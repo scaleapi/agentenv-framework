@@ -27,9 +27,9 @@ dev = [
     "mcp>=1.25,<2",
 ]
 [project.urls]
-Homepage = "https://github.com/scaleapi/agent-env"
-Repository = "https://github.com/scaleapi/agent-env/tree/main/packages/agentenv-protocol"
-Issues = "https://github.com/scaleapi/agent-env/issues"
+Homepage = "https://github.com/scaleapi/agentenv-framework"
+Repository = "https://github.com/scaleapi/agentenv-framework/tree/main/packages/agentenv-protocol"
+Issues = "https://github.com/scaleapi/agentenv-framework/issues"
 
 [build-system]
 requires = ["hatchling"]

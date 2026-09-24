@@ -20,8 +20,8 @@ You need Python 3.11 or newer, [uv](https://docs.astral.sh/uv/) and, for the int
 Docker.
 
 ```bash
-git clone https://github.com/scaleapi/agent-env.git
-cd agent-env
+git clone https://github.com/scaleapi/agentenv-framework.git
+cd agentenv-framework
 uv venv .venv
 uv pip install --python .venv/bin/python -e ./packages/agentenv-protocol -e '.[dev]'
 

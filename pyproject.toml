@@ -62,9 +62,9 @@ agent-env = "agent_env.cli:cli"
 hello = "agent_env.examples"
 
 [project.urls]
-Homepage = "https://github.com/scaleapi/agent-env"
-Repository = "https://github.com/scaleapi/agent-env"
-Issues = "https://github.com/scaleapi/agent-env/issues"
+Homepage = "https://github.com/scaleapi/agentenv-framework"
+Repository = "https://github.com/scaleapi/agentenv-framework"
+Issues = "https://github.com/scaleapi/agentenv-framework/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_env"]
