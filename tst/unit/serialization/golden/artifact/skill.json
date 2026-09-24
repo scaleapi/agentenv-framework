@@ -1,0 +1,16 @@
+{
+  "agent_skills_spec_version": "2025-10-01",
+  "allowed_tools": "Read,Write",
+  "compatibility": "claude-code",
+  "description": "Fill PDF forms",
+  "id": "pdf-filler",
+  "license": "MIT",
+  "skill_files_id": "pdf-filler-files",
+  "skill_metadata": {
+    "category": "documents"
+  },
+  "skill_name": "pdf-filler",
+  "skill_s3_url": "s3://artifact-bucket/artifacts/skill/pdf-filler/2/",
+  "type": "skill",
+  "version": 2
+}

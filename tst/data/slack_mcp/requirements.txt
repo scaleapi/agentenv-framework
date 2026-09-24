@@ -1,0 +1,4 @@
+mcp>=1.25,<2
+pydantic>=2.0
+sqlalchemy
+psycopg2-binary

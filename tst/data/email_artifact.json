@@ -1,0 +1,67 @@
+{
+  "user_email": "agent@skyhaven-support.example",
+  "emails": [
+    {
+      "email_id": "email_noise_b6a53b686198",
+      "folder": "INBOX",
+      "sender": "avery.okonkwo@company.com",
+      "recipients": [
+        "agent@skyhaven-support.example"
+      ],
+      "subject": "Update on the analytics initiative",
+      "content": "Hey Agent, Quick update on the analytics initiative: Waiting on feedback from the stakeholders. Happy to discuss furher if helpful. Thanks, Avery",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1736176998.0,
+      "is_read": false
+    },
+    {
+      "email_id": "email_noise_ff9923da1837",
+      "folder": "INBOX",
+      "sender": "zara.cohen@company.com",
+      "recipients": [
+        "agent@skyhaven-support.example"
+      ],
+      "subject": "Action required: design review",
+      "content": "Hi Agent,\n\nYour pull request is ready for review.\n\n**Details:**\n- Priority: High\n- Due: End of week\n\nView in app: app.example.com/view\n\n---\nThis is an automated message from phone system.",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1736182196.0,
+      "is_read": false
+    },
+    {
+      "email_id": "email_noise_b91d63da8af7",
+      "folder": "INBOX",
+      "sender": "thomas.thompson@company.com",
+      "recipients": [
+        "agent@skyhaven-support.example"
+      ],
+      "subject": "Re: baggage",
+      "content": "Hello Agent, Just wanted to follow up on baggage. We can discuss this further in our next sync. Let me know if you have any questions. Best, Thomas",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1736186096.0,
+      "is_read": false
+    }
+  ],
+  "contacts": [
+    "thomas.thompson@company.com",
+    "brandon.adeyemi@company.com",
+    "avery.okonkwo@company.com",
+    "priya.sharma@skyhaven-support.example",
+    "ahmed.torres@company.com",
+    "river.johnson@company.com",
+    "kevin.patel@company.com",
+    "nadia.smith@company.com",
+    "quinn.ramos@company.com",
+    "ella.jackson@company.com",
+    "maria.santos@skyhaven-support.example",
+    "zara.cohen@company.com",
+    "james.davis@company.com",
+    "scarlett.berg@company.com",
+    "james.wilson@skyhaven-support.example"
+  ]
+}

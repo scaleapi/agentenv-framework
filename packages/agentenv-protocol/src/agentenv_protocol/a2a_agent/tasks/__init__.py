@@ -1,0 +1,39 @@
+"""Versioned public task contracts for A2A agent run methods."""
+
+from .v1 import (
+    AgentConfig,
+    AgentRunResult,
+    DataPart,
+    FilePart,
+    NativeTrajectory,
+    TaskError,
+    TaskOutcome,
+    TaskPart,
+    TaskProgress,
+    TaskRequest,
+    TaskResult,
+    TaskResultBuilder,
+    TaskStreamItem,
+    TextPart,
+    Usage,
+    WriteOnly,
+)
+
+__all__ = [
+    "AgentConfig",
+    "AgentRunResult",
+    "DataPart",
+    "FilePart",
+    "NativeTrajectory",
+    "TaskError",
+    "TaskOutcome",
+    "TaskPart",
+    "TaskProgress",
+    "TaskRequest",
+    "TaskResult",
+    "TaskResultBuilder",
+    "TaskStreamItem",
+    "TextPart",
+    "Usage",
+    "WriteOnly",
+]

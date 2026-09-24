@@ -1,0 +1,190 @@
+"""Context dataclass for task step execution."""
+
+from __future__ import annotations
+
+import dataclasses
+from dataclasses import dataclass, field
+from typing import Any
+
+from agent_env.env.env import DeployedEnv
+
+_REDACTED_KEYS = {"litellm_api_key", "usersim_api_key", "remote_tokens", "cf_access_client_secret"}
+
+
+def _holds_redacted_key(value: Any) -> bool:
+    """Whether ``value`` carries a ``_REDACTED_KEYS`` entry at any depth."""
+    return isinstance(value, dict) and any(
+        k in _REDACTED_KEYS or _holds_redacted_key(v) for k, v in value.items()
+    )
+
+
+def regraft_redacted_keys(source: dict, target: dict) -> None:
+    """Copy every ``_REDACTED_KEYS`` value in ``source`` into ``target`` in place; the inverse
+    of ``_strip_redacted_keys`` for a context rebuilt from a stored document."""
+    for k, v in source.items():
+        if k in _REDACTED_KEYS:
+            target[k] = v
+        elif isinstance(v, dict):
+            child = target.get(k)
+            if not isinstance(child, dict):
+                # A secrets-only parent leaves nothing to rebuild from, so recreate it —
+                # but never over a value the rebuild did write.
+                if target.get(k) is not None or not _holds_redacted_key(v):
+                    continue
+                child = target[k] = {}
+            regraft_redacted_keys(v, child)
+
+
+def _strip_redacted_keys(value: Any) -> Any:
+    """Recursively strip `_REDACTED_KEYS` from any nested dicts in `value`.
+
+    Single source of truth used by both `to_safe_dict` (full-blob writes via
+    `record_task_failure`) and the path-level diff in `context_ops` so secrets
+    never reach Mongo regardless of which code path persists them.
+    """
+    if isinstance(value, dict):
+        return {k: _strip_redacted_keys(v) for k, v in value.items() if k not in _REDACTED_KEYS}
+    if isinstance(value, list):
+        return [_strip_redacted_keys(v) for v in value]
+    return value
+
+
+@dataclass
+class DeployedAgent:
+    agent_name: str
+    api_url: str
+    sandbox_id: str | None = None
+    sandbox_type: str | None = None
+    a2a_url: str | None = None
+    a2a_card: dict | None = None
+    instance_id: str | None = None
+    role: str | None = None
+    network_policy: dict | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict) -> DeployedAgent:
+        return cls(
+            agent_name=data["agent_name"],
+            api_url=data["api_url"],
+            sandbox_id=data.get("sandbox_id"),
+            sandbox_type=data.get("sandbox_type"),
+            a2a_url=data.get("a2a_url"),
+            a2a_card=data.get("a2a_card"),
+            instance_id=data.get("instance_id"),
+            role=data.get("role"),
+            network_policy=data.get("network_policy"),
+        )
+
+
+@dataclass
+class DeployedSandbox:
+    sandbox_name: str
+    sandbox_id: str
+    sandbox_mode: str
+    sandbox_type: str | None = None
+    tunnel_urls: dict[str, str] | None = None
+    vnc_url: str | None = None
+    instance_id: str | None = None
+    created_at_utc: str | None = None
+    expires_at_utc: str | None = None
+    network_policy: dict | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict) -> DeployedSandbox:
+        return cls(
+            sandbox_name=data["sandbox_name"],
+            sandbox_id=data["sandbox_id"],
+            sandbox_mode=data["sandbox_mode"],
+            sandbox_type=data.get("sandbox_type"),
+            tunnel_urls=data.get("tunnel_urls"),
+            vnc_url=data.get("vnc_url"),
+            instance_id=data.get("instance_id"),
+            created_at_utc=data.get("created_at_utc"),
+            expires_at_utc=data.get("expires_at_utc"),
+            network_policy=data.get("network_policy"),
+        )
+
+
+@dataclass
+class PromptResponse:
+    prompt_id: str
+    response: str
+    prompt_text: str | None = None
+    agent_trajectory_s3_uri: str | None = None
+    agent_trajectory_s3_prefix: str | None = None
+    agent_trajectory_file_path: str | None = None
+    target_agent_per_turn_trajectory_s3_uris: list[str | None] | None = None
+    # A None entry means "identical to prompt_text" — the first turn of a
+    # prompt-mode step is not stored twice.
+    source_agent_per_turn_prompt_parts: list[list[dict] | None] | None = None
+    compact_trajectory_s3_uri: str | None = None
+    tool_call_count: int | None = None
+    model: str | None = None
+    error_type: str | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    agent_session_id: str = ""
+    a2a_context_id: str | None = None
+    agent_name: str | None = None
+    step_id: str | None = None
+    structured_output: Any = None
+
+    @classmethod
+    def from_dict(cls, data: dict) -> PromptResponse:
+        return cls(
+            prompt_id=data["prompt_id"],
+            response=data["response"],
+            prompt_text=data.get("prompt_text"),
+            agent_trajectory_s3_uri=data.get("agent_trajectory_s3_uri"),
+            agent_trajectory_s3_prefix=data.get("agent_trajectory_s3_prefix"),
+            agent_trajectory_file_path=data.get("agent_trajectory_file_path"),
+            target_agent_per_turn_trajectory_s3_uris=data.get("target_agent_per_turn_trajectory_s3_uris"),
+            source_agent_per_turn_prompt_parts=data.get("source_agent_per_turn_prompt_parts"),
+            compact_trajectory_s3_uri=data.get("compact_trajectory_s3_uri"),
+            tool_call_count=data.get("tool_call_count"),
+            model=data.get("model"),
+            error_type=data.get("error_type"),
+            error_code=data.get("error_code"),
+            error_message=data.get("error_message"),
+            agent_session_id=data.get("agent_session_id", ""),
+            a2a_context_id=data.get("a2a_context_id"),
+            agent_name=data.get("agent_name"),
+            step_id=data.get("step_id"),
+            structured_output=data.get("structured_output"),
+        )
+
+
+@dataclass
+class TaskStepContext:
+    deployed_envs: list[DeployedEnv] = field(default_factory=list)
+    deployed_agents: list[DeployedAgent] = field(default_factory=list)
+    deployed_sandboxes: list[DeployedSandbox] = field(default_factory=list)
+    prompt_responses: list[PromptResponse] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    agent_model: str | None = None
+    default_agent_model: str | None = None
+    agent_artifact_id: str | None = None
+    agent_harness: str | None = None
+    instance_id: str | None = None
+
+    def to_safe_dict(self) -> dict:
+        """Return a dict representation with sensitive keys recursively removed."""
+        d = dataclasses.asdict(self)
+        if "metadata" in d:
+            d["metadata"] = _strip_redacted_keys(d["metadata"])
+        return d
+
+    @classmethod
+    def from_dict(cls, data: dict) -> TaskStepContext:
+        return cls(
+            deployed_envs=[DeployedEnv.from_dict(e) for e in data.get("deployed_envs", [])],
+            deployed_agents=[DeployedAgent.from_dict(a) for a in data.get("deployed_agents", [])],
+            deployed_sandboxes=[DeployedSandbox.from_dict(s) for s in data.get("deployed_sandboxes", [])],
+            prompt_responses=[PromptResponse.from_dict(p) for p in data.get("prompt_responses", [])],
+            metadata=data.get("metadata", {}),
+            agent_model=data.get("agent_model"),
+            default_agent_model=data.get("default_agent_model"),
+            agent_artifact_id=data.get("agent_artifact_id"),
+            agent_harness=data.get("agent_harness"),
+            instance_id=data.get("instance_id"),
+        )

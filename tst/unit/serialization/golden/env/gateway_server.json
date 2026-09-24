@@ -1,0 +1,13 @@
+{
+  "docker_image_artifact": {
+    "id": "gateway-image",
+    "type": "docker_image",
+    "version": 12
+  },
+  "id": "gateway-env",
+  "metadata": {
+    "owner": "env-pod"
+  },
+  "type": "gateway_server",
+  "version": 11
+}

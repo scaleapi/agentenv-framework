@@ -1,0 +1,15 @@
+{
+  "bundle_s3_url": "s3://artifact-bucket/artifacts/file_artifact_universe/tutorial-files/4/bundle.tar.gz",
+  "file_artifact_ids": {
+    "README.md": "readme-file"
+  },
+  "file_artifact_refs": {
+    "README.md": {
+      "id": "readme-file",
+      "version": 1
+    }
+  },
+  "id": "tutorial-files",
+  "type": "file_artifact_universe",
+  "version": 4
+}

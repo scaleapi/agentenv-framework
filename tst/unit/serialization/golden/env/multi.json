@@ -1,0 +1,22 @@
+{
+  "id": "acme-multi-env",
+  "mcp_server_envs": [
+    {
+      "id": "slack-env",
+      "type": "mcp_server",
+      "version": 4
+    }
+  ],
+  "metadata": {
+    "owner": "env-pod"
+  },
+  "type": "multi",
+  "version": 6,
+  "website_envs": [
+    {
+      "id": "shop-site-env",
+      "type": "website",
+      "version": 2
+    }
+  ]
+}

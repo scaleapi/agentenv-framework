@@ -1,0 +1,124 @@
+{
+  "user_email": "user@example.com",
+  "emails": [
+    {
+      "email_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+      "folder": "INBOX",
+      "sender": "boss@company.com",
+      "recipients": ["user@example.com"],
+      "subject": "Weekly Team Meeting",
+      "content": "Hi team,\n\nOur weekly meeting is scheduled for Friday at 2 PM. Please prepare your status updates.\n\nBest regards,\nBoss",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1702900000,
+      "is_read": false
+    },
+    {
+      "email_id": "b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5",
+      "folder": "INBOX",
+      "sender": "newsletter@techblog.com",
+      "recipients": ["user@example.com"],
+      "subject": "Latest Tech News",
+      "content": "Check out the latest developments in AI and machine learning. This week we cover:\n\n1. New breakthroughs in large language models\n2. Edge computing advances\n3. Quantum computing updates\n\nRead more at techblog.com",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1702896000,
+      "is_read": true
+    },
+    {
+      "email_id": "c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6",
+      "folder": "INBOX",
+      "sender": "hr@company.com",
+      "recipients": ["user@example.com"],
+      "subject": "Holiday Schedule Update",
+      "content": "Dear Team,\n\nPlease find attached the updated holiday schedule for the upcoming year.\n\nKey dates:\n- Winter break: Dec 23 - Jan 2\n- Spring holiday: Apr 15-17\n\nPlease plan your time off accordingly.\n\nBest,\nHR Team",
+      "cc": ["all-staff@company.com"],
+      "parent_id": null,
+      "attachments": {
+        "holiday_schedule_2024.pdf": "[Attachment: holiday_schedule_2024.pdf]"
+      },
+      "timestamp": 1702892000,
+      "is_read": false
+    },
+    {
+      "email_id": "d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1",
+      "folder": "INBOX",
+      "sender": "client@partner.com",
+      "recipients": ["user@example.com"],
+      "subject": "Project Milestone Review",
+      "content": "Hi,\n\nI wanted to follow up on our last discussion about the project milestones. Can we schedule a call this week to review progress?\n\nAvailable times:\n- Tuesday 10am\n- Wednesday 2pm\n- Thursday 11am\n\nLet me know what works for you.\n\nThanks,\nClient",
+      "cc": ["projectmanager@company.com"],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1702888000,
+      "is_read": true
+    },
+    {
+      "email_id": "e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+      "folder": "INBOX",
+      "sender": "support@software.io",
+      "recipients": ["user@example.com"],
+      "subject": "Your Support Ticket #12345 Update",
+      "content": "Hello,\n\nYour support ticket #12345 has been updated.\n\nStatus: In Progress\nAssigned to: Technical Team\nExpected resolution: Within 24 hours\n\nWe appreciate your patience.\n\nSoftware.io Support",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1702884000,
+      "is_read": false
+    },
+    {
+      "email_id": "f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3",
+      "folder": "SENT",
+      "sender": "user@example.com",
+      "recipients": ["client@partner.com"],
+      "subject": "Project Update",
+      "content": "Dear Client,\n\nI wanted to update you on the project progress. We have completed phase 1 and are moving to phase 2.\n\nKey achievements:\n- Feature A implemented\n- Testing completed\n- Documentation updated\n\nLet me know if you have any questions.\n\nBest regards",
+      "cc": ["projectmanager@company.com"],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1702880000,
+      "is_read": true
+    },
+    {
+      "email_id": "a7b8c9d0e1f2a7b8c9d0e1f2a7b8c9d0",
+      "folder": "SENT",
+      "sender": "user@example.com",
+      "recipients": ["boss@company.com"],
+      "subject": "Re: Weekly Team Meeting",
+      "content": "Hi Boss,\n\nI'll have my status update ready for Friday's meeting.\n\nBest regards",
+      "cc": [],
+      "parent_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+      "attachments": {},
+      "timestamp": 1702876000,
+      "is_read": true
+    },
+    {
+      "email_id": "b8c9d0e1f2a7b8c9d0e1f2a7b8c9d0e1",
+      "folder": "DRAFT",
+      "sender": "user@example.com",
+      "recipients": ["vendor@supplies.com"],
+      "subject": "Equipment Order Inquiry",
+      "content": "Dear Vendor,\n\nI am interested in ordering the following equipment:\n\n1. Item A - Quantity: 5\n2. Item B - Quantity: 3\n\nCould you please provide a quote?\n\nThank you",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1702872000,
+      "is_read": true
+    },
+    {
+      "email_id": "c9d0e1f2a7b8c9d0e1f2a7b8c9d0e1f2",
+      "folder": "TRASH",
+      "sender": "spam@marketing.com",
+      "recipients": ["user@example.com"],
+      "subject": "Amazing Offer Just For You!",
+      "content": "Don't miss out on this incredible opportunity! Limited time offer...",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1702868000,
+      "is_read": true
+    }
+  ]
+}

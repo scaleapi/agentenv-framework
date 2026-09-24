@@ -1,0 +1,465 @@
+# agentenv-protocol
+
+Open data-plane protocol and server SDK for agent environments.
+
+An environment author writes a class with decorated methods and serves it:
+
+```python
+import base64
+import json
+from pathlib import Path
+from typing import Annotated
+from urllib.parse import urlparse
+
+from pydantic import Field
+from agentenv_protocol import (
+    AgentEnvEnvironment, DataPart, FilePart,
+    environment_card, reset_data, add_data, get_data, tool,
+)
+
+
+@environment_card(name="slack")
+class SlackEnv(AgentEnvEnvironment):
+
+    def __init__(self):
+        self.channels, self.messages = {}, []
+
+    @reset_data
+    async def _reset(self):
+        self.channels.clear(); self.messages.clear()
+
+    @add_data
+    async def _add(self, parts):
+        # Seeds arrive as an inline DataPart (live deploy) OR a FilePart whose
+        # file carries inline bytes or a file:// URI (exported bundles). Handle
+        # all three — dropping the FilePart branch makes bundles load empty.
+        for p in parts:
+            if isinstance(p, DataPart):
+                payload = p.data
+            elif isinstance(p, FilePart):
+                f = p.file
+                if getattr(f, "bytes", None) is not None:
+                    payload = json.loads(base64.b64decode(f.bytes))
+                else:
+                    payload = json.loads(Path(urlparse(f.uri).path).read_bytes())
+            else:
+                continue  # TextPart / unknown — nothing to load
+            self.messages.extend(payload.get("messages", []))
+
+    @get_data
+    async def _state(self):
+        return [DataPart(data={"channels": list(self.channels.values()), "messages": self.messages})]
+
+    @tool(name="{environment_name}_send_message")
+    def send_message(
+        self,
+        channel: Annotated[str, Field(description="Channel to post to.")],
+        text: Annotated[str, Field(description="Message text.")],
+    ) -> str:
+        """Send a message to a channel."""
+        self.messages.append({"channel": channel, "text": text})
+        return "ok"
+
+
+if __name__ == "__main__":
+    SlackEnv().serve()
+```
+
+`@tool` methods are registered as real MCP tools on the FastMCP app at mount and advertised
+under the card's `capabilities.tools` (name, description, signature-derived `inputSchema` —
+`Annotated[..., Field(description=...)]` param descriptions included). `{environment_name}` in a
+tool name is resolved to the card's name at mount, so a shared mixin or base class can declare
+environment-prefixed tools without knowing the name at class-definition time; any other unresolved
+`{...}` token raises. Duplicate tool names raise at construction.
+
+`AgentEnvStarletteApplication` mounts the same handler onto a Starlette/FastAPI app instead of
+FastMCP; since those apps have no MCP tool registry, constructing one with `@tool` methods
+raises.
+
+## Serving
+
+`serve()` builds the FastMCP app via `create_fastmcp_app()`, which encodes the agent-env deploy
+contract once — the name resolution order (`@environment_card`'s name, then `ENVIRONMENT_NAME`,
+then the class name; `SERVICE_NAME` is no longer consulted), `MCP_HOST`/`MCP_PORT`
+binding (default 18765), DNS-rebinding protection off (gateways reach servers by compose
+hostname, which mcp's localhost-only default allowlist rejects), and the AgentEnv mount — then
+runs `streamable-http`. Pre-declared card content is more `@environment_card(...)` kwargs — any
+`EnvironmentCard` field (keys are validated at decoration time); an undecorated class defaults
+its card name to the class name. To mutate
+the app before serving (extra imperative tools, custom routes), call `create_app()` first — it
+returns the app un-served.
+
+An environment that already owns its FastMCP app keeps full control: construct and configure
+`self.mcp` yourself, then `mount(self.mcp)` — `serve()` runs it as-is (mounting first if you
+haven't) and never alters a caller-built app's settings.
+
+```python
+@environment_card(name="legacy")
+class LegacyEnv(AgentEnvEnvironment):
+
+    def __init__(self):
+        self.mcp = FastMCP("legacy")   # yours: settings, guards, extra routes
+        self.mount(self.mcp)
+
+
+LegacyEnv().serve()  # or run your app your own way; mount() alone is enough
+```
+
+The composition style — no base class, just
+`AgentEnvFastMCPApplication(environment_card=card, handler=handler).add_routes_to_app(app)` —
+remains fully supported; the base class is sugar over it.
+
+A FastMCP-backed card declares its MCP endpoint in `additionalInterfaces` when it is mounted:
+`{"url": <path>, "transport": "mcp"}`, where the path is the app's `streamable_http_path` (`/mcp`,
+`MCP_PATH`, unless configured); a FastMCP-shaped app that does not expose that setting declares no
+entry. That is the streamable-HTTP endpoint, which `serve()` runs by default and agent-env deploys
+against; an app served over another transport, such as SSE, must declare its own entry. A card
+that already declares an interface with the `mcp` transport (`MCP_TRANSPORT`) keeps it; interfaces
+with any other transport are kept beside the SDK's entry. Card URLs are paths, relative to the
+address the card was fetched from. On the client side, `client.mcp_path(card)` returns the
+declared path, or `/mcp` for a card without one.
+
+Extensions are invoked from what the card advertises. `client.find_extension_method(card, uri,
+method)` returns one advertised method, whose `endpoint` is the method's own or else the
+extension's, and `client.invoke_extension(base_url, card, uri, params, method=...)` calls it with
+its HTTP verb. Without `method`, `invoke_extension` calls the first method listed; an extension
+with several methods, such as a gateway's `urn:agentenv:clock/v1`, should always be called by name.
+
+Dependencies are intentionally light (`pydantic`, `starlette`) so the package can be added to environment server images without pulling a heavier framework — `mcp` is imported lazily inside `create_fastmcp_app()` and is deliberately not a dependency.
+
+## A2A agent framework
+
+The distribution exposes two unrelated decorators named `extension`:
+`agentenv_protocol.extension` declares environment/MCP extensions, while
+`agentenv_protocol.a2a_agent.extension` binds an operation handler on an A2A
+agent. Import the decorator from the namespace matching the application you are
+building.
+
+Install the optional agent dependencies with
+`agentenv-protocol[agent]`. The framework generates the Agent Card,
+extension routes, A2A task lifecycle, and detached task boundary from one
+agent definition:
+
+```python
+from agentenv_protocol.a2a_agent import (
+    MCP_CONFIG_V1,
+    TRAJECTORY_V1,
+    TRIGGERS_V1,
+    AgentConfig,
+    AgentEnvAgent,
+    AgentIdentity,
+    TaskRequest,
+    TaskResult,
+    Usage,
+    a2a_agent,
+    create_app,
+    enable,
+    serve,
+)
+
+
+class MyAgentConfig(AgentConfig):
+    model: str | None = "my-default-model"
+    system_prompt: str | None = None
+    timeout_seconds: int = 1800
+
+
+@a2a_agent(
+    identity=AgentIdentity(
+        name="my-cli-agent",
+        description="Runs My CLI",
+        version="1.0.0",
+        input_modes=("text", "image/png"),
+    ),
+    config=MyAgentConfig,
+    config_description="Configure the My CLI runtime.",
+    extensions=(
+        MCP_CONFIG_V1,
+        enable(
+            TRAJECTORY_V1,
+            description="Retrieve the My CLI native event trajectory.",
+        ),
+        TRIGGERS_V1,
+    ),
+)
+class MyAgent(AgentEnvAgent):
+    async def run(self, request: TaskRequest[MyAgentConfig]) -> TaskResult:
+        execution = await run_my_cli(request)
+        return (
+            TaskResult.builder()
+            .succeeded()
+            .add_text(execution.output)
+            .session_ref(execution.session_id)
+            .usage(Usage(tool_call_count=execution.tool_calls))
+            .native_trajectory(format="my-cli-events/v1", payload=execution.events)
+            .build()
+        )
+
+
+agent = MyAgent()
+app = agent.create_app()  # equivalently: create_app(agent)
+
+if __name__ == "__main__":
+    agent.serve()  # equivalently: serve(agent)
+```
+
+`AgentEnvAgent` mirrors `AgentEnvEnvironment`: it makes the `run()`,
+`create_app()`, and `serve()` authoring surface visible to static type checking.
+`@a2a_agent(...)` attaches declarative metadata to that base class; it does not
+inject methods dynamically. The concrete `TaskRequest[ConfigT]` annotation on
+`run()` provides typed configuration access without repeating the config type
+in the base class.
+When `AgentIdentity.skills` is omitted, the generated Agent Card advertises an
+empty skill list. Declare explicit skills when clients need capability discovery.
+
+The framework derives core A2A capabilities from implemented behavior.
+Async-generator `run()` methods advertise streaming; coroutine `run()` methods
+do not. Synchronous `run()` methods are rejected at startup. Push notifications
+and state-transition history remain `False` until the framework supplies their
+required runtime services.
+Extensions come from explicit definitions, configured activations, and
+decorated handlers in one validated registry, so routes and card advertisement
+cannot drift.
+
+`run(request)` is the required execution contract. It is an ordinary method
+and needs no decorator.
+
+For request-scoped streaming, implement `run()` as an async generator. Yield
+`TaskProgress` for informational updates or validated non-terminal A2A status
+updates. End every stream with one authoritative `TaskResult`; the framework
+closes the generator after that result and owns terminal task state and
+persistence. A runtime that already has a final file may return it as a
+`FilePart` in the result message. Files created in an agent workspace remain a
+runtime/control-plane collection concern rather than an A2A task-result API.
+
+Each `run()` invocation maps to one A2A task execution. Related tasks share a
+`context_id`. When a native runtime assigns a different conversation, session,
+or thread identifier, return it as `TaskResult.session_ref`; the framework
+supplies it as `TaskRequest.session_ref` on the next task in that context.
+`session_ref` is SDK-local runtime state and is not added to the A2A wire
+protocol. `TaskRequest` and `TaskResult` are framework boundary types; the
+executor maps them to and from the wire-level `a2a.types.Task` lifecycle.
+
+`TaskRequest` is a frozen record whose nested JSON values are detached copies.
+Its `config`, `mcp_servers`, `skills`, `metadata`, and inbound `DataPart.data`
+retain their declared `dict`/`list` types, so normal Pydantic serialization,
+copying, and `json.dumps(...)` work. Within `tasks.v1`, new request fields are
+additive and have framework defaults. Agent code returns a `TaskResult` through
+its factories or builder so additions to the result contract do not break
+existing handlers.
+
+Expected execution failures are returned as `TaskResult.failure(code, message)`
+and become failed A2A tasks with `error_type`, `error_code`, and `error_message`
+in the terminal message. `error_type` is the platform classification
+(`agent_error` by default, or explicitly `infra_error` for a retryable
+infrastructure failure); `error_code` preserves the author's machine-readable
+code. An exception escaping `run()`, an invalid return value, or a
+result-mapping failure is logged with a correlation ID and reported as an
+`infra_error` with code `framework.unhandled_exception`; raw exception text is
+never sent to callers.
+Invalid input that prevents task creation returns JSON-RPC `InvalidParams`.
+Once a task exists, setup failures—including config construction—also produce
+a terminal failed task rather than leaving it submitted or working.
+A successful `TaskResult` must contain at least one text, file, or data part;
+the framework rejects empty successes rather than emitting an ungradeable task.
+The SDK does not retry tasks.
+
+`enable(..., description="...")` is reserved for declarations carrying
+configuration or metadata. It preserves the agent-specific extension prose
+published in the Agent Card. The versioned SDK definition provides a generic
+fallback, while the activation can describe runtime-specific behavior without
+putting mutable card metadata on `@extension(...)` operation references.
+A bare definition in `extensions=` declares support implemented opaquely inside
+`run()` or entirely by the framework. Binding a standard or custom operation
+with `@extension(...)` automatically activates its extension, so no duplicate
+entry in `extensions=` is required.
+
+Configuration keywords are definition-owned rather than hardcoded in
+`enable()`. A configurable `ExtensionDefinition` supplies a named keyword-only
+`configuration_validator` returning `ExtensionConfiguration` with card
+`wire_params`, internal `options`, and optional `features`. `enable()` only
+dispatches to that callable. Definitions without a validator reject
+configuration keywords, and third-party definitions use the same public API as
+the built-ins.
+
+Extension request parsing and schema validation failures return HTTP 400.
+Unhandled exceptions raised by an implementation handler return HTTP 500;
+handlers use `HTTPException` when they intentionally need another status.
+
+Passing `config=MyAgentConfig` automatically enables `AGENT_CONFIG_V1`; direct
+`enable(AGENT_CONFIG_V1, ...)` declarations are rejected. The model's fields become the Agent Card's
+supported config fields, its defaults seed every task, and Pydantic validates
+each deployment-time update. `request.config` is a detached, frozen
+`MyAgentConfig`; its JSON-native nested fields remain mutable and serializable.
+Runtime code uses typed attributes such as `request.config.model` rather than
+string-keyed lookups. `AgentConfig` supplies the platform-owned `name`,
+`description`, `role`, and `timeout_seconds` fields. Agents apply
+`request.config.timeout_seconds` to their runtime, model, or subprocess call.
+Simple Pydantic field aliases are the corresponding wire names in the Agent
+Card and `/ext/agent-config` payloads.
+The card publishes the validation schema but omits literal default values;
+runtime-derived defaults therefore remain private to the agent process.
+For compatibility with the current AgentEnv control plane, `role` is also
+projected into the generic `TaskRequest.metadata` mapping. Incoming A2A message
+metadata is preserved, and a non-null configured value takes precedence.
+Runtime-specific fields must also have defaults, allowing partial updates to be
+validated against a complete model.
+Readback returns only explicitly set values.
+Declare sensitive fields as `WriteOnly[T]`; the generated schema advertises
+them as `writeOnly`, readback returns `"***"`, and agent code still receives the
+validated value as type `T`. Pass `config_readback=False` to `@a2a_agent(...)`
+to omit the GET operation entirely.
+
+```python
+from agentenv_protocol.a2a_agent import AgentConfig, WriteOnly
+
+
+class MyAgentConfig(AgentConfig):
+    provider_token: WriteOnly[str | None] = None
+```
+
+`output_format` is author-owned in v1 rather than a field on the base
+`AgentConfig`. An agent that supports structured output must declare the field
+on its config subclass, apply it to its model or runtime, and return the value
+with `TaskResult.builder().add_structured_output(...)`. When an agent does not
+advertise the field, AgentEnv's config negotiation omits it; the task may still
+succeed with text-only output, and callers must not assume `structured_output`
+will be present.
+
+`request.metadata` exposes generic A2A message metadata. The SDK does not assign
+provider-specific attribution semantics to it; an agent may pass the mapping to
+downstream clients that accept metadata. The examples forward it unchanged to
+their model client rather than declaring provider-specific config fields.
+
+Runtime-owned extension behavior is attached with the single generic
+`@extension(...)` decorator. Its argument is a versioned SDK operation
+reference, so agent code does not repeat URIs, paths, or wire schemas. The
+following decorators activate `SNAPSHOT_V1` and `TRAJECTORY_V1` automatically:
+
+Extension handlers must be async functions and use the request type owned by
+their operation. Operations with a body require exactly one argument annotated
+with that public Pydantic model; bodyless operations require a zero-argument
+handler. The framework validates the handler and request before invocation and
+derives the Agent Card's required and optional fields from the same model.
+Optional fields are part of the operation contract: every implementation
+accepts them, while callers may omit them. Agent-specific capabilities use
+explicit features or request variants.
+
+```python
+from agentenv_protocol.a2a_agent import (
+    ContextTrajectoryRequest,
+    SNAPSHOT_V1,
+    SnapshotLoadRequest,
+    SnapshotSaveRequest,
+    TRAJECTORY_V1,
+    extension,
+)
+
+
+@extension(SNAPSHOT_V1.save)
+async def save_snapshot(self, request: SnapshotSaveRequest):
+    ...
+
+
+@extension(SNAPSHOT_V1.load)
+async def load_snapshot(self, request: SnapshotLoadRequest):
+    ...
+
+
+@extension(TRAJECTORY_V1.get.context)
+async def get_live_trajectory(self, request: ContextTrajectoryRequest):
+    ...
+```
+
+The last handler opts that agent into the optional `context_id` request variant
+of `TRAJECTORY_V1.get`; without it the generated card advertises only `task_id`.
+Snapshot `save` and `load` are an atomic core contract, while its optional
+changelog handlers are enabled as an atomic feature group.
+
+After a successful `SKILL_CONFIG_V1.add` handler call, the framework records
+the registration and includes it in the detached `TaskRequest.skills` snapshot
+for later task executions. It also owns `SKILL_CONFIG_V1.list` and projects the
+installed skill onto the live Agent Card. Agent implementations only install the
+skill into their runtime; they do not implement listing or mutate framework/card
+state. Identity skills remain discoverable but are not injected into
+`TaskRequest.skills`. Duplicate names are rejected before installation.
+
+An agent can narrowly replace an SDK implementation while retaining the SDK's
+wire contract:
+
+```python
+from agentenv_protocol.a2a_agent import (
+    TRIGGERS_V1,
+    TriggerDecideRequest,
+    TriggerRegisterRequest,
+    extension,
+)
+
+
+@extension(TRIGGERS_V1.register)
+async def register_triggers(self, request: TriggerRegisterRequest):
+    return await self.default_handlers.call(TRIGGERS_V1.register, request)
+
+
+@extension(TRIGGERS_V1.decide)
+async def decide_trigger(self, request: TriggerDecideRequest):
+    decision = await self.default_handlers.call(TRIGGERS_V1.decide, request)
+    # Augment the SDK decision while preserving register/decide/state storage.
+    ...
+
+
+@extension(TRIGGERS_V1.state)
+async def trigger_state(self):
+    return await self.default_handlers.call(TRIGGERS_V1.state)
+```
+
+Because `TRIGGERS_V1.decide` is SDK-owned, the registry automatically
+classifies this handler as an override. Such overrides are logged at startup
+and reported by `app.state.agentenv_a2a.registry.conformance()`. The override API
+deliberately accepts no operational metadata. Non-standard extensions use
+`@custom_extension(...)`; that escape hatch rejects the `urn:agentenv:*`
+namespace.
+
+All active SDK-owned operations for an extension form one override group. An
+agent must override every operation in that group or none of them, preventing
+custom and default handlers from observing different state. Partial overrides
+fail during application creation. A complete override can reuse SDK behavior
+through `await self.default_handlers.call(OPERATION, request)` and augment the
+returned value while retaining the default shared state.
+
+`@custom_extension(...)` is single-operation sugar. A custom URI with multiple
+operations must use one shared public `ExtensionDefinition`, with each method
+bound through `@extension(DEFINITION.operation)`. Repeating
+`@custom_extension(...)` for the same URI creates conflicting definitions.
+Shared custom definitions activate from their discovered handlers and produce
+one Agent Card extension containing all operations.
+
+Reserved `urn:agentenv:*` URIs must use the canonical SDK definition even when
+constructing `ExtensionDefinition` or `OperationReference` directly. Extension
+routes are rejected when they collide with `GET /health`, the Agent Card route,
+or `POST` on the configured A2A JSON-RPC URL.
+
+Existing v1 extensions keep their frozen unversioned routes. New extension
+versions must use distinct resource-local versioned paths (for example
+`/ext/mcp-config/v2`), and startup rejects duplicate `(path, HTTP method)`
+registrations. Consumers use the endpoint advertised by the selected Agent Card
+extension rather than constructing paths.
+
+`MCP_CONFIG_V1.list` returns a name-keyed object, never a bare list:
+`{"mcp_servers": {name: {"url": url, "has_headers": bool}}}`. Header values
+are not exposed. `MCP_CONFIG_V1.add` requires `url` and advertises `headers` and
+`name` as optional request fields: `headers` so authenticated deployments match
+discovery, `name` so the caller can choose the server alias the harness prefixes
+tools with (agent-env relays the env card's name: the MultiEnv's declared name, else
+`env` + 4 random digits, giving e.g. `mcp__env4821__<tool>`); when absent the agent mints
+`mcp_<8 hex>`.
+
+Runnable, self-contained reference agents live in [`examples/`](examples/):
+the normal, streaming, and multimodal `run(request)` paths, single- and
+multi-operation custom extensions, and advanced ASGI-lifespan plus
+common SDK-operation override hooks.
+
+The agent examples make real OpenAI-compatible model calls. Set
+`LITELLM_API_KEY` and, when needed, `LITELLM_BASE_URL`; their typed agent config
+selects the model and system prompt for each deployment. Tests inject a fake
+model client, so the example suite remains offline and deterministic.

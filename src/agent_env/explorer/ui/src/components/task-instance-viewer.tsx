@@ -1,0 +1,4081 @@
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+import { Button, DropdownMenu, ScrollArea, Tabs } from '@radix-ui/themes';
+import JSZip from 'jszip';
+import { MCPEnvValidationEntry } from './mcp-env-validation-entry';
+import { RunStepProgress } from './run-step-progress';
+import { type AgentCard } from './advertised-agent-card';
+import { StepAttemptFailures } from './step-attempt-failures';
+import {
+  Check,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  Copy,
+  Download,
+  FileText,
+  Image as ImageIcon,
+  Loader2,
+  XCircle,
+} from 'lucide-react';
+import { BACKEND_URL, apiFetch, objectContentUrl } from './shared';
+import { ConversationsPanel } from './conversations-panel';
+import { PeerQnAPanel } from './peer-qna-panel';
+import {
+  ServerConfigPanel,
+  type ServerConfigChange,
+  type ServerConfigSkip,
+} from './server-config-panel';
+import { TriggerTurnStrip } from './triggers-panel';
+import { parseTriggerRuntime } from '../lib/parse-trigger-runtime';
+import { indexAuthoredTriggers } from '../lib/parse-triggers';
+import {
+  RubricGradingResults,
+  type RubricCriterion,
+  type VerificationResults,
+} from './rubric-grading-results';
+import {
+  CuaAgentJudgeResult,
+  parseCuaAgentJudgeMessage,
+} from './cua-agent-judge-result';
+import {
+  classifyVerifier,
+  renderJudgeOutputFormatVerifier,
+} from '../lib/verifier-visualizers';
+import {
+  buildBarDownloads,
+  shouldCollapseBarDownloads,
+  type BarDownload,
+} from '../lib/bar-downloads';
+
+const OSWORLD_V2_OUTPUT_START = '--- verifier output ---';
+const OSWORLD_V2_OUTPUT_END = '--- end verifier output ---';
+
+function OSWorldV2VerifierMessage({
+  message,
+  topLineScore,
+}: {
+  message: string;
+  topLineScore: number;
+}) {
+  const start = message.indexOf(OSWORLD_V2_OUTPUT_START);
+  if (start < 0) {
+    return (
+      <CuaAgentJudgeResult message={message} topLineScore={topLineScore} />
+    );
+  }
+
+  const outputStart = start + OSWORLD_V2_OUTPUT_START.length;
+  const end = message.indexOf(OSWORLD_V2_OUTPUT_END, outputStart);
+  const summary = message.slice(0, start).trim();
+  const output = message.slice(outputStart, end < 0 ? undefined : end).trim();
+
+  return (
+    <div className="flex flex-col gap-3">
+      {summary && (
+        <p className="text-sm text-[var(--muted-foreground)] whitespace-pre-wrap">
+          {summary}
+        </p>
+      )}
+      <div className="rounded-md border border-[var(--border)] overflow-hidden">
+        <div className="px-3 py-2 text-xs font-semibold bg-[var(--secondary)] border-b border-[var(--border)]">
+          Verifier output
+        </div>
+        <pre className="p-3 max-h-96 overflow-auto text-xs whitespace-pre-wrap break-words font-mono">
+          {output}
+        </pre>
+      </div>
+    </div>
+  );
+}
+
+/** Flatten CUA's nested verifier shape (`[{func, results:[{id,score,result}]}]`) into flat per-check
+ *  items — without unwrapping, the per-check counter reads 0/2 even when the score is 1.0. Stamps `func` onto each. */
+function flattenCuaVerifierResults(
+  rawResults: unknown[],
+): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+  rawResults.forEach((entry, funcIndex) => {
+    if (!entry || typeof entry !== 'object') return;
+    const rec = entry as Record<string, unknown>;
+    if (Array.isArray(rec.results) && typeof rec.func === 'string') {
+      for (const inner of rec.results) {
+        if (inner && typeof inner === 'object') {
+          // Stamp __funcIndex so the viewer can index the parallel config arrays (options/result/expected) per-check.
+          out.push({
+            __funcIndex: funcIndex,
+            func: rec.func,
+            ...(inner as Record<string, unknown>),
+          });
+        }
+      }
+    } else {
+      out.push(rec);
+    }
+  });
+  return out;
+}
+
+/** The agent judge produces a continuous rubric score, so a pass can land just under 1.0 (e.g. 0.9957);
+ *  identifying it lets the UI key pass/fail off the per-check `result` flag instead of `score >= 1`. */
+function isAgentJudgeFunc(func: unknown): boolean {
+  return typeof func === 'string' && func.startsWith('agent_judge');
+}
+
+// CUA agent-judge verifiers return a continuous score; a task passes above this threshold (80%) rather
+// than requiring 1.0. Exact-match/probe verifiers emit 0/1 scores and keep the strict `score >= 1` gate.
+const CUA_AGENT_JUDGE_PASS_THRESHOLD = 0.8;
+
+/** Pick the options dict for one check row. CUA writes `evaluator.options` as an array indexed by func;
+ *  others use a single object. Slice the per-func entry or pass through; undefined hides the Options row. */
+function selectCheckOptions(
+  allOptions: unknown,
+  funcIndex: number | undefined,
+): Record<string, unknown> | undefined {
+  if (!allOptions || typeof allOptions !== 'object') return undefined;
+  if (Array.isArray(allOptions)) {
+    if (typeof funcIndex !== 'number') return undefined;
+    const entry = allOptions[funcIndex];
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return undefined;
+    }
+    return entry as Record<string, unknown>;
+  }
+  return allOptions as Record<string, unknown>;
+}
+
+function renderRubricVerifierPanel(
+  verifierId: string,
+  verifier: Record<string, unknown>,
+  rubricsCriteria: Record<string, unknown>[],
+  rubricsAggregator?: string,
+): React.ReactNode {
+  const fromRegistry = renderJudgeOutputFormatVerifier({
+    verifierId,
+    verifier,
+    rubricsCriteria,
+    rubricsAggregator,
+  });
+  if (fromRegistry != null) return fromRegistry;
+  return (
+    <RubricGradingResults
+      verifierId={verifierId}
+      verificationResults={
+        { [verifierId]: verifier } as unknown as VerificationResults
+      }
+      rubrics={rubricsCriteria as unknown as RubricCriterion[]}
+      aggregator={rubricsAggregator}
+    />
+  );
+}
+
+import {
+  TrajectoryViewer,
+  type ActionCoverage,
+} from './trajectory-viewer';
+import {
+  type ParsedTrajectory,
+  type OtelSpan,
+  parseOtelTrajectory,
+} from '../lib/parse-trajectory';
+import { safeHref } from '../lib/safe-url';
+
+interface PromptResponseData {
+  prompt_id: string;
+  response: string;
+  prompt_text?: string;
+  agent_trajectory_s3_uri?: string;
+  target_agent_per_turn_trajectory_s3_uris?: (string | null)[];
+  // A null entry means "identical to prompt_text" (the initial prompt is stored once).
+  source_agent_per_turn_prompt_parts?: Array<Array<{
+    kind: string;
+    text?: string;
+    file?: { name?: string; uri?: string };
+    data?: unknown;
+  }> | null>;
+  compact_trajectory_s3_uri?: string;
+  model?: string;
+  // step_id is the human-readable step name (e.g. "run-solver"). Older instances may have only prompt_id.
+  step_id?: string;
+}
+
+interface TrajectoryState {
+  // Lazy-load: trajectories start 'idle' so a multi-step task doesn't fire N parallel fetches on mount.
+  status: 'idle' | 'loading' | 'loaded' | 'error';
+  s3Uri: string;
+  // The prompt the agent received for this step. Multi-step tasks each have a distinct prompt, rendered above their trajectory section.
+  promptText?: string;
+  trajectory?: ParsedTrajectory;
+  error?: string;
+  // The env type the trajectory was parsed under. resolvedEnvType can start undefined then become e.g.
+  // 'ios_cua' (a different parser), so a parse under a stale type is refetched, not rendered wrong.
+  parsedEnvType?: string;
+}
+
+interface FetchState {
+  status: 'idle' | 'loading' | 'loaded' | 'error';
+  data?: unknown;
+  error?: string;
+}
+
+interface UsersimModelData {
+  modelName: string;
+  trajectory: FetchState;
+  milestones: FetchState;
+  conversationLog: FetchState;
+  usersimResult: FetchState;
+  outputUrls: Record<string, string>;
+  snapshotS3Uri: string | null;
+  score: { overall_score: number; overall_score_rationale: string } | null;
+}
+
+export interface TaskStepRef {
+  id: string;
+  prompt_id?: string | null;
+  type?: string;
+  target?: string;
+  base_path?: string;
+  artifact_paths?: string[];
+  init_config?: unknown;
+  evaluator?: unknown;
+  // Trigger-registration step fields, threaded through for the badge
+  // popovers' authored-config index.
+  env_id?: string | null;
+  agent_name?: string | null;
+  triggers?: unknown;
+  osworld_v2_task_url?: string;
+  osworld_v2_task_path?: string;
+}
+
+export function TaskInstanceViewer({
+  instance,
+  taskId: taskIdProp,
+  envType,
+  evaluatorConfig,
+  rubricsCriteria,
+  rubricsAggregator,
+  taskSteps,
+  showRunContext = false,
+}: {
+  instance: Record<string, unknown>;
+  /** Re-enable the Task Run Context tab while embedded (the iframe chrome hides it). An opt-in for an
+   *  internal embed that needs the raw context to debug a run — the only place the snapshot version and
+   *  collected-artifact keys are visible. */
+  showRunContext?: boolean;
+  // List-derived instances may omit task_id; callers that know it (runner/detail
+  // pages) pass it so downstream calls can't send task_id=undefined.
+  taskId?: string;
+  envType?: string;
+  evaluatorConfig?: Record<string, unknown>;
+  rubricsCriteria?: Record<string, unknown>[];
+  /** `score_aggregator` from the rubrics_verifier step ('all_pass' | 'any_pass' | 'weighted_average').
+   *  Suppresses the redundant Score badge when it's implied by the pass count. Undefined = all_pass (default). */
+  rubricsAggregator?: string;
+  // Ordered steps from the task definition: label trajectories by step.id (not "Prompt N") and sort them
+  // in pipeline order rather than persisted order (which isn't guaranteed chronological).
+  taskSteps?: TaskStepRef[];
+}) {
+  const instanceId = instance.instance_id as string;
+  const taskId = taskIdProp ?? (instance.task_id as string);
+  // Pick the trajectory renderer from the deployed env's env_type, falling back to the envType prop until
+  // the full instance loads. Prefer a screenshot env (cua/ios_cua) if deployed — it's the only type that changes the parser.
+  const deployedEnvTypes = (
+    ((instance.context as Record<string, unknown> | null)?.deployed_envs as
+      | Record<string, unknown>[]
+      | undefined) ?? []
+  )
+    .map(e => e.env_type)
+    .filter((t): t is string => typeof t === 'string' && t.length > 0);
+  const resolvedEnvType =
+    deployedEnvTypes.find(t => t === 'cua' || t === 'ios_cua') ??
+    deployedEnvTypes[0] ??
+    envType;
+  // Latest resolvedEnvType, readable from in-flight fetches, so a manual Load can drop a parse whose env type went stale.
+  const resolvedEnvTypeRef = useRef(resolvedEnvType);
+  resolvedEnvTypeRef.current = resolvedEnvType;
+  const [trajectories, setTrajectories] = useState<
+    {
+      label: string;
+      state: TrajectoryState;
+      // Join keys for the per-turn trigger strip. stepId is the RUN-TIME step id (the ledger's key), not
+      // the resolved label id, which can diverge. Undefined for combined-only entries (no strip).
+      stepId?: string;
+      turnIndex?: number;
+      // The user message authored after this turn (next turn's prompt) —
+      // the strip quotes it as the user-sim / trigger-injected reply.
+      nextTurnPromptText?: string;
+    }[]
+  >([]);
+  const [usersimModels, setUsersimModels] = useState<UsersimModelData[]>([]);
+  const instanceGenRef = useRef(0);
+  const [copiedContext, setCopiedContext] = useState(false);
+  const [selectedOverviewFile, setSelectedOverviewFile] = useState<
+    string | null
+  >(null);
+  const [copiedUsersim, setCopiedUsersim] = useState<string | null>(null);
+  const [isEmbedded, setIsEmbedded] = useState(false);
+  useEffect(() => {
+    setIsEmbedded(window.parent !== window);
+  }, []);
+  // Per-deployment A2A cards for the Agent Card tab. The registered agent doc carries no card; it lives in
+  // context.deployed_agents[].a2a_card, which the list endpoint strips — fall back to the single-instance GET.
+  const deployedAgentsForCard = ((instance.context as Record<string, unknown> | null)
+    ?.deployed_agents ?? []) as Record<string, unknown>[];
+  const agentCardSig = deployedAgentsForCard
+    .map(a => `${String(a.agent_name ?? '')}:${a.a2a_card ? 1 : 0}`)
+    .join('|');
+  const [agentCards, setAgentCards] = useState<
+    { name: string; card: AgentCard }[]
+  >([]);
+  useEffect(() => {
+    const pick = (agents: Record<string, unknown>[]) =>
+      agents
+        .filter(a => a.a2a_card)
+        .map(a => ({
+          name: String(a.agent_name ?? 'agent'),
+          card: a.a2a_card as AgentCard,
+        }));
+    const inline = pick(deployedAgentsForCard);
+    if (inline.length > 0) {
+      setAgentCards(inline);
+      return;
+    }
+    if (deployedAgentsForCard.length === 0 || !taskId || !instanceId) {
+      setAgentCards([]);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await apiFetch(
+          `${BACKEND_URL}/api/v1/tasks/${encodeURIComponent(
+            taskId,
+          )}/instances/${encodeURIComponent(instanceId)}`,
+        );
+        if (!res.ok) return;
+        const body = await res.json();
+        const agents = (body?.context?.deployed_agents ??
+          []) as Record<string, unknown>[];
+        if (!cancelled) setAgentCards(pick(agents));
+      } catch {
+        /* no card panel on fetch failure */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taskId, instanceId, agentCardSig]);
+
+  const handleCopyJson = useCallback((key: string, data: unknown) => {
+    navigator.clipboard.writeText(JSON.stringify(data, null, 2));
+    setCopiedUsersim(key);
+    setTimeout(() => setCopiedUsersim(null), 1500);
+  }, []);
+  const [expandedTriggers, setExpandedTriggers] = useState<Set<string>>(
+    new Set(),
+  );
+
+  // Build trajectory entries (one per prompt_response with an S3 URI), all 'idle' — no eager fetch (a
+  // multi-step task can have 5+). Auto-load only when there's exactly one. Re-run when the prompt_responses
+  // array reference changes (task-detail swaps a thin row for the full doc), keyed on a content signature
+  // since the parent doesn't memoize.
+  const promptResponsesArr = (
+    instance.context as Record<string, unknown> | null
+  )?.prompt_responses as
+    | {
+        agent_trajectory_s3_uri?: string;
+        target_agent_per_turn_trajectory_s3_uris?: (string | null)[];
+      }[]
+    | undefined;
+  const promptResponsesSignature = useMemo(
+    () =>
+      (promptResponsesArr ?? [])
+        .map(pr => {
+          // Include per-turn URIs in the signature so the effect re-fires when new turns land between polls.
+          const perTurn = (
+            pr?.target_agent_per_turn_trajectory_s3_uris ?? []
+          ).join(',');
+          return `${pr?.agent_trajectory_s3_uri ?? ''}#${perTurn}`;
+        })
+        .join('|'),
+    [promptResponsesArr],
+  );
+  useEffect(() => {
+    const context = instance.context as Record<string, unknown> | null;
+    if (!context) {
+      setTrajectories([]);
+      return;
+    }
+
+    const promptResponses = (context.prompt_responses ??
+      []) as PromptResponseData[];
+
+    // Fan-out: each PromptResponse becomes 1+ entries — one per non-null turn URI for multi-turn, else one.
+    type FlatPR = PromptResponseData & {
+      _entryS3Uri: string;
+      _turnIndex?: number;
+      _totalTurns?: number;
+    };
+    const flat: FlatPR[] = [];
+    for (const pr of promptResponses) {
+      const perTurn = pr.target_agent_per_turn_trajectory_s3_uris;
+      if (perTurn && perTurn.length > 0) {
+        perTurn.forEach((uri, turnIdx) => {
+          if (!uri) return; // skip turns whose trajectory upload failed
+          flat.push({
+            ...pr,
+            _entryS3Uri: uri,
+            _turnIndex: turnIdx,
+            _totalTurns: perTurn.length,
+          });
+        });
+      } else if (pr.agent_trajectory_s3_uri) {
+        flat.push({ ...pr, _entryS3Uri: pr.agent_trajectory_s3_uri });
+      }
+    }
+
+    // Build prompt_id → step.id / step-index lookups so anonymous "Prompt N" labels become step names and
+    // trajectories sort in pipeline order rather than persisted order.
+    const stepIdByPrompt: Record<string, string> = {};
+    const stepIdxByPrompt: Record<string, number> = {};
+    (taskSteps ?? []).forEach((s, idx) => {
+      if (s.prompt_id && s.id) {
+        stepIdByPrompt[s.prompt_id] = s.id;
+        stepIdxByPrompt[s.prompt_id] = idx;
+      }
+    });
+
+    const ordered = [...flat].sort((a, b) => {
+      const ai = stepIdxByPrompt[a.prompt_id] ?? Number.MAX_SAFE_INTEGER;
+      const bi = stepIdxByPrompt[b.prompt_id] ?? Number.MAX_SAFE_INTEGER;
+      if (ai !== bi) return ai - bi;
+      // Same step → preserve turn order
+      return (a._turnIndex ?? 0) - (b._turnIndex ?? 0);
+    });
+
+    setTrajectories(prev => {
+      // Index prior loaded/loading state by s3Uri so a re-fire (e.g. taskSteps arriving late) doesn't undo
+      // in-progress work — only label/order is recomputed, payloads preserved.
+      const prevByUri = new Map<string, TrajectoryState>();
+      for (const t of prev) prevByUri.set(t.state.s3Uri, t.state);
+
+      return ordered.map((pr, i) => {
+        const resolvedStepId = stepIdByPrompt[pr.prompt_id] ?? pr.step_id;
+        const prevState = prevByUri.get(pr._entryS3Uri);
+        // Reuse a prior parse only if done under the current env type; else drop it to re-fetch with the right parser.
+        const carryover =
+          prevState && prevState.parsedEnvType === resolvedEnvType
+            ? prevState
+            : undefined;
+        const initialStatus: TrajectoryState['status'] =
+          carryover?.status ?? (ordered.length === 1 ? 'loading' : 'idle');
+        const turnSuffix =
+          pr._turnIndex !== undefined && (pr._totalTurns ?? 0) > 1
+            ? ` · Turn ${pr._turnIndex + 1}/${pr._totalTurns}`
+            : '';
+        const stepLabel = resolvedStepId ?? `Prompt ${i + 1}`;
+        const modelSuffix = pr.model ? ` (${pr.model})` : '';
+        // Multi-turn: the per-turn prompt is the text sent that turn (initial on turn 1, reply on turn 2+);
+        // fall back to prompt_text (single-turn) — a null turn-0 entry also means prompt_text. Text parts only.
+        const perTurnParts =
+          pr._turnIndex !== undefined
+            ? pr.source_agent_per_turn_prompt_parts?.[pr._turnIndex]
+            : undefined;
+        const perTurnPromptText = perTurnParts
+          ? perTurnParts
+              .filter(p => p.kind === 'text' && typeof p.text === 'string')
+              .map(p => p.text!)
+              .join('\n')
+          : undefined;
+        const promptText =
+          perTurnPromptText !== undefined
+            ? perTurnPromptText
+            : pr._turnIndex === undefined || pr._turnIndex === 0
+            ? pr.prompt_text
+            : undefined;
+        // The reply authored AFTER this turn (user-sim or trigger-injected)
+        // is the NEXT turn's prompt — surfaced by the trigger strip.
+        const nextTurnParts =
+          pr._turnIndex !== undefined
+            ? pr.source_agent_per_turn_prompt_parts?.[pr._turnIndex + 1]
+            : undefined;
+        const nextTurnPromptText = nextTurnParts
+          ? nextTurnParts
+              .filter(p => p.kind === 'text' && typeof p.text === 'string')
+              .map(p => p.text!)
+              .join('\n')
+          : undefined;
+        return {
+          label:
+            ordered.length > 1
+              ? `${stepLabel}${turnSuffix}${modelSuffix}`
+              : `Trajectory${turnSuffix}${modelSuffix}`,
+          stepId: pr.step_id ?? resolvedStepId ?? undefined,
+          turnIndex: pr._turnIndex,
+          nextTurnPromptText,
+          state: {
+            status: initialStatus,
+            s3Uri: pr._entryS3Uri,
+            promptText,
+            trajectory: carryover?.trajectory,
+            error: carryover?.error,
+            parsedEnvType: carryover?.parsedEnvType,
+          },
+        };
+      });
+    });
+
+    // Auto-fetch only when there's exactly one (single-step UX). `cancelled` guards the race where
+    // resolvedEnvType changes mid-flight so a stale parse can't overwrite the re-fetch.
+    let cancelled = false;
+    if (ordered.length === 1) {
+      const pr = ordered[0]!;
+      const fetchEnvType = resolvedEnvType;
+      fetchTrajectory(pr._entryS3Uri, fetchEnvType, pr.model)
+        .then(parsed => {
+          if (cancelled) return;
+          setTrajectories(prev =>
+            prev.map(t => ({
+              ...t,
+              state: {
+                ...t.state,
+                status: 'loaded',
+                trajectory: parsed,
+                parsedEnvType: fetchEnvType,
+              },
+            })),
+          );
+        })
+        .catch(err => {
+          if (cancelled) return;
+          setTrajectories(prev =>
+            prev.map(t => ({
+              ...t,
+              state: {
+                ...t.state,
+                status: 'error',
+                error: err instanceof Error ? err.message : 'Failed to load',
+              },
+            })),
+          );
+        });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [instanceId, resolvedEnvType, taskSteps, promptResponsesSignature]);
+
+  const loadTrajectoryAt = useCallback(
+    (index: number) => {
+      const target = trajectories[index];
+      if (!target) return;
+      // Commit by s3Uri, not array index: `trajectories` can be rebuilt/reordered while a load is in flight.
+      const s3Uri = target.state.s3Uri;
+      const fetchEnvType = resolvedEnvType;
+      setTrajectories(prev =>
+        prev.map(t =>
+          t.state.s3Uri === s3Uri
+            ? { ...t, state: { ...t.state, status: 'loading' } }
+            : t,
+        ),
+      );
+      fetchTrajectory(s3Uri, fetchEnvType)
+        .then(parsed => {
+          // Drop the result if the env type changed since this load started (a stale-parser parse would render wrong).
+          if (fetchEnvType !== resolvedEnvTypeRef.current) return;
+          setTrajectories(prev =>
+            prev.map(t =>
+              t.state.s3Uri === s3Uri
+                ? {
+                    ...t,
+                    state: {
+                      ...t.state,
+                      status: 'loaded',
+                      trajectory: parsed,
+                      parsedEnvType: fetchEnvType,
+                    },
+                  }
+                : t,
+            ),
+          );
+        })
+        .catch(err => {
+          if (fetchEnvType !== resolvedEnvTypeRef.current) return;
+          setTrajectories(prev =>
+            prev.map(t =>
+              t.state.s3Uri === s3Uri
+                ? {
+                    ...t,
+                    state: {
+                      ...t.state,
+                      status: 'error',
+                      error:
+                        err instanceof Error ? err.message : 'Failed to load',
+                    },
+                  }
+                : t,
+            ),
+          );
+        });
+    },
+    [trajectories, resolvedEnvType],
+  );
+
+  useEffect(() => {
+    const context = instance.context as Record<string, unknown> | null;
+    if (!context) return;
+    const meta = context.metadata as Record<string, unknown> | undefined;
+    if (!meta) return;
+    const trajectoryUrls = meta.trajectory_urls as
+      | Record<string, string>
+      | undefined;
+    if (!trajectoryUrls || Object.keys(trajectoryUrls).length === 0) return;
+
+    const outputUrls = meta.output_urls as
+      | Record<string, Record<string, string>>
+      | undefined;
+    const snapshotUrls = meta.snapshot_urls as
+      | Record<string, string>
+      | undefined;
+    const delivery = meta.delivery as Record<string, unknown> | undefined;
+    const deliveryTrajectories = (delivery?.trajectories ?? []) as {
+      model: string;
+      overall_score: number;
+      overall_score_rationale: string;
+    }[];
+    const scoreByModel = new Map(
+      deliveryTrajectories.map(t => [
+        t.model,
+        {
+          overall_score: t.overall_score,
+          overall_score_rationale: t.overall_score_rationale,
+        },
+      ]),
+    );
+
+    const models = Object.keys(trajectoryUrls);
+    instanceGenRef.current += 1;
+    setUsersimModels(
+      models.map(modelName => ({
+        modelName,
+        trajectory: { status: 'loading' },
+        milestones: { status: 'idle' },
+        conversationLog: { status: 'idle' },
+        usersimResult: { status: 'idle' },
+        outputUrls: outputUrls?.[modelName] ?? {},
+        snapshotS3Uri: snapshotUrls?.[modelName] ?? null,
+        score: scoreByModel.get(modelName) ?? null,
+      })),
+    );
+
+    // Only fetch trajectories eagerly (default subtab)
+    const controller = new AbortController();
+    models.forEach((modelName, i) => {
+      fetchRawS3Json(trajectoryUrls[modelName]!, controller.signal)
+        .then(data => {
+          if (!controller.signal.aborted)
+            setUsersimModels(prev =>
+              prev.map((m, j) =>
+                j === i ? { ...m, trajectory: { status: 'loaded', data } } : m,
+              ),
+            );
+        })
+        .catch(err => {
+          if (!controller.signal.aborted)
+            setUsersimModels(prev =>
+              prev.map((m, j) =>
+                j === i
+                  ? {
+                      ...m,
+                      trajectory: {
+                        status: 'error',
+                        error:
+                          err instanceof Error ? err.message : 'Failed to load',
+                      },
+                    }
+                  : m,
+              ),
+            );
+        });
+    });
+    return () => controller.abort();
+  }, [instanceId]);
+
+  const context = instance.context as Record<string, unknown> | null;
+  const promptResponses = context
+    ? ((context.prompt_responses ?? []) as PromptResponseData[])
+    : [];
+  const hasTrajectories = promptResponses.some(
+    pr => pr.agent_trajectory_s3_uri,
+  );
+  const deployedEnvs = context
+    ? ((context.deployed_envs ?? []) as Record<string, unknown>[])
+    : [];
+  const metadata = context?.metadata as Record<string, unknown> | undefined;
+  // iOS CUA per-step action-group labels; harmless for non-iOS trajectories (no badges).
+  const iosCuaActionCoverage = metadata?.ios_cua_action_coverage as
+    | ActionCoverage
+    | undefined;
+  const serverConfigChanges = (metadata?.server_config_changes ??
+    []) as ServerConfigChange[];
+  const serverConfigFailures = (
+    (metadata?.failed_steps ?? []) as Array<Record<string, unknown>>
+  )
+    .filter(f => f.step_type === 'apply_server_config')
+    .map(f => ({
+      error: String(f.error ?? ''),
+      error_type: f.error_type as string | undefined,
+      step_id: f.step_id as string | undefined,
+    }));
+  const serverConfigSkipped = (metadata?.server_config_skipped ??
+    []) as ServerConfigSkip[];
+  const hasServerConfig =
+    serverConfigChanges.length > 0 ||
+    serverConfigFailures.length > 0 ||
+    serverConfigSkipped.length > 0;
+  // Runtime trigger ledger: null when the run recorded no trigger
+  // metadata, which also hides the tab.
+  const triggerRuntime = useMemo(
+    () => parseTriggerRuntime(metadata),
+    [metadata],
+  );
+  // Authored trigger configs for the badge popovers. Empty when the surface passes slim step refs — popovers then show runtime history only.
+  const authoredTriggers = useMemo(
+    () => indexAuthoredTriggers(taskSteps),
+    [taskSteps],
+  );
+  // A PeerAgentsTaskStep records the routing table on context.metadata.agent_peerings.
+  // Its presence gates the Peer Q&A tab (peer_send_message exchanges pulled from the trajectory).
+  const hasPeerAgents =
+    Array.isArray(metadata?.agent_peerings) &&
+    metadata.agent_peerings.length > 0;
+  // The user-sim / HITL flows record an A2A transcript under context.metadata.a2a_conversations; its presence gates the Conversation tab.
+  const hasConversations =
+    !!metadata?.a2a_conversations &&
+    Object.keys(metadata.a2a_conversations as Record<string, unknown>).length >
+      0;
+  const verifications = metadata?.verifications as
+    | Record<
+        string,
+        {
+          results: {
+            id: string;
+            score: number;
+            result: boolean;
+            message: string;
+            title?: string;
+            justification?: string;
+            actual_s3_uri?: string;
+            expected_url?: string;
+          }[];
+          score: number;
+          format?: string;
+        }
+      >
+    | undefined;
+  const hasVerifications =
+    verifications && Object.keys(verifications).length > 0;
+
+  // `collect_artifacts` writes a structured map context.metadata.collected_artifacts[step_id] = { artifacts:
+  // { filename: s3_uri }, file_artifact_universe }, plus a legacy flat context.metadata.artifacts mirror.
+  // Prefer the structured map; fall back to the flat mirror for older instances.
+  const collectedArtifactsByStep = (metadata?.collected_artifacts ??
+    null) as Record<string, { artifacts?: Record<string, string> }> | null;
+
+  // The on-sandbox source path is implicit: <base_path>/<filename> (base_path from the collect step's config, default /app/artifact).
+  const collectArtifactsSteps = (taskSteps ?? []).filter(
+    s => s.type === 'collect_artifacts',
+  );
+  const basePathForStep = (stepId: string | null): string => {
+    const step =
+      (stepId ? collectArtifactsSteps.find(s => s.id === stepId) : undefined) ??
+      collectArtifactsSteps[0];
+    return step?.base_path ?? '/app/artifact';
+  };
+
+  // One render section per collect step that produced files (structured map),
+  // else a single legacy section from the flat mirror.
+  const collectedArtifactSections: {
+    stepId: string | null;
+    artifacts: Record<string, string>;
+    basePath: string;
+  }[] = collectedArtifactsByStep
+    ? Object.entries(collectedArtifactsByStep)
+        .map(([stepId, v]) => ({
+          stepId,
+          artifacts: v?.artifacts ?? {},
+          basePath: basePathForStep(stepId),
+        }))
+        .filter(s => Object.keys(s.artifacts).length > 0)
+    : (() => {
+        const flat =
+          (metadata?.artifacts as Record<string, string> | undefined) ?? {};
+        return Object.keys(flat).length > 0
+          ? [{ stepId: null, artifacts: flat, basePath: basePathForStep(null) }]
+          : [];
+      })();
+
+  // Flat merged map (filename -> s3_uri) for inline presigned links elsewhere
+  // (verifier-card path chips, reviewer-overview lookup).
+  const collectedArtifacts: Record<string, string> | null =
+    collectedArtifactSections.length > 0
+      ? collectedArtifactSections.reduce<Record<string, string>>(
+          (acc, s) => Object.assign(acc, s.artifacts),
+          {},
+        )
+      : null;
+  const artifactRoleMap: Record<string, 'input' | 'result' | 'expected'> =
+    React.useMemo(() => {
+      const inputs = new Set<string>();
+      const results = new Set<string>();
+      const expecteds = new Set<string>();
+      const basename = (p: unknown): string => {
+        if (typeof p !== 'string') return '';
+        const parts = p.split(/[\\/]/);
+        return parts[parts.length - 1] ?? '';
+      };
+      for (const stepRef of taskSteps ?? []) {
+        // TaskStepRef types only shared fields; init_config / evaluator live on the underlying step dict, so cast to a loose record.
+        const step = stepRef as unknown as Record<string, unknown>;
+        if (step.type === 'cua_initialize') {
+          for (const cfg of (step.init_config as unknown[]) ?? []) {
+            if (!cfg || typeof cfg !== 'object') continue;
+            const c = cfg as Record<string, unknown>;
+            if (c.type !== 'download') continue;
+            const params = (c.parameters as Record<string, unknown>) ?? {};
+            for (const f of (params.files as unknown[]) ?? []) {
+              if (!f || typeof f !== 'object') continue;
+              const b = basename((f as Record<string, unknown>).path);
+              if (b) inputs.add(b);
+            }
+          }
+        } else if (step.type === 'cua_evaluate') {
+          const evaluator = (step.evaluator as Record<string, unknown>) ?? {};
+          for (const [key, bucket] of [
+            ['result', results] as const,
+            ['expected', expecteds] as const,
+          ]) {
+            const val = evaluator[key];
+            const items = Array.isArray(val)
+              ? val
+              : val && typeof val === 'object'
+              ? [val]
+              : [];
+            for (const it of items) {
+              if (!it || typeof it !== 'object') continue;
+              const b = basename((it as Record<string, unknown>).path);
+              if (b) bucket.add(b);
+            }
+          }
+        }
+      }
+      const out: Record<string, 'input' | 'result' | 'expected'> = {};
+      for (const b of inputs) out[b] = 'input';
+      for (const b of expecteds) out[b] = 'expected'; // overrides input
+      for (const b of results) out[b] = 'result'; // overrides everything
+      return out;
+    }, [taskSteps]);
+  const hasCollectedArtifacts = collectedArtifactSections.length > 0;
+  const collectedArtifactsCount = collectedArtifactSections.reduce(
+    (n, s) => n + Object.keys(s.artifacts).length,
+    0,
+  );
+
+  // Golden files from cua_evaluate.evaluator.expected — public cloud URLs (not collected onto the VM), so
+  // surface them as their own previewable section via the same s3:// pipeline.
+  const expectedGoldFiles = React.useMemo(() => {
+    const out: { filename: string; s3Uri: string; sourceUrl: string }[] = [];
+    const seen = new Set<string>();
+    const basename = (p: string): string => {
+      const last = p.split(/[\\/]/).pop() ?? '';
+      // URL keys can be percent-encoded; show the decoded name as the label.
+      try {
+        return decodeURIComponent(last);
+      } catch {
+        return last;
+      }
+    };
+    for (const stepRef of taskSteps ?? []) {
+      const step = stepRef as unknown as Record<string, unknown>;
+      if (step.type !== 'cua_evaluate') continue;
+      const evaluator = (step.evaluator as Record<string, unknown>) ?? {};
+      const expected = evaluator.expected;
+      const items = Array.isArray(expected)
+        ? expected
+        : expected && typeof expected === 'object'
+        ? [expected]
+        : [];
+      for (const it of items) {
+        if (!it || typeof it !== 'object') continue;
+        const e = it as Record<string, unknown>;
+        const url = typeof e.path === 'string' ? e.path : '';
+        if (!url || seen.has(url)) continue;
+        const s3Uri = publicHttpsToS3Uri(url);
+        if (!s3Uri) continue; // only files we can presign for preview
+        seen.add(url);
+        out.push({
+          filename:
+            typeof e.dest === 'string' && e.dest ? e.dest : basename(url),
+          s3Uri,
+          sourceUrl: url,
+        });
+      }
+    }
+    return out;
+  }, [taskSteps]);
+  const hasExpectedGold = expectedGoldFiles.length > 0;
+
+  // A "reviewer overview" HTML page (plain-English functionality, API detail collapsed). Rendered in its
+  // own tab so a non-technical reviewer reads it in-app instead of downloading a file.
+  const reviewerOverviewKey = collectedArtifacts
+    ? Object.keys(collectedArtifacts).find(k =>
+        k.endsWith('reviewer_overview.html'),
+      )
+    : undefined;
+  const reviewerOverviewS3 =
+    reviewerOverviewKey && collectedArtifacts
+      ? collectedArtifacts[reviewerOverviewKey]
+      : null;
+
+  // Bucket each verifier output by stamped `format` or legacy shape
+  // so the verifier tab can show aggregate/sandbox/rubric sections together.
+  const verifierEntries: Array<[string, Record<string, unknown>]> =
+    verifications
+      ? (Object.entries(verifications) as Array<
+          [string, Record<string, unknown>]
+        >)
+      : [];
+  const aggregateVerifiers = verifierEntries.filter(
+    ([, v]) => classifyVerifier(v) === 'aggregate',
+  );
+  const sandboxVerifiers = verifierEntries.filter(
+    ([, v]) => classifyVerifier(v) === 'sandbox',
+  );
+  const rubricVerifiers = verifierEntries.filter(
+    ([, v]) => classifyVerifier(v) === 'rubric',
+  );
+  const hasAggregateOrSandbox =
+    aggregateVerifiers.length > 0 || sandboxVerifiers.length > 0;
+  const resultS3Uri = verifications
+    ? ((
+        Object.values(verifications).find(
+          v => (v as Record<string, unknown>)?.result_s3_uri,
+        ) as Record<string, unknown> | undefined
+      )?.result_s3_uri as string | undefined)
+    : undefined;
+  const hasUsersimModels = usersimModels.length > 0;
+  const taskData = metadata?.task_data as Record<string, unknown> | undefined;
+  const completedRuns = (metadata?.completed_runs ?? []) as {
+    task_id: string;
+    run_epoch: number;
+    run_id: string;
+    model_label: string;
+    result: string;
+    s3_prefix: string;
+    trajectory_url?: string;
+    output_urls?: Record<string, string>;
+  }[];
+  const hasCompletedRuns = completedRuns.length > 0;
+
+  const handleDownloadS3 = useCallback((s3Uri: string) => {
+    window.open(objectContentUrl(s3Uri), '_blank');
+  }, []);
+
+  const userIntent = taskData?.user_intent as
+    | Record<string, unknown>
+    | undefined;
+  const taskMilestones = (userIntent?.milestones ?? []) as {
+    milestone_id: string;
+    prompt: string;
+    continuation_criteria: string;
+    planned_interactions_list: { trigger: string; reaction: string }[];
+  }[];
+  const hasTaskMilestones = taskMilestones.length > 0;
+
+  const lazyFetchField = useCallback(
+    (
+      modelIndex: number,
+      field: 'milestones' | 'conversationLog' | 'usersimResult',
+    ) => {
+      const model = usersimModels[modelIndex];
+      if (!model || model[field].status !== 'idle') return;
+
+      const fileKey = {
+        milestones: 'milestone_progress.jsonl',
+        conversationLog: 'conversation_log.jsonl',
+        usersimResult: 'usersim_result.txt',
+      }[field];
+      const s3Uri = model.outputUrls[fileKey];
+      if (!s3Uri) {
+        setUsersimModels(prev =>
+          prev.map((m, j) =>
+            j === modelIndex
+              ? { ...m, [field]: { status: 'loaded', data: null } }
+              : m,
+          ),
+        );
+        return;
+      }
+
+      const gen = instanceGenRef.current;
+      setUsersimModels(prev =>
+        prev.map((m, j) =>
+          j === modelIndex ? { ...m, [field]: { status: 'loading' } } : m,
+        ),
+      );
+      fetchRawS3Json(s3Uri)
+        .then(data => {
+          if (instanceGenRef.current !== gen) return;
+          setUsersimModels(prev =>
+            prev.map((m, j) =>
+              j === modelIndex
+                ? { ...m, [field]: { status: 'loaded', data } }
+                : m,
+            ),
+          );
+        })
+        .catch(err => {
+          if (instanceGenRef.current !== gen) return;
+          setUsersimModels(prev =>
+            prev.map((m, j) =>
+              j === modelIndex
+                ? {
+                    ...m,
+                    [field]: {
+                      status: 'error',
+                      error:
+                        err instanceof Error ? err.message : 'Failed to load',
+                    },
+                  }
+                : m,
+            ),
+          );
+        });
+    },
+    [usersimModels],
+  );
+
+  const handleDownloadTrajectory = useCallback((s3Uri: string) => {
+    window.open(objectContentUrl(s3Uri), '_blank');
+  }, []);
+
+  const handleDownloadResults = useCallback(() => {
+    if (!resultS3Uri) return;
+    window.open(objectContentUrl(resultS3Uri), '_blank');
+  }, [resultS3Uri]);
+
+  // One list for both renderings, so the inline row and the collapsed dropdown
+  // always show the same entries in the same order.
+  const barDownloads = useMemo(
+    () => buildBarDownloads(promptResponses, resultS3Uri),
+    [promptResponses, resultS3Uri],
+  );
+  const collapseBarDownloads = shouldCollapseBarDownloads(barDownloads.length);
+  const runBarDownload = useCallback(
+    (download: BarDownload) => {
+      if (download.kind === 'results') {
+        void handleDownloadResults();
+        return;
+      }
+      void handleDownloadTrajectory(download.s3Uri);
+    },
+    [handleDownloadResults, handleDownloadTrajectory],
+  );
+
+  // Initial tab by status: for terminal runs lead to the most diagnostic view — verifier verdict
+  // (completed) or run context (failed). Running keeps the default.
+  const instanceStatus = (instance.status as string | undefined) ?? '';
+  const isTerminalCompleted = instanceStatus === 'completed';
+  const isTerminalFailed =
+    instanceStatus === 'failed' ||
+    instanceStatus === 'cancelled' ||
+    instanceStatus === 'timed_out';
+  const isRunning = instanceStatus === 'running';
+  // Reviewer overview: the collected copy in the object store via /objects/content. Multi-file viewer
+  // scoped to /app/reviewer_overview/ (legacy top-level reviewer_overview.html as fallback); appears once
+  // the run's artifacts are collected (no live-from-sandbox route in the standalone explorer).
+  const collectedFiles = collectedArtifacts
+    ? Object.keys(collectedArtifacts)
+        .filter(
+          k =>
+            k.startsWith('reviewer_overview/') ||
+            k.endsWith('reviewer_overview.html'),
+        )
+        .sort()
+    : [];
+  const overviewFileList = collectedFiles;
+  const activeOverviewFile =
+    selectedOverviewFile && overviewFileList.includes(selectedOverviewFile)
+      ? selectedOverviewFile
+      : overviewFileList.find(f => f.endsWith('index.html')) ??
+        overviewFileList.find(f => f.endsWith('reviewer_overview.html')) ??
+        overviewFileList.find(f => f.endsWith('.html')) ??
+        overviewFileList[0] ??
+        null;
+  const activeCollectedUri =
+    activeOverviewFile && collectedArtifacts
+      ? collectedArtifacts[activeOverviewFile]
+      : undefined;
+  const reviewerOverviewSrc = activeCollectedUri
+    ? objectContentUrl(activeCollectedUri)
+    : reviewerOverviewS3
+    ? objectContentUrl(reviewerOverviewS3)
+    : null;
+  const showReviewerOverview =
+    collectedFiles.length > 0 || !!reviewerOverviewS3;
+  // A failed run defaults to the context tab; this drives both the trigger and that fallback so it isn't a tab that's not rendered.
+  const contextHidden = isEmbedded && !showRunContext;
+  const liveDefaultValue = hasTrajectories
+    ? 'trajectory'
+    : hasUsersimModels
+    ? `model-${usersimModels[0]!.modelName}`
+    : hasVerifications
+    ? 'verifier'
+    : contextHidden && hasCompletedRuns
+    ? 'completed-runs'
+    : contextHidden && hasTaskMilestones
+    ? 'task-milestones'
+    : contextHidden
+    ? undefined
+    : 'context';
+  const defaultTabValue = isTerminalCompleted
+    ? hasVerifications
+      ? 'verifier'
+      : liveDefaultValue
+    : isTerminalFailed
+    ? contextHidden
+      ? liveDefaultValue
+      : 'context'
+    : liveDefaultValue;
+  const instanceError =
+    typeof instance.error === 'string' && instance.error.trim()
+      ? instance.error
+      : null;
+  // Agent-reported errors from context.prompt_responses — only for prompt_agent steps, and only the one
+  // persisted attempt (distinct from the step-attempt ledger below, which covers every step/attempt).
+  const promptAgentPerStepErrors: {
+    stepId: string | null;
+    model: string | null;
+    message: string;
+  }[] = (() => {
+    const ctx = instance.context as Record<string, unknown> | null | undefined;
+    const prs = ctx?.prompt_responses;
+    if (!Array.isArray(prs)) return [];
+    return prs
+      .map(pr => {
+        const p = pr as Record<string, unknown>;
+        const message =
+          typeof p.error_message === 'string' ? p.error_message.trim() : '';
+        if (!message) return null;
+        return {
+          stepId: typeof p.prompt_id === 'string' ? p.prompt_id : null,
+          model: typeof p.model === 'string' ? p.model : null,
+          message,
+        };
+      })
+      .filter(
+        (
+          x,
+        ): x is {
+          stepId: string | null;
+          model: string | null;
+          message: string;
+        } => x !== null,
+      );
+  })();
+  const showFailureBanner =
+    isTerminalFailed && (instanceError || promptAgentPerStepErrors.length > 0);
+  return (
+    <div className="border border-[var(--border)] rounded-lg bg-[var(--background)] overflow-hidden">
+      <RunStepProgress
+        key={instanceId}
+        steps={taskSteps ?? []}
+        completedSteps={
+          (instance.completed_steps as
+            | { step_id: string; status?: string }[]
+            | undefined) ?? []
+        }
+        totalSteps={instance.total_steps as number | undefined}
+        status={instanceStatus}
+        taskId={taskId}
+        instanceId={instanceId}
+      />
+      {showFailureBanner ? (
+        <div
+          role="alert"
+          className="border-b border-red-500/30 bg-red-500/5 px-4 py-3 text-sm"
+        >
+          <div className="flex items-start gap-2 text-red-500">
+            <XCircle size={16} className="mt-0.5 flex-shrink-0" aria-hidden />
+            <div className="font-medium">
+              {instanceStatus === 'cancelled'
+                ? 'Cancelled'
+                : instanceStatus === 'timed_out'
+                ? 'Timed out'
+                : 'Failed'}
+            </div>
+          </div>
+          {instanceError && (
+            <pre className="mt-2 ml-6 whitespace-pre-wrap break-words font-mono text-xs text-[var(--foreground)]">
+              {instanceError}
+            </pre>
+          )}
+          {promptAgentPerStepErrors.length > 0 && (
+            <div className="mt-2 ml-6 space-y-2">
+              {promptAgentPerStepErrors.map((err, i) => (
+                <div key={i} className="text-xs">
+                  <div className="text-[var(--muted-foreground)]">
+                    Step{' '}
+                    <span className="font-mono">{err.stepId ?? 'unknown'}</span>
+                    {err.model && (
+                      <>
+                        {' · '}
+                        <span className="font-mono">{err.model}</span>
+                      </>
+                    )}
+                  </div>
+                  <pre className="mt-0.5 whitespace-pre-wrap break-words font-mono text-[var(--foreground)]">
+                    {err.message}
+                  </pre>
+                </div>
+              ))}
+            </div>
+          )}
+          <StepAttemptFailures
+            failures={instance.step_attempt_failures}
+            status={instanceStatus}
+            nested
+          />
+        </div>
+      ) : (
+        // No banner to fold into (a completed or running run, or a failure whose only
+        // record is the ledger itself) — stand on its own.
+        <StepAttemptFailures
+          failures={instance.step_attempt_failures}
+          status={instanceStatus}
+        />
+      )}
+      <Tabs.Root defaultValue={defaultTabValue}>
+        <div className="flex items-center justify-between">
+          <Tabs.List>
+            {hasTrajectories && (
+              <Tabs.Trigger value="trajectory" className="my-1">
+                Trajectory Viewer
+              </Tabs.Trigger>
+            )}
+            {usersimModels.map(m => (
+              <Tabs.Trigger
+                key={m.modelName}
+                value={`model-${m.modelName}`}
+                className="my-1"
+              >
+                {m.modelName}
+              </Tabs.Trigger>
+            ))}
+            {hasVerifications && (
+              <Tabs.Trigger value="verifier" className="my-1">
+                {hasAggregateOrSandbox
+                  ? 'Verifier Results'
+                  : rubricsCriteria
+                  ? 'Rubric Verifier'
+                  : 'Verifier Results'}
+              </Tabs.Trigger>
+            )}
+            {showReviewerOverview && (
+              <Tabs.Trigger value="overview" className="my-1">
+                Overview
+              </Tabs.Trigger>
+            )}
+            {(hasCollectedArtifacts || hasExpectedGold) && (
+              <Tabs.Trigger value="collected-artifacts" className="my-1">
+                Collected Artifacts (
+                {collectedArtifactsCount + expectedGoldFiles.length})
+              </Tabs.Trigger>
+            )}
+            {hasCompletedRuns && (
+              <Tabs.Trigger value="completed-runs" className="my-1">
+                Completed Runs
+              </Tabs.Trigger>
+            )}
+            {hasTaskMilestones && (
+              <Tabs.Trigger value="task-milestones" className="my-1">
+                Milestones
+              </Tabs.Trigger>
+            )}
+            {hasServerConfig && (
+              <Tabs.Trigger value="server-config" className="my-1">
+                Server Config
+              </Tabs.Trigger>
+            )}
+            {hasPeerAgents && (
+              <Tabs.Trigger value="peer-qna" className="my-1">
+                Peer Q&amp;A
+              </Tabs.Trigger>
+            )}
+            {hasConversations && (
+              <Tabs.Trigger value="conversations" className="my-1">
+                Conversation
+              </Tabs.Trigger>
+            )}
+            {!contextHidden && (
+              <Tabs.Trigger value="context" className="my-1">
+                Task Run Context
+              </Tabs.Trigger>
+            )}
+          </Tabs.List>
+          <div className="flex flex-shrink-0 items-center gap-2 px-2">
+            {collapseBarDownloads ? (
+              <DropdownMenu.Root>
+                <DropdownMenu.Trigger>
+                  <button
+                    title={`Download any of ${barDownloads.length} files`}
+                    className="flex items-center gap-1 px-2 py-1 rounded text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--accent)] transition-colors"
+                  >
+                    <Download size={12} />
+                    Download Trajectories ({barDownloads.length})
+                    <ChevronDown size={12} />
+                  </button>
+                </DropdownMenu.Trigger>
+                <DropdownMenu.Content sideOffset={4} align="end">
+                  {/* Scroll on an inner element, not on Content: Radix Themes'
+                      menu content sets its own overflow (it clips to the border
+                      radius), so a max-height + overflow-y there is not
+                      reliably honoured. role="none" keeps the wrapper out of
+                      the menu's a11y tree; Radix tracks items by context, not
+                      DOM parentage, so keyboard navigation is unaffected. */}
+                  <div role="none" className="max-h-80 overflow-y-auto">
+                    {barDownloads.map(item => (
+                      <DropdownMenu.Item
+                        key={item.key}
+                        onSelect={() => runBarDownload(item)}
+                        title={item.title}
+                      >
+                        <Download size={12} />
+                        {item.label}
+                      </DropdownMenu.Item>
+                    ))}
+                  </div>
+                </DropdownMenu.Content>
+              </DropdownMenu.Root>
+            ) : (
+              barDownloads.map(item => (
+                <button
+                  key={item.key}
+                  onClick={() => runBarDownload(item)}
+                  title={item.title}
+                  className="flex items-center gap-1 px-2 py-1 rounded text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--accent)] transition-colors"
+                >
+                  <Download size={12} />
+                  {item.label}
+                </button>
+              ))
+            )}
+          </div>
+        </div>
+
+        {hasTrajectories && (
+          <Tabs.Content value="trajectory" className="p-4">
+            {trajectories.length === 0 ? (
+              <p className="text-sm text-[var(--muted-foreground)]">
+                No trajectories were uploaded for this run yet.
+              </p>
+            ) : (
+              <div className="flex flex-col gap-6">
+                {trajectories.map((t, i) => (
+                  <div key={i}>
+                    {trajectories.length > 1 && (
+                      // Per-section header + co-located download so users needn't scroll to the top toolbar for a step's trajectory.
+                      <div className="flex items-center justify-between mb-2">
+                        <h4 className="text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
+                          {t.label}
+                        </h4>
+                        <button
+                          onClick={() =>
+                            handleDownloadTrajectory(t.state.s3Uri)
+                          }
+                          title={`Download ${t.label}`}
+                          className="flex items-center gap-1 px-2 py-1 rounded text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--accent)] transition-colors"
+                        >
+                          <Download size={12} />
+                          Download
+                        </button>
+                      </div>
+                    )}
+                    {t.state.promptText && (
+                      // Native <details>, open by default so the prompt shows without a click; collapsible when a long prompt pushes the trajectory below the fold.
+                      <details
+                        open
+                        className="mb-3 rounded-md border border-[var(--border)] bg-[var(--secondary)] group"
+                      >
+                        <summary className="flex items-center justify-between cursor-pointer select-none p-3 text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)] hover:text-[var(--foreground)]">
+                          <span>Task Prompt</span>
+                          <span className="text-[var(--muted-foreground)] text-[10px] normal-case font-normal">
+                            ({t.state.promptText.length.toLocaleString()} chars
+                            · click to toggle)
+                          </span>
+                        </summary>
+                        <p className="text-sm whitespace-pre-wrap px-4 pb-4 pt-1 border-t border-[var(--border)]">
+                          {t.state.promptText}
+                        </p>
+                      </details>
+                    )}
+                    {t.state.status === 'idle' && (
+                      <button
+                        onClick={() => loadTrajectoryAt(i)}
+                        className="flex items-center gap-1 px-2 py-1 rounded text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--accent)] transition-colors border border-[var(--border)]"
+                      >
+                        Load trajectory
+                      </button>
+                    )}
+                    {t.state.status === 'loading' && (
+                      <div className="flex items-center gap-2 text-sm text-[var(--muted-foreground)]">
+                        <Loader2 size={14} className="animate-spin" />
+                        Loading trajectory...
+                      </div>
+                    )}
+                    {t.state.status === 'error' && (
+                      <p className="text-sm text-red-500">{t.state.error}</p>
+                    )}
+                    {t.state.status === 'loaded' && t.state.trajectory && (
+                      // <details open> so the trajectory shows right after Load; collapsible to scroll past it in a multi-step task.
+                      <details
+                        open
+                        className="rounded-md border border-[var(--border)] group"
+                      >
+                        <summary className="flex items-center justify-between cursor-pointer select-none p-3 text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)] hover:text-[var(--foreground)]">
+                          <span>Trajectory</span>
+                          <span className="text-[var(--muted-foreground)] text-[10px] normal-case font-normal">
+                            {t.state.trajectory.numTurns} turn
+                            {t.state.trajectory.numTurns === 1
+                              ? ''
+                              : 's'} · {t.state.trajectory.toolCallCount} tool
+                            call
+                            {t.state.trajectory.toolCallCount === 1 ? '' : 's'}
+                            {' · click to collapse'}
+                          </span>
+                        </summary>
+                        <div className="border-t border-[var(--border)] p-3">
+                          <TrajectoryViewer
+                            trajectory={t.state.trajectory}
+                            screenshotBaseUri={t.state.s3Uri}
+                            actionCoverage={iosCuaActionCoverage}
+                          />
+                        </div>
+                      </details>
+                    )}
+                    <TriggerTurnStrip
+                      runtime={triggerRuntime}
+                      stepId={t.stepId}
+                      turnIndex={t.turnIndex}
+                      authored={authoredTriggers}
+                      nextPromptText={t.nextTurnPromptText}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+          </Tabs.Content>
+        )}
+
+        {usersimModels.map((m, mi) => (
+          <Tabs.Content
+            key={m.modelName}
+            value={`model-${m.modelName}`}
+            className="p-4"
+          >
+            {m.snapshotS3Uri && (
+              <div className="mb-3">
+                <button
+                  onClick={() =>
+                    window.open(objectContentUrl(m.snapshotS3Uri!), '_blank')
+                  }
+                  className="inline-flex items-center gap-1.5 text-sm text-blue-500 hover:underline cursor-pointer"
+                >
+                  <Download size={14} />
+                  Download workspace's final state snapshot
+                </button>
+              </div>
+            )}
+            <Tabs.Root
+              defaultValue="trajectory"
+              onValueChange={val => {
+                if (val === 'score') lazyFetchField(mi, 'usersimResult');
+                if (val === 'milestones') lazyFetchField(mi, 'milestones');
+                if (val === 'conversation-log')
+                  lazyFetchField(mi, 'conversationLog');
+              }}
+            >
+              <Tabs.List>
+                <Tabs.Trigger value="trajectory" className="my-1">
+                  Trajectory
+                </Tabs.Trigger>
+                <Tabs.Trigger value="score" className="my-1">
+                  Score
+                </Tabs.Trigger>
+                <Tabs.Trigger value="milestones" className="my-1">
+                  Milestones
+                </Tabs.Trigger>
+                <Tabs.Trigger value="conversation-log" className="my-1">
+                  Conversation Log
+                </Tabs.Trigger>
+              </Tabs.List>
+
+              <Tabs.Content value="trajectory" className="pt-4">
+                <RawJsonPanel
+                  state={m.trajectory}
+                  copied={copiedUsersim === `${m.modelName}-trajectory`}
+                  onCopy={() =>
+                    handleCopyJson(
+                      `${m.modelName}-trajectory`,
+                      m.trajectory.data,
+                    )
+                  }
+                />
+              </Tabs.Content>
+
+              <Tabs.Content value="score" className="pt-4">
+                {m.score ? (
+                  <div className="flex flex-col gap-3">
+                    <div className="flex items-center gap-3">
+                      <span className="text-sm font-semibold">
+                        Overall Score
+                      </span>
+                      <span className="text-xs font-semibold px-1.5 py-0.5 rounded bg-[var(--secondary)] border border-[var(--border)]">
+                        {m.score.overall_score}
+                      </span>
+                    </div>
+                    <p className="text-sm text-[var(--muted-foreground)]">
+                      {m.score.overall_score_rationale}
+                    </p>
+                  </div>
+                ) : (
+                  <p className="text-sm text-[var(--muted-foreground)]">
+                    No score data available.
+                  </p>
+                )}
+                {m.usersimResult.status === 'loading' && (
+                  <div className="flex items-center gap-2 text-sm text-[var(--muted-foreground)] mt-4">
+                    <Loader2 size={14} className="animate-spin" />
+                    Loading usersim result...
+                  </div>
+                )}
+                {m.usersimResult.status === 'error' && (
+                  <p className="text-sm text-red-500 mt-4">
+                    {m.usersimResult.error}
+                  </p>
+                )}
+                {m.usersimResult.status === 'loaded' &&
+                  m.usersimResult.data != null && (
+                    <div className="mt-4">
+                      <h4 className="text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)] mb-2">
+                        Usersim Result
+                      </h4>
+                      <div className="rounded-md border border-[var(--border)] bg-[var(--secondary)] p-4">
+                        <pre className="text-sm whitespace-pre-wrap">
+                          {typeof (
+                            m.usersimResult.data as Record<string, unknown>
+                          )?.text === 'string'
+                            ? String(
+                                (
+                                  m.usersimResult.data as Record<
+                                    string,
+                                    unknown
+                                  >
+                                ).text,
+                              )
+                            : JSON.stringify(m.usersimResult.data, null, 2)}
+                        </pre>
+                      </div>
+                    </div>
+                  )}
+              </Tabs.Content>
+
+              <Tabs.Content value="milestones" className="pt-4">
+                {taskMilestones.length > 0 &&
+                  (() => {
+                    const progressEntries =
+                      m.milestones.status === 'loaded' &&
+                      Array.isArray(m.milestones.data)
+                        ? (m.milestones.data as {
+                            milestone_id: string;
+                            status: string;
+                            turn: number;
+                          }[])
+                        : [];
+                    const progressByMilestone = new Map<
+                      string,
+                      { startTurn?: number; endTurn?: number; status: string }
+                    >();
+                    for (const entry of progressEntries) {
+                      const existing = progressByMilestone.get(
+                        entry.milestone_id,
+                      ) ?? { status: 'unknown' };
+                      if (entry.status === 'in_progress') {
+                        existing.startTurn = entry.turn;
+                        if (existing.status !== 'completed')
+                          existing.status = 'in_progress';
+                      }
+                      if (entry.status === 'completed') {
+                        existing.endTurn = entry.turn;
+                        existing.status = 'completed';
+                      }
+                      progressByMilestone.set(entry.milestone_id, existing);
+                    }
+                    return (
+                      <div className="flex flex-col gap-6 mb-6">
+                        {taskMilestones.map(ms => {
+                          const progress = progressByMilestone.get(
+                            ms.milestone_id,
+                          );
+                          return (
+                            <div key={ms.milestone_id}>
+                              <div className="flex items-center gap-2 mb-1">
+                                <h4 className="text-sm font-semibold">
+                                  {ms.milestone_id}
+                                </h4>
+                                {progress ? (
+                                  <>
+                                    <span
+                                      className={`text-xs font-semibold px-1.5 py-0.5 rounded ${
+                                        progress.status === 'completed'
+                                          ? 'bg-green-500/10 text-green-500'
+                                          : 'bg-yellow-500/10 text-yellow-500'
+                                      }`}
+                                    >
+                                      {progress.status}
+                                    </span>
+                                    <span className="text-xs text-[var(--muted-foreground)]">
+                                      turns {progress.startTurn ?? '?'}
+                                      {'\u2013'}
+                                      {progress.endTurn ?? '?'}
+                                    </span>
+                                  </>
+                                ) : m.milestones.status === 'loaded' ? (
+                                  <span className="text-xs font-semibold px-1.5 py-0.5 rounded bg-[var(--secondary)] text-[var(--muted-foreground)]">
+                                    not reached
+                                  </span>
+                                ) : null}
+                              </div>
+                              <p className="text-xs text-[var(--muted-foreground)] mb-3">
+                                {ms.continuation_criteria}
+                              </p>
+                              {ms.planned_interactions_list.length > 0 &&
+                                (() => {
+                                  const isExpanded = expandedTriggers.has(
+                                    ms.milestone_id,
+                                  );
+                                  const PREVIEW_COUNT = 2;
+                                  const visible = isExpanded
+                                    ? ms.planned_interactions_list
+                                    : ms.planned_interactions_list.slice(
+                                        0,
+                                        PREVIEW_COUNT,
+                                      );
+                                  const hiddenCount =
+                                    ms.planned_interactions_list.length -
+                                    PREVIEW_COUNT;
+                                  return (
+                                    <div className="flex flex-col gap-2">
+                                      {visible.map((interaction, idx) => (
+                                        <div
+                                          key={idx}
+                                          className="rounded-md border border-[var(--border)] overflow-hidden text-sm"
+                                        >
+                                          <div className="p-3 bg-blue-500/5">
+                                            <span className="text-xs font-semibold uppercase tracking-wider text-blue-500">
+                                              Trigger
+                                            </span>
+                                            <p className="mt-0.5">
+                                              {interaction.trigger}
+                                            </p>
+                                          </div>
+                                          <div className="p-3 bg-amber-500/5 border-t border-[var(--border)]">
+                                            <span className="text-xs font-semibold uppercase tracking-wider text-amber-500">
+                                              Reaction
+                                            </span>
+                                            <p className="mt-0.5">
+                                              {interaction.reaction}
+                                            </p>
+                                          </div>
+                                        </div>
+                                      ))}
+                                      {hiddenCount > 0 && (
+                                        <Button
+                                          variant="soft"
+                                          size="1"
+                                          onClick={() => {
+                                            setExpandedTriggers(prev => {
+                                              const next = new Set(prev);
+                                              if (isExpanded)
+                                                next.delete(ms.milestone_id);
+                                              else next.add(ms.milestone_id);
+                                              return next;
+                                            });
+                                          }}
+                                          style={{
+                                            cursor: 'pointer',
+                                            alignSelf: 'flex-start',
+                                          }}
+                                        >
+                                          {isExpanded
+                                            ? 'Show less'
+                                            : `Show ${hiddenCount} more`}
+                                        </Button>
+                                      )}
+                                    </div>
+                                  );
+                                })()}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
+                <h4 className="text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)] mb-2">
+                  Milestone Progress
+                </h4>
+                <RawJsonPanel
+                  state={m.milestones}
+                  copied={copiedUsersim === `${m.modelName}-milestones`}
+                  onCopy={() =>
+                    handleCopyJson(
+                      `${m.modelName}-milestones`,
+                      m.milestones.data,
+                    )
+                  }
+                />
+              </Tabs.Content>
+
+              <Tabs.Content value="conversation-log" className="pt-4">
+                <RawJsonPanel
+                  state={m.conversationLog}
+                  copied={copiedUsersim === `${m.modelName}-conversationLog`}
+                  onCopy={() =>
+                    handleCopyJson(
+                      `${m.modelName}-conversationLog`,
+                      m.conversationLog.data,
+                    )
+                  }
+                />
+              </Tabs.Content>
+            </Tabs.Root>
+          </Tabs.Content>
+        ))}
+
+        {hasVerifications && (
+          <Tabs.Content
+            value="verifier"
+            className={hasAggregateOrSandbox || !rubricsCriteria ? 'p-4' : ''}
+          >
+            {hasAggregateOrSandbox ? (
+              <div className="flex flex-col gap-6">
+                {/* Aggregate score(s) — the headline value: shown at top
+                    so users see the final merged outcome before scrolling
+                    through the individual verifiers that fed into it. */}
+                {aggregateVerifiers.map(([id, v]) => (
+                  <AggregateScoreCard key={id} verifierId={id} verifier={v} />
+                ))}
+                {/* Rubric panels — one per rubric-shaped verifier. We
+                    previously passed the full set into a single panel,
+                    but `getFirstVerifierOutput` returns only the first
+                    key, silently dropping outputs from any additional
+                    rubric verifiers (e.g. an AgentPromptResponseVerifier
+                    + a separate rubrics_verifier in the same task). Rendering
+                    one panel per id surfaces all of them. */}
+                {rubricsCriteria &&
+                  rubricVerifiers.map(([id, v]) => (
+                    <React.Fragment key={id}>
+                      {renderRubricVerifierPanel(
+                        id,
+                        v,
+                        rubricsCriteria,
+                        rubricsAggregator,
+                      )}
+                    </React.Fragment>
+                  ))}
+                {/* Sandbox verifier(s) — filesystem/probe outcomes. */}
+                {sandboxVerifiers.map(([id, v]) => (
+                  <SandboxVerifierCard
+                    key={id}
+                    verifierId={id}
+                    verifier={v}
+                    collectedArtifacts={collectedArtifacts}
+                  />
+                ))}
+              </div>
+            ) : rubricsCriteria ? (
+              rubricVerifiers.length > 1 ? (
+                <div className="flex flex-col gap-6">
+                  {rubricVerifiers.map(([id, v]) => (
+                    <React.Fragment key={id}>
+                      {renderRubricVerifierPanel(
+                        id,
+                        v,
+                        rubricsCriteria,
+                        rubricsAggregator,
+                      )}
+                    </React.Fragment>
+                  ))}
+                </div>
+              ) : rubricVerifiers[0] ? (
+                renderRubricVerifierPanel(
+                  rubricVerifiers[0][0],
+                  rubricVerifiers[0][1],
+                  rubricsCriteria,
+                  rubricsAggregator,
+                )
+              ) : (
+                <RubricGradingResults
+                  verificationResults={
+                    verifications as unknown as VerificationResults
+                  }
+                  rubrics={rubricsCriteria as unknown as RubricCriterion[]}
+                  aggregator={rubricsAggregator}
+                />
+              )
+            ) : (
+              <div className="flex flex-col gap-4">
+                {Object.entries(verifications!).map(([verifierId, v]) => {
+                  const rawResults = Array.isArray(v.results) ? v.results : [];
+                  // CUA wraps checks as [{func, results:[...]}]; unwrap so passed/total reflects real per-check outcomes.
+                  const results = flattenCuaVerifierResults(
+                    rawResults,
+                  ) as unknown as typeof v.results;
+                  const isValidationStyle = 'passed' in v;
+
+                  if (isValidationStyle) {
+                    return (
+                      <MCPEnvValidationEntry
+                        key={verifierId}
+                        validationKey={verifierId}
+                        data={v as Record<string, unknown>}
+                      />
+                    );
+                  }
+
+                  const passed = results.filter(r => r.result).length;
+                  const total = results.length;
+                  const allPassed = passed === total;
+                  const evalFunc = evaluatorConfig?.func as string | undefined;
+                  const evalOptions = evaluatorConfig?.options as
+                    | Record<string, unknown>
+                    | undefined;
+                  const isInfeasible =
+                    evalFunc === 'infeasible' ||
+                    results.some(
+                      r =>
+                        r.id === 'infeasible' ||
+                        r.id === 'infeasible_on_feasible',
+                    );
+                  const lastPrompt =
+                    promptResponses.length > 0
+                      ? promptResponses[promptResponses.length - 1]
+                      : undefined;
+                  const agentResponse = lastPrompt?.response;
+                  const expectedPath = (
+                    evaluatorConfig?.expected as
+                      | Record<string, unknown>
+                      | undefined
+                  )?.path as string | undefined;
+                  const resultPath = (
+                    evaluatorConfig?.result as
+                      | Record<string, unknown>
+                      | undefined
+                  )?.path as string | undefined;
+                  // Conjunction (and/or) drives how per-check pass/fail rolls up. Surfacing it disambiguates "1/2 passed" next to "Score: 100%" on an OR-gated verifier.
+                  const conjRaw = (
+                    evaluatorConfig?.conj as string | undefined
+                  )?.toLowerCase();
+                  const conj: 'and' | 'or' | null =
+                    conjRaw === 'and' || conjRaw === 'or' ? conjRaw : null;
+                  const showConjBadge = conj !== null && total > 1;
+                  // The agent judge returns a continuous rubric score, so a CUA task passes above the 65% bar
+                  // (CUA_AGENT_JUDGE_PASS_THRESHOLD) rather than requiring 1.0. Other evaluators keep the strict `score >= 1` gate.
+                  const isAgentJudge =
+                    isAgentJudgeFunc(evalFunc) ||
+                    results.some(r =>
+                      isAgentJudgeFunc((r as { func?: unknown }).func),
+                    );
+                  const verifierPassed = isAgentJudge
+                    ? v.score > CUA_AGENT_JUDGE_PASS_THRESHOLD
+                    : v.score >= 1;
+                  return (
+                    <div key={verifierId} className="flex flex-col gap-4">
+                      {/* Summary */}
+                      <div className="flex items-center gap-3 flex-wrap">
+                        {verifierPassed ? (
+                          <CheckCircle2 size={18} className="text-green-500" />
+                        ) : (
+                          <XCircle size={18} className="text-red-500" />
+                        )}
+                        <span className="text-sm font-semibold">
+                          {passed}/{total} checks passed
+                        </span>
+                        {showConjBadge && (
+                          <span
+                            className="text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded border border-[var(--border)] text-[var(--muted-foreground)]"
+                            title={
+                              conj === 'or'
+                                ? 'Verifier passes if ANY check passes (conj: or)'
+                                : 'Verifier passes only if ALL checks pass (conj: and)'
+                            }
+                          >
+                            {conj === 'or' ? 'any-pass' : 'all-pass'} ({conj})
+                          </span>
+                        )}
+                        <span
+                          className={`text-xs font-semibold px-1.5 py-0.5 rounded ${
+                            verifierPassed
+                              ? 'bg-green-500/10 text-green-500'
+                              : 'bg-red-500/10 text-red-500'
+                          }`}
+                        >
+                          Score: {(v.score * 100).toFixed(0)}%
+                        </span>
+                      </div>
+                      {showConjBadge && passed !== total && v.score >= 1 && (
+                        <p className="text-xs text-[var(--muted-foreground)] -mt-2">
+                          Score is 100% because the evaluator uses{' '}
+                          <code className="px-1 py-0.5 rounded bg-[var(--background)] border border-[var(--border)] font-mono">
+                            conj: or
+                          </code>{' '}
+                          — the verifier passes as long as at least one of{' '}
+                          {total} checks passes.
+                        </p>
+                      )}
+
+                      {/* One block per result/check, with an AND/OR
+                       * connector between consecutive pairs when there's
+                       * more than one check. The connector reinforces the
+                       * pass-rule visually so readers don't have to hold
+                       * the conjunction in their head while scanning. */}
+                      {results.map((r, i) => (
+                        <React.Fragment key={i}>
+                          {i > 0 && conj && (
+                            <VerifierConjSeparator conj={conj} />
+                          )}
+                          <div className="rounded-lg border border-[var(--border)] p-4">
+                            {/* Check header */}
+                            <div className="flex items-center gap-2 mb-2">
+                              {r.result ? (
+                                <CheckCircle2
+                                  size={16}
+                                  className="text-green-500 flex-shrink-0"
+                                />
+                              ) : (
+                                <XCircle
+                                  size={16}
+                                  className="text-red-500 flex-shrink-0"
+                                />
+                              )}
+                              <span className="text-sm font-semibold">
+                                {(r.id ?? `check ${i + 1}`).replace(/_/g, ' ')}
+                              </span>
+                              {/* For agent_judge_* checks, surface the
+                                  comparison / rubric sub-scores as
+                                  left-aligned percentage pills (parsed from
+                                  the rendered message) in place of the raw
+                                  float. Non-judge checks keep the simple
+                                  rounded "score:" label. */}
+                              {(() => {
+                                const judge =
+                                  typeof r.message === 'string'
+                                    ? parseCuaAgentJudgeMessage(r.message)
+                                    : null;
+                                if (judge) {
+                                  const fmt = (n: number | null) =>
+                                    n === null
+                                      ? '—'
+                                      : `${(n * 100).toFixed(0)}%`;
+                                  return (
+                                    <div className="flex items-center gap-1.5 text-[10px] font-mono">
+                                      <span
+                                        className="px-1.5 py-0.5 rounded bg-[var(--secondary)] border border-[var(--border)] text-[var(--muted-foreground)]"
+                                        title="Rubric sub-score"
+                                      >
+                                        rubric {fmt(judge.rubricScore)}
+                                      </span>
+                                      <span
+                                        className="px-1.5 py-0.5 rounded bg-[var(--secondary)] border border-[var(--border)] text-[var(--muted-foreground)]"
+                                        title="Comparison (golden-compare) sub-score"
+                                      >
+                                        comparison {fmt(judge.verdictScore)}
+                                      </span>
+                                    </div>
+                                  );
+                                }
+                                if (r.score !== 0 && r.score !== 1) {
+                                  return (
+                                    <span className="text-xs text-[var(--muted-foreground)]">
+                                      score:{' '}
+                                      {typeof r.score === 'number'
+                                        ? r.score.toFixed(2)
+                                        : r.score}
+                                    </span>
+                                  );
+                                }
+                                return null;
+                              })()}
+                            </div>
+
+                            {/* Message — agent_judge_* messages get a
+                                structured renderer (per-criterion table with
+                                filters + collapsible reasons); anything else
+                                falls back to the original raw paragraph. */}
+                            {r.message ? (
+                              <div className="mb-3">
+                                {r.id === 'osworld_v2' ? (
+                                  <OSWorldV2VerifierMessage
+                                    message={r.message}
+                                    topLineScore={v.score}
+                                  />
+                                ) : (
+                                  <CuaAgentJudgeResult
+                                    message={r.message}
+                                    topLineScore={v.score}
+                                  />
+                                )}
+                              </div>
+                            ) : null}
+
+                            {/* Details grid */}
+                            <div className="flex flex-col gap-1.5 text-xs">
+                              {/* Prefer the per-check `func` stamped during
+                               * CUA-result flattening; fall back to the
+                               * top-level evaluator func for non-CUA tasks. */}
+                              {((r as { func?: string }).func ?? evalFunc) && (
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[var(--muted-foreground)]">
+                                    Function:
+                                  </span>
+                                  <code className="px-1.5 py-0.5 rounded bg-[var(--background)] border border-[var(--border)] font-mono">
+                                    {(r as { func?: string }).func ?? evalFunc}
+                                  </code>
+                                </div>
+                              )}
+                              {(() => {
+                                // Per-check options: for CUA `options` is an array indexed by func (slice the entry); for others a single dict.
+                                const checkOptions = selectCheckOptions(
+                                  evalOptions,
+                                  (r as { __funcIndex?: number }).__funcIndex,
+                                );
+                                if (
+                                  !checkOptions ||
+                                  Object.keys(checkOptions).length === 0
+                                ) {
+                                  return null;
+                                }
+                                return (
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <span className="text-[var(--muted-foreground)]">
+                                      Options:
+                                    </span>
+                                    {Object.entries(checkOptions).map(
+                                      ([key, val]) => (
+                                        <code
+                                          key={key}
+                                          className="px-1.5 py-0.5 rounded bg-[var(--background)] border border-[var(--border)] font-mono text-[var(--muted-foreground)]"
+                                        >
+                                          {key}:{' '}
+                                          {typeof val === 'object' &&
+                                          val !== null
+                                            ? JSON.stringify(val)
+                                            : String(val)}
+                                        </code>
+                                      ),
+                                    )}
+                                  </div>
+                                );
+                              })()}
+                              {(r.expected_url || expectedPath) && (
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[var(--muted-foreground)]">
+                                    Expected:
+                                  </span>
+                                  <a
+                                    href={safeHref(r.expected_url || expectedPath)}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="inline-flex items-center gap-1 text-blue-500 hover:underline"
+                                  >
+                                    <Download size={12} />
+                                    Download
+                                  </a>
+                                </div>
+                              )}
+                              {(r.actual_s3_uri || resultPath) && (
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[var(--muted-foreground)]">
+                                    Actual:
+                                  </span>
+                                  {r.actual_s3_uri ? (
+                                    <button
+                                      onClick={e => {
+                                        e.stopPropagation();
+                                        window.open(
+                                          objectContentUrl(r.actual_s3_uri!),
+                                          '_blank',
+                                        );
+                                      }}
+                                      className="inline-flex items-center gap-1 text-blue-500 hover:underline cursor-pointer"
+                                      title="Download actual result"
+                                    >
+                                      <Download size={12} />
+                                      Download
+                                    </button>
+                                  ) : (
+                                    <code className="px-1.5 py-0.5 rounded bg-[var(--background)] border border-[var(--border)] font-mono truncate">
+                                      {resultPath}
+                                    </code>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+
+                            {/* Agent response for infeasible */}
+                            {isInfeasible && agentResponse && (
+                              <div className="mt-3 pt-3 border-t border-[var(--border)]">
+                                <div className="text-xs font-semibold text-[var(--muted-foreground)] mb-1">
+                                  Agent Response
+                                </div>
+                                <p className="text-xs whitespace-pre-wrap break-words">
+                                  {agentResponse.length > 500
+                                    ? agentResponse.slice(0, 500) + '...'
+                                    : agentResponse}
+                                </p>
+                              </div>
+                            )}
+                          </div>
+                        </React.Fragment>
+                      ))}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </Tabs.Content>
+        )}
+
+        {showReviewerOverview && reviewerOverviewSrc && (
+          <Tabs.Content value="overview" className="p-0">
+            {overviewFileList.length > 1 && (
+              <div className="flex items-center gap-2 px-3 py-2 text-sm text-[var(--gray-11)]">
+                <select
+                  value={activeOverviewFile ?? ''}
+                  onChange={e => setSelectedOverviewFile(e.target.value)}
+                  className="rounded border border-[var(--gray-6)] bg-transparent px-2 py-1 text-sm"
+                >
+                  {overviewFileList.map(f => (
+                    <option key={f} value={f}>
+                      {f.replace(/^\/app\//, '')}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+            <iframe
+              key={reviewerOverviewSrc}
+              title="Sandbox file"
+              src={reviewerOverviewSrc}
+              sandbox=""
+              className="w-full"
+              style={{ height: '80vh', border: 'none' }}
+            />
+          </Tabs.Content>
+        )}
+
+        {(hasCollectedArtifacts || hasExpectedGold) && (
+          <Tabs.Content value="collected-artifacts" className="p-4">
+            <div className="flex flex-col gap-5">
+              {/* Render one list per collect step. Golden files (task-level,
+                  not per-step) go to the first section; when there are no
+                  collected artifacts at all, synthesize a single empty section
+                  so the gold-only case still renders. */}
+              {(collectedArtifactSections.length > 0
+                ? collectedArtifactSections
+                : [{ stepId: null, artifacts: {}, basePath: '' }]
+              ).map((section, i) => (
+                <div
+                  key={section.stepId ?? `legacy-${i}`}
+                  className="flex flex-col gap-3"
+                >
+                  {collectedArtifactSections.length > 1 && section.stepId && (
+                    <div className="text-xs font-medium text-[var(--muted-foreground)]">
+                      Step{' '}
+                      <code className="px-1.5 py-0.5 rounded bg-[var(--background)] border border-[var(--border)] font-mono">
+                        {section.stepId}
+                      </code>
+                    </div>
+                  )}
+                  <CollectedArtifactsList
+                    key={`${instanceId}-${section.stepId ?? i}`}
+                    artifacts={section.artifacts}
+                    basePath={section.basePath}
+                    roleMap={artifactRoleMap}
+                    taskId={taskId}
+                    instanceId={instanceId}
+                    stepId={section.stepId ?? ''}
+                    expectedGold={
+                      i === 0 && hasExpectedGold ? expectedGoldFiles : undefined
+                    }
+                  />
+                </div>
+              ))}
+            </div>
+          </Tabs.Content>
+        )}
+
+        {hasCompletedRuns && (
+          <Tabs.Content value="completed-runs" className="p-4">
+            <div className="space-y-3">
+              {completedRuns.map((run, i) => (
+                <div
+                  key={i}
+                  className="rounded-md border border-[var(--border)] p-4 flex items-center justify-between"
+                >
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs font-medium px-2 py-0.5 rounded bg-[var(--secondary)]">
+                      {run.model_label}
+                    </span>
+                    <span className="text-sm font-mono text-[var(--muted-foreground)]">
+                      {run.run_id}
+                    </span>
+                    <span
+                      className={`text-xs px-2 py-0.5 rounded-full ${
+                        run.result === 'done'
+                          ? 'bg-green-100 text-green-700'
+                          : 'bg-[var(--secondary)] text-[var(--muted-foreground)]'
+                      }`}
+                    >
+                      {run.result}
+                    </span>
+                  </div>
+                  {(run.trajectory_url ||
+                    run.output_urls?.['trajectory.json']) && (
+                    <button
+                      onClick={() =>
+                        handleDownloadS3(
+                          run.trajectory_url ||
+                            run.output_urls?.['trajectory.json'] ||
+                            '',
+                        )
+                      }
+                      className="flex items-center gap-1 px-2 py-1 rounded text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--accent)] transition-colors"
+                    >
+                      <Download size={12} />
+                      Trajectory
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          </Tabs.Content>
+        )}
+
+        {hasTaskMilestones && (
+          <Tabs.Content value="task-milestones" className="p-4">
+            <div className="space-y-4">
+              {taskMilestones.map((milestone, index) => (
+                <div
+                  key={`${milestone.milestone_id}-${index}`}
+                  className="rounded-md border border-[var(--border)] p-4"
+                >
+                  <div className="flex items-center gap-2 mb-3">
+                    <span className="text-xs font-medium px-2 py-0.5 rounded bg-[var(--secondary)]">
+                      {milestone.milestone_id}
+                    </span>
+                  </div>
+                  <div className="space-y-3 text-sm">
+                    <div>
+                      <h4 className="text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)] mb-1">
+                        Prompt
+                      </h4>
+                      <p className="whitespace-pre-wrap break-words">
+                        {milestone.prompt}
+                      </p>
+                    </div>
+                    {milestone.continuation_criteria && (
+                      <div>
+                        <h4 className="text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)] mb-1">
+                          Continuation Criteria
+                        </h4>
+                        <p className="whitespace-pre-wrap break-words text-[var(--muted-foreground)]">
+                          {milestone.continuation_criteria}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Tabs.Content>
+        )}
+
+        {hasServerConfig && (
+          <Tabs.Content value="server-config" className="p-4">
+            <ServerConfigPanel
+              changes={serverConfigChanges}
+              failures={serverConfigFailures}
+              skipped={serverConfigSkipped}
+            />
+          </Tabs.Content>
+        )}
+
+        {hasPeerAgents && (
+          <Tabs.Content value="peer-qna" className="p-0">
+            <PeerQnAPanel
+              trajectories={trajectories.map(t => ({
+                label: t.label,
+                trajectory: t.state.trajectory,
+              }))}
+            />
+          </Tabs.Content>
+        )}
+
+        {hasConversations && (
+          <Tabs.Content value="conversations" className="p-0">
+            <ConversationsPanel instanceId={instanceId} />
+          </Tabs.Content>
+        )}
+
+
+        <Tabs.Content value="context" className="p-4">
+          {context ? (
+            <div>
+              <div className="mb-2">
+                <Button
+                  variant="outline"
+                  size="1"
+                  onClick={() => {
+                    navigator.clipboard.writeText(
+                      JSON.stringify(context, null, 2),
+                    );
+                    setCopiedContext(true);
+                    setTimeout(() => setCopiedContext(false), 1500);
+                  }}
+                  style={{ cursor: 'pointer' }}
+                >
+                  {copiedContext ? (
+                    <>
+                      <Check size={12} className="text-green-500" />
+                      Copied
+                    </>
+                  ) : (
+                    <>
+                      <Copy size={12} />
+                      Copy
+                    </>
+                  )}
+                </Button>
+              </div>
+              <ScrollArea
+                scrollbars="both"
+                style={{ maxHeight: 500 }}
+                className="rounded-md border border-[var(--border)] bg-[var(--secondary)]"
+              >
+                <pre className="p-4 text-xs font-mono">
+                  {JSON.stringify(context, null, 2)}
+                </pre>
+              </ScrollArea>
+            </div>
+          ) : (
+            <p className="text-sm text-[var(--muted-foreground)]">
+              No context available for this task run.
+            </p>
+          )}
+        </Tabs.Content>
+      </Tabs.Root>
+    </div>
+  );
+}
+
+function RawJsonPanel({
+  state,
+  copied,
+  onCopy,
+}: {
+  state: FetchState;
+  copied: boolean;
+  onCopy: () => void;
+}) {
+  if (state.status === 'idle') {
+    return null;
+  }
+  if (state.status === 'loading') {
+    return (
+      <div className="flex items-center gap-2 text-sm text-[var(--muted-foreground)]">
+        <Loader2 size={14} className="animate-spin" />
+        Loading...
+      </div>
+    );
+  }
+  if (state.status === 'error') {
+    return <p className="text-sm text-red-500">{state.error}</p>;
+  }
+  if (state.data == null) {
+    return (
+      <p className="text-sm text-[var(--muted-foreground)]">
+        No data available.
+      </p>
+    );
+  }
+  return (
+    <div>
+      <div className="mb-2">
+        <Button
+          variant="outline"
+          size="1"
+          onClick={onCopy}
+          style={{ cursor: 'pointer' }}
+        >
+          {copied ? (
+            <>
+              <Check size={12} className="text-green-500" />
+              Copied
+            </>
+          ) : (
+            <>
+              <Copy size={12} />
+              Copy
+            </>
+          )}
+        </Button>
+      </div>
+      <ScrollArea
+        scrollbars="both"
+        style={{ maxHeight: 500 }}
+        className="rounded-md border border-[var(--border)] bg-[var(--secondary)]"
+      >
+        <pre className="p-4 text-xs font-mono">
+          {JSON.stringify(state.data, null, 2)}
+        </pre>
+      </ScrollArea>
+    </div>
+  );
+}
+
+// Surface the backend's structured `detail` (e.g. the 413 "too large" message)
+// instead of a bare status code.
+async function trajectoryFetchError(
+  res: Response,
+  fallback: string,
+): Promise<Error> {
+  const detail = await res
+    .json()
+    .then(body => (body as { detail?: string })?.detail)
+    .catch(() => undefined);
+  return new Error(detail || `${fallback} (${res.status})`);
+}
+
+async function fetchRawS3Json(
+  s3Uri: string,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  const res = await apiFetch(
+    objectContentUrl(s3Uri),
+    signal ? { signal } : undefined,
+  );
+  if (!res.ok) {
+    throw await trajectoryFetchError(res, 'Failed to fetch');
+  }
+  return res.json();
+}
+
+async function fetchTrajectory(
+  s3Uri: string,
+  envType?: string,
+  modelHint?: string,
+): Promise<ParsedTrajectory> {
+  const base = objectContentUrl(s3Uri);
+  let res = await apiFetch(base);
+  // Too large to inline? Retry the screenshot-trimmed stream (frames become lazy-loaded placeholders).
+  // Only .json is trimmable, so a non-JSON 413 keeps its message rather than retrying into an identical 413.
+  if (res.status === 413 && s3Uri.endsWith('.json')) {
+    res = await apiFetch(`${base}&trim=screenshots`);
+  }
+  if (!res.ok) {
+    throw await trajectoryFetchError(res, 'Failed to fetch trajectory');
+  }
+  const spans = (await res.json()) as OtelSpan[];
+
+  // modelHint feeds formats whose trajectory carries no model (e.g. OpenClaw),
+  // sourced from the prompt-response's `model`.
+  return parseOtelTrajectory(spans, envType, { modelHint });
+}
+
+/** Horizontal rule with an AND/OR label between adjacent verifier checks so the pass-rule reads visually.
+ *  Both conjunctions share the same muted weight — the label communicates the rule, not the color. */
+function VerifierConjSeparator({ conj }: { conj: 'and' | 'or' }) {
+  const label = conj === 'or' ? 'OR' : 'AND';
+  return (
+    <div className="flex items-center gap-3 px-2">
+      <div className="flex-1 border-t border-[var(--border)]" />
+      <span
+        className="text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded border border-[var(--border)] text-[var(--muted-foreground)] bg-[var(--background)]"
+        title={
+          conj === 'or'
+            ? 'The verifier passes if either the check above OR the check below passes'
+            : 'The verifier passes only if the check above AND the check below pass'
+        }
+      >
+        {label}
+      </span>
+      <div className="flex-1 border-t border-[var(--border)]" />
+    </div>
+  );
+}
+
+/** Top-of-tab card for the merged score from an `aggregate_verifiers` step. Reads `source_verifier_ids`
+ *  so users see which verifiers fed the aggregate. */
+function AggregateScoreCard({
+  verifierId,
+  verifier,
+}: {
+  verifierId: string;
+  verifier: Record<string, unknown>;
+}) {
+  const score = typeof verifier.score === 'number' ? verifier.score : 0;
+  const sourceIds = Array.isArray(verifier.source_verifier_ids)
+    ? (verifier.source_verifier_ids as string[])
+    : [];
+  const aggregator =
+    typeof verifier.score_aggregator === 'string'
+      ? (verifier.score_aggregator as string)
+      : null;
+  const passed = score >= 1;
+  return (
+    <div
+      className={`rounded-lg border-2 p-5 ${
+        passed
+          ? 'border-emerald-300 bg-emerald-50/40'
+          : score >= 0.5
+          ? 'border-amber-300 bg-amber-50/40'
+          : 'border-red-300 bg-red-50/40'
+      }`}
+    >
+      <div className="flex items-center gap-4 flex-wrap">
+        <div className="flex items-center gap-3">
+          {passed ? (
+            <CheckCircle2 size={28} className="text-emerald-600" />
+          ) : (
+            <XCircle size={28} className="text-red-500" />
+          )}
+          <div className="flex flex-col">
+            <span className="text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
+              Final Aggregate Score
+            </span>
+            <span className="text-2xl font-bold">
+              {(score * 100).toFixed(0)}%
+            </span>
+          </div>
+        </div>
+        {aggregator && (
+          <span
+            className="text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded border border-[var(--border)] text-[var(--muted-foreground)] bg-[var(--background)]"
+            title={`Aggregator: ${aggregator}`}
+          >
+            {aggregator}
+          </span>
+        )}
+        <code className="text-[10px] font-mono text-[var(--muted-foreground)] ml-auto">
+          {verifierId}
+        </code>
+      </div>
+      {sourceIds.length > 0 && (
+        <div className="mt-3 flex items-center gap-2 flex-wrap">
+          <span className="text-xs text-[var(--muted-foreground)]">
+            Merged from:
+          </span>
+          {sourceIds.map(sid => (
+            <code
+              key={sid}
+              className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[var(--background)] border border-[var(--border)]"
+            >
+              {sid}
+            </code>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Sandbox-side verifier outcomes from a `verify_sandbox` step. Per-criterion rows show the criterion
+ *  `type` (probe_file_exists, bash_cmd_succeeds, …) and its `paths`/`cmd`. */
+// Sandbox verifier — justification-string parsers. Each probe type emits its own `justification` format:
+//   probe_file_exists / probe_dir_exists: "All paths exist" | "Missing: a, b, c"
+//   probe_file_contains: "contains 'needle'" | "does not contain 'needle'"  (Python !r repr)
+//   bash_cmd_succeeds: "exit=N; stderr=<first 200 chars>"
+// Parsing structures these into per-path markers, an exit/stderr panel, and a found/not-found badge.
+
+function parseMissingPaths(justification: string): Set<string> | null {
+  const m = justification.match(/^Missing:\s*(.+)$/);
+  if (!m) return null;
+  return new Set(
+    (m[1] ?? '')
+      .split(',')
+      .map(p => p.trim())
+      .filter(Boolean),
+  );
+}
+
+function parseBashOutcome(
+  justification: string,
+): { exitCode: number | null; stderr: string } | null {
+  // [\s\S]* (not .*) catches multiline stderr — the emitter caps at 200 chars but doesn't strip newlines.
+  const m = justification.match(/^exit=(-?\d+);\s*stderr=([\s\S]*)$/);
+  if (!m) return null;
+  const code = Number.parseInt(m[1] ?? '', 10);
+  return {
+    exitCode: Number.isFinite(code) ? code : null,
+    stderr: m[2] ?? '',
+  };
+}
+
+function parseContainsOutcome(
+  justification: string,
+): { found: boolean; needle: string } | null {
+  // Python's !r is single-quoted by default, double when the string contains a single quote. Strip matching outer quotes.
+  const stripQuotes = (s: string) => s.replace(/^(['"`])([\s\S]*)\1$/, '$2');
+  if (justification.startsWith('does not contain ')) {
+    return {
+      found: false,
+      needle: stripQuotes(
+        justification.slice('does not contain '.length).trim(),
+      ),
+    };
+  }
+  if (justification.startsWith('contains ')) {
+    return {
+      found: true,
+      needle: stripQuotes(justification.slice('contains '.length).trim()),
+    };
+  }
+  return null;
+}
+
+/** Open a collected-artifact path chip via the /objects/content seam in a new tab, mirroring the Collected Artifacts download. */
+function openCollectedArtifact(s3Uri: string): void {
+  window.open(objectContentUrl(s3Uri), '_blank');
+}
+
+/** Path chip in the Sandbox Verifier card: a link when `s3Uri` is set (a collect step uploaded the file),
+ *  green/red when a "Missing: …" set was parsed (`hasMissingSet`), else neutral. */
+function SandboxPathChip({
+  path,
+  isMissing,
+  hasMissingSet,
+  s3Uri,
+}: {
+  path: string;
+  isMissing: boolean;
+  hasMissingSet: boolean;
+  s3Uri: string | undefined;
+}) {
+  const stateClasses = hasMissingSet
+    ? isMissing
+      ? 'bg-red-50 text-red-700 border-red-300'
+      : 'bg-emerald-50 text-emerald-700 border-emerald-300'
+    : 'bg-[var(--background)] text-[var(--foreground)] border-[var(--border)]';
+  const baseClasses = `inline-flex items-center gap-1 px-1.5 py-0.5 rounded font-mono border ${stateClasses}`;
+  const icon = hasMissingSet ? (
+    isMissing ? (
+      <XCircle size={10} className="text-red-500" />
+    ) : (
+      <CheckCircle2 size={10} className="text-emerald-500" />
+    )
+  ) : null;
+
+  if (s3Uri) {
+    return (
+      <button
+        type="button"
+        onClick={() => openCollectedArtifact(s3Uri)}
+        className={`${baseClasses} cursor-pointer hover:underline hover:bg-[var(--accent)]`}
+        title={
+          hasMissingSet && isMissing
+            ? 'Missing — open the collected version from a sibling step'
+            : 'Open file from collected artifacts'
+        }
+      >
+        {icon}
+        {path}
+      </button>
+    );
+  }
+  return (
+    <code
+      className={baseClasses}
+      title={hasMissingSet ? (isMissing ? 'Missing' : 'Present') : undefined}
+    >
+      {icon}
+      {path}
+    </code>
+  );
+}
+
+function SandboxVerifierCard({
+  verifierId,
+  verifier,
+  collectedArtifacts,
+}: {
+  verifierId: string;
+  verifier: Record<string, unknown>;
+  /** Map of filename → s3_uri from a sibling `collect_artifacts` step; when set, matching path chips link
+   *  to the object. Null when nothing was collected. */
+  collectedArtifacts: Record<string, string> | null;
+}) {
+  const score = typeof verifier.score === 'number' ? verifier.score : 0;
+  const rawResults = Array.isArray(verifier.results)
+    ? (verifier.results as Record<string, unknown>[])
+    : [];
+  const nonSkipped = rawResults.filter(r => !r?.skipped);
+  const passedCount = nonSkipped.filter(r => r.result === true).length;
+  const totalCount = nonSkipped.length;
+  // Sandbox probes are deterministic 0/1 checks, not the agent judge — keep the score-based gate.
+  const allPassed = score >= 1;
+
+  return (
+    <div className="rounded-lg border border-[var(--border)]">
+      <div className="px-4 py-3 border-b border-[var(--border)] bg-[var(--secondary)]/40 flex items-center gap-3 flex-wrap">
+        {allPassed ? (
+          <CheckCircle2 size={18} className="text-emerald-500" />
+        ) : (
+          <XCircle size={18} className="text-red-500" />
+        )}
+        <span className="text-sm font-semibold">Sandbox Verifier</span>
+        <span className="text-xs text-[var(--muted-foreground)]">
+          {passedCount}/{totalCount} probes passed
+        </span>
+        <span
+          className={`text-xs font-semibold px-1.5 py-0.5 rounded ml-auto ${
+            allPassed
+              ? 'bg-green-500/10 text-green-500'
+              : 'bg-red-500/10 text-red-500'
+          }`}
+        >
+          {(score * 100).toFixed(0)}%
+        </span>
+        <code className="text-[10px] font-mono text-[var(--muted-foreground)]">
+          {verifierId}
+        </code>
+      </div>
+      <div className="flex flex-col divide-y divide-[var(--border)]">
+        {rawResults.map((r, i) => {
+          const type =
+            typeof r.type === 'string' ? (r.type as string) : 'criterion';
+          const passed = r.result === true;
+          const skipped = r.skipped === true;
+          const justification =
+            typeof r.justification === 'string'
+              ? (r.justification as string)
+              : '';
+          const paths = Array.isArray(r.paths) ? (r.paths as string[]) : [];
+          // The bash_cmd_succeeds field is `bash_cmd`; older configs use `cmd` — accept either.
+          const cmd =
+            (typeof r.bash_cmd === 'string' ? (r.bash_cmd as string) : null) ??
+            (typeof r.cmd === 'string' ? (r.cmd as string) : null);
+          // Stdout isn't currently emitted (justification has exit + stderr only), but read defensively for future versions.
+          const stdout =
+            (typeof r.stdout === 'string' ? (r.stdout as string) : null) ??
+            (typeof r.bash_stdout === 'string'
+              ? (r.bash_stdout as string)
+              : null);
+          // The substring field is `expected`; older configs / test data use `substring` — fall back to either.
+          const expectedSubstr =
+            (typeof r.expected === 'string' ? (r.expected as string) : null) ??
+            (typeof r.substring === 'string' ? (r.substring as string) : null);
+          // Partial scores are agent-env's escape hatch for "you got some
+          // credit"; surface them so a 0.5 isn't visually identical to a 0.
+          const rawScore =
+            typeof r.score === 'number' ? (r.score as number) : null;
+          const showPartialScore =
+            rawScore !== null && rawScore !== 0 && rawScore !== 1;
+
+          // Structured parses (null when format doesn't apply / failed to match)
+          const missing =
+            type === 'probe_file_exists' || type === 'probe_dir_exists'
+              ? parseMissingPaths(justification)
+              : null;
+          const bashOutcome =
+            type === 'bash_cmd_succeeds'
+              ? parseBashOutcome(justification)
+              : null;
+          const containsOutcome =
+            type === 'probe_file_contains'
+              ? parseContainsOutcome(justification)
+              : null;
+
+          // Show raw justification only when we didn't structure it — otherwise it duplicates info already shown.
+          const showRawJustification =
+            justification &&
+            !missing &&
+            !bashOutcome &&
+            !containsOutcome &&
+            // Suppress the always-emitted "All paths exist" line on exists probes — the path chips already say it.
+            !(
+              (type === 'probe_file_exists' || type === 'probe_dir_exists') &&
+              passed
+            );
+
+          return (
+            <div key={i} className="px-4 py-3">
+              <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+                {skipped ? (
+                  <span className="text-gray-400">—</span>
+                ) : passed ? (
+                  <CheckCircle2
+                    size={16}
+                    className="text-emerald-500 flex-shrink-0"
+                  />
+                ) : (
+                  <XCircle size={16} className="text-red-500 flex-shrink-0" />
+                )}
+                <code className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[var(--secondary)] text-[var(--foreground)]">
+                  {type}
+                </code>
+                {skipped && (
+                  <span className="text-[10px] font-semibold uppercase text-[var(--muted-foreground)]">
+                    skipped
+                  </span>
+                )}
+                {showPartialScore && (
+                  <span
+                    className="text-[10px] font-mono text-[var(--muted-foreground)]"
+                    title={`Raw score: ${rawScore}`}
+                  >
+                    score {rawScore!.toFixed(2)}
+                  </span>
+                )}
+              </div>
+
+              {/* Paths — when this is an exists/dir probe and we parsed a
+                  missing-set, mark each chip individually so the failing
+                  path stands out instead of just the parent row flipping
+                  red. */}
+              {paths.length > 0 && (
+                <div className="text-xs text-[var(--muted-foreground)] flex items-center gap-2 flex-wrap mb-1">
+                  <span>Paths:</span>
+                  {paths.map(p => (
+                    <SandboxPathChip
+                      key={p}
+                      path={p}
+                      isMissing={missing?.has(p) ?? false}
+                      hasMissingSet={!!missing}
+                      s3Uri={collectedArtifacts?.[p]}
+                    />
+                  ))}
+                </div>
+              )}
+
+              {cmd && (
+                <div className="text-xs text-[var(--muted-foreground)] flex items-center gap-2 mb-1">
+                  <span>$</span>
+                  <code className="px-1.5 py-0.5 rounded bg-[var(--background)] border border-[var(--border)] font-mono">
+                    {cmd}
+                  </code>
+                </div>
+              )}
+
+              {/* Expected substring + found/not-found badge for
+                  probe_file_contains. Pulls the needle from the criterion
+                  field when present; falls back to the parsed-from-
+                  justification needle. */}
+              {(expectedSubstr || containsOutcome) && (
+                <div className="text-xs text-[var(--muted-foreground)] flex items-center gap-2 mb-1 flex-wrap">
+                  <span>{containsOutcome ? 'Result:' : 'Contains:'}</span>
+                  {containsOutcome && (
+                    <span
+                      className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${
+                        containsOutcome.found
+                          ? 'bg-emerald-50 text-emerald-700 border border-emerald-300'
+                          : 'bg-red-50 text-red-700 border border-red-300'
+                      }`}
+                    >
+                      {containsOutcome.found ? (
+                        <CheckCircle2 size={10} className="text-emerald-500" />
+                      ) : (
+                        <XCircle size={10} className="text-red-500" />
+                      )}
+                      {containsOutcome.found ? 'Found' : 'Not found'}
+                    </span>
+                  )}
+                  {(expectedSubstr ?? containsOutcome?.needle) && (
+                    <code className="px-1.5 py-0.5 rounded bg-[var(--background)] border border-[var(--border)] font-mono">
+                      {expectedSubstr ?? containsOutcome?.needle}
+                    </code>
+                  )}
+                </div>
+              )}
+
+              {/* Structured exit + stderr panel for bash_cmd_succeeds.
+                  Always shown when the probe ran (even on exit=0), since
+                  exit code on its own is useful confirmation; stderr
+                  block is suppressed when empty. */}
+              {bashOutcome && (
+                <div className="mt-1 flex flex-col gap-1">
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="text-[var(--muted-foreground)]">
+                      Exit code:
+                    </span>
+                    <span
+                      className={`font-mono px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                        bashOutcome.exitCode === 0
+                          ? 'bg-emerald-50 text-emerald-700 border border-emerald-300'
+                          : 'bg-red-50 text-red-700 border border-red-300'
+                      }`}
+                    >
+                      {bashOutcome.exitCode ?? '?'}
+                    </span>
+                  </div>
+                  {stdout && stdout.trim() && (
+                    <div className="text-xs">
+                      <div className="text-[var(--muted-foreground)] mb-0.5">
+                        stdout:
+                      </div>
+                      <pre className="text-[11px] font-mono bg-[var(--secondary)] rounded p-2 whitespace-pre-wrap break-all max-h-64 overflow-auto">
+                        {stdout}
+                      </pre>
+                    </div>
+                  )}
+                  {bashOutcome.stderr.trim() && (
+                    <div className="text-xs">
+                      <div className="text-[var(--muted-foreground)] mb-0.5">
+                        stderr:
+                      </div>
+                      <pre className="text-[11px] font-mono bg-[var(--secondary)] rounded p-2 whitespace-pre-wrap break-all max-h-64 overflow-auto">
+                        {bashOutcome.stderr}
+                      </pre>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {showRawJustification && (
+                <p className="text-xs text-[var(--muted-foreground)] mt-1 whitespace-pre-wrap">
+                  {justification}
+                </p>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// Collected Artifacts — files pulled off the sandbox by a `collect_artifacts` step. The instance carries
+// metadata.artifacts = { filename: s3_uri }; the source path derives from the step's base_path config.
+
+type ArtifactKind =
+  | 'image'
+  | 'text'
+  | 'pdf'
+  | 'docx'
+  | 'xlsx'
+  | 'pptx'
+  | 'other';
+
+const _IMAGE_EXTS = new Set([
+  'png',
+  'jpg',
+  'jpeg',
+  'gif',
+  'webp',
+  'svg',
+  'bmp',
+  'ico',
+  'avif',
+]);
+
+const _TEXT_EXTS = new Set([
+  'txt',
+  'log',
+  'md',
+  'markdown',
+  'json',
+  'jsonl',
+  'yaml',
+  'yml',
+  'py',
+  'js',
+  'jsx',
+  'ts',
+  'tsx',
+  'sh',
+  'bash',
+  'zsh',
+  'sql',
+  'html',
+  'css',
+  'scss',
+  'xml',
+  'csv',
+  'patch',
+  'diff',
+  'c',
+  'cpp',
+  'h',
+  'hpp',
+  'java',
+  'rb',
+  'go',
+  'rs',
+  'conf',
+  'ini',
+  'toml',
+  'env',
+  'gitignore',
+]);
+
+// Filenames with no extension that we still treat as text. Compared case-
+// insensitively against the basename.
+const _TEXT_NAMES = new Set([
+  'dockerfile',
+  'makefile',
+  'readme',
+  'license',
+  'changelog',
+]);
+
+function classifyArtifact(filename: string): ArtifactKind {
+  const base = (filename.split('/').pop() ?? filename).toLowerCase();
+  const dot = base.lastIndexOf('.');
+  if (dot < 0) {
+    return _TEXT_NAMES.has(base) ? 'text' : 'other';
+  }
+  const ext = base.slice(dot + 1);
+  if (_IMAGE_EXTS.has(ext)) return 'image';
+  if (ext === 'pdf') return 'pdf';
+  if (ext === 'docx') return 'docx';
+  if (ext === 'xlsx') return 'xlsx';
+  if (ext === 'pptx') return 'pptx';
+  if (_TEXT_EXTS.has(ext)) return 'text';
+  return 'other';
+}
+
+/** Convert a public S3 object URL into an `s3://bucket/key` URI so injected reference files flow through
+ *  the same presign backend as collected artifacts. Handles virtual-hosted and path-style forms; null when not an S3 URL. */
+function publicHttpsToS3Uri(url: string): string | null {
+  try {
+    const u = new URL(url);
+    const host = u.hostname;
+    const path = u.pathname.replace(/^\/+/, '');
+    const vhost =
+      host.match(/^(.+?)\.s3[.-][^.]+\.amazonaws\.com$/) ??
+      host.match(/^(.+?)\.s3\.amazonaws\.com$/);
+    if (vhost) return `s3://${vhost[1]}/${path}`;
+    if (/^s3([.-][^.]+)?\.amazonaws\.com$/.test(host)) {
+      const slash = path.indexOf('/');
+      if (slash <= 0) return null;
+      return `s3://${path.slice(0, slash)}/${path.slice(slash + 1)}`;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// Client-side zip of the files shown in the tab, each at its precomputed base_path-relative path.
+function CollectedArtifactsZipButton({
+  instanceId,
+  files,
+}: {
+  instanceId: string;
+  files: { path: string; s3Uri: string }[];
+}) {
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState<{
+    done: number;
+    total: number;
+  } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleZip = useCallback(async () => {
+    // Dedupe paths so same-named files (e.g. two gold files sharing a basename) don't silently overwrite.
+    const seen = new Set<string>();
+    const uniquePath = (p: string): string => {
+      if (!seen.has(p)) return seen.add(p), p;
+      const slash = p.lastIndexOf('/');
+      const dot = p.lastIndexOf('.');
+      const [stem, ext] =
+        dot > slash ? [p.slice(0, dot), p.slice(dot)] : [p, ''];
+      let i = 2;
+      while (seen.has(`${stem} (${i})${ext}`)) i++;
+      const c = `${stem} (${i})${ext}`;
+      return seen.add(c), c;
+    };
+    const jobs = files.map(f => ({
+      s3Uri: f.s3Uri,
+      zipPath: uniquePath(f.path),
+    }));
+    if (jobs.length === 0) return;
+
+    setBusy(true);
+    setError(null);
+    setProgress({ done: 0, total: jobs.length });
+    const zip = new JSZip();
+    const problems: string[] = [];
+    let done = 0;
+    let next = 0;
+    const worker = async () => {
+      while (next < jobs.length) {
+        const job = jobs[next++]!;
+        for (let attempt = 0; attempt <= 2; attempt++) {
+          try {
+            const r = await apiFetch(objectContentUrl(job.s3Uri));
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            zip.file(job.zipPath, await r.blob());
+            break;
+          } catch (e) {
+            if (attempt === 2)
+              problems.push(
+                `FETCH FAILED: ${job.zipPath} (${
+                  e instanceof Error ? e.message : String(e)
+                })`,
+              );
+          }
+        }
+        done += 1;
+        setProgress({ done, total: jobs.length });
+      }
+    };
+    try {
+      await Promise.all(
+        Array.from({ length: Math.min(6, jobs.length) }, worker),
+      );
+      if (problems.length) zip.file('_failed.txt', problems.join('\n') + '\n');
+      const blob = await zip.generateAsync({ type: 'blob' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${instanceId}-artifacts.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      // Defer revoke so Safari has a chance to start the download.
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'zip failed');
+    } finally {
+      setBusy(false);
+      setProgress(null);
+    }
+  }, [instanceId, files]);
+
+  const total = files.length;
+  if (total === 0) return null;
+
+  return (
+    <button
+      type="button"
+      onClick={handleZip}
+      disabled={busy}
+      title={
+        error
+          ? `Zip failed: ${error} — click to retry`
+          : `Download all ${total} file${
+              total === 1 ? '' : 's'
+            } as a zip (folder structure preserved)`
+      }
+      className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs transition-colors disabled:opacity-50 ${
+        error
+          ? 'text-red-500 hover:bg-[var(--accent)]'
+          : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--accent)]'
+      }`}
+    >
+      {busy ? (
+        <Loader2 size={12} className="animate-spin" />
+      ) : (
+        <Download size={12} />
+      )}
+      {busy && progress
+        ? `Zipping ${progress.done}/${progress.total}`
+        : 'Download All'}
+    </button>
+  );
+}
+
+function CollectedArtifactsList({
+  artifacts,
+  basePath,
+  roleMap,
+  taskId,
+  instanceId,
+  stepId,
+  expectedGold = [],
+}: {
+  artifacts: Record<string, string>;
+  basePath: string;
+  roleMap?: Record<string, 'input' | 'result' | 'expected'>;
+  taskId: string;
+  instanceId: string;
+  stepId: string;
+  // Task-level golden files (cua_evaluate.evaluator.expected) — public cloud files, not collected, rendered in the "Expected / gold" column. First section only.
+  expectedGold?: { filename: string; s3Uri: string; sourceUrl: string }[];
+}) {
+  // Artifact keys are absolute source paths (used verbatim) or relative (joined under base_path).
+  const isAbsolute = (p: string) => /^(\/|[A-Za-z]:[\\/])/.test(p);
+  const basename = (p: string) => p.split(/[\\/]/).pop() || p;
+
+  type Role = 'expected' | 'result' | 'input' | 'other';
+  type Card = {
+    role: Role;
+    key: string;
+    filename: string;
+    s3Uri: string;
+    sourcePath: string;
+    sourceLabel?: string;
+  };
+
+  // Unify gold (cloud) + collected files into one ordered list. Order: expected → result → input → other.
+  const collected: Record<Role, Card[]> = {
+    expected: [],
+    result: [],
+    input: [],
+    other: [],
+  };
+  for (const [path, uri] of Object.entries(artifacts)) {
+    const role = (roleMap?.[basename(path)] ?? 'other') as Role;
+    collected[role].push({
+      role,
+      key: path,
+      filename: basename(path),
+      s3Uri: uri,
+      sourcePath: isAbsolute(path)
+        ? path
+        : `${basePath.replace(/\/+$/, '')}/${path}`,
+    });
+  }
+  const goldCards: Card[] = expectedGold.map(g => ({
+    role: 'expected',
+    key: `gold:${g.sourceUrl}`,
+    filename: g.filename,
+    s3Uri: g.s3Uri,
+    sourcePath: g.sourceUrl,
+    sourceLabel: 'Source URL',
+  }));
+  const allCards: Card[] = [
+    ...goldCards,
+    ...collected.expected,
+    ...collected.result,
+    ...collected.input,
+    ...collected.other,
+  ];
+
+  // Files for the "Download All" zip: everything shown, keyed relative to
+  // base_path (absolute keys stripped) so the tree stays clean; gold under expected/.
+  const base = basePath.replace(/\/+$/, '');
+  const zipFiles = allCards
+    .filter(c => typeof c.s3Uri === 'string' && c.s3Uri.startsWith('s3://'))
+    .map(c => ({
+      path: c.key.startsWith('gold:')
+        ? `expected/${c.filename}`
+        : !isAbsolute(c.key)
+        ? c.key
+        : c.key.startsWith(`${base}/`)
+        ? c.key.slice(base.length + 1)
+        : c.key.replace(/^[/\\]+/, ''),
+      s3Uri: c.s3Uri,
+    }));
+
+  // Render every card — no pagination. Each lazy-loads its URL/bytes/preview only when expanded, so unexpanded rows are cheap.
+  const total = allCards.length;
+  const byRole: Record<Role, Card[]> = {
+    expected: [],
+    result: [],
+    input: [],
+    other: [],
+  };
+  for (const c of allCards) byRole[c.role].push(c);
+
+  // If everything is unclassified "other", the role map found no matches —
+  // drop the group chrome and render a flat list.
+  const onlyOther =
+    byRole.expected.length === 0 &&
+    byRole.result.length === 0 &&
+    byRole.input.length === 0 &&
+    byRole.other.length > 0;
+
+  const ROLE_META: Record<Role, { label: string; blurb: string }> = {
+    expected: {
+      label: 'Expected / gold',
+      blurb:
+        'Reference files from cua_evaluate.evaluator.expected — the golden deliverables the agent output is graded against.',
+    },
+    result: {
+      label: 'Agent deliverables',
+      blurb:
+        'Files the agent produced for cua_evaluate.evaluator.result — these are the outputs being graded.',
+    },
+    input: {
+      label: 'Inputs staged on the VM',
+      blurb:
+        'Files cua_initialize.init_config downloaded onto the VM before the agent ran — round-tripped by collect_artifacts for reference.',
+    },
+    other: {
+      label: 'Other',
+      blurb:
+        "Files collected by the step that aren't listed in the task's init_config or evaluator config.",
+    },
+  };
+
+  const renderBucket = (role: Role, className = '') => {
+    const cards = byRole[role];
+    if (cards.length === 0) return null;
+    return (
+      <div className={`flex flex-col gap-2 ${className}`}>
+        {!onlyOther && (
+          <div className="flex items-baseline gap-2 pb-1.5 border-b border-[var(--border)]">
+            <span className="text-[10px] uppercase tracking-wider font-semibold px-1.5 py-0.5 rounded bg-gray-300 text-gray-800 dark:bg-gray-700 dark:text-gray-200">
+              {role}
+            </span>
+            <span className="text-sm font-semibold text-[var(--foreground)]">
+              {ROLE_META[role].label}
+            </span>
+            <span className="text-xs text-[var(--muted-foreground)]">
+              ({cards.length})
+            </span>
+          </div>
+        )}
+        {!onlyOther && (
+          <p className="text-[11px] text-[var(--muted-foreground)] -mt-1">
+            {ROLE_META[role].blurb}
+          </p>
+        )}
+        <div className="flex flex-col gap-3">
+          {cards.map(c => (
+            <ArtifactCard
+              key={c.key}
+              filename={c.filename}
+              s3Uri={c.s3Uri}
+              sourcePath={c.sourcePath}
+              sourceLabel={c.sourceLabel}
+            />
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  // Expected/gold and Agent deliverables sit side by side when both present (for comparison); else full width. Inputs/Other stack below.
+  const pairBoth = byRole.expected.length > 0 && byRole.result.length > 0;
+
+  return (
+    <div className="flex flex-col gap-5">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-xs text-[var(--muted-foreground)]">
+          {total} file{total === 1 ? '' : 's'}.
+        </p>
+        {zipFiles.length > 0 && (
+          <CollectedArtifactsZipButton
+            instanceId={instanceId}
+            files={zipFiles}
+          />
+        )}
+      </div>
+      {(byRole.expected.length > 0 || byRole.result.length > 0) && (
+        <div
+          className={
+            pairBoth
+              ? 'flex flex-col lg:flex-row gap-5 items-start'
+              : 'flex flex-col gap-5'
+          }
+        >
+          {renderBucket('expected', pairBoth ? 'flex-1 min-w-0' : '')}
+          {renderBucket('result', pairBoth ? 'flex-1 min-w-0' : '')}
+        </div>
+      )}
+      {renderBucket('input')}
+      {renderBucket('other')}
+    </div>
+  );
+}
+
+const LARGE_FILE_BYTES = 10 * 1024 * 1024; // 10 MB
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${bytes} B`;
+}
+
+function ArtifactCard({
+  filename,
+  s3Uri,
+  sourcePath,
+  sourceLabel = 'Sandbox path',
+}: {
+  filename: string;
+  s3Uri: string;
+  sourcePath: string;
+  // Source-path row label: collected artifacts came off the VM ("Sandbox path"); injected files came from a URL ("Source URL").
+  sourceLabel?: string;
+}) {
+  const kind = classifyArtifact(filename);
+  const [presignedUrl, setPresignedUrl] = useState<string | null>(null);
+  const [sizeBytes, setSizeBytes] = useState<number | null>(null);
+  const [resolveError, setResolveError] = useState<string | null>(null);
+  const [textPreview, setTextPreview] = useState<string | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [loadingText, setLoadingText] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+
+  // Lazy-resolve the presigned URL on first need. Returns url + size so
+  // callers can gate on size without waiting for a second state flush.
+  const ensurePresigned = useCallback(async (): Promise<{
+    url: string;
+    sizeBytes: number;
+  } | null> => {
+    if (presignedUrl !== null && sizeBytes !== null)
+      return { url: presignedUrl, sizeBytes };
+    try {
+      const res = await apiFetch(
+        `${BACKEND_URL}/api/v1/objects/metadata?object_url=${encodeURIComponent(s3Uri)}`,
+      );
+      if (!res.ok) throw new Error(`metadata HTTP ${res.status}`);
+      const data = (await res.json()) as { size_bytes: number | null };
+      const url = objectContentUrl(s3Uri);
+      const size = data.size_bytes ?? 0;
+      setPresignedUrl(url);
+      setSizeBytes(size);
+      return { url, sizeBytes: size };
+    } catch (e) {
+      setResolveError(e instanceof Error ? e.message : 'presign failed');
+      return null;
+    }
+  }, [presignedUrl, sizeBytes, s3Uri]);
+
+  const handleDownload = useCallback(async () => {
+    const result = await ensurePresigned();
+    if (result) window.open(result.url, '_blank');
+  }, [ensurePresigned]);
+
+  const handleToggle = useCallback(async () => {
+    if (expanded) {
+      setExpanded(false);
+      return;
+    }
+    setExpanded(true);
+    const result = await ensurePresigned();
+    if (!result) return;
+    // Files over the threshold show a download-only message — skip the
+    // content fetch to avoid loading large payloads into the browser.
+    if (result.sizeBytes > LARGE_FILE_BYTES) return;
+    // image/pdf/docx render directly from the presigned URL; only text is
+    // fetched-and-inlined here.
+    if (kind !== 'text') return;
+    if (!textPreview && !previewError) {
+      setLoadingText(true);
+      try {
+        const res = await fetch(result.url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const body = await res.text();
+        // Cap inline render at ~64KB so a giant log file doesn't lock the
+        // tab; the full file is still one click away via Download.
+        const MAX = 64 * 1024;
+        setTextPreview(
+          body.length > MAX
+            ? `${body.slice(0, MAX)}\n\n…[truncated — ${
+                body.length - MAX
+              } more bytes; use Download for the full file]`
+            : body,
+        );
+      } catch (e) {
+        setPreviewError(e instanceof Error ? e.message : 'preview failed');
+      } finally {
+        setLoadingText(false);
+      }
+    }
+  }, [expanded, kind, ensurePresigned, textPreview, previewError]);
+
+  const Icon =
+    kind === 'image'
+      ? ImageIcon
+      : kind === 'text' ||
+        kind === 'pdf' ||
+        kind === 'docx' ||
+        kind === 'xlsx' ||
+        kind === 'pptx'
+      ? FileText
+      : Download;
+
+  return (
+    <div className="rounded-lg border border-[var(--border)] overflow-hidden">
+      {/* role="button" wrapper (not a real <button>) so the nested Download
+          <button> is valid HTML — nested buttons get auto-flattened by the
+          parser, breaking event isolation. */}
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={handleToggle}
+        onKeyDown={e => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            void handleToggle();
+          }
+        }}
+        className="w-full flex items-center gap-2 px-3 py-2.5 text-left hover:bg-[var(--secondary)] transition-colors cursor-pointer"
+      >
+        <ChevronRight
+          size={14}
+          className={`flex-shrink-0 text-[var(--muted-foreground)] transition-transform ${
+            expanded ? 'rotate-90' : ''
+          }`}
+        />
+        <Icon
+          size={14}
+          className="flex-shrink-0 text-[var(--muted-foreground)]"
+        />
+        <span className="font-mono text-sm font-semibold truncate">
+          {filename}
+        </span>
+        <span className="text-xs text-[var(--muted-foreground)] truncate ml-2 hidden sm:inline">
+          {sourcePath}
+        </span>
+        <div className="ml-auto flex items-center gap-1">
+          <button
+            type="button"
+            onClick={e => {
+              e.stopPropagation();
+              handleDownload();
+            }}
+            className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--accent)] transition-colors"
+            title={`Download ${filename}`}
+          >
+            <Download size={12} />
+            Download
+          </button>
+        </div>
+      </div>
+
+      {expanded && (
+        <div className="border-t border-[var(--border)] p-3">
+          {/* Always show source path on expand, including on small screens
+              where it's hidden in the row header. */}
+          <div className="text-xs text-[var(--muted-foreground)] mb-2 flex items-center gap-2 flex-wrap">
+            <span>{sourceLabel}:</span>
+            <code className="px-1.5 py-0.5 rounded bg-[var(--background)] border border-[var(--border)] font-mono">
+              {sourcePath}
+            </code>
+          </div>
+          {resolveError && (
+            <p className="text-xs text-red-500">
+              Could not resolve download URL: {resolveError}
+            </p>
+          )}
+          {!resolveError &&
+          sizeBytes !== null &&
+          sizeBytes > LARGE_FILE_BYTES ? (
+            <p className="text-xs text-[var(--muted-foreground)]">
+              File is {formatBytes(sizeBytes)} — too large to preview in the
+              browser. Use the Download button to save it locally.
+            </p>
+          ) : (
+            <>
+              {kind === 'image' && (
+                <ArtifactImagePreview presignedUrl={presignedUrl} />
+              )}
+              {kind === 'pdf' && (
+                <ArtifactPdfPreview presignedUrl={presignedUrl} />
+              )}
+              {/* docx/xlsx fetch the file bytes on mount, so gate them on a
+                  known size — otherwise they'd fetch before the large-file
+                  guard (which needs sizeBytes) can apply. Once sizeBytes is
+                  known and within the limit, this branch renders; oversized
+                  files take the "too large" branch above. */}
+              {kind === 'docx' &&
+                (sizeBytes !== null ? (
+                  <ArtifactDocxPreview s3Uri={s3Uri} />
+                ) : (
+                  <ArtifactResolving />
+                ))}
+              {kind === 'xlsx' &&
+                (sizeBytes !== null ? (
+                  <ArtifactXlsxPreview s3Uri={s3Uri} />
+                ) : (
+                  <ArtifactResolving />
+                ))}
+              {kind === 'pptx' &&
+                (sizeBytes !== null ? (
+                  <ArtifactPptxPreview s3Uri={s3Uri} />
+                ) : (
+                  <ArtifactResolving />
+                ))}
+              {kind === 'text' && (
+                <ArtifactTextPreview
+                  loading={loadingText}
+                  text={textPreview}
+                  error={previewError}
+                />
+              )}
+              {kind === 'other' && !resolveError && (
+                <p className="text-xs text-[var(--muted-foreground)]">
+                  Inline preview not supported for this file type — use Download
+                  to grab it.
+                </p>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ArtifactImagePreview({
+  presignedUrl,
+}: {
+  presignedUrl: string | null;
+}) {
+  if (!presignedUrl) {
+    return (
+      <div className="flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
+        <Loader2 size={12} className="animate-spin" />
+        Resolving URL…
+      </div>
+    );
+  }
+  return (
+    <img
+      src={presignedUrl}
+      alt=""
+      className="max-w-full max-h-[600px] rounded border border-[var(--border)] bg-white object-contain"
+    />
+  );
+}
+
+function ArtifactResolving() {
+  return (
+    <div className="flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
+      <Loader2 size={12} className="animate-spin" />
+      Resolving URL…
+    </div>
+  );
+}
+
+function ArtifactPdfPreview({ presignedUrl }: { presignedUrl: string | null }) {
+  if (!presignedUrl) {
+    return (
+      <div className="flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
+        <Loader2 size={12} className="animate-spin" />
+        Resolving URL…
+      </div>
+    );
+  }
+  // Browsers render PDFs natively in an <iframe>. The url is same-origin -- it is the
+  // `/api/v1/objects/content` proxy, not a presigned bucket url; the `presignedUrl`
+  // name is a leftover from when it was one.
+  //
+  // Sandboxed like the other previews: a PDF is agent-produced bytes rendered in an
+  // unauthenticated origin, and while Chrome and Firefox both isolate PDF scripting
+  // from the embedder, that is the viewer's choice rather than ours. `allow-popups`
+  // keeps the built-in viewer's download and print affordances working.
+  return (
+    <iframe
+      src={presignedUrl}
+      title="PDF preview"
+      sandbox="allow-popups"
+      className="w-full h-[600px] rounded border border-[var(--border)] bg-white"
+    />
+  );
+}
+
+/**
+ * Prepare a sandboxed iframe document for rendering an untrusted file preview.
+ *
+ * These previews render agent-produced files inside an unauthenticated control-plane
+ * origin, and the renderers build DOM straight from the file bytes — docx-preview
+ * assigns a raw `w:sym w:char` into `innerHTML`, which needs no click to fire, and the
+ * SheetJS HTML writer emits `<a href>` without filtering the `javascript:` scheme.
+ *
+ * `sandbox="allow-same-origin"` WITHOUT `allow-scripts` means nothing inside the frame
+ * executes — no scripts, no `onerror`/`onload`, no `javascript:` navigation. Do not add
+ * `allow-scripts`; together with `allow-same-origin` it lets framed content escape the
+ * sandbox entirely.
+ *
+ * READ THIS BEFORE BUMPING docx-preview OR pptx-preview. Neither library renders *into*
+ * this frame. `docx-preview` hardcodes `new HtmlRenderer(window.document)` and
+ * `pptx-preview` does `document.createElement("span"); s.innerHTML = ...` — both parse
+ * attacker-controlled markup in the HOST document and hand us a finished tree. A
+ * detached host-document element still fires `onerror`, so what actually saves us is
+ * that both append into the frame synchronously, in the same job as the parse, before
+ * the host can run the handler. Measured: adopting in the same job does not fire;
+ * adopting 300ms later does.
+ *
+ * So the containment is one dependency bump wide, not one attribute wide. A version
+ * that awaits between building and appending re-opens this with no change here and
+ * `preview-sandbox.smoke.ts` still green. The structural fix is to render into a fully
+ * opaque `sandbox=""` + `srcdoc` frame the way the spreadsheet preview does; until
+ * then the versions in package.json are load-bearing.
+ *
+ * Same-origin is also what lets `fitSandboxFrame` size the frame to its content from
+ * out here, so a short document does not sit in a tall empty box — the usual
+ * postMessage-from-inside trick would need a script in the frame, which is the one
+ * thing we are preventing.
+ */
+function prepareSandboxDoc(frame: HTMLIFrameElement): HTMLElement | null {
+  const doc = frame.contentDocument;
+  if (!doc) return null;
+  doc.open();
+  doc.write(
+    '<!doctype html><html><head><meta charset="utf-8">' +
+      '<meta http-equiv="Content-Security-Policy" ' +
+      "content=\"default-src 'none'; img-src data: blob:; " +
+      "style-src 'unsafe-inline'; font-src data:\">" +
+      '<style>html,body{margin:0;padding:8px;background:#fff;color:#000;' +
+      'font:12px/1.5 ui-sans-serif,system-ui,-apple-system,sans-serif}' +
+      '</style></head><body></body></html>',
+  );
+  doc.close();
+  return doc.body;
+}
+
+const SANDBOX_FRAME_CLASS =
+  'w-full rounded border border-[var(--border)] bg-white';
+
+/** Tallest a preview frame grows before it scrolls internally. */
+const SANDBOX_FRAME_MAX_HEIGHT = 600;
+
+/**
+ * The height a sandboxed preview frame needs for its content, capped at
+ * `SANDBOX_FRAME_MAX_HEIGHT` — restoring the `maxHeight` behaviour the previews had
+ * before they moved into iframes. Safe because the frame is same-origin; it reads
+ * scrollHeight from out here rather than asking the (deliberately scriptless) frame.
+ *
+ * Returns rather than assigning `style.height`, so the value can live in React state.
+ * Assigning it directly loses the race with the `setStatus('ready')` re-render, which
+ * rewrites the style prop straight back to its default.
+ */
+function measureSandboxFrame(frame: HTMLIFrameElement): number {
+  const doc = frame.contentDocument;
+  if (!doc?.documentElement) return SANDBOX_FRAME_MAX_HEIGHT;
+  const content = Math.max(
+    doc.documentElement.scrollHeight,
+    doc.body?.scrollHeight ?? 0,
+  );
+  return Math.min(content, SANDBOX_FRAME_MAX_HEIGHT);
+}
+
+function ArtifactDocxPreview({ s3Uri }: { s3Uri: string }) {
+  const frameRef = useRef<HTMLIFrameElement>(null);
+  const [status, setStatus] = useState<'loading' | 'ready' | 'error'>(
+    'loading',
+  );
+  const [frameHeight, setFrameHeight] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setStatus('loading');
+    setError(null);
+    void (async () => {
+      try {
+        // docx isn't browser-native: fetch the bytes (through the backend, same-origin, so bucket CORS doesn't block) and render with docx-preview.
+        const res = await fetch(objectContentUrl(s3Uri));
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const blob = await res.blob();
+        if (cancelled || !frameRef.current) return;
+        const { renderAsync } = await import('docx-preview');
+        if (cancelled || !frameRef.current) return;
+        const body = prepareSandboxDoc(frameRef.current);
+        if (!body) throw new Error('preview frame unavailable');
+        await renderAsync(blob, body, undefined, {
+          className: 'docx-preview',
+          inWrapper: true,
+        });
+        const fitted = measureSandboxFrame(frameRef.current);
+        if (!cancelled) {
+          setFrameHeight(fitted);
+          setStatus('ready');
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : 'render failed');
+          setStatus('error');
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [s3Uri]);
+
+  return (
+    <div>
+      {status === 'loading' && (
+        <div className="flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
+          <Loader2 size={12} className="animate-spin" />
+          Rendering document…
+        </div>
+      )}
+      {status === 'error' && (
+        <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
+          Inline preview unavailable ({error}). Use Download to fetch the file
+          directly.
+        </p>
+      )}
+      {/* Always mounted so the ref exists when renderAsync targets it; hidden
+          until the render completes. Sandboxed — see prepareSandboxDoc. */}
+      <iframe
+        ref={frameRef}
+        title="Document preview"
+        sandbox="allow-same-origin"
+        // Height, never `display: none`. Hiding an iframe with display:none and
+        // revealing it later makes the browser re-navigate it to about:blank, which
+        // throws away everything renderAsync wrote into contentDocument — the preview
+        // then renders blank. A div survives being unhidden; an iframe does not.
+        style={{ height: status === 'ready' ? frameHeight : 0 }}
+        className={`${SANDBOX_FRAME_CLASS} ${
+          status === 'ready' ? 'border' : 'border-0'
+        }`}
+      />
+    </div>
+  );
+}
+
+function ArtifactXlsxPreview({ s3Uri }: { s3Uri: string }) {
+  const [status, setStatus] = useState<'loading' | 'ready' | 'error'>(
+    'loading',
+  );
+  const [error, setError] = useState<string | null>(null);
+  const [sheets, setSheets] = useState<{ name: string; html: string }[]>([]);
+  const [active, setActive] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    setStatus('loading');
+    setError(null);
+    void (async () => {
+      try {
+        // Fetch via the backend (same-origin) so bucket CORS doesn't block the
+        // read, then parse + render to an HTML table with SheetJS client-side.
+        const res = await fetch(objectContentUrl(s3Uri));
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const buf = await res.arrayBuffer();
+        const XLSX = await import('@e965/xlsx');
+        const wb = XLSX.read(buf, { type: 'array' });
+        // sheet_to_html HTML-escapes cell values, so the output is a static
+        // table with no executable content.
+        const parsed = wb.SheetNames.flatMap(name => {
+          const ws = wb.Sheets[name];
+          // header/footer '' omits the full-document <html>/<title> wrapper, so
+          // we inject just the <table> (no leaking of the page <title>).
+          return ws
+            ? [
+                {
+                  name,
+                  html: XLSX.utils.sheet_to_html(ws, {
+                    header: '',
+                    footer: '',
+                  }),
+                },
+              ]
+            : [];
+        });
+        if (!cancelled) {
+          setSheets(parsed);
+          setActive(0);
+          setStatus('ready');
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : 'render failed');
+          setStatus('error');
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [s3Uri]);
+
+  if (status === 'loading') {
+    return (
+      <div className="flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
+        <Loader2 size={12} className="animate-spin" />
+        Rendering spreadsheet…
+      </div>
+    );
+  }
+  if (status === 'error') {
+    return (
+      <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
+        Inline preview unavailable ({error}). Use Download to fetch the file
+        directly.
+      </p>
+    );
+  }
+  return (
+    <div className="flex flex-col gap-2">
+      {sheets.length > 1 && (
+        <div className="flex flex-wrap gap-1">
+          {sheets.map((s, i) => (
+            <button
+              key={s.name}
+              type="button"
+              onClick={() => setActive(i)}
+              className={`px-2 py-0.5 rounded text-xs font-mono ${
+                active === i
+                  ? 'bg-[var(--accent)] text-[var(--foreground)]'
+                  : 'text-[var(--muted-foreground)] hover:bg-[var(--secondary)]'
+              }`}
+            >
+              {s.name}
+            </button>
+          ))}
+        </div>
+      )}
+      {/* SheetJS escapes cell *values*, but its HTML writer emits `<a href>` from
+          `cell.l.Target` without filtering the scheme, so a crafted sheet can ship a
+          clickable `javascript:` link. srcdoc + a scriptless sandbox neutralises it:
+          no allow-scripts means no execution and no javascript: navigation. */}
+      <iframe
+        title="Spreadsheet preview"
+        sandbox=""
+        style={{ height: SANDBOX_FRAME_MAX_HEIGHT }}
+        className={`${SANDBOX_FRAME_CLASS} overflow-auto`}
+        // Unlike the docx/pptx frames this one is fully opaque (sandbox="", not
+        // allow-same-origin) because srcdoc needs no parent access to render. That
+        // also puts contentDocument out of reach, so it cannot be fitted to content
+        // and stays at the cap. Keeping the stronger sandbox is worth a tall box for
+        // a small sheet; do not relax it to allow-same-origin just to shrink this.
+        srcDoc={
+          '<!doctype html><html><head><meta charset="utf-8">' +
+          '<meta http-equiv="Content-Security-Policy" ' +
+          "content=\"default-src 'none'; style-src 'unsafe-inline'\">" +
+          '<style>body{margin:0;padding:8px;background:#fff;color:#000;' +
+          'font:12px/1.5 ui-sans-serif,system-ui,sans-serif}' +
+          'table{border-collapse:collapse}' +
+          'td{border:1px solid #d1d5db;padding:2px 6px;white-space:nowrap}' +
+          '</style></head><body>' +
+          (sheets[active]?.html ?? '') +
+          '</body></html>'
+        }
+      />
+    </div>
+  );
+}
+
+function ArtifactPptxPreview({ s3Uri }: { s3Uri: string }) {
+  const frameRef = useRef<HTMLIFrameElement>(null);
+  const [status, setStatus] = useState<'loading' | 'ready' | 'error'>(
+    'loading',
+  );
+  const [frameHeight, setFrameHeight] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setStatus('loading');
+    setError(null);
+    void (async () => {
+      try {
+        // pptx isn't browser-native: fetch the bytes through the backend (same-origin) and render with pptx-preview.
+        const res = await fetch(objectContentUrl(s3Uri));
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const buf = await res.arrayBuffer();
+        if (cancelled || !frameRef.current) return;
+        const { init } = await import('pptx-preview');
+        if (cancelled || !frameRef.current) return;
+        const body = prepareSandboxDoc(frameRef.current);
+        if (!body) throw new Error('preview frame unavailable');
+        const width = frameRef.current.clientWidth || 960;
+        const previewer = init(body, {
+          width,
+          height: Math.round(width * 0.5625), // 16:9
+        });
+        await previewer.preview(buf);
+        const fitted = measureSandboxFrame(frameRef.current);
+        if (!cancelled) {
+          setFrameHeight(fitted);
+          setStatus('ready');
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : 'render failed');
+          setStatus('error');
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [s3Uri]);
+
+  return (
+    <div>
+      {status === 'loading' && (
+        <div className="flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
+          <Loader2 size={12} className="animate-spin" />
+          Rendering slides…
+        </div>
+      )}
+      {status === 'error' && (
+        <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
+          Inline preview unavailable ({error}). Use Download to fetch the file
+          directly.
+        </p>
+      )}
+      {/* Always mounted so the ref exists when preview() targets it; hidden
+          until the render completes. Sandboxed — see prepareSandboxDoc. */}
+      <iframe
+        ref={frameRef}
+        title="Slides preview"
+        sandbox="allow-same-origin"
+        // Height, never `display: none`. Hiding an iframe with display:none and
+        // revealing it later makes the browser re-navigate it to about:blank, which
+        // throws away everything preview() wrote into contentDocument — the preview
+        // then renders blank. A div survives being unhidden; an iframe does not.
+        style={{ height: status === 'ready' ? frameHeight : 0 }}
+        className={`${SANDBOX_FRAME_CLASS} ${
+          status === 'ready' ? 'border' : 'border-0'
+        }`}
+      />
+    </div>
+  );
+}
+
+function ArtifactTextPreview({
+  loading,
+  text,
+  error,
+}: {
+  loading: boolean;
+  text: string | null;
+  error: string | null;
+}) {
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
+        <Loader2 size={12} className="animate-spin" />
+        Loading preview…
+      </div>
+    );
+  }
+  if (error) {
+    // Common cause: bucket CORS blocks cross-origin reads of presigned URLs. The file still downloads (CORS isn't enforced on navigation / <a download>).
+    return (
+      <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
+        Inline preview unavailable ({error}). Use Download to fetch the file
+        directly.
+      </p>
+    );
+  }
+  if (text === null) return null;
+  return (
+    <ScrollArea
+      scrollbars="both"
+      style={{ maxHeight: 500 }}
+      className="rounded border border-[var(--border)] bg-[var(--secondary)]"
+    >
+      <pre className="p-3 text-xs font-mono whitespace-pre">{text}</pre>
+    </ScrollArea>
+  );
+}

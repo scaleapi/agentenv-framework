@@ -1,0 +1,23 @@
+{
+  "environment_artifact_refs": [
+    {
+      "id": "slack-service",
+      "version": 7
+    }
+  ],
+  "id": "acme-universe",
+  "metadata_refs": {
+    "manifest.json": {
+      "id": "acme-manifest",
+      "version": 1
+    }
+  },
+  "service_artifact_refs": [
+    {
+      "id": "slack-service",
+      "version": 7
+    }
+  ],
+  "type": "environment_universe",
+  "version": 9
+}

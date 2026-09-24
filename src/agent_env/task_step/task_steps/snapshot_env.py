@@ -1,0 +1,617 @@
+"""Snapshot a deployed env's live service state into a new EnvironmentUniverseArtifact."""
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+import logging
+import mimetypes
+import os
+import tempfile
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import ClassVar, Optional
+
+import httpx
+
+from agentenv_protocol import FilePart
+
+from agent_env.store import get_config
+from agent_env.task_step.context import TaskStepContext
+from agent_env.entity_refs import EntityRef, RefRole
+from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_EXPORT_TIMEOUT_SECONDS = 600
+DEFAULT_EXPORT_CONCURRENCY = 3
+_CONNECT_TIMEOUT_SECONDS = 30
+
+_TRAJECTORY_CAPTURE_BUDGET_SECONDS = 300
+
+# Must match the S3 credentials extension URI the server-side credentials mixin advertises.
+_S3_CREDENTIALS_EXTENSION_URI = "urn:agentenv:add-s3-credentials/v1"
+
+
+async def _push_s3_credentials(base_url: str, card: dict, timeout_seconds: float) -> None:
+    """Best-effort: push the worker's frozen AWS creds + bucket to a service
+    advertising add_s3_credentials. Never raises (get_data falls back)."""
+    from agentenv_protocol import client as protocol_v1
+
+    if protocol_v1.find_extension(card, _S3_CREDENTIALS_EXTENSION_URI) is None:
+        return
+    try:
+        import boto3
+
+        from agent_env.config import get_config
+
+        session = boto3.Session()
+        creds = session.get_credentials()
+        if creds is None:
+            logger.warning("snapshot_env: no AWS creds to push to %s", base_url)
+            return
+        frozen = creds.get_frozen_credentials()
+        params = {
+            "aws_access_key_id": frozen.access_key,
+            "aws_secret_access_key": frozen.secret_key,
+            "aws_session_token": frozen.token,
+            "region_name": session.region_name or "us-west-2",
+            "bucket": get_config().get_s3_bucket(),
+        }
+        await protocol_v1.invoke_extension(
+            base_url,
+            card,
+            _S3_CREDENTIALS_EXTENSION_URI,
+            params,
+            timeout=int(timeout_seconds),
+        )
+        logger.info("snapshot_env: pushed S3 creds to %s", base_url)
+    except Exception:
+        logger.warning(
+            "snapshot_env: failed to push S3 creds to %s (get_data will fall back)",
+            base_url,
+            exc_info=True,
+        )
+
+
+@dataclass
+class EnvSnapshotResult:
+    environment_universe_artifact_id: str
+    environment_universe_artifact_version: int
+    environments_snapshotted: list[str]
+    total: int
+
+
+class SnapshotEnvTaskStep(TaskStep):
+    """Snapshot a deployed env's current service state into a new
+    ``EnvironmentUniverseArtifact``.
+
+    Picks the env from ``context.deployed_envs`` by ``env_instance_id``, else
+    ``env_id``, else the context's single env; ``env_step_id`` narrows that to
+    one ``deploy_env`` step's deployment when an env is deployed more than once.
+    ``gateway_url``, ``snapshot_id`` and ``original_universe_artifact_id`` are
+    optional overrides; universe metadata carries over from that id, else the
+    loaded universe. The generated snapshot id is stable across
+    Temporal retries of a run, so retries bump versions instead of minting
+    duplicate universes.
+
+    Output: ``context.metadata["env_snapshotted_universes"][self.id]`` =
+    ``{"id", "version"}``. Fails the step if any service fails to export.
+    """
+
+    type: ClassVar[str] = "snapshot_env"
+    entity_refs = (
+        EntityRef.env("env_id"),
+        EntityRef.artifact("snapshot_id", role=RefRole.OUTPUT, artifact_type="environment_universe"),
+        EntityRef.artifact("original_universe_artifact_id", artifact_type="environment_universe"),
+    )
+    DEFAULT_EXPORT_TIMEOUT_SECONDS: ClassVar[int] = DEFAULT_EXPORT_TIMEOUT_SECONDS
+
+    def __init__(
+        self,
+        id: str,
+        version: Optional[int],
+        env_id: Optional[str] = None,
+        env_instance_id: Optional[str] = None,
+        env_step_id: Optional[str] = None,
+        gateway_url: Optional[str] = None,
+        snapshot_id: Optional[str] = None,
+        original_universe_artifact_id: Optional[str] = None,
+        export_timeout_seconds: int = DEFAULT_EXPORT_TIMEOUT_SECONDS,
+        include_env_trajectory: bool = False,
+        depends_on: Optional[list[TaskStepDependency]] = None,
+        fail_task_on_error: bool = True,
+    ):
+        super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
+        self.env_id = env_id
+        self.env_instance_id = env_instance_id
+        self.env_step_id = env_step_id
+        self.gateway_url = gateway_url
+        self.snapshot_id = snapshot_id
+        self.original_universe_artifact_id = original_universe_artifact_id
+        self.export_timeout_seconds = export_timeout_seconds
+        self.include_env_trajectory = include_env_trajectory
+
+    def to_dict(self) -> dict:
+        base = super().to_dict()
+        base["env_id"] = self.env_id
+        base["env_instance_id"] = self.env_instance_id
+        base["env_step_id"] = self.env_step_id
+        base["gateway_url"] = self.gateway_url
+        base["snapshot_id"] = self.snapshot_id
+        base["original_universe_artifact_id"] = self.original_universe_artifact_id
+        base["export_timeout_seconds"] = self.export_timeout_seconds
+        base["include_env_trajectory"] = self.include_env_trajectory
+        return base
+
+    @classmethod
+    def from_dict(cls, data: dict) -> SnapshotEnvTaskStep:
+        return cls(
+            **cls._base_from_dict(data),
+            env_id=data.get("env_id"),
+            env_instance_id=data.get("env_instance_id"),
+            env_step_id=data.get("env_step_id"),
+            gateway_url=data.get("gateway_url"),
+            snapshot_id=data.get("snapshot_id"),
+            original_universe_artifact_id=data.get("original_universe_artifact_id"),
+            export_timeout_seconds=data.get(
+                "export_timeout_seconds", cls.DEFAULT_EXPORT_TIMEOUT_SECONDS
+            ),
+            include_env_trajectory=data.get("include_env_trajectory", False),
+        )
+
+    async def execute(self, context: TaskStepContext) -> TaskStepContext:
+        from agent_env.env.env import Env
+
+        deployed = self._resolve_deployed_env(context)
+        env_id = self.env_id or (deployed.env_id if deployed else None)
+        if not env_id:
+            raise RuntimeError("snapshot_env could not resolve an env_id")
+        gateway_url = self.gateway_url or (deployed.gateway_url if deployed else None)
+        if not gateway_url:
+            raise RuntimeError(
+                f"Deployed env '{env_id}' has no gateway_url and no override was provided"
+            )
+
+        if self.include_env_trajectory:
+            entry: dict = {"captured_at_utc": datetime.now(timezone.utc).isoformat(), "capture_step_id": self.id}
+            try:
+                await asyncio.wait_for(self._capture_env_trajectory(entry, context, env_id, gateway_url), timeout=_TRAJECTORY_CAPTURE_BUDGET_SECONDS)
+            except Exception as e:
+                detail = f"{type(e).__name__}: {str(e)[:200]}"
+                logger.warning(f"snapshot_env: env trajectory capture aborted (continuing): {detail}")
+                entry["error"] = detail
+            context.metadata.setdefault("env_trajectory", {})[env_id] = entry
+
+        # Pin the env version the sandbox actually runs, so service enumeration
+        # can't drift if the env was re-registered since this sandbox deployed.
+        env_version = deployed.env_version if deployed else None
+        env = await asyncio.to_thread(Env.get, env_id, env_version)
+
+        snapshot_id = self._derive_snapshot_id(context, env_id)
+        result = await self.snapshot_env_state(
+            env=env,
+            gateway_url=gateway_url,
+            snapshot_id=snapshot_id,
+            deployed=deployed,
+            original_universe_artifact_id=self.original_universe_artifact_id,
+            export_timeout_seconds=self.export_timeout_seconds,
+        )
+
+        logger.info(
+            f"snapshot_env: {env_id} -> {result.environment_universe_artifact_id} "
+            f"v{result.environment_universe_artifact_version} "
+            f"({len(result.environments_snapshotted)}/{result.total} services)"
+        )
+        # Identifiers only — the context is heartbeated into task_instances.
+        context.metadata.setdefault("env_snapshotted_universes", {})[self.id] = {
+            "id": result.environment_universe_artifact_id,
+            "version": result.environment_universe_artifact_version,
+        }
+        return context
+
+    # ── internals ────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _deploy_step_of(deployed_env) -> Optional[str]:
+        return (deployed_env.metadata or {}).get("deploy_step_id")
+
+    def _select_by_step_id(self, candidates: list) -> list:
+        """The candidates ``env_step_id`` names; all of them when it isn't set."""
+        if self.env_step_id is None:
+            return candidates
+        # A filter, not a hint: an unmatched id is an error, never a substitute.
+        # Empty candidates are left to the callers' own not-deployed handling.
+        named = [d for d in candidates if self._deploy_step_of(d) == self.env_step_id]
+        if candidates and not named:
+            raise RuntimeError(
+                f"snapshot_env '{self.id}': env_step_id '{self.env_step_id}' names no deployment of "
+                f"{self._env_label} (deployed by: {[self._deploy_step_of(d) for d in candidates]})"
+            )
+        return named
+
+    @property
+    def _env_label(self) -> str:
+        return f"env '{self.env_id}'" if self.env_id else "any deployed env"
+
+    def _resolve_deployed_env(self, context: TaskStepContext):
+        """The DeployedEnv this step targets, or None in pure-override mode."""
+        if self.env_instance_id:
+            deployed = next(
+                (d for d in context.deployed_envs if d.instance_id == self.env_instance_id),
+                None,
+            )
+            if deployed is None:
+                raise RuntimeError(
+                    f"No deployed env with instance_id '{self.env_instance_id}' in context "
+                    f"(have: {[d.instance_id for d in context.deployed_envs]})"
+                )
+            return deployed
+        if self.env_id:
+            matches = self._select_by_step_id(
+                [d for d in context.deployed_envs if d.env_id == self.env_id]
+            )
+            if len(matches) > 1:
+                raise RuntimeError(
+                    f"snapshot_env '{self.id}': {len(matches)} deployments of env '{self.env_id}' "
+                    f"(deployed by: {[self._deploy_step_of(d) for d in matches]}). Set env_step_id "
+                    "to the deploy_env step this snapshot should target."
+                )
+            deployed = matches[0] if matches else None
+            if deployed is None and self.gateway_url:
+                return None  # pure-override mode: env_id + gateway_url suffice
+            if deployed is None:
+                raise RuntimeError(
+                    f"No deployed env with env_id '{self.env_id}' in context "
+                    f"(have: {[d.env_id for d in context.deployed_envs]}) and no "
+                    "gateway_url override was provided"
+                )
+            return deployed
+        # `env_step_id` alone also names one of k, so it answers this ambiguity.
+        candidates = self._select_by_step_id(context.deployed_envs)
+        if len(candidates) == 1:
+            return candidates[0]
+        raise RuntimeError(
+            "snapshot_env needs env_id, env_instance_id or env_step_id when the context has "
+            f"{len(context.deployed_envs)} deployed envs "
+            f"(have: {[d.env_id for d in context.deployed_envs]})"
+        )
+
+    async def _capture_env_trajectory(self, entry: dict, context: TaskStepContext, env_id: str, gateway_url: str) -> None:
+        """Stream the trajectory to a temp file, upload it verbatim (no envelope), and fill ``entry``."""
+        store = get_config().get_object_store()
+        event_count = 0
+        timeout = httpx.Timeout(_TRAJECTORY_CAPTURE_BUDGET_SECONDS, connect=_CONNECT_TIMEOUT_SECONDS)
+        tmp = tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False)
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                async with client.stream("GET", f"{gateway_url.rstrip('/')}/trajectory") as response:
+                    response.raise_for_status()
+                    async for chunk in response.aiter_bytes():
+                        tmp.write(chunk)
+                        event_count += chunk.count(b"\n")
+            tmp.close()
+            instance_key = context.instance_id or f"adhoc-{uuid.uuid4().hex[:12]}"
+            key = f"env_trajectory/instance_id={instance_key}/{env_id}-{uuid.uuid4().hex[:8]}.jsonl"
+            object_url = await asyncio.to_thread(store.put_file, key, tmp.name, "application/jsonl")
+        finally:
+            tmp.close()
+            os.unlink(tmp.name)
+        entry["object_url"] = object_url
+        entry["event_count"] = event_count
+
+    def _derive_snapshot_id(self, context: TaskStepContext, env_id: str) -> str:
+        if self.snapshot_id:
+            return self.snapshot_id
+        instance_id = context.instance_id or context.metadata.get("instance_id")
+        if instance_id:
+            # Stable per run instance: activity retries re-put the same ids.
+            return f"snapshot-{env_id}-{instance_id.rsplit('-', 1)[-1][:16]}"
+        generated = f"snapshot-{env_id}-{uuid.uuid4().hex[:8]}"
+        logger.warning(
+            f"snapshot_env: no instance_id in context; using random snapshot_id "
+            f"{generated} (retries will not be idempotent)"
+        )
+        return generated
+
+    @staticmethod
+    def _resolve_loaded_universe_ref(deployed) -> Optional[tuple[str, Optional[int]]]:
+        """(id, version) of the universe this instance recorded loading, or None (best-effort)."""
+        instance_id = getattr(deployed, "instance_id", None) if deployed else None
+        if not instance_id:
+            return None
+        try:
+            from agent_env.env.store import get_env_instance_store
+
+            su = get_env_instance_store().get_environment_universe(instance_id)
+        except Exception:
+            logger.warning("snapshot_env: could not read loaded universe for %s", instance_id, exc_info=True)
+            return None
+        return (su["id"], su.get("version")) if su and su.get("id") else None
+
+    @staticmethod
+    def _enumerate_environments(env) -> list[str]:
+        """environment names for a multi env or a single MCP server env."""
+        if getattr(env, "mcp_server_envs", None):
+            return [e.environment_name for e in env.mcp_server_envs]
+        if getattr(env, "environment_name", None):
+            return [env.environment_name]
+        raise RuntimeError(
+            f"Env '{env.id}' v{env.version} has no MCP services to snapshot "
+            "(expected mcp_server_envs or environment_name)"
+        )
+
+    @staticmethod
+    async def _export_environment_to_file(
+        gateway_url: str, environment_name: str, tmp_path: str, timeout_seconds: float
+    ) -> str:
+        """Export one service; return the suffix written (".json"/".zip") to
+        ``tmp_path``, or an ``s3://`` url if the service returned an ``s3://``
+        FilePart (nothing written to ``tmp_path`` then — export_one registers it).
+
+        v1 ``get_data``: ``DataPart`` → json; ``FilePart`` → ``s3://`` url (no
+        download) / base64 ``bytes`` / streamed relative-or-http ``uri`` → ".zip";
+        else legacy ``GET /export-state`` streamed to disk with a first-byte JSON
+        guard. Errors are caught by the caller (fails just this service)."""
+        from agent_env.env import legacy_protocol
+        from agentenv_protocol import client as protocol_v1
+
+        base_url = legacy_protocol.environment_base_url(gateway_url, environment_name, mcp=True)
+        if await protocol_v1.supports_v1(base_url):
+            # Push S3 creds (no-op unless the service advertises the extension).
+            card = await protocol_v1.get_card(base_url)
+            await _push_s3_credentials(base_url, card, timeout_seconds)
+            resp = await protocol_v1.get_data(base_url, timeout=int(timeout_seconds))
+            part = resp.parts[0] if resp.parts else None
+            if isinstance(part, FilePart):
+                raw = getattr(part.file, "bytes", None)
+                if raw is not None:
+                    with open(tmp_path, "wb") as f:
+                        f.write(base64.b64decode(raw))
+                else:
+                    uri = getattr(part.file, "uri", None)
+                    if not uri:
+                        # ValueError, not TypeError, so export_one catches it and
+                        # fails only this service — not the whole snapshot.
+                        raise ValueError(
+                            f"FilePart for '{environment_name}' has neither bytes nor uri"
+                        )
+                    # Service already uploaded to S3 — hand back the url as-is;
+                    # export_one registers it directly (no download). The key's
+                    # basename carries the shape (e.g. gdrive.zip).
+                    if uri.startswith("s3://"):
+                        return uri
+                    # A relative uri (e.g. "export-snapshot") means "stream it from
+                    # my service endpoint" — resolve against the service base_url so
+                    # multi-GB bundles never ride inline in the JSON-RPC response.
+                    if not uri.startswith(("http://", "https://")):
+                        uri = f"{base_url.rstrip('/')}/{uri.lstrip('/')}"
+                    async with httpx.AsyncClient() as client:
+                        async with client.stream(
+                            "GET",
+                            uri,
+                            timeout=httpx.Timeout(
+                                timeout_seconds, connect=_CONNECT_TIMEOUT_SECONDS
+                            ),
+                        ) as resp_file:
+                            resp_file.raise_for_status()
+                            with open(tmp_path, "wb") as f:
+                                async for chunk in resp_file.aiter_bytes():
+                                    f.write(chunk)
+                return os.path.splitext(getattr(part.file, "name", "") or "")[1] or ".zip"
+            state = part.data if part is not None else {}
+            with open(tmp_path, "w") as f:
+                json.dump(state, f, default=str)
+            return ".json"
+
+        async with httpx.AsyncClient() as client:
+            async with client.stream(
+                "GET",
+                f"{base_url}/export-state",
+                timeout=httpx.Timeout(timeout_seconds, connect=_CONNECT_TIMEOUT_SECONDS),
+            ) as resp:
+                resp.raise_for_status()
+                seen_first_bytes = False
+                with open(tmp_path, "wb") as f:
+                    async for chunk in resp.aiter_bytes():
+                        if not seen_first_bytes and chunk:
+                            lead = chunk.lstrip()[:1]
+                            if lead not in (b"{", b"["):
+                                raise ValueError(
+                                    f"export-state returned non-JSON body (starts with {lead!r})"
+                                )
+                            seen_first_bytes = True
+                        f.write(chunk)
+        return ".json"
+
+    @classmethod
+    async def snapshot_env_state(
+        cls,
+        *,
+        env,
+        gateway_url: str,
+        snapshot_id: str,
+        deployed=None,
+        original_universe_artifact_id: Optional[str] = None,
+        export_timeout_seconds: int = DEFAULT_EXPORT_TIMEOUT_SECONDS,
+        concurrency: int = DEFAULT_EXPORT_CONCURRENCY,
+    ) -> EnvSnapshotResult:
+        """Export all services via the gateway into a new EnvironmentUniverseArtifact
+        ``snapshot_id``. All-or-nothing; the raised error carries public
+        per-service summaries (verbose details go to the log).
+
+        A classmethod so callers that have no step instance can reuse it."""
+        from agent_env.artifact import FileArtifact, EnvironmentArtifact, EnvironmentUniverseArtifact
+
+        services = cls._enumerate_environments(env)
+        gateway = gateway_url.rstrip("/")
+        # `gateway` identifies which deployment was exported: with k deployments of
+        # one env_id, env= and snapshot_id= are identical across branches.
+        logger.info(
+            f"snapshot_env: env={env.id} v{env.version} snapshot_id={snapshot_id} "
+            f"gateway={gateway} services={services}"
+        )
+
+        # Carry the source universe's metadata into the snapshot: explicit
+        # original id (fail-fast), else the loaded universe (best-effort).
+        snapshot_metadata = None
+        source_id = original_universe_artifact_id
+        explicit = source_id is not None
+        source_version: Optional[int] = None
+        if not explicit:
+            source_id, source_version = cls._resolve_loaded_universe_ref(deployed) or (None, None)
+        if source_id:
+            try:
+                source = await asyncio.to_thread(
+                    EnvironmentUniverseArtifact.get, source_id, version=source_version
+                )
+                snapshot_metadata = await asyncio.to_thread(source.get_metadata) or None
+                if not snapshot_metadata:
+                    logger.warning("snapshot_env: source universe %s has no metadata to carry", source_id)
+            except Exception:
+                if explicit:
+                    raise  # caller named this id — surface a bad one
+                logger.warning("snapshot_env: failed to carry metadata from %s", source_id, exc_info=True)
+
+        sem = asyncio.Semaphore(concurrency)
+
+        async def export_one(environment_name: str):
+            """Returns EnvironmentArtifact on success, (public_err, log_err) on failure."""
+            async with sem:
+                # Suffix (.json/.zip) is reported by _export_environment_to_file.
+                fd, tmp_path = tempfile.mkstemp(prefix=f"{snapshot_id}-{environment_name}-")
+                os.close(fd)
+                cleanup_paths = [tmp_path]
+                artifact_path = tmp_path
+                try:
+                    try:
+                        result = await cls._export_environment_to_file(
+                            gateway, environment_name, tmp_path, export_timeout_seconds
+                        )
+                    except httpx.HTTPStatusError as e:
+                        body_snippet = ""
+                        try:
+                            body_snippet = (await e.response.aread())[:500].decode(errors="replace")
+                        except Exception:
+                            pass
+                        public = f"export-state returned HTTP {e.response.status_code}"
+                        return public, f"{public} from {environment_name}: {body_snippet!r}"
+                    except httpx.RequestError as e:
+                        public = f"export-state request failed ({type(e).__name__})"
+                        return public, f"{public}: {e}"
+                    except ValueError as e:
+                        return str(e), str(e)
+
+                    # Service uploaded the bundle itself — register a FileArtifact
+                    # pointing at it directly (no download). The s3 url is just a
+                    # path: derive filename/content_type from its basename (the
+                    # extension drives load-time parsing), like FileArtifact.put.
+                    if result.startswith("s3://"):
+                        from urllib.parse import urlparse
+
+                        from agent_env.artifact.store import get_artifact_store
+                        from agent_env.config import get_config
+
+                        s3_url = result
+                        filename = os.path.basename(urlparse(s3_url).path) or f"{environment_name}.zip"
+                        content_type = mimetypes.guess_type(filename)[0] or "application/zip"
+
+                        def _register_s3_ref():
+                            object_store = get_config().get_object_store()
+                            if object_store.get_object_metadata_at(s3_url) is None:
+                                raise FileNotFoundError(f"snapshot bundle not found at {s3_url}")
+                            store = get_artifact_store()
+                            fa_id = f"{snapshot_id}-{environment_name}-file"
+                            fa = FileArtifact(
+                                id=fa_id,
+                                version=store.next_version(fa_id),
+                                description=f"State snapshot of {environment_name} from env {env.id}",
+                                filename=filename,
+                                content_type=content_type,
+                                s3_url=s3_url,
+                            )
+                            fa = store.put_document(fa)
+                            return EnvironmentArtifact.put(
+                                id=f"{snapshot_id}-{environment_name}",
+                                environment_name=environment_name,
+                                file_artifact=fa,
+                            )
+
+                        try:
+                            return await asyncio.to_thread(_register_s3_ref)
+                        except Exception as e:
+                            public = f"failed to register s3 artifact ({type(e).__name__})"
+                            return public, f"{public} for {environment_name}: {e}"
+
+                    # Otherwise `result` is the written suffix (.json/.zip).
+                    # FileArtifact.filename = basename(path); a .zip name routes the
+                    # load side to reset_data() (lossless).
+                    if result and not tmp_path.endswith(result):
+                        artifact_path = tmp_path + result
+                        os.rename(tmp_path, artifact_path)
+                        cleanup_paths.append(artifact_path)
+
+                    try:
+                        file_artifact = await asyncio.to_thread(
+                            FileArtifact.put,
+                            id=f"{snapshot_id}-{environment_name}-file",
+                            description=f"State snapshot of {environment_name} from env {env.id}",
+                            file_path=artifact_path,
+                        )
+                        return await asyncio.to_thread(
+                            EnvironmentArtifact.put,
+                            id=f"{snapshot_id}-{environment_name}",
+                            environment_name=environment_name,
+                            file_artifact=file_artifact,
+                        )
+                    except Exception as e:
+                        public = f"failed to create artifacts ({type(e).__name__})"
+                        return public, f"{public}: {e}"
+                finally:
+                    for path in cleanup_paths:
+                        try:
+                            os.unlink(path)
+                        except OSError:
+                            pass
+
+        results = await asyncio.gather(*(export_one(name) for name in services))
+
+        environment_artifacts = []
+        skipped: dict[str, tuple[str, str]] = {}
+        for name, result in zip(services, results):
+            if isinstance(result, tuple):
+                skipped[name] = result
+            else:
+                environment_artifacts.append(result)
+
+        if skipped:
+            details = "; ".join(f"{name}: {log}" for name, (_, log) in skipped.items())
+            logger.error(
+                f"snapshot_env: skipped {len(skipped)}/{len(services)} services for "
+                f"{env.id} (snapshot_id={snapshot_id}): {details}"
+            )
+            public_summary = "; ".join(
+                f"{name}: {public}" for name, (public, _) in skipped.items()
+            )
+            raise RuntimeError(
+                f"{len(skipped)}/{len(services)} services were not exported "
+                f"(missing={sorted(skipped)}): {public_summary}"
+            )
+
+        universe = await asyncio.to_thread(
+            EnvironmentUniverseArtifact.put,
+            id=snapshot_id,
+            environment_artifacts=environment_artifacts,
+            metadata=snapshot_metadata,
+        )
+        logger.info(
+            f"snapshot_env: created {universe.id} v{universe.version} "
+            f"({len(environment_artifacts)} services)"
+        )
+        return EnvSnapshotResult(
+            environment_universe_artifact_id=universe.id,
+            environment_universe_artifact_version=universe.version,
+            environments_snapshotted=[sa.environment_name for sa in environment_artifacts],
+            total=len(services),
+        )

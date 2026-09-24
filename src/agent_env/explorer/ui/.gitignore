@@ -1,0 +1,13 @@
+# The repo root .gitignore carries `lib/` from the standard Python template (a
+# distutils build dir). That pattern also matches ui/src/lib/, which would silently
+# drop 36 source files — the trajectory parsers, the external-app shim — from any
+# checkout while still building locally. Re-include the directory here.
+!/src/lib/
+
+node_modules/
+.next/
+out/
+dist/
+*.tsbuildinfo
+.env
+.env.local

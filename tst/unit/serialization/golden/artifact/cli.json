@@ -1,0 +1,11 @@
+{
+  "cli_files_id": "slack-cli-files",
+  "cli_s3_url": "s3://artifact-bucket/artifacts/cli/slack-cli/3/",
+  "command_name": "slack",
+  "entrypoint": "bin/slack",
+  "env_id": "slack-env",
+  "env_version": 2,
+  "id": "slack-cli",
+  "type": "cli",
+  "version": 3
+}

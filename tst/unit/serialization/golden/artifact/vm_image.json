@@ -1,0 +1,13 @@
+{
+  "cpu": 4.0,
+  "description": "Ubuntu CUA desktop image",
+  "disk_size_gb": 30.0,
+  "ecr_url": "123456789012.dkr.ecr.us-west-2.amazonaws.com/cua/ubuntu:v6",
+  "id": "cua-ubuntu",
+  "image_name": null,
+  "memory_mb": 8192,
+  "os": null,
+  "sandbox_type": null,
+  "type": "vm_image",
+  "version": 6
+}

@@ -1,0 +1,1203 @@
+{
+  "users": [
+    {
+      "id": "UE6FA82B33805",
+      "name": "alice.smith",
+      "real_name": "Alice Smith",
+      "email": "alice.smith@techcorp.com",
+      "is_bot": false,
+      "is_admin": true,
+      "status": "away",
+      "title": "Engineer"
+    },
+    {
+      "id": "UA59AB0DCEF28",
+      "name": "bob.jones",
+      "real_name": "Bob Jones",
+      "email": "bob.jones@techcorp.com",
+      "is_bot": false,
+      "is_admin": false,
+      "status": "active",
+      "title": "Engineer"
+    },
+    {
+      "id": "UB50F1647959E",
+      "name": "carol.white",
+      "real_name": "Carol White",
+      "email": "carol.white@techcorp.com",
+      "is_bot": false,
+      "is_admin": false,
+      "status": "dnd",
+      "title": "Director"
+    },
+    {
+      "id": "U49D1D0D364B0",
+      "name": "david.brown",
+      "real_name": "David Brown",
+      "email": "david.brown@techcorp.com",
+      "is_bot": false,
+      "is_admin": false,
+      "status": "away",
+      "title": "Analyst"
+    },
+    {
+      "id": "U22F7D0828224",
+      "name": "emma.davis",
+      "real_name": "Emma Davis",
+      "email": "emma.davis@techcorp.com",
+      "is_bot": false,
+      "is_admin": false,
+      "status": "away",
+      "title": "Engineer"
+    },
+    {
+      "id": "UDD5E81D20491",
+      "name": "frank.miller",
+      "real_name": "Frank Miller",
+      "email": "frank.miller@techcorp.com",
+      "is_bot": false,
+      "is_admin": false,
+      "status": "active",
+      "title": "Engineer"
+    },
+    {
+      "id": "U1084901784A8",
+      "name": "grace.wilson",
+      "real_name": "Grace Wilson",
+      "email": "grace.wilson@techcorp.com",
+      "is_bot": false,
+      "is_admin": false,
+      "status": "away",
+      "title": "Engineer"
+    },
+    {
+      "id": "U271C89BE2D9F",
+      "name": "henry.taylor",
+      "real_name": "Henry Taylor",
+      "email": "henry.taylor@techcorp.com",
+      "is_bot": false,
+      "is_admin": false,
+      "status": "away",
+      "title": "Engineer"
+    },
+    {
+      "id": "U39ECBC887C08",
+      "name": "iris.anderson",
+      "real_name": "Iris Anderson",
+      "email": "iris.anderson@techcorp.com",
+      "is_bot": false,
+      "is_admin": false,
+      "status": "dnd",
+      "title": "Director"
+    },
+    {
+      "id": "UD9E0D700541F",
+      "name": "jack.thomas",
+      "real_name": "Jack Thomas",
+      "email": "jack.thomas@techcorp.com",
+      "is_bot": false,
+      "is_admin": false,
+      "status": "dnd",
+      "title": "Director"
+    }
+  ],
+  "channels": [
+    {
+      "id": "CD995CA750103",
+      "name": "general",
+      "topic": "Company-wide announcements",
+      "is_private": false,
+      "is_archived": false,
+      "num_members": 3,
+      "creator": "UB50F1647959E"
+    },
+    {
+      "id": "CA65CF9B3FCF4",
+      "name": "engineering",
+      "topic": "Engineering team discussions",
+      "is_private": false,
+      "is_archived": false,
+      "num_members": 6,
+      "creator": "UA59AB0DCEF28"
+    },
+    {
+      "id": "C919520C4C452",
+      "name": "design",
+      "topic": "Design team discussions",
+      "is_private": false,
+      "is_archived": false,
+      "num_members": 4,
+      "creator": "U22F7D0828224"
+    },
+    {
+      "id": "C0C3AF87EB837",
+      "name": "random",
+      "topic": "Random fun stuff",
+      "is_private": false,
+      "is_archived": false,
+      "num_members": 8,
+      "creator": "U39ECBC887C08"
+    },
+    {
+      "id": "C6F567224D5BD",
+      "name": "project-alpha",
+      "topic": "Project Alpha updates",
+      "is_private": true,
+      "is_archived": false,
+      "num_members": 10,
+      "creator": "UDD5E81D20491"
+    },
+    {
+      "id": "C32B245B551BA",
+      "name": "project-beta",
+      "topic": "Project Beta coordination",
+      "is_private": false,
+      "is_archived": false,
+      "num_members": 7,
+      "creator": "U271C89BE2D9F"
+    },
+    {
+      "id": "CA02D94990BDB",
+      "name": "standup",
+      "topic": "Daily standup notes",
+      "is_private": false,
+      "is_archived": false,
+      "num_members": 6,
+      "creator": "U39ECBC887C08"
+    },
+    {
+      "id": "C2F0E3BF02629",
+      "name": "incidents",
+      "topic": "Production incidents",
+      "is_private": true,
+      "is_archived": false,
+      "num_members": 4,
+      "creator": "U1084901784A8"
+    },
+    {
+      "id": "CC3A31E59BEC3",
+      "name": "hiring",
+      "topic": "Hiring and recruitment",
+      "is_private": false,
+      "is_archived": false,
+      "num_members": 4,
+      "creator": "UE6FA82B33805"
+    },
+    {
+      "id": "C006A0EC55A79",
+      "name": "social",
+      "topic": "Social events and activities",
+      "is_private": false,
+      "is_archived": false,
+      "num_members": 4,
+      "creator": "U271C89BE2D9F"
+    }
+  ],
+  "messages": [
+    {
+      "ts": "1738411278.964076",
+      "text": "Great work on the release everyone! \ud83c\udf89",
+      "thread_ts": null,
+      "reactions": [
+        {
+          "name": "heart",
+          "count": 1
+        }
+      ],
+      "channel": "CC3A31E59BEC3",
+      "user": "U39ECBC887C08"
+    },
+    {
+      "ts": "1738236371.761512",
+      "text": "The CI pipeline is green again.",
+      "thread_ts": "1738030340.622579",
+      "reactions": [
+        {
+          "name": "thumbsup",
+          "count": 5
+        }
+      ],
+      "channel": "C0C3AF87EB837",
+      "user": "UDD5E81D20491"
+    },
+    {
+      "ts": "1738300448.594729",
+      "text": "Great work on the release everyone! \ud83c\udf89",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "CA02D94990BDB",
+      "user": "UE6FA82B33805"
+    },
+    {
+      "ts": "1738090067.632286",
+      "text": "Can someone review my PR? Link in thread.",
+      "thread_ts": null,
+      "reactions": [
+        {
+          "name": "heart",
+          "count": 4
+        }
+      ],
+      "channel": "C2F0E3BF02629",
+      "user": "UD9E0D700541F"
+    },
+    {
+      "ts": "1738460910.882083",
+      "text": "Meeting in 10 minutes, don't forget!",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "C2F0E3BF02629",
+      "user": "U49D1D0D364B0"
+    },
+    {
+      "ts": "1738162110.160775",
+      "text": "Meeting in 10 minutes, don't forget!",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "C0C3AF87EB837",
+      "user": "UB50F1647959E"
+    },
+    {
+      "ts": "1738332925.177127",
+      "text": "Hey team, quick update on the project status.",
+      "thread_ts": null,
+      "reactions": [
+        {
+          "name": "eyes",
+          "count": 5
+        }
+      ],
+      "channel": "C919520C4C452",
+      "user": "U271C89BE2D9F"
+    },
+    {
+      "ts": "1738378116.838354",
+      "text": "Has anyone seen the latest metrics dashboard?",
+      "thread_ts": "1738349935.782364",
+      "reactions": [],
+      "channel": "C006A0EC55A79",
+      "user": "UB50F1647959E"
+    },
+    {
+      "ts": "1738355348.943359",
+      "text": "Documentation updated for the new API.",
+      "thread_ts": null,
+      "reactions": [
+        {
+          "name": "heart",
+          "count": 3
+        }
+      ],
+      "channel": "CC3A31E59BEC3",
+      "user": "UA59AB0DCEF28"
+    },
+    {
+      "ts": "1738483033.249769",
+      "text": "The CI pipeline is green again.",
+      "thread_ts": "1738131035.378116",
+      "reactions": [
+        {
+          "name": "thumbsup",
+          "count": 3
+        }
+      ],
+      "channel": "C919520C4C452",
+      "user": "U49D1D0D364B0"
+    },
+    {
+      "ts": "1738072967.107045",
+      "text": "Great work on the release everyone! \ud83c\udf89",
+      "thread_ts": null,
+      "reactions": [
+        {
+          "name": "heart",
+          "count": 5
+        }
+      ],
+      "channel": "C006A0EC55A79",
+      "user": "U49D1D0D364B0"
+    },
+    {
+      "ts": "1738213602.509781",
+      "text": "The CI pipeline is green again.",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "C32B245B551BA",
+      "user": "U22F7D0828224"
+    },
+    {
+      "ts": "1738303871.529446",
+      "text": "Found a bug in the auth flow, investigating.",
+      "thread_ts": null,
+      "reactions": [
+        {
+          "name": "rocket",
+          "count": 5
+        }
+      ],
+      "channel": "C2F0E3BF02629",
+      "user": "U39ECBC887C08"
+    },
+    {
+      "ts": "1738171590.813253",
+      "text": "Can someone review my PR? Link in thread.",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "CD995CA750103",
+      "user": "U49D1D0D364B0"
+    },
+    {
+      "ts": "1738369110.808302",
+      "text": "Anyone available for a quick sync?",
+      "thread_ts": "1738081159.748308",
+      "reactions": [
+        {
+          "name": "eyes",
+          "count": 5
+        }
+      ],
+      "channel": "C6F567224D5BD",
+      "user": "UDD5E81D20491"
+    },
+    {
+      "ts": "1738434488.916199",
+      "text": "The CI pipeline is green again.",
+      "thread_ts": "1738449891.204048",
+      "reactions": [],
+      "channel": "CA02D94990BDB",
+      "user": "UA59AB0DCEF28"
+    },
+    {
+      "ts": "1738342492.697173",
+      "text": "Found a bug in the auth flow, investigating.",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "C919520C4C452",
+      "user": "U39ECBC887C08"
+    },
+    {
+      "ts": "1738217684.287146",
+      "text": "Found a bug in the auth flow, investigating.",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "C2F0E3BF02629",
+      "user": "UDD5E81D20491"
+    },
+    {
+      "ts": "1738106627.171441",
+      "text": "Found a bug in the auth flow, investigating.",
+      "thread_ts": null,
+      "reactions": [
+        {
+          "name": "thumbsup",
+          "count": 2
+        }
+      ],
+      "channel": "CA65CF9B3FCF4",
+      "user": "UA59AB0DCEF28"
+    },
+    {
+      "ts": "1738474761.510461",
+      "text": "Thanks for the help with debugging!",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "C6F567224D5BD",
+      "user": "UE6FA82B33805"
+    },
+    {
+      "ts": "1738270538.991356",
+      "text": "Found a bug in the auth flow, investigating.",
+      "thread_ts": null,
+      "reactions": [
+        {
+          "name": "heart",
+          "count": 4
+        }
+      ],
+      "channel": "CD995CA750103",
+      "user": "U271C89BE2D9F"
+    },
+    {
+      "ts": "1738120292.390614",
+      "text": "I'll be OOO tomorrow, ping me on urgent stuff.",
+      "thread_ts": "1738025182.414116",
+      "reactions": [],
+      "channel": "C2F0E3BF02629",
+      "user": "U49D1D0D364B0"
+    },
+    {
+      "ts": "1738211472.621008",
+      "text": "Documentation updated for the new API.",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "C006A0EC55A79",
+      "user": "UE6FA82B33805"
+    },
+    {
+      "ts": "1738347357.787347",
+      "text": "Has anyone seen the latest metrics dashboard?",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "C6F567224D5BD",
+      "user": "UB50F1647959E"
+    },
+    {
+      "ts": "1738422010.527676",
+      "text": "Sprint planning at 2pm today.",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "C2F0E3BF02629",
+      "user": "UE6FA82B33805"
+    },
+    {
+      "ts": "1738271190.944151",
+      "text": "Meeting in 10 minutes, don't forget!",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "CA65CF9B3FCF4",
+      "user": "U1084901784A8"
+    },
+    {
+      "ts": "1738483320.790114",
+      "text": "Found a bug in the auth flow, investigating.",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "C32B245B551BA",
+      "user": "UA59AB0DCEF28"
+    },
+    {
+      "ts": "1738322647.746797",
+      "text": "Great work on the release everyone! \ud83c\udf89",
+      "thread_ts": "1738377713.354795",
+      "reactions": [
+        {
+          "name": "heart",
+          "count": 1
+        }
+      ],
+      "channel": "C0C3AF87EB837",
+      "user": "UE6FA82B33805"
+    },
+    {
+      "ts": "1738172143.648909",
+      "text": "Hey team, quick update on the project status.",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "C919520C4C452",
+      "user": "U1084901784A8"
+    },
+    {
+      "ts": "1738196472.362525",
+      "text": "The new feature is deployed to staging.",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "C919520C4C452",
+      "user": "U22F7D0828224"
+    },
+    {
+      "ts": "1738201891.144828",
+      "text": "Meeting in 10 minutes, don't forget!",
+      "thread_ts": null,
+      "reactions": [
+        {
+          "name": "thumbsup",
+          "count": 1
+        }
+      ],
+      "channel": "CA02D94990BDB",
+      "user": "U39ECBC887C08"
+    },
+    {
+      "ts": "1738482458.916446",
+      "text": "Customer feedback has been really positive!",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "CC3A31E59BEC3",
+      "user": "UE6FA82B33805"
+    },
+    {
+      "ts": "1738223896.125204",
+      "text": "Found a bug in the auth flow, investigating.",
+      "thread_ts": "1738176724.410077",
+      "reactions": [
+        {
+          "name": "eyes",
+          "count": 5
+        }
+      ],
+      "channel": "CD995CA750103",
+      "user": "UD9E0D700541F"
+    },
+    {
+      "ts": "1738031011.554589",
+      "text": "Thanks for the help with debugging!",
+      "thread_ts": "1738471964.932543",
+      "reactions": [
+        {
+          "name": "eyes",
+          "count": 4
+        }
+      ],
+      "channel": "C0C3AF87EB837",
+      "user": "UD9E0D700541F"
+    },
+    {
+      "ts": "1738060504.920909",
+      "text": "Hey team, quick update on the project status.",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "C32B245B551BA",
+      "user": "U22F7D0828224"
+    },
+    {
+      "ts": "1738202857.578645",
+      "text": "Has anyone seen the latest metrics dashboard?",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "C006A0EC55A79",
+      "user": "UD9E0D700541F"
+    },
+    {
+      "ts": "1738404234.411843",
+      "text": "Can someone review my PR? Link in thread.",
+      "thread_ts": null,
+      "reactions": [
+        {
+          "name": "rocket",
+          "count": 5
+        }
+      ],
+      "channel": "CC3A31E59BEC3",
+      "user": "U39ECBC887C08"
+    },
+    {
+      "ts": "1738387277.937100",
+      "text": "Found a bug in the auth flow, investigating.",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "C006A0EC55A79",
+      "user": "UE6FA82B33805"
+    },
+    {
+      "ts": "1738328572.870800",
+      "text": "Great work on the release everyone! \ud83c\udf89",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "C919520C4C452",
+      "user": "U22F7D0828224"
+    },
+    {
+      "ts": "1738235872.815194",
+      "text": "Documentation updated for the new API.",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "C006A0EC55A79",
+      "user": "UDD5E81D20491"
+    },
+    {
+      "ts": "1738324370.957778",
+      "text": "Thanks for the help with debugging!",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "CC3A31E59BEC3",
+      "user": "UDD5E81D20491"
+    },
+    {
+      "ts": "1738344880.809862",
+      "text": "Great work on the release everyone! \ud83c\udf89",
+      "thread_ts": "1738311095.971037",
+      "reactions": [],
+      "channel": "C006A0EC55A79",
+      "user": "U39ECBC887C08"
+    },
+    {
+      "ts": "1738025661.699865",
+      "text": "Sprint planning at 2pm today.",
+      "thread_ts": "1738208076.526487",
+      "reactions": [
+        {
+          "name": "heart",
+          "count": 3
+        }
+      ],
+      "channel": "C32B245B551BA",
+      "user": "U1084901784A8"
+    },
+    {
+      "ts": "1738318787.752912",
+      "text": "Great work on the release everyone! \ud83c\udf89",
+      "thread_ts": "1738355355.513735",
+      "reactions": [],
+      "channel": "CA65CF9B3FCF4",
+      "user": "U39ECBC887C08"
+    },
+    {
+      "ts": "1738021230.791880",
+      "text": "Sprint planning at 2pm today.",
+      "thread_ts": "1738421818.933176",
+      "reactions": [
+        {
+          "name": "heart",
+          "count": 1
+        }
+      ],
+      "channel": "C6F567224D5BD",
+      "user": "UD9E0D700541F"
+    },
+    {
+      "ts": "1738293445.586086",
+      "text": "Sprint planning at 2pm today.",
+      "thread_ts": null,
+      "reactions": [
+        {
+          "name": "thumbsup",
+          "count": 4
+        }
+      ],
+      "channel": "C6F567224D5BD",
+      "user": "UE6FA82B33805"
+    },
+    {
+      "ts": "1738356957.382402",
+      "text": "Sprint planning at 2pm today.",
+      "thread_ts": "1738110296.530092",
+      "reactions": [],
+      "channel": "C006A0EC55A79",
+      "user": "U1084901784A8"
+    },
+    {
+      "ts": "1738467312.584196",
+      "text": "The new feature is deployed to staging.",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "C2F0E3BF02629",
+      "user": "U22F7D0828224"
+    },
+    {
+      "ts": "1738481113.962312",
+      "text": "Meeting in 10 minutes, don't forget!",
+      "thread_ts": "1738336780.606589",
+      "reactions": [
+        {
+          "name": "heart",
+          "count": 2
+        }
+      ],
+      "channel": "C32B245B551BA",
+      "user": "U22F7D0828224"
+    },
+    {
+      "ts": "1738441508.295110",
+      "text": "Found a bug in the auth flow, investigating.",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "CA02D94990BDB",
+      "user": "UE6FA82B33805"
+    },
+    {
+      "ts": "1738023434.577159",
+      "text": "Anyone available for a quick sync?",
+      "thread_ts": null,
+      "reactions": [
+        {
+          "name": "eyes",
+          "count": 5
+        }
+      ],
+      "channel": "C006A0EC55A79",
+      "user": "UD9E0D700541F"
+    },
+    {
+      "ts": "1738373640.678081",
+      "text": "Sprint planning at 2pm today.",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "CD995CA750103",
+      "user": "UB50F1647959E"
+    },
+    {
+      "ts": "1738115901.329061",
+      "text": "Sprint planning at 2pm today.",
+      "thread_ts": "1738198910.739820",
+      "reactions": [],
+      "channel": "C0C3AF87EB837",
+      "user": "U271C89BE2D9F"
+    },
+    {
+      "ts": "1738182853.614228",
+      "text": "Meeting in 10 minutes, don't forget!",
+      "thread_ts": null,
+      "reactions": [
+        {
+          "name": "thumbsup",
+          "count": 2
+        }
+      ],
+      "channel": "C32B245B551BA",
+      "user": "U22F7D0828224"
+    },
+    {
+      "ts": "1738184658.352657",
+      "text": "Can someone review my PR? Link in thread.",
+      "thread_ts": null,
+      "reactions": [
+        {
+          "name": "thumbsup",
+          "count": 1
+        }
+      ],
+      "channel": "CD995CA750103",
+      "user": "UE6FA82B33805"
+    },
+    {
+      "ts": "1738364633.695371",
+      "text": "Anyone available for a quick sync?",
+      "thread_ts": null,
+      "reactions": [
+        {
+          "name": "thumbsup",
+          "count": 1
+        }
+      ],
+      "channel": "C6F567224D5BD",
+      "user": "U1084901784A8"
+    },
+    {
+      "ts": "1738006257.384755",
+      "text": "Reminder: submit your timesheets by EOD.",
+      "thread_ts": null,
+      "reactions": [
+        {
+          "name": "eyes",
+          "count": 4
+        }
+      ],
+      "channel": "C32B245B551BA",
+      "user": "U271C89BE2D9F"
+    },
+    {
+      "ts": "1738119130.503039",
+      "text": "Sprint planning at 2pm today.",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "CA65CF9B3FCF4",
+      "user": "UA59AB0DCEF28"
+    },
+    {
+      "ts": "1738196837.554025",
+      "text": "Customer feedback has been really positive!",
+      "thread_ts": null,
+      "reactions": [
+        {
+          "name": "thumbsup",
+          "count": 5
+        }
+      ],
+      "channel": "C32B245B551BA",
+      "user": "UA59AB0DCEF28"
+    },
+    {
+      "ts": "1738103863.887663",
+      "text": "Great work on the release everyone! \ud83c\udf89",
+      "thread_ts": null,
+      "reactions": [
+        {
+          "name": "thumbsup",
+          "count": 1
+        }
+      ],
+      "channel": "C0C3AF87EB837",
+      "user": "U49D1D0D364B0"
+    },
+    {
+      "ts": "1738193342.758659",
+      "text": "Reminder: submit your timesheets by EOD.",
+      "thread_ts": null,
+      "reactions": [
+        {
+          "name": "rocket",
+          "count": 3
+        }
+      ],
+      "channel": "C2F0E3BF02629",
+      "user": "U49D1D0D364B0"
+    },
+    {
+      "ts": "1738324540.220454",
+      "text": "Great work on the release everyone! \ud83c\udf89",
+      "thread_ts": "1738310659.525964",
+      "reactions": [],
+      "channel": "CC3A31E59BEC3",
+      "user": "UDD5E81D20491"
+    },
+    {
+      "ts": "1738475391.687125",
+      "text": "Anyone available for a quick sync?",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "C919520C4C452",
+      "user": "U39ECBC887C08"
+    },
+    {
+      "ts": "1738404429.192452",
+      "text": "Reminder: submit your timesheets by EOD.",
+      "thread_ts": null,
+      "reactions": [
+        {
+          "name": "eyes",
+          "count": 1
+        }
+      ],
+      "channel": "C2F0E3BF02629",
+      "user": "UA59AB0DCEF28"
+    },
+    {
+      "ts": "1738233561.201424",
+      "text": "Has anyone seen the latest metrics dashboard?",
+      "thread_ts": "1738099446.938124",
+      "reactions": [],
+      "channel": "C6F567224D5BD",
+      "user": "U271C89BE2D9F"
+    },
+    {
+      "ts": "1738236842.273920",
+      "text": "The CI pipeline is green again.",
+      "thread_ts": null,
+      "reactions": [
+        {
+          "name": "heart",
+          "count": 2
+        }
+      ],
+      "channel": "C32B245B551BA",
+      "user": "U1084901784A8"
+    },
+    {
+      "ts": "1738089836.182003",
+      "text": "Thanks for the help with debugging!",
+      "thread_ts": null,
+      "reactions": [
+        {
+          "name": "rocket",
+          "count": 3
+        }
+      ],
+      "channel": "CA65CF9B3FCF4",
+      "user": "U22F7D0828224"
+    },
+    {
+      "ts": "1738060242.162401",
+      "text": "The new feature is deployed to staging.",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "C2F0E3BF02629",
+      "user": "UB50F1647959E"
+    },
+    {
+      "ts": "1738149763.355232",
+      "text": "Thanks for the help with debugging!",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "C919520C4C452",
+      "user": "UDD5E81D20491"
+    },
+    {
+      "ts": "1738132321.213957",
+      "text": "Anyone available for a quick sync?",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "CA02D94990BDB",
+      "user": "U49D1D0D364B0"
+    },
+    {
+      "ts": "1738240198.374197",
+      "text": "The CI pipeline is green again.",
+      "thread_ts": null,
+      "reactions": [
+        {
+          "name": "thumbsup",
+          "count": 3
+        }
+      ],
+      "channel": "CD995CA750103",
+      "user": "U49D1D0D364B0"
+    },
+    {
+      "ts": "1738127929.287028",
+      "text": "Documentation updated for the new API.",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "CC3A31E59BEC3",
+      "user": "UD9E0D700541F"
+    },
+    {
+      "ts": "1738070797.652406",
+      "text": "Hey team, quick update on the project status.",
+      "thread_ts": "1738424545.317696",
+      "reactions": [],
+      "channel": "CC3A31E59BEC3",
+      "user": "UD9E0D700541F"
+    },
+    {
+      "ts": "1738097433.292363",
+      "text": "Has anyone seen the latest metrics dashboard?",
+      "thread_ts": null,
+      "reactions": [
+        {
+          "name": "rocket",
+          "count": 3
+        }
+      ],
+      "channel": "CA65CF9B3FCF4",
+      "user": "UA59AB0DCEF28"
+    },
+    {
+      "ts": "1738059896.644163",
+      "text": "Customer feedback has been really positive!",
+      "thread_ts": "1738011914.529663",
+      "reactions": [],
+      "channel": "C006A0EC55A79",
+      "user": "UB50F1647959E"
+    },
+    {
+      "ts": "1738282209.276242",
+      "text": "Hey team, quick update on the project status.",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "C006A0EC55A79",
+      "user": "U22F7D0828224"
+    },
+    {
+      "ts": "1738050132.285478",
+      "text": "Meeting in 10 minutes, don't forget!",
+      "thread_ts": null,
+      "reactions": [
+        {
+          "name": "rocket",
+          "count": 4
+        }
+      ],
+      "channel": "CA02D94990BDB",
+      "user": "UB50F1647959E"
+    },
+    {
+      "ts": "1738490960.950907",
+      "text": "Has anyone seen the latest metrics dashboard?",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "CC3A31E59BEC3",
+      "user": "U39ECBC887C08"
+    },
+    {
+      "ts": "1738190432.881732",
+      "text": "Found a bug in the auth flow, investigating.",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "CD995CA750103",
+      "user": "U39ECBC887C08"
+    },
+    {
+      "ts": "1738227478.653742",
+      "text": "Found a bug in the auth flow, investigating.",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "C32B245B551BA",
+      "user": "U49D1D0D364B0"
+    },
+    {
+      "ts": "1738466464.562512",
+      "text": "Anyone available for a quick sync?",
+      "thread_ts": "1738426838.918714",
+      "reactions": [],
+      "channel": "CA02D94990BDB",
+      "user": "UE6FA82B33805"
+    },
+    {
+      "ts": "1738490670.979587",
+      "text": "Reminder: submit your timesheets by EOD.",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "C6F567224D5BD",
+      "user": "U49D1D0D364B0"
+    },
+    {
+      "ts": "1738495128.481323",
+      "text": "Great work on the release everyone! \ud83c\udf89",
+      "thread_ts": "1738085616.918160",
+      "reactions": [],
+      "channel": "C6F567224D5BD",
+      "user": "UE6FA82B33805"
+    },
+    {
+      "ts": "1738081279.414441",
+      "text": "Can someone review my PR? Link in thread.",
+      "thread_ts": "1738393949.352085",
+      "reactions": [
+        {
+          "name": "heart",
+          "count": 2
+        }
+      ],
+      "channel": "C919520C4C452",
+      "user": "UB50F1647959E"
+    },
+    {
+      "ts": "1738154514.953788",
+      "text": "The new feature is deployed to staging.",
+      "thread_ts": "1738173978.863533",
+      "reactions": [],
+      "channel": "C6F567224D5BD",
+      "user": "U49D1D0D364B0"
+    },
+    {
+      "ts": "1738112990.215337",
+      "text": "Anyone available for a quick sync?",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "CD995CA750103",
+      "user": "U1084901784A8"
+    },
+    {
+      "ts": "1738330383.296419",
+      "text": "Customer feedback has been really positive!",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "CA02D94990BDB",
+      "user": "UD9E0D700541F"
+    },
+    {
+      "ts": "1738077889.260135",
+      "text": "Anyone available for a quick sync?",
+      "thread_ts": null,
+      "reactions": [
+        {
+          "name": "thumbsup",
+          "count": 1
+        }
+      ],
+      "channel": "CA65CF9B3FCF4",
+      "user": "UB50F1647959E"
+    },
+    {
+      "ts": "1738491637.658453",
+      "text": "Great work on the release everyone! \ud83c\udf89",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "CA02D94990BDB",
+      "user": "UA59AB0DCEF28"
+    },
+    {
+      "ts": "1738198611.179017",
+      "text": "Thanks for the help with debugging!",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "CA65CF9B3FCF4",
+      "user": "UB50F1647959E"
+    },
+    {
+      "ts": "1738294933.942257",
+      "text": "Found a bug in the auth flow, investigating.",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "C006A0EC55A79",
+      "user": "U49D1D0D364B0"
+    },
+    {
+      "ts": "1738349341.459992",
+      "text": "Has anyone seen the latest metrics dashboard?",
+      "thread_ts": null,
+      "reactions": [
+        {
+          "name": "rocket",
+          "count": 1
+        }
+      ],
+      "channel": "C0C3AF87EB837",
+      "user": "U49D1D0D364B0"
+    },
+    {
+      "ts": "1738112672.354421",
+      "text": "Meeting in 10 minutes, don't forget!",
+      "thread_ts": "1738303283.480646",
+      "reactions": [
+        {
+          "name": "eyes",
+          "count": 2
+        }
+      ],
+      "channel": "CC3A31E59BEC3",
+      "user": "UD9E0D700541F"
+    },
+    {
+      "ts": "1738399340.752024",
+      "text": "The new feature is deployed to staging.",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "CA65CF9B3FCF4",
+      "user": "UD9E0D700541F"
+    },
+    {
+      "ts": "1738132988.970770",
+      "text": "Great work on the release everyone! \ud83c\udf89",
+      "thread_ts": "1738060941.153045",
+      "reactions": [
+        {
+          "name": "thumbsup",
+          "count": 1
+        }
+      ],
+      "channel": "C32B245B551BA",
+      "user": "U39ECBC887C08"
+    },
+    {
+      "ts": "1738392876.330102",
+      "text": "Reminder: submit your timesheets by EOD.",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "C0C3AF87EB837",
+      "user": "UE6FA82B33805"
+    },
+    {
+      "ts": "1738484413.408509",
+      "text": "Anyone available for a quick sync?",
+      "thread_ts": "1738125891.475292",
+      "reactions": [
+        {
+          "name": "rocket",
+          "count": 5
+        }
+      ],
+      "channel": "C2F0E3BF02629",
+      "user": "UE6FA82B33805"
+    },
+    {
+      "ts": "1738263314.550188",
+      "text": "I'll be OOO tomorrow, ping me on urgent stuff.",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "CA65CF9B3FCF4",
+      "user": "U1084901784A8"
+    },
+    {
+      "ts": "1738237999.824177",
+      "text": "Found a bug in the auth flow, investigating.",
+      "thread_ts": null,
+      "reactions": [],
+      "channel": "C006A0EC55A79",
+      "user": "UB50F1647959E"
+    },
+    {
+      "ts": "1738247754.402510",
+      "text": "The CI pipeline is green again.",
+      "thread_ts": null,
+      "reactions": [
+        {
+          "name": "eyes",
+          "count": 5
+        }
+      ],
+      "channel": "C006A0EC55A79",
+      "user": "UE6FA82B33805"
+    }
+  ]
+}

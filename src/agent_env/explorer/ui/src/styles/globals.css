@@ -1,0 +1,175 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * agent-env explorer design tokens — semantic layer.
+ *
+ * These CSS custom properties are the runtime source of truth consumed by the
+ * app's ~1000 `text-[var(--…)]` / `bg-[var(--…)]` / `border-[var(--…)]` call
+ * sites and mirrored as Tailwind color aliases in `src/styles/tokens.ts`.
+ * Values come from the agent-env explorer design system's color scale.
+ */
+:root {
+  /* Corner radius — design-system default (md = 8px). */
+  --radius: 0.5rem;
+
+  /* Background / surface */
+  --background: #ffffff; /* background/primary */
+  --background-tertiary: #fafafa; /* background/tertiary */
+  --surface: #ffffff; /* surface/default */
+  --surface-muted: #f5f5f5; /* surface/muted */
+  --card: #ffffff;
+  --card-foreground: #111111;
+  --popover: #ffffff;
+  --popover-foreground: #111111;
+
+  /* Text */
+  --foreground: #111111; /* text/primary */
+  --muted-foreground: #525252; /* text/secondary */
+  --text-tertiary: #737373; /* text/tertiary */
+  --text-muted: #a3a3a3; /* text/muted */
+
+  /* Accent / interactive */
+  --primary: #000000; /* accent/primary */
+  --primary-foreground: #ffffff;
+  --secondary: #f5f5f5; /* background/secondary — chips, active nav */
+  --secondary-foreground: #111111;
+  --muted: #f5f5f5;
+  --accent: #f5f5f5; /* hover surface */
+  --accent-foreground: #111111;
+  --destructive: #e27553; /* accent/red */
+  --accent-red: #e27553;
+  --accent-teal: #65c2b9;
+  --accent-blue: #598dd2;
+  --accent-cyan: #6fcbef;
+
+  /* Border / ring */
+  --border: #d9d9d9; /* border/default */
+  --border-subtle: #e5e5e5; /* border/subtle */
+  --border-strong: #737373; /* border/muted */
+  --input: #d9d9d9;
+  --ring: #a3a3a3; /* gray/500 */
+
+  /* Spacing scale, px. Available for authored
+   * styles; Tailwind's numeric spacing scale already maps 1:1 to these at a
+   * 16px root — see `src/styles/tokens.ts` for why they are not overridden. */
+  --space-0: 0px;
+  --space-2: 2px;
+  --space-4: 4px;
+  --space-6: 6px;
+  --space-8: 8px;
+  --space-12: 12px;
+  --space-16: 16px;
+  --space-20: 20px;
+  --space-24: 24px;
+  --space-32: 32px;
+  --space-40: 40px;
+  --space-48: 48px;
+  --space-56: 56px;
+  --space-64: 64px;
+  --space-80: 80px;
+  --space-96: 96px;
+  --space-128: 128px;
+  --space-144: 144px;
+
+  /* Radius scale (Spacing frame — radius/*). */
+  --radius-none: 0px;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-full: 9999px;
+}
+
+/*
+ * Point the Radix Themes component library at the design-system fonts so its
+ * Buttons / Badges / Tables / Dialogs render in Inter, with Geist Mono for
+ * code. The `--font-inter` / `--font-geist-mono` variables are provided by
+ * `next/font` on the <Theme> wrapper in `_app.tsx`.
+ */
+.radix-themes {
+  --default-font-family: var(--font-inter), ui-sans-serif, system-ui,
+    -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --heading-font-family: var(--default-font-family);
+  --code-font-family: var(--font-geist-mono), ui-monospace, SFMono-Regular,
+    Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+}
+
+/* Override Radix Themes tabs: highlight instead of underline */
+.rt-TabsList::before {
+  display: none;
+}
+
+.rt-TabsTrigger::before {
+  display: none;
+}
+
+.rt-TabsTrigger {
+  border-radius: 6px;
+  padding: 6px 12px;
+  color: var(--muted-foreground);
+}
+
+.rt-TabsTrigger[data-state='active'] {
+  background-color: var(--secondary);
+  color: var(--foreground);
+  font-weight: 500;
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+    outline-color: color-mix(in srgb, var(--ring) 50%, transparent);
+  }
+  /*
+   * Pin the document to exactly the viewport so the page itself never
+   * scrolls.
+   */
+  html,
+  body {
+    height: 100%;
+    overflow: hidden;
+  }
+  html {
+    font-size: 14px;
+  }
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-inter), ui-sans-serif, system-ui, -apple-system,
+      'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /*
+   * Design-system heading defaults (Typography frame). Components that set an
+   * explicit `text-*`/`font-*` utility still win; these style bare headings.
+   */
+  h1 {
+    font-size: 32px;
+    line-height: 40px;
+    font-weight: 600;
+  }
+  h2 {
+    font-size: 30px;
+    line-height: 37.5px;
+    font-weight: 600;
+  }
+  h3 {
+    font-size: 28px;
+    line-height: 35px;
+    font-weight: 600;
+  }
+  h4 {
+    font-size: 20px;
+    line-height: 27.5px;
+    font-weight: 600;
+  }
+  h5 {
+    font-size: 18px;
+    line-height: 24.75px;
+    font-weight: 500;
+  }
+}

@@ -1,0 +1,302 @@
+"""Task step that applies a task's behavior config to deployed servers.
+
+At setup (after the env is deployed + universe loaded, before the agent runs)
+this step invokes each backing MCP server's ``set_*`` config extensions over the
+gateway. Extensions are advertised on the server's ``EnvironmentCard`` (served at
+``/.well-known/agent-env.json``) under ``capabilities.extensions[]`` and invoked
+at their advertised REST endpoint (e.g. ``/agentenv/ext/set_errors``).
+
+Config lives on the backing server, not on the gateway itself, so each server is
+addressed through the gateway's REST reverse-proxy prefix
+``{gateway_url}/svc/mcp-{service}`` (the same ``mcp-<service>`` key the gateway
+registers in ``REST_PROXY_URLS``). The agent never sees the card or these
+endpoints; only this harness step invokes them.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any, ClassVar, Optional
+
+import httpx
+from agentenv_protocol import client as protocol_v1
+
+from agent_env.task_step.context import TaskStepContext
+from agent_env.entity_refs import EntityRef
+from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+
+logger = logging.getLogger(__name__)
+
+# Prefix the gateway registers per backing MCP server in REST_PROXY_URLS
+# (gateway_provider.py: ``mcp-{environment_name}=...``). The server's card + extension
+# endpoints are reached through the gateway proxy at this prefix.
+_SVC_PROXY_PREFIX = "svc/mcp-"
+
+
+class ApplyServerConfigError(RuntimeError):
+    """Raised when a config directive cannot be applied (bad target / extension
+    not advertised / server rejected the args)."""
+
+
+class ConfigDirective:
+    """A single config extension invocation against one backing server.
+
+    - ``service``: backing MCP server name (the env's ``environment_name``); the
+      gateway proxy key is ``mcp-<service>``.
+    - ``uri``: the extension's stable card URI (e.g. ``urn:agentenv:set-errors/v1``).
+      This is the discovery key on the card, NOT a fetchable URL.
+    - ``args``: the extension's POST body (e.g. ``{"tool_name", "error_rate",
+      "error_type"}`` for set_errors).
+    """
+
+    def __init__(self, service: str, uri: str, args: dict[str, Any]):
+        if not isinstance(service, str) or not service:
+            raise ValueError("directive.service must be a non-empty string")
+        if not isinstance(uri, str) or not uri:
+            raise ValueError("directive.uri must be a non-empty string")
+        if not isinstance(args, dict):
+            raise ValueError("directive.args must be a dict")
+        self.service = service
+        self.uri = uri
+        self.args = args
+
+    def to_dict(self) -> dict:
+        # Dual-write. This feeds the `tasks` and `task_steps`
+        # documents — NOT the delivered bundle. The bundle mints its own dict
+        # from these attributes in export/exporter.py, so the permanently frozen
+        # `{'service': ...}` Harbor applier input is unaffected by the twin here.
+        return {"service": self.service, "environment": self.service, "uri": self.uri, "args": self.args}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ConfigDirective":
+        # Reads both spellings. Legacy-first: it is the spelling every
+        # SDK version has always written, so it is never the stale half of a pair.
+        service = data["service"] if "service" in data else data.get("environment")
+        if service is None:
+            raise ValueError("directive requires a 'service' (or 'environment') key")
+        return cls(service=service, uri=data["uri"], args=data.get("args") or {})
+
+
+class ApplyServerConfigStep(TaskStep):
+    type: ClassVar[str] = "apply_server_config"
+    entity_refs = (EntityRef.env("env_id"),)
+
+    # A directive whose ``service`` is this sentinel is a broadcast: at execution
+    # it expands to one directive per MCP server in the env (same uri + args).
+    # Lets a caller apply an env-wide config (e.g. set_acting_user across every
+    # server) without enumerating services itself. Pairs naturally with
+    # ``tolerate_unadvertised`` so servers that don't opt in are simply skipped.
+    _BROADCAST: ClassVar[str] = "*"
+
+    def __init__(
+        self,
+        id: str,
+        version: Optional[int],
+        env_id: str,
+        directives: list,
+        depends_on: Optional[list[TaskStepDependency]] = None,
+        fail_task_on_error: bool = True,
+        timeout_seconds: int = 30,
+        tolerate_unadvertised: bool = False,
+    ):
+        super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
+        if not isinstance(env_id, str) or not env_id:
+            raise ValueError("env_id must be a non-empty string")
+        if not isinstance(directives, list) or not directives:
+            raise ValueError("directives must be a non-empty list")
+        self.env_id = env_id
+        self.directives = [
+            d if isinstance(d, ConfigDirective) else ConfigDirective.from_dict(d)
+            for d in directives
+        ]
+        self.timeout_seconds = timeout_seconds
+        # When True, a directive whose extension isn't advertised on the target
+        # server's card is skipped (recorded) instead of failing the step. Use
+        # for broadcast directives applied across every service in an env (e.g.
+        # set_acting_user), where some services may not opt into the extension.
+        # A card-fetch failure or an extension that IS advertised but rejects
+        # the args (e.g. unresolvable persona) still fails loud regardless.
+        self.tolerate_unadvertised = tolerate_unadvertised
+
+    def to_dict(self) -> dict:
+        base = super().to_dict()
+        base["env_id"] = self.env_id
+        base["directives"] = [d.to_dict() for d in self.directives]
+        base["timeout_seconds"] = self.timeout_seconds
+        base["tolerate_unadvertised"] = self.tolerate_unadvertised
+        return base
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ApplyServerConfigStep":
+        return cls(
+            **cls._base_from_dict(data),
+            env_id=data["env_id"],
+            directives=data["directives"],
+            timeout_seconds=data.get("timeout_seconds", 30),
+            tolerate_unadvertised=data.get("tolerate_unadvertised", False),
+        )
+
+    def _expand_directives(self, deployed) -> list[ConfigDirective]:
+        """Expand any broadcast directive (service == ``*``) into one directive
+        per MCP server in the env, resolved from the env definition. The env's
+        child service names aren't otherwise enumerable here (the deployed card
+        list carries no roster), so we read them from ``Env.get`` — matching how
+        deploy_env / load_artifact resolve the env. Non-broadcast directives
+        pass through untouched."""
+        if not any(d.service == self._BROADCAST for d in self.directives):
+            return self.directives
+
+        from agent_env.env.env import Env
+
+        env = Env.get(deployed.env_id, deployed.env_version)
+        environment_names = [
+            e.environment_name for e in (getattr(env, "mcp_server_envs", None) or [])
+        ]
+        # A single-server env (a bare MCPServerEnv) exposes `environment_name` and no
+        # `mcp_server_envs`; mirror snapshot_env / exporter enumeration and fall
+        # back to it, else a broadcast silently matches nothing on single-server envs.
+        if not environment_names and getattr(env, "environment_name", None):
+            environment_names = [env.environment_name]
+        # A broadcast that resolves to zero services would apply nothing while the
+        # step reports success: the exact silent misconfig this step prevents. Fail
+        # loud (tolerate_unadvertised governs advertisement, not missing servers).
+        if not environment_names:
+            raise ApplyServerConfigError(
+                f"apply_server_config: broadcast directive matched no MCP servers "
+                f"in env {self.env_id!r} (env exposes neither mcp_server_envs nor a "
+                f"environment_name); nothing to apply, likely a task authoring error"
+            )
+        expanded: list[ConfigDirective] = []
+        for d in self.directives:
+            if d.service != self._BROADCAST:
+                expanded.append(d)
+                continue
+            for svc in environment_names:
+                expanded.append(ConfigDirective(service=svc, uri=d.uri, args=d.args))
+        return expanded
+
+    def _service_base_url(self, gateway_url: str, service: str) -> str:
+        """Base URL for a backing server's card + extension endpoints, reached
+        through the gateway REST proxy. ``invoke_extension``/``get_card`` append
+        the card path and the advertised endpoint (both leading-slash), so no
+        trailing slash here."""
+        return f"{gateway_url.rstrip('/')}/{_SVC_PROXY_PREFIX}{service}"
+
+    async def execute(self, context: TaskStepContext) -> TaskStepContext:
+        deployed = next((d for d in context.deployed_envs if d.env_id == self.env_id), None)
+        if deployed is None:
+            raise ApplyServerConfigError(f"Env '{self.env_id}' not found in context.deployed_envs")
+
+        # Record each directive in context metadata the moment it's accepted, so a
+        # later failure still leaves an accurate audit trail of what the server was
+        # actually armed with — a partial apply must not look like a no-op.
+        changes = context.metadata.setdefault("server_config_changes", [])
+        # Directives skipped because the target server doesn't advertise the
+        # extension (only when tolerate_unadvertised). Kept separate from
+        # `changes` so the audit trail never shows a skip as an applied change.
+        skipped = context.metadata.setdefault("server_config_skipped", [])
+        # Expand broadcast (service="*") directives to one-per-env-service.
+        # Env.get inside _expand_directives can raise (missing env / version /
+        # network), so wrap it to keep the broadcast path's failure contract the
+        # same ApplyServerConfigError as the per-directive HTTP calls below.
+        try:
+            directives = self._expand_directives(deployed)
+        except ApplyServerConfigError:
+            raise
+        except Exception as e:
+            raise ApplyServerConfigError(
+                f"Failed to expand broadcast directives for env {self.env_id!r}: "
+                f"{type(e).__name__}: {e}"
+            ) from e
+        # Cache one card fetch per service — a task typically sets several
+        # directives (e.g. errors on multiple tools) against the same server.
+        # A cached None marks a service that serves no card (404 on the
+        # well-known path): a server predating env-card support.
+        cards: dict[str, Optional[dict]] = {}
+        for directive in directives:
+            base_url = self._service_base_url(deployed.gateway_url, directive.service)
+            try:
+                if directive.service not in cards:
+                    try:
+                        cards[directive.service] = await protocol_v1.get_card(
+                            base_url, timeout=self.timeout_seconds
+                        )
+                    except httpx.HTTPStatusError as e:
+                        # 404 = no card served: the "hasn't opted in" case
+                        # tolerate_unadvertised covers for a missing extension
+                        # (cf. protocol_v1.supports_v1). Skip under the flag;
+                        # other statuses are real faults and still fail.
+                        if e.response.status_code == 404 and self.tolerate_unadvertised:
+                            cards[directive.service] = None
+                        else:
+                            raise
+                card = cards[directive.service]
+                if card is None:
+                    logger.warning(
+                        f"apply_server_config: service {directive.service!r} serves no "
+                        f"environment card (env={self.env_id}); skipping {directive.uri!r} "
+                        f"(tolerate_unadvertised)"
+                    )
+                    skipped.append({
+                        "step_id": self.id,
+                        "env_id": self.env_id,
+                        "service": directive.service,
+                        "environment": directive.service,
+                        "uri": directive.uri,
+                        "reason": "no_env_card",
+                    })
+                    continue
+                ext = protocol_v1.find_extension(card, directive.uri)
+                if ext is None:
+                    if self.tolerate_unadvertised:
+                        logger.warning(
+                            f"apply_server_config: {directive.uri!r} not advertised on "
+                            f"service {directive.service!r} (env={self.env_id}); skipping "
+                            f"(tolerate_unadvertised)"
+                        )
+                        skipped.append({
+                            "step_id": self.id,
+                            "env_id": self.env_id,
+                            "service": directive.service,
+                            "environment": directive.service,
+                            "uri": directive.uri,
+                            "reason": "extension_not_advertised",
+                        })
+                        continue
+                    raise ApplyServerConfigError(
+                        f"Extension {directive.uri!r} not advertised on card for service "
+                        f"{directive.service!r} (env={self.env_id}). "
+                        f"Advertised: {[e.get('uri') for e in (card.get('capabilities') or {}).get('extensions') or []]}"
+                    )
+                result = await protocol_v1.invoke_extension(
+                    base_url, card, directive.uri, params=directive.args,
+                    timeout=self.timeout_seconds,
+                )
+            except ApplyServerConfigError:
+                raise
+            except httpx.HTTPStatusError as e:
+                raise ApplyServerConfigError(
+                    f"Applying {directive.uri!r} on service {directive.service!r} "
+                    f"(env={self.env_id}) failed: HTTP {e.response.status_code} {e.response.text}"
+                ) from e
+            except Exception as e:
+                raise ApplyServerConfigError(
+                    f"Applying {directive.uri!r} on service {directive.service!r} "
+                    f"(env={self.env_id}) failed: {type(e).__name__}: {e}"
+                ) from e
+
+            logger.info(
+                f"apply_server_config: applied {directive.uri} on service={directive.service} "
+                f"env={self.env_id} args={directive.args}: {result}"
+            )
+            changes.append({
+                "step_id": self.id,
+                "env_id": self.env_id,
+                "service": directive.service,
+                "environment": directive.service,
+                "uri": directive.uri,
+                "args": directive.args,
+                "result": result,
+            })
+
+        return context

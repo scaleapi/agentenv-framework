@@ -1,0 +1,1568 @@
+{
+  "user_email": "alex.chen@techcorp.com",
+  "emails": [
+    {
+      "email_id": "fcc870fbf4e24bb3b3a87abc8e00a5e4",
+      "folder": "INBOX",
+      "sender": "sarah.johnson@techcorp.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Weekly standup reminder",
+      "content": "Hi Alex,\n\nJust a reminder that our weekly standup is tomorrow at 10 AM in Conference Room B. Please come prepared with your updates from last week and any blockers you're facing.\n\nThanks,\nSarah",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738540800,
+      "is_read": true
+    },
+    {
+      "email_id": "678cb4bb1569487d9560558193a98da4",
+      "folder": "INBOX",
+      "sender": "michael.ross@techcorp.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Q1 Planning Document Review",
+      "content": "Hey Alex,\n\nCould you review the Q1 planning document I shared yesterday? I need your input on the engineering milestones section by EOD Friday.\n\nLet me know if you have any questions.\n\nMichael",
+      "cc": [
+        "jennifer.wu@techcorp.com"
+      ],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738514800,
+      "is_read": true
+    },
+    {
+      "email_id": "af5186be44c84101aae215fd20aa7857",
+      "folder": "INBOX",
+      "sender": "newsletter@techblog.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "This Week in Tech: AI Developments and Cloud Computing Trends",
+      "content": "Welcome to this week's Tech Digest!\n\nTop Stories:\n\n1. OpenAI announces new model capabilities for enterprise customers\n2. AWS introduces cost optimization tools for serverless architectures\n3. Google Cloud expands its AI/ML toolkit with new AutoML features\n4. Microsoft Azure reports 30% growth in Q4 2024\n\nDeep Dive: The Future of Distributed Systems\nAs organizations continue to scale their infrastructure, the need for robust distributed systems has never been greater. This week, we explore the latest patterns and best practices for building resilient microservices architectures.\n\nRead more at techblog.com/weekly-digest\n\nUnsubscribe | Manage Preferences",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738488800,
+      "is_read": true
+    },
+    {
+      "email_id": "46a689076e394364ae695817550bda58",
+      "folder": "INBOX",
+      "sender": "hr@techcorp.com",
+      "recipients": [
+        "all-employees@techcorp.com"
+      ],
+      "subject": "Important: Benefits Enrollment Deadline Approaching",
+      "content": "Dear TechCorp Employees,\n\nThis is a reminder that the annual benefits enrollment period ends on February 15th, 2025. Please log into the HR portal to review and update your benefits selections.\n\nKey dates:\n- Enrollment deadline: February 15, 2025\n- Changes take effect: March 1, 2025\n\nIf you have any questions, please contact the HR team at hr@techcorp.com or ext. 5500.\n\nBest regards,\nHuman Resources Team",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738462800,
+      "is_read": true
+    },
+    {
+      "email_id": "2a4d3f9efe224f73b9df22f211314a45",
+      "folder": "INBOX",
+      "sender": "david.kim@techcorp.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Re: Weekly standup reminder",
+      "content": "Thanks for the heads up, Sarah. Alex, can we sync briefly before the standup? I want to discuss the API integration issue we discovered yesterday.\n\nDavid",
+      "cc": [
+        "sarah.johnson@techcorp.com"
+      ],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738436800,
+      "is_read": true
+    },
+    {
+      "email_id": "69045f98eb754263876cb7518541e770",
+      "folder": "INBOX",
+      "sender": "lisa.martinez@partnerco.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Partnership Integration Timeline",
+      "content": "Hi Alex,\n\nFollowing up on our call last week regarding the API integration timeline. Our team is ready to begin testing next Monday. Could you confirm that the staging environment will be available?\n\nAlso, I've attached the updated technical specifications we discussed. Let me know if you need any clarifications.\n\nBest regards,\nLisa Martinez\nSenior Technical Lead\nPartnerCo Inc.",
+      "cc": [
+        "james.wong@partnerco.com"
+      ],
+      "parent_id": null,
+      "attachments": {
+        "technical_specs_v2.pdf": "application/pdf"
+      },
+      "timestamp": 1738410800,
+      "is_read": true
+    },
+    {
+      "email_id": "2bf56ccbac30443ba94790f68d2b53a1",
+      "folder": "INBOX",
+      "sender": "it-support@techcorp.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Scheduled Maintenance: Development Servers",
+      "content": "Hello,\n\nThis is to inform you that the development servers will undergo scheduled maintenance this Saturday from 2 AM to 6 AM PST.\n\nAffected services:\n- Dev environment (dev.internal.techcorp.com)\n- CI/CD pipelines\n- Test databases\n\nPlease plan your work accordingly. Production systems will not be affected.\n\nIT Support Team",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738384800,
+      "is_read": true
+    },
+    {
+      "email_id": "490ab2ea9c314ac29fa85cdab5e86489",
+      "folder": "INBOX",
+      "sender": "robert.taylor@techcorp.com",
+      "recipients": [
+        "alex.chen@techcorp.com",
+        "engineering-team@techcorp.com"
+      ],
+      "subject": "Code Review Request: Feature/user-authentication",
+      "content": "Hi team,\n\nI've opened a PR for the new user authentication feature. Would appreciate if someone could review it before the end of the week.\n\nPR Link: https://github.com/techcorp/platform/pull/1234\n\nMain changes:\n- Implemented OAuth 2.0 flow\n- Added session management\n- Updated unit tests\n\nThanks!\nRobert",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738358800,
+      "is_read": true
+    },
+    {
+      "email_id": "f0dabbc8c5c14d1a95d0b200dd92ba03",
+      "folder": "INBOX",
+      "sender": "emma.wilson@techcorp.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Lunch tomorrow?",
+      "content": "Hey Alex!\n\nWant to grab lunch tomorrow? There's a new Thai place that opened up on 5th street and I've been wanting to try it.\n\nLet me know if you're free around noon!\n\nEmma",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738332800,
+      "is_read": true
+    },
+    {
+      "email_id": "420ff9c95b1c46ba970f7a7d0041915f",
+      "folder": "INBOX",
+      "sender": "mark.thompson@acme.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "ACME Project Status Update",
+      "content": "Hi Alex,\n\nWanted to give you a quick update on the ACME integration project:\n\n- Phase 1 is complete (data migration)\n- Phase 2 is 75% done (API integration)\n- We're on track for the February 28th deadline\n\nAny concerns from your side? Let's schedule a call this week to discuss the final phase.\n\nRegards,\nMark Thompson\nProject Manager, ACME Corp",
+      "cc": [
+        "patricia.lee@acme.com"
+      ],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738306800,
+      "is_read": true
+    },
+    {
+      "email_id": "7888d056ab34485c92edfa701cba27cd",
+      "folder": "INBOX",
+      "sender": "newsletter@devweekly.io",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "DevWeekly #247: Best Practices for API Design",
+      "content": "DevWeekly Newsletter - Issue #247\n\nFeatured Article: Best Practices for API Design in 2025\n\nAs APIs continue to be the backbone of modern software architecture, following best practices is crucial. This week we cover:\n\n- RESTful design principles that stand the test of time\n- When to consider GraphQL over REST\n- API versioning strategies\n- Documentation that developers actually read\n\nCommunity Picks:\n- TypeScript 5.4 release notes\n- React Server Components deep dive\n- PostgreSQL performance tuning guide\n\nHappy coding!\nThe DevWeekly Team",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738280800,
+      "is_read": false
+    },
+    {
+      "email_id": "b33ba2f4a46a4854bfa4bc7aa5c9739b",
+      "folder": "INBOX",
+      "sender": "jennifer.wu@techcorp.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Re: Q1 Planning Document Review",
+      "content": "Hi Alex,\n\nJust following up on Michael's request. Have you had a chance to look at the Q1 doc? We're meeting with leadership on Monday and need the engineering input finalized.\n\nThanks,\nJennifer",
+      "cc": [
+        "michael.ross@techcorp.com"
+      ],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738254800,
+      "is_read": true
+    },
+    {
+      "email_id": "262b865230ca428d9d0469a0f15bb229",
+      "folder": "INBOX",
+      "sender": "security@techcorp.com",
+      "recipients": [
+        "all-employees@techcorp.com"
+      ],
+      "subject": "Security Alert: Phishing Attempts Detected",
+      "content": "SECURITY NOTICE\n\nOur security team has detected an increase in phishing attempts targeting TechCorp employees. Please be vigilant when:\n\n- Clicking links in emails from unknown senders\n- Downloading attachments from external sources\n- Providing login credentials on unfamiliar websites\n\nIf you receive a suspicious email, please forward it to security@techcorp.com immediately.\n\nRemember: IT will never ask for your password via email.\n\nStay safe,\nTechCorp Security Team",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738228800,
+      "is_read": true
+    },
+    {
+      "email_id": "9ee911f94de24c62a71bdc240e3f54b5",
+      "folder": "INBOX",
+      "sender": "david.kim@techcorp.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "API Rate Limiting Discussion",
+      "content": "Alex,\n\nI've been thinking about the rate limiting issue we discussed. I think we should implement a sliding window approach instead of fixed windows. Here's my reasoning:\n\n1. Better user experience during high traffic\n2. More predictable behavior at window boundaries\n3. Easier to implement with Redis\n\nWant to discuss this during our 1:1 tomorrow?\n\nDavid",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738202800,
+      "is_read": true
+    },
+    {
+      "email_id": "30255c5d2b0e4609b8dadb0ae9cb6efe",
+      "folder": "INBOX",
+      "sender": "amanda.garcia@techcorp.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Product Roadmap Meeting Notes",
+      "content": "Hi Alex,\n\nHere are the key takeaways from today's product roadmap meeting:\n\n1. Mobile app v2.0 launch pushed to Q2\n2. Dashboard redesign starting next sprint\n3. New analytics features prioritized for March\n4. Customer feedback integration planned for April\n\nAction items for engineering:\n- Capacity planning for Q2 features\n- Technical debt reduction sprint in February\n\nFull meeting notes attached.\n\nAmanda",
+      "cc": [
+        "engineering-leads@techcorp.com"
+      ],
+      "parent_id": null,
+      "attachments": {
+        "roadmap_meeting_notes.pdf": "application/pdf"
+      },
+      "timestamp": 1738176800,
+      "is_read": true
+    },
+    {
+      "email_id": "6a384939e3534f40bdd8c4efb7d7c5ed",
+      "folder": "INBOX",
+      "sender": "chris.anderson@partnerco.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Re: Partnership Integration Timeline",
+      "content": "Hi Alex,\n\nLisa mentioned you confirmed the staging environment. Just wanted to follow up on the authentication credentials. Can you share the API keys when you get a chance?\n\nThanks,\nChris Anderson\nIntegration Engineer\nPartnerCo Inc.",
+      "cc": [
+        "lisa.martinez@partnerco.com"
+      ],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738150800,
+      "is_read": false
+    },
+    {
+      "email_id": "dfb6e48f2a8c4a9c951faaabe0ffaf6a",
+      "folder": "INBOX",
+      "sender": "sarah.johnson@techcorp.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Performance Review Scheduling",
+      "content": "Hi Alex,\n\nIt's that time of year again! I'd like to schedule your annual performance review. Please let me know your availability for next week - ideally a 1-hour slot.\n\nBefore our meeting, please:\n1. Complete your self-assessment form\n2. Review your goals from last year\n3. Prepare any topics you'd like to discuss\n\nLooking forward to our conversation.\n\nBest,\nSarah",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738124800,
+      "is_read": true
+    },
+    {
+      "email_id": "655e7a30fe704a8c8957152970c4c662",
+      "folder": "INBOX",
+      "sender": "newsletter@cloudarchitect.io",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Cloud Architecture Weekly: Kubernetes Best Practices",
+      "content": "Cloud Architecture Weekly\n\nThis Week's Focus: Kubernetes Best Practices for Production\n\nRunning Kubernetes in production requires careful planning and adherence to best practices. In this issue:\n\n- Resource limits and requests: Getting them right\n- Pod disruption budgets for high availability\n- Secrets management in K8s\n- Monitoring and observability patterns\n\nTools We Love:\n- Kustomize for configuration management\n- ArgoCD for GitOps deployments\n- Prometheus + Grafana for monitoring\n\nRead the full article: cloudarchitect.io/k8s-production-guide",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738098800,
+      "is_read": false
+    },
+    {
+      "email_id": "d8164b1130464098834e6ffcae586b4a",
+      "folder": "INBOX",
+      "sender": "robert.taylor@techcorp.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Re: Code Review Request: Feature/user-authentication",
+      "content": "Hey Alex,\n\nThanks for reviewing! I've addressed your comments:\n\n- Added input validation on the token endpoint\n- Increased test coverage to 85%\n- Fixed the edge case you mentioned with expired sessions\n\nReady for another look when you have time.\n\nRobert",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738072800,
+      "is_read": true
+    },
+    {
+      "email_id": "f7fa7affdd274ffc8757beaa0c457e45",
+      "folder": "INBOX",
+      "sender": "facilities@techcorp.com",
+      "recipients": [
+        "floor-3@techcorp.com"
+      ],
+      "subject": "Floor 3 Kitchen Renovation",
+      "content": "Hello Floor 3 team,\n\nWe'll be renovating the Floor 3 kitchen starting next Monday. The work is expected to take 2 weeks.\n\nDuring this time:\n- The Floor 3 kitchen will be closed\n- Please use the Floor 2 or Floor 4 kitchens\n- Vending machines will remain accessible\n\nWe apologize for any inconvenience.\n\nFacilities Management",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738046800,
+      "is_read": true
+    },
+    {
+      "email_id": "9b36cc6f98584c8eae0cb9a12c543c3b",
+      "folder": "INBOX",
+      "sender": "nathan.brown@techcorp.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Database Migration Plan",
+      "content": "Hi Alex,\n\nI've drafted the database migration plan for the PostgreSQL upgrade. Key points:\n\n1. Migration window: Saturday 11 PM - Sunday 5 AM\n2. Backup strategy: Full backup before migration\n3. Rollback plan: Automated restore from backup if issues arise\n4. Testing: Run full test suite post-migration\n\nCan you review and let me know if you see any gaps?\n\nNathan",
+      "cc": [
+        "dba-team@techcorp.com"
+      ],
+      "parent_id": null,
+      "attachments": {
+        "migration_plan.docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      },
+      "timestamp": 1738020800,
+      "is_read": true
+    },
+    {
+      "email_id": "b79200059b414e1cb8a17f8c94440aae",
+      "folder": "INBOX",
+      "sender": "lisa.martinez@partnerco.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Meeting Reschedule Request",
+      "content": "Hi Alex,\n\nI need to reschedule our Wednesday meeting. Something urgent came up on my end. Would Thursday at 2 PM work for you instead?\n\nApologies for the inconvenience.\n\nBest,\nLisa",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737994800,
+      "is_read": false
+    },
+    {
+      "email_id": "7d867da282a147c0a268597c9a1c63c4",
+      "folder": "INBOX",
+      "sender": "learning@techcorp.com",
+      "recipients": [
+        "all-engineering@techcorp.com"
+      ],
+      "subject": "New Training Available: Advanced TypeScript Patterns",
+      "content": "Engineering Team,\n\nA new training course is now available on the Learning Portal:\n\nAdvanced TypeScript Patterns\n- Duration: 4 hours\n- Level: Intermediate to Advanced\n- Topics: Generics, Conditional Types, Template Literal Types, and more\n\nThis course is highly recommended for all frontend and full-stack developers.\n\nAccess it here: learning.techcorp.com/typescript-advanced\n\nHappy learning!\nTechCorp Learning & Development",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737968800,
+      "is_read": true
+    },
+    {
+      "email_id": "310a3e73a5ff45ec9f4933d45c41e8de",
+      "folder": "INBOX",
+      "sender": "emma.wilson@techcorp.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Re: Lunch tomorrow?",
+      "content": "Great! Thai sounds perfect. Let's meet in the lobby at 12:15?\n\nSee you then!\nEmma",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737942800,
+      "is_read": true
+    },
+    {
+      "email_id": "47e37dabdd214b038b7301d8b25f14ee",
+      "folder": "INBOX",
+      "sender": "julia.chen@acme.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Technical Question About API Endpoints",
+      "content": "Hi Alex,\n\nI'm working on the ACME integration and have a question about the /users/bulk endpoint. The documentation mentions a rate limit of 100 requests per minute, but we're seeing 429 errors after only 50 requests.\n\nIs there a different rate limit for our integration tier? Or is this a bug?\n\nThanks for your help,\nJulia Chen\nSoftware Engineer, ACME Corp",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737916800,
+      "is_read": false
+    },
+    {
+      "email_id": "3ed6cadcc86d4d12b285be8f56c41028",
+      "folder": "INBOX",
+      "sender": "sarah.johnson@techcorp.com",
+      "recipients": [
+        "engineering-team@techcorp.com"
+      ],
+      "subject": "Team Offsite Planning",
+      "content": "Hi team,\n\nI'm excited to announce that we'll be having an engineering team offsite on March 15th! Please save the date.\n\nAgenda (tentative):\n- Morning: Team building activities\n- Lunch: Catered at the venue\n- Afternoon: Technical workshops and planning sessions\n\nLocation TBD - currently looking at venues. If you have suggestions, please reply!\n\nSarah",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737890800,
+      "is_read": true
+    },
+    {
+      "email_id": "8718477b0dfe41ef8d42a53aeb3a0599",
+      "folder": "INBOX",
+      "sender": "alerts@monitoring.techcorp.com",
+      "recipients": [
+        "oncall@techcorp.com",
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "[RESOLVED] High CPU Usage on prod-api-03",
+      "content": "ALERT RESOLVED\n\nIncident: High CPU Usage\nServer: prod-api-03\nDuration: 15 minutes\nStatus: Resolved\n\nDetails:\nCPU usage spiked to 95% due to a runaway query in the reporting service. The query has been terminated and the service is operating normally.\n\nNo customer impact detected.\n\nMonitoring Team",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737864800,
+      "is_read": true
+    },
+    {
+      "email_id": "f6e6287c8bf741c8a9ef5b0ba1166eb9",
+      "folder": "INBOX",
+      "sender": "michael.ross@techcorp.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Quick Question About the Auth Service",
+      "content": "Hey Alex,\n\nDo you remember why we chose JWT over session tokens for the auth service? I'm writing documentation and want to capture the reasoning.\n\nThanks,\nMichael",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737838800,
+      "is_read": false
+    },
+    {
+      "email_id": "aefa8d30fa5d4899ba21a046f051f4ff",
+      "folder": "INBOX",
+      "sender": "newsletter@hackernews-digest.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "HN Digest: Top Stories This Week",
+      "content": "Hacker News Weekly Digest\n\nTop Stories:\n\n1. Show HN: I built a distributed database in Rust (892 points)\n2. Why we're moving away from microservices (756 points)\n3. The hidden costs of cloud computing (634 points)\n4. A deep dive into modern CPU architecture (521 points)\n5. Lessons learned from a decade of software engineering (498 points)\n\nBest Discussions:\n- Is TDD still relevant in 2025?\n- The future of programming languages\n\nView more at hackernews-digest.com",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737812800,
+      "is_read": false
+    },
+    {
+      "email_id": "26fa49f1213c4c8195a0e928b85d4038",
+      "folder": "INBOX",
+      "sender": "david.kim@techcorp.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Re: API Rate Limiting Discussion",
+      "content": "Alex,\n\nGreat discussion today! To summarize what we agreed on:\n\n1. Implement sliding window rate limiting\n2. Use Redis sorted sets for tracking\n3. Default limit: 1000 requests/minute for standard tier\n4. Premium tier: 5000 requests/minute\n\nI'll start on the implementation tomorrow.\n\nDavid",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737786800,
+      "is_read": true
+    },
+    {
+      "email_id": "efb4e85a4bd04aa68392131d32be1597",
+      "folder": "INBOX",
+      "sender": "karen.white@techcorp.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Design Review for Dashboard Redesign",
+      "content": "Hi Alex,\n\nThe design team has completed the mockups for the dashboard redesign. Could you join us for a technical feasibility review?\n\nProposed time: Friday 3 PM\nLocation: Design Lab (Floor 4)\n\nWe'll be covering:\n- New data visualization components\n- Real-time update requirements\n- Mobile responsiveness\n\nPlease confirm your availability.\n\nThanks,\nKaren",
+      "cc": [
+        "design-team@techcorp.com"
+      ],
+      "parent_id": null,
+      "attachments": {
+        "dashboard_mockups.fig": "application/octet-stream"
+      },
+      "timestamp": 1737760800,
+      "is_read": true
+    },
+    {
+      "email_id": "3f0190db59f7419f8c7e1b8f6d841028",
+      "folder": "INBOX",
+      "sender": "it-support@techcorp.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Your Laptop Upgrade Request - Approved",
+      "content": "Hello Alex,\n\nYour laptop upgrade request has been approved. You've been assigned a new MacBook Pro 16-inch M3 Max.\n\nPickup Details:\n- Location: IT Help Desk (Floor 1)\n- Available from: Monday, February 10th\n- Bring your current laptop for data migration\n\nPlease schedule a time slot using the IT booking system.\n\nIT Support Team",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737734800,
+      "is_read": true
+    },
+    {
+      "email_id": "f158d2f461044373a4805cd2a9f6eca6",
+      "folder": "INBOX",
+      "sender": "james.wong@partnerco.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Integration Test Results",
+      "content": "Hi Alex,\n\nWe completed the first round of integration testing. Results summary:\n\n- Total test cases: 150\n- Passed: 142\n- Failed: 8\n\nThe failures are all related to timeout handling in the webhook endpoints. Attaching the detailed report.\n\nCan we schedule a call to discuss the fixes?\n\nJames Wong\nQA Lead, PartnerCo",
+      "cc": [
+        "lisa.martinez@partnerco.com"
+      ],
+      "parent_id": null,
+      "attachments": {
+        "test_results_report.xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      },
+      "timestamp": 1737708800,
+      "is_read": false
+    },
+    {
+      "email_id": "cac5cad810354041a6945d89fdd89eed",
+      "folder": "INBOX",
+      "sender": "recruiting@techcorp.com",
+      "recipients": [
+        "engineering-leads@techcorp.com"
+      ],
+      "subject": "Interview Panel Request",
+      "content": "Hello,\n\nWe have a senior backend engineer candidate scheduled for an onsite interview next Thursday. Could you volunteer for one of the interview slots?\n\nAvailable slots:\n- 10:00 AM - System Design (1 hour)\n- 11:00 AM - Coding (1 hour)\n- 2:00 PM - Cultural Fit (45 mins)\n\nPlease reply with your preferred slot. The candidate's resume is attached.\n\nThanks,\nRecruiting Team",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {
+        "candidate_resume.pdf": "application/pdf"
+      },
+      "timestamp": 1737682800,
+      "is_read": false
+    },
+    {
+      "email_id": "cf6ceb8bfe2540328c95f8d87a5ca609",
+      "folder": "INBOX",
+      "sender": "nathan.brown@techcorp.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Re: Database Migration Plan",
+      "content": "Hi Alex,\n\nThanks for the review! I've updated the plan based on your feedback:\n\n- Added pre-migration read replica sync check\n- Included connection pool drainage step\n- Extended monitoring window to 4 hours post-migration\n\nLet me know if this looks good.\n\nNathan",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737656800,
+      "is_read": true
+    },
+    {
+      "email_id": "593373cb25894c67a24a9a7d54030aa5",
+      "folder": "INBOX",
+      "sender": "events@techcorp.com",
+      "recipients": [
+        "all-employees@techcorp.com"
+      ],
+      "subject": "Company All-Hands Meeting - February 20th",
+      "content": "Dear TechCorp Team,\n\nPlease join us for our monthly all-hands meeting:\n\nDate: February 20th, 2025\nTime: 2:00 PM - 3:30 PM PST\nLocation: Main Auditorium / Zoom (link in calendar invite)\n\nAgenda:\n- Q4 2024 Results Review\n- Q1 2025 Goals and OKRs\n- Product Updates\n- Q&A with Leadership\n\nSubmit questions in advance: allhands-questions@techcorp.com\n\nSee you there!\nEvents Team",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737630800,
+      "is_read": true
+    },
+    {
+      "email_id": "f52f9b36f682428486b9ca19ae91fd50",
+      "folder": "INBOX",
+      "sender": "olivia.parker@techcorp.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Documentation Help Needed",
+      "content": "Hi Alex,\n\nI'm updating the API documentation and need some clarification on the /analytics endpoint. Could you help me understand:\n\n1. What's the difference between 'aggregate' and 'raw' modes?\n2. Are there any undocumented query parameters?\n3. What's the expected response time for large date ranges?\n\nThanks in advance!\nOlivia",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737604800,
+      "is_read": false
+    },
+    {
+      "email_id": "ccde055a48d245c2a876cfcc545961c7",
+      "folder": "INBOX",
+      "sender": "sarah.johnson@techcorp.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Project Allocation Update",
+      "content": "Hi Alex,\n\nFollowing our capacity planning meeting, here's your project allocation for Q1:\n\n- ACME Integration: 40%\n- PartnerCo API: 30%\n- Platform Improvements: 20%\n- On-call/Support: 10%\n\nLet me know if you have any concerns about this distribution.\n\nBest,\nSarah",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737578800,
+      "is_read": true
+    },
+    {
+      "email_id": "8a3da50420a74eb28661a4a5780565ec",
+      "folder": "INBOX",
+      "sender": "mark.thompson@acme.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Re: ACME Project Status Update",
+      "content": "Hi Alex,\n\nThanks for the call yesterday. To confirm:\n\n- Phase 2 completion target: February 15th\n- Phase 3 kickoff: February 17th\n- Final delivery: February 28th\n\nI'll send the updated project timeline document by EOD.\n\nRegards,\nMark",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737552800,
+      "is_read": true
+    },
+    {
+      "email_id": "56ab4191385e45c7a2110244fcce55f4",
+      "folder": "INBOX",
+      "sender": "newsletter@pythonweekly.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Python Weekly: FastAPI 0.110 Released",
+      "content": "Python Weekly Newsletter\n\nHeadlines:\n\n- FastAPI 0.110 brings major performance improvements\n- Python 3.13 beta 2 available for testing\n- Django 5.0.2 security release\n\nTutorials:\n- Building async microservices with FastAPI and RabbitMQ\n- Type hints best practices in large codebases\n- Testing strategies for data pipelines\n\nProjects:\n- Polars 0.20: The DataFrame library challenging pandas\n- uv: An extremely fast Python package installer\n\nPythonWeekly.com",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737526800,
+      "is_read": false
+    },
+    {
+      "email_id": "1a7ffb981f5e466aa31f5f71609a9eef",
+      "folder": "INBOX",
+      "sender": "daniel.lee@techcorp.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Code Ownership Discussion",
+      "content": "Hey Alex,\n\nI noticed we don't have clear ownership defined for the notification service. Since you built most of it, would you be willing to be the primary owner?\n\nResponsibilities would include:\n- Reviewing PRs that touch the service\n- Being the go-to person for questions\n- Maintaining documentation\n\nLet me know your thoughts.\n\nDaniel",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737500800,
+      "is_read": true
+    },
+    {
+      "email_id": "d03294629c634e85b5f7375f2bfd2ab9",
+      "folder": "INBOX",
+      "sender": "amy.foster@techcorp.com",
+      "recipients": [
+        "alex.chen@techcorp.com",
+        "engineering-team@techcorp.com"
+      ],
+      "subject": "Sprint Retrospective Notes",
+      "content": "Hi team,\n\nHere are the notes from today's sprint retrospective:\n\nWhat went well:\n- Completed all committed stories\n- Great collaboration on the auth feature\n- Improved deployment process\n\nAreas for improvement:\n- Better estimation on complex tasks\n- More async communication to reduce meetings\n- Earlier code reviews\n\nAction items:\n- Alex: Document estimation guidelines\n- David: Set up async standup bot\n- Robert: Create PR review SLA\n\nThanks everyone!\nAmy",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737474800,
+      "is_read": true
+    },
+    {
+      "email_id": "8bc382b1b3b64f639c225ad487dd0baa",
+      "folder": "INBOX",
+      "sender": "vendor-support@datadog.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Your Datadog Support Ticket #45892 - Resolved",
+      "content": "Hello Alex,\n\nYour support ticket regarding custom metrics aggregation has been resolved.\n\nSolution:\nThe issue was caused by incorrect tag cardinality settings. We've updated your account configuration to allow higher cardinality for the specified metrics.\n\nPlease verify that metrics are now appearing correctly in your dashboard.\n\nIf you have any questions, feel free to reopen this ticket.\n\nBest regards,\nDatadog Support Team",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737448800,
+      "is_read": true
+    },
+    {
+      "email_id": "d2867a9a706f4ce7b4d7edc0c24a2d36",
+      "folder": "INBOX",
+      "sender": "jennifer.wu@techcorp.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Budget Approval for Cloud Resources",
+      "content": "Hi Alex,\n\nGood news! The additional cloud budget for the load testing infrastructure has been approved.\n\nApproved amount: $5,000/month for Q1\nResources: Additional EC2 instances and RDS capacity\n\nPlease work with DevOps to provision the resources. Let me know if you need anything else.\n\nJennifer",
+      "cc": [
+        "devops@techcorp.com"
+      ],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737422800,
+      "is_read": true
+    },
+    {
+      "email_id": "ba63dfaf73cf4c259c0a7e3b73adc947",
+      "folder": "INBOX",
+      "sender": "eric.thompson@techcorp.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Mentorship Program",
+      "content": "Hi Alex,\n\nI'm a new engineer on the platform team and I was wondering if you'd be interested in being my mentor? Sarah recommended I reach out to you since you have experience with the areas I'll be working on.\n\nI'd love to set up a regular 1:1 if you have the bandwidth.\n\nThanks,\nEric",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737396800,
+      "is_read": false
+    },
+    {
+      "email_id": "355a4f5f99f4405986a13df2a70164a7",
+      "folder": "INBOX",
+      "sender": "support@github.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Security Alert: New SSH Key Added",
+      "content": "Hi alex-chen,\n\nA new SSH key was added to your GitHub account:\n\nTitle: Work MacBook Pro 2025\nFingerprint: SHA256:xK9j2mPqR5vN8wL3yH6cB4zT1sA0fE7i\nAdded: February 2, 2025 at 10:30 AM PST\n\nIf you did not add this key, please review your account security settings immediately at github.com/settings/keys.\n\nGitHub Security Team",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737370800,
+      "is_read": true
+    },
+    {
+      "email_id": "94539c90c6df4aa28debfb4c9528242b",
+      "folder": "INBOX",
+      "sender": "rachel.adams@techcorp.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Customer Feedback Summary - January",
+      "content": "Hi Alex,\n\nHere's the January customer feedback summary for the API platform:\n\nPositive:\n- Fast response times (mentioned by 15 customers)\n- Excellent documentation (12 mentions)\n- Reliable uptime (10 mentions)\n\nAreas for improvement:\n- Rate limit error messages could be clearer (8 mentions)\n- Webhook retry logic needs work (5 mentions)\n- Need more SDK examples (4 mentions)\n\nI've created tickets for the improvement items. Let me know if you need more details.\n\nRachel",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737344800,
+      "is_read": false
+    },
+    {
+      "email_id": "5085d31a88824c36a51ad252dfd5ef13",
+      "folder": "INBOX",
+      "sender": "david.kim@techcorp.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Interesting Article on Distributed Systems",
+      "content": "Hey Alex,\n\nThought you might find this interesting:\n\nhttps://blog.pragmaticengineer.com/distributed-systems-patterns-2025/\n\nIt covers some patterns we've been discussing for the event sourcing implementation.\n\nDavid",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737318800,
+      "is_read": true
+    },
+    {
+      "email_id": "1e57d567de7543e798db9a094b8d7b1b",
+      "folder": "SENT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "sarah.johnson@techcorp.com"
+      ],
+      "subject": "Re: Weekly standup reminder",
+      "content": "Hi Sarah,\n\nThanks for the reminder! I'll be there with my updates ready.\n\nDavid, yes let's sync before the standup. How about 9:30 AM in the small meeting room?\n\nAlex",
+      "cc": [
+        "david.kim@techcorp.com"
+      ],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738530800,
+      "is_read": true
+    },
+    {
+      "email_id": "0604b081cb39462a9843fce8770172bf",
+      "folder": "SENT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "michael.ross@techcorp.com"
+      ],
+      "subject": "Re: Q1 Planning Document Review",
+      "content": "Hi Michael,\n\nI've reviewed the Q1 planning document. Here's my feedback on the engineering milestones:\n\n1. The timeline for the API v2 launch looks aggressive - suggest adding 2 weeks buffer\n2. Database migration should be scheduled after the holiday freeze\n3. Love the focus on technical debt reduction in Sprint 3\n\nI've added comments directly in the doc as well.\n\nLet me know if you need anything else.\n\nAlex",
+      "cc": [
+        "jennifer.wu@techcorp.com"
+      ],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738504800,
+      "is_read": true
+    },
+    {
+      "email_id": "4ef953035a714fafa83edc9b3447c3dc",
+      "folder": "SENT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "lisa.martinez@partnerco.com"
+      ],
+      "subject": "Re: Partnership Integration Timeline",
+      "content": "Hi Lisa,\n\nGreat to hear you're ready for testing! I can confirm the staging environment will be available starting Monday.\n\nHere are the details:\n- Staging URL: https://staging-api.techcorp.com\n- API docs: https://staging-docs.techcorp.com\n- I'll send the credentials separately via our secure channel\n\nLet me know if you run into any issues during testing.\n\nBest,\nAlex",
+      "cc": [
+        "james.wong@partnerco.com"
+      ],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738478800,
+      "is_read": true
+    },
+    {
+      "email_id": "b8f5c5e8889c4658bae328659035a497",
+      "folder": "SENT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "robert.taylor@techcorp.com"
+      ],
+      "subject": "Re: Code Review Request: Feature/user-authentication",
+      "content": "Hey Robert,\n\nI reviewed the PR. Overall looks good! A few comments:\n\n1. The token validation logic could be moved to a separate utility function for reusability\n2. Consider adding rate limiting on the token refresh endpoint\n3. One edge case: what happens if the session expires during an active request?\n\nLet me know when you've addressed these and I'll do another pass.\n\nAlex",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738452800,
+      "is_read": true
+    },
+    {
+      "email_id": "bb6627d8780e48d5aed90787410672fe",
+      "folder": "SENT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "emma.wilson@techcorp.com"
+      ],
+      "subject": "Re: Lunch tomorrow?",
+      "content": "Hey Emma!\n\nThai sounds great! I've been craving some pad thai. Count me in for noon.\n\nSee you tomorrow!\nAlex",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738426800,
+      "is_read": true
+    },
+    {
+      "email_id": "5c13ef0a95a0459891662e37ddd2d452",
+      "folder": "SENT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "mark.thompson@acme.com"
+      ],
+      "subject": "Re: ACME Project Status Update",
+      "content": "Hi Mark,\n\nThanks for the update! Great progress on the project.\n\nI'm available for a call on Wednesday at 2 PM or Thursday at 10 AM. Let me know what works for you.\n\nRegards,\nAlex",
+      "cc": [
+        "patricia.lee@acme.com"
+      ],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738400800,
+      "is_read": true
+    },
+    {
+      "email_id": "81e3b854ba614ca6921c61aabaf3cc4a",
+      "folder": "SENT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "david.kim@techcorp.com"
+      ],
+      "subject": "Re: API Rate Limiting Discussion",
+      "content": "David,\n\nGood points! I agree the sliding window approach is better. Let's implement it with Redis sorted sets - that'll give us efficient O(log N) operations.\n\nI'll prepare a technical design doc before our 1:1 tomorrow.\n\nAlex",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738374800,
+      "is_read": true
+    },
+    {
+      "email_id": "75fd0571f2654403b81d62619fb20275",
+      "folder": "SENT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "nathan.brown@techcorp.com"
+      ],
+      "subject": "Re: Database Migration Plan",
+      "content": "Hi Nathan,\n\nThe migration plan looks solid. A few suggestions:\n\n1. Add a pre-migration step to verify read replica sync status\n2. Include connection pool drainage before cutover\n3. Consider extending the post-migration monitoring window to 4 hours\n\nOtherwise, I think we're good to proceed.\n\nAlex",
+      "cc": [
+        "dba-team@techcorp.com"
+      ],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738348800,
+      "is_read": true
+    },
+    {
+      "email_id": "86ee0cf0df564361927ef618ae4c0be8",
+      "folder": "SENT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "lisa.martinez@partnerco.com"
+      ],
+      "subject": "Re: Meeting Reschedule Request",
+      "content": "Hi Lisa,\n\nNo problem! Thursday at 2 PM works for me. I've updated my calendar.\n\nTalk to you then.\n\nAlex",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738322800,
+      "is_read": true
+    },
+    {
+      "email_id": "d47239afc27241c3a044823601cb00ed",
+      "folder": "SENT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "sarah.johnson@techcorp.com"
+      ],
+      "subject": "Re: Performance Review Scheduling",
+      "content": "Hi Sarah,\n\nI'm available next week on:\n- Tuesday 2-3 PM\n- Wednesday 10-11 AM\n- Thursday 3-4 PM\n\nI'll have my self-assessment ready by Monday.\n\nLooking forward to it.\n\nAlex",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738296800,
+      "is_read": true
+    },
+    {
+      "email_id": "f708bd25bf7e4b0a8dfbe97a48c44f89",
+      "folder": "SENT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "chris.anderson@partnerco.com"
+      ],
+      "subject": "Re: Partnership Integration Timeline",
+      "content": "Hi Chris,\n\nI've sent the API keys through our secure credential sharing system. You should receive an email from the vault service shortly.\n\nPlease let me know once you've retrieved them.\n\nBest,\nAlex",
+      "cc": [
+        "lisa.martinez@partnerco.com"
+      ],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738270800,
+      "is_read": true
+    },
+    {
+      "email_id": "b61edf5fef2f4ce48ac7fb7d36e4c4a0",
+      "folder": "SENT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "karen.white@techcorp.com"
+      ],
+      "subject": "Re: Design Review for Dashboard Redesign",
+      "content": "Hi Karen,\n\nFriday 3 PM works for me. I'll be there.\n\nI've looked at the preliminary designs and have some thoughts on the real-time updates implementation. I'll share more details during the review.\n\nAlex",
+      "cc": [
+        "design-team@techcorp.com"
+      ],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738244800,
+      "is_read": true
+    },
+    {
+      "email_id": "f6e4f57dd61247dea38f26ab667c2c40",
+      "folder": "SENT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "james.wong@partnerco.com"
+      ],
+      "subject": "Re: Integration Test Results",
+      "content": "Hi James,\n\nThanks for the detailed report. I've reviewed the 8 failing test cases - they're all related to timeout handling as you noted.\n\nI've identified the issue: our webhook endpoints have a 30-second timeout, but your test cases expect responses within 10 seconds. We can either:\n\n1. Increase the timeout expectation on your side\n2. Optimize our webhook processing (estimated 1 week)\n\nLet's discuss tomorrow at 3 PM if that works for you.\n\nAlex",
+      "cc": [
+        "lisa.martinez@partnerco.com"
+      ],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738218800,
+      "is_read": true
+    },
+    {
+      "email_id": "55a8077b800d4ebd88dd1e00b4ca4ff8",
+      "folder": "SENT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "recruiting@techcorp.com"
+      ],
+      "subject": "Re: Interview Panel Request",
+      "content": "Hi,\n\nI can take the 10:00 AM System Design slot.\n\nPlease send me the interview guidelines and any specific topics you'd like me to cover.\n\nAlex",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738192800,
+      "is_read": true
+    },
+    {
+      "email_id": "fb168b75e1d948dc951d908221efeb0b",
+      "folder": "SENT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "julia.chen@acme.com"
+      ],
+      "subject": "Re: Technical Question About API Endpoints",
+      "content": "Hi Julia,\n\nGreat question! The rate limit behavior you're seeing is actually correct. Here's the breakdown:\n\n- Standard tier: 50 requests/minute (what you have)\n- Premium tier: 100 requests/minute (documented default)\n\nI've checked your account and you're on the standard tier. If you need higher limits, please reach out to your account manager to discuss an upgrade.\n\nIn the meantime, I'd recommend implementing exponential backoff for 429 responses.\n\nLet me know if you need anything else.\n\nAlex",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738166800,
+      "is_read": true
+    },
+    {
+      "email_id": "a7c54fef04c94ebdb52e0b38465b7c1d",
+      "folder": "SENT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "sarah.johnson@techcorp.com"
+      ],
+      "subject": "Re: Team Offsite Planning",
+      "content": "Hi Sarah,\n\nExcited about the offsite! A few venue suggestions:\n\n1. TechHub Conference Center - great for workshops\n2. Bay View Hotel - nice outdoor space for team building\n3. Innovation Lab Downtown - has both indoor and outdoor areas\n\nHappy to help with the planning!\n\nAlex",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738140800,
+      "is_read": true
+    },
+    {
+      "email_id": "a523a3ecb78f49fb9eb2c8f22a1e8a93",
+      "folder": "SENT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "michael.ross@techcorp.com"
+      ],
+      "subject": "Re: Quick Question About the Auth Service",
+      "content": "Hey Michael,\n\nGreat question for the docs! Here's the reasoning for JWT over session tokens:\n\n1. Stateless: No server-side session storage needed, better for horizontal scaling\n2. Cross-service auth: JWT can be validated by any service without hitting a central auth server\n3. Mobile support: Better suited for mobile apps that need offline capability\n4. Performance: No database lookup required for validation\n\nThe tradeoff is that revocation is harder, which is why we implemented a short expiry (15 min) with refresh tokens.\n\nLet me know if you need more details.\n\nAlex",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738114800,
+      "is_read": true
+    },
+    {
+      "email_id": "b04dc02ef8ef42efb358bab22a3ff7b5",
+      "folder": "SENT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "olivia.parker@techcorp.com"
+      ],
+      "subject": "Re: Documentation Help Needed",
+      "content": "Hi Olivia,\n\nHappy to help with the /analytics endpoint documentation!\n\n1. aggregate vs raw modes:\n   - aggregate: Returns pre-computed daily/weekly/monthly summaries (faster)\n   - raw: Returns individual data points (more detailed but slower)\n\n2. Undocumented parameters:\n   - include_metadata=true: Adds metadata to response\n   - cache_bypass=true: Forces fresh data (internal use only, don't document)\n\n3. Response times:\n   - 1 day range: ~200ms\n   - 1 week range: ~500ms\n   - 1 month range: ~2s\n   - Larger ranges may timeout, recommend pagination\n\nLet me know if you need anything else!\n\nAlex",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738088800,
+      "is_read": true
+    },
+    {
+      "email_id": "26bb1295817e44af981316da6588196d",
+      "folder": "SENT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "daniel.lee@techcorp.com"
+      ],
+      "subject": "Re: Code Ownership Discussion",
+      "content": "Hey Daniel,\n\nI'd be happy to take ownership of the notification service! It makes sense given my involvement in building it.\n\nI'll add myself to the CODEOWNERS file and set up the necessary review rules.\n\nAlex",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738062800,
+      "is_read": true
+    },
+    {
+      "email_id": "2176cba0d66742daac27864d368ca388",
+      "folder": "SENT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "eric.thompson@techcorp.com"
+      ],
+      "subject": "Re: Mentorship Program",
+      "content": "Hi Eric,\n\nWelcome to the team! I'd be happy to be your mentor.\n\nLet's set up a weekly 30-minute 1:1 - how does Fridays at 4 PM work for you? We can use the first session to discuss your goals and what areas you'd like to focus on.\n\nLooking forward to working with you!\n\nAlex",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738036800,
+      "is_read": true
+    },
+    {
+      "email_id": "f3232295464548678d50945f17de3162",
+      "folder": "SENT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "rachel.adams@techcorp.com"
+      ],
+      "subject": "Re: Customer Feedback Summary - January",
+      "content": "Hi Rachel,\n\nThanks for compiling this feedback! I've reviewed the improvement items:\n\n1. Rate limit error messages - I'll pick this up in the next sprint\n2. Webhook retry logic - David is already working on this\n3. SDK examples - Let's sync with the docs team on this\n\nI'll update the tickets with my notes.\n\nAlex",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738010800,
+      "is_read": true
+    },
+    {
+      "email_id": "ecc5ec0f0b0a4031add95c1813d7cbb7",
+      "folder": "SENT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "engineering-team@techcorp.com"
+      ],
+      "subject": "RFC: Implementing Circuit Breaker Pattern",
+      "content": "Hi team,\n\nI'd like to propose implementing the circuit breaker pattern for our external API integrations. Here's the summary:\n\nProblem:\n- When external services are down, our retry logic can cause cascading failures\n- Users experience long wait times during outages\n\nSolution:\n- Implement circuit breaker with three states: closed, open, half-open\n- Auto-trip after 5 consecutive failures\n- Reset after 30 seconds of successful requests\n\nI've created a more detailed RFC document: https://docs.techcorp.com/rfc/circuit-breaker\n\nPlease review and share your thoughts by EOW.\n\nAlex",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737984800,
+      "is_read": true
+    },
+    {
+      "email_id": "697568a996164efb88c653a468a54d46",
+      "folder": "SENT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "sarah.johnson@techcorp.com"
+      ],
+      "subject": "Re: Project Allocation Update",
+      "content": "Hi Sarah,\n\nThe allocation looks good to me. I'm excited about the ACME integration work - it's a great opportunity to improve our partnership APIs.\n\nOne question: if the PartnerCo API work takes longer than expected, can we adjust the platform improvements allocation mid-quarter?\n\nThanks,\nAlex",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737958800,
+      "is_read": true
+    },
+    {
+      "email_id": "bb7d5268b991455682563225653ba3ea",
+      "folder": "SENT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "david.kim@techcorp.com"
+      ],
+      "subject": "Re: Interesting Article on Distributed Systems",
+      "content": "Thanks for sharing David! This is exactly what I needed for the event sourcing design.\n\nThe section on idempotency keys is particularly relevant. We should incorporate that pattern into our implementation.\n\nAlex",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737932800,
+      "is_read": true
+    },
+    {
+      "email_id": "e170e6f3dd0f4d9a95ff2e3f769a1737",
+      "folder": "SENT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "amy.foster@techcorp.com"
+      ],
+      "subject": "Re: Sprint Retrospective Notes",
+      "content": "Hi Amy,\n\nThanks for capturing these notes! I'll have the estimation guidelines document ready by end of next week.\n\nGood call on the async standup bot - that should help reduce meeting fatigue.\n\nAlex",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737906800,
+      "is_read": true
+    },
+    {
+      "email_id": "ffda5e82a3eb4b498961da3400fbd301",
+      "folder": "DRAFT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "sarah.johnson@techcorp.com"
+      ],
+      "subject": "Promotion Discussion Follow-up",
+      "content": "Hi Sarah,\n\nFollowing up on our conversation about the senior engineer promotion track. I've been reflecting on the feedback and wanted to share my thoughts:\n\n1. Technical leadership: I've been leading the API redesign initiative\n2. Mentorship: Currently mentoring Eric and have helped onboard 3 new engineers this year\n3. Impact: The rate limiting improvements reduced our 429 errors by 60%\n\nI'd like to discuss",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738520800,
+      "is_read": true
+    },
+    {
+      "email_id": "f5cb455427f346a6a0d2b027cbdadaee",
+      "folder": "DRAFT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "engineering-team@techcorp.com"
+      ],
+      "subject": "Tech Talk Proposal: Building Scalable APIs",
+      "content": "Hi team,\n\nI'd like to propose a tech talk on building scalable APIs based on our recent learnings. Topics I plan to cover:\n\n- Rate limiting strategies\n- Pagination best practices\n- Error handling patterns\n- Performance optimization\n\nSuggested time: 1 hour including Q&A\n\nWould there be interest in this? I'm thinking we could schedule it for",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738494800,
+      "is_read": true
+    },
+    {
+      "email_id": "8e56825d85be4f56b71a2de2f18438b9",
+      "folder": "DRAFT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "mark.thompson@acme.com"
+      ],
+      "subject": "Phase 3 Technical Requirements",
+      "content": "Hi Mark,\n\nAs we approach Phase 3 of the integration, I wanted to outline the technical requirements from our side:\n\nRequired from ACME:\n- Production API credentials\n- Webhook endpoint URLs\n- SSL certificates for mutual TLS\n\nWe'll provide:\n- Production environment access\n- Monitoring dashboard credentials\n-",
+      "cc": [
+        "patricia.lee@acme.com"
+      ],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738468800,
+      "is_read": true
+    },
+    {
+      "email_id": "e3b2b1701163484598f59834310c6f07",
+      "folder": "DRAFT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "jennifer.wu@techcorp.com"
+      ],
+      "subject": "Cloud Cost Optimization Proposal",
+      "content": "Hi Jennifer,\n\nI've been analyzing our cloud costs and found several opportunities for optimization:\n\n1. Reserved instances: We could save 40% by committing to 1-year reservations for our stable workloads\n2. Spot instances: Our batch processing jobs could use spot instances with 70% savings\n3. Storage tiering: Moving cold data to S3 Glacier could save $2,000/month\n\nTotal estimated savings:",
+      "cc": [
+        "devops@techcorp.com"
+      ],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738442800,
+      "is_read": true
+    },
+    {
+      "email_id": "e608a509f2474ff4917eedda9b425c97",
+      "folder": "DRAFT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "david.kim@techcorp.com"
+      ],
+      "subject": "Event Sourcing Implementation Plan",
+      "content": "Hey David,\n\nBased on our discussions and the article you shared, here's my initial plan for the event sourcing implementation:\n\nPhase 1: Event Store\n- Use PostgreSQL with JSONB for events\n- Implement optimistic locking\n- Add idempotency keys\n\nPhase 2: Projections\n- Build read models from events\n- Implement eventual consistency\n\nPhase 3:",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738416800,
+      "is_read": true
+    },
+    {
+      "email_id": "dc7dc987de4b409f9853ad2a30189809",
+      "folder": "DRAFT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "hr@techcorp.com"
+      ],
+      "subject": "Vacation Request - March",
+      "content": "Hi HR Team,\n\nI'd like to request vacation time for the following dates:\n\nMarch 20-24, 2025 (5 days)\n\nI'll ensure all my projects are covered before I leave and will designate David Kim as my backup for any urgent issues.\n\nPlease let me know if",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738390800,
+      "is_read": true
+    },
+    {
+      "email_id": "9fe8c3769f35404d8bb037b8aa9ef751",
+      "folder": "DRAFT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "security@techcorp.com"
+      ],
+      "subject": "Security Concern: Third-party Library",
+      "content": "Hi Security Team,\n\nI noticed a potential security concern with one of our dependencies. The 'lodash' package version we're using (4.17.15) has a known prototype pollution vulnerability.\n\nAffected services:\n- API Gateway\n- User Service\n- Notification Service\n\nRecommended action: Upgrade to version 4.17.21 or later.\n\nI can prepare a PR for the upgrade if",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738364800,
+      "is_read": true
+    },
+    {
+      "email_id": "3a37b7a0b6d14a41b2ab7dc19b9f7b64",
+      "folder": "DRAFT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "lisa.martinez@partnerco.com"
+      ],
+      "subject": "Integration Feedback Summary",
+      "content": "Hi Lisa,\n\nNow that we've completed the integration testing, I wanted to share some feedback for both teams:\n\nWhat worked well:\n- Clear communication throughout the process\n- Detailed technical documentation\n- Quick response times on issues\n\nAreas for improvement:\n- Earlier involvement of QA teams\n-",
+      "cc": [
+        "james.wong@partnerco.com"
+      ],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738338800,
+      "is_read": true
+    },
+    {
+      "email_id": "4d40bf27ca8145cba1dd5073087b3abf",
+      "folder": "DRAFT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "nathan.brown@techcorp.com"
+      ],
+      "subject": "Post-Migration Performance Analysis",
+      "content": "Hi Nathan,\n\nI've been analyzing the performance metrics since the database migration. Here are the initial findings:\n\nImprovements:\n- Query response times: 30% faster average\n- Connection pool efficiency: 25% improvement\n- Replication lag: Reduced from 500ms to 100ms\n\nConcerns:\n- Slightly higher CPU usage on primary (investigating)\n-",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738312800,
+      "is_read": true
+    },
+    {
+      "email_id": "f4673c13fc4741328b070b833b219591",
+      "folder": "DRAFT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "recruiting@techcorp.com"
+      ],
+      "subject": "Interview Feedback - Senior Backend Engineer Candidate",
+      "content": "Hi Recruiting,\n\nHere's my feedback from the system design interview:\n\nCandidate: [Name]\nDate: February 6, 2025\nRound: System Design\n\nStrengths:\n- Strong understanding of distributed systems\n- Good communication skills\n- Relevant experience with microservices\n\nAreas of concern:\n- Limited experience with our tech stack\n-",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738286800,
+      "is_read": true
+    },
+    {
+      "email_id": "ebc7975863af4f5086a8306ae2664aa2",
+      "folder": "TRASH",
+      "sender": "deals@superdeals-marketing.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "EXCLUSIVE: 90% OFF Premium Software Bundle!!!",
+      "content": "CONGRATULATIONS! You've been selected for our EXCLUSIVE offer!\n\nGet 90% OFF on premium software:\n- Antivirus Pro ($299 -> $29)\n- System Optimizer ($199 -> $19)\n- VPN Ultimate ($149 -> $14)\n\nHURRY! Offer expires in 24 hours!\n\nClick here to claim: [SUSPICIOUS LINK REMOVED]\n\nUnsubscribe | Privacy Policy",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738260800,
+      "is_read": false
+    },
+    {
+      "email_id": "76a3cdc0f375401cb35ba80855bffa8a",
+      "folder": "TRASH",
+      "sender": "winner@lottery-international.net",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "You've Won $5,000,000 - Claim Now!",
+      "content": "Dear Lucky Winner,\n\nYour email was randomly selected in our international lottery draw. You have won $5,000,000 USD!\n\nTo claim your prize, please send:\n- Full name\n- Address\n- Bank account details\n- Processing fee of $500\n\nReply immediately to claim your winnings!\n\nCongratulations!\nInternational Lottery Commission",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738234800,
+      "is_read": false
+    },
+    {
+      "email_id": "97f26331b15a47adbf405e3b75d7a757",
+      "folder": "TRASH",
+      "sender": "newsletter@oldservice.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Monthly Newsletter - January 2025",
+      "content": "OldService Monthly Newsletter\n\nDear subscriber,\n\nHere's what's new in January:\n- Feature updates you don't care about\n- Tips you'll never read\n- Promotions you'll ignore\n\nWe know you signed up 3 years ago and never use our service anymore, but we'll keep sending these!\n\nUnsubscribe (but we'll make it difficult)",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738208800,
+      "is_read": true
+    },
+    {
+      "email_id": "73fbe0274c3d4df29d53b105d1770f9a",
+      "folder": "TRASH",
+      "sender": "crypto@blockchain-opportunity.io",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Turn $100 into $100,000 with CryptoCoin!!!",
+      "content": "GUARANTEED RETURNS ON CRYPTOCURRENCY!\n\nOur proprietary AI algorithm guarantees 1000x returns on any investment!\n\n- No risk involved\n- Withdraw anytime\n- Join 50,000 happy investors\n\nDon't miss this once-in-a-lifetime opportunity!\n\nInvest now: [REMOVED]\n\nDisclaimer: Not really any disclaimer because this is a scam",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738182800,
+      "is_read": false
+    },
+    {
+      "email_id": "1a2da16efbf34b3cb0ab541fe8f57586",
+      "folder": "TRASH",
+      "sender": "sales@bulkemails.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Buy Email Lists - Reach Millions Instantly!",
+      "content": "Want to reach millions of potential customers?\n\nWe sell verified email lists:\n- 1 million emails: $99\n- 5 million emails: $399\n- 10 million emails: $699\n\nAll emails are \"verified\" and \"opt-in\" (they're not).\n\nStart your email marketing campaign today!\n\nContact: sales@bulkemails.com",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738156800,
+      "is_read": false
+    },
+    {
+      "email_id": "2d47f38bff2849779f4c674165509275",
+      "folder": "TRASH",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "wrong.person@unknowndomain.com"
+      ],
+      "subject": "Meeting Tomorrow",
+      "content": "Hi,\n\nJust wanted to confirm our meeting tomorrow at 2 PM.\n\nAlex",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738130800,
+      "is_read": true
+    },
+    {
+      "email_id": "748f560e9d1f47f0b8b27be8a1fb0b9a",
+      "folder": "TRASH",
+      "sender": "promo@cheapwatches.store",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Luxury Watches 95% OFF - Limited Time!",
+      "content": "REPLICA LUXURY WATCHES!\n\nRolex, Omega, Cartier - all 95% off!\n\nLooks exactly like the real thing!\nNo one will know the difference!\n\nShop now: [LINK REMOVED]\n\nFree shipping on orders over $100!",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738104800,
+      "is_read": false
+    },
+    {
+      "email_id": "c906c678df8f474db82fa95c2d49d2ba",
+      "folder": "TRASH",
+      "sender": "hr@techcorp.com",
+      "recipients": [
+        "all-employees@techcorp.com"
+      ],
+      "subject": "Updated: Parking Lot Closure - Dec 15",
+      "content": "Dear Team,\n\nPlease note that the east parking lot will be closed on December 15th for maintenance.\n\nAlternative parking:\n- West lot (limited spaces)\n- Street parking\n\nWe apologize for the inconvenience.\n\nFacilities Team",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738078800,
+      "is_read": true
+    },
+    {
+      "email_id": "4f6fea54cccb4b6db1f64c63e544d17c",
+      "folder": "TRASH",
+      "sender": "weightloss@miraclepills.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Lose 30 Pounds in 30 Days - Guaranteed!",
+      "content": "MIRACLE WEIGHT LOSS SOLUTION!\n\nDoctors don't want you to know about this one weird trick!\n\nLose 30 pounds in 30 days with our all-natural pills!\n- No exercise needed\n- Eat whatever you want\n- 100% guaranteed results\n\nOrder now and get a FREE bottle!\n\n*Results not typical. Actually, results not possible.",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738052800,
+      "is_read": false
+    },
+    {
+      "email_id": "7c4edbaf14364c0dbe5c7015a95d43bb",
+      "folder": "TRASH",
+      "sender": "support@abandoned-project.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Your Trial is Expiring",
+      "content": "Hi Alex,\n\nYour free trial of AbandonedProject Pro is expiring in 3 days.\n\nUpgrade now to keep access to:\n- Features you never used\n- Tools you forgot existed\n- Support you never needed\n\nSpecial offer: 50% off for the first year!\n\nUpgrade: [link]\n\nWe'll keep sending these reminders forever.",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738026800,
+      "is_read": true
+    },
+    {
+      "email_id": "15e3778de90247579b8e635cc16d1004",
+      "folder": "INBOX",
+      "sender": "tom.anderson@techcorp.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Quick question about the auth service",
+      "content": "Hey Alex,\n\nDo you have a minute to chat about the auth service refactor? I noticed some edge cases in the token refresh logic that might need attention.\n\nLet me know when you're free.\n\nTom",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1738000800,
+      "is_read": false
+    },
+    {
+      "email_id": "04041c026caa45daa00dfc35fa277f4d",
+      "folder": "INBOX",
+      "sender": "newsletter@pythonweekly.com",
+      "recipients": [
+        "alex.chen@techcorp.com"
+      ],
+      "subject": "Python Weekly: New PEP Proposals and FastAPI Updates",
+      "content": "Python Weekly - Issue #542\n\n== Headlines ==\n\n1. PEP 750: Pattern Matching Extensions\n2. FastAPI 0.110 Released with Async Improvements\n3. Django 5.0 Migration Guide\n\n== Articles ==\n\n- Understanding Python's GIL in 2025\n- Best Practices for Type Hints\n- Building CLI Tools with Typer\n\nHappy coding!",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737974800,
+      "is_read": true
+    },
+    {
+      "email_id": "9cfcc382d37243388dcd36ed709c444e",
+      "folder": "SENT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "sarah.johnson@techcorp.com"
+      ],
+      "subject": "Updated timeline for API migration",
+      "content": "Hi Sarah,\n\nAs discussed, I've updated the API migration timeline to account for the additional testing requirements.\n\nNew milestones:\n- Phase 1 complete: Feb 15\n- Phase 2 complete: Feb 28\n- Full rollout: March 10\n\nLet me know if you need any adjustments.\n\nBest,\nAlex",
+      "cc": [
+        "david.kim@techcorp.com"
+      ],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737948800,
+      "is_read": true
+    },
+    {
+      "email_id": "1aa6a69e57f342049736e1408db5a726",
+      "folder": "SENT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "mark.thompson@acme.com"
+      ],
+      "subject": "Re: Integration testing feedback",
+      "content": "Hi Mark,\n\nThanks for the detailed feedback on the integration tests. I've addressed the issues you mentioned:\n\n1. Fixed the timeout handling in the webhook endpoint\n2. Added retry logic for failed requests\n3. Updated the error messages to be more descriptive\n\nThe changes are deployed to staging if you want to test again.\n\nBest,\nAlex",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737922800,
+      "is_read": true
+    },
+    {
+      "email_id": "f6df8767b021433eb42f19d93b9fd871",
+      "folder": "SENT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "jennifer.wu@techcorp.com"
+      ],
+      "subject": "Design review notes",
+      "content": "Hi Jennifer,\n\nHere are my notes from the design review:\n\n- The new dashboard layout looks great\n- Suggested minor tweaks to the color scheme for accessibility\n- The loading states could use some polish\n\nOverall excellent work! Happy to discuss further.\n\nAlex",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737896800,
+      "is_read": true
+    },
+    {
+      "email_id": "7dd42488c32a453589bb0b257ca841cf",
+      "folder": "SENT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "team@techcorp.com"
+      ],
+      "subject": "Engineering blog post draft",
+      "content": "Hi team,\n\nI've drafted a blog post about our recent migration to event sourcing. Would appreciate your feedback before I submit it to marketing.\n\nKey points covered:\n- Why we chose event sourcing\n- Challenges we faced\n- Lessons learned\n- Performance improvements\n\nPlease review and share any comments by EOD Thursday.\n\nThanks,\nAlex",
+      "cc": [],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737870800,
+      "is_read": true
+    },
+    {
+      "email_id": "fadd51fdba6b4b97bed653a7a416d4a2",
+      "folder": "SENT",
+      "sender": "alex.chen@techcorp.com",
+      "recipients": [
+        "it-support@techcorp.com"
+      ],
+      "subject": "VPN access request for contractor",
+      "content": "Hi IT team,\n\nCould you please set up VPN access for our new contractor, Michael Rivera?\n\nDetails:\n- Name: Michael Rivera\n- Email: m.rivera@contractor.net\n- Start date: February 5\n- Duration: 3 months\n- Access needed: Development environment only\n\nManager approval: Sarah Johnson (cc'd)\n\nThanks,\nAlex",
+      "cc": [
+        "sarah.johnson@techcorp.com"
+      ],
+      "parent_id": null,
+      "attachments": {},
+      "timestamp": 1737844800,
+      "is_read": true
+    }
+  ]
+}

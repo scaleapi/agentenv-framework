@@ -1,0 +1,126 @@
+version: 2.1
+
+# `publish` reads the release infrastructure from CircleCI project environment variables, not
+# from this file: AWS_PUBLISH_ROLE_ARN (assumed through CircleCI OIDC), CODEARTIFACT_DOMAIN_OWNER
+# and CODEARTIFACT_REPOSITORY. Project-level rather than the agent-env-bumper context because
+# `publish` runs without a context.
+
+orbs:
+  aws-cli: circleci/aws-cli@4.1.3
+
+jobs:
+  bump:
+    docker:
+      - image: cimg/python:3.11
+    steps:
+      - checkout
+
+      - run:
+          name: Gate on `bump-version` / `bump` label, then mint GitHub App token
+          command: |
+            set -euo pipefail
+
+            if [[ -z "${GH_APP_ID:-}" || -z "${GH_APP_INSTALLATION_ID:-}" || -z "${GH_APP_PRIVATE_KEY_B64:-}" ]]; then
+              echo "Bumper App secrets not set in the agent-env-bumper context; skipping."
+              echo "(Set GH_APP_ID, GH_APP_INSTALLATION_ID, GH_APP_PRIVATE_KEY_B64 to enable.)"
+              circleci-agent step halt
+            fi
+
+            sudo apt-get update -qq && sudo apt-get install -y -qq jq >/dev/null
+            pip install --quiet 'PyJWT[crypto]==2.*'
+
+            token=$(python scripts/get_github_app_token.py)
+
+            labels=$(curl -fsS \
+              -H "Authorization: Bearer ${token}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${CIRCLE_PROJECT_USERNAME}/${CIRCLE_PROJECT_REPONAME}/commits/${CIRCLE_SHA1}/pulls" \
+              | jq -r '[.[].labels[].name] | unique | join(",")')
+            echo "labels=${labels}"
+
+            if ! echo ",${labels}," | grep -qE ',(bump-version|bump),'; then
+              echo "No bump-version/bump label on the merged PR; skipping."
+              circleci-agent step halt
+            fi
+
+            echo "Found bump label; exporting GH_TOKEN for the bump step."
+            echo "export GH_TOKEN=${token}" >> "$BASH_ENV"
+
+      - run:
+          name: Bump, tag, push
+          command: bash scripts/circleci_release_bump.sh
+
+  publish:
+    docker:
+      - image: cimg/python:3.11
+    steps:
+      - checkout
+
+      - aws-cli/setup:
+          role_arn: ${AWS_PUBLISH_ROLE_ARN}
+          region: us-west-2
+
+      - run:
+          name: Install build tools
+          command: |
+            pip install --upgrade pip build twine
+
+      - run:
+          name: Login to CodeArtifact
+          command: |
+            set -euo pipefail
+            : "${CODEARTIFACT_DOMAIN_OWNER:?set it in the CircleCI project settings}"
+            : "${CODEARTIFACT_REPOSITORY:?set it in the CircleCI project settings}"
+            aws codeartifact login --tool twine \
+              --domain scale \
+              --domain-owner "${CODEARTIFACT_DOMAIN_OWNER}" \
+              --repository "${CODEARTIFACT_REPOSITORY}" \
+              --region us-west-2
+
+      - run:
+          name: Build and publish agentenv-protocol
+          command: |
+            python -m build packages/agentenv-protocol --outdir packages/agentenv-protocol/dist
+            twine upload --repository codeartifact packages/agentenv-protocol/dist/*
+
+      - run:
+          name: Build package (pin exact agentenv-protocol version)
+          command: |
+            set -euo pipefail
+            PV=$(sed -n 's/^version = "\(.*\)"/\1/p' packages/agentenv-protocol/pyproject.toml)
+            # Only the quoted requirement: the bare name also appears in the sdist include
+            # list, the uv workspace members and [tool.uv.sources], which must not be rewritten.
+            sed -i "s/\"agentenv-protocol[^\"]*\"/\"agentenv-protocol==${PV}\"/" pyproject.toml
+            python -c "import tomllib; tomllib.load(open('pyproject.toml','rb'))"
+            grep -q "\"agentenv-protocol==${PV}\"" pyproject.toml
+            python -m build
+
+      - run:
+          name: Publish to CodeArtifact
+          command: twine upload --repository codeartifact dist/*
+
+workflows:
+  # Auto-bump pyproject version when a PR labeled `bump-version` (or `bump`)
+  # lands on main. Pushes a vX.Y.Z annotated tag, which triggers the
+  # `publish` workflow below.
+  bump:
+    jobs:
+      - bump:
+          context:
+            - agent-env-bumper
+          filters:
+            branches:
+              only: main      # Only run on pushes to the default branch
+            tags:
+              ignore: /.*/    # Don't run on tag pushes (publish handles those)
+
+  # Publish to AWS CodeArtifact on any vX.Y.Z tag push.
+  publish:
+    jobs:
+      - publish:
+          filters:
+            tags:
+              only: /^v.*/    # Only run on tags like v0.1.0, v1.2.3
+            branches:
+              ignore: /.*/    # Don't run on branch commits

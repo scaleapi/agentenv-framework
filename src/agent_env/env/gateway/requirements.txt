@@ -1,0 +1,4 @@
+psycopg2-binary>=2.9.0
+httpx
+mcp>=1.25,<2
+pydantic>=2.0

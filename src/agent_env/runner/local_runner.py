@@ -1,0 +1,190 @@
+"""In-process runner: runs ``Task.run()`` in the hub's own event loop, bounded by a worker
+semaphore. ``submit()`` fires the run in the background and returns immediately; there is no
+persisted queue or lease, so the run's asyncio task lives only in this process.
+
+Consequence: a run does not survive a hub restart. ``start()`` fails any run a previous
+process left non-terminal (it can't still be executing), and ``stop()`` cancels the ones in
+flight. A durable, lease-based runner that resurrects a run across a restart — and supports
+multiple worker processes — is a follow-up; use the Temporal runner where that matters.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+import uuid
+from typing import Optional
+
+from agent_env.runner import store as run_store
+from agent_env.runner.runner import RunHandle, RunRecord, Runner, RunStatus
+
+logger = logging.getLogger(__name__)
+
+
+class LocalRunner(Runner):
+    """In-process runner. The DocumentStore holds run records for status/listing only."""
+
+    type = "local"
+
+    def __init__(self, workers: int = 2) -> None:
+        if workers < 1:
+            raise ValueError(f"workers must be >= 1, got {workers}")
+        self.workers = int(workers)
+        self._sem = asyncio.Semaphore(self.workers)
+        self._inflight: dict[str, asyncio.Task] = {}
+        self._stopping = False
+
+    # --- lifecycle ---------------------------------------------------------
+
+    async def start(self) -> None:
+        """Reconcile orphans from a previous process: a run left QUEUED/RUNNING has no live
+        task here, so fail it rather than leave it hanging. There is no queue to resume."""
+        run_store.ensure_indexes()
+        orphaned = 0
+        for record in run_store.active_runs(self.type):
+            run_store.mark_terminal(record.run_id, RunStatus.FAILED, error="interrupted by a hub restart")
+            orphaned += 1
+        if orphaned:
+            logger.info("Failed %d run(s) left non-terminal by a previous process", orphaned)
+
+    async def stop(self) -> None:
+        self._stopping = True
+        for task in list(self._inflight.values()):
+            task.cancel()
+        if self._inflight:
+            await asyncio.gather(*self._inflight.values(), return_exceptions=True)
+        self._inflight.clear()
+
+    # --- Runner API --------------------------------------------------------
+
+    async def submit(
+        self,
+        task_id: str,
+        task_version: Optional[int] = None,
+        *,
+        agent_model: Optional[str] = None,
+        agent_artifact_id: Optional[str] = None,
+        metadata: Optional[dict] = None,
+    ) -> RunHandle:
+        run_id = f"local-{uuid.uuid4().hex}"
+        instance_id = uuid.uuid4().hex        # minted here so callers can link immediately
+        record = RunRecord(
+            run_id=run_id, runner=self.type, task_id=task_id, task_version=task_version,
+            instance_id=instance_id, status=RunStatus.QUEUED,
+            overrides={
+                "agent_model": agent_model,
+                "agent_artifact_id": agent_artifact_id,
+                "metadata": metadata or {},
+            },
+        )
+        run_store.insert_run(record)
+        self._inflight[run_id] = asyncio.create_task(self._run(record), name=f"agent-env-run-{run_id}")
+        logger.info("Submitted run %s for task %s v%s", run_id, task_id, task_version)
+        return RunHandle(run_id=run_id, instance_id=instance_id)
+
+    async def status(self, run_id: str) -> Optional[RunRecord]:
+        record = run_store.get_run(run_id)
+        if record is not None and record.runner != self.type:
+            # Submitted under a different [runner]; report rather than pretend to own it.
+            logger.warning("Run %s was submitted by runner %r, not %r", run_id, record.runner, self.type)
+        return record
+
+    async def cancel(self, run_id: str) -> bool:
+        record = run_store.get_run(run_id)
+        if record is None or record.status.is_terminal:
+            return False
+        task = self._inflight.get(run_id)
+        if task is not None:
+            # Signal only. `_run` is the sole writer of the terminal state, so a cancel that
+            # races the run's completion can't mislabel a finished run (see `_run`). This
+            # preempts Task.run() at its current await; it unwinds its in-flight step cleanly.
+            task.cancel()
+        else:
+            run_store.mark_terminal(run_id, RunStatus.CANCELED)   # no live task here (defensive)
+        return True
+
+    # --- execution ---------------------------------------------------------
+
+    async def _run(self, record: RunRecord) -> None:
+        from agent_env.task import Task
+
+        run_task: Optional[asyncio.Task] = None
+        try:
+            async with self._sem:                     # bounded concurrency; the wait here IS the queue
+                if run_store.get_run(record.run_id).status == RunStatus.CANCELED:
+                    return                            # canceled while it waited for a slot
+                run_store.set_running(record.run_id)
+                logger.info("Run %s starting (task=%s v%s)", record.run_id, record.task_id, record.task_version)
+                task = Task.get(record.task_id, record.task_version)
+                if task is None:
+                    raise LookupError(f"Task {record.task_id} v{record.task_version} not found")
+
+                context = self._seed_context(record)
+                # start_step rides in metadata but Task.run takes it as a keyword;
+                # without lifting it out here every resume re-ran from zero.
+                run_task = asyncio.ensure_future(task.run(
+                    agent_model=record.overrides.get("agent_model"),
+                    agent_artifact_id=record.overrides.get("agent_artifact_id"),
+                    context=context,
+                    instance_id=record.instance_id,
+                    start_step=int(context.metadata.get("start_step") or 0),
+                ))
+                await run_task
+                self._finish(record.run_id, context)
+        except asyncio.CancelledError:
+            # cancel()/stop() cancelled us. `_run` is the single writer of the terminal state,
+            # decided here synchronously so no cancel can interpose: if Task.run() finished
+            # before the cancel landed, honor its outcome (its side effects are done, so
+            # CANCELED would misreport it); otherwise preempt the in-flight run and record
+            # CANCELED — or, on shutdown, leave it non-terminal for start() to reconcile.
+            if run_task is not None and run_task.done() and not run_task.cancelled():
+                self._finish(record.run_id, context, exc=run_task.exception())
+            else:
+                if run_task is not None:
+                    run_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await run_task
+                if self._stopping:
+                    logger.info("Run %s interrupted by shutdown", record.run_id)
+                else:
+                    run_store.mark_terminal(record.run_id, RunStatus.CANCELED)
+                    logger.info("Run %s canceled", record.run_id)
+        except Exception as e:
+            logger.exception("Run %s failed", record.run_id)
+            run_store.mark_terminal(record.run_id, RunStatus.FAILED, error=f"{type(e).__name__}: {e}")
+        finally:
+            self._inflight.pop(record.run_id, None)
+
+    def _finish(self, run_id: str, context, *, exc: Optional[BaseException] = None) -> None:
+        """Persist the terminal state of a finished Task.run(): a raised step is FAILED,
+        otherwise an un-retried failed step on the context is authoritative (a step can fail
+        without raising when fail_task_on_error is False). Failures the scheduler recovered via
+        retry carry ``retried`` and don't count, so a run that recovers is COMPLETED."""
+        if exc is not None:
+            run_store.mark_terminal(run_id, RunStatus.FAILED, error=f"{type(exc).__name__}: {exc}")
+            logger.warning("Run %s failed: %s", run_id, exc)
+        elif failed := [
+            f for f in (context.metadata or {}).get("failed_steps") or []
+            if not (isinstance(f, dict) and f.get("retried"))   # a malformed entry counts as a failure
+        ]:
+            run_store.mark_terminal(run_id, RunStatus.FAILED, error=str(failed))
+            logger.warning("Run %s finished with failed steps: %s", run_id, failed)
+        else:
+            run_store.mark_terminal(run_id, RunStatus.COMPLETED)
+            logger.info("Run %s completed", run_id)
+
+    def _seed_context(self, record: RunRecord):
+        """Build the context ``Task.run()`` mutates, carrying the run identity in metadata.
+
+        ``workflow_id`` holds the run id — the hub, instance documents and UI all key off it —
+        so nothing downstream needs a special case for the local runner.
+        """
+        from agent_env.task_step import TaskStepContext
+
+        context = TaskStepContext()
+        context.metadata.update(record.overrides.get("metadata") or {})
+        context.metadata["workflow_id"] = record.run_id
+        context.metadata["instance_id"] = record.instance_id
+        context.metadata["runner"] = self.type
+        return context

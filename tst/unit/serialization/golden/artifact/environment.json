@@ -1,0 +1,11 @@
+{
+  "environment_name": "slack",
+  "file_artifact_ref": {
+    "id": "slack-universe-data",
+    "version": 2
+  },
+  "id": "slack-service",
+  "service_name": "slack",
+  "type": "environment",
+  "version": 7
+}

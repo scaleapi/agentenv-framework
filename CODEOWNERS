@@ -1,0 +1,10 @@
+# CODEOWNERS — every PR requires review from a code owner.
+#
+# The catch-all pattern below applies to all files in the repo. When paired
+# with branch protection's "Require review from Code Owners", at least one of
+# the listed owners must approve each PR. Multiple owners on one line are OR:
+# an approval from ANY one of them (a frontier-data member, a chat-task-eng
+# member, or polakamtejas) satisfies the requirement.
+#
+# Note: a team is only a valid owner if it has access to this repo.
+*  @scaleapi/frontier-data  @scaleapi/chat-task-eng  @polakamtejas

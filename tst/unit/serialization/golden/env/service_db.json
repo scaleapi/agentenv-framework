@@ -1,0 +1,23 @@
+{
+  "db_docker_image_artifact": {
+    "id": "postgres-image",
+    "type": "docker_image",
+    "version": 1
+  },
+  "db_mcp_docker_image_artifact": {
+    "id": "db-mcp-image",
+    "type": "docker_image",
+    "version": 1
+  },
+  "db_web_docker_image_artifact": {
+    "id": "pgweb-image",
+    "type": "docker_image",
+    "version": 1
+  },
+  "id": "service-db-env",
+  "metadata": {
+    "owner": "env-pod"
+  },
+  "type": "service_db",
+  "version": 3
+}

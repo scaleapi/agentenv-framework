@@ -1,0 +1,21 @@
+{
+  "backend_docker_image_artifact": {
+    "id": "shop-backend-image",
+    "type": "docker_image",
+    "version": 3
+  },
+  "environment_name": "shop",
+  "frontend_docker_image_artifact": {
+    "id": "shop-frontend-image",
+    "type": "docker_image",
+    "version": 3
+  },
+  "id": "shop-site-env",
+  "metadata": {
+    "owner": "env-pod"
+  },
+  "service_name": "shop",
+  "service_version": 1,
+  "type": "website",
+  "version": 2
+}

@@ -1,0 +1,286 @@
+"""The three capture primitives shared by ``snapshot_agent_state`` and
+``prompt_agent``'s periodic capture.
+
+``capture_workspace`` raises on any failure (no tar → nothing gradable);
+``read_partial_trajectory`` never raises (the bundle is what makes a row
+gradable, so a degraded trajectory read must not discard the point).
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import pytest
+
+from agent_env.task_step.snapshot_utils import agent_state_capture as mod
+
+from .capture_stubs import (
+    BUCKET,
+    CONTEXT_ID_GET,
+    agent_card,
+    install_capture_stubs,
+)
+
+
+async def _capture(**overrides):
+    kwargs = dict(
+        a2a_url="https://agent",
+        a2a_card=agent_card(),
+        agent_name="solver",
+        a2a_context_id="ctx-1",
+        artifact_id="wsp",
+        timeout_seconds=30,
+    )
+    kwargs.update(overrides)
+    return await mod.capture_workspace(**kwargs)
+
+
+# ---- capture_workspace ------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_posts_context_id_and_the_issued_prefix(monkeypatch):
+    rec = install_capture_stubs(monkeypatch)
+    result = await _capture()
+
+    (sent,) = rec.save_requests
+    assert sent["url"] == "https://agent/ext/snapshot"
+    assert sent["json"]["context_id"] == "ctx-1"
+    assert sent["json"]["s3_prefix"].startswith(f"s3://{BUCKET}/agent_snapshots/wsp/")
+    assert "presigned_post" in sent["json"]
+    # The bundle url is what the sidecar confirmed, wrapped as a universe.
+    assert result.bundle_object_url == sent["json"]["s3_prefix"]
+    assert result.universe_id == "wsp"
+    assert result.capture_prefix == sent["json"]["s3_prefix"]
+
+
+@pytest.mark.asyncio
+async def test_honours_a_card_pinned_endpoint(monkeypatch):
+    rec = install_capture_stubs(monkeypatch)
+    await _capture(a2a_card=agent_card(snapshot_endpoint="/custom/snap"))
+    assert rec.save_requests[0]["url"] == "https://agent/custom/snap"
+
+
+@pytest.mark.asyncio
+async def test_signs_the_capture_prefix_and_forwards_the_whole_grant(monkeypatch):
+    rec = install_capture_stubs(monkeypatch)
+    await _capture()
+
+    (signed,) = rec.object_store.signed_posts
+    sent = rec.save_requests[0]["json"]
+    assert signed["url_prefix"] == sent["s3_prefix"]
+    assert set(sent["presigned_post"]) == {"url", "fields"}
+
+
+@pytest.mark.asyncio
+async def test_a_backend_that_cannot_sign_omits_the_grant(monkeypatch):
+    rec = install_capture_stubs(monkeypatch)
+    monkeypatch.setattr(rec.object_store, "signed_post", lambda *a, **k: None)
+    await _capture()
+
+    assert "presigned_post" not in rec.save_requests[0]["json"]
+
+
+@pytest.mark.asyncio
+async def test_each_capture_gets_its_own_prefix(monkeypatch):
+    """The random suffix is what isolates two captures, NOT the version.
+
+    Pinned to one version on purpose: with the stub's incrementing version the
+    prefixes differ even if the suffix is deleted, so this passed while asserting
+    nothing. Two concurrent captures really can peek the same version.
+    """
+    rec = install_capture_stubs(monkeypatch)
+    monkeypatch.setattr(
+        rec, "next_version",
+        lambda artifact_id: (rec.next_version_calls.append(artifact_id), 7)[1],
+    )
+    first = await _capture()
+    second = await _capture()
+    assert first.capture_prefix != second.capture_prefix
+    assert "/7-" in first.capture_prefix and "/7-" in second.capture_prefix
+    assert rec.next_version_calls == ["wsp", "wsp"]
+
+
+@pytest.mark.asyncio
+async def test_raises_when_the_card_does_not_advertise_snapshot(monkeypatch):
+    install_capture_stubs(monkeypatch)
+    with pytest.raises(RuntimeError, match="does not advertise the snapshot extension"):
+        await _capture(a2a_card=agent_card(snapshot=False))
+
+
+@pytest.mark.asyncio
+async def test_raises_on_an_http_error(monkeypatch):
+    rec = install_capture_stubs(monkeypatch)
+    rec.save_status = 500
+    rec.save_body = {"detail": "boom"}
+    with pytest.raises(RuntimeError, match="snapshot save failed: 500"):
+        await _capture()
+
+
+@pytest.mark.asyncio
+async def test_raises_when_the_response_omits_the_prefix(monkeypatch):
+    rec = install_capture_stubs(monkeypatch)
+    rec.save_body = {"file_count": 3}
+    with pytest.raises(RuntimeError, match="missing 's3_prefix'"):
+        await _capture()
+
+
+@pytest.mark.asyncio
+async def test_a_prefix_outside_the_issued_one_is_never_registered(monkeypatch, caplog):
+    """`put_existing` lists the prefix and registers every object under it with the
+    worker's credentials, so honouring an agent-chosen prefix would let a
+    compromised sidecar pull any prefix that role can read into this snapshot."""
+    rec = install_capture_stubs(monkeypatch)
+    rec.save_body = {"s3_prefix": f"s3://{BUCKET}/someone/elses/run/"}
+    result = await _capture()
+
+    issued = rec.save_requests[0]["json"]["s3_prefix"]
+    assert result.bundle_object_url == issued
+    assert "someone/elses/run" not in result.bundle_object_url
+    assert "echoed a prefix outside the one issued" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_sidecar_that_nests_under_the_issued_prefix_is_registered_there(monkeypatch):
+    """Registering the issued prefix for a nester fails silently — the recursive list
+    still finds the object, and only a later restore cannot."""
+    rec = install_capture_stubs(monkeypatch)
+    stamp = "2026-08-05T00:00:00.000Z"
+    rec.save_body = lambda req: {"s3_prefix": f"{req['s3_prefix']}{stamp}/"}
+    result = await _capture()
+
+    issued = rec.save_requests[0]["json"]["s3_prefix"]
+    assert result.bundle_object_url == f"{issued}{stamp}/"
+    # The presigned prefix is unchanged — per-service state still lands beside it.
+    assert result.capture_prefix.startswith(f"s3://{BUCKET}/agent_snapshots/wsp/")
+
+
+@pytest.mark.asyncio
+async def test_a_flat_echo_registers_the_issued_prefix_unchanged(monkeypatch, caplog):
+    """A sidecar honouring the presigned POST writes flat and echoes it back."""
+    rec = install_capture_stubs(monkeypatch)
+    result = await _capture()
+
+    issued = rec.save_requests[0]["json"]["s3_prefix"]
+    assert result.bundle_object_url == issued
+    assert "outside the one issued" not in caplog.text
+
+
+# ---- read_partial_trajectory ------------------------------------------------
+
+async def _read(card, **overrides):
+    kwargs = dict(a2a_url="https://agent", a2a_card=card, context_id="ctx-1", timeout_seconds=30)
+    kwargs.update(overrides)
+    return await mod.read_partial_trajectory(**kwargs)
+
+
+@pytest.mark.asyncio
+async def test_reads_the_trajectory_keyed_on_context_id(monkeypatch):
+    rec = install_capture_stubs(monkeypatch)
+    result = await _read(agent_card(trajectory=CONTEXT_ID_GET))
+
+    (sent,) = rec.trajectory_requests
+    assert sent["url"] == "https://agent/ext/trajectory"
+    # context_id, never task_id: task_id is one finished turn and 404s mid-run.
+    assert sent["json"] == {"context_id": "ctx-1"}
+    assert result.trajectory == [{"role": "user"}]
+    assert result.reason is None
+
+
+@pytest.mark.parametrize(
+    "card, reason",
+    [
+        (agent_card(), "trajectory_ext_unavailable"),
+        (agent_card(trajectory={"request": {"required": ["task_id"]}}),
+         "trajectory_context_unsupported"),
+        # A bare `{}` advertises `get` with no request contract at all, so the
+        # context_id mode is not claimed — treat it as task_id-only.
+        (agent_card(trajectory={}), "trajectory_context_unsupported"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_an_unsupported_card_costs_no_round_trip(monkeypatch, card, reason):
+    rec = install_capture_stubs(monkeypatch)
+    result = await _read(card)
+    assert (result.reason, result.trajectory) == (reason, None)
+    assert rec.trajectory_requests == []  # refused off the card, not via a 400
+
+
+@pytest.mark.asyncio
+async def test_concurrent_captures_on_one_artifact_id_never_share_a_prefix(monkeypatch):
+    """Registration is deliberately unserialized: ``prompt_agent`` derives an
+    artifact id per rollout, so nothing else allocates versions of it, and a
+    genuine cross-process race is ``put_document``'s retry to absorb.
+
+    What must still hold is byte isolation — every capture writes to its own
+    random-suffixed prefix, so even captures that peek the same version cannot
+    overwrite each other's objects.
+    """
+    rec = install_capture_stubs(monkeypatch)
+    results = await asyncio.gather(*(_capture() for _ in range(4)))
+
+    assert len({r.capture_prefix for r in results}) == 4
+    assert len(rec.save_requests) == 4
+
+
+@pytest.mark.asyncio
+async def test_a_get_advertised_without_methods_is_unadvertised(monkeypatch):
+    install_capture_stubs(monkeypatch)
+    card = {"capabilities": {"extensions": [
+        {"uri": "urn:agentenv:trajectory/v1", "params": {"methods": {"save": {}}}}
+    ]}}
+    assert (await _read(card)).reason == "trajectory_get_unadvertised"
+
+
+@pytest.mark.parametrize(
+    "status, body, reason",
+    [
+        (404, {}, "trajectory_session_missing"),
+        (500, {}, "trajectory_http_500"),
+        (200, {"trajectory": []}, "trajectory_empty"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_degraded_read_is_a_reason_not_a_raise(monkeypatch, status, body, reason):
+    rec = install_capture_stubs(monkeypatch)
+    rec.trajectory_status, rec.trajectory_body = status, body
+    result = await _read(agent_card(trajectory=CONTEXT_ID_GET))
+    assert (result.reason, result.trajectory) == (reason, None)
+
+
+@pytest.mark.asyncio
+async def test_a_transport_failure_is_a_reason_not_a_raise(monkeypatch):
+    install_capture_stubs(monkeypatch)
+    import httpx
+
+    async def boom(self, method, url, **kwargs):
+        raise httpx.ConnectError("no route")
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", boom)
+    assert (await _read(agent_card(trajectory=CONTEXT_ID_GET))).reason == "trajectory_read_failed"
+
+
+# ---- upload_trajectory ------------------------------------------------------
+
+def test_uploads_under_the_prefix_with_a_unique_key(monkeypatch):
+    rec = install_capture_stubs(monkeypatch)
+    prefix = f"s3://{BUCKET}/prompt_agent_trajectories/prompt_id=p1/"
+
+    first = mod.upload_trajectory([{"a": 1}], prefix)
+    second = mod.upload_trajectory([{"a": 1}], prefix)
+
+    assert first != second, "two uploads must not collide on one key"
+    assert first.startswith(f"{prefix}trajectory-") and first.endswith(".json")
+    assert json.loads(rec.object_store.puts[0][1]) == [{"a": 1}]
+
+
+def test_a_prefix_without_a_trailing_slash_still_nests(monkeypatch):
+    install_capture_stubs(monkeypatch)
+    url = mod.upload_trajectory([], f"s3://{BUCKET}/traj")
+    assert url.startswith(f"s3://{BUCKET}/traj/trajectory-")
+
+
+def test_a_foreign_bucket_raises_rather_than_writing_to_the_configured_one(monkeypatch):
+    install_capture_stubs(monkeypatch)
+    # Derived through the object store, not urlparse().path — otherwise this
+    # silently writes to the configured bucket under the same key path.
+    with pytest.raises(ValueError, match="not in the configured bucket"):
+        mod.upload_trajectory([], "s3://someone-elses-bucket/traj/")

@@ -1,0 +1,43 @@
+{
+  "compilerOptions": {
+    "noEmit": true,
+    "allowJs": true,
+    "allowSyntheticDefaultImports": true,
+    "alwaysStrict": true,
+    "rootDir": ".",
+    "esModuleInterop": true,
+    "jsx": "preserve",
+    "moduleResolution": "bundler",
+    "preserveConstEnums": true,
+    "noImplicitAny": true,
+    "sourceMap": true,
+    "checkJs": true,
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "incremental": true,
+    "noUncheckedIndexedAccess": true,
+    "target": "ESNext",
+    "outDir": "./dist",
+    "types": ["node"],
+    "paths": {
+      "@components/*": ["./src/components/*"],
+      "@hooks/*": ["./src/hooks/*"],
+      "@constants/*": ["./src/constants/*"]
+    },
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "skipLibCheck": true,
+    "module": "esnext"
+  },
+  "include": [
+    ".eslintrc.cjs",
+    "next-env.d.ts",
+    "**/*.ts",
+    "**/*.tsx",
+    "**/*.cjs",
+    "**/*.mjs",
+    "tracer.js"
+  ],
+  "exclude": ["node_modules", "prettier.config.js"]
+}

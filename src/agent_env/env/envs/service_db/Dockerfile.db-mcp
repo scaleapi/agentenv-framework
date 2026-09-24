@@ -1,0 +1,42 @@
+# Build postgres-mcp from source to get streamable-http transport support.
+# The Docker Hub image (crystaldba/postgres-mcp:latest) ships MCP 1.6.0,
+# which only supports stdio and SSE transports.
+
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
+ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
+ENV UV_PYTHON_DOWNLOADS=0
+
+WORKDIR /app
+RUN apt-get update \
+  && apt-get install -y libpq-dev gcc git \
+  && rm -rf /var/lib/apt/lists/*
+RUN git clone https://github.com/crystaldba/postgres-mcp.git /app
+
+# Patch: disable DNS rebinding protection in FastMCP constructor.
+# FastMCP auto-enables it when host="127.0.0.1" (the default), which rejects
+# requests arriving through reverse proxies with non-localhost Host headers.
+# postgres-mcp creates FastMCP("postgres-mcp") with defaults, then sets
+# mcp.settings.host later — but transport_security is already locked in.
+RUN sed -i 's/mcp = FastMCP("postgres-mcp")/from mcp.server.transport_security import TransportSecuritySettings\nmcp = FastMCP("postgres-mcp", transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False))/' /app/src/postgres_mcp/server.py
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+  uv sync --frozen --no-dev
+
+FROM public.ecr.aws/docker/library/python:3.12-slim-bookworm
+RUN groupadd -r app && useradd -r -g app app
+COPY --from=builder --chown=app:app /app /app
+
+ENV PATH="/app/.venv/bin:$PATH"
+
+RUN apt-get update && apt-get install -y \
+  libpq-dev \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /app/docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh
+
+USER app
+EXPOSE 8000
+
+ENTRYPOINT ["/app/docker-entrypoint.sh", "postgres-mcp"]
+CMD []
