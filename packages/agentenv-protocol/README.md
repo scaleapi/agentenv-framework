@@ -479,6 +479,9 @@ declares) records the last values it sent, and returns them from a bodyless
 `POST /ext/attribution-probe` as an `AttributionProbeResponse`:
 `{"last_seen_attribution": {"project_id": ..., "task_id": ...}, "last_seen_at_utc": ...}`.
 The SDK does not record attribution itself, because only the agent knows what it sent.
+The answer is agent-wide rather than per caller, and like every extension route the
+probe carries no access check of its own, so expose an agent only to the control plane
+that drives it.
 
 Runnable, self-contained reference agents live in [`examples/`](examples/):
 the normal, streaming, and multimodal `run(request)` paths, single- and
