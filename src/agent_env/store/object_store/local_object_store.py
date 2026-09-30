@@ -4,19 +4,32 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import ipaddress
 import json
 import logging
 import os
 import shutil
 import tempfile
+import time
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import BinaryIO
 
+from agentenv_protocol.transfers import HttpGetGrant, HttpPostPolicyGrant, HttpPutGrant
+
+from agent_env.config.paths import state_root
 from agent_env.store.base import ObjectAlreadyExistsError, ObjectNotFoundError
 from agent_env.store.local_state import ensure_state_dir
-from agent_env.store.object_store.object_store import DEFAULT_CONTENT_TYPE, ObjectMetadata, ObjectStore
+from agent_env.store.object_store.local_grants.server import grant_server
+from agent_env.store.object_store.local_grants.tls import check_local_host
+from agent_env.store.object_store.local_grants.tokens import Op
+from agent_env.store.object_store.object_store import (
+    DEFAULT_CONTENT_TYPE,
+    ObjectMetadata,
+    ObjectStore,
+    UploadPolicy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -28,13 +41,29 @@ _NO_HARD_LINKS = frozenset({errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.
 
 
 class LocalFilesystemObjectStore(ObjectStore):
-    """ObjectStore backed by a local directory tree.
+    """ObjectStore backed by a local directory tree, ``<state root>/object_store`` unless ``root`` is given.
 
     A write lands whole or not at all, and keeps any content type but the default. The root-level ``.gitignore``,
-    ``.agentenv-meta`` and ``.agentenv-tmp`` keys are reserved for the store's own files."""
+    ``.agentenv-meta`` and ``.agentenv-tmp`` keys are reserved for the store's own files.
 
-    def __init__(self, root: str) -> None:
-        self._root = Path(root)
+    Its HTTPS transfer grants are served by a server in this process, started by the first grant: it listens on
+    ``grant_bind_host`` (by default loopback, or the Docker bridge gateway on Linux) and grant URLs name
+    ``grant_advertise_host`` (by default ``host.docker.internal``), which must be a local name or a loopback or
+    private address. A grant works until it expires or this process exits."""
+
+    def __init__(
+        self, root: str | None = None, *, grant_bind_host: str | None = None, grant_advertise_host: str | None = None
+    ) -> None:
+        if grant_bind_host is not None:
+            try:
+                ipaddress.ip_address(grant_bind_host)
+            except ValueError:
+                raise ValueError(f"grant_bind_host must be an IP address, got {grant_bind_host!r}") from None
+        if grant_advertise_host is not None:
+            check_local_host(grant_advertise_host)
+        self._root = Path(root) if root is not None else state_root() / "object_store"
+        self._grant_bind_host = grant_bind_host
+        self._grant_advertise_host = grant_advertise_host
 
     @property
     def root(self) -> Path:
@@ -125,6 +154,41 @@ class LocalFilesystemObjectStore(ObjectStore):
         if path != root and root not in path.parents:
             raise ValueError(f"{object_url!r} is not an object in {root}.")
         return path.relative_to(root).as_posix()
+
+    def issue_read_grant(self, object_url: str, *, expires_in: int = 3600) -> HttpGetGrant:
+        url, expires_at = self._grant("get", expires_in, key=self._grant_key(object_url))
+        return HttpGetGrant(kind="http-get", url=url, expires_at=expires_at)
+
+    def issue_write_grant(
+        self, object_url: str, *, media_type: str, max_bytes: int, expires_in: int = 3600
+    ) -> HttpPutGrant:
+        url, expires_at = self._grant(
+            "put", expires_in, key=self._grant_key(object_url), max_bytes=max_bytes, content_type=media_type
+        )
+        return HttpPutGrant(kind="http-put", url=url, expires_at=expires_at, headers={"Content-Type": media_type})
+
+    def issue_upload_policy(self, prefix_url: str, *, max_object_bytes: int, expires_in: int) -> UploadPolicy:
+        key = self.get_object_key(prefix_url)
+        url, expires_at = self._grant(
+            "post", expires_in, prefix="" if key == "." else key + "/", max_bytes=max_object_bytes
+        )
+        return UploadPolicy(
+            write=HttpPostPolicyGrant(kind="http-post-policy", url=url, fields={}, path_field="key", file_field="file"),
+            expires_at=expires_at,
+        )
+
+    def _grant(self, op: Op, expires_in: int, **scope) -> tuple[str, datetime]:
+        if expires_in <= 0:
+            raise ValueError(f"expires_in must be positive, got {expires_in}")
+        expires = int(time.time()) + expires_in
+        server = grant_server(self._grant_bind_host, self._grant_advertise_host)
+        return server.issue(self, op, expires, **scope), datetime.fromtimestamp(expires, timezone.utc)
+
+    def _grant_key(self, object_url: str) -> str:
+        """The key of the one object at ``object_url``, refusing the store's own files."""
+        key = self.get_object_key(object_url)
+        self._resolve(key)
+        return key
 
     def _resolve(self, key: str) -> Path:
         root = self._root.resolve()
