@@ -583,3 +583,16 @@ def test_a_second_run_of_the_bundle_waits_for_the_first_to_finish_writing(bundle
 def test_version_of_names_what_isnt_a_write(bundle_dir):
     with pytest.raises(KeyError, match="isn't one of this plan's writes"):
         _run(bundle_dir).version_of("env", f"{ROOT}/nothing")
+
+
+def test_a_dry_run_preflights_a_step_over_a_reused_artifact_named_like_a_rewritten_agent(bundle_dir, monkeypatch):
+    _put_image("solver-image")
+    layout(bundle_dir, {"agents/greeting/agent.toml": 'image = "solver-image"\n'})
+    _steps(bundle_dir, [{"id": "check", "type": "checked_materialize_test", "artifact_id": "greeting"},
+                        {"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "greeting"}])
+    _run(bundle_dir)
+    (bundle_dir / "agents/greeting/agent.toml").write_text('image = "solver-image"\n[default_env_vars]\nA = "1"\n')
+    monkeypatch.setattr(_Checked, "problems", ["the script is gone"])
+
+    assert _problems(lambda: _run(bundle_dir, dry_run=True)) == ("tasks/t.json: the script is gone",)
+    assert _problems(lambda: _run(bundle_dir)) == ("tasks/t.json: the script is gone",)

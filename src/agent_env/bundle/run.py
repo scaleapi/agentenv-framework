@@ -234,8 +234,9 @@ def dry_run_bundle(
     the one it would reuse or the store's next, which another run writing the id first can take. ``on_progress``
     is given the line ``run_bundle`` gives for each write, as it is checked.
 
-    It raises what ``run_bundle`` raises before anything is written, except that it runs no event loop, so a
-    running one isn't refused."""
+    It raises what ``run_bundle`` raises before its first task runs, a failed preflight included. Like
+    ``run_bundle``, it turns namespace routing on for the whole process while it runs, so it suits the CLI and
+    scripts, not a service; it runs no event loop, so a running one isn't refused."""
     if sandbox:
         build_sandbox_provider(sandbox)
     say = _progress(on_progress)

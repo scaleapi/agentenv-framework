@@ -244,7 +244,7 @@ class _Resolver:
         if not absent:
             return True
         try:
-            read = build_step(step).to_dict()
+            read = build_step({key: value for key, value in step.items() if key != "depends_on"}).to_dict()
         except Exception as e:
             self._problem(entry, f"step {step.get('id')!r}: {cls.type} can't read it ({type(e).__name__}: {e})")
             return False

@@ -430,3 +430,13 @@ def test_entities_without_references_resolve_to_a_copy_of_their_config(make):
         (BundleKind.ARTIFACT, "base-mcp"): (), (BundleKind.SKILL, "pdf"): (),
     }
     assert [image.entry.kind for image in result.built_images] == [BundleKind.AGENT]
+
+
+@pytest.mark.parametrize(("depends_on", "problem"), [
+    ("tickets", "depends_on is a list of step ids, not 'tickets'"),
+    ([7], 'a depends_on entry is a step id or {"task_step_id": "<step id>"}, not 7'),
+])
+def test_a_bad_depends_on_on_a_step_deriving_its_output_is_named_once(make, depends_on, problem):
+    assert problems(make(tasks={"t": [
+        {"id": "cli", "type": "build_mcp_cli", "env_id": "tickets", "command_name": "c", "depends_on": depends_on},
+    ]})) == (f"tasks/t.json: step 'cli': {problem}",)

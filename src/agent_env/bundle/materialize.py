@@ -95,7 +95,7 @@ def materialize(
     with nullcontext() if dry_run else materializing(plan.bundle.bundle, on_wait):
         for write in entities:
             through_ledger(write, lambda: _WRITERS[write.kind](plan, write))
-        unwritten = {item.write.id for item in done.values() if not item.reused} if dry_run else set()
+        unwritten = {_key(item.write) for item in done.values() if not item.reused} if dry_run else set()
         built, problems, unchecked = {}, [], []
         for write in tasks:
             with _noted(plan, write, "preflighting"):
@@ -201,16 +201,17 @@ def _build(write: Write) -> Task:
     return Task(id=write.id, version=None, steps=[build_step(step) for step in write.source.config])
 
 
-def _preflight(write: Write, task: Task, unwritten: set[str]) -> tuple[list[str], list[TaskStep]]:
-    """``task``'s preflight problems, and the steps with a preflight left unchecked because they read an id in
-    ``unwritten``, which a dry run would write first. A step reading one of the task's own outputs is skipped
+def _preflight(write: Write, task: Task, unwritten: set[tuple[str, str]]) -> tuple[list[str], list[TaskStep]]:
+    """``task``'s preflight problems, and the steps with a preflight left unchecked because they read a
+    (store, id) in ``unwritten``, which a dry run would write first; an artifact and an agent can share an id. A step reading one of the task's own outputs is skipped
     too, and not listed: the output only exists once the task runs."""
     outputs = {output.id for output in write.source.outputs}
     problems, unchecked = [], []
     for config, step in zip(write.source.config, task.steps):
-        if _reads_any(config, outputs):
+        reads = _reads(config)
+        if any(id in outputs for _, id in reads):
             continue
-        if _reads_any(config, unwritten):
+        if reads & unwritten:
             if type(step).preflight is not TaskStep.preflight:
                 unchecked.append(step)
             continue
@@ -218,9 +219,10 @@ def _preflight(write: Write, task: Task, unwritten: set[str]) -> tuple[list[str]
     return problems, unchecked
 
 
-def _reads_any(step: dict, ids: set[str]) -> bool:
+def _reads(step: dict) -> set[tuple[str, str]]:
+    """The (store, id) of each entity ``step`` reads."""
     refs = get_task_step_registry()[step["type"]].entity_refs or ()
-    return any(site.value in ids for site in ref_sites(refs, step) if site.ref.role is RefRole.INPUT)
+    return {(site.ref.kind.value, site.value) for site in ref_sites(refs, step) if site.ref.role is RefRole.INPUT}
 
 
 def _key(write: Write) -> tuple[str, str]:

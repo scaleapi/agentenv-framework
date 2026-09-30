@@ -53,7 +53,8 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
 
     --dry-run makes the checks the run makes before its first task, reading the stores as the run does, and
     prints what it would write and run, writing and running nothing. It exits 1 on a problem the run would
-    stop at, and 0 otherwise; --model and --keep change nothing it shows.
+    stop at, and 0 otherwise; --model and --keep change nothing it shows. It takes no lock, so another run
+    can write first and change what it shows.
 
     Each run's sandboxes are torn down as it ends; its instance and outputs stay. --keep holds them up
     until Ctrl-C instead. Ctrl-C or SIGTERM mid-run cancels the runs, tears them down, prints what ran and
