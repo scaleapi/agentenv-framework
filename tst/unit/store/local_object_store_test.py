@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from agent_env.store import LocalFilesystemObjectStore, ObjectAlreadyExistsError
+from agent_env.store.object_store import local_object_store
 from tst.store import object_conformance
 
 
@@ -220,6 +221,9 @@ def test_without_hard_links_a_racing_write_once_put_keeps_the_winner(store, monk
     assert store.read("race/once") == b"first"
 
 
+_needs_flock = pytest.mark.skipif(os.name == "nt", reason="holds a lock with flock, which Windows lacks")
+
+
 def _hold_lock(lock_file):
     """A process holding ``lock_file`` exclusively until killed, as a writer mid-commit would."""
     holder = subprocess.Popen(
@@ -242,6 +246,7 @@ def no_hard_links(store, monkeypatch):
     store.put("seed", b"s")  # creates the staging directory
 
 
+@_needs_flock
 def test_without_hard_links_a_claim_dies_with_its_holder(store, tmp_path, no_hard_links):
     """The claim is a lock the kernel drops when its holder exits, so a crashed writer never blocks the key."""
     holder = _hold_lock(store._lock_path((tmp_path / "left/x").resolve()))
@@ -299,6 +304,7 @@ def test_listings_leave_out_the_stores_own_files(store, tmp_path):
     assert staging == ["crash-residue"]  # committed writes leave nothing staged
 
 
+@_needs_flock
 def test_a_type_is_never_read_while_a_write_to_the_key_is_in_progress(store, tmp_path):
     store.put("busy/x", b"typed", content_type="text/plain")
     holder = _hold_lock(store._lock_path((tmp_path / "busy/x").resolve()))
@@ -316,34 +322,74 @@ def test_a_type_is_never_read_while_a_write_to_the_key_is_in_progress(store, tmp
     assert read[0].content_type == "text/plain"
 
 
-def test_an_overwrite_cut_short_leaves_the_type_unknown_not_the_old_one(store, tmp_path, monkeypatch):
-    store.put("cut/x", b"first", content_type="text/plain")
+def _failing_replace(monkeypatch, suffix):
     real_replace = os.replace
 
     def replace(src, dst):
-        if str(dst).endswith("cut/x") and ".agentenv-meta" not in str(dst):
+        if str(dst).endswith(suffix):
             raise OSError(errno.EIO, "disk went away")
         real_replace(src, dst)
 
     monkeypatch.setattr(os, "replace", replace)
+
+
+def test_an_overwrite_whose_bytes_do_not_land_keeps_the_old_type(store, tmp_path, monkeypatch):
+    store.put("cut/x", b"first", content_type="text/plain")
+    _failing_replace(monkeypatch, str(tmp_path / "cut/x"))
     with pytest.raises(OSError, match="disk went away"):
         store.put("cut/x", b"second", content_type="application/json", allow_overwrite=True)
-    assert (store.read("cut/x"), store.get_object_metadata("cut/x").content_type) == (b"first", None)
+    assert (store.read("cut/x"), store.get_object_metadata("cut/x").content_type) == (b"first", "text/plain")
 
 
-def test_a_store_sweeps_files_staged_by_writes_that_died(tmp_path):
+def test_an_overwrite_whose_cleanup_fails_still_succeeds(store, tmp_path, monkeypatch):
+    store.put("clean/x", b"first", content_type="text/plain")
+    real_unlink = Path.unlink
+
+    def unlink(self, missing_ok=False):
+        if "aside-" in self.name:
+            raise OSError(errno.EIO, "disk went away")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    store.put("clean/x", b"second!", content_type="application/json", allow_overwrite=True)
+    assert (store.read("clean/x"), store.get_object_metadata("clean/x").content_type) == (b"second!", "application/json")
+
+
+@_needs_flock
+def test_a_write_that_cannot_lock_its_staged_file_leaves_nothing_staged(store, tmp_path, monkeypatch):
+    def no_lock(fd, op):
+        raise OSError(errno.ENOLCK, "no locks available")
+
+    monkeypatch.setattr(local_object_store.fcntl, "flock", no_lock)
+    with pytest.raises(OSError, match="no locks"):
+        store.put("nolock/x", b"v")
+    assert [n for n in os.listdir(tmp_path / ".agentenv-tmp") if n.startswith("staged-")] == []
+
+
+def test_an_overwrite_whose_type_cannot_be_recorded_reads_unknown_not_the_old_type(store, tmp_path, monkeypatch):
+    store.put("cut/y", b"first", content_type="text/plain")
+    _failing_replace(monkeypatch, str(tmp_path / ".agentenv-meta" / "cut/y"))
+    store.put("cut/y", b"second!", content_type="application/json", allow_overwrite=True)
+    assert (store.read("cut/y"), store.get_object_metadata("cut/y").content_type) == (b"second!", None)
+
+
+@_needs_flock
+def test_a_store_sweeps_only_files_no_live_write_holds(tmp_path):
     staging = tmp_path / ".agentenv-tmp"
     staging.mkdir()
-    dead, live = staging / "staged-dead", staging / "staged-live"
-    dead.write_bytes(b"half")
-    live.write_bytes(b"in progress")
-    os.utime(dead, (time.time() - 7200, time.time() - 7200))
-    (staging / "lock-00").write_bytes(b"")
-    os.utime(staging / "lock-00", (time.time() - 7200, time.time() - 7200))
-
-    LocalFilesystemObjectStore(str(tmp_path)).put("k", b"v")
-
-    assert not dead.exists() and live.exists() and (staging / "lock-00").exists()
+    hour_ago = (time.time() - 3600, time.time() - 3600)
+    dead, paused, fresh = staging / "staged-dead", staging / "staged-paused", staging / "staged-fresh"
+    for f in (dead, paused, fresh, staging / "lock-00"):
+        f.write_bytes(b"half")
+    for f in (dead, paused, staging / "lock-00"):
+        os.utime(f, hour_ago)
+    holder = _hold_lock(paused)  # a live write paused for an hour
+    try:
+        LocalFilesystemObjectStore(str(tmp_path)).put("k", b"v")
+    finally:
+        holder.kill()
+    assert not dead.exists()
+    assert paused.exists() and fresh.exists() and (staging / "lock-00").exists()
 
 
 def test_list_of_an_unwritten_store_is_empty(tmp_path):

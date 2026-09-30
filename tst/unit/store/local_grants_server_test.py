@@ -1,7 +1,10 @@
 """The local store's grants against its real grant server, over HTTPS on loopback: the conformance
 grant cases, and the bounds and refusals S3 would apply to the same requests."""
 
+import os
 import subprocess
+import sys
+import threading
 import time
 
 import httpx
@@ -66,6 +69,32 @@ def test_a_read_returns_the_exact_bytes_and_type(store):
     assert response.headers["content-type"] == "application/json"
     assert response.headers["content-length"] == "9"
     assert "content-encoding" not in response.headers
+
+
+@pytest.mark.skipif(os.name == "nt", reason="holds the key's lock with flock, which Windows lacks")
+def test_a_download_waits_for_a_write_to_its_key(store):
+    """Bytes and type are read from one file under the key's lock, so a download never mixes two writes."""
+    grant = store.issue_read_grant(store.put("a/held", b"typed", content_type="text/plain")).url
+    holder = subprocess.Popen(
+        [sys.executable, "-c", (
+            "import fcntl, sys, time; f = open(sys.argv[1], 'a'); fcntl.flock(f, fcntl.LOCK_EX); "
+            "print('locked', flush=True); time.sleep(60)"
+        ), str(store._lock_path((store.root / "a/held").resolve()))],
+        stdout=subprocess.PIPE, text=True,
+    )
+    try:
+        assert holder.stdout.readline().strip() == "locked"
+        got = []
+        download = threading.Thread(target=lambda: got.append(httpx.get(grant, timeout=10)))
+        download.start()
+        download.join(0.3)
+        assert download.is_alive()
+        holder.kill()
+        holder.wait()
+        download.join(10)
+    finally:
+        holder.kill()
+    assert (got[0].status_code, got[0].content, got[0].headers["content-type"]) == (200, b"typed", "text/plain; charset=utf-8")
 
 
 def test_a_read_of_a_missing_object_is_404(store):
