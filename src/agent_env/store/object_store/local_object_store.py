@@ -22,6 +22,9 @@ from agentenv_protocol.transfers import HttpGetGrant, HttpPostPolicyGrant, HttpP
 
 from agent_env.config.paths import state_root
 from agent_env.store.base import ObjectAlreadyExistsError, ObjectNotFoundError
+
+if os.name != "nt":
+    import fcntl
 from agent_env.store.local_state import ensure_state_dir
 from agent_env.store.object_store.local_grants.server import grant_server
 from agent_env.store.object_store.local_grants.tls import check_local_host
@@ -38,9 +41,8 @@ logger = logging.getLogger(__name__)
 _META_DIR = ".agentenv-meta"  # each object's content type, at the object's own key
 _STAGING_DIR = ".agentenv-tmp"  # files being written, inside the root so a rename into place is atomic
 _RESERVED = (".gitignore", _META_DIR, _STAGING_DIR)
-# A filesystem without hard links: a no-overwrite write claims its key with a marker file instead.
+# A filesystem without hard links: a no-overwrite write claims its key with a lock instead.
 _NO_HARD_LINKS = frozenset({errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EXDEV, errno.EMLINK})
-_UNWRITTEN_CLAIM_SECONDS = 10  # a marker is given its owner's pid as it is created; one still empty this long never will be
 
 
 class LocalFilesystemObjectStore(ObjectStore):
@@ -275,26 +277,16 @@ class LocalFilesystemObjectStore(ObjectStore):
 
     @contextlib.contextmanager
     def _claimed(self, path: Path) -> Iterator[None]:
-        """The sole right to create ``path``, where no hard link can claim it: a marker in the staging directory,
-        created exclusively and naming its owner's pid. A writer that finds one waits for it to go, and takes it
-        over only once its owner has exited."""
+        """The sole right to create ``path``, where no hard link can claim it: an exclusive lock on a file in the
+        staging directory, which the kernel drops if its holder dies. The file stays, so every writer locks the
+        same one."""
         marker = self._root / _STAGING_DIR / f"{hashlib.sha256(str(path).encode()).hexdigest()}.claim"
-        while True:
+        with marker.open("a") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
             try:
-                fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            except FileExistsError:
-                if _abandoned(marker):
-                    marker.unlink(missing_ok=True)
-                else:
-                    time.sleep(0.01)
-                continue
-            with os.fdopen(fd, "w") as f:
-                f.write(str(os.getpid()))
-            break
-        try:
-            yield
-        finally:
-            marker.unlink(missing_ok=True)
+                yield
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
 
     def _read_content_type(self, path: Path, st: os.stat_result | None = None) -> str | None:
         """The content type recorded for the object at ``path``, if it was recorded for this very file; None
@@ -332,23 +324,6 @@ def _stamp(staged: Path) -> list[int]:
 def _identity(st: os.stat_result) -> list[int]:
     return [st.st_size, st.st_mtime_ns]
 
-
-def _abandoned(marker: Path) -> bool:
-    """Whether a claim marker's owner has exited, or never got to name itself."""
-    try:
-        owner = marker.read_text()
-        age = time.time() - marker.stat().st_mtime
-    except FileNotFoundError:
-        return False
-    if not owner:
-        return age > _UNWRITTEN_CLAIM_SECONDS
-    try:
-        os.kill(int(owner), 0)
-    except ProcessLookupError:
-        return True
-    except (PermissionError, ValueError):
-        return False
-    return False
 
 
 @contextlib.contextmanager
