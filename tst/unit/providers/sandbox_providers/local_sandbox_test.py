@@ -428,8 +428,8 @@ async def test_create_vm_publishes_on_an_allocated_host_port_not_the_requested_o
 
     assert sandbox.host_port(8000) == 41001
     assert sandbox.host_port(9001) == 41002
-    assert sandbox.tunnel_urls[8000] == "http://localhost:41001"
-    assert sandbox.tunnel_urls[9001] == "http://localhost:41002"
+    assert sandbox.tunnel_urls[8000] == "http://127.0.0.1:41001"
+    assert sandbox.tunnel_urls[9001] == "http://127.0.0.1:41002"
     # An unexposed port has nothing published, so it falls back to identity.
     assert sandbox.host_port(7777) == 7777
 
@@ -511,7 +511,7 @@ def test_host_ips_add_the_bridge_gateway_on_linux(monkeypatch, real_host_ips, tm
     assert sandbox.host_ips == ("127.0.0.1", "172.17.0.1")
     assert sandbox.host_ips == ("127.0.0.1", "172.17.0.1")
     assert [_query(args) for args, _ in runs] == ["info", "network ls", "network inspect"]
-    assert all(kwargs["timeout"] and kwargs["check"] for _, kwargs in runs)
+    assert all(kwargs["timeout"] for _, kwargs in runs)
 
 
 def test_host_ips_are_loopback_on_docker_desktop_for_linux(monkeypatch, real_host_ips, tmp_path):
@@ -535,7 +535,7 @@ def test_a_daemon_that_fails_once_is_asked_again(monkeypatch, real_host_ips, tmp
     outputs = {**_ENGINE, failing: None}
     _fake_docker(monkeypatch, outputs)
 
-    with pytest.raises(ls.subprocess.CalledProcessError):
+    with pytest.raises(RuntimeError, match="Cannot connect to the Docker daemon"):
         LocalSandbox(work_dir=tmp_path).host_ips
     outputs[failing] = _ENGINE[failing]
     assert LocalSandbox(work_dir=tmp_path).host_ips == ("127.0.0.1", "172.17.0.1")
@@ -549,15 +549,15 @@ def _query(args):
 
 
 def _fake_docker(monkeypatch, outputs):
-    """``docker <query>`` answers ``outputs[query]``; ``None`` fails the call, as ``subprocess.run(check=True)`` would."""
+    """``docker <query>`` answers ``outputs[query]``; ``None`` fails the call, as a daemon that is down would."""
     runs = []
 
     def run(args, **kwargs):
         runs.append((args, kwargs))
         out = outputs[_query(args)]
         if out is None:
-            raise ls.subprocess.CalledProcessError(1, args)
-        return SimpleNamespace(returncode=0, stdout=f"{out}\n")
+            return SimpleNamespace(returncode=1, stdout="", stderr="Cannot connect to the Docker daemon at unix:///var/run/docker.sock.\n")
+        return SimpleNamespace(returncode=0, stdout=f"{out}\n", stderr="")
 
     monkeypatch.setattr(ls.platform, "system", lambda: "Linux")
     monkeypatch.setattr(ls.subprocess, "run", run)

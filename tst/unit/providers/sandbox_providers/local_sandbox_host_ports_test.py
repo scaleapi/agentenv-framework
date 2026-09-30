@@ -91,4 +91,4 @@ async def test_tunnel_urls_stay_keyed_by_container_port(fake_ports):
 
     assert set(sandbox.tunnel_urls) == set(RESERVED)
     for port in RESERVED:
-        assert sandbox.tunnel_urls[port] == f"http://localhost:{sandbox.host_port(port)}"
+        assert sandbox.tunnel_urls[port] == f"http://127.0.0.1:{sandbox.host_port(port)}"

@@ -59,7 +59,7 @@ Every backend in `agent-env` is a seam: a TOML table naming `impl = "module.path
 - **uv** for the one-command install below. `pip` works too; see the alternative in [Install the packages](#install-the-packages).
 - **Docker** with a running daemon, needed at the point of use: the `local` sandbox, every `put` that builds an image, and the first-run bootstrap of `agent-env up`. The unit tests need neither Docker nor network.
 - **A model endpoint** for anything that prompts or judges an agent: any OpenAI-compatible base URL and key, or provider-prefixed model names routed natively. See [Point at a model](#point-at-a-model).
-- **Trust model.** The `local` sandbox runs environments and agents as ordinary containers on your Docker daemon, one compose stack per deploy, with host ports published on the machine. Treat it as a development convenience, not a security boundary. The explorer served by `agent-env up` binds `127.0.0.1` only, has no `host` setting, and rejects foreign `Host` headers with HTTP 421. Configuration values hold references (`env:NAME`, `secret:KEY`), not secrets; the run context written to disk strips API keys. agent-env does not copy your AWS credentials into agent or environment containers unless the S3 object store opts in with `share_credentials` (see [Stores and secrets](#stores-and-secrets)). Every HTTP client agent-env makes verifies TLS; there is no setting or variable that turns that off.
+- **Trust model.** The `local` sandbox runs environments and agents as ordinary containers on your Docker daemon, one compose stack per deploy, with host ports published on `127.0.0.1` only. On native Linux the gateway and agent ports are also published on the Docker bridge address, which is how containers reach the host, so a machine that routes the bridge subnet through yours can reach them. Treat it as a development convenience, not a security boundary. The explorer served by `agent-env up` binds `127.0.0.1` only, has no `host` setting, and rejects foreign `Host` headers with HTTP 421. Configuration values hold references (`env:NAME`, `secret:KEY`), not secrets; the run context written to disk strips API keys. agent-env does not copy your AWS credentials into agent or environment containers unless the S3 object store opts in with `share_credentials` (see [Stores and secrets](#stores-and-secrets)). Every HTTP client agent-env makes verifies TLS; there is no setting or variable that turns that off.
 
 ### Install the packages
 
@@ -254,10 +254,10 @@ Found env: id=<env-id> version=1 type=mcp_server
 Deploying (ttl=1800s, gateway_mode=performance, disk=10.0GB)...
 Deployed!
 Instance ID: <instance-id>
-Env MCP Url: http://localhost:<port>/mcp
-Env Gateway Url: http://localhost:<port>
-Env DB Web Url: http://localhost:<port>/
-Env DB MCP Url: http://localhost:<port>/mcp
+Env MCP Url: http://127.0.0.1:<port>/mcp
+Env Gateway Url: http://127.0.0.1:<port>
+Env DB Web Url: http://127.0.0.1:<port>/
+Env DB MCP Url: http://127.0.0.1:<port>/mcp
 Expires At (UTC): <timestamp>
 ```
 

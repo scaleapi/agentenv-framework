@@ -245,7 +245,8 @@ def test_postgres_sidecar_fragment_defaults_to_identity(stub_postgres):
 
 @pytest.mark.parametrize("host_ips", [("127.0.0.1",), ("127.0.0.1", "172.17.0.1")], ids=["loopback", "loopback-and-bridge"])
 def test_gateway_compose_publishes_only_on_the_host_ips(stub_postgres, host_ips):
-    """Each port once per host IP, and none on every interface."""
+    """Each port once per host IP, and none on every interface. pgweb and db-mcp, opened only from the
+    host, stay off the bridge address."""
     compose = EnvironmentGatewayProvider.create_docker_compose(
         EnvironmentGatewayProvider.__new__(EnvironmentGatewayProvider),
         mcp_servers=[MCPServerConfig(image="slack:test", environment_name="slack")],
@@ -257,8 +258,9 @@ def test_gateway_compose_publishes_only_on_the_host_ips(stub_postgres, host_ips)
         host_ips=host_ips,
     )
 
-    ports = [(AGENT_ENV_GATEWAY_MCP_PORT, AGENT_ENV_GATEWAY_MCP_PORT), (DB_WEB_PORT, DB_WEB_PORT),
-             (DB_MCP_PORT, DB_MCP_CONTAINER_PORT), (18768, 8000)]
+    everywhere = [(AGENT_ENV_GATEWAY_MCP_PORT, AGENT_ENV_GATEWAY_MCP_PORT), (18768, 8000)]
+    host_only = [(DB_WEB_PORT, DB_WEB_PORT), (DB_MCP_PORT, DB_MCP_CONTAINER_PORT)]
     assert sorted(_PORT_PAIR.findall(compose)) == sorted(
-        (ip, str(host + OFFSET), str(container)) for ip in host_ips for host, container in ports
+        [(ip, str(host + OFFSET), str(container)) for ip in host_ips for host, container in everywhere]
+        + [(host_ips[0], str(host + OFFSET), str(container)) for host, container in host_only]
     )

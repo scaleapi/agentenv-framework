@@ -114,8 +114,9 @@ class LocalSandbox(VmSandbox):
             port: port for port in (exposed_ports or [])
         }
         # Keyed by container port: callers index this with the well-known constants.
+        # 127.0.0.1, not localhost: ports are published on IPv4 loopback, and a client may try ::1 first.
         self.tunnel_urls = {
-            container: f"http://localhost:{host}" for container, host in self._port_map.items()
+            container: f"http://127.0.0.1:{host}" for container, host in self._port_map.items()
         }
         self.vnc_url = None
         self.mode = SANDBOX_MODE_VM
@@ -428,9 +429,10 @@ def _host_ips() -> tuple[str, ...]:
 
 def _docker(*args: str) -> str:
     """A docker CLI query's output. A failure raises, so the cache above never keeps it."""
-    return subprocess.run(
-        ["docker", *args], capture_output=True, text=True, check=True, timeout=_DOCKER_QUERY_SECONDS,
-    ).stdout.strip()
+    run = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=_DOCKER_QUERY_SECONDS)
+    if run.returncode:
+        raise RuntimeError(f"docker {' '.join(args)} failed: {run.stderr.strip()}")
+    return run.stdout.strip()
 
 
 _DOCKER_QUERY_SECONDS = 30
