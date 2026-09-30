@@ -420,15 +420,17 @@ def _host_ips() -> tuple[str, ...]:
     # Docker Desktop publishes through a host-side proxy, which can't bind the bridge address inside its VM.
     if platform.system() != "Linux" or _docker("info", "--format", "{{.OperatingSystem}}") == "Docker Desktop":
         return ("127.0.0.1",)
-    # The daemon just answered, so this failing means it has no default bridge.
-    gateway = _docker("network", "inspect", "bridge", "--format", "{{(index .IPAM.Config 0).Gateway}}", check=False)
-    return ("127.0.0.1", gateway) if gateway else ("127.0.0.1",)
+    # Listing, unlike inspecting, answers a missing network with nothing rather than an error.
+    if not _docker("network", "ls", "--quiet", "--filter", "name=^bridge$"):
+        return ("127.0.0.1",)
+    return ("127.0.0.1", _docker("network", "inspect", "bridge", "--format", "{{(index .IPAM.Config 0).Gateway}}"))
 
 
-def _docker(*args: str, check: bool = True) -> str:
-    """A docker CLI query's output. A failure raises, so the cache above never keeps it, unless ``check=False``."""
-    run = subprocess.run(["docker", *args], capture_output=True, text=True, check=check, timeout=_DOCKER_QUERY_SECONDS)
-    return run.stdout.strip() if run.returncode == 0 else ""
+def _docker(*args: str) -> str:
+    """A docker CLI query's output. A failure raises, so the cache above never keeps it."""
+    return subprocess.run(
+        ["docker", *args], capture_output=True, text=True, check=True, timeout=_DOCKER_QUERY_SECONDS,
+    ).stdout.strip()
 
 
 _DOCKER_QUERY_SECONDS = 30

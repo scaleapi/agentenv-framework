@@ -505,50 +505,59 @@ def test_host_ips_are_loopback_off_linux(monkeypatch, real_host_ips, tmp_path):
 
 def test_host_ips_add_the_bridge_gateway_on_linux(monkeypatch, real_host_ips, tmp_path):
     """On Linux host.docker.internal is the bridge gateway (host-gateway), which cannot reach a loopback-only port."""
-    runs = _fake_docker(monkeypatch, {"info": "Ubuntu 24.04.3 LTS", "network": "172.17.0.1"})
+    runs = _fake_docker(monkeypatch, {**_ENGINE})
     sandbox = LocalSandbox(work_dir=tmp_path)
 
     assert sandbox.host_ips == ("127.0.0.1", "172.17.0.1")
     assert sandbox.host_ips == ("127.0.0.1", "172.17.0.1")
-    assert [args[:2] for args, _ in runs] == [["docker", "info"], ["docker", "network"]]
-    assert all(kwargs["timeout"] for _, kwargs in runs)
+    assert [_query(args) for args, _ in runs] == ["info", "network ls", "network inspect"]
+    assert all(kwargs["timeout"] and kwargs["check"] for _, kwargs in runs)
 
 
 def test_host_ips_are_loopback_on_docker_desktop_for_linux(monkeypatch, real_host_ips, tmp_path):
     """Its proxy can't bind the bridge address, which lives in its VM (docker/desktop-feedback#485)."""
-    runs = _fake_docker(monkeypatch, {"info": "Docker Desktop", "network": "172.17.0.1"})
+    runs = _fake_docker(monkeypatch, {**_ENGINE, "info": "Docker Desktop"})
 
     assert LocalSandbox(work_dir=tmp_path).host_ips == ("127.0.0.1",)
-    assert [args[:2] for args, _ in runs] == [["docker", "info"]]
+    assert [_query(args) for args, _ in runs] == ["info"]
 
 
 def test_host_ips_are_loopback_without_a_default_bridge(monkeypatch, real_host_ips, tmp_path):
-    _fake_docker(monkeypatch, {"info": "Ubuntu 24.04.3 LTS", "network": None})
+    runs = _fake_docker(monkeypatch, {**_ENGINE, "network ls": ""})
 
     assert LocalSandbox(work_dir=tmp_path).host_ips == ("127.0.0.1",)
+    assert [_query(args) for args, _ in runs] == ["info", "network ls"]
 
 
-def test_a_daemon_that_fails_once_is_asked_again(monkeypatch, real_host_ips, tmp_path):
+@pytest.mark.parametrize("failing", ["info", "network ls", "network inspect"])
+def test_a_daemon_that_fails_once_is_asked_again(monkeypatch, real_host_ips, tmp_path, failing):
     """Caching a failed lookup would keep later agents off the bridge, and so away from their gateways."""
-    outputs = {"info": None, "network": "172.17.0.1"}
+    outputs = {**_ENGINE, failing: None}
     _fake_docker(monkeypatch, outputs)
 
     with pytest.raises(ls.subprocess.CalledProcessError):
         LocalSandbox(work_dir=tmp_path).host_ips
-    outputs["info"] = "Ubuntu 24.04.3 LTS"
+    outputs[failing] = _ENGINE[failing]
     assert LocalSandbox(work_dir=tmp_path).host_ips == ("127.0.0.1", "172.17.0.1")
 
 
+_ENGINE = {"info": "Ubuntu 24.04.3 LTS", "network ls": "38411e70d045", "network inspect": "172.17.0.1"}
+
+
+def _query(args):
+    return "info" if args[1] == "info" else " ".join(args[1:3])
+
+
 def _fake_docker(monkeypatch, outputs):
-    """``docker <command>`` answers ``outputs[command]``; ``None`` fails the call, as ``subprocess.run`` would."""
+    """``docker <query>`` answers ``outputs[query]``; ``None`` fails the call, as ``subprocess.run(check=True)`` would."""
     runs = []
 
     def run(args, **kwargs):
         runs.append((args, kwargs))
-        out = outputs[args[1]]
-        if out is None and kwargs.get("check"):
+        out = outputs[_query(args)]
+        if out is None:
             raise ls.subprocess.CalledProcessError(1, args)
-        return SimpleNamespace(returncode=1 if out is None else 0, stdout=f"{out or ''}\n")
+        return SimpleNamespace(returncode=0, stdout=f"{out}\n")
 
     monkeypatch.setattr(ls.platform, "system", lambda: "Linux")
     monkeypatch.setattr(ls.subprocess, "run", run)
