@@ -90,6 +90,8 @@ def test_the_mapping_guard_reads_every_quoting():
     """Compose accepts a mapping in any of the three forms, so a hand-written one can't slip past as another."""
     for entry in ('- "8080:8080"', "- '8080:8080'", "- 8080:8080"):
         assert _PORT_PAIR.findall(entry) == [("", "8080", "8080")]
+    # With an IP in front, the IP is its own field and the host port is still the second.
+    assert _PORT_PAIR.findall('- "127.0.0.1:18768:8000"') == [("127.0.0.1", "18768", "8000")]
 
 
 def test_source_guard_flags_a_fixed_host_port():

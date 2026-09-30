@@ -420,13 +420,14 @@ def _host_ips() -> tuple[str, ...]:
     # Docker Desktop publishes through a host-side proxy, which can't bind the bridge address inside its VM.
     if platform.system() != "Linux" or _docker("info", "--format", "{{.OperatingSystem}}") == "Docker Desktop":
         return ("127.0.0.1",)
-    gateway = _docker("network", "inspect", "bridge", "--format", "{{(index .IPAM.Config 0).Gateway}}")
+    # The daemon just answered, so this failing means it has no default bridge.
+    gateway = _docker("network", "inspect", "bridge", "--format", "{{(index .IPAM.Config 0).Gateway}}", check=False)
     return ("127.0.0.1", gateway) if gateway else ("127.0.0.1",)
 
 
-def _docker(*args: str) -> str:
-    """A docker CLI query's output, or ``""`` when it fails (e.g. a daemon with no default bridge)."""
-    run = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=_DOCKER_QUERY_SECONDS)
+def _docker(*args: str, check: bool = True) -> str:
+    """A docker CLI query's output. A failure raises, so the cache above never keeps it, unless ``check=False``."""
+    run = subprocess.run(["docker", *args], capture_output=True, text=True, check=check, timeout=_DOCKER_QUERY_SECONDS)
     return run.stdout.strip() if run.returncode == 0 else ""
 
 

@@ -528,13 +528,26 @@ def test_host_ips_are_loopback_without_a_default_bridge(monkeypatch, real_host_i
     assert LocalSandbox(work_dir=tmp_path).host_ips == ("127.0.0.1",)
 
 
+def test_a_daemon_that_fails_once_is_asked_again(monkeypatch, real_host_ips, tmp_path):
+    """Caching a failed lookup would keep later agents off the bridge, and so away from their gateways."""
+    outputs = {"info": None, "network": "172.17.0.1"}
+    _fake_docker(monkeypatch, outputs)
+
+    with pytest.raises(ls.subprocess.CalledProcessError):
+        LocalSandbox(work_dir=tmp_path).host_ips
+    outputs["info"] = "Ubuntu 24.04.3 LTS"
+    assert LocalSandbox(work_dir=tmp_path).host_ips == ("127.0.0.1", "172.17.0.1")
+
+
 def _fake_docker(monkeypatch, outputs):
-    """``docker <command>`` answers ``outputs[command]``; ``None`` fails the call."""
+    """``docker <command>`` answers ``outputs[command]``; ``None`` fails the call, as ``subprocess.run`` would."""
     runs = []
 
     def run(args, **kwargs):
         runs.append((args, kwargs))
         out = outputs[args[1]]
+        if out is None and kwargs.get("check"):
+            raise ls.subprocess.CalledProcessError(1, args)
         return SimpleNamespace(returncode=1 if out is None else 0, stdout=f"{out or ''}\n")
 
     monkeypatch.setattr(ls.platform, "system", lambda: "Linux")
