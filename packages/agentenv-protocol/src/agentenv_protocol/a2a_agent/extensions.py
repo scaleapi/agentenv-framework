@@ -231,6 +231,16 @@ class PeerAgentsSetRequest(ExtensionRequest):
     peers: list[PeerAgent]
 
 
+class LastSeenAttribution(ExtensionResponse):
+    project_id: str | None = None
+    task_id: str | None = None
+
+
+class AttributionProbeResponse(ExtensionResponse):
+    last_seen_attribution: LastSeenAttribution
+    last_seen_at_utc: str | None = None
+
+
 class TriggerRegisterRequest(ExtensionRequest):
     triggers: list[dict[str, Any]]
 
@@ -1037,6 +1047,21 @@ PEER_AGENTS_V1 = ExtensionDefinition(
     },
 )
 
+ATTRIBUTION_PROBE_V1 = ExtensionDefinition(
+    uri="urn:agentenv:attribution-probe/v1",
+    description="Report the project and task attribution last sent with a model request.",
+    endpoint="/ext/attribution-probe",
+    core_operations={
+        "probe": _op(
+            "probe",
+            "POST",
+            "/ext/attribution-probe",
+            RUNTIME,
+            response_model=AttributionProbeResponse,
+        ),
+    },
+)
+
 TRIGGERS_V1 = ExtensionDefinition(
     uri="urn:agentenv:triggers/v1",
     description="Register triggers and decide deterministic responses.",
@@ -1084,6 +1109,7 @@ STANDARD_EXTENSIONS: Mapping[str, ExtensionDefinition] = MappingProxyType(
             TRAJECTORY_V1,
             SNAPSHOT_V1,
             PEER_AGENTS_V1,
+            ATTRIBUTION_PROBE_V1,
             TRIGGERS_V1,
             INSTALL_V1,
         )

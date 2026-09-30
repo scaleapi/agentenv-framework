@@ -472,6 +472,14 @@ tools with (agent-env relays the env card's name: the MultiEnv's declared name, 
 `env` + 4 random digits, giving e.g. `mcp__env4821__<tool>`); when absent the agent mints
 `mcp_<8 hex>`.
 
+`ATTRIBUTION_PROBE_V1.probe` lets a caller check that an agent forwards attribution
+upstream. An agent that sends the caller's project and task identifiers with its
+model requests (typically from `project_id` and `task_id` config fields it
+declares) records the last values it sent, and returns them from a bodyless
+`POST /ext/attribution-probe` as an `AttributionProbeResponse`:
+`{"last_seen_attribution": {"project_id": ..., "task_id": ...}, "last_seen_at_utc": ...}`.
+The SDK does not record attribution itself, because only the agent knows what it sent.
+
 Runnable, self-contained reference agents live in [`examples/`](examples/):
 the normal, streaming, and multimodal `run(request)` paths, single- and
 multi-operation custom extensions, and advanced ASGI-lifespan plus

@@ -30,6 +30,7 @@ from a2a.types import (
 )
 from agentenv_protocol.a2a_agent import (
     AGENT_CONFIG_V1,
+    ATTRIBUTION_PROBE_V1,
     MCP_CONFIG_V1,
     PEER_AGENTS_V1,
     SKILL_CONFIG_V1,
@@ -40,6 +41,7 @@ from agentenv_protocol.a2a_agent import (
     AgentConfig,
     AgentEnvAgent,
     AgentIdentity,
+    AttributionProbeResponse,
     BundleSkillRequest,
     ContextObjectTrajectoryRequest,
     ContextTrajectoryRequest,
@@ -50,6 +52,7 @@ from agentenv_protocol.a2a_agent import (
     FieldSchema,
     ImplementationOwner,
     InlineSkillRequest,
+    LastSeenAttribution,
     McpAddRequest,
     NamespaceChangelogEnableRequest,
     NativeTrajectory,
@@ -1346,6 +1349,81 @@ def test_handler_receives_the_canonical_request_model() -> None:
         assert _operation(client, card, PEER_AGENTS_V1.uri, "list").json() == {
             "peers": peers
         }
+
+
+def test_attribution_probe_reports_what_the_agent_last_sent() -> None:
+    @a2a_agent(
+        identity=AgentIdentity(name="attributing-agent", description="test", version="1")
+    )
+    class Agent(AgentEnvAgent):
+        def __init__(self) -> None:
+            self.sent = LastSeenAttribution()
+
+        async def run(self, request: TaskRequest) -> TaskResult:
+            self.sent = LastSeenAttribution(project_id="project-1", task_id="task-1")
+            return TaskResult.text("ok")
+
+        @extension(ATTRIBUTION_PROBE_V1.probe)
+        async def probe(self):
+            return AttributionProbeResponse(
+                last_seen_attribution=self.sent, last_seen_at_utc="2026-01-01T00:00:00Z"
+            )
+
+    agent = Agent()
+    with TestClient(agent.create_app()) as client:
+        card = client.get("/.well-known/agent.json").json()
+        assert _extension(card, ATTRIBUTION_PROBE_V1.uri)["params"]["endpoint"] == (
+            "/ext/attribution-probe"
+        )
+        assert _operation(client, card, ATTRIBUTION_PROBE_V1.uri, "probe", {}).json() == {
+            "last_seen_attribution": {},
+            "last_seen_at_utc": "2026-01-01T00:00:00Z",
+        }
+        agent.sent = LastSeenAttribution(project_id="project-1", task_id="task-1")
+        assert _operation(client, card, ATTRIBUTION_PROBE_V1.uri, "probe", {}).json() == {
+            "last_seen_attribution": {"project_id": "project-1", "task_id": "task-1"},
+            "last_seen_at_utc": "2026-01-01T00:00:00Z",
+        }
+        assert (
+            _operation(
+                client, card, ATTRIBUTION_PROBE_V1.uri, "probe", {"project_id": "x"}
+            ).status_code
+            == 400
+        )
+
+
+def test_attribution_probe_rejects_an_undeclared_response_field() -> None:
+    @a2a_agent(
+        identity=AgentIdentity(name="attributing-agent", description="test", version="1")
+    )
+    class Agent(AgentEnvAgent):
+        async def run(self, request: TaskRequest) -> TaskResult:
+            return TaskResult.text("ok")
+
+        @extension(ATTRIBUTION_PROBE_V1.probe)
+        async def probe(self):
+            return {"last_seen_attribution": {}, "headers": {"x-secret": "value"}}
+
+    with TestClient(Agent().create_app(), raise_server_exceptions=False) as client:
+        card = client.get("/.well-known/agent.json").json()
+        response = _operation(client, card, ATTRIBUTION_PROBE_V1.uri, "probe", {})
+        assert response.status_code == 500
+        assert "x-secret" not in response.text
+
+
+def test_attribution_probe_is_only_declared_by_a_handler() -> None:
+    @a2a_agent(
+        identity=AgentIdentity(name="plain-agent", description="test", version="1")
+    )
+    class Agent(AgentEnvAgent):
+        async def run(self, request: TaskRequest) -> TaskResult:
+            return TaskResult.text("ok")
+
+    with TestClient(Agent().create_app()) as client:
+        card = client.get("/.well-known/agent.json").json()
+        uris = {item["uri"] for item in card["capabilities"]["extensions"]}
+        assert ATTRIBUTION_PROBE_V1.uri not in uris
+        assert client.post("/ext/attribution-probe", json={}).status_code in (404, 405)
 
 
 def test_handler_advertises_the_canonical_request_model() -> None:
