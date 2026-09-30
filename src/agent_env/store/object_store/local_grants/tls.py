@@ -4,12 +4,14 @@ One CA per user, created on first use under ``<state root>/tls/``. It is name-co
 local names and private addresses, so even a leaked key can only vouch for those, and it is
 never installed in the host's trust stores: only the containers agent-env starts trust it,
 through ``ca-bundle.pem`` (the public roots plus this CA, for ``SSL_CERT_FILE``, which replaces
-the defaults) or ``ca.pem`` (the CA alone, for trust stores that add to the defaults). Those two
-are all that ``tls/trust/`` holds, so it can be copied into a container whole.
+the defaults) or ``ca.pem`` (the CA alone, for trust stores that add to the defaults). Each CA's
+two files sit alone in a directory of their own under ``tls/trust/``, which can be copied into a
+container whole.
 """
 
 from __future__ import annotations
 
+import functools
 import ipaddress
 import os
 import secrets
@@ -38,7 +40,6 @@ LOCAL_NETWORKS = tuple(
 
 _CA_LIFETIME = timedelta(days=5 * 365)
 _CA_RENEW_BEFORE = timedelta(days=30)  # replaced this long before it expires
-_SERVER_LIFETIME = timedelta(days=90)
 _CLOCK_SKEW = timedelta(minutes=5)
 
 _CA_FILE = "ca.key.pem"  # the CA's key and certificate, private to the user
@@ -76,8 +77,14 @@ def check_local_host(host: str) -> None:
 
 
 def local_ca() -> LocalCA:
-    """This user's local CA, created on first use and replaced when it nears expiry."""
-    tls_dir = state_root() / "tls"
+    """This user's local CA, created on first use and replaced when it nears expiry. A process keeps the CA
+    it first loads, so its grant server and the containers it starts agree on it whatever another process
+    does to the one on disk."""
+    return _process_ca(state_root() / "tls")
+
+
+@functools.cache
+def _process_ca(tls_dir: Path) -> LocalCA:
     ensure_state_dir(tls_dir)
     ca_file = tls_dir / _CA_FILE
     loaded = _load(ca_file)
@@ -99,8 +106,9 @@ def local_ca() -> LocalCA:
             staged.unlink(missing_ok=True)
         loaded = _load(ca_file) or (key, cert)
     key, cert = loaded
-    trust_dir = tls_dir / _TRUST_DIR
-    trust_dir.mkdir(exist_ok=True)
+    # Written once per CA, so renewing the CA never changes the files another process's containers trust.
+    trust_dir = tls_dir / _TRUST_DIR / cert.fingerprint(hashes.SHA256()).hex()[:16]
+    trust_dir.mkdir(parents=True, exist_ok=True)
     trust_dir.chmod(0o755)
     cert_pem = cert.public_bytes(serialization.Encoding.PEM)
     cert_path = _write_if_changed(trust_dir / _CERT_FILE, cert_pem)
@@ -120,7 +128,7 @@ def server_context(ca: LocalCA, hosts: Iterable[str]) -> ssl.SSLContext:
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
         .not_valid_before(now - _CLOCK_SKEW)
-        .not_valid_after(min(now + _SERVER_LIFETIME, ca.cert.not_valid_after_utc))
+        .not_valid_after(ca.cert.not_valid_after_utc)  # a server keeps one certificate for its whole life
         .add_extension(x509.SubjectAlternativeName([_general_name(n) for n in names]), critical=False)
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
         .add_extension(_key_usage(digital_signature=True), critical=True)

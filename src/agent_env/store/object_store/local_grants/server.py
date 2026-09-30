@@ -53,6 +53,7 @@ _UPLOAD_KEY_FIELD = "key"  # the form fields a policy upload names its key and f
 _UPLOAD_FILE_FIELD = "file"
 _MAX_FORM_FIELDS = 32
 _MAX_FORM_FIELD_BYTES = 64 * 1024
+_MAX_PART_HEADER_BYTES = 16 * 1024
 
 _servers: dict[tuple[str, str], GrantServer] = {}
 _servers_lock = threading.Lock()
@@ -289,6 +290,7 @@ class _PolicyUpload:
         self._stack = stack
         self._fields: dict[str, bytes] = {}
         self._headers: dict[bytes, bytes] = {}
+        self._header_bytes = 0
         self._header_name = b""
         self._header_value = b""
         self._part_name: str | None = None
@@ -319,14 +321,22 @@ class _PolicyUpload:
 
     def _on_part_begin(self) -> None:
         self._headers = {}
+        self._header_bytes = 0
         self._part_name = None
         self._part_data = bytearray()
 
     def _on_header_field(self, data: bytes, start: int, end: int) -> None:
+        self._count_header_bytes(end - start)
         self._header_name += data[start:end]
 
     def _on_header_value(self, data: bytes, start: int, end: int) -> None:
+        self._count_header_bytes(end - start)
         self._header_value += data[start:end]
+
+    def _count_header_bytes(self, count: int) -> None:
+        self._header_bytes += count
+        if self._header_bytes > _MAX_PART_HEADER_BYTES:
+            raise _Rejected(400, "A form part's headers are too large.")
 
     def _on_header_end(self) -> None:
         self._headers[self._header_name.lower()] = self._header_value
