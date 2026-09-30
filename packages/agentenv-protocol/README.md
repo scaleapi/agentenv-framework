@@ -473,11 +473,13 @@ tools with (agent-env relays the env card's name: the MultiEnv's declared name, 
 `mcp_<8 hex>`.
 
 `ATTRIBUTION_PROBE_V1.probe` lets a caller check that an agent forwards attribution
-upstream. An agent that sends the caller's project and task identifiers with its
-model requests (typically from `project_id` and `task_id` config fields it
-declares) records the last values it sent, and returns them from a bodyless
+upstream. Attribution is an open map of string dimensions, like AgentEnv's cost
+attribution: the SDK assigns no keys, and each deployment uses whatever dimensions
+its model gateway understands (the AgentEnv control plane configures `project_id`
+and `task_id` on agents that declare those config fields). An agent records the
+dimensions it last sent with a model request and returns them from a bodyless
 `POST /ext/attribution-probe` as an `AttributionProbeResponse`:
-`{"last_seen_attribution": {"project_id": ..., "task_id": ...}, "last_seen_at_utc": ...}`.
+`{"last_seen_attribution": {<dimension>: <value>, ...}, "last_seen_at_utc": ...}`.
 The SDK does not record attribution itself, because only the agent knows what it sent.
 The answer is agent-wide rather than per caller, and like every extension route the
 probe carries no access check of its own, so expose an agent only to the control plane

@@ -231,13 +231,8 @@ class PeerAgentsSetRequest(ExtensionRequest):
     peers: list[PeerAgent]
 
 
-class LastSeenAttribution(ExtensionResponse):
-    project_id: str | None = None
-    task_id: str | None = None
-
-
 class AttributionProbeResponse(ExtensionResponse):
-    last_seen_attribution: LastSeenAttribution
+    last_seen_attribution: dict[str, str] = Field(default_factory=dict)
     last_seen_at_utc: str | None = None
 
 
@@ -1049,7 +1044,7 @@ PEER_AGENTS_V1 = ExtensionDefinition(
 
 ATTRIBUTION_PROBE_V1 = ExtensionDefinition(
     uri="urn:agentenv:attribution-probe/v1",
-    description="Report the project and task attribution last sent with a model request.",
+    description="Report the attribution dimensions last sent with a model request.",
     endpoint="/ext/attribution-probe",
     core_operations={
         "probe": _op(

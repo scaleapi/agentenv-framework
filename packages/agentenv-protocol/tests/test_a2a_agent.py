@@ -52,7 +52,6 @@ from agentenv_protocol.a2a_agent import (
     FieldSchema,
     ImplementationOwner,
     InlineSkillRequest,
-    LastSeenAttribution,
     McpAddRequest,
     NamespaceChangelogEnableRequest,
     NativeTrajectory,
@@ -1357,10 +1356,10 @@ def test_attribution_probe_reports_what_the_agent_last_sent() -> None:
     )
     class Agent(AgentEnvAgent):
         def __init__(self) -> None:
-            self.sent = LastSeenAttribution()
+            self.sent: dict[str, str] = {}
 
         async def run(self, request: TaskRequest) -> TaskResult:
-            self.sent = LastSeenAttribution(project_id="project-1", task_id="task-1")
+            self.sent = {"project_id": "project-1", "task_id": "task-1", "team": "evals"}
             return TaskResult.text("ok")
 
         @extension(ATTRIBUTION_PROBE_V1.probe)
@@ -1382,7 +1381,11 @@ def test_attribution_probe_reports_what_the_agent_last_sent() -> None:
         response = client.post("/a2a", json=_message_request())
         assert response.json()["result"]["status"]["state"] == "completed"
         assert _operation(client, card, ATTRIBUTION_PROBE_V1.uri, "probe", {}).json() == {
-            "last_seen_attribution": {"project_id": "project-1", "task_id": "task-1"},
+            "last_seen_attribution": {
+                "project_id": "project-1",
+                "task_id": "task-1",
+                "team": "evals",
+            },
             "last_seen_at_utc": "2026-01-01T00:00:00Z",
         }
         assert (
