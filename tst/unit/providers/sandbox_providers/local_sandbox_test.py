@@ -13,15 +13,22 @@ from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, Lo
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER
 from agent_env.store import LocalFilesystemObjectStore
 from agent_env.store.object_store.local_grants.tls import local_ca
+from agent_env.store.routing import LocalRunObjectStore
+from agent_env.a2a_agent import a2a_agent as a2a_agent_module
+from agent_env.a2a_agent.a2a_agent import A2AAgent
+from tst.unit.store.fakes import FakeObjectStore
 
-_real_copy_into_container = ls._copy_into_container  # before the fixture below replaces it
+_real_copy_into_container = ls._copy_into_container  # before the fixtures below replace them
+_real_local_grant_trust = ls.local_grant_trust
 
 
 @pytest.fixture(autouse=True)
 def copies(monkeypatch):
-    """What create_container would ``docker cp`` into its container, recorded instead of run."""
+    """What create_container would ``docker cp`` into its container, recorded instead of run; the configured
+    store is taken to hand out local grants."""
     recorded: list[tuple] = []
     monkeypatch.setattr(ls, "_copy_into_container", lambda *args: recorded.append(args))
+    monkeypatch.setattr(ls, "local_grant_trust", lambda: local_ca().trust_dir)
     return recorded
 
 
@@ -706,3 +713,59 @@ def test_the_copy_runs_docker_directly_and_reports_its_error(monkeypatch, tmp_pa
     with pytest.raises(RuntimeError, match="No such container"):
         _real_copy_into_container(tmp_path, "agent-x", "/etc/agentenv")
     assert calls == [["docker", "cp", f"{tmp_path}/.", "agent-x:/etc/agentenv"]]
+
+
+@pytest.mark.asyncio
+async def test_without_local_grants_a_container_is_run_as_before(tmp_path, monkeypatch, copies):
+    import agent_env.config as cfg
+
+    monkeypatch.setattr(cfg, "get_config", lambda: _StubConfig())
+    monkeypatch.setattr(ls, "local_grant_trust", lambda: None)
+    provider = _ScriptedProvider(tmp_path)
+    await provider.create_container(image_name="img:v1", port=8000, env={"K": "v"})
+
+    run = next(s for s in provider.made[0].scripts if s.startswith("docker run -d"))
+    assert "SSL_CERT_FILE" not in run
+    assert copies == []
+
+
+def test_only_a_local_store_that_grants_needs_the_local_ca(tmp_path):
+    local = LocalFilesystemObjectStore(str(tmp_path / "objects"))
+    try:
+        set_object_store(local)
+        assert _real_local_grant_trust() == local_ca().trust_dir
+        set_object_store(LocalRunObjectStore(FakeObjectStore(), local))
+        assert _real_local_grant_trust() == local_ca().trust_dir
+        set_object_store(LocalFilesystemObjectStore(str(tmp_path / "objects"), grants="off"))
+        assert _real_local_grant_trust() is None
+        set_object_store(FakeObjectStore())
+        assert _real_local_grant_trust() is None
+    finally:
+        reset_config()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trusted", [True, False])
+async def test_an_agent_placed_on_a_local_vm_sandbox_gets_the_local_ca(tmp_path, monkeypatch, copies, trusted):
+    """A linked agent starts through A2AAgent._run_container, not the provider: it is given the CA the same way."""
+    monkeypatch.setattr(a2a_agent_module, "local_grant_trust", (lambda: local_ca().trust_dir) if trusted else (lambda: None))
+    monkeypatch.setattr(a2a_agent_module.asyncio, "sleep", _no_sleep)
+    sandbox = _RecordingLocalSandbox(work_dir=tmp_path)
+    agent = A2AAgent.__new__(A2AAgent)
+    agent._sandbox = sandbox
+
+    await agent._run_container("img:v1", 8000, {"K": "v"})
+
+    script = sandbox.scripts[0]
+    assert ("docker create" in script) is trusted and ("docker run -d" in script) is not trusted
+    assert ("-e SSL_CERT_FILE='/etc/agentenv/ca-bundle.pem'" in script) is trusted
+    if trusted:
+        assert copies == [(local_ca().trust_dir, sandbox.container_name, "/etc/agentenv")]
+        assert sandbox.scripts[-1] == f"docker start {sandbox.container_name} > /dev/null"
+        assert (LocalSandboxProvider.EXTRA_CONTAINER_RUN_ARGS in script) if LocalSandboxProvider.EXTRA_CONTAINER_RUN_ARGS else True
+    else:
+        assert copies == [] and "sleep 2" in script
+
+
+async def _no_sleep(_seconds):
+    return None

@@ -29,6 +29,8 @@ from agent_env.a2a_agent.object_transfer import (
     invoke_transfer,
 )
 from agent_env.config import get_config
+from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
+from agent_env.providers.sandbox_providers.sandbox_provider import get_agent_sandbox_provider
 from agent_env.store.routing import refuse_local_derivation
 from agent_env.task_step.task_steps.a2a_agent_validator.verify_a2a_modalities import (
     AUDIO_M4A_EXPECTED,
@@ -836,7 +838,9 @@ class A2AAgentValidator:
 
         png_object_uri = store.put(f"{prefix}red.png", base64.b64decode(IMAGE_PROBE_PNG_B64), content_type="image/png", allow_overwrite=True)
         png_signed_url = store.signed_get_url(png_object_uri)
-        if png_signed_url is None and store.supports_transfer_grants:
+        # The agents are not deployed yet, so a grant is used only where it reaches the provider they will use.
+        agent_sandbox_type = LocalSandbox.type if isinstance(get_agent_sandbox_provider(), LocalSandboxProvider) else None
+        if png_signed_url is None and store.supports_transfer_grants and store.grants_reach(agent_sandbox_type):
             png_signed_url = store.issue_read_grant(png_object_uri).url
         if png_signed_url is None:
             raise RuntimeError("A2A validation requires an object store that signs URLs or issues grants, for the presigned-URI probe.")
