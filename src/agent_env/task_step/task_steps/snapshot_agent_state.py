@@ -117,6 +117,7 @@ class SnapshotAgentStateTaskStep(TaskStep):
             a2a_context_id=a2a_context_id,
             artifact_id=self.artifact_id,
             timeout_seconds=self.timeout_seconds,
+            sandbox_type=deployed.sandbox_type,
         )
 
         snapshots = context.metadata.setdefault("agent_snapshots", [])

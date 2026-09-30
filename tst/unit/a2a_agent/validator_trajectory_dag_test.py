@@ -179,6 +179,9 @@ def test_trajectory_step_records_failed_object_url_construction(monkeypatch):
     class _FailingObjectStore:
         supports_transfer_grants = True
 
+        def grants_reach(self, _sandbox_type: str | None) -> bool:
+            return True
+
         def object_url(self, _key: str) -> str:
             raise RuntimeError("cannot mint object URL")
 
@@ -221,6 +224,9 @@ class _ObjectStore:
 
     def object_url(self, key: str) -> str:
         return f"s3://test-bucket/{key}"
+
+    def grants_reach(self, sandbox_type: str | None) -> bool:
+        return True
 
     def get_object_key(self, object_url: str) -> str:
         return object_url.removeprefix("s3://test-bucket/")

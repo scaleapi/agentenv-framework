@@ -38,6 +38,8 @@ _STAGING_DIR = ".agentenv-tmp"  # files being written, inside the root so a rena
 _RESERVED = (".gitignore", _META_DIR, _STAGING_DIR)
 # A filesystem without hard links: a no-overwrite write reserves its key by exclusive create instead.
 _NO_HARD_LINKS = frozenset({errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EXDEV, errno.EMLINK})
+_GRANT_MODES = ("auto", "off")
+_LOCAL_SANDBOX_TYPE = "local"  # LocalSandbox.type: containers on this host's Docker, which trust the local CA
 
 
 class LocalFilesystemObjectStore(ObjectStore):
@@ -46,14 +48,22 @@ class LocalFilesystemObjectStore(ObjectStore):
     A write lands whole or not at all, and keeps any content type but the default. The root-level ``.gitignore``,
     ``.agentenv-meta`` and ``.agentenv-tmp`` keys are reserved for the store's own files.
 
-    Its HTTPS transfer grants are served by a server in this process, started by the first grant: it listens on
-    ``grant_bind_host`` (by default loopback, or the Docker bridge gateway on Linux) and grant URLs name
-    ``grant_advertise_host`` (by default ``host.docker.internal``), which must be a local name or a loopback or
-    private address. A grant works until it expires or this process exits."""
+    With ``grants = "auto"`` (the default) it hands agents on the local sandbox provider HTTPS transfer grants,
+    served by a server in this process, started by the first grant: it listens on ``grant_bind_host`` (by default
+    loopback, or the Docker bridge gateway on Linux) and grant URLs name ``grant_advertise_host`` (by default
+    ``host.docker.internal``), which must be a local name or a loopback or private address. A grant works until it
+    expires or this process exits. ``grants = "off"`` hands out none, so agents get the forms that carry no grant."""
 
     def __init__(
-        self, root: str | None = None, *, grant_bind_host: str | None = None, grant_advertise_host: str | None = None
+        self,
+        root: str | None = None,
+        *,
+        grants: str = "auto",
+        grant_bind_host: str | None = None,
+        grant_advertise_host: str | None = None,
     ) -> None:
+        if grants not in _GRANT_MODES:
+            raise ValueError(f"grants must be one of {_GRANT_MODES}, got {grants!r}")
         if grant_bind_host is not None:
             try:
                 ipaddress.ip_address(grant_bind_host)
@@ -62,6 +72,7 @@ class LocalFilesystemObjectStore(ObjectStore):
         if grant_advertise_host is not None:
             check_local_host(grant_advertise_host)
         self._root = Path(root) if root is not None else state_root() / "object_store"
+        self.supports_transfer_grants = grants == "auto"
         self._grant_bind_host = grant_bind_host
         self._grant_advertise_host = grant_advertise_host
 
@@ -154,6 +165,9 @@ class LocalFilesystemObjectStore(ObjectStore):
         if path != root and root not in path.parents:
             raise ValueError(f"{object_url!r} is not an object in {root}.")
         return path.relative_to(root).as_posix()
+
+    def grants_reach(self, sandbox_type: str | None) -> bool:
+        return sandbox_type == _LOCAL_SANDBOX_TYPE
 
     def issue_read_grant(self, object_url: str, *, expires_in: int = 3600) -> HttpGetGrant:
         url, expires_at = self._grant("get", expires_in, key=self._grant_key(object_url))

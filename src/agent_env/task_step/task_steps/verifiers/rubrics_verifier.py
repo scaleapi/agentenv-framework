@@ -1079,6 +1079,7 @@ class RubricsVerifierTaskStep(TaskStep):
             judge_a2a_url=judge_a2a_url,
             judge_agent_card=judge_agent_card,
             a2a_server_task_id=task_id,
+            sandbox_type=getattr(judge_agent, "sandbox_type", None),
         )
         return {"response": tr.response_text, "trajectory_s3_uri": judge_trajectory_s3_uri}
 
@@ -1088,6 +1089,7 @@ class RubricsVerifierTaskStep(TaskStep):
         judge_a2a_url: str,
         judge_agent_card: dict,
         a2a_server_task_id: str,
+        sandbox_type: Optional[str],
     ) -> Optional[str]:
         """Best-effort capture of the judge's own reasoning trajectory, via the same
         EXT_TRAJECTORY extension `prompt_agent` uses, keyed by the A2A task id. Retries
@@ -1110,7 +1112,7 @@ class RubricsVerifierTaskStep(TaskStep):
         config = get_config()
         store = config.get_object_store()
         prefix = store.object_url(f"{config.get_artifact_key_prefix()}judge_trajectories/verifier_id={self.verifier_id}/")
-        mode = trajectory_mode(get_method, store, by="task_id")
+        mode = trajectory_mode(get_method, store, by="task_id", sandbox_type=sandbox_type)
         if mode is None:
             logger.warning(
                 "Verifier '%s': judge advertises no trajectory get form this object store "

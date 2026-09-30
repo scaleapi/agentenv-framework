@@ -73,7 +73,7 @@ TASK_LEGACY = {"legacy": ("task_id",)}
 def test_choose_transfer(tmp_path, method, fields, grants, expected):
     store = GrantingObjectStore(str(tmp_path))
     store.supports_transfer_grants = grants
-    assert choose_transfer(method, store=store, **fields) == expected
+    assert choose_transfer(method, store=store, sandbox_type="local", **fields) == expected
 
 
 def test_parse_response_ignores_fields_it_does_not_know():

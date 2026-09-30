@@ -513,7 +513,7 @@ class PromptAgentTaskStep(TaskStep):
                 try:
                     turn_traj_uri = await self._fetch_trajectory(
                         target_url, traj_ext_cached, sent_task_id, trajectory_output_prefix,
-                        target_a2a_task_id,
+                        target_a2a_task_id, sandbox_type=agent.sandbox_type,
                     )
                 except Exception as e:
                     logger.warning(f"Turn {turn+1} trajectory fetch failed (continuing): {e}")
@@ -701,10 +701,13 @@ class PromptAgentTaskStep(TaskStep):
 
         return context
 
-    async def _fetch_trajectory(self, a2a_url: str, traj_ext: dict, a2a_server_task_id: str, trajectory_output_prefix: str, target_a2a_task_id: str) -> str | None:
+    async def _fetch_trajectory(
+        self, a2a_url: str, traj_ext: dict, a2a_server_task_id: str, trajectory_output_prefix: str,
+        target_a2a_task_id: str, *, sandbox_type: str | None,
+    ) -> str | None:
         get_method, get_path = A2AAgent.operation(traj_ext, "get")
         store = get_config().get_object_store()
-        mode = trajectory_mode(get_method, store, by="task_id")
+        mode = trajectory_mode(get_method, store, by="task_id", sandbox_type=sandbox_type)
         if mode is None:
             raise RuntimeError(
                 "Agent advertises no trajectory get form this object store can serve"

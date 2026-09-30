@@ -689,6 +689,7 @@ class A2AAgentValidator:
                 agent_name=apply_agent_name,
                 source_url=capture_source,
                 portable=capture.get("transfer_mode") == "objects",
+                sandbox_type=apply_agent.sandbox_type,
             )
         except RuntimeError as e:
             record(supported=False, advertised=advertised, save_ok=save_ok,
@@ -835,8 +836,10 @@ class A2AAgentValidator:
 
         png_object_uri = store.put(f"{prefix}red.png", base64.b64decode(IMAGE_PROBE_PNG_B64), content_type="image/png", allow_overwrite=True)
         png_signed_url = store.signed_get_url(png_object_uri)
+        if png_signed_url is None and store.supports_transfer_grants:
+            png_signed_url = store.issue_read_grant(png_object_uri).url
         if png_signed_url is None:
-            raise RuntimeError("A2A validation requires a signable object store for the presigned-URI probe.")
+            raise RuntimeError("A2A validation requires an object store that signs URLs or issues grants, for the presigned-URI probe.")
         logger.info(f"Uploaded probe fixture to {png_object_uri}")
 
         mp4_object_uri = store.put(f"{prefix}clip.mp4", base64.b64decode(VIDEO_PROBE_MP4_B64), content_type="video/mp4", allow_overwrite=True)

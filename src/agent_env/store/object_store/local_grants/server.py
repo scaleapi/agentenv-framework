@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import functools
 import ipaddress
+import json
 import logging
 import platform
 import socket
@@ -85,6 +86,24 @@ def grant_server(bind_host: str | None, advertise_host: str | None) -> GrantServ
         return server
 
 
+def unreachable_hint(payload: object) -> str | None:
+    """What to check when an agent could not use grants carried in ``payload``, if any came from a grant
+    server in this process; None otherwise. Names the server's address, never a grant."""
+    text = json.dumps(payload, default=str)
+    with _servers_lock:
+        servers = list(_servers.values())
+    for server in servers:
+        origin = server.origin
+        if origin is not None and f"{origin}/v1/grants/" in text:
+            return (
+                f"The agent may not have reached this process's local grant server at {origin}, which "
+                f"listens on {server.bind_host}. If the agent's container cannot reach that address, set "
+                "grant_bind_host (where the server listens) and grant_advertise_host (the host grant URLs "
+                "name) in the [stores.object] config."
+            )
+    return None
+
+
 @functools.cache
 def default_bind_host() -> str:
     """Where the grant server listens unless told otherwise. On macOS and Windows, Docker reaches
@@ -138,9 +157,16 @@ class GrantServer:
             op=op, store=self._register(store), expires=expires, key=key, prefix=prefix,
             max_bytes=max_bytes, content_type=content_type,
         )
-        port = self._start()
+        self._start()
+        return f"{self.origin}/v1/grants/{self._signer.sign(claims)}"
+
+    @property
+    def origin(self) -> str | None:
+        """The scheme, host and port grant URLs start with; None until the server has started."""
+        if self._port is None:
+            return None
         host = f"[{self.advertise_host}]" if ":" in self.advertise_host else self.advertise_host
-        return f"https://{host}:{port}/v1/grants/{self._signer.sign(claims)}"
+        return f"https://{host}:{self._port}"
 
     def close(self) -> None:
         """Stop serving; grants already issued stop working."""

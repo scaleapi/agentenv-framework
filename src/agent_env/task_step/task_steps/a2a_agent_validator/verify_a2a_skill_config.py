@@ -103,6 +103,8 @@ class VerifyA2ASkillConfigStep(TaskStep):
                     description=description,
                     object_url=object_url,
                     forms=(form,),
+                    sandbox_type=deployed_agent.sandbox_type,
+                    agent_name=deployed_agent.agent_name,
                 )
             except RuntimeError as exc:
                 logger.info("Skill %s request: not sent (%s)", form, exc)

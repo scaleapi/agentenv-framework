@@ -198,6 +198,8 @@ class A2AAgent:
             description=description,
             skill_md=skill_md,
             object_url=object_url,
+            sandbox_type=deployed.sandbox_type,
+            agent_name=deployed.agent_id,
         )
         return await invoke_transfer(
             deployed.a2a_url + add_path,
