@@ -413,7 +413,7 @@ def serve(
         import uvicorn
     except ImportError as exc:  # pragma: no cover - installation error
         raise ImportError(
-            "Serving A2A agents requires: pip install 'agentenv-protocol[agent]'"
+            "Serving A2A agents requires: pip install 'agentenv-framework-protocol[agent]'"
         ) from exc
 
     resolved_host = host or os.environ.get("A2A_HOST", "0.0.0.0")
@@ -917,7 +917,7 @@ class A2AAgentApplication:
             from a2a.server.tasks import InMemoryTaskStore
         except ImportError as exc:  # pragma: no cover - depends on installation extra
             raise ImportError(
-                "A2A agent applications require: pip install 'agentenv-protocol[agent]'"
+                "A2A agent applications require: pip install 'agentenv-framework-protocol[agent]'"
             ) from exc
 
         request_handler = DefaultRequestHandler(
@@ -941,7 +941,7 @@ class A2AAgentApplication:
             from a2a.types import AgentCard, AgentExtension, AgentSkill
         except ImportError as exc:  # pragma: no cover - depends on installation extra
             raise ImportError(
-                "A2A agent applications require: pip install 'agentenv-protocol[agent]'"
+                "A2A agent applications require: pip install 'agentenv-framework-protocol[agent]'"
             ) from exc
 
         identity = self.definition.identity

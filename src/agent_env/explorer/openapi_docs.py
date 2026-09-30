@@ -207,9 +207,9 @@ def enrich_openapi_schema(schema: dict[str, Any]) -> dict[str, Any]:
             "this install — including any added through .agentenv/config.toml."
         ),
         "counts": {
-            "artifacts": len(primitives["artifacts"]),
-            "envs": len(primitives["envs"]),
-            "taskSteps": len(primitives["taskSteps"]),
+            "artifactTypes": len(primitives["artifacts"]),
+            "envTypes": len(primitives["envs"]),
+            "taskStepTypes": len(primitives["taskSteps"]),
             "operations": sum(
                 1
                 for ops in (schema.get("paths") or {}).values()
@@ -237,6 +237,6 @@ def docs_metadata(schema: dict[str, Any]) -> dict[str, Any]:
         "openapi_version": schema.get("openapi", ""),
         "versions": {
             "agentenv-framework": _package_version("agentenv-framework"),
-            "agentenv-protocol": _package_version("agentenv-protocol"),
+            "agentenv-protocol": _package_version("agentenv-framework-protocol") or _package_version("agentenv-protocol"),
         },
     }

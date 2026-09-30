@@ -352,6 +352,16 @@ def test_docs_descriptions_are_not_inherited_from_the_base_class(client):
     assert steps["reset_env"]["description"].startswith("Return a deployed env")
 
 
+def test_every_operation_has_its_own_summary(client):
+    """The Docs nav lists operations by summary alone, so no two may share one."""
+    spec = client.get("/openapi.json").json()
+    summaries = [op["summary"] for ops in spec["paths"].values() for op in ops.values()]
+
+    assert len(summaries) == len(set(summaries))
+    assert all(s == s.strip() for s in summaries)
+    assert {"List Artifacts", "Get Environment", "List Task Versions", "Health"} <= set(summaries)
+
+
 def test_docs_metadata_reports_a_live_source(client):
     meta = client.get("/api/v1/docs/openapi/metadata").json()
     assert meta["source"] == "live"

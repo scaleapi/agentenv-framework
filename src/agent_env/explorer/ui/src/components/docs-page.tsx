@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { Code2, FileJson, Search, Server, Shapes } from 'lucide-react';
-import { apiFetch, BACKEND_URL } from './shared';
+import { apiFetch, BACKEND_URL, FRAMEWORK_DOCS_URL } from './shared';
 
 type JsonSchema = Record<string, unknown>;
 
@@ -115,9 +115,9 @@ const METHOD_CLASS: Record<HttpMethod, string> = {
 const PRIMITIVE_GROUPS: PrimitiveGroup[] = ['artifacts', 'envs', 'taskSteps'];
 
 const PRIMITIVE_LABEL: Record<PrimitiveGroup, string> = {
-  artifacts: 'Artifacts',
-  envs: 'Environments',
-  taskSteps: 'Task Steps',
+  artifacts: 'Artifact Types',
+  envs: 'Environment Types',
+  taskSteps: 'Task Step Types',
 };
 
 const ENDPOINT_NAV_LIMIT = 120;
@@ -431,7 +431,7 @@ function OverviewPane({
     <div className="space-y-8">
       <div>
         <h1 className="text-2xl font-semibold text-[var(--foreground)]">
-          {spec.info?.title ?? 'AgentEnvExplorer API'}
+          {spec.info?.title ?? 'AgentEnv Explorer API'}
         </h1>
         <div className="mt-2 text-sm text-[var(--muted-foreground)]">
           Version {spec.info?.version ?? 'unknown'}
@@ -450,6 +450,19 @@ function OverviewPane({
             {spec.info.description}
           </p>
         )}
+        <p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--muted-foreground)]">
+          This page is the explorer&apos;s API reference. For guides to
+          environments, artifacts, agents, tasks and plugins, see the{' '}
+          <a
+            href={FRAMEWORK_DOCS_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-[var(--foreground)] underline underline-offset-2"
+          >
+            AgentEnv Framework docs
+          </a>
+          .
+        </p>
       </div>
 
       <div className="grid max-w-4xl grid-cols-2 gap-3 lg:grid-cols-4">

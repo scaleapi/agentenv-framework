@@ -33,7 +33,7 @@ from agent_env.store import Filter
 from agent_env.task.store import TASK_INSTANCES_COLLECTION, TASKS_COLLECTION, TaskInstance, TaskStepStatus
 
 REUSED = (ARTIFACTS_COLLECTION, TASKS_COLLECTION, LEDGER_COLLECTION)
-OWN_DISTRIBUTIONS = {"agentenv-framework", "agentenv-protocol"}
+OWN_DISTRIBUTIONS = {"agentenv-framework", "agentenv-framework-protocol"}
 
 
 def main() -> int:

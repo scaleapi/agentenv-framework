@@ -19,8 +19,14 @@ import {
   Package,
   PanelLeftClose,
   PanelLeftOpen,
+  ExternalLink,
 } from 'lucide-react';
-import { type Page, type NavGroup, pageToPath } from '../components/shared';
+import {
+  type Page,
+  type NavGroup,
+  pageToPath,
+  FRAMEWORK_DOCS_URL,
+} from '../components/shared';
 import { HomePage } from '../components/home-page';
 import { EnvironmentsPage } from '../components/environments-page';
 import { EnvDetailPage } from '../components/env-detail-page';
@@ -290,13 +296,39 @@ export default function App() {
               sidebarOpen ? 'px-5' : 'justify-center'
             } py-5`}
           >
-            {sidebarOpen && (
+            {sidebarOpen ? (
+              <div className="flex flex-col gap-1.5">
+                <div className="flex items-center gap-2">
+                  <Image
+                    src="/logos/agentenv-icon.svg"
+                    alt=""
+                    width={32}
+                    height={32}
+                    className="h-5 w-5"
+                    priority
+                  />
+                  <span className="text-sm font-semibold text-[var(--foreground)]">
+                    AgentEnv Explorer
+                  </span>
+                </div>
+                <div className="flex items-center gap-1.5 text-[11px] text-[var(--muted-foreground)]">
+                  Built by
+                  <Image
+                    src="/logos/scale-logo.svg"
+                    alt="Scale"
+                    width={319}
+                    height={61}
+                    className="h-2.5 w-auto opacity-60"
+                  />
+                </div>
+              </div>
+            ) : (
               <Image
-                src="/logos/agent-env-logo.svg"
-                alt="AgentEnvExplorer"
-                width={664}
-                height={62}
-                className="h-3.5 w-auto object-contain"
+                src="/logos/agentenv-icon.svg"
+                alt="AgentEnv Explorer"
+                width={32}
+                height={32}
+                className="h-5 w-5"
                 priority
               />
             )}
@@ -356,9 +388,21 @@ export default function App() {
           </div>
           <div
             className={`mt-auto p-3 flex ${
-              sidebarOpen ? 'justify-end' : 'justify-center'
+              sidebarOpen
+                ? 'items-center justify-between'
+                : 'flex-col items-center gap-3'
             }`}
           >
+            <a
+              href={FRAMEWORK_DOCS_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              title={sidebarOpen ? undefined : 'AgentEnv Framework docs'}
+              className="flex items-center gap-1.5 text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors"
+            >
+              <ExternalLink size={sidebarOpen ? 14 : 18} />
+              {sidebarOpen && 'Framework docs'}
+            </a>
             <button
               onClick={() => setSidebarOpen(prev => !prev)}
               className="text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors"

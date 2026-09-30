@@ -196,11 +196,11 @@ def create_app(static_dir: Optional[str] = None) -> FastAPI:
 
     # The five (id, version) collections behind Task/Env/Agent/Universe/Evals Hub.
     # Universes Hub reads /artifacts?type=environment_universe — no route of its own.
-    app.include_router(versioned_router(prefix=f"{API}/artifacts", tag="artifacts", collection="artifacts"))
-    app.include_router(versioned_router(prefix=f"{API}/envs", tag="envs", collection="envs"))
-    app.include_router(versioned_router(prefix=f"{API}/tasks", tag="tasks", collection="tasks"))
-    app.include_router(versioned_router(prefix=f"{API}/agents", tag="agents", collection="a2a_agents"))
-    app.include_router(versioned_router(prefix=f"{API}/evals", tag="evals", collection="evals"))
+    app.include_router(versioned_router(prefix=f"{API}/artifacts", tag="artifacts", collection="artifacts", noun="artifact"))
+    app.include_router(versioned_router(prefix=f"{API}/envs", tag="envs", collection="envs", noun="environment"))
+    app.include_router(versioned_router(prefix=f"{API}/tasks", tag="tasks", collection="tasks", noun="task"))
+    app.include_router(versioned_router(prefix=f"{API}/agents", tag="agents", collection="a2a_agents", noun="agent"))
+    app.include_router(versioned_router(prefix=f"{API}/evals", tag="evals", collection="evals", noun="eval"))
     app.include_router(runs_router.router)
     app.include_router(objects_router.router)
     app.include_router(conversations_router.router)
@@ -224,12 +224,12 @@ def create_app(static_dir: Optional[str] = None) -> FastAPI:
             "runner": get_runner().type,
         }
 
-    app.get("/health")(_health)
+    app.get("/health", summary="Health")(_health)
 
     static = static_dir or settings["static_dir"] or packaged_ui_dir()
     if not (static and Path(static).is_dir()):
         # Serve health at "/" only when no UI is mounted (else the SPA owns "/").
-        app.get("/")(_health)
+        app.get("/", include_in_schema=False)(_health)
 
     if static and Path(static).is_dir():
         _mount_spa(app, Path(static))
