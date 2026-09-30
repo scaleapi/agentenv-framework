@@ -17,6 +17,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
+from agent_env.store.ids import derived_id
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.snapshot_utils import agent_state_capture as capture
 
@@ -131,8 +132,11 @@ class SnapshotSeries:
         self.a2a_context_id = a2a_context_id
         self.config = config
         self.trajectory_output_prefix = trajectory_output_prefix
+        self._instance_id = instance_id or ""
         self._discriminator = _rollout_discriminator(step_id, instance_id)
-        self.workspace_artifact_id = f"{step_id}-workspace-{self._discriminator}"
+        self.workspace_artifact_id = derived_id(
+            self._instance_id, f"{step_id}-workspace", legacy=f"{step_id}-workspace-{self._discriminator}"
+        )
         self._lock = asyncio.Lock()
         self._stop = asyncio.Event()
         self._ticker: Optional[asyncio.Task] = None
@@ -502,7 +506,10 @@ class SnapshotSeries:
                 gateway_url=deployed.gateway_url,
                 # Instance-scoped like the workspace id, never context-scoped: a
                 # pinned `context_id` is shared by every concurrent rollout.
-                snapshot_id=f"snapshot-{self.config.env_id}-{self._discriminator}",
+                snapshot_id=derived_id(
+                    self._instance_id, f"snapshot-{self.step_id}",
+                    legacy=f"snapshot-{self.config.env_id}-{self._discriminator}",
+                ),
                 deployed=deployed,
                 export_timeout_seconds=int(timeout_seconds),
             )

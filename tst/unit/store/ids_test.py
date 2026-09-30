@@ -12,6 +12,7 @@ from agent_env.store.ids import (
     LOCAL_PREFIX,
     MAX_AUTHORED_LOCAL_ID_BYTES,
     derive_id,
+    derived_id,
     fs_safe,
     image_repository,
     is_local_id,
@@ -165,6 +166,14 @@ def test_a_derived_id_keeps_its_base_namespace():
     assert derive_id("@local/~/work/triage/tickets", "image") == "@local/~/work/triage/tickets__image"
     assert is_local_id(derive_id("@local/~/a", "files"))
     assert derive_id("tickets", "files") == "tickets__files"
+
+
+def test_a_name_keeps_an_local_bases_namespace_and_a_bare_bases_legacy_spelling():
+    assert derived_id("@local/~/work/triage/tickets", "validate-v2", legacy="validate-@local/~/work/triage/tickets-v2") == (
+        "@local/~/work/triage/tickets__validate-v2"
+    )
+    assert derived_id("tickets", "validate-v2", legacy="validate-tickets-v2") == "validate-tickets-v2"
+    assert derived_id("", "snapshot-snap", legacy="snapshot-tickets-ab12cd34") == "snapshot-tickets-ab12cd34"
 
 
 def test_authored_cap_leaves_room_for_the_longest_derived_id():

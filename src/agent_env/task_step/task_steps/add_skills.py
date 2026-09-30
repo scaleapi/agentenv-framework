@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from dataclasses import dataclass
 from typing import ClassVar, Optional
 
+from agent_env.store.ids import is_local_id
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity_refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
@@ -145,10 +147,20 @@ def _build_skill_for_installed_cli(cli_artifact_id: str, entry: dict) -> Skill:
     )
 
 
+def _files_skill_name(universe_id: str) -> str:
+    """``<universe id>-files``; an ``@local`` id can't be a skill name, so it gives a slug of its last
+    segment and a hash of the whole id instead."""
+    if not is_local_id(universe_id):
+        return f"{universe_id}-files"
+    slug = re.sub(r"[^a-z0-9]+", "-", universe_id.rsplit("/", 1)[-1].lower()).strip("-")[:45].rstrip("-")
+    digest = hashlib.sha256(universe_id.encode("utf-8")).hexdigest()[:12]
+    return f"{slug}-{digest}-files" if slug else f"{digest}-files"
+
+
 def _build_skill_for_loaded_file_artifact_universe(universe_id: str, entry: dict) -> Skill:
     destination_path = entry["destination_path"]
     return Skill(
-        name=f"{universe_id}-files",
+        name=_files_skill_name(universe_id),
         description=f"Files possibly relevant to the current task are available at {destination_path}.",
         body=f"Files possibly relevant to the current task are available at `{destination_path}`.\n",
     )

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
 from agent_env.env.env_artifact_store import EnvArtifactType, get_env_artifact_store
 from agent_env.artifact.store import artifact_write_lock
+from agent_env.store.ids import derive_id, derived_id, fs_safe, is_local_id
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity_refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
@@ -78,10 +79,21 @@ class VerifyUniverseLoadExportRoundtripStep(TaskStep):
         )
 
     @staticmethod
+    def validation_id(kind: str, env_id: str, env_version: int, universe_id: str, universe_version: int) -> str:
+        """The id of a compatibility validation's ``kind`` of task or artifact for ``universe_id`` in ``env_id``.
+        The ``@local`` one of the two owns it, the env when both are, and the other goes into its suffix through
+        ``fs_safe``."""
+        if is_local_id(env_id):
+            return derive_id(env_id, f"{kind}-v{env_version}-{fs_safe(universe_id)}-v{universe_version}")
+        return derived_id(universe_id, f"{kind}-v{universe_version}-{env_id}-v{env_version}",
+                          legacy=f"{kind}-{env_id}-v{env_version}-{universe_id}-v{universe_version}")
+
+    @staticmethod
     def file_artifact_universe_id(env_id: str, env_version: int, universe_id: str, universe_version: int) -> str:
         """Deterministic id of the emitted FileArtifactUniverse, so the callsite can reference it
         statically without a runtime context lookup (mirrors the export1 artifact id scheme)."""
-        return f"validate-{env_id}-v{env_version}-{universe_id}-v{universe_version}-fau"
+        prefix = VerifyUniverseLoadExportRoundtripStep.validation_id("validate", env_id, env_version, universe_id, universe_version)
+        return f"{prefix}-fau"
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         from agent_env.artifact import EnvironmentUniverseArtifact
@@ -178,7 +190,7 @@ class VerifyUniverseLoadExportRoundtripStep(TaskStep):
         """
         from agent_env.artifact import FileArtifact, FileArtifactUniverse
 
-        prefix = f"validate-{self.env_id}-v{env_version}-{self.universe_artifact_id}-v{universe_version}"
+        prefix = self.validation_id("validate", self.env_id, env_version, self.universe_artifact_id, universe_version)
         with artifact_write_lock(prefix):
             file_artifacts: dict[str, Any] = {}
             for sa in original_environment_artifacts:
@@ -221,7 +233,7 @@ class VerifyUniverseLoadExportRoundtripStep(TaskStep):
     def _create_universe_artifact(self, original_environment_artifacts: list, export_data: dict[str, dict], env_version: int, universe_version: int) -> Any:
         """Create FileArtifact + EnvironmentArtifact per service, bundle into EnvironmentUniverseArtifact."""
         from agent_env.artifact import FileArtifact, EnvironmentArtifact, EnvironmentUniverseArtifact
-        prefix = f"validate-{self.env_id}-v{env_version}-{self.universe_artifact_id}-v{universe_version}"
+        prefix = self.validation_id("validate", self.env_id, env_version, self.universe_artifact_id, universe_version)
         with artifact_write_lock(prefix):
             export_environment_artifacts = []
             for sa in original_environment_artifacts:

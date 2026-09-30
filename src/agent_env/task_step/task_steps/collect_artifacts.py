@@ -68,6 +68,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import hashlib
 import logging
 import os
 import json
@@ -77,7 +78,9 @@ import tempfile
 import time
 from typing import ClassVar, Optional
 
+from agent_env.config import get_config
 from agent_env.env.gateway.constants import EXT_STEP_URI
+from agent_env.store.ids import derived_id, is_local_id
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity_refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
@@ -863,7 +866,10 @@ class CollectArtifactsTaskStep(TaskStep):
         FileArtifact filename is the basename for clean downloads."""
         from agent_env.artifact import FileArtifact
 
-        fa_id = f"{artifact_id}-{object_name}".replace("/", "_")[:200]
+        fa_id = derived_id(
+            artifact_id, hashlib.sha256(object_name.encode("utf-8")).hexdigest()[:16],
+            legacy=f"{artifact_id}-{object_name}".replace("/", "_")[:200],
+        )
         fa_version = store.next_version(fa_id)
         fa = FileArtifact(
             id=fa_id,
@@ -890,10 +896,15 @@ class CollectArtifactsTaskStep(TaskStep):
             or context.instance_id
             or "unknown"
         )
-        # Reserve room for the suffix inside the 100-char budget rather than appending past
-        # it, so a long run id can never truncate two collects back onto the same name.
+        # An @local id is kept whole, since key_segment bounds its object keys. Any other is capped at 100
+        # chars, with room reserved for the suffix rather than appending past it, so a long run id can never
+        # truncate two collects back onto the same name.
         suffix = _sanitize_artifact_id(self.universe_id_suffix or "")
-        artifact_id = _sanitize_artifact_id(artifact_id)[:100 - len(suffix)] + suffix
+        if is_local_id(artifact_id):
+            artifact_id += suffix
+        else:
+            artifact_id = _sanitize_artifact_id(artifact_id)[:100 - len(suffix)] + suffix
+        get_config().check_local_run_write(artifact_id)
         version = int(time.time())
 
         if self.env_id:

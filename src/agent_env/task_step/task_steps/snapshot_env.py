@@ -20,6 +20,7 @@ from agentenv_protocol import FilePart
 
 from agent_env.env.gateway.constants import EXT_TRAJECTORY_URI
 from agent_env.store import get_config
+from agent_env.store.ids import derived_id, fs_safe
 from agent_env.store.object_store import S3ObjectStore
 from agent_env.store.routing import in_local_run
 from agent_env.task_step.context import TaskStepContext
@@ -313,7 +314,7 @@ class SnapshotEnvTaskStep(TaskStep):
         instance_id = context.instance_id or context.metadata.get("instance_id")
         if instance_id:
             # Stable per run instance: activity retries re-put the same ids.
-            return f"snapshot-{env_id}-{instance_id.rsplit('-', 1)[-1][:16]}"
+            return derived_id(instance_id, f"snapshot-{self.id}", legacy=f"snapshot-{env_id}-{instance_id.rsplit('-', 1)[-1][:16]}")
         generated = f"snapshot-{env_id}-{uuid.uuid4().hex[:8]}"
         logger.warning(
             f"snapshot_env: no instance_id in context; using random snapshot_id "
@@ -491,7 +492,7 @@ class SnapshotEnvTaskStep(TaskStep):
             """Returns EnvironmentArtifact on success, (public_err, log_err) on failure."""
             async with sem:
                 # Suffix (.json/.zip) is reported by _export_environment_to_file.
-                fd, tmp_path = tempfile.mkstemp(prefix=f"{snapshot_id}-{environment_name}-")
+                fd, tmp_path = tempfile.mkstemp(prefix=f"{fs_safe(snapshot_id)}-{environment_name}-")
                 os.close(fd)
                 cleanup_paths = [tmp_path]
                 artifact_path = tmp_path

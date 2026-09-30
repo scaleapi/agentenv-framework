@@ -12,7 +12,7 @@ import click
 
 from agent_env.cli.banner import print_banner
 from agent_env.cli.identity import get_agent_env_client_id
-from agent_env.store.ids import fs_safe
+from agent_env.store.ids import fs_safe, is_local_id
 
 
 _print_lock = asyncio.Lock()
@@ -558,7 +558,10 @@ def run_batch(task_id: str, task_version: int | None, seeds: str, concurrency: i
             # FileArtifactUniverse stably across runs of the same seed.
             # Prefer seed.id, fall back to seed.name. If neither is set,
             # collect_artifacts falls through to the per-run instance_id.
+            # An @local task's run writes only @local ids, so it names the universe under the task.
             universe_id = seed.get("id") or seed.get("name")
+            if universe_id and is_local_id(task.id):
+                universe_id = f"{task.id}-v{task.version}-{universe_id}"
             if universe_id:
                 ctx.metadata["universe_id"] = universe_id
             if litellm_api_key:

@@ -17,7 +17,7 @@ from pathlib import Path
 from agent_env.store.base import ObjectAlreadyExistsError, ObjectNotFoundError
 from agent_env.store.document_store import DocumentStore, DuplicateKeyError, Eq, Filter
 from agent_env.store.image_store import ImageStore
-from agent_env.store.object_store import DEFAULT_CONTENT_TYPE, ObjectMetadata, ObjectStore
+from agent_env.store.object_store import DEFAULT_CONTENT_TYPE, LocalFilesystemObjectStore, ObjectMetadata, ObjectStore
 
 
 class FakeDocumentStore(DocumentStore):
@@ -171,6 +171,15 @@ class RecordingObjectStore(FakeObjectStore):
     def read(self, key):
         self.read_keys.append(key)
         return super().read(key)
+
+
+class SigningObjectStore(LocalFilesystemObjectStore):
+    """A filesystem object store that signs urls, as a remote store does; the urls lead nowhere."""
+
+    def signed_get_url(self, object_url, expires_in=3600):
+        return f"https://objects.example.test/{self.get_object_key(object_url)}"
+
+    signed_put_url = signed_get_url
 
 
 class FakeImageStore(ImageStore):

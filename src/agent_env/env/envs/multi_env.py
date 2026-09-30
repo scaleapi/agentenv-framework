@@ -32,7 +32,7 @@ from agent_env.env.envs._deployment import (
 )
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.website import WebsiteEnv
-from agent_env.store.routing import refuse_local_derivation
+from agent_env.store.ids import derived_id
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER
 from agent_env.attribution import Attribution
 
@@ -632,11 +632,10 @@ COMPOSE_EOF'''
 
         Deploys the env, fetches + persists its composed EnvironmentCard, then tears down.
         """
-        refuse_local_derivation(self.id, "env", "validating")
         from agent_env.task import Task
         from agent_env.task_step import DeployEnvTaskStep, VerifyEnvironmentCardStep
 
-        task_id = f"validate-{self.id}-v{self.version}"
+        task_id = derived_id(self.id, f"validate-v{self.version}", legacy=f"validate-{self.id}-v{self.version}")
         task = Task.put(
             id=task_id,
             steps=[
@@ -668,7 +667,6 @@ COMPOSE_EOF'''
         merged into the ``UNIVERSE_COMPATIBILITY`` result as per-service critical issues — so they
         surface (and gate ``compatible``) the same way programmatic issues do.
         """
-        refuse_local_derivation(self.id, "env", "validating")
         from agent_env.task import Task
         from agent_env.task_step import (
             CombineUniverseVerdictsStep,
@@ -688,7 +686,9 @@ COMPOSE_EOF'''
         from agent_env.artifact import EnvironmentUniverseArtifact
 
         universe = EnvironmentUniverseArtifact.get(universe_artifact_id, universe_artifact_version)
-        task_id = f"validate-universe-compat-{self.id}-v{self.version}-{universe.id}-v{universe.version}"
+        task_id = VerifyUniverseLoadExportRoundtripStep.validation_id(
+            "validate-universe-compat", self.id, self.version, universe.id, universe.version
+        )
         environment_names = [sa.environment_name for sa in universe.get_environment_artifacts()]
         fau_id = VerifyUniverseLoadExportRoundtripStep.file_artifact_universe_id(self.id, self.version, universe.id, universe.version)
         judge_name = "universe-judge"

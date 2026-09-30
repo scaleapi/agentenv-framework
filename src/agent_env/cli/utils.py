@@ -9,7 +9,6 @@ from agent_env.env import Env
 from agent_env.providers.env_providers.env_provider import _env_provider_class
 from agent_env.providers.env_providers.env_server_provider import EnvironmentServerProvider
 from agent_env.store.base import NotFoundError
-from agent_env.store.ids import is_local_id
 from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM
 
 
@@ -172,12 +171,3 @@ def deployed_env_from_instance(env_id: str | None, instance_id: str) -> Env:
         raise click.UsageError(
             f"--id '{env_id}' does not match instance '{instance_id}' (env '{env.id}')")
     return env
-
-
-def skips_local_validation(entity_id: str, kind: str) -> bool:
-    """Whether a put leaves ``entity_id`` unvalidated because it is an ``@local`` id: validating one
-    isn't supported yet, and the entity itself was written fine."""
-    if not is_local_id(entity_id):
-        return False
-    click.echo(f"Skipped validation: validating an @local {kind} isn't supported yet")
-    return True

@@ -13,7 +13,7 @@ from agentenv_protocol import FilePart, client as protocol_v1
 from agent_env.artifact import Artifact, DockerImageArtifact
 from agent_env.artifact.artifacts.docker_image import GitHubBuildResult, ProgressCallback, refuse_local_github_build
 from agent_env.env.env import Env, gateway_url_of
-from agent_env.store.routing import refuse_local_derivation
+from agent_env.store.ids import derived_id
 from agent_env.env import legacy_protocol
 from agent_env.env.envs._deployment import (
     as_builtin, builtin_provider_for, close_deployed, close_replaced, deploy_refusal, deploy_through_provider, host_staging_refusal,
@@ -235,14 +235,14 @@ class MCPServerEnv(Env):
     async def validate(self, on_progress: Optional[Callable[[str], None]] = None) -> str:
         """Run the env validator task and return the task instance ID.
 
-        Creates a new versioned Task with ID ``validate-{env_id}-v{version}`` each time.
+        Creates a new versioned Task with ID ``validate-{env_id}-v{version}`` each time, or
+        ``{env_id}__validate-v{version}`` for an ``@local`` env.
         """
-        refuse_local_derivation(self.id, "env", "validating")
         from agent_env.task import Task
         from agent_env.task_step import DeployAgentTaskStep, DeployEnvTaskStep, PromptAgentTaskStep, ValidationGateAggregatorStep, VerifyCoreEnvironmentProtocolStep, VerifyEnvironmentCardStep, VerifyMCPToolSchemaTaskStep, VerifySpecConformanceTaskStep, VerifyMCPEnvAssessmentStep
         from agent_env.task_step.task_steps.mcp_env_validator import TOOL_CORRECTNESS_PROMPT, TOOL_CORRECTNESS_OUTPUT_FORMAT
 
-        task_id = f"validate-{self.id}-v{self.version}"
+        task_id = derived_id(self.id, f"validate-v{self.version}", legacy=f"validate-{self.id}-v{self.version}")
         prompt_id = f"{task_id}-prompt"
 
         # Env metadata can narrow the gate, e.g. {"required_gates": ["mcp_tool_schema"]}.
@@ -306,8 +306,8 @@ class MCPServerEnv(Env):
                     logger.warning(f"Cached CliArtifact {cached} not found in store; rebuilding")
 
         cmd = command_name or self.environment_name
-        task_id = f"create-cli-{self.id}-v{self.version}"
-        cli_artifact_id = f"cli-{self.id}"
+        task_id = derived_id(self.id, f"create-cli-v{self.version}", legacy=f"create-cli-{self.id}-v{self.version}")
+        cli_artifact_id = derived_id(self.id, "cli", legacy=f"cli-{self.id}")
 
         task = Task.put(id=task_id, steps=[
             DeployEnvTaskStep(id=f"{task_id}-deploy", version=None, env_id=self.id, env_version=self.version),

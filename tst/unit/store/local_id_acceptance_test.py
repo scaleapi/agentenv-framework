@@ -4,28 +4,35 @@ every other store keeps refusing them, and the per-user store refuses bare ids s
 import asyncio
 import importlib
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from click.testing import CliRunner
 
+from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.a2a_agent.validator import A2AAgentValidator
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.cli import cli
-from agent_env.config import configure, get_config, set_image_store
+from agent_env.config import configure, get_config, set_image_store, set_object_store
 from agent_env.config.paths import state_root
+from agent_env.env.env import DeployedGatewayEnv
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.website import WebsiteEnv
 from agent_env.env.snapshot_store import EnvSnapshot
+from agent_env.providers.env_providers import EnvironmentGatewayProvider
+from agent_env.providers.env_state import LocalPostgresStateProvider
 from agent_env.store import Filter, LocalSqliteDocumentStore, VersionedEntityStore
 from agent_env.store.base import NotFoundError
 from agent_env.store.ids import fs_safe, key_segment
 from agent_env.store.routing import LocalNamespaceDocumentStore
-from tst.unit.store.fakes import FakeDocumentStore, FakeImageStore
+from agent_env.task import Task
+from tst.unit.store.fakes import FakeDocumentStore, FakeImageStore, SigningObjectStore
 
 LOCAL_ID = "@local/t/Chaos"
+LOCAL_ENV = "@local/~/bundle/envs/e"
 UNIVERSE = "@local/~/bundle/artifacts/data"
 
 
@@ -131,39 +138,117 @@ def test_a_github_build_refuses_an_local_id_before_touching_a_registry_or_a_vm(l
     assert images.repositories == []
 
 
-@pytest.mark.parametrize("validate, kind", [
-    (A2AAgentValidator.validate, "agent"),
-    (MCPServerEnv.validate, "env"),
-    (WebsiteEnv.validate, "env"),
-    (MultiEnv.validate, "env"),
-    (lambda env: MultiEnv.validate_universe_compatibility(env, "registry-universe"), "env"),
-])
-def test_validating_an_local_entity_is_refused_before_anything_is_written(validate, kind):
-    with pytest.raises(ValueError, match=f"is an @local {kind}, and validating one isn't supported yet"):
-        asyncio.run(validate(SimpleNamespace(id="@local/~/bundle/x", version=1)))
+def _validation_runs_nothing(monkeypatch):
+    universes = {u: SimpleNamespace(id=u, version=2, get_environment_artifacts=lambda: []) for u in ("registry-universe", UNIVERSE)}
+    monkeypatch.setattr("agent_env.artifact.EnvironmentUniverseArtifact.get", lambda id, version=None: universes[id])
+    finished = SimpleNamespace(deployed_envs=[], deployed_agents=[], instance_id="validation-run")
+    monkeypatch.setattr(Task, "run", lambda self, **kwargs: asyncio.sleep(0, result=finished))
 
 
-def test_a_put_skips_validating_an_local_entity_and_succeeds(local_stores):
+@pytest.mark.parametrize("validate, task_id", [
+    (lambda: MCPServerEnv(id=LOCAL_ENV, version=1, docker_image_artifact=MagicMock(), environment_name="svc").validate(),
+     f"{LOCAL_ENV}__validate-v1"),
+    (lambda: WebsiteEnv(id=LOCAL_ENV, version=1, backend_docker_image_artifact=MagicMock(), frontend_docker_image_artifact=MagicMock(),
+                        environment_name="svc").validate(),
+     f"{LOCAL_ENV}__validate-v1"),
+    (lambda: MultiEnv(id=LOCAL_ENV, version=1, mcp_server_envs=[]).validate(), f"{LOCAL_ENV}__validate-v1"),
+    (lambda: MultiEnv(id=LOCAL_ENV, version=1, mcp_server_envs=[]).validate_universe_compatibility("registry-universe"),
+     f"{LOCAL_ENV}__validate-universe-compat-v1-registry-universe-v2"),
+    (lambda: MultiEnv(id="registry-env", version=1, mcp_server_envs=[]).validate_universe_compatibility(UNIVERSE),
+     f"{UNIVERSE}__validate-universe-compat-v2-registry-env-v1"),
+], ids=["mcp_server", "website", "multi", "compat-local-env", "compat-local-universe"])
+def test_validating_an_local_entity_writes_its_task_under_it_to_the_local_store(local_stores, cli_routing, monkeypatch,
+                                                                                validate, task_id):
+    _validation_runs_nothing(monkeypatch)
+
+    assert asyncio.run(validate()) == "validation-run"
+
+    assert [d["id"] for d in _local().query("tasks", Filter())] == [task_id]
+    assert not _documents().path.exists() or _documents().count("tasks", Filter()) == 0
+
+
+def test_validating_an_local_agent_stops_at_the_local_store_it_cannot_sign_with_before_writing_a_task(
+    local_stores, cli_routing, tmp_path,
+):
+    configured = SigningObjectStore(str(tmp_path / "configured-objects"))
+    set_object_store(configured)
+    agent = A2AAgent(id="@local/~/bundle/agents/a", version=1, docker_image_artifact=MagicMock())
+
+    with pytest.raises(RuntimeError, match="A2A validation requires a signable object store"):
+        asyncio.run(A2AAgentValidator.validate(agent))
+
+    fixtures = f"a2a_validator/probe_fixtures/{key_segment(agent.id)}-v1"
+    skills = f"a2a_validator/validator_skill/{key_segment(agent.id)}-v1"
+    assert sorted(get_config().get_object_store_for(agent.id).list("a2a_validator/")) == [
+        f"{fixtures}/red.png", *(f"{skills}/{name}/SKILL.md" for name in ("validator-probe-bundle", "validator-probe-s3", "validator-test-s3")),
+    ]
+    assert configured.list("") == []
+    assert all(not store.path.exists() or store.count("tasks", Filter()) == 0 for store in (_local(), _documents()))
+
+
+def test_a_put_validates_an_local_entity_like_any_other(local_stores, monkeypatch):
     image_url = local_stores.get_object_store().put("artifacts/docker_image/srv-img/1/x.tar.gz", b"x")
     image = DockerImageArtifact.put_tar("srv-img", description="d", image_name="reg/srv:v1", tar_gz_s3_url=image_url)
     MCPServerEnv.put(id="srv", docker_image_artifact=image, environment_name="svc")
+    _validation_runs_nothing(monkeypatch)
 
     result = CliRunner().invoke(cli, ["env", "multi", "put", "--id", "@local/~/bundle/envs/m", "--mcp-server", "srv", "--validate"])
 
     assert result.exit_code == 0, result.output
-    assert "Skipped validation: validating an @local env isn't supported yet" in result.output
     assert [d["id"] for d in _local().query("envs", Filter())] == ["@local/~/bundle/envs/m"]
+    assert [d["id"] for d in _local().query("tasks", Filter())] == ["@local/~/bundle/envs/m__validate-v1"]
 
 
-def test_snapshotting_an_local_env_is_refused_before_anything_is_uploaded(local_stores, cli_routing, monkeypatch):
-    deployed = SimpleNamespace(env_id="@local/~/bundle/envs/e", env_version=1)
-    monkeypatch.setattr("agent_env.env.store.get_env_instance_store", lambda: SimpleNamespace(get=lambda instance_id: deployed))
-    monkeypatch.setattr("agent_env.env.env.Env.get", lambda *a, **k: pytest.fail("the env was read"))
+class _RecordingSandbox:
+    mode = "vm"
 
-    with pytest.raises(ValueError, match="is an @local env, and snapshotting one isn't supported yet"):
+    def __init__(self) -> None:
+        self.scripts: list[str] = []
+
+    async def exec_script(self, script: str) -> str:
+        self.scripts.append(script)
+        return ""
+
+
+def _snapshot_of(monkeypatch, env_id, universe_id) -> _RecordingSandbox:
+    """A snapshot of ``env_id`` with ``universe_id`` loaded, as far as reconnecting to its sandbox."""
+    deployed = DeployedGatewayEnv(env_id=env_id, env_version=1, sandbox_id="sb-1", gateway_url="https://gw", mcp_url="https://gw/mcp",
+                                  db_web_url=None)
+    instances = SimpleNamespace(get=lambda instance_id: deployed,
+                                get_environment_universe=lambda instance_id: {"id": universe_id, "version": 1})
+    provider = EnvironmentGatewayProvider()
+    provider._state_provider = LocalPostgresStateProvider()
+    reattached = SimpleNamespace(_sandbox=_RecordingSandbox(), _env_provider=provider)
+    monkeypatch.setattr("agent_env.env.store.get_env_instance_store", lambda: instances)
+    monkeypatch.setattr("agent_env.env.env.Env.get", lambda *args: MultiEnv(id=env_id, version=1, mcp_server_envs=[]))
+    monkeypatch.setattr(MultiEnv, "from_deployed_env", classmethod(lambda cls, record: asyncio.sleep(0, result=reattached)))
+    return reattached._sandbox
+
+
+def test_snapshotting_an_local_env_stops_at_the_local_store_it_cannot_presign_before_the_sandbox_runs_anything(
+    local_stores, cli_routing, tmp_path, monkeypatch,
+):
+    configured = SigningObjectStore(str(tmp_path / "configured-objects"))
+    set_object_store(configured)
+    sandbox = _snapshot_of(monkeypatch, LOCAL_ENV, UNIVERSE)
+
+    with pytest.raises(RuntimeError, match="LocalFilesystemObjectStore can't presign uploads"):
         asyncio.run(EnvSnapshot.create("instance-1"))
 
-    assert local_stores.get_object_store().list("") == []
+    assert sandbox.scripts == []
+    assert configured.list("") == [] and get_config().get_object_store_for(LOCAL_ENV).list("") == []
+
+
+@pytest.mark.parametrize("env_id, universe_id", [(LOCAL_ENV, "registry-universe"), ("registry-env", UNIVERSE)],
+                         ids=["local-env", "local-universe"])
+def test_a_snapshot_of_an_env_and_a_universe_in_different_namespaces_is_refused_before_the_sandbox_is_reached(
+    local_stores, cli_routing, monkeypatch, env_id, universe_id,
+):
+    _snapshot_of(monkeypatch, env_id, universe_id)
+    monkeypatch.setattr(MultiEnv, "from_deployed_env", classmethod(lambda cls, record: pytest.fail("the sandbox was reached")))
+
+    with pytest.raises(ValueError, match="are in different namespaces"):
+        asyncio.run(EnvSnapshot.create("instance-1"))
 
 
 @pytest.mark.parametrize("derived", ["env-snapshot-@local/~/bundle/envs/e", "cua-vm-@local/~/bundle/envs/e", "x-@local/y"])
