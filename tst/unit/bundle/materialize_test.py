@@ -16,9 +16,11 @@ from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.artifact.store import get_artifact_store
 from agent_env.bundle import BundleError
-from agent_env.bundle.ledger import LEDGER_COLLECTION
+from agent_env.bundle import materialize as materialize_module
+from agent_env.bundle.ledger import LEDGER_COLLECTION, Ledger
 from agent_env.bundle.materialize import materialize
 from agent_env.config import configure
+from agent_env.config.paths import state_root
 from agent_env.config.runtime import Config
 from agent_env.entity_refs import EntityRef, RefRole
 from agent_env.env.env import Env
@@ -127,12 +129,15 @@ def bundle_dir(tmp_path, monkeypatch, local_stores, cli_routing):
     return layout(tmp_path / "triage", LAYOUT)
 
 
+_RUN_OR_DRY_RUN = pytest.mark.parametrize("dry_run", [False, True], ids=["run", "dry-run"])
+
+
 def _steps(root, steps):
     (root / "tasks/t.json").write_text(json.dumps(steps))
 
 
-def _run(root):
-    return materialize(plan_of(root))
+def _run(root, dry_run=False):
+    return materialize(plan_of(root), dry_run=dry_run)
 
 
 def _summary(materialization):
@@ -172,7 +177,8 @@ def test_a_rerun_reuses_every_version_and_an_edit_rewrites_only_what_it_changed(
     assert third.version_of("task", f"{ROOT}/t") == first.version_of("task", f"{ROOT}/t")
 
 
-def test_what_has_no_writer_yet_is_refused_before_anything_is_written(bundle_dir):
+@_RUN_OR_DRY_RUN
+def test_what_has_no_writer_yet_is_refused_before_anything_is_written(bundle_dir, dry_run):
     layout(bundle_dir, {
         "envs/tickets/Dockerfile": "FROM scratch\n",
         "envs/imaged/env.toml": 'type = "imaged_materialize_test"\n',
@@ -192,7 +198,7 @@ def test_what_has_no_writer_yet_is_refused_before_anything_is_written(bundle_dir
         {"id": "snap", "type": "load_artifact", "env_id": "tickets", "artifact_id": "snap"},
     ])
 
-    assert sorted(_problems(lambda: _run(bundle_dir))) == [
+    assert sorted(_problems(lambda: _run(bundle_dir, dry_run))) == [
         "agents/solver: writing an image built from Dockerfile isn't supported yet",
         "artifacts/base-mcp: writing a docker_image artifact isn't supported yet",
         "artifacts/snap: writing an environment artifact isn't supported yet",
@@ -349,12 +355,13 @@ def test_an_eval_may_share_its_tasks_name(bundle_dir):
     assert Eval.get(f"{ROOT}/t").tasks == [EvalTask(f"{ROOT}/t")]
 
 
-def test_without_namespace_routing_nothing_is_written(bundle_dir):
+@_RUN_OR_DRY_RUN
+def test_without_namespace_routing_nothing_is_written(bundle_dir, dry_run):
     plan = plan_of(bundle_dir)
     disable_namespace_routing()
 
     with pytest.raises(RuntimeError, match="needs namespace routing"):
-        materialize(plan)
+        materialize(plan, dry_run=dry_run)
     assert not local_store().path.exists()
 
 
@@ -376,12 +383,14 @@ def test_tasks_are_preflighted_together_after_the_entities_and_none_is_written_i
     assert fixed[f"{ROOT}/t"] == (1, False, ("new",))
 
 
-def test_a_task_the_ledger_would_reuse_is_still_preflighted(bundle_dir, monkeypatch):
+@_RUN_OR_DRY_RUN
+def test_a_task_the_ledger_would_reuse_is_still_preflighted(bundle_dir, monkeypatch, dry_run):
+    """In a dry run too: the store holds the reused artifact the step reads, as the run will read it."""
     _steps(bundle_dir, [{"id": "check", "type": "checked_materialize_test", "artifact_id": "greeting"}])
     _run(bundle_dir)
     monkeypatch.setattr(_Checked, "problems", ["the script is gone"])
 
-    assert _problems(lambda: _run(bundle_dir)) == ("tasks/t.json: the script is gone",)
+    assert _problems(lambda: _run(bundle_dir, dry_run)) == ("tasks/t.json: the script is gone",)
 
 
 def test_a_step_reading_its_own_tasks_output_is_not_preflighted(bundle_dir, monkeypatch):
@@ -417,7 +426,8 @@ def test_a_step_writing_an_output_is_still_preflighted(bundle_dir, monkeypatch):
     assert _problems(lambda: _run(bundle_dir)) == ("tasks/t.json: the writer's script isn't there",)
 
 
-def test_a_preflight_that_raises_names_its_task(bundle_dir, monkeypatch):
+@_RUN_OR_DRY_RUN
+def test_a_preflight_that_raises_names_its_task(bundle_dir, monkeypatch, dry_run):
     _steps(bundle_dir, [{"id": "check", "type": "checked_materialize_test"}])
 
     def unreachable(self):
@@ -425,7 +435,7 @@ def test_a_preflight_that_raises_names_its_task(bundle_dir, monkeypatch):
 
     monkeypatch.setattr(_Checked, "preflight", unreachable)
     with pytest.raises(ConnectionError) as caught:
-        _run(bundle_dir)
+        _run(bundle_dir, dry_run)
     assert caught.value.__notes__ == [f"while preflighting tasks/t.json ({ROOT}/t)"]
 
 
@@ -458,17 +468,70 @@ def test_a_failed_write_names_its_entry_and_leaves_the_earlier_writes_reusable(b
     assert (after[f"{ROOT}/docs"], after[f"{ROOT}/greeting"][:2]) == ((1, True, ()), (1, False))
 
 
-def test_each_write_is_reported_reused_or_not(bundle_dir):
+@_RUN_OR_DRY_RUN
+def test_each_write_is_reported_reused_or_not(bundle_dir, dry_run):
     reported = []
     (bundle_dir / "artifacts/greeting/hello.txt").write_text("hello again\n")
     _run(bundle_dir)
     (bundle_dir / "artifacts/greeting/hello.txt").write_text("hello\n")
 
-    done = materialize(plan_of(bundle_dir), on_write=reported.append)
+    done = materialize(plan_of(bundle_dir), dry_run=dry_run, on_write=reported.append)
 
     assert sorted(reported, key=lambda item: item.write.id) == sorted(done.writes, key=lambda item: item.write.id)
     assert [(item.write.id, item.reused) for item in reported] == [
         (f"{ROOT}/docs", True), (f"{ROOT}/greeting", False), (f"{ROOT}/t", True)]
+
+
+def test_a_dry_run_predicts_what_materializing_then_writes(bundle_dir):
+    def agree():
+        predicted = _summary(_run(bundle_dir, dry_run=True))
+        assert predicted == _summary(_run(bundle_dir))
+        return predicted
+
+    assert set(agree().values()) == {(1, False, ("new",))}
+    assert {reused for _, reused, _ in agree().values()} == {True}
+    (bundle_dir / "artifacts/docs/b.md").write_text("b2\n")
+    assert agree()[f"{ROOT}/docs"] == (2, False, ("files changed: b.md",))
+    FileArtifact.put_bytes(f"{ROOT}/greeting", description="by hand", filename="hello.txt", content=b"by hand")
+    assert agree()[f"{ROOT}/greeting"] == (3, False, ("the store's latest, v2, wasn't recorded by this bundle",))
+
+
+def test_a_dry_run_calls_no_writer_and_takes_no_lock(bundle_dir, monkeypatch):
+    layout(bundle_dir, {"evals/regression.toml": 'tasks = ["t"]\n'})
+
+    def refused(*_, **__):
+        raise AssertionError("a dry run wrote")
+
+    monkeypatch.setattr(Ledger, "record", refused)
+    monkeypatch.setattr(materialize_module, "materializing", refused)
+    monkeypatch.setattr(Task, "put", refused)
+    monkeypatch.setattr(Eval, "put", refused)
+
+    dry = _run(bundle_dir, dry_run=True)
+
+    assert {done.version for done in dry.writes} == {1}
+    assert list(state_root().rglob("*")) == []
+
+
+def test_a_dry_run_doesnt_preflight_a_step_reading_what_it_would_write_and_lists_it(bundle_dir, monkeypatch):
+    box, greet, _ = json.loads(LAYOUT["tasks/t.json"])
+    _steps(bundle_dir, [
+        box, greet, {"id": "check", "type": "checked_materialize_test", "artifact_id": "greeting"},
+        {"id": "write", "type": "writes_materialize_test", "artifact_id": "made"},
+        {"id": "read", "type": "checked_materialize_test", "artifact_id": "made", "depends_on": [{"task_step_id": "write"}]},
+    ])
+    monkeypatch.setattr(_Writes, "preflight", lambda self: [])
+    monkeypatch.setattr(_Checked, "problems", ["greeting isn't in the store yet"])
+    new = _run(bundle_dir, dry_run=True)
+    monkeypatch.setattr(_Checked, "problems", [])
+    assert _run(bundle_dir).not_preflighted == ()
+    (bundle_dir / "artifacts/greeting/hello.txt").write_text("hello again\n")
+    monkeypatch.setattr(_Checked, "problems", ["the store holds the greeting it is about to replace"])
+
+    rewritten = _run(bundle_dir, dry_run=True)
+
+    assert [(write.id, step.id) for write, step in new.not_preflighted] == [(f"{ROOT}/t", "check")]
+    assert [(write.id, step.id) for write, step in rewritten.not_preflighted] == [(f"{ROOT}/t", "check")]
 
 
 def test_a_second_run_of_the_bundle_waits_for_the_first_to_finish_writing(bundle_dir, tmp_path):

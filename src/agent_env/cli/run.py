@@ -10,7 +10,8 @@ from pathlib import Path
 
 import click
 
-from agent_env.bundle import BundleError, BundleKind, BundleRun, Outcome, RunInterrupted, TaskRun, run_bundle
+from agent_env.bundle import (BundleError, BundleKind, BundleRun, DryRun, Outcome, RunInterrupted, TaskRun,
+                              dry_run_bundle, run_bundle)
 from agent_env.bundle.installed import InstalledBundle, checked, find_bundle, installed_bundles, run_name
 from agent_env.plugins._discovery import discovery_error
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox
@@ -23,6 +24,7 @@ _COLORS = {Outcome.PASSED: "green", Outcome.BELOW_ONE: "yellow", Outcome.UNSCORE
            Outcome.CANCELLED: "yellow"}
 _ENV_ENDPOINTS = (("mcp", "mcp_url"), ("gateway", "gateway_url"), ("pgweb", "db_web_url"), ("db-mcp", "db_mcp_url"),
                   ("vnc", "vnc_url"), ("expires", "expires_at_utc"))
+_DRY_RUN = "Dry run: nothing is written or run."
 
 
 @click.command()
@@ -35,9 +37,11 @@ _ENV_ENDPOINTS = (("mcp", "mcp_url"), ("gateway", "gateway_url"), ("pgweb", "db_
                    "fallback chain.")
 @click.option("--keep", is_flag=True,
               help="Keep the sandboxes up after the runs, print their endpoints, and tear them down on Ctrl-C.")
+@click.option("--dry-run", is_flag=True,
+              help="Check the bundle as the run does and show what it would write and run; write and run nothing.")
 @click.pass_context
 def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: tuple[str, ...], model: str | None,
-        sandbox: str | None, keep: bool):
+        sandbox: str | None, keep: bool, dry_run: bool):
     """Run a bundle's tasks and evals, or list the installed bundles.
 
     BUNDLE is a folder, or the name of a bundle an installed package provides (PACKAGE/NAME when several
@@ -47,18 +51,27 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
     once, at most four at a time, and the run exits 1 if any of them failed. With --verbose, a run that
     raised prints its traceback.
 
+    --dry-run makes the checks the run makes before its first task, reading the stores as the run does, and
+    prints what it would write and run, writing and running nothing. It exits 1 on a problem the run would
+    stop at, and 0 otherwise; --model and --keep change nothing it shows.
+
     Each run's sandboxes are torn down as it ends; its instance and outputs stay. --keep holds them up
     until Ctrl-C instead. Ctrl-C or SIGTERM mid-run cancels the runs, tears them down, prints what ran and
     exits 130 (143 for SIGTERM); a second one stops the teardown and prints what is still up.
     """
     if bundle is None:
-        if tasks or evals or model or sandbox or keep:
-            raise click.UsageError("--task, --eval, --model, --sandbox and --keep need a BUNDLE to run")
+        if tasks or evals or model or sandbox or keep or dry_run:
+            raise click.UsageError("--task, --eval, --model, --sandbox, --keep and --dry-run need a BUNDLE to run")
         _list_installed()
         return
     root, id_root = _locate(bundle)
     verbose = ctx.find_root().params.get("verbose")
     try:
+        if dry_run:
+            click.echo(_DRY_RUN)
+            _report_dry_run(dry_run_bundle(root, tasks=tasks, evals=evals, sandbox=sandbox, on_progress=click.echo,
+                                           id_root=id_root))
+            return
         result = run_bundle(root, tasks=tasks, evals=evals, model=model, sandbox=sandbox, on_progress=click.echo,
                             id_root=id_root, keep=keep)
     except BundleError as e:
@@ -172,6 +185,35 @@ def _summarize(result: BundleRun, verbose: bool) -> None:
                    f"--task {shlex.quote(entry.name)}")
     if verbose:
         _print_tracebacks(result)
+
+
+def _report_dry_run(dry: DryRun) -> None:
+    materialization = dry.materialization
+    plan = materialization.plan
+    click.echo()
+    if plan.store_refs:
+        click.echo("Store refs:")
+    for ref in plan.store_refs:
+        if ref.version is None:
+            click.echo(f"  {ref.kind} {ref.id} v{plan.store_latest[ref.kind, ref.id]}, the latest")
+        else:
+            click.echo(f"  {ref.kind} {ref.id} v{ref.version}")
+    click.echo("Would run:")
+    for entry in dry.runs:
+        click.echo(f"  {dry.path(entry)} v{materialization.version_of('task', entry.id)}")
+    if plan.evals:
+        click.echo("Evals:")
+    for entry in plan.evals:
+        named = ", ".join(dry.path(ref.local) for ref in entry.references)
+        click.echo(f"  {dry.path(entry.entry)} v{materialization.version_of('eval', entry.entry.id)}: {named}")
+    for entry in dry.skipped:
+        click.echo(f"{dry.path(entry)} isn't named by any eval, so it wouldn't run; run it with "
+                   f"--task {shlex.quote(entry.name)}")
+    if materialization.not_preflighted:
+        click.echo("Not preflighted, since each reads what the run would write first:")
+    for write, step in materialization.not_preflighted:
+        click.echo(f"  {dry.path(write.source.entry)}: step {step.id!r} ({step.type})")
+    click.echo(_DRY_RUN)
 
 
 def _print_tracebacks(result: BundleRun) -> None:

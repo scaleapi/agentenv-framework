@@ -120,11 +120,21 @@ def _written(write):
 
 def _record_changed(ledger, writes):
     """Check and record ``writes`` in order, as the materializer does; the checks, by id."""
-    checks = {}
+    checks, versions = {}, {}
     for write in writes:
-        check = ledger.check(write)
-        if not check.unchanged:
-            ledger.record(check, lambda: _written(write))
+        check = ledger.check(write, versions)
+        version = check.version if check.unchanged else ledger.record(check, lambda: _written(write))
+        versions[write.kind.store, write.id] = version
+        checks[write.id] = check
+    return checks
+
+
+def _checked(ledger, writes):
+    """Check ``writes`` in order without recording any, as a dry run does; the checks, by id."""
+    checks, versions = {}, {}
+    for write in writes:
+        check = ledger.check(write, versions)
+        versions[write.kind.store, write.id] = check.version if check.unchanged else check.next_version
         checks[write.id] = check
     return checks
 
@@ -160,8 +170,33 @@ def test_a_rewritten_dependency_rewrites_an_env_that_records_its_version_but_not
     checks = _run(bundle_dir)
 
     assert checks[GREETING].reasons == ("files changed: hello.txt",)
-    assert checks[f"{ROOT}/shelf"].reasons == (f"artifact {GREETING} was written anew (v1 → v2)",)
+    assert checks[f"{ROOT}/shelf"].reasons == (f"artifact {GREETING} is written anew (v1 → v2)",)
     assert checks[f"{ROOT}/t"].unchanged
+
+
+def test_a_dry_check_hashes_the_versions_its_needs_would_get_so_it_predicts_the_run(bundle_dir):
+    _run(bundle_dir)
+    (bundle_dir / "artifacts/greeting/hello.txt").write_text("hello again\n")
+    plan = plan_of(bundle_dir)
+
+    dry = _checked(Ledger.for_plan(plan), plan.writes)
+    real = _record_changed(Ledger.for_plan(plan), plan.writes)
+
+    assert dry[f"{ROOT}/shelf"].reasons == (f"artifact {GREETING} is written anew (v1 → v2)",)
+    assert {id: (check.unchanged, check.reasons) for id, check in dry.items()} == {
+        id: (check.unchanged, check.reasons) for id, check in real.items()}
+    assert {id: check.version if check.unchanged else check.next_version for id, check in dry.items()} == {
+        id: _latest_version(_COLLECTIONS[check.write.kind.store], id) for id, check in real.items()}
+
+
+def test_a_need_is_hashed_as_its_version_string_so_the_rows_a_run_recorded_stay_reused(bundle_dir):
+    _run(bundle_dir)
+    plan = plan_of(bundle_dir)
+
+    checks = _checked(Ledger.for_plan(plan), plan.writes)
+
+    assert checks[f"{ROOT}/shelf"].digest.inputs["needs"] == {f"artifact {GREETING}": "1"}
+    assert all(check.unchanged for check in checks.values())
 
 
 def test_a_second_file_flips_the_inferred_type_and_says_so(bundle_dir):
@@ -212,7 +247,7 @@ def test_a_version_the_bundle_didnt_record_is_written_over(bundle_dir):
     check = _run(bundle_dir)[GREETING]
 
     assert check.reasons == ("the store's latest, v3, wasn't recorded by this bundle",)
-    assert _latest_version("artifacts", GREETING) == 4
+    assert check.next_version == _latest_version("artifacts", GREETING) == 4
 
 
 def test_a_version_written_by_another_bundle_is_written_over(bundle_dir):
@@ -245,10 +280,10 @@ def test_a_file_changed_during_its_write_is_written_again_even_once_changed_back
         hello.write_text("edited\n")
         return _written(write)
 
-    ledger.record(ledger.check(write), edited_meanwhile)
+    ledger.record(ledger.check(write, {}), edited_meanwhile)
     hello.write_text("hello\n")
 
-    assert ledger.check(write).reasons == ("the ledger doesn't know what its last version was made from",)
+    assert ledger.check(write, {}).reasons == ("the ledger doesn't know what its last version was made from",)
 
 
 def test_a_new_digest_scheme_rewrites_everything_and_says_only_that(bundle_dir, monkeypatch):
@@ -269,10 +304,10 @@ def test_a_crashed_write_leaves_a_pending_row_the_bundles_next_write_drops(bundl
         raise RuntimeError("the write crashed")
 
     with pytest.raises(RuntimeError):
-        ledger.record(ledger.check(write), crash)
-    assert ledger.check(write).reasons == ("new",)
+        ledger.record(ledger.check(write, {}), crash)
+    assert ledger.check(write, {}).reasons == ("new",)
 
-    ledger.record(ledger.check(write), lambda: _written(write))
+    ledger.record(ledger.check(write, {}), lambda: _written(write))
     rows = local_store().query(LEDGER_COLLECTION, Filter.of(id=GREETING))
     assert sorted((row["bundle"], row["status"], row.get("version")) for row in rows) == [
         ("@local/~/elsewhere/triage", "pending", None), (plan.bundle.bundle.id_root, "done", 1),
@@ -334,9 +369,7 @@ def _image_document(version):
 
 def test_reads_never_create_the_local_namespaces_store(bundle_dir):
     plan = plan_of(bundle_dir)
-    ledger = Ledger.for_plan(plan)
-    for write in plan.writes:
-        ledger.check(write)
+    _checked(Ledger.for_plan(plan), plan.writes)
 
     assert not local_store().path.exists()
 
@@ -347,7 +380,7 @@ def test_the_ledger_never_touches_the_configured_store(bundle_dir, cli_routing):
     ledger = Ledger.for_plan(plan)
 
     _record_changed(ledger, plan.writes)
-    assert all(ledger.check(write).unchanged for write in plan.writes)
+    assert all(check.unchanged for check in _checked(ledger, plan.writes).values())
     (bundle_dir / "artifacts/greeting/hello.txt").write_text("hello again\n")
     rewritten = _record_changed(ledger, plan.writes)
 

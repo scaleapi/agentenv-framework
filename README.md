@@ -960,6 +960,7 @@ A rerun writes a new version only of what changed since the bundle last wrote it
 - **Overrides.**
   - `--model` sets the agent's model. The judge keeps its own, so scores stay comparable across models.
   - `--sandbox` sets the provider for `deploy_env`, `deploy_agent`, `deploy_sandbox` and the judge's deploy. It takes a name or a comma-separated fallback chain, and an unknown one is refused before anything is written. A chain can't create a VM, so under one a `deploy_sandbox` step in `vm` mode fails, and so does an environment behind a gateway.
+- **Dry run.** `--dry-run` makes every check the run makes before its first task, preflights included, and writes and runs nothing: no entity, ledger row, lock or instance. It prints the lines the run prints as it writes, each with the version the write would reuse or get, then the store ids the plan read (`Store refs`), the tasks that would run, each eval's tasks, and any step it couldn't preflight (`Not preflighted`), because that step reads what the run would write first and the store doesn't hold it yet. It exits 0, or 1 on a problem the run would stop at. `--model` and `--keep` change nothing it shows. `agent_env.bundle.dry_run_bundle()` returns the same to Python, as a `DryRun`.
 - **Results.** The summary gives each task's outcome, its scores labelled by the step that recorded each, its duration and its instance id, then each eval's pass count.
   - A task passes when it recorded a score and every score is at least 1. A task that recorded no score is `unscored`.
   - The command exits 1 when a run raised or left a failed step; a score below 1 doesn't change the exit status. With `agent-env --verbose run`, each run that raised also prints its traceback.
@@ -972,9 +973,10 @@ Known limits:
 - An eval in a bundle runs only the bundle's own tasks. One that names a store task is refused; run that task with `agent-env task run`.
 - A step that writes an entity under an id it makes up is refused when it runs, since that id isn't under `@local/`. This refuses `run_container_unit_tests_verifier`'s stdout artifacts and `collect_artifacts`, and `snapshot_env` unless the task names its `snapshot_id`. `verify_sandbox` writes nothing, so it runs.
 - A step's reference to one of the bundle's entities names no version, so it reads the latest version when the step runs. Another run of the same folder, made after an edit, can write a newer one first.
+- A dry run's versions and reasons hold for the stores as they are when it runs. It takes no lock, so another run writing the same ids can change them first, and it doesn't see what another bundle's pending run would write.
 - Teardown reaches only the sandboxes a run's context records. A `rubrics_verifier`'s judge, and an agent whose deploy was cancelled, terminate their own sandboxes but leave their local work folders. A run killed outright (`kill -9`) leaves everything it deployed.
 - A process a local sandbox's command detaches from itself (a double fork, `setsid`) outlives the command and the run.
-- A run still opens the configured stores: it reads store entities through them and sets up their indexes. Under a config whose stores are remote, their credentials must be available, even for a bundle, such as `hello`, that writes nothing there.
+- A run still opens the configured stores: it reads store entities through them and sets up their indexes. Under a config whose stores are remote, their credentials must be available, even for a bundle, such as `hello`, that writes nothing there. A dry run reads them the same way, so a read can create an empty default local store, or set up a remote one's indexes, as any command that reads a store does.
 
 ### The local explorer and runner
 

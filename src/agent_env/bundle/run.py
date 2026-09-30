@@ -5,7 +5,8 @@ four at a time, at the version materializing wrote or reused. A run that fails i
 and the others go on. Each run's sandboxes are torn down as it ends, unless ``keep`` holds them up. Ctrl-C or
 SIGTERM cancels the runs: each one that started is marked cancelled and torn down, and a second one stops the
 teardown. A bundle's evals run only the bundle's own tasks for now, so one naming a store task is refused
-before anything is written.
+before anything is written. A dry run makes every check the run makes before its first task, and writes and
+runs nothing.
 """
 
 from __future__ import annotations
@@ -139,6 +140,19 @@ class BundleRun:
                        evals=tuple(replace(eval_run, runs=swapped(eval_run.runs)) for eval_run in self.evals))
 
 
+@dataclass(frozen=True)
+class DryRun:
+    """What ``run_bundle`` would write and run, found without writing or running anything."""
+
+    materialization: Materialization  # each write at the version it would leave, and why
+    runs: tuple[BundleEntry, ...]  # the tasks that would run, each once, in the plan's order
+    skipped: tuple[BundleEntry, ...]  # the tasks no eval names, which running every eval leaves out
+
+    def path(self, entry: BundleEntry) -> str:
+        """``entry``'s path in the bundle (``tasks/hello.json``)."""
+        return relative(self.materialization.plan.bundle.bundle.root, entry.path)
+
+
 class RunInterrupted(KeyboardInterrupt):
     """Ctrl-C or SIGTERM stopped ``run_bundle``. ``result`` holds every run, those it cancelled included, each
     torn down unless a second signal stopped that."""
@@ -184,21 +198,18 @@ def run_bundle(
         build_sandbox_provider(sandbox)
     say = _progress(on_progress)
     with namespace_routing():
-        plan = plan_bundle(resolve_bundle(parse_bundle(Path(root), id_root=id_root)), tasks=tasks, evals=evals)
-        refuse_store_tasks(plan)
+        plan = _planned(root, tasks, evals, id_root)
         materialization = materialize(
             plan,
             on_wait=lambda: say("waiting for another agent-env run to finish writing this bundle's ids"),
             on_write=lambda done: say(_written(plan, done)),
         )
-        wanted = {entry.entry.id for entry in plan.tasks}
-        wanted.update(ref.id for entry in plan.evals for ref in entry.references)
-        entries = [write.source.entry for write in plan.writes if write.kind is BundleKind.TASK and write.id in wanted]
+        entries = _to_run(plan)
         to_run = [(entry, Task.get(entry.id, materialization.version_of("task", entry.id))) for entry in entries]
         with Interrupts() as interrupts:
             runs = interrupts.run(_run_all(plan, to_run, model, sandbox, keep, say, interrupts))
             _mark_cancelled(runs, interrupts.reason)
-            result = _bundle_run(plan, materialization, runs, wanted, every=not tasks and not evals)
+            result = _bundle_run(plan, materialization, runs, _skipped(plan, entries, every=not tasks and not evals))
             if not interrupts.count:
                 return result
             if interrupts.count == 1:
@@ -207,6 +218,32 @@ def run_bundle(
                 except RunInterrupted as stopped:
                     result = stopped.result
             raise RunInterrupted(result, interrupts.signum)
+
+
+def dry_run_bundle(
+    root: Path | str,
+    *,
+    tasks: Sequence[str] = (),
+    evals: Sequence[str] = (),
+    sandbox: str | None = None,
+    on_progress: Callable[[str], None] | None = None,
+    id_root: str | None = None,
+) -> DryRun:
+    """Check what ``run_bundle`` with these arguments checks before its first task runs, and say what it would
+    write and run, writing and running nothing: no entity, ledger row, lock or instance. Each write's version is
+    the one it would reuse or the store's next, which another run writing the id first can take. ``on_progress``
+    is given the line ``run_bundle`` gives for each write, as it is checked.
+
+    It raises what ``run_bundle`` raises before anything is written, except that it runs no event loop, so a
+    running one isn't refused."""
+    if sandbox:
+        build_sandbox_provider(sandbox)
+    say = _progress(on_progress)
+    with namespace_routing():
+        plan = _planned(root, tasks, evals, id_root)
+        materialization = materialize(plan, dry_run=True, on_write=lambda done: say(_written(plan, done)))
+        runs = _to_run(plan)
+        return DryRun(materialization, runs, _skipped(plan, runs, every=not tasks and not evals))
 
 
 def _mark_cancelled(runs: tuple[TaskRun, ...], reason: str) -> None:
@@ -219,19 +256,37 @@ def _mark_cancelled(runs: tuple[TaskRun, ...], reason: str) -> None:
                 record_task_cancelled(run.instance_id, reason, Task._utc_now_str())
 
 
-def _bundle_run(plan: Plan, materialization: Materialization, runs: tuple[TaskRun, ...], wanted: set[str],
-                every: bool) -> BundleRun:
+def _bundle_run(plan: Plan, materialization: Materialization, runs: tuple[TaskRun, ...],
+                skipped: tuple[BundleEntry, ...]) -> BundleRun:
     by_id = {run.task.id: run for run in runs}
     eval_runs = tuple(
         EvalRun(entry.entry, materialization.version_of("eval", entry.entry.id),
                 tuple(by_id[ref.id] for ref in entry.references))
         for entry in plan.evals
     )
-    skipped = ()
-    if every:
-        skipped = tuple(entry.entry for entry in plan.bundle.entries
-                        if entry.entry.kind is BundleKind.TASK and entry.entry.id not in wanted)
     return BundleRun(materialization, runs, eval_runs, skipped)
+
+
+def _planned(root: Path | str, tasks: Sequence[str], evals: Sequence[str], id_root: str | None) -> Plan:
+    plan = plan_bundle(resolve_bundle(parse_bundle(Path(root), id_root=id_root)), tasks=tasks, evals=evals)
+    refuse_store_tasks(plan)
+    return plan
+
+
+def _to_run(plan: Plan) -> tuple[BundleEntry, ...]:
+    """The tasks selected on their own and every task a selected eval names, each once, in the plan's order."""
+    wanted = {entry.entry.id for entry in plan.tasks}
+    wanted.update(ref.id for entry in plan.evals for ref in entry.references)
+    return tuple(write.source.entry for write in plan.writes if write.kind is BundleKind.TASK and write.id in wanted)
+
+
+def _skipped(plan: Plan, runs: Sequence[BundleEntry], every: bool) -> tuple[BundleEntry, ...]:
+    """When every eval runs, the tasks none of them names."""
+    if not every:
+        return ()
+    ran = {entry.id for entry in runs}
+    return tuple(entry.entry for entry in plan.bundle.entries
+                 if entry.entry.kind is BundleKind.TASK and entry.entry.id not in ran)
 
 
 def refuse_store_tasks(plan: Plan) -> None:
