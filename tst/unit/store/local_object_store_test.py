@@ -176,6 +176,38 @@ def test_a_filesystem_without_hard_links_still_refuses_an_existing_key(store, mo
     assert store.read("nolink/x") == b"first"
 
 
+def test_without_hard_links_a_failed_write_once_put_leaves_no_object(store, monkeypatch):
+    def no_links(src, dst):
+        raise OSError(errno.EPERM, "hard links not supported")
+
+    def failing_replace(src, dst):
+        raise OSError(errno.EIO, "disk went away")
+
+    monkeypatch.setattr(os, "link", no_links)
+    monkeypatch.setattr(os, "replace", failing_replace)
+    with pytest.raises(OSError, match="disk went away"):
+        store.put("nolink/y", b"never")
+    assert not store.exists("nolink/y")
+
+
+def test_a_type_recorded_for_another_write_reads_back_as_unknown(store, tmp_path):
+    """Two overwrites of one key race: the one that renamed first records its type last. Its type must not
+    be read as the other's."""
+    store.put("race/x", b"first", content_type="text/plain")
+    first_meta = (tmp_path / ".agentenv-meta" / "race" / "x").read_text()
+    store.put("race/x", b"second!", content_type="application/json", allow_overwrite=True)
+    (tmp_path / ".agentenv-meta" / "race" / "x").write_text(first_meta)
+    metadata = store.get_object_metadata("race/x")
+    assert (metadata.content_type, metadata.size) == (None, 7)
+
+
+def test_an_overwrite_that_names_no_type_never_inherits_the_old_one(store, tmp_path, monkeypatch):
+    store.put("keep/x", b"typed", content_type="text/plain")
+    monkeypatch.setattr(Path, "unlink", lambda self, missing_ok=False: None)  # the old record survives
+    store.put("keep/x", b"untyped!", allow_overwrite=True)
+    assert store.get_object_metadata("keep/x").content_type is None
+
+
 @pytest.mark.parametrize("key", [".agentenv-meta/x", ".agentenv-tmp/x", "a/../.agentenv-meta"])
 def test_the_stores_own_directories_are_reserved(store, key):
     with pytest.raises(ValueError, match="reserved"):

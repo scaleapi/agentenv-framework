@@ -171,6 +171,17 @@ def test_an_upload_larger_than_the_grant_is_refused(store):
     assert not any((store.root / ".agentenv-tmp").iterdir())
 
 
+def test_an_upload_with_oversized_part_headers_is_refused(store):
+    write = _policy(store)
+    body = (
+        b"--b\r\nContent-Disposition: form-data; name=\"key\"\r\nX-Padding: " + b"x" * 20_000
+        + b"\r\n\r\nns/x\r\n--b--\r\n"
+    )
+    response = httpx.post(write.url, content=body, headers={"Content-Type": "multipart/form-data; boundary=b"})
+    assert response.status_code == 400
+    assert not store.exists("ns/x")
+
+
 def test_an_upload_must_name_its_key_before_its_file(store):
     write = _policy(store)
     assert _post(write, {"key": "ns/late"}, file_first=True).status_code == 400

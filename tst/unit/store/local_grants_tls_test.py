@@ -77,22 +77,57 @@ def test_the_ca_key_is_private_to_the_user_and_the_trust_files_are_not():
 
 
 def test_the_ca_is_created_once_and_reused():
-    assert local_ca().cert == local_ca().cert
+    first = local_ca()
+    tls._process_ca.cache_clear()  # as another process would
+    assert local_ca().cert == first.cert
+
+
+def test_a_process_keeps_its_ca_and_trust_files_when_another_renews_it():
+    mine = local_ca()
+    key, cert = tls._new_ca()
+    (state_root() / "tls" / "ca.key.pem").write_bytes(tls._key_pem(key) + cert.public_bytes(tls.serialization.Encoding.PEM))
+
+    assert local_ca() is mine
+    assert x509.load_pem_x509_certificate(mine.cert_path.read_bytes()) == mine.cert
+    tls._process_ca.cache_clear()
+    theirs = local_ca()
+    assert theirs.cert == cert and theirs.trust_dir != mine.trust_dir
+    assert x509.load_pem_x509_certificate(mine.cert_path.read_bytes()) == mine.cert
+
+
+def test_a_server_certificate_lasts_as_long_as_its_ca():
+    ca = local_ca()
+    server = server_context(ca, ["localhost"])
+    client = ssl.create_default_context(cafile=str(ca.cert_path))
+    to_server, to_client = ssl.MemoryBIO(), ssl.MemoryBIO()
+    tls_client = client.wrap_bio(to_client, to_server, server_hostname="localhost")
+    tls_server = server.wrap_bio(to_server, to_client, server_side=True)
+    for _ in range(10):
+        for side in (tls_client, tls_server):
+            try:
+                side.do_handshake()
+            except ssl.SSLWantReadError:
+                pass
+    leaf = x509.load_der_x509_certificate(tls_client.getpeercert(binary_form=True))
+    assert leaf.not_valid_after_utc == ca.cert.not_valid_after_utc
 
 
 def test_a_ca_near_expiry_is_replaced(monkeypatch):
     with monkeypatch.context() as m:
         m.setattr(tls, "_CA_LIFETIME", timedelta(days=10))
         first = local_ca()
+    tls._process_ca.cache_clear()
     second = local_ca()
     assert second.cert != first.cert
     assert x509.load_pem_x509_certificate(second.cert_path.read_bytes()) == second.cert
+    tls._process_ca.cache_clear()
     assert local_ca().cert == second.cert
 
 
 def test_an_unreadable_ca_is_replaced():
     first = local_ca()
     (state_root() / "tls" / "ca.key.pem").write_text("not a key")
+    tls._process_ca.cache_clear()
     assert local_ca().cert != first.cert
 
 
