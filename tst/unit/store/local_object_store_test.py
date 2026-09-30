@@ -5,7 +5,10 @@ assertions that prove S3 parity also give quick backend-neutral coverage.
 """
 
 import errno
+import hashlib
 import os
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -188,6 +191,45 @@ def test_without_hard_links_a_failed_write_once_put_leaves_no_object(store, monk
     with pytest.raises(OSError, match="disk went away"):
         store.put("nolink/y", b"never")
     assert not store.exists("nolink/y")
+
+
+def test_without_hard_links_a_racing_write_once_put_keeps_the_winner(store, monkeypatch):
+    def no_links(src, dst):
+        raise OSError(errno.EPERM, "hard links not supported")
+
+    real_replace = os.replace
+    first_holds_its_claim = threading.Event()
+
+    def slow_first_replace(src, dst):
+        if threading.current_thread().name == "first" and str(dst).endswith("race/once"):
+            first_holds_its_claim.set()
+            time.sleep(0.3)
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "link", no_links)
+    monkeypatch.setattr(os, "replace", slow_first_replace)
+    first = threading.Thread(target=store.put, args=("race/once", b"first"), name="first")
+    first.start()
+    first_holds_its_claim.wait(5)
+    with pytest.raises(ObjectAlreadyExistsError):
+        store.put("race/once", b"second")
+    first.join()
+    assert store.read("race/once") == b"first"
+
+
+def test_without_hard_links_a_claim_a_crash_left_is_taken_over(store, tmp_path, monkeypatch):
+    def no_links(src, dst):
+        raise OSError(errno.EPERM, "hard links not supported")
+
+    monkeypatch.setattr(os, "link", no_links)
+    store.put("seed", b"s")  # creates the staging directory
+    path = (tmp_path / "left/x").resolve()
+    marker = tmp_path / ".agentenv-tmp" / f"{hashlib.sha256(str(path).encode()).hexdigest()}.claim"
+    marker.write_bytes(b"")
+    os.utime(marker, (time.time() - 60, time.time() - 60))
+    store.put("left/x", b"mine")
+    assert store.read("left/x") == b"mine"
+    assert not marker.exists()
 
 
 def test_a_type_recorded_for_another_write_reads_back_as_unknown(store, tmp_path):
