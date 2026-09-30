@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/brand/lockup-dark.png">
+  <img alt="AgentEnv Framework" src="assets/brand/lockup-light.png" width="360">
+</picture>
+
 # agent-env
 
 agent-env is a Python SDK and CLI for building, deploying and running agentic environments and the tasks that grade agents inside them. Environments are containerized servers that speak the open `agentenv-protocol`; agent-env builds them into versioned images, deploys them behind a gateway, points an agent at them, and scores what the agent did.
