@@ -97,7 +97,7 @@ def test_service_db_put_falls_back_to_the_config_default():
     cfg = _config(default_service_db_env_id="svc-db-from-config")
     with patch("agent_env.cli.env.service_db.get_config", return_value=cfg), \
          patch("agent_env.cli.env.service_db.DockerImageArtifact") as artifact, \
-         patch("agent_env.cli.env.service_db.build_image") as run:
+         patch("agent_env.cli.env.service_db.build_image"):
         artifact.put.side_effect = RuntimeError("stop once the id is recorded")
         res = CliRunner().invoke(service_db, ["put"])
 
@@ -122,7 +122,7 @@ def test_website_browser_put_falls_back_to_the_config_default():
     cfg = _config(default_website_browser_env_id="wb-from-config")
     with patch("agent_env.config.get_config", return_value=cfg), \
          patch("agent_env.cli.env.website_browser.DockerImageArtifact") as artifact, \
-         patch("agent_env.cli.env.website_browser.build_image") as run:
+         patch("agent_env.cli.env.website_browser.build_image"):
         artifact.put.side_effect = RuntimeError("stop once the id is recorded")
         res = CliRunner().invoke(website_browser, ["put"])
 

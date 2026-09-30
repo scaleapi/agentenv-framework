@@ -1,6 +1,7 @@
 """``build_image``: the argv it runs, what a failed or impossible build raises, and that importing it pulls in
 neither the CLI nor the providers, so library code can build too."""
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -51,6 +52,18 @@ def test_a_failed_build_raises_with_its_output(monkeypatch):
         build_image(Path("Dockerfile"), Path("."), "my-image", platform=None)
 
     assert str(failed.value) == f"docker build of my-image failed (exit 1):\n{output.rstrip()}"
+
+
+def test_the_error_carries_both_of_docker_s_streams_with_undecodable_bytes_replaced(tmp_path, monkeypatch):
+    docker = tmp_path / "docker"
+    docker.write_text("#!/bin/sh\nprintf 'step 1\\n'\nprintf 'bad \\377 byte\\n' >&2\nexit 3\n")
+    docker.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
+    with pytest.raises(DockerBuildError) as failed:
+        build_image(Path("Dockerfile"), Path("."), "my-image", platform=None)
+
+    assert str(failed.value) == "docker build of my-image failed (exit 3):\nstep 1\nbad � byte"
 
 
 def test_a_missing_docker_raises_rather_than_crashing(monkeypatch):

@@ -2,7 +2,7 @@
 as one line, not a traceback."""
 
 import importlib
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import pytest
 from click.testing import CliRunner
@@ -23,8 +23,9 @@ def test_platform_option_wired_on_mcp_server_put():
     assert "linux/amd64" in result.output  # default shown
 
 
-def _dockerfile(tmp_path, name="Dockerfile"):
-    path = tmp_path / name
+def _dockerfile(folder, name="Dockerfile"):
+    folder.mkdir(exist_ok=True)
+    path = folder / name
     path.write_text("FROM scratch\n")
     return path
 
@@ -67,3 +68,31 @@ def test_each_put_builds_through_build_image_and_a_failed_build_is_one_line(tmp_
     assert result.exit_code == 1
     assert result.output.endswith(f"Error: docker build of {tag} failed (exit 1):\nboom\n")
     assert "Traceback" not in result.output
+
+
+def _multi_build_puts(tmp_path):
+    """The puts that build more than one image: the env type each writes, and every build it makes."""
+    backend, frontend = _dockerfile(tmp_path / "backend"), _dockerfile(tmp_path / "frontend")
+    return {
+        "service-db": ("agent_env.cli.env.service_db", "ServiceDBEnv", ["env", "service-db", "put", "--id", "x"], [
+            (service_db.SERVICE_DB_DOCKERFILE, service_db.SERVICE_DB_DOCKERFILE.parent, service_db.SERVICE_DB_IMAGE_NAME),
+            (service_db.DB_WEB_DOCKERFILE, service_db.DB_WEB_DOCKERFILE.parent, service_db.DB_WEB_IMAGE_NAME),
+            (service_db.DB_MCP_DOCKERFILE, service_db.DB_MCP_DOCKERFILE.parent, service_db.DB_MCP_IMAGE_NAME),
+        ]),
+        "website": ("agent_env.cli.env.website", "WebsiteEnv",
+                    ["env", "website", "put", "--id", "x", "--environment-name", "shop", "--skip-validation",
+                     "--backend-dockerfile", str(backend), "--frontend-dockerfile", str(frontend)],
+                    [(backend, backend.parent, "website-backend-x"), (frontend, frontend.parent, "website-frontend-x")]),
+    }
+
+
+@pytest.mark.parametrize("name", ["service-db", "website"])
+def test_a_put_that_builds_several_images_builds_every_one_for_its_platform(tmp_path, name):
+    module, env_type, argv, builds = _multi_build_puts(tmp_path)[name]
+
+    with patch(f"{module}.build_image") as build, patch(f"{module}.DockerImageArtifact.put"), \
+            patch(f"{module}.{env_type}.put"):
+        result = CliRunner().invoke(cli, [*argv, "--platform", "linux/arm64"])
+
+    assert result.exit_code == 0, result.output
+    assert build.call_args_list == [call(*args, platform="linux/arm64") for args in builds]
