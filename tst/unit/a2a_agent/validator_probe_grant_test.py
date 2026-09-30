@@ -7,6 +7,7 @@ import pytest
 
 from agent_env.a2a_agent.validator import A2AAgentValidator
 from agent_env.config import reset_config, set_object_store
+from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SandboxProvider,
@@ -32,14 +33,20 @@ def store(tmp_path):
     reset_agent_sandbox_provider()
 
 
-def test_agents_on_the_local_provider_get_the_image_through_a_grant(store):
-    set_agent_sandbox_provider(LocalSandboxProvider())
+@pytest.mark.parametrize("provider", [
+    LocalSandboxProvider(), ChainedSandboxProvider([LocalSandboxProvider(), _RemoteProvider()]),
+], ids=["local", "local-first-in-a-chain"])
+def test_agents_on_the_local_provider_get_the_image_through_a_grant(store, provider):
+    set_agent_sandbox_provider(provider)
     fixtures = A2AAgentValidator._upload_probe_fixtures(_AGENT, "file:///skill")
     assert fixtures.png_signed_url.startswith(GRANT_ORIGIN)
 
 
-def test_agents_the_grants_do_not_reach_are_not_sent_one(store):
-    set_agent_sandbox_provider(_RemoteProvider())
+@pytest.mark.parametrize("provider", [
+    _RemoteProvider(), ChainedSandboxProvider([_RemoteProvider(), LocalSandboxProvider()]),
+], ids=["remote", "remote-first-in-a-chain"])
+def test_agents_the_grants_do_not_reach_are_not_sent_one(store, provider):
+    set_agent_sandbox_provider(provider)
     with pytest.raises(RuntimeError, match="signs URLs or issues grants"):
         A2AAgentValidator._upload_probe_fixtures(_AGENT, "file:///skill")
     assert store.granted == []

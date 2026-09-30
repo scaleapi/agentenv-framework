@@ -294,9 +294,14 @@ def local_grant_trust() -> Path | None:
 
 
 async def start_trusting(sandbox: VmSandbox, container: str, trust_dir: Path) -> None:
-    """Copy ``trust_dir`` into the created ``container`` where ``LOCAL_TRUST_ENV`` points, then start it."""
-    await asyncio.to_thread(_copy_into_container, trust_dir, container, _TRUST_DIR)
-    await sandbox.exec_script(f"docker start {shlex.quote(container)} > /dev/null")
+    """Copy ``trust_dir`` into the created ``container`` where ``LOCAL_TRUST_ENV`` points, then start it. A container
+    that cannot be given the files or started is removed, so its name is free for the next attempt."""
+    try:
+        await asyncio.to_thread(_copy_into_container, trust_dir, container, _TRUST_DIR)
+        await sandbox.exec_script(f"docker start {shlex.quote(container)} > /dev/null")
+    except Exception:
+        await sandbox.exec_script(f"docker rm -f {shlex.quote(container)} >/dev/null 2>&1 || true")
+        raise
 
 
 def _copy_into_container(source: Path, container: str, destination: str) -> None:

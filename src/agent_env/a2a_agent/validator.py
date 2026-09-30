@@ -29,6 +29,7 @@ from agent_env.a2a_agent.object_transfer import (
     invoke_transfer,
 )
 from agent_env.config import get_config
+from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox_provider import get_agent_sandbox_provider
 from agent_env.store.routing import refuse_local_derivation
@@ -60,6 +61,15 @@ if TYPE_CHECKING:
     from agent_env.a2a_agent.a2a_agent import A2AAgent
 
 logger = logging.getLogger(__name__)
+
+
+def _probe_agent_sandbox_type() -> str | None:
+    """The sandbox type the validation agents will deploy on, as far as it is known before they do: the local
+    provider's when it is the agent provider, or first in its chain, which runs the agent unless it fails."""
+    provider = get_agent_sandbox_provider()
+    if isinstance(provider, ChainedSandboxProvider):
+        provider = provider.providers[0]
+    return LocalSandbox.type if isinstance(provider, LocalSandboxProvider) else None
 
 
 @dataclass
@@ -838,9 +848,7 @@ class A2AAgentValidator:
 
         png_object_uri = store.put(f"{prefix}red.png", base64.b64decode(IMAGE_PROBE_PNG_B64), content_type="image/png", allow_overwrite=True)
         png_signed_url = store.signed_get_url(png_object_uri)
-        # The agents are not deployed yet, so a grant is used only where it reaches the provider they will use.
-        agent_sandbox_type = LocalSandbox.type if isinstance(get_agent_sandbox_provider(), LocalSandboxProvider) else None
-        if png_signed_url is None and store.supports_transfer_grants and store.grants_reach(agent_sandbox_type):
+        if png_signed_url is None and store.supports_transfer_grants and store.grants_reach(_probe_agent_sandbox_type()):
             png_signed_url = store.issue_read_grant(png_object_uri).url
         if png_signed_url is None:
             raise RuntimeError("A2A validation requires an object store that signs URLs or issues grants, for the presigned-URI probe.")

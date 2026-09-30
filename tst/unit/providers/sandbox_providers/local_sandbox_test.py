@@ -769,3 +769,19 @@ async def test_an_agent_placed_on_a_local_vm_sandbox_gets_the_local_ca(tmp_path,
 
 async def _no_sleep(_seconds):
     return None
+
+
+@pytest.mark.asyncio
+async def test_a_linked_agent_whose_copy_fails_leaves_no_container(tmp_path, monkeypatch):
+    def fail(*args):
+        raise RuntimeError("no space left")
+
+    monkeypatch.setattr(ls, "_copy_into_container", fail)
+    monkeypatch.setattr(a2a_agent_module, "local_grant_trust", lambda: local_ca().trust_dir)
+    sandbox = _RecordingLocalSandbox(work_dir=tmp_path)
+    agent = A2AAgent.__new__(A2AAgent)
+    agent._sandbox = sandbox
+
+    with pytest.raises(RuntimeError, match="no space left"):
+        await agent._run_container("img:v1", 8000, {})
+    assert sandbox.scripts[-1] == f"docker rm -f {sandbox.container_name} >/dev/null 2>&1 || true"
