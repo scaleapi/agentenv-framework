@@ -159,13 +159,6 @@ export default function App() {
     string,
     unknown
   > | null>(null);
-  const [isEmbedded, setIsEmbedded] = useState(false);
-
-  /* --- Detect iframe / host after mount to avoid SSR hydration mismatch --- */
-  useEffect(() => {
-    setIsEmbedded(window.parent !== window);
-  }, []);
-
   /* --- Initialize state from URL on mount --- */
   useEffect(() => {
     const { page, entityId } = currentRoute();
@@ -278,145 +271,142 @@ export default function App() {
 
 
   const sidebarActivePage = DETAIL_TO_PARENT[activePage] ?? activePage;
-  const hideSidebar = isEmbedded;
 
   const navGroups = NAV_GROUPS;
 
   return (
     <div className="flex h-screen">
       {/* Sidebar */}
-      {!hideSidebar && (
-        <nav
-          className={`${
-            sidebarOpen ? 'w-[220px]' : 'w-[56px]'
-          } flex-shrink-0 border-r border-[var(--border)] flex flex-col transition-[width] duration-200`}
+      <nav
+        className={`${
+          sidebarOpen ? 'w-[220px]' : 'w-[56px]'
+        } flex-shrink-0 border-r border-[var(--border)] flex flex-col transition-[width] duration-200`}
+      >
+        <div
+          className={`flex items-center ${
+            sidebarOpen ? 'px-5' : 'justify-center'
+          } py-5`}
         >
-          <div
-            className={`flex items-center ${
-              sidebarOpen ? 'px-5' : 'justify-center'
-            } py-5`}
+          {sidebarOpen ? (
+            <div className="flex flex-col gap-1.5">
+              <div className="flex items-center gap-2">
+                <Image
+                  src="/logos/agentenv-icon.svg"
+                  alt=""
+                  width={32}
+                  height={32}
+                  className="h-5 w-5"
+                  priority
+                />
+                <span className="text-sm font-semibold text-[var(--foreground)]">
+                  AgentEnv Explorer
+                </span>
+              </div>
+              <div className="flex items-center gap-1.5 text-[11px] text-[var(--muted-foreground)]">
+                Built by
+                <Image
+                  src="/logos/scale-logo.svg"
+                  alt="Scale"
+                  width={319}
+                  height={61}
+                  className="h-2.5 w-auto opacity-60"
+                />
+              </div>
+            </div>
+          ) : (
+            <Image
+              src="/logos/agentenv-icon.svg"
+              alt="AgentEnv Explorer"
+              width={32}
+              height={32}
+              className="h-5 w-5"
+              priority
+            />
+          )}
+        </div>
+        <div
+          className={`flex flex-col gap-4 ${sidebarOpen ? 'px-3' : 'px-1.5'}`}
+        >
+          {navGroups.map((group, gi) => (
+            <div key={gi} className="flex flex-col gap-0.5">
+              {group.label && sidebarOpen && (
+                <div className="px-3 pb-1 text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
+                  {group.label}
+                </div>
+              )}
+              {group.items.map(({ page, label, icon: Icon }) => (
+                <Link
+                  key={page}
+                  href={pageToPath(page)}
+                  onClick={e => {
+                    if (e.metaKey || e.ctrlKey || e.button === 1) return;
+                    e.preventDefault();
+                    setActivePage(page);
+                    setEnvHistory([]);
+                    setSelectedEnvId(null);
+                    setSelectedUniverseId(null);
+                    setSelectedUniverseVersion(undefined);
+                    setSelectedTaskId(null);
+                    setEditTaskId(null);
+                    setCloneTaskId(null);
+                    setSelectedAgentId(null);
+                    setSelectedSkillId(null);
+                    setPlaygroundInitEnvId(null);
+                    setPlaygroundInitUniverseId(null);
+                    setPlaygroundInstanceId(null);
+                    setTaskRunnerTaskId(null);
+                    setEvaluatorOnlyTaskId(null);
+                    setRerunFromStep(null);
+                    setSelectedDeliveryId(null);
+                    setSavedContextJson(null);
+                    pushRoute(page);
+                  }}
+                  title={sidebarOpen ? undefined : label}
+                  className={`flex items-center ${
+                    sidebarOpen ? 'gap-2.5 px-3' : 'justify-center px-0'
+                  } py-2 rounded-md text-sm transition-colors text-left ${
+                    sidebarActivePage === page
+                      ? 'bg-[var(--secondary)] text-[var(--foreground)] font-medium'
+                      : 'text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]'
+                  }`}
+                >
+                  <Icon size={16} className="flex-shrink-0" />
+                  {sidebarOpen && label}
+                </Link>
+              ))}
+            </div>
+          ))}
+        </div>
+        <div
+          className={`mt-auto p-3 flex ${
+            sidebarOpen
+              ? 'items-center justify-between'
+              : 'flex-col items-center gap-3'
+          }`}
+        >
+          <a
+            href={FRAMEWORK_DOCS_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={sidebarOpen ? undefined : 'AgentEnv Framework docs'}
+            className="flex items-center gap-1.5 text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors"
+          >
+            <ExternalLink size={sidebarOpen ? 14 : 18} />
+            {sidebarOpen && 'Framework docs'}
+          </a>
+          <button
+            onClick={() => setSidebarOpen(prev => !prev)}
+            className="text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors"
+            title={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
           >
             {sidebarOpen ? (
-              <div className="flex flex-col gap-1.5">
-                <div className="flex items-center gap-2">
-                  <Image
-                    src="/logos/agentenv-icon.svg"
-                    alt=""
-                    width={32}
-                    height={32}
-                    className="h-5 w-5"
-                    priority
-                  />
-                  <span className="text-sm font-semibold text-[var(--foreground)]">
-                    AgentEnv Explorer
-                  </span>
-                </div>
-                <div className="flex items-center gap-1.5 text-[11px] text-[var(--muted-foreground)]">
-                  Built by
-                  <Image
-                    src="/logos/scale-logo.svg"
-                    alt="Scale"
-                    width={319}
-                    height={61}
-                    className="h-2.5 w-auto opacity-60"
-                  />
-                </div>
-              </div>
+              <PanelLeftClose size={18} />
             ) : (
-              <Image
-                src="/logos/agentenv-icon.svg"
-                alt="AgentEnv Explorer"
-                width={32}
-                height={32}
-                className="h-5 w-5"
-                priority
-              />
+              <PanelLeftOpen size={18} />
             )}
-          </div>
-          <div
-            className={`flex flex-col gap-4 ${sidebarOpen ? 'px-3' : 'px-1.5'}`}
-          >
-            {navGroups.map((group, gi) => (
-              <div key={gi} className="flex flex-col gap-0.5">
-                {group.label && sidebarOpen && (
-                  <div className="px-3 pb-1 text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
-                    {group.label}
-                  </div>
-                )}
-                {group.items.map(({ page, label, icon: Icon }) => (
-                  <Link
-                    key={page}
-                    href={pageToPath(page)}
-                    onClick={e => {
-                      if (e.metaKey || e.ctrlKey || e.button === 1) return;
-                      e.preventDefault();
-                      setActivePage(page);
-                      setEnvHistory([]);
-                      setSelectedEnvId(null);
-                      setSelectedUniverseId(null);
-                      setSelectedUniverseVersion(undefined);
-                      setSelectedTaskId(null);
-                      setEditTaskId(null);
-                      setCloneTaskId(null);
-                      setSelectedAgentId(null);
-                      setSelectedSkillId(null);
-                      setPlaygroundInitEnvId(null);
-                      setPlaygroundInitUniverseId(null);
-                      setPlaygroundInstanceId(null);
-                      setTaskRunnerTaskId(null);
-                      setEvaluatorOnlyTaskId(null);
-                      setRerunFromStep(null);
-                      setSelectedDeliveryId(null);
-                      setSavedContextJson(null);
-                      pushRoute(page);
-                    }}
-                    title={sidebarOpen ? undefined : label}
-                    className={`flex items-center ${
-                      sidebarOpen ? 'gap-2.5 px-3' : 'justify-center px-0'
-                    } py-2 rounded-md text-sm transition-colors text-left ${
-                      sidebarActivePage === page
-                        ? 'bg-[var(--secondary)] text-[var(--foreground)] font-medium'
-                        : 'text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]'
-                    }`}
-                  >
-                    <Icon size={16} className="flex-shrink-0" />
-                    {sidebarOpen && label}
-                  </Link>
-                ))}
-              </div>
-            ))}
-          </div>
-          <div
-            className={`mt-auto p-3 flex ${
-              sidebarOpen
-                ? 'items-center justify-between'
-                : 'flex-col items-center gap-3'
-            }`}
-          >
-            <a
-              href={FRAMEWORK_DOCS_URL}
-              target="_blank"
-              rel="noopener noreferrer"
-              title={sidebarOpen ? undefined : 'AgentEnv Framework docs'}
-              className="flex items-center gap-1.5 text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors"
-            >
-              <ExternalLink size={sidebarOpen ? 14 : 18} />
-              {sidebarOpen && 'Framework docs'}
-            </a>
-            <button
-              onClick={() => setSidebarOpen(prev => !prev)}
-              className="text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors"
-              title={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
-            >
-              {sidebarOpen ? (
-                <PanelLeftClose size={18} />
-              ) : (
-                <PanelLeftOpen size={18} />
-              )}
-            </button>
-          </div>
-        </nav>
-      )}
+          </button>
+        </div>
+      </nav>
 
       {/* Main content — gate on initialized to avoid flashing home before URL is read */}
       <main className="flex-1 overflow-auto">

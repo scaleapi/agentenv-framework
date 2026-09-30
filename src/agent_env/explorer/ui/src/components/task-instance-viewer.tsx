@@ -148,13 +148,8 @@ export function TaskInstanceViewer({
   rubricsCriteria,
   rubricsAggregator,
   taskSteps,
-  showRunContext = false,
 }: {
   instance: Record<string, unknown>;
-  /** Re-enable the Task Run Context tab while embedded (the iframe chrome hides it). An opt-in for an
-   *  internal embed that needs the raw context to debug a run — the only place the snapshot version and
-   *  collected-artifact keys are visible. */
-  showRunContext?: boolean;
   // List-derived instances may omit task_id; callers that know it (runner/detail
   // pages) pass it so downstream calls can't send task_id=undefined.
   taskId?: string;
@@ -188,10 +183,6 @@ export function TaskInstanceViewer({
     string | null
   >(null);
   const [copiedUsersim, setCopiedUsersim] = useState<string | null>(null);
-  const [isEmbedded, setIsEmbedded] = useState(false);
-  useEffect(() => {
-    setIsEmbedded(window.parent !== window);
-  }, []);
   // Per-deployment A2A cards for the Agent Card tab. The registered agent doc carries no card; it lives in
   // context.deployed_agents[].a2a_card, which the list endpoint strips — fall back to the single-instance GET.
   const deployedAgentsForCard = ((instance.context as Record<string, unknown> | null)
@@ -877,29 +868,20 @@ export function TaskInstanceViewer({
     : null;
   const showReviewerOverview =
     collectedFiles.length > 0 || !!reviewerOverviewS3;
-  // A failed run defaults to the context tab; this drives both the trigger and that fallback so it isn't a tab that's not rendered.
-  const contextHidden = isEmbedded && !showRunContext;
   const liveDefaultValue = hasTrajectories
     ? 'trajectory'
     : hasUsersimModels
     ? `model-${usersimModels[0]!.modelName}`
     : hasVerifications
     ? 'verifier'
-    : contextHidden && hasCompletedRuns
-    ? 'completed-runs'
-    : contextHidden && hasTaskMilestones
-    ? 'task-milestones'
-    : contextHidden
-    ? undefined
     : 'context';
+  // A failed run defaults to the context tab.
   const defaultTabValue = isTerminalCompleted
     ? hasVerifications
       ? 'verifier'
       : liveDefaultValue
     : isTerminalFailed
-    ? contextHidden
-      ? liveDefaultValue
-      : 'context'
+    ? 'context'
     : liveDefaultValue;
   const instanceError =
     typeof instance.error === 'string' && instance.error.trim()
@@ -1070,11 +1052,9 @@ export function TaskInstanceViewer({
                 Conversation
               </Tabs.Trigger>
             )}
-            {!contextHidden && (
-              <Tabs.Trigger value="context" className="my-1">
-                Task Run Context
-              </Tabs.Trigger>
-            )}
+            <Tabs.Trigger value="context" className="my-1">
+              Task Run Context
+            </Tabs.Trigger>
           </Tabs.List>
           <div className="flex flex-shrink-0 items-center gap-2 px-2">
             {collapseBarDownloads ? (
