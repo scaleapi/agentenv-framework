@@ -233,7 +233,7 @@ The runtime dependencies of `agentenv-protocol` and its `agent` extra, at the ve
 - Source: <https://github.com/python/typing_extensions>
 - [License text 20](#license-text-20)
 
-### urllib3 2.7.0
+### urllib3 2.8.0
 
 - License: MIT
 - Copyright: Copyright (c) 2008-2020 Andrey Petrov and contributors.

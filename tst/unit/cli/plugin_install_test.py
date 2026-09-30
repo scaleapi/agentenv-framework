@@ -973,6 +973,7 @@ def test_a_symlink_planted_at_the_lock_path_is_refused_and_its_target_untouched(
     ("agentenv-framework==0.9.2", "is agent-env itself"),
     ("agentenv-framework @ git+https://github.com/mycorp/agentenv-framework@main", "is agent-env itself"),
     ("./dist/agentenv_framework-0.9.2-py3-none-any.whl", "is agent-env itself"),
+    ("agentenv-framework-protocol==0.1.1", "is agent-env itself"),
     ("agentenv-protocol==0.1.1", "is agent-env itself"),
     ("agent-env", "is agent-env itself"),
 ])

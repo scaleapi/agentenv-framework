@@ -764,7 +764,7 @@ The runtime dependencies of `agentenv-framework` and its `explorer` and `gcp` ex
 - Source: <https://github.com/python/typing_extensions>
 - [License text 2](#license-text-2)
 
-### urllib3 2.7.0
+### urllib3 2.8.0
 
 - License: MIT
 - Copyright: Copyright (c) 2008-2020 Andrey Petrov and contributors.
