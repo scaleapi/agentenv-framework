@@ -278,11 +278,14 @@ def test_a_seeded_runs_universe_is_named_after_its_seed(tmp_path, monkeypatch, t
     assert seen == [universe_id]
 
 
-def test_a_seed_that_cant_name_an_local_universe_stops_run_batch_before_any_run(tmp_path, monkeypatch):
+@pytest.mark.parametrize(("collects", "exit_code", "runs"), [(True, 1, 0), (False, 0, 2)], ids=["collects", "doesnt-collect"])
+def test_a_seed_that_cant_name_an_local_universe_stops_a_collecting_run_batch_before_any_run(
+        tmp_path, monkeypatch, collects, exit_code, runs):
     ran: list[TaskStepContext] = []
+    collect = CollectArtifactsTaskStep(id="collect", version=None, sandbox_name="box", artifact_paths=["report.pdf"])
 
     class _Task:
-        id, version, steps = "@local/~/work/triage/tasks/t", 2, []
+        id, version, steps = "@local/~/work/triage/tasks/t", 2, [collect] if collects else []
 
         async def run(self, context, **kwargs):
             ran.append(context)
@@ -294,6 +297,6 @@ def test_a_seed_that_cant_name_an_local_universe_stops_run_batch_before_any_run(
     result = CliRunner().invoke(cli, ["task", "run-batch", "--id", _Task.id, "--seeds", str(tmp_path / "seeds.csv"),
                                       "--output-dir", str(tmp_path / "out")])
 
-    assert result.exit_code == 1
-    assert "seed 2 can't name an @local universe" in result.output
-    assert ran == []
+    assert result.exit_code == exit_code, result.output
+    assert ("seed 2 can't name an @local universe" in result.output) is collects
+    assert len(ran) == runs

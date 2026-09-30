@@ -13,6 +13,7 @@ import click
 from agent_env.cli.banner import print_banner
 from agent_env.cli.identity import get_agent_env_client_id
 from agent_env.store.ids import fs_safe, is_local_id, validate_local_id
+from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTaskStep
 
 
 _print_lock = asyncio.Lock()
@@ -489,8 +490,8 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
 
 
 def _seed_universe_id(task, seed: dict) -> str | None:
-    """The universe a seed's runs collect into: the seed's id or name, under the task for an ``@local`` task,
-    whose runs write only ``@local`` ids."""
+    """The universe a seed's runs collect into, if the task collects: the seed's id or name, under the task for an
+    ``@local`` task, whose runs write only ``@local`` ids."""
     universe_id = seed.get("id") or seed.get("name")
     if universe_id and is_local_id(task.id):
         return f"{task.id}-v{task.version}-{universe_id}"
@@ -543,7 +544,7 @@ def run_batch(task_id: str, task_version: int | None, seeds: str, concurrency: i
     click.echo(f"Fetching task: id={task_id} version={task_version or 'latest'}...")
     task = Task.get(task_id, version=task_version)
     click.echo(f"Found task: id={task.id} version={task.version} steps={len(task.steps)}")
-    if is_local_id(task.id):
+    if is_local_id(task.id) and any(isinstance(step, CollectArtifactsTaskStep) for step in task.steps):
         for index, seed in enumerate(seed_rows, 1):
             universe_id = _seed_universe_id(task, seed)
             try:
