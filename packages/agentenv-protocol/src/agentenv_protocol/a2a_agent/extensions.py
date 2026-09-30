@@ -232,7 +232,7 @@ class PeerAgentsSetRequest(ExtensionRequest):
 
 
 class AttributionProbeResponse(ExtensionResponse):
-    last_seen_attribution: dict[str, str] = Field(default_factory=dict)
+    last_seen_attribution: dict[str, str]
     last_seen_at_utc: str | None = None
 
 
