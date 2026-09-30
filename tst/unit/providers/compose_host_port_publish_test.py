@@ -2,8 +2,8 @@
 
 LocalSandbox shares the host network namespace, so two concurrent deployments contend for
 any fixed host port. Each deployment is therefore given its own host port and the compose
-publishes ``resolved_host:container``. Container ports are untouched -- they are the env's
-internal contract, and callers read the host side back out of ``tunnel_urls``.
+publishes ``resolved_host:container``, on the sandbox's host IPs. Container ports are untouched --
+they are the env's internal contract, and callers read the host side back out of ``tunnel_urls``.
 
 Coverage is two layers. The source guard holds for every renderer in the tree, including
 env types added later. The rendered-document checks then exercise the config axes that
@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT
 from agent_env.providers.env_providers import EnvironmentGatewayProvider, MCPServerConfig, SidecarConfig
 from agent_env.env.envs.service_db import DB_MCP_CONTAINER_PORT, DB_MCP_PORT, DB_WEB_PORT
 from agent_env.providers.env_state.local_postgres import LocalPostgresStateProvider
@@ -28,22 +29,29 @@ OFFSET = 40000
 
 # --- source guard: exhaustive over the tree ---------------------------------
 
-# A compose port mapping. Excludes volume mounts and image refs (which contain "/" or
-# "://") and docstring illustrations written as <placeholder>.
-_PORT_PAIR = re.compile(r'-\s+"([^":/]+):([^":/]+)"')
+# A compose port mapping, ``[ip:]host:container``. Excludes volume mounts and image refs (which
+# contain "/" or "://") and docstring illustrations written as <placeholder>.
+_PORT_PAIR = re.compile(r'-\s+"(?:([^":/]+):)?([^":/]+):([^":/]+)"')
+
+# A compose port entry rendered from ``port_bindings(host_ips, host_port, container_port)``.
+_PUBLISH_SITE = re.compile(r'-\s+"\{(\w+)\}"\' for \1 in port_bindings\([^,]+, (.+), [^,]+\)')
 
 
 def _is_port_expression(text: str) -> bool:
     return text.isdigit() or (text.startswith("{") and text.endswith("}"))
 
 
-def _publish_sites():
-    """Every ``host:container`` publication written anywhere under src/."""
+def _source_lines():
     for path in sorted(SRC.rglob("*.py")):
         for lineno, line in enumerate(path.read_text().splitlines(), 1):
-            for host, container in _PORT_PAIR.findall(line):
-                if _is_port_expression(host) and _is_port_expression(container):
-                    yield path, lineno, line.strip(), host
+            yield path, lineno, line
+
+
+def _publish_sites():
+    """Every compose port entry written anywhere under src/, with its host-port expression."""
+    for path, lineno, line in _source_lines():
+        for _, host in _PUBLISH_SITE.findall(line):
+            yield path, lineno, line.strip(), host
 
 
 def _bypasses_resolver(host: str) -> bool:
@@ -66,6 +74,17 @@ def test_no_renderer_publishes_a_fixed_host_port():
     assert not violations, "host ports published without the resolver:\n" + "\n".join(violations)
 
 
+def test_no_renderer_writes_a_port_mapping_by_hand():
+    """A mapping written out skips ``port_bindings``, so on local it would publish on every interface."""
+    by_hand = [
+        f"{path.relative_to(SRC)}:{lineno}: {line.strip()}"
+        for path, lineno, line in _source_lines()
+        for _, host, container in _PORT_PAIR.findall(line)
+        if _is_port_expression(host) and _is_port_expression(container)
+    ]
+    assert not by_hand, "port mappings written without port_bindings:\n" + "\n".join(by_hand)
+
+
 def test_source_guard_flags_a_fixed_host_port():
     """The guard above only means something if a constant actually trips it."""
     assert _bypasses_resolver("{DB_WEB_PORT}")
@@ -81,7 +100,7 @@ def _published_pairs(compose: str) -> list[tuple[int, int]]:
     """Every numeric ``host:container`` pair in a rendered compose."""
     pairs = []
     for line in compose.splitlines():
-        for host, container in _PORT_PAIR.findall(line.strip()):
+        for _, host, container in _PORT_PAIR.findall(line.strip()):
             if host.isdigit() and container.isdigit():
                 pairs.append((int(host), int(container)))
     return pairs
@@ -213,3 +232,24 @@ def test_postgres_sidecar_fragment_defaults_to_identity(stub_postgres):
 
     assert f'"{DB_WEB_PORT}:{DB_WEB_PORT}"' in lines
     assert f'"{DB_MCP_PORT}:{DB_MCP_CONTAINER_PORT}"' in lines
+
+
+@pytest.mark.parametrize("host_ips", [("127.0.0.1",), ("127.0.0.1", "172.17.0.1")], ids=["loopback", "loopback-and-bridge"])
+def test_gateway_compose_publishes_only_on_the_host_ips(stub_postgres, host_ips):
+    """Each port once per host IP, and none on every interface."""
+    compose = EnvironmentGatewayProvider.create_docker_compose(
+        EnvironmentGatewayProvider.__new__(EnvironmentGatewayProvider),
+        mcp_servers=[MCPServerConfig(image="slack:test", environment_name="slack")],
+        gateway_image="gateway:test",
+        sidecars=[_sidecar("relay", 18768)],
+        state_provider=stub_postgres,
+        state_instance=_StateInstance(),
+        host_port=lambda port: port + OFFSET,
+        host_ips=host_ips,
+    )
+
+    ports = [(AGENT_ENV_GATEWAY_MCP_PORT, AGENT_ENV_GATEWAY_MCP_PORT), (DB_WEB_PORT, DB_WEB_PORT),
+             (DB_MCP_PORT, DB_MCP_CONTAINER_PORT), (18768, 8000)]
+    assert sorted(_PORT_PAIR.findall(compose)) == sorted(
+        (ip, str(host + OFFSET), str(container)) for ip in host_ips for host, container in ports
+    )

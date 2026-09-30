@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import glob
 import logging
 import os
@@ -125,6 +126,11 @@ class LocalSandbox(VmSandbox):
     def host_port(self, port: int) -> int:
         """The allocated host port for a published container port (identity if unmapped)."""
         return self._port_map.get(port, port)
+
+    @property
+    def host_ips(self) -> tuple[str, ...]:
+        """Loopback, so a local deploy is not reachable from the network (see ``_host_ips``)."""
+        return _host_ips()
 
     @classmethod
     def find_work_dir(cls, sandbox_id: str) -> Path | None:
@@ -406,3 +412,15 @@ class LocalSandboxProvider(SandboxProvider):
         inside a container: ``host.docker.internal``. Docker Desktop and Rancher Desktop (macOS/Windows)
         resolve this themselves; on Linux ``EXTRA_CONTAINER_RUN_ARGS`` maps it via ``--add-host …:host-gateway``."""
         return url.replace("localhost", "host.docker.internal").replace("127.0.0.1", "host.docker.internal")
+
+
+@functools.cache
+def _host_ips() -> tuple[str, ...]:
+    """Loopback, plus on Linux the bridge gateway ``host-gateway`` resolves to, where containers reach the host."""
+    if platform.system() != "Linux":
+        return ("127.0.0.1",)
+    gateway = subprocess.run(
+        ["docker", "network", "inspect", "bridge", "--format", "{{(index .IPAM.Config 0).Gateway}}"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    return ("127.0.0.1", gateway)

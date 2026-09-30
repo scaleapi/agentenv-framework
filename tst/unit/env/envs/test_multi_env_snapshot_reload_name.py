@@ -1,4 +1,4 @@
-"""The snapshot reload regenerates the compose; it must reuse the name the running gateway already presents."""
+"""The snapshot reload regenerates the compose; it must reuse the name and host IPs the running gateway already has."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ class _Stop(Exception):
 async def test_snapshot_reload_keeps_the_env_name(declared, deployed_as, expected):
     env = MultiEnv(id="crm-suite", version=1, mcp_server_envs=[], name=declared)
     env._mcp_server_name = deployed_as
-    env._sandbox = MagicMock(mode="vm", load_docker_images=AsyncMock())
+    env._sandbox = MagicMock(mode="vm", load_docker_images=AsyncMock(), host_ips=("127.0.0.1",))
     db_image = MagicMock(spec=DockerImageArtifact, image_name="snap:1")
     snapshot = MagicMock(db_image_artifact_id="snap", db_image_artifact_version=1)
     gateway_env, service_db = MagicMock(), MagicMock()
@@ -34,3 +34,4 @@ async def test_snapshot_reload_keeps_the_env_name(declared, deployed_as, expecte
             await env._load_from_snapshot(snapshot)
 
     assert compose.call_args.kwargs["mcp_server_name"] == expected
+    assert compose.call_args.kwargs["host_ips"] == ("127.0.0.1",)

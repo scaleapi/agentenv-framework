@@ -20,6 +20,7 @@ from agent_env.providers.sandbox_providers.sandbox import (
     NetworkPolicyUnsupportedError,
     Sandbox,
     VmSandbox,
+    port_bindings,
 )
 
 if TYPE_CHECKING:
@@ -113,9 +114,9 @@ class SandboxProvider(ABC):
                 f"-e {shlex.quote(k)}={shlex.quote(v)}" for k, v in env.items()
             )
             extra_args = f"{self.EXTRA_CONTAINER_RUN_ARGS} " if self.EXTRA_CONTAINER_RUN_ARGS else ""
-            host_side = sandbox.host_port(port)
+            publish = " ".join(f"-p {spec}" for spec in port_bindings(sandbox.host_ips, sandbox.host_port(port), port))
             await sandbox.exec_script(
-                f"docker run -d --name {shlex.quote(sandbox.container_name)} -p {host_side}:{port} {extra_args}\\\n    "
+                f"docker run -d --name {shlex.quote(sandbox.container_name)} {publish} {extra_args}\\\n    "
                 f"{env_flags} \\\n    {shlex.quote(image_name)} > /dev/null"
             )
             sandbox.mode = SANDBOX_MODE_CONTAINER

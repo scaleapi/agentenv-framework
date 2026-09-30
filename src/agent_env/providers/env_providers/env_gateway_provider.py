@@ -34,7 +34,7 @@ from agent_env.providers.env_providers.constants import (
 )
 from agent_env.providers.env_providers.env_provider import _SandboxEnvironmentProvider, _size_kwargs, _tool_names
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
-from agent_env.providers.sandbox_providers.sandbox import Sandbox, VmSandbox
+from agent_env.providers.sandbox_providers.sandbox import Sandbox, VmSandbox, port_bindings
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER, SandboxProvider
 
 if TYPE_CHECKING:
@@ -210,6 +210,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         state_provider: "DatabaseStateProvider",
         state_instance: "EnvStateInstance",
         host_port: Optional[Callable[[int], int]] = None,
+        host_ips: tuple[str, ...] = (),
         mcp_server_name: str | None = None,
     ) -> str:
         """Generate docker-compose.yml content for a gateway deployment onto a VM/laptop/arbitrary machine.
@@ -316,7 +317,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
 
         lines.extend(
             state_provider.render_compose_containers(
-                environment_names, instance=state_instance, host_port=host_port
+                environment_names, instance=state_instance, host_port=host_port, host_ips=host_ips
             )
         )
         store_dep_lines = state_provider.docker_service_dependency()
@@ -417,7 +418,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         if expose_gateway_port:
             exposed_gateway_ports.extend([
                 "    ports:",
-                f'      - "{publish(gateway_port)}:{gateway_port}"',
+                *(f'      - "{spec}"' for spec in port_bindings(host_ips, publish(gateway_port), gateway_port)),
             ])
         lines.extend([
             "    environment:",
@@ -486,7 +487,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                     lines.append(f"      - {key}={value}")
             lines.extend([
                 "    ports:",
-                f'      - "{publish(sc.host_port)}:{sc.container_port}"',
+                *(f'      - "{spec}"' for spec in port_bindings(host_ips, publish(sc.host_port), sc.container_port)),
                 f"    restart: {sc.restart}",
                 "    networks:",
                 "      - env-network",
@@ -706,6 +707,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             state_provider=self._state_provider,
             state_instance=state_instance,
             host_port=sandbox.host_port,
+            host_ips=sandbox.host_ips,
             mcp_server_name=mcp_server_name,
         )
         logger.info(f"Generated docker-compose.yml:\n{_redact_compose_secrets(compose_content)}")

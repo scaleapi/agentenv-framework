@@ -8,10 +8,17 @@ from types import SimpleNamespace
 import pytest
 
 import agent_env.providers.sandbox_providers.local_sandbox as ls
+from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.config import reset_config, set_object_store
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER
 from agent_env.store import LocalFilesystemObjectStore
+
+
+@pytest.fixture(autouse=True)
+def loopback_host_ips(monkeypatch):
+    """On Linux the host IPs take a docker call; the tests of that lookup opt back in with ``real_host_ips``."""
+    monkeypatch.setattr(ls, "_host_ips", lambda: ("127.0.0.1",))
 
 
 def test_rewrite_app_arg_only_rewrites_app_prefix():
@@ -429,8 +436,8 @@ async def test_create_vm_publishes_on_an_allocated_host_port_not_the_requested_o
 
 @pytest.mark.asyncio
 async def test_create_container_publishes_the_allocated_host_port(monkeypatch, tmp_path):
-    """The `docker run -p` left-hand side is the allocated host port, not the container port,
-    so what `tunnel_urls` advertises is what Docker actually published."""
+    """The `docker run -p` left-hand side is the allocated host port, not the container port, on
+    each host IP, so what `tunnel_urls` advertises is what Docker actually published."""
     import agent_env.config as cfg
 
     class _StubImageStore:
@@ -443,6 +450,7 @@ async def test_create_container_publishes_the_allocated_host_port(monkeypatch, t
 
     monkeypatch.setattr(cfg, "get_config", lambda: _StubConfig())
     monkeypatch.setattr(ls, "_free_host_port", lambda: 41337)
+    monkeypatch.setattr(ls, "_host_ips", lambda: ("127.0.0.1", "172.17.0.1"))
 
     recorded: list[str] = []
     made: list[LocalSandbox] = []
@@ -464,7 +472,47 @@ async def test_create_container_publishes_the_allocated_host_port(monkeypatch, t
 
     assert made[0].host_port(8000) == 41337
     run_cmd = next(s for s in recorded if "docker run" in s)
-    assert "-p 41337:8000" in run_cmd
+    assert "-p 127.0.0.1:41337:8000 -p 172.17.0.1:41337:8000 " in run_cmd
+
+
+@pytest.mark.asyncio
+async def test_an_agent_placed_on_a_local_vm_publishes_only_on_the_host_ips(monkeypatch, tmp_path):
+    monkeypatch.setattr(ls, "_host_ips", lambda: ("127.0.0.1", "172.17.0.1"))
+    agent = A2AAgent(id="a", version=None, docker_image_artifact=SimpleNamespace(image_name="img:1"))
+    agent._sandbox = _RecordingLocalSandbox(work_dir=tmp_path)
+
+    await agent._run_container("img:1", 8000, {})
+
+    [script] = agent._sandbox.scripts
+    assert "-p 127.0.0.1:8000:8000 -p 172.17.0.1:8000:8000 " in script
+
+
+@pytest.fixture
+def real_host_ips(monkeypatch):
+    monkeypatch.setattr(ls, "_host_ips", _HOST_IPS)
+    _HOST_IPS.cache_clear()
+    yield
+    _HOST_IPS.cache_clear()
+
+
+def test_host_ips_are_loopback_off_linux(monkeypatch, real_host_ips, tmp_path):
+    """Docker Desktop and Rancher route host.docker.internal to the host's loopback."""
+    monkeypatch.setattr(ls.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(ls.subprocess, "run", lambda *a, **k: pytest.fail("no docker call is needed"))
+
+    assert LocalSandbox(work_dir=tmp_path).host_ips == ("127.0.0.1",)
+
+
+def test_host_ips_add_the_bridge_gateway_on_linux(monkeypatch, real_host_ips, tmp_path):
+    """On Linux host.docker.internal is the bridge gateway (host-gateway), which cannot reach a loopback-only port."""
+    runs = []
+    monkeypatch.setattr(ls.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(ls.subprocess, "run", lambda args, **k: runs.append(args) or SimpleNamespace(stdout="172.17.0.1\n"))
+    sandbox = LocalSandbox(work_dir=tmp_path)
+
+    assert sandbox.host_ips == ("127.0.0.1", "172.17.0.1")
+    assert sandbox.host_ips == ("127.0.0.1", "172.17.0.1")
+    assert len(runs) == 1 and runs[0][:4] == ["docker", "network", "inspect", "bridge"]
 
 
 class _CapturedProcess:
@@ -604,3 +652,6 @@ async def test_a_command_cancelled_while_it_spawns_is_still_stopped(tmp_path: Pa
 
     with pytest.raises(ProcessLookupError):
         os.kill(int(pid_file.read_text()), 0)
+
+
+_HOST_IPS = ls._host_ips
