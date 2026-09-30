@@ -23,7 +23,7 @@ from agent_env.eval.eval import Eval
 from agent_env.plugins import _registration
 from agent_env.store.ids import LOCAL_PREFIX, validate_local_id
 from agent_env.task_step.registry import get_task_step_registry
-from agent_env.task_step.task_step import TaskStep, attach_retry_config
+from agent_env.task_step.task_step import TaskStep, attach_retry_config, dependencies
 
 from ._fs import fold, relative, show
 from .parse import NAMED_BY, Bundle, BundleEntry, BundleError, BundleKind
@@ -173,7 +173,7 @@ class _Resolver:
             elif self._derived_outputs(entry, step, cls):
                 declared.append((index, step, cls))
         outputs = self._outputs(entry, declared)
-        upstream = _upstream(steps)
+        upstream = _upstream(steps, self._depends_on(entry, steps))
         references: list[Reference] = []
         for index, step, cls in declared:
             where = f"step {step.get('id')!r}: "
@@ -283,6 +283,25 @@ class _Resolver:
                 outputs[kind, name] = Output(kind, output_id, index, step.get("id"), site.ref.artifact_type)
         return outputs
 
+    def _depends_on(self, entry: BundleEntry, steps: list[dict]) -> list[list[str] | None]:
+        """Each step's ``depends_on`` as the step ids it names, read as building the step reads it; None when it
+        has none. One that can't be read, or names no step in the task, is a problem here: a step reading an
+        earlier step's output is checked against these edges before any step is built."""
+        step_ids = {step.get("id") for step in steps}
+        depends = []
+        for step in steps:
+            try:
+                read = dependencies(step.get("depends_on"))
+            except ValueError as e:
+                self._problem(entry, f"step {step.get('id')!r}: {e}")
+                read = []
+            ids = None if read is None else [dep.task_step_id for dep in read]
+            for dep_id in ids or ():
+                if dep_id not in step_ids:
+                    self._problem(entry, f"step {step.get('id')!r}: depends_on {dep_id!r} names no step in this task")
+            depends.append(ids)
+        return depends
+
     def _resolve(self, entry: BundleEntry, site: RefSite, where: str, name: str, version: int | None,
                  outputs: dict[tuple[EntityKind, str], Output], upstream: set[int],
                  references: list[Reference]) -> None:
@@ -358,21 +377,15 @@ def _nfc(name: str) -> str:
     return unicodedata.normalize("NFC", name)
 
 
-def _upstream(steps: list[dict]) -> list[set[int]]:
-    """The indexes of the steps each step runs after: its ``depends_on`` or, when it has none, every
-    step before it, followed transitively; the rule the task scheduler runs steps by."""
+def _upstream(steps: list[dict], depends: list[list[str] | None]) -> list[set[int]]:
+    """The indexes of the steps each step runs after: the step ids ``depends`` holds for it or, when it has
+    none, every step before it, followed transitively; the rule the task scheduler runs steps by."""
     index_of: dict[str, int] = {}
     for index, step in enumerate(steps):
         if isinstance(step.get("id"), str):
             index_of.setdefault(step["id"], index)
-    direct = []
-    for index, step in enumerate(steps):
-        raw = step.get("depends_on")
-        if raw is None:
-            direct.append(set(range(index)))
-            continue
-        ids = [dep.get("task_step_id") for dep in raw if isinstance(dep, dict)] if isinstance(raw, list) else []
-        direct.append({index_of[dep_id] for dep_id in ids if dep_id in index_of})
+    direct = [set(range(index)) if ids is None else {index_of[dep_id] for dep_id in ids if dep_id in index_of}
+              for index, ids in enumerate(depends)]
     upstream = []
     for index in range(len(steps)):
         seen: set[int] = set()

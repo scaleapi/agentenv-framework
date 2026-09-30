@@ -19,8 +19,22 @@ class TaskStepDependency:
     task_step_id: str
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "TaskStepDependency":
-        return cls(task_step_id=data["task_step_id"])
+    def from_dict(cls, data: str | dict[str, Any]) -> "TaskStepDependency":
+        """One ``depends_on`` entry: a step id, or ``{"task_step_id": <step id>}``."""
+        step_id = data.get("task_step_id") if isinstance(data, dict) else data
+        if not isinstance(step_id, str):
+            raise ValueError(f'a depends_on entry is a step id or {{"task_step_id": "<step id>"}}, not {data!r}')
+        return cls(task_step_id=step_id)
+
+
+def dependencies(raw: Any) -> list[TaskStepDependency] | None:
+    """``depends_on`` as written, read into dependencies. None, which runs a step after every earlier one,
+    stays None; a lone step id is refused rather than read as a list of its characters."""
+    if raw is None:
+        return None
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError(f"depends_on is a list of step ids, not {raw!r}")
+    return [dep if isinstance(dep, TaskStepDependency) else TaskStepDependency.from_dict(dep) for dep in raw]
 
 
 def attach_retry_config(step: "TaskStep", data: dict[str, Any]) -> "TaskStep":
@@ -91,12 +105,7 @@ class TaskStep(ABC):
     ):
         self.id = id
         self.version = version
-        if depends_on is not None:
-            depends_on = [
-                d if isinstance(d, TaskStepDependency) else TaskStepDependency.from_dict(d)
-                for d in depends_on
-            ]
-        self.depends_on = depends_on
+        self.depends_on = dependencies(depends_on)
         self.fail_task_on_error = fail_task_on_error
         if retry_config is not None and not isinstance(retry_config, RetryConfig):
             retry_config = RetryConfig.from_dict(retry_config)
@@ -132,13 +141,9 @@ class TaskStep(ABC):
 
     @classmethod
     def _base_from_dict(cls, data: dict) -> dict:
-        raw = data.get("depends_on")
-        depends_on = (
-            [TaskStepDependency.from_dict(d) for d in raw] if raw is not None else None
-        )
         return {
             "id": data["id"], "version": data.get("version"),
-            "depends_on": depends_on,
+            "depends_on": dependencies(data.get("depends_on")),
             "fail_task_on_error": data.get("fail_task_on_error", True),
         }
 

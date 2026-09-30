@@ -399,6 +399,17 @@ def test_a_step_reading_its_own_tasks_output_is_not_preflighted(bundle_dir, monk
     assert task.steps[1].artifact_id == f"{ROOT}/t/made"
 
 
+def test_a_bare_step_id_in_depends_on_is_written_in_the_object_form_and_reused(bundle_dir):
+    box, greet, docs = json.loads(LAYOUT["tasks/t.json"])
+    _steps(bundle_dir, [box, {**greet, "depends_on": ["box"]}, {**docs, "depends_on": ["greet", {"task_step_id": "box"}]}])
+    _run(bundle_dir)
+
+    stored = local_store().find_one("tasks", Filter.of(id=f"{ROOT}/t"))
+    assert [step.get("depends_on") for step in stored["steps"]] == [
+        None, [{"task_step_id": "box"}], [{"task_step_id": "greet"}, {"task_step_id": "box"}]]
+    assert {done.reused for done in _run(bundle_dir).writes} == {True}
+
+
 def test_a_step_writing_an_output_is_still_preflighted(bundle_dir, monkeypatch):
     _steps(bundle_dir, [{"id": "write", "type": "writes_materialize_test", "artifact_id": "made"}])
     monkeypatch.setattr(_Checked, "problems", ["the writer's script isn't there"])
