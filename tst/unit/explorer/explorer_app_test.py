@@ -252,6 +252,8 @@ NAMESPACED_IDS = [
     "@local/~/Dropbox (Personal)/a&b+c,d@e/tickets",
     "@local/~/Été/Straße/tâche",
     "team/triage/versions",
+    "weird%2Fbare",
+    "100%25done",
 ]
 ID_ROUTE_COLLECTIONS = {"artifacts": "artifacts", "envs": "envs", "tasks": "tasks", "agents": "a2a_agents", "evals": "evals"}
 
@@ -270,7 +272,8 @@ def test_an_id_is_one_encoded_path_segment(client, path, collection, entity_id):
     assert client.get(f"/api/v1/{path}/{entity_id}").status_code == 404
 
 
-def test_the_run_routes_address_a_task_whose_id_ends_in_a_route_name(client, monkeypatch):
+@pytest.mark.parametrize("task_id", ["@local/~/triage/runs", "team%2F100%25/runs"])
+def test_the_run_routes_address_a_task_whose_id_ends_in_a_route_name(client, monkeypatch, task_id):
     class _Task:
         version = 1
 
@@ -278,7 +281,6 @@ def test_the_run_routes_address_a_task_whose_id_ends_in_a_route_name(client, mon
             return kw.get("context")
 
     monkeypatch.setattr(Task, "get", classmethod(lambda cls, tid, ver=None: _Task()))
-    task_id = "@local/~/triage/runs"
     get_config().get_document_store().insert("tasks", {"id": task_id, "version": 1, "created_at_utc": "2026-01-04T00:00:00Z"})
     base = f"/api/v1/tasks/{quote(task_id, safe='')}"
 
