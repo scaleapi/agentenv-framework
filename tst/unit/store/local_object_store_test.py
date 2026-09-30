@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from agent_env.store import LocalFilesystemObjectStore, ObjectAlreadyExistsError
+from agent_env.store.object_store import local_object_store
 from tst.store import object_conformance
 
 
@@ -338,6 +339,31 @@ def test_an_overwrite_whose_bytes_do_not_land_keeps_the_old_type(store, tmp_path
     with pytest.raises(OSError, match="disk went away"):
         store.put("cut/x", b"second", content_type="application/json", allow_overwrite=True)
     assert (store.read("cut/x"), store.get_object_metadata("cut/x").content_type) == (b"first", "text/plain")
+
+
+def test_an_overwrite_whose_cleanup_fails_still_succeeds(store, tmp_path, monkeypatch):
+    store.put("clean/x", b"first", content_type="text/plain")
+    real_unlink = Path.unlink
+
+    def unlink(self, missing_ok=False):
+        if "aside-" in self.name:
+            raise OSError(errno.EIO, "disk went away")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    store.put("clean/x", b"second!", content_type="application/json", allow_overwrite=True)
+    assert (store.read("clean/x"), store.get_object_metadata("clean/x").content_type) == (b"second!", "application/json")
+
+
+@_needs_flock
+def test_a_write_that_cannot_lock_its_staged_file_leaves_nothing_staged(store, tmp_path, monkeypatch):
+    def no_lock(fd, op):
+        raise OSError(errno.ENOLCK, "no locks available")
+
+    monkeypatch.setattr(local_object_store.fcntl, "flock", no_lock)
+    with pytest.raises(OSError, match="no locks"):
+        store.put("nolock/x", b"v")
+    assert [n for n in os.listdir(tmp_path / ".agentenv-tmp") if n.startswith("staged-")] == []
 
 
 def test_an_overwrite_whose_type_cannot_be_recorded_reads_unknown_not_the_old_type(store, tmp_path, monkeypatch):

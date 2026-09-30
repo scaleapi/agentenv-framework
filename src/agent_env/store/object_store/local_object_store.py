@@ -172,15 +172,16 @@ class LocalFilesystemObjectStore(ObjectStore):
             _sweep(staging)
         fd, name = tempfile.mkstemp(dir=staging, prefix=_STAGED_PREFIX)
         staged = Path(name)
-        if os.name == "nt":  # an open file cannot be renamed there, and there is no flock to hold
-            os.close(fd)
-        else:
-            fcntl.flock(fd, fcntl.LOCK_EX)  # held while the write lives, so a sweep never takes its file
         try:
+            if os.name == "nt":  # an open file cannot be renamed there, and there is no flock to hold
+                os.close(fd)
+                fd = None
+            else:
+                fcntl.flock(fd, fcntl.LOCK_EX)  # held while the write lives, so a sweep never takes its file
             staged.chmod(0o644)
             yield staged
         finally:
-            if os.name != "nt":
+            if fd is not None:
                 os.close(fd)
             staged.unlink(missing_ok=True)
 
@@ -207,7 +208,8 @@ class LocalFilesystemObjectStore(ObjectStore):
                             os.replace(aside, meta)
                     raise
                 if aside is not None:
-                    aside.unlink(missing_ok=True)
+                    with contextlib.suppress(OSError):  # the bytes have landed; a sweep takes what is left
+                        aside.unlink(missing_ok=True)
             else:
                 try:
                     os.link(staged, path)  # exclusive even against a writer that takes no lock
@@ -264,7 +266,8 @@ class LocalFilesystemObjectStore(ObjectStore):
             os.replace(meta, aside)
         except FileNotFoundError:
             return None
-        os.utime(aside)
+        with contextlib.suppress(OSError):
+            os.utime(aside)
         return aside
 
     def _lock_path(self, path: Path) -> Path:
