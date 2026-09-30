@@ -1,6 +1,6 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/brand/lockup-dark.png">
-  <img alt="AgentEnv Framework" src="assets/brand/lockup-light.png" width="360">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/scaleapi/agentenv-framework/main/assets/brand/lockup-dark.png">
+  <img alt="AgentEnv Framework" src="https://raw.githubusercontent.com/scaleapi/agentenv-framework/main/assets/brand/lockup-light.png" width="360">
 </picture>
 
 # agent-env
@@ -49,7 +49,7 @@ A task deploys an environment and an agent, prompts the agent, runs one or more 
 | `agentenv-protocol` (`packages/agentenv-protocol/`) | The wire contract plus the server and agent SDKs: `AgentEnvEnvironment`, the card, data-plane and extension decorators, and the A2A (agent-to-agent protocol) agent framework behind the `agent` extra. Depends only on `pydantic`, `starlette` and `httpx`; `mcp` is imported lazily. | Environment images and agent images. An environment image does not need `agentenv-framework`. |
 | `agentenv-framework` (this repository; import package `agent_env`, command `agent-env`) | The runtime and CLI: stores, image builds, the gateway, sandbox providers, task steps, verifiers, evals, the local explorer. | The machine that builds, deploys and runs. |
 
-Every backend in `agent-env` is a seam: a TOML table naming `impl = "module.path:ClassName"` plus a `config` table. Stores (document, object, image, secret), sandbox providers, state providers, the runner, task steps, artifacts, environment kinds, CLI groups and explorer routes all plug in this way, and a bad pointer fails loudly with `ConfigError` the first time the seam is used. An installed package can also register its types through entry points, with no config at all. Conformance suites exist for the four store seams only. Details are in [Extend agent-env](#extend-agent-env); server and agent authoring depth is in [`packages/agentenv-protocol/README.md`](packages/agentenv-protocol/README.md).
+Every backend in `agent-env` is a seam: a TOML table naming `impl = "module.path:ClassName"` plus a `config` table. Stores (document, object, image, secret), sandbox providers, state providers, the runner, task steps, artifacts, environment kinds, CLI groups and explorer routes all plug in this way, and a bad pointer fails loudly with `ConfigError` the first time the seam is used. An installed package can also register its types through entry points, with no config at all. Conformance suites exist for the four store seams only. Details are in [Extend agent-env](#extend-agent-env); server and agent authoring depth is in [`packages/agentenv-protocol/README.md`](https://github.com/scaleapi/agentenv-framework/blob/main/packages/agentenv-protocol/README.md).
 
 ## Install
 
@@ -63,10 +63,16 @@ Every backend in `agent-env` is a seam: a TOML table naming `impl = "module.path
 
 ### Install the packages
 
-Neither package is on PyPI yet. Install both from a clone. The distribution is named `agentenv-framework`; the import package is `agent_env` and the command is `agent-env`. The repository is a uv workspace, so one command installs `agentenv-framework` and `agentenv-protocol` as editable packages with their dependencies from PyPI:
+Both packages are on PyPI. The distribution is named `agentenv-framework`; the import package is `agent_env` and the command is `agent-env`. It depends on `agentenv-protocol`, which installs with it:
 
 ```bash
-git clone <repo-url> agent-env && cd agent-env
+pip install agentenv-framework
+```
+
+To work on agent-env itself, install from a clone. The repository is a uv workspace, so one command installs `agentenv-framework` and `agentenv-protocol` as editable packages with their dependencies from PyPI:
+
+```bash
+git clone https://github.com/scaleapi/agentenv-framework.git && cd agentenv-framework
 uv sync --extra dev
 ```
 
@@ -74,7 +80,7 @@ uv sync --extra dev
 
 The committed `uv.lock` is kept current: the release bump writes both packages' new versions into it, and CI fails a pull request that leaves it stale, so `uv sync --locked --extra dev` installs exactly what it records.
 
-With plain `pip`, install the protocol package first, because no public index has it and `pip install -e '.[dev]'` on its own fails with `No matching distribution found for agentenv-protocol>=0.1.0`:
+With plain `pip`, install the protocol package from the checkout first, so the editable `agentenv-framework` uses it rather than the `agentenv-protocol` release on PyPI:
 
 ```bash
 python3.11 -m venv .venv
@@ -82,11 +88,11 @@ python3.11 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
 ```
 
-`make install` runs those two installs (about 50 s, 410 MB); it is what [CONTRIBUTING.md](CONTRIBUTING.md) and CI use.
+`make install` runs those two installs (about 50 s, 410 MB); it is what [CONTRIBUTING.md](https://github.com/scaleapi/agentenv-framework/blob/main/CONTRIBUTING.md) and CI use.
 
 ### Install the command on its own
 
-To use `agent-env` rather than develop it, install it as a uv tool from an index that has both packages, then add plugins to it with `agent-env plugin add` (see [Manage plugins](#manage-plugins)):
+To use `agent-env` rather than develop it, install it as a uv tool, then add plugins to it with `agent-env plugin add` (see [Manage plugins](#manage-plugins)):
 
 ```bash
 uv tool install agentenv-framework
@@ -340,7 +346,7 @@ Terminating the agent container, what `close()` runs and what is left behind are
 
 ## Build an environment
 
-An environment is an MCP server that also speaks the agent-env data plane: one Python class with decorated methods, run as a process, then packaged as a Docker image that contains `agentenv-protocol` but not `agent-env`. This section walks the bundled example in `tst/data/agentenv_mcp/`; decorator and wire-format depth is in [`packages/agentenv-protocol/README.md`](packages/agentenv-protocol/README.md).
+An environment is an MCP server that also speaks the agent-env data plane: one Python class with decorated methods, run as a process, then packaged as a Docker image that contains `agentenv-protocol` but not `agent-env`. This section walks the bundled example in `tst/data/agentenv_mcp/`; decorator and wire-format depth is in [`packages/agentenv-protocol/README.md`](https://github.com/scaleapi/agentenv-framework/blob/main/packages/agentenv-protocol/README.md).
 
 ### Environment card, naming and tools
 
@@ -436,7 +442,7 @@ ENV PYTHONPATH=/app
 CMD ["python", "server.py"]
 ```
 
-The Dockerfile expects `agentenv_protocol/` in the build context, and `tst/data/agentenv_mcp/` does not ship it, so building that directory directly fails at the `COPY`. Assemble a context first, as shown in [Build and register the example environment](#build-and-register-the-example-environment) (or `pip install agentenv-protocol` in the Dockerfile once published). On Apple Silicon, build with `--platform linux/arm64` for the local sandbox (see [Verify and platform notes](#verify-and-platform-notes)).
+The Dockerfile expects `agentenv_protocol/` in the build context, and `tst/data/agentenv_mcp/` does not ship it, so building that directory directly fails at the `COPY`. Assemble a context first, as shown in [Build and register the example environment](#build-and-register-the-example-environment) (or `pip install agentenv-protocol` in the Dockerfile). On Apple Silicon, build with `--platform linux/arm64` for the local sandbox (see [Verify and platform notes](#verify-and-platform-notes)).
 
 ### Environment kinds
 
@@ -751,7 +757,7 @@ In a second terminal:
 curl -sf http://127.0.0.1:18777/.well-known/agent-card.json
 ```
 
-Stop the server with Ctrl-C. `serve()` reads `A2A_HOST` and `A2A_PORT`. The card lists `protocolVersion 0.3.0`, the `/a2a` endpoint, and the extensions the agent implements: `urn:agentenv:agent-config/v1` (endpoint `/ext/agent-config`, accepting `model`, `system_prompt`, `max_input_chars`, `provider_token`, `role`, `name`, `description`, `timeout_seconds`) and `urn:agentenv:trajectory/v1`. Model credentials are read only when a prompt arrives, so the card serves without them. The a2a-sdk logs a deprecation for the older `/.well-known/agent.json` alias; use `agent-card.json`. agent-env itself reads the card from `/.well-known/agent.json` (`A2AAgent.deploy` polls that path for up to 300 s); an agent must keep serving it too, or `deploy_agent`, `a2a-agent deploy` and `a2a-agent validate` fail with `did not serve /.well-known/agent.json`. The protocol framework and the a2a-sdk default server apps serve both paths. For the class model, streaming, error semantics and custom extensions, see the [A2A agent framework](packages/agentenv-protocol/README.md#a2a-agent-framework) section of the protocol README.
+Stop the server with Ctrl-C. `serve()` reads `A2A_HOST` and `A2A_PORT`. The card lists `protocolVersion 0.3.0`, the `/a2a` endpoint, and the extensions the agent implements: `urn:agentenv:agent-config/v1` (endpoint `/ext/agent-config`, accepting `model`, `system_prompt`, `max_input_chars`, `provider_token`, `role`, `name`, `description`, `timeout_seconds`) and `urn:agentenv:trajectory/v1`. Model credentials are read only when a prompt arrives, so the card serves without them. The a2a-sdk logs a deprecation for the older `/.well-known/agent.json` alias; use `agent-card.json`. agent-env itself reads the card from `/.well-known/agent.json` (`A2AAgent.deploy` polls that path for up to 300 s); an agent must keep serving it too, or `deploy_agent`, `a2a-agent deploy` and `a2a-agent validate` fail with `did not serve /.well-known/agent.json`. The protocol framework and the a2a-sdk default server apps serve both paths. For the class model, streaming, error semantics and custom extensions, see the [A2A agent framework](https://github.com/scaleapi/agentenv-framework/blob/main/packages/agentenv-protocol/README.md#a2a-agent-framework) section of the protocol README.
 
 ### Model configuration (owns precedence)
 
@@ -783,7 +789,7 @@ temperature = 0.2
 
 ### Agent configuration and agent-side triggers
 
-`prompt_agent` sends its per-prompt configuration to the agent's `urn:agentenv:agent-config/v1` endpoint before the prompt: `model`, `system_prompt`, `effort`, `harness`, `max_turns`, `max_thinking_tokens`, `output_format`, `timeout_seconds`, `project_id`, `task_id`, `agentenv_tools`, and `model_params` (`[model.params]` merged with the step's `model_params`). The set is negotiated: only the fields the agent card lists as supported are sent, the rest are dropped silently. `agentenv_tools` is therefore an opaque list of tool names for an agent that implements in-process tools of its own; no bundled agent does, and the echo agent accepts only `model`, `system_prompt`, `project_id`, `task_id` and `model_params`. On the agent side, `register_agent_triggers` (`agent_name`, `triggers`) pushes trigger definitions to the agent's `urn:agentenv:triggers/v1` extension; environment-side triggers live on the gateway (see [Gateway and agent controls for experiments](#gateway-and-agent-controls-for-experiments)). The extension contract is in the [A2A agent framework](packages/agentenv-protocol/README.md#a2a-agent-framework) section of the protocol README.
+`prompt_agent` sends its per-prompt configuration to the agent's `urn:agentenv:agent-config/v1` endpoint before the prompt: `model`, `system_prompt`, `effort`, `harness`, `max_turns`, `max_thinking_tokens`, `output_format`, `timeout_seconds`, `project_id`, `task_id`, `agentenv_tools`, and `model_params` (`[model.params]` merged with the step's `model_params`). The set is negotiated: only the fields the agent card lists as supported are sent, the rest are dropped silently. `agentenv_tools` is therefore an opaque list of tool names for an agent that implements in-process tools of its own; no bundled agent does, and the echo agent accepts only `model`, `system_prompt`, `project_id`, `task_id` and `model_params`. On the agent side, `register_agent_triggers` (`agent_name`, `triggers`) pushes trigger definitions to the agent's `urn:agentenv:triggers/v1` extension; environment-side triggers live on the gateway (see [Gateway and agent controls for experiments](#gateway-and-agent-controls-for-experiments)). The extension contract is in the [A2A agent framework](https://github.com/scaleapi/agentenv-framework/blob/main/packages/agentenv-protocol/README.md#a2a-agent-framework) section of the protocol README.
 
 ### Validate an agent
 
@@ -1081,7 +1087,7 @@ The aggregator reads `result`, `score` and `weight`; rows flagged `skipped` are 
 
 ### Trajectories
 
-The agent trajectory is written to the object store and referenced from `prompt_responses[i].agent_trajectory_s3_uri`. The field names keep their legacy `s3` spelling, but the value is an object URL for whatever store is configured: `file://...` on the local store, `s3://...` on an S3 store. The object is whatever the agent's `urn:agentenv:trajectory/v1` extension reports for the prompt, as JSON; the format is agent-defined. An agent that advertises the object form uploads it itself through a signed grant when the store issues grants, as `S3ObjectStore` does; otherwise, and always on the local default store, the agent returns it inline and agent-env writes it (see [Object transfer](packages/agentenv-protocol/README.md#object-transfer)). The bundled echo agent reports its native format, one `{"type": "echo", "input": ..., "output": ...}` entry per prompt. An agent that reports OpenTelemetry spans stores a list of spans, each with `name`, `context`, `kind`, `parent_id`, `start_time`, `end_time`, `status`, `attributes`, `events`, `links` and `resource`; the LLM judge reads them through the GenAI semantic conventions: it selects spans by `gen_ai.operation.name` (`chat` for model turns, `execute_tool` for tool calls, `chain` for the conversation root), takes the tool label from the span `name`, the arguments from `gen_ai.prompt` (`input`) and the result from `gen_ai.completion` (`output`). No span-name convention is required; the judge compacts such trajectories before grading, and a list with no `gen_ai.operation.name` attribute is passed through unchanged.
+The agent trajectory is written to the object store and referenced from `prompt_responses[i].agent_trajectory_s3_uri`. The field names keep their legacy `s3` spelling, but the value is an object URL for whatever store is configured: `file://...` on the local store, `s3://...` on an S3 store. The object is whatever the agent's `urn:agentenv:trajectory/v1` extension reports for the prompt, as JSON; the format is agent-defined. An agent that advertises the object form uploads it itself through a signed grant when the store issues grants, as `S3ObjectStore` does; otherwise, and always on the local default store, the agent returns it inline and agent-env writes it (see [Object transfer](https://github.com/scaleapi/agentenv-framework/blob/main/packages/agentenv-protocol/README.md#object-transfer)). The bundled echo agent reports its native format, one `{"type": "echo", "input": ..., "output": ...}` entry per prompt. An agent that reports OpenTelemetry spans stores a list of spans, each with `name`, `context`, `kind`, `parent_id`, `start_time`, `end_time`, `status`, `attributes`, `events`, `links` and `resource`; the LLM judge reads them through the GenAI semantic conventions: it selects spans by `gen_ai.operation.name` (`chat` for model turns, `execute_tool` for tool calls, `chain` for the conversation root), takes the tool label from the span `name`, the arguments from `gen_ai.prompt` (`input`) and the result from `gen_ai.completion` (`output`). No span-name convention is required; the judge compacts such trajectories before grading, and a list with no `gen_ai.operation.name` attribute is passed through unchanged.
 
 No CLI downloads a trajectory. Read it through the object store in Python, or via the explorer's `GET /api/v1/objects/content?object_url=...`:
 
@@ -1471,7 +1477,7 @@ Put the bucket, the Artifact Registry repository and the machines that run agent
 
 ### What works, and what does not yet
 
-- **Agents that take the object-transfer forms** (see [Object transfer](packages/agentenv-protocol/README.md#object-transfer)) get HTTPS grants for everything they move: skill bundles, trajectories, snapshot saves and loads, and changelog capture and replay. None needs Google credentials. A grant lasts at most as long as the signer can sign, twelve hours through IAM, so a changelog capture configured to last longer fails its step for an agent that takes only the object form, and sends an agent that also takes `s3_prefix` that form, which it cannot use here.
+- **Agents that take the object-transfer forms** (see [Object transfer](https://github.com/scaleapi/agentenv-framework/blob/main/packages/agentenv-protocol/README.md#object-transfer)) get HTTPS grants for everything they move: skill bundles, trajectories, snapshot saves and loads, and changelog capture and replay. None needs Google credentials. A grant lasts at most as long as the signer can sign, twelve hours through IAM, so a changelog capture configured to last longer fails its step for an agent that takes only the object form, and sends an agent that also takes `s3_prefix` that form, which it cannot use here.
 - **Agents that take only the older S3-named forms** are handed `gs://` URLs as `skill_s3_url` or `s3_prefix`, which they cannot use without their own Google credentials. A legacy snapshot save also carries a `presigned_post` that Cloud Storage accepts; an agent that uploads through it instead of `s3_prefix` works. A legacy agent that returns its trajectory inline works, since agent-env uploads it; one that answers with a `trajectory_s3_prefix` it wrote itself does not.
 - **No credentials are shared.** agent-env hands agents and environment services no Google credentials: `GcsObjectStore` shares none, and `urn:agentenv:add-s3-credentials/v1` applies to S3 only. What they move goes through grants and signed URLs.
 - **Without a signer**, the store still reads and writes, but a remote sandbox receives each object over its sandbox connection instead of fetching it, trajectories come back inline, and `env snapshot`, GitHub image builds, and the skill bundles, snapshots and changelogs agents move themselves are unavailable; see [Stores and secrets](#stores-and-secrets).
@@ -1600,7 +1606,7 @@ An `ImageStore`'s `owns(ref)` says whether a ref is on the store's registry, the
 
 Core calls a store from worker threads, several at once: every sign, registry login and grant runs off the event loop, since for a remote backend each is a network round trip. A store must be safe to call concurrently.
 
-An `ObjectStore` has three optional methods that sign the HTTPS grants through which A2A agents move skill bundles, trajectories, snapshots and changelog increments without storage credentials (see [Object transfer](packages/agentenv-protocol/README.md#object-transfer)). To offer them, set `supports_transfer_grants = True`, on the class or per instance, and implement all three; agent-env requests grants only from a store that sets the flag. The defaults raise `NotImplementedError`, so one the store cannot offer raises `GrantUnavailableError` instead. `S3ObjectStore` sets the flag unless its endpoint is plain HTTP, as a local S3 emulator's usually is, because grants are HTTPS URLs. A store whose provider caps what one upload can create sets `max_single_upload_bytes`, and no write grant promises more.
+An `ObjectStore` has three optional methods that sign the HTTPS grants through which A2A agents move skill bundles, trajectories, snapshots and changelog increments without storage credentials (see [Object transfer](https://github.com/scaleapi/agentenv-framework/blob/main/packages/agentenv-protocol/README.md#object-transfer)). To offer them, set `supports_transfer_grants = True`, on the class or per instance, and implement all three; agent-env requests grants only from a store that sets the flag. The defaults raise `NotImplementedError`, so one the store cannot offer raises `GrantUnavailableError` instead. `S3ObjectStore` sets the flag unless its endpoint is plain HTTP, as a local S3 emulator's usually is, because grants are HTTPS URLs. A store whose provider caps what one upload can create sets `max_single_upload_bytes`, and no write grant promises more.
 
 | Method | Returns |
 |---|---|
@@ -1977,7 +1983,7 @@ An installer that resolves dependencies never gets you there; `pip install --no-
 
 ### Development setup and test tiers
 
-[CONTRIBUTING.md](CONTRIBUTING.md) is the contributor guide: open an issue before anything larger than a bug fix, one logical change per pull request with tests, pull request titles in the form `type(scope): summary`, an approving review from a code owner (`CODEOWNERS`) and green CI. [AGENTS.md](AGENTS.md) is the repository map and conventions file for contributors and coding agents; `CLAUDE.md` imports it.
+[CONTRIBUTING.md](https://github.com/scaleapi/agentenv-framework/blob/main/CONTRIBUTING.md) is the contributor guide: open an issue before anything larger than a bug fix, one logical change per pull request with tests, pull request titles in the form `type(scope): summary`, an approving review from a code owner (`CODEOWNERS`) and green CI. [AGENTS.md](https://github.com/scaleapi/agentenv-framework/blob/main/AGENTS.md) is the repository map and conventions file for contributors and coding agents; `CLAUDE.md` imports it.
 
 Set up with `uv sync --extra dev` or `make install` (both in [Install the packages](#install-the-packages)). Tests are tiered by path:
 
@@ -2008,13 +2014,13 @@ cd <agent-env checkout> && PYTHONPATH=. python -m pytest -p no:cacheprovider -q 
 
 | Document | Covers |
 |---|---|
-| [`packages/agentenv-protocol/README.md`](packages/agentenv-protocol/README.md) | wire contract, environment server SDK, A2A agent framework |
-| [`CONTRIBUTING.md`](CONTRIBUTING.md) | development setup, test tiers, CI jobs, pull request rules |
-| [`AGENTS.md`](AGENTS.md) | repository map, configuration and extension-point summary, conventions for contributors and coding agents |
-| [`SECURITY.md`](SECURITY.md) | private vulnerability reporting and supported versions |
-| [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) | Contributor Covenant |
-| [`.agentenv/config.example.toml`](.agentenv/config.example.toml) | the all-local configuration to copy |
-| [`.env.example`](.env.example) | a commented reference of the `AGENT_ENV_*` variables; agent-env never loads this file, export what you need yourself. Its `AGENT_ENV_ENVIRONMENT` line is read only by an installed plugin, never by agent-env |
+| [`packages/agentenv-protocol/README.md`](https://github.com/scaleapi/agentenv-framework/blob/main/packages/agentenv-protocol/README.md) | wire contract, environment server SDK, A2A agent framework |
+| [`CONTRIBUTING.md`](https://github.com/scaleapi/agentenv-framework/blob/main/CONTRIBUTING.md) | development setup, test tiers, CI jobs, pull request rules |
+| [`AGENTS.md`](https://github.com/scaleapi/agentenv-framework/blob/main/AGENTS.md) | repository map, configuration and extension-point summary, conventions for contributors and coding agents |
+| [`SECURITY.md`](https://github.com/scaleapi/agentenv-framework/blob/main/SECURITY.md) | private vulnerability reporting and supported versions |
+| [`CODE_OF_CONDUCT.md`](https://github.com/scaleapi/agentenv-framework/blob/main/CODE_OF_CONDUCT.md) | Contributor Covenant |
+| [`.agentenv/config.example.toml`](https://github.com/scaleapi/agentenv-framework/blob/main/.agentenv/config.example.toml) | the all-local configuration to copy |
+| [`.env.example`](https://github.com/scaleapi/agentenv-framework/blob/main/.env.example) | a commented reference of the `AGENT_ENV_*` variables; agent-env never loads this file, export what you need yourself. Its `AGENT_ENV_ENVIRONMENT` line is read only by an installed plugin, never by agent-env |
 
 Full configuration, CLI, step and extension references, and the [Run on Google Cloud](#run-on-google-cloud) guide, have not been split out of this README yet.
 
@@ -2024,8 +2030,8 @@ The `agentenv-framework` distribution and `agentenv-protocol` are versioned sepa
 
 ### Releases
 
-A release is a version bump in both `pyproject.toml` files plus a `vX.Y.Z` tag. Maintainers cut releases: the bump is automated when a labelled pull request merges, so contributors do not edit `version` or push tags (see the Releases section of [CONTRIBUTING.md](CONTRIBUTING.md)). Neither package is published to a public index yet, and there is no `CHANGELOG.md`.
+A release is a version bump in both `pyproject.toml` files plus a `vX.Y.Z` tag. Maintainers cut releases: the bump is automated when a labelled pull request merges, so contributors do not edit `version` or push tags (see the Releases section of [CONTRIBUTING.md](https://github.com/scaleapi/agentenv-framework/blob/main/CONTRIBUTING.md)). Neither package is published to a public index yet, and there is no `CHANGELOG.md`.
 
 ### Support, security, license
 
-Report bugs and gaps as issues against this repository, with the installed `agentenv-framework` version and the sandbox backend in use. Report vulnerabilities privately through the contact in [SECURITY.md](SECURITY.md), not in public issues; only the latest release is supported, so reproduce against it first. Contributors follow [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md); every pull request needs a code-owner review. agent-env and agentenv-protocol are licensed under the Apache License 2.0; see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE). Their third-party dependencies and those dependencies' licenses are listed in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+Report bugs and gaps as issues against this repository, with the installed `agentenv-framework` version and the sandbox backend in use. Report vulnerabilities privately through the contact in [SECURITY.md](https://github.com/scaleapi/agentenv-framework/blob/main/SECURITY.md), not in public issues; only the latest release is supported, so reproduce against it first. Contributors follow [CONTRIBUTING.md](https://github.com/scaleapi/agentenv-framework/blob/main/CONTRIBUTING.md) and the [Code of Conduct](https://github.com/scaleapi/agentenv-framework/blob/main/CODE_OF_CONDUCT.md); every pull request needs a code-owner review. agent-env and agentenv-protocol are licensed under the Apache License 2.0; see [`LICENSE`](https://github.com/scaleapi/agentenv-framework/blob/main/LICENSE) and [`NOTICE`](https://github.com/scaleapi/agentenv-framework/blob/main/NOTICE). Their third-party dependencies and those dependencies' licenses are listed in [`THIRD_PARTY_NOTICES.md`](https://github.com/scaleapi/agentenv-framework/blob/main/THIRD_PARTY_NOTICES.md).

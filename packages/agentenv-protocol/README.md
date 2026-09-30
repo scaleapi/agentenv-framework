@@ -472,7 +472,7 @@ tools with (agent-env relays the env card's name: the MultiEnv's declared name, 
 `env` + 4 random digits, giving e.g. `mcp__env4821__<tool>`); when absent the agent mints
 `mcp_<8 hex>`.
 
-Runnable, self-contained reference agents live in [`examples/`](examples/):
+Runnable, self-contained reference agents live in [`examples/`](https://github.com/scaleapi/agentenv-framework/tree/main/packages/agentenv-protocol/examples):
 the normal, streaming, and multimodal `run(request)` paths, single- and
 multi-operation custom extensions, and advanced ASGI-lifespan plus
 common SDK-operation override hooks.

@@ -79,8 +79,9 @@ Every pull request needs an approving review from a code owner (see `CODEOWNERS`
 ## Releases
 
 Maintainers cut releases. Version bumps are automated when a labelled pull request merges, so
-contributors should not edit `version` in `pyproject.toml`. Releases publish the distribution
-`agentenv-framework`; the import package `agent_env` and the command `agent-env` keep their names.
+contributors should not edit `version` in `pyproject.toml`. Each release publishes
+`agentenv-framework` and `agentenv-protocol` to PyPI (`.github/workflows/publish-pypi.yml`, trusted publishing
+on the release tag); the import package `agent_env` and the command `agent-env` keep their names.
 
 ## Getting help
 
