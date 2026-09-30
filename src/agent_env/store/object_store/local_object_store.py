@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 _META_DIR = ".agentenv-meta"  # each object's content type, at the object's own key
 _STAGING_DIR = ".agentenv-tmp"  # files being written, inside the root so a rename into place is atomic
 _RESERVED = (".gitignore", _META_DIR, _STAGING_DIR)
-# A filesystem without hard links: a no-overwrite write reserves its key by exclusive create instead.
+# A filesystem without hard links: a no-overwrite write checks, then renames, so two racing writers can both land.
 _NO_HARD_LINKS = frozenset({errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EXDEV, errno.EMLINK})
 
 
@@ -92,7 +92,7 @@ class LocalFilesystemObjectStore(ObjectStore):
             return None
         st = path.stat()
         return ObjectMetadata(
-            content_type=self._read_content_type(path),
+            content_type=self._read_content_type(path, st),
             size=st.st_size,
             last_modified=datetime.fromtimestamp(st.st_mtime, tz=timezone.utc),
         )
@@ -166,7 +166,11 @@ class LocalFilesystemObjectStore(ObjectStore):
 
     def _commit(self, staged: Path, path: Path, content_type: str, *, allow_overwrite: bool) -> None:
         """Put a staged file in place at ``path`` and record its content type. An overwrite renames over
-        whatever is there; otherwise a hard link claims ``path`` only if no other writer got there first."""
+        whatever is there; otherwise a hard link claims ``path`` only if no other writer got there first.
+
+        The type is recorded with the identity of the file it describes, so one recorded for another
+        write (a racing overwrite, or one whose type could not be recorded) reads back as unknown."""
+        identity = _identity(staged.stat())
         path.parent.mkdir(parents=True, exist_ok=True)
         if allow_overwrite:
             os.replace(staged, path)
@@ -178,9 +182,7 @@ class LocalFilesystemObjectStore(ObjectStore):
             except OSError as e:
                 if e.errno not in _NO_HARD_LINKS:
                     raise
-                try:
-                    os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
-                except FileExistsError:
+                if path.exists():
                     raise ObjectAlreadyExistsError(f"Object already exists at {path}.") from None
                 os.replace(staged, path)
         # The default type is what a writer that named none gets; it reads back as unknown, so readers
@@ -192,15 +194,19 @@ class LocalFilesystemObjectStore(ObjectStore):
                 return
             meta.parent.mkdir(parents=True, exist_ok=True)
             with self._staged() as staged_meta:
-                staged_meta.write_text(json.dumps({"content_type": content_type}))
+                staged_meta.write_text(json.dumps({"content_type": content_type, "object": identity}))
                 os.replace(staged_meta, meta)
-        except OSError as e:  # the object is in place; only its type goes unrecorded
+        except OSError as e:  # the object is in place and its type reads back as unknown
             logger.warning("Could not record the content type of %s: %s", path, e)
 
-    def _read_content_type(self, path: Path) -> str | None:
-        """The content type recorded for the object at ``path``; None for one written before types were kept."""
+    def _read_content_type(self, path: Path, st: os.stat_result | None = None) -> str | None:
+        """The content type recorded for the object at ``path``, if it was recorded for this very file; None
+        otherwise, as for one written before types were kept."""
         try:
-            return json.loads(self._meta_path(path).read_text()).get("content_type")
+            recorded = json.loads(self._meta_path(path).read_text())
+            if recorded.get("object") != _identity(st or path.stat()):
+                return None
+            return recorded.get("content_type")
         except (OSError, ValueError, AttributeError):
             return None
 
@@ -215,6 +221,11 @@ class LocalFilesystemObjectStore(ObjectStore):
     @staticmethod
     def _from_url(object_url: str) -> str:
         return object_url[len("file://"):] if object_url.startswith("file://") else object_url
+
+
+def _identity(st: os.stat_result) -> list[int]:
+    """What tells one file apart from another written to the same key: a rename keeps all three."""
+    return [st.st_ino, st.st_size, st.st_mtime_ns]
 
 
 @contextlib.contextmanager
