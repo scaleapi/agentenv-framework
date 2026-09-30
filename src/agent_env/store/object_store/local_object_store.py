@@ -8,6 +8,7 @@ import hashlib
 import json
 import logging
 import os
+import secrets
 import shutil
 import tempfile
 import time
@@ -27,7 +28,7 @@ _STAGING_DIR = ".agentenv-tmp"  # files being written, inside the root so a rena
 _RESERVED = (".gitignore", _META_DIR, _STAGING_DIR)
 # A filesystem without hard links: a no-overwrite write claims its key with a marker file instead.
 _NO_HARD_LINKS = frozenset({errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EXDEV, errno.EMLINK})
-_STALE_CLAIM_SECONDS = 10  # a claim is held only from the check to the rename; one this old was left by a crash
+_UNWRITTEN_CLAIM_SECONDS = 10  # a marker is given its owner's pid as it is created; one still empty this long never will be
 
 
 class LocalFilesystemObjectStore(ObjectStore):
@@ -173,7 +174,7 @@ class LocalFilesystemObjectStore(ObjectStore):
 
         The type is recorded with the identity of the file it describes, so one recorded for another
         write (a racing overwrite, or one whose type could not be recorded) reads back as unknown."""
-        identity = _identity(staged.stat())
+        identity = _stamp(staged)
         path.parent.mkdir(parents=True, exist_ok=True)
         if allow_overwrite:
             os.replace(staged, path)
@@ -185,10 +186,16 @@ class LocalFilesystemObjectStore(ObjectStore):
             except OSError as e:
                 if e.errno not in _NO_HARD_LINKS:
                     raise
-                with self._claimed(path):
-                    if path.exists():
+                if os.name == "nt":  # rename there refuses an existing target, which is the claim
+                    try:
+                        os.rename(staged, path)
+                    except FileExistsError:
                         raise ObjectAlreadyExistsError(f"Object already exists at {path}.") from None
-                    os.replace(staged, path)
+                else:
+                    with self._claimed(path):
+                        if path.exists():
+                            raise ObjectAlreadyExistsError(f"Object already exists at {path}.") from None
+                        os.replace(staged, path)
         # The default type is what a writer that named none gets; it reads back as unknown, so readers
         # still guess from the name as they did before types were kept.
         try:
@@ -206,21 +213,21 @@ class LocalFilesystemObjectStore(ObjectStore):
     @contextlib.contextmanager
     def _claimed(self, path: Path) -> Iterator[None]:
         """The sole right to create ``path``, where no hard link can claim it: a marker in the staging directory,
-        created exclusively. A writer that finds one waits for it to go, taking it over once it is stale."""
+        created exclusively and naming its owner's pid. A writer that finds one waits for it to go, and takes it
+        over only once its owner has exited."""
         marker = self._root / _STAGING_DIR / f"{hashlib.sha256(str(path).encode()).hexdigest()}.claim"
         while True:
             try:
-                os.close(os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
-                break
+                fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             except FileExistsError:
-                try:
-                    stale = time.time() - marker.stat().st_mtime > _STALE_CLAIM_SECONDS
-                except FileNotFoundError:
-                    continue
-                if stale:
+                if _abandoned(marker):
                     marker.unlink(missing_ok=True)
                 else:
                     time.sleep(0.01)
+                continue
+            with os.fdopen(fd, "w") as f:
+                f.write(str(os.getpid()))
+            break
         try:
             yield
         finally:
@@ -250,9 +257,35 @@ class LocalFilesystemObjectStore(ObjectStore):
         return object_url[len("file://"):] if object_url.startswith("file://") else object_url
 
 
+def _stamp(staged: Path) -> list[int]:
+    """Give a staged file a modification time no other write shares (now, to the millisecond, plus a random
+    remainder) and return its identity. A rename keeps it, and so does a copy that keeps modification times."""
+    now_ns = time.time_ns()
+    stamp = now_ns - now_ns % 1_000_000 + secrets.randbelow(1_000_000)
+    os.utime(staged, ns=(stamp, stamp))
+    return _identity(staged.stat())
+
+
 def _identity(st: os.stat_result) -> list[int]:
-    """What tells one file apart from another written to the same key: a rename keeps all three."""
-    return [st.st_ino, st.st_size, st.st_mtime_ns]
+    return [st.st_size, st.st_mtime_ns]
+
+
+def _abandoned(marker: Path) -> bool:
+    """Whether a claim marker's owner has exited, or never got to name itself."""
+    try:
+        owner = marker.read_text()
+        age = time.time() - marker.stat().st_mtime
+    except FileNotFoundError:
+        return False
+    if not owner:
+        return age > _UNWRITTEN_CLAIM_SECONDS
+    try:
+        os.kill(int(owner), 0)
+    except ProcessLookupError:
+        return True
+    except (PermissionError, ValueError):
+        return False
+    return False
 
 
 @contextlib.contextmanager

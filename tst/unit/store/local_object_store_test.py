@@ -7,6 +7,9 @@ assertions that prove S3 parity also give quick backend-neutral coverage.
 import errno
 import hashlib
 import os
+import shutil
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -217,19 +220,47 @@ def test_without_hard_links_a_racing_write_once_put_keeps_the_winner(store, monk
     assert store.read("race/once") == b"first"
 
 
-def test_without_hard_links_a_claim_a_crash_left_is_taken_over(store, tmp_path, monkeypatch):
+def _claim_marker(tmp_path, key):
+    path = (tmp_path / key).resolve()
+    return tmp_path / ".agentenv-tmp" / f"{hashlib.sha256(str(path).encode()).hexdigest()}.claim"
+
+
+@pytest.fixture
+def no_hard_links(store, monkeypatch):
     def no_links(src, dst):
         raise OSError(errno.EPERM, "hard links not supported")
 
     monkeypatch.setattr(os, "link", no_links)
     store.put("seed", b"s")  # creates the staging directory
-    path = (tmp_path / "left/x").resolve()
-    marker = tmp_path / ".agentenv-tmp" / f"{hashlib.sha256(str(path).encode()).hexdigest()}.claim"
-    marker.write_bytes(b"")
-    os.utime(marker, (time.time() - 60, time.time() - 60))
+
+
+def test_without_hard_links_a_claim_whose_owner_exited_is_taken_over(store, tmp_path, no_hard_links):
+    exited = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"], capture_output=True, text=True)
+    marker = _claim_marker(tmp_path, "left/x")
+    marker.write_text(exited.stdout.strip())
     store.put("left/x", b"mine")
     assert store.read("left/x") == b"mine"
     assert not marker.exists()
+
+
+def test_without_hard_links_a_live_writers_claim_is_never_taken_over(store, tmp_path, no_hard_links):
+    marker = _claim_marker(tmp_path, "held/x")
+    marker.write_text(str(os.getpid()))
+    os.utime(marker, (time.time() - 3600, time.time() - 3600))
+    writer = threading.Thread(target=store.put, args=("held/x", b"late"))
+    writer.start()
+    writer.join(0.3)
+    assert writer.is_alive() and not store.exists("held/x")
+    marker.unlink()
+    writer.join(5)
+    assert store.read("held/x") == b"late"
+
+
+def test_types_survive_a_copy_that_keeps_modification_times(store, tmp_path):
+    store.put("copied/x", b"typed", content_type="text/plain")
+    copy = tmp_path.parent / f"{tmp_path.name}-copy"
+    shutil.copytree(tmp_path, copy)  # copies modification times, not inodes
+    assert LocalFilesystemObjectStore(str(copy)).get_object_metadata("copied/x").content_type == "text/plain"
 
 
 def test_a_type_recorded_for_another_write_reads_back_as_unknown(store, tmp_path):
