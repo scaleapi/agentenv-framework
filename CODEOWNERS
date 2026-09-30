@@ -1,7 +1,2 @@
-# CODEOWNERS: GitHub requests a review from these owners on every pull request.
-#
-# Code-owner approval is not a merge requirement: the ruleset on main requires one
-# approving review from anyone with write access. Multiple owners on one line are OR.
-#
-# Note: a team is only a valid owner if it has access to this repo.
-*  @scaleapi/frontier-data  @scaleapi/chat-task-eng  @polakamtejas
+# CODEOWNERS
+*  @agentenv-devs
