@@ -565,10 +565,12 @@ class LocalRunObjectStore(ObjectStore):
     def shared_credentials_env(self) -> dict[str, str]:
         return self.configured.shared_credentials_env()
 
-    def issue_read_grant(self, object_url: str, *, expires_in: int = 3600) -> HttpGetGrant:
+    def issue_read_grant(self, object_url: str, *, expires_in: int | None = None) -> HttpGetGrant:
         return self._at(object_url).issue_read_grant(object_url, expires_in=expires_in)
 
-    def issue_write_grant(self, object_url: str, *, media_type: str, max_bytes: int, expires_in: int = 3600) -> HttpPutGrant:
+    def issue_write_grant(
+        self, object_url: str, *, media_type: str, max_bytes: int, expires_in: int | None = None
+    ) -> HttpPutGrant:
         return self._writing(object_url).issue_write_grant(
             object_url, media_type=media_type, max_bytes=max_bytes, expires_in=expires_in
         )

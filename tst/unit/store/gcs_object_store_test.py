@@ -26,7 +26,7 @@ from google.oauth2 import service_account
 from agent_env.a2a_agent.object_transfer import changelog_enable_call
 from agent_env.config.errors import ConfigError
 from agent_env.store import GrantUnavailableError, ObjectAlreadyExistsError, ObjectNotFoundError, _google
-from agent_env.store.object_store import gcs_object_store
+from agent_env.store.object_store import DEFAULT_GRANT_LIFETIME_SECONDS, gcs_object_store
 from agent_env.store.object_store.gcs_object_store import GcsObjectStore
 from tst.store import object_conformance
 
@@ -408,6 +408,19 @@ def test_urls_signed_with_a_key_last_up_to_seven_days(client):
         store.issue_read_grant(f"gs://{BUCKET}/k", expires_in=604801)
 
 
+def test_grants_last_the_configured_lifetime(client, signer):
+    store = GcsObjectStore(client, BUCKET, signer=signer, grant_lifetime_seconds=900)
+    _assert_expiry(store.issue_read_grant(store.put("k", b"v")).expires_at, seconds=900)
+
+
+@pytest.mark.parametrize("signing, most", [("iam", 43200), ("key", 604800)])
+def test_a_lifetime_the_signer_cannot_sign_is_refused_when_the_store_is_made(client, signing, most):
+    signer = _FakeSigner() if signing == "iam" else _key_credentials()
+    GcsObjectStore(client, BUCKET, signer=signer, grant_lifetime_seconds=most)
+    with pytest.raises(ValueError, match=f"at most {most}"):
+        GcsObjectStore(client, BUCKET, signer=signer, grant_lifetime_seconds=most + 1)
+
+
 def test_without_a_signer_signed_urls_are_absent_and_warn_once(unsigned, caplog):
     with caplog.at_level(logging.WARNING, logger=gcs_object_store.__name__):
         assert unsigned.signed_get_url(f"gs://{BUCKET}/k") is None
@@ -444,7 +457,7 @@ def test_write_grant_signs_its_media_type_and_size_bound(store):
     assert "content-type=application/json" in grant.url
     assert "x-goog-content-length-range" in grant.url
     assert grant.headers == {"Content-Type": "application/json", "x-goog-content-length-range": "0,64"}
-    _assert_expiry(grant.expires_at, seconds=3600)
+    _assert_expiry(grant.expires_at, seconds=DEFAULT_GRANT_LIFETIME_SECONDS)
 
 
 def _policy(fields: dict) -> dict:

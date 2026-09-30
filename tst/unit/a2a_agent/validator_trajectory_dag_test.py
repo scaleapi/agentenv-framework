@@ -231,7 +231,7 @@ class _ObjectStore:
     def get_object_key(self, object_url: str) -> str:
         return object_url.removeprefix("s3://test-bucket/")
 
-    def issue_write_grant(self, object_url, *, media_type, max_bytes, expires_in):
+    def issue_write_grant(self, object_url, *, media_type, max_bytes, expires_in=None):
         self.write_grants.append(object_url)
         return HttpPutGrant(
             kind="http-put",

@@ -177,7 +177,7 @@ def test_fetch_trajectory_prefers_advertised_object_mode(monkeypatch):
         def grants_reach(self, sandbox_type):
             return True
 
-        def issue_write_grant(self, object_url, *, media_type, max_bytes, expires_in):
+        def issue_write_grant(self, object_url, *, media_type, max_bytes, expires_in=None):
             grants_on_loop.append(_on_loop())
             assert object_url == "s3://b/traj/trajectory-CLIENT-ID.json"
             assert media_type == "application/json"

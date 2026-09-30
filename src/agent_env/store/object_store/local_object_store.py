@@ -31,9 +31,11 @@ from agent_env.store.object_store.local_grants.tls import check_local_host
 from agent_env.store.object_store.local_grants.tokens import Op
 from agent_env.store.object_store.object_store import (
     DEFAULT_CONTENT_TYPE,
+    DEFAULT_GRANT_LIFETIME_SECONDS,
     ObjectMetadata,
     ObjectStore,
     UploadPolicy,
+    grant_lifetime,
 )
 
 logger = logging.getLogger(__name__)
@@ -80,6 +82,7 @@ class LocalFilesystemObjectStore(ObjectStore):
         grants: str = "auto",
         grant_bind_host: str | None = None,
         grant_advertise_host: str | None = None,
+        grant_lifetime_seconds: int = DEFAULT_GRANT_LIFETIME_SECONDS,
     ) -> None:
         if grants not in _GRANT_MODES:
             raise ValueError(f"grants must be one of {_GRANT_MODES}, got {grants!r}")
@@ -92,6 +95,7 @@ class LocalFilesystemObjectStore(ObjectStore):
             check_local_host(grant_advertise_host)
         self._root = Path(root) if root is not None else state_root() / "object_store"
         self.supports_transfer_grants = grants == "auto"
+        self.grant_lifetime_seconds = grant_lifetime(grant_lifetime_seconds)
         self._grant_bind_host = grant_bind_host
         self._grant_advertise_host = grant_advertise_host
         self._swept = False
@@ -191,13 +195,15 @@ class LocalFilesystemObjectStore(ObjectStore):
     def grants_reach(self, sandbox_type: str | None) -> bool:
         return sandbox_type == _LOCAL_SANDBOX_TYPE
 
-    def issue_read_grant(self, object_url: str, *, expires_in: int = 3600) -> HttpGetGrant:
+    def issue_read_grant(self, object_url: str, *, expires_in: int | None = None) -> HttpGetGrant:
+        expires_in = self.grant_lifetime_seconds if expires_in is None else expires_in
         url, expires_at = self._grant("get", expires_in, key=self._grant_key(object_url))
         return HttpGetGrant(kind="http-get", url=url, expires_at=expires_at)
 
     def issue_write_grant(
-        self, object_url: str, *, media_type: str, max_bytes: int, expires_in: int = 3600
+        self, object_url: str, *, media_type: str, max_bytes: int, expires_in: int | None = None
     ) -> HttpPutGrant:
+        expires_in = self.grant_lifetime_seconds if expires_in is None else expires_in
         url, expires_at = self._grant(
             "put", expires_in, key=self._grant_key(object_url), max_bytes=max_bytes, content_type=media_type
         )

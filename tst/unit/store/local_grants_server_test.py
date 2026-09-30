@@ -243,6 +243,18 @@ def test_grants_refuse_the_stores_own_files(store):
         store.issue_read_grant(store.object_url(".agentenv-meta/a"))
 
 
+def test_local_grants_last_the_stores_lifetime(store, tmp_path):
+    def lasts(grant, seconds):
+        return abs(grant.expires_at.timestamp() - time.time() - seconds) < 2
+
+    assert lasts(store.issue_read_grant(store.put("k", b"v")), 12 * 60 * 60)
+    short = LocalFilesystemObjectStore(
+        str(tmp_path / "short"), grant_bind_host="127.0.0.1", grant_advertise_host="localhost", grant_lifetime_seconds=900
+    )
+    grant = short.issue_read_grant(short.put("k", b"v"))
+    assert lasts(grant, 900) and httpx.get(grant.url).content == b"v"
+
+
 def test_a_grant_expires_when_asked(store):
     url = store.put("a/b.bin", b"v")
     grant = store.issue_read_grant(url, expires_in=120)
