@@ -13,12 +13,14 @@ import contextlib
 import functools
 import ipaddress
 import logging
+import os
 import platform
 import socket
 import subprocess
 import threading
 import time
 from pathlib import Path
+from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, BinaryIO
 
 import uvicorn
@@ -26,7 +28,7 @@ from python_multipart.exceptions import FormParserError
 from python_multipart.multipart import MultipartParser, parse_options_header
 from starlette.applications import Starlette
 from starlette.requests import ClientDisconnect, Request
-from starlette.responses import FileResponse, PlainTextResponse, Response
+from starlette.responses import PlainTextResponse, Response, StreamingResponse
 from starlette.routing import Route
 from uvicorn.protocols.http.h11_impl import H11Protocol
 
@@ -54,6 +56,7 @@ _UPLOAD_FILE_FIELD = "file"
 _MAX_FORM_FIELDS = 32
 _MAX_FORM_FIELD_BYTES = 64 * 1024
 _MAX_PART_HEADER_BYTES = 16 * 1024
+_DOWNLOAD_CHUNK_BYTES = 1024 * 1024
 
 _servers: dict[tuple[str, str], GrantServer] = {}
 _servers_lock = threading.Lock()
@@ -238,10 +241,25 @@ def _path(store: LocalFilesystemObjectStore, key: str) -> Path:
 
 def _get(store: LocalFilesystemObjectStore, claims: GrantClaims) -> Response:
     path = _path(store, claims.key)
-    metadata = store.get_object_metadata(claims.key)  # read under the key's lock, never mid-write
-    if metadata is None:
-        raise _Rejected(404, "No object exists at this grant's key.")
-    return FileResponse(path, media_type=metadata.content_type or DEFAULT_CONTENT_TYPE)
+    # Opened under the key's lock and typed from that open file, so the bytes sent and their type are one write's.
+    with store._locked(path, shared=True):
+        try:
+            f = path.open("rb")
+        except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
+            raise _Rejected(404, "No object exists at this grant's key.") from None
+        st = os.fstat(f.fileno())
+        content_type = store._read_content_type(path, st)
+    return StreamingResponse(
+        _chunks(f), media_type=content_type or DEFAULT_CONTENT_TYPE, headers={"Content-Length": str(st.st_size)}
+    )
+
+
+async def _chunks(f: BinaryIO) -> AsyncIterator[bytes]:
+    try:
+        while chunk := await asyncio.to_thread(f.read, _DOWNLOAD_CHUNK_BYTES):
+            yield chunk
+    finally:
+        f.close()
 
 
 async def _put(store: LocalFilesystemObjectStore, claims: GrantClaims, request: Request) -> None:
