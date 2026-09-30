@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Guidance for coding agents and contributors working in this repository. `CLAUDE.md` imports this file.
+Guidance for coding agents and contributors working in this repository.
 
 ## What agent-env is
 
