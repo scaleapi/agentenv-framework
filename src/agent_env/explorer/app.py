@@ -24,6 +24,7 @@ from agent_env.explorer.plugin import load_plugins
 from agent_env.explorer.routers import conversations as conversations_router
 from agent_env.explorer.routers import objects as objects_router
 from agent_env.explorer.routers import runs as runs_router
+from agent_env.explorer.routers import triggers as triggers_router
 from agent_env.explorer.routers.common import versioned_router
 from agent_env.store import NotFoundError
 from agent_env.store.routing import configured_store
@@ -207,6 +208,7 @@ def create_app(static_dir: Optional[str] = None) -> FastAPI:
     app.include_router(versioned_router(prefix=f"{API}/agents", tag="agents", collection="a2a_agents", noun="agent"))
     app.include_router(versioned_router(prefix=f"{API}/evals", tag="evals", collection="evals", noun="eval"))
     app.include_router(runs_router.router)
+    app.include_router(triggers_router.router)
     app.include_router(objects_router.router)
     app.include_router(conversations_router.router)
 

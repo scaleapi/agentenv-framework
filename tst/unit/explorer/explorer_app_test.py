@@ -2,10 +2,12 @@
 
 import dataclasses
 import gzip
+import json
 import tempfile
 import time
 from urllib.parse import quote
 
+import httpx
 import pytest
 
 pytest.importorskip("fastapi")  # the explorer is the optional [explorer] extra (fastapi, uvicorn)
@@ -20,6 +22,7 @@ from agent_env.store.object_store.local_object_store import LocalFilesystemObjec
 from agent_env.store.document_store.sqlite_document_store import LocalSqliteDocumentStore
 from agent_env.task import Task
 from agent_env.explorer.routers import objects as objects_router
+from agent_env.explorer.routers import triggers as triggers_router
 from tst.unit.store.fakes import FakeObjectStore
 
 
@@ -386,6 +389,102 @@ def test_run_groups_tally_step_progress_for_the_batch_funnel(client):
     assert client.get(f"/api/v1/tasks/t1/run-groups/{gid}").json()["step_counts"] == expected
     listed = {g["run_group_id"]: g for g in client.get("/api/v1/tasks/t1/run-groups").json()["items"]}
     assert listed[gid]["step_counts"] == expected
+
+
+# --- Triggers ---------------------------------------------------------------
+
+
+def _seed_trigger_run(status="completed", metadata=None, deployed_envs=None, task_id="t1", instance_id="i-trig"):
+    get_config().get_document_store().insert("task_instances", {
+        "instance_id": instance_id, "task_id": task_id, "task_version": 1, "status": status,
+        "context": {"metadata": metadata or {}, "deployed_envs": deployed_envs or []},
+    })
+
+
+def _envelope(instance_id="i-trig"):
+    return {
+        "instance_id": instance_id, "env_id": "crm", "capture_source": "prompt_agent",
+        "clock": {"rate": 60.0, "virtual_now": "2026-01-04T09:00:00+00:00"},
+        "clock_read_at_utc": "2026-01-04T00:00:05+00:00",
+        "state": {"triggers": [{"id": "follow-up", "status": "fired", "fire_count": 1}], "events": [{"kind": "fired"}]},
+    }
+
+
+def test_triggers_report_the_metadata_ledger(client):
+    registrations = [{"env_id": "crm", "trigger_ids": ["follow-up"]}]
+    _seed_trigger_run(metadata={"env_trigger_registrations": registrations, "agent_trigger_firings": [{"turn": 1}]})
+
+    body = client.get("/api/v1/tasks/t1/instances/i-trig/triggers").json()
+
+    assert set(triggers_router.TRIGGER_METADATA_KEYS) <= set(body)
+    assert body["status"] == "completed" and body["source"] == "metadata"
+    assert body["env_trigger_registrations"] == registrations
+    assert body["agent_trigger_firings"] == [{"turn": 1}]
+    assert body["env_trigger_state"] == {} and body["usersim_turn_outputs"] is None
+    assert (body["state"], body["state_sources"], body["state_meta"]) == ({}, {}, {})
+
+
+def test_triggers_read_a_finished_runs_saved_envelope(client, tmp_path):
+    store = LocalFilesystemObjectStore(str(tmp_path / "obj"))
+    set_object_store(store)
+    url = store.put("env_trigger_state/instance_id=i-trig/crm-1.json", json.dumps(_envelope()).encode())
+    _seed_trigger_run(metadata={"env_trigger_state": {"crm": {"object_url": url, "event_count": 1}}})
+
+    body = client.get("/api/v1/tasks/t1/instances/i-trig/triggers").json()
+
+    assert body["source"] == "artifact" and body["state_sources"] == {"crm": "artifact"}
+    assert body["state"] == {"crm": _envelope()["state"]}
+    assert body["state_meta"] == {"crm": {"clock": _envelope()["clock"], "clock_read_at_utc": _envelope()["clock_read_at_utc"]}}
+
+
+def test_triggers_skip_an_envelope_outside_the_store_or_from_another_instance(client, tmp_path):
+    store = LocalFilesystemObjectStore(str(tmp_path / "obj"))
+    set_object_store(store)
+    foreign = store.put("env_trigger_state/instance_id=other/db-1.json", json.dumps(_envelope("other")).encode())
+    _seed_trigger_run(metadata={"env_trigger_state": {
+        "crm": {"object_url": "s3://some-bucket/env_trigger_state/crm.json"},
+        "db": {"object_url": foreign},
+        "web": {"error": "capture budget of 60s exceeded"},
+    }})
+
+    body = client.get("/api/v1/tasks/t1/instances/i-trig/triggers").json()
+
+    assert body["source"] == "metadata"
+    assert (body["state"], body["state_sources"], body["state_meta"]) == ({}, {}, {})
+    assert set(body["env_trigger_state"]) == {"crm", "db", "web"}
+
+
+def test_triggers_read_the_live_gateway_while_running(client, monkeypatch):
+    get_config().get_document_store().insert("env_instances", {"instance_id": "crm-abc", "env_id": "crm", "gateway_url": "http://gateway.test/"})
+    _seed_trigger_run(status="running", deployed_envs=[
+        {"env_id": "crm", "instance_id": "crm-abc", "gateway_url": "http://ignored.test"},
+        {"env_id": "db", "instance_id": "db-gone"},
+    ])
+    live = {"http://gateway.test/triggers/state": {"triggers": [{"id": "follow-up", "status": "armed"}]},
+            "http://gateway.test/clock/state": {"rate": 60.0}}
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=live[str(request.url)]))
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: real_client(transport=transport, **kw))
+
+    body = client.get("/api/v1/tasks/t1/instances/i-trig/triggers").json()
+
+    assert body["source"] == "live" and body["state_sources"] == {"crm": "live", "db": "unavailable"}
+    assert body["state"] == {"crm": live["http://gateway.test/triggers/state"]}
+    assert body["state_meta"]["crm"]["clock"] == {"rate": 60.0}
+    assert "db" not in body["state_meta"]
+
+
+def test_triggers_for_an_unknown_instance_are_404(client):
+    assert client.get("/api/v1/tasks/t1/instances/ghost/triggers").status_code == 404
+
+
+def test_triggers_address_a_namespaced_task_and_instance(client):
+    task_id, instance_id = "@local/~/triage/runs", "@local/~/triage/runs-7f3a9c2e"
+    _seed_trigger_run(task_id=task_id, instance_id=instance_id, metadata={"env_trigger_registrations": []})
+
+    got = client.get(f"/api/v1/tasks/{quote(task_id, safe='')}/instances/{quote(instance_id, safe='')}/triggers")
+
+    assert got.status_code == 200 and got.json()["env_trigger_registrations"] == []
 
 
 # --- Docs surface -----------------------------------------------------------

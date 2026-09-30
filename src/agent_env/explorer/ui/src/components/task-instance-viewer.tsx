@@ -31,7 +31,7 @@ import {
   type ServerConfigChange,
   type ServerConfigSkip,
 } from './server-config-panel';
-import { TriggerTurnStrip } from './triggers-panel';
+import { TriggersPanel, TriggerTurnStrip } from './triggers-panel';
 import { parseTriggerRuntime } from '../lib/parse-trigger-runtime';
 import { indexAuthoredTriggers } from '../lib/parse-triggers';
 import {
@@ -1042,6 +1042,11 @@ export function TaskInstanceViewer({
                 Server Config
               </Tabs.Trigger>
             )}
+            {triggerRuntime && (
+              <Tabs.Trigger value="triggers" className="my-1">
+                Triggers
+              </Tabs.Trigger>
+            )}
             {hasPeerAgents && (
               <Tabs.Trigger value="peer-qna" className="my-1">
                 Peer Q&amp;A
@@ -1802,6 +1807,17 @@ export function TaskInstanceViewer({
               changes={serverConfigChanges}
               failures={serverConfigFailures}
               skipped={serverConfigSkipped}
+            />
+          </Tabs.Content>
+        )}
+
+        {triggerRuntime && (
+          <Tabs.Content value="triggers" className="p-4">
+            <TriggersPanel
+              runtime={triggerRuntime}
+              authored={authoredTriggers}
+              taskId={taskId}
+              instanceId={instanceId}
             />
           </Tabs.Content>
         )}
