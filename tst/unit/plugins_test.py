@@ -592,7 +592,7 @@ def test_a_plugin_that_cannot_load_does_not_conflict_with_one_that_can(monkeypat
 def test_a_name_only_plugins_that_cannot_load_claim_says_why_it_is_missing(monkeypatch):
     _install(monkeypatch, envs=[
         _EP("browser", "_BrowserEnv", dist="agentenv-a", requires=["agentenv-framework>=999"]),
-        _EP("browser", "_OtherBrowserEnv", dist="agentenv-b", requires=["agentenv-protocol>=999"]),
+        _EP("browser", "_OtherBrowserEnv", dist="agentenv-b", requires=["agentenv-framework-protocol>=999"]),
     ])
 
     assert "browser" not in get_config().env_registry()

@@ -79,21 +79,21 @@ jobs:
               --region us-west-2
 
       - run:
-          name: Build and publish agentenv-protocol
+          name: Build and publish agentenv-framework-protocol
           command: |
             python -m build packages/agentenv-protocol --outdir packages/agentenv-protocol/dist
             twine upload --repository codeartifact packages/agentenv-protocol/dist/*
 
       - run:
-          name: Build package (pin exact agentenv-protocol version)
+          name: Build package (pin exact agentenv-framework-protocol version)
           command: |
             set -euo pipefail
             PV=$(sed -n 's/^version = "\(.*\)"/\1/p' packages/agentenv-protocol/pyproject.toml)
             # Only the quoted requirement: the bare name also appears in the sdist include
             # list, the uv workspace members and [tool.uv.sources], which must not be rewritten.
-            sed -i "s/\"agentenv-protocol[^\"]*\"/\"agentenv-protocol==${PV}\"/" pyproject.toml
+            sed -i "s/\"agentenv-framework-protocol[^\"]*\"/\"agentenv-framework-protocol==${PV}\"/" pyproject.toml
             python -c "import tomllib; tomllib.load(open('pyproject.toml','rb'))"
-            grep -q "\"agentenv-protocol==${PV}\"" pyproject.toml
+            grep -q "\"agentenv-framework-protocol==${PV}\"" pyproject.toml
             python -m build
 
       - run:

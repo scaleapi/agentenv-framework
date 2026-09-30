@@ -1,9 +1,10 @@
 name: Publish to PyPI
 
-# On a release tag, builds both distributions the way the release does (agentenv-framework pinned to the exact
-# agentenv-protocol version it was released with) and uploads them to PyPI through trusted publishing, so no token is
-# stored anywhere. agentenv-protocol goes first, since agentenv-framework pins it. Files already on PyPI are skipped,
-# so a rerun is safe.
+# On a release tag, uploads agentenv-framework-protocol and then agentenv-framework to PyPI through trusted
+# publishing, so no token is stored anywhere. Each job builds its distribution the way the release does
+# (agentenv-framework pinned to the exact agentenv-framework-protocol it was released with) and runs in its own
+# environment, because PyPI binds a pending publisher to one workflow and environment per project. Files already on
+# PyPI are skipped, so a rerun is safe.
 
 on:
   push:
@@ -13,10 +14,10 @@ permissions:
   contents: read
 
 jobs:
-  pypi:
+  protocol:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    environment: pypi
+    environment: pypi-protocol
     permissions:
       contents: read
       id-token: write
@@ -33,19 +34,39 @@ jobs:
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)
           [ "v${version}" = "${GITHUB_REF_NAME}" ] || { echo "::error::tag ${GITHUB_REF_NAME}, but pyproject.toml is at ${version}"; exit 1; }
-      - name: Build agentenv-protocol
-        run: uv build --no-sources packages/agentenv-protocol --out-dir dist/protocol
-      - name: Build agentenv-framework, pinned to that agentenv-protocol
+      - name: Build agentenv-framework-protocol
+        run: uv build --no-sources packages/agentenv-protocol --out-dir dist
+      - name: Check its metadata renders
+        run: uvx --index-url https://pypi.org/simple twine check --strict dist/*
+      - name: Publish agentenv-framework-protocol
+        run: uv publish --trusted-publishing always --check-url https://pypi.org/simple/ dist/*
+
+  framework:
+    needs: protocol
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - name: Install uv from public PyPI
+        run: python -m pip install --quiet --index-url https://pypi.org/simple uv
+      - name: Build agentenv-framework, pinned to this release's agentenv-framework-protocol
         run: |
           protocol=$(sed -n 's/^version = "\(.*\)"/\1/p' packages/agentenv-protocol/pyproject.toml)
-          # Only the quoted requirement: the bare name also appears in the sdist include list, the uv workspace
-          # members and [tool.uv.sources], which must not be rewritten.
-          sed -i "s/\"agentenv-protocol[^\"]*\"/\"agentenv-protocol==${protocol}\"/" pyproject.toml
-          grep -q "\"agentenv-protocol==${protocol}\"" pyproject.toml
-          uv build --no-sources --out-dir dist/framework
-      - name: Check the distributions' metadata renders
-        run: uvx --index-url https://pypi.org/simple twine check --strict dist/protocol/* dist/framework/*
-      - name: Publish agentenv-protocol
-        run: uv publish --trusted-publishing always --check-url https://pypi.org/simple/ dist/protocol/*
+          # Only the quoted requirement: the directory name also appears in the sdist include list and the uv
+          # workspace members, and the bare name keys [tool.uv.sources]; none of those may be rewritten.
+          sed -i "s/\"agentenv-framework-protocol[^\"]*\"/\"agentenv-framework-protocol==${protocol}\"/" pyproject.toml
+          grep -q "\"agentenv-framework-protocol==${protocol}\"" pyproject.toml
+          uv build --no-sources --out-dir dist
+      - name: Check its metadata renders
+        run: uvx --index-url https://pypi.org/simple twine check --strict dist/*
       - name: Publish agentenv-framework
-        run: uv publish --trusted-publishing always --check-url https://pypi.org/simple/ dist/framework/*
+        run: uv publish --trusted-publishing always --check-url https://pypi.org/simple/ dist/*

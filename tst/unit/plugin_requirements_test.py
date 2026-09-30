@@ -13,7 +13,7 @@ class _Dist:
 
 @pytest.fixture(autouse=True)
 def _installed(monkeypatch):
-    versions = {"agentenv-framework": "0.9.1218", "agentenv-protocol": "0.1.231"}
+    versions = {"agentenv-framework": "0.9.1218", "agentenv-framework-protocol": "0.1.231"}
     monkeypatch.setattr(_requirements, "installed", versions.get)
 
 
@@ -21,7 +21,7 @@ def _installed(monkeypatch):
     [],
     ["agentenv-framework>=0.9.1193"],
     ["agentenv_framework[explorer] >=0.9"],
-    ["agentenv-framework>=0.9,<0.10", "agentenv-protocol==0.1.231"],
+    ["agentenv-framework>=0.9,<0.10", "agentenv-framework-protocol==0.1.231"],
     ["agentenv-framework>=999; extra == 'dev'"],
     ["agentenv-framework>=999; python_version < '3'"],
     ["requests>=999", "not a requirement !!"],
@@ -34,9 +34,9 @@ def test_a_requirement_the_installed_agent_env_meets_or_that_does_not_apply_pass
     (["agentenv-framework>=0.9.1220"], "needs agentenv-framework>=0.9.1220 (installed: 0.9.1218)"),
     (["agentenv-framework<0.9.1218"], "needs agentenv-framework<0.9.1218 (installed: 0.9.1218)"),
     (["Agentenv.Framework==0.9.1200"], "needs agentenv-framework==0.9.1200 (installed: 0.9.1218)"),
-    (["agentenv-protocol>=0.2"], "needs agentenv-protocol>=0.2 (installed: 0.1.231)"),
-    (["agentenv-framework>=999", "agentenv-protocol>=999"],
-     "needs agentenv-framework>=999 (installed: 0.9.1218); agentenv-protocol>=999 (installed: 0.1.231)"),
+    (["agentenv-framework-protocol>=0.2"], "needs agentenv-framework-protocol>=0.2 (installed: 0.1.231)"),
+    (["agentenv-framework>=999", "agentenv-framework-protocol>=999"],
+     "needs agentenv-framework>=999 (installed: 0.9.1218); agentenv-framework-protocol>=999 (installed: 0.1.231)"),
 ])
 def test_a_requirement_the_installed_agent_env_does_not_meet_names_both_versions(requires, why):
     assert incompatibility(_Dist(*requires)) == why

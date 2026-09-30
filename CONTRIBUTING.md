@@ -37,7 +37,7 @@ This is the same install CI performs. `make install` is equivalent.
 
 | Command | What it runs | Needs |
 |---|---|---|
-| `make unit-test` | unit suite for `agentenv-framework` and `agentenv-protocol` | nothing external |
+| `make unit-test` | unit suite for `agentenv-framework` and `agentenv-framework-protocol` | nothing external |
 | `make int-test-fast` | integration tests against the local backends | Docker |
 | `make int-test-slow` | tests that build images or deploy sandboxes, minutes each | Docker, and a sandbox backend for some |
 | `make clean-install-test` | both distributions built as the release builds them, installed into a fresh venv from public PyPI, and `agent-env run hello` run twice by name | Python 3.11, uv and git |
@@ -80,7 +80,7 @@ Every pull request needs an approving review from a code owner (see `CODEOWNERS`
 
 Maintainers cut releases. Version bumps are automated when a labelled pull request merges, so
 contributors should not edit `version` in `pyproject.toml`. Each release publishes
-`agentenv-framework` and `agentenv-protocol` to PyPI (`.github/workflows/publish-pypi.yml`, trusted publishing
+`agentenv-framework` and `agentenv-framework-protocol` to PyPI (`.github/workflows/publish-pypi.yml`, trusted publishing
 on the release tag); the import package `agent_env` and the command `agent-env` keep their names.
 
 ## Getting help

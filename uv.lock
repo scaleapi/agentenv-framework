@@ -15,7 +15,7 @@ resolution-markers = [
 [manifest]
 members = [
     "agentenv-framework",
-    "agentenv-protocol",
+    "agentenv-framework-protocol",
 ]
 
 [[package]]
@@ -47,7 +47,7 @@ version = "0.9.1253"
 source = { editable = "." }
 dependencies = [
     { name = "a2a-sdk" },
-    { name = "agentenv-protocol" },
+    { name = "agentenv-framework-protocol" },
     { name = "boto3" },
     { name = "click" },
     { name = "e2b" },
@@ -96,7 +96,7 @@ gcp = [
 requires-dist = [
     { name = "a2a-sdk", specifier = "==0.3.26" },
     { name = "agentenv-framework", extras = ["explorer", "gcp"], marker = "extra == 'dev'" },
-    { name = "agentenv-protocol", editable = "packages/agentenv-protocol" },
+    { name = "agentenv-framework-protocol", editable = "packages/agentenv-protocol" },
     { name = "boto3", specifier = ">=1.35.0" },
     { name = "click", specifier = ">=8.0.0" },
     { name = "e2b", specifier = "~=2.46.4" },
@@ -128,7 +128,7 @@ requires-dist = [
 provides-extras = ["explorer", "gcp", "dev"]
 
 [[package]]
-name = "agentenv-protocol"
+name = "agentenv-framework-protocol"
 version = "0.1.268"
 source = { editable = "packages/agentenv-protocol" }
 dependencies = [

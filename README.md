@@ -46,7 +46,7 @@ A task deploys an environment and an agent, prompts the agent, runs one or more 
 
 | Package | What it is | Who installs it |
 |---|---|---|
-| `agentenv-protocol` (`packages/agentenv-protocol/`) | The wire contract plus the server and agent SDKs: `AgentEnvEnvironment`, the card, data-plane and extension decorators, and the A2A (agent-to-agent protocol) agent framework behind the `agent` extra. Depends only on `pydantic`, `starlette` and `httpx`; `mcp` is imported lazily. | Environment images and agent images. An environment image does not need `agentenv-framework`. |
+| `agentenv-framework-protocol` (`packages/agentenv-protocol/`) | The wire contract plus the server and agent SDKs: `AgentEnvEnvironment`, the card, data-plane and extension decorators, and the A2A (agent-to-agent protocol) agent framework behind the `agent` extra. Depends only on `pydantic`, `starlette` and `httpx`; `mcp` is imported lazily. | Environment images and agent images. An environment image does not need `agentenv-framework`. |
 | `agentenv-framework` (this repository; import package `agent_env`, command `agent-env`) | The runtime and CLI: stores, image builds, the gateway, sandbox providers, task steps, verifiers, evals, the local explorer. | The machine that builds, deploys and runs. |
 
 Every backend in `agent-env` is a seam: a TOML table naming `impl = "module.path:ClassName"` plus a `config` table. Stores (document, object, image, secret), sandbox providers, state providers, the runner, task steps, artifacts, environment kinds, CLI groups and explorer routes all plug in this way, and a bad pointer fails loudly with `ConfigError` the first time the seam is used. An installed package can also register its types through entry points, with no config at all. Conformance suites exist for the four store seams only. Details are in [Extend agent-env](#extend-agent-env); server and agent authoring depth is in [`packages/agentenv-protocol/README.md`](https://github.com/scaleapi/agentenv-framework/blob/main/packages/agentenv-protocol/README.md).
@@ -63,13 +63,13 @@ Every backend in `agent-env` is a seam: a TOML table naming `impl = "module.path
 
 ### Install the packages
 
-Both packages are on PyPI. The distribution is named `agentenv-framework`; the import package is `agent_env` and the command is `agent-env`. It depends on `agentenv-protocol`, which installs with it:
+Both packages are on PyPI. The distribution is named `agentenv-framework`; the import package is `agent_env` and the command is `agent-env`. It depends on `agentenv-framework-protocol`, which installs with it:
 
 ```bash
 pip install agentenv-framework
 ```
 
-To work on agent-env itself, install from a clone. The repository is a uv workspace, so one command installs `agentenv-framework` and `agentenv-protocol` as editable packages with their dependencies from PyPI:
+To work on agent-env itself, install from a clone. The repository is a uv workspace, so one command installs `agentenv-framework` and `agentenv-framework-protocol` as editable packages with their dependencies from PyPI:
 
 ```bash
 git clone https://github.com/scaleapi/agentenv-framework.git && cd agentenv-framework
@@ -80,7 +80,7 @@ uv sync --extra dev
 
 The committed `uv.lock` is kept current: the release bump writes both packages' new versions into it, and CI fails a pull request that leaves it stale, so `uv sync --locked --extra dev` installs exactly what it records.
 
-With plain `pip`, install the protocol package from the checkout first, so the editable `agentenv-framework` uses it rather than the `agentenv-protocol` release on PyPI:
+With plain `pip`, install the protocol package from the checkout first, so the editable `agentenv-framework` uses it rather than the `agentenv-framework-protocol` release on PyPI:
 
 ```bash
 python3.11 -m venv .venv
@@ -108,9 +108,9 @@ Upgrade it with `uv tool upgrade agentenv-framework`, which keeps the plugins. R
 | `agentenv-framework[explorer]` | `fastapi`, `uvicorn` | `agent-env up` (refuses to start without it) |
 | `agentenv-framework[gcp]` | `google-api-core`, `google-auth`, `google-cloud-secret-manager`, `google-cloud-storage`, `requests` | `GcsObjectStore`, `GcpSecretManagerSecretStore`, `FirestoreMongoDocumentStore`, `GoogleAccessTokenCredentials` |
 | `agentenv-framework[dev]` | `explorer` and `gcp` plus `moto`, `psycopg2-binary`, `pytest` and its plugins (`pytest-asyncio`, `pytest-dependency`, `pytest-socket`, `pytest-timeout`, `pytest-xdist`) | running the test suite |
-| `agentenv-protocol[agent]` | `a2a-sdk[http-server]`, `uvicorn`, `regex` | authoring and serving your own A2A agent |
+| `agentenv-framework-protocol[agent]` | `a2a-sdk[http-server]`, `uvicorn`, `regex` | authoring and serving your own A2A agent |
 
-The runtime dependencies of `agentenv-framework` are `agentenv-protocol`, `boto3`, `click`, `httpx`, `litellm` (the 1.96 line), `mcp` (below 2.0), `a2a-sdk` (pinned to 0.3.26), `pydantic`, `pymongo`, `pyyaml`, `modal` and `e2b` (the 2.46 line). The cloud SDKs install every time and stay inert until a config table or a `--sandbox` flag selects them; the default sandbox and stores are local. `google-cloud-storage` and `google-cloud-secret-manager`, and what they pull in, come only with the `gcp` extra; the extra also names `google-api-core`, `google-auth` and `requests`, which core already installs, because the stores import them.
+The runtime dependencies of `agentenv-framework` are `agentenv-framework-protocol`, `boto3`, `click`, `httpx`, `litellm` (the 1.96 line), `mcp` (below 2.0), `a2a-sdk` (pinned to 0.3.26), `pydantic`, `pymongo`, `pyyaml`, `modal` and `e2b` (the 2.46 line). The cloud SDKs install every time and stay inert until a config table or a `--sandbox` flag selects them; the default sandbox and stores are local. `google-cloud-storage` and `google-cloud-secret-manager`, and what they pull in, come only with the `gcp` extra; the extra also names `google-api-core`, `google-auth` and `requests`, which core already installs, because the stores import them.
 
 An extra belongs to `agentenv-framework` itself, so `agent-env plugin add` does not install one: name it where you install agent-env, as in `uv tool install 'agentenv-framework[gcp]'`, `pipx install 'agentenv-framework[gcp]'` or `pip install 'agentenv-framework[gcp]'`. Re-running `uv tool install` drops the plugins it does not name. A store impl whose extra is missing fails to load with an error that names the extra. There is no `asyncpg`; `psycopg2-binary` comes only with the `dev` extra.
 
@@ -207,7 +207,7 @@ agent-env up
 
 ### Register an agent (the bundled echo agent)
 
-Tasks (see [Define a task](#define-a-task)) deploy an agent by id; the default id is `a2a-default` (`[agents] default_a2a_agent_id` in `.agentenv/config.toml` changes it). An A2A agent is a container that agent-env prompts over the agent-to-agent protocol and configures through the `urn:agentenv:*` extensions; see [Agents](#agents). The repository ships no model-backed agent. It ships the deterministic agent its own test suites deploy, at `tst/data/a2a_agent/` (`Dockerfile`, `agent.py`): it answers `Echo: <prompt>`, records a trajectory, and calls no tool and no model. Its Dockerfile installs `agentenv-protocol[agent]` from a copy of the protocol package in the build context, so assemble a context and register it under the default id:
+Tasks (see [Define a task](#define-a-task)) deploy an agent by id; the default id is `a2a-default` (`[agents] default_a2a_agent_id` in `.agentenv/config.toml` changes it). An A2A agent is a container that agent-env prompts over the agent-to-agent protocol and configures through the `urn:agentenv:*` extensions; see [Agents](#agents). The repository ships no model-backed agent. It ships the deterministic agent its own test suites deploy, at `tst/data/a2a_agent/` (`Dockerfile`, `agent.py`): it answers `Echo: <prompt>`, records a trajectory, and calls no tool and no model. Its Dockerfile installs `agentenv-framework-protocol[agent]` from a copy of the protocol package in the build context, so assemble a context and register it under the default id:
 
 ```bash
 mkdir echo_agent
@@ -346,7 +346,7 @@ Terminating the agent container, what `close()` runs and what is left behind are
 
 ## Build an environment
 
-An environment is an MCP server that also speaks the agent-env data plane: one Python class with decorated methods, run as a process, then packaged as a Docker image that contains `agentenv-protocol` but not `agent-env`. This section walks the bundled example in `tst/data/agentenv_mcp/`; decorator and wire-format depth is in [`packages/agentenv-protocol/README.md`](https://github.com/scaleapi/agentenv-framework/blob/main/packages/agentenv-protocol/README.md).
+An environment is an MCP server that also speaks the agent-env data plane: one Python class with decorated methods, run as a process, then packaged as a Docker image that contains `agentenv-framework-protocol` but not `agent-env`. This section walks the bundled example in `tst/data/agentenv_mcp/`; decorator and wire-format depth is in [`packages/agentenv-protocol/README.md`](https://github.com/scaleapi/agentenv-framework/blob/main/packages/agentenv-protocol/README.md).
 
 ### Environment card, naming and tools
 
@@ -442,7 +442,7 @@ ENV PYTHONPATH=/app
 CMD ["python", "server.py"]
 ```
 
-The Dockerfile expects `agentenv_protocol/` in the build context, and `tst/data/agentenv_mcp/` does not ship it, so building that directory directly fails at the `COPY`. Assemble a context first, as shown in [Build and register the example environment](#build-and-register-the-example-environment) (or `pip install agentenv-protocol` in the Dockerfile). On Apple Silicon, build with `--platform linux/arm64` for the local sandbox (see [Verify and platform notes](#verify-and-platform-notes)).
+The Dockerfile expects `agentenv_protocol/` in the build context, and `tst/data/agentenv_mcp/` does not ship it, so building that directory directly fails at the `COPY`. Assemble a context first, as shown in [Build and register the example environment](#build-and-register-the-example-environment) (or `pip install agentenv-framework-protocol` in the Dockerfile). On Apple Silicon, build with `--platform linux/arm64` for the local sandbox (see [Verify and platform notes](#verify-and-platform-notes)).
 
 ### Environment kinds
 
@@ -744,7 +744,7 @@ Inside a task, `deploy_agent` does the same deploy and then configures the insta
 
 ### Author your own agent
 
-The protocol package contains the agent-side framework and runnable examples (`basic_agent.py`, `streaming_agent.py`, `multimodal_agent.py`, `custom_extensions_agent.py`, `advanced_agent.py`). Install `agentenv-protocol[agent]` and serve one:
+The protocol package contains the agent-side framework and runnable examples (`basic_agent.py`, `streaming_agent.py`, `multimodal_agent.py`, `custom_extensions_agent.py`, `advanced_agent.py`). Install `agentenv-framework-protocol[agent]` and serve one:
 
 ```bash
 cd packages/agentenv-protocol/examples
@@ -1876,7 +1876,7 @@ A contribution that is not `active` also has a code saying why, shown in bracket
 |---|---|---|---|
 | `load-failed` | `failed` | The plugin's code raised: when it was imported (`SystemExit` included), when an explorer plugin was constructed, or in a root option's callback with the flag absent | Install what it needs, or report it to the plugin's author |
 | `invalid-plugin` | `failed` | It imported but does not fit its group: not a subclass of the group's base class; a `type` that is missing, inherited or not the entry-point name; a method its base requires left unimplemented; not a `click.Command` or `click.Option`; a root option that is required or exposes a value; a command click refused; an extra artifact name that reads no document. A bundle is never imported: it is invalid when its value isn't an installed, unpacked package holding that folder, when its metadata can't be read, or when the folder isn't a valid bundle (with plugins loading, one whose step, env or artifact types don't resolve) | Report it to the plugin's author; for a bundle whose package is installed zipped, reinstall it unpacked. For an extra name whose class's own type is in conflict, settle that conflict |
-| `incompatible-core` | `failed` | The plugin's requirement on `agentenv-framework` or `agentenv-protocol` excludes the installed version, so it was not imported. See [Plugin compatibility](#plugin-compatibility) | Upgrade agent-env, or install a version of the plugin that fits |
+| `incompatible-core` | `failed` | The plugin's requirement on `agentenv-framework` or `agentenv-framework-protocol` excludes the installed version, so it was not imported. See [Plugin compatibility](#plugin-compatibility) | Upgrade agent-env, or install a version of the plugin that fits |
 | `builtin-name` | `skipped` | agent-env owns the name: a built-in type, a core command or a core root option | The plugin has to rename it |
 | `name-conflict` | `conflict`, `skipped` | More than one entry point claims the name, from two packages or twice from one; for bundles, only twice from one package (see `qualified-only`). In a type group none of them is registered, and the rest of the group loads; two different root options on one flag are each a `conflict`, and neither is attached. A CLI command whose name a plugin loaded earlier took is `skipped`, and the earlier one stays | Remove all but one: `agent-env plugin remove PACKAGE`. A package that declares a name twice has to be fixed by its author |
 | `replaced-by-config` | `replaced` | The config registers another class under the name | Nothing, unless you did not mean it |
@@ -1971,7 +1971,7 @@ agent-env ships `py.typed`, so mypy and pyright check a plugin against its annot
 
 **Declaring the agent-env your plugin needs.** Declare a floor, `agentenv-framework>=X`, where `X` is the oldest release you test against. Leave out a ceiling such as `<1`: before 1.0 it would not guard against a change in a 0.9 release, and it would keep your plugin from installing with the next major one. Pin exact versions in the application or image that installs your plugin, not in the plugin. If your plugin imports `agentenv_protocol` itself, declare that as well.
 
-**What agent-env checks.** Before it imports a plugin, agent-env compares the plugin's requirements on `agentenv-framework` and `agentenv-protocol` with the versions installed. A plugin they exclude is not loaded:
+**What agent-env checks.** Before it imports a plugin, agent-env compares the plugin's requirements on `agentenv-framework` and `agentenv-framework-protocol` with the versions installed. A plugin they exclude is not loaded:
 
 - `plugin list`, `show` and `check` report each of its contributions as `failed` with the code `incompatible-core`, with or without `--no-load`, and `check` exits 1;
 - using one of its types names the requirement, as in `needs agentenv-framework>=0.9.1220 (installed: 0.9.1218)`;
@@ -1996,7 +1996,7 @@ Set up with `uv sync --extra dev` or `make install` (both in [Install the packag
 
 Run the unit tier from the checkout root with `AGENT_ENV_CONFIG` unset; the Makefile targets hardcode `.venv/bin/python`. The integration tiers were not run for this guide. A test may skip only for a declared capability gap, with the reason `agentenv-capability-missing: <name>` where `<name>` is `model_endpoint_configured`, `remote_sandbox`, `default_a2a_agent` or `mcp_server_sources` (see `tst/util/capabilities.py`); CI rejects any other skip reason.
 
-CI is GitHub Actions. `.github/workflows/local-backends.yml` runs the `unit`, `integration-local` and `integration-local-slow` jobs on Python 3.12, installed from public PyPI with no secrets and a `registry:2` service container for the integration jobs. The `unit` job also fails if `uv.lock` resolves anything from a registry other than PyPI, if `agentenv-protocol` is not the editable workspace member, or if `uv.lock` is out of date, before or after a trial run of the release bump (`scripts/bump_version.py`). The public jobs skip `tst/integration/env/gateway/gateway_test.py`, which needs an x86 Chromium build and, for its virtual-clock tests, MCP server sources named by `AGENT_ENV_TEST_MCP_SERVERS_DIR`; `make int-test-slow` runs it, so run that locally when a change touches the gateway and say so in the pull request. `.github/workflows/plugin-api.yml` runs the `plugin-api` job on every pull request, including a title edit, and on `main`; it fails a break to the plugin surface that the title does not mark (see [Plugin compatibility](#plugin-compatibility)). `.github/workflows/clean-install.yml` runs the `clean-install` job on every pull request and on `main`, on Python 3.11: it builds both distributions as the release does, fails if the wheel leaves out a tracked example file or bundle entry point, installs the two wheels into a fresh venv from public PyPI with an allowlisted environment (no AWS credentials, config or plugin), runs `agent-env run hello` twice by name, and checks through the local store that both runs completed with a score of 1, left no sandbox work folder, and the second changed no artifact, task, ledger row or stored object the first wrote. The required checks on `main` are `unit`, `integration-local`, `integration-local-slow`, `installer`, `plugin-api` and `clean-install`. Dependabot (`.github/dependabot.yml`) opens weekly updates for the uv lock and the pinned actions.
+CI is GitHub Actions. `.github/workflows/local-backends.yml` runs the `unit`, `integration-local` and `integration-local-slow` jobs on Python 3.12, installed from public PyPI with no secrets and a `registry:2` service container for the integration jobs. The `unit` job also fails if `uv.lock` resolves anything from a registry other than PyPI, if `agentenv-framework-protocol` is not the editable workspace member, or if `uv.lock` is out of date, before or after a trial run of the release bump (`scripts/bump_version.py`). The public jobs skip `tst/integration/env/gateway/gateway_test.py`, which needs an x86 Chromium build and, for its virtual-clock tests, MCP server sources named by `AGENT_ENV_TEST_MCP_SERVERS_DIR`; `make int-test-slow` runs it, so run that locally when a change touches the gateway and say so in the pull request. `.github/workflows/plugin-api.yml` runs the `plugin-api` job on every pull request, including a title edit, and on `main`; it fails a break to the plugin surface that the title does not mark (see [Plugin compatibility](#plugin-compatibility)). `.github/workflows/clean-install.yml` runs the `clean-install` job on every pull request and on `main`, on Python 3.11: it builds both distributions as the release does, fails if the wheel leaves out a tracked example file or bundle entry point, installs the two wheels into a fresh venv from public PyPI with an allowlisted environment (no AWS credentials, config or plugin), runs `agent-env run hello` twice by name, and checks through the local store that both runs completed with a score of 1, left no sandbox work folder, and the second changed no artifact, task, ledger row or stored object the first wrote. The required checks on `main` are `unit`, `integration-local`, `integration-local-slow`, `installer`, `plugin-api` and `clean-install`. Dependabot (`.github/dependabot.yml`) opens weekly updates for the uv lock and the pinned actions.
 
 ### Conformance suites
 
@@ -2026,7 +2026,7 @@ Full configuration, CLI, step and extension references, and the [Run on Google C
 
 ### Versioning and compatibility
 
-The `agentenv-framework` distribution and `agentenv-protocol` are versioned separately (`0.9.x` and `0.1.x` today), both in their `pyproject.toml`; agent-env releases carry a `vX.Y.Z` tag, and agentenv-protocol is bumped in the same commit and has no separate tag today. There is no `agent_env.__version__` attribute; `agent-env --version` prints the installed version. Protocol extensions carry their version in the URI (`urn:agentenv:clock/v1`, `urn:agentenv:agent-config/v1`, `urn:agentenv:trajectory/v1`). One version can take more than one request shape: under `v1` the skill, trajectory, snapshot and changelog extensions accept object-transfer requests next to their older shapes, and the request field lists on an agent's card say which ones that agent takes. Renamed CLI commands are removed outright; no deprecated aliases exist at this version (see [Deprecated aliases and legacy paths](#deprecated-aliases-and-legacy-paths)). What plugins may rely on, and how changes to it are made, is in [Plugin compatibility](#plugin-compatibility); the plugin commands' `--json` output has its own format version and rules ([Plugin report format](#plugin-report-format)). Beyond those, a written compatibility and deprecation policy does not exist yet.
+The `agentenv-framework` distribution and `agentenv-framework-protocol` are versioned separately (`0.9.x` and `0.1.x` today), both in their `pyproject.toml`; agent-env releases carry a `vX.Y.Z` tag, and agentenv-framework-protocol is bumped in the same commit and has no separate tag today. There is no `agent_env.__version__` attribute; `agent-env --version` prints the installed version. Protocol extensions carry their version in the URI (`urn:agentenv:clock/v1`, `urn:agentenv:agent-config/v1`, `urn:agentenv:trajectory/v1`). One version can take more than one request shape: under `v1` the skill, trajectory, snapshot and changelog extensions accept object-transfer requests next to their older shapes, and the request field lists on an agent's card say which ones that agent takes. Renamed CLI commands are removed outright; no deprecated aliases exist at this version (see [Deprecated aliases and legacy paths](#deprecated-aliases-and-legacy-paths)). What plugins may rely on, and how changes to it are made, is in [Plugin compatibility](#plugin-compatibility); the plugin commands' `--json` output has its own format version and rules ([Plugin report format](#plugin-report-format)). Beyond those, a written compatibility and deprecation policy does not exist yet.
 
 ### Releases
 
@@ -2034,4 +2034,4 @@ A release is a version bump in both `pyproject.toml` files plus a `vX.Y.Z` tag. 
 
 ### Support, security, license
 
-Report bugs and gaps as issues against this repository, with the installed `agentenv-framework` version and the sandbox backend in use. Report vulnerabilities privately through the contact in [SECURITY.md](https://github.com/scaleapi/agentenv-framework/blob/main/SECURITY.md), not in public issues; only the latest release is supported, so reproduce against it first. Contributors follow [CONTRIBUTING.md](https://github.com/scaleapi/agentenv-framework/blob/main/CONTRIBUTING.md) and the [Code of Conduct](https://github.com/scaleapi/agentenv-framework/blob/main/CODE_OF_CONDUCT.md); every pull request needs a code-owner review. agent-env and agentenv-protocol are licensed under the Apache License 2.0; see [`LICENSE`](https://github.com/scaleapi/agentenv-framework/blob/main/LICENSE) and [`NOTICE`](https://github.com/scaleapi/agentenv-framework/blob/main/NOTICE). Their third-party dependencies and those dependencies' licenses are listed in [`THIRD_PARTY_NOTICES.md`](https://github.com/scaleapi/agentenv-framework/blob/main/THIRD_PARTY_NOTICES.md).
+Report bugs and gaps as issues against this repository, with the installed `agentenv-framework` version and the sandbox backend in use. Report vulnerabilities privately through the contact in [SECURITY.md](https://github.com/scaleapi/agentenv-framework/blob/main/SECURITY.md), not in public issues; only the latest release is supported, so reproduce against it first. Contributors follow [CONTRIBUTING.md](https://github.com/scaleapi/agentenv-framework/blob/main/CONTRIBUTING.md) and the [Code of Conduct](https://github.com/scaleapi/agentenv-framework/blob/main/CODE_OF_CONDUCT.md); every pull request needs a code-owner review. agent-env and agentenv-framework-protocol are licensed under the Apache License 2.0; see [`LICENSE`](https://github.com/scaleapi/agentenv-framework/blob/main/LICENSE) and [`NOTICE`](https://github.com/scaleapi/agentenv-framework/blob/main/NOTICE). Their third-party dependencies and those dependencies' licenses are listed in [`THIRD_PARTY_NOTICES.md`](https://github.com/scaleapi/agentenv-framework/blob/main/THIRD_PARTY_NOTICES.md).

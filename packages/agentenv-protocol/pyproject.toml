@@ -1,5 +1,5 @@
 [project]
-name = "agentenv-protocol"
+name = "agentenv-framework-protocol"
 version = "0.1.268"
 description = "Open data-plane protocol and server SDK for agent environments."
 readme = "README.md"
