@@ -51,8 +51,22 @@ def _import_names(distribution: str) -> frozenset[str]:
         top for top, dists in importlib.metadata.packages_distributions().items()
         if any(_normalize(d) == distribution for d in dists)
     }
-    # Editable installs (the in-repo agentenv-protocol) do not always publish a top-level map.
-    return frozenset(names or {distribution.replace("-", "_")})
+    # Editable installs (the in-repo protocol package) publish no top-level map, and that distribution's name
+    # differs from its import package's, so read the packages under the directory its .pth file adds.
+    return frozenset(names or _editable_import_names(distribution) or {distribution.replace("-", "_")})
+
+
+def _editable_import_names(distribution: str) -> set[str]:
+    dist = importlib.metadata.distribution(distribution)
+    names = set()
+    for file in dist.files or ():
+        if file.suffix != ".pth":
+            continue
+        for line in Path(dist.locate_file(file)).read_text().splitlines():
+            root = Path(line.strip())
+            if root.is_dir():
+                names |= {child.name for child in root.iterdir() if (child / "__init__.py").is_file()}
+    return names
 
 
 @functools.cache

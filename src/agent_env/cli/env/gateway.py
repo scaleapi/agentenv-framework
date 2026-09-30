@@ -1,12 +1,12 @@
-import subprocess
 import sys
 from pathlib import Path
 
 import click
 
 from agent_env.artifact import DockerImageArtifact
-from agent_env.cli.utils import build_platform_option, detect_env_metadata, docker_build_platform_args
+from agent_env.cli.utils import build_platform_option, detect_env_metadata
 from agent_env.env import GatewayEnv
+from agent_env.utils.docker_build import build_image
 
 _PACKAGE_ROOT = Path(__file__).parent.parent.parent
 GATEWAY_DOCKERFILE = _PACKAGE_ROOT / "env" / "gateway" / "Dockerfile"
@@ -28,15 +28,7 @@ def put(env_id: str, metadata_pairs: tuple[str, ...], build_platform: str):
     """Build and upload a gateway environment."""
 
     click.echo(f"Building gateway Docker image...")
-    result = subprocess.run(
-        ["docker", "build", *docker_build_platform_args(build_platform),
-         "-f", str(GATEWAY_DOCKERFILE), "-t", GATEWAY_IMAGE_TAG, str(GATEWAY_CONTEXT)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        click.echo(f"Docker build failed: {result.stderr}", err=True)
-        sys.exit(1)
+    build_image(GATEWAY_DOCKERFILE, GATEWAY_CONTEXT, GATEWAY_IMAGE_TAG, platform=build_platform)
 
     click.echo(f"Creating DockerImageArtifact...")
     artifact = DockerImageArtifact.put(

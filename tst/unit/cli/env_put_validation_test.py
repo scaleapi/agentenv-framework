@@ -69,7 +69,7 @@ def _mcp_put(tmp_path, build: str, *flags: str):
             return result, gate
         dockerfile = tmp_path / "Dockerfile"
         dockerfile.write_text("FROM scratch\n")
-        with patch("agent_env.cli.env.mcp_server.subprocess.run", return_value=MagicMock(returncode=0, stdout="", stderr="")), \
+        with patch("agent_env.cli.env.mcp_server.build_image"), \
                 patch("agent_env.cli.env.mcp_server.DockerImageArtifact.put", return_value=MagicMock(id="a", version=1)), \
                 patch("agent_env.cli.env.mcp_server.detect_env_metadata", return_value={}), \
                 patch("agent_env.cli.env.mcp_server.MCPServerEnv.put", return_value=env):

@@ -76,12 +76,12 @@ def main() -> int:
         print(f"ERROR: pyproject version '{current_str}' is not X.Y.Z", file=sys.stderr)
         return 1
 
-    # agentenv-protocol's own patch version moves on every release too.
+    # agentenv-framework-protocol's own patch version moves on every release too.
     pdoc = tomlkit.parse(PROTOCOL_PYPROJECT.read_text())
     pcur_str = str(pdoc["project"]["version"])
     pcur = parse_semver(pcur_str)
     if pcur is None:
-        print(f"ERROR: agentenv-protocol version '{pcur_str}' is not X.Y.Z", file=sys.stderr)
+        print(f"ERROR: agentenv-framework-protocol version '{pcur_str}' is not X.Y.Z", file=sys.stderr)
         return 1
 
     tag = highest_tag_version()
@@ -108,7 +108,7 @@ def main() -> int:
         f"-> {new_str}",
         file=sys.stderr,
     )
-    print(f"Bumped agentenv-protocol: {pcur_str} -> {pnew_str}", file=sys.stderr)
+    print(f"Bumped agentenv-framework-protocol: {pcur_str} -> {pnew_str}", file=sys.stderr)
     print("Updated both editable entries in uv.lock", file=sys.stderr)
     print(new_str)
     return 0

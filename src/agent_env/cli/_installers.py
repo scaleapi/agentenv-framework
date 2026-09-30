@@ -29,7 +29,7 @@ HATCH = "Hatch environment"
 FORCEABLE = {"uv-tool": UV_TOOL, "pipx": PIPX, "uv-project": UV_PROJECT, "pip": VIRTUALENV}
 # agent-env itself, the protocol package it pins exactly, and the command's own name, which a spec may
 # use for agent-env; `plugin add` and `remove` never change them.
-CORE = ("agentenv-framework", "agentenv-protocol", "agent-env")
+CORE = ("agentenv-framework", "agentenv-framework-protocol", "agentenv-protocol", "agent-env")
 
 _NAME = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
 

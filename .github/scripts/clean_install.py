@@ -50,7 +50,7 @@ def main() -> int:
     for package in ("packages/agentenv-protocol", "."):
         _run([uv, "tool", "run", "--python", sys.executable, "--from", "build", "pyproject-build",
               "--outdir", str(work / "dist"), package], env=env, cwd=REPO)
-    protocol = _one(work / "dist", "agentenv_protocol-*.whl")
+    protocol = _one(work / "dist", "agentenv_framework_protocol-*.whl")
     framework = _one(work / "dist", "agentenv_framework-*.whl")
 
     _step(f"Check {framework.name} ships every tracked example and its entry points")

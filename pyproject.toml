@@ -4,15 +4,15 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentenv-framework"
-version = "0.9.1253"
-description = "Agent environment package"
+version = "0.9.1255"
+description = "SDK and CLI for building, deploying and running agent environments and the tasks that grade agents in them."
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"]
 authors = [{ name = "Scale AI" }]
 requires-python = ">=3.11"
 dependencies = [
-    "agentenv-protocol>=0.1.0",
+    "agentenv-framework-protocol>=0.1.0",
     "boto3>=1.35.0",
     "certifi>=2024.2.2",  # the public roots the local transfer CA's trust bundle carries
     "click>=8.0.0",
@@ -85,7 +85,7 @@ only-include = ["src", "tst", "packages/agentenv-protocol", ".github/scripts"]
 members = ["packages/agentenv-protocol"]
 
 [tool.uv.sources]
-agentenv-protocol = { workspace = true }
+agentenv-framework-protocol = { workspace = true }
 
 [tool.pytest.ini_options]
 asyncio_mode = "strict"

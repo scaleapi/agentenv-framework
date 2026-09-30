@@ -24,7 +24,7 @@ def test_the_github_build_puts_the_declared_type(flag, put_with):
 
 
 def test_an_unknown_type_is_refused_before_anything_is_built(tmp_path):
-    with patch("agent_env.cli.env.mcp_server.subprocess.run") as build, patch("agent_env.cli.env.mcp_server.MCPServerEnv.put") as put:
+    with patch("agent_env.cli.env.mcp_server.build_image") as build, patch("agent_env.cli.env.mcp_server.MCPServerEnv.put") as put:
         result = CliRunner().invoke(cli, [*_PUT, "--dockerfile", str(_dockerfile(tmp_path)), "--env-provider-type", "vm"])
     assert result.exit_code == 2 and "Invalid value for '--env-provider-type'" in result.output
     assert (build.called, put.called) == (False, False)
@@ -40,7 +40,7 @@ def _local_put(tmp_path, flag: list[str]) -> tuple[dict, str]:
         captured.update(kwargs)
         return _put_env(kwargs)
 
-    with patch("agent_env.cli.env.mcp_server.subprocess.run", return_value=MagicMock(returncode=0, stdout="", stderr="")), \
+    with patch("agent_env.cli.env.mcp_server.build_image"), \
             patch("agent_env.cli.env.mcp_server.DockerImageArtifact.put", return_value=MagicMock(id="a", version=1)), \
             patch("agent_env.cli.env.mcp_server.detect_env_metadata", return_value={}), \
             patch("agent_env.cli.env.mcp_server.MCPServerEnv.put", side_effect=_capture):
