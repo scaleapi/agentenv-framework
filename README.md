@@ -1,6 +1,6 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/brand/lockup-dark.png">
-  <img alt="AgentEnv Framework" src="assets/brand/lockup-light.png" width="360">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/scaleapi/agentenv-framework/main/assets/brand/lockup-dark.png">
+  <img alt="AgentEnv Framework" src="https://raw.githubusercontent.com/scaleapi/agentenv-framework/main/assets/brand/lockup-light.png" width="360">
 </picture>
 
 # agent-env
