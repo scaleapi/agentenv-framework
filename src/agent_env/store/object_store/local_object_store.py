@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import hashlib
 import ipaddress
 import json
 import logging
@@ -36,8 +37,9 @@ logger = logging.getLogger(__name__)
 _META_DIR = ".agentenv-meta"  # each object's content type, at the object's own key
 _STAGING_DIR = ".agentenv-tmp"  # files being written, inside the root so a rename into place is atomic
 _RESERVED = (".gitignore", _META_DIR, _STAGING_DIR)
-# A filesystem without hard links: a no-overwrite write checks, then renames, so two racing writers can both land.
+# A filesystem without hard links: a no-overwrite write claims its key with a marker file instead.
 _NO_HARD_LINKS = frozenset({errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EXDEV, errno.EMLINK})
+_STALE_CLAIM_SECONDS = 10  # a claim is held only from the check to the rename; one this old was left by a crash
 
 
 class LocalFilesystemObjectStore(ObjectStore):
@@ -246,9 +248,10 @@ class LocalFilesystemObjectStore(ObjectStore):
             except OSError as e:
                 if e.errno not in _NO_HARD_LINKS:
                     raise
-                if path.exists():
-                    raise ObjectAlreadyExistsError(f"Object already exists at {path}.") from None
-                os.replace(staged, path)
+                with self._claimed(path):
+                    if path.exists():
+                        raise ObjectAlreadyExistsError(f"Object already exists at {path}.") from None
+                    os.replace(staged, path)
         # The default type is what a writer that named none gets; it reads back as unknown, so readers
         # still guess from the name as they did before types were kept.
         try:
@@ -262,6 +265,29 @@ class LocalFilesystemObjectStore(ObjectStore):
                 os.replace(staged_meta, meta)
         except OSError as e:  # the object is in place and its type reads back as unknown
             logger.warning("Could not record the content type of %s: %s", path, e)
+
+    @contextlib.contextmanager
+    def _claimed(self, path: Path) -> Iterator[None]:
+        """The sole right to create ``path``, where no hard link can claim it: a marker in the staging directory,
+        created exclusively. A writer that finds one waits for it to go, taking it over once it is stale."""
+        marker = self._root / _STAGING_DIR / f"{hashlib.sha256(str(path).encode()).hexdigest()}.claim"
+        while True:
+            try:
+                os.close(os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+                break
+            except FileExistsError:
+                try:
+                    stale = time.time() - marker.stat().st_mtime > _STALE_CLAIM_SECONDS
+                except FileNotFoundError:
+                    continue
+                if stale:
+                    marker.unlink(missing_ok=True)
+                else:
+                    time.sleep(0.01)
+        try:
+            yield
+        finally:
+            marker.unlink(missing_ok=True)
 
     def _read_content_type(self, path: Path, st: os.stat_result | None = None) -> str | None:
         """The content type recorded for the object at ``path``, if it was recorded for this very file; None
