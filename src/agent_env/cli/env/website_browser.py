@@ -1,17 +1,17 @@
-import subprocess
 import sys
 from pathlib import Path
 
 import click
 
 from agent_env.artifact import DockerImageArtifact
-from agent_env.cli.utils import build_platform_option, detect_env_metadata, docker_build_platform_args
+from agent_env.cli.utils import build_platform_option, detect_env_metadata
 from agent_env.env import MCPServerEnv
 from agent_env.env.envs.website_browser import (
     PLAYWRIGHT_MCP_VERSION,
     WEBSITE_BROWSER_IMAGE_TAG,
     WEBSITE_BROWSER_ENVIRONMENT_NAME,
 )
+from agent_env.utils.docker_build import build_image
 
 _PACKAGE_ROOT = Path(__file__).parent.parent.parent
 WEBSITE_BROWSER_DOCKERFILE = _PACKAGE_ROOT / "env" / "envs" / "website_browser" / "Dockerfile"
@@ -36,16 +36,8 @@ def put(env_id: str, metadata_pairs: tuple[str, ...], build_platform: str):
         env_id = get_config().default_website_browser_env_id
 
     click.echo("Building website browser Docker image...")
-    result = subprocess.run(
-        ["docker", "build", *docker_build_platform_args(build_platform),
-         "--build-arg", f"PLAYWRIGHT_MCP_VERSION={PLAYWRIGHT_MCP_VERSION}",
-         "-f", str(WEBSITE_BROWSER_DOCKERFILE), "-t", WEBSITE_BROWSER_IMAGE_TAG, str(WEBSITE_BROWSER_CONTEXT)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        click.echo(f"Docker build failed: {result.stderr}", err=True)
-        sys.exit(1)
+    build_image(WEBSITE_BROWSER_DOCKERFILE, WEBSITE_BROWSER_CONTEXT, WEBSITE_BROWSER_IMAGE_TAG, platform=build_platform,
+                build_args={"PLAYWRIGHT_MCP_VERSION": PLAYWRIGHT_MCP_VERSION})
 
     click.echo("Creating DockerImageArtifact...")
     artifact = DockerImageArtifact.put(

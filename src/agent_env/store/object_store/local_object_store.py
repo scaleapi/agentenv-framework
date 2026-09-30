@@ -47,6 +47,17 @@ _LOCK_STRIPES = 256  # keys share this many lock files, so locking leaves no fil
 _STAGED_PREFIX = "staged-"
 _STAGED_GRACE_SECONDS = 60  # a staged file younger than this may not be locked by its writer yet
 
+logger = logging.getLogger(__name__)
+
+_META_DIR = ".agentenv-meta"  # each object's content type, at the object's own key
+_STAGING_DIR = ".agentenv-tmp"  # files being written, inside the root so a rename into place is atomic
+_RESERVED = (".gitignore", _META_DIR, _STAGING_DIR)
+# A filesystem without hard links: a no-overwrite write relies on the key's lock instead.
+_NO_HARD_LINKS = frozenset({errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EXDEV, errno.EMLINK})
+_LOCK_STRIPES = 256  # keys share this many lock files, so locking leaves no file behind per key
+_STAGED_PREFIX = "staged-"
+_STAGED_GRACE_SECONDS = 60  # a staged file younger than this may not be locked by its writer yet
+
 
 class LocalFilesystemObjectStore(ObjectStore):
     """ObjectStore backed by a local directory tree, ``<state root>/object_store`` unless ``root`` is given.

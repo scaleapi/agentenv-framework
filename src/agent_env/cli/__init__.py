@@ -5,6 +5,7 @@ import click
 from agent_env.plugins._cli import load_cli_plugins, load_cli_root_options
 from agent_env.store.base import NotFoundError
 from agent_env.store.routing import namespace_routing
+from agent_env.utils.docker_build import DockerBuildError
 
 from .a2a_agent import a2a_agent
 from .artifact import artifact
@@ -17,11 +18,11 @@ from .task import task
 from .up import up
 
 
-# Errors that mean "not allowed" or "not there" rather than "agent-env is broken". Spelled out
-# because there is no domain base class to catch: ConfigError subclasses ValueError (so does
-# pydantic's ValidationError), while NotFoundError subclasses Exception. A TypeError or a
+# Errors that mean "not allowed", "not there" or "your build failed" rather than "agent-env is broken".
+# Spelled out because there is no domain base class to catch: ConfigError subclasses ValueError (so does
+# pydantic's ValidationError), while NotFoundError and DockerBuildError don't. A TypeError or a
 # retry-exhausted DuplicateKeyError is a defect, and a defect keeps its traceback.
-_USER_FACING_ERRORS = (ValueError, NotFoundError)
+_USER_FACING_ERRORS = (ValueError, NotFoundError, DockerBuildError)
 
 
 class _UserErrorsAreNotCrashes(click.Group):
