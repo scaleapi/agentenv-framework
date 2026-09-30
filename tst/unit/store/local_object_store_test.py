@@ -234,26 +234,28 @@ def no_hard_links(store, monkeypatch):
     store.put("seed", b"s")  # creates the staging directory
 
 
-def test_without_hard_links_a_claim_whose_owner_exited_is_taken_over(store, tmp_path, no_hard_links):
-    exited = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"], capture_output=True, text=True)
+def test_without_hard_links_a_claim_dies_with_its_holder(store, tmp_path, no_hard_links):
+    """The claim is a lock the kernel drops when its holder exits, so a crashed writer never blocks the key."""
     marker = _claim_marker(tmp_path, "left/x")
-    marker.write_text(exited.stdout.strip())
-    store.put("left/x", b"mine")
+    holder = subprocess.Popen(
+        [sys.executable, "-c", (
+            "import fcntl, sys, time; f = open(sys.argv[1], 'a'); fcntl.flock(f, fcntl.LOCK_EX); "
+            "print('locked', flush=True); time.sleep(60)"
+        ), str(marker)],
+        stdout=subprocess.PIPE, text=True,
+    )
+    try:
+        assert holder.stdout.readline().strip() == "locked"
+        writer = threading.Thread(target=store.put, args=("left/x", b"mine"))
+        writer.start()
+        writer.join(0.3)
+        assert writer.is_alive() and not store.exists("left/x")  # a live holder, however old, is waited for
+        holder.kill()
+        holder.wait()
+        writer.join(5)
+    finally:
+        holder.kill()
     assert store.read("left/x") == b"mine"
-    assert not marker.exists()
-
-
-def test_without_hard_links_a_live_writers_claim_is_never_taken_over(store, tmp_path, no_hard_links):
-    marker = _claim_marker(tmp_path, "held/x")
-    marker.write_text(str(os.getpid()))
-    os.utime(marker, (time.time() - 3600, time.time() - 3600))
-    writer = threading.Thread(target=store.put, args=("held/x", b"late"))
-    writer.start()
-    writer.join(0.3)
-    assert writer.is_alive() and not store.exists("held/x")
-    marker.unlink()
-    writer.join(5)
-    assert store.read("held/x") == b"late"
 
 
 def test_types_survive_a_copy_that_keeps_modification_times(store, tmp_path):
