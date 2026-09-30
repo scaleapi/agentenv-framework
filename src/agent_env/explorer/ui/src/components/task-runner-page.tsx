@@ -1,5 +1,16 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { Play, Loader2, CheckCircle2, XCircle, RefreshCw } from 'lucide-react';
+import {
+  allTerminal,
+  buildRunBody as runBodyFor,
+  cancelRun,
+  isTerminal,
+  reconcileInstances,
+  shouldPoll,
+  startRun,
+  workflowIdOf,
+  type RunOptions,
+} from '../lib/task-runner-run';
 import { selectFinalScore } from '../lib/verifier-classification';
 import { BACKEND_URL, apiFetch } from './shared';
 import { StepsPipeline } from './steps-pipeline';
@@ -36,12 +47,6 @@ function getInstanceScore(inst: Record<string, unknown>): number | null {
   return selectFinalScore(
     metadata?.verifications as Record<string, unknown> | undefined,
   );
-}
-
-const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
-
-function isTerminal(inst: Record<string, unknown>) {
-  return TERMINAL_STATUSES.has(String(inst.status ?? ''));
 }
 
 /* ------------------------------------------------------------------ */
@@ -139,27 +144,21 @@ export function TaskRunnerPage({
       // moved off must be dropped, not applied.
       if (resolvedTaskIdRef.current !== resolvedTaskId) return;
       const items = (data.items ?? []) as Record<string, unknown>[];
-      const snap = JSON.stringify(
-        items.map(i => `${i.instance_id}:${i.status}:${i.current_step}`),
+      const poll = reconcileInstances(
+        items,
+        snapshotRef.current,
+        instanceIdsRef.current,
+        pendingRunRef.current,
       );
-      if (snap === snapshotRef.current) return;
+      if (!poll) return;
 
-      // Detect new instance for pending run
-      if (pendingRunRef.current) {
-        const newInst = items.find(
-          i => !instanceIdsRef.current.has(String(i.instance_id)),
-        );
-        if (newInst) {
-          setPendingRun(false);
-          lastWorkflowIdRef.current = null;
-          setSelectedInstanceId(String(newInst.instance_id));
-        }
+      if (poll.startedInstanceId) {
+        setPendingRun(false);
+        lastWorkflowIdRef.current = null;
+        setSelectedInstanceId(poll.startedInstanceId);
       }
 
-      // Capture context from most recent completed instance
-      const completed = items.find(
-        (inst: Record<string, unknown>) => inst.status === 'completed',
-      );
+      const completed = poll.latestCompleted;
       if (completed) {
         const ctx = completed.context as Record<string, unknown> | undefined;
         // `ctx` is from the list endpoint (a2a_card stripped) — keep the id instead.
@@ -170,8 +169,8 @@ export function TaskRunnerPage({
         });
       }
 
-      snapshotRef.current = snap;
-      instanceIdsRef.current = new Set(items.map(i => String(i.instance_id)));
+      snapshotRef.current = poll.snapshot;
+      instanceIdsRef.current = poll.ids;
       setInstances(items);
     } catch {
       /* ignore */
@@ -180,19 +179,10 @@ export function TaskRunnerPage({
 
   // Poll while a run is active; stop once every instance is terminal. Deriving stop from instance status
   // (not phase, which never goes terminal here) lets a fresh run flip polling back on.
-  const allInstancesTerminal =
-    instances.length > 0 && instances.every(isTerminal);
+  const allInstancesTerminal = allTerminal(instances);
   useEffect(() => {
-    if (
-      !resolvedTaskId ||
-      phase === 'initializing' ||
-      // 'error'/'failed' are terminal: a failed init can leave resolvedTaskId
-      // set with no instances, so the instance-derived stop below never trips.
-      phase === 'error' ||
-      phase === 'failed'
-    )
+    if (!shouldPoll(resolvedTaskId, phase, allInstancesTerminal, pendingRun))
       return;
-    if (allInstancesTerminal && !pendingRun) return;
     pollInstances();
     const interval = setInterval(pollInstances, 5000);
     return () => clearInterval(interval);
@@ -200,70 +190,27 @@ export function TaskRunnerPage({
 
   /* --- run task --- */
   const buildRunBody = useCallback(
-    (opts?: {
-      version?: number;
-      start_step?: number;
-      context_json?: Record<string, unknown> | null;
-      // Prefer over context_json when re-running one of this task's instances:
-      // `instances` comes from GET /instances, which strips a2a_card.
-      context_from_instance_id?: string;
-      // From-start re-run: inherit only the prior run's user_overrides.
-      overrides_from_instance_id?: string;
-    }) => {
-      const body: Record<string, unknown> = {};
-      body.version = opts?.version ?? taskVersion ?? undefined;
-      // priority=0 (interactive): a human is waiting. Sent explicitly so intent survives backend default changes.
-      body.priority = 0;
-      if (opts?.start_step != null) body.start_step = opts.start_step;
-      // Mutually exclusive server-side.
-      if (opts?.context_from_instance_id)
-        body.context_from_instance_id = opts.context_from_instance_id;
-      else if (opts?.context_json) body.context_json = opts.context_json;
-      if (opts?.overrides_from_instance_id)
-        body.overrides_from_instance_id = opts.overrides_from_instance_id;
-      // Only-if-truthy so "" can't defeat the backend fallback.
-      const projectId =
-        new URLSearchParams(window.location.search).get('projectId') ||
-        undefined;
-      if (projectId) body.project_id = projectId;
-      return body;
-    },
+    (opts?: RunOptions) =>
+      runBodyFor(
+        opts,
+        taskVersion,
+        new URLSearchParams(window.location.search).get('projectId'),
+      ),
     [taskVersion],
   );
 
   const handleRun = useCallback(
-    async (opts?: {
-      version?: number;
-      start_step?: number;
-      context_json?: Record<string, unknown> | null;
-      context_from_instance_id?: string;
-      overrides_from_instance_id?: string;
-    }) => {
+    async (opts?: RunOptions) => {
       if (!resolvedTaskId || pendingRun) return;
       setPendingRun(true);
       setErrorMsg(null);
       try {
-        const res = await apiFetch(
-          `${BACKEND_URL}/api/v1/tasks/${encodeURIComponent(
-            resolvedTaskId,
-          )}/run`,
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(buildRunBody(opts)),
-          },
+        lastWorkflowIdRef.current = await startRun(
+          apiFetch,
+          BACKEND_URL,
+          resolvedTaskId,
+          buildRunBody(opts),
         );
-        if (!res.ok) {
-          // Surface the backend's `detail` (e.g. "Budget has been exceeded!") instead of a bare status code.
-          const errData = await res.json().catch(() => ({}));
-          throw new Error(
-            errData.detail || `Failed to start run (${res.status})`,
-          );
-        }
-        const data = await res.json();
-        lastWorkflowIdRef.current = (data.workflow_id as string | null) ?? null;
       } catch (e) {
         lastWorkflowIdRef.current = null;
         setPendingRun(false);
@@ -279,21 +226,12 @@ export function TaskRunnerPage({
       if (!resolvedTaskId) return;
       // Cancel by the run's workflow_id (the route that exists) — there is no
       // per-instance cancel route. Read it off the instance's context.metadata.
-      const inst = instancesRef.current.find(
-        i => String(i.instance_id) === instanceId,
+      const workflowId = workflowIdOf(
+        instancesRef.current.find(i => String(i.instance_id) === instanceId),
       );
-      const context = inst?.context as Record<string, unknown> | undefined;
-      const metadata = context?.metadata as Record<string, unknown> | undefined;
-      const workflowId = metadata?.workflow_id as string | undefined;
       if (!workflowId) return;
       try {
-        const res = await apiFetch(
-          `${BACKEND_URL}/api/v1/tasks/${encodeURIComponent(
-            resolvedTaskId,
-          )}/cancel-run?workflow_id=${encodeURIComponent(workflowId)}`,
-          { method: 'POST' },
-        );
-        if (!res.ok) throw new Error(`Cancel failed (${res.status})`);
+        await cancelRun(apiFetch, BACKEND_URL, resolvedTaskId, workflowId);
         // Mark cancelled only after the backend confirms — no false success.
         setInstances(prev =>
           prev.map(i =>
@@ -314,13 +252,11 @@ export function TaskRunnerPage({
     if (!resolvedTaskId || !lastWorkflowIdRef.current) return;
     setPendingRun(false);
     try {
-      await apiFetch(
-        `${BACKEND_URL}/api/v1/tasks/${encodeURIComponent(
-          resolvedTaskId,
-        )}/cancel-run?workflow_id=${encodeURIComponent(
-          lastWorkflowIdRef.current,
-        )}`,
-        { method: 'POST' },
+      await cancelRun(
+        apiFetch,
+        BACKEND_URL,
+        resolvedTaskId,
+        lastWorkflowIdRef.current,
       );
     } catch {
       /* best-effort */
