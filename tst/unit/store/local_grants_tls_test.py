@@ -66,11 +66,14 @@ def test_the_bundle_is_the_public_roots_plus_the_ca():
     assert x509.load_pem_x509_certificate(ca.cert_path.read_bytes()) == ca.cert
 
 
-def test_the_ca_key_is_private_to_the_user():
-    local_ca()
+def test_the_ca_key_is_private_to_the_user_and_the_trust_files_are_not():
+    ca = local_ca()
     tls_dir = state_root() / "tls"
     assert stat.S_IMODE(os.stat(tls_dir).st_mode) == 0o700
     assert stat.S_IMODE(os.stat(tls_dir / "ca.key.pem").st_mode) == 0o600
+    assert stat.S_IMODE(os.stat(ca.trust_dir).st_mode) == 0o755
+    assert sorted(p.name for p in ca.trust_dir.iterdir()) == ["ca-bundle.pem", "ca.pem"]
+    assert {stat.S_IMODE(os.stat(p).st_mode) for p in ca.trust_dir.iterdir()} == {0o644}
 
 
 def test_the_ca_is_created_once_and_reused():

@@ -4,7 +4,8 @@ One CA per user, created on first use under ``<state root>/tls/``. It is name-co
 local names and private addresses, so even a leaked key can only vouch for those, and it is
 never installed in the host's trust stores: only the containers agent-env starts trust it,
 through ``ca-bundle.pem`` (the public roots plus this CA, for ``SSL_CERT_FILE``, which replaces
-the defaults) or ``ca.pem`` (the CA alone, for trust stores that add to the defaults).
+the defaults) or ``ca.pem`` (the CA alone, for trust stores that add to the defaults). Those two
+are all that ``tls/trust/`` holds, so it can be copied into a container whole.
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ _SERVER_LIFETIME = timedelta(days=90)
 _CLOCK_SKEW = timedelta(minutes=5)
 
 _CA_FILE = "ca.key.pem"  # the CA's key and certificate, private to the user
+_TRUST_DIR = "trust"  # the public files, readable by any user a container runs as
 _CERT_FILE = "ca.pem"
 _BUNDLE_FILE = "ca-bundle.pem"
 _PEM_CERT = b"-----BEGIN CERTIFICATE-----"
@@ -48,10 +50,11 @@ _PEM_CERT = b"-----BEGIN CERTIFICATE-----"
 
 @dataclass(frozen=True)
 class LocalCA:
-    """The CA's key and certificate, and the trust files derived from it."""
+    """The CA's key and certificate, and the trust files derived from it in ``trust_dir``."""
 
     key: ec.EllipticCurvePrivateKey
     cert: x509.Certificate
+    trust_dir: Path
     cert_path: Path
     bundle_path: Path
 
@@ -96,10 +99,13 @@ def local_ca() -> LocalCA:
             staged.unlink(missing_ok=True)
         loaded = _load(ca_file) or (key, cert)
     key, cert = loaded
+    trust_dir = tls_dir / _TRUST_DIR
+    trust_dir.mkdir(exist_ok=True)
+    trust_dir.chmod(0o755)
     cert_pem = cert.public_bytes(serialization.Encoding.PEM)
-    cert_path = _write_if_changed(tls_dir / _CERT_FILE, cert_pem)
-    bundle_path = _write_if_changed(tls_dir / _BUNDLE_FILE, Path(certifi.where()).read_bytes().rstrip() + b"\n" + cert_pem)
-    return LocalCA(key=key, cert=cert, cert_path=cert_path, bundle_path=bundle_path)
+    cert_path = _write_if_changed(trust_dir / _CERT_FILE, cert_pem)
+    bundle_path = _write_if_changed(trust_dir / _BUNDLE_FILE, Path(certifi.where()).read_bytes().rstrip() + b"\n" + cert_pem)
+    return LocalCA(key=key, cert=cert, trust_dir=trust_dir, cert_path=cert_path, bundle_path=bundle_path)
 
 
 def server_context(ca: LocalCA, hosts: Iterable[str]) -> ssl.SSLContext:
