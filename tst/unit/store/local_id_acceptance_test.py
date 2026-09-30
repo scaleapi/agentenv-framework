@@ -17,19 +17,16 @@ from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniv
 from agent_env.cli import cli
 from agent_env.config import configure, get_config, set_image_store, set_object_store
 from agent_env.config.paths import state_root
-from agent_env.env.env import DeployedGatewayEnv
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.website import WebsiteEnv
 from agent_env.env.snapshot_store import EnvSnapshot
-from agent_env.providers.env_providers import EnvironmentGatewayProvider
-from agent_env.providers.env_state import LocalPostgresStateProvider
 from agent_env.store import Filter, LocalSqliteDocumentStore, VersionedEntityStore
 from agent_env.store.base import NotFoundError
 from agent_env.store.ids import fs_safe, key_segment
 from agent_env.store.routing import LocalNamespaceDocumentStore
 from agent_env.task import Task
-from tst.unit.store.fakes import FakeDocumentStore, FakeImageStore, SigningObjectStore
+from tst.unit.store.fakes import FakeDocumentStore, FakeImageStore, SigningObjectStore, reattach_for_snapshot
 
 LOCAL_ID = "@local/t/Chaos"
 LOCAL_ENV = "@local/~/bundle/envs/e"
@@ -199,38 +196,12 @@ def test_a_put_validates_an_local_entity_like_any_other(local_stores, monkeypatc
     assert [d["id"] for d in _local().query("tasks", Filter())] == ["@local/~/bundle/envs/m__validate-v1"]
 
 
-class _RecordingSandbox:
-    mode = "vm"
-
-    def __init__(self) -> None:
-        self.scripts: list[str] = []
-
-    async def exec_script(self, script: str) -> str:
-        self.scripts.append(script)
-        return ""
-
-
-def _snapshot_of(monkeypatch, env_id, universe_id) -> _RecordingSandbox:
-    """A snapshot of ``env_id`` with ``universe_id`` loaded, as far as reconnecting to its sandbox."""
-    deployed = DeployedGatewayEnv(env_id=env_id, env_version=1, sandbox_id="sb-1", gateway_url="https://gw", mcp_url="https://gw/mcp",
-                                  db_web_url=None)
-    instances = SimpleNamespace(get=lambda instance_id: deployed,
-                                get_environment_universe=lambda instance_id: {"id": universe_id, "version": 1})
-    provider = EnvironmentGatewayProvider()
-    provider._state_provider = LocalPostgresStateProvider()
-    reattached = SimpleNamespace(_sandbox=_RecordingSandbox(), _env_provider=provider)
-    monkeypatch.setattr("agent_env.env.store.get_env_instance_store", lambda: instances)
-    monkeypatch.setattr("agent_env.env.env.Env.get", lambda *args: MultiEnv(id=env_id, version=1, mcp_server_envs=[]))
-    monkeypatch.setattr(MultiEnv, "from_deployed_env", classmethod(lambda cls, record: asyncio.sleep(0, result=reattached)))
-    return reattached._sandbox
-
-
 def test_snapshotting_an_local_env_stops_at_the_local_store_it_cannot_presign_before_the_sandbox_runs_anything(
     local_stores, cli_routing, tmp_path, monkeypatch,
 ):
     configured = SigningObjectStore(str(tmp_path / "configured-objects"))
     set_object_store(configured)
-    sandbox = _snapshot_of(monkeypatch, LOCAL_ENV, UNIVERSE)
+    sandbox = reattach_for_snapshot(monkeypatch, LOCAL_ENV, 1, UNIVERSE, 1)
 
     with pytest.raises(RuntimeError, match="LocalFilesystemObjectStore can't presign uploads"):
         asyncio.run(EnvSnapshot.create("instance-1"))
@@ -244,7 +215,7 @@ def test_snapshotting_an_local_env_stops_at_the_local_store_it_cannot_presign_be
 def test_a_snapshot_of_an_env_and_a_universe_in_different_namespaces_is_refused_before_the_sandbox_is_reached(
     local_stores, cli_routing, monkeypatch, env_id, universe_id,
 ):
-    _snapshot_of(monkeypatch, env_id, universe_id)
+    reattach_for_snapshot(monkeypatch, env_id, 1, universe_id, 1)
     monkeypatch.setattr(MultiEnv, "from_deployed_env", classmethod(lambda cls, record: pytest.fail("the sandbox was reached")))
 
     with pytest.raises(ValueError, match="are in different namespaces"):

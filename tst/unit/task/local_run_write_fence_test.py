@@ -2,7 +2,6 @@
 and everything it writes lands in the per-user local stores or is refused before it happens."""
 
 import asyncio
-import base64
 import hashlib
 import json
 from pathlib import Path
@@ -32,6 +31,7 @@ from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTaskStep
 from agent_env.task_step.task_steps.snapshot_env import SnapshotEnvTaskStep
 from agent_env.task_step.task_steps.verifiers.run_container_unit_tests_verifier import RunContainerUnitTestsVerifierTaskStep
+from tst.unit.store.fakes import CollectingVm
 
 LOCAL_TASK = "@local/~/bundle/tasks/t"
 LOCAL_ENV = "@local/~/bundle/envs/tickets"
@@ -209,39 +209,9 @@ async def test_concurrent_runs_keep_their_own_scope(tmp_path, cli_routing):
     assert {doc["owner"] for doc in documents.query("runs", Filter())} == {"registry-task", "other-registry-task"}
 
 
-COLLECTED = {"/app/artifact/report.pdf": b"%PDF", "/app/artifact/sub/notes.md": b"# notes"}
-
-
-class _Output:
-    def __init__(self, data: bytes):
-        self._data = data
-
-    async def read(self):
-        return self._data
-
-
-class _VmSandbox:
-    """A VM serving ``COLLECTED`` to collect's size probe and base64 read, and exiting 0 with ``ok`` otherwise."""
-
-    mode = "vm"
-
-    async def exec_script(self, script: str) -> str:
-        return ""
-
-    async def exec_with_output(self, *args):
-        if "stat" in args:
-            return 0, str(len(COLLECTED[args[-1]])), ""
-        return 0, "ok", ""
-
-    async def exec(self, *args):
-        path = args[-1].split("base64 < ", 1)[1].strip("'")
-        return SimpleNamespace(stdout=_Output(base64.b64encode(COLLECTED[path])), stderr=_Output(b""),
-                               wait=lambda: asyncio.sleep(0, result=0))
-
-
 @pytest.fixture
 def vm(monkeypatch):
-    provider = SimpleNamespace(get_sandbox=lambda sandbox_id: asyncio.sleep(0, result=_VmSandbox()), close=lambda: asyncio.sleep(0))
+    provider = SimpleNamespace(get_sandbox=lambda sandbox_id: asyncio.sleep(0, result=CollectingVm()), close=lambda: asyncio.sleep(0))
     monkeypatch.setattr(sandbox_provider, "get_sandbox_provider", lambda: provider)
     return DeployedSandbox(sandbox_name="box", sandbox_id="sb-1", sandbox_mode="vm")
 

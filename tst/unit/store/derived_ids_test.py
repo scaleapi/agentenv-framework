@@ -3,7 +3,6 @@ tasks and artifacts, retried activities and the links consumers rebuild all reco
 bare goldens here are frozen. An ``@local`` base keeps its namespace."""
 
 import asyncio
-import base64
 import time
 import uuid
 from types import SimpleNamespace
@@ -18,20 +17,17 @@ from agent_env.a2a_agent.validator import A2AAgentValidator
 from agent_env.artifact import DockerImageArtifact, FileArtifactUniverse
 from agent_env.cli import cli
 from agent_env.config import set_object_store
-from agent_env.env.env import DeployedGatewayEnv
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.website import WebsiteEnv
 from agent_env.env.snapshot_store import EnvSnapshot
-from agent_env.providers.env_providers import EnvironmentGatewayProvider
-from agent_env.providers.env_state import LocalPostgresStateProvider
 from agent_env.task import Task
 from agent_env.task_step import VerifyUniverseLoadExportRoundtripStep
 from agent_env.task_step.context import DeployedSandbox, TaskStepContext
 from agent_env.task_step.task_steps.add_skills import _build_skill_for_loaded_file_artifact_universe
 from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTaskStep
 from agent_env.task_step.task_steps.verifiers import run_container_unit_tests_verifier as verifier_module
-from tst.unit.store.fakes import SigningObjectStore
+from tst.unit.store.fakes import CollectingVm, SigningObjectStore, reattach_for_snapshot
 
 LOCAL_ENV = "@local/~/work/triage/envs/tickets"
 LOCAL_UNIVERSE = "@local/~/work/triage/artifacts/seed"
@@ -100,38 +96,16 @@ def test_the_install_image_universe_keeps_its_bare_id(local_stores, monkeypatch)
     assert universe.id == "validate-install-image-claude-code-v22-1790000000"
 
 
-class _SnapshotSandbox:
-    """A VM whose servicedb answers the changelog count and the container lookup; records every script."""
-
-    mode = "vm"
-
-    def __init__(self) -> None:
-        self.scripts: list[str] = []
-
-    async def exec_script(self, script: str) -> str:
-        self.scripts.append(script)
-        return "0\n" if "_changelog" in script else "container-1\n"
-
-
 def test_an_env_snapshot_keeps_its_bare_artifact_id_image_tag_and_key(local_stores, tmp_path, monkeypatch):
     set_object_store(SigningObjectStore(str(tmp_path / "signing")))
-    deployed = DeployedGatewayEnv(env_id="crm-suite", env_version=3, sandbox_id="sb-1", gateway_url="https://gw",
-                                  mcp_url="https://gw/mcp", db_web_url=None)
-    instances = SimpleNamespace(get=lambda instance_id: deployed,
-                                get_environment_universe=lambda instance_id: {"id": "crm-universe", "version": 2})
-    provider = EnvironmentGatewayProvider()
-    provider._state_provider = LocalPostgresStateProvider()
-    reattached = SimpleNamespace(_sandbox=_SnapshotSandbox(), _env_provider=provider)
-    monkeypatch.setattr("agent_env.env.store.get_env_instance_store", lambda: instances)
-    monkeypatch.setattr("agent_env.env.env.Env.get", lambda *args: MultiEnv(id="crm-suite", version=3, mcp_server_envs=[]))
-    monkeypatch.setattr(MultiEnv, "from_deployed_env", classmethod(lambda cls, record: asyncio.sleep(0, result=reattached)))
+    sandbox = reattach_for_snapshot(monkeypatch, "crm-suite", 3, "crm-universe", 2)
 
     snapshot = asyncio.run(EnvSnapshot.create("inst-1"))
 
     image = DockerImageArtifact.get(snapshot.db_image_artifact_id)
     assert (image.id, image.image_name) == ("env-snapshot-crm-suite", "env-snapshot-crm-suite-crm-universe")
     assert image.tar_gz_object_url.endswith("/env-snapshots/crm-suite/crm-universe/env-snapshot-crm-suite-crm-universe.tar.gz")
-    assert "docker build --platform linux/amd64 -t env-snapshot-crm-suite-crm-universe /tmp/snapshot-build" in reattached._sandbox.scripts
+    assert "docker build --platform linux/amd64 -t env-snapshot-crm-suite-crm-universe /tmp/snapshot-build" in sandbox.scripts
 
 
 class _VerifierSandbox:
@@ -168,35 +142,8 @@ def test_verifier_outputs_keep_their_bare_ids(local_stores, monkeypatch, instanc
     assert ids == [f"verifier-stdout-scrape-{run}", f"verifier-stderr-scrape-{run}"]
 
 
-COLLECTED = {"/app/artifact/report.pdf": b"%PDF", "/app/artifact/sub/notes.md": b"# notes"}
-
-
-class _Output:
-    def __init__(self, data: bytes):
-        self._data = data
-
-    async def read(self):
-        return self._data
-
-
-class _CollectSandbox:
-    """A VM serving ``COLLECTED`` to collect's size probe and base64 read."""
-
-    mode = "vm"
-
-    async def exec_with_output(self, *args):
-        if "stat" in args:
-            return 0, str(len(COLLECTED[args[-1]])), ""
-        return 0, "ok", ""
-
-    async def exec(self, *args):
-        path = args[-1].split("base64 < ", 1)[1].strip("'")
-        return SimpleNamespace(stdout=_Output(base64.b64encode(COLLECTED[path])), stderr=_Output(b""),
-                               wait=lambda: asyncio.sleep(0, result=0))
-
-
 def test_collected_files_keep_their_bare_ids(local_stores, monkeypatch):
-    provider = SimpleNamespace(get_sandbox=lambda sandbox_id: asyncio.sleep(0, result=_CollectSandbox()),
+    provider = SimpleNamespace(get_sandbox=lambda sandbox_id: asyncio.sleep(0, result=CollectingVm()),
                                close=lambda: asyncio.sleep(0))
     monkeypatch.setattr(sandbox_provider, "get_sandbox_provider", lambda: provider)
     ctx = TaskStepContext(instance_id="triage-task-1-abcd1234")
