@@ -220,9 +220,17 @@ def test_without_hard_links_a_racing_write_once_put_keeps_the_winner(store, monk
     assert store.read("race/once") == b"first"
 
 
-def _claim_marker(tmp_path, key):
-    path = (tmp_path / key).resolve()
-    return tmp_path / ".agentenv-tmp" / f"{hashlib.sha256(str(path).encode()).hexdigest()}.claim"
+def _hold_lock(lock_file):
+    """A process holding ``lock_file`` exclusively until killed, as a writer mid-commit would."""
+    holder = subprocess.Popen(
+        [sys.executable, "-c", (
+            "import fcntl, sys, time; f = open(sys.argv[1], 'a'); fcntl.flock(f, fcntl.LOCK_EX); "
+            "print('locked', flush=True); time.sleep(60)"
+        ), str(lock_file)],
+        stdout=subprocess.PIPE, text=True,
+    )
+    assert holder.stdout.readline().strip() == "locked"
+    return holder
 
 
 @pytest.fixture
@@ -236,20 +244,12 @@ def no_hard_links(store, monkeypatch):
 
 def test_without_hard_links_a_claim_dies_with_its_holder(store, tmp_path, no_hard_links):
     """The claim is a lock the kernel drops when its holder exits, so a crashed writer never blocks the key."""
-    marker = _claim_marker(tmp_path, "left/x")
-    holder = subprocess.Popen(
-        [sys.executable, "-c", (
-            "import fcntl, sys, time; f = open(sys.argv[1], 'a'); fcntl.flock(f, fcntl.LOCK_EX); "
-            "print('locked', flush=True); time.sleep(60)"
-        ), str(marker)],
-        stdout=subprocess.PIPE, text=True,
-    )
+    holder = _hold_lock(store._lock_path((tmp_path / "left/x").resolve()))
     try:
-        assert holder.stdout.readline().strip() == "locked"
         writer = threading.Thread(target=store.put, args=("left/x", b"mine"))
         writer.start()
         writer.join(0.3)
-        assert writer.is_alive() and not store.exists("left/x")  # a live holder, however old, is waited for
+        assert writer.is_alive() and not (tmp_path / "left/x").exists()  # a live holder is waited for
         holder.kill()
         holder.wait()
         writer.join(5)
@@ -295,7 +295,55 @@ def test_listings_leave_out_the_stores_own_files(store, tmp_path):
     (tmp_path / ".agentenv-tmp" / "crash-residue").write_bytes(b"half")
     assert store.list("") == ["a/x.json"]
     assert store.list_at(store.object_url("")) == [store.object_url("a/x.json")]
-    assert os.listdir(tmp_path / ".agentenv-tmp") == ["crash-residue"]  # committed writes leave nothing staged
+    staging = [name for name in os.listdir(tmp_path / ".agentenv-tmp") if not name.startswith("lock-")]
+    assert staging == ["crash-residue"]  # committed writes leave nothing staged
+
+
+def test_a_type_is_never_read_while_a_write_to_the_key_is_in_progress(store, tmp_path):
+    store.put("busy/x", b"typed", content_type="text/plain")
+    holder = _hold_lock(store._lock_path((tmp_path / "busy/x").resolve()))
+    try:
+        read = []
+        reader = threading.Thread(target=lambda: read.append(store.get_object_metadata("busy/x")))
+        reader.start()
+        reader.join(0.3)
+        assert reader.is_alive()  # waits for the write holding the key
+        holder.kill()
+        holder.wait()
+        reader.join(5)
+    finally:
+        holder.kill()
+    assert read[0].content_type == "text/plain"
+
+
+def test_an_overwrite_cut_short_leaves_the_type_unknown_not_the_old_one(store, tmp_path, monkeypatch):
+    store.put("cut/x", b"first", content_type="text/plain")
+    real_replace = os.replace
+
+    def replace(src, dst):
+        if str(dst).endswith("cut/x") and ".agentenv-meta" not in str(dst):
+            raise OSError(errno.EIO, "disk went away")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", replace)
+    with pytest.raises(OSError, match="disk went away"):
+        store.put("cut/x", b"second", content_type="application/json", allow_overwrite=True)
+    assert (store.read("cut/x"), store.get_object_metadata("cut/x").content_type) == (b"first", None)
+
+
+def test_a_store_sweeps_files_staged_by_writes_that_died(tmp_path):
+    staging = tmp_path / ".agentenv-tmp"
+    staging.mkdir()
+    dead, live = staging / "staged-dead", staging / "staged-live"
+    dead.write_bytes(b"half")
+    live.write_bytes(b"in progress")
+    os.utime(dead, (time.time() - 7200, time.time() - 7200))
+    (staging / "lock-00").write_bytes(b"")
+    os.utime(staging / "lock-00", (time.time() - 7200, time.time() - 7200))
+
+    LocalFilesystemObjectStore(str(tmp_path)).put("k", b"v")
+
+    assert not dead.exists() and live.exists() and (staging / "lock-00").exists()
 
 
 def test_list_of_an_unwritten_store_is_empty(tmp_path):

@@ -238,9 +238,10 @@ def _path(store: LocalFilesystemObjectStore, key: str) -> Path:
 
 def _get(store: LocalFilesystemObjectStore, claims: GrantClaims) -> Response:
     path = _path(store, claims.key)
-    if not path.is_file():
+    metadata = store.get_object_metadata(claims.key)  # read under the key's lock, never mid-write
+    if metadata is None:
         raise _Rejected(404, "No object exists at this grant's key.")
-    return FileResponse(path, media_type=store._read_content_type(path) or DEFAULT_CONTENT_TYPE)
+    return FileResponse(path, media_type=metadata.content_type or DEFAULT_CONTENT_TYPE)
 
 
 async def _put(store: LocalFilesystemObjectStore, claims: GrantClaims, request: Request) -> None:

@@ -41,8 +41,11 @@ logger = logging.getLogger(__name__)
 _META_DIR = ".agentenv-meta"  # each object's content type, at the object's own key
 _STAGING_DIR = ".agentenv-tmp"  # files being written, inside the root so a rename into place is atomic
 _RESERVED = (".gitignore", _META_DIR, _STAGING_DIR)
-# A filesystem without hard links: a no-overwrite write claims its key with a lock instead.
+# A filesystem without hard links: a no-overwrite write relies on the key's lock instead.
 _NO_HARD_LINKS = frozenset({errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EXDEV, errno.EMLINK})
+_LOCK_STRIPES = 64  # keys share this many lock files, so locking leaves no file behind per key
+_STAGED_PREFIX = "staged-"
+_STALE_STAGED_SECONDS = 3600  # a staged file untouched this long belongs to a write that died
 
 
 class LocalFilesystemObjectStore(ObjectStore):
@@ -69,6 +72,7 @@ class LocalFilesystemObjectStore(ObjectStore):
         self._root = Path(root) if root is not None else state_root() / "object_store"
         self._grant_bind_host = grant_bind_host
         self._grant_advertise_host = grant_advertise_host
+        self._swept = False
 
     @property
     def root(self) -> Path:
@@ -122,11 +126,13 @@ class LocalFilesystemObjectStore(ObjectStore):
 
     def get_object_metadata(self, key: str) -> ObjectMetadata | None:
         path = self._resolve(key)
-        if not path.is_file():
-            return None
-        st = path.stat()
+        with self._locked(path, shared=True):  # never between another write's bytes and its type
+            if not path.is_file():
+                return None
+            st = path.stat()
+            content_type = self._read_content_type(path, st)
         return ObjectMetadata(
-            content_type=self._read_content_type(path, st),
+            content_type=content_type,
             size=st.st_size,
             last_modified=datetime.fromtimestamp(st.st_mtime, tz=timezone.utc),
         )
@@ -224,7 +230,10 @@ class LocalFilesystemObjectStore(ObjectStore):
         ensure_state_dir(self._root)
         staging = self._root / _STAGING_DIR
         staging.mkdir(exist_ok=True)
-        fd, name = tempfile.mkstemp(dir=staging)
+        if not self._swept:
+            self._swept = True
+            _sweep(staging)
+        fd, name = tempfile.mkstemp(dir=staging, prefix=_STAGED_PREFIX)
         os.close(fd)
         staged = Path(name)
         staged.chmod(0o644)
@@ -234,59 +243,70 @@ class LocalFilesystemObjectStore(ObjectStore):
             staged.unlink(missing_ok=True)
 
     def _commit(self, staged: Path, path: Path, content_type: str, *, allow_overwrite: bool) -> None:
-        """Put a staged file in place at ``path`` and record its content type. An overwrite renames over
-        whatever is there; otherwise a hard link claims ``path`` only if no other writer got there first.
+        """Put a staged file in place at ``path`` and record its content type, both under the key's lock, so no
+        other write to the key lands in between and no reader sees one write's type with another's bytes. An
+        overwrite drops the old type first, so one cut short leaves the type unknown, never wrong.
 
-        The type is recorded with the identity of the file it describes, so one recorded for another
-        write (a racing overwrite, or one whose type could not be recorded) reads back as unknown."""
+        The type is also recorded with the identity of the file it describes, which is what keeps them paired
+        where there is no lock (Windows, whose NTFS keeps times fine enough to tell writes apart)."""
         identity = _stamp(staged)
+        meta = self._meta_path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        if allow_overwrite:
-            os.replace(staged, path)
-        else:
-            try:
-                os.link(staged, path)
-            except FileExistsError:
-                raise ObjectAlreadyExistsError(f"Object already exists at {path}.") from None
-            except OSError as e:
-                if e.errno not in _NO_HARD_LINKS:
-                    raise
-                if os.name == "nt":  # rename there refuses an existing target, which is the claim
+        with self._locked(path):
+            if allow_overwrite:
+                meta.unlink(missing_ok=True)
+                os.replace(staged, path)
+            else:
+                try:
+                    os.link(staged, path)  # exclusive even against a writer that takes no lock
+                except FileExistsError:
+                    raise ObjectAlreadyExistsError(f"Object already exists at {path}.") from None
+                except OSError as e:
+                    if e.errno not in _NO_HARD_LINKS:
+                        raise
+                    # The lock makes the check and the rename one step; on Windows, rename refuses an existing target.
+                    if path.exists():
+                        raise ObjectAlreadyExistsError(f"Object already exists at {path}.") from None
                     try:
-                        os.rename(staged, path)
+                        (os.rename if os.name == "nt" else os.replace)(staged, path)
                     except FileExistsError:
                         raise ObjectAlreadyExistsError(f"Object already exists at {path}.") from None
-                else:
-                    with self._claimed(path):
-                        if path.exists():
-                            raise ObjectAlreadyExistsError(f"Object already exists at {path}.") from None
-                        os.replace(staged, path)
-        # The default type is what a writer that named none gets; it reads back as unknown, so readers
-        # still guess from the name as they did before types were kept.
-        try:
-            meta = self._meta_path(path)
-            if content_type == DEFAULT_CONTENT_TYPE:
-                meta.unlink(missing_ok=True)
-                return
-            meta.parent.mkdir(parents=True, exist_ok=True)
-            with self._staged() as staged_meta:
-                staged_meta.write_text(json.dumps({"content_type": content_type, "object": identity}))
-                os.replace(staged_meta, meta)
-        except OSError as e:  # the object is in place and its type reads back as unknown
-            logger.warning("Could not record the content type of %s: %s", path, e)
+            # The default type is what a writer that named none gets; it reads back as unknown, so readers
+            # still guess from the name as they did before types were kept.
+            try:
+                if content_type == DEFAULT_CONTENT_TYPE:
+                    meta.unlink(missing_ok=True)
+                    return
+                meta.parent.mkdir(parents=True, exist_ok=True)
+                with self._staged() as staged_meta:
+                    staged_meta.write_text(json.dumps({"content_type": content_type, "object": identity}))
+                    os.replace(staged_meta, meta)
+            except OSError as e:  # the object is in place and its type reads back as unknown
+                logger.warning("Could not record the content type of %s: %s", path, e)
 
     @contextlib.contextmanager
-    def _claimed(self, path: Path) -> Iterator[None]:
-        """The sole right to create ``path``, where no hard link can claim it: an exclusive lock on a file in the
-        staging directory, which the kernel drops if its holder dies. The file stays, so every writer locks the
-        same one."""
-        marker = self._root / _STAGING_DIR / f"{hashlib.sha256(str(path).encode()).hexdigest()}.claim"
-        with marker.open("a") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(f, fcntl.LOCK_UN)
+    def _locked(self, path: Path, *, shared: bool = False) -> Iterator[None]:
+        """The key's lock, exclusive to write it and shared to read its type: a flock on one of a fixed set of
+        files in the staging directory, which the kernel drops if its holder dies. None on Windows."""
+        if os.name == "nt":
+            yield
+            return
+        try:
+            f = self._lock_path(path).open("r" if shared else "a")
+        except OSError:
+            if not shared:
+                raise
+            f = None  # no write has taken this lock yet, or the store is read-only: nothing to wait for
+        if f is None:
+            yield
+            return
+        with f:
+            fcntl.flock(f, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
+            yield
+
+    def _lock_path(self, path: Path) -> Path:
+        stripe = int(hashlib.sha256(str(path).encode()).hexdigest()[:8], 16) % _LOCK_STRIPES
+        return self._root / _STAGING_DIR / f"lock-{stripe:02x}"
 
     def _read_content_type(self, path: Path, st: os.stat_result | None = None) -> str | None:
         """The content type recorded for the object at ``path``, if it was recorded for this very file; None
@@ -319,6 +339,16 @@ def _stamp(staged: Path) -> list[int]:
     stamp = now_ns - now_ns % 1_000_000 + secrets.randbelow(1_000_000)
     os.utime(staged, ns=(stamp, stamp))
     return _identity(staged.stat())
+
+
+def _sweep(staging: Path) -> None:
+    """Remove files staged by writes that died. A write in progress keeps touching its file, and a finished one
+    renames it away, so one untouched for an hour will never be committed."""
+    cutoff = time.time() - _STALE_STAGED_SECONDS
+    for staged in staging.glob(f"{_STAGED_PREFIX}*"):
+        with contextlib.suppress(OSError):
+            if staged.stat().st_mtime < cutoff:
+                staged.unlink()
 
 
 def _identity(st: os.stat_result) -> list[int]:
