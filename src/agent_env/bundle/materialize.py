@@ -13,7 +13,7 @@ included, without the lock or a single write.
 from __future__ import annotations
 
 import copy
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Any
@@ -84,11 +84,17 @@ def materialize(
     tasks = [write for write in plan.writes if write.kind is BundleKind.TASK]
     evals = [write for write in plan.writes if write.kind is BundleKind.EVAL]
     done: dict[tuple[str, str], Materialized] = {}
-    versions: dict[tuple[str, str], int] = {}
 
     def through_ledger(write: Write, write_fn: Callable[[], int]) -> None:
-        done[_key(write)] = _through_ledger(plan, ledger, write, versions, write_fn, dry_run)
-        versions[_key(write)] = done[_key(write)].version
+        with _noted(plan, write, "checking" if dry_run else "writing"):
+            check = ledger.check(write, {need: done[need].version for need in write.needs})
+            if check.unchanged:
+                version = check.version
+            elif dry_run:
+                version = check.next_version
+            else:
+                version = ledger.record(check, write_fn)
+        done[_key(write)] = Materialized(write, version, check.unchanged, check.reasons)
         if on_write is not None:
             on_write(done[_key(write)])
 
@@ -175,19 +181,6 @@ def _unwritable(write: Write) -> str | None:
     return None
 
 
-def _through_ledger(plan: Plan, ledger: Ledger, write: Write, versions: Mapping[tuple[str, str], int],
-                    write_fn: Callable[[], int], dry_run: bool) -> Materialized:
-    with _noted(plan, write, "checking" if dry_run else "writing"):
-        check = ledger.check(write, versions)
-        if check.unchanged:
-            version = check.version
-        elif dry_run:
-            version = check.next_version
-        else:
-            version = ledger.record(check, write_fn)
-    return Materialized(write, version, check.unchanged, check.reasons)
-
-
 @contextmanager
 def _noted(plan: Plan, write: Write, doing: str) -> Iterator[None]:
     try:
@@ -203,8 +196,9 @@ def _build(write: Write) -> Task:
 
 def _preflight(write: Write, task: Task, unwritten: set[tuple[str, str]]) -> tuple[list[str], list[TaskStep]]:
     """``task``'s preflight problems, and the steps with a preflight left unchecked because they read a
-    (store, id) in ``unwritten``, which a dry run would write first; an artifact and an agent can share an id. A step reading one of the task's own outputs is skipped
-    too, and not listed: the output only exists once the task runs."""
+    (store, id) in ``unwritten``, which a dry run would write first; an artifact and an agent can share an id.
+    A step reading one of the task's own outputs is skipped too, and not listed: the output only exists once the
+    task runs."""
     outputs = {output.id for output in write.source.outputs}
     problems, unchecked = [], []
     for config, step in zip(write.source.config, task.steps):

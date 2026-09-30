@@ -345,17 +345,10 @@ class Task:
             for dep in step.depends_on:
                 if dep.task_step_id in prior:
                     continue
-                if dep.task_step_id in ids:
-                    raise ValueError(
-                        f"Step '{step.id}' at position {i} declares depends_on "
-                        f"'{dep.task_step_id}', which doesn't come before it "
-                        "(forward refs are not allowed: a step depends only on the steps before it)"
-                    )
-                raise ValueError(
-                    f"Step '{step.id}' at position {i} declares depends_on "
-                    f"'{dep.task_step_id}', which names no step in this task "
-                    f"(steps before it: {sorted(prior)})"
-                )
+                why = ("doesn't come before it (forward refs are not allowed: a step depends only on the steps "
+                       "before it)" if dep.task_step_id in ids else
+                       f"names no step in this task (steps before it: {sorted(prior)})")
+                raise ValueError(f"Step '{step.id}' at position {i} declares depends_on '{dep.task_step_id}', which {why}")
 
     def preflight(self) -> list[str]:
         """Every step's resolvable-config problems, in step order; empty when fine.

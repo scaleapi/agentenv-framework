@@ -91,11 +91,10 @@ class Ledger:
     def for_plan(cls, plan: Plan) -> Ledger:
         return cls(get_config().local_namespace_document_store(), plan)
 
-    def check(self, write: Write, versions: Mapping[tuple[str, str], int]) -> Check:
-        """Compare ``write`` with the latest version the ledger records for it. ``versions`` holds, by (store, id),
-        the version each earlier write of the plan left or, in a dry run, would leave; an env or agent is hashed
-        with those of what it needs, so one written anew rewrites it too."""
-        needs = {need: versions[need] for need in write.needs}
+    def check(self, write: Write, needs: Mapping[tuple[str, str], int]) -> Check:
+        """Compare ``write`` with the latest version the ledger records for it. ``needs`` holds, by (store, id),
+        the version each earlier write it needs left or, in a dry run, would leave; an env or agent is hashed with
+        them, so one written anew rewrites it too."""
         stored = self._stored_version(write)
         digest = self.digest(write, needs)
         if digest is None:

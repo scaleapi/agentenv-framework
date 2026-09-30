@@ -122,7 +122,7 @@ def _record_changed(ledger, writes):
     """Check and record ``writes`` in order, as the materializer does; the checks, by id."""
     checks, versions = {}, {}
     for write in writes:
-        check = ledger.check(write, versions)
+        check = ledger.check(write, {need: versions[need] for need in write.needs})
         version = check.version if check.unchanged else ledger.record(check, lambda: _written(write))
         versions[write.kind.store, write.id] = version
         checks[write.id] = check
@@ -133,7 +133,7 @@ def _checked(ledger, writes):
     """Check ``writes`` in order without recording any, as a dry run does; the checks, by id."""
     checks, versions = {}, {}
     for write in writes:
-        check = ledger.check(write, versions)
+        check = ledger.check(write, {need: versions[need] for need in write.needs})
         versions[write.kind.store, write.id] = check.version if check.unchanged else check.next_version
         checks[write.id] = check
     return checks

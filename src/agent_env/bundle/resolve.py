@@ -285,9 +285,8 @@ class _Resolver:
 
     def _depends_on(self, entry: BundleEntry, steps: list[dict]) -> list[list[str] | None]:
         """Each step's ``depends_on`` as the step ids it names, read as building the step reads it; None when it
-        has none. One that can't be read, names a step by anything but its id, or names no step in the task, is a
-        problem here: a step reading an earlier step's output is checked against these edges before any step is
-        built."""
+        has none. One that can't be read, or names no step in the task, is a problem here: a step reading an
+        earlier step's output is checked against these edges before any step is built."""
         step_ids = {step.get("id") for step in steps}
         depends = []
         for step in steps:
@@ -298,14 +297,11 @@ class _Resolver:
                 read = []
             ids = None if read is None else []
             for dep in read or ():
-                if not isinstance(dep.task_step_id, str):
-                    self._problem(entry, f"step {step.get('id')!r}: depends_on names a step by its id, not "
-                                         f"{dep.task_step_id!r}")
-                    continue
-                if dep.task_step_id not in step_ids:
+                if isinstance(dep.task_step_id, str) and dep.task_step_id in step_ids:
+                    ids.append(dep.task_step_id)
+                else:
                     self._problem(entry, f"step {step.get('id')!r}: depends_on {dep.task_step_id!r} names no step in "
                                          "this task")
-                ids.append(dep.task_step_id)
             depends.append(ids)
         return depends
 
@@ -391,7 +387,7 @@ def _upstream(steps: list[dict], depends: list[list[str] | None]) -> list[set[in
     for index, step in enumerate(steps):
         if isinstance(step.get("id"), str):
             index_of.setdefault(step["id"], index)
-    direct = [set(range(index)) if ids is None else {index_of[dep_id] for dep_id in ids if dep_id in index_of}
+    direct = [set(range(index)) if ids is None else {index_of[dep_id] for dep_id in ids}
               for index, ids in enumerate(depends)]
     upstream = []
     for index in range(len(steps)):

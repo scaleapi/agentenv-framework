@@ -249,7 +249,7 @@ def test_an_output_resolves_for_a_step_that_depends_on_its_writer(make, depends_
     ([7], 'a depends_on entry is a step id or {"task_step_id": "<step id>"}, not 7'),
     ([{"id": "cli"}], 'a depends_on entry is a step id or {"task_step_id": "<step id>"}, not {\'id\': \'cli\'}'),
     (["clii"], "depends_on 'clii' names no step in this task"),
-    ([{"task_step_id": ["cli"]}], "depends_on names a step by its id, not ['cli']"),
+    ([{"task_step_id": ["cli"]}], "depends_on ['cli'] names no step in this task"),
 ])
 def test_a_depends_on_that_cant_be_read_is_named_beside_the_output_it_then_cant_reach(make, depends_on, problem):
     assert set(problems(make(tasks={"t": [
