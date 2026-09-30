@@ -505,14 +505,41 @@ def test_host_ips_are_loopback_off_linux(monkeypatch, real_host_ips, tmp_path):
 
 def test_host_ips_add_the_bridge_gateway_on_linux(monkeypatch, real_host_ips, tmp_path):
     """On Linux host.docker.internal is the bridge gateway (host-gateway), which cannot reach a loopback-only port."""
-    runs = []
-    monkeypatch.setattr(ls.platform, "system", lambda: "Linux")
-    monkeypatch.setattr(ls.subprocess, "run", lambda args, **k: runs.append(args) or SimpleNamespace(stdout="172.17.0.1\n"))
+    runs = _fake_docker(monkeypatch, {"info": "Ubuntu 24.04.3 LTS", "network": "172.17.0.1"})
     sandbox = LocalSandbox(work_dir=tmp_path)
 
     assert sandbox.host_ips == ("127.0.0.1", "172.17.0.1")
     assert sandbox.host_ips == ("127.0.0.1", "172.17.0.1")
-    assert len(runs) == 1 and runs[0][:4] == ["docker", "network", "inspect", "bridge"]
+    assert [args[:2] for args, _ in runs] == [["docker", "info"], ["docker", "network"]]
+    assert all(kwargs["timeout"] for _, kwargs in runs)
+
+
+def test_host_ips_are_loopback_on_docker_desktop_for_linux(monkeypatch, real_host_ips, tmp_path):
+    """Its proxy can't bind the bridge address, which lives in its VM (docker/desktop-feedback#485)."""
+    runs = _fake_docker(monkeypatch, {"info": "Docker Desktop", "network": "172.17.0.1"})
+
+    assert LocalSandbox(work_dir=tmp_path).host_ips == ("127.0.0.1",)
+    assert [args[:2] for args, _ in runs] == [["docker", "info"]]
+
+
+def test_host_ips_are_loopback_without_a_default_bridge(monkeypatch, real_host_ips, tmp_path):
+    _fake_docker(monkeypatch, {"info": "Ubuntu 24.04.3 LTS", "network": None})
+
+    assert LocalSandbox(work_dir=tmp_path).host_ips == ("127.0.0.1",)
+
+
+def _fake_docker(monkeypatch, outputs):
+    """``docker <command>`` answers ``outputs[command]``; ``None`` fails the call."""
+    runs = []
+
+    def run(args, **kwargs):
+        runs.append((args, kwargs))
+        out = outputs[args[1]]
+        return SimpleNamespace(returncode=1 if out is None else 0, stdout=f"{out or ''}\n")
+
+    monkeypatch.setattr(ls.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(ls.subprocess, "run", run)
+    return runs
 
 
 class _CapturedProcess:

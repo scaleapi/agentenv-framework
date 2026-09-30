@@ -417,10 +417,17 @@ class LocalSandboxProvider(SandboxProvider):
 @functools.cache
 def _host_ips() -> tuple[str, ...]:
     """Loopback, plus on Linux the bridge gateway ``host-gateway`` resolves to, where containers reach the host."""
-    if platform.system() != "Linux":
+    # Docker Desktop publishes through a host-side proxy, which can't bind the bridge address inside its VM.
+    if platform.system() != "Linux" or _docker("info", "--format", "{{.OperatingSystem}}") == "Docker Desktop":
         return ("127.0.0.1",)
-    gateway = subprocess.run(
-        ["docker", "network", "inspect", "bridge", "--format", "{{(index .IPAM.Config 0).Gateway}}"],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
-    return ("127.0.0.1", gateway)
+    gateway = _docker("network", "inspect", "bridge", "--format", "{{(index .IPAM.Config 0).Gateway}}")
+    return ("127.0.0.1", gateway) if gateway else ("127.0.0.1",)
+
+
+def _docker(*args: str) -> str:
+    """A docker CLI query's output, or ``""`` when it fails (e.g. a daemon with no default bridge)."""
+    run = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=_DOCKER_QUERY_SECONDS)
+    return run.stdout.strip() if run.returncode == 0 else ""
+
+
+_DOCKER_QUERY_SECONDS = 30

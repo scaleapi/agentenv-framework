@@ -29,9 +29,10 @@ OFFSET = 40000
 
 # --- source guard: exhaustive over the tree ---------------------------------
 
-# A compose port mapping, ``[ip:]host:container``. Excludes volume mounts and image refs (which
-# contain "/" or "://") and docstring illustrations written as <placeholder>.
-_PORT_PAIR = re.compile(r'-\s+"(?:([^":/]+):)?([^":/]+):([^":/]+)"')
+# A compose port mapping, ``[ip:]host:container``, double-quoted, single-quoted or bare. Excludes
+# volume mounts and image refs (which contain "/" or "://") and docstring illustrations written as
+# <placeholder>.
+_PORT_PAIR = re.compile(r'-\s+["\']?(?:([^"\':/\s]+):)?([^"\':/\s]+):([^"\':/\s]+)')
 
 # A compose port entry rendered from ``port_bindings(host_ips, host_port, container_port)``.
 _PUBLISH_SITE = re.compile(r'-\s+"\{(\w+)\}"\' for \1 in port_bindings\([^,]+, (.+), [^,]+\)')
@@ -83,6 +84,12 @@ def test_no_renderer_writes_a_port_mapping_by_hand():
         if _is_port_expression(host) and _is_port_expression(container)
     ]
     assert not by_hand, "port mappings written without port_bindings:\n" + "\n".join(by_hand)
+
+
+def test_the_mapping_guard_reads_every_quoting():
+    """Compose accepts a mapping in any of the three forms, so a hand-written one can't slip past as another."""
+    for entry in ('- "8080:8080"', "- '8080:8080'", "- 8080:8080"):
+        assert _PORT_PAIR.findall(entry) == [("", "8080", "8080")]
 
 
 def test_source_guard_flags_a_fixed_host_port():
