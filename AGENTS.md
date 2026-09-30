@@ -146,7 +146,7 @@ orchestrators call it the same way. What callers rely on:
 - Skips are declared capability gaps, decided at collection time: the gates in
   `tst/util/capabilities.py` produce `skipif` marks with the reason
   `agentenv-capability-missing: <name>` (`model_endpoint_configured`, `remote_sandbox`,
-  `default_a2a_agent`, `mcp_server_sources`). CI rejects any other skip reason; a broken configuration must fail loudly, not skip.
+  `default_a2a_agent`, `mcp_server_sources`, `gnu_stat`). CI rejects any other skip reason; a broken configuration must fail loudly, not skip.
 - The suite is backend-agnostic: a test about one particular backend lives with that backend, not
   here. A custom store must pass `tst/store/{conformance,object_conformance,image_conformance,secret_conformance}.py`,
   the same kits the built-ins pass.

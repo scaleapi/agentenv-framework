@@ -271,6 +271,19 @@ async def test_an_local_run_refuses_a_bare_universe_to_collect_into_before_readi
         await Task(id=LOCAL_TASK, version=1, steps=[step]).run(context=context)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("seed", ["Q&A: onboarding", "VPC Endpoints "])
+async def test_an_local_run_refuses_an_invalid_local_universe_to_collect_into_before_reading_the_sandbox(
+        sentinels, vm, monkeypatch, seed):
+    monkeypatch.setattr(sandbox_provider, "get_sandbox_provider", lambda: pytest.fail("the sandbox was read"))
+    context = TaskStepContext(deployed_sandboxes=[vm])
+    context.metadata["universe_id"] = f"{LOCAL_TASK}-v1-{seed}"
+    step = CollectArtifactsTaskStep(id="collect", version=None, sandbox_name="box", artifact_paths=["report.pdf"])
+
+    with pytest.raises(ValueError, match="@local"):
+        await Task(id=LOCAL_TASK, version=1, steps=[step]).run(context=context)
+
+
 class _Gmail:
     """An env with one service, gmail."""
 

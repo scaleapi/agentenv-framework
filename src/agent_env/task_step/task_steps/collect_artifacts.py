@@ -80,7 +80,7 @@ from typing import ClassVar, Optional
 
 from agent_env.config import get_config
 from agent_env.env.gateway.constants import EXT_STEP_URI
-from agent_env.store.ids import derived_id, is_local_id
+from agent_env.store.ids import derived_id, is_local_id, validate_local_id
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity_refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
@@ -902,6 +902,7 @@ class CollectArtifactsTaskStep(TaskStep):
         suffix = _sanitize_artifact_id(self.universe_id_suffix or "")
         if is_local_id(artifact_id):
             artifact_id += suffix
+            validate_local_id(artifact_id)
         else:
             artifact_id = _sanitize_artifact_id(artifact_id)[:100 - len(suffix)] + suffix
         get_config().check_local_run_write(artifact_id)

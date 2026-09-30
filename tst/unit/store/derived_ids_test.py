@@ -71,15 +71,15 @@ def test_a_validation_task_keeps_its_bare_name(local_stores, tmp_path, monkeypat
 
 
 def test_a_compatibility_validation_keeps_its_bare_names(monkeypatch):
-    universe = SimpleNamespace(id="hg4-universe", version=2, get_environment_artifacts=lambda: [])
+    universe = SimpleNamespace(id="crm-universe", version=2, get_environment_artifacts=lambda: [])
     monkeypatch.setattr("agent_env.artifact.EnvironmentUniverseArtifact.get", lambda *args: universe)
 
-    task = _task_put_by(lambda: MultiEnv(id="crm-suite", version=3, mcp_server_envs=[]).validate_universe_compatibility("hg4-universe"),
+    task = _task_put_by(lambda: MultiEnv(id="crm-suite", version=3, mcp_server_envs=[]).validate_universe_compatibility("crm-universe"),
                         monkeypatch)
 
-    assert task["id"] == "validate-universe-compat-crm-suite-v3-hg4-universe-v2"
+    assert task["id"] == "validate-universe-compat-crm-suite-v3-crm-universe-v2"
     (load,) = [step for step in task["steps"] if step.type == "load_artifact"]
-    assert [artifact["id"] for artifact in load.artifacts] == ["validate-crm-suite-v3-hg4-universe-v2-fau"]
+    assert [artifact["id"] for artifact in load.artifacts] == ["validate-crm-suite-v3-crm-universe-v2-fau"]
 
 
 def test_create_cli_keeps_its_bare_task_and_artifact_ids(monkeypatch):
@@ -118,7 +118,7 @@ def test_an_env_snapshot_keeps_its_bare_artifact_id_image_tag_and_key(local_stor
     deployed = DeployedGatewayEnv(env_id="crm-suite", env_version=3, sandbox_id="sb-1", gateway_url="https://gw",
                                   mcp_url="https://gw/mcp", db_web_url=None)
     instances = SimpleNamespace(get=lambda instance_id: deployed,
-                                get_environment_universe=lambda instance_id: {"id": "hg4-universe", "version": 2})
+                                get_environment_universe=lambda instance_id: {"id": "crm-universe", "version": 2})
     provider = EnvironmentGatewayProvider()
     provider._state_provider = LocalPostgresStateProvider()
     reattached = SimpleNamespace(_sandbox=_SnapshotSandbox(), _env_provider=provider)
@@ -129,9 +129,9 @@ def test_an_env_snapshot_keeps_its_bare_artifact_id_image_tag_and_key(local_stor
     snapshot = asyncio.run(EnvSnapshot.create("inst-1"))
 
     image = DockerImageArtifact.get(snapshot.db_image_artifact_id)
-    assert (image.id, image.image_name) == ("env-snapshot-crm-suite", "env-snapshot-crm-suite-hg4-universe")
-    assert image.tar_gz_object_url.endswith("/env-snapshots/crm-suite/hg4-universe/env-snapshot-crm-suite-hg4-universe.tar.gz")
-    assert "docker build --platform linux/amd64 -t env-snapshot-crm-suite-hg4-universe /tmp/snapshot-build" in reattached._sandbox.scripts
+    assert (image.id, image.image_name) == ("env-snapshot-crm-suite", "env-snapshot-crm-suite-crm-universe")
+    assert image.tar_gz_object_url.endswith("/env-snapshots/crm-suite/crm-universe/env-snapshot-crm-suite-crm-universe.tar.gz")
+    assert "docker build --platform linux/amd64 -t env-snapshot-crm-suite-crm-universe /tmp/snapshot-build" in reattached._sandbox.scripts
 
 
 class _VerifierSandbox:
@@ -214,20 +214,20 @@ def test_collected_files_keep_their_bare_ids(local_stores, monkeypatch):
 
 
 def test_roundtrip_exports_keep_their_bare_ids(local_stores):
-    step = VerifyUniverseLoadExportRoundtripStep(id="rt", version=None, env_id="crm-suite", universe_artifact_id="hg4-universe")
+    step = VerifyUniverseLoadExportRoundtripStep(id="rt", version=None, env_id="crm-suite", universe_artifact_id="crm-universe")
 
     universe = step._create_universe_artifact([SimpleNamespace(environment_name="slack")], {"slack": {"messages": []}},
                                               env_version=3, universe_version=7)
 
     (service,) = universe.get_environment_artifacts()
-    assert universe.id == "validate-crm-suite-v3-hg4-universe-v7-export1"
-    assert service.id == "validate-crm-suite-v3-hg4-universe-v7-export1-svc-slack"
-    assert service.get_file_artifact().id == "validate-crm-suite-v3-hg4-universe-v7-export1-slack"
+    assert universe.id == "validate-crm-suite-v3-crm-universe-v7-export1"
+    assert service.id == "validate-crm-suite-v3-crm-universe-v7-export1-svc-slack"
+    assert service.get_file_artifact().id == "validate-crm-suite-v3-crm-universe-v7-export1-slack"
 
 
 @pytest.mark.parametrize("env_id, universe_id, expected", [
-    ("crm-suite", "hg4-universe", "validate-universe-compat-crm-suite-v3-hg4-universe-v2"),
-    (LOCAL_ENV, "hg4-universe", f"{LOCAL_ENV}__validate-universe-compat-v3-hg4-universe-v2"),
+    ("crm-suite", "crm-universe", "validate-universe-compat-crm-suite-v3-crm-universe-v2"),
+    (LOCAL_ENV, "crm-universe", f"{LOCAL_ENV}__validate-universe-compat-v3-crm-universe-v2"),
     (LOCAL_ENV, LOCAL_UNIVERSE, f"{LOCAL_ENV}__validate-universe-compat-v3-local-work-triage-artifacts-seed-ddf2904a1148-v2"),
     ("crm-suite", LOCAL_UNIVERSE, f"{LOCAL_UNIVERSE}__validate-universe-compat-v2-crm-suite-v3"),
 ], ids=["bare", "local-env", "both-local", "local-universe"])
@@ -236,8 +236,8 @@ def test_a_compatibility_validation_is_owned_by_its_local_side(env_id, universe_
 
 
 @pytest.mark.parametrize("universe_id, name, valid", [
-    ("hg4-universe", "hg4-universe-files", True),
-    ("Hg4_Universe", "Hg4_Universe-files", False),
+    ("crm-universe", "crm-universe-files", True),
+    ("Crm_Universe", "Crm_Universe-files", False),
     ("x" * 60, "x" * 60 + "-files", False),
     (LOCAL_UNIVERSE, "seed-ddf2904a1148-files", True),
     ("@local/~/work/triage/artifacts/" + "Ticket Desk (EU) " * 5 + "x",
@@ -276,3 +276,24 @@ def test_a_seeded_runs_universe_is_named_after_its_seed(tmp_path, monkeypatch, t
 
     assert result.exit_code == 0, result.output
     assert seen == [universe_id]
+
+
+def test_a_seed_that_cant_name_an_local_universe_stops_run_batch_before_any_run(tmp_path, monkeypatch):
+    ran: list[TaskStepContext] = []
+
+    class _Task:
+        id, version, steps = "@local/~/work/triage/tasks/t", 2, []
+
+        async def run(self, context, **kwargs):
+            ran.append(context)
+            return context
+
+    monkeypatch.setattr(Task, "get", classmethod(lambda cls, id, version=None: _Task()))
+    (tmp_path / "seeds.csv").write_text("name\nfine\nQ&A: onboarding\n")
+
+    result = CliRunner().invoke(cli, ["task", "run-batch", "--id", _Task.id, "--seeds", str(tmp_path / "seeds.csv"),
+                                      "--output-dir", str(tmp_path / "out")])
+
+    assert result.exit_code == 1
+    assert "seed 2 can't name an @local universe" in result.output
+    assert ran == []
