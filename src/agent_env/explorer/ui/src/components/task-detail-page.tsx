@@ -942,7 +942,7 @@ export function TaskDetailPage({
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    apiFetch(`${BACKEND_URL}/api/v1/tasks/${taskId}`)
+    apiFetch(`${BACKEND_URL}/api/v1/tasks/${encodeURIComponent(taskId)}`)
       .then(res => {
         if (!res.ok) throw new Error(`Failed to fetch (${res.status})`);
         return res.json();

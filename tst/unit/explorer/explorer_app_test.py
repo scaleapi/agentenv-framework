@@ -3,6 +3,8 @@
 import dataclasses
 import gzip
 import tempfile
+import time
+from urllib.parse import quote
 
 import pytest
 
@@ -16,6 +18,7 @@ from agent_env.runner import store as run_store
 from agent_env.runner.local_runner import LocalRunner
 from agent_env.store.object_store.local_object_store import LocalFilesystemObjectStore
 from agent_env.store.document_store.sqlite_document_store import LocalSqliteDocumentStore
+from agent_env.task import Task
 from agent_env.explorer.routers import objects as objects_router
 from tst.unit.store.fakes import FakeObjectStore
 
@@ -241,6 +244,80 @@ def test_run_for_unknown_task_is_404(client):
     assert client.post("/api/v1/tasks/ghost/run", json={}).status_code == 404
     # and it must not have enqueued anything
     assert client.get("/api/v1/tasks/ghost/runs").json()["total"] == 0
+
+
+NAMESPACED_IDS = [
+    "@local/~/stuff/instances/foo",
+    "@local/~/triage/runs",
+    "@local/~/Dropbox (Personal)/a&b+c,d@e/tickets",
+    "@local/~/Été/Straße/tâche",
+    "team/triage/versions",
+]
+ID_ROUTE_COLLECTIONS = {"artifacts": "artifacts", "envs": "envs", "tasks": "tasks", "agents": "a2a_agents", "evals": "evals"}
+
+
+@pytest.mark.parametrize("entity_id", NAMESPACED_IDS)
+@pytest.mark.parametrize("path, collection", ID_ROUTE_COLLECTIONS.items())
+def test_an_id_is_one_encoded_path_segment(client, path, collection, entity_id):
+    """An id's own segments, even ones named like a route, never split it."""
+    get_config().get_document_store().insert(
+        collection, {"id": entity_id, "version": 1, "created_at_utc": "2026-01-04T00:00:00Z"})
+    encoded = quote(entity_id, safe="")
+
+    got = client.get(f"/api/v1/{path}/{encoded}")
+    assert got.status_code == 200 and got.json()["id"] == entity_id
+    assert [d["id"] for d in client.get(f"/api/v1/{path}/{encoded}/versions").json()] == [entity_id]
+    assert client.get(f"/api/v1/{path}/{entity_id}").status_code == 404
+
+
+def test_the_run_routes_address_a_task_whose_id_ends_in_a_route_name(client, monkeypatch):
+    class _Task:
+        version = 1
+
+        async def run(self, **kw):
+            return kw.get("context")
+
+    monkeypatch.setattr(Task, "get", classmethod(lambda cls, tid, ver=None: _Task()))
+    task_id = "@local/~/triage/runs"
+    get_config().get_document_store().insert("tasks", {"id": task_id, "version": 1, "created_at_utc": "2026-01-04T00:00:00Z"})
+    base = f"/api/v1/tasks/{quote(task_id, safe='')}"
+
+    single = client.post(f"{base}/run", json={"version": 1}).json()
+    group = client.post(f"{base}/runs", json={"version": 1, "count": 1}).json()
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        runs = client.get(f"{base}/runs").json()["items"]
+        if len(runs) == 2 and all(r["status"] == "COMPLETED" for r in runs):
+            break
+        time.sleep(0.05)
+
+    assert {r["task_id"] for r in runs} == {task_id} and len(runs) == 2
+    # The stub task records no instance, so seed the ones a real run would.
+    for run in runs:
+        get_config().get_document_store().insert("task_instances", {
+            "instance_id": run["instance_id"], "task_id": task_id, "task_version": 1, "status": "completed",
+            "total_steps": 1, "current_step": 1, "completed_steps": [{"step_id": "s", "status": "success"}],
+        })
+    assert single["instance_id"] in {i["instance_id"] for i in client.get(f"{base}/instances").json()["items"]}
+    assert client.get(f"{base}/instances/{single['instance_id']}").json()["task_id"] == task_id
+    assert client.get(f"{base}/instances/{single['instance_id']}/progress").json()["instance_id"] == single["instance_id"]
+    assert group["run_group_id"] in {g["run_group_id"] for g in client.get(f"{base}/run-groups").json()["items"]}
+    assert client.get(f"{base}/run-groups/{group['run_group_id']}").json()["task_id"] == task_id
+    assert "event: complete" in client.get(f"{base}/run-groups/{group['run_group_id']}/stream").text
+    assert client.post(f"{base}/cancel-run", params={"workflow_id": single["workflow_id"]}).status_code == 200
+
+
+def test_a_bundle_runs_namespaced_instance_id_is_one_encoded_segment(client):
+    task_id, instance_id = "@local/~/triage/runs", "@local/~/triage/runs-7f3a9c2e"
+    store = get_config().get_document_store()
+    store.insert("task_instances", {"instance_id": instance_id, "task_id": task_id, "task_version": 1,
+                                    "status": "completed", "total_steps": 1, "current_step": 1, "completed_steps": []})
+    store.insert("agent_env_a2a_conversations", {"task_instance_id": instance_id, "created_at_utc": "2026-01-04T00:00:00Z"})
+    task, instance = quote(task_id, safe=""), quote(instance_id, safe="")
+
+    assert client.get(f"/api/v1/tasks/{task}/instances/{instance}").json()["instance_id"] == instance_id
+    assert client.get(f"/api/v1/tasks/{task}/instances/{instance}/progress").json()["instance_id"] == instance_id
+    assert len(client.get(f"/api/v1/task-instances/{instance}/conversations").json()["conversations"]) == 1
 
 
 def test_start_runs_caps_the_batch_size(client, monkeypatch):

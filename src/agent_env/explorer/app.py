@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 
 from agent_env.config import get_config, get_runner, runtime
 from agent_env.config.errors import ConfigError
+from agent_env.explorer.entity_ids import EncodedIdRouting
 from agent_env.explorer.openapi_docs import docs_metadata, enrich_openapi_schema
 from agent_env.explorer.plugin import load_plugins
 from agent_env.explorer.routers import conversations as conversations_router
@@ -30,6 +31,9 @@ from agent_env.store.routing import configured_store
 logger = logging.getLogger(__name__)
 
 API = "/api/v1"
+
+# The routes that take an entity or instance id in the path (see explorer/entity_ids.py).
+_ENTITY_ID_PREFIXES = tuple(f"{API}/{c}/" for c in ("artifacts", "envs", "tasks", "agents", "evals", "task-instances"))
 
 # Host headers we always accept; everything else is refused — a DNS-rebinding defense.
 # (The packaged explorer binds loopback only — see LOCAL_BIND_HOST — so this is
@@ -120,6 +124,7 @@ def create_app(static_dir: Optional[str] = None) -> FastAPI:
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["*"],
     )
+    app.add_middleware(EncodedIdRouting, prefixes=_ENTITY_ID_PREFIXES)
 
     # A no-auth local explorer needs two guards CORS alone doesn't give (CORS withholds
     # the *response*, not the *request*). The bind is loopback-only, so the Host allow-list

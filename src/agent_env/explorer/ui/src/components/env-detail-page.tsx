@@ -80,7 +80,7 @@ export function EnvDetailPage({
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    apiFetch(`${BACKEND_URL}/api/v1/envs/${envId}`)
+    apiFetch(`${BACKEND_URL}/api/v1/envs/${encodeURIComponent(envId)}`)
       .then(res => {
         if (!res.ok) throw new Error(`Failed to fetch (${res.status})`);
         return res.json();
@@ -98,7 +98,7 @@ export function EnvDetailPage({
           Promise.all(
             mcpIds.map(async id => {
               try {
-                const r = await apiFetch(`${BACKEND_URL}/api/v1/envs/${id}`);
+                const r = await apiFetch(`${BACKEND_URL}/api/v1/envs/${encodeURIComponent(id)}`);
                 if (r.ok) return [id, await r.json()] as const;
               } catch {
                 /* ignore */
