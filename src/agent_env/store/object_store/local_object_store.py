@@ -31,9 +31,9 @@ _STAGING_DIR = ".agentenv-tmp"  # files being written, inside the root so a rena
 _RESERVED = (".gitignore", _META_DIR, _STAGING_DIR)
 # A filesystem without hard links: a no-overwrite write relies on the key's lock instead.
 _NO_HARD_LINKS = frozenset({errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EXDEV, errno.EMLINK})
-_LOCK_STRIPES = 64  # keys share this many lock files, so locking leaves no file behind per key
+_LOCK_STRIPES = 256  # keys share this many lock files, so locking leaves no file behind per key
 _STAGED_PREFIX = "staged-"
-_STALE_STAGED_SECONDS = 3600  # a staged file untouched this long belongs to a write that died
+_STAGED_GRACE_SECONDS = 60  # a staged file younger than this may not be locked by its writer yet
 
 
 class LocalFilesystemObjectStore(ObjectStore):
@@ -171,12 +171,17 @@ class LocalFilesystemObjectStore(ObjectStore):
             self._swept = True
             _sweep(staging)
         fd, name = tempfile.mkstemp(dir=staging, prefix=_STAGED_PREFIX)
-        os.close(fd)
         staged = Path(name)
-        staged.chmod(0o644)
+        if os.name == "nt":  # an open file cannot be renamed there, and there is no flock to hold
+            os.close(fd)
+        else:
+            fcntl.flock(fd, fcntl.LOCK_EX)  # held while the write lives, so a sweep never takes its file
         try:
+            staged.chmod(0o644)
             yield staged
         finally:
+            if os.name != "nt":
+                os.close(fd)
             staged.unlink(missing_ok=True)
 
     def _commit(self, staged: Path, path: Path, content_type: str, *, allow_overwrite: bool) -> None:
@@ -191,8 +196,18 @@ class LocalFilesystemObjectStore(ObjectStore):
         path.parent.mkdir(parents=True, exist_ok=True)
         with self._locked(path):
             if allow_overwrite:
-                meta.unlink(missing_ok=True)
-                os.replace(staged, path)
+                # The old type is set aside while the bytes land: a write cut short reads as unknown, never as the
+                # old type, and one that fails before its bytes land puts the old type back.
+                aside = self._set_aside(meta)
+                try:
+                    os.replace(staged, path)
+                except BaseException:
+                    if aside is not None:
+                        with contextlib.suppress(FileNotFoundError):  # swept meanwhile: the type reads as unknown
+                            os.replace(aside, meta)
+                    raise
+                if aside is not None:
+                    aside.unlink(missing_ok=True)
             else:
                 try:
                     os.link(staged, path)  # exclusive even against a writer that takes no lock
@@ -241,6 +256,17 @@ class LocalFilesystemObjectStore(ObjectStore):
             fcntl.flock(f, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
             yield
 
+    def _set_aside(self, meta: Path) -> Path | None:
+        """Move a type record into the staging directory, fresh enough that no sweep takes it; None when there is
+        none."""
+        aside = self._root / _STAGING_DIR / f"{_STAGED_PREFIX}aside-{secrets.token_hex(8)}"
+        try:
+            os.replace(meta, aside)
+        except FileNotFoundError:
+            return None
+        os.utime(aside)
+        return aside
+
     def _lock_path(self, path: Path) -> Path:
         stripe = int(hashlib.sha256(str(path).encode()).hexdigest()[:8], 16) % _LOCK_STRIPES
         return self._root / _STAGING_DIR / f"lock-{stripe:02x}"
@@ -279,12 +305,17 @@ def _stamp(staged: Path) -> list[int]:
 
 
 def _sweep(staging: Path) -> None:
-    """Remove files staged by writes that died. A write in progress keeps touching its file, and a finished one
-    renames it away, so one untouched for an hour will never be committed."""
-    cutoff = time.time() - _STALE_STAGED_SECONDS
+    """Remove files staged by writes that died: each live write holds a lock on its file, which the kernel drops
+    when the writer exits, so a file no one holds will never be committed. Not on Windows, which has no flock."""
+    if os.name == "nt":
+        return
+    cutoff = time.time() - _STAGED_GRACE_SECONDS
     for staged in staging.glob(f"{_STAGED_PREFIX}*"):
-        with contextlib.suppress(OSError):
-            if staged.stat().st_mtime < cutoff:
+        with contextlib.suppress(OSError):  # BlockingIOError, the one that matters: a live write holds it
+            if staged.stat().st_mtime > cutoff:
+                continue
+            with staged.open("rb") as f:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 staged.unlink()
 
 
