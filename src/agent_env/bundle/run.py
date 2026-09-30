@@ -30,8 +30,8 @@ from agent_env.task_step.context import TaskStepContext
 from ._fs import relative
 from .materialize import Materialization, Materialized, materialize
 from .parse import BundleEntry, BundleError, BundleKind, parse_bundle
-from .plan import Plan, plan_bundle
-from .resolve import Reference, resolve_bundle
+from .plan import Plan, Write, plan_bundle
+from .resolve import BuiltImage, Reference, resolve_bundle
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +189,7 @@ def run_bundle(
         materialization = materialize(
             plan,
             on_wait=lambda: say("waiting for another agent-env run to finish writing this bundle's ids"),
+            on_build=lambda write: say(f"{_label(plan, write)}: building with docker, which can take minutes"),
             on_write=lambda done: say(_written(plan, done)),
         )
         wanted = {entry.entry.id for entry in plan.tasks}
@@ -353,8 +354,14 @@ def _task_run_command(ref: Reference) -> str:
 
 
 def _written(plan: Plan, done: Materialized) -> str:
-    what = f"{_path(plan, done.write.source.entry)}: v{done.version}"
+    what = f"{_label(plan, done.write)}: v{done.version}"
     return f"{what}, unchanged" if done.reused else f"{what} ({'; '.join(done.reasons)})"
+
+
+def _label(plan: Plan, write: Write) -> str:
+    """How a write is named: its entry's folder, and for an image built from it, which image."""
+    path = _path(plan, write.source.entry)
+    return f"{path} ({write.source.dockerfile} image)" if isinstance(write.source, BuiltImage) else path
 
 
 def _path(plan: Plan, entry: BundleEntry) -> str:

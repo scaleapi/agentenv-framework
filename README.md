@@ -906,11 +906,11 @@ Each seed writes `<task-id>-seed<N>_<8hex>.json` with `metadata.seed` (the row) 
 
 A bundle is a folder holding tasks and what they need, which `agent-env run` writes and runs without registering anything first. In this release it can hold:
 - `artifacts/<name>/`, whose files become a file artifact, or a file-artifact universe when there are several;
-- `agents/<name>/agent.toml`, an A2A agent whose `image` names a `docker_image` artifact in a store;
+- `agents/<name>/`, an A2A agent: an `agent.toml` whose `image` names a `docker_image` artifact in a store, or a `Dockerfile` the run builds the agent's image from;
 - `tasks/<name>.json`, a list of steps that refer to the bundle's entities by name;
 - `evals/<name>.toml`, with `tasks = [...]` naming the bundle's tasks.
 
-An `agent.toml` takes `image`, a store id or `{ artifact = "<id>", version = <n> }` to pin one, and optionally `default_env_vars` (string values) and a `[metadata]` table of `default_model` and `min_disk_size_gb`. The agent's card isn't authored: the image serves it when the agent deploys.
+An `agent.toml` takes `image`, a store id or `{ artifact = "<id>", version = <n> }` to pin one, and optionally `default_env_vars` (string values) and a `[metadata]` table of `default_model` and `min_disk_size_gb`. The agent's card isn't authored: the image serves it when the agent deploys. Leave `image` out, or the whole `agent.toml`, and the folder's `Dockerfile` builds the image instead, as described below.
 
 ```toml
 # agents/solver/agent.toml
@@ -923,7 +923,9 @@ default_model = "claude-sonnet-4-6"
 
 A task naming `solver`, in a `deploy_agent`'s `a2a_agent_id` or a `rubrics_verifier`'s `judge_a2a_agent_id`, deploys this agent, so its image is the one pinned here.
 
-A run that needs anything else written, such as an environment, or an image built from an agent folder's Dockerfile, is refused before any write.
+An agent folder with a `Dockerfile` and no `image` is built by the run, with `docker build` on this machine and the folder as the build context, into the `@local` image `<agent id>__agent_image`: pushed to the local registry, which starts on the first push, and saved as a tarball in the local object store. The run prints a line when a build starts. It is reused while every file of the folder stays the same, the `agent.toml` too, since a Dockerfile can copy it; a changed file rebuilds it, and rewrites the agent over the new image. What the build fetches, such as the base image a `FROM` tag names, isn't an input, so a newer one arrives only with the next rebuild. The image is built for this machine's platform and stays on this machine, so the local sandbox runs it; remote sandbox providers can't use it yet. The run needs `docker` on `PATH`, and refuses before any write without it.
+
+A run that needs anything else written, such as an environment, is refused before any write.
 
 agent-env ships one bundle, `hello`. Its task deploys a local sandbox (a work folder on this machine), loads the two files of `artifacts/greeting/` into it, and checks them with `verify_sandbox`: a file probe, and `bash check.sh`. It needs `bash` and the usual shell tools, and no Docker, model or configuration.
 
