@@ -287,6 +287,29 @@ def test_an_unpinned_store_image_is_written_at_the_version_the_plan_checked(bund
     assert A2AAgent.get(f"{ROOT}/solver").docker_image_artifact.version == 1
 
 
+def test_another_bundles_entities_are_read_like_store_ids_and_an_agent_pins_the_version_it_read(bundle_dir):
+    other = layout(bundle_dir.parent / "other", LAYOUT)
+    _run(other)
+    image = "@local/~/other/solver-image"
+    _put_image(image)
+    box, greet, _ = json.loads(LAYOUT["tasks/t.json"])
+    layout(bundle_dir, {"agents/solver/agent.toml": f'image = "{image}"\n'})
+    _steps(bundle_dir, [box, {**greet, "artifact_id": "@local/~/other/greeting"},
+                        {"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
+
+    assert _summary(_run(bundle_dir)) == {f"{ROOT}/solver": (1, False, ("new",)), f"{ROOT}/t": (1, False, ("new",))}
+    assert Task.get(f"{ROOT}/t").steps[1].artifacts == [{"id": "@local/~/other/greeting", "version": None}]
+    _put_image(image)
+    (other / "artifacts/greeting/hello.txt").write_text("hello again\n")
+    _run(other)
+
+    assert _summary(_run(bundle_dir)) == {
+        f"{ROOT}/solver": (2, False, (f"artifact {image} has a new version in the store (v1 → v2)",)),
+        f"{ROOT}/t": (1, True, ()),
+    }
+    assert A2AAgent.get(f"{ROOT}/solver").docker_image_artifact.version == 2
+
+
 def _put_image(id):
     get_artifact_store().put_document(DockerImageArtifact(
         id=id, description=id, image_name=f"{id}:v1", tar_gz_s3_url=f"file:///{id}.tar.gz"))

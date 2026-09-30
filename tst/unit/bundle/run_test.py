@@ -213,6 +213,20 @@ def test_an_eval_naming_a_store_task_is_refused_before_anything_is_written(bundl
     assert _Scored.seen == []
 
 
+def test_an_eval_naming_another_bundles_task_is_refused_as_a_store_task(bundle_dir):
+    run_bundle(layout(bundle_dir.parent / "other", {"tasks/shared.json": _scored(1.0)}))
+    layout(bundle_dir, {"evals/other.toml": 'tasks = ["@local/~/other/shared"]\n'})
+
+    with pytest.raises(BundleError) as caught:
+        run_bundle(bundle_dir, evals=["other"])
+
+    assert caught.value.problems == (
+        "evals/other.toml: tasks[0]: '@local/~/other/shared' is a store task, and a bundle's evals run only the "
+        "bundle's own tasks for now; run it on its own with agent-env task run --id '@local/~/other/shared'",
+    )
+    assert local_store().find_one("evals", Filter.of(id=f"{ROOT}/other")) is None
+
+
 def test_an_eval_that_isnt_selected_isnt_refused(bundle_dir):
     with namespace_routing():
         Task.put(id="shared-task", steps=[_Scored(id="check", version=None)])
@@ -427,6 +441,31 @@ def test_the_cli_dry_run_prints_what_the_run_would_write_and_run_and_exits_0(bun
     )
     assert not local_store().path.exists()
     assert _Scored.seen == []
+
+
+def test_the_cli_dry_run_reads_another_bundles_entity_and_says_why_an_agent_pinning_it_would_be_rewritten(
+        bundle_dir, quiet_logs):
+    image = "@local/~/other/solver-image"
+    layout(bundle_dir, {"agents/solver/agent.toml": f'image = "{image}"\n', "tasks/agent.json": json.dumps(
+        [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])})
+    with namespace_routing():
+        _put_image(image)
+        materialize(plan_bundle(resolve_bundle(parse_bundle(bundle_dir)), tasks=["agent"]))
+        _put_image(image)
+
+    result = CliRunner().invoke(cli, ["run", str(bundle_dir), "--task", "agent", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output.startswith(
+        DRY_RUN
+        + f"agents/solver: v2 (artifact {image} has a new version in the store (v1 → v2))\n"
+        "tasks/agent.json: v1, unchanged\n"
+        "\n"
+        "Store refs:\n"
+        f"  artifact {image} v2, the latest\n"
+        "Would run:\n"
+        "  tasks/agent.json v1\n"
+    )
 
 
 def test_the_cli_dry_run_prints_a_problem_as_one_line_and_exits_1(bundle_dir, quiet_logs):

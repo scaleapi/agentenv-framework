@@ -342,6 +342,23 @@ def test_an_env_naming_a_store_env_without_a_version_is_rewritten_when_the_store
     assert checks[f"{ROOT}/t"].unchanged
 
 
+def test_an_env_naming_another_bundles_env_without_a_version_is_rewritten_when_that_one_gets_a_new_one(
+        bundle_dir, monkeypatch, cli_routing):
+    monkeypatch.setattr("agent_env.env.registry.get_env_registry", lambda: {_NoteEnv.type: _NoteEnv})
+    rocket = "@local/~/other/rocket"
+    local_store().insert("envs", {"id": rocket, "version": 1, "type": _NoteEnv.type})
+    (bundle_dir / "envs/rack").mkdir()
+    (bundle_dir / "envs/rack/env.toml").write_text(f'type = "rack_ledger_test"\nenvs = ["{rocket}"]\n')
+    (bundle_dir / "tasks/t.json").write_text(_steps({"id": "rack", "type": "deploy_env", "env_id": "rack"}))
+    _run(bundle_dir)
+    local_store().insert("envs", {"id": rocket, "version": 2, "type": _NoteEnv.type})
+
+    checks = _run(bundle_dir)
+
+    assert checks[f"{ROOT}/rack"].reasons == (f"env {rocket} has a new version in the store (v1 → v2)",)
+    assert checks[f"{ROOT}/t"].unchanged
+
+
 def test_an_agent_is_rewritten_when_its_toml_changes_or_its_unpinned_store_image_does(bundle_dir):
     registry = get_config().get_document_store()
     registry.insert("artifacts", _image_document(1))

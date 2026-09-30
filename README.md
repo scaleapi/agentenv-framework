@@ -910,6 +910,8 @@ A bundle is a folder holding tasks and what they need, which `agent-env run` wri
 - `tasks/<name>.json`, a list of steps that refer to the bundle's entities by name;
 - `evals/<name>.toml`, with `tasks = [...]` naming the bundle's tasks.
 
+Anything else is named by its store id. Another bundle's entity is named by its `@local/…` id, such as `@local/~/other/greeting` for the `greeting` of a bundle at `~/other`, and read from the local store that bundle's runs write, like any store id.
+
 An `agent.toml` takes `image`, a store id or `{ artifact = "<id>", version = <n> }` to pin one, and optionally `default_env_vars` (string values) and a `[metadata]` table of `default_model` and `min_disk_size_gb`. The agent's card isn't authored: the image serves it when the agent deploys.
 
 ```toml
@@ -970,9 +972,10 @@ A rerun writes a new version only of what changed since the bundle last wrote it
   - Ctrl-C or SIGTERM during the runs cancels them: each run that started is marked `cancelled` in the store and torn down, a run that was waiting shows `didn't start`, the summary prints, and the command exits 130 (143 for SIGTERM). A second Ctrl-C stops the teardown and prints what is still up. From Python, `run_bundle()` raises `RunInterrupted`, a `KeyboardInterrupt` whose `result` holds the runs.
 
 Known limits:
-- An eval in a bundle runs only the bundle's own tasks. One that names a store task is refused; run that task with `agent-env task run`.
+- An eval in a bundle runs only the bundle's own tasks. One that names a store task, another bundle's included, is refused; run that task with `agent-env task run`.
 - A step that writes an entity under an id it makes up is refused when it runs, since that id isn't under `@local/`. This refuses `run_container_unit_tests_verifier`'s stdout artifacts and `collect_artifacts`, and `snapshot_env` unless the task names its `snapshot_id`. `verify_sandbox` writes nothing, so it runs.
-- A step's reference to one of the bundle's entities names no version, so it reads the latest version when the step runs. Another run of the same folder, made after an edit, can write a newer one first.
+- A step's reference to one of the bundle's entities names no version, so it reads the latest version when the step runs. Another run of the same folder, made after an edit, can write a newer one first. A step's reference to another bundle's entity reads its latest when the step runs too, while an agent is written with the version the run read, and is written again once that bundle writes a new one.
+- An `@local/…` id under the bundle's own root that the bundle doesn't write is refused without a store read, since it is most likely left over from a rename. So a bundle in a subfolder of another can't be named from it.
 - A dry run's versions and reasons hold for the stores as they are when it runs. It takes no lock, so another run writing the same ids can change them first, and it doesn't see what another bundle's pending run would write.
 - Teardown reaches only the sandboxes a run's context records. A `rubrics_verifier`'s judge, and an agent whose deploy was cancelled, terminate their own sandboxes but leave their local work folders. A run killed outright (`kill -9`) leaves everything it deployed.
 - A process a local sandbox's command detaches from itself (a double fork, `setsid`) outlives the command and the run.
