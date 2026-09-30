@@ -11,11 +11,26 @@ agent-env is a Python SDK and CLI for building, deploying and running agentic en
 
 ## Install
 
-Both packages are on PyPI. You need Python 3.11 or newer and, to run environments locally, a running Docker daemon:
+Both packages are on PyPI. You need Python 3.11 or newer and, to run environments locally, a running Docker daemon. With [uv](https://docs.astral.sh/uv/), install the `agent-env` command as a tool:
+
+```bash
+uv tool install agentenv-framework
+agent-env run hello
+```
+
+`agent-env run hello` runs the built-in hello task, which needs no Docker, model or configuration. To try it without installing anything, run it with uvx:
+
+```bash
+uvx --from agentenv-framework agent-env run hello
+```
+
+Or install it with pip, into a virtualenv:
 
 ```bash
 pip install agentenv-framework
 ```
+
+To use the SDK in your own project, add it as a dependency with `uv add agentenv-framework`. The explorer, `agent-env up`, needs the `explorer` extra (`uv tool install 'agentenv-framework[explorer]'`, or the same extra with uvx or pip) and an `.agentenv/config.toml` in the current folder or above it; an empty one keeps every local default.
 
 The distribution is named `agentenv-framework`, the import package is `agent_env` and the command is `agent-env`. It depends on `agentenv-framework-protocol`, whose import package is `agentenv_protocol`, and installs it too.
 
@@ -100,7 +115,7 @@ triage = "mycorp_demo.bundles"
 
 ### Plugin settings
 
-A plugin that needs settings of its own reads them from `[plugins.<package>]`, where `<package>` is its distribution name: the name `pip install` takes and `agent-env plugin list` prints. That table belongs to the plugin. agent-env reads nothing in it and checks none of its keys. Every other top-level table belongs to agent-env, which warns about one it does not read in `agent-env config show`, so a plugin keeps nothing of its own anywhere else.
+A plugin that needs settings of its own reads them from `[plugins.<package>]`, where `<package>` is its distribution name: the name `uv add` and `pip install` take and `agent-env plugin list` prints. That table belongs to the plugin. agent-env reads nothing in it and checks none of its keys. Every other top-level table belongs to agent-env, which warns about one it does not read in `agent-env config show`, so a plugin keeps nothing of its own anywhere else.
 
 ```toml
 [plugins.acme-agentenv-browser]

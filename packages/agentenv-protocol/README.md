@@ -1,7 +1,8 @@
 # agentenv-framework-protocol
 
 Open data-plane protocol and server SDK for agent environments. Install it with
-`pip install agentenv-framework-protocol`; the import package is `agentenv_protocol`.
+`uv add agentenv-framework-protocol` or `pip install agentenv-framework-protocol`; the import
+package is `agentenv_protocol`.
 
 An environment author writes a class with decorated methods and serves it:
 
