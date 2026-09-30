@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentenv-framework"
-version = "0.9.1252"
+version = "0.9.1253"
 description = "Agent environment package"
 readme = "README.md"
 license = "Apache-2.0"

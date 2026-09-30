@@ -15,12 +15,16 @@ set -euo pipefail
 : "${CIRCLE_PROJECT_USERNAME:?CIRCLE_PROJECT_USERNAME must be set}"
 : "${CIRCLE_PROJECT_REPONAME:?CIRCLE_PROJECT_REPONAME must be set}"
 
-REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${CIRCLE_PROJECT_USERNAME}/${CIRCLE_PROJECT_REPONAME}.git"
+REMOTE="https://x-access-token@github.com/${CIRCLE_PROJECT_USERNAME}/${CIRCLE_PROJECT_REPONAME}.git"
 MAIN_REF="refs/remotes/release/main"
 MAX_ATTEMPTS=3
 
 git config user.name  "${GH_APP_BOT_NAME}"
 git config user.email "${GH_APP_BOT_EMAIL}"
+# The token reaches git through a credential helper that reads it from the environment at
+# push time, so it is never part of a URL that git or this script could print. The user name
+# stays in the URL so CircleCI checkout's global https-to-ssh insteadOf rewrite does not match.
+git config credential.helper '!f() { echo username=x-access-token; echo "password=${GH_TOKEN}"; }; f'
 
 pip install --quiet tomlkit
 
