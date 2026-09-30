@@ -2,7 +2,8 @@
 
 Materializing first refuses every write this release has no writer for, so nothing is written for a bundle
 that can't be written whole. It needs the CLI's namespace routing, which sends ``@local`` writes to the
-``@local`` namespace's store. Holding the bundle's lock, it writes the entities in the plan's order, then
+``@local`` namespace's store. Holding the bundle's lock, it writes the entities in the plan's order, an image
+built from an entry's Dockerfile just before the entry, with ``docker build`` on this machine; then it
 builds and preflights every task before writing any of them, and writes the evals last, since they name the
 tasks. Each write goes through the ledger, so one whose inputs haven't changed reuses the version the bundle
 last wrote. A reused task keeps whatever its steps took from config when it was first written, such as a
@@ -12,18 +13,22 @@ rubrics verifier's default judge model.
 from __future__ import annotations
 
 import copy
+import shutil
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
 from agent_env.a2a_agent import A2AAgent
+from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.registry import canonical_type, get_artifact_registry
 from agent_env.entity_refs import EntityRef, RefRole, ref_sites
 from agent_env.eval import Eval, EvalTask
+from agent_env.store.ids import image_repository
 from agent_env.store.routing import namespace_routing_enabled
 from agent_env.task import Task
 from agent_env.task_step.registry import get_task_step_registry
+from agent_env.utils.docker_build import DockerBuildError, build_image
 
 from ._fs import relative, with_article
 from .authoring import AuthoringContext
@@ -60,11 +65,13 @@ def materialize(
     plan: Plan,
     *,
     on_wait: Callable[[], None] | None = None,
+    on_build: Callable[[Write], None] | None = None,
     on_write: Callable[[Materialized], None] | None = None,
 ) -> Materialization:
     """Write ``plan``'s entities, tasks and evals. The first write that fails stops it, and every earlier
     one stays: they're in the ledger, so the next run reuses them. ``on_wait`` is called when another run
-    holds a lock this one needs, and ``on_write`` after each write, reused or not."""
+    holds a lock this one needs, ``on_build`` before an image is built, and ``on_write`` after each write,
+    reused or not."""
     _refuse_unwritable(plan)
     if not namespace_routing_enabled():
         raise RuntimeError("materializing a bundle needs namespace routing, which the agent-env CLI turns on; "
@@ -82,7 +89,7 @@ def materialize(
 
     with materializing(plan.bundle.bundle, on_wait):
         for write in entities:
-            through_ledger(write, lambda: _WRITERS[write.kind](plan, write))
+            through_ledger(write, lambda: _write_entity(plan, write, on_build))
         built, problems = {}, []
         for write in tasks:
             with _noted(plan, write, "preflighting"):
@@ -95,6 +102,40 @@ def materialize(
         for write in evals:
             through_ledger(write, lambda: _WRITERS[write.kind](plan, write))
     return Materialization(plan, tuple(done[_key(write)] for write in plan.writes))
+
+
+def _write_entity(plan: Plan, write: Write, on_build: Callable[[Write], None] | None) -> int:
+    if not isinstance(write.source, BuiltImage):
+        return _WRITERS[write.kind](plan, write)
+    if on_build is not None:
+        on_build(write)
+    return _write_built_image(plan, write)
+
+
+def _write_built_image(plan: Plan, write: Write) -> int:
+    """Build the image an entry's Dockerfile describes, with the entry's folder as its build context, and
+    write it as a docker_image artifact: pushed to the image store, saved as a tarball, and its build context
+    kept for installing it into a running container."""
+    image = write.source
+    dockerfile = image.entry.path / image.dockerfile
+    tag = f"{image_repository(write.id)}:bundle"
+    try:
+        build_image(dockerfile, image.entry.path, tag, platform=None)
+    except DockerBuildError as e:
+        raise BundleError([f"{_path(plan, write)}: {_tail(str(e))}"]) from None
+    return DockerImageArtifact.put(
+        id=write.id, description=f"built from {_path(plan, write)}/{image.dockerfile}", image_name=tag,
+        build_context_path=str(image.entry.path), dockerfile_path=str(dockerfile),
+    ).version
+
+
+_BUILD_OUTPUT_TAIL_LINES = 40
+
+
+def _tail(message: str) -> str:
+    """A failed build's message, its first line and the end of docker's output."""
+    first, _, output = message.partition("\n")
+    return "\n".join([first, *output.splitlines()[-_BUILD_OUTPUT_TAIL_LINES:]])
 
 
 def _write_artifact(plan: Plan, write: Write) -> int:
@@ -141,15 +182,16 @@ _WRITERS: dict[BundleKind, Callable[[Plan, Write], int]] = {
 def _refuse_unwritable(plan: Plan) -> None:
     problems = [f"{_path(plan, write)}: writing {what} isn't supported yet"
                 for write in plan.writes if (what := _unwritable(write))]
+    if shutil.which("docker") is None:
+        problems.extend(f"{_path(plan, write)}: building its image from {write.source.dockerfile} needs docker, "
+                        "and it isn't on PATH" for write in plan.writes if isinstance(write.source, BuiltImage))
     if problems:
         raise BundleError(problems)
 
 
 def _unwritable(write: Write) -> str | None:
     """What ``write`` would write, when this release has no writer for it."""
-    if isinstance(write.source, BuiltImage):
-        return f"an image built from {write.source.dockerfile}"
-    if write.kind is BundleKind.TASK:
+    if isinstance(write.source, BuiltImage) or write.kind is BundleKind.TASK:
         return None
     if write.kind not in _WRITERS:
         return with_article(write.kind.value.removesuffix("s"))

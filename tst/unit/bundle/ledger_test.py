@@ -359,14 +359,9 @@ def test_the_ledger_never_touches_the_configured_store(bundle_dir, cli_routing):
     ({"artifacts/greeting/artifact.toml": 'type = "own_file_ledger_test"\n'}, None, GREETING),
     ({"envs/own/env.toml": 'type = "own_env_ledger_test"\n'},
      {"id": "own", "type": "deploy_env", "env_id": "own"}, f"{ROOT}/own"),
-    ({"envs/imaged/env.toml": 'type = "imaged_ledger_test"\n', "envs/imaged/Dockerfile": "FROM scratch\n"},
-     {"id": "imaged", "type": "deploy_env", "env_id": "imaged"}, f"{ROOT}/imaged__env_image"),
     ({"skills/pdf/SKILL.md": "---\nname: pdf\n---\n"},
      {"id": "pdf", "type": "load_artifact", "env_id": "tickets", "artifact_id": "pdf"}, f"{ROOT}/pdf"),
-    ({"agents/solver/Dockerfile": "FROM scratch\n"},
-     {"id": "agent", "type": "deploy_agent", "env_ids": ["tickets"], "a2a_agent_id": "solver"},
-     f"{ROOT}/solver__agent_image"),
-], ids=["artifact-with-own-from_toml", "env-with-own-from_toml", "built-image", "skill", "agent-image"])
+], ids=["artifact-with-own-from_toml", "env-with-own-from_toml", "skill"])
 def test_a_write_whose_inputs_arent_tracked_is_written_every_run(bundle_dir, files, step, id):
     for rel, text in files.items():
         (bundle_dir / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -376,6 +371,26 @@ def test_a_write_whose_inputs_arent_tracked_is_written_every_run(bundle_dir, fil
 
     assert _run(bundle_dir)[id].reasons == UNTRACKED
     assert _run(bundle_dir)[id].reasons == UNTRACKED
+
+
+def test_a_built_image_is_made_from_every_file_of_its_folder_the_toml_too(bundle_dir):
+    (bundle_dir / "agents/solver").mkdir(parents=True)
+    (bundle_dir / "agents/solver/Dockerfile").write_text("FROM scratch\nCOPY run.sh /\n")
+    (bundle_dir / "agents/solver/run.sh").write_text("echo hi\n")
+    (bundle_dir / "tasks/t.json").write_text(
+        _steps({"id": "agent", "type": "deploy_agent", "env_ids": ["tickets"], "a2a_agent_id": "solver"}))
+    image, agent = f"{ROOT}/solver__agent_image", f"{ROOT}/solver"
+
+    assert _run(bundle_dir)[image].reasons == ("new",)
+    assert _run(bundle_dir)[image].unchanged
+    (bundle_dir / "agents/solver/agent.toml").write_text('[metadata]\ndefault_model = "m"\n')
+    retoml = _run(bundle_dir)
+    (bundle_dir / "agents/solver/run.sh").write_text("echo bye\n")
+    rebuilt = _run(bundle_dir)
+
+    assert retoml[image].reasons == ("files added: agent.toml",) and not retoml[agent].unchanged
+    assert rebuilt[image].reasons == ("files changed: run.sh",)
+    assert not rebuilt[agent].unchanged
 
 
 @pytest.mark.parametrize("other", [
