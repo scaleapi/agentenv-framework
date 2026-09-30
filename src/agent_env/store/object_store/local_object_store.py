@@ -49,6 +49,7 @@ _LOCK_STRIPES = 256  # keys share this many lock files, so locking leaves no fil
 _STAGED_PREFIX = "staged-"
 _STAGED_GRACE_SECONDS = 60  # a staged file younger than this may not be locked by its writer yet
 _GRANT_MODES = ("auto", "off")
+_MAX_GRANT_LIFETIME_SECONDS = 7 * 24 * 60 * 60  # as S3's; a grant cannot outlive its process anyway
 _LOCAL_SANDBOX_TYPE = "local"  # LocalSandbox.type: containers on this host's Docker, which trust the local CA
 
 logger = logging.getLogger(__name__)
@@ -95,7 +96,7 @@ class LocalFilesystemObjectStore(ObjectStore):
             check_local_host(grant_advertise_host)
         self._root = Path(root) if root is not None else state_root() / "object_store"
         self.supports_transfer_grants = grants == "auto"
-        self.grant_lifetime_seconds = grant_lifetime(grant_lifetime_seconds)
+        self.grant_lifetime_seconds = grant_lifetime(grant_lifetime_seconds, most=_MAX_GRANT_LIFETIME_SECONDS)
         self._grant_bind_host = grant_bind_host
         self._grant_advertise_host = grant_advertise_host
         self._swept = False

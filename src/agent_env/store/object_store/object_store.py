@@ -16,13 +16,20 @@ from agentenv_protocol.transfers import (
 
 DEFAULT_CONTENT_TYPE = "application/octet-stream"
 DEFAULT_GRANT_LIFETIME_SECONDS = 12 * 60 * 60
+# The shortest a store's grants may be set to last: longer than the ten minutes agent-env waits for an agent
+# to move an object through one.
+MIN_GRANT_LIFETIME_SECONDS = 15 * 60
 
 
 def grant_lifetime(seconds: object, *, most: int | None = None) -> int:
-    """``seconds`` checked as a store's ``grant_lifetime_seconds`` setting: a positive whole number of
-    seconds, and no more than ``most`` where the store cannot sign for longer."""
-    if isinstance(seconds, bool) or not isinstance(seconds, int) or seconds <= 0:
-        raise ValueError(f"grant_lifetime_seconds must be a positive whole number of seconds, got {seconds!r}")
+    """``seconds`` checked as a store's ``grant_lifetime_seconds`` setting: a whole number of seconds, at
+    least ``MIN_GRANT_LIFETIME_SECONDS``, and no more than ``most`` where the store cannot sign for longer."""
+    if isinstance(seconds, bool) or not isinstance(seconds, int):
+        raise ValueError(f"grant_lifetime_seconds must be a whole number of seconds, got {seconds!r}")
+    if seconds < MIN_GRANT_LIFETIME_SECONDS:
+        raise ValueError(
+            f"grant_lifetime_seconds must be at least {MIN_GRANT_LIFETIME_SECONDS}, to outlast a transfer; got {seconds}"
+        )
     if most is not None and seconds > most:
         raise ValueError(f"grant_lifetime_seconds can be at most {most} for this store, got {seconds}")
     return seconds

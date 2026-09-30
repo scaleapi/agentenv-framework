@@ -6,10 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_env.a2a_agent.object_transfer import read_object, write_object
+from agent_env.a2a_agent.object_transfer import TRANSFER_TIMEOUT_SECONDS, read_object, write_object
 from agent_env.config import Config
 from agent_env.store import LocalFilesystemObjectStore
-from agent_env.store.object_store import DEFAULT_GRANT_LIFETIME_SECONDS, S3ObjectStore
+from agent_env.store.object_store import DEFAULT_GRANT_LIFETIME_SECONDS, MIN_GRANT_LIFETIME_SECONDS, S3ObjectStore
 from agent_env.store.routing import LocalRunObjectStore
 from tst.util.granting_object_store import GrantingObjectStore
 
@@ -46,12 +46,25 @@ def test_a_caller_can_still_name_a_lifetime():
     assert _lasts(store.issue_read_grant(f"s3://{BUCKET}/k", expires_in=60).expires_at, 60)
 
 
-@pytest.mark.parametrize("seconds", [0, -1, True, 3600.0, "3600"])
-def test_a_lifetime_that_is_not_a_positive_whole_number_of_seconds_is_refused(seconds, tmp_path):
-    with pytest.raises(ValueError, match="positive whole number"):
+@pytest.mark.parametrize("seconds, why", [
+    (True, "whole number"), (3600.0, "whole number"), ("3600", "whole number"),
+    (0, "at least 900"), (-1, "at least 900"), (899, "at least 900"),
+])
+def test_a_lifetime_that_is_not_whole_seconds_or_is_too_short_to_outlast_a_transfer_is_refused(seconds, why, tmp_path):
+    with pytest.raises(ValueError, match=why):
         S3ObjectStore(_StubS3(), BUCKET, grant_lifetime_seconds=seconds)
-    with pytest.raises(ValueError, match="positive whole number"):
+    with pytest.raises(ValueError, match=why):
         LocalFilesystemObjectStore(str(tmp_path), grant_lifetime_seconds=seconds)
+
+
+def test_the_shortest_lifetime_outlasts_agent_envs_wait_for_a_transfer():
+    assert TRANSFER_TIMEOUT_SECONDS < MIN_GRANT_LIFETIME_SECONDS <= DEFAULT_GRANT_LIFETIME_SECONDS
+
+
+def test_a_local_lifetime_beyond_seven_days_is_refused(tmp_path):
+    LocalFilesystemObjectStore(str(tmp_path), grant_lifetime_seconds=7 * 24 * 60 * 60)
+    with pytest.raises(ValueError, match="at most 604800"):
+        LocalFilesystemObjectStore(str(tmp_path), grant_lifetime_seconds=7 * 24 * 60 * 60 + 1)
 
 
 def test_an_s3_lifetime_beyond_sigv4s_seven_days_is_refused():
@@ -70,10 +83,19 @@ def test_agent_env_grants_for_the_issuing_stores_lifetime(tmp_path):
 
 def test_a_local_run_grants_for_the_lifetime_of_the_store_that_owns_the_object(tmp_path):
     local = GrantingObjectStore(str(tmp_path))
-    local.grant_lifetime_seconds = 600
+    local.grant_lifetime_seconds = 1800
     routed = LocalRunObjectStore(S3ObjectStore(_StubS3(), BUCKET, grant_lifetime_seconds=900), local)
     assert _lasts(routed.issue_read_grant(f"s3://{BUCKET}/k").expires_at, 900)
-    assert _lasts(routed.issue_read_grant(local.put("k", b"v")).expires_at, 600)
+    assert _lasts(routed.issue_read_grant(local.put("k", b"v")).expires_at, 1800)
+
+
+def test_a_local_run_leaves_a_custom_stores_own_default_alone(tmp_path):
+    class _CustomStore(S3ObjectStore):  # a store written before lifetimes were a setting
+        def issue_read_grant(self, object_url, *, expires_in: int = 300):
+            return super().issue_read_grant(object_url, expires_in=expires_in)
+
+    routed = LocalRunObjectStore(_CustomStore(_StubS3(), BUCKET), GrantingObjectStore(str(tmp_path)))
+    assert _lasts(routed.issue_read_grant(f"s3://{BUCKET}/k").expires_at, 300)
 
 
 def test_config_toml_sets_the_local_stores_grant_lifetime(monkeypatch, tmp_path):
