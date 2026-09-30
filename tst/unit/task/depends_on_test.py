@@ -56,14 +56,16 @@ def test_an_entry_is_a_step_id_or_its_object_form(entry):
     ({"task_step_id": "a"}, "depends_on is a list of step ids, not {'task_step_id': 'a'}"),
     ([7], 'a depends_on entry is a step id or {"task_step_id": "<step id>"}, not 7'),
     ([{"id": "a"}], 'a depends_on entry is a step id or {"task_step_id": "<step id>"}, not {\'id\': \'a\'}'),
-    ([{"task_step_id": 7}], 'a depends_on entry is a step id or {"task_step_id": "<step id>"}, not '
-     "{'task_step_id': 7}"),
 ])
 def test_anything_else_is_refused_saying_what_it_takes(depends_on, problem):
     with pytest.raises(ValueError, match=re.escape(problem)):
         _step("b", depends_on)
     with pytest.raises(ValueError, match=re.escape(problem)):
         _Step.from_dict({"id": "b", "depends_on": depends_on})
+
+
+def test_the_object_form_reads_whatever_id_it_holds_as_it_always_has():
+    assert _Step.from_dict({"id": "b", "depends_on": [{"task_step_id": 7}]}).depends_on == [TaskStepDependency(7)]
 
 
 def test_a_step_id_is_stored_in_the_object_form_and_reads_back(local_stores):

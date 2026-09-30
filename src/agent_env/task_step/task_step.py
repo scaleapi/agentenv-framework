@@ -21,10 +21,11 @@ class TaskStepDependency:
     @classmethod
     def from_dict(cls, data: str | dict[str, Any]) -> "TaskStepDependency":
         """One ``depends_on`` entry: a step id, or ``{"task_step_id": <step id>}``."""
-        step_id = data.get("task_step_id") if isinstance(data, dict) else data
-        if not isinstance(step_id, str):
-            raise ValueError(f'a depends_on entry is a step id or {{"task_step_id": "<step id>"}}, not {data!r}')
-        return cls(task_step_id=step_id)
+        if isinstance(data, str):
+            return cls(task_step_id=data)
+        if isinstance(data, dict) and "task_step_id" in data:
+            return cls(task_step_id=data["task_step_id"])
+        raise ValueError(f'a depends_on entry is a step id or {{"task_step_id": "<step id>"}}, not {data!r}')
 
 
 def dependencies(raw: Any) -> list[TaskStepDependency] | None:
