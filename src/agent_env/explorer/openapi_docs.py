@@ -237,6 +237,6 @@ def docs_metadata(schema: dict[str, Any]) -> dict[str, Any]:
         "openapi_version": schema.get("openapi", ""),
         "versions": {
             "agentenv-framework": _package_version("agentenv-framework"),
-            "agentenv-protocol": _package_version("agentenv-framework-protocol"),
+            "agentenv-protocol": _package_version("agentenv-framework-protocol") or _package_version("agentenv-protocol"),
         },
     }
