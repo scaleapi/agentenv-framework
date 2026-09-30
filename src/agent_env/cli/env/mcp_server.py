@@ -1,6 +1,5 @@
 import asyncio
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -8,17 +7,16 @@ import click
 
 from agent_env.artifact import DockerImageArtifact, EnvironmentArtifact
 from agent_env.cli.utils import (
-    DEFAULT_BUILD_PLATFORM,
     deployed_env_from_instance,
     build_platform_option,
     detect_env_metadata,
-    docker_build_platform_args,
     env_provider_type_option,
     environment_name_options,
     resolve_environment_name,
     skips_local_validation,
 )
 from agent_env.utils.card_naming import card_name_from_github, card_name_from_source
+from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM, build_image
 from agent_env.env import Env, MCPServerEnv
 
 
@@ -194,15 +192,7 @@ def put(env_id: str, dockerfile: str | None, context_path: str | None, dockerfil
     image_tag = f"mcp-server-{env_id}"
 
     click.echo(f"Building MCP server Docker image...")
-    result = subprocess.run(
-        ["docker", "build", *docker_build_platform_args(build_platform),
-         "-f", str(dockerfile_path), "-t", image_tag, str(context)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        click.echo(f"Docker build failed: {result.stderr}", err=True)
-        sys.exit(1)
+    build_image(dockerfile_path, context, image_tag, platform=build_platform)
 
     click.echo(f"Creating DockerImageArtifact...")
     artifact = DockerImageArtifact.put(

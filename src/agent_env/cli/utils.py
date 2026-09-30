@@ -10,8 +10,7 @@ from agent_env.providers.env_providers.env_provider import _env_provider_class
 from agent_env.providers.env_providers.env_server_provider import EnvironmentServerProvider
 from agent_env.store.base import NotFoundError
 from agent_env.store.ids import is_local_id
-
-DEFAULT_BUILD_PLATFORM = "linux/amd64"
+from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM
 
 
 def build_platform_option(f):
@@ -33,11 +32,6 @@ def build_platform_option(f):
             "Apple Silicon; pass an empty string to omit --platform entirely."
         ),
     )(f)
-
-
-def docker_build_platform_args(platform: str | None) -> list[str]:
-    """['--platform', <platform>] when a platform is set, else [] (host-native build)."""
-    return ["--platform", platform] if platform else []
 
 
 def env_provider_type_option(help: str, env_type: str = "mcp_server"):

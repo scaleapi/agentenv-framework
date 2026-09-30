@@ -116,7 +116,7 @@ def test_mcp_put_derives_name_from_card_when_flag_omitted(tmp_path):
         raise SystemExit(0)
 
     with patch("agent_env.cli.env.mcp_server.card_name_from_source", return_value="items") as derive, \
-            patch("agent_env.cli.env.mcp_server.subprocess.run", return_value=MagicMock(returncode=0, stdout="", stderr="")), \
+            patch("agent_env.cli.env.mcp_server.build_image"), \
             patch("agent_env.cli.env.mcp_server.DockerImageArtifact.put", return_value=MagicMock(id="a", version=1)), \
             patch("agent_env.cli.env.mcp_server.detect_env_metadata", return_value={}), \
             patch("agent_env.cli.env.mcp_server.MCPServerEnv.put", side_effect=_capture):
@@ -141,7 +141,7 @@ def test_website_put_derives_name_from_card_when_flag_omitted(tmp_path):
         raise SystemExit(0)
 
     with patch("agent_env.cli.env.website.card_name_from_source", return_value="webitems") as derive, \
-            patch("agent_env.cli.env.website.subprocess.run", return_value=MagicMock(returncode=0, stdout="", stderr="")), \
+            patch("agent_env.cli.env.website.build_image"), \
             patch("agent_env.cli.env.website.DockerImageArtifact.put", return_value=MagicMock(id="a", version=1)), \
             patch("agent_env.cli.env.website.detect_env_metadata", return_value={}), \
             patch("agent_env.cli.env.website.WebsiteEnv.put", side_effect=_capture):

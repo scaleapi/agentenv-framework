@@ -1,14 +1,14 @@
 """CLI commands for ServiceDBEnv."""
 
-import subprocess
 from pathlib import Path
 
 import click
 
 from agent_env.artifact import DockerImageArtifact
-from agent_env.cli.utils import build_platform_option, detect_env_metadata, docker_build_platform_args
+from agent_env.cli.utils import build_platform_option, detect_env_metadata
 from agent_env.env.envs.service_db import ServiceDBEnv
 from agent_env.config import get_config
+from agent_env.utils.docker_build import build_image
 
 # Path to ServiceDB Dockerfile
 SERVICE_DB_DOCKERFILE = Path(__file__).parent.parent.parent / "env" / "envs" / "service_db" / "Dockerfile"
@@ -37,17 +37,7 @@ def put(env_id: str, metadata_pairs: tuple[str, ...], build_platform: str):
     click.echo(f"Building ServiceDB image from {SERVICE_DB_DOCKERFILE}...")
 
     # Build Docker image
-    result = subprocess.run(
-        ["docker", "build", *docker_build_platform_args(build_platform),
-         "-f", str(SERVICE_DB_DOCKERFILE),
-         "-t", SERVICE_DB_IMAGE_NAME,
-         str(SERVICE_DB_DOCKERFILE.parent)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        click.echo(f"Docker build failed: {result.stderr}", err=True)
-        raise click.Abort()
+    build_image(SERVICE_DB_DOCKERFILE, SERVICE_DB_DOCKERFILE.parent, SERVICE_DB_IMAGE_NAME, platform=build_platform)
     click.echo("Docker build successful")
 
     # Create DB DockerImageArtifact
@@ -61,17 +51,7 @@ def put(env_id: str, metadata_pairs: tuple[str, ...], build_platform: str):
 
     # Build db-web image (build instead of pull to avoid docker save manifest issues on Apple Silicon)
     click.echo(f"Building db-web image from {DB_WEB_DOCKERFILE}...")
-    result = subprocess.run(
-        ["docker", "build", *docker_build_platform_args(build_platform),
-         "-f", str(DB_WEB_DOCKERFILE),
-         "-t", DB_WEB_IMAGE_NAME,
-         str(DB_WEB_DOCKERFILE.parent)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        click.echo(f"db-web build failed: {result.stderr}", err=True)
-        raise click.Abort()
+    build_image(DB_WEB_DOCKERFILE, DB_WEB_DOCKERFILE.parent, DB_WEB_IMAGE_NAME, platform=build_platform)
     click.echo("db-web build successful")
 
     # Create db-web DockerImageArtifact
@@ -85,17 +65,7 @@ def put(env_id: str, metadata_pairs: tuple[str, ...], build_platform: str):
 
     # Build db-mcp image (PostgreSQL MCP server for direct DB access)
     click.echo(f"Building db-mcp image from {DB_MCP_DOCKERFILE}...")
-    result = subprocess.run(
-        ["docker", "build", *docker_build_platform_args(build_platform),
-         "-f", str(DB_MCP_DOCKERFILE),
-         "-t", DB_MCP_IMAGE_NAME,
-         str(DB_MCP_DOCKERFILE.parent)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        click.echo(f"db-mcp build failed: {result.stderr}", err=True)
-        raise click.Abort()
+    build_image(DB_MCP_DOCKERFILE, DB_MCP_DOCKERFILE.parent, DB_MCP_IMAGE_NAME, platform=build_platform)
     click.echo("db-mcp build successful")
 
     # Create db-mcp DockerImageArtifact

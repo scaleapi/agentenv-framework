@@ -11,6 +11,8 @@ import sys
 from click.testing import CliRunner
 from unittest.mock import MagicMock, patch
 
+from agent_env.utils.docker_build import DockerBuildError
+
 
 def test_old_cli_path_no_longer_re_exports_the_helper():
     # The compatibility re-export is retired: its consumer, a sandbox proxy
@@ -95,8 +97,7 @@ def test_service_db_put_falls_back_to_the_config_default():
     cfg = _config(default_service_db_env_id="svc-db-from-config")
     with patch("agent_env.cli.env.service_db.get_config", return_value=cfg), \
          patch("agent_env.cli.env.service_db.DockerImageArtifact") as artifact, \
-         patch("agent_env.cli.env.service_db.subprocess.run") as run:
-        run.return_value = MagicMock(returncode=0)
+         patch("agent_env.cli.env.service_db.build_image") as run:
         artifact.put.side_effect = RuntimeError("stop once the id is recorded")
         res = CliRunner().invoke(service_db, ["put"])
 
@@ -108,8 +109,8 @@ def test_service_db_put_explicit_id_wins_and_skips_the_config_read():
     from agent_env.cli.env.service_db import service_db
 
     with patch("agent_env.cli.env.service_db.get_config") as get_config, \
-         patch("agent_env.cli.env.service_db.subprocess.run") as run:
-        run.return_value = MagicMock(returncode=1, stderr="stop here")
+         patch("agent_env.cli.env.service_db.build_image") as run:
+        run.side_effect = DockerBuildError("stop here")
         CliRunner().invoke(service_db, ["put", "--id", "explicit-env"])
 
     get_config.assert_not_called()
@@ -121,8 +122,7 @@ def test_website_browser_put_falls_back_to_the_config_default():
     cfg = _config(default_website_browser_env_id="wb-from-config")
     with patch("agent_env.config.get_config", return_value=cfg), \
          patch("agent_env.cli.env.website_browser.DockerImageArtifact") as artifact, \
-         patch("agent_env.cli.env.website_browser.subprocess.run") as run:
-        run.return_value = MagicMock(returncode=0)
+         patch("agent_env.cli.env.website_browser.build_image") as run:
         artifact.put.side_effect = RuntimeError("stop once the id is recorded")
         res = CliRunner().invoke(website_browser, ["put"])
 

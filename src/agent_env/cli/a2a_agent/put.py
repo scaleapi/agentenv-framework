@@ -1,4 +1,3 @@
-import subprocess
 import sys
 from pathlib import Path
 
@@ -6,7 +5,8 @@ import click
 
 from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact import DockerImageArtifact
-from agent_env.cli.utils import build_platform_option, detect_env_metadata, docker_build_platform_args, skips_local_validation
+from agent_env.cli.utils import build_platform_option, detect_env_metadata, skips_local_validation
+from agent_env.utils.docker_build import build_image
 
 
 @click.command()
@@ -44,15 +44,7 @@ def put(agent_id: str, dockerfile: str, context_path: str | None, env_var_pairs:
     image_tag = f"a2a-agent-{agent_id}"
 
     click.echo(f"Building Docker image...")
-    result = subprocess.run(
-        ["docker", "build", *docker_build_platform_args(build_platform),
-         "-f", str(dockerfile_path), "-t", image_tag, str(context)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        click.echo(f"Docker build failed: {result.stderr}", err=True)
-        sys.exit(1)
+    build_image(dockerfile_path, context, image_tag, platform=build_platform)
 
     click.echo(f"Creating DockerImageArtifact...")
     artifact = DockerImageArtifact.put(

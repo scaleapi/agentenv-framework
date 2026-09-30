@@ -1,6 +1,5 @@
 import asyncio
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -8,17 +7,16 @@ import click
 
 from agent_env.artifact import DockerImageArtifact, EnvironmentArtifact
 from agent_env.cli.utils import (
-    DEFAULT_BUILD_PLATFORM,
     deployed_env_from_instance,
     build_platform_option,
     detect_env_metadata,
-    docker_build_platform_args,
     env_provider_type_option,
     environment_name_options,
     resolve_environment_name,
     skips_local_validation,
 )
 from agent_env.utils.card_naming import card_name_from_github, card_name_from_source
+from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM, build_image
 from agent_env.env import Env
 from agent_env.env.envs.website import WebsiteEnv
 from agent_env.providers import get_env_sandbox_provider
@@ -152,15 +150,7 @@ def put(
         click.echo(f"Derived environment_name={environment_name!r} from the environment card.")
 
     click.echo(f"Building website backend Docker image...")
-    result = subprocess.run(
-        ["docker", "build", *docker_build_platform_args(build_platform),
-         "-f", str(backend_dockerfile_path), "-t", backend_tag, str(backend_ctx)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        click.echo(f"Backend Docker build failed: {result.stderr}", err=True)
-        sys.exit(1)
+    build_image(backend_dockerfile_path, backend_ctx, backend_tag, platform=build_platform)
 
     click.echo(f"Creating backend DockerImageArtifact...")
     backend_artifact = DockerImageArtifact.put(
@@ -175,15 +165,7 @@ def put(
     frontend_tag = f"website-frontend-{env_id}"
 
     click.echo(f"Building website frontend Docker image...")
-    result = subprocess.run(
-        ["docker", "build", *docker_build_platform_args(build_platform),
-         "-f", str(frontend_dockerfile_path), "-t", frontend_tag, str(frontend_ctx)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        click.echo(f"Frontend Docker build failed: {result.stderr}", err=True)
-        sys.exit(1)
+    build_image(frontend_dockerfile_path, frontend_ctx, frontend_tag, platform=build_platform)
 
     click.echo(f"Creating frontend DockerImageArtifact...")
     frontend_artifact = DockerImageArtifact.put(
