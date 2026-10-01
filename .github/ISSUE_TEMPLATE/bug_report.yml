@@ -29,6 +29,11 @@ body:
     validations:
       required: true
   - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots
+      description: Optional. If a picture helps, for example of the explorer or a terminal, drag it into this box.
+  - type: textarea
     id: plugin-list
     attributes:
       label: Output of agent-env plugin list
