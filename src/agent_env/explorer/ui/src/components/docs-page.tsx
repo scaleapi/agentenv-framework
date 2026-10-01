@@ -486,9 +486,12 @@ function OverviewPane({
                   ['Source', 'Served live by this hub'],
                   ['Generated', formatTimestamp(metadata?.generated_at)],
                   ['OpenAPI', metadata?.openapi_version ?? ''],
-                  ['agent-env', metadata?.versions?.['agent-env'] ?? ''],
                   [
-                    'agentenv-protocol',
+                    'agentenv-framework',
+                    metadata?.versions?.['agentenv-framework'] ?? '',
+                  ],
+                  [
+                    'agentenv-framework-protocol',
                     metadata?.versions?.['agentenv-protocol'] ?? '',
                   ],
                 ]
