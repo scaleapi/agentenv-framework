@@ -66,6 +66,7 @@ def _context(*, bundle: bool) -> TaskStepContext:
             agent_name="agent",
             api_url="https://agent",
             a2a_url="https://agent",
+            sandbox_type="local",
             a2a_card={
                 "capabilities": {
                     "extensions": [

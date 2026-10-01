@@ -11,10 +11,12 @@ import httpx
 import pytest
 from pytest_socket import enable_socket
 
+from agent_env.a2a_agent import object_transfer
+from agent_env.a2a_agent.object_transfer import TransferCall, invoke_transfer
 from agent_env.config.paths import state_root
 from agent_env.store import LocalFilesystemObjectStore
 from agent_env.store.object_store.local_grants import server as server_module
-from agent_env.store.object_store.local_grants.server import default_bind_host, grant_server
+from agent_env.store.object_store.local_grants.server import default_bind_host, grant_server, unreachable_hint
 from agent_env.store.object_store.local_grants.tls import local_ca
 from tst.store import object_conformance
 
@@ -308,3 +310,28 @@ class TestDefaultBindHost:
         monkeypatch.setattr(server_module.subprocess, "run", fail)
         assert default_bind_host() == "127.0.0.1"
         assert "grant_bind_host" in caplog.text
+
+
+def test_the_unreachable_hint_names_the_server_and_never_a_grant(store):
+    grant = store.issue_read_grant(store.put("k", b"v"))
+    hint = unreachable_hint({"objects": {"trajectory": {"read": grant.model_dump(mode="json")}}})
+    assert grant.url.split("/v1/")[0] in hint
+    assert "listens on 127.0.0.1" in hint and "grant_bind_host" in hint
+    assert grant.url.rsplit("/", 1)[1] not in hint
+    assert unreachable_hint({"objects": {"read": {"url": "https://bucket.example/obj"}}}) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code, hinted", [("transfer_unavailable", True), ("transfer_rejected", False)])
+async def test_an_agent_that_could_not_reach_the_grant_server_is_told_where_to_look(store, monkeypatch, code, hinted):
+    grant = store.issue_read_grant(store.put("k", b"v"))
+    answer = httpx.Response(502, json={"error": {"code": code, "message": "m", "retryable": True}})
+    client = httpx.AsyncClient
+    monkeypatch.setattr(
+        object_transfer.httpx, "AsyncClient", lambda **kw: client(transport=httpx.MockTransport(lambda _: answer))
+    )
+    call = TransferCall("objects", {"objects": {"read": grant.model_dump(mode="json")}})
+    with pytest.raises(httpx.HTTPStatusError) as raised:
+        await invoke_transfer("http://agent.test/ext", call, verb="POST", operation="snapshot load", timeout=5)
+    assert str(raised.value).startswith(f"snapshot load failed with HTTP 502: {code}")
+    assert ("local grant server" in str(raised.value)) is hinted

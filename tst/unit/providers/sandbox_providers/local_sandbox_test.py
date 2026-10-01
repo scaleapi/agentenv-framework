@@ -13,6 +13,47 @@ from agent_env.config import reset_config, set_object_store
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER, SANDBOX_MODE_VM
 from agent_env.store import LocalFilesystemObjectStore
+from agent_env.store.object_store.local_grants.tls import local_ca
+from agent_env.store.routing import LocalRunObjectStore
+from agent_env.a2a_agent import a2a_agent as a2a_agent_module
+from agent_env.a2a_agent.a2a_agent import A2AAgent
+from tst.unit.store.fakes import FakeObjectStore
+
+_real_copy_into_container = ls._copy_into_container  # before the fixtures below replace them
+_real_local_grant_trust = ls.local_grant_trust
+
+
+@pytest.fixture(autouse=True)
+def copies(monkeypatch):
+    """What create_container would ``docker cp`` into its container, recorded instead of run; the configured
+    store is taken to hand out local grants."""
+    recorded: list[tuple] = []
+    monkeypatch.setattr(ls, "_copy_into_container", lambda *args: recorded.append(args))
+    monkeypatch.setattr(ls, "local_grant_trust", lambda: local_ca().trust_dir)
+    return recorded
+
+
+class _StubImageStore:
+    def auth(self, image_name):
+        return None
+
+
+class _StubConfig:
+    def get_image_store(self):
+        return _StubImageStore()
+
+
+class _ScriptedProvider(LocalSandboxProvider):
+    """Creates a recording sandbox under ``work_dir`` in place of a VM."""
+
+    def __init__(self, work_dir: Path) -> None:
+        self.work_dir = work_dir
+        self.made: list[_RecordingLocalSandbox] = []
+
+    async def create_vm(self, **kwargs):
+        sandbox = _RecordingLocalSandbox(work_dir=self.work_dir)
+        self.made.append(sandbox)
+        return sandbox
 
 
 @pytest.fixture(autouse=True)
@@ -411,7 +452,7 @@ async def test_create_sandbox_splices_host_gateway_flag(tmp_path: Path, monkeypa
             return sb
 
     await _RecordingProvider().create_sandbox(image_name="img:v1", port=8000, env={"K": "v"})
-    run_cmd = next(s for s in recorded if "docker run" in s)
+    run_cmd = next(s for s in recorded if "docker create" in s)
     assert "--add-host host.docker.internal:host-gateway" in run_cmd
 
 
@@ -476,7 +517,7 @@ async def test_create_container_publishes_the_allocated_host_port(monkeypatch, t
     await _RecordingProvider().create_sandbox(image_name="img:v1", port=8000, env={})
 
     assert made[0].host_port(8000) == 41337
-    run_cmd = next(s for s in recorded if "docker run" in s)
+    run_cmd = next(s for s in recorded if "docker create" in s)
     assert "-p 127.0.0.1:41337:8000 -p 172.17.0.1:41337:8000 " in run_cmd
 
 
@@ -488,8 +529,8 @@ async def test_an_agent_placed_on_a_local_vm_publishes_only_on_the_host_ips(monk
 
     await agent._run_container("img:1", 8000, {})
 
-    [script] = agent._sandbox.scripts
-    assert "-p 127.0.0.1:8000:8000 -p 172.17.0.1:8000:8000 " in script
+    create = agent._sandbox.scripts[0]  # then started once it trusts the local CA
+    assert "-p 127.0.0.1:8000:8000 -p 172.17.0.1:8000:8000 " in create
 
 
 @pytest.fixture
@@ -706,6 +747,146 @@ async def test_a_command_cancelled_while_it_spawns_is_still_stopped(tmp_path: Pa
 
     with pytest.raises(ProcessLookupError):
         os.kill(int(pid_file.read_text()), 0)
+
+
+@pytest.mark.asyncio
+async def test_a_container_is_created_given_the_local_ca_then_started(tmp_path, monkeypatch, copies):
+    """The CA's trust files are in place before the container's first process runs, and its TLS clients
+    are pointed at them, so it can use the local object store's grants."""
+    import agent_env.config as cfg
+
+    monkeypatch.setattr(cfg, "get_config", lambda: _StubConfig())
+    provider = _ScriptedProvider(tmp_path)
+    sandbox = await provider.create_container(image_name="img:v1", port=8000, env={"K": "v"})
+
+    create, start = [s for s in provider.made[0].scripts if s.startswith(("docker create", "docker start"))]
+    assert "docker run" not in "".join(provider.made[0].scripts)
+    for flag in (
+        "-e SSL_CERT_FILE=/etc/agentenv/ca-bundle.pem",
+        "-e REQUESTS_CA_BUNDLE=/etc/agentenv/ca-bundle.pem",
+        "-e NODE_EXTRA_CA_CERTS=/etc/agentenv/ca.pem",
+        "-e K=v",
+    ):
+        assert flag in create
+    assert copies == [(local_ca().trust_dir, sandbox.container_name, "/etc/agentenv")]
+    assert start == f"docker start {sandbox.container_name} > /dev/null"
+    assert sandbox.mode == SANDBOX_MODE_CONTAINER
+
+
+@pytest.mark.asyncio
+async def test_a_trust_variable_the_caller_sets_wins(tmp_path, monkeypatch):
+    import agent_env.config as cfg
+
+    monkeypatch.setattr(cfg, "get_config", lambda: _StubConfig())
+    provider = _ScriptedProvider(tmp_path)
+    await provider.create_container(image_name="img:v1", port=8000, env={"SSL_CERT_FILE": "/own/roots.pem"})
+
+    create = next(s for s in provider.made[0].scripts if s.startswith("docker create"))
+    assert "-e SSL_CERT_FILE=/own/roots.pem" in create
+    assert "SSL_CERT_FILE=/etc/agentenv" not in create
+
+
+@pytest.mark.asyncio
+async def test_a_failed_copy_removes_the_created_container(tmp_path, monkeypatch):
+    import agent_env.config as cfg
+
+    monkeypatch.setattr(cfg, "get_config", lambda: _StubConfig())
+
+    def fail(*args):
+        raise RuntimeError("no such container")
+
+    monkeypatch.setattr(ls, "_copy_into_container", fail)
+    provider = _ScriptedProvider(tmp_path)
+    with pytest.raises(RuntimeError, match="no such container"):
+        await provider.create_container(image_name="img:v1", port=8000, env={})
+    scripts = provider.made[0].scripts
+    assert not any(s.startswith("docker start") for s in scripts)
+    assert scripts[-1].startswith(f"docker rm -f {provider.made[0].container_name}")
+
+
+def test_the_copy_runs_docker_directly_and_reports_its_error(monkeypatch, tmp_path):
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        return SimpleNamespace(returncode=1, stderr="Error: No such container: agent-x\n")
+
+    monkeypatch.setattr(ls.subprocess, "run", run)
+    with pytest.raises(RuntimeError, match="No such container"):
+        _real_copy_into_container(tmp_path, "agent-x", "/etc/agentenv")
+    assert calls == [["docker", "cp", f"{tmp_path}/.", "agent-x:/etc/agentenv"]]
+
+
+@pytest.mark.asyncio
+async def test_without_local_grants_a_container_is_run_as_before(tmp_path, monkeypatch, copies):
+    import agent_env.config as cfg
+
+    monkeypatch.setattr(cfg, "get_config", lambda: _StubConfig())
+    monkeypatch.setattr(ls, "local_grant_trust", lambda: None)
+    provider = _ScriptedProvider(tmp_path)
+    await provider.create_container(image_name="img:v1", port=8000, env={"K": "v"})
+
+    run = next(s for s in provider.made[0].scripts if s.startswith("docker run -d"))
+    assert "SSL_CERT_FILE" not in run
+    assert copies == []
+
+
+def test_only_a_local_store_that_grants_needs_the_local_ca(tmp_path):
+    local = LocalFilesystemObjectStore(str(tmp_path / "objects"))
+    try:
+        set_object_store(local)
+        assert _real_local_grant_trust() == local_ca().trust_dir
+        set_object_store(LocalRunObjectStore(FakeObjectStore(), local))
+        assert _real_local_grant_trust() == local_ca().trust_dir
+        set_object_store(LocalFilesystemObjectStore(str(tmp_path / "objects"), grants="off"))
+        assert _real_local_grant_trust() is None
+        set_object_store(FakeObjectStore())
+        assert _real_local_grant_trust() is None
+    finally:
+        reset_config()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trusted", [True, False])
+async def test_an_agent_placed_on_a_local_vm_sandbox_gets_the_local_ca(tmp_path, monkeypatch, copies, trusted):
+    """A linked agent starts through A2AAgent._run_container, not the provider: it is given the CA the same way."""
+    monkeypatch.setattr(a2a_agent_module, "local_grant_trust", (lambda: local_ca().trust_dir) if trusted else (lambda: None))
+    monkeypatch.setattr(a2a_agent_module.asyncio, "sleep", _no_sleep)
+    sandbox = _RecordingLocalSandbox(work_dir=tmp_path)
+    agent = A2AAgent.__new__(A2AAgent)
+    agent._sandbox = sandbox
+
+    await agent._run_container("img:v1", 8000, {"K": "v"})
+
+    script = sandbox.scripts[0]
+    assert ("docker create" in script) is trusted and ("docker run -d" in script) is not trusted
+    assert ("-e SSL_CERT_FILE='/etc/agentenv/ca-bundle.pem'" in script) is trusted
+    if trusted:
+        assert copies == [(local_ca().trust_dir, sandbox.container_name, "/etc/agentenv")]
+        assert sandbox.scripts[-1] == f"docker start {sandbox.container_name} > /dev/null"
+        assert (LocalSandboxProvider.EXTRA_CONTAINER_RUN_ARGS in script) if LocalSandboxProvider.EXTRA_CONTAINER_RUN_ARGS else True
+    else:
+        assert copies == [] and "sleep 2" in script
+
+
+async def _no_sleep(_seconds):
+    return None
+
+
+@pytest.mark.asyncio
+async def test_a_linked_agent_whose_copy_fails_leaves_no_container(tmp_path, monkeypatch):
+    def fail(*args):
+        raise RuntimeError("no space left")
+
+    monkeypatch.setattr(ls, "_copy_into_container", fail)
+    monkeypatch.setattr(a2a_agent_module, "local_grant_trust", lambda: local_ca().trust_dir)
+    sandbox = _RecordingLocalSandbox(work_dir=tmp_path)
+    agent = A2AAgent.__new__(A2AAgent)
+    agent._sandbox = sandbox
+
+    with pytest.raises(RuntimeError, match="no space left"):
+        await agent._run_container("img:v1", 8000, {})
+    assert sandbox.scripts[-1] == f"docker rm -f {sandbox.container_name} >/dev/null 2>&1 || true"
 
 
 _HOST_IPS = ls._host_ips

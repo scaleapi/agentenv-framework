@@ -138,7 +138,8 @@ def test_fetch_trajectory_object_named_by_target_a2a_task_id(monkeypatch):
 
     # unbound call: the inline branch never touches `self`, so we skip AWS-touching construction.
     uri = asyncio.run(PromptAgentTaskStep._fetch_trajectory(
-        object(), "http://a", {"params": {"endpoint": "/t"}}, "SERVER-ID", "s3://b/traj/", "CLIENT-ID"))
+        object(), "http://a", {"params": {"endpoint": "/t"}}, "SERVER-ID", "s3://b/traj/",
+        "CLIENT-ID", sandbox_type="local"))
     assert uri == "s3://b/traj/trajectory-CLIENT-ID.json"
     assert puts_on_loop == [False]
 
@@ -172,6 +173,9 @@ def test_fetch_trajectory_prefers_advertised_object_mode(monkeypatch):
 
         def object_url(self, key):
             return f"s3://b/{key}"
+
+        def grants_reach(self, sandbox_type):
+            return True
 
         def issue_write_grant(self, object_url, *, media_type, max_bytes, expires_in):
             grants_on_loop.append(_on_loop())
@@ -210,6 +214,7 @@ def test_fetch_trajectory_prefers_advertised_object_mode(monkeypatch):
             "SERVER-ID",
             "s3://b/traj/",
             "CLIENT-ID",
+            sandbox_type="local",
         )
     )
 
@@ -284,5 +289,7 @@ def test_agent_written_trajectory_is_found_on_the_local_store(monkeypatch, tmp_p
     ))
     monkeypatch.setattr(pa.httpx, "AsyncClient", lambda *a, **k: client)
 
-    uri = asyncio.run(step._fetch_trajectory("http://a", {"params": {"endpoint": "/t"}}, "SERVER-ID", prefix, "CLIENT-ID"))
+    uri = asyncio.run(step._fetch_trajectory(
+        "http://a", {"params": {"endpoint": "/t"}}, "SERVER-ID", prefix, "CLIENT-ID",
+        sandbox_type="local"))
     assert uri == written

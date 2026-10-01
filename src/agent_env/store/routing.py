@@ -500,6 +500,10 @@ class LocalRunObjectStore(ObjectStore):
     def supports_transfer_grants(self) -> bool:
         return self.local.supports_transfer_grants
 
+    def grants_reach(self, sandbox_type: str | None) -> bool:
+        # A run writes to the local store, so its grants must reach the agent too.
+        return self.local.grants_reach(sandbox_type)
+
     @property
     def max_single_upload_bytes(self) -> int | None:
         return self.local.max_single_upload_bytes

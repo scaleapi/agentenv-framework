@@ -11,6 +11,7 @@ from agent_env.store import GrantUnavailableError
 from agent_env.task_step.context import TaskStepContext
 from agent_env.a2a_agent import object_transfer
 from agent_env.a2a_agent.object_transfer import ObjectLimits, changelog_apply_call
+from agent_env.store.object_store import S3ObjectStore
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from tst.util.granting_object_store import GrantingObjectStore
 
@@ -20,6 +21,14 @@ NAMESPACE_KEY = "agent_changelog/run-1/solver"
 @pytest.fixture
 def store(tmp_path) -> GrantingObjectStore:
     store = GrantingObjectStore(str(tmp_path))
+    configure(object_store=store)
+    return store
+
+
+@pytest.fixture
+def s3_store() -> S3ObjectStore:
+    # The legacy form only names the prefix, so the client is never called.
+    store = S3ObjectStore(client=object(), bucket="artifact-bucket")
     configure(object_store=store)
     return store
 
@@ -116,7 +125,7 @@ async def test_enable_prefers_a_bounded_namespace_grant(monkeypatch, store):
     context = _run_context()
 
     await _step(enable_agent_changelog=True)._configure_agent_changelog(
-        "https://agent", _card(), context, expires_in=28_800
+        "https://agent", _card(), context, expires_in=28_800, sandbox_type="local"
     )
 
     sent = requests[0]
@@ -147,7 +156,7 @@ async def test_the_changelog_namespace_is_under_the_fixture_prefix(monkeypatch, 
     context = _run_context()
 
     await _step(enable_agent_changelog=True)._configure_agent_changelog(
-        "https://agent", _card(), context, expires_in=600
+        "https://agent", _card(), context, expires_in=600, sandbox_type="local"
     )
 
     assert requests[0]["json"]["write_namespace"]["root_path"] == f"fx/{NAMESPACE_KEY}"
@@ -156,20 +165,20 @@ async def test_the_changelog_namespace_is_under_the_fixture_prefix(monkeypatch, 
 
 @pytest.mark.asyncio
 async def test_enable_uses_legacy_variant_when_the_store_cannot_grant_the_lifetime(
-    monkeypatch, store
+    monkeypatch, s3_store
 ):
     def unavailable(*args, **kwargs):
         raise GrantUnavailableError("credentials expire first")
 
-    monkeypatch.setattr(store, "issue_upload_policy", unavailable)
-    requests = _install(monkeypatch, {"s3_prefix": store.object_url(NAMESPACE_KEY)})
+    monkeypatch.setattr(s3_store, "issue_upload_policy", unavailable)
+    requests = _install(monkeypatch, {"s3_prefix": s3_store.object_url(NAMESPACE_KEY)})
     context = _run_context()
 
     await _step(enable_agent_changelog=True)._configure_agent_changelog(
-        "https://agent", _card(), context, expires_in=28_800
+        "https://agent", _card(), context, expires_in=28_800, sandbox_type="local"
     )
 
-    assert requests[0]["json"] == {"s3_prefix": store.object_url(NAMESPACE_KEY)}
+    assert requests[0]["json"] == {"s3_prefix": s3_store.object_url(NAMESPACE_KEY)}
     assert context.metadata["agent_changelog"][0]["transfer_mode"] == "legacy"
 
 
@@ -191,6 +200,7 @@ async def test_enable_fails_for_a_portable_only_agent_when_the_store_cannot_gran
             _card(enable_legacy=False),
             _run_context(),
             expires_in=28_800,
+            sandbox_type="local",
         )
 
     assert not requests
@@ -201,30 +211,58 @@ async def test_enable_fails_for_a_portable_only_agent_when_the_store_cannot_gran
     "enable_legacy, expected", [(True, "legacy"), (False, None)], ids=["dual", "portable-only"]
 )
 async def test_enable_on_a_store_without_grants_asks_for_no_grant(
-    monkeypatch, store, enable_legacy, expected
+    monkeypatch, s3_store, enable_legacy, expected
 ):
-    store.supports_transfer_grants = False
-    requests = _install(monkeypatch, {"s3_prefix": store.object_url(NAMESPACE_KEY)})
+    s3_store.supports_transfer_grants = False
+    asked: list[tuple] = []
+    monkeypatch.setattr(
+        s3_store, "issue_upload_policy", lambda *args, **kwargs: asked.append(args)
+    )
+    requests = _install(monkeypatch, {"s3_prefix": s3_store.object_url(NAMESPACE_KEY)})
     context = _run_context()
     step = _step(enable_agent_changelog=True)
 
     if expected is None:
         with pytest.raises(RuntimeError, match="no changelog enable form"):
             await step._configure_agent_changelog(
-                "https://agent", _card(enable_legacy=enable_legacy), context, expires_in=7_200
+                "https://agent",
+                _card(enable_legacy=enable_legacy),
+                context,
+                expires_in=7_200,
+                sandbox_type="local",
             )
         assert not requests
     else:
         await step._configure_agent_changelog(
-            "https://agent", _card(enable_legacy=enable_legacy), context, expires_in=7_200
+            "https://agent",
+            _card(enable_legacy=enable_legacy),
+            context,
+            expires_in=7_200,
+            sandbox_type="local",
         )
         assert context.metadata["agent_changelog"][0]["transfer_mode"] == expected
+    assert asked == []
+
+
+@pytest.mark.asyncio
+async def test_enable_on_a_local_store_without_grants_is_refused(monkeypatch, store):
+    store.supports_transfer_grants = False
+    requests = _install(monkeypatch, {"s3_prefix": store.object_url(NAMESPACE_KEY)})
+
+    with pytest.raises(
+        RuntimeError, match="cannot enable a changelog on a local object store: .*issues no grants"
+    ):
+        await _step(enable_agent_changelog=True)._configure_agent_changelog(
+            "https://agent", _card(), _run_context(), expires_in=7_200, sandbox_type="local"
+        )
+
+    assert not requests
     assert store.granted == []
 
 
 @pytest.mark.asyncio
 async def test_enable_records_the_issued_prefix_when_the_agent_echoes_a_foreign_one(
-    monkeypatch, store
+    monkeypatch, s3_store
 ):
     _install(
         monkeypatch,
@@ -233,23 +271,31 @@ async def test_enable_records_the_issued_prefix_when_the_agent_echoes_a_foreign_
     context = _run_context()
 
     await _step(enable_agent_changelog=True)._configure_agent_changelog(
-        "https://agent", _card(enable_objects=False), context, expires_in=7_200
+        "https://agent",
+        _card(enable_objects=False),
+        context,
+        expires_in=7_200,
+        sandbox_type="local",
     )
 
     (entry,) = context.metadata["agent_changelog"]
-    assert entry["object_url"] == store.object_url(NAMESPACE_KEY)
+    assert entry["object_url"] == s3_store.object_url(NAMESPACE_KEY)
     assert entry["transfer_mode"] == "legacy"
 
 
 @pytest.mark.asyncio
-async def test_a_legacy_enable_error_keeps_the_agents_detail(monkeypatch, store):
+async def test_a_legacy_enable_error_keeps_the_agents_detail(monkeypatch, s3_store):
     _install(
         monkeypatch, {"detail": "s3_prefix must be s3://bucket/key"}, status_code=400
     )
 
     with pytest.raises(httpx.HTTPStatusError, match="s3_prefix must be s3://bucket/key"):
         await _step(enable_agent_changelog=True)._configure_agent_changelog(
-            "https://agent", _card(enable_objects=False), _run_context(), expires_in=7_200
+            "https://agent",
+            _card(enable_objects=False),
+            _run_context(),
+            expires_in=7_200,
+            sandbox_type="local",
         )
 
 
@@ -270,7 +316,7 @@ async def test_apply_lists_validates_and_sends_ordered_read_grants(monkeypatch, 
     context = TaskStepContext()
 
     event_loop_thread = threading.get_ident()
-    await step._apply_agent_changelog("https://agent", _card(), context)
+    await step._apply_agent_changelog("https://agent", _card(), context, sandbox_type="local")
 
     sent = requests[0]["json"]
     assert [item["sequence"] for item in sent["increments"]] == [0, 1]
@@ -293,7 +339,9 @@ async def test_apply_uses_absolute_tool_call_positions_for_the_cutoff(monkeypatc
         agent_changelog_toolcall_position_exclusive=7,
     )
 
-    await step._apply_agent_changelog("https://agent", _card(), TaskStepContext())
+    await step._apply_agent_changelog(
+        "https://agent", _card(), TaskStepContext(), sandbox_type="local"
+    )
 
     assert [item["sequence"] for item in requests[0]["json"]["increments"]] == [2, 4]
     assert _granted_names(store) == ["000002.tar", "000004.tar"]
@@ -308,7 +356,9 @@ async def test_apply_allows_a_cutoff_beyond_the_last_tool_call(monkeypatch, stor
         agent_changelog_toolcall_position_exclusive=99,
     )
 
-    await step._apply_agent_changelog("https://agent", _card(), TaskStepContext())
+    await step._apply_agent_changelog(
+        "https://agent", _card(), TaskStepContext(), sandbox_type="local"
+    )
 
     assert [item["sequence"] for item in requests[0]["json"]["increments"]] == [2, 4]
 
@@ -320,7 +370,7 @@ async def test_apply_rejects_duplicate_tool_call_positions(monkeypatch, store):
 
     with pytest.raises(ValueError, match="strictly increasing"):
         await _step(agent_changelog_object_url=namespace)._apply_agent_changelog(
-            "https://agent", _card(), TaskStepContext()
+            "https://agent", _card(), TaskStepContext(), sandbox_type="local"
         )
     assert not requests
 
@@ -332,7 +382,7 @@ async def test_apply_rejects_unsequenced_objects_in_a_portable_namespace(monkeyp
 
     with pytest.raises(ValueError, match="zero-padded sequence names"):
         await _step(agent_changelog_object_url=namespace)._apply_agent_changelog(
-            "https://agent", _card(), TaskStepContext()
+            "https://agent", _card(), TaskStepContext(), sandbox_type="local"
         )
     assert not requests
     assert store.granted == []
@@ -355,7 +405,7 @@ async def test_apply_sends_the_empty_baseline_when_no_increment_is_selected(
         agent_changelog_toolcall_position_exclusive=cutoff,
     )
 
-    await step._apply_agent_changelog("https://agent", _card(), context)
+    await step._apply_agent_changelog("https://agent", _card(), context, sandbox_type="local")
 
     assert requests[0]["json"]["increments"] == []
     assert store.granted == []
@@ -367,7 +417,8 @@ _APPLY_OBJECTS = {"request": {"required": ["increments"]}}
 
 def _apply_call(store, source_url):
     return changelog_apply_call(
-        _APPLY_OBJECTS, store, agent_name="solver", source_url=source_url, portable=True
+        _APPLY_OBJECTS, store, agent_name="solver", source_url=source_url, portable=True,
+        sandbox_type="local",
     )
 
 
@@ -416,7 +467,7 @@ async def test_apply_uses_legacy_variant_for_a_legacy_source(monkeypatch, store)
     )
     context = TaskStepContext()
 
-    await step._apply_agent_changelog("https://agent", _card(), context)
+    await step._apply_agent_changelog("https://agent", _card(), context, sandbox_type="local")
 
     assert requests[0]["json"] == {
         "s3_prefix": "s3://artifact-bucket/agent_changelog/run-1/solver",
@@ -442,7 +493,7 @@ async def test_a_portable_source_is_not_sent_to_a_legacy_only_agent(monkeypatch,
 
     with pytest.raises(RuntimeError, match="cannot apply the configured portable changelog"):
         await _step(agent_changelog_object_url=namespace)._apply_agent_changelog(
-            "https://agent", _card(apply_objects=False), TaskStepContext()
+            "https://agent", _card(apply_objects=False), TaskStepContext(), sandbox_type="local"
         )
 
     assert not requests

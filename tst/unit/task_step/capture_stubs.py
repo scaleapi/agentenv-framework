@@ -78,6 +78,9 @@ class _StubObjectStore:
     def object_url(self, key: str) -> str:
         return f"s3://{BUCKET}/{key}"
 
+    def grants_reach(self, sandbox_type: str | None) -> bool:
+        return True
+
     def issue_write_grant(self, object_url, *, media_type, max_bytes, expires_in):
         self.write_grants.append(
             {
@@ -199,6 +202,7 @@ class _StubAgent:
         self.api_url = a2a_url
         self.a2a_card = card if card is not None else agent_card()
         self.sandbox_id = "sb-agent"
+        self.sandbox_type = None
 
 
 def context(*, agent: Optional[_StubAgent] = None, env_id: Optional[str] = None) -> TaskStepContext:

@@ -18,6 +18,8 @@ from agent_env.task_step.task_steps.deploy_agent import _skill_fields
 from tst.unit.event_loop_probe import on_event_loop
 from tst.util.granting_object_store import GrantingObjectStore
 
+S3_SKILL_URL = "s3://artifact-bucket/artifacts/skill/review/1/"
+
 
 def _card(
     *, bundle: bool, legacy: bool | None = None, config_key: str = "params"
@@ -53,7 +55,11 @@ def _card(
 
 
 def _deployed(
-    *, bundle: bool, legacy: bool | None = None, config_key: str = "params"
+    *,
+    bundle: bool,
+    legacy: bool | None = None,
+    config_key: str = "params",
+    sandbox_type: str = "local",
 ) -> DeployedA2AAgent:
     return DeployedA2AAgent(
         agent_id="agent",
@@ -61,6 +67,7 @@ def _deployed(
         a2a_url="https://agent.example.test",
         sandbox_id="sandbox",
         agent_card=_card(bundle=bundle, legacy=legacy, config_key=config_key),
+        sandbox_type=sandbox_type,
     )
 
 
@@ -167,37 +174,68 @@ async def test_artifact_skill_prefers_portable_bundle_when_advertised(
 
 @pytest.mark.asyncio
 async def test_s3_skill_keeps_legacy_shape_when_bundle_is_not_advertised(
-    store: GrantingObjectStore, prefix: str, agent: _Agent
+    store: GrantingObjectStore, agent: _Agent
 ) -> None:
     await A2AAgent.add_skill(
         _deployed(bundle=False),
-        Skill(name="review", description="Review work", s3_url=prefix),
+        Skill(name="review", description="Review work", s3_url=S3_SKILL_URL),
     )
 
     assert agent.requests[0]["json"] == {
         "name": "review",
         "description": "Review work",
-        "skill_s3_url": prefix,
+        "skill_s3_url": S3_SKILL_URL,
     }
     assert store.granted == []
 
 
 @pytest.mark.asyncio
 async def test_skill_uses_the_advertised_legacy_shape_on_a_store_without_grants(
-    store: GrantingObjectStore, prefix: str, agent: _Agent
+    store: GrantingObjectStore, agent: _Agent
 ) -> None:
     store.supports_transfer_grants = False
 
     await A2AAgent.add_skill(
         _deployed(bundle=True, legacy=True),
-        Skill(name="review", description="Review work", s3_url=prefix),
+        Skill(name="review", description="Review work", s3_url=S3_SKILL_URL),
     )
 
     assert agent.requests[0]["json"] == {
         "name": "review",
         "description": "Review work",
-        "skill_s3_url": prefix,
+        "skill_s3_url": S3_SKILL_URL,
     }
+    assert store.granted == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "deployed, grants, why",
+    [
+        ({"bundle": False}, True, "the agent takes only the S3 form"),
+        ({"bundle": True, "legacy": True}, False, "the local object store issues no grants"),
+        (
+            {"bundle": True, "legacy": True, "sandbox_type": "modal"},
+            True,
+            "grants do not reach agents on the 'modal' sandbox provider",
+        ),
+    ],
+    ids=["legacy-only-agent", "store-without-grants", "grants-do-not-reach"],
+)
+async def test_a_local_skill_is_never_sent_as_its_file_url(
+    store: GrantingObjectStore, prefix: str, agent: _Agent, deployed: dict, grants: bool, why: str
+) -> None:
+    store.supports_transfer_grants = grants
+
+    with pytest.raises(
+        RuntimeError, match=f"cannot add a skill from objects on a local object store: .*{why}"
+    ):
+        await A2AAgent.add_skill(
+            _deployed(**deployed),
+            Skill(name="review", description="Review work", s3_url=prefix),
+        )
+
+    assert agent.requests == []
     assert store.granted == []
 
 
@@ -306,7 +344,7 @@ async def test_a_legacy_skill_error_keeps_the_agents_detail(
     with pytest.raises(httpx.HTTPStatusError, match="skill_s3_url must be s3://bucket/key"):
         await A2AAgent.add_skill(
             _deployed(bundle=False),
-            Skill(name="review", description="Review work", s3_url="file:///skill/"),
+            Skill(name="review", description="Review work", s3_url=S3_SKILL_URL),
         )
 
 
@@ -386,6 +424,8 @@ async def test_an_s3_url_skill_s_skill_md_is_read_off_the_event_loop(
 
     monkeypatch.setattr(httpx.AsyncClient, "post", post)
 
-    await A2AAgent.add_skill(_deployed(bundle=False), Skill(name="review", description="Review work", s3_url=prefix))
+    await A2AAgent.add_skill(
+        _deployed(bundle=True), Skill(name="review", description="Review work", s3_url=prefix)
+    )
 
     assert on_loop and not any(on_loop)

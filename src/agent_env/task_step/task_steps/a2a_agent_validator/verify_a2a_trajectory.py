@@ -93,7 +93,8 @@ class VerifyA2ATrajectoryStep(TaskStep):
         config = get_config()
         store = config.get_object_store()
         probe_prefix = f"{config.get_artifact_key_prefix()}a2a_validator_trajectories/{self.a2a_agent_id}/"
-        if trajectory_mode(get_method, store, by="task_id") == "objects":
+        sandbox_type = deployed_agent.sandbox_type
+        if trajectory_mode(get_method, store, by="task_id", sandbox_type=sandbox_type) == "objects":
             try:
                 prefix = store.object_url(probe_prefix)
                 upload = await asyncio.to_thread(
@@ -107,7 +108,7 @@ class VerifyA2ATrajectoryStep(TaskStep):
 
         s3_ok = False
         if choose_transfer(
-            get_method, legacy=("task_id", "trajectory_s3_prefix"), store=store
+            get_method, legacy=("task_id", "trajectory_s3_prefix"), store=store, sandbox_type=sandbox_type
         ) == "legacy":
             s3_prefix = store.object_url(probe_prefix)
             try:

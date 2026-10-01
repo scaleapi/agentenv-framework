@@ -20,6 +20,13 @@ from agent_env.a2a_agent.object_transfer import (
     invoke_transfer,
     skill_add_call,
 )
+from agent_env.providers.sandbox_providers.local_sandbox import (
+    LOCAL_TRUST_ENV,
+    LocalSandbox,
+    LocalSandboxProvider,
+    local_grant_trust,
+    start_trusting,
+)
 from agent_env.providers.sandbox_providers.sandbox_provider import all_sandbox_container_env, all_sandbox_url_rewrites
 from agent_env.utils.paths import validate_relative_filename
 from agent_env.attribution import Attribution
@@ -198,6 +205,8 @@ class A2AAgent:
             description=description,
             skill_md=skill_md,
             object_url=object_url,
+            sandbox_type=deployed.sandbox_type,
+            agent_name=deployed.agent_id,
         )
         return await invoke_transfer(
             deployed.a2a_url + add_path,
@@ -519,13 +528,17 @@ class A2AAgent:
         self._sandbox = None
 
     async def _run_container(self, image_name: str, a2a_port: int, merged_env: dict[str, str], enable_docker: bool = False) -> None:
-        agent_env = dict(merged_env)
+        # On a local VM sandbox the container runs on this host, so it is given the local CA as the provider's are.
+        trust_dir = await asyncio.to_thread(local_grant_trust) if isinstance(self._sandbox, LocalSandbox) else None
+        agent_env = dict(merged_env) if trust_dir is None else {**LOCAL_TRUST_ENV, **merged_env}
         setup_script = ""
-        network_flag = ""
+        network_flag = "" if trust_dir is None or not LocalSandboxProvider.EXTRA_CONTAINER_RUN_ARGS else (
+            f"{LocalSandboxProvider.EXTRA_CONTAINER_RUN_ARGS} \\\n    "
+        )
         if enable_docker:
             logger.info("enable_docker: starting rootless Docker-in-Docker sidecar for the agent (no host socket)")
             setup_script = self._dind_setup_script()
-            network_flag = f"--network {_DIND_NETWORK} \\\n    "
+            network_flag += f"--network {_DIND_NETWORK} \\\n    "
             agent_env["DOCKER_HOST"] = f"tcp://{_DIND_CONTAINER}:{_DIND_PORT}"
 
         env_flags = []
@@ -537,14 +550,17 @@ class A2AAgent:
 
         run_script = f"""#!/bin/bash
 set -e
-{setup_script}docker run -d \\
+{setup_script}docker {"run -d" if trust_dir is None else "create"} \\
     --name {self._sandbox.container_name} \\
     {publish} \\
     {network_flag}{env_str} \\
     {image_name} > /dev/null
-sleep 2
+{"sleep 2" if trust_dir is None else ""}
 """
         await self._sandbox.exec_script(run_script)
+        if trust_dir is not None:
+            await start_trusting(self._sandbox, self._sandbox.container_name, trust_dir)
+            await asyncio.sleep(2)
 
     def _dind_setup_script(self) -> str:
         # Constants become shell vars so the body stays a raw string (no f-string

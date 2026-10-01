@@ -408,14 +408,14 @@ class DeployAgentTaskStep(TaskStep):
             logger.info(f"Set context.default_agent_model to '{default_model}'")
 
         if self.agent_snapshot_files_artifact_id:
-            await self._load_snapshot(a2a_url, card, a2a_agent_id, context)
+            await self._load_snapshot(a2a_url, card, a2a_agent_id, context, sandbox_type=deployed.sandbox_type)
 
         if self.agent_changelog_object_url or self.agent_changelog_s3_prefix:
-            await self._apply_agent_changelog(a2a_url, card, context)
+            await self._apply_agent_changelog(a2a_url, card, context, sandbox_type=deployed.sandbox_type)
 
         if self.enable_agent_changelog:
             await self._configure_agent_changelog(
-                a2a_url, card, context, expires_in=resolved_ttl
+                a2a_url, card, context, expires_in=resolved_ttl, sandbox_type=deployed.sandbox_type
             )
 
         context.deployed_agents.append(DeployedAgent(
@@ -471,6 +471,7 @@ class DeployAgentTaskStep(TaskStep):
         context: TaskStepContext,
         *,
         expires_in: int,
+        sandbox_type: str | None,
     ) -> None:
         """Enable whole-writable-layer changelog capture via the snapshot enable-changelog method; records the derived prefix in context.metadata['agent_changelog']."""
         from agent_env.a2a_agent import A2AAgent
@@ -494,6 +495,7 @@ class DeployAgentTaskStep(TaskStep):
             agent_name=self.agent_name,
             namespace_url=namespace_url,
             expires_in=expires_in,
+            sandbox_type=sandbox_type,
         )
         answer = await invoke_transfer(
             a2a_url + path,
@@ -516,7 +518,9 @@ class DeployAgentTaskStep(TaskStep):
         })
         logger.info(f"agent-changelog capture enabled on '{self.agent_name}': {object_url}")
 
-    async def _apply_agent_changelog(self, a2a_url: str, card: dict, context: TaskStepContext) -> None:
+    async def _apply_agent_changelog(
+        self, a2a_url: str, card: dict, context: TaskStepContext, *, sandbox_type: str | None
+    ) -> None:
         """Rewind this fresh agent to a point in a source changelog (fs + conversation) via the snapshot apply-changelog method and resume."""
         from agent_env.a2a_agent import A2AAgent
 
@@ -539,6 +543,7 @@ class DeployAgentTaskStep(TaskStep):
             up_to_tool_call_exclusive=self.agent_changelog_toolcall_position_exclusive,
             resume_conversation=True,
             target_context_id=self.agent_snapshot_target_context_id,
+            sandbox_type=sandbox_type,
         )
         answer = await invoke_transfer(
             a2a_url + path,
@@ -571,6 +576,8 @@ class DeployAgentTaskStep(TaskStep):
         card: dict,
         a2a_agent_id: str,
         context: TaskStepContext,
+        *,
+        sandbox_type: str | None,
     ) -> None:
         """Restore a snapshot into the freshly-deployed agent via /ext/snapshot."""
         from agent_env.a2a_agent import A2AAgent
@@ -600,6 +607,7 @@ class DeployAgentTaskStep(TaskStep):
             bundle_url=universe.bundle_object_url,
             file_names=set((universe.file_artifact_refs or universe.file_artifact_ids or {}).keys()),
             target_context_id=self.agent_snapshot_target_context_id,
+            sandbox_type=sandbox_type,
         )
         answer = await invoke_transfer(
             a2a_url + load_path,

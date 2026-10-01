@@ -43,7 +43,7 @@ class ObjectStore(ABC):
     """
 
     # Whether this store can serve the three issue_* grant methods; callers check this, not
-    # the NotImplementedError the defaults raise.
+    # the NotImplementedError the defaults raise, and grants_reach before handing a grant on.
     supports_transfer_grants: bool = False
     # The largest object one upload through a grant can create, where the provider caps it.
     max_single_upload_bytes: int | None = None
@@ -160,6 +160,11 @@ class ObjectStore(ABC):
         deploys, so they can use this store directly. None by default; a deployment that wants
         it overrides this, and the workloads get whatever scope those credentials carry."""
         return {}
+
+    def grants_reach(self, sandbox_type: str | None) -> bool:
+        """Whether an agent in a sandbox of ``sandbox_type`` (None: unknown) can use this store's
+        grants. True by default, for grants that are public HTTPS URLs."""
+        return True
 
     def issue_read_grant(
         self, object_url: str, *, expires_in: int = 3600

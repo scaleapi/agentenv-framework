@@ -31,6 +31,7 @@ async def _capture(**overrides):
         a2a_context_id="ctx-1",
         artifact_id="wsp",
         timeout_seconds=30,
+        sandbox_type="local",
     )
     kwargs.update(overrides)
     return await mod.capture_workspace(**kwargs)
@@ -293,7 +294,7 @@ CONTEXT_OBJECTS_GET = {
 async def _read(card, **overrides):
     kwargs = dict(
         a2a_url="https://agent", a2a_card=card, context_id="ctx-1", timeout_seconds=30,
-        trajectory_output_prefix=PARTIAL_PREFIX,
+        trajectory_output_prefix=PARTIAL_PREFIX, sandbox_type="local",
     )
     kwargs.update(overrides)
     return await mod.read_partial_trajectory(**kwargs)

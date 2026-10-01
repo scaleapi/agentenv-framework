@@ -520,7 +520,10 @@ def test_signed_post_is_shaped_as_the_s3_store_s_and_clamped_to_the_signer(store
 
 def test_changelog_capture_gets_the_object_form(store):
     only_objects = {"request": {"oneOf": [{"required": ["write_namespace"]}]}}
-    call = changelog_enable_call(only_objects, store, agent_name="solver", namespace_url=f"gs://{BUCKET}/ns", expires_in=600)
+    call = changelog_enable_call(
+        only_objects, store, agent_name="solver", namespace_url=f"gs://{BUCKET}/ns", expires_in=600,
+        sandbox_type="modal",
+    )
     assert call.mode == "objects"
     grant = call.payload["write_namespace"]
     assert grant["root_path"] == "ns" and grant["write"]["kind"] == "http-post-policy"

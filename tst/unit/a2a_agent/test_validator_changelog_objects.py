@@ -49,7 +49,7 @@ def requests(monkeypatch) -> list[dict]:
         async def close(self):
             return None
 
-    monkeypatch.setattr(provider_mod, "get_agent_sandbox_provider", _Provider)
+    monkeypatch.setattr(provider_mod, "build_sandbox_provider", lambda spec: _Provider())
     persisted = SimpleNamespace(metadata={})
     persisted.update_metadata = lambda metadata: setattr(persisted, "metadata", metadata)
     monkeypatch.setattr(A2AAgent, "get", classmethod(lambda cls, agent_id: persisted))
@@ -77,7 +77,7 @@ def _context(capture: dict, *apply_variants: list[str]) -> TaskStepContext:
                 ]
             }
         },
-        sandbox_type=None,
+        sandbox_type="local",
         sandbox_id="sandbox-1",
     )
     context = TaskStepContext()

@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 from uuid import uuid4
 
+from agent_env import config
 from agent_env.attribution import Attribution
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, VmSandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import (
@@ -32,6 +33,9 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     SandboxProvider,
     refuse_unenforceable_policy,
 )
+from agent_env.store.object_store.local_grants.tls import local_ca
+from agent_env.store.object_store.local_object_store import LocalFilesystemObjectStore
+from agent_env.store.routing import LocalRunObjectStore
 
 if TYPE_CHECKING:
     from agent_env.store.object_store import ObjectStore
@@ -50,6 +54,15 @@ def _runs_in_container(cmd: list[str]) -> bool:
 
 
 _REAP_SECONDS = 5
+
+# Where a container finds the local transfer CA's trust files, and the variables that point TLS clients at them:
+# SSL_CERT_FILE replaces a client's roots, so it gets the public roots plus the CA; NODE_EXTRA_CA_CERTS adds.
+_TRUST_DIR = "/etc/agentenv"
+LOCAL_TRUST_ENV = {
+    "SSL_CERT_FILE": f"{_TRUST_DIR}/ca-bundle.pem",
+    "REQUESTS_CA_BUNDLE": f"{_TRUST_DIR}/ca-bundle.pem",
+    "NODE_EXTRA_CA_CERTS": f"{_TRUST_DIR}/ca.pem",
+}
 
 # Marker dropped in the work dir when this sandbox runs a container, so a later get_sandbox()
 # (post-run teardown reconstructs the sandbox from disk) knows it owns that container.
@@ -281,6 +294,36 @@ def _kill_tree(root: int) -> None:
             os.kill(pid, signal.SIGKILL)
 
 
+def local_grant_trust() -> Path | None:
+    """The trust files a container on this host needs to use the configured object store's grants: the local
+    transfer CA's, when the store is a local one that hands out grants; None otherwise."""
+    store = config.get_config().get_object_store()
+    if isinstance(store, LocalRunObjectStore):
+        store = store.local
+    if isinstance(store, LocalFilesystemObjectStore) and store.supports_transfer_grants:
+        return local_ca().trust_dir
+    return None
+
+
+async def start_trusting(sandbox: VmSandbox, container: str, trust_dir: Path) -> None:
+    """Copy ``trust_dir`` into the created ``container`` where ``LOCAL_TRUST_ENV`` points, then start it. A container
+    that cannot be given the files or started is removed, so its name is free for the next attempt."""
+    try:
+        await asyncio.to_thread(_copy_into_container, trust_dir, container, _TRUST_DIR)
+        await sandbox.exec_script(f"docker start {shlex.quote(container)} > /dev/null")
+    except Exception:
+        await sandbox.exec_script(f"docker rm -f {shlex.quote(container)} >/dev/null 2>&1 || true")
+        raise
+
+
+def _copy_into_container(source: Path, container: str, destination: str) -> None:
+    """Copy what the host directory ``source`` holds to ``destination`` in ``container``. Run directly, not
+    through a sandbox's shell, which would rewrite a host path under /app."""
+    copied = subprocess.run(["docker", "cp", f"{source}/.", f"{container}:{destination}"], capture_output=True, text=True)
+    if copied.returncode != 0:
+        raise RuntimeError(f"Could not copy {source} into container {container}: {copied.stderr.strip()}")
+
+
 def remove_local_work_dir(sandbox_id: str) -> Path | None:
     """Delete a local sandbox's work folder, and return it, when it lies directly under the sandbox root and
     isn't a symlink; anything else, a legacy folder under the temp dir included, is left alone. Raises OSError
@@ -375,6 +418,17 @@ class LocalSandboxProvider(SandboxProvider):
                     )
                 raise
         return sandbox
+
+    async def _start_container(self, sandbox: VmSandbox, *, image_name: str, port: int, env: dict[str, str]) -> None:
+        """Where the configured store hands out local grants, create the container, copy the local transfer CA's
+        trust files in, then start it, so its TLS clients trust the grant server. Variables the caller sets win."""
+        trust_dir = await asyncio.to_thread(local_grant_trust)
+        if trust_dir is None:
+            await super()._start_container(sandbox, image_name=image_name, port=port, env=env)
+            return
+        args = self._container_args(sandbox, image_name=image_name, port=port, env={**LOCAL_TRUST_ENV, **env})
+        await sandbox.exec_script(f"docker create {args} > /dev/null")
+        await start_trusting(sandbox, sandbox.container_name, trust_dir)
 
     async def create_sandbox(
         self,
