@@ -490,8 +490,9 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
 
 
 def _seed_universe_id(task, seed: dict) -> str | None:
-    """The universe a seed's runs collect into, if the task collects: the seed's id or name, under the task for an
-    ``@local`` task, whose runs write only ``@local`` ids."""
+    """The universe a seed's runs collect into, so runs of one seed share it: the seed's id, else its name, under the
+    task for an ``@local`` task, whose runs write only ``@local`` ids. None leaves collect_artifacts to name it after
+    the run."""
     universe_id = seed.get("id") or seed.get("name")
     if universe_id and is_local_id(task.id):
         return f"{task.id}-v{task.version}-{universe_id}"
@@ -547,9 +548,10 @@ def run_batch(task_id: str, task_version: int | None, seeds: str, concurrency: i
     if is_local_id(task.id) and any(isinstance(step, CollectArtifactsTaskStep) for step in task.steps):
         for index, seed in enumerate(seed_rows, 1):
             universe_id = _seed_universe_id(task, seed)
+            if not universe_id:
+                continue
             try:
-                if universe_id:
-                    validate_local_id(universe_id)
+                validate_local_id(universe_id)
             except ValueError as e:
                 raise click.ClickException(f"seed {index} can't name an @local universe: {e}") from e
     click.echo(click.style(f"Running {len(seed_rows)} seeds with concurrency={concurrency}...", fg="blue"))
@@ -572,10 +574,6 @@ def run_batch(task_id: str, task_version: int | None, seeds: str, concurrency: i
             _stamp_agent_env_client_metadata(ctx.metadata, client_id)
             ctx.metadata["run_group_id"] = batch_run_group_id
             ctx.metadata["seed"] = seed
-            # Populate universe_id so collect_artifacts can name the
-            # FileArtifactUniverse stably across runs of the same seed.
-            # Prefer seed.id, fall back to seed.name. If neither is set,
-            # collect_artifacts falls through to the per-run instance_id.
             universe_id = _seed_universe_id(task, seed)
             if universe_id:
                 ctx.metadata["universe_id"] = universe_id

@@ -80,7 +80,7 @@ from typing import ClassVar, Optional
 
 from agent_env.config import get_config
 from agent_env.env.gateway.constants import EXT_STEP_URI
-from agent_env.store.ids import derived_id, is_local_id, validate_local_id
+from agent_env.store.ids import derive_id, is_local_id, validate_local_id
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity_refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
@@ -866,10 +866,10 @@ class CollectArtifactsTaskStep(TaskStep):
         FileArtifact filename is the basename for clean downloads."""
         from agent_env.artifact import FileArtifact
 
-        fa_id = derived_id(
-            artifact_id, hashlib.sha256(object_name.encode("utf-8")).hexdigest()[:16],
-            legacy=f"{artifact_id}-{object_name}".replace("/", "_")[:200],
-        )
+        if is_local_id(artifact_id):
+            fa_id = derive_id(artifact_id, hashlib.sha256(object_name.encode("utf-8")).hexdigest()[:16])
+        else:
+            fa_id = f"{artifact_id}-{object_name}".replace("/", "_")[:200]
         fa_version = store.next_version(fa_id)
         fa = FileArtifact(
             id=fa_id,

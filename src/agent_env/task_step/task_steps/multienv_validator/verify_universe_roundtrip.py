@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
 from agent_env.env.env_artifact_store import EnvArtifactType, get_env_artifact_store
 from agent_env.artifact.store import artifact_write_lock
-from agent_env.store.ids import derive_id, derived_id, fs_safe, is_local_id
+from agent_env.store.ids import derive_id, fs_safe, is_local_id
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity_refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
@@ -85,8 +85,9 @@ class VerifyUniverseLoadExportRoundtripStep(TaskStep):
         ``fs_safe``."""
         if is_local_id(env_id):
             return derive_id(env_id, f"{kind}-v{env_version}-{fs_safe(universe_id)}-v{universe_version}")
-        return derived_id(universe_id, f"{kind}-v{universe_version}-{env_id}-v{env_version}",
-                          legacy=f"{kind}-{env_id}-v{env_version}-{universe_id}-v{universe_version}")
+        if is_local_id(universe_id):
+            return derive_id(universe_id, f"{kind}-v{universe_version}-{env_id}-v{env_version}")
+        return f"{kind}-{env_id}-v{env_version}-{universe_id}-v{universe_version}"
 
     @staticmethod
     def file_artifact_universe_id(env_id: str, env_version: int, universe_id: str, universe_version: int) -> str:
