@@ -8,6 +8,8 @@ the ``gcp`` extra, so it is not re-exported here: an impl pointer names its modu
 from agent_env.store.object_store.local_object_store import LocalFilesystemObjectStore
 from agent_env.store.object_store.object_store import (
     DEFAULT_CONTENT_TYPE,
+    DEFAULT_GRANT_LIFETIME_SECONDS,
+    MIN_GRANT_LIFETIME_SECONDS,
     ObjectMetadata,
     ObjectStore,
     UploadPolicy,
@@ -19,6 +21,8 @@ __all__ = [
     "ObjectMetadata",
     "UploadPolicy",
     "DEFAULT_CONTENT_TYPE",
+    "DEFAULT_GRANT_LIFETIME_SECONDS",
+    "MIN_GRANT_LIFETIME_SECONDS",
     "S3ObjectStore",
     "LocalFilesystemObjectStore",
 ]

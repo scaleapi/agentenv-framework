@@ -19,6 +19,7 @@ from agent_env.a2a_agent.object_transfer import (
     read_objects_under,
     write_object,
 )
+from agent_env.store.object_store import DEFAULT_GRANT_LIFETIME_SECONDS
 from tst.util.granting_object_store import GrantingObjectStore
 
 
@@ -243,7 +244,7 @@ def test_the_transfer_time_budget_nests():
     assert (
         TRANSFER_STALL_BUDGET_SECONDS
         < object_transfer.TRANSFER_TIMEOUT_SECONDS
-        < object_transfer.GRANT_LIFETIME_SECONDS
+        < DEFAULT_GRANT_LIFETIME_SECONDS
     )
 
 

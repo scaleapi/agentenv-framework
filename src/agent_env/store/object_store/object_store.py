@@ -15,6 +15,24 @@ from agentenv_protocol.transfers import (
 )
 
 DEFAULT_CONTENT_TYPE = "application/octet-stream"
+DEFAULT_GRANT_LIFETIME_SECONDS = 12 * 60 * 60
+# The shortest a store's grants may be set to last: longer than the ten minutes agent-env waits for an agent
+# to move an object through one.
+MIN_GRANT_LIFETIME_SECONDS = 15 * 60
+
+
+def grant_lifetime(seconds: object, *, most: int | None = None) -> int:
+    """``seconds`` checked as a store's ``grant_lifetime_seconds`` setting: a whole number of seconds, at
+    least ``MIN_GRANT_LIFETIME_SECONDS``, and no more than ``most`` where the store cannot sign for longer."""
+    if isinstance(seconds, bool) or not isinstance(seconds, int):
+        raise ValueError(f"grant_lifetime_seconds must be a whole number of seconds, got {seconds!r}")
+    if seconds < MIN_GRANT_LIFETIME_SECONDS:
+        raise ValueError(
+            f"grant_lifetime_seconds must be at least {MIN_GRANT_LIFETIME_SECONDS}, to outlast a transfer; got {seconds}"
+        )
+    if most is not None and seconds > most:
+        raise ValueError(f"grant_lifetime_seconds can be at most {most} for this store, got {seconds}")
+    return seconds
 
 
 @dataclass(frozen=True)
@@ -47,6 +65,9 @@ class ObjectStore(ABC):
     supports_transfer_grants: bool = False
     # The largest object one upload through a grant can create, where the provider caps it.
     max_single_upload_bytes: int | None = None
+    # How long a read or write grant lasts when its caller names no lifetime; the built-in stores
+    # take it as their grant_lifetime_seconds setting.
+    grant_lifetime_seconds: int = DEFAULT_GRANT_LIFETIME_SECONDS
 
     @classmethod
     def from_config(cls, **config) -> ObjectStore:
@@ -167,11 +188,12 @@ class ObjectStore(ABC):
         return True
 
     def issue_read_grant(
-        self, object_url: str, *, expires_in: int = 3600
+        self, object_url: str, *, expires_in: int | None = None
     ) -> HttpGetGrant:
         """An HTTPS GET grant for the existing object at ``object_url``. ``expires_at`` is at most
-        ``expires_in`` away, and earlier if the store's signing credentials expire first; raise
-        GrantUnavailableError for an ``expires_in`` beyond what the store can sign."""
+        ``expires_in`` away (None: ``grant_lifetime_seconds``), and earlier if the store's signing
+        credentials expire first; raise GrantUnavailableError for an ``expires_in`` beyond what the
+        store can sign."""
         raise NotImplementedError(
             f"{type(self).__name__} cannot issue remote object-transfer grants"
         )
@@ -182,7 +204,7 @@ class ObjectStore(ABC):
         *,
         media_type: str,
         max_bytes: int,
-        expires_in: int = 3600,
+        expires_in: int | None = None,
     ) -> HttpPutGrant:
         """An HTTPS PUT grant for one object at ``object_url``, signed for ``media_type`` and
         bounded to ``max_bytes`` where the provider can enforce that; expiry as for a read grant."""

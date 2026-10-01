@@ -565,12 +565,14 @@ class LocalRunObjectStore(ObjectStore):
     def shared_credentials_env(self) -> dict[str, str]:
         return self.configured.shared_credentials_env()
 
-    def issue_read_grant(self, object_url: str, *, expires_in: int = 3600) -> HttpGetGrant:
-        return self._at(object_url).issue_read_grant(object_url, expires_in=expires_in)
+    def issue_read_grant(self, object_url: str, *, expires_in: int | None = None) -> HttpGetGrant:
+        return self._at(object_url).issue_read_grant(object_url, **_lifetime(expires_in))
 
-    def issue_write_grant(self, object_url: str, *, media_type: str, max_bytes: int, expires_in: int = 3600) -> HttpPutGrant:
+    def issue_write_grant(
+        self, object_url: str, *, media_type: str, max_bytes: int, expires_in: int | None = None
+    ) -> HttpPutGrant:
         return self._writing(object_url).issue_write_grant(
-            object_url, media_type=media_type, max_bytes=max_bytes, expires_in=expires_in
+            object_url, media_type=media_type, max_bytes=max_bytes, **_lifetime(expires_in)
         )
 
     def issue_upload_policy(self, prefix_url: str, *, max_object_bytes: int, expires_in: int) -> UploadPolicy:
@@ -611,3 +613,9 @@ class LocalRunImageStore(ImageStore):
 
     def _for(self, repository: str) -> ImageStore:
         return self.local if repository.startswith(_LOCAL_REPOSITORY_PREFIX) else self.configured
+
+
+def _lifetime(expires_in: int | None) -> dict[str, int]:
+    """``expires_in`` as a keyword only when the caller named one, so the owning store applies its own default,
+    whatever it is."""
+    return {} if expires_in is None else {"expires_in": expires_in}

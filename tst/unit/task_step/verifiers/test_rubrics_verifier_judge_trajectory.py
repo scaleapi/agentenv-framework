@@ -78,7 +78,7 @@ class GrantingStore:
         self.puts.append(key)
         return self.object_url(key)
 
-    def issue_write_grant(self, object_url, *, media_type, max_bytes, expires_in):
+    def issue_write_grant(self, object_url, *, media_type, max_bytes, expires_in=None):
         self.write_grants.append((object_url, media_type, max_bytes))
         if self.grant_error is not None:
             raise self.grant_error

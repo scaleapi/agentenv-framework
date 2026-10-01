@@ -50,10 +50,10 @@ _MEDIA_TYPE = re.compile(r"[!#$&^_.+\-|~0-9a-z]+/[!#$&^_.+\-|~0-9a-z]+")
 _INCREMENT_NAME = re.compile(r"^(?P<sequence>[0-9]{6})(?:\.[A-Za-z0-9][A-Za-z0-9._-]*)?$")
 _TRANSFER_UNAVAILABLE = "transfer_unavailable"  # the SDK's code for a store it could not reach
 
-# The time budget of one transfer, outermost first: a grant outlives agent-env's wait for the
-# agent's answer, which outlasts the SDK's retries of stalled connections
+# The time budget of one transfer, outermost first: a grant (the issuing store's
+# grant_lifetime_seconds, 12 hours unless configured) outlives agent-env's wait for the agent's
+# answer, which outlasts the SDK's retries of stalled connections
 # (agentenv_protocol.transfers.TRANSFER_STALL_BUDGET_SECONDS).
-GRANT_LIFETIME_SECONDS = 3600
 TRANSFER_TIMEOUT_SECONDS = 600  # a call during which the agent moves objects
 REPLY_TIMEOUT_SECONDS = 120  # a call during which it moves none
 
@@ -207,9 +207,7 @@ def write_object(store: ObjectStore, url: str, *, media_type: str, max_bytes: in
     return WriteObject(
         media_type=media_type,
         max_bytes=max_bytes,
-        write=store.issue_write_grant(
-            url, media_type=media_type, max_bytes=max_bytes, expires_in=GRANT_LIFETIME_SECONDS
-        ),
+        write=store.issue_write_grant(url, media_type=media_type, max_bytes=max_bytes),
     )
 
 
@@ -228,7 +226,7 @@ def read_object(
         media_type=media_type or stored_type,
         max_bytes=max_bytes or max(metadata.size, 1),
         size_bytes=metadata.size,
-        read=store.issue_read_grant(url, expires_in=GRANT_LIFETIME_SECONDS),
+        read=store.issue_read_grant(url),
     )
 
 

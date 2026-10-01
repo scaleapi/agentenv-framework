@@ -81,7 +81,7 @@ class _StubObjectStore:
     def grants_reach(self, sandbox_type: str | None) -> bool:
         return True
 
-    def issue_write_grant(self, object_url, *, media_type, max_bytes, expires_in):
+    def issue_write_grant(self, object_url, *, media_type, max_bytes, expires_in=None):
         self.write_grants.append(
             {
                 "object_url": object_url,
