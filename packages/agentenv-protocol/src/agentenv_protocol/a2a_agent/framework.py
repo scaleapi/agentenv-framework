@@ -874,15 +874,15 @@ class A2AAgentApplication:
                 ("/.well-known/agent-card.json", "GET"): "Agent Card",
             }
         )
-        for extension in self.registry.extensions:
+        # Objects agent-env moves through the agent when its object store's grants cannot reach it.
+        self.staging = StagingStore()
+        for extension in self.registry.extensions if self.staging.max_bytes else ():
             for operation in extension.operations.values():
                 if operation.definition.path.startswith(STAGING_ENDPOINT + "/"):
                     raise ValueError(
                         f"extension operation {extension.definition.uri}.{operation.definition.name} "
                         f"conflicts with the staging routes below {STAGING_ENDPOINT}"
                     )
-        # Objects agent-env moves through the agent when its object store's grants cannot reach it.
-        self.staging = StagingStore()
         conformance = self.registry.conformance()
         for override in conformance["standard_operation_overrides"]:
             logger.warning(
