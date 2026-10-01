@@ -37,10 +37,10 @@ function MyApp({ Component, pageProps }: AppProps) {
     >
       <Head>
         {/*
-          Adaptive SVG favicon: embeds both glyphs and swaps between them with an
+          Adaptive SVG favicon: the brand mark switches its fills with an
           internal `@media (prefers-color-scheme)` query, so the icon re-renders
-          live when the OS/tab-bar theme changes (white glyph on dark chrome,
-          black glyph on light). This is the only approach browsers re-evaluate on
+          live when the OS/tab-bar theme changes (light fills on dark chrome,
+          dark fills on light). This is the only approach browsers re-evaluate on
           scheme change — per-<link> `media` on raster icons is cached/hijacked by
           the `sizes="any"` .ico and gets stuck showing one glyph.
         */}

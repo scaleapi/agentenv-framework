@@ -4,6 +4,7 @@ from a2a.types import AgentCapabilities
 
 from .extensions import (
     AGENT_CONFIG_V1,
+    ATTRIBUTION_PROBE_V1,
     INSTALL_V1,
     MCP_CONFIG_V1,
     PEER_AGENTS_V1,
@@ -12,6 +13,7 @@ from .extensions import (
     STANDARD_EXTENSIONS,
     TRAJECTORY_V1,
     TRIGGERS_V1,
+    AttributionProbeResponse,
     BundleSkillRequest,
     ChangelogIncrement,
     ContextObjectTrajectoryRequest,
@@ -108,6 +110,7 @@ from ..transfers import (
 
 __all__ = [
     "AGENT_CONFIG_V1",
+    "ATTRIBUTION_PROBE_V1",
     "INSTALL_V1",
     "MCP_CONFIG_V1",
     "PEER_AGENTS_V1",
@@ -122,6 +125,7 @@ __all__ = [
     "AgentEnvAgent",
     "AgentIdentity",
     "AgentRunResult",
+    "AttributionProbeResponse",
     "BundleSkillRequest",
     "ChangelogIncrement",
     "ContextObjectTrajectoryRequest",

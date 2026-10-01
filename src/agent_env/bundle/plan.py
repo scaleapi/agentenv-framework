@@ -22,6 +22,7 @@ from agent_env.entity_refs import EntityKind
 from agent_env.env.env import Env
 from agent_env.store.base import NotFoundError
 from agent_env.store.ids import LOCAL_PREFIX
+from agent_env.store.routing import namespace_routing_enabled
 from agent_env.task import Task
 from agent_env.task_step.registry import get_task_step_registry
 
@@ -197,8 +198,7 @@ class _Planner:
     def _check_store_refs(
         self, closure: set[_Key], *, stores: bool = True
     ) -> tuple[tuple[Reference, ...], dict[tuple[EntityKind, str], int]]:
-        """Check each store id the closure references; without ``stores``, only the ``@local`` ones, which need no
-        store read."""
+        """Check each store id the closure references; without ``stores``, only what needs no store read."""
         read: dict[tuple[EntityKind, str, int | None], Any] = {}
         checked: dict[tuple[EntityKind, str, int | None], Reference] = {}
         latest: dict[tuple[EntityKind, str], int] = {}
@@ -209,31 +209,41 @@ class _Planner:
             for ref in source.references:
                 if ref.local is not None:
                     continue
-                if not stores and not ref.id.startswith(LOCAL_PREFIX):
-                    continue
-                problem = self._store_ref_problem(ref, read)
+                problem = self._bundle_ref_problem(ref)
+                if problem is None and stores:
+                    problem = self._store_ref_problem(ref, read)
                 if problem:
                     self.problems.append(f"{self._path(source.entry)}: {ref.where}: {problem}")
-                else:
+                elif stores:
                     checked.setdefault((ref.kind, ref.id, ref.version), ref)
                     if ref.version is None:
                         latest[ref.kind, ref.id] = read[ref.kind, ref.id, None].version
         return tuple(checked.values()), latest
 
-    def _store_ref_problem(self, ref: Reference, read: dict) -> str | None:
+    def _bundle_ref_problem(self, ref: Reference) -> str | None:
+        """What makes an ``@local`` id wrong without reading a store: it names one of this bundle's outputs by id,
+        one of its entities of another kind, or an id under its root that it doesn't write. Another bundle's id is
+        read like any store id."""
+        if not ref.id.startswith(LOCAL_PREFIX):
+            return None
         kind, key = ref.kind.value, _nfc(ref.id)
-        if ref.id.startswith(LOCAL_PREFIX):
-            if (kind, key) in self.outputs:
-                entry, output = self.outputs[kind, key]
-                return (f"{ref.id!r} is written by step {output.step_id!r} of {self._path(entry)}; refer to an output "
-                        "by its name, in the task that writes it")
-            other = self.identified.get(key)
-            if other is not None:
-                return (f"{ref.id!r} is this bundle's {other.kind.store} {other.name!r}, but this field takes "
-                        f"{with_article(kind)}")
-            if key.startswith(f"{self.resolved.bundle.id_root}/"):
-                return f"{ref.id!r} isn't in this bundle"
-            return f"{ref.id!r} isn't in this bundle, and references to another bundle's entities aren't supported yet"
+        if (kind, key) in self.outputs:
+            entry, output = self.outputs[kind, key]
+            return (f"{ref.id!r} is written by step {output.step_id!r} of {self._path(entry)}; refer to an output "
+                    "by its name, in the task that writes it")
+        other = self.identified.get(key)
+        if other is not None:
+            return (f"{ref.id!r} is this bundle's {other.kind.store} {other.name!r}, but this field takes "
+                    f"{with_article(kind)}")
+        if key.startswith(f"{self.resolved.bundle.id_root}/"):
+            return f"{ref.id!r} isn't in this bundle"
+        return None
+
+    def _store_ref_problem(self, ref: Reference, read: dict) -> str | None:
+        if ref.id.startswith(LOCAL_PREFIX) and not namespace_routing_enabled():
+            raise RuntimeError("reading an @local id from the store needs namespace routing, which the agent-env CLI "
+                               "turns on; call plan_bundle inside agent_env.store.routing.namespace_routing()")
+        kind = ref.kind.value
         lookup = (ref.kind, ref.id, ref.version)
         if lookup not in read:
             try:

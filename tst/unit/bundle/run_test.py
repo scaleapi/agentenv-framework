@@ -10,9 +10,16 @@ import pytest
 from click.testing import CliRunner
 
 import agent_env.bundle.run as run_module
-from agent_env.bundle import BundleError, Outcome, TaskRun, run_bundle
+from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
+from agent_env.artifact.artifacts.file import FileArtifact
+from agent_env.artifact.store import get_artifact_store
+from agent_env.bundle import BundleError, Outcome, TaskRun, dry_run_bundle, parse_bundle, run_bundle
+from agent_env.bundle.materialize import materialize
+from agent_env.bundle.plan import plan_bundle
+from agent_env.bundle.resolve import resolve_bundle
 from agent_env.cli import cli
 from agent_env.config.runtime import Config
+from agent_env.store import Filter
 from agent_env.store.routing import namespace_routing
 from agent_env.task import Task
 from agent_env.task_step.context import TaskStepContext
@@ -20,6 +27,7 @@ from agent_env.task_step.task_step import TaskStep
 from tst.unit.bundle._support import layout, local_store, plan_of
 
 ROOT = "@local/~/triage"
+DRY_RUN = "Dry run: nothing is written or run.\n"
 
 
 class _Scored(TaskStep):
@@ -205,6 +213,20 @@ def test_an_eval_naming_a_store_task_is_refused_before_anything_is_written(bundl
     assert _Scored.seen == []
 
 
+def test_an_eval_naming_another_bundles_task_is_refused_as_a_store_task(bundle_dir):
+    run_bundle(layout(bundle_dir.parent / "other", {"tasks/shared.json": _scored(1.0)}))
+    layout(bundle_dir, {"evals/other.toml": 'tasks = ["@local/~/other/shared"]\n'})
+
+    with pytest.raises(BundleError) as caught:
+        run_bundle(bundle_dir, evals=["other"])
+
+    assert caught.value.problems == (
+        "evals/other.toml: tasks[0]: '@local/~/other/shared' is a store task, and a bundle's evals run only the "
+        "bundle's own tasks for now; run it on its own with agent-env task run --id '@local/~/other/shared'",
+    )
+    assert local_store().find_one("evals", Filter.of(id=f"{ROOT}/other")) is None
+
+
 def test_an_eval_that_isnt_selected_isnt_refused(bundle_dir):
     with namespace_routing():
         Task.put(id="shared-task", steps=[_Scored(id="check", version=None)])
@@ -344,3 +366,120 @@ def test_the_cli_prints_a_bundle_problem_as_the_answer_it_is(bundle_dir, quiet_l
 
     assert result.exit_code == 1
     assert result.output.startswith("Error: --task 'nope': this bundle has no task with that name or id")
+
+
+def _put_image(id):
+    get_artifact_store().put_document(DockerImageArtifact(
+        id=id, description=id, image_name="solver:v1", tar_gz_s3_url="file:///solver.tar.gz"))
+
+
+def test_a_dry_run_selects_what_a_run_would_and_runs_nothing(bundle_dir):
+    every = dry_run_bundle(bundle_dir)
+    selected = dry_run_bundle(bundle_dir, tasks=["unnamed", "a"], evals=["smoke"])
+
+    assert [entry.name for entry in every.runs] == ["a", "b", "c"]
+    assert [every.path(entry) for entry in every.skipped] == ["tasks/unnamed.json"]
+    assert ([entry.name for entry in selected.runs], selected.skipped) == (["a", "b", "unnamed"], ())
+    assert _Scored.seen == []
+    assert not local_store().path.exists()
+
+
+def test_a_dry_run_refuses_what_a_run_refuses_before_anything_is_written(bundle_dir):
+    with namespace_routing():
+        Task.put(id="shared-task", steps=[_Scored(id="check", version=None)])
+    layout(bundle_dir, {"evals/other.toml": 'tasks = ["shared-task"]\n'})
+
+    with pytest.raises(BundleError, match="evals/other.toml: tasks\\[0\\]: 'shared-task' is a store task"):
+        dry_run_bundle(bundle_dir)
+    with pytest.raises(ValueError, match="Unknown sandbox backend: 'nowhere'"):
+        dry_run_bundle(bundle_dir, evals=["smoke"], sandbox="nowhere")
+    with pytest.raises(BundleError, match="--task 'nope': this bundle has no task with that name or id"):
+        dry_run_bundle(bundle_dir, tasks=["nope"])
+    assert not local_store().path.exists()
+
+
+def test_the_cli_dry_run_prints_what_the_run_would_write_and_run_and_exits_0(bundle_dir, quiet_logs):
+    with namespace_routing():
+        FileArtifact.put_bytes("shared-notes", description="notes", filename="notes.txt", content=b"notes")
+    layout(bundle_dir, {
+        "artifacts/script/run.py": "print(1)\n",
+        "artifacts/script/lib.py": "x = 1\n",
+        "tasks/code.json": json.dumps([
+            {"id": "code", "type": "run_code", "script_artifact_id": "script", "script_file": "run.py"},
+            {"id": "notes", "type": "load_artifact", "sandbox_name": "box", "artifact_id": "shared-notes"},
+        ]),
+        "evals/smoke.toml": 'tasks = ["a", "b", "code"]\n',
+    })
+
+    result = CliRunner().invoke(cli, ["run", str(bundle_dir), "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output == (
+        DRY_RUN
+        + "artifacts/script: v1 (new)\n"
+        "tasks/a.json: v1 (new)\n"
+        "tasks/b.json: v1 (new)\n"
+        "tasks/c.json: v1 (new)\n"
+        "tasks/code.json: v1 (new)\n"
+        "evals/full.toml: v1 (new)\n"
+        "evals/smoke.toml: v1 (new)\n"
+        "\n"
+        "Store refs:\n"
+        "  artifact shared-notes v1, the latest\n"
+        "Would run:\n"
+        "  tasks/a.json v1\n"
+        "  tasks/b.json v1\n"
+        "  tasks/c.json v1\n"
+        "  tasks/code.json v1\n"
+        "Evals:\n"
+        "  evals/full.toml v1: tasks/a.json, tasks/c.json\n"
+        "  evals/smoke.toml v1: tasks/a.json, tasks/b.json, tasks/code.json\n"
+        "tasks/unnamed.json isn't named by any eval, so it wouldn't run; run it with --task unnamed\n"
+        "Not preflighted, since each reads what the run would write first:\n"
+        "  tasks/code.json: step 'code' (run_code)\n"
+        + DRY_RUN
+    )
+    assert not local_store().path.exists()
+    assert _Scored.seen == []
+
+
+def test_the_cli_dry_run_reads_another_bundles_entity_and_says_why_an_agent_pinning_it_would_be_rewritten(
+        bundle_dir, quiet_logs):
+    image = "@local/~/other/solver-image"
+    layout(bundle_dir, {"agents/solver/agent.toml": f'image = "{image}"\n', "tasks/agent.json": json.dumps(
+        [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])})
+    with namespace_routing():
+        _put_image(image)
+        materialize(plan_bundle(resolve_bundle(parse_bundle(bundle_dir)), tasks=["agent"]))
+        _put_image(image)
+
+    result = CliRunner().invoke(cli, ["run", str(bundle_dir), "--task", "agent", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output.startswith(
+        DRY_RUN
+        + f"agents/solver: v2 (artifact {image} has a new version in the store (v1 → v2))\n"
+        "tasks/agent.json: v1, unchanged\n"
+        "\n"
+        "Store refs:\n"
+        f"  artifact {image} v2, the latest\n"
+        "Would run:\n"
+        "  tasks/agent.json v1\n"
+    )
+
+
+def test_the_cli_dry_run_prints_a_problem_as_one_line_and_exits_1(bundle_dir, quiet_logs):
+    result = CliRunner().invoke(cli, ["run", str(bundle_dir), "--task", "nope", "--dry-run"])
+
+    assert result.exit_code == 1
+    assert result.output.startswith(f"{DRY_RUN}Error: --task 'nope': this bundle has no task with that name or id")
+    assert "Traceback" not in result.output
+
+
+def test_the_cli_dry_run_accepts_keep_and_model_and_ignores_them(bundle_dir, quiet_logs):
+    plain = CliRunner().invoke(cli, ["run", str(bundle_dir), "--eval", "smoke", "--dry-run"])
+    ignoring = CliRunner().invoke(cli, ["run", str(bundle_dir), "--eval", "smoke", "--dry-run", "--keep", "--model", "m"])
+
+    assert (plain.exit_code, ignoring.exit_code) == (0, 0)
+    assert ignoring.output == plain.output
+    assert _Scored.seen == []
