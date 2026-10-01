@@ -319,3 +319,21 @@ async def test_an_increment_rewritten_after_it_was_drained_replaces_the_stored_c
     await _Agent.uploader.upload("000000.tar", b"second")
     await staging.drain(namespace, store)
     assert store.get(f"{namespace_url}/000000.tar") == b"second"
+
+
+@pytest.mark.asyncio
+async def test_a_drain_that_keeps_failing_is_reported_once(monkeypatch, caplog):
+    monkeypatch.setattr(staging, "DRAIN_INTERVAL_SECONDS", 0.01)
+    unreachable = staging.StagedNamespace("https://gone.example.test/ext/staging/" + "n" * 32, "file:///nowhere")
+
+    def refuse(request):
+        raise httpx.ConnectError("refused", request=request)
+
+    real_async_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: real_async_client(transport=httpx.MockTransport(refuse), **kwargs))
+    monkeypatch.setattr(staging, "get_config", lambda: type("C", (), {"get_object_store_at": lambda self, url: LocalFilesystemObjectStore()})())
+    with caplog.at_level("WARNING", logger=staging.__name__):
+        async with staging.draining([unreachable]):
+            await asyncio.sleep(0.2)
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 2  # once while the prompt runs, once for the last drain

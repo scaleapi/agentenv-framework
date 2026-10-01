@@ -196,18 +196,23 @@ def staged_changelogs(metadata: Mapping[str, Any], *, agent_name: str | None = N
     ]
 
 
-async def drain_all(namespaces: Iterable[StagedNamespace], *, within: float | None = None) -> None:
+async def drain_all(namespaces: Iterable[StagedNamespace], *, within: float | None = None, quiet: bool = False) -> list[str]:
     """Drain each of ``namespaces`` into the store its namespace URL is in, giving up after ``within``
-    seconds when given. One that cannot be drained is logged and left, for the next drain to try again."""
+    seconds when given, and return why any could not be. One that cannot be drained is left for the next
+    drain to try again, and logged unless ``quiet``."""
+    failures = []
     try:
         async with asyncio.timeout(within):
             for namespace in namespaces:
                 try:
                     await drain(namespace, get_config().get_object_store_at(namespace.namespace_url))
                 except Exception as exc:  # an agent that is gone or busy must not fail the run
-                    logger.warning("%s", exc if isinstance(exc, StagingError) else type(exc).__name__)
+                    failures.append(str(exc) if isinstance(exc, StagingError) else type(exc).__name__)
     except TimeoutError:
-        logger.warning("staged changelog increments were not all drained within %gs", within)
+        failures.append(f"staged changelog increments were not all drained within {within:g}s")
+    for failure in failures if not quiet else ():
+        logger.warning("%s", failure)
+    return failures
 
 
 @asynccontextmanager
@@ -220,9 +225,15 @@ async def draining(namespaces: Iterable[StagedNamespace]) -> AsyncIterator[None]
         return
 
     async def loop() -> None:
+        failing = False
         while True:
             await asyncio.sleep(DRAIN_INTERVAL_SECONDS)
-            await drain_all(namespaces)
+            failures = await drain_all(namespaces, quiet=True)
+            if failures and not failing:  # once when draining starts to fail, not every few seconds
+                logger.warning("%s; retrying every %gs", "; ".join(failures), DRAIN_INTERVAL_SECONDS)
+            elif failing and not failures:
+                logger.info("staged changelog increments are draining again")
+            failing = bool(failures)
 
     task = asyncio.create_task(loop())
     try:
