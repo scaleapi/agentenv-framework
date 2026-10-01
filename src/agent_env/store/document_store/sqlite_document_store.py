@@ -233,7 +233,7 @@ class LocalSqliteDocumentStore(DocumentStore):
             tbl = self._ensure_table(collection)
             raw_name = tbl + "_" + "_".join(fields) + ("_unique" if unique else "_index")
             name = self._safe_ident(re.sub(r"\W", "_", raw_name))
-            cols = ", ".join(f"json_extract(doc, '$.{self._safe_path(f)}')" for f in fields)
+            cols = ", ".join(_field_expr(self._safe_path(f)) for f in fields)
             uniq = "UNIQUE " if unique else ""
             self._conn.execute(
                 # nosemgrep: sqlalchemy-execute-raw-query -- name/tbl/cols are validated identifiers
@@ -291,7 +291,7 @@ class LocalSqliteDocumentStore(DocumentStore):
             return []
         pinned = self._pinned(tbl, filter)
         # The index's own expression, so SQLite searches the index; the value is JSON so it decodes as the field does.
-        terms = [f"json_extract(doc, '$.{self._safe_path(field)}') = json_extract(?, '$')" for field, _ in pinned]
+        terms = [f"{_field_expr(self._safe_path(field))} = json_extract(?, '$')" for field, _ in pinned]
         where = f" WHERE {' AND '.join(terms)}" if terms else ""
         rows = self._conn.execute(
             # nosemgrep: sqlalchemy-execute-raw-query -- tbl and the fields are validated identifiers; values are bound
@@ -371,4 +371,10 @@ class LocalSqliteDocumentStore(DocumentStore):
             ) from e
 
 
+def _field_expr(field: str) -> str:
+    """How an index stores a field, so a query that spells it the same way searches that index."""
+    return f"json_extract(doc, '$.{field}')"
+
+
+# The fields of an index, read back from the SQL `_field_expr` wrote; the two must agree.
 _INDEX_FIELD_RE = re.compile(r"json_extract\(doc, '\$\.([A-Za-z0-9_.]+)'\)")
