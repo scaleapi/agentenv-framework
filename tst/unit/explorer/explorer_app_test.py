@@ -366,7 +366,9 @@ def test_docs_metadata_reports_a_live_source(client):
     meta = client.get("/api/v1/docs/openapi/metadata").json()
     assert meta["source"] == "live"
     assert meta["openapi_version"].startswith("3.")
+    # The keys the overview's version rows read (ui/src/lib/live-spec-versions.ts).
     assert meta["versions"]["agentenv-framework"]
+    assert meta["versions"]["agentenv-protocol"]
     # No object-store provenance to report; the UI switches panels on `source`.
     assert "bucket" not in meta
 

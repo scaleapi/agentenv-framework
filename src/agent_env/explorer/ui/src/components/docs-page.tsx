@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { Code2, FileJson, Search, Server, Shapes } from 'lucide-react';
+import { liveSpecVersionRows } from '../lib/live-spec-versions';
 import { apiFetch, BACKEND_URL, FRAMEWORK_DOCS_URL } from './shared';
 
 type JsonSchema = Record<string, unknown>;
@@ -486,14 +487,7 @@ function OverviewPane({
                   ['Source', 'Served live by this hub'],
                   ['Generated', formatTimestamp(metadata?.generated_at)],
                   ['OpenAPI', metadata?.openapi_version ?? ''],
-                  [
-                    'agentenv-framework',
-                    metadata?.versions?.['agentenv-framework'] ?? '',
-                  ],
-                  [
-                    'agentenv-framework-protocol',
-                    metadata?.versions?.['agentenv-protocol'] ?? '',
-                  ],
+                  ...liveSpecVersionRows(metadata?.versions),
                 ]
               : [
                   ['Commit', metadata?.commit ?? ''],
