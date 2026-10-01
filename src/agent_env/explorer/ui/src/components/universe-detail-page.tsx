@@ -44,7 +44,7 @@ export function UniverseDetailPage({
   const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
-    apiFetch(`${BACKEND_URL}/api/v1/artifacts/${universeId}/versions`)
+    apiFetch(`${BACKEND_URL}/api/v1/artifacts/${encodeURIComponent(universeId)}/versions`)
       .then(res => (res.ok ? res.json() : []))
       .then((list: VersionEntry[]) => {
         setVersions(Array.isArray(list) ? list : []);
@@ -56,8 +56,8 @@ export function UniverseDetailPage({
     setLoading(true);
     const url =
       selectedVersion != null
-        ? `${BACKEND_URL}/api/v1/artifacts/${universeId}?version=${selectedVersion}`
-        : `${BACKEND_URL}/api/v1/artifacts/${universeId}`;
+        ? `${BACKEND_URL}/api/v1/artifacts/${encodeURIComponent(universeId)}?version=${selectedVersion}`
+        : `${BACKEND_URL}/api/v1/artifacts/${encodeURIComponent(universeId)}`;
     apiFetch(url)
       .then(res => {
         if (!res.ok) throw new Error(`Failed to fetch (${res.status})`);

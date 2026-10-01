@@ -578,6 +578,7 @@ class MultiEnv(Env):
             gateway_mode=self._gateway_mode,
             state_provider=gw._state_provider,  # local-only, set above
             state_instance=gw._state_instance,
+            host_ips=self._sandbox.host_ips,
             mcp_server_name=self._mcp_server_name or self.name,
         )
         compose_content = compose_content.replace(

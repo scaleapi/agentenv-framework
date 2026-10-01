@@ -13,7 +13,7 @@ from agentenv_protocol.a2a_agent import STANDARD_EXTENSIONS
 
 from agent_env.config import get_config
 from agent_env.entity_refs import EntityRef
-from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, NetworkPolicyUnsupportedError
+from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, NetworkPolicyUnsupportedError, port_bindings
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.a2a_agent.object_transfer import (
     TRANSFER_TIMEOUT_SECONDS,
@@ -546,12 +546,13 @@ class A2AAgent:
             escaped_value = value.replace("'", "'\\''")
             env_flags.append(f"-e {key}='{escaped_value}'")
         env_str = " \\\n    ".join(env_flags)
+        publish = " ".join(f"-p {spec}" for spec in port_bindings(self._sandbox.host_ips, a2a_port, a2a_port))
 
         run_script = f"""#!/bin/bash
 set -e
 {setup_script}docker {"run -d" if trust_dir is None else "create"} \\
     --name {self._sandbox.container_name} \\
-    -p {a2a_port}:{a2a_port} \\
+    {publish} \\
     {network_flag}{env_str} \\
     {image_name} > /dev/null
 {"sleep 2" if trust_dir is None else ""}

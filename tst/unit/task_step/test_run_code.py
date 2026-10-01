@@ -309,6 +309,19 @@ async def test_agent_target_honors_the_agents_sandbox_type():
 
 
 @pytest.mark.asyncio
+async def test_a_reattached_local_agent_runs_the_script_inside_its_container(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_ENV_LOCAL_SANDBOX_DIR", str(tmp_path))
+    (tmp_path / "agent-env-local-agent1-abc123").mkdir()
+    (tmp_path / "agent-env-local-agent1-abc123" / ".agent-container-mode").write_text("agent-local-agent1")
+    ctx = _make_context()
+    ctx.deployed_agents[0].sandbox_id, ctx.deployed_agents[0].sandbox_type = "local-agent1", "local"
+
+    target = await _step()._agent_target(ctx)
+
+    assert target.prefix == ("sudo", "docker", "exec", "-u", "0", "agent-local-agent1")
+
+
+@pytest.mark.asyncio
 async def test_host_installed_agent_on_a_vm_runs_on_the_host():
     step = _step(result_id="filter")
     ctx = _make_context()

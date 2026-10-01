@@ -297,6 +297,11 @@ class VerifySandboxTaskStep(TaskStep):
         running = [n.strip() for n in stdout.splitlines() if n.strip()]
         if sandbox.container_name in running:
             return sandbox.container_name
+        if getattr(sandbox, "owns_container", False):
+            # Its Docker host is shared, so any other agent container there is another run's.
+            raise RuntimeError(
+                f"Agent container {sandbox.container_name!r} is not running. Running containers: {running}."
+            )
         fallback = [n for n in running if n.startswith("a2a-agent-")]
         if fallback:
             if len(fallback) > 1:

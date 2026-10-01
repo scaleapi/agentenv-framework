@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import glob
 import logging
 import os
@@ -64,7 +65,7 @@ LOCAL_TRUST_ENV = {
 }
 
 # Marker dropped in the work dir when this sandbox runs a container, so a later get_sandbox()
-# (post-run teardown reconstructs the sandbox from disk) can restore container mode and clean up.
+# (post-run teardown reconstructs the sandbox from disk) knows it owns that container.
 _CONTAINER_MODE_MARKER = ".agent-container-mode"
 
 
@@ -126,8 +127,9 @@ class LocalSandbox(VmSandbox):
             port: port for port in (exposed_ports or [])
         }
         # Keyed by container port: callers index this with the well-known constants.
+        # 127.0.0.1, not localhost: ports are published on IPv4 loopback, and a client may try ::1 first.
         self.tunnel_urls = {
-            container: f"http://localhost:{host}" for container, host in self._port_map.items()
+            container: f"http://127.0.0.1:{host}" for container, host in self._port_map.items()
         }
         self.vnc_url = None
         self.mode = SANDBOX_MODE_VM
@@ -138,6 +140,11 @@ class LocalSandbox(VmSandbox):
     def host_port(self, port: int) -> int:
         """The allocated host port for a published container port (identity if unmapped)."""
         return self._port_map.get(port, port)
+
+    @property
+    def host_ips(self) -> tuple[str, ...]:
+        """Loopback, so a local deploy is not reachable from the network (see ``_host_ips``)."""
+        return _host_ips()
 
     @classmethod
     def find_work_dir(cls, sandbox_id: str) -> Path | None:
@@ -165,6 +172,11 @@ class LocalSandbox(VmSandbox):
         return f"agent-{self.sandbox_id}"
 
     @property
+    def owns_container(self) -> bool:
+        """Whether create_container started ``container_name`` for this sandbox, not an agent placed on it."""
+        return (self._work_dir / _CONTAINER_MODE_MARKER).exists()
+
+    @property
     def work_dir(self) -> Path:
         return self._work_dir
 
@@ -179,8 +191,8 @@ class LocalSandbox(VmSandbox):
     async def terminate(self) -> None:
         """Tear down whatever this sandbox is running.
 
-        A container-mode sandbox (the A2A agent) owns the ``self.container_name`` container that
-        create_container started — remove it. A VM-mode sandbox (env/gateway) runs a docker compose
+        A sandbox create_container made (the A2A agent; VM mode once reattached) owns the container
+        ``self.container_name`` it started — remove it. A VM-mode sandbox (env/gateway) runs a docker compose
         stack out of its work dir — ``docker compose down`` it — and may carry an agent placed on it,
         which runs as the same ``self.container_name`` container. Each path only touches resources
         this sandbox created: the container name is per-sandbox (LocalSandbox.container_name), so a
@@ -441,10 +453,8 @@ class LocalSandboxProvider(SandboxProvider):
         work_dir = LocalSandbox.find_work_dir(sandbox_id)
         if work_dir is None:
             raise RuntimeError(f"Local sandbox work directory not found for sandbox_id={sandbox_id!r}")
-        sandbox = LocalSandbox(sandbox_id=sandbox_id, work_dir=work_dir)
-        if (work_dir / _CONTAINER_MODE_MARKER).exists():
-            sandbox.mode = SANDBOX_MODE_CONTAINER
-        return sandbox
+        # VM mode even for a container it owns: exec runs on this host, so steps must `docker exec` into it.
+        return LocalSandbox(sandbox_id=sandbox_id, work_dir=work_dir)
 
     @classmethod
     def shares_network_with(cls, sandbox_type: Optional[str]) -> bool:
@@ -460,3 +470,26 @@ class LocalSandboxProvider(SandboxProvider):
         inside a container: ``host.docker.internal``. Docker Desktop and Rancher Desktop (macOS/Windows)
         resolve this themselves; on Linux ``EXTRA_CONTAINER_RUN_ARGS`` maps it via ``--add-host …:host-gateway``."""
         return url.replace("localhost", "host.docker.internal").replace("127.0.0.1", "host.docker.internal")
+
+
+@functools.cache
+def _host_ips() -> tuple[str, ...]:
+    """Loopback, plus on Linux the bridge gateway ``host-gateway`` resolves to, where containers reach the host."""
+    # Docker Desktop publishes through a host-side proxy, which can't bind the bridge address inside its VM.
+    if platform.system() != "Linux" or _docker("info", "--format", "{{.OperatingSystem}}") == "Docker Desktop":
+        return ("127.0.0.1",)
+    # Listing, unlike inspecting, answers a missing network with nothing rather than an error.
+    if not _docker("network", "ls", "--quiet", "--filter", "name=^bridge$"):
+        return ("127.0.0.1",)
+    return ("127.0.0.1", _docker("network", "inspect", "bridge", "--format", "{{(index .IPAM.Config 0).Gateway}}"))
+
+
+def _docker(*args: str) -> str:
+    """A docker CLI query's output. A failure raises, so the cache above never keeps it."""
+    run = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=_DOCKER_QUERY_SECONDS)
+    if run.returncode:
+        raise RuntimeError(f"docker {' '.join(args)} failed: {run.stderr.strip()}")
+    return run.stdout.strip()
+
+
+_DOCKER_QUERY_SECONDS = 30

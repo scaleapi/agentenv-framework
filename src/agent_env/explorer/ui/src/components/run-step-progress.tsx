@@ -63,7 +63,7 @@ export function RunStepProgress({
     };
     const poll = () => {
       apiFetch(
-        `${BACKEND_URL}/api/v1/tasks/${taskId}/instances/${instanceId}/progress`,
+        `${BACKEND_URL}/api/v1/tasks/${encodeURIComponent(taskId)}/instances/${encodeURIComponent(instanceId)}/progress`,
         { signal: controller.signal },
       )
         .then(r =>

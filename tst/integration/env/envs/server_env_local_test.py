@@ -97,7 +97,7 @@ async def test_a_server_env_deploys_restores_loads_and_tears_down_on_local_conta
     container = f"agent-{deployed.sandbox_id}"
     local_stack.append(container)
     assert type(deployed) is DeployedSandboxEnv and deployed.sandbox_type == "local"
-    assert deployed.environment_card["name"] == "items" and deployed.mcp_url.startswith("http://localhost:")
+    assert deployed.environment_card["name"] == "items" and deployed.mcp_url.startswith("http://127.0.0.1:")
 
     restored = await Env.from_instance_id(deployed.instance_id)
     await restored.load_environment_artifact(_items_artifact(uid))

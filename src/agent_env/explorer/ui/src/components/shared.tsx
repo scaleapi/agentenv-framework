@@ -6,6 +6,8 @@ import Link from 'next/link';
  * `/undefined/api/v1/...` — and the catch-all answers 200 text/html, so it fails quietly. */
 export const BACKEND_URL = process.env.NEXT_PUBLIC_AGENT_ENV_HUB_BACKEND_URL ?? '';
 
+export const FRAMEWORK_DOCS_URL = 'https://www.agentenvframework.com/docs';
+
 export function apiFetch(input: string, init?: RequestInit): Promise<Response> {
   const headers = new Headers(init?.headers);
   headers.set('x-agent-env-client', 'agent-env-explorer');

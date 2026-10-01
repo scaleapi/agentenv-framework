@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Ask a question
+    url: https://github.com/scaleapi/agentenv-framework/discussions/categories/q-a
+    about: Get help installing, configuring or using AgentEnv Framework.
+  - name: Report a security vulnerability
+    url: https://github.com/scaleapi/agentenv-framework/security/advisories/new
+    about: Report it privately, not in a public issue. See SECURITY.md.

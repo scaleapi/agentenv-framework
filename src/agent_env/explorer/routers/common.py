@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from agent_env.artifact.registry import canonical_type, equivalent_types
 from agent_env.config import get_config
+from agent_env.explorer.entity_ids import EntityId
 from agent_env.store import Filter, Sort
 
 
@@ -100,13 +101,15 @@ def versioned_router(
     prefix: str,
     tag: str,
     collection: str,
+    noun: str,
     id_field: str = "id",
 ) -> APIRouter:
     """List / get / versions over one ``(id, version)`` collection (artifacts, envs, tasks,
-    agents, evals)."""
+    agents, evals). ``noun`` names the entity in each route's summary, which the Docs nav
+    lists without its path."""
     router = APIRouter(prefix=prefix, tags=[tag])
 
-    @router.get("", response_model=PaginatedResponse)
+    @router.get("", response_model=PaginatedResponse, summary=f"List {noun.title()}s")
     def list_items(
         limit: int = Query(50, ge=1, le=500),
         offset: int = Query(0, ge=0),
@@ -147,8 +150,8 @@ def versioned_router(
             has_more=offset + len(items) < total,
         )
 
-    @router.get("/{entity_id}")
-    def get_item(entity_id: str, version: Optional[int] = None) -> dict:
+    @router.get("/{entity_id}", summary=f"Get {noun.title()}")
+    def get_item(entity_id: EntityId, version: Optional[int] = None) -> dict:
         store = docs()
         if version is not None:
             doc = store.find_one(collection, Filter.of(**{id_field: entity_id, "version": version}))
@@ -159,9 +162,9 @@ def versioned_router(
             raise HTTPException(status_code=404, detail=f"{tag} {entity_id} not found")
         return _enrich_universe(doc, store, collection)
 
-    @router.get("/{entity_id}/versions")
+    @router.get("/{entity_id}/versions", summary=f"List {noun.title()} Versions")
     def list_versions(
-        entity_id: str,
+        entity_id: EntityId,
         limit: int = Query(100, ge=1, le=500),
         offset: int = Query(0, ge=0),
     ) -> list[dict]:

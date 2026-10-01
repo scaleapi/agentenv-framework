@@ -82,23 +82,19 @@ jobs:
           name: Build and publish the protocol package
           command: |
             set -euo pipefail
-            # This index carries the protocol under its former distribution name, agentenv-protocol;
-            # PyPI has it as agentenv-framework-protocol (publish-pypi.yml).
-            sed -i 's/^name = "agentenv-framework-protocol"$/name = "agentenv-protocol"/' packages/agentenv-protocol/pyproject.toml
-            grep -q '^name = "agentenv-protocol"$' packages/agentenv-protocol/pyproject.toml
             python -m build packages/agentenv-protocol --outdir packages/agentenv-protocol/dist
             twine upload --repository codeartifact packages/agentenv-protocol/dist/*
 
       - run:
-          name: Build package (pin the exact protocol version, by this index's name)
+          name: Build package (pin the exact protocol version)
           command: |
             set -euo pipefail
             PV=$(sed -n 's/^version = "\(.*\)"/\1/p' packages/agentenv-protocol/pyproject.toml)
             # Only the quoted requirement: the directory name also appears in the sdist include list
             # and the uv workspace members, and the bare name keys [tool.uv.sources]; none may change.
-            sed -i "s/\"agentenv-framework-protocol[^\"]*\"/\"agentenv-protocol==${PV}\"/" pyproject.toml
+            sed -i "s/\"agentenv-framework-protocol[^\"]*\"/\"agentenv-framework-protocol==${PV}\"/" pyproject.toml
             python -c "import tomllib; tomllib.load(open('pyproject.toml','rb'))"
-            grep -q "\"agentenv-protocol==${PV}\"" pyproject.toml
+            grep -q "\"agentenv-framework-protocol==${PV}\"" pyproject.toml
             python -m build
 
       - run:

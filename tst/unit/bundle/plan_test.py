@@ -14,12 +14,14 @@ from agent_env.bundle import plan as plan_module
 from agent_env.bundle import resolve as resolve_module
 from agent_env.bundle.plan import check_bundle, plan_bundle
 from agent_env.bundle.resolve import resolve_bundle
+from agent_env.config import configure
 from agent_env.entity_refs import EntityKind, EntityRef
 from agent_env.env.env import Env
 from agent_env.env.store import get_env_store, reset_env_store
 from agent_env.store import reset_config, set_document_store
 from agent_env.task import Task
 from agent_env.task.store import get_task_store, reset_task_store
+from tst.unit.bundle._support import RefusingStore
 from tst.unit.store.fakes import FakeDocumentStore
 
 ROOT = "@local/~/triage"
@@ -253,13 +255,47 @@ def test_store_ids_the_selection_reaches_are_read_once_and_kept(make, monkeypatc
      "'tickets' has that name"),
     ([load(f"{ROOT}/tickets")], f"step 'load': artifact_id: '{ROOT}/tickets' is this bundle's env 'tickets', but "
      "this field takes an artifact"),
-    ([deploy("@local/~/other/crm")], "step 'deploy': env_id: '@local/~/other/crm' isn't in this bundle, and "
-     "references to another bundle's entities aren't supported yet"),
     ([deploy(f"{ROOT}/tickts")], f"step 'deploy': env_id: '{ROOT}/tickts' isn't in this bundle"),
 ])
 def test_a_store_id_must_exist(make, steps, problem):
     put_env("crm")
     assert problems(make(tasks={"t": steps})) == (f"tasks/t.json: {problem}",)
+
+
+def test_another_bundles_local_id_is_read_from_the_local_namespace_like_a_store_id(make, local_stores, cli_routing):
+    put_env("@local/~/other/crm")
+    VMImageArtifact.put(id="@local/~/other/golden", description="golden", ecr_url="ecr/x")
+    configure(document_store=RefusingStore())
+
+    plan = plan_bundle(make(tasks={"t": [deploy("@local/~/other/crm")]}))
+
+    assert [(ref.kind, ref.id, ref.version) for ref in plan.store_refs] == [(EntityKind.ENV, "@local/~/other/crm", None)]
+    assert plan.store_latest == {(EntityKind.ENV, "@local/~/other/crm"): 1}
+    assert problems(make(tasks={"t": [deploy("@local/~/other/gone")]})) == (
+        "tasks/t.json: step 'deploy': env_id: there is no env '@local/~/other/gone' in the store",
+    )
+    assert problems(make(tasks={"t": [deploy("both")]}, files={
+        "envs/both/env.toml": composite(image="@local/~/other/golden")})) == (
+        "envs/both: image: '@local/~/other/golden' is a vm_image in the store, but this field takes docker_image",
+    )
+
+
+def test_an_id_under_the_bundles_own_root_that_it_doesnt_write_is_refused_without_a_read(
+        make, local_stores, cli_routing, monkeypatch):
+    put_env(f"{ROOT}/crm")
+
+    def read(*_):
+        raise AssertionError("the plan read a store")
+
+    monkeypatch.setattr(plan_module, "_GETTERS", dict.fromkeys(plan_module._GETTERS, read))
+    assert problems(make(tasks={"t": [deploy(f"{ROOT}/crm")]})) == (
+        f"tasks/t.json: step 'deploy': env_id: '{ROOT}/crm' isn't in this bundle",
+    )
+
+
+def test_planning_a_read_of_another_bundles_local_id_without_namespace_routing_is_refused(make):
+    with pytest.raises(RuntimeError, match="reading an @local id from the store needs namespace routing"):
+        plan_bundle(make(tasks={"t": [deploy("@local/~/other/crm")]}))
 
 
 def test_an_output_is_only_readable_in_its_own_task(make):
@@ -317,8 +353,6 @@ def test_a_check_covers_every_task_and_eval_and_reads_no_store(make, monkeypatch
     assert sorted(caught.value.problems) == [
         "artifacts/note: artifact.toml: unknown key 'descripton'; a file artifact takes description, type and id",
         "tasks/u.json: Duplicate step id 'd' at position 1; step ids must be unique within a task",
-        "tasks/v.json: step 'deploy': env_id: '@local/~/other/crm' isn't in this bundle, and references to another "
-        "bundle's entities aren't supported yet",
     ]
 
 

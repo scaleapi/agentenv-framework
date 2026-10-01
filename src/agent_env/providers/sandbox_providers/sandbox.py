@@ -120,6 +120,8 @@ class Sandbox(ABC):
     vnc_url: str | None
     # Effective, as applied by the backend; None when it cannot tell us.
     network_policy: NetworkPolicy | None = None
+    # Host IPs published ports bind to; empty binds every interface.
+    host_ips: tuple[str, ...] = ()
 
     _VM_READY_TIMEOUT = 1200      # wait_for_vm wall-clock budget (s)
     _VM_READY_POLL_INTERVAL = 30  # sparse polling (s)
@@ -385,3 +387,8 @@ class VmSandbox(Sandbox):
             await self._copy_into_container(vm_path, destination_path)
         finally:
             await self._remove_vm_temp_file(vm_path, f"{vm_path}.b64")
+
+
+def port_bindings(host_ips: Iterable[str], host_port: int, container_port: int) -> list[str]:
+    """Docker publish specs for one port: one per host IP, or a bare one (every interface) when there are none."""
+    return [f"{ip}:{host_port}:{container_port}" for ip in host_ips] or [f"{host_port}:{container_port}"]
