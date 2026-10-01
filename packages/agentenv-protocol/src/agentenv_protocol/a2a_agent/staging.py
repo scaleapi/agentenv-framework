@@ -16,8 +16,11 @@ Routes, below the extension's endpoint:
   given; ``DELETE {prefix}/`` removes everything below a prefix.
 
 A path's first segment is an id agent-env generates and tells no one else, so it must be long enough
-not to be guessed. Everything staged counts against ``AGENTENV_STAGING_MAX_BYTES``, and lives in
-``AGENTENV_STAGING_DIR`` until agent-env removes it or the sandbox ends. A limit of 0 turns staging off.
+not to be guessed, and the directories holding staged objects are the server user's alone. Everything
+staged counts against ``AGENTENV_STAGING_MAX_BYTES`` (a limit of 0 turns staging off), and lives until
+agent-env removes it or the server process ends: in a directory of the process's own, or under
+``AGENTENV_STAGING_DIR`` when that is set. One server process owns a staging directory, since the byte
+count and the ``If-Match`` check are its own.
 """
 
 from __future__ import annotations
@@ -97,15 +100,28 @@ class StagingStore:
     """
 
     def __init__(self, root: str | Path | None = None, *, max_bytes: int | None = None) -> None:
-        self.root = Path(
-            root or os.environ.get(STAGING_DIR_ENV) or Path(tempfile.gettempdir()) / "agentenv-staging"
-        )
+        configured = root or os.environ.get(STAGING_DIR_ENV)
+        self._root = Path(configured) if configured else None
         self.max_bytes = staging_max_bytes() if max_bytes is None else max_bytes
-        self._objects = self.root / "objects"
-        self._incoming = self.root / "incoming"
         self._lock = asyncio.Lock()
         self._used: int | None = None  # stored plus reserved bytes, counted on first use
         self._last_stamp = 0
+
+    @property
+    def root(self) -> Path:
+        """Where staged objects live; unless one was given, a new directory, made on first use, so a
+        restarted server never counts what an earlier one left."""
+        if self._root is None:
+            self._root = Path(tempfile.mkdtemp(prefix="agentenv-staging-"))
+        return self._root
+
+    @property
+    def _objects(self) -> Path:
+        return self.root / "objects"
+
+    @property
+    def _incoming(self) -> Path:
+        return self.root / "incoming"
 
     def card_extension(self, endpoint: str = STAGING_ENDPOINT) -> dict[str, object]:
         return {
@@ -220,6 +236,7 @@ class StagingStore:
             used = await self._usage()
             try:
                 replaced = target.stat().st_size if target.is_file() else 0
+                _private(self._objects)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 self._stamp(incoming.path)
                 os.replace(incoming.path, target)
@@ -263,7 +280,7 @@ class _Incoming:
             await self._store._reserve(self._declared)
             self._reserved = self._declared
         try:
-            await asyncio.to_thread(self._store._incoming.mkdir, parents=True, exist_ok=True)
+            await asyncio.to_thread(_private, self._store._incoming)
             fd, name = tempfile.mkstemp(dir=self._store._incoming)
         except BaseException:
             await self._store._release(self._reserved)
@@ -413,6 +430,14 @@ def _check_path(path: str) -> str:
     if len(parts[0]) < MIN_ID_LENGTH:
         raise StagingError(404, "Nothing is staged at this path.")
     return path
+
+
+def _private(directory: Path) -> None:
+    """Make ``directory`` readable by its owner alone, so other users on the host cannot list the ids
+    below it. Only the directories staging makes, never the one it was given."""
+    if not directory.is_dir():
+        directory.mkdir(parents=True, exist_ok=True)
+        directory.chmod(0o700)
 
 
 def _etag(stat: os.stat_result) -> str:

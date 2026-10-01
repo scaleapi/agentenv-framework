@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import shutil
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -14,6 +15,7 @@ from agentenv_protocol.a2a_agent import (
     TaskRequest,
     TaskResult,
     a2a_agent,
+    custom_extension,
     staging_routes,
 )
 from agentenv_protocol.transfers import (
@@ -81,6 +83,43 @@ def test_a_limit_of_zero_turns_staging_off(monkeypatch: pytest.MonkeyPatch) -> N
         stored = client.put(f"{BASE}/a", content=b"x")
     assert STAGING_V1_URI not in {e["uri"] for e in card["capabilities"]["extensions"]}
     assert stored.status_code == 404
+
+
+def test_staging_off_leaves_its_paths_to_the_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    @a2a_agent(identity=AgentIdentity(name="own-route", description="test", version="1"))
+    class OwnRoute(AgentEnvAgent):
+        async def run(self, request: TaskRequest) -> TaskResult:
+            return TaskResult.text("ok")
+
+        @custom_extension(uri="urn:example:own/v1", operation="read", method="GET", path="/ext/staging/own")
+        async def read(self):
+            return {"status": "ok"}
+
+    with pytest.raises(ValueError, match="conflicts with the staging routes"):
+        OwnRoute().create_app()
+    monkeypatch.setenv("AGENTENV_STAGING_MAX_BYTES", "0")
+    with TestClient(OwnRoute().create_app()) as client:
+        assert client.get("/ext/staging/own").json() == {"status": "ok"}
+
+
+def test_staged_objects_are_the_server_users_alone(tmp_path) -> None:
+    with TestClient(_app()) as client:
+        client.put(f"{BASE}/a", content=b"x")
+    for directory in ("objects", "incoming"):
+        assert (tmp_path / "staging" / directory).stat().st_mode & 0o777 == 0o700
+
+
+def test_without_a_directory_each_server_stages_in_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AGENTENV_STAGING_DIR")
+    first, second = StagingStore(max_bytes=4), StagingStore(max_bytes=4)
+    with TestClient(Starlette(routes=staging_routes(first))) as client:
+        assert client.put(f"{BASE}/a", content=b"1234").status_code == 201
+    with TestClient(Starlette(routes=staging_routes(second))) as client:  # what the first left is not counted
+        assert client.put(f"{BASE}/a", content=b"1234").status_code == 201
+        assert client.get(f"{BASE}/a").content == b"1234"
+    assert first.root != second.root and first.root.stat().st_mode & 0o777 == 0o700
+    shutil.rmtree(first.root)
+    shutil.rmtree(second.root)
 
 
 def test_a_delete_spares_an_object_rewritten_since_it_was_read() -> None:

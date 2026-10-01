@@ -607,8 +607,9 @@ unchanged.
 A path's first segment is an id AgentEnv generates, at least 22 characters, and
 never shares, which is what keeps staged objects private on a public agent URL.
 Everything staged counts against `AGENTENV_STAGING_MAX_BYTES` (16 GiB unless
-set; `0` turns staging off) and lives in `AGENTENV_STAGING_DIR` (a directory
-under the system temporary directory unless set) until AgentEnv removes it or
-the sandbox ends. An agent that doesn't use the SDK can serve the same routes
+set; `0` turns staging off) and lives until AgentEnv removes it or the server
+process ends, in a directory of the process's own (or under
+`AGENTENV_STAGING_DIR` when set) that only the server's user can read. One
+server process owns a staging directory. An agent that doesn't use the SDK can serve the same routes
 and add `{uri: "urn:agentenv:staging/v1", params: {endpoint: "/ext/staging"}}`
 to its card.
