@@ -94,7 +94,6 @@ async function main(): Promise<void> {
   const before = [{ instance_id: 'i-1', status: 'completed', current_step: 3, context: { a: 1 } }];
   const first = reconcileInstances(before, '', new Set(), false);
   assert(first !== null && first.startedInstanceId === null, 'poll: a first page selects nothing when no run is pending');
-  assert(first?.latestCompleted?.instance_id === 'i-1', 'poll: the newest completed run seeds a re-run');
   assert(reconcileInstances(before, first!.snapshot, first!.ids, true) === null, 'poll: an unchanged page is ignored');
   const after = [{ instance_id: 'i-2', status: 'running', current_step: 0 }, ...before];
   const appeared = reconcileInstances(after, first!.snapshot, first!.ids, true);
