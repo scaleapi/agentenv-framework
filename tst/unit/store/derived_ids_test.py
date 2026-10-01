@@ -1,6 +1,7 @@
-"""The ids core names after an entity or a run. A bare base keeps the spelling it has always had: stored
-tasks and artifacts, retried activities and the links consumers rebuild all record these strings, so the
-bare goldens here are frozen. An ``@local`` base keeps its namespace."""
+"""The ids core names after an entity or a run: ``derive_id(base, suffix)``, for a bare base and an ``@local`` one
+alike, so the base's namespace carries over. Consumers rebuild two of these spellings to link a validation to its
+task, ``<env>__validate-v<n>`` and ``<env>__validate-universe-compat-v<ev>-<universe>-v<uv>``, so every table here
+pins its bare row."""
 
 import asyncio
 import time
@@ -17,6 +18,7 @@ from agent_env.a2a_agent.validator import A2AAgentValidator
 from agent_env.artifact import DockerImageArtifact, FileArtifactUniverse
 from agent_env.cli import cli
 from agent_env.config import set_object_store
+from agent_env.env.env import DeployedGatewayEnv
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.website import WebsiteEnv
@@ -24,88 +26,193 @@ from agent_env.env.snapshot_store import EnvSnapshot
 from agent_env.task import Task
 from agent_env.task_step import VerifyUniverseLoadExportRoundtripStep
 from agent_env.task_step.context import DeployedSandbox, TaskStepContext
+from agent_env.task_step.snapshot_utils.snapshot_series import SnapshotConfig, SnapshotSeries
 from agent_env.task_step.task_steps.add_skills import _build_skill_for_loaded_file_artifact_universe
 from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTaskStep
+from agent_env.task_step.task_steps.snapshot_env import SnapshotEnvTaskStep
 from agent_env.task_step.task_steps.verifiers import run_container_unit_tests_verifier as verifier_module
 from tst.unit.store.fakes import CollectingVm, SigningObjectStore, reattach_for_snapshot
 
-LOCAL_ENV = "@local/~/work/triage/envs/tickets"
-LOCAL_UNIVERSE = "@local/~/work/triage/artifacts/seed"
+LOCAL = "@local/~/work/triage"
+LOCAL_ENV = f"{LOCAL}/envs/tickets"
+LOCAL_UNIVERSE = f"{LOCAL}/artifacts/seed"
+LOCAL_AGENT = f"{LOCAL}/agents/solver"
+LOCAL_TASK = f"{LOCAL}/tasks/t"
+BARE_RUN = "triage-1-abcd1234"
+LOCAL_RUN = f"{LOCAL_TASK}-abcd1234"
+# fs_safe and key_segment of LOCAL_ENV and LOCAL_UNIVERSE.
+LOCAL_ENV_FILENAME, LOCAL_ENV_KEY = "local-work-triage-envs-tickets-ca64d3fb6d09", "local/work-triage-envs-tickets-ca64d3fb6d09"
+LOCAL_UNIVERSE_FILENAME, LOCAL_UNIVERSE_KEY = (
+    "local-work-triage-artifacts-seed-ddf2904a1148", "local/work-triage-artifacts-seed-ddf2904a1148",
+)
 
 
 class _Written(Exception):
-    """Raised by the patched ``Task.put`` once it has the task a validator writes."""
+    """Raised by a patched write once it has what the code under test writes."""
 
 
-def _task_put_by(validate, monkeypatch) -> dict:
+def _written_by(run, monkeypatch, owner=Task, method="put") -> dict:
+    """The keywords of the one ``owner.method`` call ``run`` makes, which stops there."""
     written = []
 
-    def put(cls, **kwargs):
+    def write(cls, **kwargs):
         written.append(kwargs)
         raise _Written
 
-    monkeypatch.setattr(Task, "put", classmethod(put))
+    monkeypatch.setattr(owner, method, classmethod(write))
     with pytest.raises(_Written):
-        asyncio.run(validate())
-    (task,) = written
-    return task
+        asyncio.run(run())
+    (kwargs,) = written
+    return kwargs
 
 
-@pytest.mark.parametrize("validate, task_id", [
-    (lambda: MCPServerEnv(id="slack-mcp", version=3, docker_image_artifact=MagicMock(), environment_name="slack").validate(),
-     "validate-slack-mcp-v3"),
-    (lambda: WebsiteEnv(id="shop", version=3, backend_docker_image_artifact=MagicMock(), frontend_docker_image_artifact=MagicMock(),
-                        environment_name="shop").validate(),
-     "validate-shop-v3"),
-    (lambda: MultiEnv(id="crm-suite", version=3, mcp_server_envs=[]).validate(), "validate-crm-suite-v3"),
-    (lambda: A2AAgentValidator.validate(A2AAgent(id="claude-code", version=22, docker_image_artifact=MagicMock())),
-     "validate-a2a-claude-code-v22"),
-], ids=["mcp_server", "website", "multi", "a2a_agent"])
-def test_a_validation_task_keeps_its_bare_name(local_stores, tmp_path, monkeypatch, validate, task_id):
+_VALIDATIONS = {
+    "mcp_server": lambda id: MCPServerEnv(id=id, version=3, docker_image_artifact=MagicMock(), environment_name="slack").validate(),
+    "website": lambda id: WebsiteEnv(id=id, version=3, backend_docker_image_artifact=MagicMock(),
+                                     frontend_docker_image_artifact=MagicMock(), environment_name="shop").validate(),
+    "multi": lambda id: MultiEnv(id=id, version=3, mcp_server_envs=[]).validate(),
+    "a2a_agent": lambda id: A2AAgentValidator.validate(A2AAgent(id=id, version=22, docker_image_artifact=MagicMock())),
+}
+
+
+@pytest.mark.parametrize("kind, entity_id, task_id", [
+    ("mcp_server", "slack-mcp", "slack-mcp__validate-v3"),
+    ("mcp_server", LOCAL_ENV, f"{LOCAL_ENV}__validate-v3"),
+    ("website", "shop", "shop__validate-v3"),
+    ("website", LOCAL_ENV, f"{LOCAL_ENV}__validate-v3"),
+    ("multi", "crm-suite", "crm-suite__validate-v3"),
+    ("multi", LOCAL_ENV, f"{LOCAL_ENV}__validate-v3"),
+    ("a2a_agent", "claude-code", "claude-code__validate-a2a-v22"),
+    ("a2a_agent", LOCAL_AGENT, f"{LOCAL_AGENT}__validate-a2a-v22"),
+], ids=["mcp_server-bare", "mcp_server-local", "website-bare", "website-local", "multi-bare", "multi-local",
+        "a2a_agent-bare", "a2a_agent-local"])
+def test_a_validation_task_is_named_after_its_entity(local_stores, tmp_path, monkeypatch, kind, entity_id, task_id):
     set_object_store(SigningObjectStore(str(tmp_path / "signing")))
-    assert _task_put_by(validate, monkeypatch)["id"] == task_id
+    assert _written_by(lambda: _VALIDATIONS[kind](entity_id), monkeypatch)["id"] == task_id
 
 
-def test_a_compatibility_validation_keeps_its_bare_names(monkeypatch):
-    universe = SimpleNamespace(id="crm-universe", version=2, get_environment_artifacts=lambda: [])
+@pytest.mark.parametrize("env_id, universe_id, task_id, fau_id", [
+    ("crm-suite", "crm-universe",
+     "crm-suite__validate-universe-compat-v3-crm-universe-v2", "crm-suite__validate-v3-crm-universe-v2-fau"),
+    (LOCAL_ENV, "crm-universe",
+     f"{LOCAL_ENV}__validate-universe-compat-v3-crm-universe-v2", f"{LOCAL_ENV}__validate-v3-crm-universe-v2-fau"),
+    (LOCAL_ENV, LOCAL_UNIVERSE,
+     f"{LOCAL_ENV}__validate-universe-compat-v3-{LOCAL_UNIVERSE_FILENAME}-v2",
+     f"{LOCAL_ENV}__validate-v3-{LOCAL_UNIVERSE_FILENAME}-v2-fau"),
+    ("crm-suite", LOCAL_UNIVERSE,
+     f"{LOCAL_UNIVERSE}__validate-universe-compat-v2-crm-suite-v3", f"{LOCAL_UNIVERSE}__validate-v2-crm-suite-v3-fau"),
+], ids=["bare", "local-env", "both-local", "local-universe"])
+def test_a_compatibility_validation_is_named_after_its_env_unless_only_the_universe_is_local(
+        monkeypatch, env_id, universe_id, task_id, fau_id):
+    universe = SimpleNamespace(id=universe_id, version=2, get_environment_artifacts=lambda: [])
     monkeypatch.setattr("agent_env.artifact.EnvironmentUniverseArtifact.get", lambda *args: universe)
 
-    task = _task_put_by(lambda: MultiEnv(id="crm-suite", version=3, mcp_server_envs=[]).validate_universe_compatibility("crm-universe"),
-                        monkeypatch)
+    task = _written_by(lambda: MultiEnv(id=env_id, version=3, mcp_server_envs=[]).validate_universe_compatibility(universe_id),
+                       monkeypatch)
 
-    assert task["id"] == "validate-universe-compat-crm-suite-v3-crm-universe-v2"
     (load,) = [step for step in task["steps"] if step.type == "load_artifact"]
-    assert [artifact["id"] for artifact in load.artifacts] == ["validate-crm-suite-v3-crm-universe-v2-fau"]
+    assert (task["id"], [artifact["id"] for artifact in load.artifacts]) == (task_id, [fau_id])
 
 
-def test_create_cli_keeps_its_bare_task_and_artifact_ids(monkeypatch):
-    env = MCPServerEnv(id="slack-mcp", version=3, docker_image_artifact=MagicMock(), environment_name="slack")
+@pytest.mark.parametrize("env_id, export", [
+    ("crm-suite", "crm-suite__validate-v3-crm-universe-v7-export1"),
+    (LOCAL_ENV, f"{LOCAL_ENV}__validate-v3-crm-universe-v7-export1"),
+], ids=["bare", "local"])
+def test_roundtrip_exports_are_named_after_the_validation(local_stores, cli_routing, env_id, export):
+    step = VerifyUniverseLoadExportRoundtripStep(id="rt", version=None, env_id=env_id, universe_artifact_id="crm-universe")
 
-    task = _task_put_by(lambda: env.create_cli(force=True), monkeypatch)
+    universe = step._create_universe_artifact([SimpleNamespace(environment_name="slack")], {"slack": {"messages": []}},
+                                              env_version=3, universe_version=7)
 
-    assert task["id"] == "create-cli-slack-mcp-v3"
-    assert task["steps"][1].cli_artifact_id == "cli-slack-mcp"
+    (service,) = universe.get_environment_artifacts()
+    assert (universe.id, service.id, service.get_file_artifact().id) == (export, f"{export}-svc-slack", f"{export}-slack")
 
 
-def test_the_install_image_universe_keeps_its_bare_id(local_stores, monkeypatch):
+@pytest.mark.parametrize("env_id, task_id, cli_id", [
+    ("slack-mcp", "slack-mcp__create-cli-v3", "slack-mcp__cli"),
+    (LOCAL_ENV, f"{LOCAL_ENV}__create-cli-v3", f"{LOCAL_ENV}__cli"),
+], ids=["bare", "local"])
+def test_create_cli_names_its_task_and_cli_after_the_env(monkeypatch, env_id, task_id, cli_id):
+    env = MCPServerEnv(id=env_id, version=3, docker_image_artifact=MagicMock(), environment_name="slack")
+
+    task = _written_by(lambda: env.create_cli(force=True), monkeypatch)
+
+    assert (task["id"], task["steps"][1].cli_artifact_id) == (task_id, cli_id)
+
+
+@pytest.mark.parametrize("agent_id, universe_id", [
+    ("claude-code", "claude-code__validate-install-image-v22-1790000000"),
+    (LOCAL_AGENT, f"{LOCAL_AGENT}__validate-install-image-v22-1790000000"),
+], ids=["bare", "local"])
+def test_the_install_image_universe_is_named_after_the_agent(local_stores, cli_routing, monkeypatch, agent_id, universe_id):
     monkeypatch.setattr(time, "time", lambda: 1_790_000_000.0)
-    agent = A2AAgent(id="claude-code", version=22, docker_image_artifact=MagicMock())
+    agent = A2AAgent(id=agent_id, version=22, docker_image_artifact=MagicMock())
 
-    universe = A2AAgentValidator._upload_install_test_image_fixture(agent)
-
-    assert universe.id == "validate-install-image-claude-code-v22-1790000000"
+    assert A2AAgentValidator._upload_install_test_image_fixture(agent).id == universe_id
 
 
-def test_an_env_snapshot_keeps_its_bare_artifact_id_image_tag_and_key(local_stores, tmp_path, monkeypatch):
+@pytest.mark.parametrize("env_id, universe_id, artifact_id, image_tag, key", [
+    ("crm-suite", "crm-universe", "crm-suite__env-snapshot", "env-snapshot-crm-suite-crm-universe",
+     "env-snapshots/crm-suite/crm-universe/env-snapshot-crm-suite-crm-universe.tar.gz"),
+    (LOCAL_ENV, LOCAL_UNIVERSE, f"{LOCAL_ENV}__env-snapshot", f"env-snapshot-{LOCAL_ENV_FILENAME}-{LOCAL_UNIVERSE_FILENAME}",
+     f"env-snapshots/{LOCAL_ENV_KEY}/{LOCAL_UNIVERSE_KEY}/env-snapshot-{LOCAL_ENV_FILENAME}-{LOCAL_UNIVERSE_FILENAME}.tar.gz"),
+], ids=["bare", "local"])
+def test_an_env_snapshot_is_named_after_its_env(local_stores, tmp_path, monkeypatch, env_id, universe_id, artifact_id,
+                                                image_tag, key):
     set_object_store(SigningObjectStore(str(tmp_path / "signing")))
-    sandbox = reattach_for_snapshot(monkeypatch, "crm-suite", 3, "crm-universe", 2)
+    sandbox = reattach_for_snapshot(monkeypatch, env_id, 3, universe_id, 2)
 
-    snapshot = asyncio.run(EnvSnapshot.create("inst-1"))
+    image = _written_by(lambda: EnvSnapshot.create("inst-1"), monkeypatch, DockerImageArtifact, "put_tar")
 
-    image = DockerImageArtifact.get(snapshot.db_image_artifact_id)
-    assert (image.id, image.image_name) == ("env-snapshot-crm-suite", "env-snapshot-crm-suite-crm-universe")
-    assert image.tar_gz_object_url.endswith("/env-snapshots/crm-suite/crm-universe/env-snapshot-crm-suite-crm-universe.tar.gz")
-    assert "docker build --platform linux/amd64 -t env-snapshot-crm-suite-crm-universe /tmp/snapshot-build" in sandbox.scripts
+    assert (image["id"], image["image_name"]) == (artifact_id, image_tag)
+    assert image["tar_gz_s3_url"].endswith(f"/{key}")
+    assert f"docker build --platform linux/amd64 -t {image_tag} /tmp/snapshot-build" in sandbox.scripts
+
+
+@pytest.mark.parametrize("instance_id, snapshot_id", [
+    (BARE_RUN, "triage-1-abcd1234__snapshot-snap"),
+    (LOCAL_RUN, f"{LOCAL_RUN}__snapshot-snap"),
+], ids=["bare", "local"])
+def test_an_env_snapshot_step_snapshots_into_a_universe_named_after_the_run(instance_id, snapshot_id):
+    step = SnapshotEnvTaskStep(id="snap", version=None, env_id="crm-suite")
+    assert step._derive_snapshot_id(TaskStepContext(instance_id=instance_id)) == snapshot_id
+
+
+def _series(instance_id: str) -> SnapshotSeries:
+    return SnapshotSeries(step_id="solve", agent_name="solver", prompt_id="p1", a2a_context_id="c1",
+                          config=SnapshotConfig(env_id="crm-suite"), trajectory_output_prefix="unused", instance_id=instance_id)
+
+
+def _captured_snapshot_id(series: SnapshotSeries, monkeypatch) -> str:
+    """The universe ``series`` snapshots its env into on a capture."""
+    snapshot_ids = []
+
+    async def snapshot_env_state(**kwargs):
+        snapshot_ids.append(kwargs["snapshot_id"])
+        return SimpleNamespace(environment_universe_artifact_id=kwargs["snapshot_id"], environment_universe_artifact_version=1)
+
+    monkeypatch.setattr("agent_env.env.env.Env.get", lambda *args: SimpleNamespace(id="crm-suite"))
+    monkeypatch.setattr(SnapshotEnvTaskStep, "snapshot_env_state", staticmethod(snapshot_env_state))
+    deployed = DeployedGatewayEnv(env_id="crm-suite", env_version=1, gateway_url="https://gw", mcp_url="https://gw/mcp",
+                                  db_web_url=None, sandbox_id="sb-1")
+    assert asyncio.run(series._capture_env_state(TaskStepContext(deployed_envs=[deployed]), {}, 30)) is None
+    (snapshot_id,) = snapshot_ids
+    return snapshot_id
+
+
+@pytest.mark.parametrize("instance_id, workspace_id, snapshot_id", [
+    (BARE_RUN, "triage-1-abcd1234__solve-workspace", "triage-1-abcd1234__snapshot-solve"),
+    (LOCAL_RUN, f"{LOCAL_RUN}__solve-workspace", f"{LOCAL_RUN}__snapshot-solve"),
+], ids=["bare", "local"])
+def test_a_capture_series_names_its_artifacts_after_the_run(monkeypatch, instance_id, workspace_id, snapshot_id):
+    series = _series(instance_id)
+    assert (series.workspace_artifact_id, _captured_snapshot_id(series, monkeypatch)) == (workspace_id, snapshot_id)
+
+
+def test_an_env_snapshot_step_and_a_capture_series_in_one_run_snapshot_one_env_into_different_universes(monkeypatch):
+    step = SnapshotEnvTaskStep(id="snap", version=None, env_id="crm-suite")
+    from_step = step._derive_snapshot_id(TaskStepContext(instance_id=BARE_RUN))
+    assert from_step != _captured_snapshot_id(_series(BARE_RUN), monkeypatch)
 
 
 class _VerifierSandbox:
@@ -116,11 +223,12 @@ class _VerifierSandbox:
         return 0, "ok", ""
 
 
-@pytest.mark.parametrize("instance_id, run", [
-    ("verify-triage-1-abcd1234", "verify-triage-1-abcd1234-1790000000-0123456789ab"),
-    (None, "1790000000-0123456789ab"),
-])
-def test_verifier_outputs_keep_their_bare_ids(local_stores, monkeypatch, instance_id, run):
+@pytest.mark.parametrize("instance_id, base", [
+    (BARE_RUN, "triage-1-abcd1234"),
+    (LOCAL_RUN, LOCAL_RUN),
+    (None, "adhoc-0123456789ab"),
+], ids=["bare", "local", "no-instance"])
+def test_verifier_outputs_are_named_after_the_run(local_stores, monkeypatch, instance_id, base):
     provider = SimpleNamespace(get_sandbox=lambda sandbox_id: asyncio.sleep(0, result=_VerifierSandbox()))
     monkeypatch.setattr(sandbox_provider, "get_sandbox_provider", lambda: provider)
     monkeypatch.setattr(verifier_module.time, "time", lambda: 1_790_000_000.0)
@@ -139,14 +247,15 @@ def test_verifier_outputs_keep_their_bare_ids(local_stores, monkeypatch, instanc
 
     asyncio.run(step.execute(ctx))
 
-    assert ids == [f"verifier-stdout-scrape-{run}", f"verifier-stderr-scrape-{run}"]
+    assert ids == [f"{base}__verifier-{stream}-scrape-1790000000-0123456789ab" for stream in ("stdout", "stderr")]
 
 
-def test_collected_files_keep_their_bare_ids(local_stores, monkeypatch):
+@pytest.mark.parametrize("instance_id", [BARE_RUN, LOCAL_RUN], ids=["bare", "local"])
+def test_collected_files_are_named_after_the_run(local_stores, cli_routing, monkeypatch, instance_id):
     provider = SimpleNamespace(get_sandbox=lambda sandbox_id: asyncio.sleep(0, result=CollectingVm()),
                                close=lambda: asyncio.sleep(0))
     monkeypatch.setattr(sandbox_provider, "get_sandbox_provider", lambda: provider)
-    ctx = TaskStepContext(instance_id="triage-task-1-abcd1234")
+    ctx = TaskStepContext(instance_id=instance_id)
     ctx.deployed_sandboxes = [DeployedSandbox(sandbox_name="box", sandbox_id="sb-1", sandbox_mode="vm")]
     step = CollectArtifactsTaskStep(id="collect", version=None, sandbox_name="box", base_path="/app/artifact",
                                     artifact_paths=["report.pdf", "sub/notes.md"])
@@ -154,58 +263,31 @@ def test_collected_files_keep_their_bare_ids(local_stores, monkeypatch):
     asyncio.run(step.execute(ctx))
 
     universe = FileArtifactUniverse.get(ctx.metadata["file_artifact_universe"]["id"])
-    assert universe.id == "triage-task-1-abcd1234"
+    assert universe.id == instance_id
     assert universe.file_artifact_ids == {
-        "report.pdf": "triage-task-1-abcd1234-report.pdf", "sub/notes.md": "triage-task-1-abcd1234-sub_notes.md",
+        "report.pdf": f"{instance_id}__6466e450a16b77b8", "sub/notes.md": f"{instance_id}__d72324ebb0d7e97a",
     }
 
 
-def test_roundtrip_exports_keep_their_bare_ids(local_stores):
-    step = VerifyUniverseLoadExportRoundtripStep(id="rt", version=None, env_id="crm-suite", universe_artifact_id="crm-universe")
-
-    universe = step._create_universe_artifact([SimpleNamespace(environment_name="slack")], {"slack": {"messages": []}},
-                                              env_version=3, universe_version=7)
-
-    (service,) = universe.get_environment_artifacts()
-    assert universe.id == "validate-crm-suite-v3-crm-universe-v7-export1"
-    assert service.id == "validate-crm-suite-v3-crm-universe-v7-export1-svc-slack"
-    assert service.get_file_artifact().id == "validate-crm-suite-v3-crm-universe-v7-export1-slack"
-
-
-@pytest.mark.parametrize("env_id, universe_id, expected", [
-    ("crm-suite", "crm-universe", "validate-universe-compat-crm-suite-v3-crm-universe-v2"),
-    (LOCAL_ENV, "crm-universe", f"{LOCAL_ENV}__validate-universe-compat-v3-crm-universe-v2"),
-    (LOCAL_ENV, LOCAL_UNIVERSE, f"{LOCAL_ENV}__validate-universe-compat-v3-local-work-triage-artifacts-seed-ddf2904a1148-v2"),
-    ("crm-suite", LOCAL_UNIVERSE, f"{LOCAL_UNIVERSE}__validate-universe-compat-v2-crm-suite-v3"),
-], ids=["bare", "local-env", "both-local", "local-universe"])
-def test_a_compatibility_validation_is_owned_by_its_local_side(env_id, universe_id, expected):
-    assert VerifyUniverseLoadExportRoundtripStep.validation_id("validate-universe-compat", env_id, 3, universe_id, 2) == expected
-
-
-@pytest.mark.parametrize("universe_id, name, valid", [
-    ("crm-universe", "crm-universe-files", True),
-    ("Crm_Universe", "Crm_Universe-files", False),
-    ("x" * 60, "x" * 60 + "-files", False),
-    (LOCAL_UNIVERSE, "seed-ddf2904a1148-files", True),
-    ("@local/~/work/triage/artifacts/" + "Ticket Desk (EU) " * 5 + "x",
-     "ticket-desk-eu-ticket-desk-eu-ticket-desk-eu-e6f6e0683a17-files", True),
-    ("@local/~/work/日本", "e3629cd92c57-files", True),
+@pytest.mark.parametrize("universe_id, name", [
+    ("crm-universe", "crm-universe-506b24e3579f-files"),
+    ("Crm_Universe", "crm-universe-4c998975eec1-files"),
+    ("x" * 60, "x" * 45 + "-42f2d9733566-files"),
+    (LOCAL_UNIVERSE, "seed-ddf2904a1148-files"),
+    (f"{LOCAL}/artifacts/" + "Ticket Desk (EU) " * 5 + "x", "ticket-desk-eu-ticket-desk-eu-ticket-desk-eu-e6f6e0683a17-files"),
+    ("@local/~/work/日本", "e3629cd92c57-files"),
 ], ids=["bare", "bare-mixed-case", "bare-60-chars", "local", "local-long", "local-no-slug"])
-def test_a_loaded_universes_skill_is_named_after_it(universe_id, name, valid):
+def test_a_loaded_universes_skill_is_named_after_it(universe_id, name):
     skill = _build_skill_for_loaded_file_artifact_universe(universe_id, {"destination_path": "/app/files"})
     assert skill.name == name
-    if valid:
-        skill.validate()
-    else:
-        with pytest.raises(ValueError, match="does not match the spec"):
-            skill.validate()
+    skill.validate()
 
 
 @pytest.mark.parametrize("task_id, universe_id", [
-    ("triage", "VPC Endpoints"),
-    ("@local/~/work/triage/tasks/t", "@local/~/work/triage/tasks/t-v2-VPC Endpoints"),
-])
-def test_a_seeded_runs_universe_is_named_after_its_seed(tmp_path, monkeypatch, task_id, universe_id):
+    ("triage", "triage__v2-VPC Endpoints"),
+    (LOCAL_TASK, f"{LOCAL_TASK}__v2-VPC Endpoints"),
+], ids=["bare", "local"])
+def test_a_seeded_runs_universe_is_named_after_its_task_and_seed(tmp_path, monkeypatch, task_id, universe_id):
     seen: list[str] = []
 
     class _Task:
@@ -232,7 +314,7 @@ def test_a_seed_that_cant_name_an_local_universe_stops_a_collecting_run_batch_be
     collect = CollectArtifactsTaskStep(id="collect", version=None, sandbox_name="box", artifact_paths=["report.pdf"])
 
     class _Task:
-        id, version, steps = "@local/~/work/triage/tasks/t", 2, [collect] if collects else []
+        id, version, steps = LOCAL_TASK, 2, [collect] if collects else []
 
         async def run(self, context, **kwargs):
             ran.append(context)

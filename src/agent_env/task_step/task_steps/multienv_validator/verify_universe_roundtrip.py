@@ -81,13 +81,11 @@ class VerifyUniverseLoadExportRoundtripStep(TaskStep):
     @staticmethod
     def validation_id(kind: str, env_id: str, env_version: int, universe_id: str, universe_version: int) -> str:
         """The id of a compatibility validation's ``kind`` of task or artifact for ``universe_id`` in ``env_id``.
-        The ``@local`` one of the two owns it, the env when both are, and the other goes into its suffix through
-        ``fs_safe``."""
-        if is_local_id(env_id):
-            return derive_id(env_id, f"{kind}-v{env_version}-{fs_safe(universe_id)}-v{universe_version}")
-        if is_local_id(universe_id):
+        The env owns it, or the universe when only the universe is ``@local``, and the other id goes into its
+        suffix, through ``fs_safe`` when it is ``@local``."""
+        if is_local_id(universe_id) and not is_local_id(env_id):
             return derive_id(universe_id, f"{kind}-v{universe_version}-{env_id}-v{env_version}")
-        return f"{kind}-{env_id}-v{env_version}-{universe_id}-v{universe_version}"
+        return derive_id(env_id, f"{kind}-v{env_version}-{fs_safe(universe_id)}-v{universe_version}")
 
     @staticmethod
     def file_artifact_universe_id(env_id: str, env_version: int, universe_id: str, universe_version: int) -> str:

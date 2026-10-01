@@ -13,7 +13,7 @@ from agentenv_protocol import FilePart, client as protocol_v1
 from agent_env.artifact import Artifact, DockerImageArtifact, EnvironmentArtifact
 from agent_env.artifact.artifacts.docker_image import GitHubBuildResult, ProgressCallback, refuse_local_github_build
 from agent_env.env.env import Env, gateway_url_of
-from agent_env.store.ids import derived_id
+from agent_env.store.ids import derive_id
 from agent_env.env import legacy_protocol
 from agent_env.env.envs._deployment import (
     as_builtin, builtin_provider_for, close_deployed, close_replaced, deploy_refusal, deploy_through_provider, host_staging_refusal,
@@ -205,7 +205,7 @@ class WebsiteEnv(Env):
         from agent_env.task import Task
         from agent_env.task_step import DeployEnvTaskStep, VerifyEnvironmentCardStep
 
-        task_id = derived_id(self.id, f"validate-v{self.version}", legacy=f"validate-{self.id}-v{self.version}")
+        task_id = derive_id(self.id, f"validate-v{self.version}")
         task = Task.put(
             id=task_id,
             steps=[

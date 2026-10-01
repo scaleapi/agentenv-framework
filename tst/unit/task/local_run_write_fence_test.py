@@ -237,7 +237,7 @@ async def test_an_local_run_refuses_a_bare_universe_to_collect_into_before_readi
     context.metadata["universe_id"] = "VPC Endpoints"
     step = CollectArtifactsTaskStep(id="collect", version=None, sandbox_name="box", artifact_paths=["report.pdf"])
 
-    with pytest.raises(LocalRunWriteError, match="'VPC-Endpoints'"):
+    with pytest.raises(LocalRunWriteError, match="'VPC Endpoints'"):
         await Task(id=LOCAL_TASK, version=1, steps=[step]).run(context=context)
 
 

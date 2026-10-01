@@ -137,11 +137,6 @@ _CONTENT_TYPES = {
 }
 
 
-def _sanitize_artifact_id(value: str) -> str:
-    """Artifact ids become S3 key components, so spaces and separators can't survive."""
-    return value.replace(" ", "-").replace("/", "_")
-
-
 def _exec_args(sandbox, container: Optional[str], cmd: tuple) -> tuple:
     """Wrap a command for where it has to run: inside the container, on the VM host as root, or as-is."""
     from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_VM
@@ -866,10 +861,7 @@ class CollectArtifactsTaskStep(TaskStep):
         FileArtifact filename is the basename for clean downloads."""
         from agent_env.artifact import FileArtifact
 
-        if is_local_id(artifact_id):
-            fa_id = derive_id(artifact_id, hashlib.sha256(object_name.encode("utf-8")).hexdigest()[:16])
-        else:
-            fa_id = f"{artifact_id}-{object_name}".replace("/", "_")[:200]
+        fa_id = derive_id(artifact_id, hashlib.sha256(object_name.encode("utf-8")).hexdigest()[:16])
         fa_version = store.next_version(fa_id)
         fa = FileArtifact(
             id=fa_id,
@@ -895,16 +887,10 @@ class CollectArtifactsTaskStep(TaskStep):
             context.metadata.get("universe_id")
             or context.instance_id
             or "unknown"
-        )
-        # An @local id is kept whole, since key_segment bounds its object keys. Any other is capped at 100
-        # chars, with room reserved for the suffix rather than appending past it, so a long run id can never
-        # truncate two collects back onto the same name.
-        suffix = _sanitize_artifact_id(self.universe_id_suffix or "")
+        ) + (self.universe_id_suffix or "")
+        # Refused before the sandbox is read: past here a write that fails is only logged.
         if is_local_id(artifact_id):
-            artifact_id += suffix
             validate_local_id(artifact_id)
-        else:
-            artifact_id = _sanitize_artifact_id(artifact_id)[:100 - len(suffix)] + suffix
         get_config().check_local_run_write(artifact_id)
         version = int(time.time())
 

@@ -149,10 +149,17 @@ def test_an_output_is_named_under_its_task_and_later_steps_find_it(make):
 def test_an_output_id_a_step_derives_is_named_under_its_task_too(make):
     entry = resolved(make(tasks={"t": [
         {"id": "cli", "type": "build_mcp_cli", "env_id": "tickets", "command_name": "tickets"},
-        {"id": "skills", "type": "add_skills", "agent_name": "solver", "cli_artifact_ids": ["cli-tickets"]},
+        {"id": "skills", "type": "add_skills", "agent_name": "solver", "cli_artifact_ids": ["tickets__cli"]},
     ]}), "t")
-    assert entry.config[0]["cli_artifact_id"] == entry.config[1]["cli_artifact_ids"][0] == f"{ROOT}/t/cli-tickets"
-    assert [output.id for output in entry.outputs] == [f"{ROOT}/t/cli-tickets"]
+    assert entry.config[0]["cli_artifact_id"] == entry.config[1]["cli_artifact_ids"][0] == f"{ROOT}/t/tickets__cli"
+    assert [output.id for output in entry.outputs] == [f"{ROOT}/t/tickets__cli"]
+
+
+def test_an_output_id_derived_from_another_bundles_entity_is_named_under_this_task(make):
+    entry = resolved(make(tasks={"t": [
+        {"id": "cli", "type": "build_mcp_cli", "env_id": "@local/~/crm-suite/envs/crm", "command_name": "crm"},
+    ]}), "t")
+    assert [output.id for output in entry.outputs] == [entry.config[0]["cli_artifact_id"]] == [f"{ROOT}/t/crm__cli"]
 
 
 def test_a_resolved_task_still_builds_its_steps(make):

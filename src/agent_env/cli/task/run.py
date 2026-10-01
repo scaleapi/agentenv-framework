@@ -12,7 +12,7 @@ import click
 
 from agent_env.cli.banner import print_banner
 from agent_env.cli.identity import get_agent_env_client_id
-from agent_env.store.ids import fs_safe, is_local_id, validate_local_id
+from agent_env.store.ids import derive_id, fs_safe, is_local_id, validate_local_id
 from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTaskStep
 
 
@@ -490,13 +490,10 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
 
 
 def _seed_universe_id(task, seed: dict) -> str | None:
-    """The universe a seed's runs collect into, so runs of one seed share it: the seed's id, else its name, under the
-    task for an ``@local`` task, whose runs write only ``@local`` ids. None leaves collect_artifacts to name it after
-    the run."""
-    universe_id = seed.get("id") or seed.get("name")
-    if universe_id and is_local_id(task.id):
-        return f"{task.id}-v{task.version}-{universe_id}"
-    return universe_id
+    """The universe a seed's runs collect into, so runs of one seed share it: derived from the task version and the
+    seed's id, else its name. None leaves collect_artifacts to name it after the run."""
+    seed_name = seed.get("id") or seed.get("name")
+    return derive_id(task.id, f"v{task.version}-{seed_name}") if seed_name else None
 
 
 @click.command("run-batch")

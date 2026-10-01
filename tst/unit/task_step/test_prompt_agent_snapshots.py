@@ -8,6 +8,7 @@ load-bearing: an unconfigured step must behave exactly as it did before.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 
 import pytest
@@ -31,8 +32,8 @@ def _s3_store_backs_prefix_minting():
     # they stay s3://BUCKET/... instead of resolving a filesystem path under cwd.
     set_object_store(S3ObjectStore(client=object(), bucket=BUCKET))
 INSTANCE_ID = "solve-run-0123456789abcdef"
-# `INSTANCE_ID`'s tail, capped at 16 — what every artifact id is scoped by.
-DISCRIMINATOR = "0123456789abcdef"
+# The env universe a `_series()` capture versions into.
+SNAPSHOT_ID = f"{INSTANCE_ID}__snapshot-solve"
 
 
 def _series(
@@ -330,8 +331,12 @@ def test_rollouts_sharing_a_context_id_get_distinct_artifact_ids():
     shared = "a-very-long-restored-context-id"  # > 16 chars, so a prefix collides
     a = _series(a2a_context_id=shared, instance_id="solve-run-1111111111111111", env_id="env-1")
     b = _series(a2a_context_id=shared, instance_id="solve-run-2222222222222222", env_id="env-1")
-    # The token both the workspace and env universe ids are built from.
-    assert a._discriminator != b._discriminator
+    assert a.workspace_artifact_id != b.workspace_artifact_id
+
+
+def test_rollouts_without_an_instance_id_get_distinct_adhoc_artifact_ids():
+    a, b = _series(instance_id=None), _series(instance_id=None)
+    assert re.fullmatch(r"adhoc-[0-9a-f]{12}__solve-workspace", a.workspace_artifact_id)
     assert a.workspace_artifact_id != b.workspace_artifact_id
 
 
@@ -684,11 +689,11 @@ async def test_env_state_lands_as_a_versioned_service_universe_on_the_row(monkey
     assert len(rows) >= 2
     # Two scalars per row, not a per-service URL map a long series would grow
     # without bound.
-    assert all(r["env_universe_id"] == f"snapshot-env-1-{DISCRIMINATOR}" for r in rows)
+    assert all(r["env_universe_id"] == SNAPSHOT_ID for r in rows)
     versions = [r["env_universe_version"] for r in rows]
     assert versions == sorted(versions) and len(set(versions)) == len(versions)
     # One artifact id per rollout, scoped to the instance.
-    assert {c["snapshot_id"] for c in calls} == {f"snapshot-env-1-{DISCRIMINATOR}"}
+    assert {c["snapshot_id"] for c in calls} == {SNAPSHOT_ID}
 
 
 @pytest.mark.asyncio
@@ -702,7 +707,7 @@ async def test_the_final_capture_publishes_the_universe_for_load_artifact(monkey
     # Keyed on the step id, so a judge step can be wired to this prompt step
     # without knowing it snapshots. `load_artifact` resolves it once #746 lands.
     assert ctx.metadata["env_snapshotted_universes"]["solve"] == {
-        "id": f"snapshot-env-1-{DISCRIMINATOR}",
+        "id": SNAPSHOT_ID,
         "version": 4,
     }
 
@@ -1093,8 +1098,7 @@ async def test_execute_derives_the_workspace_artifact_id_from_the_instance(monke
     ctx.instance_id = "solve-0123456789abcdef01"
     await step.execute(ctx)
 
-    # Last dash-segment of the instance id, truncated to 16 — as snapshot_env does.
-    assert ws.artifact_ids == ["solve-workspace-0123456789abcdef"]
+    assert ws.artifact_ids == ["solve-0123456789abcdef01__solve-workspace"]
 
 
 # ============================================================== concurrency
@@ -1132,7 +1136,7 @@ async def test_concurrent_rollouts_on_one_step_instance_keep_separate_series(mon
     assert len(_rows(slow)) > len(_rows(fast))
     # And each rollout derived its own artifact, so no two captures across the two
     # rollouts ever allocate a version of the same id.
-    assert set(ws.artifact_ids) == {"solve-workspace-fast", "solve-workspace-slow"}
+    assert set(ws.artifact_ids) == {"solve-fast__solve-workspace", "solve-slow__solve-workspace"}
 
 
 # ============================================================== turn boundaries

@@ -12,7 +12,7 @@ from typing import Callable, Optional
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER
 from agent_env.config import get_config
 from agent_env.store.document_store import AbsentOrNull, Filter, Sort
-from agent_env.store.ids import derived_id, fs_safe, is_local_id, key_segment
+from agent_env.store.ids import derive_id, fs_safe, is_local_id, key_segment
 from agent_env.store.object_store import ObjectStore
 
 logger = logging.getLogger(__name__)
@@ -146,7 +146,7 @@ class EnvSnapshot:
         logger.info("Storing snapshot as DockerImageArtifact...")
         image_tag = _image_tag(env_id, universe_id)
         artifact = DockerImageArtifact.put_tar(
-            id=derived_id(env_id, "env-snapshot", legacy=f"env-snapshot-{env_id}"),
+            id=derive_id(env_id, "env-snapshot"),
             description=(
                 f"Snapshot of servicedb for env={env_id} "
                 f"universe={universe_id} v{universe_version}"

@@ -37,7 +37,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     all_sandbox_container_env,
     registered_sandbox_provider_classes,
 )
-from agent_env.store.ids import derived_id
+from agent_env.store.ids import derive_id
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
@@ -301,21 +301,20 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
         # outputs are write-once. The instance id and the time only group and order them.
         stamp = f"{int(time.time())}-{uuid.uuid4().hex[:12]}"
         run = "-".join(filter(None, (context.instance_id, stamp)))
+        base = context.instance_id or f"adhoc-{uuid.uuid4().hex[:12]}"
         store = config.get_object_store()
         outputs = f"{config.get_artifact_key_prefix()}verifier-outputs/{self.id}/{run}"
         stdout_artifact = await asyncio.to_thread(
             self._upload_text_artifact,
             text=stdout,
-            artifact_id=derived_id(context.instance_id or "", f"verifier-stdout-{self.id}-{stamp}",
-                                   legacy=f"verifier-stdout-{self.id}-{run}"),
+            artifact_id=derive_id(base, f"verifier-stdout-{self.id}-{stamp}"),
             description=f"stdout of {self.verifier_id} from step {self.id}",
             s3_url=store.object_url(f"{outputs}/stdout.txt"),
         )
         stderr_artifact = await asyncio.to_thread(
             self._upload_text_artifact,
             text=stderr,
-            artifact_id=derived_id(context.instance_id or "", f"verifier-stderr-{self.id}-{stamp}",
-                                   legacy=f"verifier-stderr-{self.id}-{run}"),
+            artifact_id=derive_id(base, f"verifier-stderr-{self.id}-{stamp}"),
             description=f"stderr of {self.verifier_id} from step {self.id}",
             s3_url=store.object_url(f"{outputs}/stderr.txt"),
         )

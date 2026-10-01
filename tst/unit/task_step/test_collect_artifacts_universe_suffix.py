@@ -128,28 +128,11 @@ class TestNaming:
         assert env == ["inst-42-records"]
 
     @pytest.mark.asyncio
-    async def test_suffix_is_sanitized_like_the_id(self, env):
-        await _step("collect", "/rec ords").execute(_ctx(universe_id="caa_105"))
-        assert env == ["caa_105_rec-ords"]
-
-
-class TestLengthBudget:
-    """The id is capped at 100 chars; the suffix must fit inside that, not past it."""
-
-    @pytest.mark.asyncio
-    async def test_a_long_run_id_still_yields_a_bounded_id(self, env):
-        await _step("collect", "-records").execute(_ctx(universe_id="c" * 300))
-        assert len(env[0]) == 100
-        assert env[0].endswith("-records")
-
-    @pytest.mark.asyncio
-    async def test_a_long_run_id_still_yields_distinct_names(self, env):
-        long_id = "c" * 300
-        ctx = _ctx(universe_id=long_id)
-        await _step("collect-records", "-records", "/app/records").execute(ctx)
-        await _step("collect-artifacts").execute(ctx)
-        assert env[0] != env[1], env
-        assert all(len(i) <= 100 for i in env), env
+    async def test_runs_whose_ids_share_a_100_char_prefix_get_distinct_names(self, env):
+        step, prefix = _step("collect", "-records"), "c" * 100
+        await step.execute(_ctx(instance_id=f"{prefix}-run-1"))
+        await step.execute(_ctx(instance_id=f"{prefix}-run-2"))
+        assert env == [f"{prefix}-run-1-records", f"{prefix}-run-2-records"]
 
 
 class TestConcurrentSeeds:

@@ -113,18 +113,13 @@ def fs_safe(entity_id: str) -> str:
     return _local_segment(entity_id).replace("/", "-", 1) if is_local_id(entity_id) else entity_id
 
 
-# The longest chain derive_id makes on its own is a skill's or CLI's per-file artifact,
+# The longest chain derive_id makes on an authored skill or CLI id is its per-file artifact,
 # ``{id}__files__<16 hex>``, so an authored id leaves room for those 25 bytes. An id built on a derived id
-# or on a run's id can pass 4096 bytes; validate_local_id refuses it before anything reaches a shared store.
+# (an env's ``{env}__cli``) or on a run's id can pass 4096 bytes; validate_local_id refuses it before anything
+# reaches a shared store.
 MAX_AUTHORED_LOCAL_ID_BYTES = MAX_LOCAL_ID_BYTES - len("__files__") - 16
 
 
 def derive_id(base: str, suffix: str) -> str:
     """The id of an entity derived from ``base``: a suffix, so the base's namespace carries over."""
     return f"{base}__{suffix}"
-
-
-def derived_id(base: str, suffix: str, *, legacy: str) -> str:
-    """The id of something named after ``base``: ``derive_id(base, suffix)`` for an ``@local`` base, so
-    the namespace carries over; for any other base, ``legacy``, the spelling it has always had."""
-    return derive_id(base, suffix) if is_local_id(base) else legacy

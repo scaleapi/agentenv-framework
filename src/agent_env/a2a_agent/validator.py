@@ -29,7 +29,7 @@ from agent_env.a2a_agent.object_transfer import (
     invoke_transfer,
 )
 from agent_env.config import get_config
-from agent_env.store.ids import derived_id, key_segment
+from agent_env.store.ids import derive_id, key_segment
 from agent_env.task_step.task_steps.a2a_agent_validator.verify_a2a_modalities import (
     AUDIO_M4A_EXPECTED,
     AUDIO_M4A_PROBE_PARTS,
@@ -174,7 +174,7 @@ class A2AAgentValidator:
         from agent_env.task_step.task_step import TaskStep, TaskStepDependency
         from agent_env.a2a_agent.a2a_agent import A2AAgent
 
-        task_id = derived_id(agent.id, f"validate-a2a-v{agent.version}", legacy=f"validate-a2a-{agent.id}-v{agent.version}")
+        task_id = derive_id(agent.id, f"validate-a2a-v{agent.version}")
 
         # ── Upload object-store fixtures (skill + URI probe bytes) ───────────
         skill_object_url = await asyncio.to_thread(
@@ -776,7 +776,7 @@ class A2AAgentValidator:
         from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 
         ts = int(time.time())
-        universe_id = derived_id(agent.id, f"validate-install-image-v{agent.version}-{ts}", legacy=f"validate-install-image-{agent.id}-v{agent.version}-{ts}")
+        universe_id = derive_id(agent.id, f"validate-install-image-v{agent.version}-{ts}")
         config = get_config()
         s3_url = config.get_object_store_for(universe_id).object_url(f"{config.get_artifact_key_prefix()}a2a_validator/install_test_image/{ts}/")
 

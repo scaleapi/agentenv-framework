@@ -32,7 +32,7 @@ from agent_env.env.envs._deployment import (
 )
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.website import WebsiteEnv
-from agent_env.store.ids import derived_id
+from agent_env.store.ids import derive_id
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER
 from agent_env.attribution import Attribution
 
@@ -635,7 +635,7 @@ COMPOSE_EOF'''
         from agent_env.task import Task
         from agent_env.task_step import DeployEnvTaskStep, VerifyEnvironmentCardStep
 
-        task_id = derived_id(self.id, f"validate-v{self.version}", legacy=f"validate-{self.id}-v{self.version}")
+        task_id = derive_id(self.id, f"validate-v{self.version}")
         task = Task.put(
             id=task_id,
             steps=[
