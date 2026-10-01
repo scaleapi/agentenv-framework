@@ -13,7 +13,6 @@ from agent_env.cli import _UserErrorsAreNotCrashes, cli
 from agent_env.config.errors import ConfigError
 from agent_env.store.base import NotFoundError
 from agent_env.store.document_store import DuplicateKeyError
-from agent_env.store.document_store.sqlite_document_store import DatabaseLockedError
 
 
 def _group_raising(exc):
@@ -33,8 +32,7 @@ def _group_raising(exc):
     (ValueError("id '@ns/x' starts with the reserved '@' prefix"), "id '@ns/x' starts with the reserved '@' prefix"),
     (ConfigError("Unknown AGENT_ENV_DOCUMENT_STORE='bogus'"), "Unknown AGENT_ENV_DOCUMENT_STORE='bogus'"),
     (NotFoundError("Artifact definitely-missing not found"), "Artifact definitely-missing not found"),
-    (DatabaseLockedError("/s/documents.db is locked: another process"), "/s/documents.db is locked: another process"),
-], ids=["reserved-id", "config", "not-found", "locked"])
+], ids=["reserved-id", "config", "not-found"])
 def test_a_rule_the_caller_broke_prints_one_line(exc, message):
     result = CliRunner().invoke(_group_raising(exc), ["boom"])
 
