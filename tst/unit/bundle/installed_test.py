@@ -235,10 +235,10 @@ def test_the_cli_says_so_when_no_bundles_are_installed_and_needs_a_bundle_for_it
     _registered(monkeypatch)
 
     assert CliRunner().invoke(cli, ["run"]).output == "No bundles are installed. agent-env run PATH runs a folder.\n"
-    for option in (["--task", "t"], ["--keep"]):
+    for option in (["--task", "t"], ["--keep"], ["--dry-run"]):
         usage = CliRunner().invoke(cli, ["run", *option])
         assert usage.exit_code == 2
-        assert "--task, --eval, --model, --sandbox and --keep need a BUNDLE to run" in usage.output
+        assert "--task, --eval, --model, --sandbox, --keep and --dry-run need a BUNDLE to run" in usage.output
 
 
 def test_the_cli_runs_an_installed_bundle_by_name_with_ids_rooted_at_its_package(site, monkeypatch, quiet_logs,
@@ -251,6 +251,18 @@ def test_the_cli_runs_an_installed_bundle_by_name_with_ids_rooted_at_its_package
     assert result.exit_code == 0, result.output
     assert "tasks/t.json v1: unscored" in result.output
     assert "instance @local/demo-bundles/hello/t-" in result.output
+
+
+def test_the_cli_dry_runs_an_installed_bundle_by_name_and_writes_nothing(site, monkeypatch, quiet_logs, local_stores):
+    _package(site, "demo_bundles", ["hello"])
+    _registered(monkeypatch, _ep("hello", "demo_bundles"))
+
+    result = CliRunner().invoke(cli, ["run", "hello", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "tasks/t.json: v1 (new)\n" in result.output
+    assert "Would run:\n  tasks/t.json v1\n" in result.output
+    assert not local_stores.local_namespace_document_store().path.exists()
 
 
 def test_a_folder_wins_over_an_installed_name_and_a_folder_that_isnt_a_bundle_names_it(site, monkeypatch, tmp_path,

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
 from agent_env.task_step.context import DeployedAgent, DeployedSandbox, TaskStepContext
 from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.verifiers import verify_sandbox
@@ -165,6 +166,32 @@ async def test_agent_source_probes_inside_the_agent_container(provide):
 
 
 @pytest.mark.asyncio
+async def test_a_reattached_local_agent_is_probed_inside_its_own_container(provide, tmp_path, monkeypatch):
+    sandbox, calls = await _reattached_local_agent(tmp_path, monkeypatch, running="a2a-agent-other\nagent-local-agent1\n")
+    provide(sandbox)
+
+    await _step(agent_name="solver").execute(_local_agent_context())
+
+    assert calls == [
+        ("sudo", "docker", "ps", "--format", "{{.Names}}"),
+        ("sudo", "docker", "exec", "agent-local-agent1", "test", "-e", "/app/greeting/hello.txt"),
+        ("sudo", "docker", "exec", "agent-local-agent1", "test", "-e", "/etc/hosts"),
+        ("sudo", "docker", "exec", "agent-local-agent1", "cat", "/app/greeting/hello.txt"),
+        ("sudo", "docker", "exec", "-w", "/app/greeting", "agent-local-agent1", "bash", "-c", "python3 check.py"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_reattached_local_agent_whose_container_is_gone_fails_rather_than_borrow_another(provide, tmp_path, monkeypatch):
+    sandbox, calls = await _reattached_local_agent(tmp_path, monkeypatch, running="a2a-agent-other\n")
+    provide(sandbox)
+
+    with pytest.raises(RuntimeError, match="'agent-local-agent1' is not running"):
+        await _step(agent_name="solver").execute(_local_agent_context())
+    assert calls == [("sudo", "docker", "ps", "--format", "{{.Names}}")]
+
+
+@pytest.mark.asyncio
 async def test_unknown_sandbox_name_names_the_deployed_ones():
     with pytest.raises(RuntimeError, match=r"Sandbox 'nope' not found in context.deployed_sandboxes \(deployed: \['box'\]\)"):
         await _step(sandbox_name="nope").execute(_sandbox_context())
@@ -239,3 +266,24 @@ async def test_the_sandbox_is_logged_before_container_discovery_can_fail(provide
         await _step(agent_name="solver").execute(context)
 
     assert "Connected to sandbox sb-1 (mode=vm)" in caplog.text
+
+
+def _local_agent_context():
+    return TaskStepContext(deployed_agents=[
+        DeployedAgent(agent_name="solver", api_url="http://agent", sandbox_id="local-agent1", sandbox_type="local"),
+    ])
+
+
+async def _reattached_local_agent(tmp_path, monkeypatch, *, running: str):
+    """A local agent sandbox rebuilt from its work dir, answering `docker ps` with ``running`` and recording each command."""
+    monkeypatch.setenv("AGENT_ENV_LOCAL_SANDBOX_DIR", str(tmp_path))
+    (tmp_path / "agent-env-local-agent1-abc123").mkdir()
+    (tmp_path / "agent-env-local-agent1-abc123" / ".agent-container-mode").write_text("agent-local-agent1")
+    calls: list[tuple[str, ...]] = []
+
+    async def exec_with_output(self, *args):
+        calls.append(args)
+        return 0, running if "ps" in args else "hello world\n", ""
+
+    monkeypatch.setattr(LocalSandbox, "exec_with_output", exec_with_output)
+    return await LocalSandboxProvider().get_sandbox("local-agent1"), calls

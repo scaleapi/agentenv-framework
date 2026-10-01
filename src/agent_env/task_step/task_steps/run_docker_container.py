@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity_refs import EntityRef
+from agent_env.providers.sandbox_providers.sandbox import port_bindings
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.utils.paths import validate_relative_filename
 
@@ -206,7 +207,7 @@ class RunDockerContainerTaskStep(TaskStep):
         if self.network:
             network_flag = f"--network {await self._ensure_network(sandbox, self.network)} "
 
-        port_flags = " ".join(f"-p {p}:{p}" for p in (self.ports or []))
+        port_flags = " ".join(f"-p {spec}" for p in (self.ports or []) for spec in port_bindings(sandbox.host_ips, p, p))
         env_flag_parts = []
         if self.env_vars:
             for k, v in self.env_vars.items():

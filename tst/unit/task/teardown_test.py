@@ -190,6 +190,26 @@ def test_a_local_sandbox_is_brought_down_and_its_work_folder_removed(sandbox_roo
     assert list(sandbox_root.iterdir()) == []
 
 
+def test_a_reattached_local_agent_has_its_container_and_work_folder_removed(sandbox_root, monkeypatch):
+    agent = LocalSandbox()
+    (agent.work_dir / ".agent-container-mode").write_text(agent.container_name)
+    scripts = []
+
+    async def record(self, script, *, max_retries=0):
+        scripts.append(script)
+        return ""
+
+    monkeypatch.setattr(LocalSandbox, "exec_script", record)
+    context = TaskStepContext(deployed_agents=[
+        DeployedAgent(agent_name="solver", api_url="http://agent", sandbox_id=agent.sandbox_id, sandbox_type="local")])
+
+    report = _run(context)
+
+    assert report.terminated == (RecordedSandbox(agent.sandbox_id, "local", "agent"),)
+    assert scripts == [f"docker rm -f {agent.container_name} >/dev/null 2>&1 || true"]
+    assert list(sandbox_root.iterdir()) == []
+
+
 def test_a_slow_folder_removal_does_not_count_against_the_terminate_timeout(sandbox_root, monkeypatch):
     sandbox = LocalSandbox()
     context = TaskStepContext(deployed_sandboxes=[

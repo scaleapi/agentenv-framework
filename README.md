@@ -1,21 +1,31 @@
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/scaleapi/agentenv-framework/main/assets/brand/lockup-dark.png">
-  <img alt="AgentEnv Framework" src="https://raw.githubusercontent.com/scaleapi/agentenv-framework/main/assets/brand/lockup-light.png" width="360">
-</picture>
+<h1><img alt="AgentEnv Framework" src="https://raw.githubusercontent.com/scaleapi/agentenv-framework/main/assets/brand/readme-banner.png"></h1>
 
-# agent-env
-
-agent-env is a Python SDK and CLI for building, deploying and running agentic environments and the tasks that grade agents inside them. Environments are containerized servers that speak the open `agentenv-protocol`; agent-env builds them into versioned images, deploys them behind a gateway, points an agent at them, and scores what the agent did.
+AgentEnv Framework is a Python SDK and CLI for building, deploying and running agentic environments and the tasks that grade agents inside them. Environments are containerized servers that speak the open `agentenv-framework-protocol`; AgentEnv Framework builds them into versioned images, deploys them behind a gateway, points an agent at them, and scores what the agent did.
 
 **Documentation: [www.agentenvframework.com/docs](https://www.agentenvframework.com/docs)** covers environments, artifacts, agents, tasks, the registry and plugins.
 
 ## Install
 
-Both packages are on PyPI. You need Python 3.11 or newer and, to run environments locally, a running Docker daemon:
+Both packages are on PyPI. You need Python 3.11 or newer and, to run environments locally, a running Docker daemon. With [uv](https://docs.astral.sh/uv/), install the `agent-env` command as a tool:
+
+```bash
+uv tool install agentenv-framework
+agent-env run hello
+```
+
+`agent-env run hello` runs the built-in hello task, which needs no Docker, model or configuration. To try it without installing anything, run it with uvx:
+
+```bash
+uvx --from agentenv-framework agent-env run hello
+```
+
+Or install it with pip, into a virtualenv:
 
 ```bash
 pip install agentenv-framework
 ```
+
+To use the SDK in your own project, add it as a dependency with `uv add agentenv-framework`. The explorer, `agent-env up`, needs the `explorer` extra (`uv tool install 'agentenv-framework[explorer]'`, or the same extra with uvx or pip) and an `.agentenv/config.toml` in the current folder or above it; an empty one keeps every local default.
 
 The distribution is named `agentenv-framework`, the import package is `agent_env` and the command is `agent-env`. It depends on `agentenv-framework-protocol`, whose import package is `agentenv_protocol`, and installs it too.
 
@@ -79,7 +89,7 @@ tenant = "mycorp_demo.cli:tenant_option"
 
 `agent_env.cli_plugins` entries are click commands or groups added next to the built-ins, under the entry-point name whatever the command object is called: `my-tools` above is `agent-env my-tools`. `agent_env.cli_root_options` entries are optional `click.Option` instances with `expose_value=False`; their callback runs before the subcommand, so it can set `AGENT_ENV_CONFIG` and call `agent_env.config.reset_config()` to select the config for the whole process. Plugins load when `agent_env.cli` is imported, after the built-ins. Clash rules: a plugin command whose entry-point name core already uses, or a flag core owns, is skipped with a warning on stderr, and core wins. Two different root options on the same flag are both left off with a warning, and `agent-env plugin list` reports each as a `conflict`; the CLI still starts, so `agent-env plugin remove` can settle it. The same `click.Option` object exported by two entry points, from one package or two, is attached once. Nothing grafts onto existing groups.
 
-Explorer routes: subclass `agent_env.explorer.plugin.ExplorerPlugin`, set the `type` ClassVar, and return a FastAPI `APIRouter` from the `router` property. List it under `[explorer.plugins] impls` or declare an `agent_env.explorer_plugins` entry point; `from_config()` takes no arguments, and a plugin reads its own settings with `agent_env.plugins.settings` (see [Plugin settings](#plugin-settings)). `agent-env up --no-bootstrap` mounts it before the core routers and needs no Docker.
+Explorer routes: subclass `agent_env.explorer.plugin.ExplorerPlugin`, set the `type` ClassVar, and return a FastAPI `APIRouter` from the `router` property. List it under `[explorer.plugins] impls` or declare an `agent_env.explorer_plugins` entry point; `from_config()` takes no arguments, and a plugin reads its own settings with `agent_env.plugins.settings` (see [Plugin settings](#plugin-settings)). `agent-env up --no-bootstrap` mounts it before the core routers and needs no Docker. An entity id can contain `/` (a bundle's ids are `@local/<package>/<name>`, and so are the instance ids of its runs), so in an explorer URL an id is one percent-encoded path segment, with `/` sent as `%2F`. Under the core prefixes `/api/v1/{artifacts,envs,tasks,agents,evals,task-instances}/` the explorer routes on the encoded path, so a plugin route there receives the segment still encoded and decodes it with `urllib.parse.unquote`.
 
 ### Bundles from installed packages
 
@@ -100,7 +110,7 @@ triage = "mycorp_demo.bundles"
 
 ### Plugin settings
 
-A plugin that needs settings of its own reads them from `[plugins.<package>]`, where `<package>` is its distribution name: the name `pip install` takes and `agent-env plugin list` prints. That table belongs to the plugin. agent-env reads nothing in it and checks none of its keys. Every other top-level table belongs to agent-env, which warns about one it does not read in `agent-env config show`, so a plugin keeps nothing of its own anywhere else.
+A plugin that needs settings of its own reads them from `[plugins.<package>]`, where `<package>` is its distribution name: the name `uv add` and `pip install` take and `agent-env plugin list` prints. That table belongs to the plugin. agent-env reads nothing in it and checks none of its keys. Every other top-level table belongs to agent-env, which warns about one it does not read in `agent-env config show`, so a plugin keeps nothing of its own anywhere else.
 
 ```toml
 [plugins.acme-agentenv-browser]
@@ -312,7 +322,7 @@ An installer that resolves dependencies never gets you there; `pip install --no-
 
 ## Contribute, release, license
 
-[CONTRIBUTING.md](https://github.com/scaleapi/agentenv-framework/blob/main/CONTRIBUTING.md) is the contributor guide: open an issue before anything larger than a bug fix, one logical change per pull request with tests, pull request titles in the form `type(scope): summary`, an approving review from a code owner (`CODEOWNERS`) and green CI. [AGENTS.md](https://github.com/scaleapi/agentenv-framework/blob/main/AGENTS.md) is the repository map and conventions file for contributors and coding agents; `CLAUDE.md` imports it.
+[CONTRIBUTING.md](https://github.com/scaleapi/agentenv-framework/blob/main/CONTRIBUTING.md) is the contributor guide: open an issue before anything larger than a bug fix, one logical change per pull request with tests, pull request titles in the form `type(scope): summary`, an approving review from a code owner (`CODEOWNERS`) and green CI. [AGENTS.md](https://github.com/scaleapi/agentenv-framework/blob/main/AGENTS.md) is the repository map and conventions file for contributors and coding agents.
 
 ### Documentation map
 
@@ -333,7 +343,7 @@ The `agentenv-framework` distribution and `agentenv-framework-protocol` are vers
 
 ### Releases
 
-A release is a version bump in both `pyproject.toml` files plus a `vX.Y.Z` tag. Maintainers cut releases: the bump is automated when a labelled pull request merges, so contributors do not edit `version` or push tags (see the Releases section of [CONTRIBUTING.md](https://github.com/scaleapi/agentenv-framework/blob/main/CONTRIBUTING.md)). Neither package is published to a public index yet, and there is no `CHANGELOG.md`.
+A release is a version bump in both `pyproject.toml` files plus a `vX.Y.Z` tag. Maintainers cut releases: the bump is automated when a labelled pull request merges, so contributors do not edit `version` or push tags (see the Releases section of [CONTRIBUTING.md](https://github.com/scaleapi/agentenv-framework/blob/main/CONTRIBUTING.md)). Each release publishes both packages to PyPI; there is no `CHANGELOG.md`.
 
 ### Support, security, license
 

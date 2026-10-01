@@ -1,0 +1,59 @@
+name: Bug report
+description: Report something in AgentEnv Framework that doesn't work as it should.
+labels: ["bug"]
+type: "Bug"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. For questions, use [Q&A](https://github.com/scaleapi/agentenv-framework/discussions/categories/q-a), and report vulnerabilities [privately](https://github.com/scaleapi/agentenv-framework/security/advisories/new).
+
+        Issues are public: don't paste API keys, tokens or private hostnames.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: The commands that reproduce it, what you expected, and what happened instead.
+      placeholder: |
+        1. uv tool install agentenv-framework
+        2. agent-env run hello
+        3. Expected the task to pass, but it failed with …
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output and errors
+      description: The full output, including any traceback. It's formatted as code, so there's no need for backticks.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots
+      description: Optional. If a picture helps, for example of the explorer or a terminal, drag it into this box.
+  - type: textarea
+    id: plugin-list
+    attributes:
+      label: Output of agent-env plugin list
+      description: >-
+        It shows the version, how agent-env is installed, the config file in effect and the installed
+        plugins. If `agent-env` won't start, paste the output of `agent-env --version` instead. Paths can
+        include your username; redact them if you like.
+      render: text
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Linux (x86_64)
+        - Linux (arm64)
+        - Windows (WSL 2)
+        - Other
+    validations:
+      required: true

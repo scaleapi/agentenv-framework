@@ -315,6 +315,7 @@ class Task:
 
     @classmethod
     def _validate_dag(cls, steps: list[TaskStep]) -> None:
+        ids = {s.id for s in steps}
         seen: set[str] = set()
         for i, step in enumerate(steps):
             if step.id in seen:
@@ -342,12 +343,12 @@ class Task:
             if step.depends_on is None:
                 continue
             for dep in step.depends_on:
-                if dep.task_step_id not in prior:
-                    raise ValueError(
-                        f"Step '{step.id}' at position {i} declares depends_on "
-                        f"'{dep.task_step_id}' which does not appear in a prior step "
-                        f"(forward refs are not allowed; known prior ids: {sorted(prior)})"
-                    )
+                if dep.task_step_id in prior:
+                    continue
+                why = ("doesn't come before it (forward refs are not allowed: a step depends only on the steps "
+                       "before it)" if dep.task_step_id in ids else
+                       f"names no step in this task (steps before it: {sorted(prior)})")
+                raise ValueError(f"Step '{step.id}' at position {i} declares depends_on '{dep.task_step_id}', which {why}")
 
     def preflight(self) -> list[str]:
         """Every step's resolvable-config problems, in step order; empty when fine.

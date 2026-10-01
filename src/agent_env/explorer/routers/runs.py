@@ -17,6 +17,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict
 
 from agent_env.config import get_config, get_runner
+from agent_env.explorer.entity_ids import EntityId
 from agent_env.explorer.routers.common import PaginatedResponse, docs
 from agent_env.runner.runner import RunStatus
 from agent_env.store import Filter, Sort
@@ -143,7 +144,7 @@ def _resolve_task_version(task_id: str, version: Optional[int]) -> int:
 
 
 @router.post("/{task_id}/run", response_model=RunResponse)
-async def start_run(task_id: str, body: RunRequest | None = None) -> RunResponse:
+async def start_run(task_id: EntityId, body: RunRequest | None = None) -> RunResponse:
     body = body or RunRequest()
     version = _resolve_task_version(task_id, body.version)
     handle = await get_runner().submit(
@@ -184,7 +185,7 @@ class StartRunsResponse(BaseModel):
 
 
 @router.post("/{task_id}/runs", response_model=StartRunsResponse)
-async def start_runs(task_id: str, body: StartRunsRequest | None = None) -> StartRunsResponse:
+async def start_runs(task_id: EntityId, body: StartRunsRequest | None = None) -> StartRunsResponse:
     """Start a group of runs, returning their handles immediately. ``seeds`` wins over
     ``count`` when both are given (one run per seed)."""
     body = body or StartRunsRequest()
@@ -222,14 +223,14 @@ async def start_runs(task_id: str, body: StartRunsRequest | None = None) -> Star
 
 
 @router.post("/{task_id}/cancel-run")
-async def cancel_run(task_id: str, workflow_id: str = Query(...)) -> dict:
+async def cancel_run(task_id: EntityId, workflow_id: str = Query(...)) -> dict:
     canceled = await get_runner().cancel(workflow_id)
     return {"workflow_id": workflow_id, "canceled": canceled}
 
 
 @router.get("/{task_id}/runs", response_model=PaginatedResponse)
 def list_runs(
-    task_id: str,
+    task_id: EntityId,
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ) -> PaginatedResponse:
@@ -245,7 +246,7 @@ def list_runs(
 
 @router.get("/{task_id}/instances", response_model=PaginatedResponse)
 def list_instances(
-    task_id: str,
+    task_id: EntityId,
     task_version: Optional[int] = None,
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
@@ -264,7 +265,7 @@ def list_instances(
 
 
 @router.get("/{task_id}/instances/{instance_id}")
-def get_instance(task_id: str, instance_id: str) -> dict:
+def get_instance(task_id: EntityId, instance_id: EntityId) -> dict:
     doc = docs().find_one(TASK_INSTANCES_COLLECTION, Filter.of(instance_id=instance_id))
     if doc is None:
         raise HTTPException(status_code=404, detail=f"instance {instance_id} not found")
@@ -373,7 +374,7 @@ def _group_status(task_id: str, run_group_id: str) -> dict:
 
 @router.get("/{task_id}/run-groups", response_model=PaginatedResponse)
 def list_run_groups(
-    task_id: str,
+    task_id: EntityId,
     task_version: Optional[int] = None,
     limit: int = Query(20, ge=1, le=200),
     offset: int = Query(0, ge=0),
@@ -422,12 +423,12 @@ def list_run_groups(
 
 
 @router.get("/{task_id}/run-groups/{run_group_id}")
-def get_run_group(task_id: str, run_group_id: str) -> dict:
+def get_run_group(task_id: EntityId, run_group_id: str) -> dict:
     return _group_status(task_id, run_group_id)
 
 
 @router.get("/{task_id}/run-groups/{run_group_id}/stream")
-async def stream_run_group(task_id: str, run_group_id: str):
+async def stream_run_group(task_id: EntityId, run_group_id: str):
     """Server-sent snapshots until every run in the group is terminal, ending with a
     ``complete`` event."""
     from fastapi.responses import StreamingResponse
@@ -449,7 +450,7 @@ async def stream_run_group(task_id: str, run_group_id: str):
 
 
 @router.get("/{task_id}/instances/{instance_id}/progress")
-def instance_progress(task_id: str, instance_id: str) -> dict:
+def instance_progress(task_id: EntityId, instance_id: EntityId) -> dict:
     """Step progress for one instance. Polled while a run is in flight."""
     doc = docs().find_one(TASK_INSTANCES_COLLECTION, Filter.of(instance_id=instance_id))
     if doc is None:
