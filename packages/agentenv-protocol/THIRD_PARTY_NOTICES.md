@@ -191,6 +191,13 @@ The runtime dependencies of `agentenv-protocol` and its `agent` extra, at the ve
 - Source: <https://github.com/pydantic/pydantic-core>
 - [License text 2](#license-text-2)
 
+### python-multipart 0.0.32
+
+- License: Apache-2.0
+- Author: Andrew Dunham <andrew@du.nham.ca>
+- Source: <https://github.com/Kludex/python-multipart>
+- [License text 1](#license-text-1)
+
 ### regex 2026.6.28
 
 - License: Apache-2.0 AND CNRI-Python
