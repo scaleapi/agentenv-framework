@@ -11,6 +11,7 @@ torn down. Every byte moves over a connection agent-env opens, so nothing has to
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import secrets
@@ -19,6 +20,7 @@ from collections.abc import AsyncIterator, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, BinaryIO
 from urllib.parse import quote, urlsplit
 
@@ -35,6 +37,9 @@ logger = logging.getLogger(__name__)
 # How often a running prompt's staged changelog increments are moved into the store: what is lost if
 # the agent's sandbox dies mid-prompt is at most this much of its work.
 DRAIN_INTERVAL_SECONDS = 5.0
+# The longest a last drain waits on an agent before giving up on what it still holds, so a stalled agent can't
+# hold up the end of a prompt or a teardown.
+LAST_DRAIN_SECONDS = 120.0
 _CHUNK_BYTES = 1024 * 1024
 _ATTEMPTS = 3
 _CONCURRENCY = 4
@@ -76,6 +81,7 @@ class StagedNamespace:
 
     staging_url: str  # holds an id no one else knows: kept with the run, never logged
     namespace_url: str
+    max_object_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -83,6 +89,7 @@ class _Staged:
     path: str
     object_url: str
     media_type: str = DEFAULT_CONTENT_TYPE
+    max_bytes: int | None = None  # the most the grant let the agent write
 
 
 class StagedObjectStore:
@@ -116,12 +123,12 @@ class StagedObjectStore:
     def issue_write_grant(
         self, object_url: str, *, media_type: str, max_bytes: int, expires_in: int | None = None
     ) -> HttpPutGrant:
-        staged = self._stage(self._writes, object_url, media_type)
+        staged = self._stage(self._writes, object_url, media_type, max_bytes)
         return HttpPutGrant(kind="http-put", url=self._url(staged.path), expires_at=self._expiry(expires_in))
 
     def issue_upload_policy(self, prefix_url: str, *, max_object_bytes: int, expires_in: int) -> UploadPolicy:
         url = f"{self.endpoint}/{secrets.token_urlsafe(24)}"
-        self.namespaces.append(StagedNamespace(url, prefix_url))
+        self.namespaces.append(StagedNamespace(url, prefix_url, max_object_bytes))
         return UploadPolicy(
             write=HttpPostPolicyGrant(kind="http-post-policy", url=url, fields={}, path_field="key", file_field="file"),
             expires_at=self._expiry(expires_in),
@@ -147,8 +154,10 @@ class StagedObjectStore:
         except StagingError as exc:
             logger.warning("%s", exc)
 
-    def _stage(self, staged: list[_Staged], object_url: str, media_type: str = DEFAULT_CONTENT_TYPE) -> _Staged:
-        entry = _Staged(str(len(self._reads) + len(self._writes)), object_url, media_type)
+    def _stage(
+        self, staged: list[_Staged], object_url: str, media_type: str = DEFAULT_CONTENT_TYPE, max_bytes: int | None = None
+    ) -> _Staged:
+        entry = _Staged(str(len(self._reads) + len(self._writes)), object_url, media_type, max_bytes)
         staged.append(entry)
         return entry
 
@@ -170,7 +179,7 @@ async def drain(namespace: StagedNamespace, store: ObjectStore) -> int:
         entries = [e for e in listed.json().get("objects") or () if str(e.get("path", "")).startswith(root)]
 
         async def move(entry: Mapping[str, Any]) -> None:
-            staged = _Staged(entry["path"], store.object_url(entry["path"]))
+            staged = _Staged(entry["path"], store.object_url(entry["path"]), max_bytes=namespace.max_object_bytes)
             await _pull(client, store, f"{namespace.staging_url}/{quote(entry['path'])}", staged)
 
         await _each(entries, move)
@@ -181,20 +190,24 @@ def staged_changelogs(metadata: Mapping[str, Any], *, agent_name: str | None = N
     """The changelog namespaces a run's metadata records as staged on its agents, ``agent_name``'s alone
     when one is given."""
     return [
-        StagedNamespace(entry["staging_url"], entry["object_url"])
+        StagedNamespace(entry["staging_url"], entry["object_url"], entry.get("staging_max_object_bytes"))
         for entry in metadata.get("agent_changelog") or ()
         if entry.get("staging_url") and agent_name in (None, entry.get("agent_name"))
     ]
 
 
-async def drain_all(namespaces: Iterable[StagedNamespace]) -> None:
-    """Drain each of ``namespaces`` into the store its namespace URL is in. One that cannot be drained is
-    logged and left, for the next drain to try again."""
-    for namespace in namespaces:
-        try:
-            await drain(namespace, get_config().get_object_store_at(namespace.namespace_url))
-        except Exception as exc:  # an agent that is gone or busy must not fail the run
-            logger.warning("%s", exc if isinstance(exc, StagingError) else type(exc).__name__)
+async def drain_all(namespaces: Iterable[StagedNamespace], *, within: float | None = None) -> None:
+    """Drain each of ``namespaces`` into the store its namespace URL is in, giving up after ``within``
+    seconds when given. One that cannot be drained is logged and left, for the next drain to try again."""
+    try:
+        async with asyncio.timeout(within):
+            for namespace in namespaces:
+                try:
+                    await drain(namespace, get_config().get_object_store_at(namespace.namespace_url))
+                except Exception as exc:  # an agent that is gone or busy must not fail the run
+                    logger.warning("%s", exc if isinstance(exc, StagingError) else type(exc).__name__)
+    except TimeoutError:
+        logger.warning("staged changelog increments were not all drained within %gs", within)
 
 
 @asynccontextmanager
@@ -217,7 +230,7 @@ async def draining(namespaces: Iterable[StagedNamespace]) -> AsyncIterator[None]
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
-        await drain_all(namespaces)
+        await drain_all(namespaces, within=LAST_DRAIN_SECONDS)
 
 
 async def _push(client: httpx.AsyncClient, store: ObjectStore, object_url: str, url: str) -> None:
@@ -239,13 +252,15 @@ async def _pull(client: httpx.AsyncClient, store: ObjectStore, url: str, staged:
     fd, name = tempfile.mkstemp(prefix="agentenv-staged-")
     try:
         with os.fdopen(fd, "wb") as out:
-            etag = await _retrying(lambda: _fetch(client, url, out))
-        if etag is None:
+            fetched = await _retrying(lambda: _fetch(client, url, out, staged.max_bytes))
+        if fetched is None:
             return
+        etag, digest = fetched
         try:
             await asyncio.to_thread(store.put_file_at, staged.object_url, name, staged.media_type)
         except ObjectAlreadyExistsError:
-            logger.info("a staged object was already in the store; the stored copy stays")
+            # Rewritten after an earlier copy went into the store: the latest write wins, as through a grant.
+            await asyncio.to_thread(_replace, store, staged, Path(name), digest)
         removed = await client.delete(url, headers={"if-match": etag})
         if removed.status_code not in (204, 404, 412):  # 412: rewritten since, so the next drain takes it
             removed.raise_for_status()
@@ -253,18 +268,34 @@ async def _pull(client: httpx.AsyncClient, store: ObjectStore, url: str, staged:
         os.unlink(name)
 
 
-async def _fetch(client: httpx.AsyncClient, url: str, out: BinaryIO) -> str | None:
-    """Stream the object at ``url`` into ``out``, and return its tag; None when nothing is staged there."""
+async def _fetch(client: httpx.AsyncClient, url: str, out: BinaryIO, max_bytes: int | None) -> tuple[str, str] | None:
+    """Stream the object at ``url`` into ``out``, no more than ``max_bytes`` of it, and return its tag and
+    sha256; None when nothing is staged there."""
     out.seek(0)
     out.truncate()
+    digest, size = hashlib.sha256(), 0
     async with client.stream("GET", url, headers={"accept-encoding": "identity"}) as response:
         if response.status_code == 404:
             return None
         response.raise_for_status()
         async for chunk in response.aiter_raw(_CHUNK_BYTES):
+            size += len(chunk)
+            if max_bytes is not None and size > max_bytes:
+                raise StagingError("the agent staged an object larger than its grant allows")
+            digest.update(chunk)
             await asyncio.to_thread(out.write, chunk)
     await asyncio.to_thread(out.flush)
-    return response.headers.get("etag")
+    return response.headers.get("etag", ""), digest.hexdigest()
+
+
+def _replace(store: ObjectStore, staged: _Staged, file: Path, digest: str) -> None:
+    """Put ``file`` over the stored copy of ``staged`` unless the two hold the same bytes."""
+    stored = hashlib.sha256()
+    with store.open(staged.object_url) as current:
+        while chunk := current.read(_CHUNK_BYTES):
+            stored.update(chunk)
+    if stored.hexdigest() != digest:
+        store.put(store.get_object_key(staged.object_url), file.read_bytes(), staged.media_type, allow_overwrite=True)
 
 
 async def _chunks(source: BinaryIO) -> AsyncIterator[bytes]:

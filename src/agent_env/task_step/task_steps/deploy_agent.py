@@ -521,6 +521,7 @@ class DeployAgentTaskStep(TaskStep):
         if call.mode == "objects" and isinstance(store, StagedObjectStore):
             # The increments wait on the agent until they are drained into the store.
             entry["staging_url"] = store.namespaces[-1].staging_url
+            entry["staging_max_object_bytes"] = store.namespaces[-1].max_object_bytes
         context.metadata.setdefault("agent_changelog", []).append(entry)
         logger.info(f"agent-changelog capture enabled on '{self.agent_name}': {object_url}")
 

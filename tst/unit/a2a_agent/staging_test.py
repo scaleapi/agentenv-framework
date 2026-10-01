@@ -293,3 +293,29 @@ async def test_a_full_staging_fails_the_call_without_naming_a_staged_path(tmp_pa
     with pytest.raises(StagingError, match="staging an object on the agent failed: its staging is full") as raised:
         await invoke_transfer(URL + path, call, verb="POST", operation="skill add", timeout=60, store=granting)
     assert granting.endpoint not in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_a_pull_stops_at_the_size_its_grant_allows(agent, store):
+    granting = transfer_store(store, URL, _card(agent), sandbox_type="modal")
+    grant = granting.issue_write_grant(store.object_url("out/t.json"), media_type="application/json", max_bytes=10)
+    async with httpx.AsyncClient() as client:  # an agent whose own client ignores the limit
+        assert (await client.put(grant.url, content=b"x" * 100)).status_code == 201
+
+    with pytest.raises(StagingError, match="larger than its grant allows"):
+        await granting.pull()
+    assert store.get_object_metadata_at(store.object_url("out/t.json")) is None
+
+
+@pytest.mark.asyncio
+async def test_an_increment_rewritten_after_it_was_drained_replaces_the_stored_copy(agent, store):
+    namespace_url, namespace = await _enable_changelog(agent, store)
+    await _Agent.uploader.upload("000000.tar", b"first")
+    await staging.drain(namespace, store)
+    await _Agent.uploader.upload("000000.tar", b"first")  # the same bytes again, as a retried upload sends
+    await staging.drain(namespace, store)
+    assert store.get(f"{namespace_url}/000000.tar") == b"first"
+
+    await _Agent.uploader.upload("000000.tar", b"second")
+    await staging.drain(namespace, store)
+    assert store.get(f"{namespace_url}/000000.tar") == b"second"
