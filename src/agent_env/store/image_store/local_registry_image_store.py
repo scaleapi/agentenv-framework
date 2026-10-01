@@ -34,8 +34,8 @@ class LocalRegistryImageStore(OciRegistryImageStore):
         """A local registry creates repositories on push, so this instead lazily brings up the
         backing ``registry:2`` — idempotently, and safe to call from many concurrent pushes. A
         no-op when something already serves the registry at ``registry_host`` (a registry you
-        run yourself, or one a concurrent push already started); it never removes a container
-        that might be serving. Called from the image-push path, so no caller manages it."""
+        run yourself, or one a concurrent push already started); it never removes a container.
+        Called from the image-push path, so no caller manages it."""
         port = urlsplit(f"//{self.registry_host}").port or 5000
         if self._registry_listening(port):
             return
@@ -50,21 +50,16 @@ class LocalRegistryImageStore(OciRegistryImageStore):
                 # the image pull failed, or the daemon is down. Surface it now, don't wait 30s.
                 raise RuntimeError(f"could not start the local registry: {run.stderr.strip()}")
             if existing_port != port:
-                # A stale container of ours on a different port (registry_host changed since it
-                # was created). It isn't serving our port — the check above proved that — so
-                # replacing it is safe.
-                subprocess.run(["docker", "rm", "-f", _REGISTRY_CONTAINER], capture_output=True, text=True)
-                run = self._run_registry(port)
-                if run.returncode != 0:
-                    raise RuntimeError(f"could not start the local registry: {run.stderr.strip()}")
-            else:
-                # A concurrent push won the race, or a stopped container of ours is on our port:
-                # (re)start it (a no-op if it's already running) and surface a genuine failure.
-                start = subprocess.run(["docker", "start", _REGISTRY_CONTAINER], capture_output=True, text=True)
-                if start.returncode != 0:
-                    raise RuntimeError(
-                        f"local registry container exists but could not be started: {start.stderr.strip()}"
-                    )
+                raise RuntimeError(
+                    f"{_REGISTRY_CONTAINER} is using port {existing_port}, not {port}: "
+                    f"point registry_host at port {existing_port}, or remove the container"
+                )
+            # A concurrent push won the race, or our stopped container is on this port: (re)start it.
+            start = subprocess.run(["docker", "start", _REGISTRY_CONTAINER], capture_output=True, text=True)
+            if start.returncode != 0:
+                raise RuntimeError(
+                    f"local registry container exists but could not be started: {start.stderr.strip()}"
+                )
         deadline = time.time() + 30
         while time.time() < deadline:
             if self._registry_listening(port):
