@@ -126,10 +126,9 @@ def _installed(name: str, plugin: Plugin, ep: EntryPoint, *, repeated: bool) -> 
 
 def _folder(ep: EntryPoint, name: str) -> Path:
     """The folder ``<package>/<name>`` the entry point names, found without importing the package."""
-    try:
-        package, attr = ep.module, ep.attr
-    except (AttributeError, AssertionError):  # a value that doesn't parse: AssertionError from 3.13 on
-        package, attr = None, None
+    # Not ep.module/ep.attr: on a value that doesn't parse they raise AttributeError, or AssertionError from 3.13 on.
+    match = ep.pattern.match(ep.value)
+    package, attr = (match.group("module"), match.group("attr")) if match else (None, None)
     if package is None or attr:
         raise _Unresolved(f"the entry point's value {ep.value!r} isn't a package name; name the package that holds "
                           f"the {name!r} folder")
