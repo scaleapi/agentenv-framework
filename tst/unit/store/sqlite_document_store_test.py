@@ -148,9 +148,11 @@ def test_other_filters_scan(filter, store_coll):
     assert _plans(store, lambda: store.query(coll, filter)) == ["SCAN docs_coll"]
 
 
-def test_a_reader_searches_an_index_another_connection_creates(tmp_path):
+@pytest.mark.parametrize("same_store", [False, True], ids=["another connection", "the same store"])
+def test_a_reader_searches_an_index_created_after_its_first_read(tmp_path, same_store):
     path = str(tmp_path / "shared.db")
-    reader, writer = LocalSqliteDocumentStore(path), LocalSqliteDocumentStore(path)
+    reader = LocalSqliteDocumentStore(path)
+    writer = reader if same_store else LocalSqliteDocumentStore(path)
     writer.insert("coll", {"id": "a", "version": 1})
     read = lambda: reader.find_one("coll", Filter.of(id="a"))
     assert _plans(reader, read) == ["SCAN docs_coll"]

@@ -239,7 +239,6 @@ class LocalSqliteDocumentStore(DocumentStore):
                 # nosemgrep: sqlalchemy-execute-raw-query -- name/tbl/cols are validated identifiers
                 f'CREATE {uniq}INDEX IF NOT EXISTS "{name}" ON "{tbl}" ({cols})'
             )
-            self._indexes.pop(tbl, None)
 
     # --- sqlite plumbing ---
 
@@ -350,7 +349,7 @@ class LocalSqliteDocumentStore(DocumentStore):
     def _indexes_of(self, tbl: str) -> list[tuple[bool, list[str]]]:
         # Read from the database, not kept from ensure_index: routing reads the @local store before it ensures any.
         version = self._conn.execute("PRAGMA schema_version").fetchone()[0]
-        if version != self._schema_version:  # another connection changed the schema, maybe adding an index
+        if version != self._schema_version:  # the schema changed, maybe by an index added here or by another connection
             self._indexes, self._schema_version = {}, version
         if tbl not in self._indexes:
             rows = self._conn.execute(
