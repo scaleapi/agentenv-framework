@@ -11,7 +11,7 @@ import agent_env.providers.sandbox_providers.local_sandbox as ls
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.config import reset_config, set_object_store
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
-from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER
+from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER, SANDBOX_MODE_VM
 from agent_env.store import LocalFilesystemObjectStore
 
 
@@ -244,15 +244,18 @@ async def test_terminate_vm_without_compose_removes_only_an_agent_placed_on_it(t
 
 
 @pytest.mark.asyncio
-async def test_get_sandbox_restores_container_mode_from_marker(tmp_path: Path, monkeypatch):
-    """The container-mode marker persisted at create time is restored so teardown cleans up."""
+async def test_a_reattached_container_stays_vm_mode_and_owned(tmp_path: Path, monkeypatch):
+    """Its exec runs on this host, so a reattached agent's steps must take the VM path into its container."""
     monkeypatch.setenv("AGENT_ENV_LOCAL_SANDBOX_DIR", str(tmp_path))
-    work_dir = tmp_path / "agent-env-local-agent1-abc123"
-    work_dir.mkdir()
-    (work_dir / ".agent-container-mode").write_text("agent-local-agent1")
+    for name in ("agent1", "vm1"):
+        (tmp_path / f"agent-env-local-{name}-abc123").mkdir()
+    (tmp_path / "agent-env-local-agent1-abc123" / ".agent-container-mode").write_text("agent-local-agent1")
 
-    sandbox = await LocalSandboxProvider().get_sandbox("local-agent1")
-    assert sandbox.mode == SANDBOX_MODE_CONTAINER
+    agent = await LocalSandboxProvider().get_sandbox("local-agent1")
+    vm = await LocalSandboxProvider().get_sandbox("local-vm1")
+
+    assert (agent.mode, agent.owns_container) == (SANDBOX_MODE_VM, True)
+    assert (vm.mode, vm.owns_container) == (SANDBOX_MODE_VM, False)
 
 
 @pytest.mark.asyncio
@@ -285,8 +288,10 @@ async def test_a_started_container_is_removed_by_a_teardown_rebuilt_from_disk(tm
 
     created = await getattr(_Provider(), create)(image_name="img:v1", port=8000, env={})
     rebuilt = await LocalSandboxProvider().get_sandbox(created.sandbox_id)
+    del scripts[:]
     await rebuilt.terminate()
-    assert rebuilt.mode == SANDBOX_MODE_CONTAINER and scripts[-1] == f"docker rm -f {created.container_name} >/dev/null 2>&1 || true"
+    assert created.owns_container and rebuilt.owns_container and rebuilt.mode == SANDBOX_MODE_VM
+    assert scripts == [f"docker rm -f {created.container_name} >/dev/null 2>&1 || true"]
 
 
 @pytest.mark.asyncio

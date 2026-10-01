@@ -52,7 +52,7 @@ def _runs_in_container(cmd: list[str]) -> bool:
 _REAP_SECONDS = 5
 
 # Marker dropped in the work dir when this sandbox runs a container, so a later get_sandbox()
-# (post-run teardown reconstructs the sandbox from disk) can restore container mode and clean up.
+# (post-run teardown reconstructs the sandbox from disk) knows it owns that container.
 _CONTAINER_MODE_MARKER = ".agent-container-mode"
 
 
@@ -159,6 +159,11 @@ class LocalSandbox(VmSandbox):
         return f"agent-{self.sandbox_id}"
 
     @property
+    def owns_container(self) -> bool:
+        """Whether create_container started ``container_name`` for this sandbox, not an agent placed on it."""
+        return (self._work_dir / _CONTAINER_MODE_MARKER).exists()
+
+    @property
     def work_dir(self) -> Path:
         return self._work_dir
 
@@ -173,8 +178,8 @@ class LocalSandbox(VmSandbox):
     async def terminate(self) -> None:
         """Tear down whatever this sandbox is running.
 
-        A container-mode sandbox (the A2A agent) owns the ``self.container_name`` container that
-        create_container started — remove it. A VM-mode sandbox (env/gateway) runs a docker compose
+        A sandbox create_container made (the A2A agent; VM mode once reattached) owns the container
+        ``self.container_name`` it started — remove it. A VM-mode sandbox (env/gateway) runs a docker compose
         stack out of its work dir — ``docker compose down`` it — and may carry an agent placed on it,
         which runs as the same ``self.container_name`` container. Each path only touches resources
         this sandbox created: the container name is per-sandbox (LocalSandbox.container_name), so a
@@ -394,10 +399,8 @@ class LocalSandboxProvider(SandboxProvider):
         work_dir = LocalSandbox.find_work_dir(sandbox_id)
         if work_dir is None:
             raise RuntimeError(f"Local sandbox work directory not found for sandbox_id={sandbox_id!r}")
-        sandbox = LocalSandbox(sandbox_id=sandbox_id, work_dir=work_dir)
-        if (work_dir / _CONTAINER_MODE_MARKER).exists():
-            sandbox.mode = SANDBOX_MODE_CONTAINER
-        return sandbox
+        # VM mode even for a container it owns: exec runs on this host, so steps must `docker exec` into it.
+        return LocalSandbox(sandbox_id=sandbox_id, work_dir=work_dir)
 
     @classmethod
     def shares_network_with(cls, sandbox_type: Optional[str]) -> bool:
