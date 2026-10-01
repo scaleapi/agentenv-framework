@@ -128,7 +128,7 @@ def _folder(ep: EntryPoint, name: str) -> Path:
     """The folder ``<package>/<name>`` the entry point names, found without importing the package."""
     try:
         package, attr = ep.module, ep.attr
-    except AttributeError:
+    except (AttributeError, AssertionError):  # a value that doesn't parse: AssertionError from 3.13 on
         package, attr = None, None
     if package is None or attr:
         raise _Unresolved(f"the entry point's value {ep.value!r} isn't a package name; name the package that holds "
