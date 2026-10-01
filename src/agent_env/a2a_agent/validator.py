@@ -28,6 +28,7 @@ from agent_env.a2a_agent.object_transfer import (
     check_changelog_applied,
     invoke_transfer,
 )
+from agent_env.a2a_agent.staging import transfer_store
 from agent_env.config import get_config
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
@@ -693,11 +694,14 @@ class A2AAgentValidator:
             A2AAgent.find_extension(apply_agent.a2a_card, A2AAgent.EXT_SNAPSHOT),
             A2AAgent.SNAPSHOT_METHOD_APPLY_CHANGELOG)
         a2a_url = apply_agent.a2a_url or apply_agent.api_url
+        store = transfer_store(
+            get_config().get_object_store(), a2a_url, apply_agent.a2a_card, sandbox_type=apply_agent.sandbox_type
+        )
         try:
             call = await asyncio.to_thread(
                 changelog_apply_call,
                 method,
-                get_config().get_object_store(),
+                store,
                 agent_name=apply_agent_name,
                 source_url=capture_source,
                 portable=capture.get("transfer_mode") == "objects",
@@ -720,6 +724,7 @@ class A2AAgentValidator:
                 operation="changelog apply",
                 timeout=TRANSFER_TIMEOUT_SECONDS,
                 response_model=ObjectChangelogApplyResponse,
+                store=store,
             )
             if call.mode == "objects":
                 check_changelog_applied(answer, call, agent_name=apply_agent_name)

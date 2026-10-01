@@ -20,6 +20,7 @@ from agent_env.a2a_agent.object_transfer import (
     invoke_transfer,
     skill_add_call,
 )
+from agent_env.a2a_agent.staging import transfer_store
 from agent_env.providers.sandbox_providers.local_sandbox import (
     LOCAL_TRUST_ENV,
     LocalSandbox,
@@ -197,10 +198,13 @@ class A2AAgent:
         """Send one skill, as SKILL.md text or the objects under ``object_url``, in a form the
         agent's card and the object store allow; returns the agent's answer."""
         add_method, add_path = A2AAgent.operation(A2AAgent._skill_extension(deployed), "add")
+        store = transfer_store(
+            get_config().get_object_store(), deployed.a2a_url, deployed.agent_card, sandbox_type=deployed.sandbox_type
+        )
         call = await asyncio.to_thread(
             skill_add_call,
             add_method,
-            get_config().get_object_store(),
+            store,
             name=name,
             description=description,
             skill_md=skill_md,
@@ -214,6 +218,7 @@ class A2AAgent:
             verb="POST",
             operation=f"skill add ({name})",
             timeout=TRANSFER_TIMEOUT_SECONDS,
+            store=store,
         )
 
     @staticmethod

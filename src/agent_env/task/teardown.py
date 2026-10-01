@@ -14,6 +14,7 @@ import logging
 from dataclasses import dataclass
 from typing import NamedTuple, Optional
 
+from agent_env.a2a_agent.staging import drain_all, staged_changelogs
 from agent_env.env.env import DeployedEnv
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, remove_local_work_dir
 from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider
@@ -82,6 +83,13 @@ async def teardown_run(context: TaskStepContext, *, timeout: float = TERMINATE_T
     tearing_down()
     pending = _pending(context)
     terminated, failed = [], []
+    try:  # a changelog staged on an agent goes into the store before the agent does
+        async with asyncio.timeout(timeout):
+            await drain_all(staged_changelogs(context.metadata))
+    except TimeoutError:
+        logger.warning("teardown: staged changelog increments were not all drained within %gs", timeout)
+    except asyncio.CancelledError:
+        return TeardownReport(left=pending)
 
     async def take_down(sandbox: RecordedSandbox) -> None:
         if sandbox not in pending:  # torn down already: only a local one's folder can be left
