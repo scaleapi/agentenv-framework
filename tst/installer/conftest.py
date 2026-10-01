@@ -1,6 +1,6 @@
 """Real installers, offline: `agent-env plugin add` and `remove` in each environment setup.
 
-Every run builds agentenv-framework and agentenv-protocol from the checkout, so it tests the
+Every run builds agentenv-framework and agentenv-framework-protocol from the checkout, so it tests the
 change under review. Their dependencies and build backend come from a wheelhouse downloaded
 once per `uv.lock` and cached under `.cache/`; that download is the only step that uses the
 network. After it, the build and every pip, uv and pipx install run with the package index

@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Guidance for coding agents and contributors working in this repository. `CLAUDE.md` imports this file.
+Guidance for coding agents and contributors working in this repository.
 
 ## What agent-env is
 
@@ -17,13 +17,19 @@ environments; agent-env depends on it.
 Python 3.11 or newer. The repo convention is a `.venv` at the root, which the Makefile and CI use.
 
 ```bash
-python3.11 -m venv .venv && . .venv/bin/activate
-pip install -e ./packages/agentenv-protocol -e '.[dev]'   # or: uv sync --extra dev
+uv sync --extra dev && . .venv/bin/activate
 ```
 
-Install the in-repo protocol package together with the dev extra: agent-env depends on it and the
-workspace copy is the one to develop against (`uv sync` does this through the uv workspace in
-`pyproject.toml`). `make install` is the same in one step. No cloud credentials are needed; the
+Without uv:
+
+```bash
+python3.11 -m venv .venv && . .venv/bin/activate
+pip install -e ./packages/agentenv-protocol -e '.[dev]'
+```
+
+Both install the in-repo protocol package together with the dev extra: agent-env depends on it and
+the workspace copy is the one to develop against (`uv sync` does this through the uv workspace in
+`pyproject.toml`). `make install` is the pip route in one step. No cloud credentials are needed; the
 default stores are local.
 
 ## Commands
@@ -36,7 +42,7 @@ default stores are local.
 | `make installer-test` | `tst/installer`: `plugin add` / `remove` through the real pip, uv and pipx, offline against wheels built from the checkout, and the container user journey (`python:3.12-slim`, `--network none`) with the PEP 668 refusal; needs uv, pipx and Docker |
 | `make clean-install-test` | the `clean-install` CI gate: both distributions built as the release builds them, installed into a fresh venv from public PyPI with an allowlisted environment, and `agent-env run hello` run twice by name and checked through the local store; needs Python 3.11, uv and git |
 | `pytest tst/unit/env/store_test.py -v` | one file; add `--log-cli-level=DEBUG` for debug logs |
-| `pip install build && python -m build` | wheel `agentenv_framework-<version>-py3-none-any.whl` (`src/agent_env` only) and sdist `agentenv_framework-<version>.tar.gz` (`src`, `tst`, the protocol package) |
+| `uv build` | wheel `agentenv_framework-<version>-py3-none-any.whl` (`src/agent_env` only) and sdist `agentenv_framework-<version>.tar.gz` (`src`, `tst`, the protocol package) |
 | `agent-env`, `python -m agent_env.cli` | the CLI; `agent-env config show` prints which config file is in effect and where each section came from |
 
 ## Configuration
@@ -162,7 +168,7 @@ The required checks on pull requests and `main` are `unit`, `integration-local`,
 `integration-local-slow`, `installer`, `plugin-api` and `clean-install`. `.github/workflows/local-backends.yml` runs
 the first four, all installed from public PyPI with no secrets and no external services (a `registry:2` service container for the integration jobs). The
 `unit` job also fails if `uv.lock` resolves anything from a registry other than PyPI or if
-`agentenv-protocol` is not the editable workspace member. The integration jobs run
+`agentenv-framework-protocol` is not the editable workspace member. The integration jobs run
 `.github/scripts/check_skip_policy.py` over the JUnit report: only `agentenv-capability-missing`
 skips for the allowed capabilities pass, and the fast job allows no skips under
 `tst/integration/store/`. The `installer` job runs `tst/installer` when a pull request or push
@@ -188,7 +194,7 @@ Actions are pinned to commit SHAs.
 - Versions are cut by the maintainers' release automation. Never edit `version` in
   `pyproject.toml` or push a tag in a PR.
 - Names: the distribution is `agentenv-framework`, the import package `agent_env`, the console
-  script `agent-env`. Only the first is what `pip install` and `importlib.metadata.version()` take.
+  script `agent-env`. Only the first is what `uv add`, `pip install` and `importlib.metadata.version()` take.
 - Comments: default to none. The code says what; a docstring of one to three dense lines says why
   when that is not obvious. No comment that restates the code, no trailing assertion notes in tests.
 - Imports at module top, never inside functions.

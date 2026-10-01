@@ -1,26 +1,34 @@
 """A task scores against a bare local sandbox with no Docker, model or network.
 
 A local VM-mode sandbox is a host work dir driven by subprocesses, so this needs `bash`
-and `python3` on PATH and nothing else.
+and `python3` on PATH and nothing else. The agent tests start a real container in place of
+an agent's, so they need Docker too, but no model.
 """
 
 import shutil
+import subprocess
 import uuid
 
 import pytest
+import pytest_asyncio
 
 from agent_env.artifact import FileArtifact, FileArtifactUniverse
 from agent_env.artifact.store import reset_artifact_store
-from agent_env.config import configure, reset_config
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox
+from agent_env.config import configure, get_config, reset_config
+from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
 from agent_env.task import Task
+from agent_env.task_step.context import DeployedAgent, TaskStepContext
+from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTaskStep
 from agent_env.task_step.task_steps.deploy_sandbox import DeploySandboxTaskStep
 from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
 from agent_env.task_step.task_steps.verifiers.verify_sandbox import VerifySandboxTaskStep
+from tst.util.capabilities import missing_capability_reason
 
 pytestmark = pytest.mark.integration
 
 _CHECK_PY = "import pathlib, sys\nsys.exit(0 if 'hello' in pathlib.Path('hello.txt').read_text() else 1)\n"
+# Stands in for an agent's image: a server that stays up, on a Debian userland (bash, GNU find), for any arch.
+_AGENT_IMAGE = "mirror.gcr.io/library/nginx:1.27-bookworm"
 
 
 @pytest.fixture
@@ -38,6 +46,21 @@ def local_backends(monkeypatch, tmp_path):
         shutil.rmtree(sandboxes, ignore_errors=True)
         reset_artifact_store()
         reset_config()
+
+
+@pytest_asyncio.fixture
+async def local_agent(local_backends):
+    """A running local container sandbox recorded as the deployed agent `agent`."""
+    if shutil.which("docker") is None or subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
+        pytest.skip(missing_capability_reason("docker_daemon"))
+    sandbox = await LocalSandboxProvider().create_container(image_name=_AGENT_IMAGE, port=80, env={})
+    try:
+        yield sandbox, TaskStepContext(instance_id=f"agent-{uuid.uuid4().hex[:8]}", deployed_agents=[
+            DeployedAgent(agent_name="agent", api_url=sandbox.tunnel_urls[80], sandbox_id=sandbox.sandbox_id,
+                          sandbox_type="local"),
+        ])
+    finally:
+        await sandbox.terminate()
 
 
 def _greeting_universe(src_dir, suffix):
@@ -112,3 +135,40 @@ async def test_file_artifacts_stage_beside_each_other(local_backends):
     assert ctx.metadata["verifications"]["hello"]["score"] == 1.0
     loaded = ctx.metadata["loaded_file_artifact_universes"]
     assert [(entry["artifact_type"], entry["files"]) for entry in loaded] == [("file", ["hello.txt"]), ("file", ["check.py"])]
+
+
+@pytest.mark.asyncio
+async def test_verify_sandbox_probes_a_local_agent_inside_its_container(local_agent):
+    sandbox, context = local_agent
+    _write_in_container(sandbox, "/app/out/report.txt", "done")
+    step = VerifySandboxTaskStep(
+        id="verify", version=None, agent_name="agent", base_dir="/app/out", verifier_id="agent",
+        criteria=[
+            {"type": "probe_file_exists", "criterion": "wrote it", "paths": ["report.txt"]},
+            {"type": "bash_cmd_succeeds", "criterion": "runs in the container", "bash_cmd": 'test "$(uname -s)" = Linux'},
+        ],
+    )
+
+    ctx = await step.execute(context)
+
+    assert [r["result"] for r in ctx.metadata["verifications"]["agent"]["results"]] == [True, True]
+    assert list(sandbox.work_dir.iterdir()) == [sandbox.work_dir / ".agent-container-mode"]
+
+
+@pytest.mark.asyncio
+async def test_collect_artifacts_reads_a_local_agents_file_from_its_container(local_agent):
+    sandbox, context = local_agent
+    token = uuid.uuid4().hex
+    _write_in_container(sandbox, "/app/artifact/report.txt", token)
+    step = CollectArtifactsTaskStep(id="collect", version=None, agent_name="agent", artifact_paths=["report.txt"])
+
+    ctx = await step.execute(context)
+
+    url = ctx.metadata["collected_artifacts"]["collect"]["artifacts"]["report.txt"]
+    assert get_config().get_object_store().get(url) == f"{token}\n".encode()
+
+
+def _write_in_container(sandbox, path, text):
+    """Write ``text`` at ``path`` inside the sandbox's container, as the agent would."""
+    script = f"mkdir -p $(dirname {path}) && echo {text} > {path}"
+    subprocess.run(["docker", "exec", sandbox.container_name, "sh", "-c", script], check=True, capture_output=True)

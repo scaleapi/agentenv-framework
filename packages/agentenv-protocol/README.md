@@ -1,6 +1,8 @@
-# agentenv-protocol
+# agentenv-framework-protocol
 
-Open data-plane protocol and server SDK for agent environments.
+Open data-plane protocol and server SDK for agent environments. Install it with
+`uv add agentenv-framework-protocol` or `pip install agentenv-framework-protocol`; the import
+package is `agentenv_protocol`.
 
 An environment author writes a class with decorated methods and serves it:
 
@@ -142,7 +144,7 @@ agent. Import the decorator from the namespace matching the application you are
 building.
 
 Install the optional agent dependencies with
-`agentenv-protocol[agent]`. The framework generates the Agent Card,
+`agentenv-framework-protocol[agent]`. The framework generates the Agent Card,
 extension routes, A2A task lifecycle, and detached task boundary from one
 agent definition:
 
@@ -485,7 +487,7 @@ The answer is agent-wide rather than per caller, and like every extension route 
 probe carries no access check of its own, so expose an agent only to the control plane
 that drives it.
 
-Runnable, self-contained reference agents live in [`examples/`](examples/):
+Runnable, self-contained reference agents live in [`examples/`](https://github.com/scaleapi/agentenv-framework/tree/main/packages/agentenv-protocol/examples):
 the normal, streaming, and multimodal `run(request)` paths, single- and
 multi-operation custom extensions, and advanced ASGI-lifespan plus
 common SDK-operation override hooks.
@@ -575,7 +577,7 @@ it signs with long-term credentials), and keeps the older `s3_prefix`, `skill_s3
 agent built on this protocol therefore needs an agent-env release that includes
 it: an older release sends the older shapes, which such an agent refuses apart
 from inline skills and trajectories. Roll out in this
-order: release agent-env and `agentenv-protocol` together, move every service
+order: release agent-env and `agentenv-framework-protocol` together, move every service
 that embeds agent-env to that release, and only then build agents on the new
 SDK. A snapshot or changelog is restored in the form it was captured in: one
 captured as objects only through the object variants, an older one only

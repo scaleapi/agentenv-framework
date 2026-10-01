@@ -30,6 +30,7 @@ from agent_env.env.envs.service_db import (
     PGWEB_SERVICE_NAME,
     SERVICE_DB_PORT,
 )
+from agent_env.providers.sandbox_providers.sandbox import port_bindings
 from agent_env.providers.env_state.env_state_provider import (
     DatabaseStateProvider,
     DEFAULT_STATE_TTL_SECONDS,
@@ -258,9 +259,12 @@ class LocalPostgresStateProvider(DatabaseStateProvider):
         environment_names: list[str],
         *,
         host_port: Optional[Callable[[int], int]] = None,
+        host_ips: tuple[str, ...] = (),
     ) -> list[str]:
         """The pgweb + db-mcp direct-SQL browse UIs (VM/compose path), each gated on the
         servicedb's health. Beyond the mandatory readiness service."""
+        # Opened from the host only, so kept off the bridge address containers reach the host through.
+        host_ips = host_ips[:1]
         publish = host_port or (lambda port: port)
         cfg = self.service_db_config
         lines: list[str] = []
@@ -279,7 +283,7 @@ class LocalPostgresStateProvider(DatabaseStateProvider):
                 # session and 500'd the changelog export on Save & Next).
                 "      - PGWEB_LOCK_SESSION=true",
                 "    ports:",
-                f'      - "{publish(DB_WEB_PORT)}:{DB_WEB_PORT}"',
+                *(f'      - "{spec}"' for spec in port_bindings(host_ips, publish(DB_WEB_PORT), DB_WEB_PORT)),
                 "    networks:",
                 "      - env-network",
                 "",
@@ -296,7 +300,7 @@ class LocalPostgresStateProvider(DatabaseStateProvider):
                 f"      - DATABASE_URI={self._pg_url(DATABASE_SERVICE_NAME, scheme='postgresql')}",
                 "    command: --transport=streamable-http --streamable-http-host=0.0.0.0 --access-mode=unrestricted",
                 "    ports:",
-                f'      - "{publish(DB_MCP_PORT)}:{DB_MCP_CONTAINER_PORT}"',
+                *(f'      - "{spec}"' for spec in port_bindings(host_ips, publish(DB_MCP_PORT), DB_MCP_CONTAINER_PORT)),
                 "    networks:",
                 "      - env-network",
                 "",
