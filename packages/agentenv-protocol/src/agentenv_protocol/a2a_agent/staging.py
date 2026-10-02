@@ -26,6 +26,7 @@ count and the ``If-Match`` check are its own.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import hashlib
 import os
 import shutil
@@ -109,10 +110,11 @@ class StagingStore:
 
     @property
     def root(self) -> Path:
-        """Where staged objects live; unless one was given, a new directory, made on first use, so a
-        restarted server never counts what an earlier one left."""
+        """Where staged objects live; unless one was given, a new directory, made on first use and removed
+        when the process exits, so a restarted server never counts what an earlier one left."""
         if self._root is None:
             self._root = Path(tempfile.mkdtemp(prefix="agentenv-staging-"))
+            atexit.register(shutil.rmtree, self._root, ignore_errors=True)
         return self._root
 
     @property

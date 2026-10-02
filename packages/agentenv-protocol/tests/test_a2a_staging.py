@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import httpx
 import pytest
@@ -120,6 +124,17 @@ def test_without_a_directory_each_server_stages_in_its_own(monkeypatch: pytest.M
     assert first.root != second.root and first.root.stat().st_mode & 0o777 == 0o700
     shutil.rmtree(first.root)
     shutil.rmtree(second.root)
+
+
+def test_a_servers_own_staging_directory_goes_when_it_exits(tmp_path) -> None:
+    script = (
+        "from agentenv_protocol.a2a_agent import StagingStore\n"
+        "store = StagingStore(max_bytes=1)\n"
+        f"open({str(tmp_path / 'root')!r}, 'w').write(str(store.root))\n"
+    )
+    env = {k: v for k, v in os.environ.items() if k != "AGENTENV_STAGING_DIR"}
+    subprocess.run([sys.executable, "-c", script], check=True, env=env)
+    assert not Path((tmp_path / "root").read_text()).exists()
 
 
 def test_a_delete_spares_an_object_rewritten_since_it_was_read() -> None:
