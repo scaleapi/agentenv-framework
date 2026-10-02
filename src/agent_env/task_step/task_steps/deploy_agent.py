@@ -239,6 +239,17 @@ class DeployAgentTaskStep(TaskStep):
         )
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
+        # An agent is recorded in the context only once it is configured, so one that fails on the way there
+        # (a snapshot or changelog that can't be loaded, say) is closed here, or no teardown would find it.
+        deployed: list = []
+        try:
+            return await self._execute(context, deployed)
+        except BaseException:
+            for agent in deployed:
+                await agent.close()
+            raise
+
+    async def _execute(self, context: TaskStepContext, deployed_agents: list) -> TaskStepContext:
         from agent_env.a2a_agent import A2AAgent
         from agent_env.a2a_agent.a2a_agent import DEFAULT_A2A_PORT
         from agent_env.providers.sandbox_providers.sandbox_provider import (
@@ -334,6 +345,7 @@ class DeployAgentTaskStep(TaskStep):
         if linked_sandbox is not None:
             deploy_kwargs["sandbox"] = linked_sandbox
         deployed = await agent.deploy(**deploy_kwargs)
+        deployed_agents.append(agent)
         a2a_url = deployed.a2a_url
         card = deployed.agent_card
         logger.info(f"A2A agent '{a2a_agent_id}' deployed at {a2a_url}")
