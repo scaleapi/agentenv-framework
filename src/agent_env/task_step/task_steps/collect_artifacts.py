@@ -39,8 +39,8 @@ Usage in task JSON:
     }
 
 With seed CSV:
-    name,platform,expected_artifacts
-    VPC Endpoints,Terraform,"Dockerfile,run.sh,codebase.patch,test.patch,gold.patch,prompt.md,before.json,after.json,p2p_tests.json,f2p_tests.json,validation.json,progress.md"
+    name,expected_artifacts
+    example-task,"Dockerfile,run.sh,solution.patch,report.md"
 
 Or with static fallback (no seed data needed):
     {
@@ -613,7 +613,7 @@ class CollectArtifactsTaskStep(TaskStep):
         # Read files via the CUA MCP server (cua_get_file / cua_bash) over the
         # gateway's step/v1. These are MCP tools registered on the gateway on both
         # Ubuntu and macOS — NOT endpoints on the macOS controller sidecar, whose
-        # /step only accepts a ScaleCuaAction and 500s on a call_tool payload.
+        # /step only accepts a computer-use action and 500s on a call_tool payload.
         logger.info(f"Collecting artifacts via CUA MCP server (env_id={self.env_id}, gateway={deployed_env.environment_url})")
 
         items = self._resolve_items(context)

@@ -4,10 +4,8 @@
  * and assert that classification + event extraction + sub-agent folding
  * produce sensible output.
  *
- * Fixture default: `/tmp/traj.json` — pulled from the real run
- * a captured agent run while diagnosing the
- * "Cannot read properties of undefined (reading 'openinference.span.kind')"
- * crash. Override with `CLAUDE_CLI_FIXTURE=<path>`.
+ * Fixture default: `/tmp/traj.json`, a captured agent run. Override with
+ * `CLAUDE_CLI_FIXTURE=<path>`.
  *
  * Runner: plain TS, throws on assertion failure. Run with any TS executor:
  *   npx tsx src/lib/parse-trajectory-claude-cli.smoke.ts

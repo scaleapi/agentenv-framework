@@ -14,9 +14,8 @@ import secrets
 
 # Max end-to-end time for a single service's data load (seconds).
 #
-# The previous value of 600 was sized above a then-slowest prod load of ~430s.
-# That is no longer the ceiling: a large universe's gmail component now takes 498s and slack
-# 499s, leaving under 20% headroom on a number chosen to have plenty.
+# A single component of a large universe can take close to 500s, so this leaves
+# wide headroom.
 #
 # The margin matters more than the average because of how a load fails. A
 # component that exceeds this does not retry — the environment comes up, reports
@@ -33,8 +32,8 @@ DATA_PLANE_LOAD_TIMEOUT_S = 900
 # Extra seconds granted per GB of payload, on top of the floor.
 #
 # Explicitly a heuristic, not a model. Measured load cost tracks RECORD COUNT, not bytes:
-# github moved 3.5GB in 89s while gmail took 206s for 409MB and slack 207s for 86.6MB (~20x
-# and ~94x worse per byte). So size is a weak proxy -- it over-grants to the big-blob
+# a blob-heavy service can move GBs in about a minute while a record-heavy one takes minutes
+# for well under 1GB. So size is a weak proxy -- it over-grants to the big-blob
 # services that never needed it and under-grants to the small record-heavy ones that do.
 # It is still strictly better than a flat cap, because the flat cap's failure mode was
 # killing healthy work. A real fix is a stall timeout (fail on no progress rather than on

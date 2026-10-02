@@ -209,7 +209,7 @@ async def test_container_mode_constructs_internal_mcp_servers_url_format():
 
     assert len(gp._container_sandboxes) == 4
 
-    # PR 2: the deploy routes DB state through the provider.
+    # The deploy routes DB state through the provider.
     # servicedb container env comes from the provider's store-spec
     db_call = next(c for c in create_calls if c["port"] == SERVICE_DB_PORT)
     assert db_call["env"] == LocalPostgresStateProvider().store_spec(["slack", "email"]).env

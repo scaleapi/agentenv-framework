@@ -711,7 +711,7 @@ class PromptAgentTaskStep(TaskStep):
             )
         # Fetched by a2a_server_task_id, the id the A2A server produced; stored under
         # target_a2a_task_id, the client message id persisted on the conversation as
-        # a2a_task_id, so the FE can resolve it (#731).
+        # a2a_task_id, so the FE can resolve it.
         upload = None
         if mode == "objects":
             upload = await asyncio.to_thread(

@@ -220,8 +220,8 @@ def upload_trajectory(
     Always uploaded from the worker side, never by the agent: sandbox VMs hold
     static STS env vars with a fixed expiry, and long runs exceed it.
 
-    ``name`` makes the object addressable by an id the caller already records
-    (#731); omit it to get a random one, which is what writing repeatedly under a
+    ``name`` makes the object addressable by an id the caller already records;
+    omit it to get a random one, which is what writing repeatedly under a
     single prefix needs, since a fixed name would overwrite the last upload.
     """
 

@@ -85,15 +85,15 @@ class TestSerialization:
 def _macos_cua_context():
     """A macOS CUA env: gateway_url (CUA MCP server, 18765) plus a distinct
     cua_controller_url (the osworld sidecar, 18768). cua_get_file must go to the
-    gateway, not the sidecar — the sidecar's /step only accepts a ScaleCuaAction
-    and 500s on a call_tool payload."""
+    gateway, not the sidecar — the sidecar's /step only accepts a computer-use
+    action and 500s on a call_tool payload."""
     return TaskStepContext(instance_id="inst-1", deployed_envs=[_macos_record()])
 
 
 class TestControllerPath:
     def test_reads_route_to_gateway_mcp_not_controller_sidecar(self):
         """Regression: reads must use gateway_url (CUA MCP server), even when a
-        macOS cua_controller_url is present. Routing them to the sidecar (#693)
+        macOS cua_controller_url is present. Routing them to the sidecar
         made every read 500."""
         step = CollectArtifactsTaskStep(
             id="collect", version=None, env_id="macos-cua",
@@ -503,31 +503,31 @@ class TestManifestResolution:
 
     def test_manifest_mode_keys_by_logical_name_and_filters(self):
         step = CollectArtifactsTaskStep(
-            id="collect", version=None, base_path="/app/swe_atlas",
+            id="collect", version=None, base_path="/app/workspace",
             manifest_step_id="m9", exclude_basenames=["base_image.tar", "base_image.tar.sha256"],
         )
         ctx = _manifest_ctx({
-            "dockerfile":     "/app/swe_atlas/Dockerfile",
-            "gold_patch":     "/app/swe_atlas/patches/gold_patch.diff",
-            "base_image_tar": "/app/swe_atlas/base_image.tar",        # excluded basename
-            "m7_iter_logs":   "/app/swe_atlas/logs/m7_iter_*.json",   # unresolved glob -> skipped
-            "coverage_state": "target_reached",                        # literal value, not a path -> skipped
-            "harbor_zip":     "/app/swe_atlas/ruff_harbor_v1.zip",
+            "dockerfile":     "/app/workspace/Dockerfile",
+            "gold_patch":     "/app/workspace/patches/gold_patch.diff",
+            "base_image_tar": "/app/workspace/base_image.tar",        # excluded basename
+            "run_logs":       "/app/workspace/logs/run_*.json",        # unresolved glob -> skipped
+            "status":         "complete",                              # literal value, not a path -> skipped
+            "bundle_zip":     "/app/workspace/bundle_a.zip",
         })
         items = {k: (src, obj) for k, src, obj in step._resolve_items(ctx)}
-        assert set(items) == {"dockerfile", "gold_patch", "harbor_zip"}
+        assert set(items) == {"dockerfile", "gold_patch", "bundle_zip"}
         # logical name -> (absolute source path, base_path-relative object name)
-        assert items["gold_patch"] == ("/app/swe_atlas/patches/gold_patch.diff", "patches/gold_patch.diff")
-        assert items["dockerfile"] == ("/app/swe_atlas/Dockerfile", "Dockerfile")
+        assert items["gold_patch"] == ("/app/workspace/patches/gold_patch.diff", "patches/gold_patch.diff")
+        assert items["dockerfile"] == ("/app/workspace/Dockerfile", "Dockerfile")
 
     def test_enumeration_drops_excluded_basenames(self):
         step = CollectArtifactsTaskStep(
-            id="collect", version=None, base_path="/app/swe_atlas",
+            id="collect", version=None, base_path="/app/workspace",
             exclude_basenames=["base_image.tar", "base_image.tar.sha256"],
         )
         enumerated = ["Dockerfile", "patches/gold_patch.diff", "base_image.tar",
-                      "base_image.tar.sha256", "245a_harbor_v1.zip"]
-        assert step._drop_excluded(enumerated) == ["Dockerfile", "patches/gold_patch.diff", "245a_harbor_v1.zip"]
+                      "base_image.tar.sha256", "bundle_b.zip"]
+        assert step._drop_excluded(enumerated) == ["Dockerfile", "patches/gold_patch.diff", "bundle_b.zip"]
 
     def test_manifest_uses_latest_response_when_step_reran(self):
         # On retry/resume a step can append more than once; the latest output wins.
@@ -723,7 +723,7 @@ class TestSandboxContainerPath:
 
 class TestControllerWire:
     def test_controller_call_posts_call_tool_to_the_cards_step_endpoint(self, monkeypatch):
-        """The #693 intent at the wire: call_tool goes to the gateway's step/v1 (18765), never the macOS sidecar (18768)."""
+        """The same routing at the wire: call_tool goes to the gateway's step/v1 (18765), never the macOS sidecar (18768)."""
         sent = _mock_gateway(monkeypatch, {"content": [{"type": "text", "text": "aGk="}]})
         step = CollectArtifactsTaskStep(id="collect", version=None, env_id="macos-cua", artifact_paths=["/x"])
 

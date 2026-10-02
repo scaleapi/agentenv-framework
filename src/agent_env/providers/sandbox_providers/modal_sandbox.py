@@ -467,7 +467,7 @@ async def _log_sandbox_started(
 ) -> None:
     """Log one structured line mapping Modal's container id to the sandbox and its tags.
 
-    Modal's Datadog metrics carry only ``container_id`` (the ``ta-`` task id), not sandbox tags, so
+    Modal's exported metrics carry only ``container_id`` (the ``ta-`` task id), not sandbox tags, so
     this line is the join key from a container's usage to its run and pipeline step. Never raises:
     the task id comes from a private Modal method.
     """

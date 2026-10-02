@@ -15,11 +15,10 @@ ground-truth string per probe. The outcome for each modality is one of:
 - `probe_step_did_not_run`: no matching response — the upstream
   `PromptAgentTaskStep` crashed before `context.prompt_responses.append(...)`.
 
-The gemini wrapper currently passes all 12 modality probes (text, image
-{png,jpeg,gif}, audio {wav,mpeg,mp4,ogg}, PDF, video/mp4, plus image/png
-delivered via `FileWithUri` over `s3://` and presigned `https://`). New
-A2A wrappers (claude-code, codex, grok) inherit this same probe set and
-will report which subset they actually ingest.
+There are 12 modality probes (text, image {png,jpeg,gif}, audio
+{wav,mpeg,mp4,ogg}, PDF, video/mp4, plus image/png delivered via
+`FileWithUri` over `s3://` and presigned `https://`). Every A2A agent gets
+the same probe set, and the results report which subset it ingests.
 """
 
 from __future__ import annotations
