@@ -89,6 +89,14 @@ logger = logging.getLogger(__name__)
 # a step's `env_id` resolved to a CUA env before issuing cua_* controller calls.
 _CUA_ENV_METADATA_MARKER = "cua_vm_sandbox_id"
 
+# cua_get_file returns a file's whole base64 body in one gateway response. That buffer-and-return
+# can't carry a large file within one request — a ~500MB deliverable blew past the step's 600s
+# controller timeout (and could exceed the gateway body limit) and was silently dropped. Files at
+# or under this size take that single-shot path; larger ones stream in fixed byte ranges via
+# cua_bash so no single call has to move the whole file.
+_CUA_SINGLE_SHOT_MAX = 16 * 1024 * 1024  # 16 MB
+_CUA_CHUNK_BYTES = 8 * 1024 * 1024       # 8 MB per ranged read
+
 # artifact_paths entries with a URL scheme are not VM files — they're gold/source
 # URLs that downstream consumers (evaluator, artifact previewer) fetch directly.
 # Collect skips them rather than joining them to base_path (which would mangle
@@ -170,6 +178,24 @@ def _cua_bash_stdout(text: str) -> str:
     if not isinstance(payload, dict) or "output" not in payload:
         return text
     return payload.get("output") or ""
+
+
+def _cua_bash_error(text: str) -> str:
+    """The `error`/stderr field of a `cua_bash` envelope, or "" if absent/unwrapped.
+    Used to tell a genuinely-missing file from a size-probe that failed for another
+    reason — the former is a lenient skip, the latter a dropped deliverable."""
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("error") or "")
+
+
+def _looks_absent(stderr: str) -> bool:
+    """Whether a stat/wc failure message means the file simply isn't there."""
+    return "No such file" in stderr or "cannot stat" in stderr
 
 
 def _remove(path: str) -> None:
@@ -453,12 +479,16 @@ class CollectArtifactsTaskStep(TaskStep):
         )
 
     async def _get_file_size(self, sandbox, container: Optional[str], source_path: str) -> int:
-        """Get file size on the agent's filesystem. Returns -1 if the file doesn't exist.
+        """Get file size on the agent's filesystem. Returns -1 only if the file is genuinely
+        absent; a `stat` that fails for any other reason RAISES so a failed size check is a
+        hard failure rather than a silent 'missing' skip that drops an existing deliverable.
         VM-mode wraps in `docker exec <container>`; container-mode runs `stat` directly."""
         args = _exec_args(sandbox, container, ("stat", "-c", "%s", source_path))
-        exit_code, stdout, _ = await sandbox.exec_with_output(*args)
+        exit_code, stdout, stderr = await sandbox.exec_with_output(*args)
         if exit_code != 0:
-            return -1
+            if _looks_absent(stderr):
+                return -1
+            raise RuntimeError(f"could not size {source_path} (stat exit {exit_code}): {stderr[:200]}")
         return int(stdout.strip())
 
     async def _collect_file(
@@ -555,12 +585,70 @@ class CollectArtifactsTaskStep(TaskStep):
             raise RuntimeError(f"{tool_name} returned no content: {data}")
         return content[0].get("text", "")
 
+    async def _controller_file_size(self, deployed_env, path: str) -> int:
+        """Size of ``path`` on the CUA VM in bytes, or -1 only if the file is genuinely
+        absent. A controller/transport error (e.g. a ``wc`` timeout) RAISES rather than
+        returning -1, so a failed size check becomes a hard failure instead of masquerading
+        as a missing file and silently dropping an existing deliverable. ``wc -c`` is
+        portable across the Ubuntu and macOS desktop VMs; ``stat``'s flags are not. A
+        transport exception from ``_controller_call`` propagates unchanged."""
+        out = await self._controller_call(
+            deployed_env, "cua_bash", {"script": f"wc -c < {shlex.quote(path)}"}
+        )
+        # A present file (even 0 bytes) prints its size to stdout; empty stdout means wc failed.
+        text = _cua_bash_stdout(out).strip()
+        if text:
+            try:
+                return int(text.split()[0])
+            except (ValueError, IndexError):
+                raise RuntimeError(f"unexpected `wc -c` output sizing {path}: {text!r}")
+        err = _cua_bash_error(out)
+        if _looks_absent(err):
+            return -1
+        raise RuntimeError(f"could not size {path} on the CUA VM (`wc -c` failed: {err or 'no output'})")
+
     async def _controller_get_file(self, deployed_env, path: str) -> bytes:
-        """Fetch a file from the CUA VM as raw bytes (controller returns base64)."""
+        """Fetch a file from the CUA VM as raw bytes (controller returns base64).
+
+        Raises ``FileNotFoundError`` when the file is absent (the caller treats that
+        as a lenient skip). Small files come back in one ``cua_get_file`` call; large
+        ones stream in byte ranges so no single call moves the whole file."""
         import base64
 
+        size = await self._controller_file_size(deployed_env, path)
+        if size < 0:
+            raise FileNotFoundError(f"file not found on CUA VM: {path}")
+        if size > _CUA_SINGLE_SHOT_MAX:
+            return await self._controller_get_file_chunked(deployed_env, path, size)
         b64 = await self._controller_call(deployed_env, "cua_get_file", {"path": path})
         return base64.b64decode(b64)
+
+    async def _controller_get_file_chunked(self, deployed_env, path: str, size: int) -> bytes:
+        """Read ``path`` off the CUA VM in ``_CUA_CHUNK_BYTES`` ranges via cua_bash.
+
+        ``tail -c +N | head -c M | base64`` is portable (no GNU ``dd iflag``) and seeks
+        rather than scans. base64 may wrap, so whitespace is stripped before decoding. A
+        short read fails loudly rather than uploading a truncated artifact."""
+        import base64
+
+        logger.info(
+            f"Streaming {path} ({size} bytes) off the CUA VM in {_CUA_CHUNK_BYTES}-byte chunks"
+        )
+        quoted = shlex.quote(path)
+        buf = bytearray()
+        while len(buf) < size:
+            script = f"tail -c +{len(buf) + 1} {quoted} | head -c {_CUA_CHUNK_BYTES} | base64"
+            out = await self._controller_call(deployed_env, "cua_bash", {"script": script})
+            chunk = base64.b64decode(_cua_bash_stdout(out).encode().translate(None, b"\r\n\t "))
+            if not chunk:
+                break  # no forward progress — stop rather than loop forever
+            buf += chunk
+        if len(buf) != size:
+            raise RuntimeError(
+                f"streamed {len(buf)} of {size} bytes for {path} (chunked read stalled or "
+                f"truncated) — refusing to upload a partial artifact"
+            )
+        return bytes(buf)
 
     async def _controller_list_dir(self, deployed_env) -> list[str]:
         """Recursively enumerate regular files under base_path via cua_bash.
@@ -625,13 +713,13 @@ class CollectArtifactsTaskStep(TaskStep):
                 )
             if self._configured_entries(context):
                 logger.info(f"collect '{self.id}': every configured entry is a URL; nothing to read from the VM")
-                return {}, {}
+                return {}, {}, []
             enumerated = self._drop_excluded(await self._controller_list_dir(deployed_env))
             if not enumerated:
                 logger.warning(
                     f"No artifact filenames resolved and {self.base_path} is empty — nothing to collect"
                 )
-                return {}, {}
+                return {}, {}, []
             items = [(f, f"{self.base_path}/{f}", f) for f in enumerated]
             logger.info(
                 f"No manifest/artifacts_key/artifact_paths configured; enumerated "
@@ -642,11 +730,18 @@ class CollectArtifactsTaskStep(TaskStep):
 
         collected: dict[str, str] = {}
         file_artifacts: dict[str, FileArtifact] = {}
+        hard_failures: list[str] = []
         for key, source_path, object_name in items:
             try:
                 content = await self._controller_get_file(deployed_env, source_path)
+            except FileNotFoundError:
+                # The file isn't on the VM — a listed-but-not-produced artifact. Stay lenient:
+                # only a file that EXISTS but we failed to move counts as a hard failure.
+                logger.warning(f"File not found on the VM, skipping: {source_path}")
+                continue
             except Exception as e:
                 logger.warning(f"Failed to read {source_path} via controller: {e}")
+                hard_failures.append(source_path)
                 continue
 
             ext = os.path.splitext(object_name)[1]
@@ -667,9 +762,10 @@ class CollectArtifactsTaskStep(TaskStep):
                 logger.info(f"Collected {source_path} -> {s3_url} ({len(content)} bytes) via controller")
             except Exception as e:
                 logger.warning(f"Failed to collect {source_path} via controller: {e}")
+                hard_failures.append(source_path)
 
         logger.info(f"Collected {len(collected)}/{len(items)} artifacts via controller")
-        return collected, file_artifacts
+        return collected, file_artifacts, hard_failures
 
     async def _collect_via_agent_container(self, context, store, artifact_id, version):
         from agent_env.providers.sandbox_providers.sandbox_provider import (
@@ -803,7 +899,7 @@ class CollectArtifactsTaskStep(TaskStep):
             if self._configured_entries(context):
                 logger.info(f"collect '{self.id}': every configured entry is a URL; nothing to read from the VM")
                 await provider.close()
-                return {}, {}
+                return {}, {}, []
             # Neither seed-driven nor static list was configured. Fall back
             # to enumerating base_path on the VM — useful when the agent's
             # output set is dynamic (e.g. "everything the solver wrote to
@@ -814,7 +910,7 @@ class CollectArtifactsTaskStep(TaskStep):
                     f"No artifact filenames resolved and {self.base_path} is empty — nothing to collect"
                 )
                 await provider.close()
-                return {}, {}
+                return {}, {}, []
             items = [(f, f"{self.base_path}/{f}", f) for f in enumerated]
             logger.info(
                 f"No manifest/artifacts_key/artifact_paths configured; enumerated "
@@ -825,7 +921,11 @@ class CollectArtifactsTaskStep(TaskStep):
 
         collected: dict[str, str] = {}
         file_artifacts: dict[str, FileArtifact] = {}
+        hard_failures: list[str] = []
         for key, source_path, object_name in items:
+            # In the guarded block so a size-probe error is caught as a hard failure (not a
+            # silent skip) and provider.close() below still runs; only a genuinely-absent
+            # file (size -1) is the lenient skip.
             try:
                 file_size = await self._get_file_size(sandbox, container, source_path)
                 if file_size < 0:
@@ -847,6 +947,7 @@ class CollectArtifactsTaskStep(TaskStep):
 
             except Exception as e:
                 logger.warning(f"Failed to collect {source_path}: {e}")
+                hard_failures.append(source_path)
 
         if not collected and items:
             # Surface what the agent actually left in base_path so a re-collect is a pick, not a guess.
@@ -857,7 +958,7 @@ class CollectArtifactsTaskStep(TaskStep):
             }
         logger.info(f"Collected {len(collected)}/{len(items)} artifacts")
         await provider.close()
-        return collected, file_artifacts
+        return collected, file_artifacts, hard_failures
 
     def _register_file_artifact(self, store, file_artifacts, artifact_id, key, object_name, content_type, s3_url, context):
         """Register a FileArtifact document pointing at the already-uploaded S3
@@ -902,13 +1003,13 @@ class CollectArtifactsTaskStep(TaskStep):
         version = int(time.time())
 
         if self.env_id:
-            collected, file_artifacts = await self._collect_via_controller(context, store, artifact_id, version)
+            collected, file_artifacts, hard_failures = await self._collect_via_controller(context, store, artifact_id, version)
         elif self.container_name:
-            collected, file_artifacts = await self._collect_via_sandbox_container(context, store, artifact_id, version)
+            collected, file_artifacts, hard_failures = await self._collect_via_sandbox_container(context, store, artifact_id, version)
         elif self.sandbox_name:
-            collected, file_artifacts = await self._collect_via_vm_host(context, store, artifact_id, version)
+            collected, file_artifacts, hard_failures = await self._collect_via_vm_host(context, store, artifact_id, version)
         else:
-            collected, file_artifacts = await self._collect_via_agent_container(context, store, artifact_id, version)
+            collected, file_artifacts, hard_failures = await self._collect_via_agent_container(context, store, artifact_id, version)
 
         # `artifacts` and `file_artifact_universe` (set below) are legacy flat keys
         # that mirror the latest collect step; they can be removed once all
@@ -935,6 +1036,14 @@ class CollectArtifactsTaskStep(TaskStep):
 
         # After the metadata write, so tolerant (fail_task_on_error=False) dependents still see
         # present-but-empty. Enumeration fallback resolves to empty, so it stays lenient.
+        # A file that EXISTS on the VM but could not be collected (read or upload failure) fails
+        # the step even when others succeeded — a partial collect used to drop such files with only
+        # a warning, silently losing a deliverable. Absent files stay lenient (not in hard_failures).
+        if hard_failures:
+            raise RuntimeError(
+                f"collect: {len(hard_failures)} artifact(s) exist on the VM but could not be collected "
+                f"(see per-file warnings for the cause): {hard_failures}"
+            )
         expected = self._resolve_items(context)
         if expected and collected_entry["file_artifact_universe"] is None:
             raise RuntimeError(
