@@ -8,11 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from agent_env.attribution import PIPELINE_STEP_KEY, RUN_ID_KEY, deploy_attribution
-from agent_env.providers.sandbox_providers.modal_sandbox import (
-    ModalSandboxProvider,
-    _build_cost_attribution_tags,
-    _build_sandbox_tags,
-)
+from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider, _attribution_tags
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandboxProvider
 
 
@@ -64,41 +60,32 @@ def test_deploy_attribution_does_not_mutate_the_step():
     assert step.metadata["attribution"] == {"team": "t"}
 
 
-# --- _build_sandbox_tags --------------------------------------------------------
+# --- _attribution_tags ----------------------------------------------------------
 
 
-def test_sandbox_tags_empty_without_pipeline_step():
-    assert _build_sandbox_tags({"team": "t"}) == {}
-
-
-def test_sandbox_tags_carry_both_keys():
-    assert _build_sandbox_tags({PIPELINE_STEP_KEY: "t_s", RUN_ID_KEY: "inst-1", "team": "t"}) == {
-        PIPELINE_STEP_KEY: "t_s", RUN_ID_KEY: "inst-1",
+def test_sandbox_tags_carry_every_key():
+    assert _attribution_tags({PIPELINE_STEP_KEY: "t_s", RUN_ID_KEY: "inst-1", "team": "t"}) == {
+        PIPELINE_STEP_KEY: "t_s", RUN_ID_KEY: "inst-1", "team": "t",
     }
 
 
 def test_sandbox_tags_sanitize_invalid_characters():
-    assert _build_sandbox_tags({PIPELINE_STEP_KEY: "my task/v2_deploy env"}) == {
+    assert _attribution_tags({PIPELINE_STEP_KEY: "my task/v2_deploy env"}) == {
         PIPELINE_STEP_KEY: "my-task-v2_deploy-env",
     }
 
 
 def test_sandbox_tags_fit_modal_limit_and_keep_steps_distinct():
     long_task = "t" * 80
-    a = _build_sandbox_tags({PIPELINE_STEP_KEY: f"{long_task}_deploy_env"})[PIPELINE_STEP_KEY]
-    b = _build_sandbox_tags({PIPELINE_STEP_KEY: f"{long_task}_deploy_agent"})[PIPELINE_STEP_KEY]
+    a = _attribution_tags({PIPELINE_STEP_KEY: f"{long_task}_deploy_env"})[PIPELINE_STEP_KEY]
+    b = _attribution_tags({PIPELINE_STEP_KEY: f"{long_task}_deploy_agent"})[PIPELINE_STEP_KEY]
     assert len(a) == len(b) == 63
     assert a != b
     assert a.startswith("t" * 54)
 
 
 def test_sandbox_tags_at_the_limit_are_unchanged():
-    assert _build_sandbox_tags({PIPELINE_STEP_KEY: "x" * 63}) == {PIPELINE_STEP_KEY: "x" * 63}
-
-
-def test_pipeline_step_and_run_id_stay_off_the_app_tags():
-    app_tags = _build_cost_attribution_tags({PIPELINE_STEP_KEY: "t_s", RUN_ID_KEY: "inst-1"})
-    assert PIPELINE_STEP_KEY not in app_tags and RUN_ID_KEY not in app_tags
+    assert _attribution_tags({PIPELINE_STEP_KEY: "x" * 63}) == {PIPELINE_STEP_KEY: "x" * 63}
 
 
 # --- providers pass the tag to Modal --------------------------------------------

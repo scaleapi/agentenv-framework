@@ -17,11 +17,11 @@ from typing import Any, ClassVar, Self
 from agent_env.attribution import Attribution
 from agent_env.config.errors import ConfigError
 from agent_env.providers.sandbox_providers.e2b.sandbox import E2B_ALL_TRAFFIC, E2BSandbox
-from agent_env.providers.sandbox_providers.modal_sandbox import _build_cost_attribution_tags
 from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_VM,
     SandboxProvider,
+    apply_default_attribution,
 )
 
 logger = logging.getLogger(__name__)
@@ -143,7 +143,11 @@ class E2BSandboxProvider(SandboxProvider):
             )
         effective_policy = self.effective_network_policy(network_policy)
         template = await self._resolve_template(cpu=cpu, memory=memory)
-        metadata = _build_cost_attribution_tags(dict(attribution or {}))
+        metadata = {
+            key: value
+            for key, value in apply_default_attribution(dict(attribution or {})).items()
+            if value is not None
+        }
         ports = list(exposed_ports or [])
         if ports:
             # E2B can derive a URL for any port, so the adapter's cache is the
