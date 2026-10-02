@@ -56,13 +56,17 @@ class StagingError(RuntimeError):
 def staging_endpoint(a2a_url: str, card: Mapping[str, Any] | None) -> str | None:
     """The absolute URL of the agent's staging routes, when its card advertises them on an HTTPS URL a
     grant can name; None otherwise."""
+    params = _staging_params(card)
+    endpoint = params.get("endpoint")
+    url = f"{a2a_url.rstrip('/')}{endpoint}" if isinstance(endpoint, str) and endpoint.startswith("/") else None
+    return url.rstrip("/") if url is not None and urlsplit(url).scheme == "https" else None
+
+
+def _staging_params(card: Mapping[str, Any] | None) -> Mapping[str, Any]:
     for extension in ((card or {}).get("capabilities") or {}).get("extensions") or ():
         if isinstance(extension, Mapping) and extension.get("uri") == STAGING_V1_URI:
-            endpoint = (extension.get("params") or {}).get("endpoint")
-            url = f"{a2a_url.rstrip('/')}{endpoint}" if isinstance(endpoint, str) and endpoint.startswith("/") else None
-            if url is not None and urlsplit(url).scheme == "https":
-                return url.rstrip("/")
-    return None
+            return extension.get("params") or {}
+    return {}
 
 
 def transfer_store(
@@ -74,7 +78,8 @@ def transfer_store(
     endpoint = staging_endpoint(a2a_url, card)
     if endpoint is None or (store.supports_transfer_grants and store.grants_reach(sandbox_type)):
         return store
-    return StagedObjectStore(store, endpoint)
+    limit = _staging_params(card).get("max_bytes")
+    return StagedObjectStore(store, endpoint, max_bytes=limit if isinstance(limit, int) and limit > 0 else None)
 
 
 @dataclass(frozen=True)
@@ -104,9 +109,10 @@ class StagedObjectStore:
 
     supports_transfer_grants = True
 
-    def __init__(self, store: ObjectStore, endpoint: str) -> None:
+    def __init__(self, store: ObjectStore, endpoint: str, *, max_bytes: int | None = None) -> None:
         self.store = store
         self.endpoint = endpoint
+        self.max_bytes = max_bytes  # what the agent's card says its staging holds
         self._call = secrets.token_urlsafe(24)
         self._reads: list[_Staged] = []
         self._writes: list[_Staged] = []
@@ -137,9 +143,16 @@ class StagedObjectStore:
         )
 
     async def push(self) -> None:
-        """Put each object the call reads into the agent's staging."""
+        """Put each object the call reads into the agent's staging; objects that together outgrow the limit
+        its card advertises are refused before any is sent."""
+        sizes = await asyncio.gather(*(asyncio.to_thread(_size, self.store, staged.object_url) for staged in self._reads))
+        if self.max_bytes is not None and sum(size or 0 for size in sizes) > self.max_bytes:
+            raise StagingError("staging an object on the agent failed: its staging is full")
         async with _client("staging an object on the agent") as client:
-            await _each(self._reads, lambda staged: _push(client, self.store, staged.object_url, self._url(staged.path)))
+            await _each(
+                list(zip(self._reads, sizes)),
+                lambda item: _push(client, self.store, item[0].object_url, self._url(item[0].path), item[1]),
+            )
 
     async def pull(self) -> None:
         """Move each object the agent wrote into the store; one it did not write is skipped."""
@@ -246,10 +259,12 @@ async def draining(namespaces: Iterable[StagedNamespace]) -> AsyncIterator[None]
         await drain_all(namespaces, within=LAST_DRAIN_SECONDS)
 
 
-async def _push(client: httpx.AsyncClient, store: ObjectStore, object_url: str, url: str) -> None:
-    metadata = await asyncio.to_thread(store.get_object_metadata_at, object_url)
-    size = metadata.size if metadata is not None else None
+def _size(store: ObjectStore, object_url: str) -> int | None:
+    metadata = store.get_object_metadata_at(object_url)
+    return metadata.size if metadata is not None else None
 
+
+async def _push(client: httpx.AsyncClient, store: ObjectStore, object_url: str, url: str, size: int | None) -> None:
     async def attempt() -> None:
         source = await asyncio.to_thread(store.open, object_url)
         headers = {"content-type": "application/octet-stream"}

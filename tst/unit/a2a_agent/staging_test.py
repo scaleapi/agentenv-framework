@@ -293,6 +293,7 @@ async def test_a_full_staging_fails_the_call_without_naming_a_staged_path(tmp_pa
     with pytest.raises(StagingError, match="staging an object on the agent failed: its staging is full") as raised:
         await invoke_transfer(URL + path, call, verb="POST", operation="skill add", timeout=60, store=granting)
     assert granting.endpoint not in str(raised.value)
+    assert granting.max_bytes == 1000  # refused from the card's limit, before anything was sent
 
 
 @pytest.mark.asyncio
