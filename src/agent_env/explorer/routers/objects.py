@@ -76,8 +76,7 @@ def _filename(object_url: str) -> str:
 
 
 def _content_type(object_url: str, meta) -> str:
-    """The type the explorer serves an object as. Local stores don't persist one, so it falls back
-    to the filename, keeping the media type and the sandbox decision right on every backend."""
+    """The stored content type, else one guessed from the filename (local stores keep none)."""
     return meta.content_type or mimetypes.guess_type(_filename(object_url))[0] or "application/octet-stream"
 
 

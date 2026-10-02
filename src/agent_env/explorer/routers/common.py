@@ -168,9 +168,7 @@ def versioned_router(
         limit: int = Query(100, ge=1, le=500),
         offset: int = Query(0, ge=0),
     ) -> list[dict]:
-        """Every stored version of one entity, newest first. Returns a bare array (not a
-        PaginatedResponse) — clients expect a list here. An id with no versions is a 404,
-        like the get route; a page past the last version of a stored entity is empty."""
+        """Every stored version of one entity, newest first, as a bare list; 404 for an unknown id."""
         store = docs()
         filt = Filter.of(**{id_field: entity_id})
         page = store.query(collection, filt, sort=Sort.by("version", descending=True),
