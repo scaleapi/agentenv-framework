@@ -83,6 +83,7 @@ Homepage = "https://www.agentenvframework.com"
 Documentation = "https://www.agentenvframework.com/docs"
 Repository = "https://github.com/scaleapi/agentenv-framework"
 Issues = "https://github.com/scaleapi/agentenv-framework/issues"
+Changelog = "https://github.com/scaleapi/agentenv-framework/releases"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_env"]

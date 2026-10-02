@@ -348,7 +348,7 @@ The `agentenv-framework` distribution and `agentenv-framework-protocol` are vers
 
 ### Releases
 
-A release is a version bump in both `pyproject.toml` files plus a `vX.Y.Z` tag. Maintainers cut releases: the bump is automated when a labelled pull request merges, so contributors do not edit `version` or push tags (see the Releases section of [CONTRIBUTING.md](https://github.com/scaleapi/agentenv-framework/blob/main/CONTRIBUTING.md)). Each release publishes both packages to PyPI; there is no `CHANGELOG.md`.
+A release is a version bump in both `pyproject.toml` files plus a `vX.Y.Z` tag. Maintainers cut releases: the bump is automated when a labelled pull request merges, so contributors do not edit `version` or push tags (see the Releases section of [CONTRIBUTING.md](https://github.com/scaleapi/agentenv-framework/blob/main/CONTRIBUTING.md)). Each release publishes both packages to PyPI and gets a [GitHub release](https://github.com/scaleapi/agentenv-framework/releases) whose notes list the pull requests merged since the previous one; there is no `CHANGELOG.md`.
 
 ### Support, security, license
 
