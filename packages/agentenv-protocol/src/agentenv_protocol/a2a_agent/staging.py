@@ -436,9 +436,9 @@ def _check_path(path: str) -> str:
 
 def _private(directory: Path) -> None:
     """Make ``directory`` readable by its owner alone, so other users on the host cannot list the ids
-    below it. Only the directories staging makes, never the one it was given."""
-    if not directory.is_dir():
-        directory.mkdir(parents=True, exist_ok=True)
+    below it, however it was left. Only staging's own directories, never the one it was given."""
+    directory.mkdir(parents=True, exist_ok=True)
+    if directory.stat().st_mode & 0o077:
         directory.chmod(0o700)
 
 
