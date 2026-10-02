@@ -1,7 +1,7 @@
-# Contributing to agent-env
+# Contributing to AgentEnv Framework
 
-Thank you for helping improve agent-env. Bug fixes, new sandbox providers, environments, task
-steps, tests and documentation are all welcome.
+Thank you for helping improve AgentEnv Framework. Bug fixes, new sandbox providers, environments,
+task steps, tests and documentation are all welcome.
 
 Security vulnerabilities are handled privately: see [SECURITY.md](SECURITY.md). Everyone
 participating in this project is expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
@@ -85,5 +85,8 @@ on the release tag); the import package `agent_env` and the command `agent-env` 
 
 ## Getting help
 
-Open an issue with what you tried, what you expected and what happened, including the
-installed `agentenv-framework` version (`python -c "import importlib.metadata as m; print(m.version('agentenv-framework'))"`) and the sandbox backend in use.
+Ask questions in [Discussions Q&A](https://github.com/scaleapi/agentenv-framework/discussions/categories/q-a).
+Report bugs with the [bug report form](https://github.com/scaleapi/agentenv-framework/issues/new?template=bug_report.yml):
+it asks for the output of `agent-env plugin list`, which shows the installed version, how agent-env is
+installed, the config file in effect and the plugins. Report vulnerabilities privately, as described in
+[SECURITY.md](SECURITY.md).

@@ -201,6 +201,7 @@ class DatabaseStateProvider(EnvStateProvider):
         environment_names: list[str],
         *,
         host_port: Optional[Callable[[int], int]] = None,
+        host_ips: tuple[str, ...] = (),
     ) -> list[str]:
         """Extra co-deployed compose services beyond the readiness one (e.g. pgweb / db-mcp browse
         UIs). Optional: a backend may have none, in which case this returns an empty list."""
@@ -212,16 +213,17 @@ class DatabaseStateProvider(EnvStateProvider):
         *,
         instance: EnvStateInstance | None = None,
         host_port: Optional[Callable[[int], int]] = None,
+        host_ips: tuple[str, ...] = (),
     ) -> list[str]:
         """All co-deployed compose services for this backend — the mandatory readiness service plus
         any sidecars — spliced into the gateway's docker-compose doc.
 
         ``host_port`` maps a container port to the host port to publish it on; defaults
-        to identity.
+        to identity. ``host_ips`` are the host IPs to publish on; none means every interface.
         """
         return [
             *self.render_healthcheck_service(environment_names, instance=instance),
-            *self.render_sidecar_containers(environment_names, host_port=host_port),
+            *self.render_sidecar_containers(environment_names, host_port=host_port, host_ips=host_ips),
         ]
 
     def docker_service_dependency(self) -> list[str]:

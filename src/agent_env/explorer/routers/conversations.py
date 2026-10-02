@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from agent_env.explorer.entity_ids import EntityId
 from agent_env.explorer.routers.common import docs
 from agent_env.store import Filter, Sort
 
@@ -15,7 +16,7 @@ _CONVERSATIONS_COLLECTION = "agent_env_a2a_conversations"
 
 
 @router.get("/task-instances/{task_instance_id}/conversations")
-def list_conversations(task_instance_id: str) -> dict:
+def list_conversations(task_instance_id: EntityId) -> dict:
     """A2A conversations recorded for a task instance, oldest first."""
     conversations = docs().query(
         _CONVERSATIONS_COLLECTION,

@@ -201,7 +201,7 @@ async def test_task_lifecycle_all_local(all_local):
     # is not identity — take the URL the deploy reported. Keyed by CONTAINER port
     # (deploy_sandbox stringifies the keys), which is what the caller asked for.
     served_url = deployed.tunnel_urls[str(app_port)]
-    assert re.fullmatch(r"http://localhost:\d+", served_url), served_url
+    assert re.fullmatch(r"http://127\.0\.0\.1:\d+", served_url), served_url
 
     # the pulled image is actually running and serving on the published port
     assert _wait_ready(f"{served_url}/", (200,)), \

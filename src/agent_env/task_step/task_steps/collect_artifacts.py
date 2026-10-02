@@ -435,6 +435,11 @@ class CollectArtifactsTaskStep(TaskStep):
         # Prefer this sandbox's own container name, fall back to the a2a-agent-* prefix.
         if sandbox.container_name in running:
             return sandbox.container_name
+        if getattr(sandbox, "owns_container", False):
+            # Its Docker host is shared, so any other agent container there is another run's.
+            raise RuntimeError(
+                f"Agent container {sandbox.container_name!r} is not running. Running containers: {running}."
+            )
         fallback = [n for n in running if n.startswith("a2a-agent-")]
         if fallback:
             if len(fallback) > 1:

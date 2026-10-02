@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from agent_env.artifact.registry import canonical_type, equivalent_types
 from agent_env.config import get_config
+from agent_env.explorer.entity_ids import EntityId
 from agent_env.store import Filter, Sort
 
 
@@ -150,7 +151,7 @@ def versioned_router(
         )
 
     @router.get("/{entity_id}", summary=f"Get {noun.title()}")
-    def get_item(entity_id: str, version: Optional[int] = None) -> dict:
+    def get_item(entity_id: EntityId, version: Optional[int] = None) -> dict:
         store = docs()
         if version is not None:
             doc = store.find_one(collection, Filter.of(**{id_field: entity_id, "version": version}))
@@ -163,7 +164,7 @@ def versioned_router(
 
     @router.get("/{entity_id}/versions", summary=f"List {noun.title()} Versions")
     def list_versions(
-        entity_id: str,
+        entity_id: EntityId,
         limit: int = Query(100, ge=1, le=500),
         offset: int = Query(0, ge=0),
     ) -> list[dict]:
