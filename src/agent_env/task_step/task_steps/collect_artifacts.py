@@ -194,8 +194,10 @@ def _cua_bash_error(text: str) -> str:
 
 
 def _looks_absent(stderr: str) -> bool:
-    """Whether a stat/wc failure message means the file simply isn't there."""
-    return "No such file" in stderr or "cannot stat" in stderr
+    """Whether a stat/wc failure message means the file simply isn't there. Match the
+    missing-file text specifically — a permission or I/O error also says 'cannot stat',
+    and treating that as absent would skip an existing deliverable."""
+    return "No such file" in stderr
 
 
 def _remove(path: str) -> None:
@@ -205,21 +207,19 @@ def _remove(path: str) -> None:
         pass
 
 
-def _write_and_upload(store, content: bytes, artifact_id: str, version: int, object_name: str, content_type: str) -> str:
-    """Stage ``content`` in a temp file, upload it as a collected artifact and remove the file."""
-    with tempfile.NamedTemporaryFile(delete=False, suffix=f"-{object_name.replace('/', '_')}") as tmp:
-        tmp.write(content)
+def _upload_file(store, file_path: str, artifact_id: str, version: int, object_name: str, content_type: str) -> str:
+    """Upload an already-staged local file as a collected artifact and remove it."""
     try:
         return store.put_object_file(
             artifact_type="collected_artifacts",
             id=artifact_id,
             version=version,
             object_name=object_name,
-            file_path=tmp.name,
+            file_path=file_path,
             content_type=content_type,
         )
     finally:
-        _remove(tmp.name)
+        _remove(file_path)
 
 
 class CollectArtifactsTaskStep(TaskStep):
@@ -607,48 +607,61 @@ class CollectArtifactsTaskStep(TaskStep):
             return -1
         raise RuntimeError(f"could not size {path} on the CUA VM (`wc -c` failed: {err or 'no output'})")
 
-    async def _controller_get_file(self, deployed_env, path: str) -> bytes:
-        """Fetch a file from the CUA VM as raw bytes (controller returns base64).
+    async def _controller_get_file(self, deployed_env, path: str) -> str:
+        """Download a CUA VM file to a local temp file and return its path. The caller owns
+        the returned file (uploads then removes it).
 
-        Raises ``FileNotFoundError`` when the file is absent (the caller treats that
-        as a lenient skip). Small files come back in one ``cua_get_file`` call; large
-        ones stream in byte ranges so no single call moves the whole file."""
+        Raises ``FileNotFoundError`` when the file is absent (the caller treats that as a
+        lenient skip). Small files come back in one ``cua_get_file`` call; large ones stream
+        in byte ranges straight to disk, so neither the transfer nor this process ever holds
+        the whole file in memory."""
         import base64
 
         size = await self._controller_file_size(deployed_env, path)
         if size < 0:
             raise FileNotFoundError(f"file not found on CUA VM: {path}")
-        if size > _CUA_SINGLE_SHOT_MAX:
-            return await self._controller_get_file_chunked(deployed_env, path, size)
-        b64 = await self._controller_call(deployed_env, "cua_get_file", {"path": path})
-        return base64.b64decode(b64)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f"-{os.path.basename(path)}") as tmp:
+            local_path = tmp.name
+        try:
+            if size > _CUA_SINGLE_SHOT_MAX:
+                await self._controller_stream_to_file(deployed_env, path, size, local_path)
+            else:
+                b64 = await self._controller_call(deployed_env, "cua_get_file", {"path": path})
+                with open(local_path, "wb") as fh:
+                    fh.write(base64.b64decode(b64))
+            return local_path
+        except BaseException:
+            _remove(local_path)  # nothing downstream owns it yet, so it's ours to clean up
+            raise
 
-    async def _controller_get_file_chunked(self, deployed_env, path: str, size: int) -> bytes:
-        """Read ``path`` off the CUA VM in ``_CUA_CHUNK_BYTES`` ranges via cua_bash.
+    async def _controller_stream_to_file(self, deployed_env, path: str, size: int, local_path: str) -> None:
+        """Stream ``path`` off the CUA VM into ``local_path`` in ``_CUA_CHUNK_BYTES`` ranges.
 
-        ``tail -c +N | head -c M | base64`` is portable (no GNU ``dd iflag``) and seeks
-        rather than scans. base64 may wrap, so whitespace is stripped before decoding. A
-        short read fails loudly rather than uploading a truncated artifact."""
+        ``tail -c +N | head -c M | base64`` is portable (no GNU ``dd iflag``) and seeks rather
+        than scans. Each range is decoded and written straight to the file so memory stays
+        bounded to one chunk. base64 may wrap, so whitespace is stripped before decoding. A
+        short read fails loudly rather than leaving a truncated artifact."""
         import base64
 
         logger.info(
             f"Streaming {path} ({size} bytes) off the CUA VM in {_CUA_CHUNK_BYTES}-byte chunks"
         )
         quoted = shlex.quote(path)
-        buf = bytearray()
-        while len(buf) < size:
-            script = f"tail -c +{len(buf) + 1} {quoted} | head -c {_CUA_CHUNK_BYTES} | base64"
-            out = await self._controller_call(deployed_env, "cua_bash", {"script": script})
-            chunk = base64.b64decode(_cua_bash_stdout(out).encode().translate(None, b"\r\n\t "))
-            if not chunk:
-                break  # no forward progress — stop rather than loop forever
-            buf += chunk
-        if len(buf) != size:
+        written = 0
+        with open(local_path, "wb") as fh:
+            while written < size:
+                script = f"tail -c +{written + 1} {quoted} | head -c {_CUA_CHUNK_BYTES} | base64"
+                out = await self._controller_call(deployed_env, "cua_bash", {"script": script})
+                chunk = base64.b64decode(_cua_bash_stdout(out).encode().translate(None, b"\r\n\t "))
+                if not chunk:
+                    break  # no forward progress — stop rather than loop forever
+                fh.write(chunk)
+                written += len(chunk)
+        if written != size:
             raise RuntimeError(
-                f"streamed {len(buf)} of {size} bytes for {path} (chunked read stalled or "
+                f"streamed {written} of {size} bytes for {path} (chunked read stalled or "
                 f"truncated) — refusing to upload a partial artifact"
             )
-        return bytes(buf)
 
     async def _controller_list_dir(self, deployed_env) -> list[str]:
         """Recursively enumerate regular files under base_path via cua_bash.
@@ -733,7 +746,7 @@ class CollectArtifactsTaskStep(TaskStep):
         hard_failures: list[str] = []
         for key, source_path, object_name in items:
             try:
-                content = await self._controller_get_file(deployed_env, source_path)
+                local_path = await self._controller_get_file(deployed_env, source_path)
             except FileNotFoundError:
                 # The file isn't on the VM — a listed-but-not-produced artifact. Stay lenient:
                 # only a file that EXISTS but we failed to move counts as a hard failure.
@@ -746,20 +759,23 @@ class CollectArtifactsTaskStep(TaskStep):
 
             ext = os.path.splitext(object_name)[1]
             content_type = _CONTENT_TYPES.get(ext, "application/octet-stream")
+            size = os.path.getsize(local_path)
 
             try:
+                # The upload owns the file from here: a cancel must not remove it under the upload.
                 s3_url = await finish_on_thread(
                     functools.partial(
-                        _write_and_upload, store, content, artifact_id, version, object_name, content_type,
+                        _upload_file, store, local_path, artifact_id, version, object_name, content_type,
                     ),
                     f"Uploading collected {source_path}",
+                    if_never_run=functools.partial(_remove, local_path),
                 )
 
                 collected[key] = s3_url
                 self._register_file_artifact(
                     store, file_artifacts, artifact_id, key, object_name, content_type, s3_url, context,
                 )
-                logger.info(f"Collected {source_path} -> {s3_url} ({len(content)} bytes) via controller")
+                logger.info(f"Collected {source_path} -> {s3_url} ({size} bytes) via controller")
             except Exception as e:
                 logger.warning(f"Failed to collect {source_path} via controller: {e}")
                 hard_failures.append(source_path)

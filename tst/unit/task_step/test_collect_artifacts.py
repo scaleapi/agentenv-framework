@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import tempfile
 import threading
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -27,6 +28,23 @@ from tst.unit.event_loop_probe import on_event_loop
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+def _staged(data: bytes) -> str:
+    """A real temp file holding `data` — `_controller_get_file` now downloads to a temp file
+    and returns its path (not bytes), so stubs of it hand back a staged file the uploader reads."""
+    with tempfile.NamedTemporaryFile(delete=False) as f:
+        f.write(data)
+    return f.name
+
+
+def _read_staged(path: str) -> bytes:
+    """Read and delete a file `_controller_get_file` downloaded (it returns a path now)."""
+    try:
+        with open(path, "rb") as fh:
+            return fh.read()
+    finally:
+        os.unlink(path)
 
 
 def _cua_context():
@@ -103,7 +121,7 @@ class TestControllerPath:
         store.put_object_file.return_value = "s3://bucket/report.docx"
         store.next_version.return_value = 1
         with patch.object(step, "_controller_get_file", new_callable=AsyncMock,
-                          return_value=b"data") as get_file, \
+                          side_effect=lambda *a, **k: _staged(b"data")) as get_file, \
              patch("agent_env.artifact.store.get_artifact_store", return_value=store), \
              patch("agent_env.artifact.FileArtifactUniverse") as universe:
             universe.put.return_value = MagicMock(id="inst-1", version=1)
@@ -121,7 +139,7 @@ class TestControllerPath:
         store.next_version.return_value = 1
 
         with patch.object(step, "_controller_get_file", new_callable=AsyncMock,
-                          return_value=b"%PDF-1.4 data") as get_file, \
+                          side_effect=lambda *a, **k: _staged(b"%PDF-1.4 data")) as get_file, \
              patch("agent_env.artifact.store.get_artifact_store", return_value=store), \
              patch("agent_env.artifact.FileArtifactUniverse") as universe:
             universe.put.return_value = MagicMock(id="inst-1", version=1)
@@ -145,7 +163,7 @@ class TestControllerPath:
         store = MagicMock()
         store.put_object_file.side_effect = lambda **kw: on_loop.append(on_event_loop()) or "s3://bucket/report.pdf"
         store.next_version.return_value = 1
-        with patch.object(step, "_controller_get_file", new_callable=AsyncMock, return_value=b"%PDF"), \
+        with patch.object(step, "_controller_get_file", new_callable=AsyncMock, side_effect=lambda *a, **k: _staged(b"%PDF")), \
              patch("agent_env.artifact.store.get_artifact_store", return_value=store), \
              patch("agent_env.artifact.FileArtifactUniverse") as universe:
             universe.put.return_value = MagicMock(id="inst-1", version=1)
@@ -183,7 +201,8 @@ class TestControllerPath:
                     return
                 await asyncio.sleep(0.02)
 
-        with patch.object(step, "_controller_get_file", new_callable=AsyncMock, return_value=b"%PDF-1.4"), \
+        with patch.object(step, "_controller_get_file", new_callable=AsyncMock,
+                          side_effect=lambda *a, **k: _staged(b"%PDF-1.4")), \
              patch("agent_env.artifact.store.get_artifact_store", return_value=store), \
              patch("agent_env.artifact.FileArtifactUniverse"), \
              caplog.at_level("INFO", logger="agent_env.task_step.thread_work"):
@@ -246,7 +265,7 @@ class TestControllerPath:
         store.next_version.return_value = 1
 
         with patch.object(step, "_controller_get_file", new_callable=AsyncMock,
-                          return_value=b"%PDF data") as get_file, \
+                          side_effect=lambda *a, **k: _staged(b"%PDF data")) as get_file, \
              patch("agent_env.artifact.store.get_artifact_store", return_value=store), \
              patch("agent_env.artifact.FileArtifactUniverse") as universe:
             universe.put.return_value = MagicMock(id="inst-1", version=1)
@@ -275,7 +294,7 @@ class TestControllerPath:
         async def fake_get(deployed_env, path):
             if path.endswith("gone.pdf"):
                 raise FileNotFoundError(f"file not found on CUA VM: {path}")
-            return b"data"
+            return _staged(b"data")
 
         with patch.object(step, "_controller_get_file", side_effect=fake_get), \
              patch("agent_env.artifact.store.get_artifact_store", return_value=store), \
@@ -300,7 +319,7 @@ class TestControllerPath:
         async def fake_get(deployed_env, path):
             if path.endswith("big.mp4"):
                 raise RuntimeError("ReadTimeout")  # present, but the read timed out
-            return b"data"
+            return _staged(b"data")
 
         with patch.object(step, "_controller_get_file", side_effect=fake_get), \
              patch("agent_env.artifact.store.get_artifact_store", return_value=store), \
@@ -330,7 +349,8 @@ class TestControllerPath:
 
         store.put_object_file.side_effect = put
 
-        with patch.object(step, "_controller_get_file", new_callable=AsyncMock, return_value=b"data"), \
+        with patch.object(step, "_controller_get_file", new_callable=AsyncMock,
+                          side_effect=lambda *a, **k: _staged(b"data")), \
              patch("agent_env.artifact.store.get_artifact_store", return_value=store), \
              patch("agent_env.artifact.FileArtifactUniverse") as universe:
             universe.put.return_value = MagicMock(id="inst-1", version=1)
@@ -411,7 +431,8 @@ class TestControllerPath:
         store.put_object_file.return_value = "s3://bucket/present.pdf"
         store.next_version.return_value = 1
         store.put_document.side_effect = RuntimeError("doc write failed")  # registration swallowed -> no universe
-        with patch.object(step, "_controller_get_file", new_callable=AsyncMock, return_value=b"data"), \
+        with patch.object(step, "_controller_get_file", new_callable=AsyncMock,
+                          side_effect=lambda *a, **k: _staged(b"data")), \
              patch("agent_env.artifact.store.get_artifact_store", return_value=store):
             try:
                 _run(step.execute(_cua_context()))
@@ -433,7 +454,7 @@ class TestControllerPath:
             "step_params": {"collect-artifacts": {"artifact_paths": ["right.pdf"]}}
         }
         with patch.object(step, "_controller_get_file", new_callable=AsyncMock,
-                          return_value=b"data") as get_file, \
+                          side_effect=lambda *a, **k: _staged(b"data")) as get_file, \
              patch("agent_env.artifact.store.get_artifact_store", return_value=store), \
              patch("agent_env.artifact.FileArtifactUniverse") as universe:
             universe.put.return_value = MagicMock(id="inst-1", version=1)
@@ -850,7 +871,7 @@ class TestControllerChunkedRead:
 
         with patch.object(step, "_controller_call", side_effect=call):
             out = _run(step._controller_get_file(_cua_record(), "/x/small.bin"))
-        assert out == b"hello"
+        assert _read_staged(out) == b"hello"
         assert "cua_get_file" in calls  # single-shot, not chunked
         assert not any("tail -c" in c for c in calls if isinstance(c, str))
 
@@ -860,10 +881,38 @@ class TestControllerChunkedRead:
         monkeypatch.setattr(mod, "_CUA_CHUNK_BYTES", 7)  # force several ranges over the payload
         data = bytes(range(256)) * 5  # 1280 bytes, well over the 16-byte single-shot ceiling
         step = CollectArtifactsTaskStep(id="c", version=None, env_id="ubuntu-cua")
-        with patch.object(step, "_controller_get_file", wraps=step._controller_get_file), \
-             patch.object(step, "_controller_call", side_effect=self._fake_controller(data)):
+        with patch.object(step, "_controller_call", side_effect=self._fake_controller(data)):
             out = _run(step._controller_get_file(_cua_record(), "/x/big.mp4"))
-        assert out == data  # every byte-range reassembled in order, base64 wrapping stripped
+        assert _read_staged(out) == data  # every byte-range reassembled in order, base64 wrapping stripped
+
+    def test_large_file_is_uploaded_from_a_path_not_held_in_memory(self, monkeypatch):
+        """End-to-end: a large file streams to a temp file and the uploader reads it from that
+        path (bytes intact), rather than the whole file being buffered in memory."""
+        import agent_env.task_step.task_steps.collect_artifacts as mod
+        monkeypatch.setattr(mod, "_CUA_SINGLE_SHOT_MAX", 16)
+        monkeypatch.setattr(mod, "_CUA_CHUNK_BYTES", 8)
+        data = bytes(range(256)) * 4  # 1024 bytes, over the 16-byte single-shot ceiling
+        step = CollectArtifactsTaskStep(
+            id="collect-artifacts", version=None, env_id="ubuntu-cua",
+            base_path="/home/docker/Desktop", artifact_paths=["big.mp4"],
+        )
+        uploaded = {}
+        store = MagicMock()
+        store.next_version.return_value = 1
+
+        def put(**kw):
+            with open(kw["file_path"], "rb") as fh:  # the upload reads a real on-disk file
+                uploaded["bytes"] = fh.read()
+            return "s3://bucket/big.mp4"
+
+        store.put_object_file.side_effect = put
+        with patch.object(step, "_controller_call", side_effect=self._fake_controller(data)), \
+             patch("agent_env.artifact.store.get_artifact_store", return_value=store), \
+             patch("agent_env.artifact.FileArtifactUniverse") as universe:
+            universe.put.return_value = MagicMock(id="inst-1", version=1)
+            ctx = _run(step.execute(_cua_context()))
+        assert uploaded["bytes"] == data
+        assert ctx.metadata["artifacts"] == {"big.mp4": "s3://bucket/big.mp4"}
 
     def test_truncated_stream_is_fatal(self, monkeypatch):
         """If the ranged reads stop short of the stat size, fail loudly rather than upload a partial file."""
@@ -910,7 +959,7 @@ class TestControllerChunkedRead:
             return ""  # cua_get_file for an empty file
 
         with patch.object(step, "_controller_call", side_effect=call):
-            assert _run(step._controller_get_file(_cua_record(), "/x/empty.bin")) == b""
+            assert _read_staged(_run(step._controller_get_file(_cua_record(), "/x/empty.bin"))) == b""
 
     def test_size_probe_error_raises_not_absent(self):
         """A `wc` failure that is NOT 'file missing' (e.g. a permission/IO error) raises — it must
