@@ -15,6 +15,7 @@ from agent_env.a2a_agent.object_transfer import (
     fetch_trajectory,
     trajectory_mode,
 )
+from agent_env.a2a_agent.staging import transfer_store
 from agent_env.config import get_config
 from agent_env.config.model import ModelParam
 from agent_env.task_step.context import TaskStepContext
@@ -1110,7 +1111,7 @@ class RubricsVerifierTaskStep(TaskStep):
             return None
         get_method, get_path = A2AAgent.operation(traj_ext, "get")
         config = get_config()
-        store = config.get_object_store()
+        store = transfer_store(config.get_object_store(), judge_a2a_url, judge_agent_card, sandbox_type=sandbox_type)
         prefix = store.object_url(f"{config.get_artifact_key_prefix()}judge_trajectories/verifier_id={self.verifier_id}/")
         mode = trajectory_mode(get_method, store, by="task_id", sandbox_type=sandbox_type)
         if mode is None:
@@ -1135,7 +1136,7 @@ class RubricsVerifierTaskStep(TaskStep):
         for attempt in range(1, self.DEFAULT_MAX_RETRIES + 1):
             try:
                 fetched = await fetch_trajectory(
-                    judge_a2a_url + get_path, {"task_id": a2a_server_task_id}, upload=upload
+                    judge_a2a_url + get_path, {"task_id": a2a_server_task_id}, upload=upload, store=store
                 )
                 return await asyncio.to_thread(store_trajectory, fetched, prefix)
             except Exception as exc:

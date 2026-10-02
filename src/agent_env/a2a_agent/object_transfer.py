@@ -36,6 +36,7 @@ from agentenv_protocol.transfers import ReadObject, WriteNamespaceGrant, WriteOb
 from pydantic import BaseModel, ValidationError
 
 from agent_env.a2a_agent.protocol import raise_for_extension_status
+from agent_env.a2a_agent.staging import StagedObjectStore
 from agent_env.store.base import GrantUnavailableError
 from agent_env.store.object_store import DEFAULT_CONTENT_TYPE, ObjectStore
 from agent_env.store.object_store.local_grants.server import unreachable_hint
@@ -49,6 +50,11 @@ _Response = TypeVar("_Response", bound=BaseModel)
 _MEDIA_TYPE = re.compile(r"[!#$&^_.+\-|~0-9a-z]+/[!#$&^_.+\-|~0-9a-z]+")
 _INCREMENT_NAME = re.compile(r"^(?P<sequence>[0-9]{6})(?:\.[A-Za-z0-9][A-Za-z0-9._-]*)?$")
 _TRANSFER_UNAVAILABLE = "transfer_unavailable"  # the SDK's code for a store it could not reach
+_STAGING_UNREACHABLE = (
+    "The object store's grants do not reach this agent, so its objects were staged on the agent's own "
+    "server, and the agent could not reach them there through its own URL. Its sandbox provider may not let "
+    "a sandbox call its own public URL; an object store whose grants reach the agent avoids staging."
+)
 
 # The time budget of one transfer, outermost first: a grant (the issuing store's
 # grant_lifetime_seconds, 12 hours unless configured) outlives agent-env's wait for the agent's
@@ -172,21 +178,34 @@ async def invoke_transfer(
     operation: str,
     timeout: float,
     response_model: type[_Response] | None = None,
+    store: ObjectStore | None = None,
 ) -> Any:
     """Send ``call`` and return the agent's answer, validated against ``response_model`` when
     the call carried grants. An error never quotes the answer to such a call, which may echo a
-    grant."""
-    async with httpx.AsyncClient() as client:
-        send = client.post if verb == "POST" else client.put
-        resp = await send(url, json=call.payload, timeout=timeout)
+    grant. ``store`` is the store the call's grants came from: when it stages them on the agent,
+    the objects the agent reads are pushed first and the ones it writes are in the store on return."""
+    staged = store if isinstance(store, StagedObjectStore) and call.mode == "objects" else None
     try:
-        raise_for_extension_status(resp, operation=operation, include_body=call.mode == "legacy")
-    except httpx.HTTPStatusError as exc:
-        hint = unreachable_hint(call.payload) if call.mode == "objects" else None
-        if hint is None or not str(exc).endswith(f": {_TRANSFER_UNAVAILABLE}"):
-            raise
-        raise httpx.HTTPStatusError(f"{exc}. {hint}", request=exc.request, response=exc.response) from exc
-    body = resp.json()
+        if staged is not None:
+            await staged.push()
+        async with httpx.AsyncClient() as client:
+            send = client.post if verb == "POST" else client.put
+            resp = await send(url, json=call.payload, timeout=timeout)
+        try:
+            raise_for_extension_status(resp, operation=operation, include_body=call.mode == "legacy")
+        except httpx.HTTPStatusError as exc:
+            hint = _STAGING_UNREACHABLE if staged is not None else (
+                unreachable_hint(call.payload) if call.mode == "objects" else None
+            )
+            if hint is None or not str(exc).endswith(f": {_TRANSFER_UNAVAILABLE}"):
+                raise
+            raise httpx.HTTPStatusError(f"{exc}. {hint}", request=exc.request, response=exc.response) from exc
+        body = resp.json()
+        if staged is not None:
+            await staged.pull()
+    finally:
+        if staged is not None:
+            await staged.release()
     if call.mode == "objects" and response_model is not None:
         return parse_response(response_model, body, operation=operation)
     return body
@@ -650,9 +669,10 @@ async def fetch_trajectory(
     *,
     upload: TrajectoryUpload | None = None,
     timeout: float | None = None,
+    store: ObjectStore | None = None,
 ) -> FetchedTrajectory:
     """POST one trajectory ``get``. With ``upload`` the agent uploads the trajectory through its
-    grant and the answer is checked. The default wait covers that upload."""
+    grant, issued by ``store``, and the answer is checked. The default wait covers that upload."""
     payload: dict[str, Any] = dict(selector)
     if upload is not None:
         objects = TrajectoryWriteObjects(trajectory=upload.write)
@@ -667,6 +687,7 @@ async def fetch_trajectory(
         operation="trajectory get",
         timeout=timeout,
         response_model=TrajectoryObjectsResponse,
+        store=store,
     )
     if upload is not None:
         return FetchedTrajectory(object_url=upload.object_url)

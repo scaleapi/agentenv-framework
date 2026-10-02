@@ -16,6 +16,7 @@ from agent_env.a2a_agent.object_transfer import (
     invoke_transfer,
     trajectory_mode,
 )
+from agent_env.a2a_agent.staging import transfer_store
 from agent_env.task_step.snapshot_utils.agent_state_capture import trajectory_object_url
 from agent_env.entity_refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
@@ -94,13 +95,16 @@ class VerifyA2ATrajectoryStep(TaskStep):
         store = config.get_object_store()
         probe_prefix = f"{config.get_artifact_key_prefix()}a2a_validator_trajectories/{self.a2a_agent_id}/"
         sandbox_type = deployed_agent.sandbox_type
-        if trajectory_mode(get_method, store, by="task_id", sandbox_type=sandbox_type) == "objects":
+        granting = transfer_store(
+            store, deployed_agent.a2a_url or deployed_agent.api_url, deployed_agent.a2a_card, sandbox_type=sandbox_type
+        )
+        if trajectory_mode(get_method, granting, by="task_id", sandbox_type=sandbox_type) == "objects":
             try:
-                prefix = store.object_url(probe_prefix)
+                prefix = granting.object_url(probe_prefix)
                 upload = await asyncio.to_thread(
-                    TrajectoryUpload.to, store, trajectory_object_url(prefix, name=task_id, store=store)
+                    TrajectoryUpload.to, granting, trajectory_object_url(prefix, name=task_id, store=granting)
                 )
-                await fetch_trajectory(endpoint, {"task_id": task_id}, upload=upload)
+                await fetch_trajectory(endpoint, {"task_id": task_id}, upload=upload, store=granting)
                 objects_ok = True
                 logger.info("Object trajectory: OK")
             except Exception as e:
