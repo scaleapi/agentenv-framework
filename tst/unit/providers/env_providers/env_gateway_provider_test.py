@@ -1316,14 +1316,14 @@ async def test_create_gateway_hands_the_deploy_path_every_argument(attribution, 
     gp, provider = EnvironmentGatewayProvider(), MagicMock()
     args = dict(mcp_servers=[MagicMock()], mcp_server_images=[MagicMock()], gateway_port=18999, website_configs=[MagicMock()],
                 website_images=[MagicMock()], gateway_mode=GatewayMode.CONSISTENT, ttl_seconds=61, disk_size_gb=11, cpu=1.5,
-                memory_mb=3072, priority=7, existing_sandbox=MagicMock(), sidecars=[MagicMock()], mcp_server_name="crm")
+                memory_mb=3072, existing_sandbox=MagicMock(), sidecars=[MagicMock()], mcp_server_name="crm")
     with patch.object(gp, "_deploy_via_vm", AsyncMock(return_value=_probed())) as vm, \
          patch.object(env_gateway_provider, "_tool_names", AsyncMock(return_value=set())):
         await gp.create_gateway(sandbox_provider=provider, env_id="crm-env", attribution=attribution, **args)
 
     [call] = vm.await_args_list
     assert call.args == (provider, args.pop("mcp_servers"), args.pop("mcp_server_images"))
-    assert call.kwargs == {**args, "attribution": forwarded, "priority": 7}
+    assert call.kwargs == {**args, "attribution": forwarded}
     assert call.kwargs["attribution"] is not attribution
 
 

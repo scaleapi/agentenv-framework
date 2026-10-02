@@ -205,7 +205,7 @@ def test_completion_that_does_not_land_deletes_its_journal_entry(store, monkeypa
 # ── replay reproduces the store ───────────────────────────────────────────────
 
 def test_replaying_every_entry_reproduces_the_stored_context(store):
-    iid = _new(store, seed_md={"base": 1, "user_overrides": {"litellm_api_key": "sk", "priority": 1}})
+    iid = _new(store, seed_md={"base": 1, "user_overrides": {"litellm_api_key": "sk", "agent_effort": "high"}})
     _record(store, iid, "A", _ops({"base": 1}, {"base": 1, "a": {"k": 1}, "shared": "A", "l": [1]}))
     _record(store, iid, "B", _ops({"shared": "A", "l": [1]}, {"shared": "B", "l": [1, 2], "gone": None}, agent_model="m"))
     _record(store, iid, "C", _ops({"l": [1, 2], "gone": None}, {"l": [3, 1]}))  # reorder -> wholesale set; key removed

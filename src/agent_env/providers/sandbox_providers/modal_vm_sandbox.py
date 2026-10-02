@@ -302,10 +302,9 @@ class ModalVmSandboxProvider(SandboxProvider):
         exposed_ports: Optional[list[int]] = None,
         setup_for_gateway: bool = True,
         attribution: Optional[Attribution] = None,
-        priority: Optional[int] = None,
         network_policy: Optional[NetworkPolicy] = None,
     ) -> ModalVmSandbox:
-        # image/boot_mode/disk_size_gb/priority accepted for interface parity but inert here.
+        # image/boot_mode/disk_size_gb accepted for interface parity but inert here.
         # disk_size_gb: Modal has no disk-size knob on Sandbox.create; a VM sandbox's rootfs is
         # fixed at the 512 GiB max. https://modal.com/docs/guide/vm-sandboxes
         attribution = dict(attribution or {})
@@ -371,7 +370,6 @@ class ModalVmSandboxProvider(SandboxProvider):
         disk_size_gb: float = 10,
         timeout: int = 3600 * 2,
         attribution: Optional[Attribution] = None,
-        priority: Optional[int] = None,
         network_policy: Optional[NetworkPolicy] = None,
     ) -> ModalVmSandbox:
         # Like the other VM providers' create_sandbox: return a bare VM (image_name/env are
@@ -381,7 +379,7 @@ class ModalVmSandboxProvider(SandboxProvider):
             exposed_ports=[port], cpu=cpu, memory=memory, disk_size_gb=disk_size_gb,
             timeout=timeout,
             attribution=attribution,
-            priority=priority, network_policy=network_policy,
+            network_policy=network_policy,
         )
 
     async def get_sandbox(self, sandbox_id: str) -> ModalVmSandbox:

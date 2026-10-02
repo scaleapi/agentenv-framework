@@ -36,8 +36,6 @@ export function buildRunBody(
 ): Record<string, unknown> {
   const body: Record<string, unknown> = {};
   body.version = opts?.version ?? taskVersion ?? undefined;
-  // priority=0 (interactive): a human is waiting. Sent explicitly so intent survives backend default changes.
-  body.priority = 0;
   if (opts?.start_step != null) body.start_step = opts.start_step;
   // Mutually exclusive server-side.
   if (opts?.context_from_instance_id)

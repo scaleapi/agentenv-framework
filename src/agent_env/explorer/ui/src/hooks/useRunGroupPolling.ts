@@ -8,9 +8,6 @@ export interface RunOverrides {
   agent_model?: string;
   agent_artifact_id?: string;
   a2a_agent_id?: string;
-  /** Sandbox scheduling priority (0=interactive, 1=non_interactive), threaded through
-   *  context.metadata.user_overrides to the deploy task steps' sandbox tier. */
-  priority?: number;
   [k: string]: string | number | boolean | null | undefined;
 }
 

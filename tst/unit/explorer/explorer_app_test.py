@@ -840,15 +840,13 @@ def test_run_metadata_merges_into_inherited_user_overrides(client):
     from agent_env.explorer.routers.runs import RunRequest, _run_metadata
 
     meta = _run_metadata(RunRequest(
-        metadata={"user_overrides": {"agent_effort": "high", "priority": 1}},
+        metadata={"user_overrides": {"agent_effort": "high", "step_params": {"deploy": {"cpu": 1}}}},
         step_overrides={"deploy": {"cpu": 4}},
-        priority=9,
     ))
 
     overrides = meta["user_overrides"]
     assert overrides["agent_effort"] == "high", "inherited keys survive"
-    assert overrides["step_params"] == {"deploy": {"cpu": 4}}
-    assert overrides["priority"] == 9, "an explicit field wins over the inherited one"
+    assert overrides["step_params"] == {"deploy": {"cpu": 4}}, "an explicit field wins over the inherited one"
 
 
 def test_bad_inherited_user_overrides_is_rejected(client, monkeypatch):
@@ -866,13 +864,13 @@ def test_bad_inherited_user_overrides_is_rejected(client, monkeypatch):
     for bad in ("oops", [1, 2], 7):
         resp = client.post(
             "/api/v1/tasks/t1/run",
-            json={"metadata": {"user_overrides": bad}, "priority": 1},
+            json={"metadata": {"user_overrides": bad}},
         )
         assert resp.status_code == 422, f"user_overrides={bad!r} should be refused"
 
     ok = client.post(
         "/api/v1/tasks/t1/run",
-        json={"metadata": {"user_overrides": {"agent_effort": "high"}}, "priority": 1},
+        json={"metadata": {"user_overrides": {"agent_effort": "high"}}},
     )
     assert ok.status_code == 200
 

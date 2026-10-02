@@ -53,9 +53,9 @@ async def test_a_deploy_returns_a_sandbox_record_of_the_servers_own_card_and_its
 
 @pytest.mark.asyncio
 async def test_a_deploy_starts_only_the_server_on_sqlite_with_its_sizing():
-    run = await _run_server_deploy(cpu=2.0, memory_mb=4096, priority=3, attribution={"project_id": "0123456789abcdef01234567"})
+    run = await _run_server_deploy(cpu=2.0, memory_mb=4096, attribution={"project_id": "0123456789abcdef01234567"})
     [call] = run.calls
-    assert (call["image_name"], call["port"], call["cpu"], call["memory"], call["timeout"], call["priority"]) == ("mcp-slack", 18765, 2.0, 4096, 60, 3)
+    assert (call["image_name"], call["port"], call["cpu"], call["memory"], call["timeout"]) == ("mcp-slack", 18765, 2.0, 4096, 60)
     assert call["attribution"] == {"project_id": "0123456789abcdef01234567"} and "i6pn" not in call
     assert call["env"] == {"ENVIRONMENT_NAME": "slack", "MCP_HOST": "0.0.0.0", "DATABASE_URL": "sqlite:////tmp/slack.sqlite"}
 
