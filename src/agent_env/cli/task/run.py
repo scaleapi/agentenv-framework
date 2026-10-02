@@ -542,15 +542,15 @@ def run_batch(task_id: str, task_version: int | None, seeds: str, concurrency: i
     click.echo(f"Fetching task: id={task_id} version={task_version or 'latest'}...")
     task = Task.get(task_id, version=task_version)
     click.echo(f"Found task: id={task.id} version={task.version} steps={len(task.steps)}")
-    if is_local_id(task.id) and any(isinstance(step, CollectArtifactsTaskStep) for step in task.steps):
+    suffixes = {step.universe_id_suffix or "" for step in task.steps if isinstance(step, CollectArtifactsTaskStep)}
+    if is_local_id(task.id) and suffixes:
         for index, seed in enumerate(seed_rows, 1):
             universe_id = _seed_universe_id(task, seed)
-            if not universe_id:
-                continue
-            try:
-                validate_local_id(universe_id)
-            except ValueError as e:
-                raise click.ClickException(f"seed {index} can't name an @local universe: {e}") from e
+            for suffix in sorted(suffixes) if universe_id else ():
+                try:
+                    validate_local_id(universe_id + suffix)
+                except ValueError as e:
+                    raise click.ClickException(f"seed {index} can't name an @local universe: {e}") from e
     click.echo(click.style(f"Running {len(seed_rows)} seeds with concurrency={concurrency}...", fg="blue"))
     click.echo()
 

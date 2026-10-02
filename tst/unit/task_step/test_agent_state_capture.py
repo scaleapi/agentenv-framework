@@ -150,6 +150,18 @@ async def test_a_capture_is_issued_under_the_fixture_prefix(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("artifact_id, segment", [
+    ("wsp", "wsp"),
+    ("@local/~/work/triage/tasks/t-abcd1234__solve-workspace", "local/work-triage-tasks-t-abcd1234-solve-workspace-606593d6050a"),
+], ids=["bare", "local"])
+async def test_a_capture_is_issued_under_the_workspaces_key_segment(monkeypatch, artifact_id, segment):
+    rec = install_capture_stubs(monkeypatch)
+    result = await _capture(artifact_id=artifact_id)
+    assert rec.save_requests[0]["json"]["s3_prefix"].startswith(f"s3://{BUCKET}/agent_snapshots/{segment}/")
+    assert result.universe_id == artifact_id
+
+
+@pytest.mark.asyncio
 async def test_a_sidecar_that_nests_under_the_issued_prefix_is_registered_there(monkeypatch):
     """Registering the issued prefix for a nester fails silently — the recursive list
     still finds the object, and only a later restore cannot."""

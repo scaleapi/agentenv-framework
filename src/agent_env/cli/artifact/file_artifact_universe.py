@@ -6,7 +6,7 @@ from typing import Optional, Tuple
 import click
 
 from agent_env.artifact import FileArtifact, FileArtifactUniverse
-from agent_env.store.ids import fs_safe
+from agent_env.store.ids import key_segment
 
 
 # ---------------------------------------------------------------------------
@@ -241,7 +241,7 @@ def get_many(
     def _download(job: tuple[str, str, FileArtifact]) -> tuple[str, str, int]:
         universe_id, filename, fa = job
         data = fa.load()
-        dest = out / fs_safe(universe_id) / filename
+        dest = out / key_segment(universe_id).replace("/", "-") / filename
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(data)
         return (universe_id, filename, len(data))

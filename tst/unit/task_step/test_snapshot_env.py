@@ -828,9 +828,8 @@ async def test_core_fails_a_service_whose_upload_the_store_cannot_find(local_sto
 
 @pytest.mark.asyncio
 async def test_core_snapshots_under_an_id_longer_than_a_filename_can_be(local_stores, monkeypatch):
-    """A run's snapshot id can pass the 255-byte filename limit, so no temp file may be named after it."""
-    set_object_store(FakeObjectStore())
-    reset_artifact_store()
+    """A run's snapshot id can pass the 255-byte filename limit, so neither a temp file nor a key segment of the
+    local store may be the whole id."""
     snapshot_id = f"task-{'x' * 250}__snapshot-snap-1"
 
     async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None):

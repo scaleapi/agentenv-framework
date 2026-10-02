@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Optional
@@ -241,9 +242,18 @@ async def _snapshot_servicedb(sandbox, env_id: str, environment_universe_id: str
     return object_url
 
 
+_DOCKER_NAME = re.compile(r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*")
+
+
 def _image_tag(env_id: str, universe_id: str) -> str:
-    """The snapshot image's tag, a docker reference the sandbox builds with."""
-    return f"env-snapshot-{fs_safe(env_id)}-{fs_safe(universe_id)}"
+    """The snapshot image's tag, a docker reference the sandbox builds with: ``env-snapshot-<env>-<universe>``
+    when that is a short, valid docker name, else a slug of the env and a hash of both ids."""
+    tag = f"env-snapshot-{fs_safe(env_id)}-{fs_safe(universe_id)}"
+    if len(tag) <= 200 and _DOCKER_NAME.fullmatch(tag):
+        return tag
+    slug = re.sub(r"[^a-z0-9]+", "-", fs_safe(env_id).lower()).strip("-")[:64].rstrip("-")
+    digest = hashlib.sha256(f"{env_id}\0{universe_id}".encode("utf-8", "surrogatepass")).hexdigest()[:12]
+    return f"env-snapshot-{slug}-{digest}" if slug else f"env-snapshot-{digest}"
 
 
 def _tarball_destination(env_id: str, universe_id: str) -> tuple[ObjectStore, str]:

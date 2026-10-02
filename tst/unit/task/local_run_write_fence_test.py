@@ -300,6 +300,15 @@ async def test_an_local_runs_env_snapshot_is_named_after_the_run_unless_the_task
 
 
 @pytest.mark.asyncio
+async def test_an_local_run_refuses_a_snapshot_step_id_its_universe_cant_take_before_resolving_the_env(sentinels, monkeypatch):
+    monkeypatch.setattr(SnapshotEnvTaskStep, "_resolve_deployed_env", lambda self, context: pytest.fail("the env was resolved"))
+    step = SnapshotEnvTaskStep(id="snap:final", version=None, env_id=LOCAL_ENV)
+
+    with pytest.raises(ValueError, match="contains ':'"):
+        await Task(id=LOCAL_TASK, version=1, steps=[step]).run(context=TaskStepContext(deployed_envs=[_deployed(LOCAL_ENV)]))
+
+
+@pytest.mark.asyncio
 async def test_an_local_runs_capture_series_names_its_captures_after_the_run(sentinels, exports):
     instance_id = f"{LOCAL_TASK}-ab12cd34"
     series = SnapshotSeries(step_id="solve", agent_name="solver", prompt_id="p1", a2a_context_id="c1",
@@ -315,6 +324,16 @@ async def test_an_local_runs_capture_series_names_its_captures_after_the_run(sen
     _assert_snapshot(row["env_universe_id"])
 
 
+def test_an_local_runs_capture_series_refuses_a_step_id_its_captures_cant_take_when_it_is_built():
+    def series(instance_id):
+        return SnapshotSeries(step_id="solve:1", agent_name="solver", prompt_id="p1", a2a_context_id="c1",
+                              config=SnapshotConfig(env_id="rocket"), trajectory_output_prefix="unused", instance_id=instance_id)
+
+    with pytest.raises(ValueError, match="contains ':'"):
+        series(f"{LOCAL_TASK}-ab12cd34")
+    assert series("rocket-run-ab12cd34").workspace_artifact_id == "rocket-run-ab12cd34__solve:1-workspace"
+
+
 @pytest.mark.asyncio
 async def test_an_local_runs_verifier_outputs_are_named_after_the_run(sentinels, vm):
     context = TaskStepContext(deployed_sandboxes=[vm])
@@ -328,3 +347,14 @@ async def test_an_local_runs_verifier_outputs_are_named_after_the_run(sentinels,
         artifact = FileArtifact.get(entry[f"{stream}_artifact"]["id"])
         assert artifact.id.startswith(derive_id(context.instance_id, f"verifier-{stream}-verify-"))
         assert artifact.load() == text
+
+
+@pytest.mark.asyncio
+async def test_an_local_run_refuses_a_verifier_step_id_its_outputs_cant_take_before_the_tests_run(sentinels, vm, monkeypatch):
+    monkeypatch.setattr(sandbox_provider, "get_sandbox_provider", lambda: pytest.fail("the sandbox was read"))
+    context = TaskStepContext(deployed_sandboxes=[vm])
+    context.metadata["deployed_docker_containers"] = [{"container_name": "c", "sandbox_name": "box"}]
+    step = RunContainerUnitTestsVerifierTaskStep(id="verify:1", version=None, sandbox_name="box", container_name="c", command="true")
+
+    with pytest.raises(ValueError, match="contains ':'"):
+        await Task(id=LOCAL_TASK, version=1, steps=[step]).run(context=context)

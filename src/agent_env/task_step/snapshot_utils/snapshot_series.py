@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
-from agent_env.store.ids import derive_id
+from agent_env.store.ids import derive_id, is_local_id, validate_local_id
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.snapshot_utils import agent_state_capture as capture
 
@@ -134,6 +134,8 @@ class SnapshotSeries:
         self.trajectory_output_prefix = trajectory_output_prefix
         self._base = _rollout_base(step_id, instance_id)
         self.workspace_artifact_id = derive_id(self._base, f"{step_id}-workspace")
+        if is_local_id(self._base):
+            validate_local_id(derive_id(self._base, f"snapshot-{step_id}-workspace"))
         self._lock = asyncio.Lock()
         self._stop = asyncio.Event()
         self._ticker: Optional[asyncio.Task] = None

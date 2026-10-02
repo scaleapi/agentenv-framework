@@ -17,12 +17,12 @@ from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.a2a_agent.validator import A2AAgentValidator
 from agent_env.artifact import DockerImageArtifact, FileArtifactUniverse
 from agent_env.cli import cli
-from agent_env.config import set_object_store
+from agent_env.config import get_config, set_object_store
 from agent_env.env.env import DeployedGatewayEnv
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.website import WebsiteEnv
-from agent_env.env.snapshot_store import EnvSnapshot
+from agent_env.env.snapshot_store import _DOCKER_NAME, EnvSnapshot, _image_tag
 from agent_env.task import Task
 from agent_env.task_step import VerifyUniverseLoadExportRoundtripStep
 from agent_env.task_step.context import DeployedSandbox, TaskStepContext
@@ -40,11 +40,12 @@ LOCAL_AGENT = f"{LOCAL}/agents/solver"
 LOCAL_TASK = f"{LOCAL}/tasks/t"
 BARE_RUN = "triage-1-abcd1234"
 LOCAL_RUN = f"{LOCAL_TASK}-abcd1234"
-# fs_safe and key_segment of LOCAL_ENV and LOCAL_UNIVERSE.
+# fs_safe and key_segment of LOCAL_ENV and LOCAL_UNIVERSE, and key_segment of LOCAL_RUN.
 LOCAL_ENV_FILENAME, LOCAL_ENV_KEY = "local-work-triage-envs-tickets-ca64d3fb6d09", "local/work-triage-envs-tickets-ca64d3fb6d09"
 LOCAL_UNIVERSE_FILENAME, LOCAL_UNIVERSE_KEY = (
     "local-work-triage-artifacts-seed-ddf2904a1148", "local/work-triage-artifacts-seed-ddf2904a1148",
 )
+LOCAL_RUN_KEY = "local/work-triage-tasks-t-abcd1234-d34bacfa44b2"
 
 
 class _Written(Exception):
@@ -169,6 +170,18 @@ def test_an_env_snapshot_is_named_after_its_env(local_stores, tmp_path, monkeypa
     assert f"docker build --platform linux/amd64 -t {image_tag} /tmp/snapshot-build" in sandbox.scripts
 
 
+@pytest.mark.parametrize("universe_id, image_tag", [
+    ("crm-universe", "env-snapshot-crm-suite-crm-universe"),
+    (f"crm-run-{'a' * 210}__snapshot-snap", "env-snapshot-crm-suite-16d9f6db8bf8"),
+    ("Crm-Run-abcd1234__snapshot-snap", "env-snapshot-crm-suite-a655c6c500a1"),
+], ids=["short", "233-chars", "mixed-case"])
+def test_an_env_snapshot_image_name_is_a_docker_name_of_at_most_200_chars(universe_id, image_tag):
+    tag = _image_tag("crm-suite", universe_id)
+    assert tag == image_tag
+    assert _DOCKER_NAME.fullmatch(tag)
+    assert len(tag) <= 200
+
+
 @pytest.mark.parametrize("instance_id, snapshot_id", [
     (BARE_RUN, "triage-1-abcd1234__snapshot-snap"),
     (LOCAL_RUN, f"{LOCAL_RUN}__snapshot-snap"),
@@ -223,20 +236,20 @@ class _VerifierSandbox:
         return 0, "ok", ""
 
 
-@pytest.mark.parametrize("instance_id, base", [
-    (BARE_RUN, "triage-1-abcd1234"),
-    (LOCAL_RUN, LOCAL_RUN),
-    (None, "adhoc-0123456789ab"),
+@pytest.mark.parametrize("instance_id, base, run", [
+    (BARE_RUN, "triage-1-abcd1234", "triage-1-abcd1234-1790000000-0123456789ab"),
+    (LOCAL_RUN, LOCAL_RUN, f"{LOCAL_RUN_KEY}-1790000000-0123456789ab"),
+    (None, "adhoc-0123456789ab", "1790000000-0123456789ab"),
 ], ids=["bare", "local", "no-instance"])
-def test_verifier_outputs_are_named_after_the_run(local_stores, monkeypatch, instance_id, base):
+def test_verifier_outputs_are_named_and_keyed_after_the_run(local_stores, monkeypatch, instance_id, base, run):
     provider = SimpleNamespace(get_sandbox=lambda sandbox_id: asyncio.sleep(0, result=_VerifierSandbox()))
     monkeypatch.setattr(sandbox_provider, "get_sandbox_provider", lambda: provider)
     monkeypatch.setattr(verifier_module.time, "time", lambda: 1_790_000_000.0)
     monkeypatch.setattr(verifier_module.uuid, "uuid4", lambda: uuid.UUID(hex="0123456789ab" + "0" * 20))
-    ids: list[str] = []
+    uploads: list[tuple[str, str]] = []
 
     def record(text, artifact_id, description, s3_url):
-        ids.append(artifact_id)
+        uploads.append((artifact_id, s3_url))
         return SimpleNamespace(id=artifact_id, version=1, object_url=s3_url)
 
     monkeypatch.setattr(verifier_module.RunContainerUnitTestsVerifierTaskStep, "_upload_text_artifact", staticmethod(record))
@@ -247,7 +260,9 @@ def test_verifier_outputs_are_named_after_the_run(local_stores, monkeypatch, ins
 
     asyncio.run(step.execute(ctx))
 
-    assert ids == [f"{base}__verifier-{stream}-scrape-1790000000-0123456789ab" for stream in ("stdout", "stderr")]
+    outputs = get_config().get_object_store().object_url(f"verifier-outputs/scrape/{run}")
+    assert uploads == [(f"{base}__verifier-{stream}-scrape-1790000000-0123456789ab", f"{outputs}/{stream}.txt")
+                       for stream in ("stdout", "stderr")]
 
 
 @pytest.mark.parametrize("instance_id", [BARE_RUN, LOCAL_RUN], ids=["bare", "local"])
@@ -267,6 +282,23 @@ def test_collected_files_are_named_after_the_run(local_stores, cli_routing, monk
     assert universe.file_artifact_ids == {
         "report.pdf": f"{instance_id}__6466e450a16b77b8", "sub/notes.md": f"{instance_id}__d72324ebb0d7e97a",
     }
+
+
+def test_a_seed_universe_longer_than_a_filename_collects_on_the_local_store(local_stores, monkeypatch):
+    provider = SimpleNamespace(get_sandbox=lambda sandbox_id: asyncio.sleep(0, result=CollectingVm()),
+                               close=lambda: asyncio.sleep(0))
+    monkeypatch.setattr(sandbox_provider, "get_sandbox_provider", lambda: provider)
+    universe_id = "triage__v2-" + ("Escalated tickets from the EU desk, " * 8).rstrip(", ")
+    ctx = TaskStepContext(instance_id=BARE_RUN)
+    ctx.metadata["universe_id"] = universe_id
+    ctx.deployed_sandboxes = [DeployedSandbox(sandbox_name="box", sandbox_id="sb-1", sandbox_mode="vm")]
+    step = CollectArtifactsTaskStep(id="collect", version=None, sandbox_name="box", base_path="/app/artifact",
+                                    artifact_paths=["report.pdf", "sub/notes.md"])
+
+    asyncio.run(step.execute(ctx))
+
+    universe = FileArtifactUniverse.get(universe_id)
+    assert {name: fa.load() for name, fa in universe.get_file_artifacts().items()} == {"report.pdf": b"%PDF", "sub/notes.md": b"# notes"}
 
 
 @pytest.mark.parametrize("universe_id, name", [
@@ -307,25 +339,34 @@ def test_a_seeded_runs_universe_is_named_after_its_task_and_seed(tmp_path, monke
     assert seen == [universe_id]
 
 
-@pytest.mark.parametrize(("collects", "exit_code", "runs"), [(True, 1, 0), (False, 0, 2)], ids=["collects", "doesnt-collect"])
+def _collect(suffix=None) -> CollectArtifactsTaskStep:
+    return CollectArtifactsTaskStep(id="collect", version=None, sandbox_name="box", artifact_paths=["report.pdf"],
+                                    universe_id_suffix=suffix)
+
+
+@pytest.mark.parametrize(("task_steps", "seeds", "refused", "runs"), [
+    ([_collect()], ["fine", "Q&A: onboarding"], 2, 0),
+    ([], ["fine", "Q&A: onboarding"], None, 2),
+    ([_collect("-records")], ["VPC Endpoints "], None, 1),
+    ([_collect(":records")], ["fine"], 1, 0),
+], ids=["collects", "doesnt-collect", "suffix-makes-it-valid", "suffix-makes-it-invalid"])
 def test_a_seed_that_cant_name_an_local_universe_stops_a_collecting_run_batch_before_any_run(
-        tmp_path, monkeypatch, collects, exit_code, runs):
+        tmp_path, monkeypatch, task_steps, seeds, refused, runs):
     ran: list[TaskStepContext] = []
-    collect = CollectArtifactsTaskStep(id="collect", version=None, sandbox_name="box", artifact_paths=["report.pdf"])
 
     class _Task:
-        id, version, steps = LOCAL_TASK, 2, [collect] if collects else []
+        id, version, steps = LOCAL_TASK, 2, task_steps
 
         async def run(self, context, **kwargs):
             ran.append(context)
             return context
 
     monkeypatch.setattr(Task, "get", classmethod(lambda cls, id, version=None: _Task()))
-    (tmp_path / "seeds.csv").write_text("name\nfine\nQ&A: onboarding\n")
+    (tmp_path / "seeds.csv").write_text("".join(f"{row}\n" for row in ["name", *seeds]))
 
     result = CliRunner().invoke(cli, ["task", "run-batch", "--id", _Task.id, "--seeds", str(tmp_path / "seeds.csv"),
                                       "--output-dir", str(tmp_path / "out")])
 
-    assert result.exit_code == exit_code, result.output
-    assert ("seed 2 can't name an @local universe" in result.output) is collects
+    assert result.exit_code == (1 if refused else 0), result.output
+    assert (f"seed {refused} can't name an @local universe" in result.output) is bool(refused)
     assert len(ran) == runs
