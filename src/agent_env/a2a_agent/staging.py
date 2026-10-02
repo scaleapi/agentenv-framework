@@ -16,6 +16,7 @@ import logging
 import os
 import secrets
 import tempfile
+import threading
 from collections.abc import AsyncIterator, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -44,6 +45,7 @@ _CHUNK_BYTES = 1024 * 1024
 _ATTEMPTS = 3
 _CONCURRENCY = 4
 _TIMEOUT = httpx.Timeout(connect=30.0, read=60.0, write=60.0, pool=30.0)
+_REPLACING = threading.Lock()
 
 
 class StagingError(RuntimeError):
@@ -225,15 +227,15 @@ async def draining(namespaces: Iterable[StagedNamespace]) -> AsyncIterator[None]
         return
 
     async def loop() -> None:
-        failing = False
+        reported: list[str] = []
         while True:
             await asyncio.sleep(DRAIN_INTERVAL_SECONDS)
             failures = await drain_all(namespaces, quiet=True)
-            if failures and not failing:  # once when draining starts to fail, not every few seconds
+            if failures and failures != reported:  # when the reason changes, not every few seconds
                 logger.warning("%s; retrying every %gs", "; ".join(failures), DRAIN_INTERVAL_SECONDS)
-            elif failing and not failures:
+            elif reported and not failures:
                 logger.info("staged changelog increments are draining again")
-            failing = bool(failures)
+            reported = failures
 
     task = asyncio.create_task(loop())
     try:
@@ -300,13 +302,17 @@ async def _fetch(client: httpx.AsyncClient, url: str, out: BinaryIO, max_bytes: 
 
 
 def _replace(store: ObjectStore, staged: _Staged, file: Path, digest: str) -> None:
-    """Put ``file`` over the stored copy of ``staged`` unless the two hold the same bytes."""
+    """Put ``file`` over the stored copy of ``staged`` unless the two hold the same bytes.
+
+    The store overwrites only from memory, so replacements go one at a time: an agent rewrites a drained
+    increment with new bytes only on purpose, and at most one such increment is held at once."""
     stored = hashlib.sha256()
     with store.open(staged.object_url) as current:
         while chunk := current.read(_CHUNK_BYTES):
             stored.update(chunk)
     if stored.hexdigest() != digest:
-        store.put(store.get_object_key(staged.object_url), file.read_bytes(), staged.media_type, allow_overwrite=True)
+        with _REPLACING:
+            store.put(store.get_object_key(staged.object_url), file.read_bytes(), staged.media_type, allow_overwrite=True)
 
 
 async def _chunks(source: BinaryIO) -> AsyncIterator[bytes]:
@@ -358,5 +364,5 @@ async def _client(doing: str) -> AsyncIterator[httpx.AsyncClient]:
             status = exc.response.status_code
             why = {413: "its staging is full", 507: "its disk is full"}.get(status, f"it answered {status}")
             raise StagingError(f"{doing} failed: {why}") from None
-        except httpx.HTTPError as exc:
-            raise StagingError(f"{doing} failed: {type(exc).__name__} reaching the agent") from None
+        except httpx.HTTPError:
+            raise StagingError(f"{doing} failed: the agent could not be reached") from None
