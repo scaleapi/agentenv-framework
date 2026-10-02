@@ -113,6 +113,16 @@ def test_staged_objects_are_the_server_users_alone(tmp_path) -> None:
         assert (tmp_path / "staging" / directory).stat().st_mode & 0o777 == 0o700
 
 
+def test_staging_tightens_its_own_directories_left_open(tmp_path) -> None:
+    for directory in ("objects", "incoming"):
+        (tmp_path / "staging" / directory).mkdir(parents=True)
+        (tmp_path / "staging" / directory).chmod(0o755)
+    with TestClient(_app()) as client:
+        client.put(f"{BASE}/a", content=b"x")
+    for directory in ("objects", "incoming"):
+        assert (tmp_path / "staging" / directory).stat().st_mode & 0o777 == 0o700
+
+
 def test_without_a_directory_each_server_stages_in_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("AGENTENV_STAGING_DIR")
     first, second = StagingStore(max_bytes=4), StagingStore(max_bytes=4)
