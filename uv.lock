@@ -49,7 +49,9 @@ dependencies = [
     { name = "a2a-sdk" },
     { name = "agentenv-framework-protocol" },
     { name = "boto3" },
+    { name = "certifi" },
     { name = "click" },
+    { name = "cryptography" },
     { name = "e2b" },
     { name = "httpx" },
     { name = "litellm" },
@@ -58,7 +60,10 @@ dependencies = [
     { name = "packaging" },
     { name = "pydantic" },
     { name = "pymongo" },
+    { name = "python-multipart" },
     { name = "pyyaml" },
+    { name = "starlette" },
+    { name = "uvicorn" },
 ]
 
 [package.optional-dependencies]
@@ -98,7 +103,9 @@ requires-dist = [
     { name = "agentenv-framework", extras = ["explorer", "gcp"], marker = "extra == 'dev'" },
     { name = "agentenv-framework-protocol", editable = "packages/agentenv-protocol" },
     { name = "boto3", specifier = ">=1.35.0" },
+    { name = "certifi", specifier = ">=2024.2.2" },
     { name = "click", specifier = ">=8.0.0" },
+    { name = "cryptography", specifier = ">=42" },
     { name = "e2b", specifier = "~=2.46.4" },
     { name = "fastapi", marker = "extra == 'explorer'", specifier = ">=0.110" },
     { name = "google-api-core", marker = "extra == 'gcp'", specifier = ">=2.24" },
@@ -121,8 +128,11 @@ requires-dist = [
     { name = "pytest-socket", marker = "extra == 'dev'", specifier = ">=0.7.0" },
     { name = "pytest-timeout", marker = "extra == 'dev'", specifier = ">=2.3.0" },
     { name = "pytest-xdist", marker = "extra == 'dev'", specifier = ">=3.0.0" },
+    { name = "python-multipart", specifier = ">=0.0.13" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "requests", marker = "extra == 'gcp'", specifier = ">=2.31" },
+    { name = "starlette", specifier = ">=0.40" },
+    { name = "uvicorn", specifier = ">=0.47" },
     { name = "uvicorn", marker = "extra == 'explorer'", specifier = ">=0.29" },
 ]
 provides-extras = ["explorer", "gcp", "dev"]

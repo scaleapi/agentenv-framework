@@ -281,16 +281,9 @@ def test_botocore_still_exposes_the_signing_credentials() -> None:
     assert S3ObjectStore(session, BUCKET)._signing_credentials() == (None, True)
 
 
-def test_local_store_cannot_issue_remote_transfer_grants(tmp_path) -> None:
+def test_local_store_does_not_offer_transfer_grants(tmp_path) -> None:
+    """It can issue them (local_grants_server_test.py), but agents on the local store don't use them."""
     store = LocalFilesystemObjectStore(str(tmp_path))
 
     assert S3ObjectStore.supports_transfer_grants
     assert not store.supports_transfer_grants
-    with pytest.raises(NotImplementedError, match="cannot issue"):
-        store.issue_read_grant(store.object_url("input"))
-    with pytest.raises(NotImplementedError, match="cannot issue"):
-        store.issue_write_grant(
-            store.object_url("output"), media_type="application/json", max_bytes=10
-        )
-    with pytest.raises(NotImplementedError, match="cannot issue"):
-        store.issue_upload_policy(store.object_url("changelog"), max_object_bytes=10, expires_in=60)
