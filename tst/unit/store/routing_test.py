@@ -431,7 +431,7 @@ def test_registering_a_bare_artifact_at_a_local_url_is_refused(object_stores):
     with pytest.raises(ValueError, match="configured object store"):
         DockerImageArtifact.put_tar("bare-image", description="d", image_name="img:v1", tar_gz_s3_url=url)
     with pytest.raises(ValueError, match="configured object store"):
-        FileArtifactUniverse.put("bare-universe", file_artifacts={"a": object()}, bundle_s3_url=local.object_url("k/"))
+        FileArtifactUniverse.put("bare-universe", file_artifacts={"a": object()}, bundle_object_url=local.object_url("k/"))
 
 
 def test_a_key_both_namespaces_recorded_reads_as_the_readers_own(stores):

@@ -779,7 +779,7 @@ class A2AAgentValidator:
         ts = int(time.time())
         universe_id = f"validate-install-image-{agent.id}-v{agent.version}-{ts}"
         config = get_config()
-        s3_url = config.get_object_store().object_url(f"{config.get_artifact_key_prefix()}a2a_validator/install_test_image/{ts}/")
+        bundle_object_url = config.get_object_store().object_url(f"{config.get_artifact_key_prefix()}a2a_validator/install_test_image/{ts}/")
 
         with tempfile.NamedTemporaryFile("w", suffix=".Dockerfile", delete=False) as f:
             f.write("FROM ubuntu:24.04\n")
@@ -788,9 +788,9 @@ class A2AAgentValidator:
             universe = FileArtifactUniverse.put_bundled(
                 id=universe_id,
                 files={"Dockerfile": Path(tmp_path)},
-                s3_url=s3_url,
+                bundle_object_url=bundle_object_url,
             )
-            logger.info(f"Uploaded install-test image universe '{universe.id}' v{universe.version} to {s3_url}")
+            logger.info(f"Uploaded install-test image universe '{universe.id}' v{universe.version} to {bundle_object_url}")
             return universe
         finally:
             try:

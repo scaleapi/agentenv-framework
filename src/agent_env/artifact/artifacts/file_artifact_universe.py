@@ -54,7 +54,6 @@ class FileArtifactUniverse(Universe):
     )
     bundle_object_url: str | None = Field(
         default=None,
-        alias="bundle_s3_url",
         description=(
             "Optional object-store prefix under which all bundled files "
             "reside. Set when the universe represents a contiguous directory "
@@ -69,14 +68,14 @@ class FileArtifactUniverse(Universe):
         id: str,
         *,
         file_artifacts: dict[str, "FileArtifact"],
-        bundle_s3_url: str | None = None,
+        bundle_object_url: str | None = None,
     ) -> "FileArtifactUniverse":
         from agent_env.artifact.store import get_artifact_store
 
         if not file_artifacts:
             raise ValueError("file_artifacts must be non-empty")
-        if bundle_s3_url:
-            get_config().check_object_url(id, bundle_s3_url)
+        if bundle_object_url:
+            get_config().check_object_url(id, bundle_object_url)
 
         store = get_artifact_store()
         version = store.next_version(id)
@@ -87,7 +86,7 @@ class FileArtifactUniverse(Universe):
                 fname: fa.as_ref() for fname, fa in file_artifacts.items()
             },
             file_artifact_ids={fname: fa.id for fname, fa in file_artifacts.items()},
-            bundle_s3_url=bundle_s3_url,
+            bundle_object_url=bundle_object_url,
         )
         return store.put_document(instance)
 
@@ -127,19 +126,19 @@ class FileArtifactUniverse(Universe):
         id: str,
         *,
         files: dict[str, Path],
-        s3_url: str | None = None,
+        bundle_object_url: str | None = None,
     ) -> "FileArtifactUniverse":
-        """Upload ``files`` (bundle key -> local path) under ``s3_url`` and register them as one universe.
-        Without ``s3_url``, each call writes under a prefix of its own (``ArtifactStore.attempt_prefix``)."""
+        """Upload ``files`` (bundle key -> local path) under ``bundle_object_url`` and register them as one universe.
+        Without it, each call writes under a prefix of its own (``ArtifactStore.attempt_prefix``)."""
         from agent_env.artifact.artifacts.file import FileArtifact
         from agent_env.artifact.store import get_artifact_store
 
         if not files:
             raise ValueError("files must be non-empty")
-        if s3_url is None:
-            s3_url = get_artifact_store().attempt_prefix(cls.model_fields["type"].default, id)
-        if not s3_url.endswith("/"):
-            s3_url += "/"
+        if bundle_object_url is None:
+            bundle_object_url = get_artifact_store().attempt_prefix(cls.model_fields["type"].default, id)
+        if not bundle_object_url.endswith("/"):
+            bundle_object_url += "/"
 
         file_artifacts: dict[str, FileArtifact] = {}
         for rel_path, local_path in files.items():
@@ -152,12 +151,12 @@ class FileArtifactUniverse(Universe):
                 id=derive_id(id, path_hash),
                 description=f"Bundled file '{rel_path}' of FileArtifactUniverse '{id}'",
                 file_path=str(local_path),
-                object_url=s3_url + rel_path,
+                object_url=bundle_object_url + rel_path,
                 filename=rel_path.rsplit("/", 1)[-1],
             )
             file_artifacts[rel_path] = fa
 
-        return cls.put(id=id, file_artifacts=file_artifacts, bundle_s3_url=s3_url)
+        return cls.put(id=id, file_artifacts=file_artifacts, bundle_object_url=bundle_object_url)
 
     @classmethod
     def from_toml(cls, data: dict, ctx: AuthoringContext) -> "FileArtifactUniverse":
@@ -170,26 +169,26 @@ class FileArtifactUniverse(Universe):
         cls,
         id: str,
         *,
-        s3_url: str,
+        bundle_object_url: str,
     ) -> "FileArtifactUniverse":
         """Wrap files that already exist under an object-store prefix as a universe.
 
         Unlike ``put_bundled`` (which uploads local files), this lists the
-        objects already present under *s3_url* and registers each one as a
+        objects already present under *bundle_object_url* and registers each one as a
         ``FileArtifact`` via ``FileArtifact.put_existing``. No bytes are
         downloaded or re-uploaded. Useful when another process (e.g. an
         agent's snapshot extension) has already written the files.
         """
         from agent_env.artifact.artifacts.file import FileArtifact
 
-        if not s3_url.endswith("/"):
-            s3_url += "/"
+        if not bundle_object_url.endswith("/"):
+            bundle_object_url += "/"
 
-        store = get_config().get_object_store_at(s3_url)
+        store = get_config().get_object_store_at(bundle_object_url)
 
         file_artifacts: dict[str, FileArtifact] = {}
-        for object_url in store.list_at(s3_url):
-            rel_path = object_url[len(s3_url):]
+        for object_url in store.list_at(bundle_object_url):
+            rel_path = object_url[len(bundle_object_url):]
             if not rel_path:
                 continue
             path_hash = hashlib.sha256(rel_path.encode("utf-8")).hexdigest()[:16]
@@ -201,6 +200,6 @@ class FileArtifactUniverse(Universe):
             file_artifacts[rel_path] = fa
 
         if not file_artifacts:
-            raise ValueError(f"No files found under prefix {s3_url!r}")
+            raise ValueError(f"No files found under prefix {bundle_object_url!r}")
 
-        return cls.put(id=id, file_artifacts=file_artifacts, bundle_s3_url=s3_url)
+        return cls.put(id=id, file_artifacts=file_artifacts, bundle_object_url=bundle_object_url)

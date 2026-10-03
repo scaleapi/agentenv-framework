@@ -86,10 +86,10 @@ def put_bundled(universe_id: str, file_dir: Path, s3_url: Optional[str]):
     click.echo(f"Uploading {len(files)} file(s)" + (f" under {s3_url}..." if s3_url else "..."))
     for rel in files:
         click.echo(f"  {rel}")
-    universe = FileArtifactUniverse.put_bundled(id=universe_id, files=files, s3_url=s3_url)
+    universe = FileArtifactUniverse.put_bundled(id=universe_id, files=files, bundle_object_url=s3_url)
     click.echo(
         f"Created FileArtifactUniverse: id={universe.id} version={universe.version} "
-        f"file_count={len(universe.file_artifact_ids)} bundle_s3_url={universe.bundle_object_url}"
+        f"file_count={len(universe.file_artifact_ids)} bundle_object_url={universe.bundle_object_url}"
     )
 
 

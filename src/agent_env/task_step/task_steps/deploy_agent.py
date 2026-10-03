@@ -588,7 +588,7 @@ class DeployAgentTaskStep(TaskStep):
         )
         if not universe.bundle_object_url:
             raise RuntimeError(
-                f"FileArtifactUniverse '{universe.id}' v{universe.version} has no bundle_s3_url; "
+                f"FileArtifactUniverse '{universe.id}' v{universe.version} has no bundle_object_url; "
                 "snapshot universes must be created via put_existing or put_bundled"
             )
         load_method, load_path = A2AAgent.operation(snapshot_ext, "load")

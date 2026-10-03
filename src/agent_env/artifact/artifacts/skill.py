@@ -89,7 +89,7 @@ class SkillArtifact(Artifact):
         universe = FileArtifactUniverse.put_bundled(
             id=derive_id(id, "files"),
             files=files,
-            s3_url=skill_s3_url,
+            bundle_object_url=skill_s3_url,
         )
 
         instance = cls(

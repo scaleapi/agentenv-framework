@@ -121,7 +121,7 @@ def _format_snapshot_capture(snap: dict) -> str:
         "agent-snapshot:",
         f"  artifact_id: {snap.get('id')}",
         f"  artifact_version: {snap.get('version')}",
-        f"  bundle_object_url: {snap.get('bundle_object_url') or snap.get('bundle_s3_url')}",
+        f"  bundle_object_url: {snap.get('bundle_object_url')}",
         f"  source_agent_name: {snap.get('source_agent_name')}",
         f"  source_context_id: {snap.get('source_context_id')}",
     ]

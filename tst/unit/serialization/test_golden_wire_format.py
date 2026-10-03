@@ -109,7 +109,7 @@ ARTIFACT_FIXTURES = {
         version=4,
         file_artifact_refs={"README.md": ArtifactRef(id="readme-file", version=1)},
         file_artifact_ids={"README.md": "readme-file"},
-        bundle_s3_url=f"{_BUCKET}/artifacts/file_artifact_universe/tutorial-files/4/bundle.tar.gz",
+        bundle_object_url=f"{_BUCKET}/artifacts/file_artifact_universe/tutorial-files/4/bundle.tar.gz",
     ),
     # Alias branches of the double registry entries; each pins its alias type value explicitly.
     "environment": lambda: EnvironmentArtifact(

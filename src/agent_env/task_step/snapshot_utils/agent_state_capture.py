@@ -123,7 +123,7 @@ async def capture_workspace(
     # Unserialized — a concurrent version race on one artifact id is
     # `ArtifactStore.put_document`'s retry to absorb.
     universe = await asyncio.to_thread(
-        FileArtifactUniverse.put_existing, id=artifact_id, s3_url=registered_prefix
+        FileArtifactUniverse.put_existing, id=artifact_id, bundle_object_url=registered_prefix
     )
     # `put_existing` always sets it, but the field is Optional on the artifact, and a
     # row carrying None here would read as an ungradable capture rather than an error.

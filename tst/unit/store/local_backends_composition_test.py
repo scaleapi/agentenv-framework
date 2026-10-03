@@ -21,6 +21,7 @@ from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.artifact.artifacts.skill import SkillArtifact, download_skill
 from agent_env.cli.artifact.file_artifact_universe import file_artifact_universe
+from agent_env.store import Filter
 from agent_env.store.ids import fs_safe, key_segment
 from agent_env.config import get_config, set_image_store, set_object_store
 from agent_env.store.image_store import LocalRegistryImageStore
@@ -123,9 +124,20 @@ def test_universe_put_bundled(local_stores, tmp_path):
     }
     prefix = store.object_url("artifacts/universe/bundled/1/")
 
-    uni = FileArtifactUniverse.put_bundled(id="bundled", files=files, s3_url=prefix)
+    uni = FileArtifactUniverse.put_bundled(id="bundled", files=files, bundle_object_url=prefix)
     loaded = {rel: fa.load() for rel, fa in FileArtifactUniverse.get(uni.id).get_file_artifacts().items()}
     assert loaded == {"a.txt": b"AAA", "sub/b.txt": b"BBB"}
+
+
+def test_universe_stores_its_bundle_prefix_as_bundle_object_url(local_stores, tmp_path):
+    """The saved document carries the bundle prefix under ``bundle_object_url``, and it loads back."""
+    prefix = local_stores.get_object_store().object_url("artifacts/universe/renamed/1/")
+    uni = FileArtifactUniverse.put_bundled(
+        id="renamed", files={"a.txt": _write(tmp_path, "a.txt", b"A")}, bundle_object_url=prefix,
+    )
+    doc = local_stores.get_document_store().find_one("artifacts", Filter.of(id="renamed", version=uni.version))
+    assert doc["bundle_object_url"] == f"{prefix}/"
+    assert FileArtifactUniverse.get("renamed").bundle_object_url == f"{prefix}/"
 
 
 def test_universe_put_existing_lists_via_list_at(local_stores, tmp_path):
@@ -135,7 +147,7 @@ def test_universe_put_existing_lists_via_list_at(local_stores, tmp_path):
     store.put_file("artifacts/universe/existing/1/nested/two.txt", _write(tmp_path, "two.txt", b"2"))
     prefix = store.object_url("artifacts/universe/existing/1/")
 
-    uni = FileArtifactUniverse.put_existing(id="uni-existing", s3_url=prefix)
+    uni = FileArtifactUniverse.put_existing(id="uni-existing", bundle_object_url=prefix)
     loaded = {rel: fa.load() for rel, fa in FileArtifactUniverse.get(uni.id).get_file_artifacts().items()}
     assert loaded == {"one.txt": b"1", "nested/two.txt": b"2"}
 
@@ -261,7 +273,7 @@ def test_a_docker_image_names_its_repository_and_tarball_from_the_encoded_id(
     ),
     lambda tmp_path: FileArtifactUniverse.put_bundled(
         id=HOSTILE, files={"p.txt": Path(_write(tmp_path, "p.txt", b"x"))},
-        s3_url=get_config().get_object_store().object_url("bundle/"),
+        bundle_object_url=get_config().get_object_store().object_url("bundle/"),
     ),
 ], ids=["docker_image", "file", "file_put_at", "universe_put_bundled"])
 def test_an_local_id_outside_the_cli_is_refused_before_any_image_or_object_is_written(local_stores, monkeypatch, tmp_path, put):
@@ -319,7 +331,7 @@ def test_get_many_writes_each_local_id_into_its_own_encoded_directory(local_stor
     store = local_stores.get_object_store()
     for uid, name in (("@local/t/A", "1"), ("@local/t/A/1", "f")):
         prefix = store.object_url(f"artifacts/file_artifact_universe/{key_segment(uid)}/1/")
-        FileArtifactUniverse.put_bundled(id=uid, files={name: _write(tmp_path, f"src-{name}", b"x")}, s3_url=prefix)
+        FileArtifactUniverse.put_bundled(id=uid, files={name: _write(tmp_path, f"src-{name}", b"x")}, bundle_object_url=prefix)
 
     out = tmp_path / "out"
     res = CliRunner().invoke(
