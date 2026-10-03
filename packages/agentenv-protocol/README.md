@@ -583,3 +583,33 @@ SDK. A snapshot or changelog is restored in the form it was captured in: one
 captured as objects only through the object variants, an older one only
 through `s3_prefix`. Do not roll agent-env back once portable snapshots or
 changelogs exist, because older releases cannot load them.
+
+#### Staging
+
+When the object store's grants cannot reach the agent, as with a local store
+and an agent on a remote sandbox, AgentEnv moves the objects through the agent
+itself. Every SDK agent serves the staging extension, `urn:agentenv:staging/v1`,
+a small object store at `/ext/staging` on its own server. Before a call
+AgentEnv pushes what the agent will read into it; after the call it pulls what
+the agent wrote. The grants it sends are the ordinary ones above, with URLs
+naming staged paths on the agent's own URL, so handlers and helpers are
+unchanged.
+
+| Route | Does |
+| --- | --- |
+| `PUT /ext/staging/{path}` | stores the body |
+| `GET /ext/staging/{path}` | returns it, with an `ETag` |
+| `POST /ext/staging/{prefix}` | stores a multipart upload's `file` at `{prefix}/{key}`, `key` being a form field sent before it |
+| `GET /ext/staging/{prefix}/` | lists `{objects: [{path, size_bytes, etag}]}` below the prefix |
+| `DELETE /ext/staging/{path}` | removes the object, only while it still matches an `If-Match` tag when one is given |
+| `DELETE /ext/staging/{prefix}/` | removes everything below the prefix |
+
+A path's first segment is an id AgentEnv generates, at least 22 characters, and
+never shares, which is what keeps staged objects private on a public agent URL.
+Everything staged counts against `AGENTENV_STAGING_MAX_BYTES` (16 GiB unless
+set; `0` turns staging off) and lives until AgentEnv removes it or the server
+process ends, in a directory of the process's own (or under
+`AGENTENV_STAGING_DIR` when set) that only the server's user can read. One
+server process owns a staging directory. An agent that doesn't use the SDK can serve the same routes
+and add `{uri: "urn:agentenv:staging/v1", params: {endpoint: "/ext/staging"}}`
+to its card.

@@ -847,7 +847,7 @@ def test_grant_urls_are_redacted_however_httpx_formats_its_log_call(
 ) -> None:
     caplog.set_level(logging.INFO, logger="httpx")
 
-    with transfers._redacting_request_urls():
+    with transfers.redacting_request_urls():
         logging.getLogger("httpx").info(message, *args)
 
     (record,) = caplog.records
