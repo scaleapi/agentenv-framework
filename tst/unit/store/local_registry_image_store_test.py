@@ -54,12 +54,12 @@ def test_the_default_port_runs_agentenv_registry(docker, listening):
                            "-p", "127.0.0.1:5000:5000", "registry:2"]]
 
 
-def test_another_port_runs_the_same_container_on_that_port(docker, listening):
+def test_another_port_runs_its_own_container(docker, listening):
     fake = docker()
     listening(fake)
     LocalRegistryImageStore("localhost:5001").ensure_repository("r")
-    assert fake.calls[0][fake.calls[0].index("--name") + 1] == "agentenv-registry"
-    assert "127.0.0.1:5001:5000" in fake.calls[0]
+    assert fake.calls == [["docker", "run", "-d", "--restart", "unless-stopped", "--name", "agentenv-registry-5001",
+                           "-p", "127.0.0.1:5001:5000", "registry:2"]]
 
 
 def test_a_serving_registry_is_left_alone(docker, monkeypatch):
@@ -69,21 +69,21 @@ def test_a_serving_registry_is_left_alone(docker, monkeypatch):
     assert fake.calls == []
 
 
-@pytest.mark.parametrize("port", [5000, 5001])
-def test_a_stopped_container_on_this_port_is_started(docker, listening, port):
+@pytest.mark.parametrize("port, name", [(5000, "agentenv-registry"), (5001, "agentenv-registry-5001")])
+def test_a_stopped_container_on_this_port_is_started(docker, listening, port, name):
     fake = docker(run_rc=125, existing_port=port)
     listening(fake)
     LocalRegistryImageStore(f"localhost:{port}").ensure_repository("r")
     assert [call[1] for call in fake.calls] == ["run", "inspect", "start"]
-    assert fake.calls[-1] == ["docker", "start", "agentenv-registry"]
+    assert fake.calls[1][-1] == name
+    assert fake.calls[-1] == ["docker", "start", name]
 
 
-@pytest.mark.parametrize("existing, wanted", [(5000, 5001), (5001, 5000)])
-def test_a_container_on_another_port_is_refused_not_removed(docker, monkeypatch, existing, wanted):
-    fake = docker(run_rc=125, existing_port=existing)
+def test_an_older_agentenv_registry_on_another_port_is_refused_not_removed(docker, monkeypatch):
+    fake = docker(run_rc=125, existing_port=5001)
     monkeypatch.setattr(LocalRegistryImageStore, "_registry_listening", staticmethod(lambda port: False))
-    with pytest.raises(RuntimeError, match=f"agentenv-registry is using port {existing}, not {wanted}"):
-        LocalRegistryImageStore(f"localhost:{wanted}").ensure_repository("r")
+    with pytest.raises(RuntimeError, match="agentenv-registry is using port 5001, not 5000"):
+        LocalRegistryImageStore("localhost:5000").ensure_repository("r")
     assert [call[1] for call in fake.calls] == ["run", "inspect"]
 
 
