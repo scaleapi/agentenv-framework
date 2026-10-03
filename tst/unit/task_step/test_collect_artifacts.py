@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import tempfile
 import threading
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -27,6 +28,23 @@ from tst.unit.event_loop_probe import on_event_loop
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+def _staged(data: bytes) -> str:
+    """A real temp file holding `data` — `_controller_get_file` now downloads to a temp file
+    and returns its path (not bytes), so stubs of it hand back a staged file the uploader reads."""
+    with tempfile.NamedTemporaryFile(delete=False) as f:
+        f.write(data)
+    return f.name
+
+
+def _read_staged(path: str) -> bytes:
+    """Read and delete a file `_controller_get_file` downloaded (it returns a path now)."""
+    try:
+        with open(path, "rb") as fh:
+            return fh.read()
+    finally:
+        os.unlink(path)
 
 
 def _cua_context():
@@ -103,7 +121,7 @@ class TestControllerPath:
         store.put_object_file.return_value = "s3://bucket/report.docx"
         store.next_version.return_value = 1
         with patch.object(step, "_controller_get_file", new_callable=AsyncMock,
-                          return_value=b"data") as get_file, \
+                          side_effect=lambda *a, **k: _staged(b"data")) as get_file, \
              patch("agent_env.artifact.store.get_artifact_store", return_value=store), \
              patch("agent_env.artifact.FileArtifactUniverse") as universe:
             universe.put.return_value = MagicMock(id="inst-1", version=1)
@@ -121,7 +139,7 @@ class TestControllerPath:
         store.next_version.return_value = 1
 
         with patch.object(step, "_controller_get_file", new_callable=AsyncMock,
-                          return_value=b"%PDF-1.4 data") as get_file, \
+                          side_effect=lambda *a, **k: _staged(b"%PDF-1.4 data")) as get_file, \
              patch("agent_env.artifact.store.get_artifact_store", return_value=store), \
              patch("agent_env.artifact.FileArtifactUniverse") as universe:
             universe.put.return_value = MagicMock(id="inst-1", version=1)
@@ -145,7 +163,7 @@ class TestControllerPath:
         store = MagicMock()
         store.put_object_file.side_effect = lambda **kw: on_loop.append(on_event_loop()) or "s3://bucket/report.pdf"
         store.next_version.return_value = 1
-        with patch.object(step, "_controller_get_file", new_callable=AsyncMock, return_value=b"%PDF"), \
+        with patch.object(step, "_controller_get_file", new_callable=AsyncMock, side_effect=lambda *a, **k: _staged(b"%PDF")), \
              patch("agent_env.artifact.store.get_artifact_store", return_value=store), \
              patch("agent_env.artifact.FileArtifactUniverse") as universe:
             universe.put.return_value = MagicMock(id="inst-1", version=1)
@@ -183,7 +201,8 @@ class TestControllerPath:
                     return
                 await asyncio.sleep(0.02)
 
-        with patch.object(step, "_controller_get_file", new_callable=AsyncMock, return_value=b"%PDF-1.4"), \
+        with patch.object(step, "_controller_get_file", new_callable=AsyncMock,
+                          side_effect=lambda *a, **k: _staged(b"%PDF-1.4")), \
              patch("agent_env.artifact.store.get_artifact_store", return_value=store), \
              patch("agent_env.artifact.FileArtifactUniverse"), \
              caplog.at_level("INFO", logger="agent_env.task_step.thread_work"):
@@ -246,7 +265,7 @@ class TestControllerPath:
         store.next_version.return_value = 1
 
         with patch.object(step, "_controller_get_file", new_callable=AsyncMock,
-                          return_value=b"%PDF data") as get_file, \
+                          side_effect=lambda *a, **k: _staged(b"%PDF data")) as get_file, \
              patch("agent_env.artifact.store.get_artifact_store", return_value=store), \
              patch("agent_env.artifact.FileArtifactUniverse") as universe:
             universe.put.return_value = MagicMock(id="inst-1", version=1)
@@ -261,7 +280,9 @@ class TestControllerPath:
         # S3 object name preserves dir structure with the leading slash stripped
         assert store.put_object_file.call_args.kwargs["object_name"] == "tmp/output/result.pdf"
 
-    def test_missing_file_is_skipped_not_fatal(self):
+    def test_absent_file_is_skipped_not_fatal(self):
+        """A listed file that isn't on the VM (FileNotFoundError) is skipped; a file that IS
+        present but fails to transfer is fatal — see test_present_file_that_fails_is_fatal."""
         step = CollectArtifactsTaskStep(
             id="collect-artifacts", version=None, env_id="ubuntu-cua",
             base_path="/home/docker/Desktop", artifact_paths=["there.pdf", "gone.pdf"],
@@ -272,8 +293,8 @@ class TestControllerPath:
 
         async def fake_get(deployed_env, path):
             if path.endswith("gone.pdf"):
-                raise RuntimeError("cua_get_file failed: file not found")
-            return b"data"
+                raise FileNotFoundError(f"file not found on CUA VM: {path}")
+            return _staged(b"data")
 
         with patch.object(step, "_controller_get_file", side_effect=fake_get), \
              patch("agent_env.artifact.store.get_artifact_store", return_value=store), \
@@ -283,7 +304,37 @@ class TestControllerPath:
 
         assert ctx.metadata["artifacts"] == {"there.pdf": "s3://bucket/there.pdf"}
 
-    def test_s3_upload_failure_is_skipped_not_fatal(self):
+    def test_present_file_that_fails_to_read_is_fatal(self):
+        """A file that EXISTS on the VM but can't be read (a non-FileNotFoundError, e.g. a
+        timeout/transport error — the ~500MB-deliverable failure mode) fails the step even
+        when other files collected, instead of being silently dropped."""
+        step = CollectArtifactsTaskStep(
+            id="collect-artifacts", version=None, env_id="ubuntu-cua",
+            base_path="/home/docker/Desktop", artifact_paths=["ok.pdf", "big.mp4"],
+        )
+        store = MagicMock()
+        store.put_object_file.return_value = "s3://bucket/ok.pdf"
+        store.next_version.return_value = 1
+
+        async def fake_get(deployed_env, path):
+            if path.endswith("big.mp4"):
+                raise RuntimeError("ReadTimeout")  # present, but the read timed out
+            return _staged(b"data")
+
+        with patch.object(step, "_controller_get_file", side_effect=fake_get), \
+             patch("agent_env.artifact.store.get_artifact_store", return_value=store), \
+             patch("agent_env.artifact.FileArtifactUniverse") as universe:
+            universe.put.return_value = MagicMock(id="inst-1", version=1)
+            try:
+                _run(step.execute(_cua_context()))
+                assert False, "expected RuntimeError when a present file fails to collect"
+            except RuntimeError as e:
+                assert "could not be collected" in str(e)
+                assert "big.mp4" in str(e)
+
+    def test_s3_upload_failure_is_fatal(self):
+        """A present file we fetched but failed to upload is a hard failure (retryable), not a
+        silent drop — otherwise a flaky S3 write loses a deliverable."""
         step = CollectArtifactsTaskStep(
             id="collect-artifacts", version=None, env_id="ubuntu-cua",
             base_path="/home/docker/Desktop", artifact_paths=["bad.pdf", "ok.pdf"],
@@ -298,24 +349,27 @@ class TestControllerPath:
 
         store.put_object_file.side_effect = put
 
-        with patch.object(step, "_controller_get_file", new_callable=AsyncMock, return_value=b"data"), \
+        with patch.object(step, "_controller_get_file", new_callable=AsyncMock,
+                          side_effect=lambda *a, **k: _staged(b"data")), \
              patch("agent_env.artifact.store.get_artifact_store", return_value=store), \
              patch("agent_env.artifact.FileArtifactUniverse") as universe:
             universe.put.return_value = MagicMock(id="inst-1", version=1)
-            ctx = _run(step.execute(_cua_context()))
+            try:
+                _run(step.execute(_cua_context()))
+                assert False, "expected RuntimeError when a present file fails to upload"
+            except RuntimeError as e:
+                assert "could not be collected" in str(e)
+                assert "bad.pdf" in str(e)
 
-        # bad.pdf's S3 failure is non-fatal; ok.pdf still collected
-        assert ctx.metadata["artifacts"] == {"ok.pdf": "s3://bucket/ok.pdf"}
-
-    def test_all_resolved_missing_is_fatal(self):
-        """Named artifacts that ALL fail to collect -> loud failure, not a silent empty run."""
+    def test_all_resolved_absent_is_fatal(self):
+        """Named artifacts that are ALL absent -> loud failure (no universe), not a silent empty run."""
         step = CollectArtifactsTaskStep(
             id="collect-artifacts", version=None, env_id="ubuntu-cua",
             base_path="/home/docker/Desktop", artifact_paths=["gone1.pdf", "gone2.pdf"],
         )
         store = MagicMock()
         with patch.object(step, "_controller_get_file", new_callable=AsyncMock,
-                          side_effect=RuntimeError("cua_get_file failed: file not found")), \
+                          side_effect=FileNotFoundError("file not found on CUA VM")), \
              patch("agent_env.artifact.store.get_artifact_store", return_value=store):
             try:
                 _run(step.execute(_cua_context()))
@@ -360,11 +414,11 @@ class TestControllerPath:
         provider.close = AsyncMock()
         ctx = TaskStepContext()
         with patch.object(step, "_list_base_directory", new_callable=AsyncMock) as list_dir:
-            collected, file_artifacts = _run(step._collect_items(
+            collected, file_artifacts, hard_failures = _run(step._collect_items(
                 provider, MagicMock(), None, step._resolve_items(ctx), ctx, MagicMock(), "aid", 1,
             ))
         list_dir.assert_not_awaited()
-        assert (collected, file_artifacts) == ({}, {})
+        assert (collected, file_artifacts, hard_failures) == ({}, {}, [])
         provider.close.assert_awaited_once()
 
     def test_collected_but_no_universe_is_fatal(self):
@@ -377,7 +431,8 @@ class TestControllerPath:
         store.put_object_file.return_value = "s3://bucket/present.pdf"
         store.next_version.return_value = 1
         store.put_document.side_effect = RuntimeError("doc write failed")  # registration swallowed -> no universe
-        with patch.object(step, "_controller_get_file", new_callable=AsyncMock, return_value=b"data"), \
+        with patch.object(step, "_controller_get_file", new_callable=AsyncMock,
+                          side_effect=lambda *a, **k: _staged(b"data")), \
              patch("agent_env.artifact.store.get_artifact_store", return_value=store):
             try:
                 _run(step.execute(_cua_context()))
@@ -399,7 +454,7 @@ class TestControllerPath:
             "step_params": {"collect-artifacts": {"artifact_paths": ["right.pdf"]}}
         }
         with patch.object(step, "_controller_get_file", new_callable=AsyncMock,
-                          return_value=b"data") as get_file, \
+                          side_effect=lambda *a, **k: _staged(b"data")) as get_file, \
              patch("agent_env.artifact.store.get_artifact_store", return_value=store), \
              patch("agent_env.artifact.FileArtifactUniverse") as universe:
             universe.put.return_value = MagicMock(id="inst-1", version=1)
@@ -437,6 +492,29 @@ class TestControllerPath:
 
 
 class TestAgentContainerPath:
+    def test_get_file_size_absent_returns_minus_one(self):
+        """A genuinely-missing file (stat says 'No such file') is the lenient -1 skip."""
+        step = CollectArtifactsTaskStep(id="c", version=None, agent_name="solver")
+        sandbox = MagicMock()
+        sandbox.mode = "container"
+        sandbox.exec_with_output = AsyncMock(
+            return_value=(1, "", "stat: cannot stat '/x': No such file or directory")
+        )
+        assert _run(step._get_file_size(sandbox, None, "/x")) == -1
+
+    def test_get_file_size_other_error_raises(self):
+        """A stat failure that is NOT 'missing' raises, so it becomes a hard failure rather than a
+        silent 'missing' skip that drops an existing deliverable."""
+        step = CollectArtifactsTaskStep(id="c", version=None, agent_name="solver")
+        sandbox = MagicMock()
+        sandbox.mode = "container"
+        sandbox.exec_with_output = AsyncMock(return_value=(1, "", "stat: '/x': Permission denied"))
+        try:
+            _run(step._get_file_size(sandbox, None, "/x"))
+            assert False, "expected RuntimeError, not a -1 'absent' result"
+        except RuntimeError as e:
+            assert "could not size" in str(e)
+
     def test_unreachable_sandbox_is_clear_error(self):
         """A re-run targeting an expired/unreachable sandbox fails with a clear message."""
         step = CollectArtifactsTaskStep(
@@ -709,10 +787,10 @@ class TestSandboxContainerPath:
         provider.close = AsyncMock()
 
         with patch.object(step, "_resolve_live_sandbox", AsyncMock(return_value=sandbox)), \
-             patch.object(step, "_collect_items", AsyncMock(return_value=({"page.html": "s3://x"}, {}))) as collect, \
+             patch.object(step, "_collect_items", AsyncMock(return_value=({"page.html": "s3://x"}, {}, []))) as collect, \
              patch("agent_env.providers.sandbox_providers.sandbox_provider.build_sandbox_provider",
                    return_value=provider):
-            collected, _ = _run(
+            collected, _, _ = _run(
                 step._collect_via_sandbox_container(self._context(), MagicMock(), "aid", 1)
             )
 
@@ -746,6 +824,180 @@ class TestControllerWire:
         with pytest.raises(EnvCapabilityUnsupported, match="does not offer 'step' on urn:agentenv:step/v1"):
             _run(step.execute(ctx))
         assert sent == []
+
+
+class TestControllerChunkedRead:
+    """`_controller_get_file` reads small files in one cua_get_file call and streams large
+    ones in byte ranges via cua_bash — so no single controller call has to move a ~500MB
+    file (the deliverable that silently vanished under the old single-shot read)."""
+
+    @staticmethod
+    def _fake_controller(data: bytes):
+        """Answer the three calls the reader makes against an in-VM file of `data`:
+        `wc -c` (size), `cua_get_file` (whole base64 body), and the `tail|head|base64`
+        ranged reads. Missing file -> empty `wc` output (size unknowable)."""
+        import base64 as b64
+        import re as _re
+
+        async def call(deployed_env, tool_name, arguments):
+            if tool_name == "cua_get_file":
+                return b64.b64encode(data).decode()
+            script = arguments["script"]
+            if "wc -c" in script:
+                out = "" if data is None else f"{len(data)}\n"
+                return json.dumps({"output": out, "error": "", "returncode": 0, "status": "success"})
+            m = _re.search(r"tail -c \+(\d+) .*head -c (\d+)", script)
+            start, length = int(m.group(1)) - 1, int(m.group(2))
+            # GNU base64 wraps at 76 cols; exercise that the reader strips it before decoding.
+            wrapped = "\n".join(
+                __import__("textwrap").wrap(b64.b64encode(data[start:start + length]).decode(), 76)
+            )
+            return json.dumps({"output": wrapped, "error": "", "returncode": 0})
+
+        return call
+
+    def test_small_file_uses_single_shot(self, monkeypatch):
+        import agent_env.task_step.task_steps.collect_artifacts as mod
+        monkeypatch.setattr(mod, "_CUA_SINGLE_SHOT_MAX", 16)
+        step = CollectArtifactsTaskStep(id="c", version=None, env_id="ubuntu-cua")
+        calls = []
+
+        async def call(deployed_env, tool_name, arguments):
+            calls.append(tool_name)
+            if "wc -c" in arguments.get("script", ""):
+                return json.dumps({"output": "5\n", "returncode": 0})
+            import base64 as b64
+            return b64.b64encode(b"hello").decode()
+
+        with patch.object(step, "_controller_call", side_effect=call):
+            out = _run(step._controller_get_file(_cua_record(), "/x/small.bin"))
+        assert _read_staged(out) == b"hello"
+        assert "cua_get_file" in calls  # single-shot, not chunked
+        assert not any("tail -c" in c for c in calls if isinstance(c, str))
+
+    def test_large_file_streams_and_reassembles(self, monkeypatch):
+        import agent_env.task_step.task_steps.collect_artifacts as mod
+        monkeypatch.setattr(mod, "_CUA_SINGLE_SHOT_MAX", 16)
+        monkeypatch.setattr(mod, "_CUA_CHUNK_BYTES", 7)  # force several ranges over the payload
+        data = bytes(range(256)) * 5  # 1280 bytes, well over the 16-byte single-shot ceiling
+        step = CollectArtifactsTaskStep(id="c", version=None, env_id="ubuntu-cua")
+        with patch.object(step, "_controller_call", side_effect=self._fake_controller(data)):
+            out = _run(step._controller_get_file(_cua_record(), "/x/big.mp4"))
+        assert _read_staged(out) == data  # every byte-range reassembled in order, base64 wrapping stripped
+
+    def test_large_file_is_uploaded_from_a_path_not_held_in_memory(self, monkeypatch):
+        """End-to-end: a large file streams to a temp file and the uploader reads it from that
+        path (bytes intact), rather than the whole file being buffered in memory."""
+        import agent_env.task_step.task_steps.collect_artifacts as mod
+        monkeypatch.setattr(mod, "_CUA_SINGLE_SHOT_MAX", 16)
+        monkeypatch.setattr(mod, "_CUA_CHUNK_BYTES", 8)
+        data = bytes(range(256)) * 4  # 1024 bytes, over the 16-byte single-shot ceiling
+        step = CollectArtifactsTaskStep(
+            id="collect-artifacts", version=None, env_id="ubuntu-cua",
+            base_path="/home/docker/Desktop", artifact_paths=["big.mp4"],
+        )
+        uploaded = {}
+        store = MagicMock()
+        store.next_version.return_value = 1
+
+        def put(**kw):
+            with open(kw["file_path"], "rb") as fh:  # the upload reads a real on-disk file
+                uploaded["bytes"] = fh.read()
+            return "s3://bucket/big.mp4"
+
+        store.put_object_file.side_effect = put
+        with patch.object(step, "_controller_call", side_effect=self._fake_controller(data)), \
+             patch("agent_env.artifact.store.get_artifact_store", return_value=store), \
+             patch("agent_env.artifact.FileArtifactUniverse") as universe:
+            universe.put.return_value = MagicMock(id="inst-1", version=1)
+            ctx = _run(step.execute(_cua_context()))
+        assert uploaded["bytes"] == data
+        assert ctx.metadata["artifacts"] == {"big.mp4": "s3://bucket/big.mp4"}
+
+    def test_truncated_stream_is_fatal(self, monkeypatch):
+        """If the ranged reads stop short of the stat size, fail loudly rather than upload a partial file."""
+        import agent_env.task_step.task_steps.collect_artifacts as mod
+        monkeypatch.setattr(mod, "_CUA_SINGLE_SHOT_MAX", 4)
+        monkeypatch.setattr(mod, "_CUA_CHUNK_BYTES", 4)
+        step = CollectArtifactsTaskStep(id="c", version=None, env_id="ubuntu-cua")
+
+        async def call(deployed_env, tool_name, arguments):
+            script = arguments["script"]
+            if "wc -c" in script:
+                return json.dumps({"output": "100\n", "returncode": 0})  # claims 100 bytes
+            return json.dumps({"output": "", "returncode": 0})  # but every range reads empty
+
+        with patch.object(step, "_controller_call", side_effect=call):
+            try:
+                _run(step._controller_get_file(_cua_record(), "/x/big.mp4"))
+                assert False, "expected RuntimeError on a short read"
+            except RuntimeError as e:
+                assert "refusing to upload a partial artifact" in str(e)
+
+    def test_absent_file_raises_filenotfound(self):
+        """A missing file (wc errors with 'No such file') is reported absent so the caller
+        skips it leniently."""
+        step = CollectArtifactsTaskStep(id="c", version=None, env_id="ubuntu-cua")
+
+        async def call(deployed_env, tool_name, arguments):
+            return json.dumps({"output": "", "error": "wc: /x: No such file or directory", "returncode": 1})
+
+        with patch.object(step, "_controller_call", side_effect=call):
+            try:
+                _run(step._controller_get_file(_cua_record(), "/x/missing.bin"))
+                assert False, "expected FileNotFoundError for an absent file"
+            except FileNotFoundError:
+                pass
+
+    def test_zero_byte_file_is_present_not_absent(self):
+        """`wc -c` prints 0 for an empty file; that's a present (size-0) file, not a missing one."""
+        step = CollectArtifactsTaskStep(id="c", version=None, env_id="ubuntu-cua")
+
+        async def call(deployed_env, tool_name, arguments):
+            if "wc -c" in arguments.get("script", ""):
+                return json.dumps({"output": "0\n", "error": "", "returncode": 0})
+            return ""  # cua_get_file for an empty file
+
+        with patch.object(step, "_controller_call", side_effect=call):
+            assert _read_staged(_run(step._controller_get_file(_cua_record(), "/x/empty.bin"))) == b""
+
+    def test_size_probe_error_raises_not_absent(self):
+        """A `wc` failure that is NOT 'file missing' (e.g. a permission/IO error) raises — it must
+        not be mistaken for an absent file, which would silently drop an existing deliverable."""
+        step = CollectArtifactsTaskStep(id="c", version=None, env_id="ubuntu-cua")
+
+        async def call(deployed_env, tool_name, arguments):
+            return json.dumps({"output": "", "error": "wc: /x: Permission denied", "returncode": 1})
+
+        with patch.object(step, "_controller_call", side_effect=call):
+            try:
+                _run(step._controller_file_size(_cua_record(), "/x/locked.bin"))
+                assert False, "expected RuntimeError, not a -1 'absent' result"
+            except RuntimeError as e:
+                assert "could not size" in str(e)
+            except FileNotFoundError:
+                assert False, "a non-missing wc error must not look like an absent file"
+
+    def test_size_probe_transport_error_is_fatal_not_a_missing_skip(self):
+        """If the controller times out running the size probe, the file may well exist — the step
+        fails (retryable) instead of skipping it as 'missing' and reporting success without it."""
+        step = CollectArtifactsTaskStep(
+            id="collect-artifacts", version=None, env_id="ubuntu-cua",
+            base_path="/home/docker/Desktop", artifact_paths=["deliverable.mp4"],
+        )
+        store = MagicMock()
+
+        async def call(deployed_env, tool_name, arguments):
+            raise RuntimeError("ReadTimeout")  # the wc -c size probe times out
+
+        with patch.object(step, "_controller_call", side_effect=call), \
+             patch("agent_env.artifact.store.get_artifact_store", return_value=store):
+            try:
+                _run(step.execute(_cua_context()))
+                assert False, "expected RuntimeError when the size probe errors"
+            except RuntimeError as e:
+                assert "could not be collected" in str(e)
+                assert "deliverable.mp4" in str(e)
 
 
 def _gateway_card(extensions: list = GATEWAY_EXTENSIONS) -> dict:

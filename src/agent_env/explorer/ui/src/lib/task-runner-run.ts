@@ -93,8 +93,6 @@ export interface InstancePoll {
   ids: Set<string>;
   /** The run the page was waiting on, once it appears; clears "Starting…". */
   startedInstanceId: string | null;
-  /** The newest completed instance, whose context seeds a re-run. */
-  latestCompleted: Instance | null;
 }
 
 /** Reconcile one GET /instances page against the last one; null when nothing shown changed. */
@@ -115,7 +113,6 @@ export function reconcileInstances(
     snapshot,
     ids: new Set(items.map(i => String(i.instance_id))),
     startedInstanceId: started ? String(started.instance_id) : null,
-    latestCompleted: items.find(i => i.status === 'completed') ?? null,
   };
 }
 

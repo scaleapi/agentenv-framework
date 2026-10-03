@@ -753,8 +753,8 @@ class PromptAgentTaskStep(TaskStep):
     _CAPTURE_BUDGET_SECONDS: ClassVar[float] = 90
 
     async def _persist_env_trigger_state(self, context: TaskStepContext) -> None:
-        """Snapshot each trigger-registered env's /triggers/state to S3 + a metadata summary.
-        Never raises and is bounded by _CAPTURE_BUDGET_SECONDS."""
+        """Snapshot each trigger-registered env's /triggers/state to the configured object store, plus a
+        metadata summary. Never raises and is bounded by _CAPTURE_BUDGET_SECONDS."""
         try:
             await asyncio.wait_for(
                 self._capture_env_trigger_state(context), timeout=self._CAPTURE_BUDGET_SECONDS)

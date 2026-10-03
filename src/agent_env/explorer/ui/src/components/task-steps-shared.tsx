@@ -109,11 +109,6 @@ export const JSON_FIELDS = new Set([
   'output_format',
 ]);
 
-export const EVALUATOR_STEP_TYPES = new Set<StepType>([
-  'rubrics_verifier',
-  'env_outcome_verifier',
-]);
-
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
 /* ------------------------------------------------------------------ */
