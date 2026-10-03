@@ -12,20 +12,12 @@ from agent_env.artifact.artifacts.skill import SkillArtifact
 from agent_env.artifact.store import reset_artifact_store
 from agent_env.config import configure, get_config, set_object_store
 from agent_env.env.snapshot_store import _snapshot_servicedb
-from agent_env.store.object_store.local_object_store import LocalFilesystemObjectStore
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.verifiers.judge_utils.trajectory_filter import TrajectoryFilter
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
+from tst.unit.store.fakes import SigningObjectStore
 
 _AGENT = SimpleNamespace(id="solver", version=3)
-
-
-class _SigningStore(LocalFilesystemObjectStore):
-    def signed_get_url(self, object_url: str, expires_in: int = 3600) -> str | None:
-        return f"https://objects.example.test/{self.get_object_key(object_url)}"
-
-    def signed_put_url(self, object_url: str, expires_in: int = 3600) -> str | None:
-        return f"https://objects.example.test/{self.get_object_key(object_url)}"
 
 
 @pytest.fixture
@@ -58,7 +50,7 @@ def test_a_cli_bundle_is_written_under_the_prefix(prefixed, tmp_path):
 
 
 def test_the_validator_fixtures_are_written_under_the_prefix(prefixed, tmp_path):
-    set_object_store(_SigningStore(str(tmp_path / "signing")))
+    set_object_store(SigningObjectStore(str(tmp_path / "signing")))
     store = get_config().get_object_store()
     skill_url = A2AAgentValidator._upload_skill_fixture(_AGENT, name="probe", description="d", body="b")
     assert skill_url == store.object_url("fx/a2a_validator/validator_skill/solver-v3/probe/")
@@ -90,7 +82,7 @@ class _Sandbox:
 
 
 def test_an_env_snapshot_is_uploaded_under_the_prefix(prefixed, tmp_path):
-    set_object_store(_SigningStore(str(tmp_path / "signing")))
+    set_object_store(SigningObjectStore(str(tmp_path / "signing")))
     sandbox = _Sandbox()
     url = asyncio.run(_snapshot_servicedb(sandbox, "slack-env", "acme", lambda *args: None))
     key = "fx/env-snapshots/slack-env/acme/env-snapshot-slack-env-acme.tar.gz"

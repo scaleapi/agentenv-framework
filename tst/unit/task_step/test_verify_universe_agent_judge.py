@@ -60,7 +60,7 @@ class TestFauId:
     def test_deterministic(self):
         a = VerifyUniverseLoadExportRoundtripStep.file_artifact_universe_id("env", 3, "uni", 7)
         b = VerifyUniverseLoadExportRoundtripStep.file_artifact_universe_id("env", 3, "uni", 7)
-        assert a == b == "validate-env-v3-uni-v7-fau"
+        assert a == b == "env__validate-v3-uni-v7-fau"
 
     def test_emit_flag_round_trips_through_serialization(self):
         s = VerifyUniverseLoadExportRoundtripStep(
@@ -212,8 +212,8 @@ class TestCreateFileArtifactUniverse:
 
         fau = step._create_file_artifact_universe(orig_sas, _FakeExportedUniverse(), export2_raw, env_version=3, universe_version=7)
 
-        assert fau.id == "validate-multi-x-v3-uni-v7-fau"
-        assert put_calls["id"] == "validate-multi-x-v3-uni-v7-fau"
+        assert fau.id == "multi-x__validate-v3-uni-v7-fau"
+        assert put_calls["id"] == "multi-x__validate-v3-uni-v7-fau"
 
         fa_map = put_calls["file_artifacts"]
         assert set(fa_map) == {
@@ -226,10 +226,10 @@ class TestCreateFileArtifactUniverse:
         assert fa_map["export_1/slack.json"].id == "fa-slack"
 
         # export_2 dumped losslessly: re-parses to the same object, unicode kept literal
-        slack_dumped = dumped["validate-multi-x-v3-uni-v7-export2-slack"]
+        slack_dumped = dumped["multi-x__validate-v3-uni-v7-export2-slack"]
         assert json.loads(slack_dumped) == export2_raw["slack"]
         assert "héllo" in slack_dumped  # ensure_ascii=False
-        assert json.loads(dumped["validate-multi-x-v3-uni-v7-export2-oracle_gl"]) == export2_raw["oracle_gl"]
+        assert json.loads(dumped["multi-x__validate-v3-uni-v7-export2-oracle_gl"]) == export2_raw["oracle_gl"]
 
 
 class TestFrontendContract:

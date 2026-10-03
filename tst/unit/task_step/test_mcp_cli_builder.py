@@ -90,7 +90,7 @@ def test_codegen_loads_sibling_env_file():
 
 def test_build_mcp_cli_step_dict_roundtrip():
     step = BuildMcpCliTaskStep(id="s1", version=None, env_id="slack-mcp", command_name="slack")
-    assert step.cli_artifact_id == "cli-slack-mcp"  # eager default
+    assert step.cli_artifact_id == "slack-mcp__cli"  # eager default
 
     payload = step.to_dict()
     cls = get_task_step_registry()["build_mcp_cli"]
@@ -99,7 +99,7 @@ def test_build_mcp_cli_step_dict_roundtrip():
     assert restored.id == "s1"
     assert restored.env_id == "slack-mcp"
     assert restored.command_name == "slack"
-    assert restored.cli_artifact_id == "cli-slack-mcp"
+    assert restored.cli_artifact_id == "slack-mcp__cli"
     assert restored.to_dict() == payload
 
 
@@ -253,7 +253,7 @@ async def test_a_cancel_mid_upload_leaves_the_bundle_to_the_upload(monkeypatch, 
             if "finished after its caller was cancelled" in caplog.text:
                 break
             await asyncio.sleep(0.02)
-    assert "Uploading CLI cli-slack-mcp finished after its caller was cancelled" in caplog.text
+    assert "Uploading CLI slack-mcp__cli finished after its caller was cancelled" in caplog.text
     assert not dirs[0].exists()
 
 

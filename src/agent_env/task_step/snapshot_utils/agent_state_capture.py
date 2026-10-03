@@ -29,6 +29,7 @@ from agent_env.a2a_agent.object_transfer import (
     trajectory_mode,
 )
 from agent_env.config import get_config
+from agent_env.store.ids import key_segment
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +81,7 @@ async def capture_workspace(
     snapshot_version = await asyncio.to_thread(get_artifact_store().next_version, artifact_id)
     config = get_config()
     capture_key_prefix = (
-        f"{config.get_artifact_key_prefix()}agent_snapshots/{artifact_id}/{snapshot_version}-{uuid.uuid4().hex[:8]}/"
+        f"{config.get_artifact_key_prefix()}agent_snapshots/{key_segment(artifact_id)}/{snapshot_version}-{uuid.uuid4().hex[:8]}/"
     )
     store = config.get_object_store()
     capture_prefix = store.object_url(capture_key_prefix)

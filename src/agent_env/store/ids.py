@@ -2,7 +2,8 @@
 
 An id opening ``@<namespace>/`` names the store it lives in; ``@local/…`` is the only namespace
 today. Documents keep an id verbatim. Everything derived from an ``@local`` id uses one bounded
-segment, ``local/<slug>-<sha256(id)[:12]>``, and every other id passes through byte-identical.
+segment, ``local/<slug>-<sha256(id)[:12]>``; an object key or image repository takes a bare id over
+200 bytes as ``<slug>-<sha256(id)[:12]>``; every other id passes through byte-identical.
 The encoders never raise: they expect ids that ``validate_local_id`` accepts, and still return a
 safe segment for any other input. An id may contain spaces, ``&`` and parentheses, so quote one
 before it reaches a shell or a URL, and derive object keys, image repositories and filenames with
@@ -19,6 +20,8 @@ from typing import Optional
 LOCAL_NAMESPACE = "local"
 LOCAL_PREFIX = f"@{LOCAL_NAMESPACE}/"
 MAX_LOCAL_ID_BYTES = 4096
+# A filesystem path component holds at most 255 bytes, so a bare id over this many gets a bounded segment.
+MAX_BARE_SEGMENT_BYTES = 200
 
 _SLUG_LENGTH = 48
 _HASH_LENGTH = 12
@@ -99,7 +102,11 @@ def aliases_local_encoding(entity_id: str) -> bool:
 
 def key_segment(entity_id: str) -> str:
     """The object-key segment for ``entity_id`` (``artifacts/<type>/<segment>/<version>/…``)."""
-    return _local_segment(entity_id) if is_local_id(entity_id) else entity_id
+    if is_local_id(entity_id):
+        return _local_segment(entity_id)
+    if len(entity_id.encode("utf-8", "surrogatepass")) > MAX_BARE_SEGMENT_BYTES:
+        return _local_segment(entity_id).removeprefix(f"{LOCAL_NAMESPACE}/")
+    return entity_id
 
 
 def image_repository(entity_id: str) -> str:
@@ -113,8 +120,10 @@ def fs_safe(entity_id: str) -> str:
     return _local_segment(entity_id).replace("/", "-", 1) if is_local_id(entity_id) else entity_id
 
 
-# The longest id derive_id makes is a skill's or CLI's per-file artifact, ``{id}__files__<16 hex>``,
-# so an authored id leaves room for those 25 bytes.
+# The longest chain derive_id makes on an authored skill or CLI id is its per-file artifact,
+# ``{id}__files__<16 hex>``, so an authored id leaves room for those 25 bytes. An id built on a derived id
+# (an env's ``{env}__cli``) or on a run's id can pass 4096 bytes; validate_local_id refuses it before anything
+# reaches a shared store.
 MAX_AUTHORED_LOCAL_ID_BYTES = MAX_LOCAL_ID_BYTES - len("__files__") - 16
 
 
