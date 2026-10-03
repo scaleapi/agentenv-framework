@@ -88,12 +88,17 @@ Changelog = "https://github.com/scaleapi/agentenv-framework/releases"
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_env"]
 # The explorer UI *source* lives at src/agent_env/explorer/ui/ (a Next.js project).
-# Keep it out of the wheel — only its built output ships, copied to explorer/static/
-# by the UI build step. node_modules/out/.next are already .gitignore-excluded.
+# Keep it out of the wheel — only its built output ships: the release copies the static
+# export to explorer/static/, which is git-ignored and so listed as an artifact.
 exclude = ["src/agent_env/explorer/ui"]
+artifacts = ["src/agent_env/explorer/static"]
 
 [tool.hatch.build.targets.sdist]
 only-include = ["src", "tst", "packages/agentenv-protocol", ".github/scripts"]
+# The UI ships as its built export, as in the wheel; its source stays in the repository. Hatch reads only the root
+# .gitignore, so including ui/ would pack a working tree's node_modules, build output and .env.local.
+exclude = ["src/agent_env/explorer/ui"]
+artifacts = ["src/agent_env/explorer/static"]
 
 [tool.uv.workspace]
 members = ["packages/agentenv-protocol"]

@@ -85,7 +85,7 @@ and deserialized through a registry.
 | `providers/` | `providers/sandbox_providers/` holds the sandbox providers `local`, `modal`, `modal_vm`, `e2b`; `[sandbox] default` and `agent_default` accept a comma-separated fallback chain. `providers/env_providers/` holds the environment providers: `EnvironmentProvider` (an env's containers and state store) and `EnvironmentGatewayProvider`, which renders a docker-compose for the gateway and its MCP servers inside the sandbox; `providers/env_state/` holds env-state providers (`local_postgres` built in). |
 | `a2a_agent/` | The `A2AAgent` entity (`a2a_agent`), its stores and the validator steps. The protocol package provides the agent-side framework. |
 | `runner/` | The `[runner]` seam: `Runner.submit()` returns `(run_id, instance_id)`; `LocalRunner` is built in. |
-| `explorer/` | Optional local web UI: `agent-env up`, needs the `explorer` extra, binds loopback `:8234`. |
+| `explorer/` | Optional local web UI: `agent-env up`, needs the `explorer` extra, binds loopback `:8234`. The UI's Next.js source is `explorer/ui/`; the release builds its static export into both distributions as `explorer/static/`, which is git-ignored, while the UI source stays in the repository; a source checkout without the export serves only the API. |
 | `cli/` | Click CLI with the groups `a2a-agent`, `artifact`, `config`, `env`, `eval`, `plugin`, `run`, `task`, `up`. |
 | `examples/` | The bundles agent-env ships (`hello`), registered under `agent_env.bundles` in `pyproject.toml`. Tests run them, but they are examples for users, not fixtures. |
 
