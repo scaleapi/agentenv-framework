@@ -148,12 +148,7 @@ export function TaskRunnerPage({
 
   /* --- run task --- */
   const buildRunBody = useCallback(
-    (opts?: RunOptions) =>
-      runBodyFor(
-        opts,
-        taskVersion,
-        new URLSearchParams(window.location.search).get('projectId'),
-      ),
+    (opts?: RunOptions) => runBodyFor(opts, taskVersion),
     [taskVersion],
   );
 

@@ -26,7 +26,6 @@ from agentenv_protocol.a2a_agent import (
 class EchoAgentConfig(AgentConfig):
     model: str | None = None
     system_prompt: str | None = None
-    project_id: str | None = None
     task_id: str | None = None
     model_params: WriteOnly[dict[str, Any] | None] = None
 

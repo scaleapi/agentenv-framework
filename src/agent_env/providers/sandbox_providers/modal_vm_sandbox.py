@@ -29,9 +29,7 @@ import modal
 
 from agent_env.providers.sandbox_providers.modal_sandbox import (
     _ModalProcessAdapter,
-    _app_name_for_project,
-    _build_cost_attribution_tags,
-    _build_sandbox_tags,
+    _attribution_tags,
     _log_sandbox_started,
     _resolve_app_base_name,
     _tunnel_url,
@@ -309,10 +307,10 @@ class ModalVmSandboxProvider(SandboxProvider):
         # disk_size_gb: Modal has no disk-size knob on Sandbox.create; a VM sandbox's rootfs is
         # fixed at the 512 GiB max. https://modal.com/docs/guide/vm-sandboxes
         attribution = dict(attribution or {})
-        app_tags = _build_cost_attribution_tags(attribution)
-        app_name = _app_name_for_project(self._app_name, app_tags.get("project_id"))
+        app_tags = _attribution_tags({})
+        sandbox_tags = _attribution_tags(attribution)
+        app_name = self._app_name
         app = await self._get_app(app_name, app_tags)
-        sandbox_tags = _build_sandbox_tags(attribution)
         client = await self._get_client()
         effective = self.effective_network_policy(network_policy)
         ports = list(exposed_ports or [])

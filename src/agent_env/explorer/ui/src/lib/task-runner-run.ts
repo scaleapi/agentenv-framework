@@ -32,7 +32,6 @@ function taskUrl(base: string, taskId: string): string {
 export function buildRunBody(
   opts: RunOptions | undefined,
   taskVersion: number | null,
-  projectId: string | null,
 ): Record<string, unknown> {
   const body: Record<string, unknown> = {};
   body.version = opts?.version ?? taskVersion ?? undefined;
@@ -45,8 +44,6 @@ export function buildRunBody(
   else if (opts?.context_json) body.context_json = opts.context_json;
   if (opts?.overrides_from_instance_id)
     body.overrides_from_instance_id = opts.overrides_from_instance_id;
-  // Only-if-truthy so "" can't defeat the backend fallback.
-  if (projectId) body.project_id = projectId;
   return body;
 }
 

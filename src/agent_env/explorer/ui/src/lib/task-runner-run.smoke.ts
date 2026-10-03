@@ -58,13 +58,11 @@ async function main(): Promise<void> {
   const TASK = '@local/agentenv-framework/hello/hello';
 
   // The request a run sends.
-  const body = buildRunBody({ start_step: 2, context_from_instance_id: 'i-1', context_json: { x: 1 } }, 3, '');
+  const body = buildRunBody({ start_step: 2, context_from_instance_id: 'i-1', context_json: { x: 1 } }, 3);
   assert(body.version === 3 && body.priority === 0, 'run body: task version, interactive priority');
   assert(body.start_step === 2, 'run body: start step');
   assert(body.context_from_instance_id === 'i-1' && !('context_json' in body), 'run body: instance context wins over inline context');
-  assert(!('project_id' in body), 'run body: an empty projectId is not sent');
-  assert(buildRunBody({ version: 5 }, 3, 'p-9').version === 5, 'run body: an explicit version wins');
-  assert(buildRunBody(undefined, null, 'p-9').project_id === 'p-9', 'run body: projectId is forwarded');
+  assert(buildRunBody({ version: 5 }, 3).version === 5, 'run body: an explicit version wins');
 
   // A run starts.
   const ok = fakeFetch(200, { workflow_id: 'local-abc', instance_id: 'i-2', status: 'QUEUED' });

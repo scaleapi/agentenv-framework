@@ -311,53 +311,6 @@ def _stamp_agent_env_client_metadata(context_metadata: dict, client_id: str | No
         context_metadata.setdefault("agent_env_hub", {}).setdefault("caller", client_id)
 
 
-# Step types whose execution path makes LiteLLM calls (directly or via a
-# deployed agent that consumes LITELLM_* env vars). Used to decide whether
-# the cost-attribution banner is relevant for a given task.
-_LITELLM_USING_STEP_TYPES: frozenset[str] = frozenset({
-    "deploy_agent",
-    "prompt_agent",
-    "rubrics_verifier",
-})
-
-
-def _task_uses_litellm(task) -> bool:
-    """True if any of the task's steps are known to make LiteLLM calls."""
-    return any(getattr(step, "type", None) in _LITELLM_USING_STEP_TYPES for step in task.steps)
-
-
-def _warn_missing_cost_attribution(
-    project_id: str | None,
-    task,
-) -> None:
-    """Yellow CLI banner when `--project-id` is missing on a LiteLLM task.
-
-    Project ID is the primary attribution dimension (it becomes the
-    LiteLLM `user` field that spend reporting joins on to derive the
-    customer). Skipped when the task has no LiteLLM-using
-    steps. Never blocks the run.
-    """
-    if project_id:
-        return
-    if not _task_uses_litellm(task):
-        return
-    click.echo(click.style(
-        "⚠  LiteLLM cost attribution is incomplete: --project-id not set.",
-        fg="yellow", bold=True,
-    ))
-    click.echo(click.style(
-        "   Runs will still start, but spend won't be tagged to a "
-        "project.",
-        fg="yellow",
-    ))
-    click.echo(click.style(
-        "   Pass --project-id <project-id> on your next run so the "
-        "cost shows up in your team's budget.",
-        fg="yellow",
-    ))
-    click.echo()
-
-
 async def _run_single(task, run_index, task_id, output_dir, agent_model=None, agent_artifact_id=None, start_step=0, context=None):
     """Execute a single parallel run."""
     tag = f"[run {run_index}] "
@@ -383,8 +336,6 @@ async def _run_single(task, run_index, task_id, output_dir, agent_model=None, ag
 @click.option("--a2a-agent-id", default=None, type=str, help="Override A2A agent id for deploy_agent steps")
 @click.option("--agent-sandbox", default=None,
               help="Override agent sandbox backend(s) for deploy_agent steps; comma-separated for fallback chain (e.g. 'modal,local')")
-@click.option("--project-id", "project_id", default=None, type=str,
-              help="Project id for LiteLLM cost attribution. Forwarded as the `user` field on every LLM call and as `projectId:<id>` in `metadata.tags`. Optional, but spend won't be attributed to a project without it.")
 @click.option("--env-sandbox", default=None,
               help="Override env sandbox backend(s) for deploy_env steps; comma-separated for fallback chain (e.g. 'modal,local')")
 @click.option("--gateway-env-id", default=None, type=str,
@@ -395,7 +346,7 @@ async def _run_single(task, run_index, task_id, output_dir, agent_model=None, ag
               help="Override the env state type for deploy_env steps")
 @click.option("--env-state-instance-id", default=None, type=str,
               help="Attach env to an existing EnvStateInstance")
-def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, agent_model: str | None, agent_artifact_id: str | None, start_step: int, context_json: str | None, litellm_api_key: str | None, judge_litellm_api_key: str | None, apply_trajectory_filter: bool | None, a2a_agent_id: str | None, agent_sandbox: str | None, project_id: str | None, env_sandbox: str | None, gateway_env_id: str | None, service_db_env_id: str | None, env_state_type: str | None, env_state_instance_id: str | None):
+def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, agent_model: str | None, agent_artifact_id: str | None, start_step: int, context_json: str | None, litellm_api_key: str | None, judge_litellm_api_key: str | None, apply_trajectory_filter: bool | None, a2a_agent_id: str | None, agent_sandbox: str | None, env_sandbox: str | None, gateway_env_id: str | None, service_db_env_id: str | None, env_state_type: str | None, env_state_instance_id: str | None):
     """Run a task by executing its steps sequentially."""
     if k < 1:
         raise click.BadParameter("must be at least 1", param_hint="'--k'")
@@ -438,15 +389,12 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
     if env_state_instance_id:
         initial_context.metadata.setdefault("user_overrides", {})["env_state_instance_id"] = env_state_instance_id
     initial_context.metadata["task_id"] = task_id
-    if project_id:
-        initial_context.metadata["project_id"] = project_id
 
     click.echo(f"Fetching task: id={task_id} version={task_version or 'latest'}...")
     task = Task.get(task_id, version=task_version)
     click.echo(f"Found task: id={task.id} version={task.version} steps={len(task.steps)}")
 
     print_banner()
-    _warn_missing_cost_attribution(project_id, task)
 
     if k > 1:
         # Parallel runs: compact output with [run N] prefixes
@@ -503,13 +451,11 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
               help="Override agent sandbox backend(s) for deploy_agent steps; comma-separated for fallback chain (e.g. 'modal,local')")
 @click.option("--env-sandbox", default=None,
               help="Override env sandbox backend(s) for deploy_env steps; comma-separated for fallback chain (e.g. 'modal,local')")
-@click.option("--project-id", "project_id", default=None, type=str,
-              help="Project id for LiteLLM cost attribution. Forwarded as the `user` field on every LLM call and as `projectId:<id>` in `metadata.tags`. Optional, but spend won't be attributed to a project without it.")
 @click.option("--env-state-type", default=None, type=str,
               help="Override the env state type for deploy_env steps")
 @click.option("--env-state-instance-id", default=None, type=str,
               help="Attach env to an existing EnvStateInstance")
-def run_batch(task_id: str, task_version: int | None, seeds: str, concurrency: int, output_dir: str | None, agent_model: str | None, agent_artifact_id: str | None, litellm_api_key: str | None, judge_litellm_api_key: str | None, apply_trajectory_filter: bool | None, agent_sandbox: str | None, env_sandbox: str | None, project_id: str | None, env_state_type: str | None, env_state_instance_id: str | None):
+def run_batch(task_id: str, task_version: int | None, seeds: str, concurrency: int, output_dir: str | None, agent_model: str | None, agent_artifact_id: str | None, litellm_api_key: str | None, judge_litellm_api_key: str | None, apply_trajectory_filter: bool | None, agent_sandbox: str | None, env_sandbox: str | None, env_state_type: str | None, env_state_instance_id: str | None):
     """Run a task in batch against multiple seeds from a CSV file.
 
     Each row in the CSV becomes a seed dict passed to the task via
@@ -538,7 +484,6 @@ def run_batch(task_id: str, task_version: int | None, seeds: str, concurrency: i
     click.echo()
 
     print_banner()
-    _warn_missing_cost_attribution(project_id, task)
 
     sem = asyncio.Semaphore(concurrency)
     batch_run_group_id = uuid4().hex
@@ -576,8 +521,6 @@ def run_batch(task_id: str, task_version: int | None, seeds: str, concurrency: i
             if env_state_instance_id:
                 ctx.metadata.setdefault("user_overrides", {})["env_state_instance_id"] = env_state_instance_id
             ctx.metadata["task_id"] = task_id
-            if project_id:
-                ctx.metadata["project_id"] = project_id
 
             click.echo(click.style(f"{tag} Starting...", fg="yellow"))
             context = await task.run(

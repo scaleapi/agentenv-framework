@@ -1329,11 +1329,6 @@ export function TaskDetailPage({
               taskId={String(task?.id ?? '')}
               taskVersion={Number(task?.version ?? 1)}
               taskSteps={steps}
-              taskProjectId={
-                typeof task?.project_id === 'string'
-                  ? (task.project_id as string)
-                  : undefined
-              }
               onStarted={handleStartedRuns}
               onCompleted={fetchRunGroups}
             />

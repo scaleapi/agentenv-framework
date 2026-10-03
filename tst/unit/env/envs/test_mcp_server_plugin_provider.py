@@ -108,12 +108,12 @@ def test_reading_a_stored_env_looks_up_no_environment_provider(monkeypatch):
 @pytest.mark.asyncio
 async def test_a_plugin_provider_gets_every_option_and_its_record_is_registered():
     env = _env()
-    record = await _deploy(env, ttl_seconds=60, cpu=2.0, priority=1, gateway_mode=GatewayMode.CONSISTENT, attribution={"project_id": "p"})
+    record = await _deploy(env, ttl_seconds=60, cpu=2.0, priority=1, gateway_mode=GatewayMode.CONSISTENT, attribution={"team": "t"})
 
     [(sandbox_provider, options)] = SEEN["deploys"]
     assert sandbox_provider == "SANDBOXES"
     assert options == {"ttl_seconds": 60, "disk_size_gb": 10, "gateway_mode": GatewayMode.CONSISTENT, "cpu": 2.0, "memory_mb": None,
-                       "priority": 1, "env_state_type": None, "env_state_instance_id": None, "attribution": {"project_id": "p"}}
+                       "priority": 1, "env_state_type": None, "env_state_instance_id": None, "attribution": {"team": "t"}}
     assert (record.instance_id, env._instance_id, env._deployed, env._sandbox, env._gateway_url) == ("inst-1", "inst-1", record, None, None)
 
 
@@ -252,8 +252,8 @@ class _NamedOptionsProvider(EnvironmentProvider):
 async def test_a_plugin_that_names_its_options_gets_those_and_the_rest_left_at_their_defaults():
     env = _env("plugin_named")
     env._env_provider = _NamedOptionsProvider()
-    await _deploy(env, ttl_seconds=60, attribution={"project_id": "p"})
-    assert SEEN["deploys"] == [("SANDBOXES", {"ttl_seconds": 60, "attribution": {"project_id": "p"}})]
+    await _deploy(env, ttl_seconds=60, attribution={"team": "t"})
+    assert SEEN["deploys"] == [("SANDBOXES", {"ttl_seconds": 60, "attribution": {"team": "t"}})]
 
 
 @pytest.mark.asyncio

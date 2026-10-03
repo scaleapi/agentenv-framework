@@ -36,6 +36,7 @@ MODAL_APP_NAME_ENV_VAR = "AGENT_ENV_MODAL_APP_NAME"
 ECR_READER_SECRET_KEYS = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION"]
 
 _MODAL_TAG_MAX_LEN = 63
+_MODAL_TAG_KEY = re.compile(r"[a-zA-Z0-9._-]{1,63}")
 
 
 def _resolve_app_base_name(app_name: Optional[str]) -> str:
@@ -203,9 +204,7 @@ class ModalSandboxProvider(SandboxProvider):
         # cannot attach a GPU. V1 has no ``i6pn``, so a GPU sandbox has no private-IPv6
         # east-west networking (fine for a single sandbox; not for an i6pn mesh).
         self._gpu = gpu
-        # One Modal App per attribution scope (keyed by project_id), looked up on demand.
-        # Billing aggregates per App and the dashboard is browsable by App name, so a
-        # scope-named, scope-tagged App is what makes cost both attributable and findable.
+        # Looked up on demand and cached by name.
         self._apps: dict[str, modal.App] = {}
 
     async def _get_client(self) -> modal.Client:
@@ -255,15 +254,12 @@ class ModalSandboxProvider(SandboxProvider):
         effective = self.effective_network_policy(network_policy)
         attribution = dict(attribution or {})
 
-        # Place the sandbox under a per-project App: Modal billing aggregates cost per App and
-        # the dashboard is browsable by App name, so a scope-named, scope-tagged App is what
-        # makes cost both attributable and findable. We attribute at the App level only —
-        # sandbox-level tags don't show up in billing.
-        app_tags = _build_cost_attribution_tags(attribution)
-        app_name = _app_name_for_project(self._app_name, app_tags.get("project_id"))
+        # Modal bills by App tags, and the one shared App is tagged once, so it carries only the
+        # deployment's [sandbox.attribution]; the run's own attribution goes on its sandbox.
+        app_tags = _attribution_tags({})
+        sandbox_tags = _attribution_tags(attribution)
+        app_name = self._app_name
         app = await self._get_app(app_name, app_tags)
-        # Not in billing (see above); makes sandboxes filterable by the step that deployed them.
-        sandbox_tags = _build_sandbox_tags(attribution)
 
         image_store = get_config().get_image_store_at(image_name)
         from agent_env.store.image_store import (
@@ -406,56 +402,17 @@ class ModalSandboxProvider(SandboxProvider):
         return self._sandbox_cls(sb, tunnel_urls, i6pn_address=i6pn_address)
 
 
-def _app_name_for_project(base: str, project_id: Optional[str]) -> str:
-    """Map a project_id to a stable Modal App name for per-project cost attribution.
-
-    The app name is what shows up (and is searchable) in the Modal dashboard, so it encodes
-    the project. Names are sanitized to ``[a-zA-Z0-9._-]``, kept under Modal's 64-char limit,
-    and not double-prefixed when ``project_id`` already starts with ``base``. Falls back to
-    ``base`` when no project_id is available.
-    """
-    if not project_id:
-        return base
-    slug = re.sub(r"[^a-zA-Z0-9._-]", "-", project_id).strip("-") or base
-    name = slug if (slug == base or slug.startswith(f"{base}-")) else f"{base}-{slug}"
-    if len(name) > 64:
-        logger.warning(
-            f"Modal app name for project_id={project_id!r} exceeds 64 chars; truncating to "
-            f"{name[:64]!r}. Distinct project_ids that share this prefix will be cost-attributed "
-            f"together."
-        )
-        name = name[:64]
-    return name
-
-
-def _build_cost_attribution_tags(attribution: Attribution) -> dict[str, str]:
-    """Build the Modal App tag set used for cost attribution.
-
-    Unset dimensions fall back to config.toml ``[sandbox.attribution]``; a dimension with
-    no value anywhere is omitted rather than emitted as a null tag. Returns a flat
-    ``dict[str, str]`` for ``modal.App.set_tags``. (priority is a scheduling concern,
-    not attribution, so it is not included here.)
-    """
-    resolved = apply_default_attribution(attribution)
-    return {
-        name: resolved[name]
-        for name in ("product", "customer", "team", "project_id")
-        if resolved.get(name) is not None
-    }
-
-
-def _build_sandbox_tags(attribution: Attribution) -> dict[str, str]:
-    """Build the Modal Sandbox tag set: ``pipeline_step`` and ``run_id``, each when set.
-
-    Modal rejects the whole create on an invalid tag, so values are sanitized to
-    ``[a-zA-Z0-9._-]``; past Modal's 63-char limit a value keeps a prefix plus a hash of the
-    full value, so steps of a long-named task still get distinct tags.
-    """
-    return {
-        key: _modal_tag_value(attribution[key])
-        for key in (PIPELINE_STEP_KEY, RUN_ID_KEY)
-        if attribution.get(key)
-    }
+def _attribution_tags(attribution: Attribution) -> dict[str, str]:
+    """``attribution`` as Modal tags, any keys: unset ones filled from config.toml
+    ``[sandbox.attribution]``, None omitted. A key Modal can't take is refused, not rewritten."""
+    tags = {}
+    for key, value in apply_default_attribution(attribution).items():
+        if value is None:
+            continue
+        if not _MODAL_TAG_KEY.fullmatch(key):
+            raise ValueError(f"attribution key {key!r} can't be a Modal tag: use 1-63 of a-z A-Z 0-9 . _ -")
+        tags[key] = _modal_tag_value(value)
+    return tags
 
 
 SANDBOX_STARTED_EVENT = "agent_env.modal_sandbox_started"
@@ -484,7 +441,9 @@ async def _log_sandbox_started(
             "modal_sandbox_id": sb.object_id,
             "modal_container_id": container_id,
             "modal_app_name": app_name,
-            **sandbox_tags,
+            "modal_sandbox_tags": sandbox_tags,
+            PIPELINE_STEP_KEY: sandbox_tags.get(PIPELINE_STEP_KEY),
+            RUN_ID_KEY: sandbox_tags.get(RUN_ID_KEY),
             "cpu": cpu,
             "memory_mb": memory,
             "gpu": gpu,
@@ -493,6 +452,8 @@ async def _log_sandbox_started(
 
 
 def _modal_tag_value(value: str) -> str:
+    """Modal rejects the whole create on an invalid tag, so ``value`` is cut to ``[a-zA-Z0-9._-]``;
+    past 63 chars it keeps a prefix plus a hash of the whole, so long values stay distinct."""
     slug = re.sub(r"[^a-zA-Z0-9._-]", "-", value)
     if len(slug) > _MODAL_TAG_MAX_LEN:
         digest = hashlib.sha256(value.encode()).hexdigest()[:8]

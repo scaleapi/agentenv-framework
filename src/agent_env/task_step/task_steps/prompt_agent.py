@@ -402,7 +402,6 @@ class PromptAgentTaskStep(TaskStep):
             "harness": harness, "max_turns": max_turns,
             "max_thinking_tokens": max_thinking_tokens,
             "output_format": self.output_format, "timeout_seconds": self.timeout_seconds,
-            "project_id": context.metadata.get("project_id"),
             "task_id": context.metadata.get("task_id"),
             "agentenv_tools": self.agentenv_tools,
         }

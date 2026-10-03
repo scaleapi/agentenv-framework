@@ -300,13 +300,6 @@ class DeployAgentTaskStep(TaskStep):
         if resolved_litellm_base_url:
             env_vars["LITELLM_BASE_URL"] = resolved_litellm_base_url
 
-        # Cost-attribution (project_id / task_id) is delivered per-prompt
-        # via the A2A `/ext/agent-config` extension from prompt_agent.py —
-        # not baked as container env vars at deploy time. See
-        # the openai_agents_sdk A2A agent in the universe-generation pipeline
-        # for the reference implementation that reads agent-config and threads
-        # `user` / `metadata.tags` into each LiteLLM call.
-
         resolved_sandbox_type = user_overrides.get("agent_sandbox") or self.sandbox_type
         deploy_kwargs = {"env_vars": env_vars if env_vars else None}
         if agent_disk_size_gb is not None:

@@ -155,7 +155,7 @@ def test_a_new_user_installs_agent_env_adds_plugins_runs_a_task_and_removes_them
         assert GRADER not in container.ok("agent-env", "plugin", "list").stdout
         container.ok("agent-env", "plugin", "add", grader, "--yes")
 
-        container.ok("agent-env", "task", "create", "task.json", "--id", "journey", "--project-id", "journey")
+        container.ok("agent-env", "task", "create", "task.json", "--id", "journey")
         container.ok("agent-env", "task", "run", "--id", "journey", "--output-dir", "/work/out")
         (context,) = (journey.work / "out").glob("*.json")
         metadata = json.loads(context.read_text())["metadata"]
@@ -166,7 +166,7 @@ def test_a_new_user_installs_agent_env_adds_plugins_runs_a_task_and_removes_them
         assert blocked.returncode == 1 and "stored task(s) use its step types (toy_navigate)" in blocked.stderr
         container.ok("agent-env", "plugin", "remove", BROWSER, "--yes", "--force")
 
-        gone = container.run("agent-env", "task", "create", "task.json", "--id", "again", "--project-id", "journey")
+        gone = container.run("agent-env", "task", "create", "task.json", "--id", "again")
         assert gone.returncode != 0 and "Unknown task step type: toy_navigate" in gone.stdout + gone.stderr
     finally:
         container.remove()

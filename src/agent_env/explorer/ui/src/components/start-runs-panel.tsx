@@ -60,7 +60,6 @@ interface StartRunsPanelProps {
   taskId: string;
   taskVersion: number;
   taskSteps?: ReadonlyArray<Record<string, unknown>>;
-  taskProjectId?: string;
   onStarted?: () => void;
   onCompleted?: () => void;
 }
@@ -81,15 +80,11 @@ export function StartRunsPanel({
   taskId,
   taskVersion,
   taskSteps,
-  taskProjectId,
   onStarted,
   onCompleted,
 }: StartRunsPanelProps) {
   const [persisted] = useState<PersistedConfig>(loadPersistedConfig);
 
-  const [projectId, setProjectId] = useState<string>(
-    taskProjectId?.trim() ?? '',
-  );
   const [agentModel, setAgentModel] = useState<string>(
     persisted.agent_model ?? '',
   );
@@ -398,7 +393,6 @@ export function StartRunsPanel({
     const submitSeeds = requiresSeeds ? seeds ?? undefined : undefined;
     await startRuns({
       version: taskVersion,
-      projectId: projectId.trim() || undefined,
       overrides: buildOverrides(),
       count: submitSeeds ? undefined : parsedCount ?? undefined,
       seeds: submitSeeds,
@@ -408,7 +402,6 @@ export function StartRunsPanel({
     canStart,
     startRuns,
     taskVersion,
-    projectId,
     buildOverrides,
     requiresSeeds,
     seeds,

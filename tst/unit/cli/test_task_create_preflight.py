@@ -41,7 +41,7 @@ def store(monkeypatch):
 
 def _run(tmp_path, *extra):
     return CliRunner().invoke(create, [
-        str(_task_file(tmp_path)), "--id", "t", "--project-id", "p", *extra,
+        str(_task_file(tmp_path)), "--id", "t", *extra,
     ])
 
 

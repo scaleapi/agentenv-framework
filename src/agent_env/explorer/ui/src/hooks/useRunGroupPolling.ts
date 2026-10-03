@@ -16,7 +16,6 @@ export interface RunOverrides {
 
 interface StartRunsConfig {
   version: number;
-  projectId?: string;
   overrides?: RunOverrides;
   count?: number;
   seeds?: Record<string, string>[];
@@ -96,7 +95,6 @@ export function useRunGroupPolling(taskId: string) {
       const body: Record<string, unknown> = {
         version: config.version,
       };
-      if (config.projectId) body.project_id = config.projectId;
       if (config.overrides && Object.keys(config.overrides).length > 0) {
         body.overrides = config.overrides;
       }
