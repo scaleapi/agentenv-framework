@@ -291,7 +291,6 @@ class RubricsVerifierTaskStep(TaskStep):
         use_trajectory: bool = True,
         judge_a2a_agent_id: Optional[str] = None,
         judge_sandbox_type: Optional[str] = None,
-        judge_priority: Optional[int] = None,
         judge_timeout_seconds: Optional[int] = None,
         output_format: JudgeOutputFormat | str = JudgeOutputFormat.RUBRIC_BINARY,
         grading_policy_prompt: Optional[str] = None,
@@ -337,7 +336,6 @@ class RubricsVerifierTaskStep(TaskStep):
         self.use_trajectory = use_trajectory
         self.judge_a2a_agent_id = judge_a2a_agent_id
         self.judge_sandbox_type = judge_sandbox_type
-        self.judge_priority = judge_priority
         self.judge_timeout_seconds = judge_timeout_seconds or self.DEFAULT_JUDGE_TIMEOUT_SECONDS
         if self.default_model_api_base and self.use_agent_judge:
             # Agent judges route through their deployed runtime, so this direct-judge
@@ -409,7 +407,6 @@ class RubricsVerifierTaskStep(TaskStep):
         base["use_trajectory"] = self.use_trajectory
         base["judge_a2a_agent_id"] = self.judge_a2a_agent_id
         base["judge_sandbox_type"] = self.judge_sandbox_type
-        base["judge_priority"] = self.judge_priority
         base["judge_timeout_seconds"] = self.judge_timeout_seconds
         base["output_format"] = self.output_format.value
         base["grading_policy_prompt"] = self.grading_policy_prompt
@@ -438,7 +435,6 @@ class RubricsVerifierTaskStep(TaskStep):
             use_trajectory=data.get("use_trajectory", True),
             judge_a2a_agent_id=data.get("judge_a2a_agent_id"),
             judge_sandbox_type=data.get("judge_sandbox_type"),
-            judge_priority=data.get("judge_priority"),
             judge_timeout_seconds=data.get("judge_timeout_seconds"),
             output_format=data.get("output_format", "rubric_binary"),
             grading_policy_prompt=data.get("grading_policy_prompt"),
@@ -588,10 +584,6 @@ class RubricsVerifierTaskStep(TaskStep):
                 resolved_sandbox_type = overrides.get("agent_sandbox") or self.judge_sandbox_type
                 if resolved_sandbox_type:
                     deploy_kwargs["sandbox_type"] = resolved_sandbox_type
-                _priority_override = overrides.get("priority")
-                resolved_priority = _priority_override if _priority_override is not None else self.judge_priority
-                if resolved_priority is not None:
-                    deploy_kwargs["priority"] = resolved_priority
                 auto_deployed_judge = await a2a_agent.deploy(**deploy_kwargs)
                 judge_a2a_url = auto_deployed_judge.a2a_url
                 judge_sandbox_id = auto_deployed_judge.sandbox_id

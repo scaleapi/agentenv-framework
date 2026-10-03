@@ -26,8 +26,6 @@ DEFAULT_TTL_SECONDS = 10800  # 3 hours
               help="Override default_service_db_env_id (on Modal its images must be in the configured image store)")
 @click.option("--gateway", "gateway_env_id", default=None,
               help="Override default_gateway_env_id")
-@click.option("--priority", type=int, default=0, show_default=True,
-              help="Sandbox priority: 0=interactive, 1=non_interactive (honoured by backends with priority tiers)")
 @click.option("--disk-size-gb", type=float, default=10.0, show_default=True,
               help="Sandbox VM disk size in GB. Large universes (e.g. github/gdrive "
                    "root file trees) need more than the 10GB default.")
@@ -48,7 +46,7 @@ DEFAULT_TTL_SECONDS = 10800  # 3 hours
 @click.option("--env-state-instance-id", default=None,
               help="Attach against an EXISTING env state instance instead of creating a fresh store "
                    "(its own type selects the provider).")
-def deploy(env_id: str, env_version: int | None, ttl_seconds: int, gateway_mode: str, sandbox: str, service_db_env_id: str | None, gateway_env_id: str | None, priority: int, disk_size_gb: float, cpu: float | None, memory_mb: int | None, env_state_type: str | None, env_state_instance_id: str | None):
+def deploy(env_id: str, env_version: int | None, ttl_seconds: int, gateway_mode: str, sandbox: str, service_db_env_id: str | None, gateway_env_id: str | None, disk_size_gb: float, cpu: float | None, memory_mb: int | None, env_state_type: str | None, env_state_instance_id: str | None):
     """Deploy an MCP server environment."""
     from agent_env.providers import build_sandbox_provider
     from agent_env.config import get_config
@@ -75,7 +73,7 @@ def deploy(env_id: str, env_version: int | None, ttl_seconds: int, gateway_mode:
     cpu_note = f", cpu={cpu}" if cpu else ""
     mem_note = f", memory={memory_mb}MB" if memory_mb else ""
     click.echo(f"Deploying (ttl={ttl_seconds}s, gateway_mode={mode.value}, disk={disk_size_gb}GB{cpu_note}{mem_note})...")
-    deploy_kwargs = dict(ttl_seconds=ttl_seconds, gateway_mode=mode, sandbox_type=sandbox, priority=priority, disk_size_gb=disk_size_gb)
+    deploy_kwargs = dict(ttl_seconds=ttl_seconds, gateway_mode=mode, sandbox_type=sandbox, disk_size_gb=disk_size_gb)
     if cpu is not None:
         deploy_kwargs["cpu"] = cpu
     if memory_mb is not None:

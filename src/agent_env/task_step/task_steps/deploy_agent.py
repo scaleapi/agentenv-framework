@@ -116,7 +116,6 @@ class DeployAgentTaskStep(TaskStep):
         agent_snapshot_files_artifact_id: Optional[str] = None,
         agent_snapshot_files_artifact_version: Optional[int] = None,
         agent_snapshot_target_context_id: Optional[str] = None,
-        priority: Optional[int] = None,
         network_policy: Optional[dict] = None,
         role: Optional[str] = None,
         enable_agent_changelog: bool = False,
@@ -148,7 +147,6 @@ class DeployAgentTaskStep(TaskStep):
         self.agent_snapshot_files_artifact_id = agent_snapshot_files_artifact_id
         self.agent_snapshot_files_artifact_version = agent_snapshot_files_artifact_version
         self.agent_snapshot_target_context_id = agent_snapshot_target_context_id
-        self.priority = priority
         self.metadata = metadata or {}
         self.network_policy = NetworkPolicy.from_dict(network_policy).to_dict() if network_policy else None
         self.role = role
@@ -191,7 +189,6 @@ class DeployAgentTaskStep(TaskStep):
         base["agent_snapshot_files_artifact_id"] = self.agent_snapshot_files_artifact_id
         base["agent_snapshot_files_artifact_version"] = self.agent_snapshot_files_artifact_version
         base["agent_snapshot_target_context_id"] = self.agent_snapshot_target_context_id
-        base["priority"] = self.priority
         base["metadata"] = self.metadata
         base["network_policy"] = self.network_policy
         base["role"] = self.role
@@ -225,7 +222,6 @@ class DeployAgentTaskStep(TaskStep):
             agent_snapshot_files_artifact_id=data.get("agent_snapshot_files_artifact_id"),
             agent_snapshot_files_artifact_version=data.get("agent_snapshot_files_artifact_version"),
             agent_snapshot_target_context_id=data.get("agent_snapshot_target_context_id"),
-            priority=data.get("priority"),
             metadata=dict(data.get("metadata") or {}),
             network_policy=data.get("network_policy"),
             role=data.get("role"),
@@ -320,10 +316,6 @@ class DeployAgentTaskStep(TaskStep):
         if self.memory_mb is not None:
             deploy_kwargs["memory"] = self.memory_mb
         deploy_kwargs["attribution"] = deploy_attribution(self, context)
-        _priority_override = user_overrides.get("priority")
-        resolved_priority = _priority_override if _priority_override is not None else self.priority
-        if resolved_priority is not None:
-            deploy_kwargs["priority"] = resolved_priority
         _policy_override = user_overrides.get("network_policy")
         resolved_policy = _policy_override if _policy_override is not None else self.network_policy
         if resolved_policy is not None:

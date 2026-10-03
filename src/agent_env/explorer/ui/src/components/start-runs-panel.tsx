@@ -364,8 +364,8 @@ export function StartRunsPanel({
   }, [extraOverridesJson]);
 
   const buildOverrides = useCallback((): RunOverrides => {
-    // priority=0 (interactive): a human watches the live stream. Freeform extras can override (e.g. {"priority":1}); dropdowns win last.
-    const o = { priority: 0, ...extraOverrides } as RunOverrides;
+    // Freeform extras first; the dropdowns win.
+    const o = { ...extraOverrides } as RunOverrides;
     if (agentModel.trim()) o.agent_model = agentModel.trim();
     if (agentArtifactId.trim()) o.agent_artifact_id = agentArtifactId.trim();
     if (a2aAgentId.trim()) o.a2a_agent_id = a2aAgentId.trim();

@@ -416,7 +416,6 @@ class A2AAgent:
         sandbox_type: str | None = None,
         sandbox: Sandbox | None = None,
         enable_docker: bool = False,
-        priority: Optional[int] = None,
         network_policy: NetworkPolicy | None = None,
         *,
         attribution: Optional[Attribution] = None,
@@ -449,7 +448,7 @@ class A2AAgent:
                     image_name=image_name, port=a2a_port, env=merged_env,
                     cpu=cpu, memory=memory, disk_size_gb=disk_size_gb, timeout=ttl_seconds,
                     attribution=attribution,
-                    priority=priority, network_policy=network_policy,
+                    network_policy=network_policy,
                 )
                 self._owns_sandbox = True
                 logger.info(f"Sandbox created: {self._sandbox.sandbox_id} (mode={self._sandbox.mode})")

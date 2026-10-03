@@ -59,7 +59,7 @@ async function main(): Promise<void> {
 
   // The request a run sends.
   const body = buildRunBody({ start_step: 2, context_from_instance_id: 'i-1', context_json: { x: 1 } }, 3, '');
-  assert(body.version === 3 && body.priority === 0, 'run body: task version, interactive priority');
+  assert(body.version === 3, 'run body: task version');
   assert(body.start_step === 2, 'run body: start step');
   assert(body.context_from_instance_id === 'i-1' && !('context_json' in body), 'run body: instance context wins over inline context');
   assert(!('project_id' in body), 'run body: an empty projectId is not sent');

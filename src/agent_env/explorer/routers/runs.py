@@ -52,7 +52,6 @@ class RunRequest(BaseModel):
     step_overrides: Optional[dict] = None
     overrides: Optional[dict] = None
     project_id: Optional[str] = None
-    priority: Optional[int] = None
     # Accepted but ignored: the local explorer gets models from the [model] config, not a
     # per-request key; declared so a client that always sends them isn't rejected.
     litellm_api_key: Optional[str] = None
@@ -113,10 +112,8 @@ def _run_metadata(body: "RunRequest") -> dict:
     # Seed from any user_overrides already in metadata — a re-run inherits the prior
     # instance's — so the explicit fields merge into them rather than replacing the lot.
     user_overrides = {**(metadata.get("user_overrides") or {}), **(body.overrides or {})}
-    for key in ("project_id", "priority"):
-        value = getattr(body, key)
-        if value is not None:
-            user_overrides[key] = value
+    if body.project_id is not None:
+        user_overrides["project_id"] = body.project_id
     # The steps read `step_params` (TaskStep.step_param_overrides); the request field is
     # named differently. Writing the request name through dropped every override.
     if body.step_overrides is not None:
