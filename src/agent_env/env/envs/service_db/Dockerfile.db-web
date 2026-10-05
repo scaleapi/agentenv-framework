@@ -1,8 +1,7 @@
 # Official pgweb image, pulled from its public GitHub Container Registry mirror.
 # We avoid Docker Hub because anonymous pulls are rate-limited per IP (429s from
-# CodeBuild's shared NAT). ghcr.io hosts the same image (identical digest) with
-# no anonymous rate limit and no auth required, so no private ECR mirror is
-# needed. The digest matches docker.io/sosedoff/pgweb:0.16.2. To bump: pick a
+# CI runners behind a shared NAT). ghcr.io hosts the same image (identical
+# digest) with no anonymous rate limit and no auth required. The digest matches docker.io/sosedoff/pgweb:0.16.2. To bump: pick a
 # new tag from https://github.com/sosedoff/pgweb/pkgs/container/pgweb and update
 # the tag + digest here.
 FROM ghcr.io/sosedoff/pgweb:0.16.2@sha256:8f1ed22e10c9da0912169b98b62ddc54930dc39a5ae07b0f1354d2a93d44c6ed

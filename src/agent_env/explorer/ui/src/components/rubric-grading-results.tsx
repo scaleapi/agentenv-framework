@@ -35,7 +35,7 @@ export interface VerificationResult {
 }
 
 export interface VerifierOutput {
-  /** Stamped by agent-env rubrics_verifier (PR1 judge output format registry). */
+  /** Stamped by agent-env rubrics_verifier (judge output format registry). */
   format?: JudgeOutputFormat;
   results: VerificationResult[];
   score: number;

@@ -408,7 +408,6 @@ class PromptAgentTaskStep(TaskStep):
             "harness": harness, "max_turns": max_turns,
             "max_thinking_tokens": max_thinking_tokens,
             "output_format": self.output_format, "timeout_seconds": self.timeout_seconds,
-            "project_id": context.metadata.get("project_id"),
             "task_id": context.metadata.get("task_id"),
             "agentenv_tools": self.agentenv_tools,
         }
@@ -720,7 +719,7 @@ class PromptAgentTaskStep(TaskStep):
             )
         # Fetched by a2a_server_task_id, the id the A2A server produced; stored under
         # target_a2a_task_id, the client message id persisted on the conversation as
-        # a2a_task_id, so the FE can resolve it (#731).
+        # a2a_task_id, so the FE can resolve it.
         upload = None
         if mode == "objects":
             upload = await asyncio.to_thread(
@@ -763,8 +762,8 @@ class PromptAgentTaskStep(TaskStep):
     _CAPTURE_BUDGET_SECONDS: ClassVar[float] = 90
 
     async def _persist_env_trigger_state(self, context: TaskStepContext) -> None:
-        """Snapshot each trigger-registered env's /triggers/state to S3 + a metadata summary.
-        Never raises and is bounded by _CAPTURE_BUDGET_SECONDS."""
+        """Snapshot each trigger-registered env's /triggers/state to the configured object store, plus a
+        metadata summary. Never raises and is bounded by _CAPTURE_BUDGET_SECONDS."""
         try:
             await asyncio.wait_for(
                 self._capture_env_trigger_state(context), timeout=self._CAPTURE_BUDGET_SECONDS)

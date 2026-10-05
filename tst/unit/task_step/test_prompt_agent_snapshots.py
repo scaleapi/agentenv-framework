@@ -700,7 +700,7 @@ async def test_the_final_capture_publishes_the_universe_for_load_artifact(monkey
     await _series(env_id="env-1").finish(ctx)
 
     # Keyed on the step id, so a judge step can be wired to this prompt step
-    # without knowing it snapshots. `load_artifact` resolves it once #746 lands.
+    # without knowing it snapshots. `load_artifact` resolves it.
     assert ctx.metadata["env_snapshotted_universes"]["solve"] == {
         "id": f"snapshot-env-1-{DISCRIMINATOR}",
         "version": 4,

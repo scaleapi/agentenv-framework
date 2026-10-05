@@ -12,21 +12,11 @@ from agent_env.plugins import _registration
 @click.argument("filepath", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--id", "task_id", required=True, help="Task id")
 @click.option(
-    "--project-id",
-    "project_id",
-    required=True,
-    help=(
-        "Project id for LiteLLM cost attribution. Required for new "
-        "tasks; tasks created before this requirement landed run without "
-        "one and the runner falls back to manual attribution."
-    ),
-)
-@click.option(
     "--skip-validation",
     is_flag=True,
     help="Save even if preflight finds problems (they are printed either way).",
 )
-def create(filepath: Path, task_id: str, project_id: str, skip_validation: bool):
+def create(filepath: Path, task_id: str, skip_validation: bool):
     """Create a task from a JSON file containing step definitions.
 
     \b
@@ -48,7 +38,7 @@ def create(filepath: Path, task_id: str, project_id: str, skip_validation: bool)
 
     built = _build_steps(steps)
     _report_preflight(
-        Task(id=task_id, version=None, steps=[s for _, s in built], project_id=project_id),
+        Task(id=task_id, version=None, steps=[s for _, s in built]),
         skip_validation,
     )
 
@@ -58,8 +48,8 @@ def create(filepath: Path, task_id: str, project_id: str, skip_validation: bool)
         click.echo(f"  Step {i + 1}/{len(built)}: {step.type} id={saved.id} version={saved.version}")
         task_steps.append(saved)
 
-    click.echo(f"Creating task '{task_id}' with {len(task_steps)} steps (project_id={project_id})...")
-    task = Task.put(id=task_id, steps=task_steps, project_id=project_id)
+    click.echo(f"Creating task '{task_id}' with {len(task_steps)} steps...")
+    task = Task.put(id=task_id, steps=task_steps)
     click.echo(f"Created task: id={task.id} version={task.version} steps={len(task.steps)}")
 
 

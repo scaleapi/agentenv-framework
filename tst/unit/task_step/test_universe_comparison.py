@@ -1,7 +1,6 @@
 """Unit tests for the universe load/export roundtrip comparison.
 
-Locks in the semantic-comparison behavior, including the two correctness fixes
-from PR #403 review:
+Locks in the semantic-comparison behavior, including two correctness cases:
   * large financial amounts in the epoch range must NOT be coerced to timestamps
     (otherwise distinct amounts collapse to the same second — a silent false-negative);
   * a DROPPED non-empty nested-dict key is real data loss and must fail, while an
@@ -16,7 +15,7 @@ from agent_env.task_step.task_steps.multienv_validator.universe_comparison impor
 
 
 class TestFinancialAmountsNotTimestamps:
-    """Greptile P1: numbers in the epoch range are amounts, not timestamps."""
+    """Numbers in the epoch range are amounts, not timestamps."""
 
     def test_distinct_amounts_in_epoch_range_differ(self):
         # Both fall in the old 1.4e9–2.0e9 "epoch seconds" window; sub-second precision
@@ -34,7 +33,7 @@ class TestFinancialAmountsNotTimestamps:
 
 
 class TestNestedDictKeyAsymmetry:
-    """Greptile P1: dropped universe keys fail; added export keys are enrichment."""
+    """Dropped universe keys fail; added export keys are enrichment."""
 
     def test_dropped_nonempty_key_fails(self):
         assert _vals_equal(

@@ -3,8 +3,9 @@ name: Publish to PyPI
 # On a release tag, uploads agentenv-framework-protocol and then agentenv-framework to PyPI through trusted
 # publishing, so no token is stored anywhere. Each job builds its distribution the way the release does
 # (agentenv-framework pinned to the exact agentenv-framework-protocol it was released with) and runs in its own
-# environment, because PyPI binds a pending publisher to one workflow and environment per project. Files already on
-# PyPI are skipped, so a rerun is safe.
+# environment, because PyPI binds a pending publisher to one workflow and environment per project. Once both are on
+# PyPI, it creates the tag's GitHub release, whose notes list the pull requests merged since the previous tag. Files
+# already on PyPI and a release that already exists are skipped, so a rerun is safe.
 
 on:
   push:
@@ -70,3 +71,35 @@ jobs:
         run: uvx --index-url https://pypi.org/simple twine check --strict dist/*
       - name: Publish agentenv-framework
         run: uv publish --trusted-publishing always --check-url https://pypi.org/simple/ dist/*
+
+  release:
+    needs: framework
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Create the GitHub release, with notes from the pull requests since the previous tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release ${tag} already exists."
+            exit 0
+          fi
+          framework="${tag#v}"
+          protocol=$(sed -n 's/^version = "\(.*\)"/\1/p' packages/agentenv-protocol/pyproject.toml)
+          header="On PyPI: [agentenv-framework ${framework}](https://pypi.org/project/agentenv-framework/${framework}/) · [agentenv-framework-protocol ${protocol}](https://pypi.org/project/agentenv-framework-protocol/${protocol}/)"
+          args=(--verify-tag --title "$tag" --generate-notes --notes "$header")
+          # Without a start tag, GitHub counts from the previous release rather than the previous tag.
+          previous=$(git tag --list 'v*' --sort=-v:refname | grep -A1 -x "$tag" | sed -n 2p)
+          if [ -n "$previous" ]; then
+            args+=(--notes-start-tag "$previous")
+          fi
+          gh release create "$tag" "${args[@]}"

@@ -35,7 +35,6 @@ class EnvironmentServerProvider(_SandboxEnvironmentProvider):
         disk_size_gb: float = 10,
         cpu: float | None = None,
         memory_mb: int | None = None,
-        priority: Optional[int] = None,
         attribution: Optional[Attribution] = None,
     ) -> DeployedSandboxEnv:
         """The env's MCP server in its own container; returns the record once it serves its card and its tools."""
@@ -46,7 +45,7 @@ class EnvironmentServerProvider(_SandboxEnvironmentProvider):
             raise TypeError(f"env_provider_type '{self.type}' deploys one MCP server, not a {env.type} env")
         attempt = functools.partial(
             self._deploy_server, env, ttl_seconds=ttl_seconds, disk_size_gb=disk_size_gb,
-            cpu=cpu, memory_mb=memory_mb, priority=priority, attribution=attribution,
+            cpu=cpu, memory_mb=memory_mb, attribution=attribution,
         )
         return await self._run(sandbox_provider, env.id, attempt)
 
@@ -62,7 +61,6 @@ class EnvironmentServerProvider(_SandboxEnvironmentProvider):
         disk_size_gb: float,
         cpu: float | None,
         memory_mb: int | None,
-        priority: Optional[int],
         attribution: Optional[Attribution],
     ) -> DeployedSandboxEnv:
         """One attempt: the server's container, then its card and tools; returns its record."""
@@ -80,7 +78,6 @@ class EnvironmentServerProvider(_SandboxEnvironmentProvider):
             **_size_kwargs(cpu, memory_mb),
             disk_size_gb=disk_size_gb, timeout=ttl_seconds,
             attribution=dict(attribution or {}),
-            priority=priority,
         )
         self._container_sandboxes.append(server)
         self._environment_sandboxes[name] = server

@@ -2,7 +2,7 @@
 it — the round trip is integration territory."""
 from __future__ import annotations
 
-from agent_env.store.object_store.local_object_store import LocalFilesystemObjectStore
+from agent_env.store.object_store.local.store import LocalFilesystemObjectStore
 from agent_env.store.object_store.s3_object_store import S3ObjectStore
 
 BUCKET = "artifact-bucket"

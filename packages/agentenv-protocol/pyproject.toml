@@ -1,12 +1,26 @@
 [project]
 name = "agentenv-framework-protocol"
-version = "0.1.278"
+version = "0.1.282"
 description = "Open data-plane protocol and server SDK for agent environments."
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"]
 authors = [{ name = "Scale AI" }]
 requires-python = ">=3.10"
+keywords = ["mcp", "model-context-protocol", "a2a", "ai-agents", "rl-environments", "json-rpc"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
     "pydantic>=2.11",
     "starlette>=0.37",
@@ -33,6 +47,7 @@ Homepage = "https://www.agentenvframework.com"
 Documentation = "https://www.agentenvframework.com/docs"
 Repository = "https://github.com/scaleapi/agentenv-framework/tree/main/packages/agentenv-protocol"
 Issues = "https://github.com/scaleapi/agentenv-framework/issues"
+Changelog = "https://github.com/scaleapi/agentenv-framework/releases"
 
 [build-system]
 requires = ["hatchling"]

@@ -8,15 +8,11 @@ export interface RunOverrides {
   agent_model?: string;
   agent_artifact_id?: string;
   a2a_agent_id?: string;
-  /** Sandbox scheduling priority (0=interactive, 1=non_interactive), threaded through
-   *  context.metadata.user_overrides to the deploy task steps' sandbox tier. */
-  priority?: number;
   [k: string]: string | number | boolean | null | undefined;
 }
 
 interface StartRunsConfig {
   version: number;
-  projectId?: string;
   overrides?: RunOverrides;
   count?: number;
   seeds?: Record<string, string>[];
@@ -96,7 +92,6 @@ export function useRunGroupPolling(taskId: string) {
       const body: Record<string, unknown> = {
         version: config.version,
       };
-      if (config.projectId) body.project_id = config.projectId;
       if (config.overrides && Object.keys(config.overrides).length > 0) {
         body.overrides = config.overrides;
       }

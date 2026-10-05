@@ -39,7 +39,7 @@ from agent_env.a2a_agent.protocol import raise_for_extension_status
 from agent_env.a2a_agent.staging import StagedObjectStore
 from agent_env.store.base import GrantUnavailableError
 from agent_env.store.object_store import DEFAULT_CONTENT_TYPE, ObjectStore
-from agent_env.store.object_store.local_grants.server import unreachable_hint
+from agent_env.store.object_store.local.grant_server import unreachable_hint
 
 logger = logging.getLogger(__name__)
 

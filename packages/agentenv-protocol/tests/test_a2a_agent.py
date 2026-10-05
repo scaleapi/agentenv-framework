@@ -1362,7 +1362,7 @@ def test_attribution_probe_reports_what_the_agent_last_sent() -> None:
             self.sent: dict[str, str] = {}
 
         async def run(self, request: TaskRequest) -> TaskResult:
-            self.sent = {"project_id": "project-1", "task_id": "task-1", "team": "evals"}
+            self.sent = {"task_id": "task-1", "team": "evals"}
             return TaskResult.text("ok")
 
         @extension(ATTRIBUTION_PROBE_V1.probe)
@@ -1384,16 +1384,12 @@ def test_attribution_probe_reports_what_the_agent_last_sent() -> None:
         response = client.post("/a2a", json=_message_request())
         assert response.json()["result"]["status"]["state"] == "completed"
         assert _operation(client, card, ATTRIBUTION_PROBE_V1.uri, "probe", {}).json() == {
-            "last_seen_attribution": {
-                "project_id": "project-1",
-                "task_id": "task-1",
-                "team": "evals",
-            },
+            "last_seen_attribution": {"task_id": "task-1", "team": "evals"},
             "last_seen_at_utc": "2026-01-01T00:00:00Z",
         }
         assert (
             _operation(
-                client, card, ATTRIBUTION_PROBE_V1.uri, "probe", {"project_id": "x"}
+                client, card, ATTRIBUTION_PROBE_V1.uri, "probe", {"unexpected": "x"}
             ).status_code
             == 400
         )
@@ -2668,16 +2664,6 @@ def test_generated_app_serves_sdk_extensions_and_a2a_lifecycle() -> None:
                 card,
                 "urn:agentenv:agent-config/v1",
                 "set",
-                {"project_id": "project"},
-            ).status_code
-            == 400
-        )
-        assert (
-            _operation(
-                client,
-                card,
-                "urn:agentenv:agent-config/v1",
-                "set",
                 {"task_id": "external-task"},
             ).status_code
             == 400
@@ -2824,7 +2810,6 @@ def test_generated_app_serves_sdk_extensions_and_a2a_lifecycle() -> None:
                     "parts": [{"kind": "text", "text": "hello"}],
                     "metadata": {
                         "trace_id": "trace-1",
-                        "project_id": "caller-project",
                     },
                 },
                 "configuration": {"blocking": True},
@@ -2846,7 +2831,6 @@ def test_generated_app_serves_sdk_extensions_and_a2a_lifecycle() -> None:
         assert seen[0].config.timeout_seconds == 600
         assert seen[0].metadata == {
             "trace_id": "trace-1",
-            "project_id": "caller-project",
             "role": "auditor",
         }
         assert seen[0].mcp_servers

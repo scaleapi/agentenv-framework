@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from agent_env.store import LocalFilesystemObjectStore, ObjectAlreadyExistsError
-from agent_env.store.object_store import local_object_store
+from agent_env.store.object_store.local import store as local_store
 from tst.store import object_conformance
 
 
@@ -360,7 +360,7 @@ def test_a_write_that_cannot_lock_its_staged_file_leaves_nothing_staged(store, t
     def no_lock(fd, op):
         raise OSError(errno.ENOLCK, "no locks available")
 
-    monkeypatch.setattr(local_object_store.fcntl, "flock", no_lock)
+    monkeypatch.setattr(local_store.fcntl, "flock", no_lock)
     with pytest.raises(OSError, match="no locks"):
         store.put("nolock/x", b"v")
     assert [n for n in os.listdir(tmp_path / ".agentenv-tmp") if n.startswith("staged-")] == []

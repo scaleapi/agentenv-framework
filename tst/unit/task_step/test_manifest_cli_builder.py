@@ -451,8 +451,7 @@ def test_root_command_collisions_rejected(entities, match):
 
 
 def test_manifest_live_schema_drift_warns(fake_gateway, tmp_path):
-    # The universe-generation pipeline's manifest validation keeps these in sync, but the renderer parses whatever is
-    # served: surface drift instead of dropping it silently.
+    # The renderer parses whatever is served: surface drift instead of dropping it silently.
     drifted = _manifest(
         [
             {

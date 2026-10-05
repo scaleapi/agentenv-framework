@@ -13,7 +13,7 @@ from agent_env.config import reset_config, set_object_store
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER, SANDBOX_MODE_VM
 from agent_env.store import LocalFilesystemObjectStore
-from agent_env.store.object_store.local_grants.tls import local_ca
+from agent_env.store.object_store.local.tls import local_ca
 from agent_env.store.routing import LocalRunObjectStore
 from agent_env.a2a_agent import a2a_agent as a2a_agent_module
 from agent_env.a2a_agent.a2a_agent import A2AAgent

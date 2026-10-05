@@ -171,8 +171,6 @@ class A2AAgentValidator:
             VerifyA2AAgentCardStep,
             VerifyA2AAgentConfigIdentityStep,
             VerifyA2AAgentMCPStep,
-            VerifyA2ALitellmAttributionRuntimeStep,
-            VerifyA2ALitellmAttributionStep,
             VerifyA2AModalitiesStep,
             VerifyA2APeerAgentsStep,
             VerifyA2ARoleStep,
@@ -229,14 +227,6 @@ class A2AAgentValidator:
         protocol_prompt_id = f"{task_id}-protocol-prompt"
         skill_prompt_id = f"{task_id}-skill-prompt"
         skill_verifier_id = f"{task_id}-skill-rubric"
-        # LiteLLM attribution runtime probe: plant unique IDs on context.metadata
-        # so prompt_agent forwards them via /ext/agent-config; the agent records
-        # the attribution it emits on the resulting LLM call; the post-prompt
-        # verify step queries /ext/attribution-probe and asserts the planted
-        # values came through. Unique per validation run to avoid cross-run
-        # bleed when /ext/attribution-probe is stateful.
-        probe_project_id = f"probe-project-{uuid.uuid4().hex[:12]}"
-        probe_task_id = f"probe-task-{uuid.uuid4().hex[:12]}"
         # Snapshot validation: plant a unique token on agent A, snapshot, deploy
         # agent B with the snapshot loaded into a known target context_id, prompt
         # agent B for recall, grade with a rubric.
@@ -281,19 +271,11 @@ class A2AAgentValidator:
             DeployEnvTaskStep(id=f"{task_id}-deploy-env", version=None, env_id=agent.VALIDATION_ENV_ID),
             DeployAgentTaskStep(id=deploy_agent_id, version=None, env_ids=[agent.VALIDATION_ENV_ID], a2a_agent_id=agent.id, a2a_agent_version=agent.version),
             VerifyA2AAgentCardStep(id=f"{task_id}-card", version=None, a2a_agent_id=agent.id, a2a_agent_version=agent.version, depends_on=deploy_agent_dep, fail_task_on_error=False),
-            VerifyA2ALitellmAttributionStep(id=f"{task_id}-litellm-attribution", version=None, a2a_agent_id=agent.id, a2a_agent_version=agent.version, depends_on=deploy_agent_dep, fail_task_on_error=False),
             VerifyA2AAgentConfigIdentityStep(id=f"{task_id}-agent-config-identity", version=None, a2a_agent_id=agent.id, a2a_agent_version=agent.version, depends_on=deploy_agent_dep, fail_task_on_error=False),
             VerifyA2ARoleStep(id=f"{task_id}-role", version=None, a2a_agent_id=agent.id, a2a_agent_version=agent.version, depends_on=deploy_agent_dep, fail_task_on_error=False),
             VerifyA2ASystemPromptStep(id=f"{task_id}-system-prompt", version=None, a2a_agent_id=agent.id, a2a_agent_version=agent.version, depends_on=deploy_agent_dep, fail_task_on_error=False),
             PromptAgentTaskStep(id=protocol_prompt_id, version=None, prompt="Hello, respond with OK.", prompt_id=protocol_prompt_id, timeout_seconds=120, depends_on=deploy_agent_dep, fail_task_on_error=False),
             VerifyCoreA2AProtocolStep(id=f"{task_id}-protocol", version=None, a2a_agent_id=agent.id, prompt_id=protocol_prompt_id, depends_on=[TaskStepDependency(task_step_id=protocol_prompt_id)], fail_task_on_error=False),
-            VerifyA2ALitellmAttributionRuntimeStep(
-                id=f"{task_id}-litellm-attribution-runtime", version=None,
-                a2a_agent_id=agent.id, a2a_agent_version=agent.version,
-                expected_project_id=probe_project_id, expected_task_id=probe_task_id,
-                depends_on=[TaskStepDependency(task_step_id=protocol_prompt_id)],
-                fail_task_on_error=False,
-            ),
             *modality_steps,
             VerifyA2AModalitiesStep(id=f"{task_id}-modalities", version=None, a2a_agent_id=agent.id, probes=grading_probes,
                 depends_on=[TaskStepDependency(task_step_id=sid) for sid in modality_step_ids], fail_task_on_error=False),
@@ -437,12 +419,7 @@ class A2AAgentValidator:
         initial_context = TaskStepContext()
         if litellm_api_key:
             initial_context.metadata["user_overrides"] = {"litellm_api_key": litellm_api_key}
-        # Plant LiteLLM attribution probe values so prompt_agent forwards them
-        # via /ext/agent-config — the runtime-attribution verify step reads them
-        # back from /ext/attribution-probe and asserts the agent's bridge
-        # actually wired them through to outbound LLM calls.
-        initial_context.metadata["project_id"] = probe_project_id
-        initial_context.metadata["task_id"] = probe_task_id
+        initial_context.metadata["task_id"] = task_id
         num_deploy_steps = 2
         run_kwargs = {"on_step_start": on_start, "on_step_complete": on_complete}
 

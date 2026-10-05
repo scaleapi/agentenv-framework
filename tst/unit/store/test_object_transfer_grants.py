@@ -16,7 +16,7 @@ from agentenv_protocol.transfers import (
 from botocore.credentials import Credentials, RefreshableCredentials
 
 from agent_env.store import GrantUnavailableError
-from agent_env.store.object_store.local_object_store import (
+from agent_env.store.object_store.local.store import (
     LocalFilesystemObjectStore,
 )
 from agent_env.store.object_store import UploadPolicy
