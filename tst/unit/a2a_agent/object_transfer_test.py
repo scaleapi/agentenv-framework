@@ -219,23 +219,33 @@ async def test_fetch_trajectory_waits_for_the_agent_upload_it_granted(tmp_path, 
     ]
 
 
-@pytest.mark.asyncio
-async def test_fetch_trajectory_reports_a_legacy_agents_own_upload(monkeypatch):
+def _answering(monkeypatch, body: dict) -> None:
     real_client = httpx.AsyncClient
     monkeypatch.setattr(
         object_transfer.httpx,
         "AsyncClient",
         lambda **kwargs: real_client(
-            transport=httpx.MockTransport(
-                lambda request: httpx.Response(200, json={"trajectory_s3_prefix": "s3://b/t/"})
-            ),
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, json=body)),
             **kwargs,
         ),
     )
 
+
+@pytest.mark.asyncio
+async def test_fetch_trajectory_refuses_an_answer_that_only_names_an_s3_prefix(monkeypatch):
+    _answering(monkeypatch, {"trajectory_s3_prefix": "s3://b/t/"})
+
+    with pytest.raises(RuntimeError, match="answered with trajectory_s3_prefix"):
+        await fetch_trajectory("https://agent.test/ext/trajectory", {"task_id": "t"})
+
+
+@pytest.mark.asyncio
+async def test_fetch_trajectory_reads_an_inline_trajectory_beside_a_prefix(monkeypatch):
+    _answering(monkeypatch, {"trajectory": [{"role": "user"}], "trajectory_s3_prefix": "s3://b/t/"})
+
     fetched = await fetch_trajectory("https://agent.test/ext/trajectory", {"task_id": "t"})
 
-    assert fetched == FetchedTrajectory(legacy_prefix="s3://b/t/")
+    assert fetched == FetchedTrajectory(inline=[{"role": "user"}])
 
 
 def test_the_transfer_time_budget_nests():
