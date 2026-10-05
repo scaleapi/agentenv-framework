@@ -238,7 +238,8 @@ class _Resolver:
 
     def _derived_outputs(self, entry: BundleEntry, step: dict, cls: type) -> bool:
         """Write in any output id the step's type derives when the field is left out (build_mcp_cli's
-        ``cli-<env_id>``), so it's named like one written out. False when its type can't read the step."""
+        ``<env_id>__cli``), so it's named like one written out. Only its last segment is kept, so an id derived
+        from another bundle's entity is still named under this task. False when its type can't read the step."""
         absent = [ref for ref in cls.entity_refs or ()
                   if ref.role is RefRole.OUTPUT and ref.path == ref.field and step.get(ref.field) is None]
         if not absent:
@@ -250,7 +251,7 @@ class _Resolver:
             return False
         for ref in absent:
             if read.get(ref.field) is not None:
-                step[ref.field] = read[ref.field]
+                step[ref.field] = read[ref.field].rsplit("/", 1)[-1]
         return True
 
     def _outputs(self, entry: BundleEntry, declared: list[tuple[int, dict, type]]) -> dict[tuple[EntityKind, str], Output]:

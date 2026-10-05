@@ -13,7 +13,6 @@ from agent_env.cli.utils import (
     env_provider_type_option,
     environment_name_options,
     resolve_environment_name,
-    skips_local_validation,
 )
 from agent_env.utils.card_naming import card_name_from_github, card_name_from_source
 from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM, build_image
@@ -175,7 +174,7 @@ def put(env_id: str, dockerfile: str | None, context_path: str | None, dockerfil
             on_progress=_on_progress,
         ))
         click.echo(f"Created MCPServerEnv: id={env.id} version={env.version} environment_name={env.environment_name} env_provider_type={env.env_provider_type}")
-        if (run_validation or override) and not skips_local_validation(env.id, "env"):
+        if run_validation or override:
             # GitHub-sourced build: validation_report.json lives in the repo, not
             # locally, so the unit-test verdict is unknown here (doesn't block).
             _gate_release(env, [], override)
@@ -216,7 +215,7 @@ def put(env_id: str, dockerfile: str | None, context_path: str | None, dockerfil
         metadata=metadata if metadata else None,
     )
     click.echo(f"Created MCPServerEnv: id={env.id} version={env.version} environment_name={env.environment_name} env_provider_type={env.env_provider_type}")
-    if (run_validation or override) and not skips_local_validation(env.id, "env"):
+    if run_validation or override:
         # Local build: look for the env-build handoff report next to the build context.
         _gate_release(env, [str(context), str(dockerfile_path.parent)], override)
 

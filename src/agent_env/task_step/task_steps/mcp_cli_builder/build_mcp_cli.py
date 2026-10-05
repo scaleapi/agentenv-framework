@@ -18,6 +18,7 @@ from agent_env.artifact import CliArtifact
 from agent_env.artifact.store import artifact_write_lock
 from agent_env.env import Env
 from agent_env.env.env import require_gateway_url
+from agent_env.store.ids import derive_id
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity_refs import EntityRef, RefRole
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
@@ -137,7 +138,7 @@ class BuildMcpCliTaskStep(TaskStep):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
         self.env_id = env_id
         self.command_name = command_name
-        self.cli_artifact_id = cli_artifact_id or f"cli-{env_id}"
+        self.cli_artifact_id = cli_artifact_id or derive_id(env_id, "cli")
 
     def to_dict(self) -> dict:
         base = super().to_dict()

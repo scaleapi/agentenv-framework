@@ -20,6 +20,7 @@ from agentenv_protocol import FilePart
 
 from agent_env.env.gateway.constants import EXT_TRAJECTORY_URI
 from agent_env.store import get_config
+from agent_env.store.ids import derive_id, is_local_id, validate_local_id
 from agent_env.store.object_store import S3ObjectStore
 from agent_env.store.routing import in_local_run
 from agent_env.task_step.context import TaskStepContext
@@ -166,6 +167,10 @@ class SnapshotEnvTaskStep(TaskStep):
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         from agent_env.env.env import Env, gateway_url_of
 
+        snapshot_id = self._derive_snapshot_id(context)
+        # Refused before any export: past here a write that fails only skips its service.
+        if is_local_id(snapshot_id):
+            validate_local_id(snapshot_id)
         deployed = self._resolve_deployed_env(context)
         env_id = self.env_id or (deployed.env_id if deployed else None)
         if not env_id:
@@ -191,7 +196,6 @@ class SnapshotEnvTaskStep(TaskStep):
         env_version = deployed.env_version if deployed else None
         env = await asyncio.to_thread(Env.get, env_id, env_version)
 
-        snapshot_id = self._derive_snapshot_id(context, env_id)
         result = await self.snapshot_env_state(
             env=env,
             gateway_url=gateway_url,
@@ -307,14 +311,14 @@ class SnapshotEnvTaskStep(TaskStep):
         entry["object_url"] = object_url
         entry["event_count"] = event_count
 
-    def _derive_snapshot_id(self, context: TaskStepContext, env_id: str) -> str:
+    def _derive_snapshot_id(self, context: TaskStepContext) -> str:
         if self.snapshot_id:
             return self.snapshot_id
         instance_id = context.instance_id or context.metadata.get("instance_id")
         if instance_id:
             # Stable per run instance: activity retries re-put the same ids.
-            return f"snapshot-{env_id}-{instance_id.rsplit('-', 1)[-1][:16]}"
-        generated = f"snapshot-{env_id}-{uuid.uuid4().hex[:8]}"
+            return derive_id(instance_id, f"snapshot-{self.id}")
+        generated = derive_id(f"adhoc-{uuid.uuid4().hex[:12]}", f"snapshot-{self.id}")
         logger.warning(
             f"snapshot_env: no instance_id in context; using random snapshot_id "
             f"{generated} (retries will not be idempotent)"
@@ -455,8 +459,7 @@ class SnapshotEnvTaskStep(TaskStep):
 
         services = cls._enumerate_environments(env)
         gateway = gateway_url.rstrip("/")
-        # `gateway` identifies which deployment was exported: with k deployments of
-        # one env_id, env= and snapshot_id= are identical across branches.
+        # `gateway` identifies which deployment was exported: env= alone doesn't when one env_id has several.
         logger.info(
             f"snapshot_env: env={env.id} v{env.version} snapshot_id={snapshot_id} "
             f"gateway={gateway} services={services}"
@@ -491,7 +494,7 @@ class SnapshotEnvTaskStep(TaskStep):
             """Returns EnvironmentArtifact on success, (public_err, log_err) on failure."""
             async with sem:
                 # Suffix (.json/.zip) is reported by _export_environment_to_file.
-                fd, tmp_path = tempfile.mkstemp(prefix=f"{snapshot_id}-{environment_name}-")
+                fd, tmp_path = tempfile.mkstemp(prefix=f"{environment_name}-")
                 os.close(fd)
                 cleanup_paths = [tmp_path]
                 artifact_path = tmp_path

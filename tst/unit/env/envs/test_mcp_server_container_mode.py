@@ -251,8 +251,7 @@ async def test_a_restored_env_without_a_gateway_loads_into_the_server_and_closes
 async def test_validation_deploys_a_server_env_as_declared_on_the_default_sandbox_provider():
     env, seen, default = _env("server"), {}, MagicMock()
     ran = MagicMock(run=AsyncMock(return_value=MagicMock(deployed_envs=[], deployed_agents=[], instance_id="i")))
-    with patch("agent_env.task.Task.put", side_effect=lambda **kwargs: seen.update(kwargs) or ran), \
-         patch("agent_env.env.envs.mcp_server.refuse_local_derivation"):
+    with patch("agent_env.task.Task.put", side_effect=lambda **kwargs: seen.update(kwargs) or ran):
         await env.validate()
     deploy_step = seen["steps"][0]
 
