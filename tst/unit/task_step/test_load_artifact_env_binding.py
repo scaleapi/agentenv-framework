@@ -1,7 +1,7 @@
 """Which deployment of an env a `load_artifact` step loads into.
 
 Matching on `env_id` alone sends every branch's load to one deployment, leaving the
-others deployed but empty — their agents then bind correctly (#808) to an env with
+others deployed but empty — their agents then bind correctly to an env with
 no data.
 """
 
@@ -17,7 +17,7 @@ from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
 
-ENV_ID = "multi-env-0gr8479d"
+ENV_ID = "multi-env"
 
 
 def _fake_env(sandbox_id: str):

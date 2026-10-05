@@ -1,8 +1,8 @@
 """Cost-attribution dimensions carried from the caller down to a sandbox provider.
 
-Attribution is an open ``dict[str, str]``. Core threads it without reading it; each provider
-picks out the keys its billing backend understands and ignores the rest, so a deployment can
-attribute on whatever dimensions and terminology it uses.
+Attribution is an open ``dict[str, str]``. Core threads it without reading it, and providers
+carry every key (Modal as sandbox tags, E2B as sandbox metadata), so a deployment can attribute
+on whatever dimensions and terminology it uses.
 """
 
 from __future__ import annotations

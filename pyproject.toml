@@ -4,13 +4,30 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentenv-framework"
-version = "0.9.1263"
+version = "0.9.1267"
 description = "SDK and CLI for building, deploying and running agent environments and the tasks that grade agents in them."
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"]
 authors = [{ name = "Scale AI" }]
 requires-python = ">=3.11"
+keywords = ["reinforcement-learning", "rl-environments", "ai-agents", "llm-agents", "agent-evaluation", "mcp", "model-context-protocol", "a2a", "sandbox"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Typing :: Typed",
+]
 dependencies = [
     "agentenv-framework-protocol>=0.1.0",
     "boto3>=1.35.0",
@@ -71,6 +88,7 @@ Homepage = "https://www.agentenvframework.com"
 Documentation = "https://www.agentenvframework.com/docs"
 Repository = "https://github.com/scaleapi/agentenv-framework"
 Issues = "https://github.com/scaleapi/agentenv-framework/issues"
+Changelog = "https://github.com/scaleapi/agentenv-framework/releases"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_env"]

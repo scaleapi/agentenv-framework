@@ -241,7 +241,7 @@ class TestAgentPathUnchanged:
 
         async def _fake_agent_collect(self, context, store, artifact_id, version):
             seen["called"] = True
-            return {}, {}
+            return {}, {}, []
 
         monkeypatch.setattr(
             CollectArtifactsTaskStep, "_collect_via_agent_container", _fake_agent_collect

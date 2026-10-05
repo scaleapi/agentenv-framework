@@ -33,8 +33,8 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     SandboxProvider,
     refuse_unenforceable_policy,
 )
-from agent_env.store.object_store.local_grants.tls import local_ca
-from agent_env.store.object_store.local_object_store import LocalFilesystemObjectStore
+from agent_env.store.object_store.local.tls import local_ca
+from agent_env.store.object_store.local.store import LocalFilesystemObjectStore
 from agent_env.store.routing import LocalRunObjectStore
 
 if TYPE_CHECKING:
@@ -354,7 +354,6 @@ class LocalSandboxProvider(SandboxProvider):
         exposed_ports: Optional[list[int]] = None,
         setup_for_gateway: bool = True,
         attribution: Optional[Attribution] = None,
-        priority: Optional[int] = None,
         network_policy: Optional[NetworkPolicy] = None,
     ) -> LocalSandbox:
         refuse_unenforceable_policy(self, network_policy)
@@ -377,7 +376,6 @@ class LocalSandboxProvider(SandboxProvider):
         disk_size_gb: float = 10,
         timeout: int = 3600 * 2,
         attribution: Optional[Attribution] = None,
-        priority: Optional[int] = None,
         network_policy: Optional[NetworkPolicy] = None,
     ) -> LocalSandbox:
         sandbox = await super().create_container(
@@ -389,7 +387,7 @@ class LocalSandboxProvider(SandboxProvider):
             disk_size_gb=disk_size_gb,
             timeout=timeout,
             attribution=attribution,
-            priority=priority, network_policy=network_policy,
+            network_policy=network_policy,
         )
         # The marker is how a later get_sandbox() (post-run teardown rebuilds the sandbox from disk)
         # learns this is a container and removes it. If we can't persist it, that reconstructed
@@ -441,12 +439,11 @@ class LocalSandboxProvider(SandboxProvider):
         disk_size_gb: float = 10,
         timeout: int = 3600 * 2,
         attribution: Optional[Attribution] = None,
-        priority: Optional[int] = None,
         network_policy: Optional[NetworkPolicy] = None,
     ) -> LocalSandbox:
         return await self.create_container(
             image_name=image_name, port=port, env=env, cpu=cpu, memory=memory, disk_size_gb=disk_size_gb,
-            timeout=timeout, attribution=attribution, priority=priority, network_policy=network_policy,
+            timeout=timeout, attribution=attribution, network_policy=network_policy,
         )
 
     async def get_sandbox(self, sandbox_id: str) -> LocalSandbox:

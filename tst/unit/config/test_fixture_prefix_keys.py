@@ -12,7 +12,7 @@ from agent_env.artifact.artifacts.skill import SkillArtifact
 from agent_env.artifact.store import reset_artifact_store
 from agent_env.config import configure, get_config, set_object_store
 from agent_env.env.snapshot_store import _snapshot_servicedb
-from agent_env.store.object_store.local_object_store import LocalFilesystemObjectStore
+from agent_env.store.object_store.local.store import LocalFilesystemObjectStore
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.verifiers.judge_utils.trajectory_filter import TrajectoryFilter
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep

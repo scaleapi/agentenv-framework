@@ -12,8 +12,8 @@ import pytest
 from cryptography import x509
 
 from agent_env.config.paths import state_root
-from agent_env.store.object_store.local_grants import tls
-from agent_env.store.object_store.local_grants.tls import check_local_host, local_ca, server_context
+from agent_env.store.object_store.local import tls
+from agent_env.store.object_store.local.tls import check_local_host, local_ca, server_context
 
 
 def _handshake(server: ssl.SSLContext, *, cafile: Path, hostname: str) -> None:

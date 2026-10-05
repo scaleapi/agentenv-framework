@@ -34,8 +34,8 @@ from starlette.routing import Route
 from uvicorn.protocols.http.h11_impl import H11Protocol
 
 from agent_env.store.base import GrantUnavailableError
-from agent_env.store.object_store.local_grants.tls import check_local_host, local_ca, server_context
-from agent_env.store.object_store.local_grants.tokens import (
+from agent_env.store.object_store.local.tls import check_local_host, local_ca, server_context
+from agent_env.store.object_store.local.tokens import (
     GrantClaims,
     GrantSigner,
     InvalidGrantError,
@@ -45,7 +45,7 @@ from agent_env.store.object_store.local_grants.tokens import (
 from agent_env.store.object_store.object_store import DEFAULT_CONTENT_TYPE
 
 if TYPE_CHECKING:
-    from agent_env.store.object_store.local_object_store import LocalFilesystemObjectStore
+    from agent_env.store.object_store.local.store import LocalFilesystemObjectStore
 
 logger = logging.getLogger(__name__)
 

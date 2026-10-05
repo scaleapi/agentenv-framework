@@ -1,8 +1,6 @@
-"""The `haltbench-mvp-whichenv` DAG in-process: two `deploy_env` of one `env_id`
-running concurrently, then an agent per env.
-
-Instance haltbench-mvp-whichenv-7c9fb4o9: both envs deployed, both agents wired
-to the first.
+"""A two-branch DAG in-process: two `deploy_env` of one `env_id` running
+concurrently, then an agent per env. Each agent must bind to its own branch's
+deployment, not both to the first.
 """
 
 from __future__ import annotations
@@ -17,7 +15,7 @@ from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 
-ENV_ID = "multi-env-0gr8479d"
+ENV_ID = "multi-env"
 
 
 def _fake_env_deploying_to(mcp_url: str, sandbox_id: str):

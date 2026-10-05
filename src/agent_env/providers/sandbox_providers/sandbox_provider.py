@@ -51,7 +51,6 @@ class SandboxProvider(ABC):
         disk_size_gb: float = 10,
         timeout: int = 3600 * 2,
         attribution: Optional[Attribution] = None,
-        priority: Optional[int] = None,
         network_policy: Optional[NetworkPolicy] = None,
     ) -> Sandbox: ...
 
@@ -67,7 +66,6 @@ class SandboxProvider(ABC):
         exposed_ports: Optional[list[int]] = None,
         setup_for_gateway: bool = True,
         attribution: Optional[Attribution] = None,
-        priority: Optional[int] = None,
         network_policy: Optional[NetworkPolicy] = None,
     ) -> VmSandbox:
         raise NotImplementedError(f"{type(self).__name__} does not support create_vm")
@@ -83,7 +81,6 @@ class SandboxProvider(ABC):
         disk_size_gb: float = 10,
         timeout: int = 3600 * 2,
         attribution: Optional[Attribution] = None,
-        priority: Optional[int] = None,
         network_policy: Optional[NetworkPolicy] = None,
     ) -> Sandbox:
         """Provision a sandbox with the registry image already running as a container.
@@ -98,7 +95,7 @@ class SandboxProvider(ABC):
             cpu=cpu, memory=memory, disk_size_gb=disk_size_gb,
             exposed_ports=[port], timeout=timeout,
             attribution=attribution,
-            priority=priority, network_policy=network_policy,
+            network_policy=network_policy,
         )
         try:
             from agent_env.config import get_config

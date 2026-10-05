@@ -76,6 +76,7 @@ from .registry import (
     RegisteredOperation,
     build_registry,
 )
+from .staging import STAGING_ENDPOINT, STAGING_V1_URI, StagingStore, staging_routes
 from .tasks.v1 import (
     AgentConfig,
     AgentRunResult,
@@ -116,6 +117,8 @@ __all__ = [
     "PEER_AGENTS_V1",
     "SKILL_CONFIG_V1",
     "SNAPSHOT_V1",
+    "STAGING_ENDPOINT",
+    "STAGING_V1_URI",
     "STANDARD_EXTENSIONS",
     "TRAJECTORY_V1",
     "TRIGGERS_V1",
@@ -172,6 +175,7 @@ __all__ = [
     "SnapshotReadObjects",
     "SnapshotUploadedObjects",
     "SnapshotWriteObjects",
+    "StagingStore",
     "TaskError",
     "TaskObjectTrajectoryRequest",
     "TaskOutcome",
@@ -204,5 +208,6 @@ __all__ = [
     "extension",
     "request_fields",
     "serve",
+    "staging_routes",
     "upload",
 ]

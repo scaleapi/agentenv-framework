@@ -43,7 +43,7 @@ http-server = [
 
 [[package]]
 name = "agentenv-framework"
-version = "0.9.1263"
+version = "0.9.1267"
 source = { editable = "." }
 dependencies = [
     { name = "a2a-sdk" },
@@ -139,7 +139,7 @@ provides-extras = ["explorer", "gcp", "dev"]
 
 [[package]]
 name = "agentenv-framework-protocol"
-version = "0.1.278"
+version = "0.1.282"
 source = { editable = "packages/agentenv-protocol" }
 dependencies = [
     { name = "httpx" },
@@ -150,6 +150,7 @@ dependencies = [
 [package.optional-dependencies]
 agent = [
     { name = "a2a-sdk", extra = ["http-server"] },
+    { name = "python-multipart" },
     { name = "regex" },
     { name = "uvicorn" },
 ]
@@ -158,6 +159,7 @@ dev = [
     { name = "mcp" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "python-multipart" },
     { name = "regex" },
 ]
 
@@ -170,6 +172,8 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.11" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
+    { name = "python-multipart", marker = "extra == 'agent'", specifier = ">=0.0.13" },
+    { name = "python-multipart", marker = "extra == 'dev'", specifier = ">=0.0.13" },
     { name = "regex", marker = "extra == 'agent'", specifier = ">=2023.12.25" },
     { name = "regex", marker = "extra == 'dev'", specifier = ">=2023.12.25" },
     { name = "starlette", specifier = ">=0.37" },

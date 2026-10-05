@@ -186,7 +186,7 @@ def test_a_record_takes_its_mcp_url_and_server_name_from_its_card():
 
 @pytest.mark.parametrize("card, card_url", [(None, _CARD_URL), (_CARD, None)], ids=["no-card", "no-card-url"])
 def test_a_record_without_its_card_keeps_its_stored_mcp_url_and_name(card, card_url):
-    """Records written before #1137 carry no card, so their stored values stand."""
+    """Older records carry no card, so their stored values stand."""
     record = DeployedEnv.from_dict({"env_id": "e", "env_version": 1, "gateway_url": "https://old", "sandbox_id": "sb",
                                     "mcp_url": "https://old/mcp", "mcp_server_name": "old", "environment_card": card, "environment_card_url": card_url})
     assert (record.mcp_url, record.mcp_server_name) == ("https://old/mcp", "old")
