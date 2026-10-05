@@ -194,6 +194,11 @@ class DeployAgentTaskStep(TaskStep):
 
     @classmethod
     def from_dict(cls, data: dict) -> DeployAgentTaskStep:
+        if data.get("agent_changelog_s3_prefix"):
+            raise ValueError(
+                "agent_changelog_s3_prefix is no longer supported: an S3-form changelog cannot "
+                "be applied; capture it again and set agent_changelog_object_url"
+            )
         return cls(
             **cls._base_from_dict(data),
             env_ids=data.get("env_ids"),
