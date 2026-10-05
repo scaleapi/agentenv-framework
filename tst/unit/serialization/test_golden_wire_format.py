@@ -69,7 +69,7 @@ def _mcp_server_env() -> MCPServerEnv:
         version=4,
         docker_image_artifact=_docker_image("slack-mcp-image", 5, "slack-mcp:v5"),
         environment_name="slack",
-        metadata={"owner": "env-pod"},
+        metadata={"owner": "example-team"},
     )
 
 
@@ -80,7 +80,7 @@ def _website_env() -> WebsiteEnv:
         backend_docker_image_artifact=_docker_image("shop-backend-image", 3, "shop-backend:v3"),
         frontend_docker_image_artifact=_docker_image("shop-frontend-image", 3, "shop-frontend:v3"),
         environment_name="shop",
-        metadata={"owner": "env-pod"},
+        metadata={"owner": "example-team"},
     )
 
 
@@ -156,7 +156,7 @@ ENV_FIXTURES = {
         id="gateway-env",
         version=11,
         docker_image_artifact=_docker_image("gateway-image", 12, "gateway:v12"),
-        metadata={"owner": "env-pod"},
+        metadata={"owner": "example-team"},
     ),
     "mcp_server": _mcp_server_env,
     "multi": lambda: MultiEnv(
@@ -164,7 +164,7 @@ ENV_FIXTURES = {
         version=6,
         mcp_server_envs=[_mcp_server_env()],
         website_envs=[_website_env()],
-        metadata={"owner": "env-pod"},
+        metadata={"owner": "example-team"},
     ),
     "service_db": lambda: ServiceDBEnv(
         id="service-db-env",
@@ -172,7 +172,7 @@ ENV_FIXTURES = {
         db_web_docker_image_artifact=_docker_image("pgweb-image", 1, "pgweb:v1"),
         db_mcp_docker_image_artifact=_docker_image("db-mcp-image", 1, "db-mcp:v1"),
         version=3,
-        metadata={"owner": "env-pod"},
+        metadata={"owner": "example-team"},
     ),
     "website": _website_env,
 }

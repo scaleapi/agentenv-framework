@@ -32,7 +32,6 @@ class DeployEnvTaskStep(TaskStep):
         cpu: Optional[float] = None,
         memory_mb: Optional[int] = None,
         sandbox_type: Optional[str] = None,
-        priority: Optional[int] = None,
         env_state_type: Optional[str] = None,
         env_state_instance_id: Optional[str] = None,
         depends_on: Optional[list[TaskStepDependency]] = None,
@@ -51,7 +50,6 @@ class DeployEnvTaskStep(TaskStep):
         self.env_state_type = env_state_type
         # Existing env state instance to attach to; the provider interprets it.
         self.env_state_instance_id = env_state_instance_id
-        self.priority = priority
         self.metadata = metadata or {}
 
     def to_dict(self) -> dict:
@@ -66,7 +64,6 @@ class DeployEnvTaskStep(TaskStep):
         base["sandbox_type"] = self.sandbox_type
         base["env_state_type"] = self.env_state_type
         base["env_state_instance_id"] = self.env_state_instance_id
-        base["priority"] = self.priority
         base["metadata"] = self.metadata
         return base
 
@@ -84,7 +81,6 @@ class DeployEnvTaskStep(TaskStep):
             sandbox_type=data.get("sandbox_type"),
             env_state_type=data.get("env_state_type"),
             env_state_instance_id=data.get("env_state_instance_id"),
-            priority=data.get("priority"),
             metadata=dict(data.get("metadata") or {}),
         )
 
@@ -107,7 +103,7 @@ class DeployEnvTaskStep(TaskStep):
             # As stored: run-time overrides aren't known at save, and deploy() consumes sandbox_type itself. Every run passes an
             # attribution, so the check does too, whatever it will hold.
             refusal = env.deploy_refusal(ttl_seconds=self.ttl_seconds, disk_size_gb=self.disk_size_gb, gateway_mode=self.gateway_mode, cpu=self.cpu,
-                                         memory_mb=self.memory_mb, priority=self.priority, env_state_type=self.env_state_type,
+                                         memory_mb=self.memory_mb, env_state_type=self.env_state_type,
                                          env_state_instance_id=self.env_state_instance_id, attribution={})
         except (NotFoundError, ValueError) as e:  # missing, or a type or env_provider_type this process can't load
             return [f"deploy_env '{self.id}': env '{self.env_id}' can't be loaded: {e}"]
@@ -127,8 +123,6 @@ class DeployEnvTaskStep(TaskStep):
         resolved_env_state_instance_id = (
             user_overrides.get("env_state_instance_id") or self.env_state_instance_id
         )
-        _priority_override = user_overrides.get("priority")
-        resolved_priority = _priority_override if _priority_override is not None else self.priority
         _ttl_override = user_overrides.get("ttl_seconds")
         resolved_ttl = _ttl_override if _ttl_override is not None else self.ttl_seconds
         attribution = deploy_attribution(self, context)
@@ -138,7 +132,7 @@ class DeployEnvTaskStep(TaskStep):
             f"cpu={self.cpu}, memory_mb={self.memory_mb}, "
             f"sandbox_type={resolved_sandbox_type}, env_state_type={resolved_env_state_type}, "
             f"env_state_instance_id={resolved_env_state_instance_id}, "
-            f"attribution={attribution}, priority={resolved_priority})"
+            f"attribution={attribution})"
         )
         deploy_kwargs = {
             "ttl_seconds": resolved_ttl,
@@ -146,7 +140,6 @@ class DeployEnvTaskStep(TaskStep):
             "gateway_mode": GatewayMode(self.gateway_mode),
             "cpu": self.cpu,
             "memory_mb": self.memory_mb,
-            "priority": resolved_priority,
             "attribution": attribution,
         }
         if resolved_sandbox_type is not None:

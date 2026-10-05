@@ -194,9 +194,9 @@ async def test_a_failed_steps_partial_writes_reach_the_doc_but_not_the_journal()
 
     A step that writes and then fails gets its writes onto the instance through
     ``record_task_failure``'s wholesale ``context`` write, which is not journaled. Replay
-    therefore omits them and the journal is *not* a complete record of a failed run. The
-    stacked retry PR is expected to journal the failing step with ``status=failure`` first;
-    when it does, this test should start failing and be tightened to assert equality.
+    therefore omits them and the journal is *not* a complete record of a failed run. Once
+    the failing step is journaled with ``status=failure`` first, this test should start
+    failing and be tightened to assert equality.
     """
     task_id = f"retry-resume-partial-test-{uuid.uuid4().hex[:8]}"
     instance_id = f"{task_id}-deterministic"

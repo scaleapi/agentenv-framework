@@ -258,7 +258,7 @@ def test_preflight_reports_an_option_a_server_env_would_refuse(options, refused)
 
 
 @pytest.mark.parametrize("kind, options", [
-    ("server", {"sandbox_type": "modal", "ttl_seconds": 60, "cpu": 2.0, "memory_mb": 4096, "disk_size_gb": 40, "priority": 1}),
+    ("server", {"sandbox_type": "modal", "ttl_seconds": 60, "cpu": 2.0, "memory_mb": 4096, "disk_size_gb": 40}),
     ("gateway", {"gateway_mode": "consistent", "env_state_type": "remote_postgres", "env_state_instance_id": "st-1"}),
     ("other", {"gateway_mode": "consistent", "env_state_type": "remote_postgres"}),
 ], ids=["server-sizing", "gateway-env", "other-env-type"])

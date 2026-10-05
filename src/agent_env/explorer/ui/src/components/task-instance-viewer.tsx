@@ -1229,7 +1229,7 @@ export function TaskInstanceViewer({
                   className="inline-flex items-center gap-1.5 text-sm text-blue-500 hover:underline cursor-pointer"
                 >
                   <Download size={14} />
-                  Download workspace's final state snapshot
+                  Download workspace&apos;s final state snapshot
                 </button>
               </div>
             )}

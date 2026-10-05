@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 from agent_env.config import get_config, get_runner, runtime
 from agent_env.config.errors import ConfigError
 from agent_env.explorer.entity_ids import EncodedIdRouting
-from agent_env.explorer.openapi_docs import docs_metadata, enrich_openapi_schema
+from agent_env.explorer.openapi_docs import docs_metadata, enrich_openapi_schema, package_version
 from agent_env.explorer.plugin import load_plugins
 from agent_env.explorer.routers import conversations as conversations_router
 from agent_env.explorer.routers import objects as objects_router
@@ -104,7 +104,7 @@ def create_app(static_dir: Optional[str] = None) -> FastAPI:
         title="agent-env explorer",
         description="Local control plane for agent-env: browse environments, tasks, "
                     "agents, universes and evals, and run tasks.",
-        version="0.1.0",
+        version=package_version("agentenv-framework"),
         lifespan=lifespan,
         # Swagger under /api; the UI owns /docs. openapi_url stays at the root for the UI.
         docs_url="/api/docs",

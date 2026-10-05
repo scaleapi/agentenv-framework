@@ -79,7 +79,7 @@ def test_level_restored_even_when_the_call_raises():
 
 
 def test_an_overlapping_fetch_stays_silenced_when_the_first_finishes():
-    """The race Greptile flagged, forced rather than raced for.
+    """The overlap race, forced rather than raced for.
 
     Two fetches overlap and the one that started FIRST finishes first. It
     captured DEBUG on the way in, so a naive restore puts DEBUG back while the
