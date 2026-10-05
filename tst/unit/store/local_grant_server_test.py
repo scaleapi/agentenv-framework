@@ -99,7 +99,8 @@ def test_a_read_of_a_missing_object_is_404(store):
     assert httpx.get(store.issue_read_grant(store.object_url("a/none.bin")).url).status_code == 404
 
 
-def test_a_head_reports_the_size(store):
+def test_a_head_reports_the_size_without_reading_the_object(store, monkeypatch):
+    monkeypatch.setattr(server_module, "_chunks", lambda f: pytest.fail("a HEAD read the object"))
     url = store.put("a/b.bin", b"12345")
     response = httpx.head(store.issue_read_grant(url).url)
     assert response.status_code == 200
