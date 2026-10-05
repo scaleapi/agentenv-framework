@@ -31,7 +31,7 @@ from agentenv_protocol.transfers import HttpGetGrant, HttpPostPolicyGrant, HttpP
 
 from agent_env.config import get_config
 from agent_env.store.base import ObjectAlreadyExistsError
-from agent_env.store.object_store import DEFAULT_CONTENT_TYPE, ObjectStore, UploadPolicy
+from agent_env.store.object_store import DEFAULT_CONTENT_TYPE, ObjectMetadata, ObjectStore, UploadPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +116,7 @@ class StagedObjectStore:
         self._call = secrets.token_urlsafe(24)
         self._reads: list[_Staged] = []
         self._writes: list[_Staged] = []
+        self._sizes: dict[str, int | None] = {}  # each object's size when the call described it
         self.namespaces: list[StagedNamespace] = []
 
     def __getattr__(self, name: str) -> Any:
@@ -123,6 +124,11 @@ class StagedObjectStore:
 
     def grants_reach(self, sandbox_type: str | None) -> bool:
         return True
+
+    def get_object_metadata_at(self, object_url: str) -> ObjectMetadata | None:
+        metadata = self.store.get_object_metadata_at(object_url)
+        self._sizes[object_url] = None if metadata is None else metadata.size
+        return metadata
 
     def issue_read_grant(self, object_url: str, *, expires_in: int | None = None) -> HttpGetGrant:
         staged = self._stage(self._reads, object_url)
@@ -143,9 +149,13 @@ class StagedObjectStore:
         )
 
     async def push(self) -> None:
-        """Put each object the call reads into the agent's staging; objects that together outgrow the limit
-        its card advertises are refused before any is sent."""
-        sizes = await asyncio.gather(*(asyncio.to_thread(_size, self.store, staged.object_url) for staged in self._reads))
+        """Put each object the call reads into the agent's staging, at the size the call described it with; objects
+        that together outgrow the limit its card advertises are refused before any is sent."""
+        sizes = [
+            self._sizes[staged.object_url] if staged.object_url in self._sizes
+            else await asyncio.to_thread(_size, self.store, staged.object_url)
+            for staged in self._reads
+        ]
         if self.max_bytes is not None and sum(size or 0 for size in sizes) > self.max_bytes:
             raise StagingError("staging an object on the agent failed: its staging is full")
         async with _client("staging an object on the agent") as client:

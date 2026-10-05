@@ -296,6 +296,38 @@ async def test_a_full_staging_fails_the_call_without_naming_a_staged_path(tmp_pa
     assert granting.max_bytes == 1000  # refused from the card's limit, before anything was sent
 
 
+class _CountingStore(LocalFilesystemObjectStore):
+    lookups = 0
+
+    def get_object_metadata_at(self, object_url):
+        self.lookups += 1
+        return super().get_object_metadata_at(object_url)
+
+
+@pytest.mark.asyncio
+async def test_a_push_sends_the_objects_as_the_call_described_them_without_asking_the_store_again(agent, tmp_path):
+    store = _CountingStore(str(tmp_path / "counted"))
+    set_object_store(store)
+    try:
+        files = {"SKILL.md": b"# s", "a.txt": b"a" * 10, "b.txt": b"b" * 20}
+        for name, data in files.items():
+            store.put(f"skills/s/{name}", data)
+        card = _card(agent)
+        granting = transfer_store(store, URL, card, sandbox_type="modal")
+        method, path = _method(card, SKILL_CONFIG_V1.uri, "add")
+        call = skill_add_call(
+            method, granting, name="s", description="d", object_url=store.object_url("skills/s"), sandbox_type="modal"
+        )
+        described = store.lookups
+
+        await invoke_transfer(URL + path, call, verb="POST", operation="skill add", timeout=60, store=granting)
+
+        assert store.lookups == described
+        assert _Agent.received == {f"skill/{name}": data for name, data in files.items()}
+    finally:
+        reset_config()
+
+
 @pytest.mark.asyncio
 async def test_a_pull_stops_at_the_size_its_grant_allows(agent, store):
     granting = transfer_store(store, URL, _card(agent), sandbox_type="modal")
