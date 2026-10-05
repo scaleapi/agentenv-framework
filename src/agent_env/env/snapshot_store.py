@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Optional
@@ -12,7 +13,8 @@ from typing import Callable, Optional
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER
 from agent_env.config import get_config
 from agent_env.store.document_store import AbsentOrNull, Filter, Sort
-from agent_env.store.routing import refuse_local_derivation
+from agent_env.store.ids import derive_id, fs_safe, is_local_id, key_segment
+from agent_env.store.object_store import ObjectStore
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +93,6 @@ class EnvSnapshot:
 
         log("validate", "Fetching env instance...", 5)
         deployed_env = get_env_instance_store().get(instance_id)
-        refuse_local_derivation(deployed_env.env_id, "env", "snapshotting")
         env = Env.get(deployed_env.env_id, deployed_env.env_version)
         if not isinstance(env, MultiEnv):
             raise ValueError(
@@ -110,6 +111,11 @@ class EnvSnapshot:
             raise ValueError(f"Instance '{instance_id}' has no service_universe loaded")
         universe_id = environment_universe["id"]
         universe_version = environment_universe["version"]
+        if is_local_id(env_id) != is_local_id(universe_id):
+            raise ValueError(
+                f"env {env_id!r} and universe {universe_id!r} are in different namespaces; a snapshot is recorded "
+                "under both, so both have to be @local ids or neither"
+            )
         log("reconnect", f"Reconnecting to sandbox {deployed_env.sandbox_id}...", 10)
         multi_env = await MultiEnv.from_deployed_env(deployed_env)
         if multi_env._sandbox is None:
@@ -126,6 +132,8 @@ class EnvSnapshot:
                 f"(this env's state backend does not support it: {type(state_provider).__name__ if state_provider else None}). "
                 "Remote-backed deploys use the normal per-service load."
             )
+        # Fail on an unsignable store before any command runs on the sandbox; the upload presigns a fresh url.
+        await asyncio.to_thread(_presigned_put_url, *_tarball_destination(env_id, universe_id))
 
         log("check_changelog", "Checking changelog...", 20)
         is_clean = await _check_changelog_empty(multi_env._sandbox)
@@ -137,9 +145,9 @@ class EnvSnapshot:
 
         log("store_artifact", "Storing Docker image artifact...", 70)
         logger.info("Storing snapshot as DockerImageArtifact...")
-        image_tag = f"env-snapshot-{env_id}-{universe_id}"
+        image_tag = _image_tag(env_id, universe_id)
         artifact = DockerImageArtifact.put_tar(
-            id=f"env-snapshot-{env_id}",
+            id=derive_id(env_id, "env-snapshot"),
             description=(
                 f"Snapshot of servicedb for env={env_id} "
                 f"universe={universe_id} v{universe_version}"
@@ -201,7 +209,7 @@ async def _snapshot_servicedb(sandbox, env_id: str, environment_universe_id: str
     logger.info("Exporting pgdata from servicedb container...")
     await sandbox.exec_script(f"docker cp {container_id}:/var/lib/postgresql/data /tmp/pgdata")
 
-    image_tag = f"env-snapshot-{env_id}-{environment_universe_id}"
+    image_tag = _image_tag(env_id, environment_universe_id)
     log("snapshot_db", f"Building Docker image on sandbox: {image_tag}...", 50)
     logger.info(f"Building Docker image on sandbox: {image_tag}...")
     await sandbox.exec_script(
@@ -221,16 +229,8 @@ async def _snapshot_servicedb(sandbox, env_id: str, environment_universe_id: str
     logger.info("Saving Docker image to tar.gz on sandbox...")
     await sandbox.exec_script(f"docker save {image_tag} | gzip > /tmp/snapshot-image.tar.gz")
 
-    config = get_config()
-    object_store = config.get_object_store()
-    object_url = object_store.object_url(
-        f"{config.get_artifact_key_prefix()}env-snapshots/{env_id}/{environment_universe_id}/{image_tag}.tar.gz"
-    )
-    put_url = await asyncio.to_thread(object_store.signed_put_url, object_url)
-    if put_url is None:
-        raise RuntimeError(
-            f"{type(object_store).__name__} can't presign uploads; env snapshots need a signable object store or local execution."
-        )
+    object_store, object_url = _tarball_destination(env_id, environment_universe_id)
+    put_url = await asyncio.to_thread(_presigned_put_url, object_store, object_url)
     log("snapshot_db", "Uploading Docker image...", 60)
     logger.info(f"Uploading Docker image to {object_url}...")
     await sandbox.exec_script(
@@ -240,6 +240,37 @@ async def _snapshot_servicedb(sandbox, env_id: str, environment_universe_id: str
     await sandbox.exec_script(f"rm -rf /tmp/snapshot-build /tmp/snapshot-image.tar.gz && docker rmi {image_tag}")
 
     return object_url
+
+
+_DOCKER_NAME = re.compile(r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*")
+
+
+def _image_tag(env_id: str, universe_id: str) -> str:
+    """The snapshot image's tag, a docker reference the sandbox builds with: ``env-snapshot-<env>-<universe>``
+    when that is a short, valid docker name, else a slug of the env and a hash of both ids."""
+    tag = f"env-snapshot-{fs_safe(env_id)}-{fs_safe(universe_id)}"
+    if len(tag) <= 200 and _DOCKER_NAME.fullmatch(tag):
+        return tag
+    slug = re.sub(r"[^a-z0-9]+", "-", fs_safe(env_id).lower()).strip("-")[:64].rstrip("-")
+    digest = hashlib.sha256(f"{env_id}\0{universe_id}".encode("utf-8", "surrogatepass")).hexdigest()[:12]
+    return f"env-snapshot-{slug}-{digest}" if slug else f"env-snapshot-{digest}"
+
+
+def _tarball_destination(env_id: str, universe_id: str) -> tuple[ObjectStore, str]:
+    """The object store the snapshot image's tarball is uploaded to, and its url there."""
+    config = get_config()
+    store = config.get_object_store_for(env_id)
+    key = f"env-snapshots/{key_segment(env_id)}/{key_segment(universe_id)}/{_image_tag(env_id, universe_id)}.tar.gz"
+    return store, store.object_url(f"{config.get_artifact_key_prefix()}{key}")
+
+
+def _presigned_put_url(object_store: ObjectStore, object_url: str) -> str:
+    put_url = object_store.signed_put_url(object_url)
+    if put_url is None:
+        raise RuntimeError(
+            f"{type(object_store).__name__} can't presign uploads; env snapshots need a signable object store or local execution."
+        )
+    return put_url
 
 
 class EnvSnapshotStore:

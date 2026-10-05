@@ -37,6 +37,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     all_sandbox_container_env,
     registered_sandbox_provider_classes,
 )
+from agent_env.store.ids import derive_id, is_local_id, key_segment, validate_local_id
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
@@ -205,6 +206,10 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
         )
         from agent_env.config import ConfigError, get_config
 
+        # The outputs are named after the run: refuse an id they can't take before the tests run.
+        if context.instance_id and is_local_id(context.instance_id):
+            validate_local_id(derive_id(context.instance_id, f"verifier-stdout-{self.id}"))
+
         # 1. Lookup container + sandbox, rehydrate VmSandbox
         containers = context.metadata.get("deployed_docker_containers", [])
         container_entry = next(
@@ -298,20 +303,22 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
         # 7. Persist stdout + stderr as separate FileArtifacts
         # Every execution gets its own key: a retried step keeps its run's instance id, and the
         # outputs are write-once. The instance id and the time only group and order them.
-        run = "-".join(filter(None, (context.instance_id, str(int(time.time())), uuid.uuid4().hex[:12])))
+        stamp = f"{int(time.time())}-{uuid.uuid4().hex[:12]}"
+        run = "-".join(filter(None, (context.instance_id and key_segment(context.instance_id), stamp)))
+        base = context.instance_id or f"adhoc-{uuid.uuid4().hex[:12]}"
         store = config.get_object_store()
         outputs = f"{config.get_artifact_key_prefix()}verifier-outputs/{self.id}/{run}"
         stdout_artifact = await asyncio.to_thread(
             self._upload_text_artifact,
             text=stdout,
-            artifact_id=f"verifier-stdout-{self.id}-{run}",
+            artifact_id=derive_id(base, f"verifier-stdout-{self.id}-{stamp}"),
             description=f"stdout of {self.verifier_id} from step {self.id}",
             s3_url=store.object_url(f"{outputs}/stdout.txt"),
         )
         stderr_artifact = await asyncio.to_thread(
             self._upload_text_artifact,
             text=stderr,
-            artifact_id=f"verifier-stderr-{self.id}-{run}",
+            artifact_id=derive_id(base, f"verifier-stderr-{self.id}-{stamp}"),
             description=f"stderr of {self.verifier_id} from step {self.id}",
             s3_url=store.object_url(f"{outputs}/stderr.txt"),
         )

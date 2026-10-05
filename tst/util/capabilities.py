@@ -10,6 +10,8 @@ can assert the skips taken equal the skips declared for its profile.
 
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
 MISSING_CAPABILITY_PREFIX = "agentenv-capability-missing: "
@@ -28,6 +30,10 @@ DEFAULT_A2A_AGENT = "default_a2a_agent"
 #: The gateway's virtual-clock tests build real MCP servers from sources outside this repository,
 #: found through ``AGENT_ENV_TEST_MCP_SERVERS_DIR`` (one ``<server>/Dockerfile`` per server).
 MCP_SERVER_SOURCES = "mcp_server_sources"
+
+#: ``collect_artifacts`` sizes a file with ``stat -c %s``, which only GNU stat takes (macOS ships BSD stat),
+#: so collecting off a local sandbox needs GNU stat first on PATH.
+GNU_STAT = "gnu_stat"
 
 
 def missing_capability_reason(capability: str) -> str:
@@ -130,4 +136,20 @@ def skip_without_default_a2a_agent() -> pytest.MarkDecorator:
     return pytest.mark.skipif(
         not default_a2a_agent_is_registered(),
         reason=missing_capability_reason(DEFAULT_A2A_AGENT),
+    )
+
+
+def gnu_stat_is_available() -> bool:
+    """Whether ``stat -c %s`` prints a file's size on this host."""
+    try:
+        return subprocess.run(["stat", "-c", "%s", __file__], capture_output=True).returncode == 0
+    except OSError:
+        return False
+
+
+def skip_without_gnu_stat() -> pytest.MarkDecorator:
+    """Collection-time ``skipif`` for tests that collect artifacts off a local sandbox."""
+    return pytest.mark.skipif(
+        not gnu_stat_is_available(),
+        reason=missing_capability_reason(GNU_STAT),
     )

@@ -131,13 +131,6 @@ def refuse_in_local_run(what: str) -> None:
         )
 
 
-def refuse_local_derivation(entity_id: str, kind: str, doing: str) -> None:
-    """Refuse ``doing`` to an ``@local`` entity whose tasks, artifacts or objects are named after it
-    in a form that doesn't keep the ``@local`` namespace yet."""
-    if is_local_id(entity_id):
-        raise ValueError(f"{entity_id!r} is an @local {kind}, and {doing} one isn't supported yet")
-
-
 def refuse_local_references(entity_id: object, value: Any) -> None:
     """Refuse a bare entity naming an ``@local`` id anywhere in ``value``: a shared store must
     never point into one person's local stores."""

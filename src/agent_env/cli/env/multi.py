@@ -3,7 +3,7 @@ import asyncio
 import click
 
 from agent_env.artifact import EnvironmentArtifact, EnvironmentUniverseArtifact
-from agent_env.cli.utils import detect_base_metadata, env_provider_type_option, skips_local_validation
+from agent_env.cli.utils import detect_base_metadata, env_provider_type_option
 from agent_env.env import Env, MultiEnv
 
 
@@ -78,7 +78,7 @@ def put(env_id: str, mcp_servers: tuple[str, ...], websites: tuple[str, ...], me
     multi_env = MultiEnv.put(id=env_id, mcp_server_envs=mcp_server_envs, website_envs=website_envs, metadata=metadata if metadata else None, name=name,
                              env_provider_type=env_provider_type)
     click.echo(f"Created MultiEnv: id={multi_env.id} version={multi_env.version} env_provider_type={multi_env.env_provider_type}")
-    if run_validation and not skips_local_validation(multi_env.id, "env"):
+    if run_validation:
         click.echo("\nValidating environment...")
         instance_id = asyncio.run(multi_env.validate(on_progress=click.echo))
         click.echo(f"Validation task: {instance_id}")
