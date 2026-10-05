@@ -225,7 +225,7 @@ _HTTPX_LOGGER.addFilter(_RequestUrlRedactor())
 
 
 @contextmanager
-def _redacting_request_urls() -> Iterator[None]:
+def redacting_request_urls() -> Iterator[None]:
     """httpx logs only the origin of requests made in this scope: grant URLs carry credentials."""
 
     token = _REDACT_REQUEST_URLS.set(True)
@@ -255,7 +255,7 @@ def _as_transfer_errors(expires_at: datetime) -> Iterator[None]:
 def _transfer_request(expires_at: datetime) -> Iterator[None]:
     """One request made with a grant."""
 
-    with _redacting_request_urls(), _as_transfer_errors(expires_at):
+    with redacting_request_urls(), _as_transfer_errors(expires_at):
         yield
 
 

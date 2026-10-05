@@ -16,6 +16,7 @@ from a2a.server.events import EventQueue
 from a2a.types import (
     AgentCapabilities as UpstreamAgentCapabilities,
 )
+from a2a.types import AgentExtension
 from a2a.types import (
     Message,
     MessageSendParams,
@@ -35,6 +36,7 @@ from agentenv_protocol.a2a_agent import (
     PEER_AGENTS_V1,
     SKILL_CONFIG_V1,
     SNAPSHOT_V1,
+    STAGING_V1_URI,
     TRAJECTORY_V1,
     TRIGGERS_V1,
     AgentCapabilities,
@@ -62,6 +64,7 @@ from agentenv_protocol.a2a_agent import (
     PeerAgentsSetRequest,
     RequestDefinition,
     RequestVariant,
+    StagingStore,
     TaskObjectTrajectoryRequest,
     TaskOutcome,
     TaskProgress,
@@ -694,7 +697,7 @@ def test_non_streaming_capabilities_are_derived_from_run() -> None:
         streaming=False,
         push_notifications=False,
         state_transition_history=False,
-        extensions=[],
+        extensions=[AgentExtension.model_validate(StagingStore().card_extension())],
     )
 
     with pytest.raises(TypeError, match="unexpected keyword argument 'capabilities'"):
@@ -731,7 +734,7 @@ def test_streaming_progress_and_status_events_are_forwarded_in_order() -> None:
     with TestClient(Agent().create_app()) as client:
         card = client.get("/.well-known/agent.json").json()
         assert card["capabilities"] == {
-            "extensions": [],
+            "extensions": [StagingStore().card_extension()],
             "pushNotifications": False,
             "stateTransitionHistory": False,
             "streaming": True,
@@ -2621,6 +2624,7 @@ def test_generated_app_serves_sdk_extensions_and_a2a_lifecycle() -> None:
             "urn:agentenv:skill-config/v1",
             "urn:agentenv:trajectory/v1",
             "urn:agentenv:triggers/v1",
+            STAGING_V1_URI,
         }
 
         assert (
