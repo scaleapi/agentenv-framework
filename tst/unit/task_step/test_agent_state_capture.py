@@ -23,10 +23,26 @@ from .capture_stubs import (
 )
 
 
+def _save_card(*variants: list[str], **params) -> dict:
+    return agent_card(
+        snapshot={
+            "methods": {
+                "save": {
+                    "request": {
+                        "required": ["context_id"],
+                        "oneOf": [{"required": fields} for fields in variants],
+                    }
+                }
+            }
+        },
+        **params,
+    )
+
+
 async def _capture(**overrides):
     kwargs = dict(
         a2a_url="https://agent",
-        a2a_card=agent_card(),
+        a2a_card=_save_card(["objects"]),
         agent_name="solver",
         a2a_context_id="ctx-1",
         artifact_id="wsp",
@@ -37,49 +53,39 @@ async def _capture(**overrides):
     return await mod.capture_workspace(**kwargs)
 
 
+def _granted(rec) -> dict[str, str]:
+    return {
+        grant["object_url"].rsplit("/", 1)[-1]: grant["object_url"]
+        for grant in rec.object_store.write_grants
+    }
+
+
 # ---- capture_workspace ------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_posts_context_id_and_the_issued_prefix(monkeypatch):
+async def test_posts_context_id_and_a_write_grant_for_each_snapshot_object(monkeypatch):
     rec = install_capture_stubs(monkeypatch)
     result = await _capture()
 
     (sent,) = rec.save_requests
     assert sent["url"] == "https://agent/ext/snapshot"
+    assert set(sent["json"]) == {"context_id", "objects"}
     assert sent["json"]["context_id"] == "ctx-1"
-    assert sent["json"]["s3_prefix"].startswith(f"s3://{BUCKET}/agent_snapshots/wsp/")
-    assert "presigned_post" in sent["json"]
-    # The bundle url is what the sidecar confirmed, wrapped as a universe.
-    assert result.bundle_object_url == sent["json"]["s3_prefix"]
+    assert set(sent["json"]["objects"]) == {"trajectory", "workspace"}
+    assert result.capture_prefix.startswith(f"s3://{BUCKET}/agent_snapshots/wsp/")
+    assert _granted(rec) == {
+        name: f"{result.capture_prefix}{name}" for name in ("trajectory", "workspace")
+    }
+    # Registered where the grants pointed, wrapped as a universe.
+    assert result.bundle_object_url == result.capture_prefix
     assert result.universe_id == "wsp"
-    assert result.capture_prefix == sent["json"]["s3_prefix"]
 
 
 @pytest.mark.asyncio
 async def test_honours_a_card_pinned_endpoint(monkeypatch):
     rec = install_capture_stubs(monkeypatch)
-    await _capture(a2a_card=agent_card(snapshot_endpoint="/custom/snap"))
+    await _capture(a2a_card=_save_card(["objects"], snapshot_endpoint="/custom/snap"))
     assert rec.save_requests[0]["url"] == "https://agent/custom/snap"
-
-
-@pytest.mark.asyncio
-async def test_signs_the_capture_prefix_and_forwards_the_whole_grant(monkeypatch):
-    rec = install_capture_stubs(monkeypatch)
-    await _capture()
-
-    (signed,) = rec.object_store.signed_posts
-    sent = rec.save_requests[0]["json"]
-    assert signed["url_prefix"] == sent["s3_prefix"]
-    assert set(sent["presigned_post"]) == {"url", "fields"}
-
-
-@pytest.mark.asyncio
-async def test_a_backend_that_cannot_sign_omits_the_grant(monkeypatch):
-    rec = install_capture_stubs(monkeypatch)
-    monkeypatch.setattr(rec.object_store, "signed_post", lambda *a, **k: None)
-    await _capture()
-
-    assert "presigned_post" not in rec.save_requests[0]["json"]
 
 
 @pytest.mark.asyncio
@@ -114,31 +120,9 @@ async def test_raises_on_an_http_error(monkeypatch):
     rec = install_capture_stubs(monkeypatch)
     rec.save_status = 500
     rec.save_body = {"detail": "boom"}
-    with pytest.raises(httpx.HTTPStatusError, match="snapshot save failed with HTTP 500: .*boom"):
+    with pytest.raises(httpx.HTTPStatusError, match="snapshot save failed with HTTP 500"):
         await _capture()
-
-
-@pytest.mark.asyncio
-async def test_raises_when_the_response_omits_the_prefix(monkeypatch):
-    rec = install_capture_stubs(monkeypatch)
-    rec.save_body = {"file_count": 3}
-    with pytest.raises(RuntimeError, match="missing 's3_prefix'"):
-        await _capture()
-
-
-@pytest.mark.asyncio
-async def test_a_prefix_outside_the_issued_one_is_never_registered(monkeypatch, caplog):
-    """`put_existing` lists the prefix and registers every object under it with the
-    worker's credentials, so honouring an agent-chosen prefix would let a
-    compromised sidecar pull any prefix that role can read into this snapshot."""
-    rec = install_capture_stubs(monkeypatch)
-    rec.save_body = {"s3_prefix": f"s3://{BUCKET}/someone/elses/run/"}
-    result = await _capture()
-
-    issued = rec.save_requests[0]["json"]["s3_prefix"]
-    assert result.bundle_object_url == issued
-    assert "someone/elses/run" not in result.bundle_object_url
-    assert "echoed a prefix outside the one issued" in caplog.text
+    assert not rec.universes
 
 
 @pytest.mark.asyncio
@@ -146,72 +130,18 @@ async def test_a_capture_is_issued_under_the_fixture_prefix(monkeypatch):
     rec = install_capture_stubs(monkeypatch)
     rec.key_prefix = "fx/"
     result = await _capture()
-    assert rec.save_requests[0]["json"]["s3_prefix"].startswith(f"s3://{BUCKET}/fx/agent_snapshots/wsp/")
     assert result.capture_prefix.startswith(f"s3://{BUCKET}/fx/agent_snapshots/wsp/")
+    assert all(url.startswith(result.capture_prefix) for url in _granted(rec).values())
 
 
 @pytest.mark.asyncio
-async def test_a_sidecar_that_nests_under_the_issued_prefix_is_registered_there(monkeypatch):
-    """Registering the issued prefix for a nester fails silently — the recursive list
-    still finds the object, and only a later restore cannot."""
+async def test_a_card_offering_both_save_forms_gets_the_object_one(monkeypatch):
     rec = install_capture_stubs(monkeypatch)
-    stamp = "2026-08-05T00:00:00.000Z"
-    rec.save_body = lambda req: {"s3_prefix": f"{req['s3_prefix']}{stamp}/"}
-    result = await _capture()
 
-    issued = rec.save_requests[0]["json"]["s3_prefix"]
-    assert result.bundle_object_url == f"{issued}{stamp}/"
-    # The presigned prefix is unchanged — per-service state still lands beside it.
-    assert result.capture_prefix.startswith(f"s3://{BUCKET}/agent_snapshots/wsp/")
+    result = await _capture(a2a_card=_save_card(["s3_prefix"], ["objects"]))
 
-
-@pytest.mark.asyncio
-async def test_a_flat_echo_registers_the_issued_prefix_unchanged(monkeypatch, caplog):
-    """A sidecar honouring the presigned POST writes flat and echoes it back."""
-    rec = install_capture_stubs(monkeypatch)
-    result = await _capture()
-
-    issued = rec.save_requests[0]["json"]["s3_prefix"]
-    assert result.bundle_object_url == issued
-    assert "outside the one issued" not in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_snapshot_save_prefers_advertised_object_mode(monkeypatch):
-    rec = install_capture_stubs(monkeypatch)
-    rec.save_body = {
-        "context_id": "ctx-1",
-        "objects": {
-            "trajectory": {"size_bytes": 12},
-            "workspace": {"size_bytes": 34},
-        },
-    }
-    card = agent_card(
-        snapshot={
-            "methods": {
-                "save": {
-                    "request": {
-                        "required": ["context_id"],
-                        "oneOf": [
-                            {"required": ["s3_prefix"]},
-                            {"required": ["objects"]},
-                        ],
-                    }
-                }
-            }
-        }
-    )
-
-    result = await _capture(a2a_card=card)
-
-    sent = rec.save_requests[0]["json"]
-    assert set(sent) == {"context_id", "objects"}
-    assert set(sent["objects"]) == {"trajectory", "workspace"}
-    assert not rec.object_store.signed_posts
-    assert {
-        grant["object_url"].rsplit("/", 1)[-1]
-        for grant in rec.object_store.write_grants
-    } == {"trajectory", "workspace"}
+    assert set(rec.save_requests[0]["json"]) == {"context_id", "objects"}
+    assert set(_granted(rec)) == {"trajectory", "workspace"}
     assert result.bundle_object_url == result.capture_prefix
 
 
@@ -219,61 +149,36 @@ async def test_snapshot_save_prefers_advertised_object_mode(monkeypatch):
 async def test_snapshot_save_requires_every_supplied_object(monkeypatch):
     rec = install_capture_stubs(monkeypatch)
     rec.object_store.withheld = {"workspace"}
-    rec.save_body = {
-        "context_id": "ctx-1",
-        "objects": {
-            "trajectory": {"size_bytes": 12},
-            "workspace": {"size_bytes": 34},
-        },
-    }
-    card = agent_card(
-        snapshot={
-            "methods": {
-                "save": {
-                    "request": {"required": ["context_id", "objects"]}
-                }
-            }
-        }
-    )
 
     with pytest.raises(RuntimeError, match=r"left \['workspace'\] out of the object store"):
-        await _capture(a2a_card=card)
+        await _capture()
     assert not rec.universes
 
 
-def _save_card(*variants: list[str]) -> dict:
-    return agent_card(
-        snapshot={
-            "methods": {
-                "save": {
-                    "request": {
-                        "required": ["context_id"],
-                        "oneOf": [{"required": fields} for fields in variants],
-                    }
-                }
-            }
-        }
-    )
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "card",
+    [_save_card(["s3_prefix"]), agent_card()],
+    ids=["s3-prefix-only", "no-declared-request"],
+)
+async def test_an_agent_without_the_object_save_form_is_refused_before_any_request(
+    monkeypatch, card
+):
+    rec = install_capture_stubs(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="does not advertise the object form"):
+        await _capture(a2a_card=card)
+
+    assert (rec.save_requests, rec.object_store.write_grants, rec.universes) == ([], [], [])
 
 
 @pytest.mark.asyncio
-async def test_snapshot_save_takes_the_legacy_shape_on_a_store_without_grants(monkeypatch):
+async def test_a_save_on_a_store_without_grants_is_refused(monkeypatch):
     rec = install_capture_stubs(monkeypatch)
     monkeypatch.setattr(rec.object_store, "supports_transfer_grants", False)
 
-    await _capture(a2a_card=_save_card(["s3_prefix"], ["objects"]))
-
-    assert "s3_prefix" in rec.save_requests[0]["json"]
-    assert rec.object_store.write_grants == []
-
-
-@pytest.mark.asyncio
-async def test_an_objects_only_save_on_a_store_without_grants_is_refused(monkeypatch):
-    rec = install_capture_stubs(monkeypatch)
-    monkeypatch.setattr(rec.object_store, "supports_transfer_grants", False)
-
-    with pytest.raises(RuntimeError, match="no snapshot save form"):
-        await _capture(a2a_card=_save_card(["objects"]))
+    with pytest.raises(RuntimeError, match="does not issue transfer grants"):
+        await _capture()
 
     assert rec.save_requests == []
 

@@ -168,7 +168,7 @@ async def test_inline_trajectory_gets_uploaded_and_its_url_returned(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_server_side_s3_prefix_is_listed_for_the_object_url(monkeypatch):
+async def test_a_judge_naming_its_own_trajectory_prefix_yields_no_trajectory(monkeypatch):
     verifier = _verifier()
 
     async def fake_request(self, method, url, **kwargs):
@@ -186,8 +186,7 @@ async def test_server_side_s3_prefix_is_listed_for_the_object_url(monkeypatch):
             return f"s3://bucket/{key}"
 
         def list_at(self, prefix):
-            assert prefix == "s3://bucket/pre/"
-            return ["s3://bucket/pre/trajectory-t1.json"]
+            raise AssertionError("an agent-named prefix is never listed")
 
     _use_store(monkeypatch, FakeStore())
 
@@ -197,7 +196,7 @@ async def test_server_side_s3_prefix_is_listed_for_the_object_url(monkeypatch):
         a2a_server_task_id="t1",
         sandbox_type="local",
     )
-    assert uri == "s3://bucket/pre/trajectory-t1.json"
+    assert uri is None
 
 
 @pytest.mark.asyncio
