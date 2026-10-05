@@ -16,7 +16,7 @@ from agentenv_protocol.transfers import (
 from botocore.credentials import Credentials, RefreshableCredentials
 
 from agent_env.store import GrantUnavailableError
-from agent_env.store.object_store.local_object_store import (
+from agent_env.store.object_store.local.store import (
     LocalFilesystemObjectStore,
 )
 from agent_env.store.object_store import UploadPolicy
@@ -282,7 +282,7 @@ def test_botocore_still_exposes_the_signing_credentials() -> None:
 
 
 def test_local_store_does_not_offer_transfer_grants(tmp_path) -> None:
-    """It can issue them (local_grants_server_test.py), but agents on the local store don't use them."""
+    """It can issue them (local_grant_server_test.py), but agents on the local store don't use them."""
     store = LocalFilesystemObjectStore(str(tmp_path))
 
     assert S3ObjectStore.supports_transfer_grants

@@ -26,9 +26,9 @@ from agent_env.store.base import ObjectAlreadyExistsError, ObjectNotFoundError
 if os.name != "nt":
     import fcntl
 from agent_env.store.local_state import ensure_state_dir
-from agent_env.store.object_store.local_grants.server import grant_server
-from agent_env.store.object_store.local_grants.tls import check_local_host
-from agent_env.store.object_store.local_grants.tokens import Op
+from agent_env.store.object_store.local.grant_server import grant_server
+from agent_env.store.object_store.local.tls import check_local_host
+from agent_env.store.object_store.local.tokens import Op
 from agent_env.store.object_store.object_store import (
     DEFAULT_CONTENT_TYPE,
     ObjectMetadata,

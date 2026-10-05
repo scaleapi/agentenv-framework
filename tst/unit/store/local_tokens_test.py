@@ -2,7 +2,7 @@
 
 import pytest
 
-from agent_env.store.object_store.local_grants.tokens import GrantClaims, GrantSigner, InvalidGrantError
+from agent_env.store.object_store.local.tokens import GrantClaims, GrantSigner, InvalidGrantError
 
 NOW = 1_800_000_000
 

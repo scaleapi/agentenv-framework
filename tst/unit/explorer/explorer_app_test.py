@@ -19,7 +19,7 @@ from agent_env.config import configure, get_config, reset_config, set_document_s
 from agent_env.config.errors import ConfigError
 from agent_env.runner import store as run_store
 from agent_env.runner.local_runner import LocalRunner
-from agent_env.store.object_store.local_object_store import LocalFilesystemObjectStore
+from agent_env.store.object_store.local.store import LocalFilesystemObjectStore
 from agent_env.store.document_store.sqlite_document_store import LocalSqliteDocumentStore
 from agent_env.task import Task
 from agent_env.explorer.routers import objects as objects_router
@@ -591,7 +591,7 @@ def test_root_serves_health_when_no_ui_is_mounted(client):
 def test_instance_content_serves_object_store_bytes(client, tmp_path):
     """Content route proxies an object-store blob and refuses a url outside the store."""
     from agent_env.config import set_object_store
-    from agent_env.store.object_store.local_object_store import LocalFilesystemObjectStore
+    from agent_env.store.object_store.local.store import LocalFilesystemObjectStore
 
     store = LocalFilesystemObjectStore(str(tmp_path / "obj"))
     set_object_store(store)
@@ -698,7 +698,7 @@ def test_content_sandboxes_active_types(client, tmp_path):
     active type and add a misleading policy to a passive one.
     """
     from agent_env.config import set_object_store
-    from agent_env.store.object_store.local_object_store import LocalFilesystemObjectStore
+    from agent_env.store.object_store.local.store import LocalFilesystemObjectStore
 
     store = LocalFilesystemObjectStore(str(tmp_path / "obj"))
     set_object_store(store)
