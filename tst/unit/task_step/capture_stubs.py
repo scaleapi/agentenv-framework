@@ -1,7 +1,7 @@
 """Shared stubs for the agent-state capture tests.
 
 Follows the ``tst.unit.store.fakes`` convention: the capture path touches an
-artifact store, an object store (including its presigner) and the agent sidecar, and
+artifact store, an object store (including its grants) and the agent sidecar, and
 both ``test_agent_state_capture`` and ``test_prompt_agent_periodic_snapshot`` need
 the same fakes for all three.
 """
@@ -62,7 +62,6 @@ class _StubObjectStore:
 
     def __init__(self):
         self.puts: list[tuple[str, bytes]] = []
-        self.signed_posts: list[dict] = []
         self.write_grants: list[dict] = []
         self.withheld: set[str] = set()
 
@@ -92,13 +91,6 @@ class _StubObjectStore:
             url="https://objects.example.test/write?secret=signed",
             expires_at=datetime.now(UTC) + timedelta(minutes=5),
         )
-
-    def signed_post(self, url_prefix, *, expires_in=3600, max_bytes=None):
-        self.signed_posts.append(
-            {"url_prefix": url_prefix, "expires_in": expires_in, "max_bytes": max_bytes}
-        )
-        key = f"{self.get_object_key(url_prefix)}${{filename}}"
-        return {"url": f"https://{BUCKET}.s3.amazonaws.com/", "fields": {"key": key}}
 
     def get_object_key(self, url: str) -> str:
         prefix = f"s3://{BUCKET}/"
@@ -181,11 +173,12 @@ def install_capture_stubs(monkeypatch) -> CaptureRecorder:
             {"method": method, "url": url, "json": json, "timeout": timeout}
         )
         body = rec.save_body
-        # Callable form: echo a prefix relative to the issued one, which is random.
-        if callable(body):
-            body = body(json or {})
         if body is None:
-            body = {"s3_prefix": (json or {}).get("s3_prefix")}
+            request_json = json or {}
+            body = {
+                "context_id": request_json.get("context_id"),
+                "objects": {name: {"size_bytes": 1} for name in request_json.get("objects", {})},
+            }
         return httpx.Response(rec.save_status, json=body, request=request)
 
     monkeypatch.setattr(httpx.AsyncClient, "request", fake_request)
