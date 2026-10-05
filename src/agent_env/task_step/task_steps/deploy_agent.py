@@ -16,7 +16,6 @@ from agent_env.a2a_agent import protocol
 from agent_env.a2a_agent.object_transfer import (
     REPLY_TIMEOUT_SECONDS,
     TRANSFER_TIMEOUT_SECONDS,
-    bounded_echo,
     changelog_apply_call,
     changelog_enable_call,
     check_changelog_applied,
@@ -120,7 +119,6 @@ class DeployAgentTaskStep(TaskStep):
         network_policy: Optional[dict] = None,
         role: Optional[str] = None,
         enable_agent_changelog: bool = False,
-        agent_changelog_s3_prefix: Optional[str] = None,
         agent_changelog_toolcall_position_exclusive: Optional[int] = None,
         sandbox_name: Optional[str] = None,
         enable_docker: bool = False,
@@ -153,18 +151,13 @@ class DeployAgentTaskStep(TaskStep):
         self.role = role
         self.enable_agent_changelog = enable_agent_changelog
         self.agent_changelog_object_url = agent_changelog_object_url
-        self.agent_changelog_s3_prefix = agent_changelog_s3_prefix
         self.agent_changelog_toolcall_position_exclusive = agent_changelog_toolcall_position_exclusive
-        if self.agent_changelog_object_url and self.agent_changelog_s3_prefix:
-            raise ValueError(
-                "set only one of agent_changelog_object_url and "
-                "agent_changelog_s3_prefix"
-            )
-        if self.agent_changelog_toolcall_position_exclusive is not None and not (
-            self.agent_changelog_object_url or self.agent_changelog_s3_prefix
+        if (
+            self.agent_changelog_toolcall_position_exclusive is not None
+            and not self.agent_changelog_object_url
         ):
             raise ValueError(
-                "agent_changelog_toolcall_position_exclusive requires a changelog source"
+                "agent_changelog_toolcall_position_exclusive requires agent_changelog_object_url"
             )
         self.sandbox_name = sandbox_name
         # Rootless Docker-in-Docker for the agent (not the VM socket); VM mode only.
@@ -195,7 +188,6 @@ class DeployAgentTaskStep(TaskStep):
         base["role"] = self.role
         base["enable_agent_changelog"] = self.enable_agent_changelog
         base["agent_changelog_object_url"] = self.agent_changelog_object_url
-        base["agent_changelog_s3_prefix"] = self.agent_changelog_s3_prefix
         base["agent_changelog_toolcall_position_exclusive"] = self.agent_changelog_toolcall_position_exclusive
         base["sandbox_name"] = self.sandbox_name
         base["enable_docker"] = self.enable_docker
@@ -203,6 +195,11 @@ class DeployAgentTaskStep(TaskStep):
 
     @classmethod
     def from_dict(cls, data: dict) -> DeployAgentTaskStep:
+        if data.get("agent_changelog_s3_prefix"):
+            raise ValueError(
+                "agent_changelog_s3_prefix is no longer supported: an S3-form changelog cannot "
+                "be applied; capture it again and set agent_changelog_object_url"
+            )
         return cls(
             **cls._base_from_dict(data),
             env_ids=data.get("env_ids"),
@@ -228,7 +225,6 @@ class DeployAgentTaskStep(TaskStep):
             role=data.get("role"),
             enable_agent_changelog=data.get("enable_agent_changelog", False),
             agent_changelog_object_url=data.get("agent_changelog_object_url"),
-            agent_changelog_s3_prefix=data.get("agent_changelog_s3_prefix"),
             agent_changelog_toolcall_position_exclusive=data.get("agent_changelog_toolcall_position_exclusive"),
             sandbox_name=data.get("sandbox_name"),
             enable_docker=data.get("enable_docker", False),
@@ -408,7 +404,7 @@ class DeployAgentTaskStep(TaskStep):
         if self.agent_snapshot_files_artifact_id:
             await self._load_snapshot(a2a_url, card, a2a_agent_id, context, sandbox_type=deployed.sandbox_type)
 
-        if self.agent_changelog_object_url or self.agent_changelog_s3_prefix:
+        if self.agent_changelog_object_url:
             await self._apply_agent_changelog(a2a_url, card, context, sandbox_type=deployed.sandbox_type)
 
         if self.enable_agent_changelog:
@@ -504,23 +500,18 @@ class DeployAgentTaskStep(TaskStep):
             response_model=NamespaceChangelogEnableResponse,
             store=store,
         )
-        if call.mode == "objects":
-            roots, object_url = answer.roots, namespace_url
-        else:
-            roots = answer.get("roots")
-            object_url = bounded_echo(namespace_url, answer.get("s3_prefix") or namespace_url)
         entry = {
             "agent_name": self.agent_name,
-            "roots": roots,
+            "roots": answer.roots,
             "transfer_mode": call.mode,
-            "object_url": object_url,
+            "object_url": namespace_url,
         }
-        if call.mode == "objects" and isinstance(store, StagedObjectStore):
+        if isinstance(store, StagedObjectStore):
             # The increments wait on the agent until they are drained into the store.
             entry["staging_url"] = store.namespaces[-1].staging_url
             entry["staging_max_object_bytes"] = store.namespaces[-1].max_object_bytes
         context.metadata.setdefault("agent_changelog", []).append(entry)
-        logger.info(f"agent-changelog capture enabled on '{self.agent_name}': {object_url}")
+        logger.info(f"agent-changelog capture enabled on '{self.agent_name}': {namespace_url}")
 
     async def _apply_agent_changelog(
         self, a2a_url: str, card: dict, context: TaskStepContext, *, sandbox_type: str | None
@@ -536,14 +527,13 @@ class DeployAgentTaskStep(TaskStep):
                 f"'{A2AAgent.SNAPSHOT_METHOD_APPLY_CHANGELOG}' method; cannot apply agent changelog"
             )
         store = transfer_store(get_config().get_object_store(), a2a_url, card, sandbox_type=sandbox_type)
-        source_url = self.agent_changelog_object_url or self.agent_changelog_s3_prefix
+        source_url = self.agent_changelog_object_url
         call = await asyncio.to_thread(
             changelog_apply_call,
             method,
             store,
             agent_name=self.agent_name,
             source_url=source_url,
-            portable=bool(self.agent_changelog_object_url),
             up_to_tool_call_exclusive=self.agent_changelog_toolcall_position_exclusive,
             resume_conversation=True,
             target_context_id=self.agent_snapshot_target_context_id,
@@ -558,11 +548,8 @@ class DeployAgentTaskStep(TaskStep):
             response_model=ObjectChangelogApplyResponse,
             store=store,
         )
-        if call.mode == "objects":
-            check_changelog_applied(answer, call, agent_name=self.agent_name)
-            context_id = answer.context_id
-        else:
-            context_id = answer.get("context_id")
+        check_changelog_applied(answer, call, agent_name=self.agent_name)
+        context_id = answer.context_id
         context.metadata.setdefault("agent_changelog_rewinds", []).append({
             "agent_name": self.agent_name,
             "context_id": context_id,
@@ -624,9 +611,7 @@ class DeployAgentTaskStep(TaskStep):
             response_model=ObjectSnapshotLoadResponse,
             store=store,
         )
-        loaded_context_id = (
-            answer.context_id if call.mode == "objects" else answer.get("context_id")
-        )
+        loaded_context_id = answer.context_id
         logger.info(
             f"Loaded snapshot universe={universe.id} v{universe.version} "
             f"into agent '{self.agent_name}' as context_id={loaded_context_id}"

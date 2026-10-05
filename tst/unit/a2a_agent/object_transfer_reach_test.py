@@ -1,5 +1,5 @@
-"""Whether an agent is offered grants depends on whether they reach its sandbox, and a local store's
-objects never go out as an S3-form file:// URL an agent cannot use."""
+"""Whether an agent is offered grants depends on whether they reach its sandbox, and an object call
+whose grants cannot reach the agent is refused, saying why."""
 
 import pytest
 
@@ -59,31 +59,25 @@ def _save(store, method, sandbox_type):
     )
 
 
-def test_a_legacy_only_agent_is_refused_a_local_file_url(local):
-    with pytest.raises(RuntimeError, match="Agent 'solver' cannot save a snapshot on a local object store: the agent takes only the S3 form"):
+def test_an_agent_that_takes_only_the_s3_form_is_refused(local):
+    with pytest.raises(RuntimeError, match="snapshot save on agent 'solver': the agent does not advertise the object form"):
         _save(local, SAVE_S3_ONLY, "local")
 
 
-def test_a_remote_agent_is_refused_a_local_file_url_and_told_why(local):
+def test_a_remote_agent_is_refused_and_told_why(local):
     with pytest.raises(RuntimeError, match="grants do not reach agents on the 'modal' sandbox provider"):
         _save(local, SAVE_EITHER, "modal")
 
 
-def test_with_grants_off_the_refusal_names_the_setting(tmp_path):
+def test_with_grants_off_a_local_agent_is_refused(tmp_path):
     store = LocalFilesystemObjectStore(str(tmp_path), grants="off")
-    with pytest.raises(RuntimeError, match='grants = "off"'):
+    with pytest.raises(RuntimeError, match="the object store does not issue transfer grants"):
         _save(store, SAVE_EITHER, "local")
 
 
 def test_an_objects_only_agent_out_of_reach_is_told_why(local):
-    with pytest.raises(RuntimeError, match="no snapshot save form .* do not reach agents on the 'unknown' sandbox provider"):
+    with pytest.raises(RuntimeError, match="snapshot save on agent 'solver': the object store's grants do not reach agents on the 'unknown' sandbox provider"):
         _save(local, SAVE_OBJECTS_ONLY, None)
-
-
-def test_an_s3_form_url_the_agent_can_use_goes_out_unchanged():
-    call = _save(FakeObjectStore(), SAVE_S3_ONLY, "modal")
-    assert call.mode == "legacy"
-    assert not call.payload["s3_prefix"].startswith("file://")
 
 
 def test_a_skill_given_inline_still_reaches_a_remote_agent(local):
@@ -93,8 +87,8 @@ def test_a_skill_given_inline_still_reaches_a_remote_agent(local):
 
 def test_a_skill_from_local_objects_is_refused_to_a_remote_agent(local):
     local.put("skills/s/SKILL.md", b"# s")
-    with pytest.raises(RuntimeError, match="Agent 'solver' cannot add a skill from objects"):
+    with pytest.raises(RuntimeError, match="skill add: the object store's grants do not reach agents on the 'modal' sandbox provider"):
         skill_add_call(
             SKILL_ANY, local, name="s", description="d", object_url=local.object_url("skills/s"),
-            sandbox_type="modal", agent_name="solver",
+            sandbox_type="modal",
         )

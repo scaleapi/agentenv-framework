@@ -22,7 +22,6 @@ from agent_env.a2a_agent.object_transfer import (
     SNAPSHOT_WORKSPACE_OBJECT_NAME,
     FetchedTrajectory,
     TrajectoryUpload,
-    bounded_echo,
     fetch_trajectory,
     invoke_transfer,
     snapshot_save_call,
@@ -40,10 +39,9 @@ class WorkspaceCapture:
 
     universe_id: str
     universe_version: Optional[int]
-    # Where the files landed; what restores.
+    # What restores.
     bundle_object_url: str
-    # What was presigned — not always where the agent wrote. Per-service state,
-    # captured alongside, still goes here.
+    # Where the agent wrote it. Per-service state, captured alongside, goes here too.
     capture_prefix: str
 
 
@@ -66,7 +64,7 @@ async def capture_workspace(
     timeout_seconds: float,
     sandbox_type: str | None,
 ) -> WorkspaceCapture:
-    """Tar the agent's workspace to a fresh S3 prefix and wrap it as a universe.
+    """Capture the agent's workspace below a fresh prefix and wrap it as a universe.
 
     Raises on any failure — without the tar there is nothing to grade."""
     from agent_env.artifact.store import get_artifact_store
@@ -96,7 +94,7 @@ async def capture_workspace(
         capture_prefix=capture_prefix,
         sandbox_type=sandbox_type,
     )
-    save_body = await invoke_transfer(
+    await invoke_transfer(
         a2a_url + save_path,
         call,
         verb="POST",
@@ -106,35 +104,28 @@ async def capture_workspace(
         store=store,
     )
 
-    if call.mode == "objects":
-        # The agent's answer is only a claim: a snapshot missing either object cannot be restored.
-        listed = await asyncio.to_thread(store.list_at, capture_prefix)
-        stored = {url.rsplit("/", 1)[-1] for url in listed}
-        missing = {SNAPSHOT_TRAJECTORY_OBJECT_NAME, SNAPSHOT_WORKSPACE_OBJECT_NAME} - stored
-        if missing:
-            raise RuntimeError(
-                f"snapshot save from agent '{agent_name}' left {sorted(missing)} out of the object store"
-            )
-        registered_prefix = capture_prefix
-    else:
-        echoed = save_body.get("s3_prefix")
-        if not echoed:
-            raise RuntimeError(f"snapshot save response missing 's3_prefix': {save_body}")
-        registered_prefix = bounded_echo(capture_prefix, echoed)
+    # The agent's answer is only a claim: a snapshot missing either object cannot be restored.
+    listed = await asyncio.to_thread(store.list_at, capture_prefix)
+    stored = {url.rsplit("/", 1)[-1] for url in listed}
+    missing = {SNAPSHOT_TRAJECTORY_OBJECT_NAME, SNAPSHOT_WORKSPACE_OBJECT_NAME} - stored
+    if missing:
+        raise RuntimeError(
+            f"snapshot save from agent '{agent_name}' left {sorted(missing)} out of the object store"
+        )
 
     from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 
     # Unserialized — a concurrent version race on one artifact id is
     # `ArtifactStore.put_document`'s retry to absorb.
     universe = await asyncio.to_thread(
-        FileArtifactUniverse.put_existing, id=artifact_id, s3_url=registered_prefix
+        FileArtifactUniverse.put_existing, id=artifact_id, s3_url=capture_prefix
     )
     # `put_existing` always sets it, but the field is Optional on the artifact, and a
     # row carrying None here would read as an ungradable capture rather than an error.
     if not universe.bundle_object_url:
         raise RuntimeError(
             f"FileArtifactUniverse {universe.id} v{universe.version} registered no "
-            f"bundle url for {registered_prefix}"
+            f"bundle url for {capture_prefix}"
         )
     logger.info(
         "Snapshot captured: agent=%s context_id=%s -> FileArtifactUniverse %s v%s at %s",
@@ -247,9 +238,6 @@ def store_trajectory(
     """The URL of a fetched trajectory, storing it first when the agent returned it inline."""
     if fetched.object_url is not None:
         return fetched.object_url
-    if fetched.legacy_prefix:
-        urls = get_config().get_object_store().list_at(fetched.legacy_prefix)
-        return urls[0] if urls else None
     if fetched.inline is not None:
         return upload_trajectory(fetched.inline, trajectory_output_prefix, name=name)
     return None

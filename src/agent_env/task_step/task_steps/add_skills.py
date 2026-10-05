@@ -22,8 +22,9 @@ class Skill:
 
     A skill can come from three mutually-exclusive sources:
     - **inline**: body + frontmatter fields, rendered into SKILL.md at send time
-    - **s3_url**: S3 prefix containing a skill directory with its own SKILL.md
-    - **skill_artifact_id**: a SkillArtifact in the store; name/description/skill_s3_url
+    - **s3_url**: object-store prefix containing a skill directory with its own SKILL.md,
+      sent as a bundle of read grants
+    - **skill_artifact_id**: a SkillArtifact in the store; name/description/skill_object_url
       are resolved from it at send time
     """
     name: Optional[str] = None

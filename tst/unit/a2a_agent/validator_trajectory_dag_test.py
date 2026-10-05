@@ -19,7 +19,7 @@ from agentenv_protocol.transfers import HttpPutGrant
 
 from agent_env.a2a_agent import A2AAgent, object_transfer
 from agent_env.a2a_agent.validator import A2AAgentValidator
-from agent_env.config import Config, configure, get_config
+from agent_env.config import Config, configure
 from agent_env.task import Task
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
 from agent_env.task_step.task_step import TaskStep
@@ -95,8 +95,6 @@ class _StubAsyncClient:
                     }
                 }
             )
-        if "trajectory_s3_prefix" in json:
-            return _StubResponse({"trajectory_s3_prefix": json["trajectory_s3_prefix"]})
         return _StubResponse({"trajectory": [{"type": "tool_call"}]})
 
 
@@ -123,7 +121,7 @@ def test_trajectory_step_fails_loudly_without_the_mcp_task_id():
 
 
 def test_trajectory_step_probes_with_the_task_id_from_the_mcp_verification(monkeypatch):
-    """The MCP step's `task_id` is load-bearing — it is what both probes carry.
+    """The MCP step's `task_id` is load-bearing — it is what the probes carry.
 
     Renaming the `verifications["a2a_agent_mcp"]["task_id"]` key, or severing
     the DAG edge that populates it, breaks the check.
@@ -138,11 +136,10 @@ def test_trajectory_step_probes_with_the_task_id_from_the_mcp_verification(monke
         step.execute(_context_with_trajectory_agent({"task_id": "task-abc"}))
     )
 
-    assert [p["task_id"] for p in _StubAsyncClient.posts] == ["task-abc", "task-abc"]
+    assert [p["task_id"] for p in _StubAsyncClient.posts] == ["task-abc"]
     assert result.metadata["verifications"]["a2a_trajectory"] == {
         "inline": True,
         "objects": False,
-        "s3": True,
     }
     assert (
         fake_agent.metadata["validated_a2a_extensions"][A2AAgent.EXT_TRAJECTORY][
@@ -152,7 +149,7 @@ def test_trajectory_step_probes_with_the_task_id_from_the_mcp_verification(monke
     )
 
 
-def test_trajectory_step_treats_method_without_request_as_legacy(monkeypatch):
+def test_trajectory_step_treats_method_without_request_as_inline_only(monkeypatch):
     fake_agent = _FakeAgent()
     _StubAsyncClient.posts = []
     monkeypatch.setattr(object_transfer.httpx, "AsyncClient", _StubAsyncClient)
@@ -168,11 +165,11 @@ def test_trajectory_step_treats_method_without_request_as_legacy(monkeypatch):
         )
     )
 
-    assert [set(post) for post in _StubAsyncClient.posts] == [
-        {"task_id"},
-        {"task_id", "trajectory_s3_prefix"},
-    ]
-    assert result.metadata["verifications"]["a2a_trajectory"]["s3"] is True
+    assert [set(post) for post in _StubAsyncClient.posts] == [{"task_id"}]
+    assert result.metadata["verifications"]["a2a_trajectory"] == {
+        "inline": True,
+        "objects": False,
+    }
 
 
 def test_trajectory_step_records_failed_object_url_construction(monkeypatch):
@@ -211,7 +208,6 @@ def test_trajectory_step_records_failed_object_url_construction(monkeypatch):
     assert result.metadata["verifications"]["a2a_trajectory"] == {
         "inline": True,
         "objects": False,
-        "s3": False,
     }
 
 
@@ -269,17 +265,15 @@ def test_trajectory_step_probes_the_advertised_object_variant(monkeypatch):
     assert [set(post) for post in _StubAsyncClient.posts] == [
         {"task_id"},
         {"task_id", "objects"},
-        {"task_id", "trajectory_s3_prefix"},
     ]
     assert result.metadata["verifications"]["a2a_trajectory"] == {
         "inline": True,
         "objects": True,
-        "s3": True,
     }
     options = fake_agent.metadata["validated_a2a_extensions"][
         A2AAgent.EXT_TRAJECTORY
     ]["methods"]["get"]["options"]
-    assert options["objects"] == {"supported": True}
+    assert options == {"task_id": {"supported": True}, "objects": {"supported": True}}
 
 
 def test_trajectory_step_skips_the_object_variant_on_a_store_without_grants(monkeypatch):
@@ -365,19 +359,21 @@ async def test_validator_anchors_trajectory_step_on_its_mcp_step(monkeypatch):
 def test_the_trajectory_probe_prefix_is_under_the_fixture_prefix(local_stores, monkeypatch):
     monkeypatch.setenv("AGENT_ENV_FIXTURE_PREFIX", "fx")
     configure()
+    store = _ObjectStore()
     _StubAsyncClient.posts = []
     monkeypatch.setattr(object_transfer.httpx, "AsyncClient", _StubAsyncClient)
     monkeypatch.setattr(A2AAgent, "get", lambda *_a, **_kw: _FakeAgent())
+    monkeypatch.setattr(Config, "get_object_store", lambda self: store)
+    get_method = {"request": {"required": ["task_id"], "oneOf": [{}, {"required": ["objects"]}]}}
 
     asyncio.run(
         VerifyA2ATrajectoryStep(id="t", version=None, a2a_agent_id="agent-x").execute(
-            _context_with_trajectory_agent({"task_id": "task-abc"})
+            _context_with_trajectory_agent({"task_id": "task-abc"}, get_method=get_method)
         )
     )
 
-    (legacy,) = [post for post in _StubAsyncClient.posts if "trajectory_s3_prefix" in post]
-    store = get_config().get_object_store()
-    assert store.get_object_key(legacy["trajectory_s3_prefix"]).startswith("fx/a2a_validator_trajectories/agent-x")
+    (granted,) = store.write_grants
+    assert store.get_object_key(granted).startswith("fx/a2a_validator_trajectories/agent-x/")
 
 
 @pytest.mark.asyncio
@@ -409,7 +405,7 @@ async def test_the_skill_fixtures_upload_off_the_event_loop(monkeypatch):
 
     await A2AAgentValidator.validate(FakeAgent())
 
-    assert on_loop == [False, False, False]
+    assert on_loop == [False, False]
 
 
 @pytest.mark.asyncio

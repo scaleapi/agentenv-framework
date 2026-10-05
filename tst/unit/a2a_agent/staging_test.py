@@ -231,7 +231,7 @@ async def test_a_staged_changelog_is_drained_into_the_store_and_applied_to_a_fre
     card = _card(agent)
     granting = transfer_store(store, URL, card, sandbox_type="modal")
     method, path = _method(card, SNAPSHOT_V1.uri, "apply-changelog")
-    call = changelog_apply_call(method, granting, agent_name="a", source_url=namespace_url, portable=True, sandbox_type="modal")
+    call = changelog_apply_call(method, granting, agent_name="a", source_url=namespace_url, sandbox_type="modal")
     await invoke_transfer(URL + path, call, verb="PUT", operation="changelog apply", timeout=60, store=granting)
     assert _Agent.received == {"applied/0": b"first", "applied/3": b"second"}
 

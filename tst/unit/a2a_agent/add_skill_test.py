@@ -18,8 +18,6 @@ from agent_env.task_step.task_steps.deploy_agent import _skill_fields
 from tst.unit.event_loop_probe import on_event_loop
 from tst.util.granting_object_store import GrantingObjectStore
 
-S3_SKILL_URL = "s3://artifact-bucket/artifacts/skill/review/1/"
-
 
 def _card(
     *, bundle: bool, legacy: bool | None = None, config_key: str = "params"
@@ -105,7 +103,7 @@ def agent(monkeypatch: pytest.MonkeyPatch) -> _Agent:
         body = (
             {"status": "added", "name": json["name"], "source": "s3"}
             if agent.status_code < 400
-            else {"detail": "skill_s3_url must be s3://bucket/key"}
+            else {"detail": "skill_md has no frontmatter"}
         )
         return httpx.Response(agent.status_code, json=body, request=httpx.Request("POST", url))
 
@@ -173,85 +171,47 @@ async def test_artifact_skill_prefers_portable_bundle_when_advertised(
 
 
 @pytest.mark.asyncio
-async def test_s3_skill_keeps_legacy_shape_when_bundle_is_not_advertised(
-    store: GrantingObjectStore, agent: _Agent
-) -> None:
-    await A2AAgent.add_skill(
-        _deployed(bundle=False),
-        Skill(name="review", description="Review work", s3_url=S3_SKILL_URL),
-    )
-
-    assert agent.requests[0]["json"] == {
-        "name": "review",
-        "description": "Review work",
-        "skill_s3_url": S3_SKILL_URL,
-    }
-    assert store.granted == []
-
-
-@pytest.mark.asyncio
-async def test_skill_uses_the_advertised_legacy_shape_on_a_store_without_grants(
-    store: GrantingObjectStore, agent: _Agent
-) -> None:
-    store.supports_transfer_grants = False
-
-    await A2AAgent.add_skill(
-        _deployed(bundle=True, legacy=True),
-        Skill(name="review", description="Review work", s3_url=S3_SKILL_URL),
-    )
-
-    assert agent.requests[0]["json"] == {
-        "name": "review",
-        "description": "Review work",
-        "skill_s3_url": S3_SKILL_URL,
-    }
-    assert store.granted == []
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "deployed, grants, why",
-    [
-        ({"bundle": False}, True, "the agent takes only the S3 form"),
-        ({"bundle": True, "legacy": True}, False, "the local object store issues no grants"),
-        (
-            {"bundle": True, "legacy": True, "sandbox_type": "modal"},
-            True,
-            "grants do not reach agents on the 'modal' sandbox provider",
-        ),
-    ],
-    ids=["legacy-only-agent", "store-without-grants", "grants-do-not-reach"],
-)
-async def test_a_local_skill_is_never_sent_as_its_file_url(
-    store: GrantingObjectStore, prefix: str, agent: _Agent, deployed: dict, grants: bool, why: str
-) -> None:
-    store.supports_transfer_grants = grants
-
-    with pytest.raises(
-        RuntimeError, match=f"cannot add a skill from objects on a local object store: .*{why}"
-    ):
-        await A2AAgent.add_skill(
-            _deployed(**deployed),
-            Skill(name="review", description="Review work", s3_url=prefix),
-        )
-
-    assert agent.requests == []
-    assert store.granted == []
-
-
-@pytest.mark.asyncio
-async def test_bundle_only_agent_on_a_store_without_grants_is_refused_before_any_request(
+async def test_an_object_skill_is_refused_by_an_agent_without_the_bundle_form(
     store: GrantingObjectStore, prefix: str, agent: _Agent
 ) -> None:
-    store.supports_transfer_grants = False
-
-    with pytest.raises(RuntimeError, match="no object-backed skill form"):
+    with pytest.raises(RuntimeError, match="skill add: the agent does not advertise the object form"):
         await A2AAgent.add_skill(
-            _deployed(bundle=True),
+            _deployed(bundle=False),
             Skill(name="review", description="Review work", s3_url=prefix),
         )
 
     assert agent.requests == []
+    assert store.granted == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy", [True, False], ids=["dual", "bundle-only"])
+async def test_an_object_skill_on_a_store_without_grants_is_refused_before_any_request(
+    store: GrantingObjectStore, prefix: str, agent: _Agent, legacy: bool
+) -> None:
+    store.supports_transfer_grants = False
+
+    with pytest.raises(RuntimeError, match="does not issue transfer grants"):
+        await A2AAgent.add_skill(
+            _deployed(bundle=True, legacy=legacy),
+            Skill(name="review", description="Review work", s3_url=prefix),
+        )
+
+    assert agent.requests == []
+
+
+@pytest.mark.asyncio
+async def test_an_object_skill_is_refused_when_the_stores_grants_do_not_reach_the_agent(
+    store: GrantingObjectStore, prefix: str, agent: _Agent
+) -> None:
+    with pytest.raises(RuntimeError, match="grants do not reach agents on the 'modal' sandbox provider"):
+        await A2AAgent.add_skill(
+            _deployed(bundle=True, sandbox_type="modal"),
+            Skill(name="review", description="Review work", s3_url=prefix),
+        )
+
+    assert agent.requests == []
+    assert store.granted == []
 
 
 @pytest.mark.asyncio
@@ -336,15 +296,15 @@ async def test_deploy_skill_dicts_keep_their_established_shapes(
 
 
 @pytest.mark.asyncio
-async def test_a_legacy_skill_error_keeps_the_agents_detail(
+async def test_an_inline_skill_error_keeps_the_agents_detail(
     store: GrantingObjectStore, agent: _Agent
 ) -> None:
     agent.status_code = 400
 
-    with pytest.raises(httpx.HTTPStatusError, match="skill_s3_url must be s3://bucket/key"):
+    with pytest.raises(httpx.HTTPStatusError, match="skill_md has no frontmatter"):
         await A2AAgent.add_skill(
             _deployed(bundle=False),
-            Skill(name="review", description="Review work", s3_url=S3_SKILL_URL),
+            Skill(name="review", description="Review work", body="Check it."),
         )
 
 
@@ -424,8 +384,6 @@ async def test_an_s3_url_skill_s_skill_md_is_read_off_the_event_loop(
 
     monkeypatch.setattr(httpx.AsyncClient, "post", post)
 
-    await A2AAgent.add_skill(
-        _deployed(bundle=True), Skill(name="review", description="Review work", s3_url=prefix)
-    )
+    await A2AAgent.add_skill(_deployed(bundle=True), Skill(name="review", description="Review work", s3_url=prefix))
 
     assert on_loop and not any(on_loop)

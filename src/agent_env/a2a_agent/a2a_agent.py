@@ -195,8 +195,8 @@ class A2AAgent:
         skill_md: str | None = None,
         object_url: str | None = None,
     ) -> dict:
-        """Send one skill, as SKILL.md text or the objects under ``object_url``, in a form the
-        agent's card and the object store allow; returns the agent's answer."""
+        """Send one skill, as SKILL.md text inline or the objects under ``object_url`` as a
+        bundle of read grants; returns the agent's answer."""
         add_method, add_path = A2AAgent.operation(A2AAgent._skill_extension(deployed), "add")
         store = transfer_store(
             get_config().get_object_store(), deployed.a2a_url, deployed.agent_card, sandbox_type=deployed.sandbox_type
@@ -210,7 +210,6 @@ class A2AAgent:
             skill_md=skill_md,
             object_url=object_url,
             sandbox_type=deployed.sandbox_type,
-            agent_name=deployed.agent_id,
         )
         return await invoke_transfer(
             deployed.a2a_url + add_path,

@@ -209,13 +209,6 @@ class A2AAgentValidator:
             description="Validator probe for the portable skill bundle variant.",
             body="Portable skill bundle validation fixture.",
         )
-        skill_s3_probe_url = await asyncio.to_thread(
-            A2AAgentValidator._upload_skill_fixture,
-            agent,
-            name="validator-probe-s3",
-            description="Validator probe for the legacy S3 skill variant.",
-            body="Legacy S3 skill validation fixture.",
-        )
         fixtures = await asyncio.to_thread(A2AAgentValidator._upload_probe_fixtures, agent, skill_object_url)
 
         # ── Build modality probe steps + matching grading list ───────────────
@@ -299,7 +292,6 @@ class A2AAgentValidator:
                 a2a_agent_id=agent.id,
                 rubric_verifier_id=skill_verifier_id,
                 skill_bundle_object_url=skill_bundle_probe_url,
-                skill_s3_url=skill_s3_probe_url,
                 depends_on=[TaskStepDependency(task_step_id=skill_rubric_id)],
                 fail_task_on_error=False,
             ),
@@ -681,7 +673,6 @@ class A2AAgentValidator:
                 store,
                 agent_name=apply_agent_name,
                 source_url=capture_source,
-                portable=capture.get("transfer_mode") == "objects",
                 sandbox_type=apply_agent.sandbox_type,
             )
         except RuntimeError as e:
@@ -703,8 +694,7 @@ class A2AAgentValidator:
                 response_model=ObjectChangelogApplyResponse,
                 store=store,
             )
-            if call.mode == "objects":
-                check_changelog_applied(answer, call, agent_name=apply_agent_name)
+            check_changelog_applied(answer, call, agent_name=apply_agent_name)
         except Exception as e:  # noqa: BLE001
             record(supported=False, advertised=advertised, save_ok=save_ok,
                    apply_ok=False, roundtrip_ok=False, note=f"apply request failed: {e}")

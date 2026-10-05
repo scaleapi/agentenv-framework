@@ -43,8 +43,8 @@ from agent_env.store.object_store.local.grant_server import unreachable_hint
 
 logger = logging.getLogger(__name__)
 
-# "objects": the call carries grants and the agent moves the bytes. "legacy": every form that
-# carries none, the inline ones and the older S3 ones.
+# "objects": the call carries grants and the agent moves the bytes. "legacy": the inline forms,
+# which carry none.
 TransferMode = Literal["objects", "legacy"]
 _Response = TypeVar("_Response", bound=BaseModel)
 _MEDIA_TYPE = re.compile(r"[!#$&^_.+\-|~0-9a-z]+/[!#$&^_.+\-|~0-9a-z]+")
@@ -89,12 +89,6 @@ _SNAPSHOT_OBJECTS = {
 }
 _OPAQUE = "application/octet-stream"
 
-# The S3 forms the SDK retired; older and hand-written Agent Cards still take them.
-_S3_PREFIX = ("s3_prefix",)
-_SKILL_S3_URL = ("name", "description", "skill_s3_url")
-_SNAPSHOT_SAVE_S3_PREFIX = ("context_id", "s3_prefix")
-
-
 def _fields(model: type[BaseModel]) -> tuple[str, ...]:
     return request_fields(model).required
 
@@ -133,33 +127,30 @@ def choose_transfer(
     return None
 
 
-def _unreachable(store: ObjectStore, sandbox_type: str | None) -> str:
-    """Why an agent that takes grants was offered none, or "" when that is not why."""
-    if store.supports_transfer_grants and not store.grants_reach(sandbox_type):
-        return (
-            f" (the object store's grants do not reach agents on the "
-            f"{sandbox_type or 'unknown'!r} sandbox provider)"
-        )
-    return ""
-
-
-def _s3_form_url(url: str, store: ObjectStore, sandbox_type: str | None, *, agent_name: str, what: str) -> str:
-    """``url`` for a legacy S3-form field, refused when it is a local store's ``file://`` object,
-    which an agent can reach only through a grant."""
-    if not url.startswith("file://"):
-        return url
-    if not store.supports_transfer_grants:
-        why = 'the local object store issues no grants ([stores.object] grants = "off")'
-    elif not store.grants_reach(sandbox_type):
-        why = _unreachable(store, sandbox_type).strip(" ()")
-    else:
-        why = "the agent takes only the S3 form, which names objects the agent cannot read or write"
-    raise RuntimeError(f"Agent '{agent_name}' cannot {what} on a local object store: {why}")
-
-
 def _accepts(method: Mapping[str, Any] | None, fields: Collection[str]) -> bool:
     request = method.get("request") if method is not None else None
     return isinstance(request, Mapping) and card_request_accepts(request, fields)
+
+
+def _require_object_form(
+    method: Mapping[str, Any] | None,
+    model: type[BaseModel],
+    store: ObjectStore,
+    *,
+    operation: str,
+    sandbox_type: str | None,
+) -> None:
+    """Refuse ``operation`` unless the agent takes its object form and the store issues grants
+    that reach the agent's sandbox, of ``sandbox_type``: agent-env moves objects no other way."""
+    if not _accepts(method, _fields(model)):
+        raise RuntimeError(f"{operation}: the agent does not advertise the object form")
+    if not store.supports_transfer_grants:
+        raise RuntimeError(f"{operation}: the object store does not issue transfer grants")
+    if not store.grants_reach(sandbox_type):
+        raise RuntimeError(
+            f"{operation}: the object store's grants do not reach agents on the "
+            f"{sandbox_type or 'unknown'!r} sandbox provider"
+        )
 
 
 @dataclass(frozen=True)
@@ -305,29 +296,6 @@ def namespace_grant(
     )
 
 
-def bounded_echo(issued: str, echoed: str) -> str:
-    """Where a legacy agent says it wrote, clamped to the prefix agent-env issued.
-
-    Sidecars uploading with their own client nest under it and echo that; registering the
-    issued prefix instead points the artifact a level too high, which `put_existing`'s
-    recursive list hides until a restore cannot find its files.
-
-    Escaping is still refused — `put_existing` registers everything under what it is handed,
-    with the worker's credentials. Nesting is free to allow: the presigned POST's
-    `starts-with $key` already admits any depth under the issued prefix.
-    """
-    issued_norm, echoed_norm = issued.rstrip("/"), echoed.rstrip("/")
-    if echoed_norm == issued_norm:
-        return issued
-    if echoed_norm.startswith(issued_norm + "/"):
-        return echoed
-    logger.warning(
-        "the agent echoed a prefix outside the one issued; registering the "
-        "issued one (issued=%s returned=%s)", issued, echoed,
-    )
-    return issued
-
-
 def skill_bundle_request(
     store: ObjectStore, *, name: str, description: str, object_url: str
 ) -> BundleSkillRequest:
@@ -353,29 +321,15 @@ def skill_add_call(
     description: str,
     skill_md: str | None = None,
     object_url: str | None = None,
-    forms: Collection[TransferMode] = ("objects", "legacy"),
     sandbox_type: str | None,
-    agent_name: str = "the agent",
 ) -> TransferCall:
-    """The skill ``add`` call for a skill given as SKILL.md text or as the objects under
-    ``object_url``, in a form the agent and the store allow; ``forms`` narrows the choice."""
+    """The skill ``add`` call for a skill given as SKILL.md text, sent inline, or as the objects
+    under ``object_url``, sent as a bundle of read grants."""
     base = {"name": name, "description": description}
     if object_url is not None:
-        mode = choose_transfer(
-            method,
-            objects=_fields(BundleSkillRequest) if "objects" in forms else None,
-            legacy=_SKILL_S3_URL if "legacy" in forms else None,
-            store=store,
-            sandbox_type=sandbox_type,
+        _require_object_form(
+            method, BundleSkillRequest, store, operation="skill add", sandbox_type=sandbox_type
         )
-        if mode is None:
-            raise RuntimeError(
-                "Agent advertises no object-backed skill form this object store can serve"
-                + _unreachable(store, sandbox_type)
-            )
-        if mode == "legacy":
-            url = _s3_form_url(object_url, store, sandbox_type, agent_name=agent_name, what="add a skill from objects")
-            return TransferCall("legacy", {**base, "skill_s3_url": url})
         request = skill_bundle_request(
             store, name=name, description=description, object_url=object_url
         )
@@ -399,33 +353,13 @@ def snapshot_save_call(
     sandbox_type: str | None,
 ) -> TransferCall:
     """The snapshot ``save`` call that writes one capture below ``capture_prefix``."""
-    mode = choose_transfer(
+    _require_object_form(
         method,
-        objects=_fields(ObjectSnapshotSaveRequest),
-        legacy=_SNAPSHOT_SAVE_S3_PREFIX,
-        store=store,
+        ObjectSnapshotSaveRequest,
+        store,
+        operation=f"snapshot save on agent '{agent_name}'",
         sandbox_type=sandbox_type,
     )
-    if mode is None:
-        raise RuntimeError(
-            f"Agent '{agent_name}' advertises no snapshot save form this object store can serve"
-            + _unreachable(store, sandbox_type)
-        )
-    if mode == "legacy":
-        _s3_form_url(capture_prefix, store, sandbox_type, agent_name=agent_name, what="save a snapshot")
-        # Signed with the step's fresh credentials: the sidecar's are the deployer's STS
-        # session, frozen at deploy and expired on a long run.
-        presigned_post = store.signed_post(capture_prefix)
-        return TransferCall(
-            "legacy",
-            {
-                "context_id": context_id,
-                "s3_prefix": capture_prefix,
-                # Absent, not null, when the backend cannot sign: the sidecar then uploads
-                # with its own client.
-                **({"presigned_post": presigned_post} if presigned_post else {}),
-            },
-        )
     objects = {
         name: write_object(store, url, media_type=_OPAQUE, max_bytes=max_bytes)
         for name, url, max_bytes in _snapshot_objects(store, capture_prefix)
@@ -446,27 +380,16 @@ def snapshot_load_call(
     target_context_id: str | None,
     sandbox_type: str | None,
 ) -> TransferCall:
-    """The snapshot ``load`` call that restores the capture at ``bundle_url`` in the form it was
-    captured in. An older capture is sent as ``bundle_url`` itself, whatever form it is stored in."""
-    portable = is_portable_snapshot(file_names)
-    mode = (
-        choose_transfer(
-            method, objects=_fields(ObjectSnapshotLoadRequest), store=store, sandbox_type=sandbox_type
-        )
-        if portable
-        else choose_transfer(method, legacy=_S3_PREFIX, store=store, sandbox_type=sandbox_type)
-    )
-    if mode is None:
+    """The snapshot ``load`` call that restores the capture at ``bundle_url``. Only a portable
+    capture can be restored; an older one holds the runtime's own files."""
+    operation = f"snapshot load on agent '{agent_name}'"
+    if not is_portable_snapshot(file_names):
         raise RuntimeError(
-            f"Agent '{agent_name}' cannot load the configured "
-            f"{'portable' if portable else 'legacy'} snapshot" + _unreachable(store, sandbox_type)
+            f"{operation}: {bundle_url} is not a portable snapshot, so it cannot be restored"
         )
-    if mode == "legacy":
-        _s3_form_url(bundle_url, store, sandbox_type, agent_name=agent_name, what="load a snapshot")
-        payload: dict[str, Any] = {"s3_prefix": bundle_url}
-        if target_context_id:
-            payload["target_context_id"] = target_context_id
-        return TransferCall("legacy", payload)
+    _require_object_form(
+        method, ObjectSnapshotLoadRequest, store, operation=operation, sandbox_type=sandbox_type
+    )
     objects = {
         name: read_object(store, url, media_type=_OPAQUE, max_bytes=max_bytes)
         for name, url, max_bytes in _snapshot_objects(store, bundle_url)
@@ -495,43 +418,26 @@ def changelog_enable_call(
     expires_in: int,
     sandbox_type: str | None,
 ) -> TransferCall:
-    """The ``enable-changelog`` call that captures below ``namespace_url``. When the store cannot
-    sign a namespace grant that lasts ``expires_in``, an agent that also takes ``s3_prefix``
-    gets that form; one that does not fails with GrantUnavailableError."""
-    mode = choose_transfer(
+    """The ``enable-changelog`` call that captures below ``namespace_url``. Raises
+    GrantUnavailableError when the store cannot sign a namespace grant that lasts ``expires_in``."""
+    operation = f"changelog enable on agent '{agent_name}'"
+    _require_object_form(
         method,
-        objects=_fields(NamespaceChangelogEnableRequest),
-        legacy=_S3_PREFIX,
-        store=store,
+        NamespaceChangelogEnableRequest,
+        store,
+        operation=operation,
         sandbox_type=sandbox_type,
     )
-    if mode is None:
-        raise RuntimeError(
-            f"Agent '{agent_name}' advertises no changelog enable form this object store can serve"
-            + _unreachable(store, sandbox_type)
+    try:
+        grant = namespace_grant(
+            store, namespace_url, limits=CHANGELOG_LIMITS, expires_in=expires_in
         )
-    if mode == "objects":
-        try:
-            grant = namespace_grant(
-                store, namespace_url, limits=CHANGELOG_LIMITS, expires_in=expires_in
-            )
-        except GrantUnavailableError as exc:
-            if choose_transfer(method, legacy=_S3_PREFIX, store=store, sandbox_type=sandbox_type) is None:
-                raise GrantUnavailableError(
-                    f"Agent '{agent_name}' takes only the object changelog enable form, and "
-                    f"the object store cannot issue its namespace grant: {exc}"
-                ) from exc
-            logger.warning(
-                "Portable changelog grant is unavailable for agent '%s' (%s); "
-                "using its legacy s3_prefix variant",
-                agent_name,
-                exc,
-            )
-        else:
-            request = NamespaceChangelogEnableRequest(write_namespace=grant)
-            return TransferCall("objects", request.model_dump(mode="json", exclude_none=True))
-    _s3_form_url(namespace_url, store, sandbox_type, agent_name=agent_name, what="enable a changelog")
-    return TransferCall("legacy", {"s3_prefix": namespace_url})
+    except GrantUnavailableError as exc:
+        raise GrantUnavailableError(
+            f"{operation}: the object store cannot issue its namespace grant: {exc}"
+        ) from exc
+    request = NamespaceChangelogEnableRequest(write_namespace=grant)
+    return TransferCall("objects", request.model_dump(mode="json", exclude_none=True))
 
 
 def changelog_apply_call(
@@ -540,37 +446,21 @@ def changelog_apply_call(
     *,
     agent_name: str,
     source_url: str,
-    portable: bool,
     up_to_tool_call_exclusive: int | None = None,
     resume_conversation: bool = False,
     target_context_id: str | None = None,
     sandbox_type: str | None,
 ) -> TransferCall:
-    """The ``apply-changelog`` call that replays the capture at ``source_url`` in the form it was
-    captured in: a portable one sends read grants for its increments before the cutoff, in
-    sequence order, and none when the cutoff precedes the first tool call."""
-    mode = (
-        choose_transfer(
-            method, objects=_fields(ObjectChangelogApplyRequest), store=store, sandbox_type=sandbox_type
-        )
-        if portable
-        else choose_transfer(method, legacy=_S3_PREFIX, store=store, sandbox_type=sandbox_type)
+    """The ``apply-changelog`` call that replays the capture at ``source_url``: read grants for
+    its increments before the cutoff, in sequence order, and none when the cutoff precedes the
+    first tool call."""
+    _require_object_form(
+        method,
+        ObjectChangelogApplyRequest,
+        store,
+        operation=f"changelog apply on agent '{agent_name}'",
+        sandbox_type=sandbox_type,
     )
-    if mode is None:
-        raise RuntimeError(
-            f"Agent '{agent_name}' cannot apply the configured "
-            f"{'portable' if portable else 'legacy'} changelog" + _unreachable(store, sandbox_type)
-        )
-    if mode == "legacy":
-        _s3_form_url(source_url, store, sandbox_type, agent_name=agent_name, what="apply a changelog")
-        payload: dict[str, Any] = {"s3_prefix": source_url}
-        if resume_conversation:
-            payload["resume_conversation"] = True
-        if up_to_tool_call_exclusive is not None:
-            payload["up_to_tool_call_exclusive"] = up_to_tool_call_exclusive
-        if target_context_id:
-            payload["target_context_id"] = target_context_id
-        return TransferCall("legacy", payload)
     cutoff = math.inf if up_to_tool_call_exclusive is None else up_to_tool_call_exclusive
     described = read_objects_under(
         store,
@@ -655,11 +545,9 @@ class TrajectoryUpload:
 @dataclass(frozen=True)
 class FetchedTrajectory:
     """Where a trajectory ``get`` left the trajectory: uploaded by the agent through the grant
-    (``object_url``), below a prefix a legacy agent uploaded to itself (``legacy_prefix``), or in
-    the answer (``inline``). All None: the agent returned none."""
+    (``object_url``) or in the answer (``inline``). Both None: the agent returned none."""
 
     object_url: str | None = None
-    legacy_prefix: str | None = None
     inline: Any = None
 
 
@@ -693,6 +581,9 @@ async def fetch_trajectory(
         return FetchedTrajectory(object_url=upload.object_url)
     if not isinstance(body, Mapping):
         return FetchedTrajectory()
-    return FetchedTrajectory(
-        legacy_prefix=body.get("trajectory_s3_prefix") or None, inline=body.get("trajectory")
-    )
+    if body.get("trajectory") is None and body.get("trajectory_s3_prefix"):
+        raise RuntimeError(
+            "trajectory get answered with trajectory_s3_prefix, which agent-env does not read; "
+            "the agent must return the trajectory inline or take the object form"
+        )
+    return FetchedTrajectory(inline=body.get("trajectory"))
