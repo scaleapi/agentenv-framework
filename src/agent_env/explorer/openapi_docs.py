@@ -221,7 +221,7 @@ def enrich_openapi_schema(schema: dict[str, Any]) -> dict[str, Any]:
     return schema
 
 
-def _package_version(name: str) -> str:
+def package_version(name: str) -> str:
     try:
         return pkg_version(name)
     except PackageNotFoundError:
@@ -236,7 +236,7 @@ def docs_metadata(schema: dict[str, Any]) -> dict[str, Any]:
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "openapi_version": schema.get("openapi", ""),
         "versions": {
-            "agentenv-framework": _package_version("agentenv-framework"),
-            "agentenv-protocol": _package_version("agentenv-framework-protocol") or _package_version("agentenv-protocol"),
+            "agentenv-framework": package_version("agentenv-framework"),
+            "agentenv-protocol": package_version("agentenv-framework-protocol") or package_version("agentenv-protocol"),
         },
     }

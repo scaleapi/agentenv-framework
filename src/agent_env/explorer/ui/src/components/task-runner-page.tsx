@@ -15,7 +15,6 @@ import { selectFinalScore } from '../lib/verifier-classification';
 import { BACKEND_URL, apiFetch } from './shared';
 import { StepsPipeline } from './steps-pipeline';
 import { TaskInstanceViewer, type TaskStepRef } from './task-instance-viewer';
-import { type StepType, EVALUATOR_STEP_TYPES } from './task-steps-shared';
 
 type Phase =
   | 'initializing'
@@ -55,16 +54,8 @@ function getInstanceScore(inst: Record<string, unknown>): number | null {
 
 export function TaskRunnerPage({
   taskId: urlTaskId,
-  onEditEvaluator,
-  onRerunFromStep,
-  savedContextJson: externalContextJson,
-  onContextCaptured,
 }: {
   taskId?: string | null;
-  onEditEvaluator?: (taskId: string) => void;
-  onRerunFromStep?: (taskId: string, stepIndex: number) => void;
-  savedContextJson?: Record<string, unknown> | null;
-  onContextCaptured?: (ctx: Record<string, unknown>) => void;
 }) {
   /* --- core state --- */
   const [phase, setPhase] = useState<Phase>('initializing');
@@ -72,25 +63,6 @@ export function TaskRunnerPage({
   const [taskVersion, setTaskVersion] = useState<number | null>(null);
   const [task, setTask] = useState<Record<string, unknown> | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [lastContextJson, setLastContextJsonRaw] = useState<Record<
-    string,
-    unknown
-  > | null>(externalContextJson ?? null);
-  // Instance the captured context came from (when from this task's runs). Tagged with its task id since loading is task-scoped.
-  const [lastContextSource, setLastContextSource] = useState<{
-    taskId: string;
-    instanceId: string;
-  } | null>(null);
-
-  // Wrap setter to also report to parent
-  const setLastContextJson = useCallback(
-    (ctx: Record<string, unknown> | null) => {
-      setLastContextJsonRaw(ctx);
-      if (ctx) onContextCaptured?.(ctx);
-    },
-    [onContextCaptured],
-  );
-
   /* --- instances --- */
   const [instances, setInstances] = useState<Record<string, unknown>[]>([]);
   const [selectedInstanceId, setSelectedInstanceId] = useState<string | null>(
@@ -107,9 +79,6 @@ export function TaskRunnerPage({
   resolvedTaskIdRef.current = resolvedTaskId;
   // The page is not remounted per task, so it initialises once per mount.
   const initializedRef = useRef(false);
-
-  const setLastContextJsonRef = useRef(setLastContextJson);
-  setLastContextJsonRef.current = setLastContextJson;
 
   /* --- fetch task metadata --- */
   const fetchTask = useCallback(async (id: string) => {
@@ -158,17 +127,6 @@ export function TaskRunnerPage({
         setSelectedInstanceId(poll.startedInstanceId);
       }
 
-      const completed = poll.latestCompleted;
-      if (completed) {
-        const ctx = completed.context as Record<string, unknown> | undefined;
-        // `ctx` is from the list endpoint (a2a_card stripped) — keep the id instead.
-        if (ctx) setLastContextJsonRef.current(ctx);
-        setLastContextSource({
-          taskId: resolvedTaskId,
-          instanceId: String(completed.instance_id),
-        });
-      }
-
       snapshotRef.current = poll.snapshot;
       instanceIdsRef.current = poll.ids;
       setInstances(items);
@@ -190,12 +148,7 @@ export function TaskRunnerPage({
 
   /* --- run task --- */
   const buildRunBody = useCallback(
-    (opts?: RunOptions) =>
-      runBodyFor(
-        opts,
-        taskVersion,
-        new URLSearchParams(window.location.search).get('projectId'),
-      ),
+    (opts?: RunOptions) => runBodyFor(opts, taskVersion),
     [taskVersion],
   );
 
@@ -288,109 +241,8 @@ export function TaskRunnerPage({
       });
   }, [urlTaskId, fetchTask]);
 
-  // Ref to always access the latest handleEvaluatorSaved without stale closures
-  const handleEvaluatorSavedRef = useRef<
-    | ((taskId: string, version: number, startStep?: number) => Promise<void>)
-    | null
-  >(null);
-
   // One run at a time: Run is blocked while one is active; per-run Cancel escapes.
   const activeRunExists = pendingRun || instances.some(i => !isTerminal(i));
-
-  /* --- handle return from evaluator editor --- */
-  // Store pending eval rerun params so the effect below can fire startRun
-  // after resolvedTaskId state has updated.
-  const [pendingEvalRun, setPendingEvalRun] = useState<{
-    version: number;
-    startStep: number;
-    // Unset for an externally supplied context, which belongs to no instance.
-    contextInstanceId?: string;
-    contextJson: Record<string, unknown>;
-  } | null>(null);
-
-  const handleEvaluatorSaved = useCallback(
-    async (
-      savedTaskId: string,
-      newVersion: number,
-      overrideStartStep?: number,
-    ) => {
-      setResolvedTaskId(savedTaskId);
-      setTaskVersion(newVersion);
-      setInstances([]);
-      snapshotRef.current = '';
-
-      // Refresh task data
-      try {
-        const data = await fetchTask(savedTaskId);
-        setTask(data);
-
-        // Use override start step, or find first evaluator step
-        const stepDicts = (data.steps ?? []) as Record<string, unknown>[];
-        const evalStartStep =
-          overrideStartStep ??
-          stepDicts.findIndex(s =>
-            EVALUATOR_STEP_TYPES.has(s.type as StepType),
-          );
-
-        // Only usable if it belongs to the task being saved.
-        const contextInstanceId =
-          lastContextSource?.taskId === savedTaskId
-            ? lastContextSource.instanceId
-            : undefined;
-        // A captured context belongs to lastContextSource's task; only the externalContextJson prop is task-agnostic.
-        const fallbackContext = lastContextSource ? null : lastContextJson;
-
-        if (evalStartStep >= 0 && (contextInstanceId || fallbackContext)) {
-          // Defer the run to next render when resolvedTaskId is updated
-          setPhase('running');
-
-          setErrorMsg(null);
-          setPendingEvalRun({
-            version: newVersion,
-            startStep: evalStartStep,
-            contextInstanceId,
-            contextJson: fallbackContext ?? {},
-          });
-        } else {
-          // No context or no evaluator step — will do full re-run after state updates
-          setPhase('running');
-
-          setErrorMsg(null);
-          setPendingEvalRun({
-            version: newVersion,
-            startStep: 0,
-            contextJson: {},
-          });
-        }
-      } catch (e) {
-        setPhase('error');
-        setErrorMsg(
-          e instanceof Error ? e.message : 'Failed to run after save',
-        );
-      }
-    },
-    [fetchTask, lastContextJson, lastContextSource],
-  );
-  handleEvaluatorSavedRef.current = handleEvaluatorSaved;
-
-  // Fire handleRun after resolvedTaskId state has updated
-  useEffect(() => {
-    if (!pendingEvalRun || !resolvedTaskId) return;
-    const { version, startStep, contextInstanceId, contextJson } =
-      pendingEvalRun;
-    setPendingEvalRun(null);
-    if (startStep > 0 && contextInstanceId) {
-      handleRun({
-        version,
-        start_step: startStep,
-        context_from_instance_id: contextInstanceId,
-      });
-    } else if (startStep > 0 && Object.keys(contextJson).length > 0) {
-      handleRun({ version, start_step: startStep, context_json: contextJson });
-    } else {
-      handleRun({ version });
-    }
-  }, [pendingEvalRun, resolvedTaskId, handleRun]);
 
   /* --- derived state --- */
   const taskSteps = (task?.steps ?? []) as Record<string, unknown>[];

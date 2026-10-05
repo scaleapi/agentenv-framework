@@ -209,7 +209,7 @@ async def test_container_mode_constructs_internal_mcp_servers_url_format():
 
     assert len(gp._container_sandboxes) == 4
 
-    # PR 2: the deploy routes DB state through the provider.
+    # The deploy routes DB state through the provider.
     # servicedb container env comes from the provider's store-spec
     db_call = next(c for c in create_calls if c["port"] == SERVICE_DB_PORT)
     assert db_call["env"] == LocalPostgresStateProvider().store_spec(["slack", "email"]).env
@@ -1308,7 +1308,7 @@ async def test_a_chained_gateway_that_fails_everywhere_names_every_member():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("attribution, forwarded", [({"project_id": "p1"}, {"project_id": "p1"}), (None, {})], ids=["set", "unset"])
+@pytest.mark.parametrize("attribution, forwarded", [({"team": "t1"}, {"team": "t1"}), (None, {})], ids=["set", "unset"])
 async def test_create_gateway_hands_the_deploy_path_every_argument(attribution, forwarded):
     """The topology entry point loses nothing on its way to the VM path; attribution arrives as a fresh dict."""
     from agent_env.env.gateway import GatewayMode

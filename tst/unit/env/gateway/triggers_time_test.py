@@ -256,7 +256,7 @@ async def test_event_anchored_never_fires_without_anchor():
 ], ids=["one-shot", "bounded-recurrence"])
 @pytest.mark.asyncio
 async def test_terminating_time_anchor_does_not_strand_dependent(anchor_when):
-    """Greptile #765: a TIME anchor that retires must still resolve its dependents, even though
+    """A TIME anchor that retires must still resolve its dependents, even though
     `_fire_time` recomputes `_has_time_triggers` (in `finally`) *before* calling `_resolve_dependents`,
     which early-returns on a cleared flag.
 
@@ -534,7 +534,7 @@ async def test_rearm_reanchors_trigger_that_was_firing():
 
 @pytest.mark.asyncio
 async def test_rearm_drops_capped_backlog_and_says_so(monkeypatch):
-    """Greptile P1c: a re-arm that lands while a capped catch-up batch is firing drops the leftover
+    """A re-arm that lands while a capped catch-up batch is firing drops the leftover
     backlog — by design (those marks are on a timeline the new clock never reached) — but the drop must
     NOT be silent: it emits a `reanchored` event naming the dropped mark, and the trigger re-anchors to
     the new t0 rather than replaying the old axis."""

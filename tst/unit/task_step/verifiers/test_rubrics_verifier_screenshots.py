@@ -401,7 +401,6 @@ async def test_prompt_llm_judge_base_url_precedence(monkeypatch):
 
     import litellm
     import agent_env.config as cfg_mod
-    import agent_env.utils.litellm_attribution as attr_mod
 
     from agent_env.store import LocalSecretStore
 
@@ -409,7 +408,6 @@ async def test_prompt_llm_judge_base_url_precedence(monkeypatch):
     real_cfg.set_secret_store(LocalSecretStore(values={"litellm_api_key": "k"}, use_env=False))
     monkeypatch.setattr(real_cfg, "_model_cfg", ModelConfig())
     monkeypatch.setattr(cfg_mod, "get_config", lambda: real_cfg)
-    monkeypatch.setattr(attr_mod, "build_litellm_cost_attribution_kwargs", lambda md: {})
     monkeypatch.delenv("LITELLM_BASE_URL", raising=False)
     monkeypatch.delenv("LITELLM_API_KEY", raising=False)
 

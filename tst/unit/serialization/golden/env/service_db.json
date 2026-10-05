@@ -16,7 +16,7 @@
   },
   "id": "service-db-env",
   "metadata": {
-    "owner": "env-pod"
+    "owner": "example-team"
   },
   "type": "service_db",
   "version": 3

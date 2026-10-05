@@ -477,9 +477,8 @@ tools with (agent-env relays the env card's name: the MultiEnv's declared name, 
 `ATTRIBUTION_PROBE_V1.probe` lets a caller check that an agent forwards attribution
 upstream. Attribution is an open map of string dimensions, like AgentEnv's cost
 attribution: the SDK assigns no keys, and each deployment uses whatever dimensions
-its model gateway understands (the AgentEnv control plane configures `project_id`
-and `task_id` on agents that declare those config fields). An agent records the
-dimensions it last sent with a model request and returns them from a bodyless
+its model gateway understands. An agent records the dimensions it last sent with a
+model request and returns them from a bodyless
 `POST /ext/attribution-probe` as an `AttributionProbeResponse`:
 `{"last_seen_attribution": {<dimension>: <value>, ...}, "last_seen_at_utc": ...}`.
 The SDK does not record attribution itself, because only the agent knows what it sent.

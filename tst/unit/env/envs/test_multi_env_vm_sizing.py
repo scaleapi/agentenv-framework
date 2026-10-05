@@ -1,11 +1,11 @@
 """A MultiEnv does not size its own box; cpu and memory both defer to the provider.
 
-The providers already floor both per backend (#1045: 0.125 vCPU on Modal, where cpu is a
+The providers already floor both per backend (0.125 vCPU on Modal, where cpu is a
 burstable reservation, 0.5 on the VM backends; 8GB memory on either), and a number invented
 here could only override a better-informed default. In container mode it was actively
 wrong: the derived size landed on the gateway, a router, as if it hosted every service.
 
-7 days of production logs showed nothing depending on the derived cpu except that gateway,
+Nothing depended on the derived cpu except that gateway,
 and the two callers that leaned on the derived memory were getting it from `cpu x 4096` --
 an 11-service env on 2GB. An explicit value from the caller still wins on both axes.
 """

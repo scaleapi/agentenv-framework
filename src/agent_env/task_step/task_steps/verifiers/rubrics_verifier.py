@@ -565,22 +565,9 @@ class RubricsVerifierTaskStep(TaskStep):
                     or config.get_litellm_base_url()
                 )
                 env_vars = {"LITELLM_API_KEY": api_key, "LITELLM_BASE_URL": litellm_base_url}
-                judge_project_id = context.metadata.get("project_id")
-                judge_customer = context.metadata.get("customer_id")
-                if judge_customer:
-                    env_vars["LITELLM_USER"] = judge_customer
-                if judge_project_id:
-                    env_vars["LITELLM_PROJECT_ID"] = judge_project_id
                 resolved_judge_id = self.judge_a2a_agent_id or config.get_default_a2a_agent_id()
                 a2a_agent = A2AAgent.get(resolved_judge_id)
-                deploy_kwargs = {
-                    "env_vars": env_vars,
-                    "attribution": {
-                        k: v for k, v in
-                        (("project_id", judge_project_id), ("customer", judge_customer))
-                        if v
-                    },
-                }
+                deploy_kwargs = {"env_vars": env_vars}
                 resolved_sandbox_type = overrides.get("agent_sandbox") or self.judge_sandbox_type
                 if resolved_sandbox_type:
                     deploy_kwargs["sandbox_type"] = resolved_sandbox_type
@@ -923,11 +910,9 @@ class RubricsVerifierTaskStep(TaskStep):
         import litellm
 
         from agent_env.config import get_config
-        from agent_env.utils.litellm_attribution import build_litellm_cost_attribution_kwargs
 
         overrides = context.metadata.get("user_overrides", {})
         config = get_config()
-        cost_kwargs = build_litellm_cost_attribution_kwargs(context.metadata)
         call_config = config.resolve_model_call(
             model,
             default_api_key=overrides.get("judge_litellm_api_key") or overrides.get("litellm_api_key"),
@@ -960,7 +945,6 @@ class RubricsVerifierTaskStep(TaskStep):
                     messages=[{"role": "user", "content": user_content}],
                     timeout=self.judge_timeout_seconds,
                     **call_config.client_kwargs(),
-                    **cost_kwargs,
                 )
                 if use_response_format:
                     request_kwargs[ModelParam.RESPONSE_FORMAT] = response_format
@@ -1002,7 +986,6 @@ class RubricsVerifierTaskStep(TaskStep):
             "max_thinking_tokens": judge_max_thinking_tokens,
             "output_format": self._spec().output_format,
             "timeout_seconds": self.judge_timeout_seconds,
-            "project_id": context.metadata.get("project_id"),
             "task_id": context.metadata.get("task_id"),
         }
         desired_config = {k: v for k, v in desired_config.items() if v is not None}
