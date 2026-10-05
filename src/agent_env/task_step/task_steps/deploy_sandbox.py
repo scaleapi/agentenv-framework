@@ -35,7 +35,6 @@ class DeploySandboxTaskStep(TaskStep):
         port: Optional[int] = None,
         env_vars: Optional[dict[str, str]] = None,
         sandbox_type: Optional[str] = None,
-        priority: Optional[int] = None,
         network_policy: Optional[dict] = None,
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
@@ -56,7 +55,6 @@ class DeploySandboxTaskStep(TaskStep):
         self.port = port
         self.env_vars = env_vars
         self.sandbox_type = sandbox_type
-        self.priority = priority
         self.metadata = metadata or {}
         self.network_policy = NetworkPolicy.from_dict(network_policy).to_dict() if network_policy else None
 
@@ -74,7 +72,6 @@ class DeploySandboxTaskStep(TaskStep):
         base["port"] = self.port
         base["env_vars"] = self.env_vars
         base["sandbox_type"] = self.sandbox_type
-        base["priority"] = self.priority
         base["metadata"] = self.metadata
         base["network_policy"] = self.network_policy
         return base
@@ -95,7 +92,6 @@ class DeploySandboxTaskStep(TaskStep):
             port=data.get("port"),
             env_vars=data.get("env_vars"),
             sandbox_type=data.get("sandbox_type"),
-            priority=data.get("priority"),
             metadata=dict(data.get("metadata") or {}),
             network_policy=data.get("network_policy"),
         )
@@ -139,7 +135,6 @@ class DeploySandboxTaskStep(TaskStep):
                 timeout=resolved_ttl,
                 exposed_ports=self.exposed_ports or [],
                 attribution=attribution,
-                priority=self.priority,
                 network_policy=policy,
             )
         else:
@@ -154,7 +149,6 @@ class DeploySandboxTaskStep(TaskStep):
                 disk_size_gb=self.disk_size_gb,
                 timeout=resolved_ttl,
                 attribution=attribution,
-                priority=self.priority,
                 network_policy=policy,
             )
 

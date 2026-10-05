@@ -8,7 +8,7 @@
   "environment_name": "slack",
   "id": "slack-env",
   "metadata": {
-    "owner": "env-pod"
+    "owner": "example-team"
   },
   "service_name": "slack",
   "type": "mcp_server",

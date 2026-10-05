@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentenv-framework"
-version = "0.9.1265"
+version = "0.9.1267"
 description = "SDK and CLI for building, deploying and running agent environments and the tasks that grade agents in them."
 readme = "README.md"
 license = "Apache-2.0"
@@ -83,6 +83,7 @@ Homepage = "https://www.agentenvframework.com"
 Documentation = "https://www.agentenvframework.com/docs"
 Repository = "https://github.com/scaleapi/agentenv-framework"
 Issues = "https://github.com/scaleapi/agentenv-framework/issues"
+Changelog = "https://github.com/scaleapi/agentenv-framework/releases"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_env"]

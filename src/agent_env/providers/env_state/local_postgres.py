@@ -59,7 +59,7 @@ _STOCK_POSTGRES_IMAGE = "public.ecr.aws/docker/library/postgres:16-alpine"
 class ContainerSpec:
     """Declarative spec for a store/sidecar container the compute layer provisions (Modal
     path). The gateway's ``create_container`` loop consumes these and adds its own sandbox
-    knobs (i6pn, attribution, priority)
+    knobs (i6pn, attribution)
     """
 
     name: str

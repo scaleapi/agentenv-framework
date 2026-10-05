@@ -42,7 +42,7 @@ async def test_create_container_wraps_modal_create_failure_with_context(_patched
 
         with pytest.raises(RuntimeError) as ei:
             await _patched_provider.create_container(
-                image_name="123456789012.dkr.ecr.us-west-2.amazonaws.com/agent-env/agent-images/mcp-server-airtable:v4",
+                image_name="123456789012.dkr.ecr.us-west-2.amazonaws.com/example/mcp-server:v1",
                 port=18765,
                 env={},
                 cpu=2.0,
@@ -54,7 +54,7 @@ async def test_create_container_wraps_modal_create_failure_with_context(_patched
     msg = str(ei.value)
     assert "Modal sandbox create failed" in msg
     assert "_BareSandboxTimeoutError" in msg
-    assert "mcp-server-airtable:v4" in msg
+    assert "example/mcp-server:v1" in msg
     assert "port=18765" in msg
     assert "region=us-east-1" in msg
     assert "i6pn=True" in msg
@@ -75,7 +75,7 @@ async def test_create_container_wraps_post_create_failure_and_terminates(_patche
 
         with pytest.raises(RuntimeError) as ei:
             await _patched_provider.create_container(
-                image_name="registry.example/mcp-server-openclaw-strava:v6",
+                image_name="registry.example/mcp-server-example:v1",
                 port=18765,
                 env={},
             )
@@ -83,7 +83,7 @@ async def test_create_container_wraps_post_create_failure_and_terminates(_patche
     msg = str(ei.value)
     assert "Modal sandbox post-create failed" in msg
     assert "sb_id=sb-FAKEFAKEFAKEFAKEFAKE" in msg
-    assert "mcp-server-openclaw-strava:v6" in msg
+    assert "mcp-server-example:v1" in msg
     fake_sb.terminate.aio.assert_awaited_once()
 
 
@@ -141,7 +141,7 @@ async def test_image_auth_paths(_patched_provider):
             return RegistryAuth(host, "u", "p")
 
     ecr_host = "123456789012.dkr.ecr.us-west-2.amazonaws.com"
-    ecr = "123456789012.dkr.ecr.us-west-2.amazonaws.com/agent-env/agent-images/x:v1"
+    ecr = "123456789012.dkr.ecr.us-west-2.amazonaws.com/example/x:v1"
     _patched_provider._ecr_pull_secret_name = "agent-env-ecr-reader"
     p = lambda n: patch(f"agent_env.providers.sandbox_providers.modal_sandbox.modal.{n}")  # noqa: E731
 

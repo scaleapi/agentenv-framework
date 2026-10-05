@@ -5,6 +5,7 @@ import gzip
 import json
 import tempfile
 import time
+from importlib.metadata import version as installed_version
 from urllib.parse import quote
 
 import httpx
@@ -199,6 +200,11 @@ def test_versions_returns_a_bare_list_newest_first(client):
     body = client.get("/api/v1/artifacts/slack/versions").json()
     assert isinstance(body, list)
     assert [i["version"] for i in body] == [2, 1]
+
+
+def test_versions_of_an_unknown_id_is_404_like_get(client):
+    assert client.get("/api/v1/artifacts/missing/versions").status_code == 404
+    assert client.get("/api/v1/artifacts/slack/versions", params={"offset": 5}).json() == []
 
 
 @pytest.mark.parametrize("path", ["envs", "tasks", "agents", "evals"])
@@ -540,6 +546,10 @@ def test_every_operation_has_its_own_summary(client):
     assert {"List Artifacts", "Get Environment", "List Task Versions", "Health"} <= set(summaries)
 
 
+def test_openapi_version_is_the_installed_framework(client):
+    assert client.get("/openapi.json").json()["info"]["version"] == installed_version("agentenv-framework")
+
+
 def test_docs_metadata_reports_a_live_source(client):
     meta = client.get("/api/v1/docs/openapi/metadata").json()
     assert meta["source"] == "live"
@@ -597,6 +607,16 @@ def test_instance_content_serves_object_store_bytes(client, tmp_path):
         "/api/v1/objects/content", params={"object_url": "file:///etc/passwd"}
     )
     assert bad.status_code == 400
+
+
+def test_object_metadata_reports_the_type_content_serves(client, tmp_path):
+    store = LocalFilesystemObjectStore(str(tmp_path / "obj"))
+    set_object_store(store)
+    url = store.put("out/notes.json", b"{}")
+
+    meta = client.get("/api/v1/objects/metadata", params={"object_url": url}).json()
+    served = client.get("/api/v1/objects/content", params={"object_url": url}).headers["content-type"]
+    assert meta["content_type"] == served == "application/json"
 
 
 def test_object_routes_serve_only_the_stores_own_urls(client, tmp_path):
@@ -840,15 +860,13 @@ def test_run_metadata_merges_into_inherited_user_overrides(client):
     from agent_env.explorer.routers.runs import RunRequest, _run_metadata
 
     meta = _run_metadata(RunRequest(
-        metadata={"user_overrides": {"agent_effort": "high", "priority": 1}},
+        metadata={"user_overrides": {"agent_effort": "high", "step_params": {"deploy": {"cpu": 1}}}},
         step_overrides={"deploy": {"cpu": 4}},
-        priority=9,
     ))
 
     overrides = meta["user_overrides"]
     assert overrides["agent_effort"] == "high", "inherited keys survive"
-    assert overrides["step_params"] == {"deploy": {"cpu": 4}}
-    assert overrides["priority"] == 9, "an explicit field wins over the inherited one"
+    assert overrides["step_params"] == {"deploy": {"cpu": 4}}, "an explicit field wins over the inherited one"
 
 
 def test_bad_inherited_user_overrides_is_rejected(client, monkeypatch):
@@ -866,13 +884,13 @@ def test_bad_inherited_user_overrides_is_rejected(client, monkeypatch):
     for bad in ("oops", [1, 2], 7):
         resp = client.post(
             "/api/v1/tasks/t1/run",
-            json={"metadata": {"user_overrides": bad}, "priority": 1},
+            json={"metadata": {"user_overrides": bad}},
         )
         assert resp.status_code == 422, f"user_overrides={bad!r} should be refused"
 
     ok = client.post(
         "/api/v1/tasks/t1/run",
-        json={"metadata": {"user_overrides": {"agent_effort": "high"}}, "priority": 1},
+        json={"metadata": {"user_overrides": {"agent_effort": "high"}}},
     )
     assert ok.status_code == 200
 

@@ -6,7 +6,7 @@
   },
   "id": "gateway-env",
   "metadata": {
-    "owner": "env-pod"
+    "owner": "example-team"
   },
   "type": "gateway_server",
   "version": 11

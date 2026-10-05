@@ -60,7 +60,6 @@ interface StartRunsPanelProps {
   taskId: string;
   taskVersion: number;
   taskSteps?: ReadonlyArray<Record<string, unknown>>;
-  taskProjectId?: string;
   onStarted?: () => void;
   onCompleted?: () => void;
 }
@@ -81,15 +80,11 @@ export function StartRunsPanel({
   taskId,
   taskVersion,
   taskSteps,
-  taskProjectId,
   onStarted,
   onCompleted,
 }: StartRunsPanelProps) {
   const [persisted] = useState<PersistedConfig>(loadPersistedConfig);
 
-  const [projectId, setProjectId] = useState<string>(
-    taskProjectId?.trim() ?? '',
-  );
   const [agentModel, setAgentModel] = useState<string>(
     persisted.agent_model ?? '',
   );
@@ -364,8 +359,8 @@ export function StartRunsPanel({
   }, [extraOverridesJson]);
 
   const buildOverrides = useCallback((): RunOverrides => {
-    // priority=0 (interactive): a human watches the live stream. Freeform extras can override (e.g. {"priority":1}); dropdowns win last.
-    const o = { priority: 0, ...extraOverrides } as RunOverrides;
+    // Freeform extras first; the dropdowns win.
+    const o = { ...extraOverrides } as RunOverrides;
     if (agentModel.trim()) o.agent_model = agentModel.trim();
     if (agentArtifactId.trim()) o.agent_artifact_id = agentArtifactId.trim();
     if (a2aAgentId.trim()) o.a2a_agent_id = a2aAgentId.trim();
@@ -398,7 +393,6 @@ export function StartRunsPanel({
     const submitSeeds = requiresSeeds ? seeds ?? undefined : undefined;
     await startRuns({
       version: taskVersion,
-      projectId: projectId.trim() || undefined,
       overrides: buildOverrides(),
       count: submitSeeds ? undefined : parsedCount ?? undefined,
       seeds: submitSeeds,
@@ -408,7 +402,6 @@ export function StartRunsPanel({
     canStart,
     startRuns,
     taskVersion,
-    projectId,
     buildOverrides,
     requiresSeeds,
     seeds,

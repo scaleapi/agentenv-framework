@@ -4,8 +4,7 @@
  * `looksLikeOpenCodeStreamJson`) and assert the event extraction contract.
  *
  * Default fixture is inline + synthetic but faithful to the real record shape
- * (verified against the live run `task-v2env-186-778c8c2c-opencode-y5hm9olj`:
- * records are `{type, timestamp, sessionID, part}`; tool calls are
+ * (records are `{type, timestamp, sessionID, part}`; tool calls are
  * self-contained with `part.state={status,input,output,time}`; a turn ends on a
  * `step_finish` whose `part.reason === 'stop'`). Point at a real pulled
  * trajectory with `OPENCODE_FIXTURE=<path>`.

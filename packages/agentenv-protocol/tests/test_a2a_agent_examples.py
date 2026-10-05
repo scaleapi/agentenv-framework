@@ -159,7 +159,6 @@ def test_basic_example_uses_typed_config_and_framework_trajectory() -> None:
         )
         schema = config["params"]["methods"]["set"]["request"]["schema"]
         assert schema["properties"]["provider_token"]["writeOnly"] is True
-        assert "project_id" not in supported
         assert "task_id" not in supported
 
         configured = client.post(

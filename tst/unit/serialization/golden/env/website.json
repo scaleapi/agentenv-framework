@@ -13,7 +13,7 @@
   },
   "id": "shop-site-env",
   "metadata": {
-    "owner": "env-pod"
+    "owner": "example-team"
   },
   "service_name": "shop",
   "type": "website",

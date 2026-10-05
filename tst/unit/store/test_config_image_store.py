@@ -93,10 +93,10 @@ def test_env_override_beats_config_toml(monkeypatch, tmp_path):
 def test_ecr_from_config_builds_store_lazily_without_network(monkeypatch):
     store = EcrImageStore.from_config(
         registry_host="123.dkr.ecr.us-west-2.amazonaws.com",
-        repository_prefix="agent-env/agent-images-dev",
+        repository_prefix="example/images-dev",
     )
     assert isinstance(store, EcrImageStore)
-    assert store.image_ref("foo", "v1") == "123.dkr.ecr.us-west-2.amazonaws.com/agent-env/agent-images-dev/foo:v1"
+    assert store.image_ref("foo", "v1") == "123.dkr.ecr.us-west-2.amazonaws.com/example/images-dev/foo:v1"
 
 
 def test_ecr_rejects_a_non_ecr_credential_provider():
@@ -115,11 +115,11 @@ def test_ecr_rejects_a_non_ecr_credential_provider():
 def test_ecr_store_exposes_its_registry_host():
     store = EcrImageStore.from_config(
         registry_host="123.dkr.ecr.us-west-2.amazonaws.com",
-        repository_prefix="agent-env/agent-images-dev",
+        repository_prefix="example/images-dev",
     )
     assert store.registry_host == "123.dkr.ecr.us-west-2.amazonaws.com"
     # Host only — no repository prefix, unlike image_ref().
-    assert "agent-images-dev" not in store.registry_host
+    assert "images-dev" not in store.registry_host
 
 
 def test_registry_host_is_the_host_component_of_image_ref():

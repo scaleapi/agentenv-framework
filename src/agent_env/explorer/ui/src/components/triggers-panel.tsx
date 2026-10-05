@@ -610,7 +610,7 @@ export function TriggersPanel({
       <Text size="1" color="gray">
         Runtime trigger evidence recorded by this run. Turns are 1-based
         reaction turns: env-trigger changes happen during the turn (provoked by
-        the agent's tool calls), while agent firings and the reply that opens
+        the agent&apos;s tool calls), while agent firings and the reply that opens
         the next turn happen after it. A missing user-sim entry on a turn with
         firings marks a trigger-injected (typed) message rather than an LLM
         reply. Click a trigger badge for its condition, actions, and status

@@ -32,12 +32,9 @@ function taskUrl(base: string, taskId: string): string {
 export function buildRunBody(
   opts: RunOptions | undefined,
   taskVersion: number | null,
-  projectId: string | null,
 ): Record<string, unknown> {
   const body: Record<string, unknown> = {};
   body.version = opts?.version ?? taskVersion ?? undefined;
-  // priority=0 (interactive): a human is waiting. Sent explicitly so intent survives backend default changes.
-  body.priority = 0;
   if (opts?.start_step != null) body.start_step = opts.start_step;
   // Mutually exclusive server-side.
   if (opts?.context_from_instance_id)
@@ -45,8 +42,6 @@ export function buildRunBody(
   else if (opts?.context_json) body.context_json = opts.context_json;
   if (opts?.overrides_from_instance_id)
     body.overrides_from_instance_id = opts.overrides_from_instance_id;
-  // Only-if-truthy so "" can't defeat the backend fallback.
-  if (projectId) body.project_id = projectId;
   return body;
 }
 
@@ -96,8 +91,6 @@ export interface InstancePoll {
   ids: Set<string>;
   /** The run the page was waiting on, once it appears; clears "Starting…". */
   startedInstanceId: string | null;
-  /** The newest completed instance, whose context seeds a re-run. */
-  latestCompleted: Instance | null;
 }
 
 /** Reconcile one GET /instances page against the last one; null when nothing shown changed. */
@@ -118,7 +111,6 @@ export function reconcileInstances(
     snapshot,
     ids: new Set(items.map(i => String(i.instance_id))),
     startedInstanceId: started ? String(started.instance_id) : null,
-    latestCompleted: items.find(i => i.status === 'completed') ?? null,
   };
 }
 
