@@ -177,7 +177,7 @@ def test_validating_an_local_agent_stops_at_the_local_store_it_cannot_sign_with_
     fixtures = f"a2a_validator/probe_fixtures/{key_segment(agent.id)}-v1"
     skills = f"a2a_validator/validator_skill/{key_segment(agent.id)}-v1"
     assert sorted(get_config().get_object_store_for(agent.id).list("a2a_validator/")) == [
-        f"{fixtures}/red.png", *(f"{skills}/{name}/SKILL.md" for name in ("validator-probe-bundle", "validator-probe-s3", "validator-test-s3")),
+        f"{fixtures}/red.png", *(f"{skills}/{name}/SKILL.md" for name in ("validator-probe-bundle", "validator-test-s3")),
     ]
     assert configured.list("") == []
     assert all(not store.path.exists() or store.count("tasks", Filter()) == 0 for store in (_local(), _documents()))

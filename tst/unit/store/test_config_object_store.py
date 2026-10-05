@@ -83,6 +83,20 @@ def test_config_toml_selects_custom_impl(monkeypatch, tmp_path):
     assert isinstance(Config().get_object_store(), FakeObjectStore)
 
 
+def test_config_toml_sets_the_local_stores_grant_hosts(monkeypatch, tmp_path):
+    monkeypatch.delenv("AGENT_ENV_OBJECT_STORE", raising=False)
+    monkeypatch.delenv("AGENT_ENV_CONFIG", raising=False)
+    monkeypatch.chdir(tmp_path)
+    _write_config(tmp_path, (
+        '[stores.object]\nimpl = "agent_env.store.object_store:LocalFilesystemObjectStore"\n'
+        'config = { grant_bind_host = "172.18.0.1", grant_advertise_host = "172.18.0.1" }\n'
+    ))
+    store = Config().get_object_store()
+    assert isinstance(store, LocalFilesystemObjectStore)
+    assert store.root == state_root() / "object_store"
+    assert (store._grant_bind_host, store._grant_advertise_host) == ("172.18.0.1", "172.18.0.1")
+
+
 def test_env_override_beats_config_toml(monkeypatch, tmp_path):
     monkeypatch.delenv("AGENT_ENV_CONFIG", raising=False)
     monkeypatch.chdir(tmp_path)
