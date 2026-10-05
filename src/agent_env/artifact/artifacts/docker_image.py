@@ -248,10 +248,7 @@ class DockerImageArtifact(Artifact):
 
         log("create_vm", "Creating VM...", 10)
         logger.info(f"put_from_github: cloning {owner}/{repo} ref={ref} dockerfile={dockerfile_repo_path} context={context_repo_path}")
-        sandbox = await get_sandbox_provider().create_vm(
-            disk_size_gb=20, timeout=1800, exposed_ports=[],
-            attribution={"project_id": "agent-env-image-builder"},
-        )
+        sandbox = await get_sandbox_provider().create_vm(disk_size_gb=20, timeout=1800, exposed_ports=[])
         try:
             log("install_git", "Installing git...", 20)
             await sandbox.exec_script("apt-get update -qq && apt-get install -y -qq git >/dev/null 2>&1")

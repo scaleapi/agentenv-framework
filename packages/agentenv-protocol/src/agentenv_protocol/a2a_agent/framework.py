@@ -45,6 +45,7 @@ from .extensions import (
     enable,
 )
 from .registry import RegisteredOperation, build_registry
+from .staging import STAGING_ENDPOINT, StagingStore, staging_routes
 from .tasks.v1 import (
     AgentConfig,
     AgentRunResult,
@@ -873,6 +874,15 @@ class A2AAgentApplication:
                 ("/.well-known/agent-card.json", "GET"): "Agent Card",
             }
         )
+        # Objects agent-env moves through the agent when its object store's grants cannot reach it.
+        self.staging = StagingStore()
+        for extension in self.registry.extensions if self.staging.max_bytes else ():
+            for operation in extension.operations.values():
+                if operation.definition.path.startswith(STAGING_ENDPOINT + "/"):
+                    raise ValueError(
+                        f"extension operation {extension.definition.uri}.{operation.definition.name} "
+                        f"conflicts with the staging routes below {STAGING_ENDPOINT}"
+                    )
         conformance = self.registry.conformance()
         for override in conformance["standard_operation_overrides"]:
             logger.warning(
@@ -906,6 +916,8 @@ class A2AAgentApplication:
                         methods=[operation.definition.method],
                     )
                 )
+        if self.staging.max_bytes:
+            routes.extend(staging_routes(self.staging))
         kwargs = {"routes": routes}
         if definition.lifespan is not None:
             kwargs["lifespan"] = definition.lifespan
@@ -953,6 +965,8 @@ class A2AAgentApplication:
             AgentExtension.model_validate(item)
             for item in self.registry.card_extensions()
         ]
+        if self.staging.max_bytes:
+            extensions.append(AgentExtension.model_validate(self.staging.card_extension()))
         resolved_capabilities = AgentCapabilities(
             streaming=self.streaming,
             push_notifications=False,

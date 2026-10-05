@@ -81,7 +81,7 @@ class DeployedEnv:
     expires_at_utc: Optional[str] = None
 
     def __post_init__(self) -> None:
-        # Only records from before #1137 (2026-09-24) lack their card: they keep the stored values.
+        # Only older records lack their card: they keep the stored values.
         if self.environment_card and self.environment_card_url:
             self.mcp_url = _mcp_url(self.environment_url, self.environment_card)
             self.mcp_server_name = self.environment_card.get("name")

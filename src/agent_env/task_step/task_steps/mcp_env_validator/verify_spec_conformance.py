@@ -14,10 +14,6 @@ Record-only, and not in ``DEFAULT_REQUIRED_GATES``: findings persist under
 enforcement by passing ``spec_conformance`` in ``ValidationGateAggregatorStep``'s
 ``required_gates`` (a step arg, not env metadata). No baked spec = ``skipped``. Execution
 errors (unreachable MCP) still raise.
-
-Keep the diff logic in sync with the universe-generation pipeline's
-``synthetic_mcp_server_generation/validation/spec_conformance.py`` (same diff at generation
-time); tool shape differs — MCP objects here, dicts there.
 """
 
 from __future__ import annotations

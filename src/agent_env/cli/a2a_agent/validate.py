@@ -16,7 +16,7 @@ def run_validation(agent: A2AAgent, litellm_api_key: str | None = None) -> dict:
     # Re-fetch agent to get the persisted metadata
     agent = A2AAgent.get(agent.id, agent.version)
 
-    for key in ("validated_agent_card", "validated_a2a_protocol", "validated_a2a_extensions", "validated_data_extensions", "validated_litellm_attribution", "validated_litellm_attribution_runtime"):
+    for key in ("validated_agent_card", "validated_a2a_protocol", "validated_a2a_extensions", "validated_data_extensions"):
         value = agent.metadata.get(key, {})
         click.echo(click.style(f"\n{key}:", bold=True))
         click.echo(json.dumps(value, indent=2))

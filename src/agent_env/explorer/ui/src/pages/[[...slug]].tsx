@@ -131,8 +131,6 @@ export default function App() {
     number | undefined
   >(undefined);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
-  const [editTaskId, setEditTaskId] = useState<string | null>(null);
-  const [cloneTaskId, setCloneTaskId] = useState<string | null>(null);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
   const [selectedDeliveryId, setSelectedDeliveryId] = useState<string | null>(
@@ -151,14 +149,6 @@ export default function App() {
     string | null
   >(null);
   const [taskRunnerTaskId, setTaskRunnerTaskId] = useState<string | null>(null);
-  const [evaluatorOnlyTaskId, setEvaluatorOnlyTaskId] = useState<string | null>(
-    null,
-  );
-  const [rerunFromStep, setRerunFromStep] = useState<number | null>(null);
-  const [savedContextJson, setSavedContextJson] = useState<Record<
-    string,
-    unknown
-  > | null>(null);
   /* --- Initialize state from URL on mount --- */
   useEffect(() => {
     const { page, entityId } = currentRoute();
@@ -188,13 +178,9 @@ export default function App() {
       setSelectedUniverseId(page === 'universe-detail' ? entityId : null);
       if (page !== 'universe-detail') setSelectedUniverseVersion(undefined);
       setSelectedTaskId(page === 'task-detail' ? entityId : null);
-      setCloneTaskId(null);
-      setEvaluatorOnlyTaskId(null);
-      setRerunFromStep(null);
       setSelectedAgentId(page === 'agent-detail' ? entityId : null);
       setTaskRunnerTaskId(page === 'task-runner' ? entityId : null);
       setEnvHistory([]);
-      setSavedContextJson(null);
     };
     router.events.on('routeChangeComplete', handleRouteChange);
     return () => router.events.off('routeChangeComplete', handleRouteChange);
@@ -249,8 +235,6 @@ export default function App() {
   const navigateToTaskDetail = useCallback(
     (taskId: string) => {
       setSelectedTaskId(taskId);
-      setEditTaskId(null);
-      setCloneTaskId(null);
       setActivePage('task-detail');
       pushRoute('task-detail', taskId);
     },
@@ -347,18 +331,13 @@ export default function App() {
                     setSelectedUniverseId(null);
                     setSelectedUniverseVersion(undefined);
                     setSelectedTaskId(null);
-                    setEditTaskId(null);
-                    setCloneTaskId(null);
                     setSelectedAgentId(null);
                     setSelectedSkillId(null);
                     setPlaygroundInitEnvId(null);
                     setPlaygroundInitUniverseId(null);
                     setPlaygroundInstanceId(null);
                     setTaskRunnerTaskId(null);
-                    setEvaluatorOnlyTaskId(null);
-                    setRerunFromStep(null);
                     setSelectedDeliveryId(null);
-                    setSavedContextJson(null);
                     pushRoute(page);
                   }}
                   title={sidebarOpen ? undefined : label}
@@ -469,11 +448,7 @@ export default function App() {
               />
             )}
             {activePage === 'task-runner' && (
-              <TaskRunnerPage
-                taskId={taskRunnerTaskId}
-                savedContextJson={savedContextJson}
-                onContextCaptured={setSavedContextJson}
-              />
+              <TaskRunnerPage taskId={taskRunnerTaskId} />
             )}
         </>
       </main>

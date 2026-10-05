@@ -21,9 +21,7 @@ DEFAULT_TTL_SECONDS = 7200
               help="Sandbox backend(s): a built-in (modal, modal_vm, e2b, local) "
                    "or a name from [sandbox.providers] in .agentenv/config.toml; comma-separated for a "
                    "fallback chain. Defaults to [sandbox].agent_default (else local) when omitted.")
-@click.option("--priority", type=int, default=0, show_default=True,
-              help="Sandbox priority: 0=interactive, 1=non_interactive (honoured by backends with priority tiers)")
-def deploy(agent_id: str, agent_version: int | None, env_var_pairs: tuple[str, ...], ttl_seconds: int, sandbox: str, priority: int):
+def deploy(agent_id: str, agent_version: int | None, env_var_pairs: tuple[str, ...], ttl_seconds: int, sandbox: str):
     """Deploy an A2A agent on a sandbox VM."""
     from agent_env.providers import build_sandbox_provider, set_agent_sandbox_provider
 
@@ -49,7 +47,7 @@ def deploy(agent_id: str, agent_version: int | None, env_var_pairs: tuple[str, .
 
     click.echo(f"Deploying (ttl={ttl_seconds}s)...")
     with run_scope(agent.id):
-        deployed = asyncio.run(agent.deploy(ttl_seconds=ttl_seconds, env_vars=env_vars if env_vars else None, priority=priority))
+        deployed = asyncio.run(agent.deploy(ttl_seconds=ttl_seconds, env_vars=env_vars if env_vars else None))
 
     click.echo("Deployed!")
     click.echo("Instance ID: " + click.style(deployed.instance_id, fg="green"))

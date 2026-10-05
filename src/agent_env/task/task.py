@@ -305,12 +305,10 @@ class Task:
         id: str,
         version: Optional[int],
         steps: list[TaskStep] | None = None,
-        project_id: Optional[str] = None,
     ):
         self.id = id
         self.version = version
         self.steps: list[TaskStep] = steps or []
-        self.project_id = project_id
         self._validate_dag(self.steps)
 
     @classmethod
@@ -361,15 +359,12 @@ class Task:
         return problems
 
     def to_dict(self) -> dict:
-        doc: dict = {
+        return {
             "id": self.id,
             "type": self.type,
             "version": self.version,
             "steps": [step.to_dict() for step in self.steps],
         }
-        if self.project_id is not None:
-            doc["project_id"] = self.project_id
-        return doc
 
     @classmethod
     def from_dict(cls, data: dict) -> "Task":
@@ -391,7 +386,6 @@ class Task:
             id=data["id"],
             version=data.get("version"),
             steps=steps,
-            project_id=data.get("project_id"),
         )
 
     async def run(

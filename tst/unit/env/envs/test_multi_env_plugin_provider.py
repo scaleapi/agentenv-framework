@@ -165,7 +165,7 @@ async def test_deploy_env_deploys_a_stock_multi_env_through_the_plugin_and_the_r
 
     [deployed] = context.deployed_envs
     [(deployed_env, options)] = SEEN["deploys"]
-    assert deployed_env is env and set(options) == {"ttl_seconds", "disk_size_gb", "gateway_mode", "cpu", "memory_mb", "priority",
+    assert deployed_env is env and set(options) == {"ttl_seconds", "disk_size_gb", "gateway_mode", "cpu", "memory_mb",
                                                      "env_state_type", "env_state_instance_id", "attribution"}
     assert (deployed.instance_id, deployed.mcp_url, env._sandbox, env._deployed) == ("inst-7", f"{_URL}/mcp", None, deployed)
     for child in [*env.mcp_server_envs, *env.website_envs]:

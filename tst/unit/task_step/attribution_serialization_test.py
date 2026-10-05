@@ -4,9 +4,6 @@ Attribution lives at `metadata["attribution"]` and nowhere else in a step docume
 rather than assumed because `tasks.steps[]` documents are versioned and immutable, and
 consumers query them by dotted path: a key that moves returns an empty result set, not an
 error.
-
-`priority` is serialized in the same block but is a scheduling concern, not
-attribution, so it is not asserted here.
 """
 
 from unittest.mock import MagicMock, patch

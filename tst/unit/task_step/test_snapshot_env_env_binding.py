@@ -2,8 +2,8 @@
 
 Matching on `env_id` alone sends every branch's snapshot to one deployment: the
 first-appended env gets snapshotted k times while the other rollouts' state is
-never captured. Same defect #808 fixed for `deploy_agent` and #817 for
-`load_artifact`, on the step that reads the state back out.
+never captured. The same defect as in `deploy_agent` and `load_artifact`, on the
+step that reads the state back out.
 
 `snapshot_env` has three resolution modes rather than one, so the filter is
 exercised against each: `env_instance_id` (exact, untouched), `env_id`, and the
@@ -22,7 +22,7 @@ from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.snapshot_env import EnvSnapshotResult, SnapshotEnvTaskStep
 
-ENV_ID = "haltbench-rollout-env-0gr8479d"
+ENV_ID = "rollout-env"
 
 
 def _fake_env(sandbox_id: str):

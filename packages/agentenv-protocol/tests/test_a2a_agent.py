@@ -16,6 +16,7 @@ from a2a.server.events import EventQueue
 from a2a.types import (
     AgentCapabilities as UpstreamAgentCapabilities,
 )
+from a2a.types import AgentExtension
 from a2a.types import (
     Message,
     MessageSendParams,
@@ -35,6 +36,7 @@ from agentenv_protocol.a2a_agent import (
     PEER_AGENTS_V1,
     SKILL_CONFIG_V1,
     SNAPSHOT_V1,
+    STAGING_V1_URI,
     TRAJECTORY_V1,
     TRIGGERS_V1,
     AgentCapabilities,
@@ -62,6 +64,7 @@ from agentenv_protocol.a2a_agent import (
     PeerAgentsSetRequest,
     RequestDefinition,
     RequestVariant,
+    StagingStore,
     TaskObjectTrajectoryRequest,
     TaskOutcome,
     TaskProgress,
@@ -694,7 +697,7 @@ def test_non_streaming_capabilities_are_derived_from_run() -> None:
         streaming=False,
         push_notifications=False,
         state_transition_history=False,
-        extensions=[],
+        extensions=[AgentExtension.model_validate(StagingStore().card_extension())],
     )
 
     with pytest.raises(TypeError, match="unexpected keyword argument 'capabilities'"):
@@ -731,7 +734,7 @@ def test_streaming_progress_and_status_events_are_forwarded_in_order() -> None:
     with TestClient(Agent().create_app()) as client:
         card = client.get("/.well-known/agent.json").json()
         assert card["capabilities"] == {
-            "extensions": [],
+            "extensions": [StagingStore().card_extension()],
             "pushNotifications": False,
             "stateTransitionHistory": False,
             "streaming": True,
@@ -1359,7 +1362,7 @@ def test_attribution_probe_reports_what_the_agent_last_sent() -> None:
             self.sent: dict[str, str] = {}
 
         async def run(self, request: TaskRequest) -> TaskResult:
-            self.sent = {"project_id": "project-1", "task_id": "task-1", "team": "evals"}
+            self.sent = {"task_id": "task-1", "team": "evals"}
             return TaskResult.text("ok")
 
         @extension(ATTRIBUTION_PROBE_V1.probe)
@@ -1381,16 +1384,12 @@ def test_attribution_probe_reports_what_the_agent_last_sent() -> None:
         response = client.post("/a2a", json=_message_request())
         assert response.json()["result"]["status"]["state"] == "completed"
         assert _operation(client, card, ATTRIBUTION_PROBE_V1.uri, "probe", {}).json() == {
-            "last_seen_attribution": {
-                "project_id": "project-1",
-                "task_id": "task-1",
-                "team": "evals",
-            },
+            "last_seen_attribution": {"task_id": "task-1", "team": "evals"},
             "last_seen_at_utc": "2026-01-01T00:00:00Z",
         }
         assert (
             _operation(
-                client, card, ATTRIBUTION_PROBE_V1.uri, "probe", {"project_id": "x"}
+                client, card, ATTRIBUTION_PROBE_V1.uri, "probe", {"unexpected": "x"}
             ).status_code
             == 400
         )
@@ -2625,6 +2624,7 @@ def test_generated_app_serves_sdk_extensions_and_a2a_lifecycle() -> None:
             "urn:agentenv:skill-config/v1",
             "urn:agentenv:trajectory/v1",
             "urn:agentenv:triggers/v1",
+            STAGING_V1_URI,
         }
 
         assert (
@@ -2655,16 +2655,6 @@ def test_generated_app_serves_sdk_extensions_and_a2a_lifecycle() -> None:
                 "urn:agentenv:agent-config/v1",
                 "set",
                 {"metadata": {"trace_id": "not-yet-a-config-field"}},
-            ).status_code
-            == 400
-        )
-        assert (
-            _operation(
-                client,
-                card,
-                "urn:agentenv:agent-config/v1",
-                "set",
-                {"project_id": "project"},
             ).status_code
             == 400
         )
@@ -2820,7 +2810,6 @@ def test_generated_app_serves_sdk_extensions_and_a2a_lifecycle() -> None:
                     "parts": [{"kind": "text", "text": "hello"}],
                     "metadata": {
                         "trace_id": "trace-1",
-                        "project_id": "caller-project",
                     },
                 },
                 "configuration": {"blocking": True},
@@ -2842,7 +2831,6 @@ def test_generated_app_serves_sdk_extensions_and_a2a_lifecycle() -> None:
         assert seen[0].config.timeout_seconds == 600
         assert seen[0].metadata == {
             "trace_id": "trace-1",
-            "project_id": "caller-project",
             "role": "auditor",
         }
         assert seen[0].mcp_servers

@@ -671,9 +671,9 @@ async def test_secrets_survive_the_rebuild_from_the_stored_context(store):
     # must graft them back, or the re-dispatched span loses its credentials.
     deploy = _FakeDeployEnv("s0")
     flaky = _FlakyPrompt("s1", retry_config=RetryConfig(retry_from_step_id="s0"), fail_times=1)
-    ctx = TaskStepContext(metadata={"user_overrides": {"litellm_api_key": "SECRET", "priority": 3}})
+    ctx = TaskStepContext(metadata={"user_overrides": {"litellm_api_key": "SECRET", "agent_effort": "high"}})
     result = await Task(id="t", version=1, steps=[deploy, flaky]).run(context=ctx)
-    assert result.metadata["user_overrides"] == {"litellm_api_key": "SECRET", "priority": 3}
+    assert result.metadata["user_overrides"] == {"litellm_api_key": "SECRET", "agent_effort": "high"}
     assert "SECRET" not in str(_doc(store, ctx.instance_id)) and "SECRET" not in str(_rows(store, ctx.instance_id))
 
 

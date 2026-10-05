@@ -57,9 +57,8 @@ class ConfigDirective:
 
     def to_dict(self) -> dict:
         # Dual-write. This feeds the `tasks` and `task_steps`
-        # documents — NOT the delivered bundle. The bundle mints its own dict
-        # from these attributes in export/exporter.py, so the permanently frozen
-        # `{'service': ...}` Harbor applier input is unaffected by the twin here.
+        # documents only. An exporter builds its own dict from these attributes,
+        # so a frozen `{'service': ...}` export format is unaffected by the twin here.
         return {"service": self.service, "environment": self.service, "uri": self.uri, "args": self.args}
 
     @classmethod

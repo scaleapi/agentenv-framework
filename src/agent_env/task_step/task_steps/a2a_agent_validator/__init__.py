@@ -3,8 +3,6 @@ from .verify_a2a_agent_config_identity import VerifyA2AAgentConfigIdentityStep
 from .verify_a2a_agent_mcp import VerifyA2AAgentMCPStep
 from .verify_a2a_core_protocol import VerifyCoreA2AProtocolStep
 from .verify_a2a_install import VerifyA2AInstallStep
-from .verify_a2a_litellm_attribution import VerifyA2ALitellmAttributionStep
-from .verify_a2a_litellm_attribution_runtime import VerifyA2ALitellmAttributionRuntimeStep
 from .verify_a2a_modalities import VerifyA2AModalitiesStep
 from .verify_a2a_peer_agents import VerifyA2APeerAgentsStep
 from .verify_a2a_role import VerifyA2ARoleStep
@@ -19,8 +17,6 @@ __all__ = [
     "VerifyA2AAgentMCPStep",
     "VerifyCoreA2AProtocolStep",
     "VerifyA2AInstallStep",
-    "VerifyA2ALitellmAttributionStep",
-    "VerifyA2ALitellmAttributionRuntimeStep",
     "VerifyA2AModalitiesStep",
     "VerifyA2APeerAgentsStep",
     "VerifyA2ARoleStep",

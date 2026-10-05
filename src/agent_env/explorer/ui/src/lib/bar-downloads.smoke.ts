@@ -164,17 +164,17 @@ function main(): void {
     );
   }
 
-  // The reported case: demo-bench-proof-c2, many steps + results.
+  // A task with many steps + results.
   {
     const many = Array.from({ length: 12 }, (_, i) => ({
-      agent_trajectory_s3_uri: `obj://halt/${i}`,
+      agent_trajectory_s3_uri: `obj://bucket/${i}`,
       step_id: `step-${i}`,
     }));
-    const downloads = buildBarDownloads(many, 'obj://halt/results.json');
+    const downloads = buildBarDownloads(many, 'obj://bucket/results.json');
     assert(downloads.length === 13, 'all 12 trajectories plus results kept');
     assert(
       shouldCollapseBarDownloads(downloads.length),
-      'the reported task collapses into a dropdown',
+      'a many-step task collapses into a dropdown',
     );
     assert(
       new Set(downloads.map(d => d.key)).size === downloads.length,

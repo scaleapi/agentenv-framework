@@ -30,7 +30,7 @@ function rubricLabel(rubric: RubricCriterion): string {
  * Pick the verifier output that actually grades the configured rubrics,
  * not just whichever happens to come first in dict iteration order.
  *
- * Tasks like `mm-avatar-full-urls` write multiple entries to
+ * A task can write multiple entries to
  * `metadata.verifications` — `verify-fs` (sandbox), `verify-response`
  * (rubric), `aggregate`. Prefer entries stamped with
  * `format: "rubric_binary"`; fall back to max rubric-id overlap

@@ -60,12 +60,7 @@ async def test_create_vm_uses_derived_template_and_preserves_attribution(
         disk_size_gb=99,
         timeout=123,
         exposed_ports=[8080, 9000],
-        attribution={
-            "product": "product-a",
-            "customer": "customer-b",
-            "team": "team-c",
-            "project_id": "project-d",
-        },
+        attribution={"team": "team-c", "cost_center": "research", "run_id": "inst-1"},
     )
 
     assert isinstance(sandbox, E2BSandbox)
@@ -76,10 +71,9 @@ async def test_create_vm_uses_derived_template_and_preserves_attribution(
         timeout=123,
         api_key="e2b-secret",
         metadata={
-            "product": "product-a",
-            "customer": "customer-b",
             "team": "team-c",
-            "project_id": "project-d",
+            "cost_center": "research",
+            "run_id": "inst-1",
             "agent_env_exposed_ports": "8080,9000",
         },
         network={"allow_public_traffic": True},
@@ -247,6 +241,24 @@ async def test_rejects_image_override_before_resolving_or_creating():
 
     with pytest.raises(ValueError, match="base_template is immutable"):
         await provider.create_vm(image="untrusted:latest")
+
+    resolver.resolve.assert_not_awaited()
+    _AsyncSandboxSdk.create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rejects_the_exposed_ports_key_as_attribution_before_resolving_or_creating():
+    """The provider reads the key back as the sandbox's exposed ports on reconnect."""
+    resolver = _Resolver()
+    provider = E2BSandboxProvider(
+        api_key="e2b-secret",
+        base_template="agent-env-v1",
+        template_resolver=resolver,
+        sandbox_cls=_AsyncSandboxSdk,
+    )
+
+    with pytest.raises(ValueError, match="'agent_env_exposed_ports' is reserved"):
+        await provider.create_vm(attribution={"agent_env_exposed_ports": "22"})
 
     resolver.resolve.assert_not_awaited()
     _AsyncSandboxSdk.create.assert_not_awaited()

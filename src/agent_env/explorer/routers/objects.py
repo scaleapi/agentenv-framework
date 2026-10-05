@@ -71,6 +71,15 @@ def object_content(object_url: str = Query(...)):
     return response
 
 
+def _filename(object_url: str) -> str:
+    return object_url.rstrip("/").rsplit("/", 1)[-1] or "object"
+
+
+def _content_type(object_url: str, meta) -> str:
+    """The stored content type, else one guessed from the filename (local stores keep none)."""
+    return meta.content_type or mimetypes.guess_type(_filename(object_url))[0] or "application/octet-stream"
+
+
 def _streamed(tmp: str, object_url: str, meta) -> StreamingResponse:
     def _stream_and_cleanup():
         try:
@@ -80,13 +89,10 @@ def _streamed(tmp: str, object_url: str, meta) -> StreamingResponse:
         finally:
             os.unlink(tmp)
 
-    filename = object_url.rstrip("/").rsplit("/", 1)[-1] or "object"
-    # Local stores don't persist a content type; fall back to the filename so both the
-    # media type and the sandbox decision below are correct on every backend.
-    content_type = meta.content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    content_type = _content_type(object_url, meta)
     headers = {
         "X-Content-Type-Options": "nosniff",  # untrusted artifact bytes must not sniff-execute
-        "Content-Disposition": _content_disposition(filename),
+        "Content-Disposition": _content_disposition(_filename(object_url)),
     }
     if content_type.split(";")[0].strip().lower() in _SANDBOX_TYPES:
         headers["Content-Security-Policy"] = "sandbox"
@@ -109,4 +115,4 @@ def object_metadata(object_url: str = Query(...)):
     meta = store.get_object_metadata_at(object_url)
     if meta is None:
         raise HTTPException(status_code=404, detail="no object at the given object_url")
-    return {"size_bytes": meta.size, "content_type": meta.content_type}
+    return {"size_bytes": meta.size, "content_type": _content_type(object_url, meta)}
