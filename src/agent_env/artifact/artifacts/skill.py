@@ -3,7 +3,7 @@
 A SkillArtifact references one FileArtifactUniverse bundling every file in the skill
 (SKILL.md + scripts/, references/, assets/, …) colocated under a single object-store prefix
 (`artifacts/skill/<key_segment(id)>/<version>/`). That prefix IS the bundle — no duplication, and
-the prefix is handed to deployed A2A agents as `skill_s3_url`.
+deployed A2A agents get its files through read grants.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ class SkillArtifact(Artifact):
     type: Literal["skill"] = "skill"
 
     skill_files_id: str = Field(description="ID of the FileArtifactUniverse bundling every file in the skill")
-    skill_object_url: str = Field(alias="skill_s3_url", description="Object-store prefix where the skill bundle lives (handed to agents)")
+    skill_object_url: str = Field(alias="skill_s3_url", description="Object-store prefix where the skill bundle lives")
     agent_skills_spec_version: str = Field(description="agentskills.io spec revision this skill was validated under")
 
     skill_name: str = Field(description="Skill name from SKILL.md frontmatter; equals the artifact id")

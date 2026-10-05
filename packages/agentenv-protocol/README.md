@@ -568,17 +568,14 @@ that is by the uploading agent. AgentEnv accepts a trajectory upload response
 without reading the object back, and registers a snapshot only once both its
 objects are in the store.
 
-SDK agents advertise only these shapes. AgentEnv reads each Agent Card, sends
-the object variants when the agent advertises them and its object store issues
-grants (the S3 store does, and namespace grants for changelog capture only when
-it signs with long-term credentials), and keeps the older `s3_prefix`, `skill_s3_url` and
-`trajectory_s3_prefix` shapes for agents that advertise those instead. An SDK
-agent built on this protocol therefore needs an agent-env release that includes
-it: an older release sends the older shapes, which such an agent refuses apart
-from inline skills and trajectories. Roll out in this
-order: release agent-env and `agentenv-framework-protocol` together, move every service
-that embeds agent-env to that release, and only then build agents on the new
-SDK. A snapshot or changelog is restored in the form it was captured in: one
-captured as objects only through the object variants, an older one only
-through `s3_prefix`. Do not roll agent-env back once portable snapshots or
-changelogs exist, because older releases cannot load them.
+SDK agents advertise only these shapes, and AgentEnv sends no others. It moves
+a skill bundle, snapshot or changelog only through grants, so the call needs an
+agent that advertises the object variant and an object store that issues grants
+(the S3 store does, and namespace grants for changelog capture only when it
+signs with long-term credentials); otherwise it fails before anything is sent.
+Skills given as SKILL.md text and trajectories returned inline need no grants.
+A snapshot is restored only from the snapshot objects in the table above; one
+that holds the runtime's own files instead cannot be. An
+agent-env release without the object variants sends other shapes, which SDK
+agents refuse apart from inline skills and trajectories, and cannot load
+portable snapshots or changelogs, so do not run one alongside these agents.

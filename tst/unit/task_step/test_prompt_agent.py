@@ -22,7 +22,7 @@ from agentenv_protocol.a2a_agent import (
 from agentenv_protocol.transfers import HttpPutGrant
 
 from agent_env.a2a_agent.object_transfer import DEFAULT_TRAJECTORY_MAX_BYTES
-from agent_env.config import configure, set_object_store
+from agent_env.config import configure
 from agent_env.store.object_store import LocalFilesystemObjectStore
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
 from agent_env.task_step.snapshot_utils import agent_state_capture
@@ -272,17 +272,3 @@ async def test_sdk_agent_on_the_local_store_still_records_its_trajectory(monkeyp
     assert json.loads(store.get(uri)) == [{"type": "echo", "output": "Echo: hi"}]
 
 
-def test_agent_written_trajectory_is_found_on_the_local_store(monkeypatch, tmp_path):
-    store = LocalFilesystemObjectStore(str(tmp_path))
-    set_object_store(store)
-    step = PromptAgentTaskStep(id="p", version=None, prompt="hi", prompt_id="pid", agent_name="a")
-    prefix = step._trajectory_prefix()
-    written = store.put(f"{store.get_object_key(prefix)}/trajectory-1.json", b"{}")
-    client = MagicMock()
-    client.__aenter__.return_value.post = AsyncMock(return_value=SimpleNamespace(
-        raise_for_status=lambda: None, json=lambda: {"trajectory_s3_prefix": prefix},
-    ))
-    monkeypatch.setattr(pa.httpx, "AsyncClient", lambda *a, **k: client)
-
-    uri = asyncio.run(step._fetch_trajectory("http://a", {"params": {"endpoint": "/t"}}, "SERVER-ID", prefix, "CLIENT-ID"))
-    assert uri == written
