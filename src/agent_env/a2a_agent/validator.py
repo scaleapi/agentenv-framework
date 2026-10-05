@@ -33,7 +33,7 @@ from agent_env.config import get_config
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox_provider import get_agent_sandbox_provider
-from agent_env.store.routing import refuse_local_derivation
+from agent_env.store.ids import derive_id, key_segment
 from agent_env.task_step.task_steps.a2a_agent_validator.verify_a2a_modalities import (
     AUDIO_M4A_EXPECTED,
     AUDIO_M4A_PROBE_PARTS,
@@ -157,7 +157,6 @@ class A2AAgentValidator:
 
         Returns the merged `verifications` dict from the run's task context.
         """
-        refuse_local_derivation(agent.id, "agent", "validating")
         from agent_env.task import Task
         from agent_env.task_step import (
             AddSkillsTaskStep,
@@ -186,7 +185,7 @@ class A2AAgentValidator:
         from agent_env.task_step.task_step import TaskStep, TaskStepDependency
         from agent_env.a2a_agent.a2a_agent import A2AAgent
 
-        task_id = f"validate-a2a-{agent.id}-v{agent.version}"
+        task_id = derive_id(agent.id, f"validate-a2a-v{agent.version}")
 
         # ── Upload object-store fixtures (skill + URI probe bytes) ───────────
         skill_object_url = await asyncio.to_thread(
@@ -762,9 +761,9 @@ class A2AAgentValidator:
         from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 
         ts = int(time.time())
-        universe_id = f"validate-install-image-{agent.id}-v{agent.version}-{ts}"
+        universe_id = derive_id(agent.id, f"validate-install-image-v{agent.version}-{ts}")
         config = get_config()
-        s3_url = config.get_object_store().object_url(f"{config.get_artifact_key_prefix()}a2a_validator/install_test_image/{ts}/")
+        s3_url = config.get_object_store_for(universe_id).object_url(f"{config.get_artifact_key_prefix()}a2a_validator/install_test_image/{ts}/")
 
         with tempfile.NamedTemporaryFile("w", suffix=".Dockerfile", delete=False) as f:
             f.write("FROM ubuntu:24.04\n")
@@ -790,9 +789,9 @@ class A2AAgentValidator:
         from agent_env.task_step.task_steps.add_skills import Skill
 
         config = get_config()
-        store = config.get_object_store()
+        store = config.get_object_store_for(agent.id)
         prefix = (
-            f"{config.get_artifact_key_prefix()}a2a_validator/validator_skill/{agent.id}-v{agent.version}/{name}/"
+            f"{config.get_artifact_key_prefix()}a2a_validator/validator_skill/{key_segment(agent.id)}-v{agent.version}/{name}/"
         )
         skill = Skill(
             name=name,
@@ -815,8 +814,8 @@ class A2AAgentValidator:
         """
 
         config = get_config()
-        store = config.get_object_store()
-        prefix = f"{config.get_artifact_key_prefix()}a2a_validator/probe_fixtures/{agent.id}-v{agent.version}/"
+        store = config.get_object_store_for(agent.id)
+        prefix = f"{config.get_artifact_key_prefix()}a2a_validator/probe_fixtures/{key_segment(agent.id)}-v{agent.version}/"
 
         png_object_uri = store.put(f"{prefix}red.png", base64.b64decode(IMAGE_PROBE_PNG_B64), content_type="image/png", allow_overwrite=True)
         png_signed_url = store.signed_get_url(png_object_uri)

@@ -19,13 +19,17 @@ import pytest
 from click.testing import CliRunner
 
 import agent_env
+from agent_env.artifact import FileArtifactUniverse
 from agent_env.artifact.store import reset_artifact_store
 from agent_env.bundle.installed import find_bundle
 from agent_env.cli import cli
 from agent_env.config import configure, reset_config
+from agent_env.config.paths import state_root
 from agent_env.providers.sandbox_providers.sandbox_provider import reset_sandbox_provider
+from agent_env.store import Filter, LocalSqliteDocumentStore
 from agent_env.store.routing import namespace_routing
 from agent_env.task import Task
+from tst.util.capabilities import skip_without_gnu_stat
 
 pytestmark = pytest.mark.integration
 
@@ -120,6 +124,24 @@ def test_a_bundle_runs_from_its_folder_and_a_rerun_writes_only_what_changed(bund
     with namespace_routing():
         results = Task.get_instance(instance_id).context["metadata"]["verifications"]["hello"]["results"]
     assert [(result["criterion"], result["result"]) for result in results] == [("greets", False), ("check passes", False)]
+
+
+@skip_without_gnu_stat()
+def test_a_bundle_task_collects_from_its_sandbox_into_a_universe_named_after_the_run(bundle, quiet_logs):
+    steps = json.loads((bundle / "tasks/hello.json").read_text())
+    steps.append({"id": "collect", "type": "collect_artifacts", "sandbox_name": "box", "base_path": "/app/greeting",
+                  "artifact_paths": ["hello.txt"]})
+    (bundle / "tasks/hello.json").write_text(json.dumps(steps))
+
+    output = _run(bundle)
+
+    assert "tasks/hello.json v1: passed (hello: 1)" in output
+    (instance_id,) = re.findall(r"instance (@local/~/my-hello/hello-[a-z0-9]{8})\b", output)
+    with namespace_routing():
+        universe = FileArtifactUniverse.get(instance_id)
+        assert {name: fa.load() for name, fa in universe.get_file_artifacts().items()} == {"hello.txt": b"hello\n"}
+    documents = LocalSqliteDocumentStore(str(state_root() / "document_store" / "documents.db"))
+    assert not documents.path.exists() or documents.count("artifacts", Filter()) == 0
 
 
 def test_an_installed_bundle_runs_by_name_with_ids_rooted_at_its_package(bundle, monkeypatch, tmp_path, quiet_logs):

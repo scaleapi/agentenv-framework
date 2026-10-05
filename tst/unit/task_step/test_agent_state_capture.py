@@ -135,6 +135,18 @@ async def test_a_capture_is_issued_under_the_fixture_prefix(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("artifact_id, segment", [
+    ("wsp", "wsp"),
+    ("@local/~/work/triage/tasks/t-abcd1234__solve-workspace", "local/work-triage-tasks-t-abcd1234-solve-workspace-606593d6050a"),
+], ids=["bare", "local"])
+async def test_a_capture_is_issued_under_the_workspaces_key_segment(monkeypatch, artifact_id, segment):
+    install_capture_stubs(monkeypatch)
+    result = await _capture(artifact_id=artifact_id)
+    assert result.capture_prefix.startswith(f"s3://{BUCKET}/agent_snapshots/{segment}/")
+    assert result.universe_id == artifact_id
+
+
+@pytest.mark.asyncio
 async def test_a_card_offering_both_save_forms_gets_the_object_one(monkeypatch):
     rec = install_capture_stubs(monkeypatch)
 

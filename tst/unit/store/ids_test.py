@@ -1,6 +1,6 @@
 """The encoding of namespaced ids into object keys, image repositories and filenames.
 
-The golden table is frozen: persisted ``object_url``s and ``image_name``s record these strings,
+The golden tables are frozen: persisted ``object_url``s and ``image_name``s record these strings,
 so a change here orphans every local cache written before it."""
 
 import hashlib
@@ -51,12 +51,20 @@ LEGACY = [
     "with space",
     "hash#frag?q",
     "user@example.com",
-    "x" * 300,
+    "x" * 200,
+    "é" * 100,
     "",
     " ",
     "__",
     "@acme/tickets",
     "@LOCAL/upper-namespace",
+]
+
+LONG_BARE = [
+    ("x" * 201, "x" * 48 + "-84a0678c9093"),
+    ("é" * 101, "e" * 48 + "-96cbf9775498"),
+    ("tickets/" + "Ticket Desk (EU) " * 12, "tickets-ticket-desk-eu-ticket-desk-eu-ticket-des-abdff07f35af"),
+    ("!" * 201, "667fa95bbbea"),
 ]
 
 
@@ -75,13 +83,23 @@ def test_the_hash_covers_the_full_unnormalized_id():
     assert key_segment("@local/~/My Work/Tickets V2") != key_segment("@local/~/my work/tickets v2")
     long_a, long_b = "@local/~/" + "x" * 60 + "a", "@local/~/" + "x" * 60 + "b"
     assert key_segment(long_a) != key_segment(long_b)
+    assert key_segment("x" * 300 + "a") != key_segment("x" * 300 + "b")
 
 
 @pytest.mark.parametrize("entity_id", LEGACY)
-def test_every_other_id_passes_through_every_helper_byte_identical(entity_id):
+def test_every_other_id_up_to_200_bytes_passes_through_every_helper_byte_identical(entity_id):
     assert key_segment(entity_id) == entity_id
     assert image_repository(entity_id) == entity_id
     assert fs_safe(entity_id) == entity_id
+
+
+@pytest.mark.parametrize("entity_id, segment", LONG_BARE)
+def test_a_bare_id_over_200_bytes_encodes_to_a_frozen_segment_that_is_one_path_component(tmp_path, entity_id, segment):
+    assert key_segment(entity_id) == image_repository(entity_id) == segment
+    assert segment.endswith(hashlib.sha256(entity_id.encode("utf-8")).hexdigest()[:12])
+    assert _OCI_REPOSITORY.fullmatch(segment)
+    (tmp_path / segment).write_bytes(b"")
+    assert [path.name for path in tmp_path.iterdir()] == [segment]
 
 
 @pytest.mark.parametrize("entity_id, namespace, local", [

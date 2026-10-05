@@ -830,7 +830,7 @@ async def test_cli_install_e2e(sandbox_provider, multi_env, a2a_agent):
         build_step = BuildMcpCliTaskStep(id=f"cli-e2e-build-{suffix}", version=None, env_id=multi_env.id, command_name=multi_env.id)
         await build_step.execute(context)
         cli_ref = context.metadata["cli_artifact"]
-        assert cli_ref["id"] == f"cli-{multi_env.id}"
+        assert cli_ref["id"] == f"{multi_env.id}__cli"
         logger.info(f"CLI e2e: built CliArtifact {cli_ref['id']} v{cli_ref['version']}")
 
         load_step = LoadArtifactTaskStep(

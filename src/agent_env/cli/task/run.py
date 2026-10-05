@@ -12,7 +12,8 @@ import click
 
 from agent_env.cli.banner import print_banner
 from agent_env.cli.identity import get_agent_env_client_id
-from agent_env.store.ids import fs_safe
+from agent_env.store.ids import derive_id, fs_safe, is_local_id, validate_local_id
+from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTaskStep
 
 
 _print_lock = asyncio.Lock()
@@ -436,6 +437,13 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
         _write_context(context, task_id, output_dir)
 
 
+def _seed_universe_id(task, seed: dict) -> str | None:
+    """The universe a seed's runs collect into, so runs of one seed share it: derived from the task version and the
+    seed's id, else its name. None leaves collect_artifacts to name it after the run."""
+    seed_name = seed.get("id") or seed.get("name")
+    return derive_id(task.id, f"v{task.version}-{seed_name}") if seed_name else None
+
+
 @click.command("run-batch")
 @click.option("--id", "task_id", required=True, help="Task id")
 @click.option("--version", "task_version", default=None, type=int, help="Task version (defaults to latest)")
@@ -480,6 +488,15 @@ def run_batch(task_id: str, task_version: int | None, seeds: str, concurrency: i
     click.echo(f"Fetching task: id={task_id} version={task_version or 'latest'}...")
     task = Task.get(task_id, version=task_version)
     click.echo(f"Found task: id={task.id} version={task.version} steps={len(task.steps)}")
+    suffixes = {step.universe_id_suffix or "" for step in task.steps if isinstance(step, CollectArtifactsTaskStep)}
+    if is_local_id(task.id) and suffixes:
+        for index, seed in enumerate(seed_rows, 1):
+            universe_id = _seed_universe_id(task, seed)
+            for suffix in sorted(suffixes) if universe_id else ():
+                try:
+                    validate_local_id(universe_id + suffix)
+                except ValueError as e:
+                    raise click.ClickException(f"seed {index} can't name an @local universe: {e}") from e
     click.echo(click.style(f"Running {len(seed_rows)} seeds with concurrency={concurrency}...", fg="blue"))
     click.echo()
 
@@ -499,11 +516,7 @@ def run_batch(task_id: str, task_version: int | None, seeds: str, concurrency: i
             _stamp_agent_env_client_metadata(ctx.metadata, client_id)
             ctx.metadata["run_group_id"] = batch_run_group_id
             ctx.metadata["seed"] = seed
-            # Populate universe_id so collect_artifacts can name the
-            # FileArtifactUniverse stably across runs of the same seed.
-            # Prefer seed.id, fall back to seed.name. If neither is set,
-            # collect_artifacts falls through to the per-run instance_id.
-            universe_id = seed.get("id") or seed.get("name")
+            universe_id = _seed_universe_id(task, seed)
             if universe_id:
                 ctx.metadata["universe_id"] = universe_id
             if litellm_api_key:
