@@ -243,7 +243,7 @@ class GrantServer:
             return PlainTextResponse("The grant does not allow this request.", status_code=403)
         try:
             if claims.op == "get":
-                return _get(store, claims)
+                return _get(store, claims, head=request.method == "HEAD")
             if claims.op == "put":
                 await _put(store, claims, request)
                 return Response(status_code=200)
@@ -265,7 +265,7 @@ def _path(store: LocalFilesystemObjectStore, key: str) -> Path:
         raise _Rejected(403, "The grant's key is not an object key of this store.") from None
 
 
-def _get(store: LocalFilesystemObjectStore, claims: GrantClaims) -> Response:
+def _get(store: LocalFilesystemObjectStore, claims: GrantClaims, *, head: bool = False) -> Response:
     path = _path(store, claims.key)
     # Opened under the key's lock and typed from that open file, so the bytes sent and their type are one write's.
     with store._locked(path, shared=True):
@@ -275,9 +275,11 @@ def _get(store: LocalFilesystemObjectStore, claims: GrantClaims) -> Response:
             raise _Rejected(404, "No object exists at this grant's key.") from None
         st = os.fstat(f.fileno())
         content_type = store._read_content_type(path, st)
-    return StreamingResponse(
-        _chunks(f), media_type=content_type or DEFAULT_CONTENT_TYPE, headers={"Content-Length": str(st.st_size)}
-    )
+    headers = {"Content-Length": str(st.st_size)}
+    if head:  # the size and type alone: a StreamingResponse would read the whole object to send nothing
+        f.close()
+        return Response(media_type=content_type or DEFAULT_CONTENT_TYPE, headers=headers)
+    return StreamingResponse(_chunks(f), media_type=content_type or DEFAULT_CONTENT_TYPE, headers=headers)
 
 
 async def _chunks(f: BinaryIO) -> AsyncIterator[bytes]:
