@@ -247,6 +247,24 @@ async def test_rejects_image_override_before_resolving_or_creating():
 
 
 @pytest.mark.asyncio
+async def test_rejects_the_exposed_ports_key_as_attribution_before_resolving_or_creating():
+    """The provider reads the key back as the sandbox's exposed ports on reconnect."""
+    resolver = _Resolver()
+    provider = E2BSandboxProvider(
+        api_key="e2b-secret",
+        base_template="agent-env-v1",
+        template_resolver=resolver,
+        sandbox_cls=_AsyncSandboxSdk,
+    )
+
+    with pytest.raises(ValueError, match="'agent_env_exposed_ports' is reserved"):
+        await provider.create_vm(attribution={"agent_env_exposed_ports": "22"})
+
+    resolver.resolve.assert_not_awaited()
+    _AsyncSandboxSdk.create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_forwards_network_allowlist_to_e2b(sandbox_setup):
     provider = E2BSandboxProvider(
         api_key="e2b-secret",

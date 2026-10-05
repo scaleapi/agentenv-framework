@@ -141,13 +141,18 @@ class E2BSandboxProvider(SandboxProvider):
                 "is fixed by the selected template and cannot be configured per sandbox",
                 disk_size_gb,
             )
-        effective_policy = self.effective_network_policy(network_policy)
-        template = await self._resolve_template(cpu=cpu, memory=memory)
         metadata = {
             key: value
             for key, value in apply_default_attribution(dict(attribution or {})).items()
             if value is not None
         }
+        if _EXPOSED_PORTS_METADATA_KEY in metadata:
+            raise ValueError(
+                f"attribution key {_EXPOSED_PORTS_METADATA_KEY!r} is reserved: "
+                "the E2B provider stores the sandbox's exposed ports under it"
+            )
+        effective_policy = self.effective_network_policy(network_policy)
+        template = await self._resolve_template(cpu=cpu, memory=memory)
         ports = list(exposed_ports or [])
         if ports:
             # E2B can derive a URL for any port, so the adapter's cache is the
