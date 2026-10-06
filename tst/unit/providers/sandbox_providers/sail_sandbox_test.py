@@ -118,14 +118,24 @@ async def test_a_broken_stream_is_raised_not_reported_as_success():
 
 
 @pytest.mark.asyncio
-async def test_a_stream_cut_by_a_migration_is_exit_minus_one():
+async def test_a_stream_cut_by_a_migration_ends_and_waits_to_exit_minus_one():
     process = _process()
     process.stdout_bytes = _failing_chunks(_HostLost("moved"))
     sandbox, _ = _sandbox(process)
     running = await sandbox.exec("cat", "f")
-    with pytest.raises(_HostLost):
-        await running.stdout.read()
+    assert await running.stdout.read() == b"partial"
     assert await running.wait() == -1
+
+
+@pytest.mark.asyncio
+async def test_exec_script_retries_a_command_whose_output_stream_was_cut(monkeypatch):
+    monkeypatch.setattr("agent_env.providers.sandbox_providers.sandbox.asyncio.sleep", AsyncMock())
+    cut = _process()
+    cut.stdout_bytes = _failing_chunks(_HostLost("moved"))
+    sandbox, sailbox = _sandbox(cut, _process(stdout=b"loaded\n"))
+
+    assert await sandbox.exec_script("docker load < image.tar", max_retries=1) == "loaded\n"
+    assert sailbox.exec.aio.await_count == 2
 
 
 @pytest.mark.asyncio

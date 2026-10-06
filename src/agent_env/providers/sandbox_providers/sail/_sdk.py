@@ -1,8 +1,8 @@
 """The Sail SDK, imported on first use and authenticated with the provider's configured key.
 
-The Python SDK takes its key only from ``SAIL_API_KEY``, read once when it builds its process-wide
-client. The key is set for that one build and the variable restored, so subprocesses never inherit it
-and a process holds one Sail key.
+The Python SDK takes its key (and its thread-pool size) only from the environment, read once when it
+builds its process-wide client. Both are set for that one build and restored, so subprocesses never
+inherit them and a process holds one Sail key.
 """
 
 from __future__ import annotations
@@ -38,18 +38,20 @@ def connect(api_key: str, app_name: str, *, runtime_threads: int | None = None, 
     fingerprint = _fingerprint(api_key)
     with _lock:
         if _installed_key is None:
-            previous = os.environ.get(API_KEY_ENV)
-            os.environ[API_KEY_ENV] = api_key
+            overrides = {API_KEY_ENV: api_key}
             if runtime_threads is not None:
-                os.environ[RUNTIME_THREADS_ENV] = str(runtime_threads)
+                overrides[RUNTIME_THREADS_ENV] = str(runtime_threads)
+            previous = {name: os.environ.get(name) for name in overrides}
+            os.environ.update(overrides)
             try:
                 sdk.reset_transports()
                 _apps[app_name] = sdk.App.find(name=app_name, mint_if_missing=True)
             finally:
-                if previous is None:
-                    os.environ.pop(API_KEY_ENV, None)
-                else:
-                    os.environ[API_KEY_ENV] = previous
+                for name, value in previous.items():
+                    if value is None:
+                        os.environ.pop(name, None)
+                    else:
+                        os.environ[name] = value
             _installed_key = fingerprint
         elif _installed_key != fingerprint:
             raise ConfigError(

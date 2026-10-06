@@ -120,6 +120,45 @@ async def test_default_create_container_mutates_mode_to_container():
 
 
 @pytest.mark.asyncio
+async def test_a_create_container_cancelled_during_the_pull_terminates_the_vm():
+    pulling = asyncio.Event()
+
+    class _HangingVm(VmSandbox):
+        type = "fake-vm"
+
+        def __init__(self):
+            self.sandbox_id = "vm-fake"
+            self.tunnel_urls = {}
+            self.vnc_url = None
+            self.mode = "vm"
+            self.terminated = False
+
+        async def terminate(self) -> None:
+            self.terminated = True
+
+        async def exec_script(self, script: str) -> str:
+            pulling.set()
+            await asyncio.Event().wait()
+            return ""
+
+    vm = _HangingVm()
+
+    class _VmStyleProvider(SandboxProvider):
+        async def create_vm(self, **kwargs):
+            return vm
+
+        async def create_sandbox(self, **kwargs):
+            raise NotImplementedError
+
+    task = asyncio.ensure_future(_VmStyleProvider().create_container(image_name="nginx:latest", port=8080, env={}))
+    await pulling.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert vm.terminated
+
+
+@pytest.mark.asyncio
 async def test_create_container_mints_the_registry_login_off_the_event_loop():
     """A remote registry's login is a network round trip, an IAM token exchange for one."""
     minted_on_loop = []

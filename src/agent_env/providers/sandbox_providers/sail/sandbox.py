@@ -82,11 +82,14 @@ class _CompletedProcess:
 class _Stream:
     """One output stream, pumped from the moment the exec starts so no byte is dropped: iterate it to
     stream (``collect_artifacts`` does), or ``read()`` it whole. The queue is bounded, so a slow reader
-    pauses the command rather than growing memory; a stream nobody claims is drained by ``wait()``."""
+    pauses the command rather than growing memory; a stream nobody claims is drained by ``wait()``. A
+    transient failure just ends the stream, leaving ``wait()`` to report exit -1 for ``exec_script`` to
+    retry; any other is raised to the reader."""
 
     _MAX_CHUNKS = 64
 
-    def __init__(self, chunks):
+    def __init__(self, chunks, transient: tuple[type[BaseException], ...]):
+        self._transient = transient
         self._queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=self._MAX_CHUNKS)
         self.claimed = False
         self.error: BaseException | None = None
@@ -104,7 +107,7 @@ class _Stream:
     async def _chunks(self):
         while (chunk := await self._queue.get()) is not None:
             yield chunk
-        if self.error is not None:
+        if self.error is not None and not isinstance(self.error, self._transient):
             raise self.error
 
     def __aiter__(self):
@@ -127,8 +130,8 @@ class _SailProcess:
     def __init__(self, process: Any, sdk: Any):
         self._process = process
         self._transient = (sdk.SailboxHostLostError, sdk.TransportError)
-        self.stdout = _Stream(process.stdout_bytes)
-        self.stderr = _Stream(process.stderr_bytes)
+        self.stdout = _Stream(process.stdout_bytes, self._transient)
+        self.stderr = _Stream(process.stderr_bytes, self._transient)
 
     async def wait(self) -> int:
         await asyncio.gather(self.stdout.drain(), self.stderr.drain(), return_exceptions=True)

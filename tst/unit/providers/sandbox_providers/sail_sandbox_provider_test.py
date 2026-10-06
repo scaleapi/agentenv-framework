@@ -357,18 +357,20 @@ def test_the_key_is_set_only_while_the_sdk_builds_its_client():
 
     assert seen == {"key": "sail-secret", "threads": "16"}
     assert _sdk.API_KEY_ENV not in os.environ
+    assert _sdk.RUNTIME_THREADS_ENV not in os.environ
     sdk.reset_transports.assert_called_once()
 
 
-def test_an_operator_key_is_overridden_for_the_build_and_then_restored(monkeypatch):
+def test_operator_settings_are_overridden_for_the_build_and_then_restored(monkeypatch):
     monkeypatch.setenv(_sdk.API_KEY_ENV, "operator-key")
+    monkeypatch.setenv(_sdk.RUNTIME_THREADS_ENV, "4")
     sdk = _fake_sdk(_sailbox())
-    sdk.App.find = MagicMock(side_effect=lambda **_: os.environ[_sdk.API_KEY_ENV])
+    sdk.App.find = MagicMock(side_effect=lambda **_: (os.environ[_sdk.API_KEY_ENV], os.environ[_sdk.RUNTIME_THREADS_ENV]))
 
-    _, app = _sdk.connect("sail-secret", "agent-env", sdk=sdk)
+    _, app = _sdk.connect("sail-secret", "agent-env", runtime_threads=16, sdk=sdk)
 
-    assert app == "sail-secret"
-    assert os.environ[_sdk.API_KEY_ENV] == "operator-key"
+    assert app == ("sail-secret", "16")
+    assert (os.environ[_sdk.API_KEY_ENV], os.environ[_sdk.RUNTIME_THREADS_ENV]) == ("operator-key", "4")
 
 
 def test_the_key_is_installed_once_per_process_and_apps_are_cached():

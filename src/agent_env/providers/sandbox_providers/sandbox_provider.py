@@ -123,7 +123,7 @@ class SandboxProvider(ABC):
             await self._start_container(sandbox, image_name=image_name, port=port, env=env)
             sandbox.mode = SANDBOX_MODE_CONTAINER
             return sandbox
-        except Exception:
+        except BaseException:
             try:
                 await sandbox.terminate()
             except Exception:
