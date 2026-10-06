@@ -97,7 +97,8 @@ class _Image:
 class _Walk:
     def __init__(self, plan: Plan, sandbox: str | None):
         self.plan, self.sandbox = plan, sandbox
-        self.problems: list[str] = []
+        self.problems: dict[str, dict[str, None]] = {}  # each deploy's problem, and the deploys it's found at
+        self.run_problems: list[str] = []  # the run's as a whole
         self.infra: set[str] = set()  # the infra kinds a deploy on the local provider needs
         self.remote_infra: list[tuple[str, SandboxProvider, set[str]]] = []  # (where, provider, kinds) of a deploy elsewhere
         self.docker_users: list[str] = []
@@ -121,24 +122,29 @@ class _Walk:
                 elif isinstance(step, RubricsVerifierTaskStep):
                     self._judge(where, step)
             except ValueError as e:  # a provider that names no backend, or can't be built from its config
-                self.problems.append(f"{where}: {e}")
+                self._problem(where, str(e))
 
     def finish(self) -> Preflight:
         infra: list[InfraBuild] = []
         try:
             infra = infra_to_build(self.infra)
         except InfraError as e:
-            self.problems.extend(e.problems)
+            self.run_problems.extend(e.problems)
         for where, provider, kinds in self.remote_infra:
             self._remote_infra(where, provider, kinds)
         self._default_agent()
         if self.docker_users and (reason := docker_unreachable()):
             shown = ", ".join(self.docker_users[:_SHOWN_DOCKER_USERS])
             more = len(self.docker_users) - _SHOWN_DOCKER_USERS
-            self.problems.append(f"the local sandbox provider runs containers for {shown}"
-                                 f"{f' and {more} more' if more > 0 else ''}, and {reason}")
-        if self.problems:
-            raise BundleError(self.problems)
+            self.run_problems.append(f"the local sandbox provider runs containers for {shown}"
+                                     f"{f' and {more} more' if more > 0 else ''}, and {reason}")
+        problems = list(self.run_problems)
+        for problem, wheres in self.problems.items():
+            first, *others = wheres
+            more = f" (and {len(others)} more deploy{'s' if len(others) > 1 else ''})" if others else ""
+            problems.append(f"{first}{more}: {problem}")
+        if problems:
+            raise BundleError(problems)
         return Preflight(frozenset(self.infra), tuple(infra))
 
     # Deploys, each resolving its provider as its step does when it runs
@@ -180,7 +186,7 @@ class _Walk:
             containers = [link for link in remote if isinstance(link, ModalSandboxProvider)]
             vms = [link for link in remote if link not in containers]
             if WEBSITE_BROWSER in kinds and containers:
-                self.problems.append(f"{where}: deploys env {env.id!r}, which has websites, on the {_shown(containers[0])} "
+                self._problem(where, f"deploys env {env.id!r}, which has websites, on the {_shown(containers[0])} "
                                      "sandbox provider, whose gateway runs in containers and can't serve websites; run it "
                                      "on a VM provider, such as --sandbox local")
             if containers:
@@ -220,8 +226,8 @@ class _Walk:
         provider = _provider(self.sandbox or step.sandbox_type, get_sandbox_provider)
         if step.sandbox_mode == "vm":
             if not _creates_vms(provider):
-                self.problems.append(f"{where}: deploys a VM sandbox, and the {_shown(provider)} sandbox provider can't "
-                                     "create a VM; run it on one that can, such as --sandbox local")
+                self._problem(where, f"deploys a VM sandbox, and the {_shown(provider)} sandbox provider can't create a "
+                                     "VM; run it on one that can, such as --sandbox local")
             return
         if _local_link(provider):
             self.docker_users.append(where)
@@ -250,8 +256,8 @@ class _Walk:
     def _reachable(self, where: str, remote: list[SandboxProvider], images: list[_Image]) -> None:
         for image in images:
             if image.local_only:
-                self.problems.append(f"{where}: deploys {image.what} on the {_shown(remote[0])} sandbox provider, which "
-                                     f"can't reach it: {image.local_only}; run it with --sandbox local")
+                self._problem(where, f"deploys {image.what} on the {_shown(remote[0])} sandbox provider, which can't "
+                                     f"reach it: {image.local_only}; run it with --sandbox local")
 
     def _remote_infra(self, where: str, provider: SandboxProvider, kinds: set[str]) -> None:
         for kind in sorted(kinds):
@@ -259,8 +265,8 @@ class _Walk:
             try:
                 env = Env.get(env_id)
             except NotFoundError:
-                self.problems.append(f"{where}: deploys on the {_shown(provider)} sandbox provider, which needs the {kind} "
-                                     f"env {env_id!r}, and the store doesn't hold it; agent-env builds it only for the local "
+                self._problem(where, f"deploys on the {_shown(provider)} sandbox provider, which needs the {kind} env "
+                                     f"{env_id!r}, and the store doesn't hold it; agent-env builds it only for the local "
                                      f"sandbox provider, so put it in a store that provider can reach (`{put_command(kind)}`)")
                 continue
             images = ([env.db_docker_image_artifact, env.db_web_docker_image_artifact, env.db_mcp_docker_image_artifact]
@@ -283,7 +289,12 @@ class _Walk:
         except (ValueError, KeyError, TypeError) as e:
             problem = f"agent {agent_id!r} can't be read ({type(e).__name__}: {e})"
         for where, unnamed in self.default_agent_users:
-            self.problems.append(f"{where}: {unnamed}, so it deploys the default, {agent_id!r}, and {problem}")
+            self._problem(where, f"{unnamed}, so it deploys the default, {agent_id!r}, and {problem}")
+
+    def _problem(self, where: str, problem: str) -> None:
+        """Record ``problem`` at the deploy ``where``. One found at several deploys, such as an infra env's image every
+        gateway deploy runs, is reported once, naming the first of them."""
+        self.problems.setdefault(problem, {})[where] = None
 
 
 def _state_type(step: DeployEnvTaskStep) -> str | None:

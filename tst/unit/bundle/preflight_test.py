@@ -361,6 +361,27 @@ def test_a_gateway_deploy_on_another_provider_needs_infra_it_can_reach(bundle_di
     assert len(problems) == 4  # the gateway's image, and the service-db's three
 
 
+def test_a_problem_several_deploys_share_is_reported_once_naming_the_first(bundle_dir):
+    _env("crm")
+    with namespace_routing():
+        GatewayEnv.put(id="default", docker_image_artifact=_image("gateway-default"))
+        db = _image("db")  # one image for all three of the service-db's, so each deploy finds its problem three times
+        ServiceDBEnv.put(id="default-db", db_docker_image_artifact=db, db_web_docker_image_artifact=db,
+                         db_mcp_docker_image_artifact=db)
+    for name in ("a", "b", "c"):
+        _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}], name=name)
+
+    unreachable = ("on the 'modal_vm' sandbox provider, which can't reach it: localhost:5000/local/img:v1 is in a "
+                   "registry on this machine; run it with --sandbox local")
+    assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox="modal_vm")) == [
+        f"tasks/a.json: step 'env' (and 2 more deploys): deploys env 'crm''s image 'crm-image' {unreachable}",
+        f"tasks/a.json: step 'env' (and 2 more deploys): deploys the gateway env 'default''s image 'gateway-default' "
+        f"{unreachable}",
+        f"tasks/a.json: step 'env' (and 2 more deploys): deploys the service-db env 'default-db''s image 'db' "
+        f"{unreachable}",
+    ]
+
+
 def test_the_cli_dry_run_lists_the_infra_it_would_build(bundle_dir, quiet_logs):
     _env("crm")
     _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
