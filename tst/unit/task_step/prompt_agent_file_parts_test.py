@@ -109,7 +109,7 @@ async def test_a_user_sim_agent_is_sent_the_agents_file_part_as_a_grant(monkeypa
     agents = FakeA2AAgents({AGENT_URL: _replying_with(url), USER_URL: user_done}).serve(monkeypatch)
     context = _context()
     context.deployed_agents.append(DeployedAgent(
-        agent_name="human_agent", api_url=USER_URL, a2a_url=USER_URL, sandbox_type="local",
+        agent_name="human_agent", api_url=USER_URL, a2a_url=USER_URL, sandbox_id="sb-user", sandbox_type="local",
     ))
     step = PromptAgentTaskStep(
         id="solve", version=None, agent_name="solver", prompt="hi", poll_interval_seconds=0, max_conversation_turns=2,
@@ -120,6 +120,22 @@ async def test_a_user_sim_agent_is_sent_the_agents_file_part_as_a_grant(monkeypa
     assert agents.sent[USER_URL] == [
         [{"kind": "text", "text": "here it is"}, _file(f"{GRANT_ORIGIN}/outputs/z.png?sig=read")]
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_registered_human_peer_is_sent_the_objects_own_url(monkeypatch, store, recorded):
+    url = store.put("outputs/z.png", b"png")
+    agents = FakeA2AAgents({AGENT_URL: _replying_with(url), USER_URL: DONE}).serve(monkeypatch)
+    context = _context()
+    context.deployed_agents.append(DeployedAgent(agent_name="human_agent", api_url=USER_URL, a2a_url=USER_URL))
+    step = PromptAgentTaskStep(
+        id="solve", version=None, agent_name="solver", prompt="hi", poll_interval_seconds=0, max_conversation_turns=2,
+    )
+
+    await step.execute(context)
+
+    assert agents.sent[USER_URL] == [[{"kind": "text", "text": "here it is"}, _file(url)]]
+    assert store.granted == []
 
 
 @pytest.mark.asyncio

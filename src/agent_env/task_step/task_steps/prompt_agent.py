@@ -568,9 +568,11 @@ class PromptAgentTaskStep(TaskStep):
 
             user_a2a_task_id = uuid.uuid4().hex
             try:
-                # A user-sim is an agent agent-env deployed; a human's hub reads the store itself.
+                # A user-sim runs in a sandbox agent-env deployed; a human peer, registered or named by
+                # user_a2a_url, has none and reads the store itself.
                 _, user_result = await send_and_wait(
-                    user_url, agent_response_parts, agent=user_sim if is_user_sim else None,
+                    user_url, agent_response_parts,
+                    agent=user_sim if is_user_sim and user_sim.sandbox_id else None,
                     message_id=user_a2a_task_id, context_id=conversation_id,
                     timeout_seconds=self.user_agent_timeout_seconds,
                     poll_interval_seconds=self.poll_interval_seconds,
