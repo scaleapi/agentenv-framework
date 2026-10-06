@@ -24,6 +24,7 @@ from agent_env.env.gateway import GatewayMode
 from agent_env.env.gateway.constants import data_plane_load_timeout_s
 from agent_env.providers.env_providers.env_gateway_provider import DeployedGateway
 from agent_env.providers.env_providers.env_provider import _builtin_env_providers, build_env_provider
+from agent_env.providers.sandbox_providers.sandbox import VmSandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER, SANDBOX_MODE_VM
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.teardown_sandboxes import _env_sandbox_ids
@@ -84,6 +85,18 @@ async def test_a_container_stat_that_fails_leaves_the_load_its_floor_timeout():
     env._sandbox = server
 
     assert await env._staged_artifact_size("/data/email.json") is None
+
+
+@pytest.mark.asyncio
+async def test_a_container_on_a_docker_host_is_measured_through_docker_exec():
+    """A VM-backed sandbox in container mode (the local one) execs on the container's host, not in it."""
+    env = _env()
+    env._sandbox = MagicMock(spec=VmSandbox, mode=SANDBOX_MODE_CONTAINER, container_name="agent-env-srv")
+    env._sandbox.exec_with_output = AsyncMock(return_value=(0, "1234\n", ""))
+
+    assert await env._staged_artifact_size("/data/email.json") == 1234
+    env._sandbox.exec_with_output.assert_awaited_once_with(
+        "sudo", "docker", "exec", "agent-env-srv", "stat", "-c", "%s", "/data/email.json")
 
 
 @pytest.mark.asyncio

@@ -20,6 +20,7 @@ from agent_env.env.envs._deployment import (
     load_by_signed_url, plugin_provider_like_a_builtin, provider_or_class,
 )
 from agent_env.env.gateway import GatewayMode
+from agent_env.providers.sandbox_providers.sandbox import VmSandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER
 from agent_env.attribution import Attribution
 
@@ -195,9 +196,12 @@ class MCPServerEnv(Env):
         if self._sandbox is None:
             return None
         try:
-            # A container-mode sandbox is the env's container, staged into directly; a VM runs it under docker.
+            # A container-mode sandbox is the env's container; a VM runs the env under docker.
             if self._sandbox.mode == SANDBOX_MODE_CONTAINER:
-                exit_code, out, err = await self._sandbox.exec_with_output("stat", "-c", "%s", container_path)
+                command = ("stat", "-c", "%s", container_path)
+                if isinstance(self._sandbox, VmSandbox):  # its exec runs on the container's Docker host
+                    command = ("sudo", "docker", "exec", self._sandbox.container_name, *command)
+                exit_code, out, err = await self._sandbox.exec_with_output(*command)
                 if exit_code != 0:
                     raise RuntimeError(f"stat exited {exit_code}: {err.strip()[-200:]}")
             else:
