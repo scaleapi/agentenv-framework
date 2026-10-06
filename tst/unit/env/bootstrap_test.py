@@ -156,14 +156,16 @@ def test_the_website_browser_runs_playwrights_chromium_which_is_built_for_amd64_
     assert "--browser chromium" in (bootstrap.WEBSITE_BROWSER_CONTEXT / "entrypoint.sh").read_text()
 
 
-def test_a_put_records_what_the_env_was_built_from(local_stores, monkeypatch):
+def test_a_put_records_what_the_env_was_built_from_whatever_metadata_it_was_given(local_stores, monkeypatch):
     monkeypatch.setattr(bootstrap, "build_image", lambda *args, **kwargs: None)
     monkeypatch.setattr(bootstrap.DockerImageArtifact, "put", lambda id, **kwargs: get_artifact_store().put_document(
         DockerImageArtifact(id=id, description="b", image_name=kwargs["image_name"], tar_gz_s3_url="file:///b.tar.gz")))
 
-    env = bootstrap.put_website_browser_env("website-browser", platform=None)
+    env = bootstrap.put_website_browser_env("website-browser", platform=None,
+                                            metadata={bootstrap.BUILD_INPUTS_KEY: "mine", "owner": "me"})
 
     assert env.metadata[bootstrap.BUILD_INPUTS_KEY] == bootstrap.build_inputs_digest(WEBSITE_BROWSER)
+    assert env.metadata["owner"] == "me"
 
 
 def test_the_build_inputs_are_the_shipped_files_and_build_args_less_python_caches(tmp_path, monkeypatch):

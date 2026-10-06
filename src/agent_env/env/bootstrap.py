@@ -117,7 +117,7 @@ def put_website_browser_env(env_id: str, *, platform: str | None, metadata: Mapp
 
 
 def _metadata(kind: str, dockerfile: Path, context: Path, extra: Mapping[str, str] | None) -> dict[str, str]:
-    return {**detect_env_metadata(dockerfile, context), BUILD_INPUTS_KEY: build_inputs_digest(kind), **(extra or {})}
+    return {**detect_env_metadata(dockerfile, context), **(extra or {}), BUILD_INPUTS_KEY: build_inputs_digest(kind)}
 
 
 BUILD_INPUTS_KEY = "build_inputs_sha256"  # the metadata key a put records build_inputs_digest under
