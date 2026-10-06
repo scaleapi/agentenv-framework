@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import stat
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -123,8 +124,7 @@ class Ledger:
             built = isinstance(write.source, BuiltImage)
             for key, path in (build_context_files if built else entry_files)(self._plan.bundle.bundle,
                                                                               write.source.entry).items():
-                # A build copies each file's mode into the image, so an executable bit is part of what it's made from.
-                inputs["files"][key] = _file_sha256(path) + (_EXECUTABLE if built and _executable(path) else "")
+                inputs["files"][key] = _file_sha256(path) + (_mode(path) if built else "")
         elif write.kind in (BundleKind.ENV, BundleKind.AGENT):
             # An env's or agent's document records the versions of what it references, so one written anew means
             # it must be written again. A task or eval names its references without a version.
@@ -271,11 +271,14 @@ def _sha256(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
-_EXECUTABLE = "+x"
+# A build copies each file's permission bits into the image, so they're part of what it's made from; a file with the
+# usual rw-r--r-- is hashed as its content alone.
+_USUAL_MODE = 0o644
 
 
-def _executable(path: Path) -> bool:
-    return bool(path.stat().st_mode & 0o111)
+def _mode(path: Path) -> str:
+    mode = stat.S_IMODE(path.stat().st_mode)
+    return "" if mode == _USUAL_MODE else f"+{mode:o}"
 
 
 def _file_sha256(path: Path) -> str:

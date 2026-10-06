@@ -463,26 +463,29 @@ def test_a_built_image_is_made_from_every_file_of_its_folder_the_toml_too(bundle
     assert not rebuilt[agent].unchanged
 
 
-def test_a_built_images_executable_bits_are_inputs_and_a_file_artifacts_arent(bundle_dir):
+def test_a_built_images_permission_bits_are_inputs_and_a_file_artifacts_arent(bundle_dir):
     (bundle_dir / "agents/solver").mkdir(parents=True)
     (bundle_dir / "agents/solver/Dockerfile").write_text("FROM scratch\nCOPY run.sh /\n")
     run_sh = bundle_dir / "agents/solver/run.sh"
     run_sh.write_text("echo hi\n")
+    run_sh.chmod(0o644)
     (bundle_dir / "tasks/t.json").write_text(
         _steps({"id": "agent", "type": "deploy_agent", "env_ids": ["tickets"], "a2a_agent_id": "solver"}))
     image = f"{ROOT}/solver__agent_image"
     plan = plan_of(bundle_dir)
     built = next(write for write in plan.writes if write.id == image)
-    # A file with no executable bit is hashed as its content alone, as before, so earlier rows stay reused.
+    # A file with the usual rw-r--r-- is hashed as its content alone, as before, so earlier rows stay reused.
     assert Ledger.for_plan(plan).digest(built, {}).inputs["files"]["run.sh"] == _file_digest(run_sh)
     _run(bundle_dir)
 
-    run_sh.chmod(0o755)
-    (bundle_dir / "artifacts/greeting/hello.txt").chmod(0o755)
-    checks = _run(bundle_dir)
+    rebuilt = []
+    for mode in (0o755, 0o700):
+        run_sh.chmod(mode)
+        (bundle_dir / "artifacts/greeting/hello.txt").chmod(mode)
+        rebuilt.append(_run(bundle_dir))
 
-    assert checks[image].reasons == ("files changed: run.sh",)
-    assert checks[GREETING].unchanged
+    assert [checks[image].reasons for checks in rebuilt] == [("files changed: run.sh",)] * 2
+    assert all(checks[GREETING].unchanged for checks in rebuilt)
     assert _run(bundle_dir)[image].unchanged
 
 
