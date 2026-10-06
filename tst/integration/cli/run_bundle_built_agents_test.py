@@ -12,6 +12,7 @@ from click.testing import CliRunner
 from agent_env.artifact.store import reset_artifact_store
 from agent_env.cli import cli
 from agent_env.config import configure, reset_config
+from agent_env.store.object_store.local.grant_server import grant_server
 from tst.util.a2a_test_agent import AGENT_DIR, PROTOCOL_DIR
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
@@ -138,6 +139,9 @@ def state(monkeypatch, tmp_path):
         assert not sandboxes.exists() or not any(sandboxes.iterdir()), "a run left a sandbox work folder"
     finally:
         logging.disable(logging.NOTSET)
+        # The agents moved their trajectories through this process's grant server, which serves a certificate from
+        # this test's state root; a later test's agents trust another root's CA, so it must start afresh.
+        grant_server(None, None).close()
         reset_artifact_store()
         reset_config()
 
