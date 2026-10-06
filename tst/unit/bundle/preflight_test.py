@@ -11,6 +11,7 @@ import pytest
 from click.testing import CliRunner
 
 import agent_env.bundle.preflight as preflight_module
+import agent_env.bundle.run as run_module
 from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store
@@ -433,6 +434,25 @@ def test_an_env_the_bundle_writes_names_the_infra_its_deploy_on_the_local_provid
     _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": deployed}])
 
     assert [build.kind for build in dry_run_bundle(bundle_dir).infra] == kinds
+
+
+def test_a_store_image_an_env_names_without_a_version_is_checked_at_the_version_the_plan_read(
+    bundle_dir, monkeypatch,
+):
+    _image("base", REMOTE)
+    _infra(REMOTE)
+    layout(bundle_dir, {"envs/crm/env.toml": 'image = "base"\nenvironment_name = "crm"\n'})
+    _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
+    planned = run_module.plan_bundle
+
+    def a_local_image_lands_once_planned(*args, **kwargs):
+        plan = planned(*args, **kwargs)
+        _image("base", LOCAL)  # v2, after the plan read v1, which the env is written at
+        return plan
+
+    monkeypatch.setattr(run_module, "plan_bundle", a_local_image_lands_once_planned)
+
+    assert dry_run_bundle(bundle_dir, sandbox="modal_vm").runs
 
 
 def test_the_cli_dry_run_lists_the_infra_it_would_build(bundle_dir, quiet_logs):

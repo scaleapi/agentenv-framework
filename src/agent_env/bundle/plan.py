@@ -26,6 +26,11 @@ from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.website import WebsiteEnv
 from agent_env.env.registry import get_env_registry
 from agent_env.env.store import ENVS_COLLECTION
+from agent_env.providers.env_providers.constants import (
+    AGENT_ENV_WEBSITE_BACKEND_SUFFIX,
+    AGENT_ENV_WEBSITE_FRONTEND_SUFFIX,
+)
+from agent_env.providers.env_providers.env_provider import _env_provider_class, _SandboxEnvironmentProvider
 from agent_env.store import Filter, Sort
 from agent_env.store.base import NotFoundError
 from agent_env.store.ids import LOCAL_PREFIX
@@ -331,25 +336,39 @@ class _Planner:
                                      "across versions; rename the folder")
 
     def _check_multi_names(self, closure: set[_Key], store_latest: dict[tuple[EntityKind, str], int]) -> None:
-        """A multi's MCP servers each need their own environment_name, as its websites do: each is a container of
-        its deploy, named by it."""
+        """Each env of a multi runs as containers its environment_name names: an MCP server as one by that name, a
+        website as its backend's and frontend's. No two of a multi's envs may name one container, and a provider
+        other than the core's, which gives a multi one env card, can't tell an MCP server and a website of one name
+        apart."""
         for key in sorted(closure, key=self.rank.__getitem__):
             source = self.nodes[key]
             if isinstance(source, BuiltImage) or source.entry.kind is not BundleKind.ENV:
                 continue
             if not issubclass(get_env_registry().get(source.entry.type, Env), MultiEnv):
                 continue
-            first: dict[tuple[str, str], str] = {}
+            where = self._path(source.entry)
+            taken: dict[str, str] = {}  # each container a child runs as, by the field naming the child
+            named: dict[str, set[str]] = {}  # the environment_names of each list's envs
             for ref in source.references:
                 name = self._environment_name(ref, store_latest)
-                group = ref.where.partition("[")[0]
                 if name is None:
                     continue
-                if (group, name) in first:
-                    self.problems.append(f"{self._path(source.entry)}: {ref.where}: environment_name {name!r} is also "
-                                         f"{first[group, name]}'s; each of a multi's {group} needs its own")
+                group = ref.where.partition("[")[0]
+                named.setdefault(group, set()).add(name)
+                containers = [name] if group == "mcp_server_envs" else [
+                    f"{name}-{AGENT_ENV_WEBSITE_BACKEND_SUFFIX}", f"{name}-{AGENT_ENV_WEBSITE_FRONTEND_SUFFIX}"]
+                clash = next((container for container in containers if container in taken), None)
+                if clash is not None:
+                    self.problems.append(f"{where}: {ref.where}: environment_name {name!r} names the container "
+                                         f"{clash!r}, as {taken[clash]}'s does; each env of a multi needs its own")
                 else:
-                    first[group, name] = ref.where
+                    taken.update(dict.fromkeys(containers, ref.where))
+            shared = named.get("mcp_server_envs", set()) & named.get("website_envs", set())
+            provider_type = source.config.get("env_provider_type", "gateway")
+            if shared and not _deploys_in_sandboxes(provider_type):
+                self.problems.append(f"{where}: env_provider_type {provider_type!r} gives a multi one env card, which "
+                                     "can't tell an MCP server and a website apart by name, and both are named "
+                                     f"{', '.join(map(repr, sorted(shared)))}; rename one")
 
     def _environment_name(self, ref: Reference, store_latest: dict[tuple[EntityKind, str], int]) -> str | None:
         if ref.local is not None:
@@ -415,6 +434,15 @@ def unpinned_store_refs(plan: Plan, write: Write) -> dict[tuple[EntityKind, str]
         return {}
     return {(ref.kind, ref.id): plan.store_latest[ref.kind, ref.id]
             for ref in write.source.references if ref.local is None and ref.version is None}
+
+
+def _deploys_in_sandboxes(provider_type: str) -> bool:
+    """Whether the provider ``provider_type`` names is one of the core's, which deploy each env in a sandbox of its
+    own; a type no installed provider has is accepted here, since the env's toml check refuses it."""
+    try:
+        return issubclass(_env_provider_class(provider_type), _SandboxEnvironmentProvider)
+    except ValueError:
+        return True
 
 
 def env_writer(cls: type | None) -> bool:

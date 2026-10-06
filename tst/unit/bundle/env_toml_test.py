@@ -11,15 +11,22 @@ from agent_env.artifact.store import get_artifact_store
 from agent_env.bundle import BundleError, parse_bundle
 from agent_env.bundle.plan import check_bundle
 from agent_env.bundle.resolve import resolve_bundle
+from agent_env.bundle import plan as plan_module
 from agent_env.bundle.materialize import materialize
 from agent_env.env import Env
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.website import WebsiteEnv
+from agent_env.providers.env_providers import env_provider as env_provider_module
 from agent_env.store.routing import namespace_routing
 from tst.unit.bundle._support import RefusingStore, layout, local_store, plan_of
 
 ROOT = "@local/~/triage"
+
+
+class _OneCard:
+    """A plugin's provider, which deploys a multi behind one env card rather than a sandbox per env."""
+
 CARD = 'from agentenv_protocol import environment_card\n\n\n@environment_card(name="{}")\nclass Server:\n    pass\n'
 DOCKERFILE = "FROM scratch\nCOPY . /app\n"
 
@@ -191,8 +198,12 @@ def _website(name, toml=""):
     ({**_website("shop"), "envs/x/env.toml": 'type = "multi"\nmcp_server_envs = ["shop"]\n'},
      "envs/x: mcp_server_envs[0]: 'shop' is this bundle's website, but this field takes mcp_server"),
     ({**_mcp("a", "crm"), **_mcp("b", "crm"), "envs/x/env.toml": 'type = "multi"\nmcp_server_envs = ["a", "b"]\n'},
-     "envs/x: mcp_server_envs[1]: environment_name 'crm' is also mcp_server_envs[0]'s; each of a multi's "
-     "mcp_server_envs needs its own"),
+     "envs/x: mcp_server_envs[1]: environment_name 'crm' names the container 'crm', as mcp_server_envs[0]'s does; "
+     "each env of a multi needs its own"),
+    ({**_mcp("a", "shop-website-backend"), **_website("shop"),
+      "envs/x/env.toml": 'type = "multi"\nmcp_server_envs = ["a"]\nwebsite_envs = ["shop"]\n'},
+     "envs/x: website_envs[0]: environment_name 'shop' names the container 'shop-website-backend', as "
+     "mcp_server_envs[0]'s does; each env of a multi needs its own"),
     ({"envs/x/env.toml": 'type = "gateway_server"\n'},
      "envs/x: a gateway_server env isn't written from a bundle: config names the one every deploy uses "
      "(default_gateway_env_id), and a run builds it when it's missing"),
@@ -201,6 +212,7 @@ def _website(name, toml=""):
      "(default_service_db_env_id), and a run builds it when it's missing"),
 ], ids=["no-card", "several-cards", "store-image-unnamed", "metadata", "empty-name", "reserved-name",
         "website-on-server", "build-args", "multi-without-envs", "multi-name", "multi-wrong-child", "multi-same-names",
+        "multi-same-container",
         "gateway", "service-db"])
 def test_an_env_toml_that_cant_be_written_is_refused_before_any_write(bundle_dir, files, problem):
     _store_image("base")
@@ -215,6 +227,23 @@ def test_an_unknown_env_provider_type_is_refused_naming_the_known_ones(bundle_di
 
     (problem,) = _problems(bundle_dir)
     assert problem.startswith("envs/x: env.toml: env_provider_type: Unknown env_provider_type: 'nope' (expected one of")
+
+
+def test_a_plugin_provider_multi_with_an_mcp_server_and_a_website_of_one_name_is_refused_before_any_write(
+    bundle_dir, monkeypatch,
+):
+    real = env_provider_module._env_provider_class
+    providers = lambda name: _OneCard if name == "one_card_test" else real(name)
+    monkeypatch.setattr(env_provider_module, "_env_provider_class", providers)
+    monkeypatch.setattr(plan_module, "_env_provider_class", providers)
+    _bundle(bundle_dir, {**_mcp("crm", "shop"), **_website("shop"), "envs/x/env.toml":
+                         'type = "multi"\nmcp_server_envs = ["crm"]\nwebsite_envs = ["shop"]\n'
+                         'env_provider_type = "one_card_test"\n'}, "x")
+
+    assert _problems(bundle_dir) == (
+        "envs/x: env_provider_type 'one_card_test' gives a multi one env card, which can't tell an MCP server and a "
+        "website apart by name, and both are named 'shop'; rename one",)
+    assert not local_store().path.exists()
 
 
 def test_a_multi_naming_a_store_env_of_another_type_is_refused(bundle_dir):

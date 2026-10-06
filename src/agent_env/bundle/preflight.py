@@ -239,7 +239,8 @@ class _Walk:
                     child_images, child_websites = self._planned_images(ref.id)
                 else:
                     try:
-                        child_images, child_websites = _stored_images(Env.get(ref.id, ref.version))
+                        child = Env.get(ref.id, self._planned_version(ref.kind, ref.id, ref.version))
+                        child_images, child_websites = _stored_images(child)
                     except NotFoundError:
                         continue  # the plan reports a store env that isn't there
                 images += child_images
@@ -254,9 +255,14 @@ class _Walk:
         if ref.id in self.written:
             return None  # another of the bundle's writes, which materialize refuses or writes first
         try:
-            return _Image(what, _local_only(DockerImageArtifact.get(ref.id, ref.version)))
+            return _Image(what, _local_only(DockerImageArtifact.get(ref.id, self._planned_version(ref.kind, ref.id,
+                                                                                                    ref.version))))
         except NotFoundError:
             return None  # the plan reports a store image that isn't there
+
+    def _planned_version(self, kind: EntityKind, entity_id: str, version: int | None) -> int | None:
+        """The version a write names a store entity at: its pin, else the one the plan read, which the writer pins."""
+        return version if version is not None else self.plan.store_latest.get((kind, entity_id))
 
     def _agent(self, where: str, step: DeployAgentTaskStep, sandboxes: dict[str, DeploySandboxTaskStep]) -> None:
         if step.sandbox_name:
@@ -311,7 +317,8 @@ class _Walk:
                 return _Image(what, f"it's built on this machine from {path}/{built.dockerfile}")
             if image_id in self.written:
                 return None  # another of the bundle's writes, which materialize refuses or writes first
-            return _Image(what, _local_only(DockerImageArtifact.get(image_id, image_version)))
+            planned = self._planned_version(EntityKind.ARTIFACT, image_id, image_version)
+            return _Image(what, _local_only(DockerImageArtifact.get(image_id, planned)))
         try:
             return _Image(what, _local_only(A2AAgent.get(agent_id, version).docker_image_artifact))
         except NotFoundError:
