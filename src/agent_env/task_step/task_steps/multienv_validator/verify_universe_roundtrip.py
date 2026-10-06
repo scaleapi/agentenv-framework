@@ -215,19 +215,10 @@ class VerifyUniverseLoadExportRoundtripStep(TaskStep):
 
     @staticmethod
     async def _export_all(deployed: DeployedEnv, environment_names: list[str]) -> dict[str, dict]:
-        """Export each service: v1 ``data/get`` at the base the env card gives it, else legacy ``GET /export-state``."""
+        """Export each service's state as JSON (see ``legacy_protocol.service_state``)."""
         from agent_env.env import legacy_protocol
         from agent_env.env.env import gateway_url_of
-        from agentenv_protocol import client as protocol_v1
-        result = {}
-        for name in environment_names:
-            base_url = await legacy_protocol.v1_base_url(deployed, gateway_url_of(deployed), name)
-            if base_url is not None:
-                resp = await protocol_v1.get_data(base_url)
-                result[name] = resp.parts[0].data if resp.parts else {}
-            else:
-                result[name] = await legacy_protocol.export_state(gateway_url_of(deployed), name)
-        return result
+        return {name: await legacy_protocol.service_state(deployed, gateway_url_of(deployed), name) for name in environment_names}
 
     def _create_universe_artifact(self, original_environment_artifacts: list, export_data: dict[str, dict], env_version: int, universe_version: int) -> Any:
         """Create FileArtifact + EnvironmentArtifact per service, bundle into EnvironmentUniverseArtifact."""
