@@ -30,9 +30,6 @@ from agent_env.a2a_agent.object_transfer import (
 )
 from agent_env.a2a_agent.staging import transfer_store
 from agent_env.config import get_config
-from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
-from agent_env.providers.sandbox_providers.sandbox_provider import get_agent_sandbox_provider
 from agent_env.store.ids import derive_id, key_segment
 from agent_env.task_step.task_steps.a2a_agent_validator.verify_a2a_modalities import (
     AUDIO_M4A_EXPECTED,
@@ -64,21 +61,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _probe_agent_sandbox_type() -> str | None:
-    """The sandbox type the validation agents will deploy on, as far as it is known before they do: the local
-    provider's when it is the agent provider, or first in its chain, which runs the agent unless it fails."""
-    provider = get_agent_sandbox_provider()
-    if isinstance(provider, ChainedSandboxProvider):
-        provider = provider.providers[0]
-    return LocalSandbox.type if isinstance(provider, LocalSandboxProvider) else None
-
-
 @dataclass
 class _UploadedFixtures:
     """Object-store-hosted probe fixtures created at validation runtime."""
     skill_object_url: str
     png_object_uri: str
-    png_signed_url: str
     mp4_object_uri: str
 
 
@@ -91,8 +78,8 @@ class ModalityProbe:
 
     `parts` is either a static list of A2A parts (for inline probes whose
     bytes are known at module load) or a callable that takes the runtime
-    `_UploadedFixtures` and returns parts (for URI probes whose s3:// or
-    presigned https:// URIs only exist after upload).
+    `_UploadedFixtures` and returns parts (for URI probes whose object URLs
+    only exist after upload; prompt_agent sends each as an HTTPS URL).
 
     Each `ModalityProbe` produces exactly one `PromptAgentTaskStep` and
     one entry in `VerifyA2AModalitiesStep.probes`. Step ID, prompt ID,
@@ -116,18 +103,10 @@ MODALITY_PROBES: list[ModalityProbe] = [
     ModalityProbe("audio/ogg",       "modality-audio-ogg",       AUDIO_OGG_PROBE_PARTS,  AUDIO_OGG_EXPECTED),
     ModalityProbe("application/pdf", "modality-pdf",             PDF_PROBE_PARTS,        PDF_PROBE_EXPECTED),
     ModalityProbe(
-        "image/png+uri-s3", "modality-image-uri-s3",
-        lambda f: [
-            {"kind": "text", "text": IMAGE_PROBE_PROMPT},
-            {"kind": "file", "file": {"uri": f.png_object_uri, "mimeType": "image/png", "name": "red.png"}},
-        ],
-        IMAGE_PROBE_EXPECTED,
-    ),
-    ModalityProbe(
         "image/png+uri-https", "modality-image-uri-https",
         lambda f: [
             {"kind": "text", "text": IMAGE_PROBE_PROMPT},
-            {"kind": "file", "file": {"uri": f.png_signed_url, "mimeType": "image/png", "name": "red.png"}},
+            {"kind": "file", "file": {"uri": f.png_object_uri, "mimeType": "image/png", "name": "red.png"}},
         ],
         IMAGE_PROBE_EXPECTED,
     ),
@@ -818,11 +797,6 @@ class A2AAgentValidator:
         prefix = f"{config.get_artifact_key_prefix()}a2a_validator/probe_fixtures/{key_segment(agent.id)}-v{agent.version}/"
 
         png_object_uri = store.put(f"{prefix}red.png", base64.b64decode(IMAGE_PROBE_PNG_B64), content_type="image/png", allow_overwrite=True)
-        png_signed_url = store.signed_get_url(png_object_uri)
-        if png_signed_url is None and store.supports_transfer_grants and store.grants_reach(_probe_agent_sandbox_type()):
-            png_signed_url = store.issue_read_grant(png_object_uri).url
-        if png_signed_url is None:
-            raise RuntimeError("A2A validation requires an object store that signs URLs or issues grants, for the presigned-URI probe.")
         logger.info(f"Uploaded probe fixture to {png_object_uri}")
 
         mp4_object_uri = store.put(f"{prefix}clip.mp4", base64.b64decode(VIDEO_PROBE_MP4_B64), content_type="video/mp4", allow_overwrite=True)
@@ -831,7 +805,6 @@ class A2AAgentValidator:
         return _UploadedFixtures(
             skill_object_url=skill_object_url,
             png_object_uri=png_object_uri,
-            png_signed_url=png_signed_url,
             mp4_object_uri=mp4_object_uri,
         )
 
@@ -839,7 +812,7 @@ class A2AAgentValidator:
     def _build_modality_steps(task_id: str, fixtures: _UploadedFixtures, deploy_agent_id: str):
         """Build modality probe `PromptAgentTaskStep`s and the matching grading list.
 
-        All 11 prompts depend only on deploy-agent so they fan out in parallel
+        Every probe depends only on deploy-agent so they fan out in parallel
         once the agent is deployed. Adding a new probe is one new entry in
         MODALITY_PROBES, nothing else.
         """

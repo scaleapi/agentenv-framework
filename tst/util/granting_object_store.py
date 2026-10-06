@@ -2,6 +2,11 @@
 
 Each grant is an https URL naming the object's key, so a test reads from a request which
 object a descriptor points at; ``granted`` lists the URLs granted, in order.
+
+Its options model the stores a test needs: ``reaches`` sets whether its grants reach every sandbox or
+none (default: only local ones, as the local store's), ``signs`` makes it sign URLs (recording each
+lifetime asked for in ``signed``), ``grant_headers`` puts headers on its read grants, and
+``max_grant_seconds`` refuses a read grant meant to last longer.
 """
 
 from __future__ import annotations
@@ -16,6 +21,7 @@ from agentenv_protocol.transfers import (
     HttpPutGrant,
 )
 
+from agent_env.store.base import GrantUnavailableError
 from agent_env.store.object_store import (
     DEFAULT_CONTENT_TYPE,
     LocalFilesystemObjectStore,
@@ -24,6 +30,7 @@ from agent_env.store.object_store import (
 )
 
 GRANT_ORIGIN = "https://objects.example.test"
+SIGNED_ORIGIN = "https://signed.example.test"
 
 
 class GrantingObjectStore(LocalFilesystemObjectStore):
@@ -31,10 +38,32 @@ class GrantingObjectStore(LocalFilesystemObjectStore):
 
     supports_transfer_grants = True
 
-    def __init__(self, root: str) -> None:
+    def __init__(
+        self,
+        root: str,
+        *,
+        reaches: bool | None = None,
+        signs: bool = False,
+        grant_headers: dict[str, str] | None = None,
+        max_grant_seconds: int | None = None,
+    ) -> None:
         super().__init__(root)
         self.granted: list[str] = []
+        self.signed: list[int] = []
         self._content_types: dict[str, str] = {}
+        self._reaches = reaches
+        self._signs = signs
+        self._grant_headers = grant_headers
+        self._max_grant_seconds = max_grant_seconds
+
+    def grants_reach(self, sandbox_type: str | None) -> bool:
+        return super().grants_reach(sandbox_type) if self._reaches is None else self._reaches
+
+    def signed_get_url(self, object_url: str, expires_in: int = 3600) -> str | None:
+        if not self._signs:
+            return super().signed_get_url(object_url, expires_in)
+        self.signed.append(expires_in)
+        return f"{SIGNED_ORIGIN}/{quote(self.get_object_key(object_url))}"
 
     def put(
         self,
@@ -55,10 +84,13 @@ class GrantingObjectStore(LocalFilesystemObjectStore):
 
     def issue_read_grant(self, object_url: str, *, expires_in: int | None = None) -> HttpGetGrant:
         expires_in = self.grant_lifetime_seconds if expires_in is None else expires_in
+        if self._max_grant_seconds is not None and expires_in > self._max_grant_seconds:
+            raise GrantUnavailableError(f"this store's grants last at most {self._max_grant_seconds}s")
         return HttpGetGrant(
             kind="http-get",
             url=self._grant_url(object_url, "read"),
             expires_at=_expiry(expires_in),
+            headers=self._grant_headers,
         )
 
     def issue_write_grant(

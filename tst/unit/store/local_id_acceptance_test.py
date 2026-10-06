@@ -181,23 +181,34 @@ def remote_agents():
     reset_agent_sandbox_provider()
 
 
-def test_validating_an_local_agent_stops_at_a_local_store_its_sandbox_cannot_reach_before_writing_a_task(
-    local_stores, cli_routing, remote_agents, tmp_path,
+class _Stopped(Exception):
+    pass
+
+
+def test_validating_an_local_agent_on_a_remote_provider_keeps_its_fixtures_and_task_in_the_local_stores(
+    local_stores, cli_routing, remote_agents, tmp_path, monkeypatch,
 ):
     configured = SigningObjectStore(str(tmp_path / "configured-objects"))
     set_object_store(configured)
     agent = A2AAgent(id="@local/~/bundle/agents/a", version=1, docker_image_artifact=MagicMock())
 
-    with pytest.raises(RuntimeError, match="signs URLs or issues grants"):
+    def stop(self, **kwargs):
+        raise _Stopped
+
+    monkeypatch.setattr(Task, "run", stop)
+
+    with pytest.raises(_Stopped):
         asyncio.run(A2AAgentValidator.validate(agent))
 
     fixtures = f"a2a_validator/probe_fixtures/{key_segment(agent.id)}-v1"
     skills = f"a2a_validator/validator_skill/{key_segment(agent.id)}-v1"
     assert sorted(get_config().get_object_store_for(agent.id).list("a2a_validator/")) == [
-        f"{fixtures}/red.png", *(f"{skills}/{name}/SKILL.md" for name in ("validator-probe-bundle", "validator-test-s3")),
+        f"{fixtures}/clip.mp4", f"{fixtures}/red.png",
+        *(f"{skills}/{name}/SKILL.md" for name in ("validator-probe-bundle", "validator-test-s3")),
     ]
     assert configured.list("") == []
-    assert all(not store.path.exists() or store.count("tasks", Filter()) == 0 for store in (_local(), _documents()))
+    assert _local().count("tasks", Filter()) == 1
+    assert not _documents().path.exists() or _documents().count("tasks", Filter()) == 0
 
 
 def test_a_put_validates_an_local_entity_like_any_other(local_stores, monkeypatch):
