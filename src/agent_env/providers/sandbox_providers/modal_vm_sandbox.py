@@ -51,7 +51,9 @@ logger = logging.getLogger(__name__)
 _COMPOSE_VERSION = "v2.29.7"
 _VM_IMAGE = (
     modal.Image.from_registry("ubuntu:22.04")
-    .apt_install("docker.io", "curl", "aria2")  # aria2: object downloads, see _DL_*
+    # aria2: object downloads, see _DL_*. python3: the steps that run Python on the VM host
+    # (load_artifact expanding an EnvironmentArtifact, run_code on an env).
+    .apt_install("docker.io", "curl", "aria2", "python3")
     .run_commands(
         "mkdir -p /usr/local/lib/docker/cli-plugins",
         f"curl -sSL https://github.com/docker/compose/releases/download/{_COMPOSE_VERSION}/"
