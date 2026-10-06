@@ -312,11 +312,13 @@ async def readable_parts(
     card: Mapping[str, Any] | None,
     sandbox_type: str | None,
     expires_in: int,
+    shareable: Collection[str] | None = None,
 ) -> AsyncIterator[list[dict]]:
     """``parts`` as the agent at ``a2a_url`` can read them: a file part naming an object a configured store
     owns names an HTTPS URL for it instead, one ``readable_url`` gives for at least ``expires_in`` seconds,
     or else a copy staged on the agent for the length of the block. Other parts, and file parts naming
-    anything else, are sent as they are. Raises when an owned object can be given no URL the agent can read."""
+    anything else, are sent as they are; so is an owned object ``shareable`` (when given) does not name.
+    Raises when an owned object can be given no URL the agent can read."""
     config = get_config()
     readable = list(parts)
     staged: dict[int, StagedObjectStore] = {}  # by identity: a store need not be hashable
@@ -326,7 +328,7 @@ async def readable_parts(
         if not isinstance(uri, str):
             continue
         store = config.get_object_store_at(uri)
-        if not store.owns(uri):
+        if not store.owns(uri) or (shareable is not None and uri not in shareable):
             continue
         url = await asyncio.to_thread(readable_url, store, uri, sandbox_type=sandbox_type, expires_in=expires_in)
         if url is None:
@@ -360,15 +362,17 @@ async def send_and_wait(
     timeout_seconds: int,
     poll_interval_seconds: int,
     before_send: Callable[[], None] | None = None,
+    shareable: Collection[str] | None = None,
 ) -> tuple[str, dict]:
     """Send ``parts`` to the A2A peer at ``a2a_url`` and wait for its task to end: the task's id and its
     final state. A peer that is an ``agent`` agent-env deployed is sent each file part a configured store
-    owns as an HTTPS URL it can read (``readable_parts``); any other peer, such as a human's hub, reads the
-    store itself and is sent the parts as they are. ``before_send`` runs once the parts are ready, just
-    before the message goes out."""
+    owns, of those ``shareable`` names when given, as an HTTPS URL it can read (``readable_parts``); any
+    other peer, such as a human's hub, reads the store itself and is sent the parts as they are.
+    ``before_send`` runs once the parts are ready, just before the message goes out."""
     sending = (
         readable_parts(
-            parts, a2a_url=a2a_url, card=agent.a2a_card, sandbox_type=agent.sandbox_type, expires_in=timeout_seconds
+            parts, a2a_url=a2a_url, card=agent.a2a_card, sandbox_type=agent.sandbox_type,
+            expires_in=timeout_seconds, shareable=shareable,
         )
         if agent is not None
         else nullcontext(parts)

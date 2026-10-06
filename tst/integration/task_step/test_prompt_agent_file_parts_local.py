@@ -1,5 +1,6 @@
 """prompt_agent hands store files to the agents it talks to, on the local defaults. A deployed agent is sent a URL it
-can fetch, for each file in its prompt and, as a user-sim, for each file the solver returns; a human peer is sent the
+can fetch for each file in its prompt, and a user-sim one for each file the solver passes back of those it was sent;
+a file the solver names but was never sent stays as it is, so the user-sim can't read it. A human peer is sent the
 store's own URL and reads the store itself. The run records the store's own URLs throughout. The agents are the echo
 agent (tst/data/a2a_agent), which reports what each file part held. Needs Docker and a throwaway local registry."""
 
@@ -134,7 +135,7 @@ def _uris(message: dict) -> list[str]:
 
 
 @pytest.mark.asyncio
-async def test_the_solver_and_a_user_sim_each_fetch_the_store_files_they_are_handed(local_registry):
+async def test_the_solver_and_a_user_sim_fetch_the_files_the_conversation_shares_and_no_other(local_registry):
     suffix = uuid.uuid4().hex[:8]
     urls = _files(suffix)
     agent = put_test_agent(f"file-parts-agent-{suffix}")
@@ -145,7 +146,7 @@ async def test_the_solver_and_a_user_sim_each_fetch_the_store_files_they_are_han
             id="ask", version=None, prompt_id="ask", agent_name="solver", user_agent_name="user",
             max_conversation_turns=2, poll_interval_seconds=1,
             parts=[
-                {"kind": "text", "text": f"send-file {urls['report']}"},
+                {"kind": "text", "text": f"send-file {urls['brief']}\nsend-file {urls['report']}"},
                 {"kind": "file", "file": {"uri": urls["brief"], "name": "brief.txt", "mimeType": "text/plain"}},
             ],
         ),
@@ -154,8 +155,11 @@ async def test_the_solver_and_a_user_sim_each_fetch_the_store_files_they_are_han
     prompt, reply, user_reply, _ = _conversation(await task.run())
 
     assert f"read brief.txt over https: brief-{suffix}" in _text(reply)
-    assert f"read report.txt over https: report-{suffix}" in _text(user_reply)
-    assert (_uris(prompt), _uris(reply)) == ([urls["brief"]], [urls["report"]])
+    # The user-sim's own lines follow its echo of the reply, one per file it was sent.
+    shared, never_sent = _text(user_reply).splitlines()[-2:]
+    assert shared == f"read brief.txt over https: brief-{suffix}"
+    assert never_sent.startswith("could not read report.txt over file:")
+    assert (_uris(prompt), _uris(reply)) == ([urls["brief"]], [urls["brief"], urls["report"]])
     assert "https://" not in json.dumps([prompt, reply, user_reply])
 
 

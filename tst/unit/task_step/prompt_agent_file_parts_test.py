@@ -105,43 +105,50 @@ def _replying_with(url):
     return [{"kind": "text", "text": "here it is"}, _file(url)]
 
 
-@pytest.mark.asyncio
-async def test_a_user_sim_agent_is_sent_the_agents_file_part_as_a_grant(monkeypatch, store, recorded):
-    url = store.put("outputs/z.png", b"png")
-    user_done = [{"kind": "text", "text": '{"message": "thanks", "done": true}'}]
-    agents = FakeA2AAgents({AGENT_URL: _replying_with(url), USER_URL: user_done}).serve(monkeypatch)
-    context = _context()
-    context.deployed_agents.append(DeployedAgent(
-        agent_name="human_agent", api_url=USER_URL, a2a_url=USER_URL, sandbox_id="sb-user", sandbox_type="local",
-    ))
-    step = PromptAgentTaskStep(
-        id="solve", version=None, agent_name="solver", prompt="hi", poll_interval_seconds=0, max_conversation_turns=2,
+def _two_turns(*files):
+    return PromptAgentTaskStep(
+        id="solve", version=None, agent_name="solver", poll_interval_seconds=0, max_conversation_turns=2,
+        parts=[{"kind": "text", "text": "hi"}, *(_file(url) for url in files)],
     )
 
-    await step.execute(context)
+
+def _user_sim(url, sandbox_type="local", card=None):
+    return DeployedAgent(
+        agent_name="human_agent", api_url=url, a2a_url=url, sandbox_id="sb-user", sandbox_type=sandbox_type, a2a_card=card,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_user_sim_agent_is_sent_a_file_the_target_passes_on_as_a_grant(monkeypatch, store, recorded):
+    url = store.put("inputs/z.png", b"png")
+    agents = FakeA2AAgents({AGENT_URL: _replying_with(url), USER_URL: USER_DONE}).serve(monkeypatch)
+    context = _context()
+    context.deployed_agents.append(_user_sim(USER_URL))
+
+    await _two_turns(url).execute(context)
 
     assert agents.sent[USER_URL] == [
-        [{"kind": "text", "text": "here it is"}, _file(f"{GRANT_ORIGIN}/outputs/z.png?sig=read")]
+        [{"kind": "text", "text": "here it is"}, _file(f"{GRANT_ORIGIN}/inputs/z.png?sig=read")]
     ]
 
 
-def _remote_user_sim(url, card=None):
-    return DeployedAgent(
-        agent_name="human_agent", api_url=url, a2a_url=url, sandbox_id="sb-user", sandbox_type="modal", a2a_card=card,
-    )
+@pytest.mark.asyncio
+async def test_a_user_sim_is_not_made_able_to_read_a_file_the_target_was_never_sent(monkeypatch, store, recorded):
+    sent = store.put("inputs/z.png", b"png")
+    other = store.put("someone-elses/answer.json", b"{}")
+    agents = FakeA2AAgents({AGENT_URL: _replying_with(other), USER_URL: USER_DONE}).serve(monkeypatch)
+    context = _context()
+    context.deployed_agents.append(_user_sim(USER_URL))
 
+    await _two_turns(sent).execute(context)
 
-def _two_turns():
-    return PromptAgentTaskStep(
-        id="solve", version=None, agent_name="solver", prompt="hi", poll_interval_seconds=0, max_conversation_turns=2,
-    )
+    assert agents.sent[USER_URL] == [[{"kind": "text", "text": "here it is"}, _file(other)]]
+    assert store.granted == [sent]  # the target's own file, and nothing for the user-sim
 
 
 @pytest.mark.asyncio
-async def test_a_user_sim_the_stores_grants_cannot_reach_is_sent_a_copy_staged_on_it(monkeypatch, tmp_path, recorded):
-    store = GrantingObjectStore(str(tmp_path), reaches=False)
-    configure(object_store=store)
-    url = store.put("outputs/z.png", b"png")
+async def test_a_user_sim_the_stores_grants_cannot_reach_is_sent_a_copy_staged_on_it(monkeypatch, store, recorded):
+    url = store.put("inputs/z.png", b"png")
     user_url = "https://user.test"
     staging = []  # each staging request, with how many messages the user-sim had been sent by then
 
@@ -152,9 +159,9 @@ async def test_a_user_sim_the_stores_grants_cannot_reach_is_sent_a_copy_staged_o
     agents = FakeA2AAgents({AGENT_URL: _replying_with(url), user_url: USER_DONE}, other=staging_route).serve(monkeypatch)
     context = _context()
     card = {"capabilities": {"extensions": [{"uri": STAGING_V1_URI, "params": {"endpoint": "/ext/staging"}}]}}
-    context.deployed_agents.append(_remote_user_sim(user_url, card))
+    context.deployed_agents.append(_user_sim(user_url, "modal", card))
 
-    await _two_turns().execute(context)
+    await _two_turns(url).execute(context)
 
     ((text, file),) = agents.sent[user_url]
     assert file["file"]["uri"].startswith(f"{user_url}/ext/staging/")
@@ -163,20 +170,18 @@ async def test_a_user_sim_the_stores_grants_cannot_reach_is_sent_a_copy_staged_o
 
 @pytest.mark.asyncio
 async def test_a_user_sim_that_can_be_sent_no_readable_url_fails_the_step_before_it_is_sent_anything(
-    monkeypatch, tmp_path, recorded
+    monkeypatch, store, recorded
 ):
-    store = GrantingObjectStore(str(tmp_path), reaches=False)
-    configure(object_store=store)
-    url = store.put("outputs/z.png", b"png")
+    url = store.put("inputs/z.png", b"png")
     agents = FakeA2AAgents({AGENT_URL: _replying_with(url), USER_URL: USER_DONE}).serve(monkeypatch)
     context = _context()
-    context.deployed_agents.append(_remote_user_sim(USER_URL))
+    context.deployed_agents.append(_user_sim(USER_URL, "modal"))
 
     with pytest.raises(RuntimeError, match="cannot be sent to the agent"):
-        await _two_turns().execute(context)
+        await _two_turns(url).execute(context)
 
     assert agents.sent[USER_URL] == []
-    assert recorded == [[{"kind": "text", "text": "hi"}]]  # the solver's turn, which ran
+    assert recorded == [[{"kind": "text", "text": "hi"}, _file(url)]]  # the solver's turn, which ran
 
 
 @pytest.mark.asyncio
