@@ -47,6 +47,7 @@ dependencies = [
     "uvicorn>=0.47",  # 0.47 adds ssl_context_factory, how the local grant server gets its TLS context
     "modal>=1.5.2.dev22",  # dev22 adds _experimental_create(tags=); dev2 added VM-mode V2 (vm_runtime)
     "e2b~=2.46.4",  # AsyncSandbox/AsyncTemplate APIs validated against the 2.46 line
+    "sail~=0.12.8",  # Sailbox exec/fs/listener/egress APIs validated against the 0.12 line
 ]
 
 [project.optional-dependencies]

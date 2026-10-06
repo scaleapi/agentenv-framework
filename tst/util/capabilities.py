@@ -19,7 +19,7 @@ MISSING_CAPABILITY_PREFIX = "agentenv-capability-missing: "
 #: Only the agent-driving paths need a model endpoint.
 MODEL_ENDPOINT = "model_endpoint_configured"
 
-#: The remote sandbox providers (``modal``, ``modal_vm``, ``e2b``) need credentials the resolved
+#: The remote sandbox providers (``modal``, ``modal_vm``, ``e2b``, ``sail``) need credentials the resolved
 #: config may not carry; the local default never does.
 REMOTE_SANDBOX = "remote_sandbox"
 
@@ -75,21 +75,21 @@ def skip_without_model_endpoint() -> pytest.MarkDecorator:
 
 
 def remote_sandbox_is_available(provider: str) -> bool:
-    """Whether the resolved config can build the ``modal`` / ``modal_vm`` / ``e2b`` sandbox
+    """Whether the resolved config can build the ``modal`` / ``modal_vm`` / ``e2b`` / ``sail`` sandbox
     provider, credentials included.
 
-    Modal: any failure to resolve the credentials answers False. E2B: building the provider
-    resolves ``[sandbox.providers.e2b.config]`` and its ``secret:`` references; only a
+    Modal: any failure to resolve the credentials answers False. E2B and Sail: building the provider
+    resolves ``[sandbox.providers.<name>.config]`` and its ``secret:`` references; only a
     ``ConfigError`` (absent or incomplete config) answers False, any other failure answers True and
     lets the test fail on the real problem, as ``model_endpoint_is_configured`` does."""
-    if provider not in ("modal", "modal_vm", "e2b"):
+    if provider not in ("modal", "modal_vm", "e2b", "sail"):
         raise ValueError(f"unknown remote sandbox provider {provider!r}")
-    if provider == "e2b":
+    if provider in ("e2b", "sail"):
         from agent_env.config.errors import ConfigError
         from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider
 
         try:
-            build_sandbox_provider("e2b")
+            build_sandbox_provider(provider)
         except ConfigError:
             return False
         except Exception:

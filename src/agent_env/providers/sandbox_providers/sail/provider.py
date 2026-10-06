@@ -1,0 +1,315 @@
+"""Sail Research Sailbox VM sandbox provider."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import math
+import re
+import uuid
+from typing import Any, ClassVar, Self
+
+from agent_env.attribution import PIPELINE_STEP_KEY, RUN_ID_KEY, Attribution
+from agent_env.config.errors import ConfigError
+from agent_env.providers.sandbox_providers.sail import _sdk
+from agent_env.providers.sandbox_providers.sail.sandbox import (
+    MAX_ALLOWLIST_ENTRIES,
+    SailSandbox,
+    egress_document,
+    policy_from_document,
+)
+from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, NetworkPolicyUnsupportedError
+from agent_env.providers.sandbox_providers.sandbox_provider import (
+    SANDBOX_MODE_VM,
+    SandboxProvider,
+    apply_default_attribution,
+)
+
+logger = logging.getLogger(__name__)
+
+SANDBOX_STARTED_EVENT = "agent_env.sail_sandbox_started"
+
+#: (size, vCPU, (min, max) memory GiB, (min, max) disk GiB), smallest first. Memory and disk are
+#: ceilings, not reservations: Sail bills observed usage.
+_SIZES: tuple[tuple[str, int, tuple[int, int], tuple[int, int]], ...] = (
+    ("s", 1, (2, 64), (8, 128)),
+    ("m", 4, (8, 128), (32, 512)),
+    ("l", 8, (16, 256), (64, 1024)),
+)
+_SIZE_NAMES = tuple(size[0] for size in _SIZES)
+_LISTENER_TIMEOUT = 60
+_LISTENER_POLL_INTERVAL = 1
+_MAX_NAME_LENGTH = 128
+_REAP_ATTEMPTS = 3
+
+_reapers: set[asyncio.Task] = set()
+
+
+def sailbox_shape(cpu: float, memory_mb: int, disk_size_gb: float, *, min_size: str = "s") -> tuple[str, int, int]:
+    """The smallest size at or above ``min_size`` covering the request, and its memory and disk ceilings
+    in GiB, each rounded up to whole GiB and into the size's range."""
+    memory_gib = math.ceil(memory_mb / 1024)
+    disk_gib = math.ceil(disk_size_gb)
+    for name, vcpu, (memory_min, memory_max), (disk_min, disk_max) in _SIZES[_SIZE_NAMES.index(min_size):]:
+        if cpu <= vcpu and memory_gib <= memory_max and disk_gib <= disk_max:
+            return name, max(memory_gib, memory_min), max(disk_gib, disk_min)
+    raise ValueError(
+        f"no Sailbox size fits cpu={cpu}, memory={memory_mb}MiB, disk={disk_size_gb}GB "
+        "(largest is l: 8 vCPU, 256 GiB memory, 1024 GiB disk)"
+    )
+
+
+def sailbox_name(attribution: Attribution) -> str:
+    """``ae-<random>`` plus the attribution values in key order, slugged: for people and ``list(search=)``."""
+    slugs = [re.sub(r"[^A-Za-z0-9]+", "-", str(attribution[key])).strip("-") for key in sorted(attribution)]
+    return "-".join(["ae", uuid.uuid4().hex[:8], *filter(None, slugs)])[:_MAX_NAME_LENGTH].rstrip("-")
+
+
+async def _reap(sailbox: Any) -> None:
+    for attempt in range(_REAP_ATTEMPTS):
+        try:
+            await sailbox.terminate.aio()
+            logger.info("Terminated Sailbox %s, created after its caller was cancelled", sailbox.sailbox_id)
+            return
+        except Exception as exc:  # noqa: BLE001 - every failure is retried, then reported
+            logger.warning("Terminating orphaned Sailbox %s failed (attempt %s): %s", sailbox.sailbox_id, attempt + 1, exc)
+            await asyncio.sleep(2 ** attempt)
+    logger.error(
+        "Orphaned Sailbox %s is still running after %s termination attempts; it stops at its max lifetime",
+        sailbox.sailbox_id, _REAP_ATTEMPTS,
+    )
+
+
+def _terminate_orphan(create: asyncio.Future) -> None:
+    if create.cancelled() or create.exception() is not None:
+        return
+    reaper = asyncio.ensure_future(_reap(create.result()))
+    _reapers.add(reaper)
+    reaper.add_done_callback(_reapers.discard)
+
+
+async def _create_or_reclaim(create: Any) -> Any:
+    """Await a Sailbox create; if the caller is cancelled first, terminate the Sailbox it yields, which
+    would otherwise keep running with no handle."""
+    task = asyncio.ensure_future(create)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        task.add_done_callback(_terminate_orphan)
+        raise
+
+
+class SailSandboxProvider(SandboxProvider):
+    """Docker-capable Sailboxes. ``api_key`` comes from resolved provider config (a ``secret:`` reference)
+    and never reaches a workload."""
+
+    EGRESS_HOSTS: ClassVar[tuple[str, ...]] = ("*.sail.box",)
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        app: str = "agent-env",
+        min_size: str = "s",
+        auto_sleep: bool = False,
+        auto_sleep_min_idle_seconds: int | None = None,
+        runtime_threads: int | None = None,
+        sdk: Any | None = None,
+    ):
+        self._api_key = api_key
+        self._app_name = app
+        self._min_size = min_size
+        self._auto_sleep = auto_sleep or auto_sleep_min_idle_seconds is not None
+        self._auto_sleep_min_idle_seconds = auto_sleep_min_idle_seconds
+        self._runtime_threads = runtime_threads
+        self._sdk = sdk
+        self._app: Any | None = None
+
+    def __repr__(self) -> str:
+        return f"SailSandboxProvider(app={self._app_name!r})"
+
+    @classmethod
+    def from_config(cls, **config: Any) -> Self:
+        section = "[sandbox.providers.sail.config]"
+        api_key = config.get("api_key")
+        if not isinstance(api_key, str) or not api_key.strip():
+            raise ConfigError(f"{section} requires a non-empty 'api_key' (e.g. \"secret:sail_api_key\")")
+        app = config.get("app", "agent-env")
+        if not isinstance(app, str) or not app.strip():
+            raise ConfigError(f"{section} 'app' must be a non-empty string")
+        if config.get("min_size", "s") not in _SIZE_NAMES:
+            raise ConfigError(f"{section} 'min_size' must be one of {list(_SIZE_NAMES)}")
+        if not isinstance(config.get("auto_sleep", False), bool):
+            raise ConfigError(f"{section} 'auto_sleep' must be true or false")
+        for key, (low, high) in {"auto_sleep_min_idle_seconds": (1, 3600), "runtime_threads": (1, 256)}.items():
+            value = config.get(key)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high):
+                raise ConfigError(f"{section} '{key}' must be an integer from {low} to {high}")
+        unknown = set(config) - {"api_key", "app", "min_size", "auto_sleep", "auto_sleep_min_idle_seconds", "runtime_threads"}
+        if unknown:
+            raise ConfigError(f"{section} has unknown key(s): {sorted(unknown)}")
+        return cls(**config)
+
+    @classmethod
+    def supports_network_policy(cls, policy: NetworkPolicy) -> bool:
+        """Allow-all, or an allowlist of hostnames, IPv4 addresses and IPv4 CIDRs within Sail's entry limit."""
+        if not policy.restricts_egress:
+            return True
+        return (
+            len(policy.allow_hosts) + len(policy.allow_cidrs) <= MAX_ALLOWLIST_ENTRIES
+            and not any(":" in entry for entry in (*policy.allow_hosts, *policy.allow_cidrs))
+        )
+
+    async def _connect(self) -> tuple[Any, Any]:
+        if self._app is None:
+            self._sdk, self._app = await asyncio.to_thread(
+                _sdk.connect, self._api_key, self._app_name, runtime_threads=self._runtime_threads, sdk=self._sdk,
+            )
+        return self._sdk, self._app
+
+    def _auto_sleep_setting(self, sdk: Any) -> Any:
+        if not self._auto_sleep:
+            return sdk.AutoSleep.never()
+        if self._auto_sleep_min_idle_seconds is not None:
+            return sdk.AutoSleep.not_before(self._auto_sleep_min_idle_seconds)
+        return sdk.AutoSleep.default()
+
+    async def create_vm(
+        self,
+        *,
+        image: str | None = None,
+        boot_mode: str | None = None,
+        cpu: float = 1.0,
+        memory: int = 8192,
+        disk_size_gb: float = 10,
+        timeout: int = 3600 * 2,
+        exposed_ports: list[int] | None = None,
+        setup_for_gateway: bool = True,
+        attribution: Attribution | None = None,
+        network_policy: NetworkPolicy | None = None,
+    ) -> SailSandbox:
+        """Create a Sailbox from the devbox image; ``timeout`` is its hard maximum lifetime."""
+        if image is not None:
+            raise ValueError("the Sail provider boots its own Docker-capable image; image overrides are unsupported")
+        del boot_mode
+        size, memory_gib, disk_gib = sailbox_shape(cpu, memory, disk_size_gb, min_size=self._min_size)
+        effective_policy = self.effective_network_policy(network_policy)
+        if not self.supports_network_policy(effective_policy):
+            raise NetworkPolicyUnsupportedError(
+                f"Sail enforces allow-all or up to {MAX_ALLOWLIST_ENTRIES} hostname/IPv4 allowlist entries, "
+                f"not {effective_policy.to_dict()}"
+            )
+        resolved_attribution = {
+            key: str(value) for key, value in apply_default_attribution(dict(attribution or {})).items() if value is not None
+        }
+        ports = list(dict.fromkeys(exposed_ports or []))
+        sdk, app = await self._connect()
+        raw = await _create_or_reclaim(sdk.Sailbox.create.aio(
+            app=app,
+            image=sdk.Image.devbox("amd64"),
+            name=sailbox_name(resolved_attribution),
+            size=size,
+            memory_limit_gib=memory_gib,
+            disk_limit_gib=disk_gib,
+            max_lifetime_seconds=timeout,
+            ingress_ports=ports,
+            auto_sleep=self._auto_sleep_setting(sdk),
+            egress_policy=egress_document(effective_policy),
+        ))
+        try:
+            if raw.status in ("failed", "create_failed"):
+                raise RuntimeError(f"Sailbox {raw.sailbox_id} failed to start: {raw.error_message}")
+            sandbox = SailSandbox(
+                raw, sdk=sdk, tunnel_urls=await self._tunnel_urls(raw, ports), network_policy=effective_policy,
+            )
+            sandbox.mode = SANDBOX_MODE_VM
+            logger.info(
+                "Sail sandbox started: sailbox_id=%s app=%s size=%s memory=%sGiB disk=%sGiB attribution=%s",
+                raw.sailbox_id, self._app_name, size, memory_gib, disk_gib, resolved_attribution,
+                extra={
+                    "event": SANDBOX_STARTED_EVENT,
+                    "sail_sailbox_id": raw.sailbox_id,
+                    "sail_app_name": self._app_name,
+                    "sail_attribution": resolved_attribution,
+                    PIPELINE_STEP_KEY: resolved_attribution.get(PIPELINE_STEP_KEY),
+                    RUN_ID_KEY: resolved_attribution.get(RUN_ID_KEY),
+                    "size": size,
+                    "memory_limit_gib": memory_gib,
+                    "disk_limit_gib": disk_gib,
+                },
+            )
+            if setup_for_gateway:
+                await sandbox.setup_vm_for_gateway(ports)
+            return sandbox
+        except BaseException:
+            try:
+                await raw.terminate.aio()
+            except Exception as cleanup_error:  # noqa: BLE001 - cleanup must not mask the create failure
+                logger.warning("Failed to terminate Sailbox %s after setup failure: %s", raw.sailbox_id, cleanup_error)
+            raise
+
+    @staticmethod
+    async def _tunnel_urls(raw: Any, ports: list[int]) -> dict[int, str]:
+        """Each exposed port's public URL, polling until Sail has routed all of them."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _LISTENER_TIMEOUT
+        while True:
+            urls = {
+                listener.guest_port: listener.endpoint.url
+                for listener in await raw.listeners.aio()
+                if listener.endpoint is not None and getattr(listener.endpoint, "url", None)
+            }
+            missing = [port for port in ports if port not in urls]
+            if not missing:
+                return {port: urls[port] for port in ports}
+            if loop.time() >= deadline:
+                raise RuntimeError(f"Sailbox {raw.sailbox_id} has no public URL for port(s) {missing} after {_LISTENER_TIMEOUT}s")
+            await asyncio.sleep(_LISTENER_POLL_INTERVAL)
+
+    async def create_sandbox(
+        self,
+        *,
+        image_name: str,
+        port: int,
+        env: dict[str, str],
+        cpu: float = 1.0,
+        memory: int = 8192,
+        disk_size_gb: float = 10,
+        timeout: int = 3600 * 2,
+        attribution: Attribution | None = None,
+        network_policy: NetworkPolicy | None = None,
+    ) -> SailSandbox:
+        """A bare VM: the caller loads and starts ``image_name`` in it, as on the other VM providers."""
+        del image_name, env
+        return await self.create_vm(
+            cpu=cpu, memory=memory, disk_size_gb=disk_size_gb, timeout=timeout,
+            exposed_ports=[port], attribution=attribution, network_policy=network_policy,
+        )
+
+    async def create_container(self, **kwargs: Any) -> SailSandbox:
+        """The inherited login-pull-run, then the registry credentials removed from the VM disk, which Sail
+        checkpoints for host-failure recovery."""
+        sandbox = await super().create_container(**kwargs)
+        try:
+            await sandbox.exec_script("rm -f /root/.docker/config.json")
+        except BaseException:
+            await sandbox.terminate()
+            raise
+        return sandbox
+
+    async def get_sandbox(self, sandbox_id: str) -> SailSandbox:
+        sdk, _ = await self._connect()
+        raw = await sdk.Sailbox.get.aio(sandbox_id)
+        tunnel_urls = {
+            listener.guest_port: listener.endpoint.url
+            for listener in await raw.listeners.aio()
+            if listener.endpoint is not None and getattr(listener.endpoint, "url", None)
+        }
+        applied = getattr(raw, "egress_policy", None)
+        policy = policy_from_document(getattr(applied, "document", None)) if getattr(applied, "policy_id", None) is None else None
+        if policy is None:
+            logger.warning(
+                "Sailbox %s has an egress policy agent-env can't represent (%r); image loading will fail closed",
+                sandbox_id, applied,
+            )
+        return SailSandbox(raw, sdk=sdk, tunnel_urls=tunnel_urls, network_policy=policy)

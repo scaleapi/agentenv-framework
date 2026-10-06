@@ -14,6 +14,7 @@ from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, Lo
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandbox, ModalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandbox, ModalVmSandboxProvider
 from agent_env.providers.sandbox_providers.e2b import E2BSandbox, E2BSandboxProvider
+from agent_env.providers.sandbox_providers.sail import SailSandbox, SailSandboxProvider
 
 __all__ = [
     "ChainedSandboxProvider", "Sandbox", "VmSandbox",
@@ -22,6 +23,7 @@ __all__ = [
     "ModalSandbox", "ModalSandboxProvider",
     "ModalVmSandbox", "ModalVmSandboxProvider",
     "E2BSandbox", "E2BSandboxProvider",
+    "SailSandbox", "SailSandboxProvider",
     "build_sandbox_provider",
     "get_sandbox_provider", "set_sandbox_provider", "reset_sandbox_provider",
     "get_env_sandbox_provider", "set_env_sandbox_provider", "reset_env_sandbox_provider",

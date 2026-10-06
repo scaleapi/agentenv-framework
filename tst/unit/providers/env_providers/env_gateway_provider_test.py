@@ -549,6 +549,28 @@ async def test_modal_vm_provider_routes_to_vm_path_not_containers():
 
 
 @pytest.mark.asyncio
+async def test_sail_provider_routes_to_vm_path_not_containers():
+    """A Sailbox is a Docker-capable VM: the gateway deploys onto it with docker-compose."""
+    from agent_env.env.gateway import GatewayMode
+    from agent_env.providers.sandbox_providers.sail import SailSandboxProvider
+
+    gp = EnvironmentGatewayProvider()
+    gp._deploy_via_vm = AsyncMock(return_value="VM_RESULT")
+    gp._deploy_via_containers = AsyncMock(return_value="CONTAINER_RESULT")
+
+    result = await gp.create_gateway(
+        sandbox_provider=SailSandboxProvider(api_key="sail-test-key"),
+        mcp_servers=[MCPServerConfig(image="mcp-a", environment_name="a")],
+        mcp_server_images=[MagicMock(image_name="mcp-a")],
+        gateway_mode=GatewayMode.PERFORMANCE,
+        ttl_seconds=60,
+        disk_size_gb=10,
+    )
+    assert result == "VM_RESULT"
+    gp._deploy_via_containers.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_build_local_store_no_services():
     """No services at all (and website_configs left unset, as the container path calls it) must
     self-build local Postgres without raising — guards the empty service list + website_configs=None

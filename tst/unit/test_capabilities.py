@@ -165,3 +165,18 @@ def test_e2b_present_when_the_provider_builds(monkeypatch):
 def test_e2b_other_failures_read_as_present_rather_than_absent(monkeypatch):
     _fake_e2b_builder(monkeypatch, RuntimeError("api key rejected"))
     assert capabilities.remote_sandbox_is_available("e2b") is True
+
+
+@pytest.mark.parametrize(
+    ("outcome", "available"),
+    [(ConfigError("[sandbox.providers.sail.config] requires a non-empty 'api_key'"), False), (object(), True), (RuntimeError("boom"), True)],
+)
+def test_sail_availability_follows_the_provider_build(monkeypatch, outcome, available):
+    def build(spec):
+        assert spec == "sail"
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr("agent_env.providers.sandbox_providers.sandbox_provider.build_sandbox_provider", build)
+    assert capabilities.remote_sandbox_is_available("sail") is available
