@@ -415,7 +415,10 @@ async def test_stop_ends_even_when_a_step_ignores_its_cancel(docs, monkeypatch):
     from agent_env.runner import local_runner
     from agent_env.task.teardown import TeardownReport
 
+    torn_down_at = []
+
     async def teardown_run(context):
+        torn_down_at.append(asyncio.get_running_loop().time())
         return TeardownReport()
 
     started = asyncio.Event()
@@ -444,6 +447,8 @@ async def test_stop_ends_even_when_a_step_ignores_its_cancel(docs, monkeypatch):
     stopping = loop.time()
     await asyncio.wait_for(runner.stop(), 5)
 
-    assert loop.time() - stopping < 1.0, "stop() waited for the step that ignored its cancel"
+    stopped = loop.time()
+    assert stopped - stopping < 1.0, "stop() waited for the step that ignored its cancel"
     assert not runner._inflight
+    assert torn_down_at and torn_down_at[0] < stopped, "stop() left the abandoned run's sandboxes up"
     await asyncio.sleep(1.6)  # let the abandoned run end before the loop closes

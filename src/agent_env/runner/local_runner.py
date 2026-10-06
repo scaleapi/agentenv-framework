@@ -42,6 +42,7 @@ class LocalRunner(Runner):
         self._sem = asyncio.Semaphore(self.workers)
         self._inflight: dict[str, asyncio.Task] = {}
         self._tearing_down: set[str] = set()  # runs past their task, removing what it deployed
+        self._contexts: dict = {}  # each run's context, so stop() can still tear down a run it gives up on
         self._stopping = False
 
     # --- lifecycle ---------------------------------------------------------
@@ -69,11 +70,19 @@ class LocalRunner(Runner):
             _, stuck = await asyncio.wait(
                 list(self._inflight.values()), timeout=self.STOP_WAIT_SECONDS + self.TEARDOWN_WAIT_SECONDS)
             if stuck:
-                logger.warning("Shutting down without %d run(s) that didn't finish; what they deployed may still be up",
-                               len(stuck))
                 for task in stuck:
                     task.cancel()
                 await asyncio.wait(stuck, timeout=self.ABANDON_WAIT_SECONDS)
+                # A run still going never reached its own teardown: remove what it has recorded so far.
+                left = [run_id for run_id, task in self._inflight.items()
+                        if not task.done() and run_id not in self._tearing_down and run_id in self._contexts]
+                if left:
+                    logger.warning("Shutting down without %d run(s) that didn't stop; tearing down what they recorded",
+                                   len(left))
+                    with contextlib.suppress(TimeoutError):
+                        async with asyncio.timeout(self.TEARDOWN_WAIT_SECONDS):
+                            await asyncio.gather(*(self._tear_down(run_id, self._contexts[run_id]) for run_id in left),
+                                                 return_exceptions=True)
         self._inflight.clear()
 
     # --- Runner API --------------------------------------------------------
@@ -142,6 +151,7 @@ class LocalRunner(Runner):
                     raise LookupError(f"Task {record.task_id} v{record.task_version} not found")
 
                 context = self._seed_context(record)
+                self._contexts[record.run_id] = context
                 # start_step rides in metadata but Task.run takes it as a keyword;
                 # without lifting it out here every resume re-ran from zero.
                 run_task = asyncio.ensure_future(task.run(
@@ -186,6 +196,7 @@ class LocalRunner(Runner):
                                        "removed is still up", record.run_id, self.TEARDOWN_WAIT_SECONDS)
             finally:
                 self._tearing_down.discard(record.run_id)
+                self._contexts.pop(record.run_id, None)
                 self._inflight.pop(record.run_id, None)
 
     @staticmethod
