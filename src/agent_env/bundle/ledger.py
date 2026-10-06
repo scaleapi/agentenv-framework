@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -22,25 +21,19 @@ from agent_env.a2a_agent.store import A2A_AGENTS_COLLECTION
 from agent_env.artifact.registry import canonical_type, get_artifact_registry
 from agent_env.artifact.store import ARTIFACTS_COLLECTION
 from agent_env.config import get_config
-from agent_env.config.paths import state_root
 from agent_env.env.env import Env
 from agent_env.env.registry import get_env_registry
 from agent_env.env.store import ENVS_COLLECTION
 from agent_env.eval.store import EVALS_COLLECTION
 from agent_env.store import Filter, Sort
 from agent_env.store.document_store import LocalSqliteDocumentStore
-from agent_env.store.local_state import ensure_state_dir
+from agent_env.store.local_state import holding_locks
 from agent_env.task.store import TASKS_COLLECTION
 
 from .authoring import entry_files
 from .parse import Bundle, BundleKind
 from .plan import Plan, Write, folder_walk, keeps_base_from_toml
 from .resolve import BuiltImage
-
-try:
-    import fcntl
-except ImportError:  # Windows: runs of one bundle aren't serialized
-    fcntl = None
 
 LEDGER_COLLECTION = "bundle_ledger"
 # Bumped by hand when what a digest covers changes, or a writer's output changes enough that every
@@ -171,31 +164,10 @@ class Ledger:
 @contextmanager
 def materializing(bundle: Bundle, on_wait: Callable[[], None] | None = None) -> Iterator[None]:
     """Hold a lock on every id the bundle's entries write while its entities are written. Another run that
-    writes any of those ids, of this bundle or another, waits here, calling ``on_wait`` first. The locks are
-    taken in one order, so two runs can't each hold one the other waits for. Task runs don't hold them."""
-    if fcntl is None:
+    writes any of those ids, of this bundle or another, waits here, calling ``on_wait`` first. Task runs don't
+    hold them."""
+    with holding_locks((entry.id for entry in bundle.entries), on_wait):
         yield
-        return
-    ensure_state_dir(state_root() / "locks")
-    fds, waited = [], False
-    try:
-        for path in sorted({_lock_path(entry.id) for entry in bundle.entries}):
-            fds.append(os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600))
-            try:
-                fcntl.flock(fds[-1], fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                if on_wait is not None and not waited:
-                    on_wait()
-                    waited = True
-                fcntl.flock(fds[-1], fcntl.LOCK_EX)
-        yield
-    finally:
-        for fd in fds:
-            os.close(fd)
-
-
-def _lock_path(id: str) -> Path:
-    return state_root() / "locks" / f"entity-{hashlib.sha256(id.encode()).hexdigest()[:16]}.lock"
 
 
 def _tracked(write: Write) -> bool:

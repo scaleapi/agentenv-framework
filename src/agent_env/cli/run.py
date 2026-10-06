@@ -199,6 +199,10 @@ def _report_dry_run(dry: DryRun) -> None:
             click.echo(f"  {ref.kind} {ref.id} v{plan.store_latest[ref.kind, ref.id]}, the latest")
         else:
             click.echo(f"  {ref.kind} {ref.id} v{ref.version}")
+    if dry.infra:
+        click.echo("Would build first:")
+    for build in dry.infra:
+        click.echo(f"  {build}")
     click.echo("Would run:")
     for entry in dry.runs:
         click.echo(f"  {dry.path(entry)} v{materialization.version_of('task', entry.id)}")
