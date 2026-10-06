@@ -89,6 +89,7 @@ def materialize(
         raise RuntimeError("materializing a bundle needs namespace routing, which the agent-env CLI turns on; "
                            "call it inside agent_env.store.routing.namespace_routing()")
     ledger = Ledger.for_plan(plan)
+    _refuse_builds_without_docker(plan, ledger)
     entities = [write for write in plan.writes if write.kind not in (BundleKind.TASK, BundleKind.EVAL)]
     tasks = [write for write in plan.writes if write.kind is BundleKind.TASK]
     evals = [write for write in plan.writes if write.kind is BundleKind.EVAL]
@@ -210,9 +211,17 @@ _WRITERS: dict[BundleKind, Callable[[Plan, Write], int]] = {
 def _refuse_unwritable(plan: Plan) -> None:
     problems = [f"{_path(plan, write)}: writing {what} isn't supported yet"
                 for write in plan.writes if (what := _unwritable(write))]
-    if shutil.which("docker") is None:
-        problems.extend(f"{_path(plan, write)}: building its image from {write.source.dockerfile} needs docker, "
-                        "and it isn't on PATH" for write in plan.writes if isinstance(write.source, BuiltImage))
+    if problems:
+        raise BundleError(problems)
+
+
+def _refuse_builds_without_docker(plan: Plan, ledger: Ledger) -> None:
+    """An image the ledger will reuse needs no docker, so only the ones it would build are refused."""
+    if shutil.which("docker") is not None:
+        return
+    problems = [f"{_path(plan, write)}: building its image from {write.source.dockerfile} needs docker, and it isn't "
+                "on PATH" for write in plan.writes
+                if isinstance(write.source, BuiltImage) and not ledger.check(write, {}).unchanged]
     if problems:
         raise BundleError(problems)
 
