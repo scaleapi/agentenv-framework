@@ -38,6 +38,9 @@ logger = logging.getLogger(__name__)
 # the partial bytes already consumed, corrupting the stream. Pipe consumers must
 # download to a temp file first, then read the file (see load_docker_images).
 CURL_RETRY_FLAGS = "--retry 5 --retry-all-errors --retry-delay 1"
+# Docker label on what a step starts on a sandbox's Docker host (containers, images, networks), valued with the
+# sandbox id, so a sandbox that shares its host (the local one) can remove its own when it terminates.
+SANDBOX_LABEL = "agentenv.sandbox"
 
 # At most this many image signs in flight per event loop: each holds a worker thread, for up to a
 # remote signer's whole retry window, and a connection from its session's pool.

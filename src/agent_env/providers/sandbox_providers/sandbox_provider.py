@@ -36,6 +36,19 @@ class SandboxProviderTypeError(ConfigError):
     """A config-registered provider produced a Sandbox whose ``.type`` != its ``[sandbox.providers.<name>]`` key."""
 
 
+async def _pull(sandbox: VmSandbox, image_name: str) -> None:
+    """``docker pull image_name``. An image built for linux/amd64 only has nothing for an arm64 host (an
+    Apple Silicon Mac running the local provider), so that pull falls back to the amd64 image, which the
+    host's Docker runs emulated."""
+    try:
+        await sandbox.exec_script(f"docker pull {shlex.quote(image_name)}")
+    except RuntimeError as e:
+        if "no matching manifest" not in str(e):
+            raise
+        logger.warning("%s has no image for this host's platform; pulling linux/amd64, which runs emulated", image_name)
+        await sandbox.exec_script(f"docker pull --platform linux/amd64 {shlex.quote(image_name)}")
+
+
 class SandboxProvider(ABC):
     """Compute backend that provisions sandboxes. Selected via [sandbox] default / build_sandbox_provider(); swap via set_sandbox_provider()."""
 
@@ -106,7 +119,7 @@ class SandboxProvider(ABC):
                     f"echo {shlex.quote(auth.password)} | docker login "
                     f"--username {shlex.quote(auth.username)} --password-stdin {shlex.quote(auth.registry)}"
                 )
-            await sandbox.exec_script(f"docker pull {shlex.quote(image_name)}")
+            await _pull(sandbox, image_name)
             await self._start_container(sandbox, image_name=image_name, port=port, env=env)
             sandbox.mode = SANDBOX_MODE_CONTAINER
             return sandbox

@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity_refs import EntityRef
-from agent_env.providers.sandbox_providers.sandbox import port_bindings
+from agent_env.providers.sandbox_providers.sandbox import SANDBOX_LABEL, port_bindings
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.utils.paths import validate_relative_filename
 
@@ -190,9 +190,10 @@ class RunDockerContainerTaskStep(TaskStep):
             build_arg_flags = " ".join(
                 f"--build-arg {shlex.quote(f'{k}={v}')}" for k, v in self.build_args.items()
             )
+        label = shlex.quote(f"{SANDBOX_LABEL}={ds.sandbox_id}")
         build_cmd = (
             f"cd {shlex.quote(work_dir)} && "
-            f"docker build --platform linux/amd64 "
+            f"docker build --platform linux/amd64 --label {label} "
             f"-f {shlex.quote(self.dockerfile_path)} "
             f"-t {shlex.quote(image_tag)} "
             f"{build_arg_flags} ."
@@ -241,7 +242,7 @@ class RunDockerContainerTaskStep(TaskStep):
         else:
             command_tail = ""
         run_cmd = (
-            f"docker run -d --name {shlex.quote(self.container_name)} "
+            f"docker run -d --name {shlex.quote(self.container_name)} --label {label} "
             f"{network_flag}{entrypoint_flag}{extra_flags} {port_flags} {env_flags} "
             f"{shlex.quote(image_tag)}{command_tail}"
         )
@@ -287,7 +288,7 @@ class RunDockerContainerTaskStep(TaskStep):
             return net
         await sandbox.exec_script(
             f"docker network inspect {net} >/dev/null 2>&1 "    # already exists -> reuse it
-            f"|| docker network create {net} >/dev/null 2>&1 "  # else create the user bridge
+            f"|| docker network create --label {shlex.quote(f'{SANDBOX_LABEL}={sandbox.sandbox_id}')} {net} >/dev/null 2>&1 "  # else create the user bridge
             f"|| docker network inspect {net} >/dev/null"       # lost a create race -> confirm it exists
         )
         return net

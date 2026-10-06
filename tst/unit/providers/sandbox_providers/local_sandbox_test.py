@@ -146,8 +146,8 @@ async def test_get_sandbox_raises_when_work_dir_missing(tmp_path: Path, monkeypa
 
 
 class _RecordingLocalSandbox(LocalSandbox):
-    def __init__(self, work_dir):
-        super().__init__(work_dir=work_dir)
+    def __init__(self, work_dir, **kwargs):
+        super().__init__(work_dir=work_dir, **kwargs)
         self.scripts: list[str] = []
 
     async def exec_script(self, script, *, max_retries=0):
@@ -281,7 +281,21 @@ async def test_terminate_vm_without_compose_removes_only_an_agent_placed_on_it(t
     sandbox = _RecordingLocalSandbox(work_dir=tmp_path)
     await sandbox.terminate()
 
-    assert sandbox.scripts == [f"docker rm -f {sandbox.container_name} >/dev/null 2>&1 || true"]
+    assert len(sandbox.scripts) == 2 and "label=agentenv.sandbox=" in sandbox.scripts[0]
+    assert sandbox.scripts[1] == f"docker rm -f {sandbox.container_name} >/dev/null 2>&1 || true"
+
+
+@pytest.mark.asyncio
+async def test_terminate_removes_what_steps_started_for_this_sandbox_only(tmp_path: Path):
+    """run_docker_container's containers, images and networks carry the sandbox's label; a VM would take them down
+    with it, but the laptop's Docker is shared, so the local sandbox removes its own."""
+    sandbox = _RecordingLocalSandbox(sandbox_id="local-abc", work_dir=tmp_path)
+    await sandbox.terminate()
+
+    (removal,) = [s for s in sandbox.scripts if "--filter" in s]
+    for listing in ("docker ps -aq", "docker images -q", "docker network ls -q"):
+        assert f"{listing} --filter label=agentenv.sandbox=local-abc" in removal
+    assert "|| exit 0" in removal and "docker rm -f $ids >/dev/null || exit 1" in removal
 
 
 @pytest.mark.asyncio
