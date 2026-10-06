@@ -42,13 +42,13 @@ from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_
 
 logger = logging.getLogger(__name__)
 
-# Ubuntu 22.04 + Docker engine + the compose v2 plugin baked in — the Modal-native
+# Ubuntu 22.04 + Docker engine + the compose CLI plugin baked in — the Modal-native
 # equivalent of a KubeVirt containerdisk image with Docker pre-installed,
 # matching its OS baseline so the two backends behave alike. Modal builds/caches this
-# image (no ECR push / no auth — public base). `docker.io` is the engine; the compose v2
+# image (no ECR push / no auth — public base). `docker.io` is the engine; the compose
 # plugin isn't in Ubuntu's repos, so we drop the release binary into the CLI-plugins dir.
 # amd64: Modal VM sandboxes run x86_64, matching the linux-x86_64 compose binary.
-_COMPOSE_VERSION = "v2.29.7"
+_COMPOSE_VERSION = "v5.5.1"
 _VM_IMAGE = (
     modal.Image.from_registry("ubuntu:22.04")
     .apt_install("docker.io", "curl", "aria2")  # aria2: object downloads, see _DL_*

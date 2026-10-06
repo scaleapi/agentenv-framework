@@ -7,6 +7,12 @@ from typing import TYPE_CHECKING, Callable, ClassVar, Optional
 
 logger = logging.getLogger(__name__)
 
+# `docker compose` has data races that end in a Go runtime panic (exit 2) while stopping or
+# recreating containers. The snapshot restore's lifecycle commands are idempotent, so a crashed
+# attempt is re-run this many extra times instead of failing the load.
+_COMPOSE_CRASH_EXIT_CODES = (2,)
+_COMPOSE_CRASH_RETRIES = 2
+
 # Off by default: a bake builds and pushes a multi-GB servicedb image, which is the right
 # trade once per universe and the wrong one on every deploy. Callers that know they are
 # seeding a reusable universe pass snapshot_after_load=True explicitly; this flag exists
@@ -592,7 +598,8 @@ COMPOSE_EOF'''
         # Remove old servicedb container and its anonymous volume, then start fresh from snapshot image
         logger.info("Recreating servicedb container with snapshot image...")
         await self._sandbox.exec_script(
-            f"cd {GATEWAY_APP_DIR} && docker compose rm -sf -v {DATABASE_SERVICE_NAME} && docker compose up -d {DATABASE_SERVICE_NAME} 2>&1"
+            f"cd {GATEWAY_APP_DIR} && docker compose rm -sf -v {DATABASE_SERVICE_NAME} && docker compose up -d {DATABASE_SERVICE_NAME} 2>&1",
+            max_retries=_COMPOSE_CRASH_RETRIES, retry_exit_codes=_COMPOSE_CRASH_EXIT_CODES,
         )
 
         # Wait for servicedb to be healthy
@@ -620,7 +627,8 @@ COMPOSE_EOF'''
         svc_list = " ".join(environment_names + [GATEWAY_SERVICE_NAME, PGWEB_SERVICE_NAME, DB_MCP_SERVICE_NAME])
         logger.info(f"Recreating services: {svc_list}")
         await self._sandbox.exec_script(
-            f"cd {GATEWAY_APP_DIR} && docker compose up -d --force-recreate {svc_list}"
+            f"cd {GATEWAY_APP_DIR} && docker compose up -d --force-recreate {svc_list}",
+            max_retries=_COMPOSE_CRASH_RETRIES, retry_exit_codes=_COMPOSE_CRASH_EXIT_CODES,
         )
         await gw._wait_for_gateway(self._sandbox, AGENT_ENV_GATEWAY_MCP_PORT)
 

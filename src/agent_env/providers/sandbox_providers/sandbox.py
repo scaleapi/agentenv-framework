@@ -163,6 +163,20 @@ class Sandbox(ABC):
         raise NotImplementedError(f"{self.__class__.__name__} does not support write_file_from_text")
 
 
+_OUTPUT_CLIP_CHARS = 1500
+_RETRY_LOG_CLIP_CHARS = 200
+
+
+def clip_output(text: str, limit: int = _OUTPUT_CLIP_CHARS) -> str:
+    """``text`` whole when it fits in ``2 * limit`` chars, otherwise its first and last ``limit``
+    chars around an elision marker. A tail alone drops the one line that explains a crash (a Go
+    ``panic:`` header sits above thousands of goroutine frames); a head alone drops the final
+    error of a long log."""
+    if len(text) <= 2 * limit:
+        return text
+    return f"{text[:limit]}\n... [{len(text) - 2 * limit} chars elided] ...\n{text[-limit:]}"
+
+
 class VmSandbox(Sandbox):
     """VM-style sandbox with a Docker daemon and shell access inside."""
 
@@ -177,25 +191,30 @@ class VmSandbox(Sandbox):
         teardown removes only its own container."""
         return "agent-api"
 
-    async def exec_script(self, script: str, *, max_retries: int = 0) -> str:
+    async def exec_script(self, script: str, *, max_retries: int = 0, retry_exit_codes: tuple[int, ...] = ()) -> str:
         """Execute a bash script in the sandbox.
 
         Set ``max_retries`` > 0 only for idempotent scripts. Retries are gated
         on exit code -1, which a provider's exec client returns when the server
         closes the websocket without sending an exit frame (e.g. a control
-        plane wrapping a transient port-forward 500 as a generic error). Real
-        script failures (positive exit codes) raise immediately.
+        plane wrapping a transient port-forward 500 as a generic error), plus
+        any code in ``retry_exit_codes``, for a script whose binary is known to
+        die in a way a re-run cures (``docker compose`` hitting one of its data
+        races exits 2, a Go runtime panic). Other failures raise immediately.
         """
+        retryable = {-1, *retry_exit_codes}
         for attempt in range(max_retries + 1):
             exit_code, stdout, stderr = await self.exec_with_output("sudo", "bash", "-c", script)
             if exit_code == 0:
                 return stdout
-            if exit_code != -1 or attempt == max_retries:
-                raise RuntimeError(f"Script failed (exit {exit_code}):\nstdout: {stdout[-1500:]}\nstderr: {stderr[-1500:]}")
+            if exit_code not in retryable or attempt == max_retries:
+                raise RuntimeError(
+                    f"Script failed (exit {exit_code}):\nstdout: {clip_output(stdout)}\nstderr: {clip_output(stderr)}"
+                )
             backoff = 2 ** attempt
             logger.warning(
-                f"exec_script exit -1 (transient server error), retrying in {backoff}s "
-                f"(attempt {attempt + 1}/{max_retries + 1}); stderr tail: {stderr[-200:]!r}"
+                f"exec_script exit {exit_code} ({'transient server error' if exit_code == -1 else 'retryable'}), "
+                f"retrying in {backoff}s (attempt {attempt + 1}/{max_retries + 1}); output: {clip_output(stderr or stdout, _RETRY_LOG_CLIP_CHARS)!r}"
             )
             await asyncio.sleep(backoff)
         raise AssertionError("unreachable")

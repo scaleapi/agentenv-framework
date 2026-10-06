@@ -5,9 +5,10 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
+from unittest.mock import AsyncMock
 
 from agent_env.providers.sandbox_providers import sandbox as sandbox_module
-from agent_env.providers.sandbox_providers.sandbox import VmSandbox
+from agent_env.providers.sandbox_providers.sandbox import VmSandbox, clip_output
 from agent_env.store import set_object_store
 from agent_env.config import reset_config
 
@@ -386,3 +387,86 @@ async def test_write_host_file_writes_on_the_host_in_bounded_chunks():
     b64_path = "/tmp/agentenv_run_code/input.json.b64"
     assert _b64_from_chunk_scripts(sandbox.scripts, b64_path) == base64.b64encode(data).decode()
     assert sandbox.scripts[-1] == f"base64 -d {b64_path} > /tmp/agentenv_run_code/input.json && rm -f {b64_path}"
+
+
+class _ExitCodeSandbox(VmSandbox):
+    """Concrete VmSandbox whose scripts exit with a scripted sequence of codes, then 0."""
+
+    def __init__(self, exit_codes: list[int], stderr: str = ""):
+        self.sandbox_id = "vm-test"
+        self._exit_codes = list(exit_codes)
+        self._stderr = stderr
+        self.calls = 0
+
+    async def terminate(self) -> None:  # pragma: no cover - not exercised
+        pass
+
+    async def exec(self, *command):  # pragma: no cover - not exercised
+        return None
+
+    async def exec_with_output(self, *args):
+        self.calls += 1
+        code = self._exit_codes.pop(0) if self._exit_codes else 0
+        return (0, "ok", "") if code == 0 else (code, "", self._stderr)
+
+
+@pytest.fixture
+def no_backoff(monkeypatch):
+    monkeypatch.setattr(sandbox_module.asyncio, "sleep", AsyncMock())
+
+
+# A Go crash: the one informative line, then thousands of goroutine frames.
+_PANIC = "panic: concurrent map writes\n\ngoroutine 1 [running]:\n" + "net/http.(*persistConn).readLoop(0xc0004e66c0)\n" * 200
+
+
+@pytest.mark.asyncio
+async def test_exec_script_retries_a_listed_exit_code(no_backoff):
+    sb = _ExitCodeSandbox([2, 2], stderr=_PANIC)
+    assert await sb.exec_script("docker compose up -d", max_retries=2, retry_exit_codes=(2,)) == "ok"
+    assert sb.calls == 3
+
+
+@pytest.mark.asyncio
+async def test_exec_script_does_not_retry_an_unlisted_exit_code(no_backoff):
+    sb = _ExitCodeSandbox([1, 0], stderr="boom")
+    with pytest.raises(RuntimeError, match=r"exit 1"):
+        await sb.exec_script("false", max_retries=2, retry_exit_codes=(2,))
+    assert sb.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_exec_script_without_retry_codes_still_fails_fast_on_exit_2(no_backoff):
+    sb = _ExitCodeSandbox([2, 0], stderr=_PANIC)
+    with pytest.raises(RuntimeError, match=r"exit 2"):
+        await sb.exec_script("pg_isready", max_retries=2)
+    assert sb.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_exec_script_gives_up_after_max_retries(no_backoff):
+    sb = _ExitCodeSandbox([2, 2, 2], stderr=_PANIC)
+    with pytest.raises(RuntimeError, match=r"exit 2"):
+        await sb.exec_script("docker compose up -d", max_retries=1, retry_exit_codes=(2,))
+    assert sb.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_exec_script_error_keeps_the_panic_header_and_the_tail(no_backoff):
+    sb = _ExitCodeSandbox([2], stderr=_PANIC)
+    with pytest.raises(RuntimeError) as exc:
+        await sb.exec_script("docker compose up -d")
+    message = str(exc.value)
+    assert "panic: concurrent map writes" in message
+    assert message.rstrip().endswith("readLoop(0xc0004e66c0)")
+    assert "chars elided" in message
+
+
+def test_clip_output_returns_text_that_fits_whole():
+    assert clip_output("short", 10) == "short"
+    assert clip_output("x" * 20, 10) == "x" * 20
+
+
+def test_clip_output_keeps_head_and_tail_around_a_marker():
+    text = "H" * 10 + "m" * 5 + "T" * 10
+    assert clip_output(text, 10) == "H" * 10 + "\n... [5 chars elided] ...\n" + "T" * 10
+
