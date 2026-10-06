@@ -35,12 +35,16 @@ from agent_env.env.bootstrap import (
 )
 from agent_env.env.env import Env
 from agent_env.env.envs._deployment import provider_or_class
+from agent_env.env.envs.mcp_server import MCPServerEnv
+from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.service_db import ServiceDBEnv
+from agent_env.env.envs.website import WebsiteEnv
 from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider, _gateway_topology
 from agent_env.providers.env_providers.env_server_provider import EnvironmentServerProvider
 from agent_env.providers.env_state.env_state_provider import LOCAL_POSTGRES_STATE_TYPE
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
+from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SandboxProvider,
     build_sandbox_provider,
@@ -146,6 +150,8 @@ class _Walk:
             env = Env.get(step.env_id, step.env_version)
         except NotFoundError:
             return  # the plan reports a store env that isn't there
+        if not isinstance(env, (MCPServerEnv, WebsiteEnv, MultiEnv)):
+            return  # an env type that deploys itself, as deploy_env's own preflight leaves it
         try:
             provider_class = provider_or_class(env)
         except (ValueError, KeyError):
@@ -160,17 +166,26 @@ class _Walk:
                 kinds.add(SERVICE_DB)
             if topology.website_configs:
                 kinds.add(WEBSITE_BROWSER)
-        elif issubclass(provider_class, EnvironmentServerProvider):
+        elif issubclass(provider_class, EnvironmentServerProvider) and isinstance(env, MCPServerEnv):
             images, kinds = [env.docker_image_artifact], set()
-        else:
-            return  # a plugin's provider, which deploys its own way
+        else:  # a plugin's provider, or one deploy_env's own preflight refuses for this env
+            return
         if _local_link(provider):
             self.infra |= kinds
             self.docker_users.append(where)
         if remote := _remote_links(provider):
             self._reachable(where, remote, [_Image(f"env {env.id!r}'s image {image.id!r}", _local_only(image)) for image in images])
-            if kinds:
-                self.remote_infra.append((where, remote[0], kinds))
+            # Modal's gateway runs each server in a container of its own, and can't serve websites.
+            containers = [link for link in remote if isinstance(link, ModalSandboxProvider)]
+            vms = [link for link in remote if link not in containers]
+            if WEBSITE_BROWSER in kinds and containers:
+                self.problems.append(f"{where}: deploys env {env.id!r}, which has websites, on the {_shown(containers[0])} "
+                                     "sandbox provider, whose gateway runs in containers and can't serve websites; run it "
+                                     "on a VM provider, such as --sandbox local")
+            if containers:
+                self.remote_infra.append((where, containers[0], kinds - {WEBSITE_BROWSER}))
+            if vms:
+                self.remote_infra.append((where, vms[0], kinds))
 
     def _agent(self, where: str, step: DeployAgentTaskStep, sandboxes: dict[str, DeploySandboxTaskStep]) -> None:
         if step.sandbox_name:
@@ -223,6 +238,8 @@ class _Walk:
             if (built := self.built.get(image_id)) is not None:
                 path = relative(self.plan.bundle.bundle.root, built.entry.path)
                 return _Image(what, f"it's built on this machine from {path}/{built.dockerfile}")
+            if image_id in self.written:
+                return None  # another of the bundle's writes, which materialize refuses or writes first
             return _Image(what, _local_only(DockerImageArtifact.get(image_id, image_version)))
         try:
             return _Image(what, _local_only(A2AAgent.get(agent_id, version).docker_image_artifact))

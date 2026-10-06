@@ -154,12 +154,15 @@ def put_command(kind: str) -> str:
 
 def infra_to_build(kinds: Iterable[str]) -> list[InfraBuild]:
     """The infra envs of ``kinds`` a run builds: each one missing from the store and, in local stores, each one another
-    agent-env release built, whose images may predate this release's gateway. Raises InfraError naming the put command
-    for each one missing from stores that aren't all local, which agent-env never builds into."""
+    agent-env release built from the Dockerfile it ships, whose images may predate this release's. Raises InfraError
+    naming the put command for each one missing from stores that aren't all local, which agent-env never builds into."""
+    kinds = _in_order(kinds)
+    if not kinds:
+        return []
     builds, problems = [], []
     local = stores_are_local()
     running = _agent_env_version()
-    for kind in _in_order(kinds):
+    for kind in kinds:
         env_id = default_env_id(kind)
         try:
             env = Env.get(env_id)
@@ -171,7 +174,7 @@ def infra_to_build(kinds: Iterable[str]) -> list[InfraBuild]:
                                 f"local stores; put it with `{put_command(kind)}`")
             continue
         built_by = (env.metadata or {}).get("agent_env_version")
-        if local and built_by and running and built_by != running:
+        if local and built_by and running and built_by != running and _built_from_stock(env, kind):
             builds.append(InfraBuild(kind, env_id, f"built by agent-env {built_by}, this is {running}"))
     if problems:
         raise InfraError(problems)
@@ -202,6 +205,17 @@ def stores_are_local() -> bool:
     return (isinstance(configured_store(config.get_document_store()), LocalSqliteDocumentStore)
             and isinstance(configured_store(config.get_object_store()), LocalFilesystemObjectStore)
             and isinstance(configured_store(config.get_image_store()), LocalRegistryImageStore))
+
+
+_STOCK_DOCKERFILES = {GATEWAY: GATEWAY_DOCKERFILE, SERVICE_DB: SERVICE_DB_DOCKERFILE, WEBSITE_BROWSER: WEBSITE_BROWSER_DOCKERFILE}
+
+
+def _built_from_stock(env: Env, kind: str) -> bool:
+    """Whether ``env`` was built from the Dockerfile agent-env ships for ``kind``, in this install or another one, as
+    the put commands record it; an env someone built from their own Dockerfile is theirs to rebuild."""
+    recorded = (env.metadata or {}).get("dockerfile_path")
+    shipped = _STOCK_DOCKERFILES[kind].relative_to(_ENV_PACKAGE.parent.parent).parts  # ("agent_env", "env", ...)
+    return recorded is not None and Path(recorded).parts[-len(shipped):] == shipped
 
 
 def _in_order(kinds: Iterable[str]) -> list[str]:

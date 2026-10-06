@@ -24,7 +24,9 @@ def puts(local_stores, monkeypatch):
             calls.append((kind, env_id, platform))
             artifact = get_artifact_store().put_document(DockerImageArtifact(
                 id=f"{kind}-{env_id}", description=kind, image_name=f"{kind}:v1", tar_gz_s3_url="file:///x.tar.gz"))
-            GatewayEnv.put(id=env_id, docker_image_artifact=artifact, metadata={"agent_env_version": "0.9.2"})
+            shipped = bootstrap._STOCK_DOCKERFILES[kind].relative_to(bootstrap._ENV_PACKAGE.parent.parent)
+            GatewayEnv.put(id=env_id, docker_image_artifact=artifact, metadata={
+                "agent_env_version": "0.9.2", "dockerfile_path": f"/another/install/site-packages/{shipped}"})
         return write
 
     for kind in (GATEWAY, SERVICE_DB, WEBSITE_BROWSER):
@@ -64,6 +66,22 @@ def test_infra_with_no_recorded_release_is_left_as_it_is(puts):
 
     assert ensure_default_envs([GATEWAY]) == []
     assert puts == []
+
+
+def test_an_env_built_from_someone_elses_dockerfile_is_theirs_to_rebuild(puts, monkeypatch):
+    artifact = get_artifact_store().put_document(DockerImageArtifact(
+        id="website-browser-website-browser", description="b", image_name="b:v1", tar_gz_s3_url="file:///b.tar.gz"))
+    GatewayEnv.put(id="website-browser", docker_image_artifact=artifact,
+                   metadata={"agent_env_version": "0.9.1", "dockerfile_path": "/home/me/my-browser/Dockerfile"})
+
+    assert ensure_default_envs([WEBSITE_BROWSER]) == []
+    assert puts == []
+
+
+def test_a_run_that_needs_no_infra_reads_no_store(monkeypatch):
+    monkeypatch.setattr(bootstrap, "stores_are_local", lambda: pytest.fail("read the configured stores"))
+
+    assert bootstrap.infra_to_build([]) == []
 
 
 def test_nothing_is_built_without_docker(puts, monkeypatch):
@@ -117,3 +135,4 @@ def test_up_reports_infra_it_cant_build_as_one_line(puts, monkeypatch):
     assert result.output.rstrip().endswith(
         "Error: building the service-db, gateway env needs docker, and docker isn't on PATH; or run "
         "`agent-env up --no-bootstrap`")
+

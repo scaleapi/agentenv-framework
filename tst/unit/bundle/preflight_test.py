@@ -5,6 +5,7 @@ agent, and the infra envs a gateway deploy on the local provider needs."""
 import asyncio
 import json
 import logging
+from typing import ClassVar
 
 import pytest
 from click.testing import CliRunner
@@ -15,9 +16,13 @@ from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store
 from agent_env.bundle import BundleError, dry_run_bundle, run_bundle
 from agent_env.cli import cli
-from agent_env.env import GatewayEnv, MCPServerEnv
+from agent_env.config.runtime import Config
+from agent_env.env import Env, GatewayEnv, MCPServerEnv, MultiEnv
+from agent_env.env import bootstrap
 from agent_env.env.envs.service_db import ServiceDBEnv
 from agent_env.env.envs.website import WebsiteEnv
+from agent_env.env.store import get_env_store
+from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
 from agent_env.store.routing import namespace_routing
 from agent_env.task_step.context import PromptResponse, TaskStepContext
@@ -67,12 +72,16 @@ def _env(id, where=LOCAL, **fields):
 
 
 def _infra(where=LOCAL, version=None):
-    metadata = {"agent_env_version": version} if version else None
+    def metadata(dockerfile):
+        return {"agent_env_version": version, "dockerfile_path": str(dockerfile)} if version else None
+
     with namespace_routing():
-        GatewayEnv.put(id="default", docker_image_artifact=_image("gateway-default", where), metadata=metadata)
+        GatewayEnv.put(id="default", docker_image_artifact=_image("gateway-default", where),
+                       metadata=metadata(bootstrap.GATEWAY_DOCKERFILE))
         ServiceDBEnv.put(id="default-db", db_docker_image_artifact=_image("service-db-default-db", where),
                          db_web_docker_image_artifact=_image("db-web-default-db", where),
-                         db_mcp_docker_image_artifact=_image("db-mcp-default-db", where), metadata=metadata)
+                         db_mcp_docker_image_artifact=_image("db-mcp-default-db", where),
+                         metadata=metadata(bootstrap.SERVICE_DB_DOCKERFILE))
 
 
 def _problems(fn):
@@ -179,6 +188,72 @@ def test_containers_on_the_local_provider_need_docker_and_a_vm_sandbox_doesnt(bu
     assert _problems(lambda: dry_run_bundle(bundle_dir, tasks=["agent", "hello"])) == [
         "the local sandbox provider runs containers for tasks/agent.json: step 'agent', and docker isn't on PATH",
     ]
+
+
+class _DeploysItself(Env):
+    """An env type with a deploy() of its own, as a plugin's env can have."""
+
+    type: ClassVar[str] = "deploys_itself_preflight_test"
+    description = "test"
+
+    @classmethod
+    def from_dict(cls, data):
+        return cls(id=data["id"], version=data.get("version"))
+
+    async def deploy(self, **kwargs):
+        raise NotImplementedError
+
+
+class _BuildsItsOwnGateway(_DeploysItself):
+    """One that sets up a gateway itself, with no image of its own."""
+
+    type: ClassVar[str] = "builds_its_own_gateway_preflight_test"
+
+    def __init__(self, id, version, metadata=None):
+        super().__init__(id, version, metadata=metadata)
+        self._env_provider = EnvironmentGatewayProvider()
+
+
+@pytest.mark.parametrize("cls", [_DeploysItself, _BuildsItsOwnGateway])
+def test_an_env_type_that_deploys_itself_is_left_to_its_own_deploy(bundle_dir, monkeypatch, cls):
+    registry = Config.env_registry
+    monkeypatch.setattr(Config, "env_registry", lambda self: {**registry(self), cls.type: cls})
+    with namespace_routing():
+        get_env_store().put_document(cls(id="plug", version=None))
+    _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "plug"}])
+
+    assert dry_run_bundle(bundle_dir, sandbox="modal").infra == ()
+
+
+def test_a_multi_env_on_the_server_provider_is_left_to_deploy_envs_own_refusal(bundle_dir):
+    crm = _env("crm")
+    with namespace_routing():
+        MultiEnv.put(id="both", mcp_server_envs=[crm], env_provider_type="server")
+    _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "both"}])
+
+    (problem,) = _problems(lambda: dry_run_bundle(bundle_dir, sandbox="modal"))
+    assert "deploys one MCP server, not a multi env" in problem
+
+
+def test_a_website_on_modal_is_refused_since_its_gateway_runs_in_containers(bundle_dir):
+    with namespace_routing():
+        WebsiteEnv.put(id="shop", backend_docker_image_artifact=_image("shop-back", REMOTE),
+                       frontend_docker_image_artifact=_image("shop-front", REMOTE), environment_name="shop")
+    _infra(REMOTE)
+    _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "shop"}])
+
+    assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox="modal")) == [
+        "tasks/t.json: step 'env': deploys env 'shop', which has websites, on the 'modal' sandbox provider, whose "
+        "gateway runs in containers and can't serve websites; run it on a VM provider, such as --sandbox local",
+    ]
+
+
+def test_an_agent_over_another_of_the_bundles_writes_gets_that_writes_own_refusal(bundle_dir):
+    layout(bundle_dir, {"artifacts/base/Dockerfile": "FROM scratch\n", "agents/solver/agent.toml": 'image = "base"\n'})
+    _task(bundle_dir, [AGENT])
+
+    assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox="modal")) == [
+        "artifacts/base: writing a docker_image artifact isn't supported yet"]
 
 
 # The default agent
@@ -323,6 +398,10 @@ _STEPS = {
 }
 _FIELDS = {"deploy_env": "sandbox_type", "deploy_agent": "sandbox_type", "deploy_sandbox": "sandbox_type",
            "rubrics_verifier": "judge_sandbox_type"}
+# What a step falls back to with no provider named: deploy_env's env through deploy_through_provider, the agents through
+# A2AAgent.deploy, deploy_sandbox itself.
+_DEFAULT_GETTERS = {"deploy_env": "get_env_sandbox_provider", "deploy_agent": "get_agent_sandbox_provider",
+                    "deploy_sandbox": "get_sandbox_provider", "rubrics_verifier": "get_agent_sandbox_provider"}
 _OVERRIDE_KEYS = {"deploy_env": "env_sandbox", "deploy_agent": "agent_sandbox", "deploy_sandbox": "sandbox",
                   "rubrics_verifier": "agent_sandbox"}
 
@@ -332,7 +411,7 @@ def _walked_spec(bundle_dir, monkeypatch, config, sandbox):
     seen = []
     monkeypatch.setattr(preflight_module, "build_sandbox_provider", lambda spec: seen.append(spec) or LocalSandboxProvider())
     for getter in ("get_env_sandbox_provider", "get_agent_sandbox_provider", "get_sandbox_provider"):
-        monkeypatch.setattr(preflight_module, getter, lambda: seen.append("default") or LocalSandboxProvider())
+        monkeypatch.setattr(preflight_module, getter, lambda getter=getter: seen.append(getter) or LocalSandboxProvider())
     _task(bundle_dir, [config])
     dry_run_bundle(bundle_dir, sandbox=sandbox)
     return seen[0]
@@ -377,5 +456,6 @@ def test_the_walk_resolves_each_deploys_provider_as_its_step_does(bundle_dir, mo
     walked = _walked_spec(bundle_dir, monkeypatch, config, sandbox)
     executed = _executed_spec(monkeypatch, kind, config, sandbox)
 
-    assert walked == executed == (sandbox or field or "default")
+    assert executed == (sandbox or field or "default")
+    assert walked == (sandbox or field or _DEFAULT_GETTERS[kind])
     assert _OVERRIDE_KEYS[kind]  # run_bundle sets every override key to --sandbox
