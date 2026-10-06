@@ -29,6 +29,7 @@ ROOT = "@local/~/triage"
 GREETING = f"{ROOT}/greeting"
 LAYOUT = {
     "envs/tickets/Dockerfile": "FROM scratch\n",
+    "envs/tickets/env.toml": 'environment_name = "tickets"\n',
     "envs/shelf/env.toml": 'type = "shelf_ledger_test"\ndata = "greeting"\n',
     "artifacts/greeting/hello.txt": "hello\n",
     "tasks/t.json": json.dumps([
@@ -161,7 +162,7 @@ def _steps(*extra):
 def test_a_rerun_reuses_every_version_whose_inputs_havent_changed(bundle_dir):
     first = _run(bundle_dir)
     assert {id: check.reasons for id, check in first.items()} == dict.fromkeys(
-        [f"{ROOT}/tickets", GREETING, f"{ROOT}/shelf", f"{ROOT}/t"], ("new",))
+        [f"{ROOT}/tickets__env_image", f"{ROOT}/tickets", GREETING, f"{ROOT}/shelf", f"{ROOT}/t"], ("new",))
 
     second = _run(bundle_dir)
 

@@ -15,6 +15,7 @@ from agent_env.task_step.task_step import TaskStep
 ROOT = "@local/~/triage"
 LAYOUT = {
     "envs/tickets/Dockerfile": "FROM scratch\n",
+    "envs/tickets/env.toml": 'environment_name = "tickets"\n',
     "agents/solver/Dockerfile": "FROM scratch\n",
     "artifacts/greeting/hello.txt": "hello\n",
     "artifacts/greeting/check.py": "print('ok')\n",
@@ -331,14 +332,15 @@ def test_an_eval_type_other_than_eval_is_refused(make):
 
 def test_a_toml_names_envs_and_images_in_the_bundle_or_the_store(make):
     toml = ('type = "composite_test"\nmcp_server_envs = ["tickets", { env = "crm", version = 2 }]\n'
-            'image = "base-mcp"\n')
+            'image = "base-mcp"\nbackend_image = { artifact = "store-backend", version = 4 }\n')
     entry = resolved(make(files={"envs/both/env.toml": toml}), "both")
     assert entry.config == {"type": "composite_test", "mcp_server_envs": [f"{ROOT}/tickets", {"env": "crm", "version": 2}],
-                            "image": f"{ROOT}/base-mcp"}
+                            "image": f"{ROOT}/base-mcp", "backend_image": {"artifact": "store-backend", "version": 4}}
     assert refs(entry) == [
         (EntityKind.ENV, f"{ROOT}/tickets", None, "tickets"),
         (EntityKind.ENV, "crm", 2, None),
         (EntityKind.ARTIFACT, f"{ROOT}/base-mcp", None, "base-mcp"),
+        (EntityKind.ARTIFACT, "store-backend", 4, None),
     ]
 
 
@@ -365,7 +367,8 @@ def test_an_agent_names_a_store_image_or_builds_its_folder(make):
     solver, judge = (next(e for e in result.entries if e.entry.name == name) for name in ("solver", "judge"))
     assert (solver.config, judge.config) == (
         {"image": f"{ROOT}/solver__agent_image"}, {"image": {"artifact": "claude-image", "version": 3}})
-    assert result.built_images == (BuiltImage(f"{ROOT}/solver__agent_image", solver.entry, "Dockerfile"),)
+    assert [image for image in result.built_images if image.entry.kind is BundleKind.AGENT] == [
+        BuiltImage(f"{ROOT}/solver__agent_image", solver.entry, "Dockerfile")]
     assert (refs(solver), refs(judge)) == (
         [(EntityKind.ARTIFACT, f"{ROOT}/solver__agent_image", None, "Dockerfile")],
         [(EntityKind.ARTIFACT, "claude-image", 3, None)],
@@ -386,12 +389,13 @@ def test_an_agent_names_a_store_image_or_builds_its_folder(make):
      "or { env = \"<id>\", version = <n> }, the version optional, not {'env': 'crm', 'extra': 1}"),
 ])
 def test_a_bad_toml_reference_is_refused(make, toml, problem):
-    bundle = make(files={"envs/web/env.toml": f'type = "composite_test"\n{toml}\n'})
+    bundle = make(files={"envs/web/env.toml": f'type = "composite_test"\n{toml}\n', "envs/web/Dockerfile.backend": "FROM x\n"})
     assert problems(bundle) == (f"envs/web: {problem}",)
 
 
-def test_an_image_left_out_needs_a_dockerfile_to_build(make):
+def test_an_image_left_out_needs_its_dockerfile_to_build_image_for_image_and_dockerfile_role_for_role_image(make):
     assert problems(make(files={"envs/web/env.toml": 'type = "composite_test"\n'})) == (
+        "envs/web: backend_image: there is no 'Dockerfile.backend' in this folder to build",
         "envs/web: image: there is no 'Dockerfile' in this folder to build",
     )
 
@@ -433,11 +437,11 @@ def test_every_problem_is_reported_together(make):
 
 def test_entities_without_references_resolve_to_a_copy_of_their_config(make):
     result = resolve_bundle(make())
-    assert {(e.entry.kind, e.entry.name): e.references for e in result.entries if e.entry.kind is not BundleKind.AGENT} == {
-        (BundleKind.ENV, "tickets"): (), (BundleKind.ARTIFACT, "greeting"): (),
-        (BundleKind.ARTIFACT, "base-mcp"): (), (BundleKind.SKILL, "pdf"): (),
+    built = (BundleKind.AGENT, BundleKind.ENV)  # each names the image built from its folder
+    assert {(e.entry.kind, e.entry.name): e.references for e in result.entries if e.entry.kind not in built} == {
+        (BundleKind.ARTIFACT, "greeting"): (), (BundleKind.ARTIFACT, "base-mcp"): (), (BundleKind.SKILL, "pdf"): (),
     }
-    assert [image.entry.kind for image in result.built_images] == [BundleKind.AGENT]
+    assert {image.entry.kind for image in result.built_images} == set(built)
 
 
 @pytest.mark.parametrize(("depends_on", "problem"), [

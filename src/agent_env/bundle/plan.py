@@ -18,8 +18,15 @@ from typing import Any
 from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact import Artifact, FileArtifact, FileArtifactUniverse
 from agent_env.artifact.registry import canonical_type, get_artifact_registry
+from agent_env.config import get_config
 from agent_env.entity_refs import EntityKind
 from agent_env.env.env import Env
+from agent_env.env.envs.mcp_server import MCPServerEnv
+from agent_env.env.envs.multi_env import MultiEnv
+from agent_env.env.envs.website import WebsiteEnv
+from agent_env.env.registry import get_env_registry
+from agent_env.env.store import ENVS_COLLECTION
+from agent_env.store import Filter, Sort
 from agent_env.store.base import NotFoundError
 from agent_env.store.ids import LOCAL_PREFIX
 from agent_env.store.routing import namespace_routing_enabled
@@ -38,6 +45,9 @@ _GETTERS = {EntityKind.ENV: Env.get, EntityKind.AGENT: A2AAgent.get, EntityKind.
 
 # The artifact types written from their folder's files, and how each lists them.
 _FOLDER_WALKS = {FileArtifact: entry_file, FileArtifactUniverse: entry_files}
+# The env types whose from_toml reads only the toml and what it names, so a type built by one of them is written from
+# its env.toml and the ledger can list what it's made from.
+_ENV_FROM_TOMLS = (Env, MCPServerEnv, WebsiteEnv, MultiEnv)
 
 _NOTHING_TO_RUN = "this bundle has no tasks or evals to run"
 
@@ -94,6 +104,7 @@ class _Planner:
         self.identified = {entry.entry.id: entry.entry for entry in resolved.entries}
         self.outputs = {(output.kind.value, output.id): (entry.entry, output)
                         for entry in resolved.entries for output in entry.outputs}
+        self.accepted: dict[_Key, dict] = {}  # each agent's and env's toml, as its type accepted it
 
     def _add(self, key: _Key, source: ResolvedEntry | BuiltImage, needs: list[_Key]) -> None:
         """Record a write in bundle order, a built image just before the entry that builds it."""
@@ -107,6 +118,8 @@ class _Planner:
         store_refs, store_latest = self._check_store_refs(closure)
         self._build_tasks(closure)
         self._check_files(closure)
+        self._check_env_types(closure)
+        self._check_multi_names(closure, store_latest)
         if self.problems:
             raise BundleError(self.problems)
         return Plan(self.resolved, self._ordered(closure), tuple(selected_tasks), tuple(selected_evals), store_refs,
@@ -265,17 +278,20 @@ class _Planner:
         return None
 
     def _check_files(self, closure: set[_Key]) -> None:
-        """List the folder of each file artifact, and read its toml and each agent's the way their writes
-        will, so a link that leaves the bundle or a key the type doesn't take fails before anything is
+        """List the folder of each file artifact, and read its toml and each agent's and env's the way their
+        writes will, so a link that leaves the bundle or a key the type doesn't take fails before anything is
         written."""
         registry = get_artifact_registry()
         for key in sorted(closure, key=self.rank.__getitem__):
             source = self.nodes[key]
             if isinstance(source, BuiltImage):
                 continue
-            if source.entry.kind is BundleKind.AGENT:
+            if source.entry.kind in (BundleKind.AGENT, BundleKind.ENV):
+                agent = source.entry.kind is BundleKind.AGENT
+                accept = A2AAgent.accept_toml if agent else self._env_accept(source.entry)
                 try:
-                    A2AAgent.accept_toml(source.config, AuthoringContext(self.resolved.bundle, source.entry))
+                    if accept is not None:
+                        self.accepted[key] = accept(source.config, AuthoringContext(self.resolved.bundle, source.entry))
                 except BundleError as e:
                     self.problems.extend(e.problems)
                 continue
@@ -293,6 +309,56 @@ class _Planner:
                 AuthoringContext(self.resolved.bundle, source.entry).accept(source.config, **cls.toml_keys)
             except BundleError as e:
                 self.problems.extend(e.problems)
+
+    def _env_accept(self, entry: BundleEntry) -> Any:
+        """How ``entry``'s env type checks its env.toml, when it's an env written from one and checks it at all."""
+        cls = get_env_registry().get(entry.type) if entry.kind is BundleKind.ENV else None
+        return getattr(cls, "accept_toml", None) if env_writer(cls) else None
+
+    def _check_env_types(self, closure: set[_Key]) -> None:
+        """An env keeps its type across versions, so an env folder whose id is another type of env in the store
+        is refused here, not by the store once earlier entities are written."""
+        store = get_config().get_document_store()
+        for key in sorted(closure, key=self.rank.__getitem__):
+            source = self.nodes[key]
+            if isinstance(source, BuiltImage) or source.entry.kind is not BundleKind.ENV:
+                continue
+            latest = Sort.by("version", descending=True)
+            stored = store.find_one(ENVS_COLLECTION, Filter.of(id=source.entry.id), sort=latest)
+            if stored is not None and stored.get("type") not in (None, source.entry.type):
+                self.problems.append(f"{self._path(source.entry)}: {source.entry.id!r} is "
+                                     f"{with_article(stored.get('type'))} env in the store, and an env keeps its type "
+                                     "across versions; rename the folder")
+
+    def _check_multi_names(self, closure: set[_Key], store_latest: dict[tuple[EntityKind, str], int]) -> None:
+        """A multi's MCP servers each need their own environment_name, as its websites do: each is a container of
+        its deploy, named by it."""
+        for key in sorted(closure, key=self.rank.__getitem__):
+            source = self.nodes[key]
+            if isinstance(source, BuiltImage) or source.entry.kind is not BundleKind.ENV:
+                continue
+            if not issubclass(get_env_registry().get(source.entry.type, Env), MultiEnv):
+                continue
+            first: dict[tuple[str, str], str] = {}
+            for ref in source.references:
+                name = self._environment_name(ref, store_latest)
+                group = ref.where.partition("[")[0]
+                if name is None:
+                    continue
+                if (group, name) in first:
+                    self.problems.append(f"{self._path(source.entry)}: {ref.where}: environment_name {name!r} is also "
+                                         f"{first[group, name]}'s; each of a multi's {group} needs its own")
+                else:
+                    first[group, name] = ref.where
+
+    def _environment_name(self, ref: Reference, store_latest: dict[tuple[EntityKind, str], int]) -> str | None:
+        if ref.local is not None:
+            return self.accepted.get(_key(ref.local), {}).get("environment_name")
+        try:
+            env = Env.get(ref.id, ref.version if ref.version is not None else store_latest.get((ref.kind, ref.id)))
+        except (NotFoundError, ValueError, KeyError, TypeError):
+            return None  # reported by the store ref check
+        return getattr(env, "environment_name", None)
 
     def _build_tasks(self, closure: set[_Key]) -> None:
         """Build each task's steps the way a write will, so a bad step fails before anything is written."""
@@ -349,6 +415,12 @@ def unpinned_store_refs(plan: Plan, write: Write) -> dict[tuple[EntityKind, str]
         return {}
     return {(ref.kind, ref.id): plan.store_latest[ref.kind, ref.id]
             for ref in write.source.references if ref.local is None and ref.version is None}
+
+
+def env_writer(cls: type | None) -> bool:
+    """Whether an env of type ``cls`` is written from its env.toml, by a ``from_toml`` that reads only the toml and
+    what it names: its own, or one it inherits from a core env type."""
+    return cls is not None and next(c for c in cls.__mro__ if "from_toml" in vars(c)) in _ENV_FROM_TOMLS
 
 
 def folder_walk(cls: type | None) -> Any:

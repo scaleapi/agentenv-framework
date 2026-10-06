@@ -12,6 +12,7 @@ from typing import Any, NoReturn, TypeVar, overload
 from agent_env.artifact.artifact import Artifact
 from agent_env.entity_refs import EntityKind, parse_toml_ref
 from agent_env.env.env import Env
+from agent_env.utils.card_naming import card_names_in_files
 
 from ._fs import os_reason, relative, show, with_article
 from .parse import CONFIG_FILES, LEAVINGS, NAMED_BY, Bundle, BundleEntry, BundleError
@@ -20,7 +21,13 @@ A = TypeVar("A", bound=Artifact)
 E = TypeVar("E", bound=Env)
 
 _BRING_IT_IN = "copy what it points to into the bundle, or put it in a store and refer to it by id"
-_TOML_TYPES = {str: "a string", dict: "a table"}
+_TOML_TYPES = {str: "a string", dict: "a table", list: "a list"}
+
+
+def default_dockerfile(key: str) -> str:
+    """The Dockerfile an image key left out builds from the entry's folder: ``Dockerfile`` for ``image``, and
+    ``Dockerfile.<role>`` for ``<role>_image``, as a website's ``backend_image`` and ``frontend_image``."""
+    return "Dockerfile" if key == "image" else f"Dockerfile.{key.removesuffix('_image')}"
 
 
 @dataclass(frozen=True)
@@ -49,6 +56,19 @@ class AuthoringContext:
 
     def file(self) -> tuple[str, Path]:
         return entry_file(self.bundle, self.entry)
+
+    def card_names(self, image_key: str) -> list[str] | None:
+        """The names ``@environment_card(name=...)`` gives in the source of the image ``image_key`` builds from
+        this folder: the ``.py`` files of its build context, those in its Dockerfile's folder first. None when the
+        key names an image rather than building one."""
+        value = self.entry.config.get(image_key) if isinstance(self.entry.config, dict) else None
+        if value is None:
+            dockerfile = default_dockerfile(image_key)
+        elif isinstance(value, dict) and value.keys() == {"dockerfile"} and isinstance(value["dockerfile"], str):
+            dockerfile = value["dockerfile"]
+        else:
+            return None
+        return card_names_in_files(build_context_files(self.bundle, self.entry), dockerfile)
 
     def accept(self, data: dict, /, **takes: type) -> dict:
         """The keys of ``data`` a type takes, each checked against the type given; any other key but

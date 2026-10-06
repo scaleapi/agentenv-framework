@@ -22,7 +22,6 @@ from agent_env.a2a_agent.store import A2A_AGENTS_COLLECTION
 from agent_env.artifact.registry import canonical_type, get_artifact_registry
 from agent_env.artifact.store import ARTIFACTS_COLLECTION
 from agent_env.config import get_config
-from agent_env.env.env import Env
 from agent_env.env.registry import get_env_registry
 from agent_env.env.store import ENVS_COLLECTION
 from agent_env.eval.store import EVALS_COLLECTION
@@ -33,7 +32,7 @@ from agent_env.task.store import TASKS_COLLECTION
 
 from .authoring import build_context_files, entry_files
 from .parse import Bundle, BundleKind
-from .plan import Plan, Write, folder_walk, keeps_base_from_toml, unpinned_store_refs
+from .plan import Plan, Write, env_writer, folder_walk, unpinned_store_refs
 from .resolve import BuiltImage
 
 LEDGER_COLLECTION = "bundle_ledger"
@@ -200,8 +199,8 @@ def materializing(bundle: Bundle, on_wait: Callable[[], None] | None = None) -> 
 
 def _tracked(write: Write) -> bool:
     """Whether the ledger can list everything ``write`` is made from. Not yet for a skill, nor for a type with
-    a ``from_toml`` of its own, which may read its folder in ways it can't see. An agent is made from its
-    agent.toml alone: its image is a reference. A built image is made from its build context,
+    a ``from_toml`` of its own, which may read its folder in ways it can't see. An agent or env is made from its
+    toml alone: its images and envs are references. A built image is made from its build context,
     ``build_context_files``; what the build fetches (its base image, packages) isn't an input."""
     if isinstance(write.source, BuiltImage):
         return True
@@ -210,8 +209,7 @@ def _tracked(write: Write) -> bool:
     if write.kind is BundleKind.ARTIFACT:
         return folder_walk(get_artifact_registry().get(_type(write))) is not None
     if write.kind is BundleKind.ENV:
-        cls = get_env_registry().get(_type(write))
-        return cls is not None and keeps_base_from_toml(cls, Env)
+        return env_writer(get_env_registry().get(_type(write)))
     return True
 
 

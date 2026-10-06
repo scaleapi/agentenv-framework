@@ -62,6 +62,7 @@ class EntityRef:
     version_field: str | None = None
     role: RefRole = RefRole.INPUT
     artifact_type: str | None = None
+    env_type: str | None = None
     walk: Walker | None = None
 
     @classmethod
@@ -92,6 +93,8 @@ class EntityRef:
             raise ValueError(f"entity ref {self.path!r}: a list element has no sibling key to hold a version")
         if self.artifact_type is not None and self.kind is not EntityKind.ARTIFACT:
             raise ValueError(f"entity ref {self.path!r}: artifact_type is only for EntityKind.ARTIFACT")
+        if self.env_type is not None and self.kind is not EntityKind.ENV:
+            raise ValueError(f"entity ref {self.path!r}: env_type is only for EntityKind.ENV")
 
     @property
     def field(self) -> str:

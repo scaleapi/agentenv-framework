@@ -27,6 +27,7 @@ from tst.unit.store.fakes import FakeDocumentStore
 ROOT = "@local/~/triage"
 LAYOUT = {
     "envs/tickets/Dockerfile": "FROM scratch\n",
+    "envs/tickets/env.toml": 'environment_name = "tickets"\n',
     "agents/solver/Dockerfile": "FROM scratch\n",
     "artifacts/greeting/hello.txt": "hello\n",
     "artifacts/greeting/check.py": "print('ok')\n",
@@ -152,7 +153,8 @@ def test_a_bundle_without_evals_runs_every_task_and_writes_only_what_they_reach(
         "t": [deploy("tickets"), load("greeting"),
               {"id": "agent", "type": "deploy_agent", "env_ids": ["tickets"], "a2a_agent_id": "solver"}],
     }))
-    assert writes(plan) == [(BundleKind.ENV, f"{ROOT}/tickets"), (BundleKind.ARTIFACT, f"{ROOT}/solver__agent_image"),
+    assert writes(plan) == [(BundleKind.ARTIFACT, f"{ROOT}/tickets__env_image"), (BundleKind.ENV, f"{ROOT}/tickets"),
+                            (BundleKind.ARTIFACT, f"{ROOT}/solver__agent_image"),
                             (BundleKind.AGENT, f"{ROOT}/solver"), (BundleKind.ARTIFACT, f"{ROOT}/greeting"),
                             (BundleKind.TASK, f"{ROOT}/t")]
     assert set(plan.writes[-1].needs) == {("env", f"{ROOT}/tickets"), ("agent", f"{ROOT}/solver"),
@@ -163,7 +165,8 @@ def test_a_bundle_without_evals_runs_every_task_and_writes_only_what_they_reach(
 def test_a_bundle_with_evals_runs_every_eval_and_writes_the_tasks_they_name(make):
     plan = plan_bundle(make(tasks={"t": [deploy("tickets")], "u": [deploy("tickets")]},
                             evals={"regression": 'tasks = ["t"]'}))
-    assert writes(plan) == [(BundleKind.ENV, f"{ROOT}/tickets"), (BundleKind.TASK, f"{ROOT}/t"),
+    assert writes(plan) == [(BundleKind.ARTIFACT, f"{ROOT}/tickets__env_image"), (BundleKind.ENV, f"{ROOT}/tickets"),
+                            (BundleKind.TASK, f"{ROOT}/t"),
                             (BundleKind.EVAL, f"{ROOT}/regression")]
     assert plan.writes[-1].needs == (("task", f"{ROOT}/t"),)
     assert (plan.tasks, names(plan.evals)) == ((), ["regression"])
@@ -199,10 +202,11 @@ def test_each_write_comes_after_what_it_references(make):
     plan = plan_bundle(make(tasks={"t": [deploy("both")]}, files={
         "envs/both/Dockerfile": "FROM scratch\n", "envs/both/env.toml": composite(mcp_server_envs=["tickets"]),
     }))
-    assert writes(plan) == [(BundleKind.ARTIFACT, f"{ROOT}/both__env_image"), (BundleKind.ENV, f"{ROOT}/tickets"),
+    assert writes(plan) == [(BundleKind.ARTIFACT, f"{ROOT}/both__env_image"),
+                            (BundleKind.ARTIFACT, f"{ROOT}/tickets__env_image"), (BundleKind.ENV, f"{ROOT}/tickets"),
                             (BundleKind.ENV, f"{ROOT}/both"), (BundleKind.TASK, f"{ROOT}/t")]
     assert plan.writes[0].needs == ()
-    assert plan.writes[2].needs == (("artifact", f"{ROOT}/both__env_image"), ("env", f"{ROOT}/tickets"))
+    assert plan.writes[3].needs == (("artifact", f"{ROOT}/both__env_image"), ("env", f"{ROOT}/tickets"))
 
 
 @pytest.mark.parametrize(("files", "problem"), [

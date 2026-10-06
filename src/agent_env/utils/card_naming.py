@@ -2,6 +2,7 @@
 
 import ast
 import posixpath
+from collections.abc import Mapping
 from pathlib import Path
 
 import httpx
@@ -66,6 +67,24 @@ def _github_card_names(client: httpx.Client, owner: str, repo: str, ref: str | N
             if download_url:
                 found |= _card_names_in_source(client.get(download_url).text)
     return sorted(found)
+
+
+def card_names_in_files(files: Mapping[str, Path], dockerfile: str) -> list[str]:
+    """The names `@environment_card(name="...")` gives in the `.py` files among ``files``, keyed by POSIX path: in
+    those in the Dockerfile's folder, else in all of them, as `card_name_from_source` reads a folder."""
+    folder = posixpath.dirname(dockerfile)
+    sources = {key: path for key, path in files.items() if key.endswith(".py")}
+    near = {key: path for key, path in sources.items() if not folder or key.startswith(f"{folder}/")}
+    for chosen in (near, sources):
+        found: set[str] = set()
+        for path in chosen.values():
+            try:
+                found |= _card_names_in_source(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError):
+                continue
+        if found:
+            return sorted(found)
+    return []
 
 
 def _scan_environment_card_names(root: Path) -> list[str]:

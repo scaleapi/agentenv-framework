@@ -18,6 +18,8 @@ from typing import Any
 from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact.registry import canonical_type, get_artifact_registry
 from agent_env.entity_refs import EntityKind, EntityRef, RefRole, RefSite, parse_toml_ref, ref_sites
+from agent_env.env.envs.gateway_server import GatewayEnv
+from agent_env.env.envs.service_db import ServiceDBEnv
 from agent_env.env.registry import get_env_registry
 from agent_env.eval.eval import Eval
 from agent_env.plugins import _registration
@@ -26,10 +28,13 @@ from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_step import TaskStep, attach_retry_config, dependencies
 
 from ._fs import fold, relative, show
+from .authoring import default_dockerfile
 from .parse import NAMED_BY, Bundle, BundleEntry, BundleError, BundleKind
 
 # Step keys that hold step ids, never entity ids.
 _STEP_ID_KEYS = ("id", "type", "depends_on")
+# The env types config names one of, for every deploy that needs one, by the setting that names it.
+_INFRA_ENVS = {GatewayEnv.type: "default_gateway_env_id", ServiceDBEnv.type: "default_service_db_env_id"}
 
 
 @dataclass(frozen=True)
@@ -51,7 +56,7 @@ class Reference:
     version: int | None
     local: BundleEntry | BuiltImage | None
     where: str  # the referencing field, as problems name it
-    artifact_type: str | None  # the type the field takes, when it names one
+    artifact_type: str | None  # the type the field takes, when it names one: an artifact's, or an env's
 
 
 @dataclass(frozen=True)
@@ -195,6 +200,10 @@ class _Resolver:
     def _toml_class(self, entry: BundleEntry) -> type:
         group = None
         if entry.kind is BundleKind.ENV:
+            if entry.type in _INFRA_ENVS:
+                self._problem(entry, f"a {entry.type} env isn't written from a bundle: config names the one every "
+                              f"deploy uses ({_INFRA_ENVS[entry.type]}), and a run builds it when it's missing")
+                raise _Skip
             cls, group = get_env_registry().get(entry.type), _registration.ENVS
         elif entry.kind is BundleKind.AGENT:
             cls = A2AAgent if entry.type == A2AAgent.type else None
@@ -218,10 +227,14 @@ class _Resolver:
         if isinstance(value, dict) and "ref" in value:
             self._problem(entry, f"{ref.path}: an external image ({{ ref = ... }}) isn't supported yet")
             return True
-        if value is None and ref.path == "image":
-            dockerfile = "Dockerfile"
+        if value is None:
+            dockerfile = default_dockerfile(ref.path)
         elif isinstance(value, dict) and value.keys() == {"dockerfile"}:
             dockerfile = value["dockerfile"]
+        elif isinstance(value, dict) and "dockerfile" in value:
+            extra = ", ".join(sorted(value.keys() - {"dockerfile"}))
+            self._problem(entry, f"{ref.path}: an image built from this folder takes only dockerfile, not {extra}")
+            return True
         else:
             return False
         path = entry.path / dockerfile if isinstance(dockerfile, str) and dockerfile else None
@@ -309,7 +322,7 @@ class _Resolver:
     def _resolve(self, entry: BundleEntry, site: RefSite, where: str, name: str, version: int | None,
                  outputs: dict[tuple[EntityKind, str], Output], upstream: set[int],
                  references: list[Reference]) -> None:
-        kind, expected, key = site.ref.kind, site.ref.artifact_type, _nfc(name)
+        kind, expected, key = site.ref.kind, site.ref.artifact_type or site.ref.env_type, _nfc(name)
         output = outputs.get((kind, key))
         if output is not None:
             if output.step not in upstream:
