@@ -224,7 +224,7 @@ class TestExecArgs:
         return _exec_args(type("S", (), {"mode": mode})(), container, ("find", "/app"))
 
     def test_vm_with_container_execs_into_it(self):
-        assert self._args("vm", "agent-api") == ("sudo", "docker", "exec", "agent-api", "find", "/app")
+        assert self._args("vm", "agent-api") == ("sudo", "docker", "exec", "-u", "0", "agent-api", "find", "/app")
 
     def test_vm_without_container_still_sudoes(self):
         assert self._args("vm", None) == ("sudo", "find", "/app")

@@ -28,6 +28,7 @@ import shlex
 import uuid
 from typing import ClassVar, Optional
 
+from agent_env.providers.sandbox_providers.sandbox import VmSandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_VM,
     build_sandbox_provider,
@@ -118,13 +119,21 @@ class VerifySandboxTaskStep(TaskStep):
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         on_agent = self.sandbox_name is None
-        sandbox = await (self._agent_sandbox(context) if on_agent else self._deployed_sandbox(context))
+        if on_agent:
+            sandbox = await self._agent_sandbox(context)
+        else:
+            deployed, sandbox = await self._deployed_sandbox(context)
         logger.info(f"Connected to sandbox {sandbox.sandbox_id} (mode={sandbox.mode})")
-        container = (
-            await find_agent_container(sandbox)
-            if on_agent and sandbox.mode == SANDBOX_MODE_VM
-            else None
-        )
+        if on_agent:
+            container = await find_agent_container(sandbox) if sandbox.mode == SANDBOX_MODE_VM else None
+        else:
+            # A container-mode sandbox on a VM-backed provider runs its image beside the host, and reattaches as a VM:
+            # its files are reached in the container, decided by the mode deploy_sandbox recorded.
+            container = (
+                sandbox.container_name
+                if deployed.sandbox_mode != SANDBOX_MODE_VM and isinstance(sandbox, VmSandbox)
+                else None
+            )
         if container:
             logger.info(f"Using agent container: {container}")
 
@@ -204,7 +213,7 @@ class VerifySandboxTaskStep(TaskStep):
             if deployed.sandbox_type
             else get_sandbox_provider()
         )
-        return await provider.get_sandbox(deployed.sandbox_id)
+        return deployed, await provider.get_sandbox(deployed.sandbox_id)
 
     async def _eval_criterion(self, sandbox, container: Optional[str], criterion: dict) -> dict:
         rtype = criterion["type"]
