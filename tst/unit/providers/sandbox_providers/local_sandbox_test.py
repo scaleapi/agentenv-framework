@@ -691,6 +691,8 @@ async def test_exec_leaves_a_docker_exec_script_naming_the_containers_app_alone(
     ("docker cp /tmp/x/. agent-local-1:/app/files", "docker cp /tmp/x/. agent-local-1:/app/files"),
     ("docker cp agent-local-1:/app/out.txt /app/out.txt", "docker cp agent-local-1:/app/out.txt /tmp/agent-env-work/out.txt"),
     ("docker cp /tmp/x c:'/app/a b'", "docker cp /tmp/x c:'/app/a b'"),
+    ("docker cp /tmp/x 'agent-local-1:/app/files'", "docker cp /tmp/x 'agent-local-1:/app/files'"),
+    ('docker cp /tmp/x "agent-local-1:/app/files"', 'docker cp /tmp/x "agent-local-1:/app/files"'),
     ("docker run -v /app/h:/app/c img", "docker run -v /tmp/agent-env-work/h:/app/c img"),
     ("docker run --volume=data:/app img", "docker run --volume=data:/app img"),
 ])
