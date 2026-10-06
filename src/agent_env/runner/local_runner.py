@@ -30,6 +30,10 @@ class LocalRunner(Runner):
     # How long a run's teardown may take, from when it starts: each sandbox gets TERMINATE_TIMEOUT_SECONDS,
     # and the folder of a local one is removed after that, outside it.
     TEARDOWN_WAIT_SECONDS = 2 * TERMINATE_TIMEOUT_SECONDS
+    # How long stop() gives a cancelled run to unwind its steps and reach its teardown.
+    STOP_WAIT_SECONDS = 60
+    # After those waits, how long stop() gives a run it cancels again before shutting down without it.
+    ABANDON_WAIT_SECONDS = 1
 
     def __init__(self, workers: int = 2) -> None:
         if workers < 1:
@@ -54,14 +58,22 @@ class LocalRunner(Runner):
             logger.info("Failed %d run(s) left non-terminal by a previous process", orphaned)
 
     async def stop(self) -> None:
-        """Cancel the runs still working and wait for every run, letting a teardown under way finish; each bounds
-        its own teardown by TEARDOWN_WAIT_SECONDS."""
+        """Cancel the runs still working and wait for every run, letting a teardown under way finish: each bounds
+        its own teardown by TEARDOWN_WAIT_SECONDS. A run still going after a run's whole allowance, a step that
+        ignored its cancel or a teardown that never ended, is cancelled again and left behind."""
         self._stopping = True
         for run_id, task in list(self._inflight.items()):
             if run_id not in self._tearing_down:
                 task.cancel()
         if self._inflight:
-            await asyncio.gather(*self._inflight.values(), return_exceptions=True)
+            _, stuck = await asyncio.wait(
+                list(self._inflight.values()), timeout=self.STOP_WAIT_SECONDS + self.TEARDOWN_WAIT_SECONDS)
+            if stuck:
+                logger.warning("Shutting down without %d run(s) that didn't finish; what they deployed may still be up",
+                               len(stuck))
+                for task in stuck:
+                    task.cancel()
+                await asyncio.wait(stuck, timeout=self.ABANDON_WAIT_SECONDS)
         self._inflight.clear()
 
     # --- Runner API --------------------------------------------------------

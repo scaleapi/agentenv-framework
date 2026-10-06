@@ -407,3 +407,43 @@ async def test_a_teardown_gets_its_whole_wait_however_long_the_run_took_to_stop(
     await asyncio.wait_for(runner.stop(), 5)
 
     assert finished == [handle.run_id]
+
+
+
+@pytest.mark.asyncio
+async def test_stop_ends_even_when_a_step_ignores_its_cancel(docs, monkeypatch):
+    from agent_env.runner import local_runner
+    from agent_env.task.teardown import TeardownReport
+
+    async def teardown_run(context):
+        return TeardownReport()
+
+    started = asyncio.Event()
+
+    loop = asyncio.get_running_loop()
+    gives_up_at = loop.time() + 1.5
+
+    async def stubborn(_):
+        started.set()
+        while loop.time() < gives_up_at:  # swallows every cancel for 1.5 s, then ends so the loop can close
+            try:
+                await asyncio.sleep(gives_up_at - loop.time())
+            except asyncio.CancelledError:
+                continue
+
+    monkeypatch.setattr(local_runner, "teardown_run", teardown_run)
+    monkeypatch.setattr(LocalRunner, "STOP_WAIT_SECONDS", 0.2)
+    monkeypatch.setattr(LocalRunner, "TEARDOWN_WAIT_SECONDS", 0.1)
+    monkeypatch.setattr(LocalRunner, "ABANDON_WAIT_SECONDS", 0.1)
+    _install_task(monkeypatch, _FakeTask(on_run=stubborn))
+    runner = LocalRunner(workers=1)
+    await runner.start()
+    await runner.submit("t1", 1)
+    await asyncio.wait_for(started.wait(), 5)
+
+    stopping = loop.time()
+    await asyncio.wait_for(runner.stop(), 5)
+
+    assert loop.time() - stopping < 1.0, "stop() waited for the step that ignored its cancel"
+    assert not runner._inflight
+    await asyncio.sleep(1.6)  # let the abandoned run end before the loop closes
