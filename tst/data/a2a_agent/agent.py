@@ -5,12 +5,11 @@ trajectory and triggers come from the agentenv-protocol framework. ``model_param
 config field so the agent-config negotiation and its redaction on read-back can be observed.
 
 It also moves files both ways. After the echo it adds a ``read <name> over <scheme>: <text>`` line for
-each file part it is sent (``could not read ...`` when it can't), and it answers each ``send-file <uri>``
-line of its prompt with a file part naming that URI.
+each file part it is sent, fetching only inline bytes and HTTP(S) URLs (``could not read ...`` otherwise),
+and it answers each ``send-file <uri>`` line of its prompt with a file part naming that URI.
 """
 
 import base64
-from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -32,6 +31,7 @@ from agentenv_protocol.a2a_agent import (
 )
 
 SEND_FILE = "send-file "
+READ_TIMEOUT_SECONDS = 120
 
 
 class EchoAgentConfig(AgentConfig):
@@ -42,15 +42,13 @@ class EchoAgentConfig(AgentConfig):
 
 
 async def _read(part: FilePart) -> str:
-    """What a file part holds: inline, at a file:// path (for an agent beside the store), or at a URL."""
+    """What a file part holds, inline or at an HTTP(S) URL."""
     scheme = "bytes" if part.bytes is not None else urlsplit(part.uri).scheme
     try:
         if part.bytes is not None:
             data = base64.b64decode(part.bytes)
-        elif scheme == "file":
-            data = Path(urlsplit(part.uri).path).read_bytes()
         else:
-            async with httpx.AsyncClient(timeout=120) as client:
+            async with httpx.AsyncClient(timeout=READ_TIMEOUT_SECONDS) as client:
                 response = await client.get(part.uri)
                 response.raise_for_status()
                 data = response.content

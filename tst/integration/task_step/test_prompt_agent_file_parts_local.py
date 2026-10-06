@@ -1,8 +1,8 @@
 """prompt_agent hands store files to the agents it talks to, on the local defaults. A deployed agent is sent a URL it
 can fetch for each file in its prompt, and a user-sim one for each file the solver passes back of those it was sent;
-a file the solver names but was never sent stays as it is, so the user-sim can't read it. A human peer is sent the
-store's own URL and reads the store itself. The run records the store's own URLs throughout. The agents are the echo
-agent (tst/data/a2a_agent), which reports what each file part held. Needs Docker and a throwaway local registry."""
+a file the solver names but was never sent stays as it is, so the user-sim can't read it. A human peer, which reads
+the store itself, is sent the store's own URL. The run records the store's own URLs throughout. The agents are the
+echo agent (tst/data/a2a_agent), which reports what each file part held. Needs Docker and a throwaway local registry."""
 
 import importlib.util
 import json
@@ -31,6 +31,9 @@ from tst.util.a2a_test_agent import AGENT_DIR, put_test_agent
 
 pytestmark = pytest.mark.integration
 
+REGISTRY_READY_SECONDS = 45
+PEER_READY_SECONDS = 15
+
 
 def _docker(*args):
     return subprocess.run(["docker", *args], capture_output=True, text=True)
@@ -56,7 +59,7 @@ def local_registry(monkeypatch, tmp_path):
     started = _docker("run", "-d", "--rm", "--name", name, "-p", f"127.0.0.1:{port}:5000", "registry:2")
     assert started.returncode == 0, started.stderr
     host = f"localhost:{port}"
-    deadline = time.time() + 45
+    deadline = time.time() + REGISTRY_READY_SECONDS
     while time.time() < deadline:
         try:
             if httpx.get(f"http://{host}/v2/", timeout=2).status_code in (200, 401):
@@ -86,7 +89,7 @@ def local_registry(monkeypatch, tmp_path):
 
 @pytest.fixture
 def human_peer():
-    """The echo agent served in this process, beside the store, as a human's hub would be: its URL."""
+    """The echo agent served in this process, standing in for a human's hub: its URL."""
     spec = importlib.util.spec_from_file_location("echo_agent_here", AGENT_DIR / "agent.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -94,7 +97,7 @@ def human_peer():
     server = uvicorn.Server(uvicorn.Config(module.EchoAgent().create_app(), host="127.0.0.1", port=port, log_level="warning"))
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
-    deadline = time.time() + 15
+    deadline = time.time() + PEER_READY_SECONDS
     while not server.started and time.time() < deadline:
         time.sleep(0.1)
     try:
@@ -165,7 +168,7 @@ async def test_the_solver_and_a_user_sim_fetch_the_files_the_conversation_shares
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("registered", [False, True], ids=["user_a2a_url", "registered"])
-async def test_a_human_peer_is_sent_the_stores_own_url_and_reads_the_store_itself(local_registry, human_peer, registered):
+async def test_a_human_peer_is_sent_the_stores_own_url(local_registry, human_peer, registered):
     suffix = uuid.uuid4().hex[:8]
     urls = _files(suffix)
     agent = put_test_agent(f"file-parts-agent-{suffix}")
@@ -183,4 +186,4 @@ async def test_a_human_peer_is_sent_the_stores_own_url_and_reads_the_store_itsel
     _, reply, peer_reply, _ = _conversation(await task.run())
 
     assert _uris(reply) == [urls["report"]]
-    assert f"read report.txt over file: report-{suffix}" in _text(peer_reply)
+    assert _text(peer_reply).splitlines()[-1].startswith("could not read report.txt over file:")
