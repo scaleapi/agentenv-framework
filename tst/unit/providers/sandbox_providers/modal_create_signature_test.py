@@ -12,7 +12,7 @@ import modal
 import pytest
 
 from agent_env.attribution import PIPELINE_STEP_KEY
-from agent_env.config import get_config
+from agent_env.config import get_config, reset_config
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy
@@ -30,6 +30,7 @@ class _Stop(Exception):
 def _image_store():
     get_config().set_image_store(FakeImageStore())
     yield
+    reset_config()
 
 
 def _provider(cls, **kwargs):
@@ -41,9 +42,11 @@ def _provider(cls, **kwargs):
 
 _CREATES = {
     "container": (ModalSandboxProvider, {}, "_experimental_create", lambda p: p.create_container(
-        image_name="img:latest", port=8000, env={"A": "1"}, network_policy=_ALLOWLIST, attribution=_ATTRIBUTION)),
+        image_name="img:latest", port=8000, env={"A": "1"}, network_policy=_ALLOWLIST, attribution=_ATTRIBUTION,
+        region="us-east-1")),
     "gpu container": (ModalSandboxProvider, {"gpu": "H100"}, "create", lambda p: p.create_container(
-        image_name="img:latest", port=8000, env={"A": "1"}, network_policy=_ALLOWLIST, attribution=_ATTRIBUTION)),
+        image_name="img:latest", port=8000, env={"A": "1"}, network_policy=_ALLOWLIST, attribution=_ATTRIBUTION,
+        region="us-east-1")),
     "vm": (ModalVmSandboxProvider, {}, "_experimental_create", lambda p: p.create_vm(
         exposed_ports=[8000], network_policy=_ALLOWLIST, attribution=_ATTRIBUTION)),
 }
