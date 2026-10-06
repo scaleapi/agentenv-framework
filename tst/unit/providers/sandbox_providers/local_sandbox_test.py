@@ -312,6 +312,18 @@ async def test_a_failed_lookup_is_reported_with_the_command_that_cleans_up(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_teardown_without_docker_installed_finishes(tmp_path: Path):
+    class _NoDocker(_RecordingLocalSandbox):
+        async def exec_with_output(self, *args):
+            raise FileNotFoundError(2, "No such file or directory", "docker")
+
+    sandbox = _NoDocker(tmp_path, sandbox_id="local-abc")
+    await sandbox.terminate()
+
+    assert sandbox.scripts == [f"docker rm -f {sandbox.container_name} >/dev/null 2>&1 || true"]
+
+
+@pytest.mark.asyncio
 async def test_a_container_that_wont_go_still_lets_the_compose_stack_come_down(tmp_path: Path):
     (tmp_path / "docker-compose.yml").write_text("")
 

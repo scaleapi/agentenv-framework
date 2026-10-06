@@ -220,7 +220,10 @@ class LocalSandbox(VmSandbox):
         images and networks), which a real VM would take down with it. Images and networks go best-effort: another
         local sandbox's container can still be using one."""
         label = f"label={SANDBOX_LABEL}={self.sandbox_id}"
-        exit_code, stdout, stderr = await self.exec_with_output("docker", "ps", "-aq", "--filter", label)
+        try:
+            exit_code, stdout, stderr = await self.exec_with_output("docker", "ps", "-aq", "--filter", label)
+        except FileNotFoundError:  # no Docker installed: nothing could have been started
+            return
         if exit_code != 0:
             # No Docker to reach (a run that never needed it) or Docker is down; either way nothing can be removed now.
             logger.warning(
