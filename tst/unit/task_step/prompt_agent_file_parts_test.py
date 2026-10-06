@@ -96,3 +96,42 @@ async def test_an_object_the_agent_could_not_read_is_never_sent(monkeypatch, sto
 
     assert agents.sent[AGENT_URL] == []
     assert recorded == []  # no turn left waiting for a reply
+
+
+def _replying_with(url):
+    return [{"kind": "text", "text": "here it is"}, _file(url)]
+
+
+@pytest.mark.asyncio
+async def test_a_user_sim_agent_is_sent_the_agents_file_part_as_a_grant(monkeypatch, store, recorded):
+    url = store.put("outputs/z.png", b"png")
+    user_done = [{"kind": "text", "text": '{"message": "thanks", "done": true}'}]
+    agents = FakeA2AAgents({AGENT_URL: _replying_with(url), USER_URL: user_done}).serve(monkeypatch)
+    context = _context()
+    context.deployed_agents.append(DeployedAgent(
+        agent_name="human_agent", api_url=USER_URL, a2a_url=USER_URL, sandbox_type="local",
+    ))
+    step = PromptAgentTaskStep(
+        id="solve", version=None, agent_name="solver", prompt="hi", poll_interval_seconds=0, max_conversation_turns=2,
+    )
+
+    await step.execute(context)
+
+    assert agents.sent[USER_URL] == [
+        [{"kind": "text", "text": "here it is"}, _file(f"{GRANT_ORIGIN}/outputs/z.png?sig=read")]
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_humans_hub_is_sent_the_objects_own_url(monkeypatch, store, recorded):
+    url = store.put("outputs/z.png", b"png")
+    agents = FakeA2AAgents({AGENT_URL: _replying_with(url), USER_URL: DONE}).serve(monkeypatch)
+    step = PromptAgentTaskStep(
+        id="solve", version=None, agent_name="solver", prompt="hi", poll_interval_seconds=0,
+        max_conversation_turns=2, user_a2a_url=USER_URL,
+    )
+
+    await step.execute(_context())
+
+    assert agents.sent[USER_URL] == [[{"kind": "text", "text": "here it is"}, _file(url)]]
+    assert store.granted == []

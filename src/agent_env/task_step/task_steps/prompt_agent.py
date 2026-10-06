@@ -17,7 +17,7 @@ from agent_env.a2a_agent import protocol
 from agent_env.a2a_agent.object_transfer import (
     TrajectoryUpload,
     fetch_trajectory,
-    readable_parts,
+    send_and_wait,
     trajectory_mode,
 )
 from agent_env.a2a_agent.staging import draining, staged_changelogs, transfer_store
@@ -480,12 +480,10 @@ class PromptAgentTaskStep(TaskStep):
             # agent and recorded on the conversation as `a2a_task_id`.
             # This id is also used as part of the key name for the trajectory S3 object.
             target_a2a_task_id = uuid.uuid4().hex
-            # Only the sent copy names readable URLs; the turn records the objects' own URLs, and only
-            # once the copy is ready, so an object the agent can't be sent leaves no turn waiting.
-            async with readable_parts(
-                current_user_parts, a2a_url=target_url, card=card,
-                sandbox_type=agent.sandbox_type, expires_in=self.timeout_seconds,
-            ) as sent_parts:
+
+            # The turn records the objects' own URLs, and only once the parts are ready to send, so an
+            # object the agent can't be sent leaves no turn waiting.
+            def record_turn() -> None:
                 conversation_store.add_a2a_task(
                     conversation_id=conversation_id,
                     parts=current_user_parts,
@@ -502,13 +500,11 @@ class PromptAgentTaskStep(TaskStep):
                     else list(current_user_parts)
                 )
 
-                sent_task_id, _ = await protocol.send_a2a_message(
-                    target_url, sent_parts, target_a2a_task_id,
-                    solver_context_id, self.timeout_seconds,
-                )
-                result = await protocol.poll_a2a_task(
-                    target_url, sent_task_id, self.timeout_seconds, self.poll_interval_seconds,
-                )
+            sent_task_id, result = await send_and_wait(
+                target_url, current_user_parts, agent=agent, message_id=target_a2a_task_id,
+                context_id=solver_context_id, timeout_seconds=self.timeout_seconds,
+                poll_interval_seconds=self.poll_interval_seconds, before_send=record_turn,
+            )
             target_state = result["status"]["state"]
             status_msg = (result.get("status") or {}).get("message") or {}
             final_terminal = protocol.TerminalResponse.from_message(status_msg)
@@ -572,13 +568,12 @@ class PromptAgentTaskStep(TaskStep):
 
             user_a2a_task_id = uuid.uuid4().hex
             try:
-                sent_user_task_id, _ = await protocol.send_a2a_message(
-                    user_url, agent_response_parts, user_a2a_task_id,
-                    conversation_id, self.user_agent_timeout_seconds,
-                )
-                user_result = await protocol.poll_a2a_task(
-                    user_url, sent_user_task_id,
-                    self.user_agent_timeout_seconds, self.poll_interval_seconds,
+                # A user-sim is an agent agent-env deployed; a human's hub reads the store itself.
+                _, user_result = await send_and_wait(
+                    user_url, agent_response_parts, agent=user_sim if is_user_sim else None,
+                    message_id=user_a2a_task_id, context_id=conversation_id,
+                    timeout_seconds=self.user_agent_timeout_seconds,
+                    poll_interval_seconds=self.poll_interval_seconds,
                 )
             except TimeoutError:
                 logger.warning(f"user_a2a_url timeout for conversation {conversation_id}; marking abandoned")

@@ -7,9 +7,9 @@ import logging
 import math
 import re
 from collections.abc import AsyncIterator, Callable, Collection, Mapping
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass
-from typing import Any, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 import httpx
 from agentenv_protocol.a2a_agent import (
@@ -37,6 +37,7 @@ from agentenv_protocol.a2a_agent import (
 from agentenv_protocol.transfers import ReadObject, WriteNamespaceGrant, WriteObject
 from pydantic import BaseModel, ValidationError
 
+from agent_env.a2a_agent import protocol
 from agent_env.a2a_agent.protocol import raise_for_extension_status
 from agent_env.a2a_agent.staging import StagedObjectStore, staged_store
 from agent_env.config import get_config
@@ -44,6 +45,9 @@ from agent_env.store.base import GrantUnavailableError
 from agent_env.store.object_store import DEFAULT_CONTENT_TYPE, ObjectStore
 from agent_env.store.object_store.object_store import readable_url
 from agent_env.store.object_store.local.grant_server import unreachable_hint
+
+if TYPE_CHECKING:
+    from agent_env.task_step.context import DeployedAgent
 
 logger = logging.getLogger(__name__)
 
@@ -344,6 +348,36 @@ async def readable_parts(
     finally:
         for staging in staged.values():
             await staging.release()
+
+
+async def send_and_wait(
+    a2a_url: str,
+    parts: list[dict],
+    *,
+    agent: DeployedAgent | None,
+    message_id: str,
+    context_id: str | None,
+    timeout_seconds: int,
+    poll_interval_seconds: int,
+    before_send: Callable[[], None] | None = None,
+) -> tuple[str, dict]:
+    """Send ``parts`` to the A2A peer at ``a2a_url`` and wait for its task to end: the task's id and its
+    final state. A peer that is an ``agent`` agent-env deployed is sent each file part a configured store
+    owns as an HTTPS URL it can read (``readable_parts``); any other peer, such as a human's hub, reads the
+    store itself and is sent the parts as they are. ``before_send`` runs once the parts are ready, just
+    before the message goes out."""
+    sending = (
+        readable_parts(
+            parts, a2a_url=a2a_url, card=agent.a2a_card, sandbox_type=agent.sandbox_type, expires_in=timeout_seconds
+        )
+        if agent is not None
+        else nullcontext(parts)
+    )
+    async with sending as sent:
+        if before_send is not None:
+            before_send()
+        task_id, _ = await protocol.send_a2a_message(a2a_url, sent, message_id, context_id, timeout_seconds)
+        return task_id, await protocol.poll_a2a_task(a2a_url, task_id, timeout_seconds, poll_interval_seconds)
 
 
 def skill_bundle_request(
