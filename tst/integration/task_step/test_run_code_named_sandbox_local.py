@@ -191,7 +191,19 @@ async def test_a_script_builds_in_a_named_container_sandbox_and_its_output_round
         id="deploy", version=None, sandbox_name="box", sandbox_mode="container", sandbox_type="local",
         image=image.image_name, port=port,
     )
-    ctx = await _chain(tmp_path, suffix, deploy, "/work").run()
+    try:
+        ctx = await _chain(tmp_path, suffix, deploy, "/work").run()
+    finally:
+        # The tag is unique to this run, as is its registry copy: drop them, and the containers holding them, so
+        # repeated runs don't pile up images.
+        refs = [r for ref in (f"run-code-box-{suffix}", f"*/run-code-box-{suffix}") for r in _docker(
+            "image", "ls", "--format", "{{.Repository}}:{{.Tag}}", "--filter", f"reference={ref}",
+        ).stdout.split()]
+        for ref in refs:
+            if containers := _docker("ps", "-aq", "--filter", f"ancestor={ref}").stdout.split():
+                _docker("rm", "-f", *containers)
+        if refs:
+            _docker("rmi", "-f", *refs)
 
     (deployed,) = ctx.deployed_sandboxes
     assert deployed.sandbox_mode == "container"
