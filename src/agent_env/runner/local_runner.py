@@ -80,8 +80,11 @@ class LocalRunner(Runner):
                 if left:
                     logger.warning("Shutting down without %d run(s) that didn't stop; tearing down what they recorded",
                                    len(left))
-                    self._abandoned.update(left)  # their own teardown, if they ever get there, leaves it to this one
-                    await self._tear_down_abandoned(left)
+                    self._abandoned.update(left)  # their own teardown waits while this one runs
+                    try:
+                        await self._tear_down_abandoned(left)
+                    finally:  # a run that ends later tears down whatever this one didn't
+                        self._abandoned.difference_update(left)
         self._inflight.clear()
 
     async def _tear_down_abandoned(self, run_ids: list[str]) -> None:
