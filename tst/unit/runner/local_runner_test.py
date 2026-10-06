@@ -452,3 +452,38 @@ async def test_stop_ends_even_when_a_step_ignores_its_cancel(docs, monkeypatch):
     assert not runner._inflight
     assert torn_down_at and torn_down_at[0] < stopped, "stop() left the abandoned run's sandboxes up"
     await asyncio.sleep(1.6)  # let the abandoned run end before the loop closes
+    assert len(torn_down_at) == 1, "the abandoned run tore itself down again once its step ended"
+
+
+@pytest.mark.asyncio
+async def test_a_shutdown_teardown_that_runs_out_of_time_is_reported(docs, monkeypatch, caplog):
+    from agent_env.runner import local_runner
+
+    async def teardown_run(context):
+        await asyncio.sleep(10)
+
+    loop = asyncio.get_running_loop()
+    gives_up_at = loop.time() + 1.0
+    started = asyncio.Event()
+
+    async def stubborn(_):
+        started.set()
+        while loop.time() < gives_up_at:
+            try:
+                await asyncio.sleep(gives_up_at - loop.time())
+            except asyncio.CancelledError:
+                continue
+
+    monkeypatch.setattr(local_runner, "teardown_run", teardown_run)
+    for name, value in (("STOP_WAIT_SECONDS", 0.1), ("TEARDOWN_WAIT_SECONDS", 0.1), ("ABANDON_WAIT_SECONDS", 0.1)):
+        monkeypatch.setattr(LocalRunner, name, value)
+    _install_task(monkeypatch, _FakeTask(on_run=stubborn))
+    runner = LocalRunner(workers=1)
+    await runner.start()
+    handle = await runner.submit("t1", 1)
+    await asyncio.wait_for(started.wait(), 5)
+
+    await asyncio.wait_for(runner.stop(), 5)
+
+    assert f"Gave up tearing down {handle.run_id}" in caplog.text
+    await asyncio.sleep(1.1)  # let the abandoned run end before the loop closes

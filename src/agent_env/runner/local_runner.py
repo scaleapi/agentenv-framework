@@ -43,6 +43,7 @@ class LocalRunner(Runner):
         self._inflight: dict[str, asyncio.Task] = {}
         self._tearing_down: set[str] = set()  # runs past their task, removing what it deployed
         self._contexts: dict = {}  # each run's context, so stop() can still tear down a run it gives up on
+        self._abandoned: set[str] = set()  # runs stop() gave up on and tore down itself
         self._stopping = False
 
     # --- lifecycle ---------------------------------------------------------
@@ -79,11 +80,23 @@ class LocalRunner(Runner):
                 if left:
                     logger.warning("Shutting down without %d run(s) that didn't stop; tearing down what they recorded",
                                    len(left))
-                    with contextlib.suppress(TimeoutError):
-                        async with asyncio.timeout(self.TEARDOWN_WAIT_SECONDS):
-                            await asyncio.gather(*(self._tear_down(run_id, self._contexts[run_id]) for run_id in left),
-                                                 return_exceptions=True)
+                    self._abandoned.update(left)  # their own teardown, if they ever get there, leaves it to this one
+                    await self._tear_down_abandoned(left)
         self._inflight.clear()
+
+    async def _tear_down_abandoned(self, run_ids: list[str]) -> None:
+        try:
+            async with asyncio.timeout(self.TEARDOWN_WAIT_SECONDS):
+                results = await asyncio.gather(
+                    *(self._tear_down(run_id, self._contexts[run_id]) for run_id in run_ids), return_exceptions=True)
+        except TimeoutError:
+            logger.warning("Gave up tearing down %s after %ss; what they deployed may still be up",
+                           ", ".join(run_ids), self.TEARDOWN_WAIT_SECONDS)
+            return
+        for run_id, result in zip(run_ids, results):
+            if isinstance(result, BaseException):
+                logger.warning("Run %s: tearing it down failed (%s: %s); what it deployed may still be up",
+                               run_id, type(result).__name__, result)
 
     # --- Runner API --------------------------------------------------------
 
@@ -186,7 +199,7 @@ class LocalRunner(Runner):
             run_store.mark_terminal(record.run_id, RunStatus.FAILED, error=f"{type(e).__name__}: {e}")
         finally:
             try:
-                if context is not None:
+                if context is not None and record.run_id not in self._abandoned:
                     self._tearing_down.add(record.run_id)
                     try:
                         async with asyncio.timeout(self.TEARDOWN_WAIT_SECONDS):
@@ -196,6 +209,7 @@ class LocalRunner(Runner):
                                        "removed is still up", record.run_id, self.TEARDOWN_WAIT_SECONDS)
             finally:
                 self._tearing_down.discard(record.run_id)
+                self._abandoned.discard(record.run_id)
                 self._contexts.pop(record.run_id, None)
                 self._inflight.pop(record.run_id, None)
 
