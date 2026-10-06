@@ -152,9 +152,10 @@ async def poll_a2a_task(
 ) -> dict:
     """POST /a2a tasks/get until the task reaches a terminal state, and return it.
 
-    Out of time, it asks the agent to cancel the task, so it stops working on it, and raises ``TimeoutError``.
-    ``sandbox_id`` names the sandbox the agent runs on: then it raises ``AgentUnreachableError``, naming it, once
-    the agent has gone UNREACHABLE_AFTER_SECONDS without answering, rather than waiting out the timeout."""
+    Out of time, it raises ``TimeoutError``. ``sandbox_id`` names the sandbox the agent runs on: then it raises
+    ``AgentUnreachableError``, naming it, once the agent has gone UNREACHABLE_AFTER_SECONDS without answering,
+    rather than waiting out the timeout. Either way it first asks the agent to cancel the task, so an agent still
+    working on it stops."""
     deadline = time.monotonic() + timeout_seconds
     consecutive_failures = 0
     answered_at, unanswered, last_failure = time.monotonic(), 0, ""
@@ -194,6 +195,7 @@ async def poll_a2a_task(
             continue
         silent = time.monotonic() - answered_at
         if sandbox_id is not None and unanswered >= _UNREACHABLE_MIN_POLLS and silent >= UNREACHABLE_AFTER_SECONDS:
+            await cancel_a2a_task(a2a_url, task_id)
             raise AgentUnreachableError(
                 f"The agent on sandbox {sandbox_id} stopped answering: {unanswered} polls in a row over "
                 f"{silent:.0f}s got no reply (last: {last_failure})")

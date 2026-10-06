@@ -199,6 +199,7 @@ class _Agent:
     def __init__(self, monkeypatch, answer):
         self.now = 0.0
         self.calls: list[str] = []
+        self.first_called_at: dict[str, float] = {}
         self._answer = answer
         transport = httpx.MockTransport(self._handle)
         client = httpx.AsyncClient
@@ -212,6 +213,7 @@ class _Agent:
     def _handle(self, request):
         method = json.loads(request.content)["method"]
         self.calls.append(method)
+        self.first_called_at.setdefault(method, self.now)
         return self._answer(method, request, self)
 
 
@@ -253,8 +255,26 @@ async def test_an_agent_whose_sandbox_died_is_given_up_on_naming_it(monkeypatch,
         await poll_a2a_task("http://agent", "t-1", 1200, 2, sandbox_id="sb-1")
 
     assert isinstance(raised.value, TimeoutError)
-    assert agent.now <= 2 * UNREACHABLE_AFTER_SECONDS
-    assert "tasks/cancel" not in agent.calls
+    assert agent.first_called_at["tasks/cancel"] <= 2 * UNREACHABLE_AFTER_SECONDS
+    assert agent.calls[-1] == "tasks/cancel"
+
+
+@pytest.mark.asyncio
+async def test_an_agent_given_up_on_is_asked_to_cancel_in_case_it_is_still_working(monkeypatch):
+    cancelled = []
+
+    def answer(method, request, agent):
+        if method == "tasks/cancel":
+            cancelled.append(json.loads(request.content)["params"])
+            return _task("canceled")
+        return _task("working") if agent.calls.count("tasks/get") == 1 else _refused(request, agent)
+
+    _Agent(monkeypatch, answer)
+
+    with pytest.raises(AgentUnreachableError):
+        await poll_a2a_task("http://agent", "t-1", 1200, 2, sandbox_id="sb-1")
+
+    assert cancelled == [{"id": "t-1"}]
 
 
 @pytest.mark.asyncio
