@@ -21,7 +21,7 @@ from agent_env.entity_refs import EntityKind, EntityRef, RefRole, RefSite, parse
 from agent_env.env.registry import get_env_registry
 from agent_env.eval.eval import Eval
 from agent_env.plugins import _registration
-from agent_env.store.ids import LOCAL_PREFIX, validate_local_id
+from agent_env.store.ids import LOCAL_PREFIX, derive_id, validate_local_id
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_step import TaskStep, attach_retry_config, dependencies
 
@@ -230,7 +230,7 @@ class _Resolver:
             self._problem(entry, f"{ref.path}: there is no {dockerfile!r} in this folder to build")
             return True
         role = f"{entry.kind.store}_image" if ref.path == "image" else ref.path
-        image = BuiltImage(f"{entry.id}__{role}", entry, dockerfile)
+        image = BuiltImage(derive_id(entry.id, role), entry, dockerfile)
         config[ref.path] = image.id
         self.built.append(image)
         references.append(Reference(EntityKind.ARTIFACT, image.id, None, image, ref.path, ref.artifact_type))

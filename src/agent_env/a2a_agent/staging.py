@@ -78,6 +78,16 @@ def transfer_store(
     endpoint = staging_endpoint(a2a_url, card)
     if endpoint is None or (store.supports_transfer_grants and store.grants_reach(sandbox_type)):
         return store
+    return _staged(store, endpoint, card)
+
+
+def staged_store(store: ObjectStore, a2a_url: str, card: Mapping[str, Any] | None) -> StagedObjectStore | None:
+    """``store``, issuing grants staged through the agent at ``a2a_url``; None when the agent serves no staging."""
+    endpoint = staging_endpoint(a2a_url, card)
+    return None if endpoint is None else _staged(store, endpoint, card)
+
+
+def _staged(store: ObjectStore, endpoint: str, card: Mapping[str, Any] | None) -> StagedObjectStore:
     limit = _staging_params(card).get("max_bytes")
     return StagedObjectStore(store, endpoint, max_bytes=limit if isinstance(limit, int) and limit > 0 else None)
 

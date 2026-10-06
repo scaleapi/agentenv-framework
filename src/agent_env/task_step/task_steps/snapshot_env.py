@@ -16,12 +16,16 @@ from urllib.parse import urlparse
 
 import httpx
 
-from agentenv_protocol import FilePart
+from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI, FilePart, uploaded_object_path
+from agentenv_protocol.client import find_extension
+from agentenv_protocol.transfers import WriteNamespaceGrant
 
+from agent_env.a2a_agent.object_transfer import ObjectLimits, namespace_grant
 from agent_env.env.gateway.constants import EXT_TRAJECTORY_URI
 from agent_env.store import get_config
+from agent_env.store.base import GrantUnavailableError
 from agent_env.store.ids import derive_id, is_local_id, validate_local_id
-from agent_env.store.object_store import S3ObjectStore
+from agent_env.store.object_store import MIN_GRANT_LIFETIME_SECONDS, ObjectStore, S3ObjectStore
 from agent_env.store.routing import in_local_run
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity_refs import EntityRef, RefRole
@@ -37,6 +41,49 @@ _TRAJECTORY_CAPTURE_BUDGET_SECONDS = 300
 
 # Must match the S3 credentials extension URI the server-side credentials mixin advertises.
 _S3_CREDENTIALS_EXTENSION_URI = "urn:agentenv:add-s3-credentials/v1"
+
+# What a service may upload through its snapshot grant: one bundle, as large as one upload to the
+# store can be up to this.
+ENV_SNAPSHOT_LIMITS = ObjectLimits(max_objects=1, max_object_bytes=50 * 1024**3, max_total_bytes=50 * 1024**3)
+_SNAPSHOT_KEY_PREFIX = "agentenv-snapshots"
+
+
+@dataclass(frozen=True)
+class _SnapshotUpload:
+    """Where one service may upload its snapshot bundle, and the grant it uploads with."""
+
+    store: ObjectStore
+    grant: WriteNamespaceGrant
+
+    def object_url(self, path: str) -> str:
+        return self.store.object_url(f"{self.grant.root_path}/{path}")
+
+
+def _snapshot_upload(card: dict, timeout_seconds: float, sandbox_type: Optional[str]) -> Optional[_SnapshotUpload]:
+    """A grant for a service advertising the data-objects form to upload its bundle with, under a namespace
+    of its own; None when it does not advertise the form, or the object store issues no grant that reaches
+    the service's sandbox, of ``sandbox_type`` (None: unknown) and lasts the export."""
+    if find_extension(card, DATA_OBJECTS_EXTENSION_URI) is None:
+        return None
+    config = get_config()
+    store = config.get_object_store()
+    if not (store.supports_transfer_grants and store.grants_reach(sandbox_type)):
+        return None
+    cap = store.max_single_upload_bytes or ENV_SNAPSHOT_LIMITS.max_object_bytes
+    limits = ObjectLimits(
+        max_objects=ENV_SNAPSHOT_LIMITS.max_objects,
+        max_object_bytes=min(ENV_SNAPSHOT_LIMITS.max_object_bytes, cap),
+        max_total_bytes=min(ENV_SNAPSHOT_LIMITS.max_total_bytes, cap),
+    )
+    namespace_url = store.object_url(f"{config.get_artifact_key_prefix()}{_SNAPSHOT_KEY_PREFIX}/{uuid.uuid4().hex}")
+    try:
+        grant = namespace_grant(
+            store, namespace_url, limits=limits, expires_in=max(int(timeout_seconds), MIN_GRANT_LIFETIME_SECONDS)
+        )
+    except GrantUnavailableError as exc:
+        logger.info("snapshot_env: the object store issues no snapshot upload grant (%s)", exc)
+        return None
+    return _SnapshotUpload(store, grant)
 
 
 async def _push_s3_credentials(base_url: str, card: dict, timeout_seconds: float) -> None:
@@ -360,20 +407,28 @@ class SnapshotEnvTaskStep(TaskStep):
         ``tmp_path``, or the object url a FilePart names when the service uploaded the
         bundle itself (nothing written to ``tmp_path`` then — export_one registers it).
 
-        v1 ``get_data``: ``DataPart`` → json; ``FilePart`` → object url (no
-        download) / base64 ``bytes`` / streamed relative-or-http ``uri`` → ".zip";
-        else legacy ``GET /export-state`` streamed to disk with a first-byte JSON
+        v1 ``get_data``, handed a namespace grant when the service takes the data-objects
+        form: an upload through it → its object url; ``DataPart`` → json; ``FilePart`` →
+        object url (no download) / base64 ``bytes`` / streamed relative-or-http ``uri`` →
+        ".zip"; else legacy ``GET /export-state`` streamed to disk with a first-byte JSON
         guard. Errors are caught by the caller (fails just this service)."""
         from agent_env.env import legacy_protocol
         from agentenv_protocol import client as protocol_v1
 
         base_url = await legacy_protocol.v1_base_url(deployed, gateway_url, environment_name, mcp=True)
         if base_url is not None:
-            # Push S3 creds (no-op unless the service advertises the extension).
             card_base, card = await legacy_protocol.child_env_card(deployed, gateway_url, environment_name)
+            upload = await asyncio.to_thread(
+                _snapshot_upload, card or {}, timeout_seconds, getattr(deployed, "sandbox_type", None)
+            )
+            # Push S3 creds (no-op unless the service advertises the extension), with a grant too: a
+            # bundle the grant cannot hold can still be uploaded with them.
             await _push_s3_credentials(card_base, card or {}, timeout_seconds)
-            resp = await protocol_v1.get_data(base_url, timeout=int(timeout_seconds))
+            grant = {} if upload is None else {"write_namespace": upload.grant}
+            resp = await protocol_v1.get_data(base_url, timeout=int(timeout_seconds), **grant)
             part = resp.parts[0] if resp.parts else None
+            if upload is not None and (path := uploaded_object_path(part)) is not None:
+                return upload.object_url(path)
             if isinstance(part, FilePart):
                 raw = getattr(part.file, "bytes", None)
                 if raw is not None:

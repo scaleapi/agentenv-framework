@@ -17,6 +17,7 @@ from agent_env.a2a_agent import protocol
 from agent_env.a2a_agent.object_transfer import (
     TrajectoryUpload,
     fetch_trajectory,
+    readable_parts,
     trajectory_mode,
 )
 from agent_env.a2a_agent.staging import draining, staged_changelogs, transfer_store
@@ -211,8 +212,8 @@ class PromptAgentTaskStep(TaskStep):
     def _apply_seed(self, parts: list[dict], seed: dict) -> list[dict]:
         """Return a deep-copied parts list with seed substitutions applied.
         `<key>` placeholders are replaced inside text parts' `text` and inside
-        file parts' `uri`/`name` (so tasks-as-templates with
-        `s3://bucket/seeds/<seed_id>/x.png` resolve per-run)."""
+        file parts' `uri`/`name` (so tasks-as-templates with an object URL
+        ending `seeds/<seed_id>/x.png` resolve per-run)."""
         if not seed:
             return parts
         out = copy.deepcopy(parts)
@@ -479,29 +480,35 @@ class PromptAgentTaskStep(TaskStep):
             # agent and recorded on the conversation as `a2a_task_id`.
             # This id is also used as part of the key name for the trajectory S3 object.
             target_a2a_task_id = uuid.uuid4().hex
-            conversation_store.add_a2a_task(
-                conversation_id=conversation_id,
-                parts=current_user_parts,
-                a2a_task_id=target_a2a_task_id,
-                role="user",
-            )
-            # Turn 0 of a prompt-mode step re-sends exactly the text already
-            # persisted as PromptResponse.prompt_text; store a None placeholder
-            # instead of a second copy so the doc doesn't carry the prompt twice.
-            # The list stays index-aligned with the per-turn trajectory URIs.
-            source_agent_per_turn_prompt_parts.append(
-                None
-                if turn == 0 and _duplicates_prompt_text(current_user_parts, prompt_text)
-                else list(current_user_parts)
-            )
+            # Only the sent copy names readable URLs; the turn records the objects' own URLs, and only
+            # once the copy is ready, so an object the agent can't be sent leaves no turn waiting.
+            async with readable_parts(
+                current_user_parts, a2a_url=target_url, card=card,
+                sandbox_type=agent.sandbox_type, expires_in=self.timeout_seconds,
+            ) as sent_parts:
+                conversation_store.add_a2a_task(
+                    conversation_id=conversation_id,
+                    parts=current_user_parts,
+                    a2a_task_id=target_a2a_task_id,
+                    role="user",
+                )
+                # Turn 0 of a prompt-mode step re-sends exactly the text already
+                # persisted as PromptResponse.prompt_text; store a None placeholder
+                # instead of a second copy so the doc doesn't carry the prompt twice.
+                # The list stays index-aligned with the per-turn trajectory URIs.
+                source_agent_per_turn_prompt_parts.append(
+                    None
+                    if turn == 0 and _duplicates_prompt_text(current_user_parts, prompt_text)
+                    else list(current_user_parts)
+                )
 
-            sent_task_id, _ = await protocol.send_a2a_message(
-                target_url, current_user_parts, target_a2a_task_id,
-                solver_context_id, self.timeout_seconds,
-            )
-            result = await protocol.poll_a2a_task(
-                target_url, sent_task_id, self.timeout_seconds, self.poll_interval_seconds,
-            )
+                sent_task_id, _ = await protocol.send_a2a_message(
+                    target_url, sent_parts, target_a2a_task_id,
+                    solver_context_id, self.timeout_seconds,
+                )
+                result = await protocol.poll_a2a_task(
+                    target_url, sent_task_id, self.timeout_seconds, self.poll_interval_seconds,
+                )
             target_state = result["status"]["state"]
             status_msg = (result.get("status") or {}).get("message") or {}
             final_terminal = protocol.TerminalResponse.from_message(status_msg)

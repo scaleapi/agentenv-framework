@@ -133,6 +133,35 @@ extension's, and `client.invoke_extension(base_url, card, uri, params, method=..
 its HTTP verb. Without `method`, `invoke_extension` calls the first method listed; an extension
 with several methods, such as a gateway's `urn:agentenv:clock/v1`, should always be called by name.
 
+### Uploading an export through a grant
+
+An export too large to return from `data/get` can go straight to the caller's object store. A
+`@get_data` handler that takes a `write_namespace` parameter is advertised under
+`urn:agentenv:data-objects/v1` (`DATA_OBJECTS_EXTENSION_URI`), and a caller may then send a
+`transfers.WriteNamespaceGrant` with the call: `client.get_data(base_url,
+write_namespace=grant)`. The handler is called with the grant, or with None when the caller
+sent none. It uploads under the grant with `transfers.NamespaceUploader` and answers with
+`uploaded_file_part(path, name=..., mime_type=...)`, where `path` is relative to the grant's
+`root_path`; the caller reads it back with `uploaded_object_path(part)`, which refuses a path
+outside the root. A handler that cannot use the grant (its export outgrows the grant's limits,
+say) answers as it would without one.
+
+```python
+from agentenv_protocol import AgentEnvEnvironment, DataPart, environment_card, get_data, uploaded_file_part
+from agentenv_protocol.transfers import NamespaceUploader, WriteNamespaceGrant
+
+
+@environment_card(name="slack")
+class SlackEnv(AgentEnvEnvironment):
+    @get_data
+    async def _state(self, write_namespace: WriteNamespaceGrant | None = None):
+        bundle = self.write_bundle()  # a Path
+        if write_namespace is not None and bundle.stat().st_size <= write_namespace.max_object_bytes:
+            await NamespaceUploader(write_namespace).upload("slack.zip", bundle)
+            return [uploaded_file_part("slack.zip", name="slack.zip", mime_type="application/zip")]
+        return [DataPart(data=self.state())]
+```
+
 Dependencies are intentionally light (`pydantic`, `starlette`) so the package can be added to environment server images without pulling a heavier framework — `mcp` is imported lazily inside `create_fastmcp_app()` and is deliberately not a dependency.
 
 ## A2A agent framework

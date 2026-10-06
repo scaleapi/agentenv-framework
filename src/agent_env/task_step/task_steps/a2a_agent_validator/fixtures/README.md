@@ -4,7 +4,7 @@ Binary fixtures used by the A2A agent validator's modality probes. Each
 file is loaded at import time via `_b64(name)` in `verify_a2a_modalities.py`
 and exposed as a `*_B64` constant. The same constants get assembled into
 `*_PROBE_PARTS` lists for the inline-bytes path, and the raw bytes are also
-read directly for the URI-based S3 upload path.
+uploaded to the object store for the URI path.
 
 | File | Probe modality | What it contains | Why |
 |---|---|---|---|
@@ -59,12 +59,13 @@ the larger 480×360 frame size were each needed: smaller / barer clips
 truncated to "FFE" probabilistically.
 
 ### Why video is URI-only
-The video fixture is delivered via `FileWithUri` (`s3://`), not inline
-`FileWithBytes` like the others. At 8.9 KB it would fit inline, but the
-validator deliberately exercises the wrapper's URI-materialization code
-path with this probe — it's the only fixture that does so for video, and
-one of three (alongside the two URI-delivered PNG probes) that exercise
-URI delivery at all.
+The video fixture is delivered via `FileWithUri`, not inline
+`FileWithBytes` like the others: the validator uploads it to the object
+store and the agent receives an HTTPS URL for it. At 8.9 KB it would fit
+inline, but the validator deliberately exercises the wrapper's
+URI-materialization code path with this probe — it's the only fixture that
+does so for video, and one of two (alongside the URI-delivered PNG probe)
+that exercise URI delivery at all.
 
 ## Regenerating fixtures
 

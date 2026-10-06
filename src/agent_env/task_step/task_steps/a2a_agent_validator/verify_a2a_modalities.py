@@ -15,10 +15,10 @@ ground-truth string per probe. The outcome for each modality is one of:
 - `probe_step_did_not_run`: no matching response — the upstream
   `PromptAgentTaskStep` crashed before `context.prompt_responses.append(...)`.
 
-There are 12 modality probes (text, image {png,jpeg,gif}, audio
+There are 11 modality probes (text, image {png,jpeg,gif}, audio
 {wav,mpeg,mp4,ogg}, PDF, video/mp4, plus image/png delivered via
-`FileWithUri` over `s3://` and presigned `https://`). Every A2A agent gets
-the same probe set, and the results report which subset it ingests.
+`FileWithUri` over HTTPS). Every A2A agent gets the same probe set, and the
+results report which subset it ingests.
 """
 
 from __future__ import annotations
@@ -93,7 +93,7 @@ PDF_PROBE_EXPECTED = "elephant"
 
 # 8.7KB h.264 mp4 (3s @ 480×360, 15fps, no audio) showing "GIRAFFE" on a
 # static frame with on-screen instructional context. Delivered via
-# FileWithUri (s3://) at validator runtime. See `fixtures/README.md`.
+# FileWithUri (HTTPS) at validator runtime. See `fixtures/README.md`.
 VIDEO_PROBE_MP4_B64 = _b64("clip.mp4")
 VIDEO_PROBE_PROMPT = (
     "A short video clip is attached. Read the target word displayed in "

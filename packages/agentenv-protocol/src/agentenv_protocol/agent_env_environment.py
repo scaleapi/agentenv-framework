@@ -13,12 +13,14 @@ import uuid
 from abc import ABC, abstractmethod
 from typing import Annotated, Any, Callable, ClassVar, Literal, NamedTuple, Union, get_args, get_origin, get_type_hints
 
+from pydantic import ValidationError
 from pydantic.fields import FieldInfo
 from starlette.requests import Request
 from starlette.responses import Response
 from starlette.routing import Route
 
-from .types import MCP_TRANSPORT, METHOD_ADD, METHOD_GET, METHOD_RESET, RPC_PATH, WELL_KNOWN_PATH, AddDataRequest, AddDataResponse, EnvironmentCapabilities, EnvironmentCard, EnvironmentExtension, EnvironmentInterface, EnvironmentTool, GetDataResponse, ResetDataResponse, error_body
+from .transfers import WriteNamespaceGrant
+from .types import DATA_OBJECTS_EXTENSION_URI, MCP_TRANSPORT, METHOD_ADD, METHOD_GET, METHOD_RESET, RPC_PATH, WELL_KNOWN_PATH, AddDataRequest, AddDataResponse, EnvironmentCapabilities, EnvironmentCard, EnvironmentExtension, EnvironmentInterface, EnvironmentTool, GetDataResponse, ResetDataResponse, error_body
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +52,9 @@ def add_data(fn: Callable) -> Callable:
 
 
 def get_data(fn: Callable) -> Callable:
+    """Mark the ``data/get`` handler. One that takes a ``write_namespace`` parameter is advertised under
+    ``DATA_OBJECTS_EXTENSION_URI`` and called with the grant a caller sends, else None; it may upload its
+    export under the grant and return ``uploaded_file_part``."""
     setattr(fn, _OP_ATTR, OP_GET_DATA)
     return fn
 
@@ -157,6 +162,7 @@ class AgentEnvApplication(ABC):
         environment_card = _merge_tools(environment_card, tool_handlers)
         methods = _discover_methods(handler)
         environment_card = _merge_operations(environment_card, methods)
+        environment_card = _merge_data_objects(environment_card, methods)
         self.environment_card = environment_card
         self._dispatch = _jsonrpc_handler(methods)
         self._ext_routes = [(path, method, _extension_handler(fn, method)) for _descriptor, fn, path, method in ext_handlers]
@@ -426,6 +432,24 @@ def _merge_operations(card: EnvironmentCard, methods: dict) -> EnvironmentCard:
     return card.model_copy(update={"capabilities": caps.model_copy(update={"operations": list(methods)})})
 
 
+_DATA_OBJECTS_EXTENSION = EnvironmentExtension(
+    uri=DATA_OBJECTS_EXTENSION_URI,
+    description="data/get takes a write_namespace grant and may upload its export under it.",
+)
+
+
+def _takes_write_namespace(fn: Callable) -> bool:
+    return "write_namespace" in inspect.signature(fn).parameters
+
+
+def _merge_data_objects(card: EnvironmentCard, methods: dict) -> EnvironmentCard:
+    """Advertise the data-objects extension when the ``data/get`` handler takes a ``write_namespace``."""
+    entry = methods.get(METHOD_GET)
+    if entry is None or not _takes_write_namespace(entry[1]):
+        return card
+    return _merge_extensions(card, [(_DATA_OBJECTS_EXTENSION,)])
+
+
 def _merge_mcp_interface(card: EnvironmentCard, path: str) -> EnvironmentCard:
     """Declare the MCP endpoint at the path the app serves it on; a card-declared `MCP_TRANSPORT` interface wins.
 
@@ -471,8 +495,19 @@ async def _invoke_add(fn: Callable, params: dict) -> dict:
 
 
 async def _invoke_get(fn: Callable, params: dict) -> dict:
+    kwargs = {}
+    if _takes_write_namespace(fn):
+        if not isinstance(params, dict):
+            raise _InvalidParams("data/get takes its params by name")
+        raw = params.get("write_namespace")
+        try:
+            kwargs["write_namespace"] = None if raw is None else WriteNamespaceGrant.model_validate(raw)
+        except ValidationError as e:
+            # Name the fields only: the values carry the grant's signature.
+            fields = ", ".join(".".join(map(str, error["loc"])) or "write_namespace" for error in e.errors())
+            raise _InvalidParams(f"write_namespace is not a valid namespace grant ({fields})")
     try:
-        parts = await _maybe_await(fn())
+        parts = await _maybe_await(fn(**kwargs))
         return GetDataResponse(parts=parts).model_dump(exclude_none=True)
     except Exception as e:
         logger.exception("data/get failed")

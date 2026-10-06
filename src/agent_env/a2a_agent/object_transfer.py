@@ -2,10 +2,12 @@
 carries, the call itself, and the limits and time budget that bound it."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import re
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import AsyncIterator, Callable, Collection, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Literal, TypeVar
 
@@ -36,9 +38,11 @@ from agentenv_protocol.transfers import ReadObject, WriteNamespaceGrant, WriteOb
 from pydantic import BaseModel, ValidationError
 
 from agent_env.a2a_agent.protocol import raise_for_extension_status
-from agent_env.a2a_agent.staging import StagedObjectStore
+from agent_env.a2a_agent.staging import StagedObjectStore, staged_store
+from agent_env.config import get_config
 from agent_env.store.base import GrantUnavailableError
 from agent_env.store.object_store import DEFAULT_CONTENT_TYPE, ObjectStore
+from agent_env.store.object_store.object_store import readable_url
 from agent_env.store.object_store.local.grant_server import unreachable_hint
 
 logger = logging.getLogger(__name__)
@@ -294,6 +298,52 @@ def namespace_grant(
         max_total_bytes=limits.max_total_bytes,
         write=policy.write,
     )
+
+
+@asynccontextmanager
+async def readable_parts(
+    parts: list[dict],
+    *,
+    a2a_url: str,
+    card: Mapping[str, Any] | None,
+    sandbox_type: str | None,
+    expires_in: int,
+) -> AsyncIterator[list[dict]]:
+    """``parts`` as the agent at ``a2a_url`` can read them: a file part naming an object a configured store
+    owns names an HTTPS URL for it instead, one ``readable_url`` gives for at least ``expires_in`` seconds,
+    or else a copy staged on the agent for the length of the block. Other parts, and file parts naming
+    anything else, are sent as they are. Raises when an owned object can be given no URL the agent can read."""
+    config = get_config()
+    readable = list(parts)
+    staged: dict[int, StagedObjectStore] = {}  # by identity: a store need not be hashable
+    for index, part in enumerate(parts):
+        file = part.get("file") if part.get("kind") == "file" else None
+        uri = file.get("uri") if isinstance(file, dict) else None
+        if not isinstance(uri, str):
+            continue
+        store = config.get_object_store_at(uri)
+        if not store.owns(uri):
+            continue
+        url = await asyncio.to_thread(readable_url, store, uri, sandbox_type=sandbox_type, expires_in=expires_in)
+        if url is None:
+            staging = staged.get(id(store)) or staged_store(store, a2a_url, card)
+            if staging is not None:
+                staged[id(store)] = staging
+                url = str(staging.issue_read_grant(uri).url)
+        if url is None:
+            raise RuntimeError(
+                f"{uri} cannot be sent to the agent: {type(store).__name__} gives no URL that agents on the "
+                f"{sandbox_type or 'unknown'!r} sandbox provider can read, and the agent serves no staging to "
+                "send it through"
+            )
+        readable[index] = {**part, "file": {**file, "uri": url}}
+    try:
+        for staging in staged.values():
+            await staging.push()
+        yield readable
+    finally:
+        for staging in staged.values():
+            await staging.release()
 
 
 def skill_bundle_request(

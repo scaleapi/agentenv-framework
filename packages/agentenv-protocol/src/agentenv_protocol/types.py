@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError
+
+from .transfers import RelativePath
 
 
 def error_body(code: str, message: str) -> dict:
@@ -29,6 +31,13 @@ METHOD_GET = "data/get"
 # accepts and what `data/get` returns, for discoverability + pre-deploy fit checks. Absence of the
 # extension means "no claim" (skip fit-checks), matching the `supports_v1` 404->legacy precedent.
 INTAKE_EXTENSION_URI = "urn:agentenv:intake/v1"
+
+# A declaration-only extension: `data/get` takes a `write_namespace` param (a
+# `transfers.WriteNamespaceGrant`) and may upload its export under the grant instead of returning
+# it, answering with the part `uploaded_file_part` builds. A server that does not advertise it
+# is never sent one.
+DATA_OBJECTS_EXTENSION_URI = "urn:agentenv:data-objects/v1"
+_RELATIVE_PATH = TypeAdapter(RelativePath)
 
 
 class FileWithBytes(BaseModel):
@@ -62,6 +71,29 @@ class DataPart(BaseModel):
 
 
 Part = Annotated[Union[TextPart, FilePart, DataPart], Field(discriminator="kind")]
+
+
+def uploaded_file_part(path: str, *, name: Optional[str] = None, mime_type: Optional[str] = None) -> FilePart:
+    """The `data/get` answer naming an export uploaded through its `write_namespace` grant, at
+    `path` relative to the grant's `root_path`."""
+    path = _RELATIVE_PATH.validate_python(path)
+    return FilePart(
+        file=FileWithUri(uri=path, name=name, mimeType=mime_type),
+        metadata={DATA_OBJECTS_EXTENSION_URI: {"path": path}},
+    )
+
+
+def uploaded_object_path(part: Part) -> Optional[str]:
+    """Where, relative to the `write_namespace` grant's `root_path`, `part` says the export was
+    uploaded; None when it names no upload. Raises ValueError for a path outside the root."""
+    marker = (part.metadata or {}).get(DATA_OBJECTS_EXTENSION_URI) if isinstance(part, FilePart) else None
+    if marker is None:
+        return None
+    path = marker.get("path") if isinstance(marker, dict) else None
+    try:
+        return _RELATIVE_PATH.validate_python(path)
+    except ValidationError:
+        raise ValueError(f"the uploaded export's path {path!r} is not a normalized relative path") from None
 
 
 class AddDataRequest(BaseModel):

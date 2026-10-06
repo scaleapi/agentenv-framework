@@ -34,6 +34,7 @@ from .manifest import (
     manifest_compatible,
 )
 from .types import (
+    DATA_OBJECTS_EXTENSION_URI,
     INTAKE_EXTENSION_URI,
     MCP_PATH,
     MCP_TRANSPORT,
@@ -60,6 +61,8 @@ from .types import (
     TextPart,
     error_body,
     intake_extension,
+    uploaded_file_part,
+    uploaded_object_path,
 )
 
 __all__ = [
@@ -88,6 +91,9 @@ __all__ = [
     "intake_extension",
     "intake_fit_check",
     "INTAKE_EXTENSION_URI",
+    "DATA_OBJECTS_EXTENSION_URI",
+    "uploaded_file_part",
+    "uploaded_object_path",
     "MCP_PATH",
     "MCP_TRANSPORT",
     "MANIFEST_VERSION",
