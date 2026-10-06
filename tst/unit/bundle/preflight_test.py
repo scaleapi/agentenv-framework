@@ -73,9 +73,10 @@ def _env(id, where=LOCAL, **fields):
         return MCPServerEnv.put(id=id, docker_image_artifact=_image(f"{id}-image", where), environment_name=id, **fields)
 
 
-def _infra(where=LOCAL, version=None):
+def _infra(where=LOCAL, built_from=None):
+    """The infra envs, as agent-env would have built them from inputs whose digest is ``built_from``."""
     def metadata(dockerfile):
-        return {"agent_env_version": version, "dockerfile_path": str(dockerfile)} if version else None
+        return {"dockerfile_path": str(dockerfile), bootstrap.BUILD_INPUTS_KEY: built_from} if built_from else None
 
     with namespace_routing():
         GatewayEnv.put(id="default", docker_image_artifact=_image("gateway-default", where),
@@ -319,17 +320,16 @@ def test_an_attached_state_instance_needs_the_service_db_by_its_own_type(bundle_
     assert [build.kind for build in dry_run_bundle(bundle_dir).infra] == kinds
 
 
-def test_infra_another_agent_env_release_built_is_rebuilt_and_this_releases_isnt(bundle_dir, monkeypatch):
-    monkeypatch.setattr("agent_env.env.bootstrap._agent_env_version", lambda: "0.9.2")
+def test_infra_built_from_other_inputs_is_rebuilt_and_infra_built_from_this_releases_isnt(bundle_dir, monkeypatch):
     _env("crm")
     _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
-    _infra(version="0.9.1")
+    _infra(built_from="an earlier release's")
 
     assert [str(build) for build in dry_run_bundle(bundle_dir).infra] == [
-        "service-db env 'default-db' (built by agent-env 0.9.1, this is 0.9.2)",
-        "gateway env 'default' (built by agent-env 0.9.1, this is 0.9.2)",
+        "service-db env 'default-db' (its build inputs changed)",
+        "gateway env 'default' (its build inputs changed)",
     ]
-    monkeypatch.setattr("agent_env.env.bootstrap._agent_env_version", lambda: "0.9.1")
+    monkeypatch.setattr("agent_env.env.bootstrap.build_inputs_digest", lambda kind: "an earlier release's")
     assert dry_run_bundle(bundle_dir).infra == ()
 
 

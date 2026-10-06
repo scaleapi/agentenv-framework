@@ -7,9 +7,9 @@ The put commands build them one at a time; ``ensure_default_envs`` builds the on
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from agent_env.artifact import DockerImageArtifact
@@ -62,7 +62,7 @@ def put_gateway_env(env_id: str, *, platform: str | None, metadata: Mapping[str,
     say(f"Created artifact: id={artifact.id} version={artifact.version}")
     say("Creating GatewayEnv...")
     env = GatewayEnv.put(id=env_id, docker_image_artifact=artifact,
-                         metadata=_metadata(GATEWAY_DOCKERFILE, GATEWAY_CONTEXT, metadata))
+                         metadata=_metadata(GATEWAY, GATEWAY_DOCKERFILE, GATEWAY_CONTEXT, metadata))
     say(f"Created GatewayEnv: id={env.id} version={env.version}")
     return env
 
@@ -91,7 +91,7 @@ def put_service_db_env(env_id: str, *, platform: str | None, metadata: Mapping[s
         db_docker_image_artifact=artifacts[0],
         db_web_docker_image_artifact=artifacts[1],
         db_mcp_docker_image_artifact=artifacts[2],
-        metadata=_metadata(SERVICE_DB_DOCKERFILE, SERVICE_DB_DOCKERFILE.parent, metadata),
+        metadata=_metadata(SERVICE_DB, SERVICE_DB_DOCKERFILE, SERVICE_DB_DOCKERFILE.parent, metadata),
     )
     say(f"Created ServiceDBEnv: id={env.id} version={env.version}")
     return env
@@ -110,13 +110,39 @@ def put_website_browser_env(env_id: str, *, platform: str | None, metadata: Mapp
     say(f"Created artifact: id={artifact.id} version={artifact.version}")
     say("Creating MCPServerEnv...")
     env = MCPServerEnv.put(id=env_id, docker_image_artifact=artifact, environment_name=WEBSITE_BROWSER_ENVIRONMENT_NAME,
-                           metadata=_metadata(WEBSITE_BROWSER_DOCKERFILE, WEBSITE_BROWSER_CONTEXT, metadata))
+                           metadata=_metadata(WEBSITE_BROWSER, WEBSITE_BROWSER_DOCKERFILE, WEBSITE_BROWSER_CONTEXT,
+                                              metadata))
     say(f"Created MCPServerEnv: id={env.id} version={env.version} environment_name={env.environment_name}")
     return env
 
 
-def _metadata(dockerfile: Path, context: Path, extra: Mapping[str, str] | None) -> dict[str, str] | None:
-    return {**detect_env_metadata(dockerfile, context), **(extra or {})} or None
+def _metadata(kind: str, dockerfile: Path, context: Path, extra: Mapping[str, str] | None) -> dict[str, str]:
+    return {**detect_env_metadata(dockerfile, context), BUILD_INPUTS_KEY: build_inputs_digest(kind), **(extra or {})}
+
+
+BUILD_INPUTS_KEY = "build_inputs_sha256"  # the metadata key a put records build_inputs_digest under
+_BUILD_INPUTS = {
+    GATEWAY: lambda: _files_under(GATEWAY_DOCKERFILE.parent),  # the gateway's Dockerfile copies only its own folder
+    SERVICE_DB: lambda: [SERVICE_DB_DOCKERFILE, DB_WEB_DOCKERFILE, DB_MCP_DOCKERFILE],  # they copy nothing
+    WEBSITE_BROWSER: lambda: [WEBSITE_BROWSER_DOCKERFILE, WEBSITE_BROWSER_CONTEXT / "entrypoint.sh"],
+}
+_BUILD_ARGS = {WEBSITE_BROWSER: {"PLAYWRIGHT_MCP_VERSION": PLAYWRIGHT_MCP_VERSION}}
+
+
+def build_inputs_digest(kind: str) -> str:
+    """A digest of what agent-env builds ``kind``'s images from: the Dockerfiles it ships, the files they copy and the
+    build args. What a build fetches (base images, packages) isn't an input."""
+    digest = hashlib.sha256()
+    for path in sorted(_BUILD_INPUTS[kind]()):
+        digest.update(path.relative_to(_ENV_PACKAGE).as_posix().encode() + b"\0" + path.read_bytes() + b"\0")
+    for name, value in sorted(_BUILD_ARGS.get(kind, {}).items()):
+        digest.update(f"{name}={value}\0".encode())
+    return digest.hexdigest()
+
+
+def _files_under(folder: Path) -> list[Path]:
+    return [path for path in folder.rglob("*")
+            if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc"]
 
 
 _PUTS = {GATEWAY: put_gateway_env, SERVICE_DB: put_service_db_env, WEBSITE_BROWSER: put_website_browser_env}
@@ -153,15 +179,14 @@ def put_command(kind: str) -> str:
 
 
 def infra_to_build(kinds: Iterable[str]) -> list[InfraBuild]:
-    """The infra envs of ``kinds`` a run builds: each one missing from the store and, in local stores, each one another
-    agent-env release built from the Dockerfile it ships, whose images may predate this release's. Raises InfraError
-    naming the put command for each one missing from stores that aren't all local, which agent-env never builds into."""
+    """The infra envs of ``kinds`` a run builds: each one missing from the store and, in local stores, each one agent-env
+    built from the Dockerfile it ships whose recorded build inputs aren't this release's. Raises InfraError naming the
+    put command for each one missing from stores that aren't all local, which agent-env never builds into."""
     kinds = _in_order(kinds)
     if not kinds:
         return []
     builds, problems = [], []
     local = stores_are_local()
-    running = _agent_env_version()
     for kind in kinds:
         env_id = default_env_id(kind)
         try:
@@ -173,9 +198,10 @@ def infra_to_build(kinds: Iterable[str]) -> list[InfraBuild]:
                 problems.append(f"the {kind} env {env_id!r} isn't in the store, and agent-env builds infra envs only into "
                                 f"local stores; put it with `{put_command(kind)}`")
             continue
-        built_by = (env.metadata or {}).get("agent_env_version")
-        if local and built_by and running and built_by != running and _built_from_stock(env, kind):
-            builds.append(InfraBuild(kind, env_id, f"built by agent-env {built_by}, this is {running}"))
+        recorded = (env.metadata or {}).get(BUILD_INPUTS_KEY)
+        if local and _built_from_stock(env, kind) and recorded != build_inputs_digest(kind):
+            reason = "its build inputs changed" if recorded else "built before agent-env recorded its build inputs"
+            builds.append(InfraBuild(kind, env_id, reason))
     if problems:
         raise InfraError(problems)
     return builds
@@ -221,10 +247,3 @@ def _built_from_stock(env: Env, kind: str) -> bool:
 def _in_order(kinds: Iterable[str]) -> list[str]:
     wanted = set(kinds)
     return [kind for kind in (SERVICE_DB, GATEWAY, WEBSITE_BROWSER) if kind in wanted]
-
-
-def _agent_env_version() -> str | None:
-    try:
-        return version("agentenv-framework")
-    except PackageNotFoundError:
-        return None

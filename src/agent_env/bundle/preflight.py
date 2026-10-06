@@ -74,7 +74,7 @@ class Preflight:
     """What a run needs before its tasks start, beyond its writes: the infra envs it builds."""
 
     infra_kinds: frozenset[str]  # the infra its deploys on the local provider run on
-    infra: tuple[InfraBuild, ...]  # those the store doesn't hold yet, or another agent-env release built
+    infra: tuple[InfraBuild, ...]  # those the store doesn't hold yet, or holds built from other inputs
 
 
 def preflight_run(plan: Plan, tasks: Iterable[ResolvedEntry], sandbox: str | None) -> Preflight:

@@ -27,8 +27,8 @@ def _require_explorer_deps() -> None:
 
 
 def _bootstrap_envs() -> None:
-    """Build the two envs ``deploy_env`` resolves by id (service-db, gateway) when they're missing or another
-    agent-env release built them, so `up` is cheap after the first run, which builds their images."""
+    """Build the two envs ``deploy_env`` resolves by id (service-db, gateway) when they're missing or were built from
+    other inputs than this release's, so `up` is cheap after the first run, which builds their images."""
     try:
         builds = ensure_default_envs((SERVICE_DB, GATEWAY), say=lambda line: click.echo(f"  {line}"))
     except InfraError as e:

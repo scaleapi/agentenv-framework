@@ -26,12 +26,12 @@ def puts(local_stores, monkeypatch):
                 id=f"{kind}-{env_id}", description=kind, image_name=f"{kind}:v1", tar_gz_s3_url="file:///x.tar.gz"))
             shipped = bootstrap._STOCK_DOCKERFILES[kind].relative_to(bootstrap._ENV_PACKAGE.parent.parent)
             GatewayEnv.put(id=env_id, docker_image_artifact=artifact, metadata={
-                "agent_env_version": "0.9.2", "dockerfile_path": f"/another/install/site-packages/{shipped}"})
+                "dockerfile_path": f"/another/install/site-packages/{shipped}",
+                bootstrap.BUILD_INPUTS_KEY: bootstrap.build_inputs_digest(kind)})
         return write
 
     for kind in (GATEWAY, SERVICE_DB, WEBSITE_BROWSER):
         monkeypatch.setitem(bootstrap._PUTS, kind, put(kind))
-    monkeypatch.setattr(bootstrap, "_agent_env_version", lambda: "0.9.2")
     return calls
 
 
@@ -49,17 +49,30 @@ def test_missing_infra_is_built_for_this_host_in_order_and_once(puts):
     assert len(puts) == 3
 
 
-def test_infra_another_release_built_is_rebuilt(puts, monkeypatch):
+def test_infra_built_from_other_inputs_is_rebuilt_once(puts, monkeypatch):
     ensure_default_envs([GATEWAY])
-    monkeypatch.setattr(bootstrap, "_agent_env_version", lambda: "0.9.3")
+    monkeypatch.setattr(bootstrap, "build_inputs_digest", lambda kind: "this release's")
 
     (build,) = ensure_default_envs([GATEWAY])
 
-    assert build.reason == "built by agent-env 0.9.2, this is 0.9.3"
+    assert build.reason == "its build inputs changed"
+    assert ensure_default_envs([GATEWAY]) == []
     assert len(puts) == 2
 
 
-def test_infra_with_no_recorded_release_is_left_as_it_is(puts):
+def test_infra_built_before_its_inputs_were_recorded_is_rebuilt(puts):
+    artifact = get_artifact_store().put_document(DockerImageArtifact(
+        id="gateway-default", description="g", image_name="g:v1", tar_gz_s3_url="file:///g.tar.gz"))
+    GatewayEnv.put(id="default", docker_image_artifact=artifact,
+                   metadata={"agent_env_version": "0.9.1", "dockerfile_path": str(bootstrap.GATEWAY_DOCKERFILE)})
+
+    (build,) = ensure_default_envs([GATEWAY])
+
+    assert build.reason == "built before agent-env recorded its build inputs"
+    assert puts == [(GATEWAY, "default", None)]
+
+
+def test_infra_that_records_no_shipped_dockerfile_is_left_as_it_is(puts):
     artifact = get_artifact_store().put_document(DockerImageArtifact(
         id="gateway-default", description="g", image_name="g:v1", tar_gz_s3_url="file:///g.tar.gz"))
     GatewayEnv.put(id="default", docker_image_artifact=artifact)
@@ -72,7 +85,7 @@ def test_an_env_built_from_someone_elses_dockerfile_is_theirs_to_rebuild(puts, m
     artifact = get_artifact_store().put_document(DockerImageArtifact(
         id="website-browser-website-browser", description="b", image_name="b:v1", tar_gz_s3_url="file:///b.tar.gz"))
     GatewayEnv.put(id="website-browser", docker_image_artifact=artifact,
-                   metadata={"agent_env_version": "0.9.1", "dockerfile_path": "/home/me/my-browser/Dockerfile"})
+                   metadata={"dockerfile_path": "/home/me/my-browser/Dockerfile", bootstrap.BUILD_INPUTS_KEY: "theirs"})
 
     assert ensure_default_envs([WEBSITE_BROWSER]) == []
     assert puts == []
@@ -97,14 +110,14 @@ def test_nothing_is_built_without_docker(puts, monkeypatch):
 def test_stores_that_arent_local_are_never_built_into(puts, monkeypatch):
     ensure_default_envs([GATEWAY])
     monkeypatch.setattr(bootstrap, "stores_are_local", lambda: False)
-    monkeypatch.setattr(bootstrap, "_agent_env_version", lambda: "0.9.3")
+    monkeypatch.setattr(bootstrap, "build_inputs_digest", lambda kind: "this release's")
 
     with pytest.raises(InfraError) as e:
         ensure_default_envs([GATEWAY, SERVICE_DB])
 
     assert e.value.problems == ["the service-db env 'default-db' isn't in the store, and agent-env builds infra envs "
                                 "only into local stores; put it with `agent-env env service-db put --id default-db`"]
-    assert ensure_default_envs([GATEWAY]) == []  # another release's gateway, in a store it doesn't build into
+    assert ensure_default_envs([GATEWAY]) == []  # built from other inputs, in a store it doesn't build into
     assert len(puts) == 1
 
 
@@ -141,3 +154,24 @@ def test_the_website_browser_runs_playwrights_chromium_which_is_built_for_amd64_
     """Chrome has no Linux arm64 build, so a browser built for an Apple Silicon host couldn't install it."""
     assert "npx playwright install chromium" in bootstrap.WEBSITE_BROWSER_DOCKERFILE.read_text()
     assert "--browser chromium" in (bootstrap.WEBSITE_BROWSER_CONTEXT / "entrypoint.sh").read_text()
+
+
+def test_a_put_records_what_the_env_was_built_from(local_stores, monkeypatch):
+    monkeypatch.setattr(bootstrap, "build_image", lambda *args, **kwargs: None)
+    monkeypatch.setattr(bootstrap.DockerImageArtifact, "put", lambda id, **kwargs: get_artifact_store().put_document(
+        DockerImageArtifact(id=id, description="b", image_name=kwargs["image_name"], tar_gz_s3_url="file:///b.tar.gz")))
+
+    env = bootstrap.put_website_browser_env("website-browser", platform=None)
+
+    assert env.metadata[bootstrap.BUILD_INPUTS_KEY] == bootstrap.build_inputs_digest(WEBSITE_BROWSER)
+
+
+def test_the_build_inputs_are_the_shipped_files_and_build_args_less_python_caches(tmp_path, monkeypatch):
+    (tmp_path / "__pycache__").mkdir()
+    (tmp_path / "__pycache__/gateway.cpython-312.pyc").write_text("compiled")
+    (tmp_path / "gateway.py").write_text("served")
+    before = bootstrap.build_inputs_digest(WEBSITE_BROWSER)
+    monkeypatch.setitem(bootstrap._BUILD_ARGS, WEBSITE_BROWSER, {"PLAYWRIGHT_MCP_VERSION": "9.9.9"})
+
+    assert bootstrap._files_under(tmp_path) == [tmp_path / "gateway.py"]
+    assert bootstrap.build_inputs_digest(WEBSITE_BROWSER) != before
