@@ -23,6 +23,8 @@ from agent_env.env.envs.service_db import ServiceDBEnv
 from agent_env.env.envs.website import WebsiteEnv
 from agent_env.env.store import get_env_store
 from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider
+from agent_env.providers.env_state.env_state_provider import EnvStateInstance
+from agent_env.providers.env_state.store import register_env_state_instance
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
 from agent_env.store.routing import namespace_routing
 from agent_env.task_step.context import PromptResponse, TaskStepContext
@@ -305,6 +307,16 @@ def test_external_state_needs_no_service_db_and_a_website_needs_the_browser(bund
     _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "shop", "env_state_type": "external_db"}])
 
     assert [build.kind for build in dry_run_bundle(bundle_dir).infra] == ["gateway", "website-browser"]
+
+
+@pytest.mark.parametrize("state_type, kinds", [("local_postgres", ["service-db", "gateway"]), ("external_db", ["gateway"])])
+def test_an_attached_state_instance_needs_the_service_db_by_its_own_type(bundle_dir, state_type, kinds):
+    _env("crm")
+    with namespace_routing():
+        register_env_state_instance(EnvStateInstance(state_type=state_type, instance_id="state-1"), ttl_seconds=600)
+    _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm", "env_state_instance_id": "state-1"}])
+
+    assert [build.kind for build in dry_run_bundle(bundle_dir).infra] == kinds
 
 
 def test_infra_another_agent_env_release_built_is_rebuilt_and_this_releases_isnt(bundle_dir, monkeypatch):

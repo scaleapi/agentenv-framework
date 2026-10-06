@@ -42,6 +42,7 @@ from agent_env.env.envs.website import WebsiteEnv
 from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider, _gateway_topology
 from agent_env.providers.env_providers.env_server_provider import EnvironmentServerProvider
 from agent_env.providers.env_state.env_state_provider import LOCAL_POSTGRES_STATE_TYPE
+from agent_env.providers.env_state.store import get_env_state_instance_store
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
@@ -162,7 +163,7 @@ class _Walk:
             topology = _gateway_topology(env)
             images = [*topology.mcp_server_images, *(topology.website_images or [])]
             kinds = {GATEWAY}
-            if step.env_state_instance_id is None and (step.env_state_type or LOCAL_POSTGRES_STATE_TYPE) == LOCAL_POSTGRES_STATE_TYPE:
+            if _state_type(step) == LOCAL_POSTGRES_STATE_TYPE:
                 kinds.add(SERVICE_DB)
             if topology.website_configs:
                 kinds.add(WEBSITE_BROWSER)
@@ -283,6 +284,16 @@ class _Walk:
             problem = f"agent {agent_id!r} can't be read ({type(e).__name__}: {e})"
         for where, unnamed in self.default_agent_users:
             self.problems.append(f"{where}: {unnamed}, so it deploys the default, {agent_id!r}, and {problem}")
+
+
+def _state_type(step: DeployEnvTaskStep) -> str | None:
+    """The type of the env state store the deploy runs on: an attached instance's own, else the one it creates."""
+    if step.env_state_instance_id is None:
+        return step.env_state_type or LOCAL_POSTGRES_STATE_TYPE
+    try:
+        return get_env_state_instance_store().get(step.env_state_instance_id).state_type
+    except NotFoundError:
+        return None  # the deploy refuses an instance that isn't there
 
 
 def _provider(spec: str | None, default: Callable[[], SandboxProvider]) -> SandboxProvider:
