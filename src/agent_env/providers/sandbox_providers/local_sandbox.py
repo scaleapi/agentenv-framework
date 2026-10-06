@@ -43,13 +43,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _APP_PATH_PATTERN = re.compile(r"(?<![A-Za-z0-9_./~})$-])/app(?=(?:/|:|[\s'\";)&|]|$))")
-# The /app that names a container's: after the container of a `docker cp`, or after the host side of a `-v` mount.
-_CONTAINER_APP = re.compile(r"""\bdocker\s+cp\b[^;&|\n]*?[\w.-]:['"]?(?=/app)|(?:^|\s)(?:-v|--volume)[\s=]+\S*?:['"]?(?=/app)""")
-_IN_CONTAINER_SCRIPT = re.compile(r"\s*(?:sudo\s+)?docker\s+exec\b")
+_IN_CONTAINER_SCRIPT = re.compile(r"\s*(?:sudo\s+)?docker\s+(?:exec|cp)\b")
 
 
 def _runs_in_container(cmd: list[str]) -> bool:
-    """A ``docker exec``, as arguments or as a ``bash -c`` script: its /app is the container's."""
+    """A ``docker exec``, as arguments or as a ``bash -c`` script, or a ``docker cp`` script: its /app is the container's."""
     return cmd[:2] == ["docker", "exec"] or (
         cmd[:2] == ["bash", "-c"] and len(cmd) > 2 and bool(_IN_CONTAINER_SCRIPT.match(cmd[2]))
     )
@@ -188,8 +186,7 @@ class LocalSandbox(VmSandbox):
         return arg
 
     def _rewrite_app_script(self, script: str) -> str:
-        in_container = {m.end() for m in _CONTAINER_APP.finditer(script)}
-        return _APP_PATH_PATTERN.sub(lambda m: m[0] if m.start() in in_container else str(self._work_dir), script)
+        return _APP_PATH_PATTERN.sub(lambda _: str(self._work_dir), script)
 
     async def terminate(self) -> None:
         """Tear down whatever this sandbox is running.
