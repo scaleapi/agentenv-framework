@@ -2908,3 +2908,77 @@ def test_extension_cannot_shadow_framework_route(
 
     with pytest.raises(ValueError, match=rf"conflicts with {owner} route"):
         Agent().create_app()
+
+
+def _send_in_context(client: TestClient, text: str, message_id: str) -> str:
+    response = client.post(
+        "/a2a",
+        json={
+            "jsonrpc": "2.0",
+            "id": message_id,
+            "method": "message/send",
+            "params": {
+                "message": {
+                    "kind": "message",
+                    "messageId": message_id,
+                    "role": "user",
+                    "contextId": "context-1",
+                    "parts": [{"kind": "text", "text": text}],
+                },
+                "configuration": {"blocking": False},
+            },
+        },
+    )
+    return response.json()["result"]["id"]
+
+
+def _task_rpc(client: TestClient, method: str, task_id: str) -> dict[str, Any]:
+    return client.post(
+        "/a2a",
+        json={"jsonrpc": "2.0", "id": method, "method": method, "params": {"id": task_id}},
+    ).json()
+
+
+def _within(seconds: float, condition) -> bool:
+    deadline = time.monotonic() + seconds
+    while not condition():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.01)
+    return True
+
+
+def test_cancel_stops_a_running_task_and_frees_its_context() -> None:
+    ran: list[str] = []
+    cancelled: list[str] = []
+
+    @a2a_agent(identity=AgentIdentity(name="slow", description="test", version="1"))
+    class Agent(AgentEnvAgent):
+        async def run(self, request: TaskRequest) -> TaskResult:
+            text = request.parts[0].text
+            ran.append(text)
+            if text == "hang":
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    cancelled.append(text)
+                    raise
+            return TaskResult.text(f"did {text}")
+
+    def state(client: TestClient, task_id: str) -> str:
+        return _task_rpc(client, "tasks/get", task_id)["result"]["status"]["state"]
+
+    with TestClient(Agent().create_app()) as client:
+        hung = _send_in_context(client, "hang", "message-1")
+        assert _within(5, lambda: ran == ["hang"])
+
+        canceled = _task_rpc(client, "tasks/cancel", hung)
+        assert canceled["result"]["status"]["state"] == "canceled"
+
+        # The next task in the same context runs only once the canceled one let go of it.
+        following = _send_in_context(client, "next", "message-2")
+        assert _within(5, lambda: state(client, following) == "completed")
+        assert state(client, hung) == "canceled"
+
+    assert cancelled == ["hang"]
+    assert ran == ["hang", "next"]

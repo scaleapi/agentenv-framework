@@ -4,12 +4,20 @@ The terminal A2A status message carries the agent's text reply plus a DataPart w
 telemetry and — when the agent ran with output_format — the typed structured_output.
 """
 
+import json
+import logging
+from types import SimpleNamespace
+
 import httpx
 import pytest
 
+from agent_env.a2a_agent import protocol
 from agent_env.a2a_agent.protocol import (
+    UNREACHABLE_AFTER_SECONDS,
+    AgentUnreachableError,
     TerminalResponse,
     extract_terminal_response,
+    poll_a2a_task,
     raise_for_extension_status,
 )
 from agentenv_protocol.a2a_agent import TaskResult, Usage
@@ -182,3 +190,158 @@ def test_extract_terminal_response_shim_returns_legacy_5_tuple():
         {"kind": "data", "data": {"tool_call_count": 2, "error_type": "E"}},
     ]}
     assert extract_terminal_response(msg) == ("hi", 2, "E", None, None)
+
+
+class _Agent:
+    """An agent behind a mock transport, on a fake clock: ``answer(method, request, agent)`` replies to each
+    JSON-RPC call, and sleeping only moves the clock."""
+
+    def __init__(self, monkeypatch, answer):
+        self.now = 0.0
+        self.calls: list[str] = []
+        self._answer = answer
+        transport = httpx.MockTransport(self._handle)
+        client = httpx.AsyncClient
+        monkeypatch.setattr(protocol.httpx, "AsyncClient", lambda **kw: client(transport=transport, **kw))
+        monkeypatch.setattr(protocol, "time", SimpleNamespace(monotonic=lambda: self.now))
+        monkeypatch.setattr(protocol, "asyncio", SimpleNamespace(sleep=self._sleep))
+
+    async def _sleep(self, seconds):
+        self.now += seconds
+
+    def _handle(self, request):
+        method = json.loads(request.content)["method"]
+        self.calls.append(method)
+        return self._answer(method, request, self)
+
+
+def _task(state):
+    return httpx.Response(200, json={"jsonrpc": "2.0", "id": "poll", "result": {"id": "t-1", "status": {"state": state}}})
+
+
+def _disconnected(request, agent):
+    raise httpx.RemoteProtocolError("Server disconnected without sending a response.", request=request)
+
+
+def _refused(request, agent):
+    raise httpx.ConnectError("Connection refused", request=request)
+
+
+def _hung(request, agent):
+    agent.now += 30
+    raise httpx.ReadTimeout("timed out", request=request)
+
+
+def _bad_gateway(request, agent):
+    return httpx.Response(502)
+
+
+def _working_then(failure):
+    def answer(method, request, agent):
+        return _task("working") if agent.calls.count("tasks/get") == 1 else failure(request, agent)
+    return answer
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure, last", [
+    (_disconnected, "RemoteProtocolError"), (_refused, "ConnectError"), (_hung, "ReadTimeout"), (_bad_gateway, "HTTP 502"),
+])
+async def test_an_agent_whose_sandbox_died_is_given_up_on_naming_it(monkeypatch, failure, last):
+    agent = _Agent(monkeypatch, _working_then(failure))
+
+    with pytest.raises(AgentUnreachableError, match=rf"The agent on sandbox sb-1 stopped answering: .*\(last: {last}") as raised:
+        await poll_a2a_task("http://agent", "t-1", 1200, 2, sandbox_id="sb-1")
+
+    assert isinstance(raised.value, TimeoutError)  # handled wherever running out of time is, only sooner
+    assert agent.now <= 2 * UNREACHABLE_AFTER_SECONDS
+    assert "tasks/cancel" not in agent.calls
+
+
+@pytest.mark.asyncio
+async def test_a_blip_shorter_than_the_window_is_ridden_out(monkeypatch):
+    def answer(method, request, agent):
+        if 10 < agent.now < 50:
+            _disconnected(request, agent)
+        return _task("completed" if agent.now > 50 else "working")
+
+    agent = _Agent(monkeypatch, answer)
+
+    result = await poll_a2a_task("http://agent", "t-1", 1200, 2, sandbox_id="sb-1")
+
+    assert result["status"]["state"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_it_takes_three_unanswered_polls_however_far_apart(monkeypatch):
+    agent = _Agent(monkeypatch, _working_then(_refused))
+
+    with pytest.raises(AgentUnreachableError):
+        await poll_a2a_task("http://agent", "t-1", 1200, 60, sandbox_id="sb-1")
+
+    assert agent.calls.count("tasks/get") == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reply", [
+    httpx.Response(500),
+    httpx.Response(200, json={"jsonrpc": "2.0", "id": "poll", "error": {"code": -32603, "message": "boom"}}),
+], ids=["http-500", "json-rpc-error"])
+async def test_an_agent_answering_with_errors_is_waited_on_until_the_timeout(monkeypatch, reply):
+    agent = _Agent(monkeypatch, lambda method, request, agent: reply if method == "tasks/get" else _task("canceled"))
+
+    with pytest.raises(TimeoutError, match="did not complete within 600s") as raised:
+        await poll_a2a_task("http://agent", "t-1", 600, 2, sandbox_id="sb-1")
+
+    assert not isinstance(raised.value, AgentUnreachableError)
+    assert agent.now >= 600
+
+
+@pytest.mark.asyncio
+async def test_without_a_sandbox_a_silent_agent_is_waited_on_until_the_timeout(monkeypatch):
+    agent = _Agent(monkeypatch, lambda method, request, agent: _refused(request, agent))
+
+    with pytest.raises(TimeoutError, match="did not complete within 600s") as raised:
+        await poll_a2a_task("http://agent", "t-1", 600, 2)
+
+    assert type(raised.value) is TimeoutError
+    assert agent.now >= 600
+
+
+@pytest.mark.asyncio
+async def test_running_out_of_time_cancels_the_task(monkeypatch):
+    cancelled = []
+
+    def answer(method, request, agent):
+        if method == "tasks/cancel":
+            cancelled.append(json.loads(request.content)["params"])
+            return _task("canceled")
+        return _task("working")
+
+    agent = _Agent(monkeypatch, answer)
+
+    with pytest.raises(TimeoutError, match="did not complete within 60s"):
+        await poll_a2a_task("http://agent", "t-1", 60, 2)
+
+    assert cancelled == [{"id": "t-1"}]
+    assert agent.calls[-1] == "tasks/cancel"
+
+
+def _unsupported(request, agent):
+    return httpx.Response(200, json={
+        "jsonrpc": "2.0", "id": "cancel", "error": {"code": -32004, "message": "This operation is not supported"}})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refusal, logged", [
+    (_unsupported, "The agent didn't cancel A2A task t-1"),
+    (lambda request, agent: httpx.Response(500), "Couldn't cancel A2A task t-1: HTTPStatusError"),
+    (_refused, "Couldn't cancel A2A task t-1: ConnectError"),
+], ids=["unsupported", "http-500", "unreachable"])
+async def test_a_cancel_that_fails_still_reports_the_timeout(monkeypatch, caplog, refusal, logged):
+    _Agent(monkeypatch, lambda method, request, agent: refusal(request, agent) if method == "tasks/cancel" else _task("working"))
+
+    with caplog.at_level(logging.WARNING, logger=protocol.__name__):
+        with pytest.raises(TimeoutError, match="did not complete within 60s"):
+            await poll_a2a_task("http://agent", "t-1", 60, 2)
+
+    assert logged in caplog.text

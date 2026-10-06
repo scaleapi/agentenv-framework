@@ -301,6 +301,11 @@ A successful `TaskResult` must contain at least one text, file, or data part;
 the framework rejects empty successes rather than emitting an ungradeable task.
 The SDK does not retry tasks.
 
+A client that gives up on a task sends `tasks/cancel`. The framework marks the
+task canceled and cancels `run()`, which gets `asyncio.CancelledError` at its
+next `await`. A process `run()` started keeps running unless `run()` stops it,
+so kill it before re-raising.
+
 `enable(..., description="...")` is reserved for declarations carrying
 configuration or metadata. It preserves the agent-specific extension prose
 published in the Agent Card. The versioned SDK definition provides a generic

@@ -508,6 +508,7 @@ class PromptAgentTaskStep(TaskStep):
                 )
                 result = await protocol.poll_a2a_task(
                     target_url, sent_task_id, self.timeout_seconds, self.poll_interval_seconds,
+                    sandbox_id=agent.sandbox_id,
                 )
             target_state = result["status"]["state"]
             status_msg = (result.get("status") or {}).get("message") or {}
@@ -579,9 +580,10 @@ class PromptAgentTaskStep(TaskStep):
                 user_result = await protocol.poll_a2a_task(
                     user_url, sent_user_task_id,
                     self.user_agent_timeout_seconds, self.poll_interval_seconds,
+                    sandbox_id=user_sim.sandbox_id if is_user_sim else None,
                 )
-            except TimeoutError:
-                logger.warning(f"user_a2a_url timeout for conversation {conversation_id}; marking abandoned")
+            except TimeoutError as e:
+                logger.warning(f"user_a2a_url timeout for conversation {conversation_id} ({e}); marking abandoned")
                 conversation_store.mark_closed(conversation_id)
                 break
 
