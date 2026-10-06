@@ -1022,6 +1022,7 @@ class RubricsVerifierTaskStep(TaskStep):
             task_id,
             timeout_seconds=self.judge_timeout_seconds,
             poll_interval_seconds=self.DEFAULT_POLL_INTERVAL_SECONDS,
+            sandbox_id=getattr(judge_agent, "sandbox_id", None),
         )
         state = result["status"]["state"]
         status_msg = (result.get("status") or {}).get("message") or {}

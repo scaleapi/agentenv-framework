@@ -368,7 +368,8 @@ async def send_and_wait(
     final state. A peer that is an ``agent`` agent-env deployed is sent each file part a configured store
     owns, of those ``shareable`` names when given, as an HTTPS URL it can read (``readable_parts``); any
     other peer, such as a human's hub, reads the store itself and is sent the parts as they are.
-    ``before_send`` runs once the parts are ready, just before the message goes out."""
+    ``before_send`` runs once the parts are ready, just before the message goes out. An ``agent``'s sandbox is
+    watched while it works, so one that dies is given up on (``poll_a2a_task``)."""
     sending = (
         readable_parts(
             parts, a2a_url=a2a_url, card=agent.a2a_card, sandbox_type=agent.sandbox_type,
@@ -381,7 +382,10 @@ async def send_and_wait(
         if before_send is not None:
             before_send()
         task_id, _ = await protocol.send_a2a_message(a2a_url, sent, message_id, context_id, timeout_seconds)
-        return task_id, await protocol.poll_a2a_task(a2a_url, task_id, timeout_seconds, poll_interval_seconds)
+        return task_id, await protocol.poll_a2a_task(
+            a2a_url, task_id, timeout_seconds, poll_interval_seconds,
+            sandbox_id=agent.sandbox_id if agent is not None else None,
+        )
 
 
 def skill_bundle_request(

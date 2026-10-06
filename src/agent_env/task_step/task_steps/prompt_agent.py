@@ -586,8 +586,8 @@ class PromptAgentTaskStep(TaskStep):
                     timeout_seconds=self.user_agent_timeout_seconds,
                     poll_interval_seconds=self.poll_interval_seconds,
                 )
-            except TimeoutError:
-                logger.warning(f"user_a2a_url timeout for conversation {conversation_id}; marking abandoned")
+            except TimeoutError as e:
+                logger.warning(f"user_a2a_url timeout for conversation {conversation_id} ({e}); marking abandoned")
                 conversation_store.mark_closed(conversation_id)
                 break
 
