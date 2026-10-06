@@ -497,6 +497,8 @@ async def _invoke_add(fn: Callable, params: dict) -> dict:
 async def _invoke_get(fn: Callable, params: dict) -> dict:
     kwargs = {}
     if _takes_write_namespace(fn):
+        if not isinstance(params, dict):
+            raise _InvalidParams("data/get takes its params by name")
         raw = params.get("write_namespace")
         try:
             kwargs["write_namespace"] = None if raw is None else WriteNamespaceGrant.model_validate(raw)

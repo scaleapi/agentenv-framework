@@ -421,9 +421,9 @@ class SnapshotEnvTaskStep(TaskStep):
             upload = await asyncio.to_thread(
                 _snapshot_upload, card or {}, timeout_seconds, getattr(deployed, "sandbox_type", None)
             )
-            if upload is None:
-                # Push S3 creds (no-op unless the service advertises the extension).
-                await _push_s3_credentials(card_base, card or {}, timeout_seconds)
+            # Push S3 creds (no-op unless the service advertises the extension), with a grant too: a
+            # bundle the grant cannot hold can still be uploaded with them.
+            await _push_s3_credentials(card_base, card or {}, timeout_seconds)
             grant = {} if upload is None else {"write_namespace": upload.grant}
             resp = await protocol_v1.get_data(base_url, timeout=int(timeout_seconds), **grant)
             part = resp.parts[0] if resp.parts else None

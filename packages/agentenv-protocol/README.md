@@ -147,9 +147,12 @@ outside the root. A handler that cannot use the grant (its export outgrows the g
 say) answers as it would without one.
 
 ```python
-from agentenv_protocol import DataPart, get_data, uploaded_file_part
+from agentenv_protocol import AgentEnvEnvironment, DataPart, environment_card, get_data, uploaded_file_part
 from agentenv_protocol.transfers import NamespaceUploader, WriteNamespaceGrant
 
+
+@environment_card(name="slack")
+class SlackEnv(AgentEnvEnvironment):
     @get_data
     async def _state(self, write_namespace: WriteNamespaceGrant | None = None):
         bundle = self.write_bundle()  # a Path

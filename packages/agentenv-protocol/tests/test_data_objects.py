@@ -161,6 +161,18 @@ async def test_an_invalid_grant_is_refused_without_echoing_it():
 
 
 @pytest.mark.asyncio
+async def test_params_given_by_position_are_refused():
+    handler = _UploadingHandler()
+    _, app = _app(handler)
+
+    body = await _post(app, {"jsonrpc": "2.0", "id": 1, "method": "data/get", "params": [_grant().model_dump(mode="json")]})
+
+    assert body["error"]["code"] == -32602
+    assert _SIGNATURE not in json.dumps(body)
+    assert handler.grants == []
+
+
+@pytest.mark.asyncio
 async def test_get_data_sends_no_params_without_a_grant_and_the_grant_with_one(monkeypatch):
     sent: list[dict] = []
     real = httpx.AsyncClient
