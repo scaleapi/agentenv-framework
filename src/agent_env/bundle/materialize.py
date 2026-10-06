@@ -89,7 +89,6 @@ def materialize(
         raise RuntimeError("materializing a bundle needs namespace routing, which the agent-env CLI turns on; "
                            "call it inside agent_env.store.routing.namespace_routing()")
     ledger = Ledger.for_plan(plan)
-    _refuse_builds_without_docker(plan, ledger)
     entities = [write for write in plan.writes if write.kind not in (BundleKind.TASK, BundleKind.EVAL)]
     tasks = [write for write in plan.writes if write.kind is BundleKind.TASK]
     evals = [write for write in plan.writes if write.kind is BundleKind.EVAL]
@@ -109,6 +108,7 @@ def materialize(
             on_write(done[_key(write)])
 
     with nullcontext() if dry_run else materializing(plan.bundle.bundle, on_wait):
+        _refuse_builds_without_docker(plan, ledger)  # once another run writing these ids is done
         for write in entities:
             through_ledger(write, lambda: _write_entity(plan, write, on_build))
         unwritten = {_key(item.write) for item in done.values() if not item.reused} if dry_run else set()

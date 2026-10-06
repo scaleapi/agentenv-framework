@@ -1,5 +1,6 @@
 """Materializing a planned bundle: what gets written, what is reused, and what is refused before any write."""
 
+import contextlib
 import json
 import subprocess
 import sys
@@ -466,6 +467,29 @@ def test_an_image_to_build_without_docker_on_path_is_refused_before_anything_is_
     assert _problems(lambda: _run(bundle_dir, dry_run)) == (
         "agents/solver: building its image from Dockerfile needs docker, and it isn't on PATH",)
     assert not local_store().path.exists()
+
+
+def test_whether_an_image_needs_docker_is_decided_once_another_run_writing_it_is_done(bundle_dir, builds, monkeypatch):
+    """Another run may be building the image; once its lock is released, the ledger can reuse what it built."""
+    events = []
+    locked = materialize_module.materializing
+
+    @contextlib.contextmanager
+    def materializing(bundle, on_wait=None):
+        with locked(bundle, on_wait):
+            events.append("locked")
+            yield
+
+    monkeypatch.setattr(materialize_module, "materializing", materializing)
+    check = materialize_module._refuse_builds_without_docker
+    monkeypatch.setattr(materialize_module, "_refuse_builds_without_docker",
+                        lambda plan, ledger: events.append("docker checked") or check(plan, ledger))
+    layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\n"})
+    _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
+
+    _run(bundle_dir)
+
+    assert events == ["locked", "docker checked"]
 
 
 @_RUN_OR_DRY_RUN
