@@ -1,6 +1,7 @@
 """The bundle ledger: a re-run reuses every version whose inputs haven't changed, and says why the rest
 are written anew."""
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -11,13 +12,15 @@ from typing import Literal
 
 import pytest
 
+from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.bundle import parse_bundle
 from agent_env.bundle import plan as plan_module
 from agent_env.bundle import resolve as resolve_module
 from agent_env.bundle.ledger import LEDGER_COLLECTION, Ledger, materializing
+from agent_env.bundle.materialize import _pinned
 from agent_env.config import configure, get_config
-from agent_env.entity_refs import EntityRef
+from agent_env.entity_refs import EntityKind, EntityRef
 from agent_env.env.env import Env
 from agent_env.store import Filter, Sort, UpdateSpec
 from tst.unit.bundle._support import RefusingStore, local_store, plan_of
@@ -123,6 +126,8 @@ def _record_changed(ledger, writes):
     checks, versions = {}, {}
     for write in writes:
         check = ledger.check(write, {need: versions[need] for need in write.needs})
+        if check.adopted:
+            ledger.adopt(check)
         version = check.version if check.unchanged else ledger.record(check, lambda: _written(write))
         versions[write.kind.store, write.id] = version
         checks[write.id] = check
@@ -379,6 +384,21 @@ def test_an_agent_is_rewritten_when_its_toml_changes_or_its_unpinned_store_image
     assert checks[f"{ROOT}/t"].unchanged
 
 
+def test_a_store_ref_named_without_a_version_is_pinned_at_the_version_the_ledger_hashes(bundle_dir):
+    get_config().get_document_store().insert("artifacts", _image_document(3))
+    layout = {"agents/solver/agent.toml": 'image = "claude-image"\n',
+              "tasks/t.json": _steps({"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"})}
+    for rel, text in layout.items():
+        (bundle_dir / rel).parent.mkdir(parents=True, exist_ok=True)
+        (bundle_dir / rel).write_text(text)
+    plan = plan_of(bundle_dir)
+    agent = next(write for write in plan.writes if write.id == f"{ROOT}/solver")
+
+    assert plan_module.unpinned_store_refs(plan, agent) == {(EntityKind.ARTIFACT, "claude-image"): 3}
+    assert _pinned(plan, agent, A2AAgent.toml_refs)["image"] == {"artifact": "claude-image", "version": 3}
+    assert Ledger.for_plan(plan).digest(agent, {}).inputs["store_refs"] == {"artifact claude-image": "3"}
+
+
 def _image_document(version):
     return {"id": "claude-image", "version": version, "type": "docker_image", "description": "claude",
             "image_name": f"claude:v{version}", "tar_gz_s3_url": f"file:///claude-v{version}.tar.gz"}
@@ -441,6 +461,81 @@ def test_a_built_image_is_made_from_every_file_of_its_folder_the_toml_too(bundle
     assert retoml[image].reasons == ("files added: agent.toml",) and not retoml[agent].unchanged
     assert rebuilt[image].reasons == ("files changed: run.sh",)
     assert not rebuilt[agent].unchanged
+
+
+def test_a_built_images_executable_bits_are_inputs_and_a_file_artifacts_arent(bundle_dir):
+    (bundle_dir / "agents/solver").mkdir(parents=True)
+    (bundle_dir / "agents/solver/Dockerfile").write_text("FROM scratch\nCOPY run.sh /\n")
+    run_sh = bundle_dir / "agents/solver/run.sh"
+    run_sh.write_text("echo hi\n")
+    (bundle_dir / "tasks/t.json").write_text(
+        _steps({"id": "agent", "type": "deploy_agent", "env_ids": ["tickets"], "a2a_agent_id": "solver"}))
+    image = f"{ROOT}/solver__agent_image"
+    plan = plan_of(bundle_dir)
+    built = next(write for write in plan.writes if write.id == image)
+    # A file with no executable bit is hashed as its content alone, as before, so earlier rows stay reused.
+    assert Ledger.for_plan(plan).digest(built, {}).inputs["files"]["run.sh"] == _file_digest(run_sh)
+    _run(bundle_dir)
+
+    run_sh.chmod(0o755)
+    (bundle_dir / "artifacts/greeting/hello.txt").chmod(0o755)
+    checks = _run(bundle_dir)
+
+    assert checks[image].reasons == ("files changed: run.sh",)
+    assert checks[GREETING].unchanged
+    assert _run(bundle_dir)[image].unchanged
+
+
+def _file_digest(path):
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _interrupted_after_its_write(ledger, write, monkeypatch):
+    """Record ``write`` as a run does, interrupted once its write has returned, while the ledger checks what
+    the write held."""
+    def interrupted(*_):
+        raise KeyboardInterrupt
+
+    check = ledger.check(write, {})
+    monkeypatch.setattr(ledger, "digest", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        ledger.record(check, lambda: _written(write))
+
+
+def test_a_version_an_interrupted_run_wrote_is_kept_and_recorded_not_written_again(bundle_dir, monkeypatch):
+    plan = plan_of(bundle_dir)
+    write = next(w for w in plan.writes if w.id == GREETING)
+    _interrupted_after_its_write(Ledger.for_plan(plan), write, monkeypatch)
+
+    predicted = _checked(Ledger.for_plan(plan), plan.writes)[GREETING]
+    kept = _record_changed(Ledger.for_plan(plan), plan.writes)[GREETING]
+
+    for check in (predicted, kept):
+        assert (check.version, check.adopted) == (1, True)
+        assert check.reasons == ("written by an interrupted run that didn't record it",)
+    assert _latest_version("artifacts", GREETING) == 1
+    after = _record_changed(Ledger.for_plan(plan), plan.writes)[GREETING]
+    assert (after.version, after.adopted, after.reasons) == (1, False, ())
+    assert [row["status"] for row in local_store().query(LEDGER_COLLECTION, Filter.of(id=GREETING))] == ["done"]
+
+
+@pytest.mark.parametrize("since", ["another-write", "an-edit"])
+def test_an_interrupted_runs_version_is_written_over_once_the_store_or_the_files_have_moved_on(
+    bundle_dir, monkeypatch, since,
+):
+    plan = plan_of(bundle_dir)
+    write = next(w for w in plan.writes if w.id == GREETING)
+    _interrupted_after_its_write(Ledger.for_plan(plan), write, monkeypatch)
+    if since == "another-write":
+        _written(write)
+    else:
+        (bundle_dir / "artifacts/greeting/hello.txt").write_text("edited\n")
+
+    check = Ledger.for_plan(plan).check(write, {})
+
+    stored = 2 if since == "another-write" else 1
+    assert not check.unchanged and not check.adopted
+    assert check.reasons == (f"the store's latest, v{stored}, wasn't recorded by this bundle",)
 
 
 @pytest.mark.parametrize("other", [

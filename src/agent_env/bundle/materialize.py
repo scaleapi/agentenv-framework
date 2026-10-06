@@ -38,7 +38,7 @@ from ._fs import relative, with_article
 from .authoring import AuthoringContext, build_context_files
 from .ledger import Ledger, materializing
 from .parse import BundleError, BundleKind
-from .plan import Plan, Write, folder_walk
+from .plan import Plan, Write, folder_walk, unpinned_store_refs
 from .resolve import BuiltImage, build_step
 
 @dataclass(frozen=True)
@@ -99,6 +99,8 @@ def materialize(
             check = ledger.check(write, {need: done[need].version for need in write.needs})
             if check.unchanged:
                 version = check.version
+                if check.adopted and not dry_run:
+                    ledger.adopt(check)
             elif dry_run:
                 version = check.next_version
             else:
@@ -184,10 +186,11 @@ def _write_agent(plan: Plan, write: Write) -> int:
 
 def _pinned(plan: Plan, write: Write, refs: tuple[EntityRef, ...]) -> Any:
     """A copy of ``write``'s resolved toml with each store ref that names no version pinned to the version
-    the plan checked, which the ledger hashed, so one the store gains before the write isn't written."""
+    the plan read, which the ledger hashed (``unpinned_store_refs``)."""
     config = copy.deepcopy(write.source.config)
+    pins = unpinned_store_refs(plan, write)
     for site in ref_sites(refs, config, inline_pins=True):
-        planned = plan.store_latest.get((site.ref.kind, site.value)) if site.version is None else None
+        planned = pins.get((site.ref.kind, site.value)) if site.version is None else None
         if planned is None:
             continue
         if site.version_key is None:

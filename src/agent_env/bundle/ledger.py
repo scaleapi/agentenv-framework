@@ -32,7 +32,7 @@ from agent_env.task.store import TASKS_COLLECTION
 
 from .authoring import build_context_files, entry_files
 from .parse import Bundle, BundleKind
-from .plan import Plan, Write, folder_walk, keeps_base_from_toml
+from .plan import Plan, Write, folder_walk, keeps_base_from_toml, unpinned_store_refs
 from .resolve import BuiltImage
 
 LEDGER_COLLECTION = "bundle_ledger"
@@ -61,6 +61,7 @@ class Check:
     reasons: tuple[str, ...]
     stored: int | None  # the store's latest version of the id when checked
     needs: Mapping[tuple[str, str], int]  # the version hashed for each earlier write it needs, by (store, id)
+    adopted: bool = False  # ``version`` was written by an interrupted run of this bundle, which didn't record it
 
     @property
     def unchanged(self) -> bool:
@@ -93,6 +94,10 @@ class Ledger:
         if digest is None:
             untracked = ("its inputs aren't tracked yet, so it is written every run",)
             return Check(write, None, None, untracked, stored, needs)
+        orphan = self._orphan(write, stored, digest)
+        if orphan is not None:
+            return Check(write, digest, orphan, ("written by an interrupted run that didn't record it",), stored, needs,
+                         adopted=True)
         row = self._latest(write.kind.store, write.id)
         recorded = row["version"] if row else None
         reasons = []
@@ -115,24 +120,26 @@ class Ledger:
         inputs = {"type": _type(write), "config": _sha256(_canonical(config)),
                   "files": {}, "needs": {}, "store_refs": {}}
         if write.kind is BundleKind.ARTIFACT:
-            files = build_context_files if isinstance(write.source, BuiltImage) else entry_files
-            for key, path in files(self._plan.bundle.bundle, write.source.entry).items():
-                inputs["files"][key] = _file_sha256(path)
+            built = isinstance(write.source, BuiltImage)
+            for key, path in (build_context_files if built else entry_files)(self._plan.bundle.bundle,
+                                                                              write.source.entry).items():
+                # A build copies each file's mode into the image, so an executable bit is part of what it's made from.
+                inputs["files"][key] = _file_sha256(path) + (_EXECUTABLE if built and _executable(path) else "")
         elif write.kind in (BundleKind.ENV, BundleKind.AGENT):
-            # An env's or agent's document records the versions of what it references, so one written anew, or
-            # a store entity it names without a version getting a new one, means it must be written again. A
-            # task or eval names its references without a version.
+            # An env's or agent's document records the versions of what it references, so one written anew means
+            # it must be written again. A task or eval names its references without a version.
             for store, id in write.needs:
                 inputs["needs"][f"{store} {id}"] = str(needs[store, id])
-            for ref in write.source.references:
-                if ref.local is None and ref.version is None:
-                    inputs["store_refs"][f"{ref.kind} {ref.id}"] = str(self._plan.store_latest[ref.kind, ref.id])
+        if write.kind not in (BundleKind.TASK, BundleKind.EVAL):
+            for (kind, id), version in unpinned_store_refs(self._plan, write).items():
+                inputs["store_refs"][f"{kind} {id}"] = str(version)
         value = _sha256(_canonical({"scheme": SCHEME, "store": write.kind.store, "id": write.id, "inputs": inputs}))
         return Digest(value, inputs)
 
     def record(self, check: Check, write: Callable[[], int]) -> int:
         """Write ``check``'s entity with ``write``, which returns the version it wrote, and record it.
-        A pending row marks the attempt until it's done; one a crash of this bundle left is dropped here."""
+        A pending row marks the attempt until it's done, with its version once ``write`` returns. One an
+        interrupted run of this bundle left is kept by ``check`` when its version can be, and dropped here."""
         key = {"store": check.write.kind.store, "id": check.write.id, "bundle": self._bundle}
         self._store.ensure_index(LEDGER_COLLECTION, ["store", "id", "status"])
         while self._store.delete(LEDGER_COLLECTION, Filter.of(**key, status="pending")):
@@ -142,12 +149,31 @@ class Ledger:
                    "inputs": check.digest.inputs if check.digest else None, "at": _now()}
         self._store.insert(LEDGER_COLLECTION, pending)
         version = write()
+        # Stamped before the check below, which can take seconds, so a run interrupted during it leaves the version
+        # this attempt wrote, and the next run keeps it rather than writing it again.
+        self._store.replace(LEDGER_COLLECTION, Filter.of(**key, status="pending"), {**pending, "version": version})
         done = {**pending, "status": "done", "version": version, "at": _now()}
         if check.digest is not None and self.digest(check.write, check.needs) != check.digest:
             # A file changed during the write, so what the version holds is unknown: the next run writes it again.
             done.update(digest=None, inputs=None)
         self._store.replace(LEDGER_COLLECTION, Filter.of(**key, status="pending"), done, upsert=True)
         return version
+
+    def adopt(self, check: Check) -> None:
+        """Record the version an interrupted run wrote, which ``check`` keeps, as that run would have."""
+        key = {"store": check.write.kind.store, "id": check.write.id, "bundle": self._bundle}
+        done = {**key, "status": "done", "scheme": SCHEME, "digest": check.digest.value, "inputs": check.digest.inputs,
+                "version": check.version, "at": _now()}
+        self._store.replace(LEDGER_COLLECTION, Filter.of(**key, status="pending"), done, upsert=True)
+
+    def _orphan(self, write: Write, stored: int | None, digest: Digest) -> int | None:
+        """The version an interrupted run of this bundle wrote and didn't record, when it's still the store's
+        latest and was made from what ``write`` is now made from."""
+        pending = self._find(LEDGER_COLLECTION, Filter.of(store=write.kind.store, id=write.id, bundle=self._bundle,
+                                                          status="pending"))
+        if pending is None or pending.get("version") is None or pending["version"] != stored:
+            return None
+        return stored if (pending["scheme"], pending["digest"]) == (SCHEME, digest.value) else None
 
     def _latest(self, store: str, id: str) -> dict | None:
         return self._find(LEDGER_COLLECTION, Filter.of(store=store, id=id, status="done"))
@@ -243,6 +269,13 @@ def _scalar(value: Any) -> str:
 
 def _sha256(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+_EXECUTABLE = "+x"
+
+
+def _executable(path: Path) -> bool:
+    return bool(path.stat().st_mode & 0o111)
 
 
 def _file_sha256(path: Path) -> str:

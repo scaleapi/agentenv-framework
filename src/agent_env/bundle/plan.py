@@ -341,6 +341,16 @@ class _Planner:
         return relative(self.resolved.bundle.root, entry.path)
 
 
+def unpinned_store_refs(plan: Plan, write: Write) -> dict[tuple[EntityKind, str], int]:
+    """The version the plan read for each store entity ``write`` names without a version, by (kind, id). Its writer
+    pins each to that version and the ledger hashes them, so a version the store gains in between isn't written,
+    and one it gains later rewrites ``write``."""
+    if isinstance(write.source, BuiltImage):
+        return {}
+    return {(ref.kind, ref.id): plan.store_latest[ref.kind, ref.id]
+            for ref in write.source.references if ref.local is None and ref.version is None}
+
+
 def folder_walk(cls: type | None) -> Any:
     """The listing a type's write runs: a subclass keeping its base's ``from_toml`` lists the same way,
     one that overrides it may read its folder differently, so it gets none."""

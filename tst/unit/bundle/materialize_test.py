@@ -21,6 +21,8 @@ from agent_env.bundle import BundleError
 from agent_env.bundle import materialize as materialize_module
 from agent_env.bundle.ledger import LEDGER_COLLECTION, Ledger
 from agent_env.bundle.materialize import materialize
+from agent_env.bundle.parse import BundleKind
+from agent_env.bundle.run import _written
 from agent_env.config import configure
 from agent_env.config.paths import state_root
 from agent_env.config.runtime import Config
@@ -710,6 +712,39 @@ def test_a_dry_run_predicts_what_materializing_then_writes(bundle_dir):
     assert agree()[f"{ROOT}/docs"] == (2, False, ("files changed: b.md",))
     FileArtifact.put_bytes(f"{ROOT}/greeting", description="by hand", filename="hello.txt", content=b"by hand")
     assert agree()[f"{ROOT}/greeting"] == (3, False, ("the store's latest, v2, wasn't recorded by this bundle",))
+
+
+def test_a_version_a_run_wrote_before_it_was_interrupted_is_kept_by_the_next_run_and_its_dry_run(
+    bundle_dir, monkeypatch,
+):
+    interrupted, write_artifact, digest = [], materialize_module._WRITERS[BundleKind.ARTIFACT], Ledger.digest
+
+    def written(plan, write):  # the greeting's write lands, and then the run is interrupted
+        version = write_artifact(plan, write)
+        interrupted.append(write.id == f"{ROOT}/greeting")
+        return version
+
+    def digest_until_interrupted(self, *args):
+        if any(interrupted):
+            raise KeyboardInterrupt
+        return digest(self, *args)
+
+    monkeypatch.setitem(materialize_module._WRITERS, BundleKind.ARTIFACT, written)
+    monkeypatch.setattr(Ledger, "digest", digest_until_interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        _run(bundle_dir)
+    monkeypatch.setitem(materialize_module._WRITERS, BundleKind.ARTIFACT, write_artifact)
+    monkeypatch.setattr(Ledger, "digest", digest)
+
+    kept = (1, True, ("written by an interrupted run that didn't record it",))
+    assert _summary(_run(bundle_dir, dry_run=True))[f"{ROOT}/greeting"] == kept
+    done = _run(bundle_dir)
+    assert _summary(done)[f"{ROOT}/greeting"] == kept
+    greeting = next(item for item in done.writes if item.write.id == f"{ROOT}/greeting")
+    assert _written(done.plan, greeting) == (
+        "artifacts/greeting: v1, unchanged (written by an interrupted run that didn't record it)")
+    assert _summary(_run(bundle_dir))[f"{ROOT}/greeting"] == (1, True, ())
+    assert [d["version"] for d in local_store().query("artifacts", Filter.of(id=f"{ROOT}/greeting"))] == [1]
 
 
 def test_a_dry_run_calls_no_writer_and_takes_no_lock(bundle_dir, monkeypatch):
