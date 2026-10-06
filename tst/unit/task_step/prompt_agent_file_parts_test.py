@@ -116,3 +116,4 @@ async def test_an_object_the_agent_could_not_read_is_never_sent(monkeypatch, sto
         await step.execute(_context(sandbox_type="modal"))
 
     assert recorded["sent"][AGENT_URL] == []
+    assert recorded["recorded"] == []  # no turn left waiting for a reply

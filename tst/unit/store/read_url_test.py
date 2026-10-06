@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from agentenv_protocol.transfers import HttpGetGrant
 
+from agent_env.store.base import GrantUnavailableError
 from agent_env.store.object_store import DEFAULT_GRANT_LIFETIME_SECONDS, read_url
 from tst.util.granting_object_store import GRANT_ORIGIN, GrantingObjectStore
 
@@ -28,6 +29,13 @@ class _HeaderGrants(_Signing):
             kind="http-get", url=f"{GRANT_ORIGIN}/x", expires_at=datetime.now(UTC) + timedelta(hours=1),
             headers={"x-token": "t"},
         )
+
+
+class _ShortGrants(_Signing):
+    def issue_read_grant(self, object_url: str, *, expires_in: int | None = None) -> HttpGetGrant:
+        if expires_in is not None and expires_in > DEFAULT_GRANT_LIFETIME_SECONDS:
+            raise GrantUnavailableError("this store signs grants for at most 12 hours")
+        return super().issue_read_grant(object_url, expires_in=expires_in)
 
 
 @pytest.fixture
@@ -72,3 +80,10 @@ def test_it_lasts_the_grant_lifetime_or_longer_when_asked(signing, lasting, expe
     read_url(signing, url, sandbox_type="modal", lasting=lasting)
 
     assert signing.signed == [expected]
+
+
+def test_a_grant_that_cannot_last_long_enough_is_signed_instead(tmp_path):
+    store = _ShortGrants(str(tmp_path))
+    url = store.put("files/a.png", b"png")
+
+    assert read_url(store, url, sandbox_type="local", lasting=2 * DEFAULT_GRANT_LIFETIME_SECONDS) == f"{SIGNED_ORIGIN}/files/a.png"

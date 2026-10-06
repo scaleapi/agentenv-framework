@@ -56,7 +56,7 @@ async def test_parts_that_name_no_owned_object_are_sent_as_they_are(store):
 async def test_an_owned_object_the_agent_can_be_given_no_url_for_is_not_sent(store):
     url = store.put("seeds/s1/x.png", b"png")
 
-    with pytest.raises(RuntimeError, match="neither issues grants that reach agents on the 'modal' sandbox provider") as raised:
+    with pytest.raises(RuntimeError, match="gives no URL that agents on the 'modal' sandbox provider can read") as raised:
         async with readable_parts([_file(url)], a2a_url=URL, card=None, sandbox_type="modal", lasting=600):
             pytest.fail("the parts must not be sent")
 

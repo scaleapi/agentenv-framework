@@ -14,6 +14,8 @@ from agentenv_protocol.transfers import (
     HttpPutGrant,
 )
 
+from agent_env.store.base import GrantUnavailableError
+
 DEFAULT_CONTENT_TYPE = "application/octet-stream"
 DEFAULT_GRANT_LIFETIME_SECONDS = 12 * 60 * 60
 # The shortest a store's grants may be set to last: longer than the ten minutes agent-env waits for an agent
@@ -229,10 +231,13 @@ def read_url(store: ObjectStore, object_url: str, *, sandbox_type: str | None, l
     """An HTTPS URL that a remote party on the ``sandbox_type`` sandbox provider (None: unknown) can GET the
     object at ``object_url`` from: a read grant when the store's grants reach it, else a URL the store
     signs; None when the store offers neither. It lasts the store's grant lifetime, or ``lasting``
-    seconds when that is longer, unless the store's signing credentials expire first."""
+    seconds when that is longer, unless the store's signing credentials or limits end it first."""
     expires_in = max(lasting, store.grant_lifetime_seconds)
     if store.supports_transfer_grants and store.grants_reach(sandbox_type):
-        grant = store.issue_read_grant(object_url, expires_in=expires_in)
-        if not grant.headers:
+        try:
+            grant = store.issue_read_grant(object_url, expires_in=expires_in)
+        except GrantUnavailableError:  # it cannot last that long; a signed URL may
+            grant = None
+        if grant is not None and not grant.headers:
             return str(grant.url)
     return store.signed_get_url(object_url, expires_in=expires_in)

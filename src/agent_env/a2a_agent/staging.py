@@ -75,9 +75,17 @@ def transfer_store(
     """The store an extension call's grants come from: ``store`` when its grants reach the agent, else a
     store that stages them through the agent when the agent serves staging, else ``store`` itself, so the
     call falls back to the forms that carry no grants."""
-    endpoint = staging_endpoint(a2a_url, card)
-    if endpoint is None or (store.supports_transfer_grants and store.grants_reach(sandbox_type)):
+    staged = staged_store(store, a2a_url, card)
+    if staged is None or (store.supports_transfer_grants and store.grants_reach(sandbox_type)):
         return store
+    return staged
+
+
+def staged_store(store: ObjectStore, a2a_url: str, card: Mapping[str, Any] | None) -> StagedObjectStore | None:
+    """``store``, issuing grants staged through the agent at ``a2a_url``; None when the agent serves no staging."""
+    endpoint = staging_endpoint(a2a_url, card)
+    if endpoint is None:
+        return None
     limit = _staging_params(card).get("max_bytes")
     return StagedObjectStore(store, endpoint, max_bytes=limit if isinstance(limit, int) and limit > 0 else None)
 

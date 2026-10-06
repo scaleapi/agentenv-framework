@@ -480,27 +480,28 @@ class PromptAgentTaskStep(TaskStep):
             # agent and recorded on the conversation as `a2a_task_id`.
             # This id is also used as part of the key name for the trajectory S3 object.
             target_a2a_task_id = uuid.uuid4().hex
-            conversation_store.add_a2a_task(
-                conversation_id=conversation_id,
-                parts=current_user_parts,
-                a2a_task_id=target_a2a_task_id,
-                role="user",
-            )
-            # Turn 0 of a prompt-mode step re-sends exactly the text already
-            # persisted as PromptResponse.prompt_text; store a None placeholder
-            # instead of a second copy so the doc doesn't carry the prompt twice.
-            # The list stays index-aligned with the per-turn trajectory URIs.
-            source_agent_per_turn_prompt_parts.append(
-                None
-                if turn == 0 and _duplicates_prompt_text(current_user_parts, prompt_text)
-                else list(current_user_parts)
-            )
-
-            # Only the sent copy names readable URLs: what is recorded above keeps the objects' own URLs.
+            # Only the sent copy names readable URLs; the turn records the objects' own URLs, and only
+            # once the copy is ready, so an object the agent can't be sent leaves no turn waiting.
             async with readable_parts(
                 current_user_parts, a2a_url=target_url, card=card,
                 sandbox_type=agent.sandbox_type, lasting=self.timeout_seconds,
             ) as sent_parts:
+                conversation_store.add_a2a_task(
+                    conversation_id=conversation_id,
+                    parts=current_user_parts,
+                    a2a_task_id=target_a2a_task_id,
+                    role="user",
+                )
+                # Turn 0 of a prompt-mode step re-sends exactly the text already
+                # persisted as PromptResponse.prompt_text; store a None placeholder
+                # instead of a second copy so the doc doesn't carry the prompt twice.
+                # The list stays index-aligned with the per-turn trajectory URIs.
+                source_agent_per_turn_prompt_parts.append(
+                    None
+                    if turn == 0 and _duplicates_prompt_text(current_user_parts, prompt_text)
+                    else list(current_user_parts)
+                )
+
                 sent_task_id, _ = await protocol.send_a2a_message(
                     target_url, sent_parts, target_a2a_task_id,
                     solver_context_id, self.timeout_seconds,
