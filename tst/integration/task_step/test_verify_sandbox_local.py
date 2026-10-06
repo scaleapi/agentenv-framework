@@ -5,24 +5,31 @@ and `python3` on PATH and nothing else. The agent tests start a real container i
 an agent's, so they need Docker too, but no model.
 """
 
+import io
+import json
 import shutil
 import subprocess
 import uuid
+import zipfile
 
 import pytest
 import pytest_asyncio
 
 from agent_env.artifact import FileArtifact, FileArtifactUniverse
+from agent_env.artifact.artifacts.environment import EnvironmentArtifact
 from agent_env.a2a_agent.a2a_agent import DeployedA2AAgent
 from agent_env.a2a_agent.store import get_a2a_agent_instance_store
 from agent_env.artifact.store import reset_artifact_store
 from agent_env.config import configure, get_config, reset_config
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
 from agent_env.task import Task
-from agent_env.task_step.context import DeployedAgent, TaskStepContext
+from agent_env.task_step.context import DeployedAgent, DeployedSandbox, TaskStepContext
 from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTaskStep
 from agent_env.task_step.task_steps.deploy_sandbox import DeploySandboxTaskStep
 from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
+from agent_env.task_step.task_steps.verifiers.run_container_unit_tests_verifier import (
+    RunContainerUnitTestsVerifierTaskStep,
+)
 from agent_env.task_step.task_steps.verifiers.verify_sandbox import VerifySandboxTaskStep
 from tst.util.capabilities import missing_capability_reason
 
@@ -189,6 +196,60 @@ async def test_load_artifact_puts_a_universe_in_a_local_agents_container(local_a
                            capture_output=True, text=True)
     assert (shown.returncode, shown.stdout) == (0, "hello, world\n")
     assert list(sandbox.work_dir.iterdir()) == [sandbox.work_dir / ".agent-container-mode"]
+
+
+@pytest.mark.asyncio
+async def test_load_artifact_stages_an_environment_payload_in_a_local_container(local_agent, tmp_path):
+    sandbox, context = local_agent
+    _as_deployed_container(sandbox, context)
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as zf:
+        zf.writestr("root/docs/readme.md", "root doc\n")
+        zf.writestr("data.json", json.dumps({"files": [{"path": "notes/a.txt", "content": "from data.json\n"}]}))
+    (tmp_path / "payload.zip").write_bytes(payload.getvalue())
+    suffix = uuid.uuid4().hex[:8]
+    artifact = EnvironmentArtifact.put(
+        id=f"payload-{suffix}", environment_name="filesystem",
+        file_artifact=FileArtifact.put(id=f"payload-{suffix}-zip", description="payload", file_path=str(tmp_path / "payload.zip")),
+    )
+    step = LoadArtifactTaskStep(
+        id="load", version=None, artifact_id=artifact.id, sandbox_name="box", container_name=sandbox.container_name,
+        destination_path="/app/my files",
+    )
+
+    await step.execute(context)
+
+    for path, text in (("/app/my files/docs/readme.md", "root doc\n"), ("/app/my files/notes/a.txt", "from data.json\n")):
+        shown = subprocess.run(["docker", "exec", sandbox.container_name, "cat", path], capture_output=True, text=True)
+        assert (shown.returncode, shown.stdout) == (0, text)
+
+
+@pytest.mark.asyncio
+async def test_the_unit_tests_verifier_runs_in_a_local_container(local_agent):
+    sandbox, context = local_agent
+    _as_deployed_container(sandbox, context)
+    _write_in_container(sandbox, "/app/data/hello.txt", "hello")
+    step = RunContainerUnitTestsVerifierTaskStep(
+        id="verify", version=None, sandbox_name="box", container_name=sandbox.container_name,
+        setup_commands=["mkdir -p /logs && touch /logs/setup-ran"],
+        command="test -f /logs/setup-ran && grep -q hello /app/data/hello.txt && echo '{\"reward\": 1}' > /logs/reward.json",
+        result_paths=["/logs/reward.json"],
+    )
+
+    ctx = await step.execute(context)
+
+    entry = ctx.metadata["verifications"]["verify"]
+    assert (entry["exit_code"], entry["extracted_files"]) == (0, {"/logs/reward.json": {"reward": 1}})
+
+
+def _as_deployed_container(sandbox, context):
+    """Record the agent's container as a ``run_docker_container`` container on the deployed sandbox ``box``."""
+    context.deployed_sandboxes.append(
+        DeployedSandbox(sandbox_name="box", sandbox_id=sandbox.sandbox_id, sandbox_mode="vm", sandbox_type="local"),
+    )
+    context.metadata.setdefault("deployed_docker_containers", []).append(
+        {"container_name": sandbox.container_name, "sandbox_name": "box", "sandbox_id": sandbox.sandbox_id},
+    )
 
 
 def _write_in_container(sandbox, path, text):

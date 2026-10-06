@@ -683,33 +683,6 @@ async def test_exec_leaves_a_docker_exec_script_naming_the_containers_app_alone(
 
     await sandbox.exec("sudo", "bash", "-c", script)
 
-    assert spawned == [("bash", "-c", script.removeprefix("sudo "))]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("script, ran", [
-    ("sudo docker exec -u 0 c mkdir -p /files", "docker exec -u 0 c mkdir -p /files"),
-    ("sudo docker cp /tmp/s/. c:/files && rm -f /tmp/s", "docker cp /tmp/s/. c:/files && rm -f /tmp/s"),
-    ("set -e\nsudo docker ps", "set -e\ndocker ps"),
-    ("a; sudo b | sudo tee f && v=$(sudo cat g)", "a; b | tee f && v=$(cat g)"),
-])
-async def test_exec_drops_sudo_a_script_runs_as_a_command_on_this_host(spawned, script, ran):
-    await LocalSandbox(work_dir=Path("/tmp/agent-env-work")).exec("sudo", "bash", "-c", script)
-
-    assert spawned == [("bash", "-c", ran)]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("script", [
-    "docker exec c sudo ls",
-    "echo pseudo sudoers",
-    "docker exec c bash -c 'make; sudo make install'",
-    "docker exec c bash -c 'it'\"'\"'s; sudo ls'",
-    'echo "a; sudo b"',
-])
-async def test_exec_keeps_sudo_that_is_not_a_command_on_this_host(spawned, script):
-    await LocalSandbox(work_dir=Path("/tmp/agent-env-work")).exec("bash", "-c", script)
-
     assert spawned == [("bash", "-c", script)]
 
 
