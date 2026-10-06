@@ -86,8 +86,12 @@ class DockerImageArtifact(Artifact):
 
         store = get_artifact_store()
         version = store.next_version(id)
+        # Objects are written once, so each attempt writes under a prefix of its own: one that stopped
+        # before its document was written doesn't block the next.
+        prefix = store.attempt_prefix("docker_image", id)
 
         config = get_config()
+        objects = config.get_object_store_to_write(prefix, id)
         image_store = config.get_image_store_for(id)
         repository = image_repository(id)
         image_ref = image_store.image_ref(repository, f"v{version}")
@@ -115,13 +119,8 @@ class DockerImageArtifact(Artifact):
                 stderr = save_proc.stderr.read().decode() if save_proc.stderr else ""
                 raise RuntimeError(f"docker save {image_ref} failed: {stderr}")
 
-            tar_gz_s3_url = store.put_object_file(
-                artifact_type="docker_image",
-                id=id,
-                version=version,
-                object_name=f"{fs_safe(id)}-v{version}.tar.gz",
-                file_path=str(tmp_path),
-                content_type="application/gzip",
+            tar_gz_s3_url = objects.put_file_at(
+                f"{prefix}{fs_safe(id)}-v{version}.tar.gz", str(tmp_path), "application/gzip"
             )
         finally:
             if tmp_path.exists():
@@ -139,13 +138,8 @@ class DockerImageArtifact(Artifact):
                         full_path = context_dir / rel_path
                         if full_path.exists():
                             tar.add(str(full_path), arcname=rel_path)
-                build_context_s3_url = store.put_object_file(
-                    artifact_type="docker_image",
-                    id=id,
-                    version=version,
-                    object_name="build-context.tar.gz",
-                    file_path=str(ctx_tmp_path),
-                    content_type="application/gzip",
+                build_context_s3_url = objects.put_file_at(
+                    f"{prefix}build-context.tar.gz", str(ctx_tmp_path), "application/gzip"
                 )
             finally:
                 if ctx_tmp_path.exists():

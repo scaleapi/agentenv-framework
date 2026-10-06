@@ -229,8 +229,9 @@ class _DockerSave:
 
 @pytest.mark.parametrize("entity_id, registry, repository, tarball", [
     (HOSTILE, "localhost:5000", HOSTILE_SEGMENT,
-     f"artifacts/docker_image/{HOSTILE_SEGMENT}/1/local-my-work-tickets-v2-ee679b8e5d3a-v1.tar.gz"),
-    ("legacy-image", "fake.registry", "legacy-image", "artifacts/docker_image/legacy-image/1/legacy-image-v1.tar.gz"),
+     (f"artifacts/docker_image/{HOSTILE_SEGMENT}/1-", "/local-my-work-tickets-v2-ee679b8e5d3a-v1.tar.gz")),
+    ("legacy-image", "fake.registry", "legacy-image",
+     ("artifacts/docker_image/legacy-image/1-", "/legacy-image-v1.tar.gz")),
 ])
 def test_a_docker_image_names_its_repository_and_tarball_from_the_encoded_id(
     local_stores, cli_routing, monkeypatch, entity_id, registry, repository, tarball,
@@ -247,7 +248,9 @@ def test_a_docker_image_names_its_repository_and_tarball_from_the_encoded_id(
 
     assert images.repositories + local_registry == [repository]
     assert pushed == [f"{registry}/{repository}:v1"] and art.image_name == pushed[0]
-    assert local_stores.get_object_store().get_object_key(art.tar_gz_object_url) == tarball
+    before, after = tarball
+    key = local_stores.get_object_store().get_object_key(art.tar_gz_object_url)
+    assert re.fullmatch(f"{re.escape(before)}[0-9a-f]{{8}}{re.escape(after)}", key), key
     assert gzip.decompress(docker_image.DockerImageArtifact.get(entity_id).load()) == b"image-tar-bytes"
 
 
@@ -313,6 +316,25 @@ def test_a_put_bundled_that_fails_partway_doesnt_block_the_next(local_stores, mo
     universe = FileArtifactUniverse.put_bundled(id="interrupted", files=files)
     assert universe.version == 1
     assert {key: fa.load() for key, fa in universe.get_file_artifacts().items()} == {"a.txt": b"A", "b.txt": b"B"}
+
+
+def test_a_docker_image_put_that_stops_before_its_document_doesnt_block_the_next(local_stores, monkeypatch):
+    set_image_store(FakeImageStore())
+    monkeypatch.setattr(docker_image, "_push_local_image", lambda src, ref, store: None)
+    monkeypatch.setattr(docker_image.subprocess, "Popen", _DockerSave)
+    put_tar = docker_image.DockerImageArtifact.put_tar
+
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(docker_image.DockerImageArtifact, "put_tar", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        docker_image.DockerImageArtifact.put(id="interrupted", description="d", image_name="src:latest")
+    monkeypatch.setattr(docker_image.DockerImageArtifact, "put_tar", put_tar)
+    art = docker_image.DockerImageArtifact.put(id="interrupted", description="d", image_name="src:latest")
+
+    assert art.version == 1
+    assert gzip.decompress(art.load()) == b"image-tar-bytes"
 
 
 def test_get_many_writes_each_local_id_into_its_own_encoded_directory(local_stores, cli_routing, tmp_path):
