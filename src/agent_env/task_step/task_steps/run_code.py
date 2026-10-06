@@ -9,8 +9,10 @@ file can import its siblings; non-``.py`` members are skipped. ``script_file`` n
 the entry, defaulting to the sole ``.py`` member or to ``run.py``.
 
 Target: with ``env_id`` set, the script runs on that env's VM host (no agent, no
-LLM key); otherwise it runs inside the agent container (``agent_name``), where it
-can see the agent's workspace.
+LLM key); with ``sandbox_name`` set, on a ``deploy_sandbox`` sandbox (its VM host, or its
+container for a container-mode sandbox);
+otherwise it runs inside the agent container (``agent_name``), where it can see the
+agent's workspace.
 """
 
 from __future__ import annotations
@@ -82,6 +84,7 @@ class RunCodeTaskStep(TaskStep):
         "timeout_seconds",
         "env_id",
         "agent_name",
+        "sandbox_name",
     )
 
     def __init__(
@@ -98,10 +101,20 @@ class RunCodeTaskStep(TaskStep):
         timeout_seconds: Optional[int] = None,
         env_id: Optional[str] = None,
         agent_name: Optional[str] = None,
+        sandbox_name: Optional[str] = None,
         # --- base TaskStep params ---
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
     ):
+        # A blank field (as a form submits it) is unset, not a second target.
+        env_id, sandbox_name, agent_name = env_id or None, sandbox_name or None, agent_name or None
+        targets = [
+            name
+            for name, value in (("env_id", env_id), ("sandbox_name", sandbox_name), ("agent_name", agent_name))
+            if value is not None
+        ]
+        if len(targets) > 1:
+            raise ValueError(f"run_code: set at most one of `env_id`, `sandbox_name` and `agent_name`; got {targets}")
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
         self.script_artifact_id = script_artifact_id
         self.script_artifact_version = script_artifact_version
@@ -111,9 +124,9 @@ class RunCodeTaskStep(TaskStep):
         self.args = args or {}
         self.result_id = result_id or id
         self.timeout_seconds = timeout_seconds or self.DEFAULT_TIMEOUT_SECONDS
-        # `env_id` set → host mode (no agent); otherwise agent mode via `agent_name`.
         self.env_id = env_id
-        self.agent_name = agent_name or self.DEFAULT_AGENT_NAME
+        self.sandbox_name = sandbox_name
+        self.agent_name = None if env_id or sandbox_name else agent_name or self.DEFAULT_AGENT_NAME
 
     def to_dict(self) -> dict:
         base = super().to_dict()
@@ -122,10 +135,12 @@ class RunCodeTaskStep(TaskStep):
 
     @classmethod
     def from_dict(cls, data: dict) -> "RunCodeTaskStep":
-        return cls(
-            **cls._base_from_dict(data),
-            **{f: data[f] for f in cls._SERIALIZED_FIELDS if f in data},
-        )
+        fields = {f: data[f] for f in cls._SERIALIZED_FIELDS if f in data}
+        # Steps stored before the targets were exclusive carry DEFAULT_AGENT_NAME beside `env_id`.
+        host_target = fields.get("env_id") or fields.get("sandbox_name")
+        if host_target and fields.get("agent_name") == cls.DEFAULT_AGENT_NAME:
+            del fields["agent_name"]
+        return cls(**cls._base_from_dict(data), **fields)
 
     def preflight(self) -> list[str]:
         """Config problems detectable without a sandbox; resolves documents, never content."""
@@ -155,7 +170,7 @@ class RunCodeTaskStep(TaskStep):
         context.metadata.setdefault("script_results", {})[self.result_id] = result
         logger.info(
             "run_code '%s' completed (result_id=%s, target=%s)",
-            self.id, self.result_id, "host" if self.env_id else "agent",
+            self.id, self.result_id, self._target_kind(),
         )
         return context
 
@@ -278,10 +293,19 @@ class RunCodeTaskStep(TaskStep):
             "results": context.metadata.get("script_results", {}),
         }
 
+    def _target_kind(self) -> str:
+        if self.env_id is not None:
+            return "host"
+        if self.sandbox_name is not None:
+            return "sandbox"
+        return "agent"
+
     async def _resolve_target(self, context: TaskStepContext) -> _ExecTarget:
-        """Pick where the script runs: the env's VM host or the agent container."""
+        """Pick where the script runs: the env's VM host, a deployed sandbox's host, or the agent container."""
         if self.env_id is not None:
             return await self._host_target(context)
+        if self.sandbox_name is not None:
+            return await self._sandbox_target(context)
         return await self._agent_target(context)
 
     async def _stage(
@@ -362,6 +386,35 @@ class RunCodeTaskStep(TaskStep):
         sandbox = await provider.get_sandbox(deployed.sandbox_id)
         return _HostTarget(sandbox)
 
+    async def _sandbox_target(self, context: TaskStepContext) -> _ExecTarget:
+        from agent_env.providers.sandbox_providers.sandbox import VmSandbox
+        from agent_env.providers.sandbox_providers.sandbox_provider import (
+            SANDBOX_MODE_VM,
+            build_sandbox_provider,
+            get_sandbox_provider,
+        )
+
+        deployed = next(
+            (s for s in context.deployed_sandboxes if s.sandbox_name == self.sandbox_name), None
+        )
+        if deployed is None:
+            raise RuntimeError(f"Sandbox '{self.sandbox_name}' not found in context.deployed_sandboxes")
+        provider = (
+            build_sandbox_provider(deployed.sandbox_type)
+            if deployed.sandbox_type
+            else get_sandbox_provider()
+        )
+        sandbox = await provider.get_sandbox(deployed.sandbox_id)
+        if deployed.sandbox_mode == SANDBOX_MODE_VM:
+            return _HostTarget(sandbox)
+        # A container sandbox on a VM-backed provider runs its image beside the host: exec into it.
+        prefix = (
+            ("sudo", "docker", "exec", "-u", "0", sandbox.container_name)
+            if isinstance(sandbox, VmSandbox)
+            else ()
+        )
+        return _AgentTarget(sandbox, prefix)
+
     async def _agent_target(self, context: TaskStepContext) -> _ExecTarget:
         # Runs inside the agent container. VM mode needs `sudo docker exec -u 0`:
         # docker on the host needs sudo, and -u 0 reads the root-owned copied files.
@@ -425,7 +478,7 @@ class _ExecTarget(Protocol):
 
 @dataclass
 class _HostTarget:
-    """Runs the script on the env's VM host (no agent)."""
+    """Runs the script on a VM host (an env's or a deployed sandbox's; no agent)."""
 
     sandbox: Any
 

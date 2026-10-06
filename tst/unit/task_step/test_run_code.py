@@ -17,7 +17,8 @@ import pytest
 from agent_env.artifact import FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, EnvNeedsSandbox
-from agent_env.task_step.context import DeployedAgent, TaskStepContext
+from agent_env.providers.sandbox_providers.sandbox import VmSandbox
+from agent_env.task_step.context import DeployedAgent, DeployedSandbox, TaskStepContext
 from agent_env.task_step.task_steps import run_code as _run_code_module
 from tst.unit.event_loop_probe import on_event_loop
 from agent_env.task_step.task_steps.run_code import (
@@ -277,6 +278,159 @@ async def test_host_target_honors_custom_env_sandbox_type():
     assert ctx.metadata["script_results"]["filter"] == {"keep": True}
 
 
+def _sandbox_context(*, sandbox_type=None):
+    ctx = _make_context(with_agent=False)
+    ctx.deployed_sandboxes = [
+        DeployedSandbox(sandbox_name="bundler", sandbox_id="sb-bundler", sandbox_mode="vm", sandbox_type=sandbox_type)
+    ]
+    return ctx
+
+
+def _host_sandbox():
+    sandbox = AsyncMock()
+    sandbox.mode = "vm"
+    sandbox.exec_with_output = AsyncMock(
+        side_effect=[(0, "", ""), (0, "13", ""), (0, '{"keep": true}', "")]
+    )
+    provider = MagicMock()
+    provider.get_sandbox = AsyncMock(return_value=sandbox)
+    return sandbox, provider
+
+
+@pytest.mark.asyncio
+async def test_sandbox_target_runs_on_the_named_sandboxs_host():
+    step = _step(sandbox_name="bundler", result_id="filter")
+    sandbox, provider = _host_sandbox()
+    with patch(
+        "agent_env.providers.sandbox_providers.sandbox_provider.get_sandbox_provider",
+        return_value=provider,
+    ), patch("agent_env.artifact.Artifact.get", return_value=_file_artifact()), patch.object(
+        FileArtifact, "load", _load_body
+    ):
+        ctx = await step.execute(_sandbox_context())
+
+    provider.get_sandbox.assert_awaited_once_with("sb-bundler")
+    commands = [" ".join(map(str, c.args)) for c in sandbox.exec_with_output.await_args_list]
+    assert not any("docker" in c for c in commands)
+    sandbox.write_file_from_text.assert_not_awaited()
+    written = [c.args[1].rsplit("/", 1)[-1] for c in sandbox.write_host_file.await_args_list]
+    assert {"input.json", "runner.py"} <= set(written)
+    assert ctx.metadata["script_results"]["filter"] == {"keep": True}
+
+
+@pytest.mark.asyncio
+async def test_sandbox_target_honors_the_sandboxs_type():
+    step = _step(sandbox_name="bundler", result_id="filter")
+    _, provider = _host_sandbox()
+    with patch(
+        "agent_env.providers.sandbox_providers.sandbox_provider.build_sandbox_provider",
+        return_value=provider,
+    ) as build, patch(
+        "agent_env.providers.sandbox_providers.sandbox_provider.get_sandbox_provider",
+    ) as default, patch("agent_env.artifact.Artifact.get", return_value=_file_artifact()), patch.object(
+        FileArtifact, "load", _load_body
+    ):
+        ctx = await step.execute(_sandbox_context(sandbox_type="modal_vm"))
+
+    build.assert_called_once_with("modal_vm")
+    default.assert_not_called()
+    assert ctx.metadata["script_results"]["filter"] == {"keep": True}
+
+
+@pytest.mark.asyncio
+async def test_sandbox_target_names_a_sandbox_the_run_never_deployed():
+    with pytest.raises(RuntimeError, match="^Sandbox 'ghost' not found in context.deployed_sandboxes$"):
+        await _step(sandbox_name="ghost")._sandbox_target(_sandbox_context())
+
+
+def _container_sandbox(*, vm_backed):
+    sandbox = AsyncMock(spec=VmSandbox) if vm_backed else AsyncMock()
+    sandbox.mode = "container"
+    sandbox.container_name = "agent-local-1"
+    # reset_dir's `rm -rf` + `mkdir -p`, then the script run, `wc -c`, then `cat`.
+    sandbox.exec_with_output = AsyncMock(
+        side_effect=[(0, "", ""), (0, "", ""), (0, "", ""), (0, "13", ""), (0, '{"keep": true}', "")]
+    )
+    provider = MagicMock()
+    provider.get_sandbox = AsyncMock(return_value=sandbox)
+    return sandbox, provider
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("vm_backed,prefix", [
+    (False, ()),
+    (True, ("sudo", "docker", "exec", "-u", "0", "agent-local-1")),
+])
+async def test_sandbox_target_runs_inside_a_container_mode_sandbox(vm_backed, prefix):
+    step = _step(sandbox_name="bundler", result_id="filter")
+    ctx = _sandbox_context()
+    ctx.deployed_sandboxes[0].sandbox_mode = "container"
+    sandbox, provider = _container_sandbox(vm_backed=vm_backed)
+    with patch(
+        "agent_env.providers.sandbox_providers.sandbox_provider.get_sandbox_provider",
+        return_value=provider,
+    ), patch("agent_env.artifact.Artifact.get", return_value=_file_artifact()), patch.object(
+        FileArtifact, "load", _load_body
+    ):
+        ctx = await step.execute(ctx)
+
+    calls = [c.args for c in sandbox.exec_with_output.await_args_list]
+    assert all(c[: len(prefix)] == prefix for c in calls)
+    assert any("runner.py" in " ".join(c) for c in calls)
+    sandbox.write_host_file.assert_not_awaited()
+    written = [c.args[1].rsplit("/", 1)[-1] for c in sandbox.write_file_from_text.await_args_list]
+    assert {"input.json", "runner.py"} <= set(written)
+    assert ctx.metadata["script_results"]["filter"] == {"keep": True}
+
+
+@pytest.mark.parametrize("targets", [
+    {"env_id": "env-x", "sandbox_name": "bundler"},
+    {"env_id": "env-x", "agent_name": "solver"},
+    {"sandbox_name": "bundler", "agent_name": "solver"},
+    {"sandbox_name": "bundler", "agent_name": RunCodeTaskStep.DEFAULT_AGENT_NAME},
+    {"env_id": "env-x", "sandbox_name": "bundler", "agent_name": "solver"},
+])
+def test_the_three_targets_are_mutually_exclusive(targets):
+    with pytest.raises(ValueError, match="set at most one of `env_id`, `sandbox_name` and `agent_name`"):
+        _step(**targets)
+
+
+@pytest.mark.parametrize("target", [{"env_id": "env-x"}, {"sandbox_name": "bundler"}])
+@pytest.mark.parametrize("blank", ["", None])
+def test_a_blank_agent_name_beside_a_host_target_is_unset(target, blank):
+    step = _step(**target, agent_name=blank)
+    assert step.agent_name is None
+    assert RunCodeTaskStep.from_dict({**step.to_dict(), "agent_name": blank}).to_dict() == step.to_dict()
+
+
+def test_blank_targets_fall_back_to_the_default_agent():
+    step = _step(env_id="", sandbox_name="", agent_name="")
+    assert (step.env_id, step.sandbox_name, step.agent_name) == (None, None, RunCodeTaskStep.DEFAULT_AGENT_NAME)
+
+
+@pytest.mark.parametrize("target", [{"env_id": "env-x"}, {"sandbox_name": "bundler"}])
+def test_a_host_target_stores_no_agent_name(target):
+    assert _step(**target).to_dict()["agent_name"] is None
+
+
+def test_no_target_runs_in_the_default_agent():
+    assert _step().agent_name == RunCodeTaskStep.DEFAULT_AGENT_NAME
+
+
+@pytest.mark.parametrize("target", [{"env_id": "env-x"}, {"sandbox_name": "bundler"}])
+def test_a_stored_step_with_the_default_agent_name_beside_its_target_still_loads(target):
+    stored = {**_step(**target).to_dict(), "agent_name": RunCodeTaskStep.DEFAULT_AGENT_NAME}
+    step = RunCodeTaskStep.from_dict(stored)
+    assert step.agent_name is None
+    assert {k: getattr(step, k) for k in target} == target
+
+
+def test_a_stored_step_with_a_named_agent_beside_its_target_is_rejected():
+    stored = {**_step(env_id="env-x").to_dict(), "agent_name": "solver"}
+    with pytest.raises(ValueError, match="set at most one of"):
+        RunCodeTaskStep.from_dict(stored)
+
+
 @pytest.mark.asyncio
 async def test_agent_target_honors_the_agents_sandbox_type():
     # an agent deployed on another provider is reached there, not through the configured default
@@ -480,6 +634,12 @@ def test_config_round_trips_through_to_dict_from_dict():
     d = step.to_dict()
     assert d["type"] == "run_code"
     assert d["env_id"] == "env-x"  # the field whose drop broke the first host run
+    assert RunCodeTaskStep.from_dict(d).to_dict() == d
+
+
+def test_sandbox_name_round_trips_through_to_dict_from_dict():
+    d = _step(sandbox_name="bundler").to_dict()
+    assert d["sandbox_name"] == "bundler"
     assert RunCodeTaskStep.from_dict(d).to_dict() == d
 
 
