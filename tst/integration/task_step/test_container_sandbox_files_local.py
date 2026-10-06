@@ -113,15 +113,16 @@ async def test_a_container_mode_deploy_sandbox(local_registry):
     tmp_path = local_registry
     suffix = uuid.uuid4().hex[:8]
     port = _free_port()
+    probe_dir = f"/probe-{suffix}"
     with tempfile.TemporaryDirectory() as d:
-        # A non-root image user: loaded files are root-owned, so the steps reach them as root.
+        # A non-root image user and a root-only probe dir: the steps only reach the loaded files as root.
         (Path(d) / "Dockerfile").write_text(
-            f'FROM python:3.12-slim\nUSER nobody\nCMD ["python", "-m", "http.server", "{port}"]\n'
+            f"FROM python:3.12-slim\nRUN mkdir -m 700 {probe_dir}\nUSER nobody\n"
+            f'CMD ["python", "-m", "http.server", "{port}"]\n'
         )
         built = _docker("build", "-t", f"files-local-box-{suffix}", d)
         assert built.returncode == 0, built.stderr
     image = DockerImageArtifact.put(id=f"files-local-box-{suffix}", description="box", image_name=f"files-local-box-{suffix}")
-    probe_dir = f"/probe-{suffix}"
     task = Task.put(id=f"files-box-{suffix}", steps=[
         DeploySandboxTaskStep(
             id="deploy", version=None, sandbox_name="box", sandbox_mode="container", sandbox_type="local",
