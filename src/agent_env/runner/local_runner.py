@@ -34,6 +34,7 @@ class LocalRunner(Runner):
         self.workers = int(workers)
         self._sem = asyncio.Semaphore(self.workers)
         self._inflight: dict[str, asyncio.Task] = {}
+        self._tearing_down: set[str] = set()  # runs past their task, removing what it deployed
         self._stopping = False
 
     # --- lifecycle ---------------------------------------------------------
@@ -50,9 +51,11 @@ class LocalRunner(Runner):
             logger.info("Failed %d run(s) left non-terminal by a previous process", orphaned)
 
     async def stop(self) -> None:
+        """Cancel the runs still working and wait for every run, letting a teardown under way finish."""
         self._stopping = True
-        for task in list(self._inflight.values()):
-            task.cancel()
+        for run_id, task in list(self._inflight.items()):
+            if run_id not in self._tearing_down:
+                task.cancel()
         if self._inflight:
             await asyncio.gather(*self._inflight.values(), return_exceptions=True)
         self._inflight.clear()
@@ -158,8 +161,10 @@ class LocalRunner(Runner):
         finally:
             try:
                 if context is not None:
+                    self._tearing_down.add(record.run_id)
                     await self._tear_down(record.run_id, context)
             finally:
+                self._tearing_down.discard(record.run_id)
                 self._inflight.pop(record.run_id, None)
 
     @staticmethod

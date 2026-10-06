@@ -326,3 +326,28 @@ async def test_what_a_run_deployed_is_torn_down_however_it_ends(docs, monkeypatc
         await runner.stop()
 
     assert torn_down == [handle.run_id]
+
+
+@pytest.mark.asyncio
+async def test_stop_lets_a_teardown_under_way_finish(docs, monkeypatch):
+    from agent_env.runner import local_runner
+    from agent_env.task.teardown import TeardownReport
+
+    tearing, finished = asyncio.Event(), []
+
+    async def teardown_run(context):
+        tearing.set()
+        await asyncio.sleep(0.3)
+        finished.append(context.metadata["workflow_id"])
+        return TeardownReport()
+
+    monkeypatch.setattr(local_runner, "teardown_run", teardown_run)
+    _install_task(monkeypatch, _FakeTask())
+    runner = LocalRunner(workers=1)
+    await runner.start()
+    handle = await runner.submit("t1", 1)
+    await asyncio.wait_for(tearing.wait(), 5)
+
+    await runner.stop()
+
+    assert finished == [handle.run_id]

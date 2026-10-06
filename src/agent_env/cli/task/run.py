@@ -328,6 +328,8 @@ async def _run_and_settle(task, tag, context, *, keep, output_dir, output_name, 
     except Exception:
         if not keep:
             echo_teardown(tag, await teardown_run(context))
+        elif output_dir:  # what it left up is kept, so its context is what resumes or inspects it
+            _write_context(context, output_name, output_dir, prefix=f"{tag} " if tag else "")
         raise
     if not keep:
         echo_teardown(tag, await teardown_run(context))
@@ -346,10 +348,38 @@ def _outcomes(futures) -> list:
     return [asyncio.CancelledError() if f.cancelled() else (f.exception() or f.result()) for f in futures]
 
 
+def _kept(tagged_contexts) -> list:
+    """Each run that still has sandboxes up, with them: what ``--keep`` held, and nothing a teardown took down."""
+    kept = [(tag, context, TeardownReport.skipped(context).left) for tag, context in tagged_contexts]
+    return [(tag, context, left) for tag, context, left in kept if left]
+
+
+def _tear_down_kept(kept) -> None:
+    """Tear down what the runs kept; a Ctrl-C stops it. Counts signals afresh, so the one that got here doesn't."""
+    count = sum(len(left) for _, _, left in kept)
+    click.echo(f"\nTearing down {count} {'sandbox' if count == 1 else 'sandboxes'} (Ctrl-C again to stop now)")
+    with Interrupts() as stopper:
+        try:
+            reports = stopper.run(stopper.stopping(teardown_run(context) for _, context, _ in kept))
+        except asyncio.CancelledError:
+            click.echo(click.style("Stopped the teardown; what it hadn't reached is still up.", fg="yellow"))
+            return
+    for (tag, _, _), report in zip(kept, reports):
+        echo_teardown(tag, report)
+
+
+def _settle_kept(tagged_contexts, interrupts: Interrupts, interrupted) -> None:
+    """``--keep``'s end: hold what the runs left up until Ctrl-C, unless Ctrl-C already ended the runs, which tears
+    down what the ones that finished first kept."""
+    if interrupted is None:
+        _hold(tagged_contexts, interrupts)
+    elif kept := _kept(tagged_contexts):
+        _tear_down_kept(kept)
+
+
 def _hold(tagged_contexts, interrupts: Interrupts) -> None:
     """Print what ``--keep`` left up, wait for Ctrl-C or SIGTERM, then tear it down; another one stops that."""
-    kept = [(tag, context, TeardownReport.skipped(context).left) for tag, context in tagged_contexts]
-    kept = [(tag, context, left) for tag, context, left in kept if left]
+    kept = _kept(tagged_contexts)
     count = sum(len(left) for _, _, left in kept)
     if not count:
         click.echo("\nNothing to keep up: no run left a sandbox.")
@@ -365,15 +395,7 @@ def _hold(tagged_contexts, interrupts: Interrupts) -> None:
         time.sleep(0.2)
     if interrupts.count > 1:
         return
-    click.echo(f"\nTearing down {count} {noun} (Ctrl-C again to stop now)")
-    with Interrupts() as stopper:  # counts afresh: the Ctrl-C that ended the hold mustn't stop the teardown
-        try:
-            reports = stopper.run(stopper.stopping(teardown_run(context) for _, context, _ in kept))
-        except asyncio.CancelledError:
-            click.echo(click.style("Stopped the teardown; what it hadn't reached is still up.", fg="yellow"))
-            return
-    for (tag, _, _), report in zip(kept, reports):
-        echo_teardown(tag, report)
+    _tear_down_kept(kept)
 
 
 @click.command()
@@ -496,8 +518,8 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
             click.echo(click.style("Task cancelled.", fg="red"))
         elif not failures:
             click.echo(click.style("Task completed!", fg="blue"))
-        if keep and interrupted is None:
-            _hold(tagged, interrupts)
+        if keep:
+            _settle_kept(tagged, interrupts, interrupted)
     if interrupted is not None:
         raise SystemExit(128 + interrupted)
     if failures and k == 1:
@@ -627,8 +649,8 @@ def run_batch(task_id: str, task_version: int | None, seeds: str, concurrency: i
     with Interrupts() as interrupts:
         results = interrupts.run(_run_all(interrupts))
         interrupted = interrupts.signum if interrupts.count else None
-        if keep and interrupted is None:
-            _hold(tagged, interrupts)
+        if keep:
+            _settle_kept(tagged, interrupts, interrupted)
 
     click.echo()
     successes = 0

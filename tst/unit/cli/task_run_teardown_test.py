@@ -13,7 +13,7 @@ from click.testing import CliRunner
 
 from agent_env.cli import cli
 from agent_env.task import Task
-from agent_env.task.teardown import RecordedSandbox, TeardownReport
+from agent_env.task.teardown import TORN_DOWN_KEY, RecordedSandbox, TeardownReport
 from agent_env.task_step.context import DeployedSandbox
 
 task_run = importlib.import_module("agent_env.cli.task.run")  # the package's ``run`` is the click command
@@ -42,8 +42,9 @@ class _Deploys:
 def torn_down(monkeypatch):
     torn = []
 
-    async def teardown_run(context):
+    async def teardown_run(context):  # records what it took down, as the real one does
         torn.append(context)
+        context.metadata.setdefault(TORN_DOWN_KEY, []).extend(s.sandbox_id for s in context.deployed_sandboxes)
         return TeardownReport(terminated=tuple(
             RecordedSandbox(s.sandbox_id, s.sandbox_type, "sandbox") for s in context.deployed_sandboxes))
 
@@ -132,3 +133,30 @@ def test_each_seed_of_a_batch_is_torn_down(monkeypatch, tmp_path, torn_down):
 
     assert result.exit_code == 0, result.output
     assert len(torn_down) == 2
+
+
+class _OneQuickOneSlow(_Deploys):
+    """Its first run ends at once; every later one naps."""
+
+    async def run(self, context, **kwargs):
+        self.nap = 0 if not self.contexts else 30
+        return await super().run(context, **kwargs)
+
+
+def test_ctrl_c_with_keep_also_tears_down_a_run_that_already_finished(monkeypatch, tmp_path, torn_down):
+    task = _OneQuickOneSlow()
+
+    result = _invoke(monkeypatch, tmp_path, task, "run", "--k", "2", "--keep", signal_after=1.0)
+
+    assert result.exit_code == 130, result.output
+    assert {id(c) for c in torn_down} == {id(c) for c in task.contexts}
+    assert "Holding" not in result.output
+
+
+def test_keep_writes_the_context_of_a_run_that_failed(monkeypatch, tmp_path, torn_down):
+    task = _Deploys(ending=RuntimeError("boom"))
+
+    result = _invoke(monkeypatch, tmp_path, task, "run", "--keep", signal_after=1.0)
+
+    assert isinstance(result.exception, RuntimeError)
+    assert list(tmp_path.glob("t_*.json")), "no context file to resume the kept run from"
