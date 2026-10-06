@@ -213,7 +213,7 @@ async def cancel_a2a_task(a2a_url: str, task_id: str) -> None:
             }, timeout=_CANCEL_TIMEOUT_SECONDS)
         resp.raise_for_status()
         error = resp.json().get("error")
-    except Exception as e:  # nothing here may replace the timeout being reported
+    except (httpx.HTTPError, ValueError) as e:
         logger.warning(f"Couldn't cancel A2A task {task_id}: {type(e).__name__}: {e}")
         return
     if error:

@@ -2975,7 +2975,6 @@ def test_cancel_stops_a_running_task_and_frees_its_context() -> None:
         canceled = _task_rpc(client, "tasks/cancel", hung)
         assert canceled["result"]["status"]["state"] == "canceled"
 
-        # The next task in the same context runs only once the canceled one let go of it.
         following = _send_in_context(client, "next", "message-2")
         assert _within(5, lambda: state(client, following) == "completed")
         assert state(client, hung) == "canceled"

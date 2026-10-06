@@ -252,7 +252,7 @@ async def test_an_agent_whose_sandbox_died_is_given_up_on_naming_it(monkeypatch,
     with pytest.raises(AgentUnreachableError, match=rf"The agent on sandbox sb-1 stopped answering: .*\(last: {last}") as raised:
         await poll_a2a_task("http://agent", "t-1", 1200, 2, sandbox_id="sb-1")
 
-    assert isinstance(raised.value, TimeoutError)  # handled wherever running out of time is, only sooner
+    assert isinstance(raised.value, TimeoutError)
     assert agent.now <= 2 * UNREACHABLE_AFTER_SECONDS
     assert "tasks/cancel" not in agent.calls
 
