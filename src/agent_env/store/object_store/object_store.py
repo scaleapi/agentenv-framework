@@ -227,13 +227,19 @@ class ObjectStore(ABC):
         )
 
 
+def issues_grants_to(store: ObjectStore, sandbox_type: str | None) -> bool:
+    """Whether ``store`` can hand a transfer grant to a remote party on the ``sandbox_type`` sandbox
+    provider (None: unknown): it issues grants, and they reach that provider."""
+    return store.supports_transfer_grants and store.grants_reach(sandbox_type)
+
+
 def readable_url(store: ObjectStore, object_url: str, *, sandbox_type: str | None, expires_in: int) -> str | None:
     """An HTTPS URL that a remote party on the ``sandbox_type`` sandbox provider (None: unknown) can GET the
     object at ``object_url`` from: a read grant when the store's grants reach it, else a URL the store
     signs; None when the store offers neither. It lasts at least ``expires_in`` seconds and at least the
     store's grant lifetime, unless the store's signing credentials or limits end it sooner."""
     expires_in = max(expires_in, store.grant_lifetime_seconds)
-    if store.supports_transfer_grants and store.grants_reach(sandbox_type):
+    if issues_grants_to(store, sandbox_type):
         try:
             grant = store.issue_read_grant(object_url, expires_in=expires_in)
         except GrantUnavailableError:  # it cannot last that long; a signed URL may
