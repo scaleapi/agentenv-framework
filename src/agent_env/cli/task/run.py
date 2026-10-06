@@ -380,6 +380,9 @@ def _settle_kept(tagged_contexts, interrupts: Interrupts, interrupted) -> None:
         _tear_down_kept(kept)
 
 
+_HOLD_POLL_SECONDS = 0.2  # how often a hold looks for the Ctrl-C that ends it
+
+
 def _hold(tagged_contexts, interrupts: Interrupts) -> None:
     """Print what ``--keep`` left up, wait for Ctrl-C or SIGTERM, then tear it down; another one stops that."""
     kept = _kept(tagged_contexts)
@@ -395,7 +398,7 @@ def _hold(tagged_contexts, interrupts: Interrupts) -> None:
     noun = "sandbox" if count == 1 else "sandboxes"
     click.echo(f"\nHolding {count} {noun} up; Ctrl-C tears {'it' if count == 1 else 'them'} down.")
     while not interrupts.count:
-        time.sleep(0.2)
+        time.sleep(_HOLD_POLL_SECONDS)
     if interrupts.count > 1:
         return
     _tear_down_kept(kept)

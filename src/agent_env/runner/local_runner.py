@@ -27,6 +27,9 @@ class LocalRunner(Runner):
     """In-process runner. The DocumentStore holds run records for status/listing only."""
 
     type = "local"
+    # How long a run's teardown may take, from when it starts: each sandbox gets TERMINATE_TIMEOUT_SECONDS,
+    # and the folder of a local one is removed after that, outside it.
+    TEARDOWN_WAIT_SECONDS = 2 * TERMINATE_TIMEOUT_SECONDS
 
     def __init__(self, workers: int = 2) -> None:
         if workers < 1:
@@ -51,19 +54,14 @@ class LocalRunner(Runner):
             logger.info("Failed %d run(s) left non-terminal by a previous process", orphaned)
 
     async def stop(self) -> None:
-        """Cancel the runs still working and wait for every run, letting a teardown under way finish. A teardown
-        still going after twice its own timeout (a local folder that won't go) is cancelled, so shutdown ends."""
+        """Cancel the runs still working and wait for every run, letting a teardown under way finish; each bounds
+        its own teardown by TEARDOWN_WAIT_SECONDS."""
         self._stopping = True
         for run_id, task in list(self._inflight.items()):
             if run_id not in self._tearing_down:
                 task.cancel()
         if self._inflight:
-            _, stuck = await asyncio.wait(list(self._inflight.values()), timeout=2 * TERMINATE_TIMEOUT_SECONDS)
-            for task in stuck:
-                task.cancel()
-            if stuck:
-                logger.warning("Stopped waiting for %d run teardown(s); what they hadn't removed is still up", len(stuck))
-                await asyncio.gather(*stuck, return_exceptions=True)
+            await asyncio.gather(*self._inflight.values(), return_exceptions=True)
         self._inflight.clear()
 
     # --- Runner API --------------------------------------------------------
@@ -168,7 +166,12 @@ class LocalRunner(Runner):
             try:
                 if context is not None:
                     self._tearing_down.add(record.run_id)
-                    await self._tear_down(record.run_id, context)
+                    try:
+                        async with asyncio.timeout(self.TEARDOWN_WAIT_SECONDS):
+                            await self._tear_down(record.run_id, context)
+                    except TimeoutError:
+                        logger.warning("Run %s: stopped waiting for its teardown after %ss; what it hadn't "
+                                       "removed is still up", record.run_id, self.TEARDOWN_WAIT_SECONDS)
             finally:
                 self._tearing_down.discard(record.run_id)
                 self._inflight.pop(record.run_id, None)

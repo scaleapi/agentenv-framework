@@ -354,7 +354,7 @@ async def test_stop_lets_a_teardown_under_way_finish(docs, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_stop_gives_up_on_a_teardown_that_never_ends(docs, monkeypatch):
+async def test_a_teardown_that_never_ends_is_given_up_on_so_stop_ends(docs, monkeypatch):
     from agent_env.runner import local_runner
 
     tearing = asyncio.Event()
@@ -364,7 +364,7 @@ async def test_stop_gives_up_on_a_teardown_that_never_ends(docs, monkeypatch):
         await asyncio.sleep(3600)
 
     monkeypatch.setattr(local_runner, "teardown_run", teardown_run)
-    monkeypatch.setattr(local_runner, "TERMINATE_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(LocalRunner, "TEARDOWN_WAIT_SECONDS", 0.2)
     _install_task(monkeypatch, _FakeTask())
     runner = LocalRunner(workers=1)
     await runner.start()
@@ -374,3 +374,36 @@ async def test_stop_gives_up_on_a_teardown_that_never_ends(docs, monkeypatch):
     await asyncio.wait_for(runner.stop(), 5)
 
     assert not runner._inflight
+
+
+
+@pytest.mark.asyncio
+async def test_a_teardown_gets_its_whole_wait_however_long_the_run_took_to_stop(docs, monkeypatch):
+    from agent_env.runner import local_runner
+    from agent_env.task.teardown import TeardownReport
+
+    finished = []
+
+    async def teardown_run(context):
+        await asyncio.sleep(0.3)
+        finished.append(context.metadata["workflow_id"])
+        return TeardownReport()
+
+    async def slow_to_stop(_):
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.3)  # a step that takes a while to unwind
+            raise
+
+    monkeypatch.setattr(local_runner, "teardown_run", teardown_run)
+    monkeypatch.setattr(LocalRunner, "TEARDOWN_WAIT_SECONDS", 0.5)
+    _install_task(monkeypatch, _FakeTask(on_run=slow_to_stop))
+    runner = LocalRunner(workers=1)
+    await runner.start()
+    handle = await runner.submit("t1", 1)
+    await asyncio.sleep(0.1)
+
+    await asyncio.wait_for(runner.stop(), 5)
+
+    assert finished == [handle.run_id]
