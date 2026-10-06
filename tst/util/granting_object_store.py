@@ -53,7 +53,8 @@ class GrantingObjectStore(LocalFilesystemObjectStore):
             return None
         return replace(metadata, content_type=self._content_types.get(key))
 
-    def issue_read_grant(self, object_url: str, *, expires_in: int = 3600) -> HttpGetGrant:
+    def issue_read_grant(self, object_url: str, *, expires_in: int | None = None) -> HttpGetGrant:
+        expires_in = self.grant_lifetime_seconds if expires_in is None else expires_in
         return HttpGetGrant(
             kind="http-get",
             url=self._grant_url(object_url, "read"),
@@ -61,8 +62,9 @@ class GrantingObjectStore(LocalFilesystemObjectStore):
         )
 
     def issue_write_grant(
-        self, object_url: str, *, media_type: str, max_bytes: int, expires_in: int = 3600
+        self, object_url: str, *, media_type: str, max_bytes: int, expires_in: int | None = None
     ) -> HttpPutGrant:
+        expires_in = self.grant_lifetime_seconds if expires_in is None else expires_in
         return HttpPutGrant(
             kind="http-put",
             url=self._grant_url(object_url, "write"),

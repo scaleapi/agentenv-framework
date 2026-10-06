@@ -15,6 +15,7 @@ from agent_env.a2a_agent.object_transfer import (
     fetch_trajectory,
     trajectory_mode,
 )
+from agent_env.a2a_agent.staging import transfer_store
 from agent_env.config import get_config
 from agent_env.config.model import ModelParam
 from agent_env.task_step.context import TaskStepContext
@@ -291,7 +292,6 @@ class RubricsVerifierTaskStep(TaskStep):
         use_trajectory: bool = True,
         judge_a2a_agent_id: Optional[str] = None,
         judge_sandbox_type: Optional[str] = None,
-        judge_priority: Optional[int] = None,
         judge_timeout_seconds: Optional[int] = None,
         output_format: JudgeOutputFormat | str = JudgeOutputFormat.RUBRIC_BINARY,
         grading_policy_prompt: Optional[str] = None,
@@ -337,7 +337,6 @@ class RubricsVerifierTaskStep(TaskStep):
         self.use_trajectory = use_trajectory
         self.judge_a2a_agent_id = judge_a2a_agent_id
         self.judge_sandbox_type = judge_sandbox_type
-        self.judge_priority = judge_priority
         self.judge_timeout_seconds = judge_timeout_seconds or self.DEFAULT_JUDGE_TIMEOUT_SECONDS
         if self.default_model_api_base and self.use_agent_judge:
             # Agent judges route through their deployed runtime, so this direct-judge
@@ -409,7 +408,6 @@ class RubricsVerifierTaskStep(TaskStep):
         base["use_trajectory"] = self.use_trajectory
         base["judge_a2a_agent_id"] = self.judge_a2a_agent_id
         base["judge_sandbox_type"] = self.judge_sandbox_type
-        base["judge_priority"] = self.judge_priority
         base["judge_timeout_seconds"] = self.judge_timeout_seconds
         base["output_format"] = self.output_format.value
         base["grading_policy_prompt"] = self.grading_policy_prompt
@@ -438,7 +436,6 @@ class RubricsVerifierTaskStep(TaskStep):
             use_trajectory=data.get("use_trajectory", True),
             judge_a2a_agent_id=data.get("judge_a2a_agent_id"),
             judge_sandbox_type=data.get("judge_sandbox_type"),
-            judge_priority=data.get("judge_priority"),
             judge_timeout_seconds=data.get("judge_timeout_seconds"),
             output_format=data.get("output_format", "rubric_binary"),
             grading_policy_prompt=data.get("grading_policy_prompt"),
@@ -569,29 +566,12 @@ class RubricsVerifierTaskStep(TaskStep):
                     or config.get_litellm_base_url()
                 )
                 env_vars = {"LITELLM_API_KEY": api_key, "LITELLM_BASE_URL": litellm_base_url}
-                judge_project_id = context.metadata.get("project_id")
-                judge_customer = context.metadata.get("customer_id")
-                if judge_customer:
-                    env_vars["LITELLM_USER"] = judge_customer
-                if judge_project_id:
-                    env_vars["LITELLM_PROJECT_ID"] = judge_project_id
                 resolved_judge_id = self.judge_a2a_agent_id or config.get_default_a2a_agent_id()
                 a2a_agent = A2AAgent.get(resolved_judge_id)
-                deploy_kwargs = {
-                    "env_vars": env_vars,
-                    "attribution": {
-                        k: v for k, v in
-                        (("project_id", judge_project_id), ("customer", judge_customer))
-                        if v
-                    },
-                }
+                deploy_kwargs = {"env_vars": env_vars}
                 resolved_sandbox_type = overrides.get("agent_sandbox") or self.judge_sandbox_type
                 if resolved_sandbox_type:
                     deploy_kwargs["sandbox_type"] = resolved_sandbox_type
-                _priority_override = overrides.get("priority")
-                resolved_priority = _priority_override if _priority_override is not None else self.judge_priority
-                if resolved_priority is not None:
-                    deploy_kwargs["priority"] = resolved_priority
                 auto_deployed_judge = await a2a_agent.deploy(**deploy_kwargs)
                 judge_a2a_url = auto_deployed_judge.a2a_url
                 judge_sandbox_id = auto_deployed_judge.sandbox_id
@@ -931,11 +911,9 @@ class RubricsVerifierTaskStep(TaskStep):
         import litellm
 
         from agent_env.config import get_config
-        from agent_env.utils.litellm_attribution import build_litellm_cost_attribution_kwargs
 
         overrides = context.metadata.get("user_overrides", {})
         config = get_config()
-        cost_kwargs = build_litellm_cost_attribution_kwargs(context.metadata)
         call_config = config.resolve_model_call(
             model,
             default_api_key=overrides.get("judge_litellm_api_key") or overrides.get("litellm_api_key"),
@@ -968,7 +946,6 @@ class RubricsVerifierTaskStep(TaskStep):
                     messages=[{"role": "user", "content": user_content}],
                     timeout=self.judge_timeout_seconds,
                     **call_config.client_kwargs(),
-                    **cost_kwargs,
                 )
                 if use_response_format:
                     request_kwargs[ModelParam.RESPONSE_FORMAT] = response_format
@@ -1010,7 +987,6 @@ class RubricsVerifierTaskStep(TaskStep):
             "max_thinking_tokens": judge_max_thinking_tokens,
             "output_format": self._spec().output_format,
             "timeout_seconds": self.judge_timeout_seconds,
-            "project_id": context.metadata.get("project_id"),
             "task_id": context.metadata.get("task_id"),
         }
         desired_config = {k: v for k, v in desired_config.items() if v is not None}
@@ -1079,6 +1055,7 @@ class RubricsVerifierTaskStep(TaskStep):
             judge_a2a_url=judge_a2a_url,
             judge_agent_card=judge_agent_card,
             a2a_server_task_id=task_id,
+            sandbox_type=getattr(judge_agent, "sandbox_type", None),
         )
         return {"response": tr.response_text, "trajectory_s3_uri": judge_trajectory_s3_uri}
 
@@ -1088,6 +1065,7 @@ class RubricsVerifierTaskStep(TaskStep):
         judge_a2a_url: str,
         judge_agent_card: dict,
         a2a_server_task_id: str,
+        sandbox_type: Optional[str],
     ) -> Optional[str]:
         """Best-effort capture of the judge's own reasoning trajectory, via the same
         EXT_TRAJECTORY extension `prompt_agent` uses, keyed by the A2A task id. Retries
@@ -1108,9 +1086,9 @@ class RubricsVerifierTaskStep(TaskStep):
             return None
         get_method, get_path = A2AAgent.operation(traj_ext, "get")
         config = get_config()
-        store = config.get_object_store()
+        store = transfer_store(config.get_object_store(), judge_a2a_url, judge_agent_card, sandbox_type=sandbox_type)
         prefix = store.object_url(f"{config.get_artifact_key_prefix()}judge_trajectories/verifier_id={self.verifier_id}/")
-        mode = trajectory_mode(get_method, store, by="task_id")
+        mode = trajectory_mode(get_method, store, by="task_id", sandbox_type=sandbox_type)
         if mode is None:
             logger.warning(
                 "Verifier '%s': judge advertises no trajectory get form this object store "
@@ -1133,7 +1111,7 @@ class RubricsVerifierTaskStep(TaskStep):
         for attempt in range(1, self.DEFAULT_MAX_RETRIES + 1):
             try:
                 fetched = await fetch_trajectory(
-                    judge_a2a_url + get_path, {"task_id": a2a_server_task_id}, upload=upload
+                    judge_a2a_url + get_path, {"task_id": a2a_server_task_id}, upload=upload, store=store
                 )
                 return await asyncio.to_thread(store_trajectory, fetched, prefix)
             except Exception as exc:

@@ -1,6 +1,8 @@
-# agentenv-protocol
+# agentenv-framework-protocol
 
-Open data-plane protocol and server SDK for agent environments.
+Open data-plane protocol and server SDK for agent environments. Install it with
+`uv add agentenv-framework-protocol` or `pip install agentenv-framework-protocol`; the import
+package is `agentenv_protocol`.
 
 An environment author writes a class with decorated methods and serves it:
 
@@ -142,7 +144,7 @@ agent. Import the decorator from the namespace matching the application you are
 building.
 
 Install the optional agent dependencies with
-`agentenv-protocol[agent]`. The framework generates the Agent Card,
+`agentenv-framework-protocol[agent]`. The framework generates the Agent Card,
 extension routes, A2A task lifecycle, and detached task boundary from one
 agent definition:
 
@@ -472,7 +474,19 @@ tools with (agent-env relays the env card's name: the MultiEnv's declared name, 
 `env` + 4 random digits, giving e.g. `mcp__env4821__<tool>`); when absent the agent mints
 `mcp_<8 hex>`.
 
-Runnable, self-contained reference agents live in [`examples/`](examples/):
+`ATTRIBUTION_PROBE_V1.probe` lets a caller check that an agent forwards attribution
+upstream. Attribution is an open map of string dimensions, like AgentEnv's cost
+attribution: the SDK assigns no keys, and each deployment uses whatever dimensions
+its model gateway understands. An agent records the dimensions it last sent with a
+model request and returns them from a bodyless
+`POST /ext/attribution-probe` as an `AttributionProbeResponse`:
+`{"last_seen_attribution": {<dimension>: <value>, ...}, "last_seen_at_utc": ...}`.
+The SDK does not record attribution itself, because only the agent knows what it sent.
+The answer is agent-wide rather than per caller, and like every extension route the
+probe carries no access check of its own, so expose an agent only to the control plane
+that drives it.
+
+Runnable, self-contained reference agents live in [`examples/`](https://github.com/scaleapi/agentenv-framework/tree/main/packages/agentenv-protocol/examples):
 the normal, streaming, and multimodal `run(request)` paths, single- and
 multi-operation custom extensions, and advanced ASGI-lifespan plus
 common SDK-operation override hooks.
@@ -554,17 +568,44 @@ that is by the uploading agent. AgentEnv accepts a trajectory upload response
 without reading the object back, and registers a snapshot only once both its
 objects are in the store.
 
-SDK agents advertise only these shapes. AgentEnv reads each Agent Card, sends
-the object variants when the agent advertises them and its object store issues
-grants (the S3 store does, and namespace grants for changelog capture only when
-it signs with long-term credentials), and keeps the older `s3_prefix`, `skill_s3_url` and
-`trajectory_s3_prefix` shapes for agents that advertise those instead. An SDK
-agent built on this protocol therefore needs an agent-env release that includes
-it: an older release sends the older shapes, which such an agent refuses apart
-from inline skills and trajectories. Roll out in this
-order: release agent-env and `agentenv-protocol` together, move every service
-that embeds agent-env to that release, and only then build agents on the new
-SDK. A snapshot or changelog is restored in the form it was captured in: one
-captured as objects only through the object variants, an older one only
-through `s3_prefix`. Do not roll agent-env back once portable snapshots or
-changelogs exist, because older releases cannot load them.
+SDK agents advertise only these shapes, and AgentEnv sends no others. It moves
+a skill bundle, snapshot or changelog only through grants, so the call needs an
+agent that advertises the object variant and an object store that issues grants
+(the S3 store does, and namespace grants for changelog capture only when it
+signs with long-term credentials); otherwise it fails before anything is sent.
+Skills given as SKILL.md text and trajectories returned inline need no grants.
+A snapshot is restored only from the snapshot objects in the table above; one
+that holds the runtime's own files instead cannot be. An
+agent-env release without the object variants sends other shapes, which SDK
+agents refuse apart from inline skills and trajectories, and cannot load
+portable snapshots or changelogs, so do not run one alongside these agents.
+
+#### Staging
+
+When the object store's grants cannot reach the agent, as with a local store
+and an agent on a remote sandbox, AgentEnv moves the objects through the agent
+itself. Every SDK agent serves the staging extension, `urn:agentenv:staging/v1`,
+a small object store at `/ext/staging` on its own server. Before a call
+AgentEnv pushes what the agent will read into it; after the call it pulls what
+the agent wrote. The grants it sends are the ordinary ones above, with URLs
+naming staged paths on the agent's own URL, so handlers and helpers are
+unchanged.
+
+| Route | Does |
+| --- | --- |
+| `PUT /ext/staging/{path}` | stores the body |
+| `GET /ext/staging/{path}` | returns it, with an `ETag` |
+| `POST /ext/staging/{prefix}` | stores a multipart upload's `file` at `{prefix}/{key}`, `key` being a form field sent before it |
+| `GET /ext/staging/{prefix}/` | lists `{objects: [{path, size_bytes, etag}]}` below the prefix |
+| `DELETE /ext/staging/{path}` | removes the object, only while it still matches an `If-Match` tag when one is given |
+| `DELETE /ext/staging/{prefix}/` | removes everything below the prefix |
+
+A path's first segment is an id AgentEnv generates, at least 22 characters, and
+never shares, which is what keeps staged objects private on a public agent URL.
+Everything staged counts against `AGENTENV_STAGING_MAX_BYTES` (16 GiB unless
+set; `0` turns staging off) and lives until AgentEnv removes it or the server
+process ends, in a directory of the process's own (or under
+`AGENTENV_STAGING_DIR` when set) that only the server's user can read. One
+server process owns a staging directory. An agent that doesn't use the SDK can serve the same routes
+and add `{uri: "urn:agentenv:staging/v1", params: {endpoint: "/ext/staging"}}`
+to its card.

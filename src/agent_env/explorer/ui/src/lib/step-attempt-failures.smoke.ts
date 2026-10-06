@@ -25,7 +25,7 @@ function assert(cond: unknown, msg: string): void {
 }
 
 function main(): void {
-  // The real prod entry from aeh-0000000000000-000000000000000a (completed run, one retry).
+  // A completed run's entry, one retry.
   const real = {
     attempt: 1,
     step_id: 'verify-response',
@@ -80,9 +80,8 @@ function main(): void {
   }
 
   {
-    // Timestamps are minute-precision, so a step failing in seconds produces ties.
-    // Shape from aeh-0000000000000-000000000000000b, whose verify-response attempts took
-    // 83s / 11s / 22s.
+    // Timestamps are minute-precision, so a step failing in seconds produces ties:
+    // here three verify-response attempts that took 83s / 11s / 22s.
     const parsed = parseStepAttemptFailures([
       { ...real, attempt: 3, occurred_at_utc: '2026-07-29 00:49 UTC' },
       { ...real, attempt: 2, occurred_at_utc: '2026-07-29 00:49 UTC' },

@@ -14,7 +14,7 @@ from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
 
 # What a plugin may constrain: agent-env, and the protocol package it pins exactly.
-CORE = ("agentenv-framework", "agentenv-protocol")
+CORE = ("agentenv-framework", "agentenv-framework-protocol")
 
 
 @functools.cache

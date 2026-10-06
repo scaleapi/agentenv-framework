@@ -16,11 +16,12 @@ from agentenv_protocol.transfers import (
 from botocore.credentials import Credentials, RefreshableCredentials
 
 from agent_env.store import GrantUnavailableError
-from agent_env.store.object_store.local_object_store import (
+from agent_env.store.object_store.local.store import (
     LocalFilesystemObjectStore,
 )
 from agent_env.store.object_store import UploadPolicy
 from agent_env.store.object_store.s3_object_store import S3ObjectStore
+from agent_env.store.routing import LocalRunObjectStore
 
 BUCKET = "artifact-bucket"
 
@@ -281,16 +282,29 @@ def test_botocore_still_exposes_the_signing_credentials() -> None:
     assert S3ObjectStore(session, BUCKET)._signing_credentials() == (None, True)
 
 
-def test_local_store_cannot_issue_remote_transfer_grants(tmp_path) -> None:
+def test_local_store_grants_reach_only_local_sandboxes(tmp_path) -> None:
     store = LocalFilesystemObjectStore(str(tmp_path))
 
-    assert S3ObjectStore.supports_transfer_grants
-    assert not store.supports_transfer_grants
-    with pytest.raises(NotImplementedError, match="cannot issue"):
-        store.issue_read_grant(store.object_url("input"))
-    with pytest.raises(NotImplementedError, match="cannot issue"):
-        store.issue_write_grant(
-            store.object_url("output"), media_type="application/json", max_bytes=10
-        )
-    with pytest.raises(NotImplementedError, match="cannot issue"):
-        store.issue_upload_policy(store.object_url("changelog"), max_object_bytes=10, expires_in=60)
+    assert store.supports_transfer_grants
+    assert store.grants_reach("local")
+    assert not store.grants_reach("modal")
+    assert not store.grants_reach(None)
+
+
+def test_local_store_grants_can_be_turned_off(tmp_path) -> None:
+    assert not LocalFilesystemObjectStore(str(tmp_path), grants="off").supports_transfer_grants
+    with pytest.raises(ValueError, match="grants must be one of"):
+        LocalFilesystemObjectStore(str(tmp_path), grants="on")
+
+
+def test_hosted_store_grants_reach_any_sandbox(store: S3ObjectStore) -> None:
+    assert store.supports_transfer_grants
+    assert store.grants_reach("modal") and store.grants_reach("local") and store.grants_reach(None)
+
+
+def test_a_local_run_offers_grants_that_reach_its_local_store(tmp_path, store: S3ObjectStore) -> None:
+    routed = LocalRunObjectStore(store, LocalFilesystemObjectStore(str(tmp_path)))
+
+    assert routed.supports_transfer_grants
+    assert routed.grants_reach("local")
+    assert not routed.grants_reach("modal")

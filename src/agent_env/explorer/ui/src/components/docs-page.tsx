@@ -1,7 +1,8 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { Code2, FileJson, Search, Server, Shapes } from 'lucide-react';
-import { apiFetch, BACKEND_URL } from './shared';
+import { liveSpecVersionRows } from '../lib/live-spec-versions';
+import { apiFetch, BACKEND_URL, FRAMEWORK_DOCS_URL } from './shared';
 
 type JsonSchema = Record<string, unknown>;
 
@@ -36,15 +37,8 @@ interface OpenApiSpec {
 }
 
 interface OpenApiMetadata {
-  /** 'live' when served straight from the running hub; absent for a published spec. */
-  source?: string;
-  bucket?: string;
-  commit?: string;
   generated_at?: string;
-  latest_key?: string;
-  metadata_key?: string;
   openapi_version?: string;
-  version_key?: string | null;
   versions?: Record<string, string | null | undefined>;
 }
 
@@ -115,9 +109,9 @@ const METHOD_CLASS: Record<HttpMethod, string> = {
 const PRIMITIVE_GROUPS: PrimitiveGroup[] = ['artifacts', 'envs', 'taskSteps'];
 
 const PRIMITIVE_LABEL: Record<PrimitiveGroup, string> = {
-  artifacts: 'Artifacts',
-  envs: 'Environments',
-  taskSteps: 'Task Steps',
+  artifacts: 'Artifact Types',
+  envs: 'Environment Types',
+  taskSteps: 'Task Step Types',
 };
 
 const ENDPOINT_NAV_LIMIT = 120;
@@ -145,10 +139,6 @@ function docsMetadataUrl(): string {
   return base
     ? `${base}/api/v1/docs/openapi/metadata`
     : '/api/v1/docs/openapi/metadata';
-}
-
-function shortCommit(commit?: string): string {
-  return commit ? commit.slice(0, 12) : '';
 }
 
 function formatTimestamp(timestamp?: string): string {
@@ -431,25 +421,26 @@ function OverviewPane({
     <div className="space-y-8">
       <div>
         <h1 className="text-2xl font-semibold text-[var(--foreground)]">
-          {spec.info?.title ?? 'AgentEnvExplorer API'}
+          {spec.info?.title ?? 'AgentEnv Explorer API'}
         </h1>
-        <div className="mt-2 text-sm text-[var(--muted-foreground)]">
-          Version {spec.info?.version ?? 'unknown'}
-          {metadata?.commit && (
-            <>
-              {' '}
-              · Spec commit{' '}
-              <code className="text-[var(--foreground)]">
-                {shortCommit(metadata.commit)}
-              </code>
-            </>
-          )}
-        </div>
         {spec.info?.description && (
           <p className="mt-4 max-w-3xl text-sm leading-6 text-[var(--foreground)]">
             {spec.info.description}
           </p>
         )}
+        <p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--muted-foreground)]">
+          This page is the explorer&apos;s API reference. For guides to
+          environments, artifacts, agents, tasks and plugins, see the{' '}
+          <a
+            href={FRAMEWORK_DOCS_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-[var(--foreground)] underline underline-offset-2"
+          >
+            AgentEnv Framework docs
+          </a>
+          .
+        </p>
       </div>
 
       <div className="grid max-w-4xl grid-cols-2 gap-3 lg:grid-cols-4">
@@ -462,33 +453,15 @@ function OverviewPane({
 
       <div>
         <h2 className="mb-3 text-sm font-semibold text-[var(--foreground)]">
-          {metadata?.source === 'live' ? 'This Hub' : 'Published Spec'}
+          This Hub
         </h2>
         <DetailGrid
-          rows={
-            metadata?.source === 'live'
-              ? [
-                  // A live spec has no object-store provenance; showing blank
-                  // Bucket / key rows would imply it failed to load one.
-                  ['Source', 'Served live by this hub'],
-                  ['Generated', formatTimestamp(metadata?.generated_at)],
-                  ['OpenAPI', metadata?.openapi_version ?? ''],
-                  ['agent-env', metadata?.versions?.['agent-env'] ?? ''],
-                  [
-                    'agentenv-protocol',
-                    metadata?.versions?.['agentenv-protocol'] ?? '',
-                  ],
-                ]
-              : [
-                  ['Commit', metadata?.commit ?? ''],
-                  ['Generated', formatTimestamp(metadata?.generated_at)],
-                  ['Bucket', metadata?.bucket ?? ''],
-                  ['Latest key', metadata?.latest_key ?? ''],
-                  ['Version key', metadata?.version_key ?? ''],
-                  ['OpenAPI', metadata?.openapi_version ?? ''],
-                  ['agent-env', metadata?.versions?.['agent-env'] ?? ''],
-                ]
-          }
+          rows={[
+            ['Source', 'Served live by this hub'],
+            ['Generated', formatTimestamp(metadata?.generated_at)],
+            ['OpenAPI', metadata?.openapi_version ?? ''],
+            ...liveSpecVersionRows(metadata?.versions),
+          ]}
         />
       </div>
 
@@ -851,11 +824,6 @@ export function DocsPage() {
             <FileJson size={18} />
             Docs
           </div>
-          {metadata?.commit && (
-            <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-              Spec {shortCommit(metadata.commit)}
-            </div>
-          )}
           <div className="relative mt-4">
             <Search
               size={15}

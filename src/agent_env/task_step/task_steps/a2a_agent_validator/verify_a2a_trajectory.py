@@ -8,14 +8,11 @@ from typing import ClassVar, Optional
 
 from agent_env.task_step.context import TaskStepContext
 from agent_env.a2a_agent.object_transfer import (
-    REPLY_TIMEOUT_SECONDS,
-    TransferCall,
     TrajectoryUpload,
-    choose_transfer,
     fetch_trajectory,
-    invoke_transfer,
     trajectory_mode,
 )
+from agent_env.a2a_agent.staging import transfer_store
 from agent_env.task_step.snapshot_utils.agent_state_capture import trajectory_object_url
 from agent_env.entity_refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
@@ -93,59 +90,33 @@ class VerifyA2ATrajectoryStep(TaskStep):
         config = get_config()
         store = config.get_object_store()
         probe_prefix = f"{config.get_artifact_key_prefix()}a2a_validator_trajectories/{self.a2a_agent_id}/"
-        if trajectory_mode(get_method, store, by="task_id") == "objects":
+        sandbox_type = deployed_agent.sandbox_type
+        granting = transfer_store(
+            store, deployed_agent.a2a_url or deployed_agent.api_url, deployed_agent.a2a_card, sandbox_type=sandbox_type
+        )
+        if trajectory_mode(get_method, granting, by="task_id", sandbox_type=sandbox_type) == "objects":
             try:
-                prefix = store.object_url(probe_prefix)
+                prefix = granting.object_url(probe_prefix)
                 upload = await asyncio.to_thread(
-                    TrajectoryUpload.to, store, trajectory_object_url(prefix, name=task_id, store=store)
+                    TrajectoryUpload.to, granting, trajectory_object_url(prefix, name=task_id, store=granting)
                 )
-                await fetch_trajectory(endpoint, {"task_id": task_id}, upload=upload)
+                await fetch_trajectory(endpoint, {"task_id": task_id}, upload=upload, store=granting)
                 objects_ok = True
                 logger.info("Object trajectory: OK")
             except Exception as e:
                 logger.warning(f"Object trajectory: failed ({e})")
 
-        s3_ok = False
-        if choose_transfer(
-            get_method, legacy=("task_id", "trajectory_s3_prefix"), store=store
-        ) == "legacy":
-            s3_prefix = store.object_url(probe_prefix)
-            try:
-                data = await invoke_transfer(
-                    endpoint,
-                    TransferCall(
-                        "legacy", {"task_id": task_id, "trajectory_s3_prefix": s3_prefix}
-                    ),
-                    verb="POST",
-                    operation="legacy trajectory get",
-                    timeout=REPLY_TIMEOUT_SECONDS,
-                )
-                if data.get("trajectory_s3_prefix"):
-                    s3_ok = True
-                    logger.info(f"S3 trajectory: OK ({data['trajectory_s3_prefix']})")
-                else:
-                    logger.warning(
-                        "S3 trajectory: response missing 'trajectory_s3_prefix' key or empty"
-                    )
-            except Exception as e:
-                logger.warning(f"S3 trajectory: failed ({e})")
-
-        logger.info(
-            f"Trajectory validation: inline={inline_ok} objects={objects_ok} s3={s3_ok}"
-        )
+        logger.info(f"Trajectory validation: inline={inline_ok} objects={objects_ok}")
 
         # Build validated_a2a_extensions entry
         traj_entry = {
-            "supported": inline_ok or objects_ok or s3_ok,
+            "supported": inline_ok or objects_ok,
             "methods": {
                 "get": {
-                    "supported": inline_ok or objects_ok or s3_ok,
+                    "supported": inline_ok or objects_ok,
                     "options": {
-                        "task_id": {
-                            "supported": inline_ok or objects_ok or s3_ok
-                        },
+                        "task_id": {"supported": inline_ok or objects_ok},
                         "objects": {"supported": objects_ok},
-                        "trajectory_s3_prefix": {"supported": s3_ok},
                     },
                 },
             },
@@ -159,6 +130,5 @@ class VerifyA2ATrajectoryStep(TaskStep):
         context.metadata.setdefault("verifications", {})["a2a_trajectory"] = {
             "inline": inline_ok,
             "objects": objects_ok,
-            "s3": s3_ok,
         }
         return context

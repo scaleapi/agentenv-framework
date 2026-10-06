@@ -3,6 +3,7 @@ all-or-nothing export policy of the shared snapshot core."""
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 from agentenv_protocol import FilePart
@@ -121,20 +122,21 @@ def test_resolve_unknown_instance_id_raises():
 def test_snapshot_id_derived_from_instance_id_is_deterministic():
     ctx = _ctx(_deployed())
     step = _step()
-    first = step._derive_snapshot_id(ctx, "env-1")
-    second = step._derive_snapshot_id(ctx, "env-1")
-    assert first == second == "snapshot-env-1-65717eb66eeec083"
+    first = step._derive_snapshot_id(ctx)
+    second = step._derive_snapshot_id(ctx)
+    assert first == second == "task-x-65717eb66eeec083__snapshot-snap-1"
 
 
 def test_snapshot_id_override_wins():
     ctx = _ctx(_deployed())
-    assert _step(snapshot_id="snap-mine")._derive_snapshot_id(ctx, "env-1") == "snap-mine"
+    assert _step(snapshot_id="snap-mine")._derive_snapshot_id(ctx) == "snap-mine"
 
 
-def test_snapshot_id_falls_back_to_random_without_instance_id():
+def test_snapshot_id_falls_back_to_an_adhoc_run_without_instance_id():
     ctx = _ctx(_deployed(), task_instance_id=None)
-    generated = _step()._derive_snapshot_id(ctx, "env-1")
-    assert generated.startswith("snapshot-env-1-")
+    first, second = _step()._derive_snapshot_id(ctx), _step()._derive_snapshot_id(ctx)
+    assert re.fullmatch(r"adhoc-[0-9a-f]{12}__snapshot-snap-1", first)
+    assert first != second
 
 
 # ── execute wiring ───────────────────────────────────────────────────────────
@@ -177,7 +179,7 @@ async def test_execute_writes_summary_to_context(monkeypatch):
     assert captured["gateway_url"] == "https://gw-1"
     assert captured["original_universe_artifact_id"] == "base-universe"
     assert ctx.metadata["env_snapshotted_universes"]["snap-1"] == {
-        "id": "snapshot-env-1-65717eb66eeec083",
+        "id": "task-x-65717eb66eeec083__snapshot-snap-1",
         "version": 1,
     }
 
@@ -822,6 +824,26 @@ async def test_core_fails_a_service_whose_upload_the_store_cannot_find(local_sto
         await SnapshotEnvTaskStep.snapshot_env_state(
             env=_FakeMultiEnv(["gdrive"]), gateway_url="https://gw", snapshot_id="snap-g",
         )
+
+
+@pytest.mark.asyncio
+async def test_core_snapshots_under_an_id_longer_than_a_filename_can_be(local_stores, monkeypatch):
+    """A run's snapshot id can pass the 255-byte filename limit, so neither a temp file nor a key segment of the
+    local store may be the whole id."""
+    snapshot_id = f"task-{'x' * 250}__snapshot-snap-1"
+
+    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None):
+        with open(tmp_path, "w") as f:
+            json.dump({"service": name}, f)
+        return ".json"
+
+    monkeypatch.setattr(SnapshotEnvTaskStep, "_export_environment_to_file", staticmethod(fake_export))
+
+    result = await SnapshotEnvTaskStep.snapshot_env_state(env=_FakeMultiEnv(["slack"]), gateway_url="https://gw", snapshot_id=snapshot_id)
+
+    (service,) = EnvironmentUniverseArtifact.get(result.environment_universe_artifact_id).get_environment_artifacts()
+    assert (result.environment_universe_artifact_id, service.id) == (snapshot_id, f"{snapshot_id}-slack")
+    assert json.loads(service.get_file_artifact().load()) == {"service": "slack"}
 
 
 @pytest.mark.asyncio

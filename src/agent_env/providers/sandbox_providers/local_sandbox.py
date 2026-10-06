@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import glob
 import logging
 import os
@@ -23,6 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 from uuid import uuid4
 
+from agent_env import config
 from agent_env.attribution import Attribution
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, VmSandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import (
@@ -31,6 +33,9 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     SandboxProvider,
     refuse_unenforceable_policy,
 )
+from agent_env.store.object_store.local.tls import local_ca
+from agent_env.store.object_store.local.store import LocalFilesystemObjectStore
+from agent_env.store.routing import LocalRunObjectStore
 
 if TYPE_CHECKING:
     from agent_env.store.object_store import ObjectStore
@@ -50,8 +55,17 @@ def _runs_in_container(cmd: list[str]) -> bool:
 
 _REAP_SECONDS = 5
 
+# Where a container finds the local transfer CA's trust files, and the variables that point TLS clients at them:
+# SSL_CERT_FILE replaces a client's roots, so it gets the public roots plus the CA; NODE_EXTRA_CA_CERTS adds.
+_TRUST_DIR = "/etc/agentenv"
+LOCAL_TRUST_ENV = {
+    "SSL_CERT_FILE": f"{_TRUST_DIR}/ca-bundle.pem",
+    "REQUESTS_CA_BUNDLE": f"{_TRUST_DIR}/ca-bundle.pem",
+    "NODE_EXTRA_CA_CERTS": f"{_TRUST_DIR}/ca.pem",
+}
+
 # Marker dropped in the work dir when this sandbox runs a container, so a later get_sandbox()
-# (post-run teardown reconstructs the sandbox from disk) can restore container mode and clean up.
+# (post-run teardown reconstructs the sandbox from disk) knows it owns that container.
 _CONTAINER_MODE_MARKER = ".agent-container-mode"
 
 
@@ -113,8 +127,9 @@ class LocalSandbox(VmSandbox):
             port: port for port in (exposed_ports or [])
         }
         # Keyed by container port: callers index this with the well-known constants.
+        # 127.0.0.1, not localhost: ports are published on IPv4 loopback, and a client may try ::1 first.
         self.tunnel_urls = {
-            container: f"http://localhost:{host}" for container, host in self._port_map.items()
+            container: f"http://127.0.0.1:{host}" for container, host in self._port_map.items()
         }
         self.vnc_url = None
         self.mode = SANDBOX_MODE_VM
@@ -125,6 +140,11 @@ class LocalSandbox(VmSandbox):
     def host_port(self, port: int) -> int:
         """The allocated host port for a published container port (identity if unmapped)."""
         return self._port_map.get(port, port)
+
+    @property
+    def host_ips(self) -> tuple[str, ...]:
+        """Loopback, so a local deploy is not reachable from the network (see ``_host_ips``)."""
+        return _host_ips()
 
     @classmethod
     def find_work_dir(cls, sandbox_id: str) -> Path | None:
@@ -152,6 +172,11 @@ class LocalSandbox(VmSandbox):
         return f"agent-{self.sandbox_id}"
 
     @property
+    def owns_container(self) -> bool:
+        """Whether create_container started ``container_name`` for this sandbox, not an agent placed on it."""
+        return (self._work_dir / _CONTAINER_MODE_MARKER).exists()
+
+    @property
     def work_dir(self) -> Path:
         return self._work_dir
 
@@ -166,8 +191,8 @@ class LocalSandbox(VmSandbox):
     async def terminate(self) -> None:
         """Tear down whatever this sandbox is running.
 
-        A container-mode sandbox (the A2A agent) owns the ``self.container_name`` container that
-        create_container started — remove it. A VM-mode sandbox (env/gateway) runs a docker compose
+        A sandbox create_container made (the A2A agent; VM mode once reattached) owns the container
+        ``self.container_name`` it started — remove it. A VM-mode sandbox (env/gateway) runs a docker compose
         stack out of its work dir — ``docker compose down`` it — and may carry an agent placed on it,
         which runs as the same ``self.container_name`` container. Each path only touches resources
         this sandbox created: the container name is per-sandbox (LocalSandbox.container_name), so a
@@ -269,6 +294,36 @@ def _kill_tree(root: int) -> None:
             os.kill(pid, signal.SIGKILL)
 
 
+def local_grant_trust() -> Path | None:
+    """The trust files a container on this host needs to use the configured object store's grants: the local
+    transfer CA's, when the store is a local one that hands out grants; None otherwise."""
+    store = config.get_config().get_object_store()
+    if isinstance(store, LocalRunObjectStore):
+        store = store.local
+    if isinstance(store, LocalFilesystemObjectStore) and store.supports_transfer_grants:
+        return local_ca().trust_dir
+    return None
+
+
+async def start_trusting(sandbox: VmSandbox, container: str, trust_dir: Path) -> None:
+    """Copy ``trust_dir`` into the created ``container`` where ``LOCAL_TRUST_ENV`` points, then start it. A container
+    that cannot be given the files or started is removed, so its name is free for the next attempt."""
+    try:
+        await asyncio.to_thread(_copy_into_container, trust_dir, container, _TRUST_DIR)
+        await sandbox.exec_script(f"docker start {shlex.quote(container)} > /dev/null")
+    except Exception:
+        await sandbox.exec_script(f"docker rm -f {shlex.quote(container)} >/dev/null 2>&1 || true")
+        raise
+
+
+def _copy_into_container(source: Path, container: str, destination: str) -> None:
+    """Copy what the host directory ``source`` holds to ``destination`` in ``container``. Run directly, not
+    through a sandbox's shell, which would rewrite a host path under /app."""
+    copied = subprocess.run(["docker", "cp", f"{source}/.", f"{container}:{destination}"], capture_output=True, text=True)
+    if copied.returncode != 0:
+        raise RuntimeError(f"Could not copy {source} into container {container}: {copied.stderr.strip()}")
+
+
 def remove_local_work_dir(sandbox_id: str) -> Path | None:
     """Delete a local sandbox's work folder, and return it, when it lies directly under the sandbox root and
     isn't a symlink; anything else, a legacy folder under the temp dir included, is left alone. Raises OSError
@@ -299,7 +354,6 @@ class LocalSandboxProvider(SandboxProvider):
         exposed_ports: Optional[list[int]] = None,
         setup_for_gateway: bool = True,
         attribution: Optional[Attribution] = None,
-        priority: Optional[int] = None,
         network_policy: Optional[NetworkPolicy] = None,
     ) -> LocalSandbox:
         refuse_unenforceable_policy(self, network_policy)
@@ -322,7 +376,6 @@ class LocalSandboxProvider(SandboxProvider):
         disk_size_gb: float = 10,
         timeout: int = 3600 * 2,
         attribution: Optional[Attribution] = None,
-        priority: Optional[int] = None,
         network_policy: Optional[NetworkPolicy] = None,
     ) -> LocalSandbox:
         sandbox = await super().create_container(
@@ -334,7 +387,7 @@ class LocalSandboxProvider(SandboxProvider):
             disk_size_gb=disk_size_gb,
             timeout=timeout,
             attribution=attribution,
-            priority=priority, network_policy=network_policy,
+            network_policy=network_policy,
         )
         # The marker is how a later get_sandbox() (post-run teardown rebuilds the sandbox from disk)
         # learns this is a container and removes it. If we can't persist it, that reconstructed
@@ -364,6 +417,17 @@ class LocalSandboxProvider(SandboxProvider):
                 raise
         return sandbox
 
+    async def _start_container(self, sandbox: VmSandbox, *, image_name: str, port: int, env: dict[str, str]) -> None:
+        """Where the configured store hands out local grants, create the container, copy the local transfer CA's
+        trust files in, then start it, so its TLS clients trust the grant server. Variables the caller sets win."""
+        trust_dir = await asyncio.to_thread(local_grant_trust)
+        if trust_dir is None:
+            await super()._start_container(sandbox, image_name=image_name, port=port, env=env)
+            return
+        args = self._container_args(sandbox, image_name=image_name, port=port, env={**LOCAL_TRUST_ENV, **env})
+        await sandbox.exec_script(f"docker create {args} > /dev/null")
+        await start_trusting(sandbox, sandbox.container_name, trust_dir)
+
     async def create_sandbox(
         self,
         *,
@@ -375,22 +439,19 @@ class LocalSandboxProvider(SandboxProvider):
         disk_size_gb: float = 10,
         timeout: int = 3600 * 2,
         attribution: Optional[Attribution] = None,
-        priority: Optional[int] = None,
         network_policy: Optional[NetworkPolicy] = None,
     ) -> LocalSandbox:
         return await self.create_container(
             image_name=image_name, port=port, env=env, cpu=cpu, memory=memory, disk_size_gb=disk_size_gb,
-            timeout=timeout, attribution=attribution, priority=priority, network_policy=network_policy,
+            timeout=timeout, attribution=attribution, network_policy=network_policy,
         )
 
     async def get_sandbox(self, sandbox_id: str) -> LocalSandbox:
         work_dir = LocalSandbox.find_work_dir(sandbox_id)
         if work_dir is None:
             raise RuntimeError(f"Local sandbox work directory not found for sandbox_id={sandbox_id!r}")
-        sandbox = LocalSandbox(sandbox_id=sandbox_id, work_dir=work_dir)
-        if (work_dir / _CONTAINER_MODE_MARKER).exists():
-            sandbox.mode = SANDBOX_MODE_CONTAINER
-        return sandbox
+        # VM mode even for a container it owns: exec runs on this host, so steps must `docker exec` into it.
+        return LocalSandbox(sandbox_id=sandbox_id, work_dir=work_dir)
 
     @classmethod
     def shares_network_with(cls, sandbox_type: Optional[str]) -> bool:
@@ -406,3 +467,26 @@ class LocalSandboxProvider(SandboxProvider):
         inside a container: ``host.docker.internal``. Docker Desktop and Rancher Desktop (macOS/Windows)
         resolve this themselves; on Linux ``EXTRA_CONTAINER_RUN_ARGS`` maps it via ``--add-host …:host-gateway``."""
         return url.replace("localhost", "host.docker.internal").replace("127.0.0.1", "host.docker.internal")
+
+
+@functools.cache
+def _host_ips() -> tuple[str, ...]:
+    """Loopback, plus on Linux the bridge gateway ``host-gateway`` resolves to, where containers reach the host."""
+    # Docker Desktop publishes through a host-side proxy, which can't bind the bridge address inside its VM.
+    if platform.system() != "Linux" or _docker("info", "--format", "{{.OperatingSystem}}") == "Docker Desktop":
+        return ("127.0.0.1",)
+    # Listing, unlike inspecting, answers a missing network with nothing rather than an error.
+    if not _docker("network", "ls", "--quiet", "--filter", "name=^bridge$"):
+        return ("127.0.0.1",)
+    return ("127.0.0.1", _docker("network", "inspect", "bridge", "--format", "{{(index .IPAM.Config 0).Gateway}}"))
+
+
+def _docker(*args: str) -> str:
+    """A docker CLI query's output. A failure raises, so the cache above never keeps it."""
+    run = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=_DOCKER_QUERY_SECONDS)
+    if run.returncode:
+        raise RuntimeError(f"docker {' '.join(args)} failed: {run.stderr.strip()}")
+    return run.stdout.strip()
+
+
+_DOCKER_QUERY_SECONDS = 30

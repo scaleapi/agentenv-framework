@@ -28,8 +28,12 @@ from agent_env.a2a_agent.object_transfer import (
     check_changelog_applied,
     invoke_transfer,
 )
+from agent_env.a2a_agent.staging import transfer_store
 from agent_env.config import get_config
-from agent_env.store.routing import refuse_local_derivation
+from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
+from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
+from agent_env.providers.sandbox_providers.sandbox_provider import get_agent_sandbox_provider
+from agent_env.store.ids import derive_id, key_segment
 from agent_env.task_step.task_steps.a2a_agent_validator.verify_a2a_modalities import (
     AUDIO_M4A_EXPECTED,
     AUDIO_M4A_PROBE_PARTS,
@@ -58,6 +62,15 @@ if TYPE_CHECKING:
     from agent_env.a2a_agent.a2a_agent import A2AAgent
 
 logger = logging.getLogger(__name__)
+
+
+def _probe_agent_sandbox_type() -> str | None:
+    """The sandbox type the validation agents will deploy on, as far as it is known before they do: the local
+    provider's when it is the agent provider, or first in its chain, which runs the agent unless it fails."""
+    provider = get_agent_sandbox_provider()
+    if isinstance(provider, ChainedSandboxProvider):
+        provider = provider.providers[0]
+    return LocalSandbox.type if isinstance(provider, LocalSandboxProvider) else None
 
 
 @dataclass
@@ -144,7 +157,6 @@ class A2AAgentValidator:
 
         Returns the merged `verifications` dict from the run's task context.
         """
-        refuse_local_derivation(agent.id, "agent", "validating")
         from agent_env.task import Task
         from agent_env.task_step import (
             AddSkillsTaskStep,
@@ -158,8 +170,6 @@ class A2AAgentValidator:
             VerifyA2AAgentCardStep,
             VerifyA2AAgentConfigIdentityStep,
             VerifyA2AAgentMCPStep,
-            VerifyA2ALitellmAttributionRuntimeStep,
-            VerifyA2ALitellmAttributionStep,
             VerifyA2AModalitiesStep,
             VerifyA2APeerAgentsStep,
             VerifyA2ARoleStep,
@@ -175,7 +185,7 @@ class A2AAgentValidator:
         from agent_env.task_step.task_step import TaskStep, TaskStepDependency
         from agent_env.a2a_agent.a2a_agent import A2AAgent
 
-        task_id = f"validate-a2a-{agent.id}-v{agent.version}"
+        task_id = derive_id(agent.id, f"validate-a2a-v{agent.version}")
 
         # ── Upload object-store fixtures (skill + URI probe bytes) ───────────
         skill_object_url = await asyncio.to_thread(
@@ -198,13 +208,6 @@ class A2AAgentValidator:
             description="Validator probe for the portable skill bundle variant.",
             body="Portable skill bundle validation fixture.",
         )
-        skill_s3_probe_url = await asyncio.to_thread(
-            A2AAgentValidator._upload_skill_fixture,
-            agent,
-            name="validator-probe-s3",
-            description="Validator probe for the legacy S3 skill variant.",
-            body="Legacy S3 skill validation fixture.",
-        )
         fixtures = await asyncio.to_thread(A2AAgentValidator._upload_probe_fixtures, agent, skill_object_url)
 
         # ── Build modality probe steps + matching grading list ───────────────
@@ -216,14 +219,6 @@ class A2AAgentValidator:
         protocol_prompt_id = f"{task_id}-protocol-prompt"
         skill_prompt_id = f"{task_id}-skill-prompt"
         skill_verifier_id = f"{task_id}-skill-rubric"
-        # LiteLLM attribution runtime probe: plant unique IDs on context.metadata
-        # so prompt_agent forwards them via /ext/agent-config; the agent records
-        # the attribution it emits on the resulting LLM call; the post-prompt
-        # verify step queries /ext/attribution-probe and asserts the planted
-        # values came through. Unique per validation run to avoid cross-run
-        # bleed when /ext/attribution-probe is stateful.
-        probe_project_id = f"probe-project-{uuid.uuid4().hex[:12]}"
-        probe_task_id = f"probe-task-{uuid.uuid4().hex[:12]}"
         # Snapshot validation: plant a unique token on agent A, snapshot, deploy
         # agent B with the snapshot loaded into a known target context_id, prompt
         # agent B for recall, grade with a rubric.
@@ -268,19 +263,11 @@ class A2AAgentValidator:
             DeployEnvTaskStep(id=f"{task_id}-deploy-env", version=None, env_id=agent.VALIDATION_ENV_ID),
             DeployAgentTaskStep(id=deploy_agent_id, version=None, env_ids=[agent.VALIDATION_ENV_ID], a2a_agent_id=agent.id, a2a_agent_version=agent.version),
             VerifyA2AAgentCardStep(id=f"{task_id}-card", version=None, a2a_agent_id=agent.id, a2a_agent_version=agent.version, depends_on=deploy_agent_dep, fail_task_on_error=False),
-            VerifyA2ALitellmAttributionStep(id=f"{task_id}-litellm-attribution", version=None, a2a_agent_id=agent.id, a2a_agent_version=agent.version, depends_on=deploy_agent_dep, fail_task_on_error=False),
             VerifyA2AAgentConfigIdentityStep(id=f"{task_id}-agent-config-identity", version=None, a2a_agent_id=agent.id, a2a_agent_version=agent.version, depends_on=deploy_agent_dep, fail_task_on_error=False),
             VerifyA2ARoleStep(id=f"{task_id}-role", version=None, a2a_agent_id=agent.id, a2a_agent_version=agent.version, depends_on=deploy_agent_dep, fail_task_on_error=False),
             VerifyA2ASystemPromptStep(id=f"{task_id}-system-prompt", version=None, a2a_agent_id=agent.id, a2a_agent_version=agent.version, depends_on=deploy_agent_dep, fail_task_on_error=False),
             PromptAgentTaskStep(id=protocol_prompt_id, version=None, prompt="Hello, respond with OK.", prompt_id=protocol_prompt_id, timeout_seconds=120, depends_on=deploy_agent_dep, fail_task_on_error=False),
             VerifyCoreA2AProtocolStep(id=f"{task_id}-protocol", version=None, a2a_agent_id=agent.id, prompt_id=protocol_prompt_id, depends_on=[TaskStepDependency(task_step_id=protocol_prompt_id)], fail_task_on_error=False),
-            VerifyA2ALitellmAttributionRuntimeStep(
-                id=f"{task_id}-litellm-attribution-runtime", version=None,
-                a2a_agent_id=agent.id, a2a_agent_version=agent.version,
-                expected_project_id=probe_project_id, expected_task_id=probe_task_id,
-                depends_on=[TaskStepDependency(task_step_id=protocol_prompt_id)],
-                fail_task_on_error=False,
-            ),
             *modality_steps,
             VerifyA2AModalitiesStep(id=f"{task_id}-modalities", version=None, a2a_agent_id=agent.id, probes=grading_probes,
                 depends_on=[TaskStepDependency(task_step_id=sid) for sid in modality_step_ids], fail_task_on_error=False),
@@ -304,7 +291,6 @@ class A2AAgentValidator:
                 a2a_agent_id=agent.id,
                 rubric_verifier_id=skill_verifier_id,
                 skill_bundle_object_url=skill_bundle_probe_url,
-                skill_s3_url=skill_s3_probe_url,
                 depends_on=[TaskStepDependency(task_step_id=skill_rubric_id)],
                 fail_task_on_error=False,
             ),
@@ -424,12 +410,7 @@ class A2AAgentValidator:
         initial_context = TaskStepContext()
         if litellm_api_key:
             initial_context.metadata["user_overrides"] = {"litellm_api_key": litellm_api_key}
-        # Plant LiteLLM attribution probe values so prompt_agent forwards them
-        # via /ext/agent-config — the runtime-attribution verify step reads them
-        # back from /ext/attribution-probe and asserts the agent's bridge
-        # actually wired them through to outbound LLM calls.
-        initial_context.metadata["project_id"] = probe_project_id
-        initial_context.metadata["task_id"] = probe_task_id
+        initial_context.metadata["task_id"] = task_id
         num_deploy_steps = 2
         run_kwargs = {"on_step_start": on_start, "on_step_complete": on_complete}
 
@@ -681,14 +662,17 @@ class A2AAgentValidator:
             A2AAgent.find_extension(apply_agent.a2a_card, A2AAgent.EXT_SNAPSHOT),
             A2AAgent.SNAPSHOT_METHOD_APPLY_CHANGELOG)
         a2a_url = apply_agent.a2a_url or apply_agent.api_url
+        store = transfer_store(
+            get_config().get_object_store(), a2a_url, apply_agent.a2a_card, sandbox_type=apply_agent.sandbox_type
+        )
         try:
             call = await asyncio.to_thread(
                 changelog_apply_call,
                 method,
-                get_config().get_object_store(),
+                store,
                 agent_name=apply_agent_name,
                 source_url=capture_source,
-                portable=capture.get("transfer_mode") == "objects",
+                sandbox_type=apply_agent.sandbox_type,
             )
         except RuntimeError as e:
             record(supported=False, advertised=advertised, save_ok=save_ok,
@@ -707,9 +691,9 @@ class A2AAgentValidator:
                 operation="changelog apply",
                 timeout=TRANSFER_TIMEOUT_SECONDS,
                 response_model=ObjectChangelogApplyResponse,
+                store=store,
             )
-            if call.mode == "objects":
-                check_changelog_applied(answer, call, agent_name=apply_agent_name)
+            check_changelog_applied(answer, call, agent_name=apply_agent_name)
         except Exception as e:  # noqa: BLE001
             record(supported=False, advertised=advertised, save_ok=save_ok,
                    apply_ok=False, roundtrip_ok=False, note=f"apply request failed: {e}")
@@ -777,9 +761,9 @@ class A2AAgentValidator:
         from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 
         ts = int(time.time())
-        universe_id = f"validate-install-image-{agent.id}-v{agent.version}-{ts}"
+        universe_id = derive_id(agent.id, f"validate-install-image-v{agent.version}-{ts}")
         config = get_config()
-        s3_url = config.get_object_store().object_url(f"{config.get_artifact_key_prefix()}a2a_validator/install_test_image/{ts}/")
+        s3_url = config.get_object_store_for(universe_id).object_url(f"{config.get_artifact_key_prefix()}a2a_validator/install_test_image/{ts}/")
 
         with tempfile.NamedTemporaryFile("w", suffix=".Dockerfile", delete=False) as f:
             f.write("FROM ubuntu:24.04\n")
@@ -805,9 +789,9 @@ class A2AAgentValidator:
         from agent_env.task_step.task_steps.add_skills import Skill
 
         config = get_config()
-        store = config.get_object_store()
+        store = config.get_object_store_for(agent.id)
         prefix = (
-            f"{config.get_artifact_key_prefix()}a2a_validator/validator_skill/{agent.id}-v{agent.version}/{name}/"
+            f"{config.get_artifact_key_prefix()}a2a_validator/validator_skill/{key_segment(agent.id)}-v{agent.version}/{name}/"
         )
         skill = Skill(
             name=name,
@@ -830,13 +814,15 @@ class A2AAgentValidator:
         """
 
         config = get_config()
-        store = config.get_object_store()
-        prefix = f"{config.get_artifact_key_prefix()}a2a_validator/probe_fixtures/{agent.id}-v{agent.version}/"
+        store = config.get_object_store_for(agent.id)
+        prefix = f"{config.get_artifact_key_prefix()}a2a_validator/probe_fixtures/{key_segment(agent.id)}-v{agent.version}/"
 
         png_object_uri = store.put(f"{prefix}red.png", base64.b64decode(IMAGE_PROBE_PNG_B64), content_type="image/png", allow_overwrite=True)
         png_signed_url = store.signed_get_url(png_object_uri)
+        if png_signed_url is None and store.supports_transfer_grants and store.grants_reach(_probe_agent_sandbox_type()):
+            png_signed_url = store.issue_read_grant(png_object_uri).url
         if png_signed_url is None:
-            raise RuntimeError("A2A validation requires a signable object store for the presigned-URI probe.")
+            raise RuntimeError("A2A validation requires an object store that signs URLs or issues grants, for the presigned-URI probe.")
         logger.info(f"Uploaded probe fixture to {png_object_uri}")
 
         mp4_object_uri = store.put(f"{prefix}clip.mp4", base64.b64decode(VIDEO_PROBE_MP4_B64), content_type="video/mp4", allow_overwrite=True)

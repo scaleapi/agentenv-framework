@@ -1,10 +1,6 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { Search, X, RefreshCw } from 'lucide-react';
 import {
-  useExternalApp,
-  type SubmissionItem,
-} from '../lib/external-app';
-import {
   BACKEND_URL,
   apiFetch,
   PaginatedResponse,
@@ -18,20 +14,6 @@ import {
   universeTypeQueryValues,
   type UniverseType,
 } from '../lib/universe-types';
-
-/** Iframe-host config via INIT_STATE.payload.inputs.value. All fields optional — omitting it still gives a
- *  working hub. Currently a single pre-filter knob; more picker policies can be added as optional fields. */
-interface UniversesConfig {
-  type_filter?: UniverseType;
-}
-
-/** Shape posted back to the parent as a SUBMISSION `data` item. Same for picked and newly-created universes; `source` distinguishes for host analytics. */
-interface UniversePickSubmission {
-  universe_id: string;
-  version: number;
-  type: UniverseType;
-  source: 'picked' | 'created';
-}
 
 export const UNIVERSE_PAGE_SIZE = 10;
 
@@ -53,19 +35,6 @@ export function UniversesPage({
   universeType?: UniverseType;
 }) {
   const lockedType = universeType;
-
-  // Iframe-host integration, auto-detected via window.parent !== window. When embedded: card click selects
-  // (two-step), a sticky bar emits a SUBMISSION, and Create auto-submits instead of navigating. Standalone unchanged.
-  const externalApp = useExternalApp();
-  // window.parent !== window is stable for the component's life, but recomputing inline risks a hydration
-  // render flipping the value (SSR → client) and retriggering the INIT_STATE effect. Memo'd once.
-  const isEmbedded = useMemo(
-    () => typeof window !== 'undefined' && window.parent !== window,
-    [],
-  );
-  const [pickedUniverse, setPickedUniverse] =
-    useState<UniversePickSubmission | null>(null);
-  const lastEmbedInputsRef = useRef<unknown>(undefined);
 
   const [items, setItems] = useState<Record<string, unknown>[]>([]);
   const [total, setTotal] = useState(0);
@@ -179,36 +148,6 @@ export function UniversesPage({
   const handleRefresh = useCallback(() => {
     fetchUniverses(searchQuery.trim(), runGroupIdQuery.trim(), queriedTypes);
   }, [searchQuery, runGroupIdQuery, queriedTypes, fetchUniverses]);
-
-  // Consume INIT_STATE from the host: unwrap `.value` to reach UniversesConfig. React only to new inputs (tracked by ref).
-  useEffect(() => {
-    if (!isEmbedded || !externalApp.isReady) return;
-    if (lastEmbedInputsRef.current === externalApp.receivedInputs) return;
-    lastEmbedInputsRef.current = externalApp.receivedInputs;
-    const inputs =
-      (externalApp.receivedInputs as { value?: UniversesConfig } | null)
-        ?.value ?? null;
-    if (!inputs) return;
-    if (inputs.type_filter && !lockedType) {
-      setTypeFilter(inputs.type_filter);
-    }
-  }, [isEmbedded, externalApp.isReady, externalApp.receivedInputs, lockedType]);
-
-  // Post a SUBMISSION back to the host. Shape matches the task-runner pattern so both pages share the host message handler.
-  const submitToHost = useCallback(
-    (data: UniversePickSubmission) => {
-      const item: SubmissionItem = {
-        content: {
-          id: 'universe-pick',
-          type: 'json',
-          data: data as unknown as Record<string, unknown>,
-        },
-        metadata: { universe_id: data.universe_id, version: data.version },
-      };
-      externalApp.sendSubmission([item]);
-    },
-    [externalApp],
-  );
 
   const hasMore = items.length < total;
 
@@ -352,37 +291,16 @@ export function UniversesPage({
               const itemType: UniverseType = normalizeUniverseType(item.type);
               const id = String(item.id);
               const v = item.version != null ? Number(item.version) : undefined;
-              // Embed pick mode: a card is "selected" when it matches the picked universe. Selection lives in local state.
-              const isPickedHere =
-                isEmbedded &&
-                pickedUniverse?.universe_id === id &&
-                (v == null || pickedUniverse?.version === v);
               return (
                 <UniverseCard
                   key={`${id}-${i}`}
                   item={item}
                   universeType={itemType}
-                  selected={
-                    isPickedHere || (selectionMode && selectedId === id)
-                  }
+                  selected={selectionMode && selectedId === id}
                   onClick={() => {
                     // Pin a version only for a run-group-scoped view (each card = a specific version); otherwise undefined → detail defaults to latest.
                     const pinned = runGroupIdQuery.trim() ? v : undefined;
-                    if (isEmbedded) {
-                      // Two-step picker: card click toggles selection; the "Use this universe" bar emits the submission.
-                      setPickedUniverse(prev =>
-                        prev &&
-                        prev.universe_id === id &&
-                        prev.version === (v ?? 1)
-                          ? null
-                          : {
-                              universe_id: id,
-                              version: v ?? 1,
-                              type: itemType,
-                              source: 'picked',
-                            },
-                      );
-                    } else if (selectionMode) {
+                    if (selectionMode) {
                       onSelect?.(id, v, itemType);
                     } else {
                       onSelectUniverse?.(id, pinned);
@@ -402,47 +320,6 @@ export function UniversesPage({
             </button>
           )}
         </>
-      )}
-
-
-      {/* Sticky two-step picker action bar — only when embedded and the
-          user has a card selected. Floats over the bottom edge of the
-          iframe viewport. */}
-      {isEmbedded && pickedUniverse && (
-        <div className="sticky bottom-0 left-0 right-0 mt-6 -mx-4 -mb-4 sm:-mx-6 sm:-mb-6 border-t border-[var(--border)] bg-[var(--background)]/95 backdrop-blur px-4 sm:px-6 py-3 flex items-center gap-3 flex-wrap shadow-[0_-2px_8px_rgba(0,0,0,0.04)]">
-          <div className="flex flex-col min-w-0">
-            <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
-              Selected
-            </span>
-            <div className="flex items-baseline gap-2 min-w-0">
-              <code className="font-mono text-sm font-semibold truncate">
-                {pickedUniverse.universe_id}
-              </code>
-              <span className="text-xs text-[var(--muted-foreground)]">
-                v{pickedUniverse.version}
-              </span>
-              <span className="text-[10px] font-mono uppercase text-[var(--muted-foreground)]">
-                {pickedUniverse.type}
-              </span>
-            </div>
-          </div>
-          <div className="ml-auto flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setPickedUniverse(null)}
-              className="px-3 py-1.5 rounded-md border border-[var(--border)] text-sm text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--accent)] transition-colors"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={() => submitToHost(pickedUniverse)}
-              className="px-4 py-1.5 rounded-md bg-violet-600 text-white text-sm font-semibold hover:bg-violet-700 transition-colors"
-            >
-              Use this universe
-            </button>
-          </div>
-        </div>
       )}
     </div>
   );

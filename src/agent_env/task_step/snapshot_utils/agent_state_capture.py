@@ -22,13 +22,14 @@ from agent_env.a2a_agent.object_transfer import (
     SNAPSHOT_WORKSPACE_OBJECT_NAME,
     FetchedTrajectory,
     TrajectoryUpload,
-    bounded_echo,
     fetch_trajectory,
     invoke_transfer,
     snapshot_save_call,
     trajectory_mode,
 )
+from agent_env.a2a_agent.staging import transfer_store
 from agent_env.config import get_config
+from agent_env.store.ids import key_segment
 
 logger = logging.getLogger(__name__)
 
@@ -39,10 +40,9 @@ class WorkspaceCapture:
 
     universe_id: str
     universe_version: Optional[int]
-    # Where the files landed; what restores.
+    # What restores.
     bundle_object_url: str
-    # What was presigned — not always where the agent wrote. Per-service state,
-    # captured alongside, still goes here.
+    # Where the agent wrote it. Per-service state, captured alongside, goes here too.
     capture_prefix: str
 
 
@@ -63,8 +63,9 @@ async def capture_workspace(
     a2a_context_id: str,
     artifact_id: str,
     timeout_seconds: float,
+    sandbox_type: str | None,
 ) -> WorkspaceCapture:
-    """Tar the agent's workspace to a fresh S3 prefix and wrap it as a universe.
+    """Capture the agent's workspace below a fresh prefix and wrap it as a universe.
 
     Raises on any failure — without the tar there is nothing to grade."""
     from agent_env.artifact.store import get_artifact_store
@@ -80,9 +81,9 @@ async def capture_workspace(
     snapshot_version = await asyncio.to_thread(get_artifact_store().next_version, artifact_id)
     config = get_config()
     capture_key_prefix = (
-        f"{config.get_artifact_key_prefix()}agent_snapshots/{artifact_id}/{snapshot_version}-{uuid.uuid4().hex[:8]}/"
+        f"{config.get_artifact_key_prefix()}agent_snapshots/{key_segment(artifact_id)}/{snapshot_version}-{uuid.uuid4().hex[:8]}/"
     )
-    store = config.get_object_store()
+    store = transfer_store(config.get_object_store(), a2a_url, a2a_card, sandbox_type=sandbox_type)
     capture_prefix = store.object_url(capture_key_prefix)
 
     call = await asyncio.to_thread(
@@ -92,45 +93,40 @@ async def capture_workspace(
         agent_name=agent_name,
         context_id=a2a_context_id,
         capture_prefix=capture_prefix,
+        sandbox_type=sandbox_type,
     )
-    save_body = await invoke_transfer(
+    await invoke_transfer(
         a2a_url + save_path,
         call,
         verb="POST",
         operation="snapshot save",
         timeout=timeout_seconds,
         response_model=ObjectSnapshotSaveResponse,
+        store=store,
     )
 
-    if call.mode == "objects":
-        # The agent's answer is only a claim: a snapshot missing either object cannot be restored.
-        listed = await asyncio.to_thread(store.list_at, capture_prefix)
-        stored = {url.rsplit("/", 1)[-1] for url in listed}
-        missing = {SNAPSHOT_TRAJECTORY_OBJECT_NAME, SNAPSHOT_WORKSPACE_OBJECT_NAME} - stored
-        if missing:
-            raise RuntimeError(
-                f"snapshot save from agent '{agent_name}' left {sorted(missing)} out of the object store"
-            )
-        registered_prefix = capture_prefix
-    else:
-        echoed = save_body.get("s3_prefix")
-        if not echoed:
-            raise RuntimeError(f"snapshot save response missing 's3_prefix': {save_body}")
-        registered_prefix = bounded_echo(capture_prefix, echoed)
+    # The agent's answer is only a claim: a snapshot missing either object cannot be restored.
+    listed = await asyncio.to_thread(store.list_at, capture_prefix)
+    stored = {url.rsplit("/", 1)[-1] for url in listed}
+    missing = {SNAPSHOT_TRAJECTORY_OBJECT_NAME, SNAPSHOT_WORKSPACE_OBJECT_NAME} - stored
+    if missing:
+        raise RuntimeError(
+            f"snapshot save from agent '{agent_name}' left {sorted(missing)} out of the object store"
+        )
 
     from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 
     # Unserialized — a concurrent version race on one artifact id is
     # `ArtifactStore.put_document`'s retry to absorb.
     universe = await asyncio.to_thread(
-        FileArtifactUniverse.put_existing, id=artifact_id, s3_url=registered_prefix
+        FileArtifactUniverse.put_existing, id=artifact_id, s3_url=capture_prefix
     )
     # `put_existing` always sets it, but the field is Optional on the artifact, and a
     # row carrying None here would read as an ungradable capture rather than an error.
     if not universe.bundle_object_url:
         raise RuntimeError(
             f"FileArtifactUniverse {universe.id} v{universe.version} registered no "
-            f"bundle url for {registered_prefix}"
+            f"bundle url for {capture_prefix}"
         )
     logger.info(
         "Snapshot captured: agent=%s context_id=%s -> FileArtifactUniverse %s v%s at %s",
@@ -152,6 +148,7 @@ async def read_partial_trajectory(
     context_id: str,
     timeout_seconds: float,
     trajectory_output_prefix: str,
+    sandbox_type: str | None,
 ) -> TrajectoryCapture:
     """Read the trajectory-so-far for an in-progress run.
 
@@ -179,8 +176,8 @@ async def read_partial_trajectory(
     # none may be task_id-only, and would 400 on every tick.
     if "request" not in get_method:
         return TrajectoryCapture(reason="trajectory_context_unsupported")
-    store = get_config().get_object_store()
-    mode = trajectory_mode(get_method, store, by="context_id")
+    store = transfer_store(get_config().get_object_store(), a2a_url, a2a_card, sandbox_type=sandbox_type)
+    mode = trajectory_mode(get_method, store, by="context_id", sandbox_type=sandbox_type)
     if mode is None:
         return TrajectoryCapture(reason="trajectory_context_unsupported")
 
@@ -194,7 +191,7 @@ async def read_partial_trajectory(
             return TrajectoryCapture(reason="trajectory_grant_unavailable")
     try:
         fetched = await fetch_trajectory(
-            a2a_url + get_path, {"context_id": context_id}, upload=upload, timeout=timeout_seconds
+            a2a_url + get_path, {"context_id": context_id}, upload=upload, timeout=timeout_seconds, store=store
         )
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:
@@ -220,8 +217,8 @@ def upload_trajectory(
     Always uploaded from the worker side, never by the agent: sandbox VMs hold
     static STS env vars with a fixed expiry, and long runs exceed it.
 
-    ``name`` makes the object addressable by an id the caller already records
-    (#731); omit it to get a random one, which is what writing repeatedly under a
+    ``name`` makes the object addressable by an id the caller already records;
+    omit it to get a random one, which is what writing repeatedly under a
     single prefix needs, since a fixed name would overwrite the last upload.
     """
 
@@ -242,9 +239,6 @@ def store_trajectory(
     """The URL of a fetched trajectory, storing it first when the agent returned it inline."""
     if fetched.object_url is not None:
         return fetched.object_url
-    if fetched.legacy_prefix:
-        urls = get_config().get_object_store().list_at(fetched.legacy_prefix)
-        return urls[0] if urls else None
     if fetched.inline is not None:
         return upload_trajectory(fetched.inline, trajectory_output_prefix, name=name)
     return None

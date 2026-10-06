@@ -25,6 +25,7 @@ from agent_env.task import Task, TaskStepStatus
 from agent_env.task_step import AddSkillsTaskStep, BuildMcpCliTaskStep, DeployAgentTaskStep, DeployEnvTaskStep, EnvOutcomeVerifierTaskStep, LoadArtifactTaskStep, PromptAgentTaskStep, RubricsVerifierTaskStep, TaskStep, TaskStepContext, VerifyMCPToolSchemaTaskStep
 from agent_env.task_step.task_step import TaskStepDependency
 from agent_env.a2a_agent import A2AAgent, conversation_store
+from agent_env.a2a_agent.object_transfer import trajectory_mode
 from agent_env.providers.sandbox_providers.sandbox import VmSandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_agent_sandbox_provider
 
@@ -757,6 +758,42 @@ async def test_load_artifact_stages_files_into_env_and_agent(mcp_server_env, ech
 
 @pytest.mark.asyncio
 @pytest.mark.integration
+async def test_an_agent_uploads_its_trajectory_through_a_local_grant(mcp_server_env, echo_agent):
+    """On the local defaults an agent that takes the object form uploads its own trajectory: its container
+    trusts the local transfer CA and reaches the grant server on this host."""
+    suffix = uuid.uuid4().hex[:8]
+    store = get_config().get_object_store()
+    context = await DeployEnvTaskStep(
+        id=f"grant-traj-env-{suffix}", version=None, env_id=mcp_server_env.id, env_version=mcp_server_env.version,
+    ).execute(TaskStepContext())
+    deployed_env = context.deployed_envs[0]
+    try:
+        await DeployAgentTaskStep(
+            id=f"grant-traj-agent-{suffix}", version=None, env_ids=[mcp_server_env.id],
+            a2a_agent_id=echo_agent.id, a2a_agent_version=echo_agent.version,
+        ).execute(context)
+        agent = context.deployed_agents[0]
+        get_method, _ = A2AAgent.operation(A2AAgent.find_extension(agent.a2a_card, A2AAgent.EXT_TRAJECTORY), "get")
+        assert trajectory_mode(get_method, store, by="task_id", sandbox_type=agent.sandbox_type) == "objects"
+
+        await PromptAgentTaskStep(
+            id=f"grant-traj-prompt-{suffix}", version=None, prompt="hello through a grant", timeout_seconds=120,
+        ).execute(context)
+        uri = context.prompt_responses[-1].agent_trajectory_s3_uri
+        assert uri, "the agent did not upload its trajectory through the grant"
+        assert "hello through a grant" in store.get(uri).decode()
+    finally:
+        if context.deployed_agents:
+            try:
+                await (await _agent_sandbox(context.deployed_agents[0])).terminate()
+            except Exception as e:
+                logger.warning(f"grant trajectory test agent cleanup: {e}")
+        env = await type(Env.get(deployed_env.env_id, deployed_env.env_version)).from_deployed_env(deployed_env)
+        await env.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
 @skip_without_model_endpoint()
 @skip_without_default_a2a_agent()
 async def test_cli_install_e2e(sandbox_provider, multi_env, a2a_agent):
@@ -793,7 +830,7 @@ async def test_cli_install_e2e(sandbox_provider, multi_env, a2a_agent):
         build_step = BuildMcpCliTaskStep(id=f"cli-e2e-build-{suffix}", version=None, env_id=multi_env.id, command_name=multi_env.id)
         await build_step.execute(context)
         cli_ref = context.metadata["cli_artifact"]
-        assert cli_ref["id"] == f"cli-{multi_env.id}"
+        assert cli_ref["id"] == f"{multi_env.id}__cli"
         logger.info(f"CLI e2e: built CliArtifact {cli_ref['id']} v{cli_ref['version']}")
 
         load_step = LoadArtifactTaskStep(

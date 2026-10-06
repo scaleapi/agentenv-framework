@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from dataclasses import dataclass
@@ -22,8 +23,9 @@ class Skill:
 
     A skill can come from three mutually-exclusive sources:
     - **inline**: body + frontmatter fields, rendered into SKILL.md at send time
-    - **s3_url**: S3 prefix containing a skill directory with its own SKILL.md
-    - **skill_artifact_id**: a SkillArtifact in the store; name/description/skill_s3_url
+    - **s3_url**: object-store prefix containing a skill directory with its own SKILL.md,
+      sent as a bundle of read grants
+    - **skill_artifact_id**: a SkillArtifact in the store; name/description/skill_object_url
       are resolved from it at send time
     """
     name: Optional[str] = None
@@ -145,10 +147,18 @@ def _build_skill_for_installed_cli(cli_artifact_id: str, entry: dict) -> Skill:
     )
 
 
+def _files_skill_name(universe_id: str) -> str:
+    """``<slug>-<hash>-files``: a slug of the id's last segment and a hash of the whole id, since an id itself
+    needn't be a valid skill name."""
+    slug = re.sub(r"[^a-z0-9]+", "-", universe_id.rsplit("/", 1)[-1].lower()).strip("-")[:45].rstrip("-")
+    digest = hashlib.sha256(universe_id.encode("utf-8")).hexdigest()[:12]
+    return f"{slug}-{digest}-files" if slug else f"{digest}-files"
+
+
 def _build_skill_for_loaded_file_artifact_universe(universe_id: str, entry: dict) -> Skill:
     destination_path = entry["destination_path"]
     return Skill(
-        name=f"{universe_id}-files",
+        name=_files_skill_name(universe_id),
         description=f"Files possibly relevant to the current task are available at {destination_path}.",
         body=f"Files possibly relevant to the current task are available at `{destination_path}`.\n",
     )

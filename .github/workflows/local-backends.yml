@@ -42,7 +42,7 @@ jobs:
       - name: Lockfile resolves from PyPI only
         run: |
           if grep 'source = { registry = ' uv.lock | grep -v 'registry = "https://pypi.org/simple"' | grep -q .; then echo "uv.lock has a registry source other than PyPI"; exit 1; fi
-          grep -A2 '^name = "agentenv-protocol"$' uv.lock | grep -q 'source = { editable = "packages/agentenv-protocol" }'
+          grep -A2 '^name = "agentenv-framework-protocol"$' uv.lock | grep -q 'source = { editable = "packages/agentenv-protocol" }'
       - name: Lockfile is current, before and after a release bump
         run: |
           uv lock --check
@@ -68,6 +68,8 @@ jobs:
       - run: npm ci
       - name: Typecheck
         run: npm run typecheck
+      - name: Lint
+        run: npm run lint
       - name: Smoke suite
         run: npm run test:smoke
       - name: Static export

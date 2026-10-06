@@ -13,7 +13,7 @@ from agentenv_protocol import FilePart, client as protocol_v1
 from agent_env.artifact import Artifact, DockerImageArtifact
 from agent_env.artifact.artifacts.docker_image import GitHubBuildResult, ProgressCallback, refuse_local_github_build
 from agent_env.env.env import Env, gateway_url_of
-from agent_env.store.routing import refuse_local_derivation
+from agent_env.store.ids import derive_id
 from agent_env.env import legacy_protocol
 from agent_env.env.envs._deployment import (
     as_builtin, builtin_provider_for, close_deployed, close_replaced, deploy_refusal, deploy_through_provider, host_staging_refusal,
@@ -78,11 +78,11 @@ class MCPServerEnv(Env):
             env_provider_type=data.get("env_provider_type", "gateway"),
         )
 
-    async def deploy(self, ttl_seconds: int = 10800, disk_size_gb: float = 10, gateway_mode: GatewayMode = GatewayMode.PERFORMANCE, cpu: float | None = None, memory_mb: int | None = None, sandbox_type: str | None = None, priority: Optional[int] = None, env_state_type: str | None = None, env_state_instance_id: str | None = None, *, attribution: Optional[Attribution] = None) -> DeployedEnv:
+    async def deploy(self, ttl_seconds: int = 10800, disk_size_gb: float = 10, gateway_mode: GatewayMode = GatewayMode.PERFORMANCE, cpu: float | None = None, memory_mb: int | None = None, sandbox_type: str | None = None, env_state_type: str | None = None, env_state_instance_id: str | None = None, *, attribution: Optional[Attribution] = None) -> DeployedEnv:
         # In container mode the server runs in its own container, so loads stage there, as for a MultiEnv child.
         return await deploy_through_provider(
             self, environment_name=self.environment_name, ttl_seconds=ttl_seconds, sandbox_type=sandbox_type,
-            disk_size_gb=disk_size_gb, gateway_mode=gateway_mode, cpu=cpu, memory_mb=memory_mb, priority=priority,
+            disk_size_gb=disk_size_gb, gateway_mode=gateway_mode, cpu=cpu, memory_mb=memory_mb,
             env_state_type=env_state_type, env_state_instance_id=env_state_instance_id, attribution=attribution,
         )
 
@@ -235,14 +235,13 @@ class MCPServerEnv(Env):
     async def validate(self, on_progress: Optional[Callable[[str], None]] = None) -> str:
         """Run the env validator task and return the task instance ID.
 
-        Creates a new versioned Task with ID ``validate-{env_id}-v{version}`` each time.
+        Creates a new versioned Task with ID ``{env_id}__validate-v{version}`` each time.
         """
-        refuse_local_derivation(self.id, "env", "validating")
         from agent_env.task import Task
         from agent_env.task_step import DeployAgentTaskStep, DeployEnvTaskStep, PromptAgentTaskStep, ValidationGateAggregatorStep, VerifyCoreEnvironmentProtocolStep, VerifyEnvironmentCardStep, VerifyMCPToolSchemaTaskStep, VerifySpecConformanceTaskStep, VerifyMCPEnvAssessmentStep
         from agent_env.task_step.task_steps.mcp_env_validator import TOOL_CORRECTNESS_PROMPT, TOOL_CORRECTNESS_OUTPUT_FORMAT
 
-        task_id = f"validate-{self.id}-v{self.version}"
+        task_id = derive_id(self.id, f"validate-v{self.version}")
         prompt_id = f"{task_id}-prompt"
 
         # Env metadata can narrow the gate, e.g. {"required_gates": ["mcp_tool_schema"]}.
@@ -306,12 +305,11 @@ class MCPServerEnv(Env):
                     logger.warning(f"Cached CliArtifact {cached} not found in store; rebuilding")
 
         cmd = command_name or self.environment_name
-        task_id = f"create-cli-{self.id}-v{self.version}"
-        cli_artifact_id = f"cli-{self.id}"
+        task_id = derive_id(self.id, f"create-cli-v{self.version}")
 
         task = Task.put(id=task_id, steps=[
             DeployEnvTaskStep(id=f"{task_id}-deploy", version=None, env_id=self.id, env_version=self.version),
-            BuildMcpCliTaskStep(id=f"{task_id}-build", version=None, env_id=self.id, command_name=cmd, cli_artifact_id=cli_artifact_id),
+            BuildMcpCliTaskStep(id=f"{task_id}-build", version=None, env_id=self.id, command_name=cmd),
         ])
         logger.info(f"Created create-cli task: {task.id} version={task.version}")
 

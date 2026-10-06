@@ -145,11 +145,11 @@ async def test_a_deploy_hands_the_gateway_its_sizing_state_and_attribution_and_r
     env, state, seen = _env(), SimpleNamespace(state_type="remote", instance_id="st-ext"), {}
 
     record = await _deploy(env, {"gw": _sandbox("gw")}, seen, state, gateway_mode=GatewayMode.CONSISTENT, env_state_type="remote",
-                           ttl_seconds=60, disk_size_gb=20, cpu=2.0, memory_mb=4096, priority=3, attribution={"project_id": "p1"})
+                           ttl_seconds=60, disk_size_gb=20, cpu=2.0, memory_mb=4096, attribution={"team": "t1"})
 
     assert ([c.environment_name for c in seen["mcp_servers"]], seen["mcp_server_images"]) == (["email"], [env.docker_image_artifact])
-    assert {k: seen[k] for k in ("ttl_seconds", "disk_size_gb", "cpu", "memory_mb", "priority", "attribution", "gateway_mode")} == {
-        "ttl_seconds": 60, "disk_size_gb": 20, "cpu": 2.0, "memory_mb": 4096, "priority": 3, "attribution": {"project_id": "p1"},
+    assert {k: seen[k] for k in ("ttl_seconds", "disk_size_gb", "cpu", "memory_mb", "attribution", "gateway_mode")} == {
+        "ttl_seconds": 60, "disk_size_gb": 20, "cpu": 2.0, "memory_mb": 4096, "attribution": {"team": "t1"},
         "gateway_mode": GatewayMode.CONSISTENT}
     assert (seen["gateway_port"], seen["website_configs"], seen["website_images"], seen["existing_sandbox"], seen["sidecars"]) == (
         18765, None, None, None, None)
@@ -199,9 +199,9 @@ async def test_a_deploy_without_a_gateway_records_the_servers_own_card():
 async def test_a_deploy_without_a_gateway_hands_the_server_its_sizing_and_attribution():
     seen = {}
     await _deploy(_env("server"), {"srv": _sandbox("srv")}, seen, gateway_mode=GatewayMode.PERFORMANCE,  # the deploy_env step's default
-                  ttl_seconds=60, disk_size_gb=20, cpu=2.0, memory_mb=4096, priority=3, attribution={"project_id": "p1"})
+                  ttl_seconds=60, disk_size_gb=20, cpu=2.0, memory_mb=4096, attribution={"team": "t1"})
 
-    assert seen == {"ttl_seconds": 60, "disk_size_gb": 20, "cpu": 2.0, "memory_mb": 4096, "priority": 3, "attribution": {"project_id": "p1"}}
+    assert seen == {"ttl_seconds": 60, "disk_size_gb": 20, "cpu": 2.0, "memory_mb": 4096, "attribution": {"team": "t1"}}
 
 
 @pytest.mark.asyncio
@@ -251,8 +251,7 @@ async def test_a_restored_env_without_a_gateway_loads_into_the_server_and_closes
 async def test_validation_deploys_a_server_env_as_declared_on_the_default_sandbox_provider():
     env, seen, default = _env("server"), {}, MagicMock()
     ran = MagicMock(run=AsyncMock(return_value=MagicMock(deployed_envs=[], deployed_agents=[], instance_id="i")))
-    with patch("agent_env.task.Task.put", side_effect=lambda **kwargs: seen.update(kwargs) or ran), \
-         patch("agent_env.env.envs.mcp_server.refuse_local_derivation"):
+    with patch("agent_env.task.Task.put", side_effect=lambda **kwargs: seen.update(kwargs) or ran):
         await env.validate()
     deploy_step = seen["steps"][0]
 
@@ -271,7 +270,7 @@ async def test_validation_deploys_a_server_env_as_declared_on_the_default_sandbo
     [record] = context.deployed_envs
     assert (record.env_provider_type, record.environment_card_url) == ("server", f"{_SRV}{WELL_KNOWN_PATH}")  # the card the gate records
     assert seen["sandbox_provider"] is default
-    assert set(seen["options"]) == {"ttl_seconds", "disk_size_gb", "cpu", "memory_mb", "priority", "attribution"}
+    assert set(seen["options"]) == {"ttl_seconds", "disk_size_gb", "cpu", "memory_mb", "attribution"}
 
 
 def _env(env_provider_type: str = "gateway") -> MCPServerEnv:

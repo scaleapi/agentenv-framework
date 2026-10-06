@@ -149,10 +149,17 @@ def test_an_output_is_named_under_its_task_and_later_steps_find_it(make):
 def test_an_output_id_a_step_derives_is_named_under_its_task_too(make):
     entry = resolved(make(tasks={"t": [
         {"id": "cli", "type": "build_mcp_cli", "env_id": "tickets", "command_name": "tickets"},
-        {"id": "skills", "type": "add_skills", "agent_name": "solver", "cli_artifact_ids": ["cli-tickets"]},
+        {"id": "skills", "type": "add_skills", "agent_name": "solver", "cli_artifact_ids": ["tickets__cli"]},
     ]}), "t")
-    assert entry.config[0]["cli_artifact_id"] == entry.config[1]["cli_artifact_ids"][0] == f"{ROOT}/t/cli-tickets"
-    assert [output.id for output in entry.outputs] == [f"{ROOT}/t/cli-tickets"]
+    assert entry.config[0]["cli_artifact_id"] == entry.config[1]["cli_artifact_ids"][0] == f"{ROOT}/t/tickets__cli"
+    assert [output.id for output in entry.outputs] == [f"{ROOT}/t/tickets__cli"]
+
+
+def test_an_output_id_derived_from_another_bundles_entity_is_named_under_this_task(make):
+    entry = resolved(make(tasks={"t": [
+        {"id": "cli", "type": "build_mcp_cli", "env_id": "@local/~/crm-suite/envs/crm", "command_name": "crm"},
+    ]}), "t")
+    assert [output.id for output in entry.outputs] == [entry.config[0]["cli_artifact_id"]] == [f"{ROOT}/t/crm__cli"]
 
 
 def test_a_resolved_task_still_builds_its_steps(make):
@@ -230,6 +237,9 @@ def test_an_output_must_come_from_one_earlier_step_of_the_right_type(make, steps
 @pytest.mark.parametrize("depends_on", [
     [{"task_step_id": "cli"}],
     [{"task_step_id": "tag"}],
+    ["cli"],
+    ["tag"],
+    [{"task_step_id": "tag"}, "cli"],
 ])
 def test_an_output_resolves_for_a_step_that_depends_on_its_writer(make, depends_on):
     entry = resolved(make(tasks={"t": [
@@ -239,6 +249,25 @@ def test_an_output_resolves_for_a_step_that_depends_on_its_writer(make, depends_
          "depends_on": depends_on},
     ]}), "t")
     assert entry.config[2]["artifact_id"] == f"{ROOT}/t/tickets-cli"
+
+
+@pytest.mark.parametrize(("depends_on", "problem"), [
+    ("cli", "depends_on is a list of step ids, not 'cli'"),
+    ([7], 'a depends_on entry is a step id or {"task_step_id": "<step id>"}, not 7'),
+    ([{"id": "cli"}], 'a depends_on entry is a step id or {"task_step_id": "<step id>"}, not {\'id\': \'cli\'}'),
+    (["clii"], "depends_on 'clii' names no step in this task"),
+    ([{"task_step_id": ["cli"]}], "depends_on ['cli'] names no step in this task"),
+])
+def test_a_depends_on_that_cant_be_read_is_named_beside_the_output_it_then_cant_reach(make, depends_on, problem):
+    assert set(problems(make(tasks={"t": [
+        {"id": "cli", "type": "build_mcp_cli", "env_id": "tickets", "command_name": "c", "cli_artifact_id": "tickets-cli"},
+        {"id": "install", "type": "load_artifact", "agent_name": "solver", "artifact_id": "tickets-cli",
+         "depends_on": depends_on},
+    ]}))) == {
+        "tasks/t.json: step 'install': artifact_id: 'tickets-cli' is written by step 'cli', which this step doesn't "
+        "depend on",
+        f"tasks/t.json: step 'install': {problem}",
+    }
 
 
 def test_a_name_differing_only_in_unicode_form_still_resolves(make):
@@ -257,6 +286,8 @@ def test_a_name_differing_only_in_unicode_form_still_resolves(make):
 def test_an_undeclared_step_passes_through_unless_it_repeats_a_bundle_name(make):
     clean = {"id": "tickets", "type": "plugin_test", "note": "hello", "after_step_id": "greeting"}
     assert resolved(make(tasks={"t": [clean], "hello": []}, evals={"regression": 'tasks = ["t"]'}), "t").config == [clean]
+    after = {"id": "after", "type": "plugin_test", "depends_on": ["tickets"]}
+    assert resolved(make(tasks={"t": [clean, after]}), "t").config == [clean, after]
     assert resolved(make(tasks={"u": [{**clean, "note": "regression"}]}), "u").config == [{**clean, "note": "regression"}]
     assert problems(make(tasks={"u": [{"id": "p", "type": "plugin_test", "target": {"name": "Tickets"}}]})) == (
         "tasks/u.json: step 'p': target.name = 'Tickets' names this bundle's env 'tickets', but plugin_test "
@@ -407,3 +438,13 @@ def test_entities_without_references_resolve_to_a_copy_of_their_config(make):
         (BundleKind.ARTIFACT, "base-mcp"): (), (BundleKind.SKILL, "pdf"): (),
     }
     assert [image.entry.kind for image in result.built_images] == [BundleKind.AGENT]
+
+
+@pytest.mark.parametrize(("depends_on", "problem"), [
+    ("tickets", "depends_on is a list of step ids, not 'tickets'"),
+    ([7], 'a depends_on entry is a step id or {"task_step_id": "<step id>"}, not 7'),
+])
+def test_a_bad_depends_on_on_a_step_deriving_its_output_is_named_once(make, depends_on, problem):
+    assert problems(make(tasks={"t": [
+        {"id": "cli", "type": "build_mcp_cli", "env_id": "tickets", "command_name": "c", "depends_on": depends_on},
+    ]})) == (f"tasks/t.json: step 'cli': {problem}",)

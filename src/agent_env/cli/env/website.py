@@ -13,7 +13,6 @@ from agent_env.cli.utils import (
     env_provider_type_option,
     environment_name_options,
     resolve_environment_name,
-    skips_local_validation,
 )
 from agent_env.utils.card_naming import card_name_from_github, card_name_from_source
 from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM, build_image
@@ -132,7 +131,7 @@ def put(
             env_provider_type=env_provider_type,
         ))
         click.echo(f"Created WebsiteEnv: id={env.id} version={env.version} environment_name={env.environment_name}")
-        if not skip_validation and not skips_local_validation(env.id, "env"):
+        if not skip_validation:
             click.echo("\nValidating environment (use --skip-validation to skip)...")
             instance_id = asyncio.run(env.validate(on_progress=click.echo))
             click.echo(f"Validation task: {instance_id}")
@@ -188,7 +187,7 @@ def put(
         env_provider_type=env_provider_type,
     )
     click.echo(f"Created WebsiteEnv: id={env.id} version={env.version} environment_name={env.environment_name} env_provider_type={env.env_provider_type}")
-    if not skip_validation and not skips_local_validation(env.id, "env"):
+    if not skip_validation:
         click.echo("\nValidating environment (use --skip-validation to skip)...")
         instance_id = asyncio.run(env.validate(on_progress=click.echo))
         click.echo(f"Validation task: {instance_id}")

@@ -19,8 +19,14 @@ import {
   Package,
   PanelLeftClose,
   PanelLeftOpen,
+  ExternalLink,
 } from 'lucide-react';
-import { type Page, type NavGroup, pageToPath } from '../components/shared';
+import {
+  type Page,
+  type NavGroup,
+  pageToPath,
+  FRAMEWORK_DOCS_URL,
+} from '../components/shared';
 import { HomePage } from '../components/home-page';
 import { EnvironmentsPage } from '../components/environments-page';
 import { EnvDetailPage } from '../components/env-detail-page';
@@ -125,8 +131,6 @@ export default function App() {
     number | undefined
   >(undefined);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
-  const [editTaskId, setEditTaskId] = useState<string | null>(null);
-  const [cloneTaskId, setCloneTaskId] = useState<string | null>(null);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
   const [selectedDeliveryId, setSelectedDeliveryId] = useState<string | null>(
@@ -145,21 +149,6 @@ export default function App() {
     string | null
   >(null);
   const [taskRunnerTaskId, setTaskRunnerTaskId] = useState<string | null>(null);
-  const [evaluatorOnlyTaskId, setEvaluatorOnlyTaskId] = useState<string | null>(
-    null,
-  );
-  const [rerunFromStep, setRerunFromStep] = useState<number | null>(null);
-  const [savedContextJson, setSavedContextJson] = useState<Record<
-    string,
-    unknown
-  > | null>(null);
-  const [isEmbedded, setIsEmbedded] = useState(false);
-
-  /* --- Detect iframe / host after mount to avoid SSR hydration mismatch --- */
-  useEffect(() => {
-    setIsEmbedded(window.parent !== window);
-  }, []);
-
   /* --- Initialize state from URL on mount --- */
   useEffect(() => {
     const { page, entityId } = currentRoute();
@@ -189,13 +178,9 @@ export default function App() {
       setSelectedUniverseId(page === 'universe-detail' ? entityId : null);
       if (page !== 'universe-detail') setSelectedUniverseVersion(undefined);
       setSelectedTaskId(page === 'task-detail' ? entityId : null);
-      setCloneTaskId(null);
-      setEvaluatorOnlyTaskId(null);
-      setRerunFromStep(null);
       setSelectedAgentId(page === 'agent-detail' ? entityId : null);
       setTaskRunnerTaskId(page === 'task-runner' ? entityId : null);
       setEnvHistory([]);
-      setSavedContextJson(null);
     };
     router.events.on('routeChangeComplete', handleRouteChange);
     return () => router.events.off('routeChangeComplete', handleRouteChange);
@@ -250,8 +235,6 @@ export default function App() {
   const navigateToTaskDetail = useCallback(
     (taskId: string) => {
       setSelectedTaskId(taskId);
-      setEditTaskId(null);
-      setCloneTaskId(null);
       setActivePage('task-detail');
       pushRoute('task-detail', taskId);
     },
@@ -272,107 +255,137 @@ export default function App() {
 
 
   const sidebarActivePage = DETAIL_TO_PARENT[activePage] ?? activePage;
-  const hideSidebar = isEmbedded;
 
   const navGroups = NAV_GROUPS;
 
   return (
     <div className="flex h-screen">
       {/* Sidebar */}
-      {!hideSidebar && (
-        <nav
-          className={`${
-            sidebarOpen ? 'w-[220px]' : 'w-[56px]'
-          } flex-shrink-0 border-r border-[var(--border)] flex flex-col transition-[width] duration-200`}
+      <nav
+        className={`${
+          sidebarOpen ? 'w-[220px]' : 'w-[56px]'
+        } flex-shrink-0 border-r border-[var(--border)] flex flex-col transition-[width] duration-200`}
+      >
+        <div
+          className={`flex items-center ${
+            sidebarOpen ? 'px-5' : 'justify-center'
+          } py-5`}
         >
-          <div
-            className={`flex items-center ${
-              sidebarOpen ? 'px-5' : 'justify-center'
-            } py-5`}
-          >
-            {sidebarOpen && (
-              <Image
-                src="/logos/agent-env-logo.svg"
-                alt="AgentEnvExplorer"
-                width={664}
-                height={62}
-                className="h-3.5 w-auto object-contain"
-                priority
-              />
-            )}
-          </div>
-          <div
-            className={`flex flex-col gap-4 ${sidebarOpen ? 'px-3' : 'px-1.5'}`}
-          >
-            {navGroups.map((group, gi) => (
-              <div key={gi} className="flex flex-col gap-0.5">
-                {group.label && sidebarOpen && (
-                  <div className="px-3 pb-1 text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
-                    {group.label}
-                  </div>
-                )}
-                {group.items.map(({ page, label, icon: Icon }) => (
-                  <Link
-                    key={page}
-                    href={pageToPath(page)}
-                    onClick={e => {
-                      if (e.metaKey || e.ctrlKey || e.button === 1) return;
-                      e.preventDefault();
-                      setActivePage(page);
-                      setEnvHistory([]);
-                      setSelectedEnvId(null);
-                      setSelectedUniverseId(null);
-                      setSelectedUniverseVersion(undefined);
-                      setSelectedTaskId(null);
-                      setEditTaskId(null);
-                      setCloneTaskId(null);
-                      setSelectedAgentId(null);
-                      setSelectedSkillId(null);
-                      setPlaygroundInitEnvId(null);
-                      setPlaygroundInitUniverseId(null);
-                      setPlaygroundInstanceId(null);
-                      setTaskRunnerTaskId(null);
-                      setEvaluatorOnlyTaskId(null);
-                      setRerunFromStep(null);
-                      setSelectedDeliveryId(null);
-                      setSavedContextJson(null);
-                      pushRoute(page);
-                    }}
-                    title={sidebarOpen ? undefined : label}
-                    className={`flex items-center ${
-                      sidebarOpen ? 'gap-2.5 px-3' : 'justify-center px-0'
-                    } py-2 rounded-md text-sm transition-colors text-left ${
-                      sidebarActivePage === page
-                        ? 'bg-[var(--secondary)] text-[var(--foreground)] font-medium'
-                        : 'text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]'
-                    }`}
-                  >
-                    <Icon size={16} className="flex-shrink-0" />
-                    {sidebarOpen && label}
-                  </Link>
-                ))}
+          {sidebarOpen ? (
+            <div className="flex flex-col gap-1.5">
+              <div className="flex items-center gap-2">
+                <Image
+                  src="/logos/agentenv-icon.svg"
+                  alt=""
+                  width={32}
+                  height={32}
+                  className="h-5 w-5"
+                  priority
+                />
+                <span className="text-sm font-semibold text-[var(--foreground)]">
+                  AgentEnv Explorer
+                </span>
               </div>
-            ))}
-          </div>
-          <div
-            className={`mt-auto p-3 flex ${
-              sidebarOpen ? 'justify-end' : 'justify-center'
-            }`}
-          >
-            <button
-              onClick={() => setSidebarOpen(prev => !prev)}
-              className="text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors"
-              title={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
-            >
-              {sidebarOpen ? (
-                <PanelLeftClose size={18} />
-              ) : (
-                <PanelLeftOpen size={18} />
+              <div className="flex items-center gap-1.5 text-[11px] text-[var(--muted-foreground)]">
+                Built by
+                <Image
+                  src="/logos/scale-logo.svg"
+                  alt="Scale"
+                  width={319}
+                  height={61}
+                  className="h-2.5 w-auto opacity-60"
+                />
+              </div>
+            </div>
+          ) : (
+            <Image
+              src="/logos/agentenv-icon.svg"
+              alt="AgentEnv Explorer"
+              width={32}
+              height={32}
+              className="h-5 w-5"
+              priority
+            />
+          )}
+        </div>
+        <div
+          className={`flex flex-col gap-4 ${sidebarOpen ? 'px-3' : 'px-1.5'}`}
+        >
+          {navGroups.map((group, gi) => (
+            <div key={gi} className="flex flex-col gap-0.5">
+              {group.label && sidebarOpen && (
+                <div className="px-3 pb-1 text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
+                  {group.label}
+                </div>
               )}
-            </button>
-          </div>
-        </nav>
-      )}
+              {group.items.map(({ page, label, icon: Icon }) => (
+                <Link
+                  key={page}
+                  href={pageToPath(page)}
+                  onClick={e => {
+                    if (e.metaKey || e.ctrlKey || e.button === 1) return;
+                    e.preventDefault();
+                    setActivePage(page);
+                    setEnvHistory([]);
+                    setSelectedEnvId(null);
+                    setSelectedUniverseId(null);
+                    setSelectedUniverseVersion(undefined);
+                    setSelectedTaskId(null);
+                    setSelectedAgentId(null);
+                    setSelectedSkillId(null);
+                    setPlaygroundInitEnvId(null);
+                    setPlaygroundInitUniverseId(null);
+                    setPlaygroundInstanceId(null);
+                    setTaskRunnerTaskId(null);
+                    setSelectedDeliveryId(null);
+                    pushRoute(page);
+                  }}
+                  title={sidebarOpen ? undefined : label}
+                  className={`flex items-center ${
+                    sidebarOpen ? 'gap-2.5 px-3' : 'justify-center px-0'
+                  } py-2 rounded-md text-sm transition-colors text-left ${
+                    sidebarActivePage === page
+                      ? 'bg-[var(--secondary)] text-[var(--foreground)] font-medium'
+                      : 'text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]'
+                  }`}
+                >
+                  <Icon size={16} className="flex-shrink-0" />
+                  {sidebarOpen && label}
+                </Link>
+              ))}
+            </div>
+          ))}
+        </div>
+        <div
+          className={`mt-auto p-3 flex ${
+            sidebarOpen
+              ? 'items-center justify-between'
+              : 'flex-col items-center gap-3'
+          }`}
+        >
+          <a
+            href={FRAMEWORK_DOCS_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={sidebarOpen ? undefined : 'AgentEnv Framework docs'}
+            className="flex items-center gap-1.5 text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors"
+          >
+            <ExternalLink size={sidebarOpen ? 14 : 18} />
+            {sidebarOpen && 'Framework docs'}
+          </a>
+          <button
+            onClick={() => setSidebarOpen(prev => !prev)}
+            className="text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors"
+            title={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
+          >
+            {sidebarOpen ? (
+              <PanelLeftClose size={18} />
+            ) : (
+              <PanelLeftOpen size={18} />
+            )}
+          </button>
+        </div>
+      </nav>
 
       {/* Main content — gate on initialized to avoid flashing home before URL is read */}
       <main className="flex-1 overflow-auto">
@@ -435,11 +448,7 @@ export default function App() {
               />
             )}
             {activePage === 'task-runner' && (
-              <TaskRunnerPage
-                taskId={taskRunnerTaskId}
-                savedContextJson={savedContextJson}
-                onContextCaptured={setSavedContextJson}
-              />
+              <TaskRunnerPage taskId={taskRunnerTaskId} />
             )}
         </>
       </main>

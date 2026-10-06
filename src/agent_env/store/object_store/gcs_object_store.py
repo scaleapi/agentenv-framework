@@ -31,9 +31,11 @@ from agent_env.store import _google
 from agent_env.store.base import GrantUnavailableError, ObjectAlreadyExistsError, ObjectNotFoundError
 from agent_env.store.object_store.object_store import (
     DEFAULT_CONTENT_TYPE,
+    DEFAULT_GRANT_LIFETIME_SECONDS,
     ObjectMetadata,
     ObjectStore,
     UploadPolicy,
+    grant_lifetime,
 )
 
 logger = logging.getLogger(__name__)
@@ -84,7 +86,14 @@ class GcsObjectStore(ObjectStore):
 
     max_single_upload_bytes = 5 * 1024**4  # one Cloud Storage object
 
-    def __init__(self, client, bucket: str, *, signer: Signing | None = None) -> None:
+    def __init__(
+        self,
+        client,
+        bucket: str,
+        *,
+        signer: Signing | None = None,
+        grant_lifetime_seconds: int = DEFAULT_GRANT_LIFETIME_SECONDS,
+    ) -> None:
         self._client = client
         self._bucket = bucket
         self._signer = signer
@@ -93,11 +102,17 @@ class GcsObjectStore(ObjectStore):
         self._max_signed_seconds = (
             _MAX_KEY_SIGNED_SECONDS if isinstance(signer, service_account.Credentials) else _MAX_IAM_SIGNED_SECONDS
         )
+        self.grant_lifetime_seconds = grant_lifetime(grant_lifetime_seconds, most=self._max_signed_seconds)
         self._warned_unsigned = False
 
     @classmethod
     def from_config(
-        cls, *, bucket: str, project: str | None = None, signing_service_account: str | None = None
+        cls,
+        *,
+        bucket: str,
+        project: str | None = None,
+        signing_service_account: str | None = None,
+        grant_lifetime_seconds: int = DEFAULT_GRANT_LIFETIME_SECONDS,
     ) -> GcsObjectStore:
         """Authenticate through Application Default Credentials. With ``signing_service_account``
         the store always signs as that account through IAM, which needs
@@ -127,7 +142,7 @@ class GcsObjectStore(ObjectStore):
                 quota = getattr(credentials, "quota_project_id", None)
                 billed = f" (requests are billed to quota project {quota!r})" if quota else ""
                 raise ConfigError(f"Cannot sign as {signer.signer_email}{billed}: {e}") from e
-        return cls(client, bucket, signer=signer)
+        return cls(client, bucket, signer=signer, grant_lifetime_seconds=grant_lifetime_seconds)
 
     def put(
         self,
@@ -230,7 +245,8 @@ class GcsObjectStore(ObjectStore):
             return None
         return self._sign(blob, "PUT", min(expires_in, self._max_signed_seconds))
 
-    def issue_read_grant(self, object_url: str, *, expires_in: int = 3600) -> HttpGetGrant:
+    def issue_read_grant(self, object_url: str, *, expires_in: int | None = None) -> HttpGetGrant:
+        expires_in = self.grant_lifetime_seconds if expires_in is None else expires_in
         blob = self._blob(object_url)
         expires_at = self._grant_expiry(expires_in)
         return HttpGetGrant(kind="http-get", url=self._sign(blob, "GET", expires_in), expires_at=expires_at)
@@ -241,8 +257,9 @@ class GcsObjectStore(ObjectStore):
         *,
         media_type: str,
         max_bytes: int,
-        expires_in: int = 3600,
+        expires_in: int | None = None,
     ) -> HttpPutGrant:
+        expires_in = self.grant_lifetime_seconds if expires_in is None else expires_in
         blob = self._blob(object_url)
         expires_at = self._grant_expiry(expires_in)
         bound = {"x-goog-content-length-range": f"0,{max_bytes}"}

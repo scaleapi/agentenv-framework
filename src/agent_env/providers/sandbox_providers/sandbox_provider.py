@@ -20,6 +20,7 @@ from agent_env.providers.sandbox_providers.sandbox import (
     NetworkPolicyUnsupportedError,
     Sandbox,
     VmSandbox,
+    port_bindings,
 )
 
 if TYPE_CHECKING:
@@ -50,7 +51,6 @@ class SandboxProvider(ABC):
         disk_size_gb: float = 10,
         timeout: int = 3600 * 2,
         attribution: Optional[Attribution] = None,
-        priority: Optional[int] = None,
         network_policy: Optional[NetworkPolicy] = None,
     ) -> Sandbox: ...
 
@@ -66,7 +66,6 @@ class SandboxProvider(ABC):
         exposed_ports: Optional[list[int]] = None,
         setup_for_gateway: bool = True,
         attribution: Optional[Attribution] = None,
-        priority: Optional[int] = None,
         network_policy: Optional[NetworkPolicy] = None,
     ) -> VmSandbox:
         raise NotImplementedError(f"{type(self).__name__} does not support create_vm")
@@ -82,7 +81,6 @@ class SandboxProvider(ABC):
         disk_size_gb: float = 10,
         timeout: int = 3600 * 2,
         attribution: Optional[Attribution] = None,
-        priority: Optional[int] = None,
         network_policy: Optional[NetworkPolicy] = None,
     ) -> Sandbox:
         """Provision a sandbox with the registry image already running as a container.
@@ -97,7 +95,7 @@ class SandboxProvider(ABC):
             cpu=cpu, memory=memory, disk_size_gb=disk_size_gb,
             exposed_ports=[port], timeout=timeout,
             attribution=attribution,
-            priority=priority, network_policy=network_policy,
+            network_policy=network_policy,
         )
         try:
             from agent_env.config import get_config
@@ -109,15 +107,7 @@ class SandboxProvider(ABC):
                     f"--username {shlex.quote(auth.username)} --password-stdin {shlex.quote(auth.registry)}"
                 )
             await sandbox.exec_script(f"docker pull {shlex.quote(image_name)}")
-            env_flags = " \\\n    ".join(
-                f"-e {shlex.quote(k)}={shlex.quote(v)}" for k, v in env.items()
-            )
-            extra_args = f"{self.EXTRA_CONTAINER_RUN_ARGS} " if self.EXTRA_CONTAINER_RUN_ARGS else ""
-            host_side = sandbox.host_port(port)
-            await sandbox.exec_script(
-                f"docker run -d --name {shlex.quote(sandbox.container_name)} -p {host_side}:{port} {extra_args}\\\n    "
-                f"{env_flags} \\\n    {shlex.quote(image_name)} > /dev/null"
-            )
+            await self._start_container(sandbox, image_name=image_name, port=port, env=env)
             sandbox.mode = SANDBOX_MODE_CONTAINER
             return sandbox
         except Exception:
@@ -126,6 +116,21 @@ class SandboxProvider(ABC):
             except Exception:
                 pass
             raise
+
+    async def _start_container(self, sandbox: VmSandbox, *, image_name: str, port: int, env: dict[str, str]) -> None:
+        """Run the pulled ``image_name`` as the sandbox's container, publishing ``port``."""
+        args = self._container_args(sandbox, image_name=image_name, port=port, env=env)
+        await sandbox.exec_script(f"docker run -d {args} > /dev/null")
+
+    def _container_args(self, sandbox: VmSandbox, *, image_name: str, port: int, env: dict[str, str]) -> str:
+        """The ``docker run`` / ``docker create`` arguments for the sandbox's container."""
+        env_flags = " \\\n    ".join(f"-e {shlex.quote(k)}={shlex.quote(v)}" for k, v in env.items())
+        extra_args = f"{self.EXTRA_CONTAINER_RUN_ARGS} " if self.EXTRA_CONTAINER_RUN_ARGS else ""
+        publish = " ".join(f"-p {spec}" for spec in port_bindings(sandbox.host_ips, sandbox.host_port(port), port))
+        return (
+            f"--name {shlex.quote(sandbox.container_name)} {publish} {extra_args}\\\n    "
+            f"{env_flags} \\\n    {shlex.quote(image_name)}"
+        )
 
     async def get_sandbox(self, sandbox_id: str) -> Sandbox:
         raise NotImplementedError(f"{type(self).__name__} does not support get_sandbox")

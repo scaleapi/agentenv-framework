@@ -18,6 +18,11 @@ class ChainedSandboxProvider(SandboxProvider):
             raise ValueError("ChainedSandboxProvider requires at least one provider")
         self._providers = providers
 
+    @property
+    def providers(self) -> tuple[SandboxProvider, ...]:
+        """The providers tried, in order."""
+        return tuple(self._providers)
+
     @staticmethod
     def filter_sandbox_providers(
         providers: list[SandboxProvider], policy: NetworkPolicy | None

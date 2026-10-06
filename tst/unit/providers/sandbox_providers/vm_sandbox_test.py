@@ -62,7 +62,7 @@ async def test_load_docker_images_downloads_to_file_before_load(signing_store):
 
     Retrying `curl ... | gunzip | docker load` directly corrupts the stream
     because curl can't rewind bytes already piped to stdout, so the retry flags
-    must only apply to a `-o file` download (Greptile P1 on PR #430).
+    must only apply to a `-o file` download.
     """
     sandbox = _RecordingVmSandbox(images_stdout="myimage\n")
     artifact = SimpleNamespace(tar_gz_object_url="s3://bucket/img.tar.gz", image_name="myimage:latest")

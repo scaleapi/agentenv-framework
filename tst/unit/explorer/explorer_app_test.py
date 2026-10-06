@@ -2,8 +2,13 @@
 
 import dataclasses
 import gzip
+import json
 import tempfile
+import time
+from importlib.metadata import version as installed_version
+from urllib.parse import quote
 
+import httpx
 import pytest
 
 pytest.importorskip("fastapi")  # the explorer is the optional [explorer] extra (fastapi, uvicorn)
@@ -14,9 +19,11 @@ from agent_env.config import configure, get_config, reset_config, set_document_s
 from agent_env.config.errors import ConfigError
 from agent_env.runner import store as run_store
 from agent_env.runner.local_runner import LocalRunner
-from agent_env.store.object_store.local_object_store import LocalFilesystemObjectStore
+from agent_env.store.object_store.local.store import LocalFilesystemObjectStore
 from agent_env.store.document_store.sqlite_document_store import LocalSqliteDocumentStore
+from agent_env.task import Task
 from agent_env.explorer.routers import objects as objects_router
+from agent_env.explorer.routers import triggers as triggers_router
 from tst.unit.store.fakes import FakeObjectStore
 
 
@@ -195,6 +202,11 @@ def test_versions_returns_a_bare_list_newest_first(client):
     assert [i["version"] for i in body] == [2, 1]
 
 
+def test_versions_of_an_unknown_id_is_404_like_get(client):
+    assert client.get("/api/v1/artifacts/missing/versions").status_code == 404
+    assert client.get("/api/v1/artifacts/slack/versions", params={"offset": 5}).json() == []
+
+
 @pytest.mark.parametrize("path", ["envs", "tasks", "agents", "evals"])
 def test_every_surface_lists(client, path):
     body = client.get(f"/api/v1/{path}").json()
@@ -241,6 +253,82 @@ def test_run_for_unknown_task_is_404(client):
     assert client.post("/api/v1/tasks/ghost/run", json={}).status_code == 404
     # and it must not have enqueued anything
     assert client.get("/api/v1/tasks/ghost/runs").json()["total"] == 0
+
+
+NAMESPACED_IDS = [
+    "@local/~/stuff/instances/foo",
+    "@local/~/triage/runs",
+    "@local/~/Dropbox (Personal)/a&b+c,d@e/tickets",
+    "@local/~/Été/Straße/tâche",
+    "team/triage/versions",
+    "weird%2Fbare",
+    "100%25done",
+]
+ID_ROUTE_COLLECTIONS = {"artifacts": "artifacts", "envs": "envs", "tasks": "tasks", "agents": "a2a_agents", "evals": "evals"}
+
+
+@pytest.mark.parametrize("entity_id", NAMESPACED_IDS)
+@pytest.mark.parametrize("path, collection", ID_ROUTE_COLLECTIONS.items())
+def test_an_id_is_one_encoded_path_segment(client, path, collection, entity_id):
+    """An id's own segments, even ones named like a route, never split it."""
+    get_config().get_document_store().insert(
+        collection, {"id": entity_id, "version": 1, "created_at_utc": "2026-01-04T00:00:00Z"})
+    encoded = quote(entity_id, safe="")
+
+    got = client.get(f"/api/v1/{path}/{encoded}")
+    assert got.status_code == 200 and got.json()["id"] == entity_id
+    assert [d["id"] for d in client.get(f"/api/v1/{path}/{encoded}/versions").json()] == [entity_id]
+    assert client.get(f"/api/v1/{path}/{entity_id}").status_code == 404
+
+
+@pytest.mark.parametrize("task_id", ["@local/~/triage/runs", "team%2F100%25/runs"])
+def test_the_run_routes_address_a_task_whose_id_ends_in_a_route_name(client, monkeypatch, task_id):
+    class _Task:
+        version = 1
+
+        async def run(self, **kw):
+            return kw.get("context")
+
+    monkeypatch.setattr(Task, "get", classmethod(lambda cls, tid, ver=None: _Task()))
+    get_config().get_document_store().insert("tasks", {"id": task_id, "version": 1, "created_at_utc": "2026-01-04T00:00:00Z"})
+    base = f"/api/v1/tasks/{quote(task_id, safe='')}"
+
+    single = client.post(f"{base}/run", json={"version": 1}).json()
+    group = client.post(f"{base}/runs", json={"version": 1, "count": 1}).json()
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        runs = client.get(f"{base}/runs").json()["items"]
+        if len(runs) == 2 and all(r["status"] == "COMPLETED" for r in runs):
+            break
+        time.sleep(0.05)
+
+    assert {r["task_id"] for r in runs} == {task_id} and len(runs) == 2
+    # The stub task records no instance, so seed the ones a real run would.
+    for run in runs:
+        get_config().get_document_store().insert("task_instances", {
+            "instance_id": run["instance_id"], "task_id": task_id, "task_version": 1, "status": "completed",
+            "total_steps": 1, "current_step": 1, "completed_steps": [{"step_id": "s", "status": "success"}],
+        })
+    assert single["instance_id"] in {i["instance_id"] for i in client.get(f"{base}/instances").json()["items"]}
+    assert client.get(f"{base}/instances/{single['instance_id']}").json()["task_id"] == task_id
+    assert client.get(f"{base}/instances/{single['instance_id']}/progress").json()["instance_id"] == single["instance_id"]
+    assert group["run_group_id"] in {g["run_group_id"] for g in client.get(f"{base}/run-groups").json()["items"]}
+    assert client.get(f"{base}/run-groups/{group['run_group_id']}").json()["task_id"] == task_id
+    assert "event: complete" in client.get(f"{base}/run-groups/{group['run_group_id']}/stream").text
+    assert client.post(f"{base}/cancel-run", params={"workflow_id": single["workflow_id"]}).status_code == 200
+
+
+def test_a_bundle_runs_namespaced_instance_id_is_one_encoded_segment(client):
+    task_id, instance_id = "@local/~/triage/runs", "@local/~/triage/runs-7f3a9c2e"
+    store = get_config().get_document_store()
+    store.insert("task_instances", {"instance_id": instance_id, "task_id": task_id, "task_version": 1,
+                                    "status": "completed", "total_steps": 1, "current_step": 1, "completed_steps": []})
+    store.insert("agent_env_a2a_conversations", {"task_instance_id": instance_id, "created_at_utc": "2026-01-04T00:00:00Z"})
+    task, instance = quote(task_id, safe=""), quote(instance_id, safe="")
+
+    assert client.get(f"/api/v1/tasks/{task}/instances/{instance}").json()["instance_id"] == instance_id
+    assert client.get(f"/api/v1/tasks/{task}/instances/{instance}/progress").json()["instance_id"] == instance_id
+    assert len(client.get(f"/api/v1/task-instances/{instance}/conversations").json()["conversations"]) == 1
 
 
 def test_start_runs_caps_the_batch_size(client, monkeypatch):
@@ -309,6 +397,102 @@ def test_run_groups_tally_step_progress_for_the_batch_funnel(client):
     assert listed[gid]["step_counts"] == expected
 
 
+# --- Triggers ---------------------------------------------------------------
+
+
+def _seed_trigger_run(status="completed", metadata=None, deployed_envs=None, task_id="t1", instance_id="i-trig"):
+    get_config().get_document_store().insert("task_instances", {
+        "instance_id": instance_id, "task_id": task_id, "task_version": 1, "status": status,
+        "context": {"metadata": metadata or {}, "deployed_envs": deployed_envs or []},
+    })
+
+
+def _envelope(instance_id="i-trig"):
+    return {
+        "instance_id": instance_id, "env_id": "crm", "capture_source": "prompt_agent",
+        "clock": {"rate": 60.0, "virtual_now": "2026-01-04T09:00:00+00:00"},
+        "clock_read_at_utc": "2026-01-04T00:00:05+00:00",
+        "state": {"triggers": [{"id": "follow-up", "status": "fired", "fire_count": 1}], "events": [{"kind": "fired"}]},
+    }
+
+
+def test_triggers_report_the_metadata_ledger(client):
+    registrations = [{"env_id": "crm", "trigger_ids": ["follow-up"]}]
+    _seed_trigger_run(metadata={"env_trigger_registrations": registrations, "agent_trigger_firings": [{"turn": 1}]})
+
+    body = client.get("/api/v1/tasks/t1/instances/i-trig/triggers").json()
+
+    assert set(triggers_router.TRIGGER_METADATA_KEYS) <= set(body)
+    assert body["status"] == "completed" and body["source"] == "metadata"
+    assert body["env_trigger_registrations"] == registrations
+    assert body["agent_trigger_firings"] == [{"turn": 1}]
+    assert body["env_trigger_state"] == {} and body["usersim_turn_outputs"] is None
+    assert (body["state"], body["state_sources"], body["state_meta"]) == ({}, {}, {})
+
+
+def test_triggers_read_a_finished_runs_saved_envelope(client, tmp_path):
+    store = LocalFilesystemObjectStore(str(tmp_path / "obj"))
+    set_object_store(store)
+    url = store.put("env_trigger_state/instance_id=i-trig/crm-1.json", json.dumps(_envelope()).encode())
+    _seed_trigger_run(metadata={"env_trigger_state": {"crm": {"object_url": url, "event_count": 1}}})
+
+    body = client.get("/api/v1/tasks/t1/instances/i-trig/triggers").json()
+
+    assert body["source"] == "artifact" and body["state_sources"] == {"crm": "artifact"}
+    assert body["state"] == {"crm": _envelope()["state"]}
+    assert body["state_meta"] == {"crm": {"clock": _envelope()["clock"], "clock_read_at_utc": _envelope()["clock_read_at_utc"]}}
+
+
+def test_triggers_skip_an_envelope_outside_the_store_or_from_another_instance(client, tmp_path):
+    store = LocalFilesystemObjectStore(str(tmp_path / "obj"))
+    set_object_store(store)
+    foreign = store.put("env_trigger_state/instance_id=other/db-1.json", json.dumps(_envelope("other")).encode())
+    _seed_trigger_run(metadata={"env_trigger_state": {
+        "crm": {"object_url": "s3://some-bucket/env_trigger_state/crm.json"},
+        "db": {"object_url": foreign},
+        "web": {"error": "capture budget of 60s exceeded"},
+    }})
+
+    body = client.get("/api/v1/tasks/t1/instances/i-trig/triggers").json()
+
+    assert body["source"] == "metadata"
+    assert (body["state"], body["state_sources"], body["state_meta"]) == ({}, {}, {})
+    assert set(body["env_trigger_state"]) == {"crm", "db", "web"}
+
+
+def test_triggers_read_the_live_gateway_while_running(client, monkeypatch):
+    get_config().get_document_store().insert("env_instances", {"instance_id": "crm-abc", "env_id": "crm", "gateway_url": "http://gateway.test/"})
+    _seed_trigger_run(status="running", deployed_envs=[
+        {"env_id": "crm", "instance_id": "crm-abc", "gateway_url": "http://ignored.test"},
+        {"env_id": "db", "instance_id": "db-gone"},
+    ])
+    live = {"http://gateway.test/triggers/state": {"triggers": [{"id": "follow-up", "status": "armed"}]},
+            "http://gateway.test/clock/state": {"rate": 60.0}}
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=live[str(request.url)]))
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: real_client(transport=transport, **kw))
+
+    body = client.get("/api/v1/tasks/t1/instances/i-trig/triggers").json()
+
+    assert body["source"] == "live" and body["state_sources"] == {"crm": "live", "db": "unavailable"}
+    assert body["state"] == {"crm": live["http://gateway.test/triggers/state"]}
+    assert body["state_meta"]["crm"]["clock"] == {"rate": 60.0}
+    assert "db" not in body["state_meta"]
+
+
+def test_triggers_for_an_unknown_instance_are_404(client):
+    assert client.get("/api/v1/tasks/t1/instances/ghost/triggers").status_code == 404
+
+
+def test_triggers_address_a_namespaced_task_and_instance(client):
+    task_id, instance_id = "@local/~/triage/runs", "@local/~/triage/runs-7f3a9c2e"
+    _seed_trigger_run(task_id=task_id, instance_id=instance_id, metadata={"env_trigger_registrations": []})
+
+    got = client.get(f"/api/v1/tasks/{quote(task_id, safe='')}/instances/{quote(instance_id, safe='')}/triggers")
+
+    assert got.status_code == 200 and got.json()["env_trigger_registrations"] == []
+
+
 # --- Docs surface -----------------------------------------------------------
 
 
@@ -352,11 +536,27 @@ def test_docs_descriptions_are_not_inherited_from_the_base_class(client):
     assert steps["reset_env"]["description"].startswith("Return a deployed env")
 
 
+def test_every_operation_has_its_own_summary(client):
+    """The Docs nav lists operations by summary alone, so no two may share one."""
+    spec = client.get("/openapi.json").json()
+    summaries = [op["summary"] for ops in spec["paths"].values() for op in ops.values()]
+
+    assert len(summaries) == len(set(summaries))
+    assert all(s == s.strip() for s in summaries)
+    assert {"List Artifacts", "Get Environment", "List Task Versions", "Health"} <= set(summaries)
+
+
+def test_openapi_version_is_the_installed_framework(client):
+    assert client.get("/openapi.json").json()["info"]["version"] == installed_version("agentenv-framework")
+
+
 def test_docs_metadata_reports_a_live_source(client):
     meta = client.get("/api/v1/docs/openapi/metadata").json()
     assert meta["source"] == "live"
     assert meta["openapi_version"].startswith("3.")
+    # The keys the overview's version rows read (ui/src/lib/live-spec-versions.ts).
     assert meta["versions"]["agentenv-framework"]
+    assert meta["versions"]["agentenv-protocol"]
     # No object-store provenance to report; the UI switches panels on `source`.
     assert "bucket" not in meta
 
@@ -391,7 +591,7 @@ def test_root_serves_health_when_no_ui_is_mounted(client):
 def test_instance_content_serves_object_store_bytes(client, tmp_path):
     """Content route proxies an object-store blob and refuses a url outside the store."""
     from agent_env.config import set_object_store
-    from agent_env.store.object_store.local_object_store import LocalFilesystemObjectStore
+    from agent_env.store.object_store.local.store import LocalFilesystemObjectStore
 
     store = LocalFilesystemObjectStore(str(tmp_path / "obj"))
     set_object_store(store)
@@ -407,6 +607,16 @@ def test_instance_content_serves_object_store_bytes(client, tmp_path):
         "/api/v1/objects/content", params={"object_url": "file:///etc/passwd"}
     )
     assert bad.status_code == 400
+
+
+def test_object_metadata_reports_the_type_content_serves(client, tmp_path):
+    store = LocalFilesystemObjectStore(str(tmp_path / "obj"))
+    set_object_store(store)
+    url = store.put("out/notes.json", b"{}")
+
+    meta = client.get("/api/v1/objects/metadata", params={"object_url": url}).json()
+    served = client.get("/api/v1/objects/content", params={"object_url": url}).headers["content-type"]
+    assert meta["content_type"] == served == "application/json"
 
 
 def test_object_routes_serve_only_the_stores_own_urls(client, tmp_path):
@@ -488,7 +698,7 @@ def test_content_sandboxes_active_types(client, tmp_path):
     active type and add a misleading policy to a passive one.
     """
     from agent_env.config import set_object_store
-    from agent_env.store.object_store.local_object_store import LocalFilesystemObjectStore
+    from agent_env.store.object_store.local.store import LocalFilesystemObjectStore
 
     store = LocalFilesystemObjectStore(str(tmp_path / "obj"))
     set_object_store(store)
@@ -650,15 +860,13 @@ def test_run_metadata_merges_into_inherited_user_overrides(client):
     from agent_env.explorer.routers.runs import RunRequest, _run_metadata
 
     meta = _run_metadata(RunRequest(
-        metadata={"user_overrides": {"agent_effort": "high", "priority": 1}},
+        metadata={"user_overrides": {"agent_effort": "high", "step_params": {"deploy": {"cpu": 1}}}},
         step_overrides={"deploy": {"cpu": 4}},
-        priority=9,
     ))
 
     overrides = meta["user_overrides"]
     assert overrides["agent_effort"] == "high", "inherited keys survive"
-    assert overrides["step_params"] == {"deploy": {"cpu": 4}}
-    assert overrides["priority"] == 9, "an explicit field wins over the inherited one"
+    assert overrides["step_params"] == {"deploy": {"cpu": 4}}, "an explicit field wins over the inherited one"
 
 
 def test_bad_inherited_user_overrides_is_rejected(client, monkeypatch):
@@ -676,13 +884,13 @@ def test_bad_inherited_user_overrides_is_rejected(client, monkeypatch):
     for bad in ("oops", [1, 2], 7):
         resp = client.post(
             "/api/v1/tasks/t1/run",
-            json={"metadata": {"user_overrides": bad}, "priority": 1},
+            json={"metadata": {"user_overrides": bad}},
         )
         assert resp.status_code == 422, f"user_overrides={bad!r} should be refused"
 
     ok = client.post(
         "/api/v1/tasks/t1/run",
-        json={"metadata": {"user_overrides": {"agent_effort": "high"}}, "priority": 1},
+        json={"metadata": {"user_overrides": {"agent_effort": "high"}}},
     )
     assert ok.status_code == 200
 

@@ -4,6 +4,7 @@ from a2a.types import AgentCapabilities
 
 from .extensions import (
     AGENT_CONFIG_V1,
+    ATTRIBUTION_PROBE_V1,
     INSTALL_V1,
     MCP_CONFIG_V1,
     PEER_AGENTS_V1,
@@ -12,6 +13,7 @@ from .extensions import (
     STANDARD_EXTENSIONS,
     TRAJECTORY_V1,
     TRIGGERS_V1,
+    AttributionProbeResponse,
     BundleSkillRequest,
     ChangelogIncrement,
     ContextObjectTrajectoryRequest,
@@ -74,6 +76,7 @@ from .registry import (
     RegisteredOperation,
     build_registry,
 )
+from .staging import STAGING_ENDPOINT, STAGING_V1_URI, StagingStore, staging_routes
 from .tasks.v1 import (
     AgentConfig,
     AgentRunResult,
@@ -108,11 +111,14 @@ from ..transfers import (
 
 __all__ = [
     "AGENT_CONFIG_V1",
+    "ATTRIBUTION_PROBE_V1",
     "INSTALL_V1",
     "MCP_CONFIG_V1",
     "PEER_AGENTS_V1",
     "SKILL_CONFIG_V1",
     "SNAPSHOT_V1",
+    "STAGING_ENDPOINT",
+    "STAGING_V1_URI",
     "STANDARD_EXTENSIONS",
     "TRAJECTORY_V1",
     "TRIGGERS_V1",
@@ -122,6 +128,7 @@ __all__ = [
     "AgentEnvAgent",
     "AgentIdentity",
     "AgentRunResult",
+    "AttributionProbeResponse",
     "BundleSkillRequest",
     "ChangelogIncrement",
     "ContextObjectTrajectoryRequest",
@@ -168,6 +175,7 @@ __all__ = [
     "SnapshotReadObjects",
     "SnapshotUploadedObjects",
     "SnapshotWriteObjects",
+    "StagingStore",
     "TaskError",
     "TaskObjectTrajectoryRequest",
     "TaskOutcome",
@@ -200,5 +208,6 @@ __all__ = [
     "extension",
     "request_fields",
     "serve",
+    "staging_routes",
     "upload",
 ]

@@ -22,9 +22,11 @@ from botocore.exceptions import ClientError
 from agent_env.store.base import GrantUnavailableError, ObjectAlreadyExistsError, ObjectNotFoundError
 from agent_env.store.object_store.object_store import (
     DEFAULT_CONTENT_TYPE,
+    DEFAULT_GRANT_LIFETIME_SECONDS,
     ObjectMetadata,
     ObjectStore,
     UploadPolicy,
+    grant_lifetime,
 )
 
 logger = logging.getLogger(__name__)
@@ -51,10 +53,17 @@ class S3ObjectStore(ObjectStore):
     max_single_upload_bytes = 5 * 1024 * 1024 * 1024  # one S3 PUT
 
     def __init__(
-        self, client, bucket: str, *, region: str | None = None, share_credentials: bool = False
+        self,
+        client,
+        bucket: str,
+        *,
+        region: str | None = None,
+        share_credentials: bool = False,
+        grant_lifetime_seconds: int = DEFAULT_GRANT_LIFETIME_SECONDS,
     ) -> None:
         if not isinstance(share_credentials, bool):
             raise ValueError(f"share_credentials must be true or false, got {share_credentials!r}")
+        self.grant_lifetime_seconds = grant_lifetime(grant_lifetime_seconds, most=_MAX_SIGV4_EXPIRY_SECONDS)
         self._s3 = client
         self._bucket = bucket
         self._region = region
@@ -66,7 +75,12 @@ class S3ObjectStore(ObjectStore):
 
     @classmethod
     def from_config(
-        cls, *, bucket: str, region: str | None = None, share_credentials: bool = False
+        cls,
+        *,
+        bucket: str,
+        region: str | None = None,
+        share_credentials: bool = False,
+        grant_lifetime_seconds: int = DEFAULT_GRANT_LIFETIME_SECONDS,
     ) -> S3ObjectStore:
         """Build an adaptive-retry boto3 S3 client for ``bucket``."""
         kwargs = {
@@ -78,7 +92,10 @@ class S3ObjectStore(ObjectStore):
         }
         if region:
             kwargs["region_name"] = region
-        return cls(boto3.client("s3", **kwargs), bucket, region=region, share_credentials=share_credentials)
+        return cls(
+            boto3.client("s3", **kwargs), bucket, region=region, share_credentials=share_credentials,
+            grant_lifetime_seconds=grant_lifetime_seconds,
+        )
 
     @property
     def bucket(self) -> str:
@@ -164,8 +181,9 @@ class S3ObjectStore(ObjectStore):
         return self._signed_url("put_object", object_url, expires_in)
 
     def issue_read_grant(
-        self, object_url: str, *, expires_in: int = 3600
+        self, object_url: str, *, expires_in: int | None = None
     ) -> HttpGetGrant:
+        expires_in = self.grant_lifetime_seconds if expires_in is None else expires_in
         return HttpGetGrant(
             kind="http-get",
             url=self._signed_url("get_object", object_url, expires_in),
@@ -178,8 +196,9 @@ class S3ObjectStore(ObjectStore):
         *,
         media_type: str,
         max_bytes: int,
-        expires_in: int = 3600,
+        expires_in: int | None = None,
     ) -> HttpPutGrant:
+        expires_in = self.grant_lifetime_seconds if expires_in is None else expires_in
         # A presigned S3 PUT cannot bound the upload size, so the uploader enforces max_bytes.
         return HttpPutGrant(
             kind="http-put",

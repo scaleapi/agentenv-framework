@@ -49,7 +49,7 @@ def requests(monkeypatch) -> list[dict]:
         async def close(self):
             return None
 
-    monkeypatch.setattr(provider_mod, "get_agent_sandbox_provider", _Provider)
+    monkeypatch.setattr(provider_mod, "build_sandbox_provider", lambda spec: _Provider())
     persisted = SimpleNamespace(metadata={})
     persisted.update_metadata = lambda metadata: setattr(persisted, "metadata", metadata)
     monkeypatch.setattr(A2AAgent, "get", classmethod(lambda cls, agent_id: persisted))
@@ -77,7 +77,7 @@ def _context(capture: dict, *apply_variants: list[str]) -> TaskStepContext:
                 ]
             }
         },
-        sandbox_type=None,
+        sandbox_type="local",
         sandbox_id="sandbox-1",
     )
     context = TaskStepContext()
@@ -120,35 +120,11 @@ async def test_validator_applies_a_captured_portable_changelog(store, requests):
 
 
 @pytest.mark.asyncio
-async def test_validator_sends_a_legacy_capture_as_its_prefix(store, requests):
+async def test_validator_records_an_apply_agent_without_the_object_form(store, requests):
+    store.put("changelog/run-1/000000.tar", b"increment")
     context = _context(
-        {
-            "object_url": "s3://artifact-bucket/agent_changelog/run-1/capture",
-            "transfer_mode": "legacy",
-        },
+        {"object_url": store.object_url("changelog/run-1"), "transfer_mode": "objects"},
         ["s3_prefix"],
-        ["increments"],
-    )
-
-    verification = await _validate(context)
-
-    assert requests[0]["json"] == {
-        "s3_prefix": "s3://artifact-bucket/agent_changelog/run-1/capture"
-    }
-    assert verification["roundtrip"] is True
-    assert store.granted == []
-
-
-@pytest.mark.asyncio
-async def test_validator_never_signs_a_foreign_namespace_an_agent_echoed(store, requests):
-    for name in ("000000.tar", "000001.tar"):
-        store.put(f"agent_changelog/other-run/solver/{name}", b"someone else's increment")
-    context = _context(
-        {
-            "object_url": store.object_url("agent_changelog/other-run/solver"),
-            "transfer_mode": "legacy",
-        },
-        ["increments"],
     )
 
     verification = await _validate(context)
@@ -156,7 +132,7 @@ async def test_validator_never_signs_a_foreign_namespace_an_agent_echoed(store, 
     assert not requests
     assert store.granted == []
     assert verification["apply"] is False
-    assert "cannot apply the configured legacy changelog" in verification["note"]
+    assert "does not advertise the object form" in verification["note"]
 
 
 @pytest.mark.asyncio

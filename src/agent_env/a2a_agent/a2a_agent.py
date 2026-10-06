@@ -13,12 +13,20 @@ from agentenv_protocol.a2a_agent import STANDARD_EXTENSIONS
 
 from agent_env.config import get_config
 from agent_env.entity_refs import EntityRef
-from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, NetworkPolicyUnsupportedError
+from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, NetworkPolicyUnsupportedError, port_bindings
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.a2a_agent.object_transfer import (
     TRANSFER_TIMEOUT_SECONDS,
     invoke_transfer,
     skill_add_call,
+)
+from agent_env.a2a_agent.staging import transfer_store
+from agent_env.providers.sandbox_providers.local_sandbox import (
+    LOCAL_TRUST_ENV,
+    LocalSandbox,
+    LocalSandboxProvider,
+    local_grant_trust,
+    start_trusting,
 )
 from agent_env.providers.sandbox_providers.sandbox_provider import all_sandbox_container_env, all_sandbox_url_rewrites
 from agent_env.utils.paths import validate_relative_filename
@@ -187,17 +195,21 @@ class A2AAgent:
         skill_md: str | None = None,
         object_url: str | None = None,
     ) -> dict:
-        """Send one skill, as SKILL.md text or the objects under ``object_url``, in a form the
-        agent's card and the object store allow; returns the agent's answer."""
+        """Send one skill, as SKILL.md text inline or the objects under ``object_url`` as a
+        bundle of read grants; returns the agent's answer."""
         add_method, add_path = A2AAgent.operation(A2AAgent._skill_extension(deployed), "add")
+        store = transfer_store(
+            get_config().get_object_store(), deployed.a2a_url, deployed.agent_card, sandbox_type=deployed.sandbox_type
+        )
         call = await asyncio.to_thread(
             skill_add_call,
             add_method,
-            get_config().get_object_store(),
+            store,
             name=name,
             description=description,
             skill_md=skill_md,
             object_url=object_url,
+            sandbox_type=deployed.sandbox_type,
         )
         return await invoke_transfer(
             deployed.a2a_url + add_path,
@@ -205,6 +217,7 @@ class A2AAgent:
             verb="POST",
             operation=f"skill add ({name})",
             timeout=TRANSFER_TIMEOUT_SECONDS,
+            store=store,
         )
 
     @staticmethod
@@ -416,7 +429,6 @@ class A2AAgent:
         sandbox_type: str | None = None,
         sandbox: Sandbox | None = None,
         enable_docker: bool = False,
-        priority: Optional[int] = None,
         network_policy: NetworkPolicy | None = None,
         *,
         attribution: Optional[Attribution] = None,
@@ -449,7 +461,7 @@ class A2AAgent:
                     image_name=image_name, port=a2a_port, env=merged_env,
                     cpu=cpu, memory=memory, disk_size_gb=disk_size_gb, timeout=ttl_seconds,
                     attribution=attribution,
-                    priority=priority, network_policy=network_policy,
+                    network_policy=network_policy,
                 )
                 self._owns_sandbox = True
                 logger.info(f"Sandbox created: {self._sandbox.sandbox_id} (mode={self._sandbox.mode})")
@@ -519,13 +531,17 @@ class A2AAgent:
         self._sandbox = None
 
     async def _run_container(self, image_name: str, a2a_port: int, merged_env: dict[str, str], enable_docker: bool = False) -> None:
-        agent_env = dict(merged_env)
+        # On a local VM sandbox the container runs on this host, so it is given the local CA as the provider's are.
+        trust_dir = await asyncio.to_thread(local_grant_trust) if isinstance(self._sandbox, LocalSandbox) else None
+        agent_env = dict(merged_env) if trust_dir is None else {**LOCAL_TRUST_ENV, **merged_env}
         setup_script = ""
-        network_flag = ""
+        network_flag = "" if trust_dir is None or not LocalSandboxProvider.EXTRA_CONTAINER_RUN_ARGS else (
+            f"{LocalSandboxProvider.EXTRA_CONTAINER_RUN_ARGS} \\\n    "
+        )
         if enable_docker:
             logger.info("enable_docker: starting rootless Docker-in-Docker sidecar for the agent (no host socket)")
             setup_script = self._dind_setup_script()
-            network_flag = f"--network {_DIND_NETWORK} \\\n    "
+            network_flag += f"--network {_DIND_NETWORK} \\\n    "
             agent_env["DOCKER_HOST"] = f"tcp://{_DIND_CONTAINER}:{_DIND_PORT}"
 
         env_flags = []
@@ -533,17 +549,21 @@ class A2AAgent:
             escaped_value = value.replace("'", "'\\''")
             env_flags.append(f"-e {key}='{escaped_value}'")
         env_str = " \\\n    ".join(env_flags)
+        publish = " ".join(f"-p {spec}" for spec in port_bindings(self._sandbox.host_ips, a2a_port, a2a_port))
 
         run_script = f"""#!/bin/bash
 set -e
-{setup_script}docker run -d \\
+{setup_script}docker {"run -d" if trust_dir is None else "create"} \\
     --name {self._sandbox.container_name} \\
-    -p {a2a_port}:{a2a_port} \\
+    {publish} \\
     {network_flag}{env_str} \\
     {image_name} > /dev/null
-sleep 2
+{"sleep 2" if trust_dir is None else ""}
 """
         await self._sandbox.exec_script(run_script)
+        if trust_dir is not None:
+            await start_trusting(self._sandbox, self._sandbox.container_name, trust_dir)
+            await asyncio.sleep(2)
 
     def _dind_setup_script(self) -> str:
         # Constants become shell vars so the body stays a raw string (no f-string

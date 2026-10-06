@@ -59,11 +59,10 @@ class EnvironmentUniverseArtifact(Universe):
             data.pop("service_artifact_ids", None)
             data.pop("metadata", None)
             # Dual-write: the pinned refs get a twin, and only them.
-            # The scope line also asked for a `service_artifact_ids` twin on these
-            # modern docs — declined. That key means "unpinned, resolve at latest"
-            # to every reader, and v0.9.1 (pinned permanently by
-            # synthetic-artifacts-pipeline) acts on it, so writing it onto a doc
-            # that IS pinned tells that worker to ignore the pins. Nothing legacy
+            # No `service_artifact_ids` twin on these modern docs: that key means
+            # "unpinned, resolve at latest" to every reader, older releases
+            # included, so writing it onto a doc that IS pinned tells those
+            # readers to ignore the pins. Nothing legacy
             # is dropped here: unpinned docs never reach this branch and still
             # round-trip `service_artifact_ids` / `metadata` above, and
             # get_environment_artifacts still falls back to them.

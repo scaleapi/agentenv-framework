@@ -34,7 +34,7 @@ from agent_env.providers.env_providers.constants import (
 )
 from agent_env.providers.env_providers.env_provider import _SandboxEnvironmentProvider, _size_kwargs, _tool_names
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
-from agent_env.providers.sandbox_providers.sandbox import Sandbox, VmSandbox
+from agent_env.providers.sandbox_providers.sandbox import Sandbox, VmSandbox, port_bindings
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER, SandboxProvider
 
 if TYPE_CHECKING:
@@ -210,6 +210,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         state_provider: "DatabaseStateProvider",
         state_instance: "EnvStateInstance",
         host_port: Optional[Callable[[int], int]] = None,
+        host_ips: tuple[str, ...] = (),
         mcp_server_name: str | None = None,
     ) -> str:
         """Generate docker-compose.yml content for a gateway deployment onto a VM/laptop/arbitrary machine.
@@ -316,7 +317,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
 
         lines.extend(
             state_provider.render_compose_containers(
-                environment_names, instance=state_instance, host_port=host_port
+                environment_names, instance=state_instance, host_port=host_port, host_ips=host_ips
             )
         )
         store_dep_lines = state_provider.docker_service_dependency()
@@ -417,7 +418,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         if expose_gateway_port:
             exposed_gateway_ports.extend([
                 "    ports:",
-                f'      - "{publish(gateway_port)}:{gateway_port}"',
+                *(f'      - "{spec}"' for spec in port_bindings(host_ips, publish(gateway_port), gateway_port)),
             ])
         lines.extend([
             "    environment:",
@@ -486,7 +487,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                     lines.append(f"      - {key}={value}")
             lines.extend([
                 "    ports:",
-                f'      - "{publish(sc.host_port)}:{sc.container_port}"',
+                *(f'      - "{spec}"' for spec in port_bindings(host_ips, publish(sc.host_port), sc.container_port)),
                 f"    restart: {sc.restart}",
                 "    networks:",
                 "      - env-network",
@@ -513,7 +514,6 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         disk_size_gb: float = 10,
         cpu: float | None = None,
         memory_mb: int | None = None,
-        priority: Optional[int] = None,
         attribution: Optional[Attribution] = None,
     ) -> DeployedGatewayEnv:
         """A gateway in front of the env, with the state store it acquires (local Postgres by default); returns the record.
@@ -534,7 +534,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             sandbox_provider, env.id, state_instance=state_instance, mcp_servers=topology.mcp_servers,
             mcp_server_images=topology.mcp_server_images, website_configs=topology.website_configs,
             website_images=topology.website_images, mcp_server_name=topology.mcp_server_name, gateway_mode=gateway_mode,
-            ttl_seconds=ttl_seconds, disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb, priority=priority, attribution=attribution,
+            ttl_seconds=ttl_seconds, disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb, attribution=attribution,
         )
         return DeployedGatewayEnv(
             env_id=env.id,
@@ -566,7 +566,6 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         disk_size_gb: float = 10,
         cpu: float | None = None,
         memory_mb: int | None = None,
-        priority: Optional[int] = None,
         existing_sandbox: Sandbox | None = None,
         env_id: str | None = None,
         state_instance: "EnvStateInstance | None" = None,
@@ -592,7 +591,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             sandbox_provider, env_id, state_instance=state_instance, mcp_servers=mcp_servers, mcp_server_images=mcp_server_images,
             gateway_port=gateway_port, website_configs=website_configs, website_images=website_images,
             gateway_mode=gateway_mode, ttl_seconds=ttl_seconds, disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb,
-            priority=priority, existing_sandbox=existing_sandbox, sidecars=sidecars, mcp_server_name=mcp_server_name,
+            existing_sandbox=existing_sandbox, sidecars=sidecars, mcp_server_name=mcp_server_name,
             attribution=attribution,
         )
 
@@ -620,7 +619,6 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         cpu: float | None = None,
         memory_mb: int | None = None,
         attribution: Optional[Attribution] = None,
-        priority: Optional[int] = None,
         existing_sandbox: Sandbox | None = None,
         sidecars: list[SidecarConfig] | None = None,
         mcp_server_name: str | None = None,
@@ -645,7 +643,6 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 timeout=ttl_seconds,
                 disk_size_gb=disk_size_gb,
                 attribution=attribution,
-                priority=priority,
                 **vm_kwargs,
             )
         sandbox = self._sandbox
@@ -706,6 +703,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             state_provider=self._state_provider,
             state_instance=state_instance,
             host_port=sandbox.host_port,
+            host_ips=sandbox.host_ips,
             mcp_server_name=mcp_server_name,
         )
         logger.info(f"Generated docker-compose.yml:\n{_redact_compose_secrets(compose_content)}")
@@ -829,7 +827,6 @@ COMPOSE_EOF'''
         cpu: float | None = None,
         memory_mb: int | None = None,
         attribution: Optional[Attribution] = None,
-        priority: Optional[int] = None,
         mcp_server_name: str | None = None,
     ) -> DeployedGateway:
         from agent_env.env.env import Env
@@ -846,7 +843,7 @@ COMPOSE_EOF'''
         i6pn_kwargs = {"i6pn": True, "region": config.modal_default_region} if isinstance(sandbox_provider, ModalSandboxProvider) else {}
         deploy = _ContainerDeploy(
             sandbox_provider=sandbox_provider, cpu=cpu, disk_size_gb=disk_size_gb, ttl_seconds=ttl_seconds,
-            attribution=attribution, priority=priority, i6pn_kwargs=i6pn_kwargs,
+            attribution=attribution, i6pn_kwargs=i6pn_kwargs,
         )
 
         try:
@@ -934,7 +931,6 @@ COMPOSE_EOF'''
                 **_size_kwargs(cpu, memory_mb),
                 disk_size_gb=disk_size_gb, timeout=ttl_seconds,
                 attribution=attribution,
-                priority=priority,
                 **i6pn_kwargs,
             )
             self._container_sandboxes.append(gateway_sb)
@@ -1023,7 +1019,6 @@ COMPOSE_EOF'''
             **_size_kwargs(deploy.cpu, None),
             disk_size_gb=deploy.disk_size_gb, timeout=deploy.ttl_seconds,
             attribution=deploy.attribution,
-            priority=deploy.priority,
             **deploy.i6pn_kwargs,
         )
 
@@ -1095,7 +1090,6 @@ COMPOSE_EOF'''
             disk_size_gb=deploy.disk_size_gb, timeout=deploy.ttl_seconds,
             expose_externally=False,
             attribution=deploy.attribution,
-            priority=deploy.priority,
             **deploy.i6pn_kwargs,
         )
         self._container_sandboxes.append(db_sb)
@@ -1128,7 +1122,6 @@ COMPOSE_EOF'''
             **_size_kwargs(deploy.cpu, None),
             disk_size_gb=deploy.disk_size_gb, timeout=deploy.ttl_seconds,
             attribution=deploy.attribution,
-            priority=deploy.priority,
             **deploy.i6pn_kwargs,
         )
         return cfg.environment_name, sb
@@ -1148,7 +1141,6 @@ COMPOSE_EOF'''
         disk_size_gb: float = 10,
         cpu: float | None = None,
         memory_mb: int | None = None,
-        priority: Optional[int] = None,
         existing_sandbox: Sandbox | None = None,
         sidecars: list[SidecarConfig] | None = None,
         mcp_server_name: str | None = None,
@@ -1164,7 +1156,7 @@ COMPOSE_EOF'''
             if state_instance is not None
             else LocalPostgresStateProvider()
         )
-        deploy_kwargs = {"attribution": dict(attribution or {}), "priority": priority}
+        deploy_kwargs = {"attribution": dict(attribution or {})}
         if isinstance(sandbox_provider, ModalSandboxProvider):
             if existing_sandbox is not None:
                 raise ValueError("existing_sandbox is only supported for VM-mode providers")
@@ -1350,5 +1342,4 @@ class _ContainerDeploy:
     disk_size_gb: float
     ttl_seconds: int
     attribution: Optional[Attribution]
-    priority: Optional[int]
     i6pn_kwargs: dict

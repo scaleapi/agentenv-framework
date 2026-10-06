@@ -44,6 +44,7 @@ async def test_logs_the_container_id_with_the_sandbox_and_its_tags(caplog):
     assert record.modal_container_id == "ta-01ABC"
     assert record.modal_sandbox_id == "sb-01XYZ"
     assert record.modal_app_name == "agent-env-p"
+    assert record.modal_sandbox_tags == _TAGS
     assert getattr(record, PIPELINE_STEP_KEY) == "my-pipeline_deploy_env"
     assert getattr(record, RUN_ID_KEY) == "inst-1"
     assert (record.cpu, record.memory_mb, record.gpu) == (2.0, 4096, "H100")
@@ -57,6 +58,17 @@ async def test_an_unreadable_container_id_still_logs_and_never_raises(caplog):
             cpu=1.0, memory=1024, gpu=None,
         )
     assert _started_record(caplog).modal_container_id is None
+
+
+@pytest.mark.asyncio
+async def test_a_tag_named_like_a_log_record_field_does_not_clobber_it(caplog):
+    tags = {"name": "n", "module": "m", RUN_ID_KEY: "inst-1"}
+    with caplog.at_level(logging.INFO, logger="agent_env.providers.sandbox_providers.modal_sandbox"):
+        await _log_sandbox_started(_fake_sb(), app_name="a", sandbox_tags=tags, cpu=1.0, memory=1024, gpu=None)
+    record = _started_record(caplog)
+    assert record.modal_sandbox_tags == tags
+    assert record.name == "agent_env.providers.sandbox_providers.modal_sandbox"
+    assert getattr(record, RUN_ID_KEY) == "inst-1"
 
 
 @pytest.fixture(autouse=True)

@@ -19,6 +19,7 @@ from agent_env.a2a_agent.object_transfer import (
     fetch_trajectory,
     trajectory_mode,
 )
+from agent_env.a2a_agent.staging import draining, staged_changelogs, transfer_store
 from agent_env.config.model import MODEL_PARAMS_RESERVED
 from agent_env.env.gateway.constants import EXT_CLOCK_URI, EXT_TRIGGERS_URI, TRIGGER_IN_FLIGHT_STATUSES
 from agent_env.store import DuplicateKeyError, get_config
@@ -334,6 +335,11 @@ class PromptAgentTaskStep(TaskStep):
             )
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
+        # A changelog staged on the agent moves into the store while it works, and the rest when it is done.
+        async with draining(staged_changelogs(context.metadata, agent_name=self.agent_name)):
+            return await self._execute(context)
+
+    async def _execute(self, context: TaskStepContext) -> TaskStepContext:
         # Minted here, not in `_execute_conversation`, so the series can address the
         # same session before the first turn.
         a2a_context_id = self.context_id or uuid.uuid4().hex
@@ -402,7 +408,6 @@ class PromptAgentTaskStep(TaskStep):
             "harness": harness, "max_turns": max_turns,
             "max_thinking_tokens": max_thinking_tokens,
             "output_format": self.output_format, "timeout_seconds": self.timeout_seconds,
-            "project_id": context.metadata.get("project_id"),
             "task_id": context.metadata.get("task_id"),
             "agentenv_tools": self.agentenv_tools,
         }
@@ -513,7 +518,7 @@ class PromptAgentTaskStep(TaskStep):
                 try:
                     turn_traj_uri = await self._fetch_trajectory(
                         target_url, traj_ext_cached, sent_task_id, trajectory_output_prefix,
-                        target_a2a_task_id,
+                        target_a2a_task_id, card=card, sandbox_type=agent.sandbox_type,
                     )
                 except Exception as e:
                     logger.warning(f"Turn {turn+1} trajectory fetch failed (continuing): {e}")
@@ -701,24 +706,27 @@ class PromptAgentTaskStep(TaskStep):
 
         return context
 
-    async def _fetch_trajectory(self, a2a_url: str, traj_ext: dict, a2a_server_task_id: str, trajectory_output_prefix: str, target_a2a_task_id: str) -> str | None:
+    async def _fetch_trajectory(
+        self, a2a_url: str, traj_ext: dict, a2a_server_task_id: str, trajectory_output_prefix: str,
+        target_a2a_task_id: str, *, sandbox_type: str | None, card: dict | None = None,
+    ) -> str | None:
         get_method, get_path = A2AAgent.operation(traj_ext, "get")
-        store = get_config().get_object_store()
-        mode = trajectory_mode(get_method, store, by="task_id")
+        store = transfer_store(get_config().get_object_store(), a2a_url, card, sandbox_type=sandbox_type)
+        mode = trajectory_mode(get_method, store, by="task_id", sandbox_type=sandbox_type)
         if mode is None:
             raise RuntimeError(
                 "Agent advertises no trajectory get form this object store can serve"
             )
         # Fetched by a2a_server_task_id, the id the A2A server produced; stored under
         # target_a2a_task_id, the client message id persisted on the conversation as
-        # a2a_task_id, so the FE can resolve it (#731).
+        # a2a_task_id, so the FE can resolve it.
         upload = None
         if mode == "objects":
             upload = await asyncio.to_thread(
                 TrajectoryUpload.to,
                 store, trajectory_object_url(trajectory_output_prefix, name=target_a2a_task_id, store=store),
             )
-        fetched = await fetch_trajectory(a2a_url + get_path, {"task_id": a2a_server_task_id}, upload=upload)
+        fetched = await fetch_trajectory(a2a_url + get_path, {"task_id": a2a_server_task_id}, upload=upload, store=store)
         return await asyncio.to_thread(store_trajectory, fetched, trajectory_output_prefix, name=target_a2a_task_id)
 
     async def _read_env_triggers(self, context: TaskStepContext) -> dict:
@@ -754,8 +762,8 @@ class PromptAgentTaskStep(TaskStep):
     _CAPTURE_BUDGET_SECONDS: ClassVar[float] = 90
 
     async def _persist_env_trigger_state(self, context: TaskStepContext) -> None:
-        """Snapshot each trigger-registered env's /triggers/state to S3 + a metadata summary.
-        Never raises and is bounded by _CAPTURE_BUDGET_SECONDS."""
+        """Snapshot each trigger-registered env's /triggers/state to the configured object store, plus a
+        metadata summary. Never raises and is bounded by _CAPTURE_BUDGET_SECONDS."""
         try:
             await asyncio.wait_for(
                 self._capture_env_trigger_state(context), timeout=self._CAPTURE_BUDGET_SECONDS)

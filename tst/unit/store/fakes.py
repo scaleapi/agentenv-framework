@@ -11,13 +11,20 @@ fake implements it.
 
 from __future__ import annotations
 
+import asyncio
+import base64
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
+from agent_env.env.env import DeployedGatewayEnv
+from agent_env.env.envs.multi_env import MultiEnv
+from agent_env.providers.env_providers import EnvironmentGatewayProvider
+from agent_env.providers.env_state import LocalPostgresStateProvider
 from agent_env.store.base import ObjectAlreadyExistsError, ObjectNotFoundError
 from agent_env.store.document_store import DocumentStore, DuplicateKeyError, Eq, Filter
 from agent_env.store.image_store import ImageStore
-from agent_env.store.object_store import DEFAULT_CONTENT_TYPE, ObjectMetadata, ObjectStore
+from agent_env.store.object_store import DEFAULT_CONTENT_TYPE, LocalFilesystemObjectStore, ObjectMetadata, ObjectStore
 
 
 class FakeDocumentStore(DocumentStore):
@@ -173,6 +180,15 @@ class RecordingObjectStore(FakeObjectStore):
         return super().read(key)
 
 
+class SigningObjectStore(LocalFilesystemObjectStore):
+    """A filesystem object store that signs urls, as a remote store does; the urls lead nowhere."""
+
+    def signed_get_url(self, object_url, expires_in=3600):
+        return f"https://objects.example.test/{self.get_object_key(object_url)}"
+
+    signed_put_url = signed_get_url
+
+
 class FakeImageStore(ImageStore):
     """In-memory ImageStore fake: records ensure_repository calls, no docker involved.
 
@@ -192,3 +208,64 @@ class FakeImageStore(ImageStore):
 
     def auth(self, ref):
         return None
+
+
+COLLECTED = {"/app/artifact/report.pdf": b"%PDF", "/app/artifact/sub/notes.md": b"# notes"}
+
+
+class _Stream:
+    def __init__(self, data: bytes):
+        self._data = data
+
+    async def read(self):
+        return self._data
+
+
+class CollectingVm:
+    """A VM serving ``COLLECTED`` to collect_artifacts' size probe and base64 read, and exiting 0 with ``ok``
+    otherwise."""
+
+    mode = "vm"
+
+    async def exec_script(self, script: str) -> str:
+        return ""
+
+    async def exec_with_output(self, *args):
+        if "stat" in args:
+            return 0, str(len(COLLECTED[args[-1]])), ""
+        return 0, "ok", ""
+
+    async def exec(self, *args):
+        path = args[-1].split("base64 < ", 1)[1].strip("'")
+        return SimpleNamespace(stdout=_Stream(base64.b64encode(COLLECTED[path])), stderr=_Stream(b""),
+                               wait=lambda: asyncio.sleep(0, result=0))
+
+
+class SnapshotSandbox:
+    """A VM whose servicedb answers the changelog count and the container lookup; records every script."""
+
+    mode = "vm"
+
+    def __init__(self) -> None:
+        self.scripts: list[str] = []
+
+    async def exec_script(self, script: str) -> str:
+        self.scripts.append(script)
+        return "0\n" if "_changelog" in script else "container-1\n"
+
+
+def reattach_for_snapshot(monkeypatch, env_id: str, env_version: int, universe_id: str,
+                          universe_version: int) -> SnapshotSandbox:
+    """Make ``EnvSnapshot.create`` find ``env_id`` deployed with ``universe_id`` loaded, and reconnect to a
+    ``SnapshotSandbox``, which it returns."""
+    deployed = DeployedGatewayEnv(env_id=env_id, env_version=env_version, sandbox_id="sb-1", gateway_url="https://gw",
+                                  mcp_url="https://gw/mcp", db_web_url=None)
+    instances = SimpleNamespace(get=lambda instance_id: deployed,
+                                get_environment_universe=lambda instance_id: {"id": universe_id, "version": universe_version})
+    provider = EnvironmentGatewayProvider()
+    provider._state_provider = LocalPostgresStateProvider()
+    reattached = SimpleNamespace(_sandbox=SnapshotSandbox(), _env_provider=provider)
+    monkeypatch.setattr("agent_env.env.store.get_env_instance_store", lambda: instances)
+    monkeypatch.setattr("agent_env.env.env.Env.get", lambda *args: MultiEnv(id=env_id, version=env_version, mcp_server_envs=[]))
+    monkeypatch.setattr(MultiEnv, "from_deployed_env", classmethod(lambda cls, record: asyncio.sleep(0, result=reattached)))
+    return reattached._sandbox

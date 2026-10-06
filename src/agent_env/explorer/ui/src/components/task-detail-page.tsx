@@ -11,7 +11,6 @@ import {
   ChevronDown,
   CheckCircle2,
   XCircle,
-  Download,
   Loader2,
   RefreshCw,
   X,
@@ -239,91 +238,6 @@ interface RunGroupSummary {
     workflow_id?: string | null;
     status: string;
   }>;
-}
-
-/** Per-row button: fetches a run group's trajectory manifest (JSON of presigned URLs, 24h TTL) and
- *  downloads it. Accepts a runGroupId or an instance_id. */
-function ManifestDownloadButton({
-  taskId,
-  runGroupId,
-  className,
-}: {
-  taskId: string;
-  runGroupId: string;
-  className?: string;
-}) {
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const onClick = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await apiFetch(
-        `${BACKEND_URL}/api/v1/tasks/${encodeURIComponent(
-          taskId,
-        )}/runs/${encodeURIComponent(runGroupId)}/trajectory-manifest`,
-      );
-      if (!res.ok) {
-        const detail = await res.text().catch(() => '');
-        throw new Error(
-          `manifest request failed: ${res.status} ${res.statusText}${
-            detail ? ` — ${detail.slice(0, 200)}` : ''
-          }`,
-        );
-      }
-      const manifest = await res.json();
-      const blob = new Blob([JSON.stringify(manifest, null, 2)], {
-        type: 'application/json',
-      });
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = blobUrl;
-      a.download = `${runGroupId}.trajectory-manifest.json`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      // Defer revoke so Safari has a chance to fire the download.
-      setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
-    } catch (err) {
-      console.error(err);
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
-    }
-  }, [taskId, runGroupId]);
-
-  return (
-    <button
-      type="button"
-      onClick={e => {
-        e.stopPropagation();
-        onClick();
-      }}
-      onKeyDown={e =>
-        onActivateKey(e, () => {
-          onClick();
-        })
-      }
-      disabled={loading}
-      aria-label={`Download trajectory manifest for run group ${runGroupId}`}
-      title="Download trajectory manifest (JSON of presigned S3 URLs, valid 24h)"
-      className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded px-2 py-1 text-xs hover:bg-[var(--accent)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] disabled:opacity-50 ${
-        className ?? ''
-      }`}
-    >
-      {loading ? (
-        <Loader2 size={12} className="animate-spin" aria-hidden />
-      ) : (
-        <Download size={12} aria-hidden />
-      )}
-      <span>Trajectory Manifest</span>
-      {error && (
-        <span role="alert" className="text-red-500" title={error}>
-          failed
-        </span>
-      )}
-    </button>
-  );
 }
 
 interface InstanceRowProps {
@@ -619,16 +533,6 @@ function InstanceRow({
             <span className="text-xs text-[var(--muted-foreground)]">--</span>
           )}
         </td>
-        <td className="px-3 py-2">
-          {!isPending && !nested ? (
-            <div className="flex flex-col items-start gap-1">
-              <ManifestDownloadButton
-                taskId={taskId}
-                runGroupId={String(inst.run_group_id ?? inst.instance_id ?? '')}
-              />
-            </div>
-          ) : null}
-        </td>
         <td className="px-2 py-2 text-[var(--muted-foreground)]">
           {!isPending && (
             <button
@@ -665,7 +569,7 @@ function InstanceRow({
           className="border-t border-[var(--border)]"
           style={{ boxShadow: 'inset 3px 0 0 0 var(--ring)' }}
         >
-          <td colSpan={10} className="p-4">
+          <td colSpan={9} className="p-4">
             {isFullInstanceLoading && !fullInstance && (
               <div
                 role="status"
@@ -682,7 +586,7 @@ function InstanceRow({
                 className="flex items-center justify-between gap-3 mb-3 px-3 py-2 rounded border border-red-500/30 bg-red-500/5 text-xs text-red-500"
               >
                 <span>
-                  Couldn't load full trajectory: {fullInstanceError}. Showing
+                  Couldn&apos;t load full trajectory: {fullInstanceError}. Showing
                   partial data.
                 </span>
                 <button
@@ -859,11 +763,6 @@ function GroupHeaderRow({
           <span className="text-xs text-[var(--muted-foreground)]">--</span>
         )}
       </td>
-      <td className="px-3 py-2">
-        <div className="flex flex-col items-start gap-1">
-          <ManifestDownloadButton taskId={taskId} runGroupId={runGroupId} />
-        </div>
-      </td>
       <td className="px-2 py-2 text-[var(--muted-foreground)]">
         <button
           type="button"
@@ -942,7 +841,7 @@ export function TaskDetailPage({
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    apiFetch(`${BACKEND_URL}/api/v1/tasks/${taskId}`)
+    apiFetch(`${BACKEND_URL}/api/v1/tasks/${encodeURIComponent(taskId)}`)
       .then(res => {
         if (!res.ok) throw new Error(`Failed to fetch (${res.status})`);
         return res.json();
@@ -1430,11 +1329,6 @@ export function TaskDetailPage({
               taskId={String(task?.id ?? '')}
               taskVersion={Number(task?.version ?? 1)}
               taskSteps={steps}
-              taskProjectId={
-                typeof task?.project_id === 'string'
-                  ? (task.project_id as string)
-                  : undefined
-              }
               onStarted={handleStartedRuns}
               onCompleted={fetchRunGroups}
             />
@@ -1500,19 +1394,17 @@ export function TaskDetailPage({
             ) : (
               <div className="rounded-lg border border-[var(--border)] overflow-hidden">
                 <table className="w-full text-sm table-fixed">
-                  {/* Columns sum to 100. Trajectory Manifest Download
-                   * column trims a few % from Status + Score; identifier
-                   * columns kept wide enough to avoid truncating IDs. */}
+                  {/* Columns sum to 100; identifier columns kept wide
+                   * enough to avoid truncating IDs. */}
                   <colgroup>
                     <col className="w-[18%]" />
-                    <col className="w-[13%]" />
+                    <col className="w-[16%]" />
                     <col className="w-[10%]" />
                     <col className="w-[5%]" />
                     <col className="w-[14%]" />
                     <col className="w-[7%]" />
-                    <col className="w-[10%]" />
-                    <col className="w-[9%]" />
-                    <col className="w-[10%]" />
+                    <col className="w-[14%]" />
+                    <col className="w-[12%]" />
                     <col className="w-[4%]" />
                   </colgroup>
                   <thead>
@@ -1540,9 +1432,6 @@ export function TaskDetailPage({
                       </th>
                       <th className="px-3 py-2 text-xs font-semibold text-[var(--muted-foreground)]">
                         Score
-                      </th>
-                      <th className="px-3 py-2 text-xs font-semibold text-[var(--muted-foreground)]">
-                        Downloads
                       </th>
                       <th />
                     </tr>
@@ -1607,7 +1496,7 @@ export function TaskDetailPage({
                           key={`funnel-${group.run_group_id}`}
                           className="border-t border-[var(--border)] bg-[var(--secondary)]"
                         >
-                          <td colSpan={10} className="px-4 pb-3 pt-1">
+                          <td colSpan={9} className="px-4 pb-3 pt-1">
                             <RunGroupStepFunnel
                               steps={taskSteps}
                               stepCounts={group.step_counts ?? {}}

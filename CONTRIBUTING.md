@@ -1,7 +1,7 @@
-# Contributing to agent-env
+# Contributing to AgentEnv Framework
 
-Thank you for helping improve agent-env. Bug fixes, new sandbox providers, environments, task
-steps, tests and documentation are all welcome.
+Thank you for helping improve AgentEnv Framework. Bug fixes, new sandbox providers, environments,
+task steps, tests and documentation are all welcome.
 
 Security vulnerabilities are handled privately: see [SECURITY.md](SECURITY.md). Everyone
 participating in this project is expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
@@ -37,7 +37,7 @@ This is the same install CI performs. `make install` is equivalent.
 
 | Command | What it runs | Needs |
 |---|---|---|
-| `make unit-test` | unit suite for `agentenv-framework` and `agentenv-protocol` | nothing external |
+| `make unit-test` | unit suite for `agentenv-framework` and `agentenv-framework-protocol` | nothing external |
 | `make int-test-fast` | integration tests against the local backends | Docker |
 | `make int-test-slow` | tests that build images or deploy sandboxes, minutes each | Docker, and a sandbox backend for some |
 | `make clean-install-test` | both distributions built as the release builds them, installed into a fresh venv from public PyPI, and `agent-env run hello` run twice by name | Python 3.11, uv and git |
@@ -79,10 +79,16 @@ Every pull request needs an approving review from a code owner (see `CODEOWNERS`
 ## Releases
 
 Maintainers cut releases. Version bumps are automated when a labelled pull request merges, so
-contributors should not edit `version` in `pyproject.toml`. Releases publish the distribution
-`agentenv-framework`; the import package `agent_env` and the command `agent-env` keep their names.
+contributors should not edit `version` in `pyproject.toml`. Each release publishes
+`agentenv-framework` and `agentenv-framework-protocol` to PyPI (`.github/workflows/publish-pypi.yml`, trusted publishing
+on the release tag); the import package `agent_env` and the command `agent-env` keep their names. Once both are
+on PyPI, the same workflow creates the GitHub release, whose notes are the titles of the pull requests merged since
+the previous tag, so a clear pull request title is also the release note.
 
 ## Getting help
 
-Open an issue with what you tried, what you expected and what happened, including the
-installed `agentenv-framework` version (`python -c "import importlib.metadata as m; print(m.version('agentenv-framework'))"`) and the sandbox backend in use.
+Ask questions in [Discussions Q&A](https://github.com/scaleapi/agentenv-framework/discussions/categories/q-a).
+Report bugs with the [bug report form](https://github.com/scaleapi/agentenv-framework/issues/new?template=bug_report.yml):
+it asks for the output of `agent-env plugin list`, which shows the installed version, how agent-env is
+installed, the config file in effect and the plugins. Report vulnerabilities privately, as described in
+[SECURITY.md](SECURITY.md).

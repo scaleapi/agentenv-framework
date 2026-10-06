@@ -47,8 +47,8 @@ def test_nested_list_items_are_redaction_stripped():
 
 
 def test_regraft_redacted_keys_restores_secrets_into_a_stored_context():
-    live = {"user_overrides": {"litellm_api_key": "sk", "priority": 1}, "remote_tokens": "r", "plain": 1}
-    stored = {"user_overrides": {"priority": 1}, "plain": 1}
+    live = {"user_overrides": {"litellm_api_key": "sk", "agent_effort": "high"}, "remote_tokens": "r", "plain": 1}
+    stored = {"user_overrides": {"agent_effort": "high"}, "plain": 1}
     regraft_redacted_keys(live, stored)
     assert stored == live
 
@@ -77,9 +77,9 @@ def test_regraft_never_overwrites_a_value_the_rebuild_did_write():
 
 
 def test_the_judge_key_never_reaches_the_store_but_survives_a_rebuild():
-    live = TaskStepContext(metadata={"user_overrides": {"judge_litellm_api_key": "sk-judge", "priority": 1}})
+    live = TaskStepContext(metadata={"user_overrides": {"judge_litellm_api_key": "sk-judge", "agent_effort": "high"}})
     stored = live.to_safe_dict()
-    assert stored["metadata"]["user_overrides"] == {"priority": 1}
+    assert stored["metadata"]["user_overrides"] == {"agent_effort": "high"}
     assert "sk-judge" not in repr(build_context_update_ops(None, live).to_journal_dict())
     _rebuild_context(live, stored)
-    assert live.metadata["user_overrides"] == {"judge_litellm_api_key": "sk-judge", "priority": 1}
+    assert live.metadata["user_overrides"] == {"judge_litellm_api_key": "sk-judge", "agent_effort": "high"}

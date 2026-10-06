@@ -68,6 +68,9 @@ class GrantingStore:
     def object_url(self, key):
         return f"s3://bucket/{key}"
 
+    def grants_reach(self, sandbox_type):
+        return True
+
     def get_object_key(self, object_url):
         return object_url.removeprefix("s3://bucket/")
 
@@ -75,7 +78,7 @@ class GrantingStore:
         self.puts.append(key)
         return self.object_url(key)
 
-    def issue_write_grant(self, object_url, *, media_type, max_bytes, expires_in):
+    def issue_write_grant(self, object_url, *, media_type, max_bytes, expires_in=None):
         self.write_grants.append((object_url, media_type, max_bytes))
         if self.grant_error is not None:
             raise self.grant_error
@@ -107,6 +110,7 @@ async def test_no_extension_on_card_skips_the_fetch_entirely(monkeypatch):
 
     uri = await verifier._fetch_judge_trajectory(
         judge_a2a_url="http://judge.example", judge_agent_card={}, a2a_server_task_id="t1",
+        sandbox_type="local",
     )
     assert uri is None
 
@@ -123,6 +127,7 @@ async def test_extension_without_an_endpoint_skips_the_fetch_without_guessing_on
     card = {"capabilities": {"extensions": [{"uri": A2AAgent.EXT_TRAJECTORY, "params": {}}]}}
     uri = await verifier._fetch_judge_trajectory(
         judge_a2a_url="http://judge.example", judge_agent_card=card, a2a_server_task_id="t1",
+        sandbox_type="local",
     )
     assert uri is None
 
@@ -154,6 +159,7 @@ async def test_inline_trajectory_gets_uploaded_and_its_url_returned(monkeypatch)
         judge_a2a_url="http://judge.example",
         judge_agent_card=_card_with_trajectory_ext(),
         a2a_server_task_id="t1",
+        sandbox_type="local",
     )
 
     assert uri == "s3://bucket/judge_trajectories/verifier_id=verifier-test/trajectory-t1.json"
@@ -162,7 +168,7 @@ async def test_inline_trajectory_gets_uploaded_and_its_url_returned(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_server_side_s3_prefix_is_listed_for_the_object_url(monkeypatch):
+async def test_a_judge_naming_its_own_trajectory_prefix_yields_no_trajectory(monkeypatch):
     verifier = _verifier()
 
     async def fake_request(self, method, url, **kwargs):
@@ -180,8 +186,7 @@ async def test_server_side_s3_prefix_is_listed_for_the_object_url(monkeypatch):
             return f"s3://bucket/{key}"
 
         def list_at(self, prefix):
-            assert prefix == "s3://bucket/pre/"
-            return ["s3://bucket/pre/trajectory-t1.json"]
+            raise AssertionError("an agent-named prefix is never listed")
 
     _use_store(monkeypatch, FakeStore())
 
@@ -189,8 +194,9 @@ async def test_server_side_s3_prefix_is_listed_for_the_object_url(monkeypatch):
         judge_a2a_url="http://judge.example",
         judge_agent_card=_card_with_trajectory_ext(),
         a2a_server_task_id="t1",
+        sandbox_type="local",
     )
-    assert uri == "s3://bucket/pre/trajectory-t1.json"
+    assert uri is None
 
 
 @pytest.mark.asyncio
@@ -219,6 +225,7 @@ async def test_advertised_object_trajectory_writes_to_the_judge_prefix(monkeypat
         judge_a2a_url="http://judge.example",
         judge_agent_card=_card_with_object_trajectory_ext(),
         a2a_server_task_id="t1",
+        sandbox_type="local",
     )
 
     assert store.write_grants == [(uri, "application/json", DEFAULT_TRAJECTORY_MAX_BYTES)]
@@ -239,6 +246,7 @@ async def test_the_judge_prefix_is_under_the_fixture_prefix(monkeypatch):
         judge_a2a_url="http://judge.example",
         judge_agent_card=_card_with_object_trajectory_ext(),
         a2a_server_task_id="t1",
+        sandbox_type="local",
     )
 
     assert uri.startswith("s3://bucket/fx/judge_trajectories/verifier_id=verifier-test/trajectory-")
@@ -266,6 +274,7 @@ async def test_each_call_names_its_trajectory_apart_from_the_judge_task_id(monke
     uris = [
         await verifier._fetch_judge_trajectory(
             judge_a2a_url="http://judge.example", judge_agent_card=card, a2a_server_task_id="t1",
+            sandbox_type="local",
         )
         for _ in range(2)
     ]
@@ -294,6 +303,7 @@ async def test_a_store_without_grants_asks_an_object_capable_judge_inline(monkey
         judge_a2a_url="http://judge.example",
         judge_agent_card=_card_with_object_trajectory_ext(),
         a2a_server_task_id="t1",
+        sandbox_type="local",
     )
 
     assert sent == [{"task_id": "t1"}]
@@ -317,6 +327,7 @@ async def test_a_grant_that_cannot_be_issued_is_not_retried(monkeypatch):
         judge_a2a_url="http://judge.example",
         judge_agent_card=_card_with_object_trajectory_ext(),
         a2a_server_task_id="t1",
+        sandbox_type="local",
     )
 
     assert uri is None
@@ -339,6 +350,7 @@ async def test_a_transport_failure_is_retried_then_swallowed_not_raised(monkeypa
         judge_a2a_url="http://judge.example",
         judge_agent_card=_card_with_trajectory_ext(),
         a2a_server_task_id="t1",
+        sandbox_type="local",
     )
     assert uri is None
     assert attempts == RubricsVerifierTaskStep.DEFAULT_MAX_RETRIES
@@ -369,6 +381,7 @@ async def test_a_transient_failure_is_retried_until_it_succeeds(monkeypatch):
         judge_a2a_url="http://judge.example",
         judge_agent_card=_card_with_trajectory_ext(),
         a2a_server_task_id="t1",
+        sandbox_type="local",
     )
     assert uri == "s3://bucket/trajectory.json"
     assert attempts == 2
@@ -389,9 +402,12 @@ async def test_invoke_judge_a2a_wires_the_captured_trajectory_onto_the_result(mo
     monkeypatch.setattr(protocol, "send_a2a_message", fake_send)
     monkeypatch.setattr(protocol, "poll_a2a_task", fake_poll)
 
-    async def fake_fetch(self, *, judge_a2a_url, judge_agent_card, a2a_server_task_id):
+    async def fake_fetch(
+        self, *, judge_a2a_url, judge_agent_card, a2a_server_task_id, sandbox_type
+    ):
         assert judge_a2a_url == "http://judge.example"
         assert a2a_server_task_id == "task-1"
+        assert sandbox_type is None
         return "s3://bucket/judge_trajectories/verifier_id=verifier-test/trajectory-task-1.json"
 
     monkeypatch.setattr(RubricsVerifierTaskStep, "_fetch_judge_trajectory", fake_fetch)

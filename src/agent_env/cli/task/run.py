@@ -12,7 +12,8 @@ import click
 
 from agent_env.cli.banner import print_banner
 from agent_env.cli.identity import get_agent_env_client_id
-from agent_env.store.ids import fs_safe
+from agent_env.store.ids import derive_id, fs_safe, is_local_id, validate_local_id
+from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTaskStep
 
 
 _print_lock = asyncio.Lock()
@@ -311,53 +312,6 @@ def _stamp_agent_env_client_metadata(context_metadata: dict, client_id: str | No
         context_metadata.setdefault("agent_env_hub", {}).setdefault("caller", client_id)
 
 
-# Step types whose execution path makes LiteLLM calls (directly or via a
-# deployed agent that consumes LITELLM_* env vars). Used to decide whether
-# the cost-attribution banner is relevant for a given task.
-_LITELLM_USING_STEP_TYPES: frozenset[str] = frozenset({
-    "deploy_agent",
-    "prompt_agent",
-    "rubrics_verifier",
-})
-
-
-def _task_uses_litellm(task) -> bool:
-    """True if any of the task's steps are known to make LiteLLM calls."""
-    return any(getattr(step, "type", None) in _LITELLM_USING_STEP_TYPES for step in task.steps)
-
-
-def _warn_missing_cost_attribution(
-    project_id: str | None,
-    task,
-) -> None:
-    """Yellow CLI banner when `--project-id` is missing on a LiteLLM task.
-
-    Project ID is the primary attribution dimension (it becomes the
-    LiteLLM `user` field that spend reporting joins on to derive the
-    customer). Skipped when the task has no LiteLLM-using
-    steps. Never blocks the run.
-    """
-    if project_id:
-        return
-    if not _task_uses_litellm(task):
-        return
-    click.echo(click.style(
-        "⚠  LiteLLM cost attribution is incomplete: --project-id not set.",
-        fg="yellow", bold=True,
-    ))
-    click.echo(click.style(
-        "   Runs will still start, but spend won't be tagged to a "
-        "project.",
-        fg="yellow",
-    ))
-    click.echo(click.style(
-        "   Pass --project-id <project-id> on your next run so the "
-        "cost shows up in your team's budget.",
-        fg="yellow",
-    ))
-    click.echo()
-
-
 async def _run_single(task, run_index, task_id, output_dir, agent_model=None, agent_artifact_id=None, start_step=0, context=None):
     """Execute a single parallel run."""
     tag = f"[run {run_index}] "
@@ -383,8 +337,6 @@ async def _run_single(task, run_index, task_id, output_dir, agent_model=None, ag
 @click.option("--a2a-agent-id", default=None, type=str, help="Override A2A agent id for deploy_agent steps")
 @click.option("--agent-sandbox", default=None,
               help="Override agent sandbox backend(s) for deploy_agent steps; comma-separated for fallback chain (e.g. 'modal,local')")
-@click.option("--project-id", "project_id", default=None, type=str,
-              help="Project id for LiteLLM cost attribution. Forwarded as the `user` field on every LLM call and as `projectId:<id>` in `metadata.tags`. Optional, but spend won't be attributed to a project without it.")
 @click.option("--env-sandbox", default=None,
               help="Override env sandbox backend(s) for deploy_env steps; comma-separated for fallback chain (e.g. 'modal,local')")
 @click.option("--gateway-env-id", default=None, type=str,
@@ -395,7 +347,7 @@ async def _run_single(task, run_index, task_id, output_dir, agent_model=None, ag
               help="Override the env state type for deploy_env steps")
 @click.option("--env-state-instance-id", default=None, type=str,
               help="Attach env to an existing EnvStateInstance")
-def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, agent_model: str | None, agent_artifact_id: str | None, start_step: int, context_json: str | None, litellm_api_key: str | None, judge_litellm_api_key: str | None, apply_trajectory_filter: bool | None, a2a_agent_id: str | None, agent_sandbox: str | None, project_id: str | None, env_sandbox: str | None, gateway_env_id: str | None, service_db_env_id: str | None, env_state_type: str | None, env_state_instance_id: str | None):
+def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, agent_model: str | None, agent_artifact_id: str | None, start_step: int, context_json: str | None, litellm_api_key: str | None, judge_litellm_api_key: str | None, apply_trajectory_filter: bool | None, a2a_agent_id: str | None, agent_sandbox: str | None, env_sandbox: str | None, gateway_env_id: str | None, service_db_env_id: str | None, env_state_type: str | None, env_state_instance_id: str | None):
     """Run a task by executing its steps sequentially."""
     if k < 1:
         raise click.BadParameter("must be at least 1", param_hint="'--k'")
@@ -438,15 +390,12 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
     if env_state_instance_id:
         initial_context.metadata.setdefault("user_overrides", {})["env_state_instance_id"] = env_state_instance_id
     initial_context.metadata["task_id"] = task_id
-    if project_id:
-        initial_context.metadata["project_id"] = project_id
 
     click.echo(f"Fetching task: id={task_id} version={task_version or 'latest'}...")
     task = Task.get(task_id, version=task_version)
     click.echo(f"Found task: id={task.id} version={task.version} steps={len(task.steps)}")
 
     print_banner()
-    _warn_missing_cost_attribution(project_id, task)
 
     if k > 1:
         # Parallel runs: compact output with [run N] prefixes
@@ -488,6 +437,13 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
         _write_context(context, task_id, output_dir)
 
 
+def _seed_universe_id(task, seed: dict) -> str | None:
+    """The universe a seed's runs collect into, so runs of one seed share it: derived from the task version and the
+    seed's id, else its name. None leaves collect_artifacts to name it after the run."""
+    seed_name = seed.get("id") or seed.get("name")
+    return derive_id(task.id, f"v{task.version}-{seed_name}") if seed_name else None
+
+
 @click.command("run-batch")
 @click.option("--id", "task_id", required=True, help="Task id")
 @click.option("--version", "task_version", default=None, type=int, help="Task version (defaults to latest)")
@@ -503,13 +459,11 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
               help="Override agent sandbox backend(s) for deploy_agent steps; comma-separated for fallback chain (e.g. 'modal,local')")
 @click.option("--env-sandbox", default=None,
               help="Override env sandbox backend(s) for deploy_env steps; comma-separated for fallback chain (e.g. 'modal,local')")
-@click.option("--project-id", "project_id", default=None, type=str,
-              help="Project id for LiteLLM cost attribution. Forwarded as the `user` field on every LLM call and as `projectId:<id>` in `metadata.tags`. Optional, but spend won't be attributed to a project without it.")
 @click.option("--env-state-type", default=None, type=str,
               help="Override the env state type for deploy_env steps")
 @click.option("--env-state-instance-id", default=None, type=str,
               help="Attach env to an existing EnvStateInstance")
-def run_batch(task_id: str, task_version: int | None, seeds: str, concurrency: int, output_dir: str | None, agent_model: str | None, agent_artifact_id: str | None, litellm_api_key: str | None, judge_litellm_api_key: str | None, apply_trajectory_filter: bool | None, agent_sandbox: str | None, env_sandbox: str | None, project_id: str | None, env_state_type: str | None, env_state_instance_id: str | None):
+def run_batch(task_id: str, task_version: int | None, seeds: str, concurrency: int, output_dir: str | None, agent_model: str | None, agent_artifact_id: str | None, litellm_api_key: str | None, judge_litellm_api_key: str | None, apply_trajectory_filter: bool | None, agent_sandbox: str | None, env_sandbox: str | None, env_state_type: str | None, env_state_instance_id: str | None):
     """Run a task in batch against multiple seeds from a CSV file.
 
     Each row in the CSV becomes a seed dict passed to the task via
@@ -534,11 +488,19 @@ def run_batch(task_id: str, task_version: int | None, seeds: str, concurrency: i
     click.echo(f"Fetching task: id={task_id} version={task_version or 'latest'}...")
     task = Task.get(task_id, version=task_version)
     click.echo(f"Found task: id={task.id} version={task.version} steps={len(task.steps)}")
+    suffixes = {step.universe_id_suffix or "" for step in task.steps if isinstance(step, CollectArtifactsTaskStep)}
+    if is_local_id(task.id) and suffixes:
+        for index, seed in enumerate(seed_rows, 1):
+            universe_id = _seed_universe_id(task, seed)
+            for suffix in sorted(suffixes) if universe_id else ():
+                try:
+                    validate_local_id(universe_id + suffix)
+                except ValueError as e:
+                    raise click.ClickException(f"seed {index} can't name an @local universe: {e}") from e
     click.echo(click.style(f"Running {len(seed_rows)} seeds with concurrency={concurrency}...", fg="blue"))
     click.echo()
 
     print_banner()
-    _warn_missing_cost_attribution(project_id, task)
 
     sem = asyncio.Semaphore(concurrency)
     batch_run_group_id = uuid4().hex
@@ -554,11 +516,7 @@ def run_batch(task_id: str, task_version: int | None, seeds: str, concurrency: i
             _stamp_agent_env_client_metadata(ctx.metadata, client_id)
             ctx.metadata["run_group_id"] = batch_run_group_id
             ctx.metadata["seed"] = seed
-            # Populate universe_id so collect_artifacts can name the
-            # FileArtifactUniverse stably across runs of the same seed.
-            # Prefer seed.id, fall back to seed.name. If neither is set,
-            # collect_artifacts falls through to the per-run instance_id.
-            universe_id = seed.get("id") or seed.get("name")
+            universe_id = _seed_universe_id(task, seed)
             if universe_id:
                 ctx.metadata["universe_id"] = universe_id
             if litellm_api_key:
@@ -576,8 +534,6 @@ def run_batch(task_id: str, task_version: int | None, seeds: str, concurrency: i
             if env_state_instance_id:
                 ctx.metadata.setdefault("user_overrides", {})["env_state_instance_id"] = env_state_instance_id
             ctx.metadata["task_id"] = task_id
-            if project_id:
-                ctx.metadata["project_id"] = project_id
 
             click.echo(click.style(f"{tag} Starting...", fg="yellow"))
             context = await task.run(

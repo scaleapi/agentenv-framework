@@ -32,7 +32,7 @@ from agent_env.env.envs._deployment import (
 )
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.website import WebsiteEnv
-from agent_env.store.routing import refuse_local_derivation
+from agent_env.store.ids import derive_id
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER
 from agent_env.attribution import Attribution
 
@@ -87,10 +87,10 @@ class MultiEnv(Env):
         return cls(id=data["id"], version=data.get("version"), mcp_server_envs=mcp_server_envs, website_envs=website_envs, metadata=data.get("metadata", {}),
                    name=data.get("name"), env_provider_type=data.get("env_provider_type", "gateway"))
 
-    async def deploy(self, ttl_seconds: int = 10800, disk_size_gb: float = 10, gateway_mode: GatewayMode = GatewayMode.PERFORMANCE, cpu: float | None = None, memory_mb: int | None = None, sandbox_type: str | None = None, priority: Optional[int] = None, env_state_type: str | None = None, env_state_instance_id: str | None = None, *, attribution: Optional[Attribution] = None) -> DeployedEnv:
+    async def deploy(self, ttl_seconds: int = 10800, disk_size_gb: float = 10, gateway_mode: GatewayMode = GatewayMode.PERFORMANCE, cpu: float | None = None, memory_mb: int | None = None, sandbox_type: str | None = None, env_state_type: str | None = None, env_state_instance_id: str | None = None, *, attribution: Optional[Attribution] = None) -> DeployedEnv:
         deployed_env = await deploy_through_provider(
             self, environment_name=None, ttl_seconds=ttl_seconds, sandbox_type=sandbox_type,
-            disk_size_gb=disk_size_gb, gateway_mode=gateway_mode, cpu=cpu, memory_mb=memory_mb, priority=priority,
+            disk_size_gb=disk_size_gb, gateway_mode=gateway_mode, cpu=cpu, memory_mb=memory_mb,
             env_state_type=env_state_type, env_state_instance_id=env_state_instance_id, attribution=attribution,
         )
         self._gateway_mode = gateway_mode
@@ -578,6 +578,7 @@ class MultiEnv(Env):
             gateway_mode=self._gateway_mode,
             state_provider=gw._state_provider,  # local-only, set above
             state_instance=gw._state_instance,
+            host_ips=self._sandbox.host_ips,
             mcp_server_name=self._mcp_server_name or self.name,
         )
         compose_content = compose_content.replace(
@@ -632,11 +633,10 @@ COMPOSE_EOF'''
 
         Deploys the env, fetches + persists its composed EnvironmentCard, then tears down.
         """
-        refuse_local_derivation(self.id, "env", "validating")
         from agent_env.task import Task
         from agent_env.task_step import DeployEnvTaskStep, VerifyEnvironmentCardStep
 
-        task_id = f"validate-{self.id}-v{self.version}"
+        task_id = derive_id(self.id, f"validate-v{self.version}")
         task = Task.put(
             id=task_id,
             steps=[
@@ -668,7 +668,6 @@ COMPOSE_EOF'''
         merged into the ``UNIVERSE_COMPATIBILITY`` result as per-service critical issues — so they
         surface (and gate ``compatible``) the same way programmatic issues do.
         """
-        refuse_local_derivation(self.id, "env", "validating")
         from agent_env.task import Task
         from agent_env.task_step import (
             CombineUniverseVerdictsStep,
@@ -688,7 +687,9 @@ COMPOSE_EOF'''
         from agent_env.artifact import EnvironmentUniverseArtifact
 
         universe = EnvironmentUniverseArtifact.get(universe_artifact_id, universe_artifact_version)
-        task_id = f"validate-universe-compat-{self.id}-v{self.version}-{universe.id}-v{universe.version}"
+        task_id = VerifyUniverseLoadExportRoundtripStep.validation_id(
+            "validate-universe-compat", self.id, self.version, universe.id, universe.version
+        )
         environment_names = [sa.environment_name for sa in universe.get_environment_artifacts()]
         fau_id = VerifyUniverseLoadExportRoundtripStep.file_artifact_universe_id(self.id, self.version, universe.id, universe.version)
         judge_name = "universe-judge"

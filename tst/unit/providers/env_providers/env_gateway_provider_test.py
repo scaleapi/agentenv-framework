@@ -209,7 +209,7 @@ async def test_container_mode_constructs_internal_mcp_servers_url_format():
 
     assert len(gp._container_sandboxes) == 4
 
-    # PR 2: the deploy routes DB state through the provider.
+    # The deploy routes DB state through the provider.
     # servicedb container env comes from the provider's store-spec
     db_call = next(c for c in create_calls if c["port"] == SERVICE_DB_PORT)
     assert db_call["env"] == LocalPostgresStateProvider().store_spec(["slack", "email"]).env
@@ -1308,7 +1308,7 @@ async def test_a_chained_gateway_that_fails_everywhere_names_every_member():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("attribution, forwarded", [({"project_id": "p1"}, {"project_id": "p1"}), (None, {})], ids=["set", "unset"])
+@pytest.mark.parametrize("attribution, forwarded", [({"team": "t1"}, {"team": "t1"}), (None, {})], ids=["set", "unset"])
 async def test_create_gateway_hands_the_deploy_path_every_argument(attribution, forwarded):
     """The topology entry point loses nothing on its way to the VM path; attribution arrives as a fresh dict."""
     from agent_env.env.gateway import GatewayMode
@@ -1316,14 +1316,14 @@ async def test_create_gateway_hands_the_deploy_path_every_argument(attribution, 
     gp, provider = EnvironmentGatewayProvider(), MagicMock()
     args = dict(mcp_servers=[MagicMock()], mcp_server_images=[MagicMock()], gateway_port=18999, website_configs=[MagicMock()],
                 website_images=[MagicMock()], gateway_mode=GatewayMode.CONSISTENT, ttl_seconds=61, disk_size_gb=11, cpu=1.5,
-                memory_mb=3072, priority=7, existing_sandbox=MagicMock(), sidecars=[MagicMock()], mcp_server_name="crm")
+                memory_mb=3072, existing_sandbox=MagicMock(), sidecars=[MagicMock()], mcp_server_name="crm")
     with patch.object(gp, "_deploy_via_vm", AsyncMock(return_value=_probed())) as vm, \
          patch.object(env_gateway_provider, "_tool_names", AsyncMock(return_value=set())):
         await gp.create_gateway(sandbox_provider=provider, env_id="crm-env", attribution=attribution, **args)
 
     [call] = vm.await_args_list
     assert call.args == (provider, args.pop("mcp_servers"), args.pop("mcp_server_images"))
-    assert call.kwargs == {**args, "attribution": forwarded, "priority": 7}
+    assert call.kwargs == {**args, "attribution": forwarded}
     assert call.kwargs["attribution"] is not attribution
 
 
@@ -1336,7 +1336,7 @@ async def test_deploy_returns_the_gateway_record_for_the_env(caplog):
     caplog.set_level(logging.INFO, logger="agent_env.providers.env_providers")
     gp, external = EnvironmentGatewayProvider(), MagicMock(state_type="remote", instance_id="st-ext")
     state_provider = MagicMock(spec=DatabaseStateProvider, prepare=AsyncMock(), teardown=AsyncMock())
-    vm = MagicMock(sandbox_id="vm-1", type="modal_vm", tunnel_urls={18765: "https://vm.example"}, host_port=lambda port: port,
+    vm = MagicMock(sandbox_id="vm-1", type="modal_vm", tunnel_urls={18765: "https://vm.example"}, host_port=lambda port: port, host_ips=(),
                    load_docker_images=AsyncMock(), exec_script=AsyncMock(), exec_with_output=AsyncMock(return_value=(0, "gateway", "")))
     env = MagicMock(id="crm-env", version=3, environment_name="slack", docker_image_artifact=MagicMock(image_name="mcp-slack"))
     card = {"name": "env1234", "children_environments": []}
@@ -1359,6 +1359,7 @@ async def test_deploy_returns_the_gateway_record_for_the_env(caplog):
     [server] = compose.call_args.kwargs["mcp_servers"]
     assert (server.image, server.environment_name, compose.call_args.kwargs["gateway_mode"]) == ("mcp-slack", "slack", GatewayMode.CONSISTENT)
     assert re.fullmatch(r"env\d{4}", compose.call_args.kwargs["mcp_server_name"])
+    assert compose.call_args.kwargs["host_ips"] == ()
     assert dataclasses.asdict(record) == dataclasses.asdict(DeployedGatewayEnv(
         env_id="crm-env", env_version=3, gateway_url="https://vm.example", mcp_url="https://vm.example/mcp", db_web_url=None,
         sandbox_id="vm-1", sandbox_type="modal_vm", sandbox_ids={}, db_mcp_url=None,

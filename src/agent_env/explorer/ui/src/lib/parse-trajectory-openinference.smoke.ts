@@ -5,7 +5,7 @@
  * output.
  *
  * The fixture is a 22-span trajectory captured from a 3-sub-agent kimi-k2p5
- * run via `/tmp/smoke_otel_bridge.py`. It exercises the OpenInference
+ * run. It exercises the OpenInference
  * adapter on every span kind (AGENT/CHAIN/TOOL/LLM), nested sub-agent
  * runs, and tool calls.
  *

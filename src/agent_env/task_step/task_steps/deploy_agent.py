@@ -16,13 +16,13 @@ from agent_env.a2a_agent import protocol
 from agent_env.a2a_agent.object_transfer import (
     REPLY_TIMEOUT_SECONDS,
     TRANSFER_TIMEOUT_SECONDS,
-    bounded_echo,
     changelog_apply_call,
     changelog_enable_call,
     check_changelog_applied,
     invoke_transfer,
     snapshot_load_call,
 )
+from agent_env.a2a_agent.staging import StagedObjectStore, transfer_store
 from agent_env.config import get_config
 from agent_env.env.env import DeployedEnv, DeployedSandboxEnv, Env
 from agent_env.providers.sandbox_providers.sandbox_provider import reachable_url, sandbox_request_headers_for_url
@@ -116,11 +116,9 @@ class DeployAgentTaskStep(TaskStep):
         agent_snapshot_files_artifact_id: Optional[str] = None,
         agent_snapshot_files_artifact_version: Optional[int] = None,
         agent_snapshot_target_context_id: Optional[str] = None,
-        priority: Optional[int] = None,
         network_policy: Optional[dict] = None,
         role: Optional[str] = None,
         enable_agent_changelog: bool = False,
-        agent_changelog_s3_prefix: Optional[str] = None,
         agent_changelog_toolcall_position_exclusive: Optional[int] = None,
         sandbox_name: Optional[str] = None,
         enable_docker: bool = False,
@@ -148,24 +146,18 @@ class DeployAgentTaskStep(TaskStep):
         self.agent_snapshot_files_artifact_id = agent_snapshot_files_artifact_id
         self.agent_snapshot_files_artifact_version = agent_snapshot_files_artifact_version
         self.agent_snapshot_target_context_id = agent_snapshot_target_context_id
-        self.priority = priority
         self.metadata = metadata or {}
         self.network_policy = NetworkPolicy.from_dict(network_policy).to_dict() if network_policy else None
         self.role = role
         self.enable_agent_changelog = enable_agent_changelog
         self.agent_changelog_object_url = agent_changelog_object_url
-        self.agent_changelog_s3_prefix = agent_changelog_s3_prefix
         self.agent_changelog_toolcall_position_exclusive = agent_changelog_toolcall_position_exclusive
-        if self.agent_changelog_object_url and self.agent_changelog_s3_prefix:
-            raise ValueError(
-                "set only one of agent_changelog_object_url and "
-                "agent_changelog_s3_prefix"
-            )
-        if self.agent_changelog_toolcall_position_exclusive is not None and not (
-            self.agent_changelog_object_url or self.agent_changelog_s3_prefix
+        if (
+            self.agent_changelog_toolcall_position_exclusive is not None
+            and not self.agent_changelog_object_url
         ):
             raise ValueError(
-                "agent_changelog_toolcall_position_exclusive requires a changelog source"
+                "agent_changelog_toolcall_position_exclusive requires agent_changelog_object_url"
             )
         self.sandbox_name = sandbox_name
         # Rootless Docker-in-Docker for the agent (not the VM socket); VM mode only.
@@ -191,13 +183,11 @@ class DeployAgentTaskStep(TaskStep):
         base["agent_snapshot_files_artifact_id"] = self.agent_snapshot_files_artifact_id
         base["agent_snapshot_files_artifact_version"] = self.agent_snapshot_files_artifact_version
         base["agent_snapshot_target_context_id"] = self.agent_snapshot_target_context_id
-        base["priority"] = self.priority
         base["metadata"] = self.metadata
         base["network_policy"] = self.network_policy
         base["role"] = self.role
         base["enable_agent_changelog"] = self.enable_agent_changelog
         base["agent_changelog_object_url"] = self.agent_changelog_object_url
-        base["agent_changelog_s3_prefix"] = self.agent_changelog_s3_prefix
         base["agent_changelog_toolcall_position_exclusive"] = self.agent_changelog_toolcall_position_exclusive
         base["sandbox_name"] = self.sandbox_name
         base["enable_docker"] = self.enable_docker
@@ -205,6 +195,11 @@ class DeployAgentTaskStep(TaskStep):
 
     @classmethod
     def from_dict(cls, data: dict) -> DeployAgentTaskStep:
+        if data.get("agent_changelog_s3_prefix"):
+            raise ValueError(
+                "agent_changelog_s3_prefix is no longer supported: an S3-form changelog cannot "
+                "be applied; capture it again and set agent_changelog_object_url"
+            )
         return cls(
             **cls._base_from_dict(data),
             env_ids=data.get("env_ids"),
@@ -225,19 +220,28 @@ class DeployAgentTaskStep(TaskStep):
             agent_snapshot_files_artifact_id=data.get("agent_snapshot_files_artifact_id"),
             agent_snapshot_files_artifact_version=data.get("agent_snapshot_files_artifact_version"),
             agent_snapshot_target_context_id=data.get("agent_snapshot_target_context_id"),
-            priority=data.get("priority"),
             metadata=dict(data.get("metadata") or {}),
             network_policy=data.get("network_policy"),
             role=data.get("role"),
             enable_agent_changelog=data.get("enable_agent_changelog", False),
             agent_changelog_object_url=data.get("agent_changelog_object_url"),
-            agent_changelog_s3_prefix=data.get("agent_changelog_s3_prefix"),
             agent_changelog_toolcall_position_exclusive=data.get("agent_changelog_toolcall_position_exclusive"),
             sandbox_name=data.get("sandbox_name"),
             enable_docker=data.get("enable_docker", False),
         )
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
+        # An agent is recorded in the context only once it is configured, so one that fails on the way there
+        # (a snapshot or changelog that can't be loaded, say) is closed here, or no teardown would find it.
+        deployed: list = []
+        try:
+            return await self._execute(context, deployed)
+        except BaseException:
+            for agent in deployed:
+                await agent.close()
+            raise
+
+    async def _execute(self, context: TaskStepContext, deployed_agents: list) -> TaskStepContext:
         from agent_env.a2a_agent import A2AAgent
         from agent_env.a2a_agent.a2a_agent import DEFAULT_A2A_PORT
         from agent_env.providers.sandbox_providers.sandbox_provider import (
@@ -300,13 +304,6 @@ class DeployAgentTaskStep(TaskStep):
         if resolved_litellm_base_url:
             env_vars["LITELLM_BASE_URL"] = resolved_litellm_base_url
 
-        # Cost-attribution (project_id / task_id) is delivered per-prompt
-        # via the A2A `/ext/agent-config` extension from prompt_agent.py —
-        # not baked as container env vars at deploy time. See
-        # the openai_agents_sdk A2A agent in the universe-generation pipeline
-        # for the reference implementation that reads agent-config and threads
-        # `user` / `metadata.tags` into each LiteLLM call.
-
         resolved_sandbox_type = user_overrides.get("agent_sandbox") or self.sandbox_type
         deploy_kwargs = {"env_vars": env_vars if env_vars else None}
         if agent_disk_size_gb is not None:
@@ -320,10 +317,6 @@ class DeployAgentTaskStep(TaskStep):
         if self.memory_mb is not None:
             deploy_kwargs["memory"] = self.memory_mb
         deploy_kwargs["attribution"] = deploy_attribution(self, context)
-        _priority_override = user_overrides.get("priority")
-        resolved_priority = _priority_override if _priority_override is not None else self.priority
-        if resolved_priority is not None:
-            deploy_kwargs["priority"] = resolved_priority
         _policy_override = user_overrides.get("network_policy")
         resolved_policy = _policy_override if _policy_override is not None else self.network_policy
         if resolved_policy is not None:
@@ -333,6 +326,7 @@ class DeployAgentTaskStep(TaskStep):
         if linked_sandbox is not None:
             deploy_kwargs["sandbox"] = linked_sandbox
         deployed = await agent.deploy(**deploy_kwargs)
+        deployed_agents.append(agent)
         a2a_url = deployed.a2a_url
         card = deployed.agent_card
         logger.info(f"A2A agent '{a2a_agent_id}' deployed at {a2a_url}")
@@ -408,14 +402,14 @@ class DeployAgentTaskStep(TaskStep):
             logger.info(f"Set context.default_agent_model to '{default_model}'")
 
         if self.agent_snapshot_files_artifact_id:
-            await self._load_snapshot(a2a_url, card, a2a_agent_id, context)
+            await self._load_snapshot(a2a_url, card, a2a_agent_id, context, sandbox_type=deployed.sandbox_type)
 
-        if self.agent_changelog_object_url or self.agent_changelog_s3_prefix:
-            await self._apply_agent_changelog(a2a_url, card, context)
+        if self.agent_changelog_object_url:
+            await self._apply_agent_changelog(a2a_url, card, context, sandbox_type=deployed.sandbox_type)
 
         if self.enable_agent_changelog:
             await self._configure_agent_changelog(
-                a2a_url, card, context, expires_in=resolved_ttl
+                a2a_url, card, context, expires_in=resolved_ttl, sandbox_type=deployed.sandbox_type
             )
 
         context.deployed_agents.append(DeployedAgent(
@@ -471,6 +465,7 @@ class DeployAgentTaskStep(TaskStep):
         context: TaskStepContext,
         *,
         expires_in: int,
+        sandbox_type: str | None,
     ) -> None:
         """Enable whole-writable-layer changelog capture via the snapshot enable-changelog method; records the derived prefix in context.metadata['agent_changelog']."""
         from agent_env.a2a_agent import A2AAgent
@@ -485,7 +480,7 @@ class DeployAgentTaskStep(TaskStep):
         instance_id = (context.instance_id or "noinstance").replace("/", "_")
         agent_name = self.agent_name.replace("/", "_")
         config = get_config()
-        store = config.get_object_store()
+        store = transfer_store(config.get_object_store(), a2a_url, card, sandbox_type=sandbox_type)
         namespace_url = store.object_url(f"{config.get_artifact_key_prefix()}agent_changelog/{instance_id}/{agent_name}")
         call = await asyncio.to_thread(
             changelog_enable_call,
@@ -494,6 +489,7 @@ class DeployAgentTaskStep(TaskStep):
             agent_name=self.agent_name,
             namespace_url=namespace_url,
             expires_in=expires_in,
+            sandbox_type=sandbox_type,
         )
         answer = await invoke_transfer(
             a2a_url + path,
@@ -502,21 +498,24 @@ class DeployAgentTaskStep(TaskStep):
             operation="changelog enable",
             timeout=REPLY_TIMEOUT_SECONDS,
             response_model=NamespaceChangelogEnableResponse,
+            store=store,
         )
-        if call.mode == "objects":
-            roots, object_url = answer.roots, namespace_url
-        else:
-            roots = answer.get("roots")
-            object_url = bounded_echo(namespace_url, answer.get("s3_prefix") or namespace_url)
-        context.metadata.setdefault("agent_changelog", []).append({
+        entry = {
             "agent_name": self.agent_name,
-            "roots": roots,
+            "roots": answer.roots,
             "transfer_mode": call.mode,
-            "object_url": object_url,
-        })
-        logger.info(f"agent-changelog capture enabled on '{self.agent_name}': {object_url}")
+            "object_url": namespace_url,
+        }
+        if isinstance(store, StagedObjectStore):
+            # The increments wait on the agent until they are drained into the store.
+            entry["staging_url"] = store.namespaces[-1].staging_url
+            entry["staging_max_object_bytes"] = store.namespaces[-1].max_object_bytes
+        context.metadata.setdefault("agent_changelog", []).append(entry)
+        logger.info(f"agent-changelog capture enabled on '{self.agent_name}': {namespace_url}")
 
-    async def _apply_agent_changelog(self, a2a_url: str, card: dict, context: TaskStepContext) -> None:
+    async def _apply_agent_changelog(
+        self, a2a_url: str, card: dict, context: TaskStepContext, *, sandbox_type: str | None
+    ) -> None:
         """Rewind this fresh agent to a point in a source changelog (fs + conversation) via the snapshot apply-changelog method and resume."""
         from agent_env.a2a_agent import A2AAgent
 
@@ -527,18 +526,18 @@ class DeployAgentTaskStep(TaskStep):
                 f"Agent '{self.agent_name}' does not support the snapshot "
                 f"'{A2AAgent.SNAPSHOT_METHOD_APPLY_CHANGELOG}' method; cannot apply agent changelog"
             )
-        store = get_config().get_object_store()
-        source_url = self.agent_changelog_object_url or self.agent_changelog_s3_prefix
+        store = transfer_store(get_config().get_object_store(), a2a_url, card, sandbox_type=sandbox_type)
+        source_url = self.agent_changelog_object_url
         call = await asyncio.to_thread(
             changelog_apply_call,
             method,
             store,
             agent_name=self.agent_name,
             source_url=source_url,
-            portable=bool(self.agent_changelog_object_url),
             up_to_tool_call_exclusive=self.agent_changelog_toolcall_position_exclusive,
             resume_conversation=True,
             target_context_id=self.agent_snapshot_target_context_id,
+            sandbox_type=sandbox_type,
         )
         answer = await invoke_transfer(
             a2a_url + path,
@@ -547,12 +546,10 @@ class DeployAgentTaskStep(TaskStep):
             operation="changelog apply",
             timeout=TRANSFER_TIMEOUT_SECONDS,
             response_model=ObjectChangelogApplyResponse,
+            store=store,
         )
-        if call.mode == "objects":
-            check_changelog_applied(answer, call, agent_name=self.agent_name)
-            context_id = answer.context_id
-        else:
-            context_id = answer.get("context_id")
+        check_changelog_applied(answer, call, agent_name=self.agent_name)
+        context_id = answer.context_id
         context.metadata.setdefault("agent_changelog_rewinds", []).append({
             "agent_name": self.agent_name,
             "context_id": context_id,
@@ -571,6 +568,8 @@ class DeployAgentTaskStep(TaskStep):
         card: dict,
         a2a_agent_id: str,
         context: TaskStepContext,
+        *,
+        sandbox_type: str | None,
     ) -> None:
         """Restore a snapshot into the freshly-deployed agent via /ext/snapshot."""
         from agent_env.a2a_agent import A2AAgent
@@ -592,14 +591,16 @@ class DeployAgentTaskStep(TaskStep):
                 "snapshot universes must be created via put_existing or put_bundled"
             )
         load_method, load_path = A2AAgent.operation(snapshot_ext, "load")
+        store = transfer_store(get_config().get_object_store(), a2a_url, card, sandbox_type=sandbox_type)
         call = await asyncio.to_thread(
             snapshot_load_call,
             load_method,
-            get_config().get_object_store(),
+            store,
             agent_name=self.agent_name,
             bundle_url=universe.bundle_object_url,
             file_names=set((universe.file_artifact_refs or universe.file_artifact_ids or {}).keys()),
             target_context_id=self.agent_snapshot_target_context_id,
+            sandbox_type=sandbox_type,
         )
         answer = await invoke_transfer(
             a2a_url + load_path,
@@ -608,10 +609,9 @@ class DeployAgentTaskStep(TaskStep):
             operation="snapshot load",
             timeout=TRANSFER_TIMEOUT_SECONDS,
             response_model=ObjectSnapshotLoadResponse,
+            store=store,
         )
-        loaded_context_id = (
-            answer.context_id if call.mode == "objects" else answer.get("context_id")
-        )
+        loaded_context_id = answer.context_id
         logger.info(
             f"Loaded snapshot universe={universe.id} v{universe.version} "
             f"into agent '{self.agent_name}' as context_id={loaded_context_id}"

@@ -17,6 +17,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
+from agent_env.store.ids import derive_id, is_local_id, validate_local_id
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.snapshot_utils import agent_state_capture as capture
 
@@ -84,18 +85,18 @@ class SnapshotConfig:
         )
 
 
-def _rollout_discriminator(step_id: str, instance_id: Optional[str]) -> str:
-    """The per-rollout token every artifact id in one series is scoped by.
+def _rollout_base(step_id: str, instance_id: Optional[str]) -> str:
+    """The id every artifact id in one series is derived from: the rollout's instance id.
 
     Instance-scoped, so concurrent rollouts never contend on one id and retries
     reuse it. Deliberately not derived from the context id: a caller-supplied
     ``context_id`` is shared by every rollout, so ids built from it would collide.
     """
     if instance_id:
-        return instance_id.rsplit("-", 1)[-1][:16]
-    generated = uuid.uuid4().hex[:8]
+        return instance_id
+    generated = f"adhoc-{uuid.uuid4().hex[:12]}"
     logger.warning(
-        "%s: no instance_id in context; using random artifact discriminator %s "
+        "%s: no instance_id in context; using random artifact base %s "
         "(retries will not be idempotent)", step_id, generated,
     )
     return generated
@@ -131,8 +132,10 @@ class SnapshotSeries:
         self.a2a_context_id = a2a_context_id
         self.config = config
         self.trajectory_output_prefix = trajectory_output_prefix
-        self._discriminator = _rollout_discriminator(step_id, instance_id)
-        self.workspace_artifact_id = f"{step_id}-workspace-{self._discriminator}"
+        self._base = _rollout_base(step_id, instance_id)
+        self.workspace_artifact_id = derive_id(self._base, f"{step_id}-workspace")
+        if is_local_id(self._base):
+            validate_local_id(derive_id(self._base, f"snapshot-{step_id}-workspace"))
         self._lock = asyncio.Lock()
         self._stop = asyncio.Event()
         self._ticker: Optional[asyncio.Task] = None
@@ -424,6 +427,7 @@ class SnapshotSeries:
             a2a_context_id=self.a2a_context_id,
             artifact_id=self.workspace_artifact_id,
             timeout_seconds=remaining(),
+            sandbox_type=agent.sandbox_type,
         )
         row["id"] = workspace.universe_id
         row["version"] = workspace.universe_version
@@ -440,6 +444,7 @@ class SnapshotSeries:
             context_id=self.a2a_context_id,
             timeout_seconds=remaining(),
             trajectory_output_prefix=self.trajectory_output_prefix,
+            sandbox_type=agent.sandbox_type,
         )
         if traj.reason and is_final:
             recorded = self._recorded_trajectory_uri(context)
@@ -502,7 +507,7 @@ class SnapshotSeries:
                 gateway_url=deployed.gateway_url,
                 # Instance-scoped like the workspace id, never context-scoped: a
                 # pinned `context_id` is shared by every concurrent rollout.
-                snapshot_id=f"snapshot-{self.config.env_id}-{self._discriminator}",
+                snapshot_id=derive_id(self._base, f"snapshot-{self.step_id}"),
                 deployed=deployed,
                 export_timeout_seconds=int(timeout_seconds),
             )

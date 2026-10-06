@@ -23,7 +23,7 @@ from agent_env.eval.eval import Eval
 from agent_env.plugins import _registration
 from agent_env.store.ids import LOCAL_PREFIX, validate_local_id
 from agent_env.task_step.registry import get_task_step_registry
-from agent_env.task_step.task_step import TaskStep, attach_retry_config
+from agent_env.task_step.task_step import TaskStep, attach_retry_config, dependencies
 
 from ._fs import fold, relative, show
 from .parse import NAMED_BY, Bundle, BundleEntry, BundleError, BundleKind
@@ -173,7 +173,7 @@ class _Resolver:
             elif self._derived_outputs(entry, step, cls):
                 declared.append((index, step, cls))
         outputs = self._outputs(entry, declared)
-        upstream = _upstream(steps)
+        upstream = _upstream(steps, self._depends_on(entry, steps))
         references: list[Reference] = []
         for index, step, cls in declared:
             where = f"step {step.get('id')!r}: "
@@ -238,19 +238,20 @@ class _Resolver:
 
     def _derived_outputs(self, entry: BundleEntry, step: dict, cls: type) -> bool:
         """Write in any output id the step's type derives when the field is left out (build_mcp_cli's
-        ``cli-<env_id>``), so it's named like one written out. False when its type can't read the step."""
+        ``<env_id>__cli``), so it's named like one written out. Only its last segment is kept, so an id derived
+        from another bundle's entity is still named under this task. False when its type can't read the step."""
         absent = [ref for ref in cls.entity_refs or ()
                   if ref.role is RefRole.OUTPUT and ref.path == ref.field and step.get(ref.field) is None]
         if not absent:
             return True
         try:
-            read = build_step(step).to_dict()
+            read = build_step({key: value for key, value in step.items() if key != "depends_on"}).to_dict()
         except Exception as e:
             self._problem(entry, f"step {step.get('id')!r}: {cls.type} can't read it ({type(e).__name__}: {e})")
             return False
         for ref in absent:
             if read.get(ref.field) is not None:
-                step[ref.field] = read[ref.field]
+                step[ref.field] = read[ref.field].rsplit("/", 1)[-1]
         return True
 
     def _outputs(self, entry: BundleEntry, declared: list[tuple[int, dict, type]]) -> dict[tuple[EntityKind, str], Output]:
@@ -282,6 +283,28 @@ class _Resolver:
                 site.rewrite(output_id)
                 outputs[kind, name] = Output(kind, output_id, index, step.get("id"), site.ref.artifact_type)
         return outputs
+
+    def _depends_on(self, entry: BundleEntry, steps: list[dict]) -> list[list[str] | None]:
+        """Each step's ``depends_on`` as the step ids it names, read as building the step reads it; None when it
+        has none. One that can't be read, or names no step in the task, is a problem here: a step reading an
+        earlier step's output is checked against these edges before any step is built."""
+        step_ids = {step.get("id") for step in steps}
+        depends = []
+        for step in steps:
+            try:
+                read = dependencies(step.get("depends_on"))
+            except ValueError as e:
+                self._problem(entry, f"step {step.get('id')!r}: {e}")
+                read = []
+            ids = None if read is None else []
+            for dep in read or ():
+                if isinstance(dep.task_step_id, str) and dep.task_step_id in step_ids:
+                    ids.append(dep.task_step_id)
+                else:
+                    self._problem(entry, f"step {step.get('id')!r}: depends_on {dep.task_step_id!r} names no step in "
+                                         "this task")
+            depends.append(ids)
+        return depends
 
     def _resolve(self, entry: BundleEntry, site: RefSite, where: str, name: str, version: int | None,
                  outputs: dict[tuple[EntityKind, str], Output], upstream: set[int],
@@ -358,21 +381,15 @@ def _nfc(name: str) -> str:
     return unicodedata.normalize("NFC", name)
 
 
-def _upstream(steps: list[dict]) -> list[set[int]]:
-    """The indexes of the steps each step runs after: its ``depends_on`` or, when it has none, every
-    step before it, followed transitively; the rule the task scheduler runs steps by."""
+def _upstream(steps: list[dict], depends: list[list[str] | None]) -> list[set[int]]:
+    """The indexes of the steps each step runs after: the step ids ``depends`` holds for it or, when it has
+    none, every step before it, followed transitively; the rule the task scheduler runs steps by."""
     index_of: dict[str, int] = {}
     for index, step in enumerate(steps):
         if isinstance(step.get("id"), str):
             index_of.setdefault(step["id"], index)
-    direct = []
-    for index, step in enumerate(steps):
-        raw = step.get("depends_on")
-        if raw is None:
-            direct.append(set(range(index)))
-            continue
-        ids = [dep.get("task_step_id") for dep in raw if isinstance(dep, dict)] if isinstance(raw, list) else []
-        direct.append({index_of[dep_id] for dep_id in ids if dep_id in index_of})
+    direct = [set(range(index)) if ids is None else {index_of[dep_id] for dep_id in ids}
+              for index, ids in enumerate(depends)]
     upstream = []
     for index in range(len(steps)):
         seen: set[int] = set()

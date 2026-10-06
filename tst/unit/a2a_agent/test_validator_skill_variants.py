@@ -43,7 +43,7 @@ class _Client:
         )
 
     async def post(self, url, *, json, timeout):
-        variant = "bundle" if "skill_bundle" in json else "s3"
+        variant = "bundle" if "skill_bundle" in json else "other"
         self.posts.append({"variant": variant, "json": json})
         status_code = 422 if variant in self.rejected_variants else 200
         return httpx.Response(
@@ -66,6 +66,7 @@ def _context(*, bundle: bool) -> TaskStepContext:
             agent_name="agent",
             api_url="https://agent",
             a2a_url="https://agent",
+            sandbox_type="local",
             a2a_card={
                 "capabilities": {
                     "extensions": [
@@ -91,7 +92,6 @@ def _context(*, bundle: bool) -> TaskStepContext:
         "rubric": {
             "results": [
                 {"id": "secret_code_inline", "score": 1.0},
-                {"id": "secret_code_s3", "score": 1.0},
             ]
         }
     }
@@ -101,10 +101,11 @@ def _context(*, bundle: bool) -> TaskStepContext:
 @pytest.mark.parametrize(
     ("bundle", "rejected_variants", "expected"),
     [
-        (True, set(), {"bundle": True, "s3": True}),
-        (False, set(), {"bundle": False, "s3": True}),
-        (True, {"bundle"}, {"bundle": False, "s3": True}),
+        (True, set(), {"bundle": True}),
+        (False, set(), {"bundle": False}),
+        (True, {"bundle"}, {"bundle": False}),
     ],
+    ids=["bundle", "no-bundle-form", "bundle-rejected"],
 )
 def test_validator_reports_the_artifact_variant_actually_used(
     monkeypatch, tmp_path, bundle, rejected_variants, expected
@@ -137,19 +138,16 @@ def test_validator_reports_the_artifact_variant_actually_used(
             a2a_agent_id="agent-1",
             rubric_verifier_id="rubric",
             skill_bundle_object_url="s3://bucket/bundle/",
-            skill_s3_url="s3://bucket/legacy/",
         ).execute(_context(bundle=bundle))
     )
 
     verification = result.metadata["verifications"]["a2a_skill_config"]
-    assert {name: verification[name] for name in expected} == expected
+    assert verification == {"inline": True, "list": True, **expected}
     options = agent.metadata["validated_a2a_extensions"][
         A2AAgent.EXT_SKILL_CONFIG
     ]["methods"]["add"]["options"]
     assert options["skill_bundle"] == {"supported": expected["bundle"]}
-    assert options["skill_s3_url"] == {"supported": expected["s3"]}
+    assert "skill_s3_url" not in options
     assert options["skill_md"] == {"supported": True}
-    expected_variants = ["s3"]
-    if bundle:
-        expected_variants.insert(0, "bundle")
-    assert [post["variant"] for post in posts] == expected_variants
+    # An agent without the bundle form is never sent the object-backed probe at all.
+    assert [post["variant"] for post in posts] == (["bundle"] if bundle else [])

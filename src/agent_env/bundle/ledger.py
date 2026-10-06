@@ -66,10 +66,17 @@ class Check:
     digest: Digest | None  # None when the write's inputs aren't tracked, so it is always written
     version: int | None  # the version to reuse; None when the write needs a new one
     reasons: tuple[str, ...]
+    stored: int | None  # the store's latest version of the id when checked
+    needs: Mapping[tuple[str, str], int]  # the version hashed for each earlier write it needs, by (store, id)
 
     @property
     def unchanged(self) -> bool:
         return self.version is not None
+
+    @property
+    def next_version(self) -> int:
+        """The version a new write lands on, unless another run writes the id first."""
+        return (self.stored or 0) + 1
 
 
 class Ledger:
@@ -84,15 +91,17 @@ class Ledger:
     def for_plan(cls, plan: Plan) -> Ledger:
         return cls(get_config().local_namespace_document_store(), plan)
 
-    def check(self, write: Write) -> Check:
-        """Compare ``write`` with the latest version the ledger records for it. Checks run in the plan's
-        order, after each earlier write is recorded, so the versions a dependent records are current."""
-        digest = self.digest(write)
+    def check(self, write: Write, needs: Mapping[tuple[str, str], int]) -> Check:
+        """Compare ``write`` with the latest version the ledger records for it. ``needs`` holds, by (store, id),
+        the version each earlier write it needs left or, in a dry run, would leave; an env or agent is hashed with
+        them, so one written anew rewrites it too."""
+        stored = self._stored_version(write)
+        digest = self.digest(write, needs)
         if digest is None:
-            return Check(write, None, None, ("its inputs aren't tracked yet, so it is written every run",))
+            untracked = ("its inputs aren't tracked yet, so it is written every run",)
+            return Check(write, None, None, untracked, stored, needs)
         row = self._latest(write.kind.store, write.id)
         recorded = row["version"] if row else None
-        stored = self._stored_version(write)
         reasons = []
         if row is not None and row["bundle"] != self._bundle:
             reasons.append(f"last written by the bundle {row['bundle']}")
@@ -102,10 +111,11 @@ class Ledger:
             reasons.append(f"the store's latest, v{stored}, wasn't recorded by this bundle")
         if row is not None:
             reasons.extend(_changes(row, digest))
-        return Check(write, digest, None if reasons else recorded, tuple(reasons))
+        return Check(write, digest, None if reasons else recorded, tuple(reasons), stored, needs)
 
-    def digest(self, write: Write) -> Digest | None:
-        """What ``write`` is made from, or None when the ledger can't tell it all, so it is written every run."""
+    def digest(self, write: Write, needs: Mapping[tuple[str, str], int]) -> Digest | None:
+        """What ``write`` is made from, given the version of each write it needs, or None when the ledger can't
+        tell it all, so it is written every run."""
         if not _tracked(write):
             return None
         config = {"dockerfile": write.source.dockerfile} if isinstance(write.source, BuiltImage) else write.source.config
@@ -122,8 +132,7 @@ class Ledger:
             # a store entity it names without a version getting a new one, means it must be written again. A
             # task or eval names its references without a version.
             for store, id in write.needs:
-                row = self._latest(store, id)
-                inputs["needs"][f"{store} {id}"] = str(row["version"]) if row else "unwritten"
+                inputs["needs"][f"{store} {id}"] = str(needs[store, id])
             for ref in write.source.references:
                 if ref.local is None and ref.version is None:
                     inputs["store_refs"][f"{ref.kind} {ref.id}"] = str(self._plan.store_latest[ref.kind, ref.id])
@@ -143,7 +152,7 @@ class Ledger:
         self._store.insert(LEDGER_COLLECTION, pending)
         version = write()
         done = {**pending, "status": "done", "version": version, "at": _now()}
-        if check.digest is not None and self.digest(check.write) != check.digest:
+        if check.digest is not None and self.digest(check.write, check.needs) != check.digest:
             # A file changed during the write, so what the version holds is unknown: the next run writes it again.
             done.update(digest=None, inputs=None)
         self._store.replace(LEDGER_COLLECTION, Filter.of(**key, status="pending"), done, upsert=True)
@@ -238,7 +247,7 @@ def _changes(row: Mapping[str, Any], digest: Digest) -> list[str]:
             reasons.append(f"{label}: {shown}")
     needs_before, needs_after = before["needs"], after["needs"]
     added, removed, changed = _diff(needs_before, needs_after)
-    reasons.extend(f"{name} was written anew (v{needs_before[name]} → v{needs_after[name]})" for name in changed)
+    reasons.extend(f"{name} is written anew (v{needs_before[name]} → v{needs_after[name]})" for name in changed)
     reasons.extend(f"now needs {name}" for name in added)
     reasons.extend(f"no longer needs {name}" for name in removed)
     refs_before, refs_after = before["store_refs"], after["store_refs"]

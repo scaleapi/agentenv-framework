@@ -331,3 +331,26 @@ def test_get_many_writes_each_local_id_into_its_own_encoded_directory(local_stor
     assert (out / fs_safe("@local/t/A") / "1").is_file()
     assert (out / fs_safe("@local/t/A/1") / "f").is_file()
     assert not (out / "@local").exists()
+
+
+def test_get_many_writes_a_universe_whose_id_is_longer_than_a_filename(local_stores, tmp_path):
+    universe_id = "crm-suite__v2-" + "Escalated tickets from the EU desk, " * 7 + "and the US desk, escalated by hand"
+    FileArtifactUniverse.put_bundled(id=universe_id, files={"report.md": _write(tmp_path, "report.md", b"# report")})
+
+    out = tmp_path / "out"
+    res = CliRunner().invoke(file_artifact_universe, ["get-many", "--id", universe_id, "--output-dir", str(out)])
+
+    assert res.exit_code == 0, res.output
+    assert (out / key_segment(universe_id) / "report.md").read_bytes() == b"# report"
+
+
+def test_get_many_writes_universes_that_differ_by_a_slash_into_different_directories(local_stores, tmp_path):
+    for universe_id, data in (("crm/eu", b"eu"), ("crm-eu", b"flat")):
+        FileArtifactUniverse.put_bundled(id=universe_id, files={"report.md": _write(tmp_path, f"{data.decode()}.md", data)})
+
+    out = tmp_path / "out"
+    res = CliRunner().invoke(file_artifact_universe, ["get-many", "--id", "crm/eu", "--id", "crm-eu", "--output-dir", str(out)])
+
+    assert res.exit_code == 0, res.output
+    assert (out / "crm" / "eu" / "report.md").read_bytes() == b"eu"
+    assert (out / "crm-eu" / "report.md").read_bytes() == b"flat"
