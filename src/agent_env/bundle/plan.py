@@ -21,6 +21,7 @@ from agent_env.artifact.registry import canonical_type, get_artifact_registry
 from agent_env.config import get_config
 from agent_env.entity_refs import EntityKind
 from agent_env.env.env import Env
+from agent_env.env.envs._deployment import provider_refusal
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.website import WebsiteEnv
@@ -30,7 +31,8 @@ from agent_env.providers.env_providers.constants import (
     AGENT_ENV_WEBSITE_BACKEND_SUFFIX,
     AGENT_ENV_WEBSITE_FRONTEND_SUFFIX,
 )
-from agent_env.providers.env_providers.env_provider import _env_provider_class, _SandboxEnvironmentProvider
+from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider
+from agent_env.providers.env_providers.env_provider import _env_provider_class
 from agent_env.store import Filter, Sort
 from agent_env.store.base import NotFoundError
 from agent_env.store.ids import LOCAL_PREFIX
@@ -363,12 +365,17 @@ class _Planner:
                                          f"{clash!r}, as {taken[clash]}'s does; each env of a multi needs its own")
                 else:
                     taken.update(dict.fromkeys(containers, ref.where))
-            shared = named.get("mcp_server_envs", set()) & named.get("website_envs", set())
-            provider_type = source.config.get("env_provider_type", "gateway")
-            if shared and not _deploys_in_sandboxes(provider_type):
-                self.problems.append(f"{where}: env_provider_type {provider_type!r} gives a multi one env card, which "
-                                     "can't tell an MCP server and a website apart by name, and both are named "
-                                     f"{', '.join(map(repr, sorted(shared)))}; rename one")
+            provider_type = source.config.get("env_provider_type", EnvironmentGatewayProvider.type)
+            try:
+                provider = _env_provider_class(provider_type)
+            except ValueError:
+                continue  # the env's toml check refuses a type no installed provider has
+            if provider_refusal(provider, MultiEnv) is not None:
+                continue  # and one that deploys no multi at all
+            reason = provider_refusal(provider, MultiEnv, mcp_names=named.get("mcp_server_envs", ()),
+                                      website_names=named.get("website_envs", ()))
+            if reason is not None:
+                self.problems.append(f"{where}: env_provider_type {provider_type!r} {reason}; rename one")
 
     def _environment_name(self, ref: Reference, store_latest: dict[tuple[EntityKind, str], int]) -> str | None:
         if ref.local is not None:
@@ -434,15 +441,6 @@ def unpinned_store_refs(plan: Plan, write: Write) -> dict[tuple[EntityKind, str]
         return {}
     return {(ref.kind, ref.id): plan.store_latest[ref.kind, ref.id]
             for ref in write.source.references if ref.local is None and ref.version is None}
-
-
-def _deploys_in_sandboxes(provider_type: str) -> bool:
-    """Whether the provider ``provider_type`` names is one of the core's, which deploy each env in a sandbox of its
-    own; a type no installed provider has is accepted here, since the env's toml check refuses it."""
-    try:
-        return issubclass(_env_provider_class(provider_type), _SandboxEnvironmentProvider)
-    except ValueError:
-        return True
 
 
 def env_writer(cls: type | None) -> bool:

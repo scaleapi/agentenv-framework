@@ -12,6 +12,10 @@ from typing import Any, NoReturn, TypeVar, overload
 from agent_env.artifact.artifact import Artifact
 from agent_env.entity_refs import EntityKind, parse_toml_ref
 from agent_env.env.env import Env
+from agent_env.env.envs._deployment import provider_refusal
+from agent_env.providers.env_providers.constants import GATEWAY_SERVICE_NAMES
+from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider
+from agent_env.providers.env_providers.env_provider import _env_provider_class
 from agent_env.utils.card_naming import card_names_in_files
 
 from ._fs import os_reason, relative, show, with_article
@@ -81,19 +85,78 @@ class AuthoringContext:
     def accepted(self, data: dict, /, **takes: type) -> tuple[dict, list[str]]:
         """``accept`` without refusing: the keys of ``data`` a type takes and of the type given, and the
         problems with the rest, for a type that checks more before it refuses."""
-        config = CONFIG_FILES[self.entry.kind]
         problems = []
         unknown = sorted(set(data) - {"type", "id", *takes})
         if unknown:
             names = [*takes, "type", "id"]
-            problems.append(f"{config}: unknown key{'s' * (len(unknown) > 1)} {', '.join(map(repr, unknown))}; "
-                            f"{with_article(f'{self.entry.type} {self.entry.kind.store}')} takes "
-                            f"{', '.join(names[:-1])} and {names[-1]}")
+            problems.append(self.config_problem(
+                f"unknown key{'s' * (len(unknown) > 1)} {', '.join(map(repr, unknown))}; "
+                f"{with_article(f'{self.entry.type} {self.entry.kind.store}')} takes "
+                f"{', '.join(names[:-1])} and {names[-1]}"))
         for key, kind in takes.items():
             if key in data and not isinstance(data[key], kind):
-                problems.append(f"{config}: {key} must be {_TOML_TYPES.get(kind, kind.__name__)}, not {data[key]!r}")
+                problems.append(self.config_problem(
+                    f"{key} must be {_TOML_TYPES.get(kind, kind.__name__)}, not {data[key]!r}"))
         fields = {key: data[key] for key, kind in takes.items() if key in data and isinstance(data[key], kind)}
         return fields, problems
+
+    def accept_env(self, data: dict, env_class: type[Env], *, named_by: str | None = None) -> dict:
+        """The keys of ``data``, an env.toml, ``env_class`` takes, checked the way ``accepted_env`` checks
+        them; every problem is refused."""
+        fields, problems = self.accepted_env(data, env_class, named_by=named_by)
+        if problems:
+            self.refuse(problems)
+        return fields
+
+    def accepted_env(self, data: dict, env_class: type[Env], *,
+                     named_by: str | None = None) -> tuple[dict, list[str]]:
+        """``accepted`` for an env.toml: the keys ``env_class`` takes, and the problems with them. The fields
+        carry its env_provider_type, the gateway's when left out, which must name an installed provider that
+        deploys an env of ``env_class``. With ``named_by``, they carry its environment_name too: the one set,
+        else the one the ``@environment_card`` in the source of the image that key builds gives, which a
+        gateway deploy can't take from one of its own containers."""
+        fields, problems = self.accepted(data, **env_class.toml_keys)
+        provider_type = fields.setdefault("env_provider_type", EnvironmentGatewayProvider.type)
+        try:
+            provider = _env_provider_class(provider_type)
+        except ValueError as e:
+            problems.append(self.config_problem(str(e)))
+            provider = None
+        if provider is not None and (reason := provider_refusal(provider, env_class)) is not None:
+            problems.append(self.config_problem(f"env_provider_type {provider_type!r} {reason}"))
+        if named_by is not None:
+            name, problem = self._environment_name(data, fields, named_by)
+            if problem is not None:
+                problems.append(self.config_problem(problem))
+            elif name is not None:
+                fields["environment_name"] = name
+            if (name in GATEWAY_SERVICE_NAMES and provider is not None
+                    and issubclass(provider, EnvironmentGatewayProvider)):
+                problems.append(self.config_problem(
+                    f"environment_name {name!r} is one a gateway deploy names its own containers "
+                    f"({', '.join(sorted(GATEWAY_SERVICE_NAMES))}); choose another"))
+        return fields, problems
+
+    def _environment_name(self, data: dict, fields: dict, named_by: str) -> tuple[str | None, str | None]:
+        """The env's environment_name, and the problem when there's none: the one set, else the one the source
+        of the image ``named_by`` builds from this folder declares."""
+        if "environment_name" in data:  # one of the wrong type is a problem accepted() reported
+            name = fields.get("environment_name")
+            return name, "environment_name can't be empty" if name == "" else None
+        names = self.card_names(named_by)
+        what = "image" if named_by == "image" else named_by.replace("_", " ")
+        if names is None:
+            return None, (f"environment_name isn't set, and its {what} isn't built from this folder, so there's no "
+                          "source to read it from; set it")
+        if len(names) != 1:
+            found = (f"several environment cards ({', '.join(map(repr, names))})" if names
+                     else "no @environment_card(name=...)")
+            return None, f"environment_name isn't set, and the source its {what} is built from declares {found}; set it"
+        return names[0], None
+
+    def config_problem(self, message: str) -> str:
+        """``message`` as a problem with the entry's toml, ready for ``refuse``."""
+        return f"{CONFIG_FILES[self.entry.kind]}: {message}"
 
     def refuse(self, problems: list[str]) -> NoReturn:
         """Raise BundleError with ``problems``, each named by the entry's folder."""

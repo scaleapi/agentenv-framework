@@ -219,8 +219,9 @@ class _Walk:
         cls = get_env_registry().get(self.envs[env_id].entry.type)
         if cls is None or not issubclass(cls, (MCPServerEnv, WebsiteEnv, MultiEnv)):
             return None
+        provider_type = self.envs[env_id].config.get("env_provider_type", EnvironmentGatewayProvider.type)
         try:
-            provider_class = _env_provider_class(self.envs[env_id].config.get("env_provider_type", "gateway"))
+            provider_class = _env_provider_class(provider_type)
         except ValueError:
             return None
         images, websites = self._planned_images(env_id)

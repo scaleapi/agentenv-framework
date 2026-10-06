@@ -9,6 +9,7 @@ import pytest
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store
 from agent_env.bundle import BundleError, parse_bundle
+from agent_env.bundle import authoring as authoring_module
 from agent_env.bundle.plan import check_bundle
 from agent_env.bundle.resolve import resolve_bundle
 from agent_env.bundle import plan as plan_module
@@ -226,7 +227,7 @@ def test_an_unknown_env_provider_type_is_refused_naming_the_known_ones(bundle_di
     _bundle(bundle_dir, {**_mcp("x"), "envs/x/env.toml": 'env_provider_type = "nope"\n'}, "x")
 
     (problem,) = _problems(bundle_dir)
-    assert problem.startswith("envs/x: env.toml: env_provider_type: Unknown env_provider_type: 'nope' (expected one of")
+    assert problem.startswith("envs/x: env.toml: Unknown env_provider_type: 'nope' (expected one of")
 
 
 def test_a_plugin_provider_multi_with_an_mcp_server_and_a_website_of_one_name_is_refused_before_any_write(
@@ -234,14 +235,14 @@ def test_a_plugin_provider_multi_with_an_mcp_server_and_a_website_of_one_name_is
 ):
     real = env_provider_module._env_provider_class
     providers = lambda name: _OneCard if name == "one_card_test" else real(name)
-    monkeypatch.setattr(env_provider_module, "_env_provider_class", providers)
-    monkeypatch.setattr(plan_module, "_env_provider_class", providers)
+    for module in (env_provider_module, authoring_module, plan_module):
+        monkeypatch.setattr(module, "_env_provider_class", providers)
     _bundle(bundle_dir, {**_mcp("crm", "shop"), **_website("shop"), "envs/x/env.toml":
                          'type = "multi"\nmcp_server_envs = ["crm"]\nwebsite_envs = ["shop"]\n'
                          'env_provider_type = "one_card_test"\n'}, "x")
 
     assert _problems(bundle_dir) == (
-        "envs/x: env_provider_type 'one_card_test' gives a multi one env card, which can't tell an MCP server and a "
+        "envs/x: env_provider_type 'one_card_test' gives a multi one env card, so it can't tell an MCP server and a "
         "website apart by name, and both are named 'shop'; rename one",)
     assert not local_store().path.exists()
 

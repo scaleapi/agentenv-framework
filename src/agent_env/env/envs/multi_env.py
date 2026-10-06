@@ -27,7 +27,6 @@ if TYPE_CHECKING:
 
 from agent_env.entity_refs import EntityRef
 from agent_env.env.env import Env, gateway_url_of
-from agent_env.env.envs._toml import accept_env_toml
 from agent_env.env.gateway import GatewayMode
 from agent_env.env.envs._deployment import (
     as_builtin, builtin_provider_for, close_deployed, close_replaced, deploy_refusal, deploy_through_provider, host_staging_refusal,
@@ -101,7 +100,7 @@ class MultiEnv(Env):
         fields = cls.accept_toml(data, ctx)
         env = dict(mcp_server_envs=[ctx.env(ref, MCPServerEnv) for ref in fields.get("mcp_server_envs", [])],
                    website_envs=[ctx.env(ref, WebsiteEnv) for ref in fields.get("website_envs", [])],
-                   name=fields.get("name"), env_provider_type=fields.get("env_provider_type", "gateway"))
+                   name=fields.get("name"), env_provider_type=fields["env_provider_type"])
         if refusal := cls(id=ctx.id, version=None, **env).deploy_refusal():
             ctx.refuse([refusal])
         return cls.put(id=ctx.id, **env)
@@ -109,12 +108,12 @@ class MultiEnv(Env):
     @classmethod
     def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:
         """The keys of ``data``, an env.toml, a multi env takes. Raises BundleError listing every problem."""
-        fields, problems = accept_env_toml(cls, data, ctx)
+        fields, problems = ctx.accepted_env(data, cls)
         if not (fields.get("mcp_server_envs") or fields.get("website_envs")):
-            problems.append("env.toml: a multi env needs at least one env in mcp_server_envs or website_envs")
+            problems.append(ctx.config_problem("a multi env needs at least one env in mcp_server_envs or website_envs"))
         name = fields.get("name")
         if name is not None and (not name or any(ch.isspace() for ch in name)):
-            problems.append(f"env.toml: name must be non-empty with no whitespace, not {name!r}")
+            problems.append(ctx.config_problem(f"name must be non-empty with no whitespace, not {name!r}"))
         if problems:
             ctx.refuse(problems)
         return fields

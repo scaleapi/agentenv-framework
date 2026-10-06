@@ -14,7 +14,6 @@ from agent_env.artifact import Artifact, DockerImageArtifact, EnvironmentArtifac
 from agent_env.artifact.artifacts.docker_image import GitHubBuildResult, ProgressCallback, refuse_local_github_build
 from agent_env.entity_refs import EntityRef
 from agent_env.env.env import Env, gateway_url_of
-from agent_env.env.envs._toml import accept_env_toml
 from agent_env.store.ids import derive_id
 from agent_env.env import legacy_protocol
 from agent_env.env.envs._deployment import (
@@ -109,17 +108,13 @@ class WebsiteEnv(Env):
         return cls.put(id=ctx.id,
                        backend_docker_image_artifact=ctx.artifact(fields["backend_image"], DockerImageArtifact),
                        frontend_docker_image_artifact=ctx.artifact(fields["frontend_image"], DockerImageArtifact),
-                       environment_name=fields["environment_name"],
-                       env_provider_type=fields.get("env_provider_type", "gateway"))
+                       environment_name=fields["environment_name"], env_provider_type=fields["env_provider_type"])
 
     @classmethod
     def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:
         """The keys of ``data``, an env.toml, a website env takes, its environment_name read from the backend image's
         @environment_card when it isn't set. Raises BundleError listing every problem."""
-        fields, problems = accept_env_toml(cls, data, ctx, image_key="backend_image")
-        if problems:
-            ctx.refuse(problems)
-        return fields
+        return ctx.accept_env(data, cls, named_by="backend_image")
 
     async def deploy(self, ttl_seconds: int = 10800, disk_size_gb: float = 10, gateway_mode: GatewayMode = GatewayMode.PERFORMANCE, cpu: float | None = None, memory_mb: int | None = None, sandbox_type: str | None = None, env_state_type: str | None = None, env_state_instance_id: str | None = None, *, attribution: Optional[Attribution] = None) -> DeployedEnv:
         return await deploy_through_provider(
