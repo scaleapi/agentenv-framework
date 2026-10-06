@@ -83,7 +83,7 @@ def test_infra_that_records_no_shipped_dockerfile_is_left_as_it_is(puts):
 
 def test_an_env_built_from_someone_elses_dockerfile_is_theirs_to_rebuild(puts, monkeypatch):
     artifact = get_artifact_store().put_document(DockerImageArtifact(
-        id="website-browser-website-browser", description="b", image_name="b:v1", tar_gz_s3_url="file:///b.tar.gz"))
+        id="website-browser__env_image", description="b", image_name="b:v1", tar_gz_s3_url="file:///b.tar.gz"))
     GatewayEnv.put(id="website-browser", docker_image_artifact=artifact,
                    metadata={"dockerfile_path": "/home/me/my-browser/Dockerfile", bootstrap.BUILD_INPUTS_KEY: "theirs"})
 

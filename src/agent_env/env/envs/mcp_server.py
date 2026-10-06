@@ -373,7 +373,7 @@ class MCPServerEnv(Env):
         """
         refuse_local_github_build(id)
         docker_image_artifact = await DockerImageArtifact.put_from_github(
-            id=f"mcp-server-{id}",
+            id=derive_id(id, "env_image"),
             dockerfile_github_url=dockerfile_github_url,
             docker_context_github_url=docker_context_github_url,
             on_progress=on_progress,

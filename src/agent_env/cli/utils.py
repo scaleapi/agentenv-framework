@@ -2,6 +2,7 @@ import asyncio
 
 import click
 
+from agent_env.config import get_config
 from agent_env.env import Env
 from agent_env.providers.env_providers.env_provider import _env_provider_class
 from agent_env.providers.env_providers.env_server_provider import EnvironmentServerProvider
@@ -29,6 +30,17 @@ def build_platform_option(f):
             "Apple Silicon; pass an empty string to omit --platform entirely."
         ),
     )(f)
+
+
+def refuse_unwritable_ids(*ids: str) -> None:
+    """Refuse, before anything is built, an id the store a put writes it to wouldn't take, such as an @local id the
+    image's suffix makes too long."""
+    store = get_config().get_document_store()
+    for entity_id in ids:
+        try:
+            store.check_id(entity_id)
+        except ValueError as e:
+            raise click.ClickException(str(e)) from None
 
 
 def env_provider_type_option(help: str, env_type: str = "mcp_server"):

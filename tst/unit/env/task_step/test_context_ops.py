@@ -1,5 +1,6 @@
 """Unit tests for context_ops — path-level diff + UpdateSpec compilation."""
 
+import copy
 import dataclasses
 
 import pytest
@@ -105,6 +106,31 @@ def test_agents_and_responses_lists_use_add_to_set():
     ops = build_context_update_ops(pre, post)
     assert "context.deployed_agents" in ops.add_to_sets
     assert "context.prompt_responses" in ops.add_to_sets
+
+
+@pytest.mark.parametrize("append_new", [False, True])
+def test_response_history_diff_uses_linear_comparisons(monkeypatch, append_new):
+    pre = TaskStepContext(prompt_responses=[_response(f"p{i}") for i in range(100)])
+    post = copy.deepcopy(pre)
+    if append_new:
+        post.prompt_responses.append(_response("new"))
+
+    comparisons = 0
+    original_eq = PromptResponse.__eq__
+
+    def count_equal(self, other):
+        nonlocal comparisons
+        comparisons += 1
+        return original_eq(self, other)
+
+    monkeypatch.setattr(PromptResponse, "__eq__", count_equal)
+    ops = build_context_update_ops(pre, post)
+
+    if append_new:
+        assert ops.add_to_sets["context.prompt_responses"] == [dataclasses.asdict(_response("new"))]
+    else:
+        assert ops.is_empty()
+    assert comparisons <= 2 * len(pre.prompt_responses)
 
 
 def test_scalar_nil_to_value_emits_set():
@@ -325,7 +351,6 @@ def test_filename_keyed_output_urls_falls_back_to_wholesale_set():
 
 def _apply_ops_to_mirror(doc: dict, ops: ContextUpdateOps) -> dict:
     """Apply ops to an in-memory dict, modeling Mongo's $set / $unset / $addToSet."""
-    import copy
     out = copy.deepcopy(doc)
 
     def descend(d: dict, path: list[str]) -> dict:

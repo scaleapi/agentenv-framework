@@ -29,11 +29,15 @@ def _union(existing: list, items: list, *, move_to_end: bool = False, path: str 
     """Union by value (deployed envs by instance), order-stable. ``move_to_end`` is the re-record case: that step's
     completion moves to the end of the replay order, so its items must move with it."""
     key = _item_key(path)
-    fresh = [x for i, x in enumerate(items) if key(x) not in [key(y) for y in items[:i]]]
-    fresh_keys = [key(x) for x in fresh]
+    fresh, fresh_keys = [], []
+    for item in items:
+        item_key = key(item)
+        if item_key not in fresh_keys:
+            fresh.append(item)
+            fresh_keys.append(item_key)
+    existing_keys = [key(item) for item in existing]
     if move_to_end:
-        return [x for x in existing if key(x) not in fresh_keys] + fresh
-    existing_keys = [key(x) for x in existing]
+        return [item for item, item_key in zip(existing, existing_keys) if item_key not in fresh_keys] + fresh
     return list(existing) + [x for x, k in zip(fresh, fresh_keys) if k not in existing_keys]
 
 
