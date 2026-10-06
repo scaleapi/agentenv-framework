@@ -13,6 +13,8 @@ import pytest
 import pytest_asyncio
 
 from agent_env.artifact import FileArtifact, FileArtifactUniverse
+from agent_env.a2a_agent.a2a_agent import DeployedA2AAgent
+from agent_env.a2a_agent.store import get_a2a_agent_instance_store
 from agent_env.artifact.store import reset_artifact_store
 from agent_env.config import configure, get_config, reset_config
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
@@ -166,6 +168,27 @@ async def test_collect_artifacts_reads_a_local_agents_file_from_its_container(lo
 
     url = ctx.metadata["collected_artifacts"]["collect"]["artifacts"]["report.txt"]
     assert get_config().get_object_store().get(url) == f"{token}\n".encode()
+
+
+@pytest.mark.asyncio
+async def test_load_artifact_puts_a_universe_in_a_local_agents_container(local_agent, tmp_path):
+    sandbox, context = local_agent
+    instance = get_a2a_agent_instance_store().create_instance(DeployedA2AAgent(
+        agent_id="agent", agent_version=1, a2a_url=sandbox.tunnel_urls[80], sandbox_id=sandbox.sandbox_id,
+        agent_card={}, sandbox_type="local",
+    ), 600)
+    context.deployed_agents[0].instance_id = instance.instance_id
+    universe = _greeting_universe(tmp_path / "greeting", uuid.uuid4().hex[:8])
+    step = LoadArtifactTaskStep(
+        id="load", version=None, artifact_id=universe.id, agent_name="agent", destination_path="/app/greeting",
+    )
+
+    await step.execute(context)
+
+    shown = subprocess.run(["docker", "exec", sandbox.container_name, "cat", "/app/greeting/hello.txt"],
+                           capture_output=True, text=True)
+    assert (shown.returncode, shown.stdout) == (0, "hello, world\n")
+    assert list(sandbox.work_dir.iterdir()) == [sandbox.work_dir / ".agent-container-mode"]
 
 
 def _write_in_container(sandbox, path, text):

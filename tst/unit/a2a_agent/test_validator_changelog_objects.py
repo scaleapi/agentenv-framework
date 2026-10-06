@@ -149,3 +149,42 @@ async def test_validator_records_a_capture_it_cannot_send_instead_of_raising(sto
     assert not requests
     assert verification["apply"] is False
     assert verification["note"].startswith("apply request failed: ")
+
+
+@pytest.mark.asyncio
+async def test_the_marker_is_never_read_from_another_runs_container(store, requests, monkeypatch):
+    """A reattached local agent owns its container; with that container gone, the check fails rather than
+    reading the marker out of another run's agent on the same Docker host."""
+    calls: list[tuple] = []
+
+    class _ReattachedLocalAgent:
+        mode = "vm"
+        container_name = "agent-local-apply1"
+        owns_container = True
+
+        async def exec_with_output(self, *args):
+            calls.append(args)
+            if args[:3] == ("sudo", "docker", "ps"):
+                return 0, "a2a-agent-other\n", ""
+            return 0, "marker-token", ""
+
+    class _Provider:
+        async def get_sandbox(self, sandbox_id):
+            return _ReattachedLocalAgent()
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(provider_mod, "build_sandbox_provider", lambda spec: _Provider())
+    for name in ("000000.tar", "000001.tar"):
+        store.put(f"changelog/run-1/{name}", b"increment")
+    context = _context(
+        {"object_url": store.object_url("changelog/run-1"), "transfer_mode": "objects"},
+        ["increments"],
+    )
+
+    verification = await _validate(context)
+
+    assert verification["roundtrip"] is False
+    assert "'agent-local-apply1' is not running" in verification["note"]
+    assert calls == [("sudo", "docker", "ps", "--format", "{{.Names}}")]

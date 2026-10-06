@@ -36,6 +36,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
 )
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import find_agent_container
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
 
 logger = logging.getLogger(__name__)
@@ -120,7 +121,7 @@ class VerifySandboxTaskStep(TaskStep):
         sandbox = await (self._agent_sandbox(context) if on_agent else self._deployed_sandbox(context))
         logger.info(f"Connected to sandbox {sandbox.sandbox_id} (mode={sandbox.mode})")
         container = (
-            await self._discover_container(sandbox)
+            await find_agent_container(sandbox)
             if on_agent and sandbox.mode == SANDBOX_MODE_VM
             else None
         )
@@ -287,27 +288,3 @@ class VerifySandboxTaskStep(TaskStep):
         exit_code, _, stderr = await self._exec(sandbox, args)
         return _outcome(exit_code == 0, f"exit={exit_code}; stderr={stderr[:200]}")
 
-    async def _discover_container(self, sandbox) -> str:
-        """Find the agent container on a VM sandbox. Mirrors collect_artifacts._discover_container."""
-        exit_code, stdout, stderr = await sandbox.exec_with_output(
-            "sudo", "docker", "ps", "--format", "{{.Names}}",
-        )
-        if exit_code != 0:
-            raise RuntimeError(f"Failed to list containers: {stderr[:300]}")
-        running = [n.strip() for n in stdout.splitlines() if n.strip()]
-        if sandbox.container_name in running:
-            return sandbox.container_name
-        if getattr(sandbox, "owns_container", False):
-            # Its Docker host is shared, so any other agent container there is another run's.
-            raise RuntimeError(
-                f"Agent container {sandbox.container_name!r} is not running. Running containers: {running}."
-            )
-        fallback = [n for n in running if n.startswith("a2a-agent-")]
-        if fallback:
-            if len(fallback) > 1:
-                logger.warning(f"Multiple a2a-agent-* containers found; using first: {fallback}")
-            return fallback[0]
-        raise RuntimeError(
-            f"No agent container found on the VM (looked for 'agent-api' or 'a2a-agent-*'). "
-            f"Running containers: {running}."
-        )

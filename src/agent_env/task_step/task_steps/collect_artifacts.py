@@ -84,6 +84,7 @@ from agent_env.store.ids import derive_id, is_local_id, validate_local_id
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity_refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import find_agent_container
 from agent_env.task_step.thread_work import finish_on_thread
 
 logger = logging.getLogger(__name__)
@@ -443,39 +444,6 @@ class CollectArtifactsTaskStep(TaskStep):
             f"a re-run-from-step needs the original live sandbox; re-run the full task."
         ) from err
 
-    async def _discover_container(self, sandbox) -> str:
-        """Find the agent container running on the VM.
-
-        The A2A agent deploy hardcodes the container name to 'agent-api'
-        (see agent_env/a2a_agent/a2a_agent.py). We also accept any
-        'a2a-agent-*' container as a fallback in case the naming scheme
-        evolves.
-        """
-        exit_code, stdout, stderr = await sandbox.exec_with_output(
-            "sudo", "docker", "ps",
-            "--format", "{{.Names}}",
-        )
-        if exit_code != 0:
-            raise RuntimeError(f"Failed to list containers: {stderr[:300]}")
-        running = [n.strip() for n in stdout.splitlines() if n.strip()]
-        # Prefer this sandbox's own container name, fall back to the a2a-agent-* prefix.
-        if sandbox.container_name in running:
-            return sandbox.container_name
-        if getattr(sandbox, "owns_container", False):
-            # Its Docker host is shared, so any other agent container there is another run's.
-            raise RuntimeError(
-                f"Agent container {sandbox.container_name!r} is not running. Running containers: {running}."
-            )
-        fallback = [n for n in running if n.startswith("a2a-agent-")]
-        if fallback:
-            if len(fallback) > 1:
-                logger.warning(f"Multiple a2a-agent-* containers found; using first: {fallback}")
-            return fallback[0]
-        raise RuntimeError(
-            f"No agent container found on the VM (looked for 'agent-api' or 'a2a-agent-*'). "
-            f"Running containers: {running}. Has deploy_agent been run in this task?"
-        )
-
     async def _get_file_size(self, sandbox, container: Optional[str], source_path: str) -> int:
         """Get file size on the agent's filesystem. Returns -1 only if the file is genuinely
         absent; a `stat` that fails for any other reason RAISES so a failed size check is a
@@ -809,7 +777,7 @@ class CollectArtifactsTaskStep(TaskStep):
         sandbox = await self._resolve_live_sandbox(provider, agent.sandbox_id)
         logger.info(f"Connected to sandbox {agent.sandbox_id} (mode={sandbox.mode})")
 
-        container = await self._discover_container(sandbox) if sandbox.mode == SANDBOX_MODE_VM else None
+        container = await find_agent_container(sandbox) if sandbox.mode == SANDBOX_MODE_VM else None
         if container:
             logger.info(f"Using agent container: {container}")
 
@@ -847,7 +815,7 @@ class CollectArtifactsTaskStep(TaskStep):
     async def _collect_via_sandbox_container(self, context, store, artifact_id, version):
         """Collect from a plain container started by ``run_docker_container``.
 
-        The agent path finds its container by discovery, and ``_discover_container`` only accepts
+        The agent path finds its container by discovery, and ``find_agent_container`` only accepts
         ``agent-api`` / ``a2a-agent-*`` names — so a task that deploys a sandbox and runs an ordinary
         image had no way to get its files out. Here the (sandbox, container) pair is named
         explicitly and resolved exactly as ``load_artifact`` resolves it.

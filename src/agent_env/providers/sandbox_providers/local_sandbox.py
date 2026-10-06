@@ -42,7 +42,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_APP_PATH_PATTERN = re.compile(r"(?<![A-Za-z0-9_./~})$-])/app(?=(?:/|:|[\s'\";)&|]|$))")
+# Not after ":": that is the container side of `docker cp f c:/app/x` or `-v h:/app/x`.
+_APP_PATH_PATTERN = re.compile(r"(?<![A-Za-z0-9_./~})$:-])/app(?=(?:/|:|[\s'\";)&|]|$))")
+# `sudo` as a command inside a script: this host's would ask for a password, and local Docker needs none.
+_SCRIPT_SUDO = re.compile(r"(^|[;&|(\n]|\$\()(\s*)sudo\s+")
 _IN_CONTAINER_SCRIPT = re.compile(r"\s*(?:sudo\s+)?docker\s+exec\b")
 
 
@@ -215,11 +218,13 @@ class LocalSandbox(VmSandbox):
         """Execute a command locally via subprocess.
 
         Strips 'sudo' and points /app at the local work directory, both as a path argument and
-        inside the script of a top-level ``bash -c``, unless the command runs in a container.
-        Returns an object with .stdout, .stderr streams and .wait() method, matching the
+        inside the script of a top-level ``bash -c``; /app is left alone when the command runs in a
+        container. Returns an object with .stdout, .stderr streams and .wait() method, matching the
         interface expected by exec_with_output().
         """
         cmd = [c for c in command if c != "sudo"]
+        if cmd[:2] == ["bash", "-c"] and len(cmd) > 2:
+            cmd[2] = _SCRIPT_SUDO.sub(r"\1\2", cmd[2])
         if not _runs_in_container(cmd):
             is_script = cmd[:2] == ["bash", "-c"]
             cmd = [
