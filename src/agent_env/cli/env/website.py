@@ -19,6 +19,7 @@ from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM, build_image
 from agent_env.env import Env
 from agent_env.env.envs.website import WebsiteEnv
 from agent_env.providers import get_env_sandbox_provider
+from agent_env.store.ids import derive_id, image_repository
 
 
 
@@ -140,7 +141,8 @@ def put(
     # Local Docker build path
     backend_dockerfile_path = Path(backend_dockerfile)
     backend_ctx = Path(backend_docker_context) if backend_docker_context else backend_dockerfile_path.parent
-    backend_tag = f"website-backend-{env_id}"
+    backend_id = derive_id(env_id, "backend_image")
+    backend_tag = image_repository(backend_id)
     if environment_name is None:
         environment_name = card_name_from_source(str(backend_dockerfile_path), str(backend_ctx))
         if not environment_name:
@@ -153,7 +155,7 @@ def put(
 
     click.echo(f"Creating backend DockerImageArtifact...")
     backend_artifact = DockerImageArtifact.put(
-        id=f"website-backend-{env_id}",
+        id=backend_id,
         description="Website backend image created from agent-env CLI",
         image_name=backend_tag,
     )
@@ -161,14 +163,15 @@ def put(
 
     frontend_dockerfile_path = Path(frontend_dockerfile)
     frontend_ctx = Path(frontend_docker_context) if frontend_docker_context else frontend_dockerfile_path.parent
-    frontend_tag = f"website-frontend-{env_id}"
+    frontend_id = derive_id(env_id, "frontend_image")
+    frontend_tag = image_repository(frontend_id)
 
     click.echo(f"Building website frontend Docker image...")
     build_image(frontend_dockerfile_path, frontend_ctx, frontend_tag, platform=build_platform)
 
     click.echo(f"Creating frontend DockerImageArtifact...")
     frontend_artifact = DockerImageArtifact.put(
-        id=f"website-frontend-{env_id}",
+        id=frontend_id,
         description="Website frontend image created from agent-env CLI",
         image_name=frontend_tag,
     )

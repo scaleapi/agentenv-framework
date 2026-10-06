@@ -247,14 +247,14 @@ class WebsiteEnv(Env):
         refuse_local_github_build(id)
         backend, frontend = await asyncio.gather(
             DockerImageArtifact.put_from_github(
-                id=f"website-backend-{id}",
+                id=derive_id(id, "backend_image"),
                 dockerfile_github_url=backend_dockerfile_github_url,
                 docker_context_github_url=backend_docker_context_github_url,
                 on_progress=on_backend_progress,
                 github_token=github_token,
             ),
             DockerImageArtifact.put_from_github(
-                id=f"website-frontend-{id}",
+                id=derive_id(id, "frontend_image"),
                 dockerfile_github_url=frontend_dockerfile_github_url,
                 docker_context_github_url=frontend_docker_context_github_url,
                 on_progress=on_frontend_progress,

@@ -28,7 +28,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
 )
 from agent_env.store import Filter, LocalSqliteDocumentStore, VersionedEntityStore
 from agent_env.store.base import NotFoundError
-from agent_env.store.ids import fs_safe, key_segment
+from agent_env.store.ids import fs_safe, image_repository, key_segment
 from agent_env.store.routing import LocalNamespaceDocumentStore
 from agent_env.task import Task
 from tst.unit.store.fakes import FakeDocumentStore, FakeImageStore, SigningObjectStore, reattach_for_snapshot
@@ -259,6 +259,40 @@ def test_under_the_cli_a_bare_id_derived_from_an_local_one_is_refused_before_any
 
     assert local_stores.get_object_store().list("") == []
     LocalSqliteDocumentStore(str(state_root() / "services.db")).check_id(derived)
+
+
+LOCAL_AGENT = "@local/~/bundle/agents/a"
+
+
+@pytest.mark.parametrize("module, argv, images", [
+    ("agent_env.cli.a2a_agent.put", ["a2a-agent", "put", "--id", LOCAL_AGENT, "--skip-validation"],
+     [f"{LOCAL_AGENT}__agent_image"]),
+    ("agent_env.cli.env.mcp_server", ["env", "mcp-server", "put", "--id", LOCAL_ENV, "--environment-name", "items"],
+     [f"{LOCAL_ENV}__env_image"]),
+    ("agent_env.cli.env.website", ["env", "website", "put", "--id", LOCAL_ENV, "--environment-name", "shop",
+                                   "--skip-validation", "--backend-dockerfile", "{dockerfile}"],
+     [f"{LOCAL_ENV}__backend_image", f"{LOCAL_ENV}__frontend_image"]),
+], ids=["a2a-agent", "mcp-server", "website"])
+def test_a_put_with_an_local_id_builds_and_writes_its_images_under_ids_derived_from_it(
+    local_stores, tmp_path, monkeypatch, module, argv, images,
+):
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text("FROM scratch\n")
+    tags = []
+    monkeypatch.setattr(importlib.import_module(module), "build_image",
+                        lambda dockerfile, context, tag, **kwargs: tags.append(tag))
+    tarball = local_stores.get_object_store().put("image.tar.gz", b"x")
+    monkeypatch.setattr(DockerImageArtifact, "put", classmethod(lambda cls, id, *, description, image_name, **kwargs: (
+        cls.put_tar(id, description=description, image_name=image_name, tar_gz_s3_url=tarball))))
+    argv = [arg.format(dockerfile=dockerfile) for arg in argv]
+    flag = "--frontend-dockerfile" if "--backend-dockerfile" in argv else "--dockerfile"
+
+    result = CliRunner().invoke(cli, [*argv, flag, str(dockerfile)])
+
+    assert result.exit_code == 0, result.output
+    assert tags == [image_repository(image) for image in images] and all(tag.startswith("local/") for tag in tags)
+    assert sorted(d["id"] for d in _local().query("artifacts", Filter())) == images
+    assert not _documents().path.exists() or _documents().count("artifacts", Filter()) == 0
 
 
 class _Deployable:
