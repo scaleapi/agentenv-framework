@@ -429,8 +429,6 @@ def _parse_copy_sources(dockerfile_text: str, dockerfile_rel_path: str | None = 
             if src.startswith("/") or "://" in src:
                 continue
             src_clean = src.rstrip("/")
-            if src_clean in ("", "."):
-                return ["."]  # the whole context
             top_dir = src_clean.split("/")[0]
             if top_dir and top_dir != "." and top_dir not in paths:
                 paths.append(top_dir)

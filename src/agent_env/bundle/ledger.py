@@ -32,8 +32,8 @@ from agent_env.store.document_store import LocalSqliteDocumentStore
 from agent_env.store.local_state import ensure_state_dir
 from agent_env.task.store import TASKS_COLLECTION
 
-from .authoring import entry_files
-from .parse import CONFIG_FILES, Bundle, BundleKind
+from .authoring import build_context_files, entry_files
+from .parse import Bundle, BundleKind
 from .plan import Plan, Write, folder_walk, keeps_base_from_toml
 from .resolve import BuiltImage
 
@@ -122,11 +122,9 @@ class Ledger:
         inputs = {"type": _type(write), "config": _sha256(_canonical(config)),
                   "files": {}, "needs": {}, "store_refs": {}}
         if write.kind is BundleKind.ARTIFACT:
-            for key, path in entry_files(self._plan.bundle.bundle, write.source.entry).items():
+            files = build_context_files if isinstance(write.source, BuiltImage) else entry_files
+            for key, path in files(self._plan.bundle.bundle, write.source.entry).items():
                 inputs["files"][key] = _file_sha256(path)
-            toml = write.source.entry.path / CONFIG_FILES[write.source.entry.kind]
-            if isinstance(write.source, BuiltImage) and toml.is_file():
-                inputs["files"][toml.name] = _file_sha256(toml)
         elif write.kind in (BundleKind.ENV, BundleKind.AGENT):
             # An env's or agent's document records the versions of what it references, so one written anew, or
             # a store entity it names without a version getting a new one, means it must be written again. A
@@ -205,9 +203,8 @@ def _lock_path(id: str) -> Path:
 def _tracked(write: Write) -> bool:
     """Whether the ledger can list everything ``write`` is made from. Not yet for a skill, nor for a type with
     a ``from_toml`` of its own, which may read its folder in ways it can't see. An agent is made from its
-    agent.toml alone: its image is a reference. A built image is made from every file of its entry's folder,
-    its build context, the toml too, since a Dockerfile can copy it; what the build fetches (its base image,
-    packages) isn't an input."""
+    agent.toml alone: its image is a reference. A built image is made from its build context,
+    ``build_context_files``; what the build fetches (its base image, packages) isn't an input."""
     if isinstance(write.source, BuiltImage):
         return True
     if write.kind is BundleKind.SKILL:

@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import copy
 import shutil
+import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from agent_env.a2a_agent import A2AAgent
@@ -33,7 +35,7 @@ from agent_env.task_step.task_step import TaskStep
 from agent_env.utils.docker_build import DockerBuildError, build_image
 
 from ._fs import relative, with_article
-from .authoring import AuthoringContext
+from .authoring import AuthoringContext, build_context_files
 from .ledger import Ledger, materializing
 from .parse import BundleError, BundleKind
 from .plan import Plan, Write, folder_walk
@@ -134,20 +136,25 @@ def _write_entity(plan: Plan, write: Write, on_build: Callable[[Write], None] | 
 
 
 def _write_built_image(plan: Plan, write: Write) -> int:
-    """Build the image an entry's Dockerfile describes, with the entry's folder as its build context, and
-    write it as a docker_image artifact: pushed to the image store, saved as a tarball, and its build context
-    kept for installing it into a running container."""
+    """Build the image an entry's Dockerfile describes and write it as a docker_image artifact: pushed to the
+    image store, saved as a tarball, and its build context kept for installing it into a running container.
+    The build context is a copy of the files the ledger hashes, ``build_context_files``, so an image the
+    ledger reuses was built from what it hashed."""
     image = write.source
-    dockerfile = image.entry.path / image.dockerfile
     tag = f"{image_repository(write.id)}:bundle"
-    try:
-        build_image(dockerfile, image.entry.path, tag, platform=None)
-    except DockerBuildError as e:
-        raise BundleError([f"{_path(plan, write)}: {_tail(str(e))}"]) from None
-    return DockerImageArtifact.put(
-        id=write.id, description=f"built from {_path(plan, write)}/{image.dockerfile}", image_name=tag,
-        build_context_path=str(image.entry.path), dockerfile_path=str(dockerfile),
-    ).version
+    with tempfile.TemporaryDirectory(prefix="agent-env-build-") as staged:
+        context = Path(staged)
+        for key, path in build_context_files(plan.bundle.bundle, image.entry).items():
+            (context / key).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, context / key)
+        try:
+            build_image(context / image.dockerfile, context, tag, platform=None)
+        except DockerBuildError as e:
+            raise BundleError([f"{_path(plan, write)}: {_tail(str(e))}"]) from None
+        return DockerImageArtifact.put(
+            id=write.id, description=f"built from {_path(plan, write)}/{image.dockerfile}", image_name=tag,
+            build_context_path=str(context),
+        ).version
 
 
 _BUILD_OUTPUT_TAIL_LINES = 40

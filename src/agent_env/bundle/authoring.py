@@ -123,6 +123,16 @@ def entry_files(bundle: Bundle, entry: BundleEntry) -> dict[str, Path]:
     return _Walk(bundle, entry).files()
 
 
+def build_context_files(bundle: Bundle, entry: BundleEntry) -> dict[str, Path]:
+    """What an image built from an entry's folder is built from: its ``entry_files`` and its own toml, which
+    the Dockerfile can copy too."""
+    files = entry_files(bundle, entry)
+    toml = entry.path / CONFIG_FILES[entry.kind]
+    if toml.is_file():
+        files[toml.name] = toml
+    return dict(sorted(files.items()))
+
+
 def entry_file(bundle: Bundle, entry: BundleEntry) -> tuple[str, Path]:
     """The one file in an entry's folder, as ``(name, path)``. Raises BundleError otherwise."""
     files = entry_files(bundle, entry)

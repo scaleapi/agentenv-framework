@@ -5,6 +5,7 @@ import subprocess
 import sys
 import textwrap
 import time
+from pathlib import Path
 from typing import Literal
 
 import pytest
@@ -316,19 +317,26 @@ def docker_on_path(monkeypatch):
 
 @pytest.fixture
 def builds(monkeypatch, docker_on_path):
-    """Stands in for docker: each build is recorded, and the image written as a docker_image document."""
+    """Stands in for docker: each build is recorded with the files of its context, a link marked with a
+    trailing ``@``, and the image written as a docker_image document."""
     calls = []
 
+    def build(dockerfile, context, tag, *, platform):
+        calls.append({"build": (dockerfile.relative_to(context).as_posix(), _listing(context), tag, platform)})
+
     def put(id, *, description, image_name, build_context_path=None, dockerfile_path=None):
-        calls[-1]["put"] = (id, image_name, build_context_path)
+        calls[-1]["put"] = (id, image_name, _listing(build_context_path), dockerfile_path)
         return get_artifact_store().put_document(DockerImageArtifact(
             id=id, description=description, image_name=image_name, tar_gz_s3_url=f"file:///{id}.tar.gz"))
 
-    monkeypatch.setattr(materialize_module, "build_image",
-                        lambda dockerfile, context, tag, *, platform: calls.append(
-                            {"build": (dockerfile, context, tag, platform)}))
+    monkeypatch.setattr(materialize_module, "build_image", build)
     monkeypatch.setattr(materialize_module.DockerImageArtifact, "put", put)
     return calls
+
+
+def _listing(folder):
+    return sorted(path.relative_to(folder).as_posix() + ("@" if path.is_symlink() else "")
+                  for path in Path(folder).rglob("*") if not path.is_dir() or path.is_symlink())
 
 
 def test_an_agent_folder_with_a_dockerfile_is_built_and_the_agent_written_over_its_image(bundle_dir, builds):
@@ -339,9 +347,9 @@ def test_an_agent_folder_with_a_dockerfile_is_built_and_the_agent_written_over_i
 
     first = materialize(plan_of(bundle_dir), on_build=lambda write: announced.append(write.id))
 
-    folder = bundle_dir / "agents/solver"
-    assert builds == [{"build": (folder / "Dockerfile", folder, f"{image_repository(image)}:bundle", None),
-                       "put": (image, f"{image_repository(image)}:bundle", str(folder))}]
+    tag = f"{image_repository(image)}:bundle"
+    assert builds == [{"build": ("Dockerfile", ["Dockerfile", "run.sh"], tag, None),
+                       "put": (image, tag, ["Dockerfile", "run.sh"], None)}]
     assert announced == [image]
     assert {id: summary[:2] for id, summary in _summary(first).items() if "solver" in id} == {
         image: (1, False), f"{ROOT}/solver": (1, False)}
@@ -352,6 +360,29 @@ def test_an_agent_folder_with_a_dockerfile_is_built_and_the_agent_written_over_i
 
     assert len(builds) == 1 and announced == [image]
     assert _summary(again)[image] == (1, True, ()) and _summary(again)[f"{ROOT}/solver"] == (1, True, ())
+
+
+def test_an_image_is_built_from_the_files_the_ledger_hashes_so_a_reused_one_matches_them(bundle_dir, builds):
+    layout(bundle_dir, {
+        "agents/solver/Dockerfile": "FROM scratch\nCOPY . /agent\n",
+        "agents/solver/agent.toml": '[metadata]\ndefault_model = "claude-sonnet-4-6"\n',
+        "agents/solver/.dockerignore": "notes.md\n",
+        "agents/solver/lib/run.sh": "echo hi\n",
+        "agents/solver/__pycache__/run.cpython-312.pyc": "compiled",
+        "agents/solver/.DS_Store": "finder",
+    })
+    (bundle_dir / "agents/solver/run.sh").symlink_to("lib/run.sh")
+    _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
+
+    _run(bundle_dir)
+    (bundle_dir / "agents/solver/__pycache__/run.cpython-312.pyc").write_text("recompiled")
+    (bundle_dir / "agents/solver/.DS_Store").write_text("moved")
+    again = _summary(_run(bundle_dir))
+
+    context = [".dockerignore", "Dockerfile", "agent.toml", "lib/run.sh", "run.sh"]
+    assert [call["build"][1] for call in builds] == [context]
+    assert builds[0]["put"][2] == context
+    assert again[f"{ROOT}/solver__agent_image"] == (1, True, ())
 
 
 def test_a_changed_build_context_rebuilds_the_image_and_rewrites_its_agent(bundle_dir, builds):

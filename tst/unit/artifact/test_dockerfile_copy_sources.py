@@ -39,9 +39,3 @@ def test_context_relative_dockerfile_still_works(tmp_path, monkeypatch):
 
 def test_no_dockerfile_returns_dot():
     assert _get_dockerfile_copy_sources(Path("/tmp"), None) == ["."]
-
-
-def test_copying_the_whole_context_keeps_the_whole_context(tmp_path):
-    ctx = _make_tree(tmp_path)
-    (ctx / "Dockerfile").write_text("FROM python:3.11-slim\nCOPY app/ ./app/\nCOPY . /src\n")
-    assert _get_dockerfile_copy_sources(ctx, str(ctx / "Dockerfile")) == ["."]
