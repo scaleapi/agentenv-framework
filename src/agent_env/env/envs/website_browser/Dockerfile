@@ -1,6 +1,6 @@
 FROM public.ecr.aws/docker/library/node:22-slim@sha256:813a7480f28fdadac1f7f5c824bcdad435b5bc1322a5968bbbdef8d058f9dff4
 
-# Chrome runtime dependencies for headless mode.
+# Chromium runtime dependencies for headless mode.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libnss3 \
     libnspr4 \
@@ -29,10 +29,11 @@ WORKDIR /app
 ARG PLAYWRIGHT_MCP_VERSION
 ENV PLAYWRIGHT_MCP_VERSION=${PLAYWRIGHT_MCP_VERSION}
 
-# Pre-install the pinned version and Chrome.
+# Pre-install the pinned version and Playwright's Chromium, which is built for linux/amd64 and linux/arm64 alike
+# (Chrome has no Linux arm64 build).
 RUN npm init -y && \
     npm install @playwright/mcp@${PLAYWRIGHT_MCP_VERSION} && \
-    npx playwright install chrome
+    npx playwright install chromium
 
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh

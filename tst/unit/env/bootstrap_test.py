@@ -136,3 +136,8 @@ def test_up_reports_infra_it_cant_build_as_one_line(puts, monkeypatch):
         "Error: building the service-db, gateway env needs docker, and docker isn't on PATH; or run "
         "`agent-env up --no-bootstrap`")
 
+
+def test_the_website_browser_runs_playwrights_chromium_which_is_built_for_amd64_and_arm64():
+    """Chrome has no Linux arm64 build, so a browser built for an Apple Silicon host couldn't install it."""
+    assert "npx playwright install chromium" in bootstrap.WEBSITE_BROWSER_DOCKERFILE.read_text()
+    assert "--browser chromium" in (bootstrap.WEBSITE_BROWSER_CONTEXT / "entrypoint.sh").read_text()
