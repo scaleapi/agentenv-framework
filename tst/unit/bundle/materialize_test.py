@@ -427,6 +427,18 @@ def test_a_failed_build_is_a_bundle_problem_naming_the_agent(bundle_dir, builds,
     assert lines[1:] == [*(f"#{n} step" for n in range(21, 60)), "ERROR: failed to solve"]
 
 
+def test_a_failed_push_is_a_bundle_problem_naming_the_agent(bundle_dir, builds, monkeypatch):
+    def fail(id, **kwargs):
+        raise RuntimeError("could not start the local registry on port 5000: port is already allocated")
+
+    monkeypatch.setattr(materialize_module.DockerImageArtifact, "put", fail)
+    layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\n"})
+    _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
+
+    assert _problems(lambda: _run(bundle_dir)) == (
+        "agents/solver: could not start the local registry on port 5000: port is already allocated",)
+
+
 @_RUN_OR_DRY_RUN
 def test_an_image_to_build_without_docker_on_path_is_refused_before_anything_is_written(
     bundle_dir, monkeypatch, dry_run,

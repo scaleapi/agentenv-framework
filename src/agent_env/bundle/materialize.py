@@ -152,10 +152,13 @@ def _write_built_image(plan: Plan, write: Write) -> int:
             build_image(context / image.dockerfile, context, tag, platform=None)
         except DockerBuildError as e:
             raise BundleError([f"{_path(plan, write)}: {_tail(str(e))}"]) from None
-        return DockerImageArtifact.put(
-            id=write.id, description=f"built from {_path(plan, write)}/{image.dockerfile}", image_name=tag,
-            build_context_path=str(context),
-        ).version
+        try:
+            return DockerImageArtifact.put(
+                id=write.id, description=f"built from {_path(plan, write)}/{image.dockerfile}", image_name=tag,
+                build_context_path=str(context),
+            ).version
+        except RuntimeError as e:  # the image store, docker push or docker save
+            raise BundleError([f"{_path(plan, write)}: {e}"]) from None
 
 
 _BUILD_OUTPUT_TAIL_LINES = 40
