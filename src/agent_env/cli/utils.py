@@ -1,14 +1,13 @@
 import asyncio
-import os
-import subprocess
-from pathlib import Path
 
 import click
 
+from agent_env.config import get_config
 from agent_env.env import Env
 from agent_env.providers.env_providers.env_provider import _env_provider_class
 from agent_env.providers.env_providers.env_server_provider import EnvironmentServerProvider
 from agent_env.store.base import NotFoundError
+from agent_env.utils.build_metadata import detect_base_metadata, detect_env_metadata  # noqa: F401  re-exported for the put commands
 from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM
 
 
@@ -31,6 +30,17 @@ def build_platform_option(f):
             "Apple Silicon; pass an empty string to omit --platform entirely."
         ),
     )(f)
+
+
+def refuse_unwritable_ids(*ids: str) -> None:
+    """Refuse, before anything is built, an id the store a put writes it to wouldn't take, such as an @local id the
+    image's suffix makes too long."""
+    store = get_config().get_document_store()
+    for entity_id in ids:
+        try:
+            store.check_id(entity_id)
+        except ValueError as e:
+            raise click.ClickException(str(e)) from None
 
 
 def env_provider_type_option(help: str, env_type: str = "mcp_server"):
@@ -95,65 +105,6 @@ def parse_artifact_ref(ref: str) -> tuple[str, int | None]:
             f"Version must be >= 1, got {version} in {ref!r}"
         )
     return id_part, version
-
-
-def detect_base_metadata() -> dict[str, str]:
-    """Auto-detect non-git metadata (created_by, agent_env_version, etc.)."""
-    from importlib.metadata import version
-    metadata: dict[str, str] = {}
-    metadata["created_by"] = os.getenv("USER", "")
-    try:
-        metadata["agent_env_version"] = version("agentenv-framework")
-    except Exception:
-        pass
-    return {k: v for k, v in metadata.items() if v}
-
-
-def detect_env_metadata(dockerfile: Path, context: Path) -> dict[str, str]:
-    """Auto-detect metadata from a Dockerfile path and its git repo."""
-    metadata = detect_base_metadata()
-    metadata["dockerfile_path"] = str(dockerfile.resolve())
-    metadata.update(_detect_git_metadata(context))
-    return {k: v for k, v in metadata.items() if v}
-
-
-def _detect_git_metadata(path: Path) -> dict[str, str]:
-    """Auto-detect git metadata from a path. Returns empty dict if not in a git repo."""
-    directory = path if path.is_dir() else path.parent
-
-    def _git(*args: str) -> str | None:
-        try:
-            result = subprocess.run(
-                ["git", "-C", str(directory), *args],
-                capture_output=True, text=True, timeout=5,
-            )
-            return result.stdout.strip() if result.returncode == 0 else None
-        except Exception:
-            return None
-
-    metadata: dict[str, str] = {}
-    commit = _git("rev-parse", "--short", "HEAD")
-    if commit:
-        metadata["git_commit"] = commit
-    commit_full = _git("rev-parse", "HEAD")
-    if commit_full:
-        metadata["git_commit_full"] = commit_full
-    commit_date = _git("log", "-1", "--format=%aI")
-    if commit_date:
-        metadata["git_commit_date"] = commit_date
-    branch = _git("rev-parse", "--abbrev-ref", "HEAD")
-    if branch:
-        metadata["git_branch"] = branch
-    tag = _git("describe", "--tags", "--exact-match", "HEAD")
-    if tag:
-        metadata["git_tag"] = tag
-    remote = _git("remote", "get-url", "origin")
-    if remote:
-        metadata["git_repo"] = remote
-    dirty = _git("status", "--porcelain")
-    if dirty is not None:
-        metadata["git_dirty"] = str(dirty != "").lower()
-    return metadata
 
 
 def deployed_env_from_instance(env_id: str | None, instance_id: str) -> Env:

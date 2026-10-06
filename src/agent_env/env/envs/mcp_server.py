@@ -222,7 +222,7 @@ class MCPServerEnv(Env):
             await self._sandbox.load_s3_file(file_artifact.object_url, vm_temp_path)
             container_id = await self._env_provider._get_container_id(self._sandbox, self.environment_name)
             await self._sandbox.exec_script(f"docker exec {container_id} mkdir -p /data")
-            await self._sandbox.exec_script(f"docker cp {vm_temp_path} {container_id}:{container_path}")
+            await self._sandbox.docker_cp(vm_temp_path, f"{container_id}:{container_path}")
             await self._sandbox.exec_script(f"rm -f {vm_temp_path}")
         return container_path
 
@@ -350,7 +350,7 @@ class MCPServerEnv(Env):
         """
         refuse_local_github_build(id)
         docker_image_artifact = await DockerImageArtifact.put_from_github(
-            id=f"mcp-server-{id}",
+            id=derive_id(id, "env_image"),
             dockerfile_github_url=dockerfile_github_url,
             docker_context_github_url=docker_context_github_url,
             on_progress=on_progress,

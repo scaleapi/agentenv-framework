@@ -142,7 +142,8 @@ def build_context_update_ops(
     for name in _FIELDS.lists:
         pre_items = getattr(pre_ctx, name)
         post_items = getattr(post, name)
-        new_items = [x for x in post_items if x not in pre_items]
+        candidates = post_items[len(pre_items):] if _is_prefix(pre_items, post_items) else post_items
+        new_items = [x for x in candidates if x not in pre_items]
         if new_items:
             ops.add_to_sets[f"context.{name}"] = [
                 dataclasses.asdict(x) if dataclasses.is_dataclass(x) else x

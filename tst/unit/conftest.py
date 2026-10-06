@@ -47,6 +47,14 @@ def _disable_network():
 
 
 @pytest.fixture(autouse=True)
+def _docker_answers(monkeypatch):
+    """A bundle run asks whether Docker answers before it deploys containers locally or builds an infra env; unit
+    tests never reach a daemon, so it answers. Tests of the probe itself patch ``subprocess.run``."""
+    monkeypatch.setattr("agent_env.bundle.preflight.docker_unreachable", lambda: None)
+    monkeypatch.setattr("agent_env.env.bootstrap.docker_unreachable", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def isolated_state_root(tmp_path_factory, monkeypatch):
     """A fresh per-user state root for every unit test, overriding the run's."""
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("state")))

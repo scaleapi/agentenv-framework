@@ -21,6 +21,7 @@ import pytest
 from agent_env.task_step.context import DeployedAgent, PromptResponse, TaskStepContext
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
 from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTaskStep, _exec_args, _is_url_entry
+from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import find_agent_container
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, EnvCapabilityUnsupported
 from agent_env.env.gateway.constants import EXT_STEP_URI, GATEWAY_EXTENSIONS, WELL_KNOWN_PATH
 from tst.unit.event_loop_probe import on_event_loop
@@ -547,21 +548,21 @@ class TestAgentContainerPath:
         sandbox, calls = _reattached_local_agent(tmp_path, monkeypatch, running="a2a-agent-other\nagent-local-agent1\n")
         step = CollectArtifactsTaskStep(id="collect", version=None, agent_name="solver")
 
-        container = _run(step._discover_container(sandbox))
+        container = _run(find_agent_container(sandbox))
         _run(step._list_base_directory(sandbox, container))
 
         assert calls == [
             ("sudo", "docker", "ps", "--format", "{{.Names}}"),
-            ("sudo", "docker", "exec", "agent-local-agent1", "find", "/app/artifact", "-type", "f", "-printf", "%P\n"),
+            ("sudo", "docker", "exec", "-u", "0", "agent-local-agent1", "find", "/app/artifact", "-type", "f", "-printf", "%P\n"),
         ]
         assert _exec_args(sandbox, container, ("bash", "-c", "base64 < /app/artifact/a.txt")) == (
-            "sudo", "docker", "exec", "agent-local-agent1", "bash", "-c", "base64 < /app/artifact/a.txt")
+            "sudo", "docker", "exec", "-u", "0", "agent-local-agent1", "bash", "-c", "base64 < /app/artifact/a.txt")
 
     def test_a_reattached_local_agent_never_borrows_another_runs_container(self, tmp_path, monkeypatch):
         sandbox, calls = _reattached_local_agent(tmp_path, monkeypatch, running="a2a-agent-other\n")
 
         with pytest.raises(RuntimeError, match="'agent-local-agent1' is not running"):
-            _run(CollectArtifactsTaskStep(id="collect", version=None)._discover_container(sandbox))
+            _run(find_agent_container(sandbox))
         assert calls == [("sudo", "docker", "ps", "--format", "{{.Names}}")]
 
 
@@ -716,7 +717,7 @@ class TestSandboxContainerPath:
     """`container_name` + `sandbox_name`: collecting from a plain run_docker_container container.
 
     Before this path existed, a task built from deploy_sandbox -> run_docker_container had no way
-    to get files out: `_discover_container` only matches `agent-api` / `a2a-agent-*`, so the agent
+    to get files out: `find_agent_container` only matches `agent-api` / `a2a-agent-*`, so the agent
     path found nothing and the CUA path refuses a non-CUA env.
     """
 

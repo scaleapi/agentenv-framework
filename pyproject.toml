@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentenv-framework"
-version = "0.9.1272"
+version = "0.9.1277"
 description = "SDK and CLI for building, deploying and running agent environments and the tasks that grade agents in them."
 readme = "README.md"
 license = "Apache-2.0"
@@ -45,7 +45,7 @@ dependencies = [
     "pyyaml>=6.0",
     "starlette>=0.40",  # the local grant server
     "uvicorn>=0.47",  # 0.47 adds ssl_context_factory, how the local grant server gets its TLS context
-    "modal>=1.5.2.dev2",  # dev2 adds VM-mode V2 (_experimental_create + vm_runtime)
+    "modal>=1.5.2.dev22",  # dev22 adds _experimental_create(tags=); dev2 added VM-mode V2 (vm_runtime)
     "e2b~=2.46.4",  # AsyncSandbox/AsyncTemplate APIs validated against the 2.46 line
 ]
 

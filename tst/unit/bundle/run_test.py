@@ -10,6 +10,7 @@ import pytest
 from click.testing import CliRunner
 
 import agent_env.bundle.run as run_module
+from agent_env.bundle import materialize as materialize_module
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.store import get_artifact_store
@@ -19,6 +20,7 @@ from agent_env.bundle.plan import plan_bundle
 from agent_env.bundle.resolve import resolve_bundle
 from agent_env.cli import cli
 from agent_env.config.runtime import Config
+from agent_env.entity_refs import EntityRef
 from agent_env.store import Filter
 from agent_env.store.routing import namespace_routing
 from agent_env.task import Task
@@ -77,6 +79,24 @@ class _Cancelled(_Scored):
         raise asyncio.CancelledError
 
 
+class _NamesAgent(_Scored):
+    """Names an agent, so the agent and its image are written, without deploying it."""
+
+    type = "names_agent_run_test"
+    entity_refs = (EntityRef.agent("a2a_agent_id"),)
+
+    def __init__(self, a2a_agent_id=None, **base):
+        super().__init__(**base)
+        self.a2a_agent_id = a2a_agent_id
+
+    @classmethod
+    def from_dict(cls, data):
+        return cls(**cls._base_from_dict(data), a2a_agent_id=data.get("a2a_agent_id"))
+
+    def to_dict(self):
+        return {**super().to_dict(), "a2a_agent_id": self.a2a_agent_id}
+
+
 def _scored(score):
     return json.dumps([{"id": "check", "type": "scored_run_test", "verifier_id": "v", "score": score}])
 
@@ -93,7 +113,7 @@ LAYOUT = {
 
 @pytest.fixture(autouse=True)
 def registries(monkeypatch):
-    steps = {**Config().task_step_registry(), **{cls.type: cls for cls in (_Scored, _Failing, _Cancelled)}}
+    steps = {**Config().task_step_registry(), **{cls.type: cls for cls in (_Scored, _Failing, _Cancelled, _NamesAgent)}}
     monkeypatch.setattr(Config, "task_step_registry", lambda self: steps)
     monkeypatch.setattr(_Scored, "seen", [])
     monkeypatch.setattr(_Scored, "peak", 0)
@@ -103,6 +123,25 @@ def registries(monkeypatch):
 def bundle_dir(tmp_path, monkeypatch, local_stores):
     monkeypatch.setenv("HOME", str(tmp_path))
     return layout(tmp_path / "triage", LAYOUT)
+
+
+BUILT_AGENT = {
+    "agents/solver/Dockerfile": "FROM scratch\n",
+    "tasks/agent.json": json.dumps([{"id": "agent", "type": "names_agent_run_test", "a2a_agent_id": "solver"}]),
+}
+
+
+@pytest.fixture
+def docker(monkeypatch):
+    """Stands in for docker: each build's tag is recorded, and the image written as a docker_image document."""
+    builds = []
+    monkeypatch.setattr(materialize_module.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(materialize_module, "build_image",
+                        lambda dockerfile, context, tag, *, platform: builds.append(tag))
+    monkeypatch.setattr(materialize_module.DockerImageArtifact, "put", lambda id, **kwargs: get_artifact_store(
+    ).put_document(DockerImageArtifact(id=id, description="d", image_name=kwargs["image_name"],
+                                       tar_gz_s3_url=f"file:///{id}.tar.gz")))
+    return builds
 
 
 def _names(runs):
@@ -254,6 +293,21 @@ def test_progress_is_reported_and_a_progress_callback_that_raises_stops_without_
 
     assert run_bundle(bundle_dir, tasks=["a"], on_progress=broken).runs[0].outcome is Outcome.PASSED
     assert calls == ["tasks/a.json: v1, unchanged"]
+
+
+def test_a_run_says_before_it_builds_an_image_and_names_the_image_apart_from_its_agent(bundle_dir, docker):
+    layout(bundle_dir, BUILT_AGENT)
+    lines = []
+
+    run_bundle(bundle_dir, tasks=["agent"], on_progress=lines.append)
+
+    assert lines[:4] == [
+        "agents/solver (Dockerfile image): building with docker, which can take minutes",
+        "agents/solver (Dockerfile image): v1 (new)",
+        "agents/solver: v1 (new)",
+        "tasks/agent.json: v1 (new)",
+    ]
+    assert len(docker) == 1
 
 
 def test_a_cancelled_run_raises_rather_than_being_kept_as_a_failure(bundle_dir):
@@ -466,6 +520,26 @@ def test_the_cli_dry_run_reads_another_bundles_entity_and_says_why_an_agent_pinn
         "Would run:\n"
         "  tasks/agent.json v1\n"
     )
+
+
+def test_the_cli_dry_run_lists_an_image_it_would_build_and_builds_nothing(bundle_dir, docker, quiet_logs):
+    layout(bundle_dir, BUILT_AGENT)
+
+    result = CliRunner().invoke(cli, ["run", str(bundle_dir), "--task", "agent", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output == (
+        DRY_RUN
+        + "agents/solver (Dockerfile image): v1 (new)\n"
+        "agents/solver: v1 (new)\n"
+        "tasks/agent.json: v1 (new)\n"
+        "\n"
+        "Would run:\n"
+        "  tasks/agent.json v1\n"
+        + DRY_RUN
+    )
+    assert docker == []
+    assert not local_store().path.exists()
 
 
 def test_the_cli_dry_run_prints_a_problem_as_one_line_and_exits_1(bundle_dir, quiet_logs):

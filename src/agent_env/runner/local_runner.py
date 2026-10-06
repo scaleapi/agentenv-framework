@@ -18,6 +18,7 @@ from typing import Optional
 
 from agent_env.runner import store as run_store
 from agent_env.runner.runner import RunHandle, RunRecord, Runner, RunStatus
+from agent_env.task.teardown import TERMINATE_TIMEOUT_SECONDS, teardown_run
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,13 @@ class LocalRunner(Runner):
     """In-process runner. The DocumentStore holds run records for status/listing only."""
 
     type = "local"
+    # How long a run's teardown may take, from when it starts: each sandbox gets TERMINATE_TIMEOUT_SECONDS,
+    # and the folder of a local one is removed after that, outside it.
+    TEARDOWN_WAIT_SECONDS = 2 * TERMINATE_TIMEOUT_SECONDS
+    # How long stop() gives a cancelled run to unwind its steps and reach its teardown.
+    STOP_WAIT_SECONDS = 60
+    # After those waits, how long stop() gives a run it cancels again before shutting down without it.
+    ABANDON_WAIT_SECONDS = 1
 
     def __init__(self, workers: int = 2) -> None:
         if workers < 1:
@@ -33,6 +41,9 @@ class LocalRunner(Runner):
         self.workers = int(workers)
         self._sem = asyncio.Semaphore(self.workers)
         self._inflight: dict[str, asyncio.Task] = {}
+        self._tearing_down: set[str] = set()  # runs past their task, removing what it deployed
+        self._contexts: dict = {}  # each run's context, so stop() can still tear down a run it gives up on
+        self._abandoned: set[str] = set()  # runs stop() gave up on and tore down itself
         self._stopping = False
 
     # --- lifecycle ---------------------------------------------------------
@@ -49,12 +60,46 @@ class LocalRunner(Runner):
             logger.info("Failed %d run(s) left non-terminal by a previous process", orphaned)
 
     async def stop(self) -> None:
+        """Cancel the runs still working and wait for every run, letting a teardown under way finish: each bounds
+        its own teardown by TEARDOWN_WAIT_SECONDS. A run still going after a run's whole allowance, a step that
+        ignored its cancel or a teardown that never ended, is cancelled again and left behind."""
         self._stopping = True
-        for task in list(self._inflight.values()):
-            task.cancel()
+        for run_id, task in list(self._inflight.items()):
+            if run_id not in self._tearing_down:
+                task.cancel()
         if self._inflight:
-            await asyncio.gather(*self._inflight.values(), return_exceptions=True)
+            _, stuck = await asyncio.wait(
+                list(self._inflight.values()), timeout=self.STOP_WAIT_SECONDS + self.TEARDOWN_WAIT_SECONDS)
+            if stuck:
+                for task in stuck:
+                    task.cancel()
+                await asyncio.wait(stuck, timeout=self.ABANDON_WAIT_SECONDS)
+                # A run still going never reached its own teardown: remove what it has recorded so far.
+                left = [run_id for run_id, task in self._inflight.items()
+                        if not task.done() and run_id not in self._tearing_down and run_id in self._contexts]
+                if left:
+                    logger.warning("Shutting down without %d run(s) that didn't stop; tearing down what they recorded",
+                                   len(left))
+                    self._abandoned.update(left)  # their own teardown waits while this one runs
+                    try:
+                        await self._tear_down_abandoned(left)
+                    finally:  # a run that ends later tears down whatever this one didn't
+                        self._abandoned.difference_update(left)
         self._inflight.clear()
+
+    async def _tear_down_abandoned(self, run_ids: list[str]) -> None:
+        try:
+            async with asyncio.timeout(self.TEARDOWN_WAIT_SECONDS):
+                results = await asyncio.gather(
+                    *(self._tear_down(run_id, self._contexts[run_id]) for run_id in run_ids), return_exceptions=True)
+        except TimeoutError:
+            logger.warning("Gave up tearing down %s after %ss; what they deployed may still be up",
+                           ", ".join(run_ids), self.TEARDOWN_WAIT_SECONDS)
+            return
+        for run_id, result in zip(run_ids, results):
+            if isinstance(result, BaseException):
+                logger.warning("Run %s: tearing it down failed (%s: %s); what it deployed may still be up",
+                               run_id, type(result).__name__, result)
 
     # --- Runner API --------------------------------------------------------
 
@@ -110,6 +155,7 @@ class LocalRunner(Runner):
         from agent_env.task import Task
 
         run_task: Optional[asyncio.Task] = None
+        context = None
         try:
             async with self._sem:                     # bounded concurrency; the wait here IS the queue
                 if run_store.get_run(record.run_id).status == RunStatus.CANCELED:
@@ -121,6 +167,7 @@ class LocalRunner(Runner):
                     raise LookupError(f"Task {record.task_id} v{record.task_version} not found")
 
                 context = self._seed_context(record)
+                self._contexts[record.run_id] = context
                 # start_step rides in metadata but Task.run takes it as a keyword;
                 # without lifting it out here every resume re-ran from zero.
                 run_task = asyncio.ensure_future(task.run(
@@ -154,7 +201,29 @@ class LocalRunner(Runner):
             logger.exception("Run %s failed", record.run_id)
             run_store.mark_terminal(record.run_id, RunStatus.FAILED, error=f"{type(e).__name__}: {e}")
         finally:
-            self._inflight.pop(record.run_id, None)
+            try:
+                if context is not None and record.run_id not in self._abandoned:
+                    self._tearing_down.add(record.run_id)
+                    try:
+                        async with asyncio.timeout(self.TEARDOWN_WAIT_SECONDS):
+                            await self._tear_down(record.run_id, context)
+                    except TimeoutError:
+                        logger.warning("Run %s: stopped waiting for its teardown after %ss; what it hadn't "
+                                       "removed is still up", record.run_id, self.TEARDOWN_WAIT_SECONDS)
+            finally:
+                self._tearing_down.discard(record.run_id)
+                self._abandoned.discard(record.run_id)
+                self._contexts.pop(record.run_id, None)
+                self._inflight.pop(record.run_id, None)
+
+    @staticmethod
+    async def _tear_down(run_id: str, context) -> None:
+        """Remove what the run deployed, however it ended: nothing resumes from a local run's sandboxes."""
+        report = await teardown_run(context)
+        for sandbox, why in report.failed:
+            logger.warning("Run %s: couldn't tear down %s: %s", run_id, sandbox.sandbox_id, why)
+        for sandbox in report.left:
+            logger.warning("Run %s: %s is still up", run_id, sandbox.sandbox_id)
 
     def _finish(self, run_id: str, context, *, exc: Optional[BaseException] = None) -> None:
         """Persist the terminal state of a finished Task.run(): a raised step is FAILED,

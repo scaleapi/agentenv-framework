@@ -84,3 +84,23 @@ def test_importing_it_pulls_neither_cli_nor_providers():
     )
     proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
+
+
+@pytest.mark.parametrize("outcome, reason", [
+    (SimpleNamespace(returncode=0, stderr=""), None),
+    (SimpleNamespace(returncode=1, stderr="\nCannot connect to the Docker daemon. Is the docker daemon running?\n"),
+     "the Docker daemon isn't reachable: Cannot connect to the Docker daemon. Is the docker daemon running?"),
+    (SimpleNamespace(returncode=1, stderr=""), "the Docker daemon isn't reachable"),
+    (FileNotFoundError("docker"), "docker isn't on PATH"),
+    (subprocess.TimeoutExpired(["docker", "info"], 10), "`docker info` didn't answer in 10s"),
+], ids=["answers", "down", "down-silently", "not-installed", "hangs"])
+def test_docker_unreachable_says_why_docker_info_didnt_answer(monkeypatch, outcome, reason):
+    def run(argv, **kwargs):
+        assert argv == ["docker", "info"] and kwargs["timeout"] == docker_build.DOCKER_INFO_TIMEOUT_SECONDS
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(docker_build.subprocess, "run", run)
+
+    assert docker_build.docker_unreachable() == reason

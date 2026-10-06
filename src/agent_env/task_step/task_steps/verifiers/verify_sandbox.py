@@ -28,6 +28,7 @@ import shlex
 import uuid
 from typing import ClassVar, Optional
 
+from agent_env.providers.sandbox_providers.sandbox import VmSandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_VM,
     build_sandbox_provider,
@@ -36,6 +37,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
 )
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import find_agent_container
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
 
 logger = logging.getLogger(__name__)
@@ -117,13 +119,21 @@ class VerifySandboxTaskStep(TaskStep):
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         on_agent = self.sandbox_name is None
-        sandbox = await (self._agent_sandbox(context) if on_agent else self._deployed_sandbox(context))
+        if on_agent:
+            sandbox = await self._agent_sandbox(context)
+        else:
+            deployed, sandbox = await self._deployed_sandbox(context)
         logger.info(f"Connected to sandbox {sandbox.sandbox_id} (mode={sandbox.mode})")
-        container = (
-            await self._discover_container(sandbox)
-            if on_agent and sandbox.mode == SANDBOX_MODE_VM
-            else None
-        )
+        if on_agent:
+            container = await find_agent_container(sandbox) if sandbox.mode == SANDBOX_MODE_VM else None
+        else:
+            # A container-mode sandbox on a VM-backed provider runs its image beside the host, and reattaches as a VM:
+            # its files are reached in the container, decided by the mode deploy_sandbox recorded.
+            container = (
+                sandbox.container_name
+                if deployed.sandbox_mode != SANDBOX_MODE_VM and isinstance(sandbox, VmSandbox)
+                else None
+            )
         if container:
             logger.info(f"Using agent container: {container}")
 
@@ -203,7 +213,7 @@ class VerifySandboxTaskStep(TaskStep):
             if deployed.sandbox_type
             else get_sandbox_provider()
         )
-        return await provider.get_sandbox(deployed.sandbox_id)
+        return deployed, await provider.get_sandbox(deployed.sandbox_id)
 
     async def _eval_criterion(self, sandbox, container: Optional[str], criterion: dict) -> dict:
         rtype = criterion["type"]
@@ -224,7 +234,8 @@ class VerifySandboxTaskStep(TaskStep):
     @staticmethod
     def _probe_args(sandbox, container: Optional[str], cmd: tuple[str, ...]) -> tuple[str, ...]:
         if container is not None:
-            return ("sudo", "docker", "exec", container, *cmd)
+            # As root, like the steps that write into the container: a non-root image user can't read their files.
+            return ("sudo", "docker", "exec", "-u", "0", container, *cmd)
         if sandbox.mode == SANDBOX_MODE_VM:
             return ("sudo", *cmd)
         return cmd
@@ -287,27 +298,3 @@ class VerifySandboxTaskStep(TaskStep):
         exit_code, _, stderr = await self._exec(sandbox, args)
         return _outcome(exit_code == 0, f"exit={exit_code}; stderr={stderr[:200]}")
 
-    async def _discover_container(self, sandbox) -> str:
-        """Find the agent container on a VM sandbox. Mirrors collect_artifacts._discover_container."""
-        exit_code, stdout, stderr = await sandbox.exec_with_output(
-            "sudo", "docker", "ps", "--format", "{{.Names}}",
-        )
-        if exit_code != 0:
-            raise RuntimeError(f"Failed to list containers: {stderr[:300]}")
-        running = [n.strip() for n in stdout.splitlines() if n.strip()]
-        if sandbox.container_name in running:
-            return sandbox.container_name
-        if getattr(sandbox, "owns_container", False):
-            # Its Docker host is shared, so any other agent container there is another run's.
-            raise RuntimeError(
-                f"Agent container {sandbox.container_name!r} is not running. Running containers: {running}."
-            )
-        fallback = [n for n in running if n.startswith("a2a-agent-")]
-        if fallback:
-            if len(fallback) > 1:
-                logger.warning(f"Multiple a2a-agent-* containers found; using first: {fallback}")
-            return fallback[0]
-        raise RuntimeError(
-            f"No agent container found on the VM (looked for 'agent-api' or 'a2a-agent-*'). "
-            f"Running containers: {running}."
-        )

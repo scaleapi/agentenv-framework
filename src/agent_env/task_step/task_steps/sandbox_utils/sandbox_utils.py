@@ -77,3 +77,28 @@ async def fetch_container_logs(agent, tail: int = 500) -> Optional[str]:
             sandbox_id, e, exc_info=True,
         )
         return None
+
+
+async def find_agent_container(sandbox) -> str:
+    """The agent container running on a VM sandbox: the sandbox's own ``container_name``, else the
+    first ``a2a-agent-*``. A sandbox that owns its container never takes another: its Docker host
+    is shared, so any other agent container there is another run's."""
+    exit_code, stdout, stderr = await sandbox.exec_with_output("sudo", "docker", "ps", "--format", "{{.Names}}")
+    if exit_code != 0:
+        raise RuntimeError(f"Failed to list containers: {stderr[:300]}")
+    running = [n.strip() for n in stdout.splitlines() if n.strip()]
+    if sandbox.container_name in running:
+        return sandbox.container_name
+    if getattr(sandbox, "owns_container", False):
+        raise RuntimeError(
+            f"Agent container {sandbox.container_name!r} is not running. Running containers: {running}."
+        )
+    fallback = [n for n in running if n.startswith("a2a-agent-")]
+    if fallback:
+        if len(fallback) > 1:
+            logger.warning(f"Multiple a2a-agent-* containers found; using first: {fallback}")
+        return fallback[0]
+    raise RuntimeError(
+        f"No agent container found on the VM (looked for {sandbox.container_name!r} or 'a2a-agent-*'). "
+        f"Running containers: {running}. Has deploy_agent been run in this task?"
+    )

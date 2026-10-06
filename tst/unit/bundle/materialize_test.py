@@ -1,10 +1,12 @@
 """Materializing a planned bundle: what gets written, what is reused, and what is refused before any write."""
 
+import contextlib
 import json
 import subprocess
 import sys
 import textwrap
 import time
+from pathlib import Path
 from typing import Literal
 
 import pytest
@@ -19,6 +21,8 @@ from agent_env.bundle import BundleError
 from agent_env.bundle import materialize as materialize_module
 from agent_env.bundle.ledger import LEDGER_COLLECTION, Ledger
 from agent_env.bundle.materialize import materialize
+from agent_env.bundle.parse import BundleKind
+from agent_env.bundle.run import _written
 from agent_env.config import configure
 from agent_env.config.paths import state_root
 from agent_env.config.runtime import Config
@@ -26,6 +30,7 @@ from agent_env.entity_refs import EntityRef, RefRole
 from agent_env.env.env import Env
 from agent_env.eval import Eval, EvalTask
 from agent_env.store import Filter
+from agent_env.store.ids import image_repository
 from agent_env.store.routing import disable_namespace_routing
 from agent_env.task import Task
 from agent_env.task_step.task_step import TaskStep
@@ -199,11 +204,9 @@ def test_what_has_no_writer_yet_is_refused_before_anything_is_written(bundle_dir
     ])
 
     assert sorted(_problems(lambda: _run(bundle_dir, dry_run))) == [
-        "agents/solver: writing an image built from Dockerfile isn't supported yet",
         "artifacts/base-mcp: writing a docker_image artifact isn't supported yet",
         "artifacts/snap: writing an environment artifact isn't supported yet",
         "envs/imaged: writing an env isn't supported yet",
-        "envs/imaged: writing an image built from Dockerfile isn't supported yet",
         "envs/tickets: writing an env isn't supported yet",
         "skills/pdf: writing a skill isn't supported yet",
     ]
@@ -308,6 +311,198 @@ def test_another_bundles_entities_are_read_like_store_ids_and_an_agent_pins_the_
         f"{ROOT}/t": (1, True, ()),
     }
     assert A2AAgent.get(f"{ROOT}/solver").docker_image_artifact.version == 2
+
+
+@pytest.fixture
+def docker_on_path(monkeypatch):
+    monkeypatch.setattr(materialize_module.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+
+@pytest.fixture
+def builds(monkeypatch, docker_on_path):
+    """Stands in for docker: each build is recorded with the files of its context, a link marked with a
+    trailing ``@``, and the image written as a docker_image document."""
+    calls = []
+
+    def build(dockerfile, context, tag, *, platform):
+        calls.append({"build": (dockerfile.relative_to(context).as_posix(), _listing(context), tag, platform)})
+
+    def put(id, *, description, image_name, build_context_path=None, dockerfile_path=None):
+        calls[-1]["put"] = (id, image_name, _listing(build_context_path), dockerfile_path)
+        return get_artifact_store().put_document(DockerImageArtifact(
+            id=id, description=description, image_name=image_name, tar_gz_s3_url=f"file:///{id}.tar.gz"))
+
+    monkeypatch.setattr(materialize_module, "build_image", build)
+    monkeypatch.setattr(materialize_module.DockerImageArtifact, "put", put)
+    return calls
+
+
+def _listing(folder):
+    return sorted(path.relative_to(folder).as_posix() + ("@" if path.is_symlink() else "")
+                  for path in Path(folder).rglob("*") if not path.is_dir() or path.is_symlink())
+
+
+def test_an_agent_folder_with_a_dockerfile_is_built_and_the_agent_written_over_its_image(bundle_dir, builds):
+    layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\nCOPY run.sh /\n", "agents/solver/run.sh": "echo hi\n"})
+    _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
+    image = f"{ROOT}/solver__agent_image"
+    announced = []
+
+    first = materialize(plan_of(bundle_dir), on_build=lambda write: announced.append(write.id))
+
+    tag = f"{image_repository(image)}:bundle"
+    assert builds == [{"build": ("Dockerfile", ["Dockerfile", "run.sh"], tag, None),
+                       "put": (image, tag, ["Dockerfile", "run.sh"], None)}]
+    assert announced == [image]
+    assert {id: summary[:2] for id, summary in _summary(first).items() if "solver" in id} == {
+        image: (1, False), f"{ROOT}/solver": (1, False)}
+    agent = A2AAgent.get(f"{ROOT}/solver")
+    assert (agent.docker_image_artifact.id, agent.docker_image_artifact.version) == (image, 1)
+
+    again = materialize(plan_of(bundle_dir), on_build=lambda write: announced.append(write.id))
+
+    assert len(builds) == 1 and announced == [image]
+    assert _summary(again)[image] == (1, True, ()) and _summary(again)[f"{ROOT}/solver"] == (1, True, ())
+
+
+def test_an_image_is_built_from_the_files_the_ledger_hashes_so_a_reused_one_matches_them(bundle_dir, builds):
+    layout(bundle_dir, {
+        "agents/solver/Dockerfile": "FROM scratch\nCOPY . /agent\n",
+        "agents/solver/agent.toml": '[metadata]\ndefault_model = "claude-sonnet-4-6"\n',
+        "agents/solver/.dockerignore": "notes.md\n",
+        "agents/solver/lib/run.sh": "echo hi\n",
+        "agents/solver/__pycache__/run.cpython-312.pyc": "compiled",
+        "agents/solver/.DS_Store": "finder",
+    })
+    (bundle_dir / "agents/solver/run.sh").symlink_to("lib/run.sh")
+    _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
+
+    _run(bundle_dir)
+    (bundle_dir / "agents/solver/__pycache__/run.cpython-312.pyc").write_text("recompiled")
+    (bundle_dir / "agents/solver/.DS_Store").write_text("moved")
+    again = _summary(_run(bundle_dir))
+
+    context = [".dockerignore", "Dockerfile", "agent.toml", "lib/run.sh", "run.sh"]
+    assert [call["build"][1] for call in builds] == [context]
+    assert builds[0]["put"][2] == context
+    assert again[f"{ROOT}/solver__agent_image"] == (1, True, ())
+
+
+def test_a_changed_build_context_rebuilds_the_image_and_rewrites_its_agent(bundle_dir, builds):
+    layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\nCOPY run.sh /\n", "agents/solver/run.sh": "echo hi\n"})
+    _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
+    _run(bundle_dir)
+    (bundle_dir / "agents/solver/run.sh").write_text("echo bye\n")
+
+    rebuilt = _summary(_run(bundle_dir))
+
+    assert len(builds) == 2
+    assert rebuilt[f"{ROOT}/solver__agent_image"][:2] == (2, False)
+    assert rebuilt[f"{ROOT}/solver"][:2] == (2, False)
+    assert A2AAgent.get(f"{ROOT}/solver").docker_image_artifact.version == 2
+
+
+def test_a_dry_run_predicts_a_rebuild_and_its_agents_rewrite_without_building(bundle_dir, builds):
+    layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\nCOPY run.sh /\n", "agents/solver/run.sh": "echo hi\n"})
+    _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
+    _run(bundle_dir)
+    (bundle_dir / "agents/solver/run.sh").write_text("echo bye\n")
+    image = f"{ROOT}/solver__agent_image"
+
+    predicted = _summary(_run(bundle_dir, dry_run=True))
+
+    assert len(builds) == 1
+    assert predicted[image] == (2, False, ("files changed: run.sh",))
+    assert predicted[f"{ROOT}/solver"] == (2, False, (f"artifact {image} is written anew (v1 → v2)",))
+    assert _summary(_run(bundle_dir)) == predicted
+    assert len(builds) == 2
+
+
+def test_an_agent_toml_edit_rebuilds_the_image_too_since_a_dockerfile_can_copy_it(bundle_dir, builds):
+    layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\nCOPY . /agent\n"})
+    _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
+    _run(bundle_dir)
+    (bundle_dir / "agents/solver/agent.toml").write_text('[metadata]\ndefault_model = "claude-sonnet-4-6"\n')
+
+    edited = _summary(_run(bundle_dir))
+
+    assert len(builds) == 2
+    assert edited[f"{ROOT}/solver__agent_image"][:3] == (2, False, ("files added: agent.toml",))
+    assert edited[f"{ROOT}/solver"][:2] == (2, False)
+
+
+def test_a_failed_build_is_a_bundle_problem_naming_the_agent(bundle_dir, builds, monkeypatch):
+    def fail(dockerfile, context, tag, *, platform):
+        output = "\n".join(f"#{n} step" for n in range(60))
+        raise materialize_module.DockerBuildError(f"docker build of {tag} failed (exit 1):\n{output}\nERROR: failed to solve")
+
+    monkeypatch.setattr(materialize_module, "build_image", fail)
+    layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\n"})
+    _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
+
+    (problem,) = _problems(lambda: _run(bundle_dir))
+    lines = problem.splitlines()
+    assert lines[0].startswith("agents/solver: docker build of ") and lines[0].endswith(" failed (exit 1):")
+    assert lines[1:] == [*(f"#{n} step" for n in range(21, 60)), "ERROR: failed to solve"]
+
+
+def test_a_failed_push_is_a_bundle_problem_naming_the_agent(bundle_dir, builds, monkeypatch):
+    def fail(id, **kwargs):
+        raise RuntimeError("could not start the local registry on port 5000: port is already allocated")
+
+    monkeypatch.setattr(materialize_module.DockerImageArtifact, "put", fail)
+    layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\n"})
+    _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
+
+    assert _problems(lambda: _run(bundle_dir)) == (
+        "agents/solver: could not start the local registry on port 5000: port is already allocated",)
+
+
+@_RUN_OR_DRY_RUN
+def test_an_image_to_build_without_docker_on_path_is_refused_before_anything_is_written(
+    bundle_dir, monkeypatch, dry_run,
+):
+    monkeypatch.setattr(materialize_module.shutil, "which", lambda name: None)
+    layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\n"})
+    _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
+
+    assert _problems(lambda: _run(bundle_dir, dry_run)) == (
+        "agents/solver: building its image from Dockerfile needs docker, and it isn't on PATH",)
+    assert not local_store().path.exists()
+
+
+def test_whether_an_image_needs_docker_is_decided_once_another_run_writing_it_is_done(bundle_dir, builds, monkeypatch):
+    """Another run may be building the image; once its lock is released, the ledger can reuse what it built."""
+    events = []
+    locked = materialize_module.materializing
+
+    @contextlib.contextmanager
+    def materializing(bundle, on_wait=None):
+        with locked(bundle, on_wait):
+            events.append("locked")
+            yield
+
+    monkeypatch.setattr(materialize_module, "materializing", materializing)
+    check = materialize_module._refuse_builds_without_docker
+    monkeypatch.setattr(materialize_module, "_refuse_builds_without_docker",
+                        lambda plan, ledger: events.append("docker checked") or check(plan, ledger))
+    layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\n"})
+    _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
+
+    _run(bundle_dir)
+
+    assert events == ["locked", "docker checked"]
+
+
+@_RUN_OR_DRY_RUN
+def test_an_image_the_ledger_reuses_needs_no_docker(bundle_dir, builds, monkeypatch, dry_run):
+    layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\n"})
+    _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
+    _run(bundle_dir)
+    monkeypatch.setattr(materialize_module.shutil, "which", lambda name: None)
+
+    assert _summary(_run(bundle_dir, dry_run))[f"{ROOT}/solver__agent_image"] == (1, True, ())
+    assert len(builds) == 1
 
 
 def _put_image(id):
@@ -517,6 +712,39 @@ def test_a_dry_run_predicts_what_materializing_then_writes(bundle_dir):
     assert agree()[f"{ROOT}/docs"] == (2, False, ("files changed: b.md",))
     FileArtifact.put_bytes(f"{ROOT}/greeting", description="by hand", filename="hello.txt", content=b"by hand")
     assert agree()[f"{ROOT}/greeting"] == (3, False, ("the store's latest, v2, wasn't recorded by this bundle",))
+
+
+def test_a_version_a_run_wrote_before_it_was_interrupted_is_kept_by_the_next_run_and_its_dry_run(
+    bundle_dir, monkeypatch,
+):
+    interrupted, write_artifact, digest = [], materialize_module._WRITERS[BundleKind.ARTIFACT], Ledger.digest
+
+    def written(plan, write):  # the greeting's write lands, and then the run is interrupted
+        version = write_artifact(plan, write)
+        interrupted.append(write.id == f"{ROOT}/greeting")
+        return version
+
+    def digest_until_interrupted(self, *args):
+        if any(interrupted):
+            raise KeyboardInterrupt
+        return digest(self, *args)
+
+    monkeypatch.setitem(materialize_module._WRITERS, BundleKind.ARTIFACT, written)
+    monkeypatch.setattr(Ledger, "digest", digest_until_interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        _run(bundle_dir)
+    monkeypatch.setitem(materialize_module._WRITERS, BundleKind.ARTIFACT, write_artifact)
+    monkeypatch.setattr(Ledger, "digest", digest)
+
+    kept = (1, True, ("written by an interrupted run that didn't record it",))
+    assert _summary(_run(bundle_dir, dry_run=True))[f"{ROOT}/greeting"] == kept
+    done = _run(bundle_dir)
+    assert _summary(done)[f"{ROOT}/greeting"] == kept
+    greeting = next(item for item in done.writes if item.write.id == f"{ROOT}/greeting")
+    assert _written(done.plan, greeting) == (
+        "artifacts/greeting: v1, unchanged (written by an interrupted run that didn't record it)")
+    assert _summary(_run(bundle_dir))[f"{ROOT}/greeting"] == (1, True, ())
+    assert [d["version"] for d in local_store().query("artifacts", Filter.of(id=f"{ROOT}/greeting"))] == [1]
 
 
 def test_a_dry_run_calls_no_writer_and_takes_no_lock(bundle_dir, monkeypatch):

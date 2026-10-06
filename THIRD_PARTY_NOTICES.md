@@ -443,7 +443,7 @@ The runtime dependencies of `agentenv-framework` and its `explorer` and `gcp` ex
 - Source: <https://github.com/executablebooks/mdurl>
 - [License text 27](#license-text-27)
 
-### modal 1.5.2.dev12
+### modal 1.6.2.dev1
 
 - License: Apache-2.0
 - Author: Modal Labs <support@modal.com>
@@ -695,11 +695,11 @@ The runtime dependencies of `agentenv-framework` and its `explorer` and `gcp` ex
 - Source: <https://github.com/Kludex/starlette>
 - [License text 23](#license-text-23)
 
-### synchronicity 0.12.5
+### synchronicity 0.12.6
 
 - License: Apache-2.0
 - Author: Modal Labs
-- Source: <https://pypi.org/project/synchronicity/0.12.5/>
+- Source: <https://pypi.org/project/synchronicity/0.12.6/>
 - [License text 1](#license-text-1)
 
 ### tiktoken 0.12.0

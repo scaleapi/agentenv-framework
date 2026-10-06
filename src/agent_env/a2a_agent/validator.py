@@ -54,6 +54,7 @@ from agent_env.task_step.task_steps.a2a_agent_validator.verify_a2a_modalities im
     VIDEO_PROBE_MP4_B64,
     VIDEO_PROBE_PROMPT,
 )
+from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import find_agent_container
 
 if TYPE_CHECKING:
     from agent_env.a2a_agent.a2a_agent import A2AAgent
@@ -686,7 +687,7 @@ class A2AAgentValidator:
                         if apply_agent.sandbox_type else get_agent_sandbox_provider())
             sandbox = await provider.get_sandbox(apply_agent.sandbox_id)
             if sandbox.mode == SANDBOX_MODE_VM:
-                container = await A2AAgentValidator._discover_agent_container(sandbox)
+                container = await find_agent_container(sandbox)
                 args = ("sudo", "docker", "exec", container, "cat", marker_path)
             else:
                 args = ("cat", marker_path)
@@ -705,22 +706,6 @@ class A2AAgentValidator:
 
         record(supported=roundtrip_ok, advertised=advertised, save_ok=save_ok,
                apply_ok=True, roundtrip_ok=roundtrip_ok)
-
-    @staticmethod
-    async def _discover_agent_container(sandbox) -> str:
-        """Find the agent container on a VM sandbox (mirrors collect_artifacts /
-        verify_sandbox): prefer 'agent-api', else the first 'a2a-agent-*'."""
-        exit_code, stdout, stderr = await sandbox.exec_with_output(
-            "sudo", "docker", "ps", "--format", "{{.Names}}")
-        if exit_code != 0:
-            raise RuntimeError(f"docker ps failed: {stderr[:200]}")
-        running = [n.strip() for n in stdout.splitlines() if n.strip()]
-        if sandbox.container_name in running:
-            return sandbox.container_name
-        fallback = [n for n in running if n.startswith("a2a-agent-")]
-        if not fallback:
-            raise RuntimeError(f"no agent container found; running: {running}")
-        return fallback[0]
 
     @staticmethod
     def _upload_install_test_image_fixture(agent: "A2AAgent"):

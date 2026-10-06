@@ -4,6 +4,7 @@ set -euo pipefail
 # MCP_PORT and MCP_HOST are injected by docker-compose (gateway convention).
 # PLAYWRIGHT_MCP_VERSION is baked into the image at build time.
 exec npx @playwright/mcp@${PLAYWRIGHT_MCP_VERSION} \
+    --browser chromium \
     --headless \
     --isolated \
     --no-sandbox \

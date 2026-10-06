@@ -288,6 +288,7 @@ class LoadArtifactTaskStep(TaskStep):
         from agent_env.env.env import Env, require_gateway_url
         from agent_env.providers.sandbox_providers.sandbox import VmSandbox
         from agent_env.providers.sandbox_providers.sandbox_provider import (
+            SANDBOX_MODE_VM,
             build_sandbox_provider,
             get_agent_sandbox_provider,
             get_sandbox_provider,
@@ -329,6 +330,10 @@ class LoadArtifactTaskStep(TaskStep):
                 build_sandbox_provider(ds.sandbox_type) if ds.sandbox_type else get_sandbox_provider()
             )
             target_sandbox = await provider.get_sandbox(ds.sandbox_id)
+        # A VM-mode sandbox with no container_name is loaded onto its host; a container-mode one, into its container.
+        onto_vm_host = (
+            self.sandbox_name is not None and self.container_name is None and ds.sandbox_mode == SANDBOX_MODE_VM
+        )
 
         env = None
         for ref in resolved_artifacts:
@@ -352,8 +357,10 @@ class LoadArtifactTaskStep(TaskStep):
                         files = await _load_universe_into_container(
                             target_sandbox, self.container_name, artifact, destination,
                         )
-                    else:
+                    elif onto_vm_host:
                         files = await _load_universe_onto_vm(target_sandbox, artifact, destination)
+                    else:
+                        files = await _load_universe_into_sandbox_container(target_sandbox, artifact, destination)
                     context.metadata.setdefault("loaded_file_artifact_universes", []).append({
                         "id": artifact.id,
                         "version": artifact.version,
@@ -418,8 +425,10 @@ class LoadArtifactTaskStep(TaskStep):
                     # involved.
                     if self.sandbox_name is not None:
                         sandbox = target_sandbox
-                        # None targets the VM host itself.
+                        # None targets the VM host itself, or a container sandbox directly.
                         container = self.container_name
+                        if container is None and not onto_vm_host and isinstance(sandbox, VmSandbox):
+                            container = sandbox.container_name
                     else:
                         agent = next((a for a in context.deployed_agents if a.agent_name == self.agent_name), None)
                         if agent is None or not agent.sandbox_id:
@@ -523,15 +532,11 @@ class LoadArtifactTaskStep(TaskStep):
             async def _load_one(url: str, filename: str) -> None:
                 async with semaphore:
                     dest = f"{destination}/{filename}"
-                    if self.sandbox_name is not None and self.container_name is None:
+                    if onto_vm_host:
                         await self._load_url_onto_vm(sandbox, url, dest)
                     else:
                         await sandbox.write_file_from_url(url, dest)
-                    target_desc = (
-                        f"VM sandbox '{self.sandbox_name}'"
-                        if self.sandbox_name is not None and self.container_name is None
-                        else "agent"
-                    )
+                    target_desc = f"VM sandbox '{self.sandbox_name}'" if onto_vm_host else "agent"
                     logger.info(f"Loaded URL into {target_desc}: {url} -> {dest}")
 
             await asyncio.gather(*(_load_one(u, f) for u, f in zip(urls, files)))
@@ -662,12 +667,9 @@ async def _stage_environment_payload_into_container(
                 )
             else:
                 await sandbox.exec_script(
-                    f"sudo docker exec -u 0 {shlex.quote(container_name)} mkdir -p {shlex.quote(destination)}"
+                    f"docker exec -u 0 {shlex.quote(container_name)} mkdir -p {shlex.quote(destination)}"
                 )
-                await sandbox.exec_script(
-                    f"sudo docker cp {shlex.quote(vm_stage)}/. "
-                    f"{shlex.quote(container_name)}:{shlex.quote(destination)}"
-                )
+                await sandbox.docker_cp(f"{vm_stage}/.", f"{container_name}:{destination}")
         finally:
             try:
                 await sandbox.exec_script(f"rm -rf {shlex.quote(vm_payload)} {shlex.quote(vm_stage)}")
@@ -737,6 +739,23 @@ async def _load_universe_onto_vm(sandbox, universe, destination: str) -> list[st
     return loaded
 
 
+async def _load_universe_into_sandbox_container(sandbox, universe, destination: str) -> list[str]:
+    """Stage each file in `universe` into a container-mode sandbox, as an agent's container is loaded."""
+    from agent_env.providers.sandbox_providers.sandbox import stage_files_into_container
+
+    file_artifacts = universe.get_file_artifacts()
+    if not file_artifacts:
+        logger.warning(
+            f"FileArtifactUniverse '{universe.id}' v{universe.version} has no files; nothing to load"
+        )
+        return []
+    logger.info(
+        f"Loading FileArtifactUniverse '{universe.id}' v{universe.version} ({len(file_artifacts)} file(s)) "
+        f"into the container sandbox at {destination}"
+    )
+    return list(await stage_files_into_container(sandbox, file_artifacts, destination))
+
+
 async def _load_universe_into_container(sandbox, container_name: str, universe, destination: str) -> list[str]:
     """For each file in `universe`: pull from S3 to a VM temp path, then `docker cp` into `container_name` at `destination/<rel_path>`."""
     file_artifacts = universe.get_file_artifacts()
@@ -747,7 +766,7 @@ async def _load_universe_into_container(sandbox, container_name: str, universe, 
         return []
 
     await sandbox.exec_script(
-        f"sudo docker exec {shlex.quote(container_name)} mkdir -p {shlex.quote(destination)}"
+        f"docker exec {shlex.quote(container_name)} mkdir -p {shlex.quote(destination)}"
     )
     loaded: list[str] = []
     total = len(file_artifacts)
@@ -764,12 +783,8 @@ async def _load_universe_into_container(sandbox, container_name: str, universe, 
         await sandbox.load_s3_file(fa.object_url, vm_temp)
         if parent and parent != destination:
             await sandbox.exec_script(
-                f"sudo docker exec {shlex.quote(container_name)} mkdir -p {shlex.quote(parent)}"
+                f"docker exec {shlex.quote(container_name)} mkdir -p {shlex.quote(parent)}"
             )
-        await sandbox.exec_script(
-            f"sudo docker cp {shlex.quote(vm_temp)} "
-            f"{shlex.quote(container_name)}:{shlex.quote(dest_path)} && "
-            f"rm -f {shlex.quote(vm_temp)}"
-        )
+        await sandbox.docker_cp(vm_temp, f"{container_name}:{dest_path}", remove_source=True)
         loaded.append(filename)
     return loaded

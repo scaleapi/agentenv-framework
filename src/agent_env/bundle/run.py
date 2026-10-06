@@ -5,8 +5,9 @@ four at a time, at the version materializing wrote or reused. A run that fails i
 and the others go on. Each run's sandboxes are torn down as it ends, unless ``keep`` holds them up. Ctrl-C or
 SIGTERM cancels the runs: each one that started is marked cancelled and torn down, and a second one stops the
 teardown. A bundle's evals run only the bundle's own tasks for now, so one naming a store task is refused
-before anything is written. A dry run makes every check the run makes before its first task, and writes and
-runs nothing.
+before anything is written, and so is a deploy its sandbox provider can't serve (``preflight``). The infra envs a
+gateway deploy on the local provider needs are built once the writes are done, before any task starts. A dry run
+makes every check the run makes before its first task, and writes, builds and runs nothing.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 
+from agent_env.env.bootstrap import InfraBuild, ensure_default_envs
 from agent_env.providers import build_sandbox_provider
 from agent_env.store.routing import namespace_routing, run_scope
 from agent_env.task import Task, record_task_cancelled
@@ -31,8 +33,9 @@ from agent_env.task_step.context import TaskStepContext
 from ._fs import relative
 from .materialize import Materialization, Materialized, materialize
 from .parse import BundleEntry, BundleError, BundleKind, parse_bundle
-from .plan import Plan, plan_bundle
-from .resolve import Reference, resolve_bundle
+from .plan import Plan, Write, plan_bundle
+from .preflight import Preflight, preflight_run
+from .resolve import BuiltImage, Reference, resolve_bundle
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +150,7 @@ class DryRun:
     materialization: Materialization  # each write at the version it would leave, and why
     runs: tuple[BundleEntry, ...]  # the tasks that would run, each once, in the plan's order
     skipped: tuple[BundleEntry, ...]  # the tasks no eval names, which running every eval leaves out
+    infra: tuple[InfraBuild, ...] = ()  # the infra envs the run would build first
 
     def path(self, entry: BundleEntry) -> str:
         """``entry``'s path in the bundle (``tasks/hello.json``)."""
@@ -191,21 +195,26 @@ def run_bundle(
     ends.
 
     Before anything is written, raises RuntimeError when an event loop is already running, ValueError when
-    ``sandbox`` names no provider, and BundleError when the bundle can't be planned. A task that fails its
-    preflight raises BundleError once the entities it reads are written, before any task is."""
+    ``sandbox`` names no provider, and BundleError when the bundle can't be planned or a deploy can't run where
+    it would (``preflight``). A task that fails its preflight raises BundleError once the entities it reads are
+    written, before any task is. Building an infra env the run needs raises what the build raises, before any task
+    runs."""
     _refuse_a_running_loop()
     if sandbox:
         build_sandbox_provider(sandbox)
     say = _progress(on_progress)
     with namespace_routing():
-        plan = _planned(root, tasks, evals, id_root)
+        plan, preflight = _planned(root, tasks, evals, id_root, sandbox)
         materialization = materialize(
             plan,
             on_wait=lambda: say("waiting for another agent-env run to finish writing this bundle's ids"),
+            on_build=lambda write: say(f"{_label(plan, write)}: building with docker, which can take minutes"),
             on_write=lambda done: say(_written(plan, done)),
         )
         entries = _to_run(plan)
         to_run = [(entry, Task.get(entry.id, materialization.version_of("task", entry.id))) for entry in entries]
+        if preflight.infra:
+            ensure_default_envs(preflight.infra_kinds, say=say)
         with Interrupts() as interrupts:
             runs = interrupts.run(_run_all(plan, to_run, model, sandbox, keep, say, interrupts))
             _mark_cancelled(runs, interrupts.reason)
@@ -241,10 +250,10 @@ def dry_run_bundle(
         build_sandbox_provider(sandbox)
     say = _progress(on_progress)
     with namespace_routing():
-        plan = _planned(root, tasks, evals, id_root)
+        plan, preflight = _planned(root, tasks, evals, id_root, sandbox)
         materialization = materialize(plan, dry_run=True, on_write=lambda done: say(_written(plan, done)))
         runs = _to_run(plan)
-        return DryRun(materialization, runs, _skipped(plan, runs, every=not tasks and not evals))
+        return DryRun(materialization, runs, _skipped(plan, runs, every=not tasks and not evals), preflight.infra)
 
 
 def _mark_cancelled(runs: tuple[TaskRun, ...], reason: str) -> None:
@@ -268,10 +277,13 @@ def _bundle_run(plan: Plan, materialization: Materialization, runs: tuple[TaskRu
     return BundleRun(materialization, runs, eval_runs, skipped)
 
 
-def _planned(root: Path | str, tasks: Sequence[str], evals: Sequence[str], id_root: str | None) -> Plan:
+def _planned(root: Path | str, tasks: Sequence[str], evals: Sequence[str], id_root: str | None,
+             sandbox: str | None) -> tuple[Plan, Preflight]:
     plan = plan_bundle(resolve_bundle(parse_bundle(Path(root), id_root=id_root)), tasks=tasks, evals=evals)
     refuse_store_tasks(plan)
-    return plan
+    to_run = set(_to_run(plan))
+    return plan, preflight_run(plan, [write.source for write in plan.writes
+                                      if write.kind is BundleKind.TASK and write.source.entry in to_run], sandbox)
 
 
 def _to_run(plan: Plan) -> tuple[BundleEntry, ...]:
@@ -409,8 +421,16 @@ def _task_run_command(ref: Reference) -> str:
 
 
 def _written(plan: Plan, done: Materialized) -> str:
-    what = f"{_path(plan, done.write.source.entry)}: v{done.version}"
-    return f"{what}, unchanged" if done.reused else f"{what} ({'; '.join(done.reasons)})"
+    what = f"{_label(plan, done.write)}: v{done.version}"
+    if done.reused:
+        return f"{what}, unchanged" + (f" ({'; '.join(done.reasons)})" if done.reasons else "")
+    return f"{what} ({'; '.join(done.reasons)})"
+
+
+def _label(plan: Plan, write: Write) -> str:
+    """How a write is named: its entry's folder, and for an image built from it, which image."""
+    path = _path(plan, write.source.entry)
+    return f"{path} ({write.source.dockerfile} image)" if isinstance(write.source, BuiltImage) else path
 
 
 def _path(plan: Plan, entry: BundleEntry) -> str:

@@ -36,19 +36,19 @@ def _put_commands(tmp_path):
     backend, frontend = _dockerfile(tmp_path, "backend.Dockerfile"), _dockerfile(tmp_path, "frontend.Dockerfile")
     return {
         "a2a-agent": ("agent_env.cli.a2a_agent.put", ["a2a-agent", "put", "--id", "x", "--dockerfile", str(dockerfile)],
-                      (dockerfile, tmp_path, "a2a-agent-x"), None),
+                      (dockerfile, tmp_path, "x__agent_image"), None),
         "mcp-server": ("agent_env.cli.env.mcp_server",
                        ["env", "mcp-server", "put", "--id", "x", "--environment-name", "items", "--dockerfile",
-                        str(dockerfile)], (dockerfile, tmp_path, "mcp-server-x"), None),
+                        str(dockerfile)], (dockerfile, tmp_path, "x__env_image"), None),
         "website": ("agent_env.cli.env.website",
                     ["env", "website", "put", "--id", "x", "--environment-name", "shop", "--backend-dockerfile", str(backend),
-                     "--frontend-dockerfile", str(frontend)], (backend, tmp_path, "website-backend-x"), None),
-        "gateway": ("agent_env.cli.env.gateway", ["env", "gateway", "put", "--id", "x"],
+                     "--frontend-dockerfile", str(frontend)], (backend, tmp_path, "x__backend_image"), None),
+        "gateway": ("agent_env.env.bootstrap", ["env", "gateway", "put", "--id", "x"],
                     (gateway.GATEWAY_DOCKERFILE, gateway.GATEWAY_CONTEXT, gateway.GATEWAY_IMAGE_TAG), None),
-        "service-db": ("agent_env.cli.env.service_db", ["env", "service-db", "put", "--id", "x"],
+        "service-db": ("agent_env.env.bootstrap", ["env", "service-db", "put", "--id", "x"],
                        (service_db.SERVICE_DB_DOCKERFILE, service_db.SERVICE_DB_DOCKERFILE.parent,
                         service_db.SERVICE_DB_IMAGE_NAME), None),
-        "website-browser": ("agent_env.cli.env.website_browser", ["env", "website-browser", "put", "--id", "x"],
+        "website-browser": ("agent_env.env.bootstrap", ["env", "website-browser", "put", "--id", "x"],
                             (website_browser.WEBSITE_BROWSER_DOCKERFILE, website_browser.WEBSITE_BROWSER_CONTEXT,
                              WEBSITE_BROWSER_IMAGE_TAG), {"PLAYWRIGHT_MCP_VERSION": PLAYWRIGHT_MCP_VERSION}),
     }
@@ -74,7 +74,7 @@ def _multi_build_puts(tmp_path):
     """The puts that build more than one image: the env type each writes, and every build it makes."""
     backend, frontend = _dockerfile(tmp_path / "backend"), _dockerfile(tmp_path / "frontend")
     return {
-        "service-db": ("agent_env.cli.env.service_db", "ServiceDBEnv", ["env", "service-db", "put", "--id", "x"], [
+        "service-db": ("agent_env.env.bootstrap", "ServiceDBEnv", ["env", "service-db", "put", "--id", "x"], [
             (service_db.SERVICE_DB_DOCKERFILE, service_db.SERVICE_DB_DOCKERFILE.parent, service_db.SERVICE_DB_IMAGE_NAME),
             (service_db.DB_WEB_DOCKERFILE, service_db.DB_WEB_DOCKERFILE.parent, service_db.DB_WEB_IMAGE_NAME),
             (service_db.DB_MCP_DOCKERFILE, service_db.DB_MCP_DOCKERFILE.parent, service_db.DB_MCP_IMAGE_NAME),
@@ -82,7 +82,7 @@ def _multi_build_puts(tmp_path):
         "website": ("agent_env.cli.env.website", "WebsiteEnv",
                     ["env", "website", "put", "--id", "x", "--environment-name", "shop", "--skip-validation",
                      "--backend-dockerfile", str(backend), "--frontend-dockerfile", str(frontend)],
-                    [(backend, backend.parent, "website-backend-x"), (frontend, frontend.parent, "website-frontend-x")]),
+                    [(backend, backend.parent, "x__backend_image"), (frontend, frontend.parent, "x__frontend_image")]),
     }
 
 

@@ -13,8 +13,9 @@ from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, Lo
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandbox, ModalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandbox, ModalVmSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import Sandbox, VmSandbox
-from agent_env.providers.sandbox_providers.sandbox_provider import _BUILTIN_SANDBOX_PROVIDERS, SandboxProvider, build_sandbox_provider
+from agent_env.providers.sandbox_providers.sandbox_provider import _BUILTIN_SANDBOX_PROVIDERS, SandboxProvider, _pull, build_sandbox_provider
 from agent_env.store import ImageStore, RegistryAuth
+from tst.util.exec_scripts import script_run
 
 
 class _FakeSandbox(Sandbox):
@@ -313,6 +314,10 @@ class _RecordingVm(VmSandbox):
         self.scripts.append(script)
         return ""
 
+    async def exec_with_output(self, *args):
+        self.scripts.append(script_run(args))
+        return 0, "", ""
+
 
 @pytest.mark.asyncio
 async def test_load_s3_file_curl_retries_dns_failures():
@@ -417,3 +422,37 @@ def test_cpu_floor_differs_between_container_and_vm_backends():
     assert cpu_default(ModalSandboxProvider, "create_sandbox") == 0.125
     assert cpu_default(ModalSandboxProvider, "create_container") == 0.125
     assert cpu_default(ModalVmSandboxProvider, "create_sandbox") == 0.5
+
+
+class _PullingVm(VmSandbox):
+    def __init__(self, first_pull_error: str | None):
+        self.scripts: list[str] = []
+        self._first_pull_error = first_pull_error
+
+    async def terminate(self) -> None:
+        pass
+
+    async def exec_script(self, script: str, *, max_retries: int = 0) -> str:
+        self.scripts.append(script)
+        if self._first_pull_error and len(self.scripts) == 1:
+            raise RuntimeError(f"Script failed (exit 1):\nstdout: \nstderr: {self._first_pull_error}")
+        return ""
+
+
+@pytest.mark.asyncio
+async def test_an_image_with_nothing_for_this_platform_is_pulled_for_amd64():
+    """An Apple Silicon host has no arm64 variant of an amd64-only image; its Docker runs the amd64 one emulated."""
+    sandbox = _PullingVm("Error response from daemon: no matching manifest for linux/arm64/v8 in the manifest list entries")
+
+    await _pull(sandbox, "registry/agent:v1")
+
+    assert sandbox.scripts == ["docker pull registry/agent:v1", "docker pull --platform linux/amd64 registry/agent:v1"]
+
+
+@pytest.mark.asyncio
+async def test_any_other_pull_failure_is_raised_as_it_was():
+    sandbox = _PullingVm("Error response from daemon: pull access denied for registry/agent")
+
+    with pytest.raises(RuntimeError, match="pull access denied"):
+        await _pull(sandbox, "registry/agent:v1")
+    assert sandbox.scripts == ["docker pull registry/agent:v1"]
