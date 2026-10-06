@@ -315,7 +315,7 @@ async def readable_parts(
     anything else, are sent as they are. Raises when an owned object can be given no URL the agent can read."""
     config = get_config()
     readable = list(parts)
-    staged: dict[ObjectStore, StagedObjectStore] = {}
+    staged: dict[int, StagedObjectStore] = {}  # by identity: a store need not be hashable
     for index, part in enumerate(parts):
         file = part.get("file") if part.get("kind") == "file" else None
         uri = file.get("uri") if isinstance(file, dict) else None
@@ -326,9 +326,9 @@ async def readable_parts(
             continue
         url = await asyncio.to_thread(readable_url, store, uri, sandbox_type=sandbox_type, expires_in=expires_in)
         if url is None:
-            staging = staged.get(store) or staged_store(store, a2a_url, card)
+            staging = staged.get(id(store)) or staged_store(store, a2a_url, card)
             if staging is not None:
-                staged[store] = staging
+                staged[id(store)] = staging
                 url = str(staging.issue_read_grant(uri).url)
         if url is None:
             raise RuntimeError(
