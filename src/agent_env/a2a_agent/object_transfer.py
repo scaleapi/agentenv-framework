@@ -3,7 +3,6 @@ carries, the call itself, and the limits and time budget that bound it."""
 from __future__ import annotations
 
 import asyncio
-import copy
 import logging
 import math
 import re
@@ -313,9 +312,9 @@ async def readable_parts(
     object a configured store owns names an HTTPS URL for it instead, from ``read_url`` or else staged on
     the agent for the length of the block. Other parts, and file parts naming anything else, are sent as
     they are. Raises when an owned object can be given no URL the agent can read."""
-    readable = copy.deepcopy(parts)
+    readable = list(parts)
     staged: dict[int, StagedObjectStore] = {}
-    for part in readable:
+    for index, part in enumerate(parts):
         file = part.get("file") if part.get("kind") == "file" else None
         uri = file.get("uri") if isinstance(file, dict) else None
         if not isinstance(uri, str):
@@ -335,7 +334,7 @@ async def readable_parts(
                 f"agents on the {sandbox_type or 'unknown'!r} sandbox provider nor signs URLs, and the agent "
                 "serves no staging to send it through"
             )
-        file["uri"] = url
+        readable[index] = {**part, "file": {**file, "uri": url}}
     try:
         for staging in staged.values():
             await staging.push()
