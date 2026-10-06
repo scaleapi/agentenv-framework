@@ -326,11 +326,22 @@ class VmSandbox(Sandbox):
         except Exception as e:
             logger.warning(f"Best-effort cleanup of {', '.join(vm_paths)} failed (ignored): {e}")
 
+    async def docker_cp(self, source: str, destination: str, *, remove_source: bool = False) -> None:
+        """``docker cp source destination``, one side ``container:path``. The paths go as arguments, not
+        script text, so a sandbox that maps its paths (the local one maps /app) maps only the host side.
+        ``remove_source`` deletes the copied host file in the same exec."""
+        script = 'docker cp "$1" "$2"' + (' && rm -f "$1"' if remove_source else "")
+        exit_code, stdout, stderr = await self.exec_with_output("sudo", "bash", "-c", script, "docker-cp", source, destination)
+        if exit_code != 0:
+            raise RuntimeError(
+                f"docker cp {source} {destination} failed (exit {exit_code}):\nstdout: {stdout[-1500:]}\nstderr: {stderr[-1500:]}"
+            )
+
     async def _copy_into_container(self, vm_path: str, destination_path: str) -> None:
         parent = os.path.dirname(destination_path)
         if parent:
             await self.exec_script(f"docker exec -u 0 {shlex.quote(self.container_name)} mkdir -p {shlex.quote(parent)}")
-        await self.exec_script(f"docker cp {shlex.quote(vm_path)} {self.container_name}:{shlex.quote(destination_path)}")
+        await self.docker_cp(vm_path, f"{self.container_name}:{destination_path}")
 
     @staticmethod
     def _staging_path(kind: str, destination_path: str) -> str:

@@ -15,6 +15,7 @@ from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandbo
 from agent_env.providers.sandbox_providers.sandbox import Sandbox, VmSandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import _BUILTIN_SANDBOX_PROVIDERS, SandboxProvider, build_sandbox_provider
 from agent_env.store import ImageStore, RegistryAuth
+from tst.util.exec_scripts import script_run
 
 
 class _FakeSandbox(Sandbox):
@@ -312,6 +313,10 @@ class _RecordingVm(VmSandbox):
     async def exec_script(self, script: str, *, max_retries: int = 0) -> str:
         self.scripts.append(script)
         return ""
+
+    async def exec_with_output(self, *args):
+        self.scripts.append(script_run(args))
+        return 0, "", ""
 
 
 @pytest.mark.asyncio

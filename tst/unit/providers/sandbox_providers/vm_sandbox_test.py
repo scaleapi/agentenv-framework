@@ -10,6 +10,7 @@ from agent_env.providers.sandbox_providers import sandbox as sandbox_module
 from agent_env.providers.sandbox_providers.sandbox import VmSandbox
 from agent_env.store import set_object_store
 from agent_env.config import reset_config
+from tst.util.exec_scripts import script_run
 
 
 class _SigningStore:
@@ -49,7 +50,7 @@ class _RecordingVmSandbox(VmSandbox):
         if args[:2] == ("sudo", "docker") and "images" in args:
             return 0, self._images_stdout, ""
         if args[:2] == ("sudo", "bash"):
-            self.scripts.append(args[-1])
+            self.scripts.append(script_run(args))
         return 0, "", ""
 
     async def write_file_from_text(self, content, destination_path):  # pragma: no cover
@@ -109,7 +110,7 @@ class _ScriptRecorder(VmSandbox):
 
     async def exec_with_output(self, *args):
         if args[:3] == ("sudo", "bash", "-c"):
-            self.scripts.append(args[-1])
+            self.scripts.append(script_run(args))
         return 0, "", ""
 
 
@@ -181,7 +182,7 @@ class _CleanupFailingSandbox(VmSandbox):
 
     async def exec_with_output(self, *args):
         if args[:3] == ("sudo", "bash", "-c"):
-            script = args[-1]
+            script = script_run(args)
             self.scripts.append(script)
             if script.startswith(self._fail_on):
                 return -1, "", ""
@@ -386,3 +387,38 @@ async def test_write_host_file_writes_on_the_host_in_bounded_chunks():
     b64_path = "/tmp/agentenv_run_code/input.json.b64"
     assert _b64_from_chunk_scripts(sandbox.scripts, b64_path) == base64.b64encode(data).decode()
     assert sandbox.scripts[-1] == f"base64 -d {b64_path} > /tmp/agentenv_run_code/input.json && rm -f {b64_path}"
+
+
+class _ArgsRecorder(VmSandbox):
+    def __init__(self, exit_code: int = 0):
+        self.calls: list[tuple[str, ...]] = []
+        self._exit_code = exit_code
+
+    async def terminate(self) -> None:  # pragma: no cover
+        pass
+
+    async def exec(self, *command):  # pragma: no cover
+        return None
+
+    async def exec_with_output(self, *args):
+        self.calls.append(args)
+        return self._exit_code, "", "no such container"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remove_source, script", [
+    (False, 'docker cp "$1" "$2"'),
+    (True, 'docker cp "$1" "$2" && rm -f "$1"'),
+])
+async def test_docker_cp_passes_its_paths_as_arguments(remove_source, script):
+    sandbox = _ArgsRecorder()
+
+    await sandbox.docker_cp("/tmp/a b", "c:/app/x", remove_source=remove_source)
+
+    assert sandbox.calls == [("sudo", "bash", "-c", script, "docker-cp", "/tmp/a b", "c:/app/x")]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_docker_cp_raises_with_its_stderr():
+    with pytest.raises(RuntimeError, match="(?s)exit 1.*no such container"):
+        await _ArgsRecorder(exit_code=1).docker_cp("/tmp/a", "c:/x")

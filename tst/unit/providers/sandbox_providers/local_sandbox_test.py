@@ -687,15 +687,14 @@ async def test_exec_leaves_a_docker_exec_script_naming_the_containers_app_alone(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("script", [
-    "docker cp /tmp/x/. agent-local-1:/app/files",
-    "docker cp /tmp/x 'agent-local-1:/app/a b' && rm -f /tmp/x",
-    "docker cp agent-local-1:/app/out.txt /tmp/out.txt",
+@pytest.mark.parametrize("source, destination, ran", [
+    ("/app/_artifact_staging/x", "c:/app/x", ("/tmp/agent-env-work/_artifact_staging/x", "c:/app/x")),
+    ("c:/app/out.txt", "/app/out.txt", ("c:/app/out.txt", "/tmp/agent-env-work/out.txt")),
 ])
-async def test_exec_leaves_a_docker_cp_script_naming_the_containers_app_alone(spawned, script):
-    await LocalSandbox(work_dir=Path("/tmp/agent-env-work")).exec("bash", "-c", script)
+async def test_docker_cp_points_only_the_host_side_at_the_work_dir(spawned, source, destination, ran):
+    await LocalSandbox(work_dir=Path("/tmp/agent-env-work")).docker_cp(source, destination)
 
-    assert spawned == [("bash", "-c", script)]
+    assert spawned == [("bash", "-c", 'docker cp "$1" "$2"', "docker-cp", *ran)]
 
 
 @pytest.mark.parametrize("script", ["ls ~/app/x", "cat ${HOME}/app/x", "cat $(pwd)/app/x", "cat $APP/app/x"])

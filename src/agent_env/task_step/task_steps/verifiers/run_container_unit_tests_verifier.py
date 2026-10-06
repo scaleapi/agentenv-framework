@@ -428,10 +428,7 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
     async def _extract_file(self, sandbox, path_in_container: str) -> str:
         """`docker cp` a file out of the container, read it from the VM, return text."""
         vm_temp = f"/tmp/_verifier_out_{uuid.uuid4().hex[:8]}"
-        await sandbox.exec_script(
-            f"docker cp {shlex.quote(self.container_name)}:{shlex.quote(path_in_container)} "
-            f"{shlex.quote(vm_temp)}"
-        )
+        await sandbox.docker_cp(f"{self.container_name}:{path_in_container}", vm_temp)
         try:
             exit_code, stdout, stderr = await sandbox.exec_with_output("sudo", "cat", vm_temp)
             if exit_code != 0:

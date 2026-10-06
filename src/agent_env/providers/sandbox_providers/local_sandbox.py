@@ -43,11 +43,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _APP_PATH_PATTERN = re.compile(r"(?<![A-Za-z0-9_./~})$-])/app(?=(?:/|:|[\s'\";)&|]|$))")
-_IN_CONTAINER_SCRIPT = re.compile(r"\s*(?:sudo\s+)?docker\s+(?:exec|cp)\b")
+_IN_CONTAINER_SCRIPT = re.compile(r"\s*(?:sudo\s+)?docker\s+exec\b")
 
 
 def _runs_in_container(cmd: list[str]) -> bool:
-    """A ``docker exec``, as arguments or as a ``bash -c`` script, or a ``docker cp`` script: its /app is the container's."""
+    """A ``docker exec``, as arguments or as a ``bash -c`` script: its /app is the container's."""
     return cmd[:2] == ["docker", "exec"] or (
         cmd[:2] == ["bash", "-c"] and len(cmd) > 2 and bool(_IN_CONTAINER_SCRIPT.match(cmd[2]))
     )
