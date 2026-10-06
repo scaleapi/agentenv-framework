@@ -41,6 +41,7 @@ from agent_env.a2a_agent.object_transfer import (
     changelog_enable_call,
     fetch_trajectory,
     invoke_transfer,
+    readable_parts,
     skill_add_call,
     snapshot_load_call,
     snapshot_save_call,
@@ -160,6 +161,20 @@ async def test_a_remote_agent_gets_a_skill_bundle_through_its_staging(agent, sto
     assert isinstance(granting, StagedObjectStore) and call.mode == "objects"
     assert _Agent.received == {"skill/SKILL.md": b"# s", "skill/ref/big.bin": b"b" * 3_000_000}
     assert _staged_paths(tmp_path) == []  # the call's staging is cleared once it is answered
+
+
+@pytest.mark.asyncio
+async def test_a_file_part_reaches_a_remote_agent_through_its_staging_while_it_is_sent(agent, store, tmp_path):
+    url = store.put("seeds/x.png", b"png bytes")
+    parts = [{"kind": "file", "file": {"uri": url, "mimeType": "image/png", "name": "x.png"}}]
+
+    async with readable_parts(parts, a2a_url=URL, card=_card(agent), sandbox_type="modal", lasting=600) as sent:
+        assert sent[0]["file"]["uri"].startswith(f"{URL}/")
+        async with httpx.AsyncClient() as client:
+            fetched = await client.get(sent[0]["file"]["uri"])
+        assert fetched.content == b"png bytes"
+
+    assert _staged_paths(tmp_path) == []
 
 
 @pytest.mark.asyncio

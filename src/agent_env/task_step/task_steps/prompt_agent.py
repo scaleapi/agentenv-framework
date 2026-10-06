@@ -17,6 +17,7 @@ from agent_env.a2a_agent import protocol
 from agent_env.a2a_agent.object_transfer import (
     TrajectoryUpload,
     fetch_trajectory,
+    readable_parts,
     trajectory_mode,
 )
 from agent_env.a2a_agent.staging import draining, staged_changelogs, transfer_store
@@ -211,8 +212,8 @@ class PromptAgentTaskStep(TaskStep):
     def _apply_seed(self, parts: list[dict], seed: dict) -> list[dict]:
         """Return a deep-copied parts list with seed substitutions applied.
         `<key>` placeholders are replaced inside text parts' `text` and inside
-        file parts' `uri`/`name` (so tasks-as-templates with
-        `s3://bucket/seeds/<seed_id>/x.png` resolve per-run)."""
+        file parts' `uri`/`name` (so tasks-as-templates with an object URL
+        ending `seeds/<seed_id>/x.png` resolve per-run)."""
         if not seed:
             return parts
         out = copy.deepcopy(parts)
@@ -495,13 +496,18 @@ class PromptAgentTaskStep(TaskStep):
                 else list(current_user_parts)
             )
 
-            sent_task_id, _ = await protocol.send_a2a_message(
-                target_url, current_user_parts, target_a2a_task_id,
-                solver_context_id, self.timeout_seconds,
-            )
-            result = await protocol.poll_a2a_task(
-                target_url, sent_task_id, self.timeout_seconds, self.poll_interval_seconds,
-            )
+            # Only the sent copy names readable URLs: what is recorded above keeps the objects' own URLs.
+            async with readable_parts(
+                current_user_parts, a2a_url=target_url, card=card,
+                sandbox_type=agent.sandbox_type, lasting=self.timeout_seconds,
+            ) as sent_parts:
+                sent_task_id, _ = await protocol.send_a2a_message(
+                    target_url, sent_parts, target_a2a_task_id,
+                    solver_context_id, self.timeout_seconds,
+                )
+                result = await protocol.poll_a2a_task(
+                    target_url, sent_task_id, self.timeout_seconds, self.poll_interval_seconds,
+                )
             target_state = result["status"]["state"]
             status_msg = (result.get("status") or {}).get("message") or {}
             final_terminal = protocol.TerminalResponse.from_message(status_msg)
