@@ -1,7 +1,9 @@
 """prompt_agent sends the agent an HTTPS URL for each file part naming an object the store owns, on every turn,
 while the run records the object's own URL."""
 
+import httpx
 import pytest
+from agentenv_protocol.a2a_agent import STAGING_V1_URI
 
 from agent_env.config import configure
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
@@ -13,6 +15,7 @@ from tst.util.granting_object_store import GRANT_ORIGIN, GrantingObjectStore
 AGENT_URL = "http://agent.test"
 USER_URL = "http://user.test"
 DONE = [{"kind": "text", "text": "done"}]
+USER_DONE = [{"kind": "text", "text": '{"message": "thanks", "done": true}'}]
 
 
 @pytest.fixture
@@ -120,6 +123,60 @@ async def test_a_user_sim_agent_is_sent_the_agents_file_part_as_a_grant(monkeypa
     assert agents.sent[USER_URL] == [
         [{"kind": "text", "text": "here it is"}, _file(f"{GRANT_ORIGIN}/outputs/z.png?sig=read")]
     ]
+
+
+def _remote_user_sim(url, card=None):
+    return DeployedAgent(
+        agent_name="human_agent", api_url=url, a2a_url=url, sandbox_id="sb-user", sandbox_type="modal", a2a_card=card,
+    )
+
+
+def _two_turns():
+    return PromptAgentTaskStep(
+        id="solve", version=None, agent_name="solver", prompt="hi", poll_interval_seconds=0, max_conversation_turns=2,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_user_sim_the_stores_grants_cannot_reach_is_sent_a_copy_staged_on_it(monkeypatch, tmp_path, recorded):
+    store = GrantingObjectStore(str(tmp_path), reaches=False)
+    configure(object_store=store)
+    url = store.put("outputs/z.png", b"png")
+    user_url = "https://user.test"
+    staging = []  # each staging request, with how many messages the user-sim had been sent by then
+
+    def staging_route(request):
+        staging.append((request.method, len(agents.sent[user_url])))
+        return httpx.Response(201 if request.method == "PUT" else 204)
+
+    agents = FakeA2AAgents({AGENT_URL: _replying_with(url), user_url: USER_DONE}, other=staging_route).serve(monkeypatch)
+    context = _context()
+    card = {"capabilities": {"extensions": [{"uri": STAGING_V1_URI, "params": {"endpoint": "/ext/staging"}}]}}
+    context.deployed_agents.append(_remote_user_sim(user_url, card))
+
+    await _two_turns().execute(context)
+
+    ((text, file),) = agents.sent[user_url]
+    assert file["file"]["uri"].startswith(f"{user_url}/ext/staging/")
+    assert staging == [("PUT", 0), ("DELETE", 1)]  # staged before the message went, cleared once it was answered
+
+
+@pytest.mark.asyncio
+async def test_a_user_sim_that_can_be_sent_no_readable_url_fails_the_step_before_it_is_sent_anything(
+    monkeypatch, tmp_path, recorded
+):
+    store = GrantingObjectStore(str(tmp_path), reaches=False)
+    configure(object_store=store)
+    url = store.put("outputs/z.png", b"png")
+    agents = FakeA2AAgents({AGENT_URL: _replying_with(url), USER_URL: USER_DONE}).serve(monkeypatch)
+    context = _context()
+    context.deployed_agents.append(_remote_user_sim(USER_URL))
+
+    with pytest.raises(RuntimeError, match="cannot be sent to the agent"):
+        await _two_turns().execute(context)
+
+    assert agents.sent[USER_URL] == []
+    assert recorded == [[{"kind": "text", "text": "hi"}]]  # the solver's turn, which ran
 
 
 @pytest.mark.asyncio
