@@ -18,6 +18,7 @@ from typing import Optional
 
 from agent_env.runner import store as run_store
 from agent_env.runner.runner import RunHandle, RunRecord, Runner, RunStatus
+from agent_env.task.teardown import teardown_run
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,7 @@ class LocalRunner(Runner):
         from agent_env.task import Task
 
         run_task: Optional[asyncio.Task] = None
+        context = None
         try:
             async with self._sem:                     # bounded concurrency; the wait here IS the queue
                 if run_store.get_run(record.run_id).status == RunStatus.CANCELED:
@@ -154,7 +156,20 @@ class LocalRunner(Runner):
             logger.exception("Run %s failed", record.run_id)
             run_store.mark_terminal(record.run_id, RunStatus.FAILED, error=f"{type(e).__name__}: {e}")
         finally:
-            self._inflight.pop(record.run_id, None)
+            try:
+                if context is not None:
+                    await self._tear_down(record.run_id, context)
+            finally:
+                self._inflight.pop(record.run_id, None)
+
+    @staticmethod
+    async def _tear_down(run_id: str, context) -> None:
+        """Remove what the run deployed, however it ended: nothing resumes from a local run's sandboxes."""
+        report = await teardown_run(context)
+        for sandbox, why in report.failed:
+            logger.warning("Run %s: couldn't tear down %s: %s", run_id, sandbox.sandbox_id, why)
+        for sandbox in report.left:
+            logger.warning("Run %s: %s is still up", run_id, sandbox.sandbox_id)
 
     def _finish(self, run_id: str, context, *, exc: Optional[BaseException] = None) -> None:
         """Persist the terminal state of a finished Task.run(): a raised step is FAILED,

@@ -279,3 +279,50 @@ async def test_start_reconciles_an_orphan_behind_many_terminal_runs(docs):
     await runner.start()
     await runner.stop()
     assert run_store.get_run("old-orphan").status is RunStatus.FAILED
+
+
+async def _settled(runner, run_id, timeout=5.0):
+    """Wait for a run's task to finish, teardown included: its terminal state is recorded first."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while run_id in runner._inflight:
+        if asyncio.get_event_loop().time() > deadline:
+            raise AssertionError(f"run {run_id} never finished")
+        await asyncio.sleep(0.02)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["completes", "raises", "is cancelled"])
+async def test_what_a_run_deployed_is_torn_down_however_it_ends(docs, monkeypatch, ending):
+    from agent_env.runner import local_runner
+    from agent_env.task.teardown import TeardownReport
+
+    torn_down = []
+
+    async def teardown_run(context):
+        torn_down.append(context.metadata["workflow_id"])
+        return TeardownReport()
+
+    monkeypatch.setattr(local_runner, "teardown_run", teardown_run)
+    started = asyncio.Event()
+
+    async def on_run(_):
+        started.set()
+        if ending == "raises":
+            raise RuntimeError("boom")
+        if ending == "is cancelled":
+            await asyncio.sleep(30)
+
+    _install_task(monkeypatch, _FakeTask(on_run=on_run))
+    runner = LocalRunner(workers=1)
+    await runner.start()
+    handle = await runner.submit("t1", 1)
+    try:
+        if ending == "is cancelled":
+            await asyncio.wait_for(started.wait(), 5)
+            await runner.cancel(handle.run_id)
+        await _drain(runner, handle.run_id)
+        await _settled(runner, handle.run_id)
+    finally:
+        await runner.stop()
+
+    assert torn_down == [handle.run_id]
