@@ -166,12 +166,16 @@ def local_registry(local_backends):
     try:
         yield local_backends
     finally:
-        # Only this test's containers: every local sandbox it deployed has a work dir in its own sandbox root, and its
-        # container is named after that sandbox. Matching by image could reach another run's containers.
-        for work_dir in (local_backends / "sandboxes").glob("agent-env-*"):
-            if m := re.match(r"agent-env-(local-[0-9a-f]+)-", work_dir.name):
-                _docker("rm", "-f", f"agent-{m.group(1)}")
+        _remove_sandbox_containers(local_backends / "sandboxes")
         _docker("rm", "-f", name)
+
+
+def _remove_sandbox_containers(sandboxes: Path):
+    # Only this test's containers: every local sandbox it deployed has a work dir in its own sandbox root, and its
+    # container is named after that sandbox. Matching by image could reach another run's containers.
+    for work_dir in sandboxes.glob("agent-env-*"):
+        if m := re.match(r"agent-env-(local-[0-9a-f]+)-", work_dir.name):
+            _docker("rm", "-f", f"agent-{m.group(1)}")
 
 
 @pytest.mark.asyncio
@@ -194,14 +198,12 @@ async def test_a_script_builds_in_a_named_container_sandbox_and_its_output_round
     try:
         ctx = await _chain(tmp_path, suffix, deploy, "/work").run()
     finally:
-        # The tag is unique to this run, as is its registry copy: drop them, and the containers holding them, so
-        # repeated runs don't pile up images.
+        # The tag is unique to this run, as is its registry copy: drop them so repeated runs don't pile up images.
+        # This test's container still holds them, so remove it first.
+        _remove_sandbox_containers(tmp_path / "sandboxes")
         refs = [r for ref in (f"run-code-box-{suffix}", f"*/run-code-box-{suffix}") for r in _docker(
             "image", "ls", "--format", "{{.Repository}}:{{.Tag}}", "--filter", f"reference={ref}",
         ).stdout.split()]
-        for ref in refs:
-            if containers := _docker("ps", "-aq", "--filter", f"ancestor={ref}").stdout.split():
-                _docker("rm", "-f", *containers)
         if refs:
             _docker("rmi", "-f", *refs)
 
