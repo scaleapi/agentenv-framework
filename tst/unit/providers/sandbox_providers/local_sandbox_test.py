@@ -700,7 +700,13 @@ async def test_exec_drops_sudo_a_script_runs_as_a_command_on_this_host(spawned, 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("script", ["docker exec c sudo ls", "echo pseudo sudoers"])
+@pytest.mark.parametrize("script", [
+    "docker exec c sudo ls",
+    "echo pseudo sudoers",
+    "docker exec c bash -c 'make; sudo make install'",
+    "docker exec c bash -c 'it'\"'\"'s; sudo ls'",
+    'echo "a; sudo b"',
+])
 async def test_exec_keeps_sudo_that_is_not_a_command_on_this_host(spawned, script):
     await LocalSandbox(work_dir=Path("/tmp/agent-env-work")).exec("bash", "-c", script)
 
@@ -710,12 +716,23 @@ async def test_exec_keeps_sudo_that_is_not_a_command_on_this_host(spawned, scrip
 @pytest.mark.asyncio
 @pytest.mark.parametrize("script, ran", [
     ("docker cp /tmp/x/. agent-local-1:/app/files", "docker cp /tmp/x/. agent-local-1:/app/files"),
+    ("docker cp agent-local-1:/app/out.txt /app/out.txt", "docker cp agent-local-1:/app/out.txt /tmp/agent-env-work/out.txt"),
+    ("docker cp /tmp/x c:'/app/a b'", "docker cp /tmp/x c:'/app/a b'"),
     ("docker run -v /app/h:/app/c img", "docker run -v /tmp/agent-env-work/h:/app/c img"),
+    ("docker run --volume=data:/app img", "docker run --volume=data:/app img"),
 ])
 async def test_exec_leaves_the_container_side_of_a_copy_or_mount_alone(spawned, script, ran):
     await LocalSandbox(work_dir=Path("/tmp/agent-env-work")).exec("bash", "-c", script)
 
     assert spawned == [("bash", "-c", ran)]
+
+
+@pytest.mark.parametrize("script, ran", [
+    ("PATH=$PATH:/app/bin tool", "PATH=$PATH:/tmp/agent-env-work/bin tool"),
+    ("docker cp /tmp/x c:/files && PATH=$PATH:/app/bin t", "docker cp /tmp/x c:/files && PATH=$PATH:/tmp/agent-env-work/bin t"),
+])
+def test_rewrite_app_script_rewrites_a_host_path_after_a_colon(script, ran):
+    assert LocalSandbox(work_dir=Path("/tmp/agent-env-work"))._rewrite_app_script(script) == ran
 
 
 @pytest.mark.parametrize("script", ["ls ~/app/x", "cat ${HOME}/app/x", "cat $(pwd)/app/x", "cat $APP/app/x"])

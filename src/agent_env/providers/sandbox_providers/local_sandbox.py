@@ -42,10 +42,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Not after ":": that is the container side of `docker cp f c:/app/x` or `-v h:/app/x`.
-_APP_PATH_PATTERN = re.compile(r"(?<![A-Za-z0-9_./~})$:-])/app(?=(?:/|:|[\s'\";)&|]|$))")
-# `sudo` as a command inside a script: this host's would ask for a password, and local Docker needs none.
-_SCRIPT_SUDO = re.compile(r"(^|[;&|(\n]|\$\()(\s*)sudo\s+")
+_APP_PATH_PATTERN = re.compile(r"(?<![A-Za-z0-9_./~})$-])/app(?=(?:/|:|[\s'\";)&|]|$))")
+# The /app that names a container's: after the container of a `docker cp`, or after the host side of a `-v` mount.
+_CONTAINER_APP = re.compile(r"""\bdocker\s+cp\b[^;&|\n]*?[\w.-]:['"]?(?=/app)|(?:^|\s)(?:-v|--volume)[\s=]+\S*?:['"]?(?=/app)""")
+# `sudo` where this host's shell runs it, so not inside quotes, which hold a command for a container.
+# This host's sudo would ask for a password, and local Docker needs none.
+_HOST_SUDO = re.compile(r"""'[^']*'|"(?:\\.|[^"\\])*"|\\.|(^|[;&|(\n]|\$\()(\s*)sudo\s+""")
 _IN_CONTAINER_SCRIPT = re.compile(r"\s*(?:sudo\s+)?docker\s+exec\b")
 
 
@@ -189,7 +191,8 @@ class LocalSandbox(VmSandbox):
         return arg
 
     def _rewrite_app_script(self, script: str) -> str:
-        return _APP_PATH_PATTERN.sub(lambda _: str(self._work_dir), script)
+        in_container = {m.end() for m in _CONTAINER_APP.finditer(script)}
+        return _APP_PATH_PATTERN.sub(lambda m: m[0] if m.start() in in_container else str(self._work_dir), script)
 
     async def terminate(self) -> None:
         """Tear down whatever this sandbox is running.
@@ -224,7 +227,7 @@ class LocalSandbox(VmSandbox):
         """
         cmd = [c for c in command if c != "sudo"]
         if cmd[:2] == ["bash", "-c"] and len(cmd) > 2:
-            cmd[2] = _SCRIPT_SUDO.sub(r"\1\2", cmd[2])
+            cmd[2] = _HOST_SUDO.sub(lambda m: m[0] if m[1] is None else m[1] + m[2], cmd[2])
         if not _runs_in_container(cmd):
             is_script = cmd[:2] == ["bash", "-c"]
             cmd = [
