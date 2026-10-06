@@ -351,3 +351,26 @@ async def test_stop_lets_a_teardown_under_way_finish(docs, monkeypatch):
     await runner.stop()
 
     assert finished == [handle.run_id]
+
+
+@pytest.mark.asyncio
+async def test_stop_gives_up_on_a_teardown_that_never_ends(docs, monkeypatch):
+    from agent_env.runner import local_runner
+
+    tearing = asyncio.Event()
+
+    async def teardown_run(context):
+        tearing.set()
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(local_runner, "teardown_run", teardown_run)
+    monkeypatch.setattr(local_runner, "TERMINATE_TIMEOUT_SECONDS", 0.1)
+    _install_task(monkeypatch, _FakeTask())
+    runner = LocalRunner(workers=1)
+    await runner.start()
+    await runner.submit("t1", 1)
+    await asyncio.wait_for(tearing.wait(), 5)
+
+    await asyncio.wait_for(runner.stop(), 5)
+
+    assert not runner._inflight

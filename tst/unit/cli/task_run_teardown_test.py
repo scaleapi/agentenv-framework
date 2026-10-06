@@ -53,13 +53,17 @@ def torn_down(monkeypatch):
 
 
 def _invoke(monkeypatch, tmp_path, task, *args, signal_after=None):
+    """Invoke the CLI, sending Ctrl-C ``signal_after`` seconds in; a Ctrl-C not yet sent when it returns never is."""
     monkeypatch.setattr(Task, "get", classmethod(lambda cls, id, version=None: task))
-    if signal_after is not None:
-        threading.Timer(signal_after, lambda: os.kill(os.getpid(), signal.SIGINT)).start()
+    timer = threading.Timer(signal_after, lambda: os.kill(os.getpid(), signal.SIGINT)) if signal_after else None
+    if timer:
+        timer.start()
     logging.disable(logging.CRITICAL)
     try:
         return CliRunner().invoke(cli, ["task", *args, "--id", "t", "--output-dir", str(tmp_path)])
     finally:
+        if timer:
+            timer.cancel()
         logging.disable(logging.NOTSET)
 
 
@@ -160,3 +164,17 @@ def test_keep_writes_the_context_of_a_run_that_failed(monkeypatch, tmp_path, tor
 
     assert isinstance(result.exception, RuntimeError)
     assert list(tmp_path.glob("t_*.json")), "no context file to resume the kept run from"
+
+
+def test_a_kept_failed_run_reports_its_own_error_when_its_context_cant_be_written(monkeypatch, tmp_path, torn_down):
+    def disk_full(*_, **__):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(task_run, "_write_context", disk_full)
+    task = _Deploys(ending=RuntimeError("boom"))
+
+    result = _invoke(monkeypatch, tmp_path, task, "run", "--keep", signal_after=1.0)
+
+    assert isinstance(result.exception, RuntimeError) and str(result.exception) == "boom"
+    assert "Couldn't write the run's context: [Errno 28] No space left on device" in result.output
+    assert torn_down == task.contexts  # the Ctrl-C that ended the hold

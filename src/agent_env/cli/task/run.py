@@ -329,7 +329,10 @@ async def _run_and_settle(task, tag, context, *, keep, output_dir, output_name, 
         if not keep:
             echo_teardown(tag, await teardown_run(context))
         elif output_dir:  # what it left up is kept, so its context is what resumes or inspects it
-            _write_context(context, output_name, output_dir, prefix=f"{tag} " if tag else "")
+            try:
+                _write_context(context, output_name, output_dir, prefix=f"{tag} " if tag else "")
+            except OSError as e:  # the run's own error is the one to report
+                click.echo(click.style(f"{f'{tag} ' if tag else ''}Couldn't write the run's context: {e}", fg="red"))
         raise
     if not keep:
         echo_teardown(tag, await teardown_run(context))

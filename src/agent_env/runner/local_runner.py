@@ -18,7 +18,7 @@ from typing import Optional
 
 from agent_env.runner import store as run_store
 from agent_env.runner.runner import RunHandle, RunRecord, Runner, RunStatus
-from agent_env.task.teardown import teardown_run
+from agent_env.task.teardown import TERMINATE_TIMEOUT_SECONDS, teardown_run
 
 logger = logging.getLogger(__name__)
 
@@ -51,13 +51,19 @@ class LocalRunner(Runner):
             logger.info("Failed %d run(s) left non-terminal by a previous process", orphaned)
 
     async def stop(self) -> None:
-        """Cancel the runs still working and wait for every run, letting a teardown under way finish."""
+        """Cancel the runs still working and wait for every run, letting a teardown under way finish. A teardown
+        still going after twice its own timeout (a local folder that won't go) is cancelled, so shutdown ends."""
         self._stopping = True
         for run_id, task in list(self._inflight.items()):
             if run_id not in self._tearing_down:
                 task.cancel()
         if self._inflight:
-            await asyncio.gather(*self._inflight.values(), return_exceptions=True)
+            _, stuck = await asyncio.wait(list(self._inflight.values()), timeout=2 * TERMINATE_TIMEOUT_SECONDS)
+            for task in stuck:
+                task.cancel()
+            if stuck:
+                logger.warning("Stopped waiting for %d run teardown(s); what they hadn't removed is still up", len(stuck))
+                await asyncio.gather(*stuck, return_exceptions=True)
         self._inflight.clear()
 
     # --- Runner API --------------------------------------------------------
