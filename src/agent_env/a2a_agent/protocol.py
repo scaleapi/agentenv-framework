@@ -181,7 +181,7 @@ async def poll_a2a_task(
         except httpx.HTTPError as e:
             consecutive_failures += 1
             logger.warning(f"A2A poll failed (consec={consecutive_failures}, will retry): {type(e).__name__}: {e}")
-            unanswered, last_failure = unanswered + 1, f"{type(e).__name__}: {e}"
+            unanswered, last_failure = unanswered + 1, f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
         else:
             answered_at, unanswered = time.monotonic(), 0
             if "error" in data:
