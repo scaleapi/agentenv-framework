@@ -119,14 +119,14 @@ class DockerImageArtifact(Artifact):
                 stderr = save_proc.stderr.read().decode() if save_proc.stderr else ""
                 raise RuntimeError(f"docker save {image_ref} failed: {stderr}")
 
-            tar_gz_s3_url = objects.put_file_at(
+            tar_gz_object_url = objects.put_file_at(
                 f"{prefix}{fs_safe(id)}-v{version}.tar.gz", str(tmp_path), "application/gzip"
             )
         finally:
             if tmp_path.exists():
                 tmp_path.unlink()
 
-        build_context_s3_url = None
+        build_context_object_url = None
         if build_context_path:
             context_dir = Path(build_context_path)
             paths_to_include = _get_dockerfile_copy_sources(context_dir, dockerfile_path)
@@ -138,7 +138,7 @@ class DockerImageArtifact(Artifact):
                         full_path = context_dir / rel_path
                         if full_path.exists():
                             tar.add(str(full_path), arcname=rel_path)
-                build_context_s3_url = objects.put_file_at(
+                build_context_object_url = objects.put_file_at(
                     f"{prefix}build-context.tar.gz", str(ctx_tmp_path), "application/gzip"
                 )
             finally:
@@ -149,8 +149,8 @@ class DockerImageArtifact(Artifact):
             id,
             description=description,
             image_name=image_ref,
-            tar_gz_s3_url=tar_gz_s3_url,
-            build_context_s3_url=build_context_s3_url,
+            tar_gz_s3_url=tar_gz_object_url,
+            build_context_s3_url=build_context_object_url,
         )
 
     @classmethod
@@ -291,7 +291,7 @@ class DockerImageArtifact(Artifact):
                     )
                 return url, put
 
-            tar_gz_s3_url, image_put_url = await asyncio.to_thread(_signed_put, f"github-builds/{id}/{image_tag}.tar.gz")
+            tar_gz_object_url, image_put_url = await asyncio.to_thread(_signed_put, f"github-builds/{id}/{image_tag}.tar.gz")
             await sandbox.exec_script(f'curl -fsSL -X PUT --upload-file /tmp/image.tar.gz "{image_put_url}"')
 
             log("upload_context", "Uploading build context...", 80)
@@ -300,7 +300,7 @@ class DockerImageArtifact(Artifact):
             copy_sources = _parse_copy_sources(dockerfile_content, df_rel)
             tar_paths = " ".join(shlex.quote(p) for p in copy_sources)
             await sandbox.exec_script(f"tar czf /tmp/build-context.tar.gz -C {context_abs} {tar_paths}")
-            build_context_s3_url, context_put_url = await asyncio.to_thread(
+            build_context_object_url, context_put_url = await asyncio.to_thread(
                 _signed_put, f"github-builds/{id}/{image_tag}-context.tar.gz"
             )
             await sandbox.exec_script(f'curl -fsSL -X PUT --upload-file /tmp/build-context.tar.gz "{context_put_url}"')
@@ -313,8 +313,8 @@ class DockerImageArtifact(Artifact):
             id=id,
             description=f"Built from GitHub: {dockerfile_github_url}",
             image_name=image_ref,
-            tar_gz_s3_url=tar_gz_s3_url,
-            build_context_s3_url=build_context_s3_url,
+            tar_gz_s3_url=tar_gz_object_url,
+            build_context_s3_url=build_context_object_url,
         )
         logger.info(f"put_from_github: created artifact id={artifact.id} version={artifact.version}")
 
