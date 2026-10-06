@@ -425,8 +425,14 @@ def test_a_stored_step_with_the_default_agent_name_beside_its_target_still_loads
     assert {k: getattr(step, k) for k in target} == target
 
 
-def test_a_stored_step_with_a_named_agent_beside_its_target_is_rejected():
+def test_a_stored_step_with_a_named_agent_beside_its_env_id_still_loads_on_the_host():
     stored = {**_step(env_id="env-x").to_dict(), "agent_name": "solver"}
+    step = RunCodeTaskStep.from_dict(stored)
+    assert (step.env_id, step.agent_name) == ("env-x", None)
+
+
+def test_a_stored_step_with_a_named_agent_beside_its_sandbox_name_is_rejected():
+    stored = {**_step(sandbox_name="bundler").to_dict(), "agent_name": "solver"}
     with pytest.raises(ValueError, match="set at most one of"):
         RunCodeTaskStep.from_dict(stored)
 

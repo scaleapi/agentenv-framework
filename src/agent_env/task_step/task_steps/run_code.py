@@ -136,10 +136,12 @@ class RunCodeTaskStep(TaskStep):
     @classmethod
     def from_dict(cls, data: dict) -> "RunCodeTaskStep":
         fields = {f: data[f] for f in cls._SERIALIZED_FIELDS if f in data}
-        # Steps stored before the targets were exclusive carry DEFAULT_AGENT_NAME beside `env_id`.
-        host_target = fields.get("env_id") or fields.get("sandbox_name")
-        if host_target and fields.get("agent_name") == cls.DEFAULT_AGENT_NAME:
-            del fields["agent_name"]
+        # Steps stored before the targets were exclusive can carry an `agent_name` beside `env_id`, which `env_id`
+        # overrode: drop it so they still load. A sandbox_name step only ever stored the default.
+        if fields.get("env_id") or (
+            fields.get("sandbox_name") and fields.get("agent_name") == cls.DEFAULT_AGENT_NAME
+        ):
+            fields.pop("agent_name", None)
         return cls(**cls._base_from_dict(data), **fields)
 
     def preflight(self) -> list[str]:
