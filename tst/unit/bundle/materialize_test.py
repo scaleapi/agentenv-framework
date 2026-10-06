@@ -399,6 +399,22 @@ def test_a_changed_build_context_rebuilds_the_image_and_rewrites_its_agent(bundl
     assert A2AAgent.get(f"{ROOT}/solver").docker_image_artifact.version == 2
 
 
+def test_a_dry_run_predicts_a_rebuild_and_its_agents_rewrite_without_building(bundle_dir, builds):
+    layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\nCOPY run.sh /\n", "agents/solver/run.sh": "echo hi\n"})
+    _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
+    _run(bundle_dir)
+    (bundle_dir / "agents/solver/run.sh").write_text("echo bye\n")
+    image = f"{ROOT}/solver__agent_image"
+
+    predicted = _summary(_run(bundle_dir, dry_run=True))
+
+    assert len(builds) == 1
+    assert predicted[image] == (2, False, ("files changed: run.sh",))
+    assert predicted[f"{ROOT}/solver"] == (2, False, (f"artifact {image} is written anew (v1 → v2)",))
+    assert _summary(_run(bundle_dir)) == predicted
+    assert len(builds) == 2
+
+
 def test_an_agent_toml_edit_rebuilds_the_image_too_since_a_dockerfile_can_copy_it(bundle_dir, builds):
     layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\nCOPY . /agent\n"})
     _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
