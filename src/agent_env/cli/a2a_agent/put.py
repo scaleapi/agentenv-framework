@@ -5,7 +5,7 @@ import click
 
 from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact import DockerImageArtifact
-from agent_env.cli.utils import build_platform_option, detect_env_metadata
+from agent_env.cli.utils import build_platform_option, detect_env_metadata, refuse_unwritable_ids
 from agent_env.store.ids import derive_id, image_repository
 from agent_env.utils.docker_build import build_image
 
@@ -44,6 +44,7 @@ def put(agent_id: str, dockerfile: str, context_path: str | None, env_var_pairs:
     context = Path(context_path) if context_path else dockerfile_path.parent
     image_id = derive_id(agent_id, "agent_image")
     image_tag = image_repository(image_id)
+    refuse_unwritable_ids(agent_id, image_id)
 
     click.echo(f"Building Docker image...")
     build_image(dockerfile_path, context, image_tag, platform=build_platform)

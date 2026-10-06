@@ -291,8 +291,29 @@ def test_a_put_with_an_local_id_builds_and_writes_its_images_under_ids_derived_f
 
     assert result.exit_code == 0, result.output
     assert tags == [image_repository(image) for image in images] and all(tag.startswith("local/") for tag in tags)
-    assert sorted(d["id"] for d in _local().query("artifacts", Filter())) == images
+    saved = {d["id"]: d["image_name"] for d in _local().query("artifacts", Filter())}
+    assert saved == {image: image_repository(image) for image in images}
+    (owner,) = _local().query("a2a_agents" if module.endswith(".put") else "envs", Filter())
+    assert sorted(ref["id"] for ref in owner.values() if isinstance(ref, dict) and "id" in ref) == images
     assert not _documents().path.exists() or _documents().count("artifacts", Filter()) == 0
+
+
+@pytest.mark.parametrize("module, argv", [
+    ("agent_env.cli.a2a_agent.put", ["a2a-agent", "put", "--skip-validation"]),
+    ("agent_env.cli.env.mcp_server", ["env", "mcp-server", "put", "--environment-name", "items"]),
+], ids=["a2a-agent", "mcp-server"])
+def test_a_put_whose_image_id_would_be_too_long_is_refused_before_it_builds(
+    local_stores, tmp_path, monkeypatch, module, argv,
+):
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text("FROM scratch\n")
+    monkeypatch.setattr(importlib.import_module(module), "build_image", lambda *args, **kwargs: pytest.fail("it built"))
+    longest = "@local/~/" + "x" * (4096 - len("@local/~/"))  # as long as an @local id may be, so a suffix can't fit
+
+    result = CliRunner().invoke(cli, [*argv, "--id", longest, "--dockerfile", str(dockerfile)])
+
+    assert result.exit_code == 1 and "Error:" in result.output, result.output
+    assert not _local().path.exists() or _local().count("artifacts", Filter()) == 0
 
 
 class _Deployable:

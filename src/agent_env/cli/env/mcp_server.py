@@ -12,6 +12,7 @@ from agent_env.cli.utils import (
     detect_env_metadata,
     env_provider_type_option,
     environment_name_options,
+    refuse_unwritable_ids,
     resolve_environment_name,
 )
 from agent_env.utils.card_naming import card_name_from_github, card_name_from_source
@@ -191,6 +192,7 @@ def put(env_id: str, dockerfile: str | None, context_path: str | None, dockerfil
         click.echo(f"Derived environment_name={environment_name!r} from the environment card.")
     image_id = derive_id(env_id, "env_image")
     image_tag = image_repository(image_id)
+    refuse_unwritable_ids(env_id, image_id)
 
     click.echo(f"Building MCP server Docker image...")
     build_image(dockerfile_path, context, image_tag, platform=build_platform)

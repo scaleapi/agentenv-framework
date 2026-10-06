@@ -12,6 +12,7 @@ from agent_env.cli.utils import (
     detect_env_metadata,
     env_provider_type_option,
     environment_name_options,
+    refuse_unwritable_ids,
     resolve_environment_name,
 )
 from agent_env.utils.card_naming import card_name_from_github, card_name_from_source
@@ -141,7 +142,8 @@ def put(
     # Local Docker build path
     backend_dockerfile_path = Path(backend_dockerfile)
     backend_ctx = Path(backend_docker_context) if backend_docker_context else backend_dockerfile_path.parent
-    backend_id = derive_id(env_id, "backend_image")
+    backend_id, frontend_id = derive_id(env_id, "backend_image"), derive_id(env_id, "frontend_image")
+    refuse_unwritable_ids(env_id, backend_id, frontend_id)
     backend_tag = image_repository(backend_id)
     if environment_name is None:
         environment_name = card_name_from_source(str(backend_dockerfile_path), str(backend_ctx))
@@ -163,7 +165,6 @@ def put(
 
     frontend_dockerfile_path = Path(frontend_dockerfile)
     frontend_ctx = Path(frontend_docker_context) if frontend_docker_context else frontend_dockerfile_path.parent
-    frontend_id = derive_id(env_id, "frontend_image")
     frontend_tag = image_repository(frontend_id)
 
     click.echo(f"Building website frontend Docker image...")
