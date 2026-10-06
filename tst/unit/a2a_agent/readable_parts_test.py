@@ -29,7 +29,7 @@ async def test_an_owned_object_is_sent_as_a_grant_and_the_parts_given_are_left_a
     parts = [{"kind": "text", "text": "look"}, _file(url)]
     given = copy.deepcopy(parts)
 
-    async with readable_parts(parts, a2a_url=URL, card=None, sandbox_type="local", lasting=600) as sent:
+    async with readable_parts(parts, a2a_url=URL, card=None, sandbox_type="local", expires_in=600) as sent:
         assert sent == [{"kind": "text", "text": "look"}, _file(f"{GRANT_ORIGIN}/seeds/s1/x.png?sig=read")]
 
     assert parts == given
@@ -46,7 +46,7 @@ async def test_parts_that_name_no_owned_object_are_sent_as_they_are(store):
         _file("s3://another-bucket/x.png"),
     ]
 
-    async with readable_parts(parts, a2a_url=URL, card=None, sandbox_type="modal", lasting=600) as sent:
+    async with readable_parts(parts, a2a_url=URL, card=None, sandbox_type="modal", expires_in=600) as sent:
         assert sent == parts
 
     assert store.granted == []
@@ -57,7 +57,7 @@ async def test_an_owned_object_the_agent_can_be_given_no_url_for_is_not_sent(sto
     url = store.put("seeds/s1/x.png", b"png")
 
     with pytest.raises(RuntimeError, match="gives no URL that agents on the 'modal' sandbox provider can read") as raised:
-        async with readable_parts([_file(url)], a2a_url=URL, card=None, sandbox_type="modal", lasting=600):
+        async with readable_parts([_file(url)], a2a_url=URL, card=None, sandbox_type="modal", expires_in=600):
             pytest.fail("the parts must not be sent")
 
     assert url in str(raised.value)

@@ -484,7 +484,7 @@ class PromptAgentTaskStep(TaskStep):
             # once the copy is ready, so an object the agent can't be sent leaves no turn waiting.
             async with readable_parts(
                 current_user_parts, a2a_url=target_url, card=card,
-                sandbox_type=agent.sandbox_type, lasting=self.timeout_seconds,
+                sandbox_type=agent.sandbox_type, expires_in=self.timeout_seconds,
             ) as sent_parts:
                 conversation_store.add_a2a_task(
                     conversation_id=conversation_id,

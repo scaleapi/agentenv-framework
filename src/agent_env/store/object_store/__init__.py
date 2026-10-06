@@ -13,7 +13,6 @@ from agent_env.store.object_store.object_store import (
     ObjectMetadata,
     ObjectStore,
     UploadPolicy,
-    read_url,
 )
 from agent_env.store.object_store.s3_object_store import S3ObjectStore
 
@@ -21,7 +20,6 @@ __all__ = [
     "ObjectStore",
     "ObjectMetadata",
     "UploadPolicy",
-    "read_url",
     "DEFAULT_CONTENT_TYPE",
     "DEFAULT_GRANT_LIFETIME_SECONDS",
     "MIN_GRANT_LIFETIME_SECONDS",

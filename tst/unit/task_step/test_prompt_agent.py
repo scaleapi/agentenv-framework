@@ -32,6 +32,7 @@ from agent_env.task_step.task_steps.prompt_agent import (
     _duplicates_prompt_text,
     _parse_structured_output,
 )
+from tst.util.fake_a2a import FakeA2AAgents
 
 
 def test_parses_pure_json_object():
@@ -244,21 +245,12 @@ async def test_sdk_agent_on_the_local_store_still_records_its_trajectory(monkeyp
     ).card_extensions()
     trajectory_requests: list[dict] = []
 
-    def agent(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content)
-        if request.url.path == "/ext/trajectory":
-            trajectory_requests.append(body)
-            return httpx.Response(200, json={"trajectory": [{"type": "echo", "output": "Echo: hi"}]})
-        if body["method"] == "message/send":
-            result = {"id": "server-task", "contextId": "ctx"}
-        else:
-            result = {"status": {"state": "completed",
-                                 "message": {"parts": [{"kind": "text", "text": "Echo: hi"}]}}}
-        return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": result})
+    def trajectory(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/ext/trajectory"
+        trajectory_requests.append(json.loads(request.content))
+        return httpx.Response(200, json={"trajectory": [{"type": "echo", "output": "Echo: hi"}]})
 
-    transport = httpx.MockTransport(agent)
-    real_client = httpx.AsyncClient
-    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: real_client(*a, transport=transport, **kw))
+    FakeA2AAgents({"http://agent.test": [{"kind": "text", "text": "Echo: hi"}]}, other=trajectory).serve(monkeypatch)
     context = TaskStepContext(instance_id="ti-1")
     context.deployed_agents.append(DeployedAgent(
         agent_name="solver", api_url="http://agent.test", a2a_url="http://agent.test",
@@ -272,7 +264,7 @@ async def test_sdk_agent_on_the_local_store_still_records_its_trajectory(monkeyp
     result = await step.execute(context)
 
     uri = result.prompt_responses[-1].agent_trajectory_s3_uri
-    assert trajectory_requests == [{"task_id": "server-task"}]
+    assert trajectory_requests == [{"task_id": "task-1"}]
     assert store.get_object_key(uri).startswith("prompt_agent_trajectories/trajectory-")
     assert json.loads(store.get(uri)) == [{"type": "echo", "output": "Echo: hi"}]
 

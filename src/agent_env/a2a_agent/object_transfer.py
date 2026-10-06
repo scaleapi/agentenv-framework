@@ -41,7 +41,8 @@ from agent_env.a2a_agent.protocol import raise_for_extension_status
 from agent_env.a2a_agent.staging import StagedObjectStore, staged_store
 from agent_env.config import get_config
 from agent_env.store.base import GrantUnavailableError
-from agent_env.store.object_store import DEFAULT_CONTENT_TYPE, ObjectStore, read_url
+from agent_env.store.object_store import DEFAULT_CONTENT_TYPE, ObjectStore
+from agent_env.store.object_store.object_store import readable_url
 from agent_env.store.object_store.local.grant_server import unreachable_hint
 
 logger = logging.getLogger(__name__)
@@ -306,28 +307,29 @@ async def readable_parts(
     a2a_url: str,
     card: Mapping[str, Any] | None,
     sandbox_type: str | None,
-    lasting: int,
+    expires_in: int,
 ) -> AsyncIterator[list[dict]]:
-    """``parts`` as the agent at ``a2a_url`` can read them for ``lasting`` seconds: a file part naming an
-    object a configured store owns names an HTTPS URL for it instead, from ``read_url`` or else staged on
-    the agent for the length of the block. Other parts, and file parts naming anything else, are sent as
-    they are. Raises when an owned object can be given no URL the agent can read."""
+    """``parts`` as the agent at ``a2a_url`` can read them: a file part naming an object a configured store
+    owns names an HTTPS URL for it instead, one ``readable_url`` gives for at least ``expires_in`` seconds,
+    or else a copy staged on the agent for the length of the block. Other parts, and file parts naming
+    anything else, are sent as they are. Raises when an owned object can be given no URL the agent can read."""
+    config = get_config()
     readable = list(parts)
-    staged: dict[int, StagedObjectStore] = {}
+    staged: dict[ObjectStore, StagedObjectStore] = {}
     for index, part in enumerate(parts):
         file = part.get("file") if part.get("kind") == "file" else None
         uri = file.get("uri") if isinstance(file, dict) else None
         if not isinstance(uri, str):
             continue
-        store = get_config().get_object_store_at(uri)
+        store = config.get_object_store_at(uri)
         if not store.owns(uri):
             continue
-        url = await asyncio.to_thread(read_url, store, uri, sandbox_type=sandbox_type, lasting=lasting)
+        url = await asyncio.to_thread(readable_url, store, uri, sandbox_type=sandbox_type, expires_in=expires_in)
         if url is None:
-            staging = staged.get(id(store)) or staged_store(store, a2a_url, card)
+            staging = staged.get(store) or staged_store(store, a2a_url, card)
             if staging is not None:
-                staged[id(store)] = staging
-                url = str(staging.issue_read_grant(uri, expires_in=lasting).url)
+                staged[store] = staging
+                url = str(staging.issue_read_grant(uri).url)
         if url is None:
             raise RuntimeError(
                 f"{uri} cannot be sent to the agent: {type(store).__name__} gives no URL that agents on the "

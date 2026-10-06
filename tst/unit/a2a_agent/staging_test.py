@@ -6,7 +6,6 @@ agent make, the agent's own calls to its staging included, runs without a networ
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -33,7 +32,6 @@ from agentenv_protocol.a2a_agent import (
     extension,
     upload,
 )
-from agentenv_protocol.transfers import HttpGetGrant
 from starlette.testclient import TestClient
 
 import agent_env.a2a_agent.staging as staging
@@ -54,6 +52,7 @@ from agent_env.config import reset_config, set_object_store
 from agent_env.store import LocalFilesystemObjectStore
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
+from tst.util.granting_object_store import GrantingObjectStore
 
 URL = "https://agent.example.test"
 
@@ -170,7 +169,7 @@ async def test_a_file_part_reaches_a_remote_agent_through_its_staging_while_it_i
     url = store.put("seeds/x.png", b"png bytes")
     parts = [{"kind": "file", "file": {"uri": url, "mimeType": "image/png", "name": "x.png"}}]
 
-    async with readable_parts(parts, a2a_url=URL, card=_card(agent), sandbox_type="modal", lasting=600) as sent:
+    async with readable_parts(parts, a2a_url=URL, card=_card(agent), sandbox_type="modal", expires_in=600) as sent:
         assert sent[0]["file"]["uri"].startswith(f"{URL}/")
         async with httpx.AsyncClient() as client:
             fetched = await client.get(sent[0]["file"]["uri"])
@@ -179,29 +178,14 @@ async def test_a_file_part_reaches_a_remote_agent_through_its_staging_while_it_i
     assert _staged_paths(tmp_path) == []
 
 
-class _HeaderGrantStore(LocalFilesystemObjectStore):
-    """Grants that reach every agent but name a header a file part's URL cannot carry."""
-
-    supports_transfer_grants = True
-
-    def grants_reach(self, sandbox_type):
-        return True
-
-    def issue_read_grant(self, object_url, *, expires_in=None):
-        return HttpGetGrant(
-            kind="http-get", url="https://objects.example.test/x", headers={"x-token": "t"},
-            expires_at=datetime.now(UTC) + timedelta(hours=1),
-        )
-
-
 @pytest.mark.asyncio
 async def test_a_file_part_whose_grant_needs_headers_is_staged_instead(agent, tmp_path):
-    store = _HeaderGrantStore(str(tmp_path / "store"))
+    store = GrantingObjectStore(str(tmp_path / "store"), reaches=True, grant_headers={"x-token": "t"})
     set_object_store(store)
     url = store.put("seeds/x.png", b"png bytes")
     parts = [{"kind": "file", "file": {"uri": url, "mimeType": "image/png", "name": "x.png"}}]
 
-    async with readable_parts(parts, a2a_url=URL, card=_card(agent), sandbox_type="modal", lasting=600) as sent:
+    async with readable_parts(parts, a2a_url=URL, card=_card(agent), sandbox_type="modal", expires_in=600) as sent:
         async with httpx.AsyncClient() as client:
             fetched = await client.get(sent[0]["file"]["uri"])
         assert fetched.content == b"png bytes"
