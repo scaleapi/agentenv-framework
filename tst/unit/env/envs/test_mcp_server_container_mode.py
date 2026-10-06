@@ -1,6 +1,7 @@
 """A standalone MCPServerEnv on Modal containers stages into its server's own container and records every container it
 created, so a later process can reattach them: loads stage into the server again, and close() and the reapers reach
 them all. A dead servicedb or sidecar is skipped on restore; a dead server fails it. A VM deploy's record is unchanged.
+A load is timed by the size of the payload it staged, read in the server's container, or in the env's docker container on a VM.
 Deployed without a gateway, the server is the env: its own card and container are the record's, and loads go straight to it.
 Only the sandboxes, the HTTP boundary and each topology's deploy path are faked."""
 
@@ -20,6 +21,7 @@ from agent_env.artifact import Artifact
 from agent_env.env.env import DeployedEnv, DeployedSandboxEnv
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.gateway import GatewayMode
+from agent_env.env.gateway.constants import data_plane_load_timeout_s
 from agent_env.providers.env_providers.env_gateway_provider import DeployedGateway
 from agent_env.providers.env_providers.env_provider import _builtin_env_providers, build_env_provider
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER, SANDBOX_MODE_VM
@@ -60,6 +62,38 @@ async def test_a_container_deploy_stages_into_the_server_and_records_every_conta
     assert {i for i, _ in _env_sandbox_ids(deployed)} == {sb.sandbox_id for sb in env._env_provider._container_sandboxes}
     sandboxes["srv"].write_file_from_s3.assert_awaited_once_with("s3://bucket/email.json", "/data/email.json")
     sandboxes["gw"].write_file_from_s3.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_container_load_is_timed_by_the_payload_staged_in_the_server(sent):
+    env, sandboxes, size = _env(), _containers(), 3_500 * 1024 * 1024
+    sandboxes["srv"].exec_with_output = AsyncMock(return_value=(0, f"{size}\n", ""))
+
+    await _deploy(env, sandboxes)
+    await env.load_environment_artifact(_artifact())
+
+    sandboxes["srv"].exec_with_output.assert_awaited_once_with("stat", "-c", "%s", "/data/email.json")
+    assert sent and {r.extensions["timeout"]["read"] for r in sent} == {data_plane_load_timeout_s(size)}
+    assert data_plane_load_timeout_s(size) > data_plane_load_timeout_s(None)
+
+
+@pytest.mark.asyncio
+async def test_a_container_stat_that_fails_leaves_the_load_its_floor_timeout():
+    env, server = _env(), _sandbox("srv")
+    server.exec_with_output = AsyncMock(return_value=(1, "", "stat: cannot statx '/data/email.json'"))
+    env._sandbox = server
+
+    assert await env._staged_artifact_size("/data/email.json") is None
+
+
+@pytest.mark.asyncio
+async def test_a_vm_payload_is_measured_in_the_envs_docker_container():
+    env, vm = _env(), _sandbox("vm-1", mode=SANDBOX_MODE_VM, sandbox_type="modal_vm")
+    vm.exec_script = AsyncMock(return_value="1234\n")
+    env._sandbox, env._env_provider._get_container_id = vm, AsyncMock(return_value="ctr-1")
+
+    assert await env._staged_artifact_size("/data/email.json") == 1234
+    vm.exec_script.assert_awaited_once_with("docker exec ctr-1 stat -c %s /data/email.json")
 
 
 @pytest.mark.asyncio

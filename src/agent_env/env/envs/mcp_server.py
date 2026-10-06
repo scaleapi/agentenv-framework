@@ -195,10 +195,16 @@ class MCPServerEnv(Env):
         if self._sandbox is None:
             return None
         try:
-            container_id = await self._env_provider._get_container_id(self._sandbox, self.environment_name)
-            out = await self._sandbox.exec_script(
-                f"docker exec {container_id} stat -c %s {shlex.quote(container_path)}"
-            )
+            # A container-mode sandbox is the env's container, staged into directly; a VM runs it under docker.
+            if self._sandbox.mode == SANDBOX_MODE_CONTAINER:
+                exit_code, out, err = await self._sandbox.exec_with_output("stat", "-c", "%s", container_path)
+                if exit_code != 0:
+                    raise RuntimeError(f"stat exited {exit_code}: {err.strip()[-200:]}")
+            else:
+                container_id = await self._env_provider._get_container_id(self._sandbox, self.environment_name)
+                out = await self._sandbox.exec_script(
+                    f"docker exec {container_id} stat -c %s {shlex.quote(container_path)}"
+                )
             return int(out.strip())
         except Exception as e:  # noqa: BLE001 -- a measurement, not a dependency
             logger.warning(
