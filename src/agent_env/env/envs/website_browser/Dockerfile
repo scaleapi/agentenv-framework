@@ -1,7 +1,9 @@
 FROM public.ecr.aws/docker/library/node:22-slim@sha256:813a7480f28fdadac1f7f5c824bcdad435b5bc1322a5968bbbdef8d058f9dff4
 
-# Chromium runtime dependencies for headless mode.
+# Chromium runtime dependencies for headless mode, and python3 for the socket probe the gateway's compose
+# health-checks every MCP server with.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3-minimal \
     libnss3 \
     libnspr4 \
     libatk1.0-0 \
