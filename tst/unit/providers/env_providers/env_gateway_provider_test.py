@@ -549,6 +549,38 @@ async def test_modal_vm_provider_routes_to_vm_path_not_containers():
 
 
 @pytest.mark.asyncio
+async def test_read_trajectory_retries_a_read_whose_transport_failed():
+    gp = EnvironmentGatewayProvider()
+    gp._get_container_id = AsyncMock(return_value="gw")
+    sandbox = MagicMock()
+    sandbox.exec_with_output = AsyncMock(side_effect=[(-1, "", "host lost"), (0, '{"a": 1}\n{"b": 2}\n', "")])
+
+    assert await gp.read_trajectory(sandbox) == [{"a": 1}, {"b": 2}]
+    assert sandbox.exec_with_output.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_read_trajectory_raises_rather_than_parse_a_read_that_keeps_failing():
+    gp = EnvironmentGatewayProvider()
+    gp._get_container_id = AsyncMock(return_value="gw")
+    sandbox = MagicMock()
+    sandbox.exec_with_output = AsyncMock(return_value=(-1, '{"a": 1}\n', "host lost"))
+
+    with pytest.raises(RuntimeError, match="exec transport failed 3 times"):
+        await gp.read_trajectory(sandbox)
+
+
+@pytest.mark.asyncio
+async def test_read_trajectory_of_a_gateway_with_no_history_yet_is_empty():
+    gp = EnvironmentGatewayProvider()
+    gp._get_container_id = AsyncMock(return_value="gw")
+    sandbox = MagicMock()
+    sandbox.exec_with_output = AsyncMock(return_value=(1, "", "cat: /var/log/agentenv/trajectory.jsonl: No such file"))
+
+    assert await gp.read_trajectory(sandbox) == []
+
+
+@pytest.mark.asyncio
 async def test_sail_provider_routes_to_vm_path_not_containers():
     """A Sailbox is a Docker-capable VM: the gateway deploys onto it with docker-compose."""
     from agent_env.env.gateway import GatewayMode

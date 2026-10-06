@@ -46,6 +46,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_TRAJECTORY_READ_ATTEMPTS = 3
+
 # MCP server health-check budget. Some servers wait on an upstream before they bind; a server
 # that is up passes its first probe, so the long start period only delays failing a broken one.
 MCP_HC_RETRIES = 30
@@ -987,14 +989,21 @@ COMPOSE_EOF'''
         return False
 
     async def read_trajectory(self, sandbox: VmSandbox) -> list[dict]:
-        """Read trajectory JSONL from gateway container."""
+        """Read trajectory JSONL from gateway container. A read whose exec transport failed (exit -1) may
+        hold only part of the history, so it is retried and then raised, never parsed."""
         container_id = await self._get_container_id(sandbox, GATEWAY_SERVICE_NAME)
         if not container_id:
             return []
 
-        exit_code, stdout, stderr = await sandbox.exec_with_output(
-            "sudo", "docker", "exec", container_id, "cat", "/var/log/agentenv/trajectory.jsonl"
-        )
+        for attempt in range(_TRAJECTORY_READ_ATTEMPTS):
+            exit_code, stdout, stderr = await sandbox.exec_with_output(
+                "sudo", "docker", "exec", container_id, "cat", "/var/log/agentenv/trajectory.jsonl"
+            )
+            if exit_code != -1:
+                break
+            logger.warning(f"Trajectory read lost its exec transport (attempt {attempt + 1}): {stderr[-200:]}")
+        else:
+            raise RuntimeError(f"Could not read the gateway trajectory: exec transport failed {_TRAJECTORY_READ_ATTEMPTS} times")
         events = []
         for line in stdout.strip().split("\n"):
             if line:

@@ -128,6 +128,14 @@ async def test_a_stream_cut_by_a_migration_ends_and_waits_to_exit_minus_one():
 
 
 @pytest.mark.asyncio
+async def test_exec_with_output_never_returns_the_partial_stdout_of_a_cut_stream():
+    process = _process(stderr=b"moved\n")
+    process.stdout_bytes = _failing_chunks(_HostLost("moved"))
+    sandbox, _ = _sandbox(process)
+    assert await sandbox.exec_with_output("cat", "trajectory.jsonl") == (-1, "", "moved\n")
+
+
+@pytest.mark.asyncio
 async def test_exec_script_retries_a_command_whose_output_stream_was_cut(monkeypatch):
     monkeypatch.setattr("agent_env.providers.sandbox_providers.sandbox.asyncio.sleep", AsyncMock())
     cut = _process()

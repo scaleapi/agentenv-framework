@@ -175,6 +175,14 @@ class SailSandbox(VmSandbox):
         exit -1, which ``exec_script`` retries."""
         return await self._run(*command)
 
+    async def exec_with_output(self, *args: str) -> tuple[int, str, str]:
+        """``(exit_code, stdout, stderr)``; a command whose output stream was cut (exit -1) returns no stdout,
+        so a caller that skips the exit code can't mistake partial output for the whole."""
+        process = await self.exec(*args)
+        stdout, stderr = await asyncio.gather(process.stdout.read(), process.stderr.read())
+        exit_code = await process.wait()
+        return exit_code, "" if exit_code == -1 else stdout.decode(), stderr.decode()
+
     async def _run(self, *command: str, timeout: Optional[int] = None) -> _SailProcess | _CompletedProcess:
         argv = list(command[1:] if command[:1] == ("sudo",) else command)
         try:
