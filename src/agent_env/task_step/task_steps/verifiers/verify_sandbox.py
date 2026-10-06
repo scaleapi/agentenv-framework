@@ -234,7 +234,8 @@ class VerifySandboxTaskStep(TaskStep):
     @staticmethod
     def _probe_args(sandbox, container: Optional[str], cmd: tuple[str, ...]) -> tuple[str, ...]:
         if container is not None:
-            return ("sudo", "docker", "exec", container, *cmd)
+            # As root, like the steps that write into the container: a non-root image user can't read their files.
+            return ("sudo", "docker", "exec", "-u", "0", container, *cmd)
         if sandbox.mode == SANDBOX_MODE_VM:
             return ("sudo", *cmd)
         return cmd
