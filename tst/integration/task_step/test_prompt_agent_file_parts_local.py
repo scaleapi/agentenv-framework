@@ -89,19 +89,27 @@ def local_registry(monkeypatch, tmp_path):
 
 @pytest.fixture
 def human_peer():
-    """The echo agent served in this process, standing in for a human's hub: its URL."""
+    """The echo agent served in this process, standing in for a human's hub: its URL, and the file URIs it is sent."""
     spec = importlib.util.spec_from_file_location("echo_agent_here", AGENT_DIR / "agent.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    agent, received = module.EchoAgent(), []
+    run = agent.run
+
+    async def recording(request: module.TaskRequest[module.EchoAgentConfig]):
+        received.extend(part.uri for part in request.parts if isinstance(part, module.FilePart) and part.uri)
+        return await run(request)
+
+    agent.run = recording
     port = _free_port()
-    server = uvicorn.Server(uvicorn.Config(module.EchoAgent().create_app(), host="127.0.0.1", port=port, log_level="warning"))
+    server = uvicorn.Server(uvicorn.Config(agent.create_app(), host="127.0.0.1", port=port, log_level="warning"))
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
     deadline = time.time() + PEER_READY_SECONDS
     while not server.started and time.time() < deadline:
         time.sleep(0.1)
     try:
-        yield f"http://127.0.0.1:{port}"
+        yield f"http://127.0.0.1:{port}", received
     finally:
         server.should_exit = True
         thread.join(timeout=10)
@@ -172,10 +180,11 @@ async def test_a_human_peer_is_sent_the_stores_own_url(local_registry, human_pee
     suffix = uuid.uuid4().hex[:8]
     urls = _files(suffix)
     agent = put_test_agent(f"file-parts-agent-{suffix}")
-    peer = {"user_agent_name": "human"} if registered else {"user_a2a_url": human_peer}
+    peer_url, received = human_peer
+    peer = {"user_agent_name": "human"} if registered else {"user_a2a_url": peer_url}
     task = Task.put(id=f"file-parts-human-{suffix}", steps=[
         _deploy(agent, "solver"),
-        *([DeployHumanAgentTaskStep(id="register-human", version=None, agent_name="human", a2a_url=human_peer)]
+        *([DeployHumanAgentTaskStep(id="register-human", version=None, agent_name="human", a2a_url=peer_url)]
           if registered else []),
         PromptAgentTaskStep(
             id="ask", version=None, prompt_id="ask", agent_name="solver", max_conversation_turns=2,
@@ -183,7 +192,7 @@ async def test_a_human_peer_is_sent_the_stores_own_url(local_registry, human_pee
         ),
     ])
 
-    _, reply, peer_reply, _ = _conversation(await task.run())
+    _, reply, _, _ = _conversation(await task.run())
 
     assert _uris(reply) == [urls["report"]]
-    assert _text(peer_reply).splitlines()[-1].startswith("could not read report.txt over file:")
+    assert received == [urls["report"]]
