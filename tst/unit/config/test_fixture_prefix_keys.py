@@ -1,6 +1,7 @@
 """The fixture prefix reaches every key core builds by hand for artifacts and validator fixtures,
 not only the ones ArtifactStore builds, so a control plane sharing a bucket keeps to its prefix."""
 
+import re
 import asyncio
 from types import SimpleNamespace
 
@@ -85,8 +86,8 @@ def test_an_env_snapshot_is_uploaded_under_the_prefix(prefixed, tmp_path):
     set_object_store(SigningObjectStore(str(tmp_path / "signing")))
     sandbox = _Sandbox()
     url = asyncio.run(_snapshot_servicedb(sandbox, "slack-env", "acme", lambda *args: None))
-    key = "fx/env-snapshots/slack-env/acme/env-snapshot-slack-env-acme.tar.gz"
-    assert url == get_config().get_object_store().object_url(key)
+    key = get_config().get_object_store().get_object_key(url)
+    assert re.fullmatch(r"fx/env-snapshots/slack-env/acme/env-snapshot-slack-env-acme-[0-9a-f]{8}\.tar\.gz", key)
     assert any(f"https://objects.example.test/{key}" in script for script in sandbox.scripts)
 
 

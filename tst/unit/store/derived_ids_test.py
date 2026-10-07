@@ -4,6 +4,7 @@ task, ``<env>__validate-v<n>`` and ``<env>__validate-universe-compat-v<ev>-<univ
 pins its bare row."""
 
 import asyncio
+import re
 import time
 import uuid
 from types import SimpleNamespace
@@ -154,9 +155,9 @@ def test_the_install_image_universe_is_named_after_the_agent(local_stores, cli_r
 
 @pytest.mark.parametrize("env_id, universe_id, artifact_id, image_tag, key", [
     ("crm-suite", "crm-universe", "crm-suite__env-snapshot", "env-snapshot-crm-suite-crm-universe",
-     "env-snapshots/crm-suite/crm-universe/env-snapshot-crm-suite-crm-universe.tar.gz"),
+     "env-snapshots/crm-suite/crm-universe/env-snapshot-crm-suite-crm-universe"),
     (LOCAL_ENV, LOCAL_UNIVERSE, f"{LOCAL_ENV}__env-snapshot", f"env-snapshot-{LOCAL_ENV_FILENAME}-{LOCAL_UNIVERSE_FILENAME}",
-     f"env-snapshots/{LOCAL_ENV_KEY}/{LOCAL_UNIVERSE_KEY}/env-snapshot-{LOCAL_ENV_FILENAME}-{LOCAL_UNIVERSE_FILENAME}.tar.gz"),
+     f"env-snapshots/{LOCAL_ENV_KEY}/{LOCAL_UNIVERSE_KEY}/env-snapshot-{LOCAL_ENV_FILENAME}-{LOCAL_UNIVERSE_FILENAME}"),
 ], ids=["bare", "local"])
 def test_an_env_snapshot_is_named_after_its_env(local_stores, tmp_path, monkeypatch, env_id, universe_id, artifact_id,
                                                 image_tag, key):
@@ -166,7 +167,7 @@ def test_an_env_snapshot_is_named_after_its_env(local_stores, tmp_path, monkeypa
     image = _written_by(lambda: EnvSnapshot.create("inst-1"), monkeypatch, DockerImageArtifact, "put_tar")
 
     assert (image["id"], image["image_name"]) == (artifact_id, image_tag)
-    assert image["tar_gz_s3_url"].endswith(f"/{key}")
+    assert re.search(rf"/{re.escape(key)}-[0-9a-f]{{8}}\.tar\.gz$", image["tar_gz_s3_url"])
     assert f"docker build --platform linux/amd64 -t {image_tag} /tmp/snapshot-build" in sandbox.scripts
 
 

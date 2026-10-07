@@ -57,7 +57,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     get_sandbox_provider,
 )
 from agent_env.store.base import NotFoundError
-from agent_env.store.image_store.oci_registry_credentials import registry_host_from_ref
+from agent_env.store.image_store.oci_registry_credentials import is_loopback_host, registry_host_from_ref
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.deploy_sandbox import DeploySandboxTaskStep
@@ -426,16 +426,8 @@ def _local_only(image: DockerImageArtifact | str) -> str | None:
     """Why only this machine has ``image``: its reference names a registry on this machine, or it's saved in this
     machine's object store. None when neither."""
     ref = image if isinstance(image, str) else image.image_name
-    if _loopback(registry_host_from_ref(ref)):
+    if is_loopback_host(registry_host_from_ref(ref)):
         return f"{ref} is in a registry on this machine"
     if not isinstance(image, str) and urlparse(image.tar_gz_object_url).scheme == "file":
         return f"{image.id!r} is saved in this machine's object store"
     return None
-
-
-def _loopback(host: str | None) -> bool:
-    if not host:
-        return False
-    name = host[1:host.find("]")] if host.startswith("[") else host.rsplit(":", 1)[0]
-    return name == "localhost" or name.startswith("127.") or name == "::1"
-

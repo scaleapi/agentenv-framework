@@ -224,18 +224,20 @@ def test_a_put_validates_an_local_entity_like_any_other(local_stores, monkeypatc
     assert [d["id"] for d in _local().query("tasks", Filter())] == ["@local/~/bundle/envs/m__validate-v1"]
 
 
-def test_snapshotting_an_local_env_stops_at_the_local_store_it_cannot_presign_before_the_sandbox_runs_anything(
+def test_snapshotting_an_local_env_copies_its_image_off_the_sandbox_into_the_local_store(
     local_stores, cli_routing, tmp_path, monkeypatch,
 ):
     configured = SigningObjectStore(str(tmp_path / "configured-objects"))
     set_object_store(configured)
     sandbox = reattach_for_snapshot(monkeypatch, LOCAL_ENV, 1, UNIVERSE, 1)
 
-    with pytest.raises(RuntimeError, match="LocalFilesystemObjectStore can't presign uploads"):
-        asyncio.run(EnvSnapshot.create("instance-1"))
+    snapshot = asyncio.run(EnvSnapshot.create("instance-1"))
 
-    assert sandbox.scripts == []
-    assert configured.list("") == [] and get_config().get_object_store_for(LOCAL_ENV).list("") == []
+    local = get_config().get_object_store_for(LOCAL_ENV)
+    image = DockerImageArtifact.get(snapshot.db_image_artifact_id, snapshot.db_image_artifact_version)
+    assert local.get(image.tar_gz_object_url) == sandbox.tarball
+    assert configured.list("") == []
+    assert not any("curl" in script for script in sandbox.scripts)
 
 
 @pytest.mark.parametrize("env_id, universe_id", [(LOCAL_ENV, "registry-universe"), ("registry-env", UNIVERSE)],
