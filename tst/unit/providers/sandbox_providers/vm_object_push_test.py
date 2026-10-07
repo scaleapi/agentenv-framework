@@ -1,6 +1,7 @@
 """An object a store can't sign reaches a VM host over exec: a chunk per exec, or segments over stdin, each checked."""
 
 import asyncio
+import gzip
 import io
 import os
 import re
@@ -18,6 +19,7 @@ class _ShellVm:
     """Runs each script in a real shell on this machine, as the VM host would, stdin included."""
 
     _WFT_CHUNK_BYTES = BLOCK // 3 * 4
+    _PUSHES_IN_FLIGHT = 3
 
     def __init__(self) -> None:
         self.scripts: list[str] = []
@@ -103,6 +105,16 @@ class _StreamStore:
         return io.BytesIO(self.data)
 
 
+class _GzipStore:
+    """Opens its object through a decompressing reader, which still names the compressed file's descriptor."""
+
+    def __init__(self, path) -> None:
+        self.path = path
+
+    def open(self, object_url: str):
+        return gzip.open(self.path, "rb")
+
+
 class _ChangingVm(_ShellVm):
     """Changes the object's file on this machine as the first segment starts, before any of it is read."""
 
@@ -119,7 +131,7 @@ class _ChangingVm(_ShellVm):
 
 @pytest.fixture
 def small(monkeypatch):
-    monkeypatch.setattr(sandbox_module, "_PUSH_STREAMS", 3)
+    monkeypatch.setattr(sandbox_module, "_MIN_SEGMENT_BYTES", BLOCK)
     monkeypatch.setattr(sandbox_module, "_STDIN_PIECE_BYTES", BLOCK)
 
 
@@ -178,6 +190,48 @@ async def test_a_reader_that_isnt_a_file_goes_over_stdin_as_one_stream(small, tm
 
     assert target.read_bytes() == data
     assert len(vm.stdin_scripts) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_decompressing_reader_isnt_taken_for_the_file_under_it(small, tmp_path):
+    data = os.urandom(5 * BLOCK)
+    compressed = tmp_path / "object.gz"
+    with gzip.open(compressed, "wb") as out:
+        out.write(data)
+    target = tmp_path / "on the vm.bin"
+    vm = _ShellVm()
+
+    await push_object_over_stdin(vm, _GzipStore(compressed), "mem://object", str(target))
+
+    assert target.read_bytes() == data
+    assert len(vm.stdin_scripts) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_object_of_one_chunk_goes_over_exec_in_a_single_exec(small, tmp_path):
+    data = os.urandom(BLOCK - 1)
+    store, url = _stored(tmp_path, data)
+    target = tmp_path / "on the vm.bin"
+    vm = _ShellVm()
+
+    await push_object_over_exec(vm, store, url, str(target))
+
+    assert target.read_bytes() == data
+    assert len(vm.scripts) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_object_of_one_segment_goes_over_stdin_in_a_single_exec(small, tmp_path):
+    data = os.urandom(BLOCK)
+    store, url = _stored(tmp_path, data)
+    target = tmp_path / "on the vm.bin"
+    target.write_bytes(os.urandom(3 * BLOCK))
+    vm = _ShellVm()
+
+    await push_object_over_stdin(vm, store, url, str(target))
+
+    assert target.read_bytes() == data
+    assert vm.scripts == [] and len(vm.stdin_scripts) == 1
 
 
 @pytest.mark.asyncio
@@ -242,10 +296,10 @@ async def test_a_stdin_exec_that_reports_success_and_nothing_else_fails_the_push
 
 
 @pytest.mark.asyncio
-async def test_a_failed_chunk_stops_the_push(small, tmp_path, monkeypatch):
-    monkeypatch.setattr(sandbox_module, "_PUSHES_IN_FLIGHT", 1)
+async def test_a_failed_chunk_stops_the_push(small, tmp_path):
     store, url = _stored(tmp_path, os.urandom(10 * BLOCK))
     vm = _ChunkFailingVm(3 * BLOCK)
+    vm._PUSHES_IN_FLIGHT = 1
 
     with pytest.raises(RuntimeError, match="the VM went away"):
         await push_object_over_exec(vm, store, url, str(tmp_path / "on the vm.bin"))

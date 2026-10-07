@@ -6,6 +6,7 @@ import asyncio
 import base64
 import contextlib
 import hashlib
+import io
 import logging
 import os
 import posixpath
@@ -58,13 +59,13 @@ _sign_slots: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaph
 # provider serves each exec a fraction of its bandwidth, so many ranges are in flight.
 _READ_RANGE_BYTES = 4 * 1024 * 1024
 _READS_IN_FLIGHT = 16
-# An object pushed onto a VM host over exec arguments goes a chunk per exec, the chunk's base64 in the script, with many
-# in flight for the same reason. Over stdin it goes as a few segments at once, each in pieces. Chunks and segments start
-# at multiples of _PUSH_BLOCK, a multiple of the 4096-byte block dd seeks in and of 3, so a piece's base64 is unpadded.
+# An object pushed onto a VM host over exec arguments goes a chunk per exec, the chunk's base64 in the script; over stdin
+# it goes as segments of at least _MIN_SEGMENT_BYTES, each in pieces. An object of one chunk or one segment goes in a
+# single exec. Chunks and segments start at multiples of _PUSH_BLOCK, a multiple of the 4096-byte block dd seeks in and
+# of 3, so a piece's base64 is unpadded.
 _PUSH_BLOCK = 3 * 4096
-_PUSHES_IN_FLIGHT = 32
-_PUSH_STREAMS = 8
 _STDIN_PIECE_BYTES = 16 * _PUSH_BLOCK
+_MIN_SEGMENT_BYTES = 1024 * 1024 // _PUSH_BLOCK * _PUSH_BLOCK
 
 
 class NetworkPolicyUnsupportedError(NotImplementedError):
@@ -396,6 +397,9 @@ class VmSandbox(Sandbox):
     # One exec_script is a single `bash -c <script>` arg, capped by Linux MAX_ARG_STRLEN
     # (128 KiB); 96 KiB leaves room for the printf wrapper.
     _WFT_CHUNK_BYTES = 96 * 1024
+    # How many execs carry one object pushed onto the host at once, chunks or segments. A provider whose execs scale
+    # differently sets its own.
+    _PUSHES_IN_FLIGHT = 8
 
     async def _write_bytes_to_vm_path(self, data: bytes, vm_path: str) -> None:
         """Stream bytes from agent-env onto the VM host at vm_path (base64 over exec)."""
@@ -508,18 +512,38 @@ async def upload_vm_file(sandbox: VmSandbox, vm_path: str, store: ObjectStore, o
 
 async def push_object_over_exec(sandbox: VmSandbox, store: ObjectStore, object_url: str, vm_path: str) -> None:
     """Write the object at ``object_url`` to ``vm_path`` on the VM host a chunk per exec, the chunk's base64 in the
-    script and written at its offset, many execs in flight. The file is checked against the object's sha256."""
+    script and written at its offset, ``sandbox._PUSHES_IN_FLIGHT`` execs at once; an object of one chunk goes in a
+    single exec. The file is checked against the object's sha256."""
     chunk = max(_PUSH_BLOCK, sandbox._WFT_CHUNK_BYTES // 4 * 3 // _PUSH_BLOCK * _PUSH_BLOCK)
     quoted = shlex.quote(vm_path)
-    await sandbox.exec_script(f": > {quoted}")
     digest = hashlib.sha256()
-    gate = asyncio.Semaphore(_PUSHES_IN_FLIGHT)
+    with contextlib.closing(await asyncio.to_thread(store.open, object_url)) as source:
+        data = await asyncio.to_thread(_read_exactly, source, chunk)
+        digest.update(data)
+        if len(data) < chunk:
+            encoded = shlex.quote(base64.b64encode(data).decode())
+            written = await sandbox.exec_script(
+                f"printf %s {encoded} | base64 -d > {quoted} && sha256sum {quoted}", max_retries=2)
+        else:
+            await sandbox.exec_script(f": > {quoted}")
+            await _push_chunks(sandbox, quoted, source, chunk, data, digest)
+            written = await sandbox.exec_script(f"sha256sum {quoted}")
+    if written.split()[:1] != [digest.hexdigest()]:
+        raise RuntimeError(f"{vm_path} on the VM doesn't match {object_url}: its sha256 is {written.split()[:1]}, the "
+                           f"object's {digest.hexdigest()}")
+
+
+async def _push_chunks(
+    sandbox: VmSandbox, quoted: str, source: IO[bytes], chunk: int, data: bytes, digest: Any,
+) -> None:
+    """Write ``data``, the object's first chunk, and every chunk ``source`` has after it, each at its offset."""
+    gate = asyncio.Semaphore(sandbox._PUSHES_IN_FLIGHT)
     failed = False
 
     async def write(offset: int, data: bytes) -> None:
         nonlocal failed
         try:
-            encoded = base64.b64encode(data).decode()
+            encoded = shlex.quote(base64.b64encode(data).decode())
             await sandbox.exec_script(
                 f"printf %s {encoded} | base64 -d | dd of={quoted} bs=4096 seek={offset // 4096} conv=notrunc",
                 max_retries=2,
@@ -532,44 +556,43 @@ async def push_object_over_exec(sandbox: VmSandbox, store: ObjectStore, object_u
 
     writes: list[asyncio.Future] = []
     try:
-        with contextlib.closing(await asyncio.to_thread(store.open, object_url)) as source:
-            offset = 0
-            while not failed and (data := await asyncio.to_thread(_read_exactly, source, chunk)):
-                digest.update(data)
-                await gate.acquire()
-                if failed:
-                    gate.release()
-                    break
-                writes.append(asyncio.ensure_future(write(offset, data)))
-                offset += len(data)
+        offset = 0
+        while not failed and data:
+            await gate.acquire()
+            if failed:
+                gate.release()
+                break
+            writes.append(asyncio.ensure_future(write(offset, data)))
+            offset += len(data)
+            data = await asyncio.to_thread(_read_exactly, source, chunk)
+            digest.update(data)
         await asyncio.gather(*writes)
     finally:
         for pending in writes:
             pending.cancel()
         await asyncio.gather(*writes, return_exceptions=True)
-    written = (await sandbox.exec_script(f"sha256sum {quoted}")).split()[:1]
-    if written != [digest.hexdigest()]:
-        raise RuntimeError(f"{vm_path} on the VM doesn't match {object_url}: its sha256 is {written}, the object's "
-                           f"{digest.hexdigest()}")
 
 
 async def push_object_over_stdin(sandbox: VmSandbox, store: ObjectStore, object_url: str, vm_path: str) -> None:
     """Write the object at ``object_url`` to ``vm_path`` on the VM host over exec stdin. When the store opens it as a
-    file, it goes as up to _PUSH_STREAMS segments at once, all read from that one open file, so one version of it;
-    any other reader goes as one stream. Each segment is written at its offset and checked against its sha256 by the
-    exec that writes it."""
+    file, it goes as up to ``sandbox._PUSHES_IN_FLIGHT`` segments at once, all read from that one open file, so one
+    version of it; an object of one segment, or any other reader, goes in a single exec. Each segment is written at its
+    offset and checked against its sha256 by the exec that writes it."""
     quoted = shlex.quote(vm_path)
-    await sandbox.exec_script(f": > {quoted}")
     with contextlib.closing(await asyncio.to_thread(store.open, object_url)) as source:
         descriptor = _file_descriptor(source)
         if descriptor is None:
-            await _push_segment(sandbox, quoted, lambda size: _read_exactly(source, size), 0, None)
+            await _push_segment(sandbox, quoted, lambda size: _read_exactly(source, size), 0, None, whole_file=True)
             return
         size = os.fstat(descriptor).st_size
-        segment = max(_PUSH_BLOCK, -(-size // (_PUSH_STREAMS * _PUSH_BLOCK)) * _PUSH_BLOCK)
+        segment = max(_MIN_SEGMENT_BYTES, -(-size // (sandbox._PUSHES_IN_FLIGHT * _PUSH_BLOCK)) * _PUSH_BLOCK)
+        if size <= segment:
+            await _push_segment(sandbox, quoted, _reader_at(descriptor, 0), 0, size, whole_file=True)
+            return
+        await sandbox.exec_script(f": > {quoted}")
         pushes = [
             asyncio.ensure_future(_push_segment(
-                sandbox, quoted, _reader_at(descriptor, offset), offset, min(segment, size - offset)))
+                sandbox, quoted, _reader_at(descriptor, offset), offset, min(segment, size - offset), whole_file=False))
             for offset in range(0, size, segment)
         ]
         try:
@@ -581,9 +604,10 @@ async def push_object_over_stdin(sandbox: VmSandbox, store: ObjectStore, object_
 
 
 async def _push_segment(
-    sandbox: VmSandbox, quoted: str, read: Callable[[int], bytes], offset: int, length: int | None,
+    sandbox: VmSandbox, quoted: str, read: Callable[[int], bytes], offset: int, length: int | None, *, whole_file: bool,
 ) -> None:
-    """Stream ``length`` bytes from ``read`` (all it gives when None) into the VM file at ``offset``, and check them."""
+    """Stream ``length`` bytes from ``read`` (all it gives when None) into the VM file at ``offset``, and check them.
+    A ``whole_file`` segment creates the file, which holds nothing else."""
     digest = hashlib.sha256()
 
     async def pieces() -> AsyncIterator[bytes]:
@@ -600,9 +624,12 @@ async def _push_segment(
                 left -= len(data)
             yield base64.b64encode(data)
 
-    written = f"cat {quoted}" if length is None else f"tail -c +{offset + 1} {quoted} | head -c {length}"
-    code, stdout, stderr = await sandbox._exec_with_stdin(
-        f"base64 -d | dd of={quoted} bs=4096 seek={offset // 4096} conv=notrunc && {written} | sha256sum", pieces())
+    if whole_file:
+        script = f"base64 -d > {quoted} && sha256sum {quoted}"
+    else:
+        script = (f"base64 -d | dd of={quoted} bs=4096 seek={offset // 4096} conv=notrunc && "
+                  f"tail -c +{offset + 1} {quoted} | head -c {length} | sha256sum")
+    code, stdout, stderr = await sandbox._exec_with_stdin(script, pieces())
     if code != 0:
         raise RuntimeError(f"Writing {quoted} at offset {offset} on the VM failed (exit {code}): {stderr[-1500:]}")
     if stdout.split()[:1] != [digest.hexdigest()]:
@@ -611,10 +638,14 @@ async def _push_segment(
 
 
 def _file_descriptor(reader: IO[bytes]) -> int | None:
-    """The descriptor of the regular file ``reader`` reads, or None when it reads anything else."""
+    """The descriptor of the regular file ``reader`` reads as it is, or None when it reads anything else. A reader that
+    transforms what it reads, such as a decompressing one, can still name its file's descriptor, so only a plain file
+    reader counts."""
+    if not isinstance(reader, (io.BufferedReader, io.FileIO)):
+        return None
     try:
         descriptor = reader.fileno()
-    except (AttributeError, OSError):
+    except OSError:
         return None
     return descriptor if stat.S_ISREG(os.fstat(descriptor).st_mode) else None
 

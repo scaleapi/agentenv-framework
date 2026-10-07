@@ -151,7 +151,7 @@ class ModalVmSandbox(VmSandbox):
         return exit_code, stdout.decode(), stderr.decode()
 
     async def _write_unsigned_object(self, object_store: ObjectStore, object_url: str, vm_path: str) -> None:
-        """Over stdin, which on Modal carries an object about 2.5 times as fast as exec arguments, 32 execs in flight."""
+        """Over stdin, which on Modal carries an object several times as fast as exec arguments do."""
         await push_object_over_stdin(self, object_store, object_url, vm_path)
 
     async def setup_vm_for_gateway(self, exposed_ports: Optional[list[int]] = None) -> None:

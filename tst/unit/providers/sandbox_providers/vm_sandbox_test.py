@@ -67,7 +67,7 @@ class _PushTargetVmSandbox(_RecordingVmSandbox):
         self._digest = hashlib.sha256(pushed).hexdigest()
 
     async def exec_with_output(self, *args):
-        if args[:2] == ("sudo", "bash") and script_run(args).startswith("sha256sum "):
+        if args[:2] == ("sudo", "bash") and "sha256sum " in script_run(args):
             self.scripts.append(script_run(args))
             return 0, f"{self._digest}  pushed\n", ""
         return await super().exec_with_output(*args)
