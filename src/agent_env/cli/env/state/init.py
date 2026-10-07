@@ -65,7 +65,7 @@ def init_env_state(env_id: str, env_state_type: str | None, ttl_seconds: int):
     state_type = env_state_type
 
     try:
-        build_state_provider(state_type)  # resolve before any Mongo/AWS work, so a typo fails fast
+        build_state_provider(state_type)  # resolve before any store work, so a typo fails fast
     except ValueError as e:
         raise click.BadParameter(str(e), param_hint="'--env-state-type'") from e
 

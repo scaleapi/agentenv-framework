@@ -18,24 +18,24 @@ Semantics:
 
 - **Concurrency-safe.** Because the id encodes the content, two runs that
   first-build the same context are building byte-identical images. They race to
-  ``put()`` the same content-addressed id; the artifact store's immutable-S3
+  ``put()`` the same content-addressed id; the artifact store's write-once
   guard lets exactly one win. The loser catches ``ObjectAlreadyExistsError``
   and *adopts* the winner's artifact (see ``_adopt_concurrent_build``) - it
   never rebuilds. This matters because CI runs share these fixture ids across
   all PRs (``concurrent_build_limit`` > 1), so same-context first-builds do
   overlap in practice, e.g. after a base-image bump fans out to open PRs.
 
-  Not handled: a *torn* write - if the winner dies between its S3 upload and
-  its Mongo document write, that one content id is wedged (``get()`` misses
-  forever, so every later run rebuilds and re-collides on the immutable S3
-  object). Recovery is deleting that one prefix:
-  ``s3://<dev bucket>/artifacts/docker_image/<artifact_id>-<hash>/1/``. Rare in
+  Not handled: a *torn* write - if the winner dies between its object upload and
+  its document write, that one content id is wedged (``get()`` misses
+  forever, so every later run rebuilds and re-collides on the write-once
+  object). Recovery is deleting that one prefix from the object store:
+  ``artifacts/docker_image/<artifact_id>-<hash>/1/``. Rare in
   practice; fixing it in general needs an application-side idempotent put,
   deliberately out of scope for this test helper.
 
 - **Reuse skips ``docker build`` entirely**, so the local docker tag is NOT
-  created on the reuse path. Callers must consume the returned artifact (ECR/
-  S3-backed), not the local tag.
+  created on the reuse path. Callers must consume the returned artifact (backed by
+  the image and object stores), not the local tag.
 """
 
 import hashlib

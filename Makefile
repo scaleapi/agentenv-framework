@@ -65,7 +65,7 @@ clean-install-test: ## Build both distributions, install them clean from public 
 	if $(SYSTEM_PYTHON) .github/scripts/clean_install.py --work "$$work"; then rm -rf "$$work"; \
 	else status=$$?; echo "kept $$work to inspect"; exit $$status; fi
 
-test: ## Run the full test suite (includes integration; requires Docker/Mongo/AWS)
+test: ## Run the full test suite (includes integration; needs Docker and a local OCI registry)
 	$(PYTHON) -m pytest tst/ -v
 
 clean: ## Remove the virtualenv and Python caches

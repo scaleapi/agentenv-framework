@@ -1,6 +1,6 @@
 """Pre-deploy fit-check for the data-plane intake declaration.
 
-Pure functions over plain dicts — no I/O, no Mongo/S3 — so they run at authoring/
+Pure functions over plain dicts — no I/O, no store access — so they run at authoring/
 registration time. The agent-env-side ``preflight(universe, env)`` wraps these by
 reading ``client.intake_declaration(card)`` and each service's seed ``data.json``.
 """

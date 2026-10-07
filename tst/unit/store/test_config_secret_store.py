@@ -60,10 +60,10 @@ def test_default_backend_is_local(monkeypatch, tmp_path):
     assert store._load() == {}
 
 
-def test_aws_selector_raises_actionable_config_error(monkeypatch):
+def test_an_unknown_backend_names_the_table_and_the_overriding_env_var(monkeypatch):
     monkeypatch.delenv("AGENT_ENV_CONFIG", raising=False)
-    monkeypatch.setenv("AGENT_ENV_SECRET_STORE", "aws")
-    with pytest.raises(ConfigError, match=r"stores\.secret"):
+    monkeypatch.setenv("AGENT_ENV_SECRET_STORE", "hosted")
+    with pytest.raises(ConfigError, match=r"\[stores\.secret\].*AGENT_ENV_SECRET_STORE"):
         Config().get_secret_store()
 
 

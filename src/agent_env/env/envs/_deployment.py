@@ -124,7 +124,7 @@ async def load_by_signed_url(env: MCPServerEnv | WebsiteEnv, file_artifact: File
     url = await asyncio.to_thread(store.signed_get_url, file_artifact.object_url, len(LOAD_OPERATIONS) * timeout)
     if url is None:
         raise RuntimeError(f"{deployed_by}, so its server fetches {file_artifact.object_url} itself, and {type(store).__name__} "
-                           "can't sign a URL for it; loading into such an env needs an object store that signs URLs, such as S3")
+                           "can't sign a URL for it; loading into such an env needs an object store that signs URLs (S3, Cloud Storage)")
     await protocol_v1.reset_data(base_url, timeout=timeout)
     await protocol_v1.add_data(base_url, [FilePart(file={
         "uri": url,

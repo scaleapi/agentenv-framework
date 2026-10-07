@@ -70,9 +70,9 @@ class FileArtifact(Artifact):
 
         version = store.next_version(id)
 
-        # Use put_object_file (boto3 managed multipart upload) instead of
-        # put_object (s3.put_object — hard 5 GB single-object limit). Streams
-        # directly from disk so large files don't get loaded into RAM either.
+        # put_object_file, not put_object: a hosted store uploads a file in parts, where a
+        # single put is capped (5 GB on S3). It streams from disk, so large files don't get
+        # loaded into RAM either.
         stored_url = store.put_object_file(
             artifact_type="file",
             id=id,
