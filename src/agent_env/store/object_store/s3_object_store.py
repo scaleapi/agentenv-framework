@@ -214,9 +214,7 @@ class S3ObjectStore(ObjectStore):
     ) -> UploadPolicy:
         self._check_sigv4_expiry(expires_in)
         self._require_long_term_credentials(expires_in)
-        post = self.signed_post(
-            prefix_url.rstrip("/") + "/", expires_in=expires_in, max_bytes=max_object_bytes
-        )
+        post = self._post_policy(prefix_url, expires_in, max_object_bytes)
         return UploadPolicy(
             write=HttpPostPolicyGrant(
                 kind="http-post-policy",
@@ -228,13 +226,12 @@ class S3ObjectStore(ObjectStore):
             expires_at=datetime.now(UTC) + timedelta(seconds=expires_in),
         )
 
-    def signed_post(
-        self, url_prefix: str, *, expires_in: int = 3600, max_bytes: int | None = None
-    ) -> dict | None:
-        bucket, prefix = self._split(url_prefix)
-        conditions: list = [["starts-with", "$key", prefix]]
-        if max_bytes is not None:
-            conditions.append(["content-length-range", 0, max_bytes])
+    def _post_policy(self, url_prefix: str, expires_in: int, max_bytes: int) -> dict:
+        """A presigned POST for any key below ``url_prefix``: the key is a condition the uploader
+        fills in, not part of what is signed. The prefix ends in ``/``, so that ``root`` does not
+        admit ``root-evil/``."""
+        bucket, prefix = self._split(url_prefix.rstrip("/") + "/")
+        conditions: list = [["starts-with", "$key", prefix], ["content-length-range", 0, max_bytes]]
         # POST policies are default-deny on extra form fields: without this the
         # uploader's Content-Type 403s and objects store as binary/octet-stream.
         conditions.append(["starts-with", "$Content-Type", ""])

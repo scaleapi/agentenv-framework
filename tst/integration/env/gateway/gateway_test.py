@@ -1975,6 +1975,7 @@ async def test_gateway_with_agentenv_environment(agentenv_items_env):
         assert card["additionalInterfaces"] == [{"url": "/mcp", "transport": "mcp"}]
         assert {e["uri"] for e in card["capabilities"]["extensions"]} == {
             "urn:agentenv:disable-tool/v1", "urn:agentenv:set-errors/v1", "urn:agentenv:clock/v1",
+            "urn:agentenv:export-as-file/v1",
         }
         # Decorator tools ride capabilities.tools ({environment_name} resolved); imperative tools stay handshake-only.
         assert [t["name"] for t in card["capabilities"]["tools"]] == ["items_add_item"]

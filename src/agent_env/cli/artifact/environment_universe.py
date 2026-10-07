@@ -64,7 +64,7 @@ def environment_universe_put(
             if not p.is_file():
                 click.echo(f"Error: metadata file not found: {file_path}", err=True)
                 raise SystemExit(1)
-            fa_id = f"{artifact_id}-metadata-{key}"
+            fa_id = EnvironmentUniverseArtifact.derived_metadata_id(artifact_id, key)
             click.echo(f"Creating metadata FileArtifact: key={key} file={file_path}...")
             fa = FileArtifact.put(
                 id=fa_id,
@@ -137,7 +137,7 @@ def environment_universe_get(
         click.echo(f"Downloading {len(metadata_artifacts)} metadata file(s)...")
         for key, file_artifact in metadata_artifacts.items():
             data = file_artifact.load()
-            metadata_dir = out / "metadata" / key
+            metadata_dir = out / EnvironmentUniverseArtifact.metadata_name / key
             metadata_dir.mkdir(parents=True, exist_ok=True)
             dest = metadata_dir / file_artifact.filename
             dest.write_bytes(data)

@@ -24,6 +24,7 @@ from agent_env.env.envs.website_browser import (
 )
 from agent_env.store.base import NotFoundError
 from agent_env.store.document_store import LocalSqliteDocumentStore
+from agent_env.store.ids import derive_id
 from agent_env.store.image_store import LocalRegistryImageStore
 from agent_env.store.local_state import holding_locks
 from agent_env.store.object_store import LocalFilesystemObjectStore
@@ -57,7 +58,7 @@ def put_gateway_env(env_id: str, *, platform: str | None, metadata: Mapping[str,
     say("Building gateway Docker image...")
     build_image(GATEWAY_DOCKERFILE, GATEWAY_CONTEXT, GATEWAY_IMAGE_TAG, platform=platform)
     say("Creating DockerImageArtifact...")
-    artifact = DockerImageArtifact.put(id=f"gateway-{env_id}", description="Created from agent-env CLI",
+    artifact = DockerImageArtifact.put(id=derive_id(env_id, "env_image"), description="Created from agent-env CLI",
                                        image_name=GATEWAY_IMAGE_TAG)
     say(f"Created artifact: id={artifact.id} version={artifact.version}")
     say("Creating GatewayEnv...")
@@ -73,11 +74,11 @@ def put_service_db_env(env_id: str, *, platform: str | None, metadata: Mapping[s
     service-db env ``env_id``."""
     artifacts = []
     for label, dockerfile, image, artifact_id, description in (
-        ("ServiceDB", SERVICE_DB_DOCKERFILE, SERVICE_DB_IMAGE_NAME, f"service-db-{env_id}",
+        ("ServiceDB", SERVICE_DB_DOCKERFILE, SERVICE_DB_IMAGE_NAME, derive_id(env_id, "db_image"),
          f"ServiceDB PostgreSQL image for {env_id}"),
-        ("db-web", DB_WEB_DOCKERFILE, DB_WEB_IMAGE_NAME, f"db-web-{env_id}",
+        ("db-web", DB_WEB_DOCKERFILE, DB_WEB_IMAGE_NAME, derive_id(env_id, "db_web_image"),
          "db-web lightweight web UI for database inspection"),
-        ("db-mcp", DB_MCP_DOCKERFILE, DB_MCP_IMAGE_NAME, f"db-mcp-{env_id}",
+        ("db-mcp", DB_MCP_DOCKERFILE, DB_MCP_IMAGE_NAME, derive_id(env_id, "db_mcp_image"),
          "db-mcp PostgreSQL MCP server for direct DB access"),
     ):
         say(f"Building {label} image from {dockerfile}...")
@@ -105,7 +106,7 @@ def put_website_browser_env(env_id: str, *, platform: str | None, metadata: Mapp
     build_image(WEBSITE_BROWSER_DOCKERFILE, WEBSITE_BROWSER_CONTEXT, WEBSITE_BROWSER_IMAGE_TAG, platform=platform,
                 build_args={"PLAYWRIGHT_MCP_VERSION": PLAYWRIGHT_MCP_VERSION})
     say("Creating DockerImageArtifact...")
-    artifact = DockerImageArtifact.put(id=f"website-browser-{env_id}", description="Website browser MCP server",
+    artifact = DockerImageArtifact.put(id=derive_id(env_id, "env_image"), description="Website browser MCP server",
                                        image_name=WEBSITE_BROWSER_IMAGE_TAG)
     say(f"Created artifact: id={artifact.id} version={artifact.version}")
     say("Creating MCPServerEnv...")

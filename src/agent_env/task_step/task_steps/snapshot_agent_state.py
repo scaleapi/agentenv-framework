@@ -144,7 +144,7 @@ class SnapshotAgentStateTaskStep(TaskStep):
     async def _capture_universe_state(
         self, context: TaskStepContext, capture_prefix: str
     ) -> None:
-        """GET /svc/mcp-<name>/export-state for each service, upload, publish `s3://` refs."""
+        """Read each service's state as JSON, upload it, publish `s3://` refs."""
         from agent_env.artifact import EnvironmentUniverseArtifact
         from agent_env.config import get_config
 
@@ -177,16 +177,10 @@ class SnapshotAgentStateTaskStep(TaskStep):
 
         from agent_env.env import legacy_protocol
         from agent_env.env.env import gateway_url_of
-        from agentenv_protocol import client as protocol_v1
         urls: dict[str, str] = {}
         for name in environment_names:
             try:
-                base_url = await legacy_protocol.v1_base_url(deployed_env, gateway_url_of(deployed_env), name, mcp=True)
-                if base_url is not None:
-                    resp = await protocol_v1.get_data(base_url)
-                    state = resp.parts[0].data if resp.parts else {}
-                else:
-                    state = await legacy_protocol.export_state(gateway_url_of(deployed_env), name)
+                state = await legacy_protocol.service_state(deployed_env, gateway_url_of(deployed_env), name)
                 urls[name] = await asyncio.to_thread(
                     store.put, f"{key_prefix}services/{name}.json", json.dumps(state).encode(),
                     content_type="application/json", allow_overwrite=True,

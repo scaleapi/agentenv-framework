@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import stat
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -21,7 +22,6 @@ from agent_env.a2a_agent.store import A2A_AGENTS_COLLECTION
 from agent_env.artifact.registry import canonical_type, get_artifact_registry
 from agent_env.artifact.store import ARTIFACTS_COLLECTION
 from agent_env.config import get_config
-from agent_env.env.env import Env
 from agent_env.env.registry import get_env_registry
 from agent_env.env.store import ENVS_COLLECTION
 from agent_env.eval.store import EVALS_COLLECTION
@@ -30,9 +30,9 @@ from agent_env.store.document_store import LocalSqliteDocumentStore
 from agent_env.store.local_state import holding_locks
 from agent_env.task.store import TASKS_COLLECTION
 
-from .authoring import build_context_files, entry_files
+from .authoring import build_context_files
 from .parse import Bundle, BundleKind
-from .plan import Plan, Write, folder_walk, keeps_base_from_toml
+from .plan import Plan, Write, env_writer, folder_walk, unpinned_store_refs
 from .resolve import BuiltImage
 
 LEDGER_COLLECTION = "bundle_ledger"
@@ -61,6 +61,7 @@ class Check:
     reasons: tuple[str, ...]
     stored: int | None  # the store's latest version of the id when checked
     needs: Mapping[tuple[str, str], int]  # the version hashed for each earlier write it needs, by (store, id)
+    adopted: bool = False  # ``version`` was written by an interrupted run of this bundle, which didn't record it
 
     @property
     def unchanged(self) -> bool:
@@ -93,6 +94,10 @@ class Ledger:
         if digest is None:
             untracked = ("its inputs aren't tracked yet, so it is written every run",)
             return Check(write, None, None, untracked, stored, needs)
+        orphan = self._orphan(write, stored, digest)
+        if orphan is not None:
+            return Check(write, digest, orphan, ("written by an interrupted run that didn't record it",), stored, needs,
+                         adopted=True)
         row = self._latest(write.kind.store, write.id)
         recorded = row["version"] if row else None
         reasons = []
@@ -115,24 +120,25 @@ class Ledger:
         inputs = {"type": _type(write), "config": _sha256(_canonical(config)),
                   "files": {}, "needs": {}, "store_refs": {}}
         if write.kind is BundleKind.ARTIFACT:
-            files = build_context_files if isinstance(write.source, BuiltImage) else entry_files
-            for key, path in files(self._plan.bundle.bundle, write.source.entry).items():
-                inputs["files"][key] = _file_sha256(path)
-        elif write.kind in (BundleKind.ENV, BundleKind.AGENT):
-            # An env's or agent's document records the versions of what it references, so one written anew, or
-            # a store entity it names without a version getting a new one, means it must be written again. A
-            # task or eval names its references without a version.
+            built = isinstance(write.source, BuiltImage)
+            listing = build_context_files if built else folder_walk(get_artifact_registry().get(_type(write)))
+            for key, path in listing(self._plan.bundle.bundle, write.source.entry).items():
+                inputs["files"][key] = _file_sha256(path) + (_mode(path) if built else "")
+        if write.kind not in (BundleKind.TASK, BundleKind.EVAL):
+            # A document records the versions of what it references (an env its images, a universe its
+            # environments), so one written anew means it must be written again. A task or eval names its
+            # references without a version.
             for store, id in write.needs:
                 inputs["needs"][f"{store} {id}"] = str(needs[store, id])
-            for ref in write.source.references:
-                if ref.local is None and ref.version is None:
-                    inputs["store_refs"][f"{ref.kind} {ref.id}"] = str(self._plan.store_latest[ref.kind, ref.id])
+            for (kind, id), version in unpinned_store_refs(self._plan, write).items():
+                inputs["store_refs"][f"{kind} {id}"] = str(version)
         value = _sha256(_canonical({"scheme": SCHEME, "store": write.kind.store, "id": write.id, "inputs": inputs}))
         return Digest(value, inputs)
 
     def record(self, check: Check, write: Callable[[], int]) -> int:
         """Write ``check``'s entity with ``write``, which returns the version it wrote, and record it.
-        A pending row marks the attempt until it's done; one a crash of this bundle left is dropped here."""
+        A pending row marks the attempt until it's done, with its version once ``write`` returns. One an
+        interrupted run of this bundle left is kept by ``check`` when its version can be, and dropped here."""
         key = {"store": check.write.kind.store, "id": check.write.id, "bundle": self._bundle}
         self._store.ensure_index(LEDGER_COLLECTION, ["store", "id", "status"])
         while self._store.delete(LEDGER_COLLECTION, Filter.of(**key, status="pending")):
@@ -142,12 +148,31 @@ class Ledger:
                    "inputs": check.digest.inputs if check.digest else None, "at": _now()}
         self._store.insert(LEDGER_COLLECTION, pending)
         version = write()
+        # Stamped before the check below, which can take seconds, so a run interrupted during it leaves the version
+        # this attempt wrote, and the next run keeps it rather than writing it again.
+        self._store.replace(LEDGER_COLLECTION, Filter.of(**key, status="pending"), {**pending, "version": version})
         done = {**pending, "status": "done", "version": version, "at": _now()}
         if check.digest is not None and self.digest(check.write, check.needs) != check.digest:
             # A file changed during the write, so what the version holds is unknown: the next run writes it again.
             done.update(digest=None, inputs=None)
         self._store.replace(LEDGER_COLLECTION, Filter.of(**key, status="pending"), done, upsert=True)
         return version
+
+    def adopt(self, check: Check) -> None:
+        """Record the version an interrupted run wrote, which ``check`` keeps, as that run would have."""
+        key = {"store": check.write.kind.store, "id": check.write.id, "bundle": self._bundle}
+        done = {**key, "status": "done", "scheme": SCHEME, "digest": check.digest.value, "inputs": check.digest.inputs,
+                "version": check.version, "at": _now()}
+        self._store.replace(LEDGER_COLLECTION, Filter.of(**key, status="pending"), done, upsert=True)
+
+    def _orphan(self, write: Write, stored: int | None, digest: Digest) -> int | None:
+        """The version an interrupted run of this bundle wrote and didn't record, when it's still the store's
+        latest and was made from what ``write`` is now made from."""
+        pending = self._find(LEDGER_COLLECTION, Filter.of(store=write.kind.store, id=write.id, bundle=self._bundle,
+                                                          status="pending"))
+        if pending is None or pending.get("version") is None or pending["version"] != stored:
+            return None
+        return stored if (pending["scheme"], pending["digest"]) == (SCHEME, digest.value) else None
 
     def _latest(self, store: str, id: str) -> dict | None:
         return self._find(LEDGER_COLLECTION, Filter.of(store=store, id=id, status="done"))
@@ -174,9 +199,10 @@ def materializing(bundle: Bundle, on_wait: Callable[[], None] | None = None) -> 
 
 def _tracked(write: Write) -> bool:
     """Whether the ledger can list everything ``write`` is made from. Not yet for a skill, nor for a type with
-    a ``from_toml`` of its own, which may read its folder in ways it can't see. An agent is made from its
-    agent.toml alone: its image is a reference. A built image is made from its build context,
-    ``build_context_files``; what the build fetches (its base image, packages) isn't an input."""
+    a ``from_toml`` of its own, which may read its folder in ways it can't see. An artifact is made from its toml,
+    the files its type reads from its folder (``folder_walk``) and what it references; an agent or env from its
+    toml and what it references. A built image is made from its build context, ``build_context_files``; what the
+    build fetches (its base image, packages) isn't an input."""
     if isinstance(write.source, BuiltImage):
         return True
     if write.kind is BundleKind.SKILL:
@@ -184,8 +210,7 @@ def _tracked(write: Write) -> bool:
     if write.kind is BundleKind.ARTIFACT:
         return folder_walk(get_artifact_registry().get(_type(write))) is not None
     if write.kind is BundleKind.ENV:
-        cls = get_env_registry().get(_type(write))
-        return cls is not None and keeps_base_from_toml(cls, Env)
+        return env_writer(get_env_registry().get(_type(write)))
     return True
 
 
@@ -243,6 +268,16 @@ def _scalar(value: Any) -> str:
 
 def _sha256(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+# A build copies each file's permission bits into the image, so they're part of what it's made from; a file with the
+# usual rw-r--r-- is hashed as its content alone.
+_USUAL_MODE = 0o644
+
+
+def _mode(path: Path) -> str:
+    mode = stat.S_IMODE(path.stat().st_mode)
+    return "" if mode == _USUAL_MODE else f"+{mode:o}"
 
 
 def _file_sha256(path: Path) -> str:

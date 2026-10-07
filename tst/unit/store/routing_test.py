@@ -4,17 +4,19 @@ everything else to the configured ones, and an ``@local`` run can't write to a c
 import inspect
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import click
 import pytest
 from click.testing import CliRunner
 
+from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.artifact.store import get_artifact_store
 from agent_env.cli import cli
-from agent_env.config import configure, get_config
+from agent_env.config import configure, get_config, reset_config, set_object_store
 from agent_env.config.errors import ConfigError
 from agent_env.config.paths import state_root
 from agent_env.store import DuplicateKeyError, Filter, LocalSqliteDocumentStore, Sort, UpdateSpec, VersionedEntityStore
@@ -469,6 +471,17 @@ def test_an_id_recorded_in_both_stores_reduces_to_one_latest_row(stores):
         assert {d["id"]: d.get("from") for d in router.latest_per_id("env_snapshots", Filter())}["tied"] == "local"
 
 
+def test_latest_version_lookup_uses_the_routed_namespace(stores):
+    router, _, _ = stores
+    versioned = VersionedEntityStore(router, "env_snapshots", dict, dict)
+    router.insert("env_snapshots", {"id": "shared", "version": 1})
+    local_id = "@local/~/bundle/env_snapshots/local-only"
+    with run_scope(LOCAL_TASK):
+        router.insert("env_snapshots", {"id": local_id, "version": 3})
+    assert versioned.get("shared")["version"] == 1
+    assert versioned.get(local_id)["version"] == 3
+
+
 def test_the_local_namespace_file_cant_be_the_configured_store(tmp_path, cli_routing):
     configure(document_store=LocalSqliteDocumentStore(str(state_root() / "document_store" / "local.db")))
     with pytest.raises(ConfigError, match="kept for @local documents"):
@@ -524,3 +537,24 @@ def test_a_routing_wrapper_says_how_every_store_method_routes(base, wrapper):
         if not name.startswith("_") and (callable(member) or isinstance(member, property))
     }
     assert public - set(vars(wrapper)) == _NOT_ROUTED
+
+
+class _SharingStore(LocalFilesystemObjectStore):
+    """A configured store that hands its credentials to the workloads agent-env deploys."""
+
+    def shared_credentials_env(self) -> dict[str, str]:
+        return {"AWS_ACCESS_KEY_ID": "configured-id", "AWS_SECRET_ACCESS_KEY": "configured-secret"}
+
+
+def test_an_agent_deployed_in_an_at_local_run_gets_none_of_the_configured_stores_credentials(tmp_path):
+    configured = _SharingStore(str(tmp_path / "configured"))
+    routed = LocalRunObjectStore(configured, LocalFilesystemObjectStore(str(tmp_path / "local")))
+    agent = A2AAgent(id="solver", version=1, docker_image_artifact=SimpleNamespace(image_name="img"))
+    try:
+        set_object_store(configured)
+        assert agent._build_merged_env({}, 8000)["AWS_ACCESS_KEY_ID"] == "configured-id"
+        set_object_store(routed)
+        assert routed.shared_credentials_env() == {}
+        assert "AWS_ACCESS_KEY_ID" not in agent._build_merged_env({}, 8000)
+    finally:
+        reset_config()

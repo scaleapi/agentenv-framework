@@ -352,7 +352,7 @@ class A2AAgent:
             kinds, described = cls.toml_metadata[name]
             if isinstance(value, bool) or not isinstance(value, kinds):
                 values.append(f"metadata.{name} must be {described}, not {value!r}")
-        problems += [f"agent.toml: {problem}" for problem in values]
+        problems += [ctx.config_problem(problem) for problem in values]
         if problems:
             ctx.refuse(problems)
         return fields

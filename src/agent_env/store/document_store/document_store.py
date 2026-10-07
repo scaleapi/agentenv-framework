@@ -286,6 +286,12 @@ class DocumentStore(ABC):
                 keys.add(value)
         return len(keys)
 
+    def latest_version(self, collection: str, entity_id: str) -> Optional[dict]:
+        """Return the latest versioned entity; backends may optimize the generic sorted lookup."""
+        return self.find_one(
+            collection, Filter.of(id=entity_id), sort=Sort.by("version", descending=True)
+        )
+
     @abstractmethod
     def insert(self, collection: str, doc: dict) -> None:
         """Insert one document. Raises DuplicateKeyError on unique violation."""
@@ -389,9 +395,7 @@ class VersionedEntityStore(Generic[T]):
         if version is not None:
             doc = self._doc_store.find_one(self._collection, Filter.of(id=id, version=version))
         else:
-            doc = self._doc_store.find_one(
-                self._collection, Filter.of(id=id), sort=Sort.by("version", descending=True)
-            )
+            doc = self._doc_store.latest_version(self._collection, id)
         return self._deserialize(doc) if doc is not None else None
 
     def next_version(self, id: str) -> int:
@@ -403,9 +407,7 @@ class VersionedEntityStore(Generic[T]):
         that data orphaned with no artifact record pointing at it.
         """
         self._doc_store.check_id(id)
-        doc = self._doc_store.find_one(
-            self._collection, Filter.of(id=id), sort=Sort.by("version", descending=True)
-        )
+        doc = self._doc_store.latest_version(self._collection, id)
         return (doc["version"] + 1) if doc is not None else 1
 
     def put(self, entity: T, max_retries: int = 5) -> int:

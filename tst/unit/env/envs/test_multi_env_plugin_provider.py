@@ -240,7 +240,8 @@ def _preflight(env, **options) -> list[str]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("make, refusal", [
-    (lambda: _multi(websites=("slack",)), "whose one env card can't tell an MCP server and a website apart by name, and both are named 'slack'"),
+    (lambda: _multi(websites=("slack",)),
+     "which gives a multi one env card, so it can't tell an MCP server and a website apart by name, and both are named 'slack'"),
     (lambda: _multi("server"), "which deploys one MCP server, not a multi env"),
     (lambda: _site("shop", "server"), "which deploys one MCP server, not a website env"),
     (lambda: _multi("plugin_named"), "which doesn't take cpu; name it in the provider's deploy() or take **options"),

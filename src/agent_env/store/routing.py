@@ -254,6 +254,14 @@ class RoutingDocumentStore(DocumentStore):
         ]
         return _merge_sort(found, sort)[0] if found else None
 
+    def latest_version(self, collection: str, entity_id: str) -> Optional[dict]:
+        filter = Filter.of(id=entity_id)
+        found = [
+            doc for store in self._readers(collection, filter)
+            if (doc := self._read(store, lambda: store.latest_version(collection, entity_id))) is not None
+        ]
+        return _merge_sort(found, Sort.by("version", descending=True))[0] if found else None
+
     def query(
         self,
         collection: str,
@@ -552,11 +560,10 @@ class LocalRunObjectStore(ObjectStore):
     def signed_put_url(self, object_url: str, expires_in: int = 3600) -> str | None:
         return self._writing(object_url).signed_put_url(object_url, expires_in)
 
-    def signed_post(self, url_prefix: str, *, expires_in: int = 3600, max_bytes: int | None = None) -> dict | None:
-        return self._writing(url_prefix).signed_post(url_prefix, expires_in=expires_in, max_bytes=max_bytes)
-
     def shared_credentials_env(self) -> dict[str, str]:
-        return self.configured.shared_credentials_env()
+        """None: an ``@local`` run's objects reach its sandboxes through grants, staging or pushed bytes, so the
+        configured store's credentials, the caller's own, stay with the caller."""
+        return {}
 
     def issue_read_grant(self, object_url: str, *, expires_in: int | None = None) -> HttpGetGrant:
         return self._at(object_url).issue_read_grant(object_url, **_lifetime(expires_in))

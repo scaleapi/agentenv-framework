@@ -1,6 +1,7 @@
 """A standalone MCPServerEnv on Modal containers stages into its server's own container and records every container it
 created, so a later process can reattach them: loads stage into the server again, and close() and the reapers reach
 them all. A dead servicedb or sidecar is skipped on restore; a dead server fails it. A VM deploy's record is unchanged.
+A load is timed by the size its object store holds for the payload it stages.
 Deployed without a gateway, the server is the env: its own card and container are the record's, and loads go straight to it.
 Only the sandboxes, the HTTP boundary and each topology's deploy path are faked."""
 
@@ -18,8 +19,11 @@ from agentenv_protocol import WELL_KNOWN_PATH
 
 from agent_env.artifact import Artifact
 from agent_env.env.env import DeployedEnv, DeployedSandboxEnv
+from agent_env.env.envs import mcp_server
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.gateway import GatewayMode
+from agent_env.env.gateway.constants import data_plane_load_timeout_s
+from agent_env.store.object_store import ObjectMetadata
 from agent_env.providers.env_providers.env_gateway_provider import DeployedGateway
 from agent_env.providers.env_providers.env_provider import _builtin_env_providers, build_env_provider
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER, SANDBOX_MODE_VM
@@ -60,6 +64,35 @@ async def test_a_container_deploy_stages_into_the_server_and_records_every_conta
     assert {i for i, _ in _env_sandbox_ids(deployed)} == {sb.sandbox_id for sb in env._env_provider._container_sandboxes}
     sandboxes["srv"].write_file_from_s3.assert_awaited_once_with("s3://bucket/email.json", "/data/email.json")
     sandboxes["gw"].write_file_from_s3.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_load_is_timed_by_the_size_its_store_holds_for_the_payload(sent, monkeypatch):
+    env, sandboxes, size = _env(), _containers(), 3_500 * 1024 * 1024
+    store = _store_reporting(ObjectMetadata(size=size))
+    monkeypatch.setattr(mcp_server, "get_config", lambda: MagicMock(get_object_store_at=MagicMock(return_value=store)))
+
+    await _deploy(env, sandboxes)
+    await env.load_environment_artifact(_artifact())
+
+    store.get_object_metadata_at.assert_called_once_with("s3://bucket/email.json")
+    assert sent and {r.extensions["timeout"]["read"] for r in sent} == {data_plane_load_timeout_s(size)}
+    assert data_plane_load_timeout_s(size) > data_plane_load_timeout_s(None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lookup", [None, RuntimeError("store unreachable")], ids=["no-metadata", "lookup-fails"])
+async def test_a_store_that_cannot_size_the_payload_leaves_the_load_its_floor_timeout(monkeypatch, lookup):
+    store = _store_reporting(lookup)
+    monkeypatch.setattr(mcp_server, "get_config", lambda: MagicMock(get_object_store_at=MagicMock(return_value=store)))
+
+    assert await _env()._staged_artifact_size(_artifact().get_file_artifact()) is None
+
+
+def _store_reporting(metadata):
+    """A store whose metadata lookup returns ``metadata``, or raises it."""
+    lookup = MagicMock(side_effect=metadata) if isinstance(metadata, Exception) else MagicMock(return_value=metadata)
+    return MagicMock(get_object_metadata_at=lookup)
 
 
 @pytest.mark.asyncio

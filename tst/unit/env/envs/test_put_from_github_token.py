@@ -61,5 +61,5 @@ async def test_website_env_forwards_the_token_to_both_builds(recorded_builds):
         frontend_dockerfile_github_url="https://github.com/o/r/blob/main/fe/Dockerfile",
         github_token="ghs_y",
     )
-    assert sorted(c["id"] for c in recorded_builds) == ["website-backend-w", "website-frontend-w"]
+    assert sorted(c["id"] for c in recorded_builds) == ["w__backend_image", "w__frontend_image"]
     assert {c["github_token"] for c in recorded_builds} == {"ghs_y"}

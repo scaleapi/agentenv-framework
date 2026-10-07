@@ -32,6 +32,7 @@ from agentenv_protocol.transfers import HttpGetGrant, HttpPostPolicyGrant, HttpP
 from agent_env.config import get_config
 from agent_env.store.base import ObjectAlreadyExistsError
 from agent_env.store.object_store import DEFAULT_CONTENT_TYPE, ObjectMetadata, ObjectStore, UploadPolicy
+from agent_env.store.object_store.object_store import issues_grants_to
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +77,7 @@ def transfer_store(
     store that stages them through the agent when the agent serves staging, else ``store`` itself, so the
     call falls back to the forms that carry no grants."""
     endpoint = staging_endpoint(a2a_url, card)
-    if endpoint is None or (store.supports_transfer_grants and store.grants_reach(sandbox_type)):
+    if endpoint is None or issues_grants_to(store, sandbox_type):
         return store
     return _staged(store, endpoint, card)
 

@@ -164,20 +164,6 @@ class ObjectStore(ABC):
         or None if the backend can't produce one (e.g. local filesystem)."""
         return None
 
-    def signed_post(
-        self, url_prefix: str, *, expires_in: int = 3600, max_bytes: int | None = None
-    ) -> dict | None:
-        """Credentials letting a remote party upload objects it names itself, anywhere
-        under ``url_prefix``. None if the backend can't produce them.
-
-        Prefix-scoped so the uploader owns its file layout — the caller bounds where
-        it may write, not what it may call things. That is also why the grant is a
-        dict and not a url: a signed url covers one key, since the key is part of
-        what is signed, so a prefix needs a policy the uploader submits as form
-        fields. Pass the whole value on, not just ``url``.
-        """
-        return None
-
     def shared_credentials_env(self) -> dict[str, str]:
         """Environment variables handing credentials to the agents and env services agent-env
         deploys, so they can use this store directly. None by default; a deployment that wants
@@ -227,13 +213,19 @@ class ObjectStore(ABC):
         )
 
 
+def issues_grants_to(store: ObjectStore, sandbox_type: str | None) -> bool:
+    """Whether ``store`` can hand a transfer grant to a remote party on the ``sandbox_type`` sandbox
+    provider (None: unknown): it issues grants, and they reach that provider."""
+    return store.supports_transfer_grants and store.grants_reach(sandbox_type)
+
+
 def readable_url(store: ObjectStore, object_url: str, *, sandbox_type: str | None, expires_in: int) -> str | None:
     """An HTTPS URL that a remote party on the ``sandbox_type`` sandbox provider (None: unknown) can GET the
     object at ``object_url`` from: a read grant when the store's grants reach it, else a URL the store
     signs; None when the store offers neither. It lasts at least ``expires_in`` seconds and at least the
     store's grant lifetime, unless the store's signing credentials or limits end it sooner."""
     expires_in = max(expires_in, store.grant_lifetime_seconds)
-    if store.supports_transfer_grants and store.grants_reach(sandbox_type):
+    if issues_grants_to(store, sandbox_type):
         try:
             grant = store.issue_read_grant(object_url, expires_in=expires_in)
         except GrantUnavailableError:  # it cannot last that long; a signed URL may

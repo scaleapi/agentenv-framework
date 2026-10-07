@@ -1226,12 +1226,12 @@ class _StandardExecutor:
                 "streaming TaskStatusUpdateEvent must be non-terminal and final=False"
             )
 
-    async def cancel(self, _context: Any, _event_queue: Any) -> None:
-        """Satisfy the upstream executor interface without offering cancellation."""
-        from a2a.types import UnsupportedOperationError
-        from a2a.utils.errors import ServerError
+    async def cancel(self, context: Any, event_queue: Any) -> None:
+        """Mark the task canceled. The SDK then cancels the coroutine running it, so ``agent.run`` gets
+        ``CancelledError`` at its next ``await`` and should stop whatever it started, such as a CLI process."""
+        from a2a.server.tasks import TaskUpdater
 
-        raise ServerError(error=UnsupportedOperationError())
+        await TaskUpdater(event_queue, context.task_id, context.context_id).cancel()
 
 
 def _from_a2a_part(part: Any) -> Any:

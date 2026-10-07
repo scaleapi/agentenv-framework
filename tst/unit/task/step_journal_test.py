@@ -9,6 +9,7 @@ import asyncio
 
 import pytest
 
+import agent_env.task.step_journal as journal_mod
 import agent_env.task.store as store_mod
 from agent_env.store import Filter, LocalSqliteDocumentStore, Sort
 from agent_env.task.step_journal import _union, commit_ordered, replay_context
@@ -572,6 +573,30 @@ def test_a_deployed_env_written_by_two_kernels_stays_one_entry():
     assert _union([old, unregistered], [new, other, unregistered], path="context.deployed_envs") == [old, unregistered, other]
     assert _union([old, other], [new], move_to_end=True, path="context.deployed_envs") == [other, new]
     assert _union([old], [new], path="context.prompt_responses") == [old, new]  # every other list stays by value
+
+
+def test_union_projects_each_item_key_once(monkeypatch):
+    calls = 0
+
+    def item_key(path):
+        def project(item):
+            nonlocal calls
+            calls += 1
+            return item
+
+        return project
+
+    monkeypatch.setattr(journal_mod, "_item_key", item_key)
+    existing = [["old"], ["shared"]]
+    items = [["shared"], ["new"], ["new"]]
+
+    assert _union(existing, items) == [["old"], ["shared"], ["new"]]
+    assert calls == len(existing) + len(items)
+
+    calls = 0
+    moved_items = [["old"]]
+    assert _union(existing, moved_items, move_to_end=True) == [["shared"], ["old"]]
+    assert calls == len(existing) + len(moved_items)
 
 
 def test_a_completion_that_re_adds_a_deployed_env_keeps_one_entry(store):

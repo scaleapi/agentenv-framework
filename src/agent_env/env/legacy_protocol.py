@@ -12,7 +12,7 @@ import logging
 from typing import TYPE_CHECKING, Optional
 
 import httpx
-from agentenv_protocol import RPC_PATH, client as protocol_v1
+from agentenv_protocol import RPC_PATH, DataPart, client as protocol_v1
 
 if TYPE_CHECKING:
     from agent_env.env.env import DeployedEnv
@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DEFAULT_MCP_MAX_RETRIES = 5
+EXPORT_STATE_TIMEOUT_SECONDS = 60
 
 
 def environment_base_url(gateway_url: Optional[str], environment_name: str, mcp: bool = True) -> str:
@@ -80,13 +81,35 @@ async def add_via_rest(base_url: str, file_path: str, timeout: int = 120, verify
         return result
 
 
-async def export_state(gateway_url: str, environment_name: str, timeout: int = 60, verify: bool = True) -> dict:
+async def export_state(
+    gateway_url: str, environment_name: str, timeout: int = EXPORT_STATE_TIMEOUT_SECONDS, verify: bool = True
+) -> dict:
     """GET ``/svc/mcp-{name}/export-state`` — the legacy state snapshot for one service."""
-    base_url = environment_base_url(gateway_url, environment_name, mcp=True)
+    return await _export_state_at(environment_base_url(gateway_url, environment_name, mcp=True), timeout, verify)
+
+
+async def _export_state_at(base_url: str, timeout: int, verify: bool) -> dict:
     async with httpx.AsyncClient(verify=verify) as client:
         response = await client.get(f"{base_url}/export-state", timeout=timeout)
         response.raise_for_status()
         return response.json()
+
+
+async def service_state(deployed: Optional[DeployedEnv], gateway_url: Optional[str], environment_name: str) -> dict:
+    """An MCP service's state as JSON: its v1 ``data/get`` answer when that is data, else ``GET /export-state``.
+
+    A service that exports a file from ``data/get`` (a bundle of its database, to reload from) still serves its state
+    as JSON at ``/export-state``.
+    """
+    base_url = await v1_base_url(deployed, gateway_url, environment_name, mcp=True)
+    if base_url is None:
+        return await export_state(gateway_url, environment_name)
+    response = await protocol_v1.get_data(base_url)
+    if not response.parts:
+        return {}
+    if isinstance(response.parts[0], DataPart):
+        return response.parts[0].data
+    return await _export_state_at(base_url, timeout=EXPORT_STATE_TIMEOUT_SECONDS, verify=True)
 
 
 async def reset_via_mcp_tool(

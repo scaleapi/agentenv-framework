@@ -18,6 +18,7 @@ from tst.unit.store.fakes import FakeDocumentStore
 
 LAYOUT = {
     "envs/tickets/Dockerfile": "FROM scratch\n",
+    "envs/tickets/env.toml": 'environment_name = "tickets"\n',
     "envs/both/env.toml": 'type = "multi"\n',
     "artifacts/golden/artifact.toml": 'type = "vm_image"\n',
 }

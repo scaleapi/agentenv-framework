@@ -23,6 +23,7 @@ from pydantic import Field
 
 from agent_env.artifact.artifact import Artifact
 from agent_env.store.ids import fs_safe, image_repository, is_local_id
+from agent_env.store.image_store.oci_registry_credentials import is_loopback_host, registry_host_from_ref
 
 logger = logging.getLogger(__name__)
 
@@ -197,14 +198,16 @@ class DockerImageArtifact(Artifact):
         """Build a Docker image from a GitHub repo on a temporary VM.
 
         Clones the repo (with ``github_token`` when the repository is private), runs docker
-        build, saves the image, uploads to S3, and creates a DockerImageArtifact. Returns a GitHubBuildResult with
-        the artifact and git metadata.
+        build, saves the image, uploads it to the object store, and creates a DockerImageArtifact. Returns a
+        GitHubBuildResult with the artifact and git metadata.
 
         Note: Branch names containing slashes (e.g. feature/fix-bug) are not
         supported in GitHub URLs due to path ambiguity. Use branches/tags
         without slashes, or the default branch.
         """
         from agent_env.providers import get_sandbox_provider
+        from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
+        from agent_env.providers.sandbox_providers.sandbox import upload_vm_file
         from agent_env.config import get_config
 
         refuse_local_github_build(id)
@@ -228,7 +231,7 @@ class DockerImageArtifact(Artifact):
         owner, repo, ref = df_parts.owner, df_parts.repo, df_parts.ref
         dockerfile_repo_path = df_parts.path
         config = get_config()
-        suffix = uuid.uuid4().hex[:8]
+        suffix = uuid.uuid4().hex[:16]
         image_tag = f"{id}-{suffix}"
 
         from agent_env.artifact.store import get_artifact_store
@@ -237,12 +240,18 @@ class DockerImageArtifact(Artifact):
         image_store = config.get_image_store()
         repository = image_repository(id)
         image_ref = image_store.image_ref(repository, f"v{version}")
+        provider = get_sandbox_provider()
+        if is_loopback_host(registry_host_from_ref(image_ref)) and not isinstance(provider, LocalSandboxProvider):
+            raise ValueError(
+                f"{image_ref} is in a registry on this machine, which a {type(provider).__name__} build VM can't push to; "
+                "build on the local sandbox provider, or configure an image store a remote VM can reach"
+            )
         await asyncio.to_thread(image_store.ensure_repository, repository)
         auth = await asyncio.to_thread(image_store.auth, image_ref)
 
         log("create_vm", "Creating VM...", 10)
         logger.info(f"put_from_github: cloning {owner}/{repo} ref={ref} dockerfile={dockerfile_repo_path} context={context_repo_path}")
-        sandbox = await get_sandbox_provider().create_vm(disk_size_gb=20, timeout=1800, exposed_ports=[])
+        sandbox = await provider.create_vm(disk_size_gb=20, timeout=1800, exposed_ports=[])
         try:
             log("install_git", "Installing git...", 20)
             await sandbox.exec_script("apt-get update -qq && apt-get install -y -qq git >/dev/null 2>&1")
@@ -281,18 +290,9 @@ class DockerImageArtifact(Artifact):
 
             log("upload", "Uploading to object store...", 75)
             object_store = config.get_object_store()
-
-            def _signed_put(key: str) -> tuple[str, str]:
-                url = object_store.object_url(f"{config.get_artifact_key_prefix()}{key}")
-                put = object_store.signed_put_url(url)
-                if put is None:
-                    raise RuntimeError(
-                        f"{type(object_store).__name__} can't presign uploads; GitHub image builds need a signable object store."
-                    )
-                return url, put
-
-            tar_gz_object_url, image_put_url = await asyncio.to_thread(_signed_put, f"github-builds/{id}/{image_tag}.tar.gz")
-            await sandbox.exec_script(f'curl -fsSL -X PUT --upload-file /tmp/image.tar.gz "{image_put_url}"')
+            builds = f"{config.get_artifact_key_prefix()}github-builds/{id}"
+            tar_gz_object_url = object_store.object_url(f"{builds}/{suffix}.tar.gz")
+            await upload_vm_file(sandbox, "/tmp/image.tar.gz", object_store, tar_gz_object_url)
 
             log("upload_context", "Uploading build context...", 80)
             dockerfile_content = await sandbox.exec_script(f"cat {dockerfile_abs}")
@@ -300,10 +300,8 @@ class DockerImageArtifact(Artifact):
             copy_sources = _parse_copy_sources(dockerfile_content, df_rel)
             tar_paths = " ".join(shlex.quote(p) for p in copy_sources)
             await sandbox.exec_script(f"tar czf /tmp/build-context.tar.gz -C {context_abs} {tar_paths}")
-            build_context_object_url, context_put_url = await asyncio.to_thread(
-                _signed_put, f"github-builds/{id}/{image_tag}-context.tar.gz"
-            )
-            await sandbox.exec_script(f'curl -fsSL -X PUT --upload-file /tmp/build-context.tar.gz "{context_put_url}"')
+            build_context_object_url = object_store.object_url(f"{builds}/{suffix}-context.tar.gz")
+            await upload_vm_file(sandbox, "/tmp/build-context.tar.gz", object_store, build_context_object_url)
         finally:
             log("cleanup", "Terminating build VM...", 85)
             await sandbox.terminate()

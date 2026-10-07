@@ -36,7 +36,7 @@ from tst.unit.store.fakes import CollectingVm
 LOCAL_TASK = "@local/~/bundle/tasks/t"
 LOCAL_ENV = "@local/~/bundle/envs/tickets"
 _DOCUMENT_WRITES = ("insert", "update", "update_one_and_get", "replace", "delete")
-_OBJECT_WRITES = ("put", "put_file", "put_file_at", "signed_put_url", "signed_post", "issue_write_grant", "issue_upload_policy")
+_OBJECT_WRITES = ("put", "put_file", "put_file_at", "signed_put_url", "issue_write_grant", "issue_upload_policy")
 
 
 def _refusing(cls, methods):

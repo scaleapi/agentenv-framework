@@ -23,7 +23,7 @@ def put(artifact_id: str, description: str, environment_name: str | None, filepa
 
     click.echo("Creating FileArtifact...")
     file_artifact = FileArtifact.put(
-        id=f"{artifact_id}-file",
+        id=EnvironmentArtifact.derived_file_id(artifact_id),
         description=description,
         file_path=str(filepath),
     )

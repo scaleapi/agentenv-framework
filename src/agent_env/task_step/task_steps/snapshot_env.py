@@ -26,6 +26,7 @@ from agent_env.store import get_config
 from agent_env.store.base import GrantUnavailableError
 from agent_env.store.ids import derive_id, is_local_id, validate_local_id
 from agent_env.store.object_store import MIN_GRANT_LIFETIME_SECONDS, ObjectStore, S3ObjectStore
+from agent_env.store.object_store.object_store import issues_grants_to
 from agent_env.store.routing import in_local_run
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity_refs import EntityRef, RefRole
@@ -67,7 +68,7 @@ def _snapshot_upload(card: dict, timeout_seconds: float, sandbox_type: Optional[
         return None
     config = get_config()
     store = config.get_object_store()
-    if not (store.supports_transfer_grants and store.grants_reach(sandbox_type)):
+    if not issues_grants_to(store, sandbox_type):
         return None
     cap = store.max_single_upload_bytes or ENV_SNAPSHOT_LIMITS.max_object_bytes
     limits = ObjectLimits(

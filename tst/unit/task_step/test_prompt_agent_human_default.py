@@ -20,7 +20,7 @@ def _wire(monkeypatch, cfg):
     async def send(url, parts, message_id, context_id, timeout):
         return "task-1", None
 
-    async def poll(url, task_id, timeout, interval):
+    async def poll(url, task_id, timeout, interval, **_):
         return {
             "status": {
                 "state": TaskState.completed,
