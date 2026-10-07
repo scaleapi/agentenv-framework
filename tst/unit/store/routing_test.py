@@ -471,6 +471,17 @@ def test_an_id_recorded_in_both_stores_reduces_to_one_latest_row(stores):
         assert {d["id"]: d.get("from") for d in router.latest_per_id("env_snapshots", Filter())}["tied"] == "local"
 
 
+def test_latest_version_lookup_uses_the_routed_namespace(stores):
+    router, _, _ = stores
+    versioned = VersionedEntityStore(router, "env_snapshots", dict, dict)
+    router.insert("env_snapshots", {"id": "shared", "version": 1})
+    local_id = "@local/~/bundle/env_snapshots/local-only"
+    with run_scope(LOCAL_TASK):
+        router.insert("env_snapshots", {"id": local_id, "version": 3})
+    assert versioned.get("shared")["version"] == 1
+    assert versioned.get(local_id)["version"] == 3
+
+
 def test_the_local_namespace_file_cant_be_the_configured_store(tmp_path, cli_routing):
     configure(document_store=LocalSqliteDocumentStore(str(state_root() / "document_store" / "local.db")))
     with pytest.raises(ConfigError, match="kept for @local documents"):

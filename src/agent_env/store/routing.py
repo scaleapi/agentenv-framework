@@ -254,6 +254,14 @@ class RoutingDocumentStore(DocumentStore):
         ]
         return _merge_sort(found, sort)[0] if found else None
 
+    def latest_version(self, collection: str, entity_id: str) -> Optional[dict]:
+        filter = Filter.of(id=entity_id)
+        found = [
+            doc for store in self._readers(collection, filter)
+            if (doc := self._read(store, lambda: store.latest_version(collection, entity_id))) is not None
+        ]
+        return _merge_sort(found, Sort.by("version", descending=True))[0] if found else None
+
     def query(
         self,
         collection: str,

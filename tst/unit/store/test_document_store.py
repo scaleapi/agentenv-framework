@@ -195,6 +195,26 @@ class TestVersionedEntityStore:
         store.put({"id": "e"})
         assert store.next_version("e") == 2
 
+    def test_default_latest_version_uses_custom_find_one_sort(self):
+        class RecordingStore(FakeDocumentStore):
+            def __init__(self):
+                super().__init__()
+                self.reads = []
+
+            def find_one(self, collection, filter, sort=None):
+                self.reads.append((collection, filter, sort))
+                return super().find_one(collection, filter, sort)
+
+        docs = RecordingStore()
+        store = _versioned(docs)
+        store.put({"id": "e"})
+        docs.reads.clear()
+
+        assert store.get("e")["version"] == 1
+        assert docs.reads[-1] == ("c", Filter.of(id="e"), Sort.by("version", descending=True))
+        assert store.next_version("e") == 2
+        assert docs.reads[-1] == ("c", Filter.of(id="e"), Sort.by("version", descending=True))
+
     def test_put_retries_past_a_collision(self):
         docs = FakeDocumentStore(fail_inserts=1)
         store = _versioned(docs)

@@ -116,6 +116,29 @@ class LocalSqliteDocumentStore(DocumentStore):
             matches = evaluation.sort_docs(matches, sort)
             return matches[0] if matches else None
 
+    def latest_version(self, collection: str, entity_id: str) -> Optional[dict]:
+        """Read one scalar-id, integer-version entity through the compound index."""
+        if not isinstance(entity_id, str):
+            return super().latest_version(collection, entity_id)
+        with self._lock:
+            tbl = self._table(collection)
+            if tbl not in self._tables and not self._adopt_if_created(tbl):
+                return None
+            if not any(unique and fields == ["id", "version"] for unique, fields in self._indexes_of(tbl)):
+                return super().latest_version(collection, entity_id)
+            row = self._conn.execute(
+                # nosemgrep: sqlalchemy-execute-raw-query -- tbl and JSON paths are fixed/validated; id is bound
+                f'SELECT doc, json_type(doc, \'$.version\'), typeof({_field_expr("version")}) FROM "{tbl}" '
+                f'WHERE {_field_expr("id")} = json_extract(?, \'$\') '
+                f'ORDER BY {_field_expr("version")} DESC LIMIT 1',
+                (json.dumps(entity_id),),
+            ).fetchone()
+            if row is None:
+                return None
+            if row[1] != "integer" or row[2] != "integer":
+                return super().latest_version(collection, entity_id)
+            return json.loads(row[0])
+
     def query(
         self,
         collection: str,

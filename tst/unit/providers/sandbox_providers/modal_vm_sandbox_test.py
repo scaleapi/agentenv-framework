@@ -7,7 +7,6 @@ step runs (ports are exposed via Modal encrypted_ports)."""
 
 from __future__ import annotations
 
-import base64
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -306,30 +305,64 @@ async def test_download_attempts_exhausted_cleans_up_and_raises(store, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_unsigned_store_keeps_the_base_class_path():
+async def test_an_object_the_store_cannot_sign_goes_over_stdin(monkeypatch):
     class _Local:
         def signed_get_url(self, object_url, expires_in=3600):
             return None
 
-        def get(self, object_url):
-            return b"BYTES"
+    pushed = []
 
-    set_object_store(_Local())
+    async def push(sandbox, store, object_url, vm_path):
+        pushed.append((sandbox, store, object_url, vm_path))
+
+    monkeypatch.setattr(mvs, "push_object_over_stdin", push)
+    store = _Local()
+    set_object_store(store)
     try:
         vm = _ScriptedVm([])
         await vm.load_object_file("file:///store/x", "/app/x")
     finally:
         reset_config()
-    assert not vm.downloads() and any("base64 -d" in s for s in vm.scripts)
+    assert pushed == [(vm, store, "file:///store/x", "/app/x")]
+    assert not vm.downloads()
 
 
 @pytest.mark.asyncio
-async def test_a_url_the_local_store_holds_is_read_from_it_not_the_configured_store(cli_routing):
+async def test_a_stdin_exec_feeds_the_script_and_returns_what_it_printed():
+    process = MagicMock()
+    process.stdin.drain.aio = AsyncMock()
+    process.wait.aio = AsyncMock(return_value=0)
+    process.stdout.read.aio = AsyncMock(return_value=b"abc123  -\n")
+    process.stderr.read.aio = AsyncMock(return_value=b"2+0 records in\n")
+    sb = MagicMock()
+    sb.exec.aio = AsyncMock(return_value=process)
+
+    async def pieces():
+        yield b"QUJD"
+        yield b"REVG"
+
+    result = await _sandbox(sb)._exec_with_stdin("base64 -d | dd of=/tmp/x && sha256sum /tmp/x", pieces())
+
+    assert result == (0, "abc123  -\n", "2+0 records in\n")
+    sb.exec.aio.assert_awaited_once_with("bash", "-c", "base64 -d | dd of=/tmp/x && sha256sum /tmp/x", text=False)
+    assert [c.args for c in process.stdin.write.call_args_list] == [(b"QUJD",), (b"REVG",)]
+    process.stdin.write_eof.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_a_url_the_local_store_holds_is_read_from_it_not_the_configured_store(cli_routing, monkeypatch):
     set_object_store(ConfiguredObjectStore())
-    url = get_config().get_object_store_for("@local/~/t").put("objects/x.zip", b"LOCAL")
+    local = get_config().get_object_store_for("@local/~/t")
+    url = local.put("objects/x.zip", b"LOCAL")
+    pushed = []
+
+    async def push(sandbox, store, object_url, vm_path):
+        pushed.append((store, object_url))
+
+    monkeypatch.setattr(mvs, "push_object_over_stdin", push)
     vm = _ScriptedVm([])
     await vm.load_object_file(url, "/app/x.zip")
-    assert not vm.downloads() and any(base64.b64encode(b"LOCAL").decode() in s for s in vm.scripts)
+    assert pushed == [(local, url)] and not vm.downloads()
 
 
 @pytest.mark.asyncio

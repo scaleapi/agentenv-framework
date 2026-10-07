@@ -160,6 +160,44 @@ def test_a_reader_searches_an_index_created_after_its_first_read(tmp_path, same_
     assert "USING INDEX docs_coll_id_version_unique (<expr>=?)" in _plans(reader, read)[0]
 
 
+def test_latest_version_uses_indexed_top_one_and_reads_existing_table(tmp_path):
+    store = LocalSqliteDocumentStore(str(tmp_path / "latest.db"))
+    store.insert("coll", {"id": "a", "version": 1})
+    store.insert("coll", {"id": "a", "version": 2})
+    store.ensure_index("coll", ["id", "version"], unique=True)
+    statements = []
+    store._conn.set_trace_callback(statements.append)
+    view = VersionedEntityStore(store, "coll", dict, dict)
+    statements.clear()
+    assert view.get("a")["version"] == 2
+    assert view.next_version("a") == 3
+    reads = [sql for sql in statements if sql.startswith("SELECT doc, json_type")]
+    assert len(reads) == 2
+    plan = store._conn.execute("EXPLAIN QUERY PLAN " + reads[0]).fetchall()
+    assert any("docs_coll_id_version_unique" in row[3] for row in plan), plan
+    assert all("LIMIT 1" in sql for sql in reads)
+
+
+def test_latest_version_does_not_create_an_absent_table(tmp_path):
+    store = LocalSqliteDocumentStore(str(tmp_path / "absent.db"))
+    assert store.latest_version("coll", "missing") is None
+    assert store._conn.execute("SELECT 1 FROM sqlite_master WHERE name='docs_coll'").fetchone() is None
+
+
+def test_latest_version_falls_back_for_non_integer_entity_version(tmp_path):
+    store = LocalSqliteDocumentStore(str(tmp_path / "malformed-version.db"))
+    view = VersionedEntityStore(store, "coll", dict, dict)
+    store.insert("coll", {"id": "a", "version": "legacy"})
+    assert view.get("a")["version"] == "legacy"
+
+
+def test_latest_version_falls_back_for_versions_outside_sqlite_integer_range(tmp_path):
+    store = LocalSqliteDocumentStore(str(tmp_path / "large-version.db"))
+    view = VersionedEntityStore(store, "coll", dict, dict)
+    store.insert("coll", {"id": "a", "version": 10**30})
+    assert view.get("a")["version"] == 10**30
+
+
 def test_indexed_reads_and_writes_match_a_full_scan(tmp_path):
     """Random documents and operations give the same results, in the same order, as the same store with no index."""
     rng = random.Random(3205)
@@ -320,5 +358,5 @@ def _plans(store, call) -> list[str]:
         call()
     finally:
         store._conn.set_trace_callback(None)
-    reads = [sql for sql in statements if sql.startswith("SELECT rowid, doc")]
+    reads = [sql for sql in statements if sql.startswith(("SELECT rowid, doc", "SELECT doc, json_type"))]
     return [" ".join(row[3] for row in store._conn.execute(f"EXPLAIN QUERY PLAN {sql}")) for sql in reads]

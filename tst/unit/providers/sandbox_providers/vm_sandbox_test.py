@@ -1,5 +1,6 @@
 import asyncio
-import base64
+import hashlib
+import io
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -57,6 +58,20 @@ class _RecordingVmSandbox(VmSandbox):
 
     async def write_file_from_text(self, content, destination_path):  # pragma: no cover
         pass
+
+
+class _PushTargetVmSandbox(_RecordingVmSandbox):
+    """Answers a push's sha256 check with the digest of ``pushed``, as a VM that received all of it would."""
+
+    def __init__(self, pushed: bytes, images_stdout: str = ""):
+        super().__init__(images_stdout)
+        self._digest = hashlib.sha256(pushed).hexdigest()
+
+    async def exec_with_output(self, *args):
+        if args[:2] == ("sudo", "bash") and "sha256sum " in script_run(args):
+            self.scripts.append(script_run(args))
+            return 0, f"{self._digest}  pushed\n", ""
+        return await super().exec_with_output(*args)
 
 
 @pytest.mark.asyncio
@@ -235,12 +250,12 @@ async def test_load_docker_images_streams_through_when_unsigned():
         def signed_get_url(self, object_url, expires_in=3600):
             return None
 
-        def get(self, object_url):
-            return b"IMGBYTES"
+        def open(self, object_url):
+            return io.BytesIO(b"IMGBYTES")
 
     set_object_store(_LocalStore())
     try:
-        sandbox = _RecordingVmSandbox(images_stdout="myimage\n")
+        sandbox = _PushTargetVmSandbox(b"IMGBYTES", images_stdout="myimage\n")
         artifact = SimpleNamespace(tar_gz_object_url="file:///store/img.tar.gz", image_name="myimage:latest")
         await sandbox.load_docker_images([artifact])
     finally:
@@ -269,9 +284,9 @@ class _LoopCheckingStore:
         self._record()
         return f"https://signed/{object_url.rsplit('/', 1)[-1]}" if self.signs else None
 
-    def get(self, object_url):
+    def open(self, object_url):
         self._record()
-        return b"IMG"
+        return io.BytesIO(b"IMG")
 
 
 @pytest.mark.asyncio
@@ -281,7 +296,7 @@ async def test_the_store_is_called_off_the_event_loop(signs):
     store = _LoopCheckingStore(signs)
     set_object_store(store)
     try:
-        sandbox = _RecordingVmSandbox(images_stdout="a\nb\n")
+        sandbox = _PushTargetVmSandbox(b"IMG", images_stdout="a\nb\n")
         artifacts = [SimpleNamespace(tar_gz_object_url=f"s3://bucket/{n}.tar.gz", image_name=f"{n}:1") for n in "ab"]
         await sandbox.load_docker_images(artifacts)
         await sandbox.load_object_file("s3://bucket/data.json", "/tmp/data.json")
@@ -438,17 +453,21 @@ async def test_the_s3_named_methods_are_deprecated_aliases(signing_store):
 
 
 @pytest.mark.asyncio
-async def test_a_url_the_local_store_holds_is_read_from_it_not_the_configured_store(cli_routing):
+async def test_a_url_the_local_store_holds_is_read_from_it_not_the_configured_store(cli_routing, monkeypatch):
     """Under namespace routing, outside an @local run, the configured store owns only its own urls."""
     set_object_store(ConfiguredObjectStore())
     local = get_config().get_object_store_for("@local/~/t")
     data = local.put("objects/data.json", b"LOCAL-DATA")
     image = local.put("images/img.tar.gz", b"LOCAL-IMAGE")
+    pushed = []
+
+    async def push(sandbox, store, object_url, vm_path):
+        pushed.append((store, object_url))
+
+    monkeypatch.setattr(sandbox_module, "push_object_over_exec", push)
     sandbox = _RecordingVmSandbox(images_stdout="myimage\n")
 
     await sandbox.load_object_file(data, "/tmp/data.json")
     await sandbox.load_docker_images([SimpleNamespace(tar_gz_object_url=image, image_name="myimage:latest")])
 
-    pushed = "\n".join(sandbox.scripts)
-    assert base64.b64encode(b"LOCAL-DATA").decode() in pushed
-    assert base64.b64encode(b"LOCAL-IMAGE").decode() in pushed
+    assert pushed == [(local, data), (local, image)]
