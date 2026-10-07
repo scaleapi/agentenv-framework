@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import shlex
 import time
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 #: Sail's limit on entries in one egress allowlist.
 MAX_ALLOWLIST_ENTRIES = 128
 _CLEANUP_ATTEMPTS = 3
+_STREAM_CHUNK_BYTES = 8 * 1024 * 1024
 _SHELLS = frozenset({"bash", "sh"})
 
 # One lock per Sailbox and event loop, shared by every handle to it while an update is in flight.
@@ -339,6 +341,14 @@ class SailSandbox(VmSandbox):
         exit_code, stdout, stderr = await self.exec_with_output("docker", "compose", "version")
         if exit_code != 0:
             raise RuntimeError(f"Sailbox {self.sandbox_id} has no Docker Compose v2: {(stderr or stdout).strip()}")
+
+    async def _write_unsigned_object(self, object_store: Any, object_url: str, vm_path: str) -> None:
+        """Stream an object the store can't sign straight onto the VM host through Sail's filesystem API,
+        a chunk at a time, instead of base64 over exec."""
+        with contextlib.closing(await asyncio.to_thread(object_store.open, object_url)) as source:
+            async with await self._sailbox.fs.write_stream.aio(vm_path) as writer:
+                while chunk := await asyncio.to_thread(source.read, _STREAM_CHUNK_BYTES):
+                    await writer.write(chunk)
 
     async def _write_bytes_to_vm_path(self, data: bytes, vm_path: str) -> None:
         if self._injection is not None:

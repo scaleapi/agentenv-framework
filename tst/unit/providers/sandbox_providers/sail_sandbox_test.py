@@ -1,6 +1,7 @@
 """Unit tests for the Sailbox adapter over a fake SDK Sailbox."""
 
 import asyncio
+import io
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -302,7 +303,10 @@ async def test_a_host_already_allowed_is_not_reapplied(monkeypatch):
 
 
 def _object_store(monkeypatch, signed):
-    store = MagicMock(signed_get_url=MagicMock(return_value=signed), get=MagicMock(return_value=b"\x00payload"))
+    store = MagicMock(
+        signed_get_url=MagicMock(return_value=signed),
+        open=MagicMock(side_effect=lambda _url: io.BytesIO(b"\x00payload")),
+    )
     monkeypatch.setattr(
         "agent_env.providers.sandbox_providers.sail.sandbox.get_config", lambda: MagicMock(get_object_store=lambda: store)
     )
@@ -326,9 +330,18 @@ async def test_a_signed_object_download_allows_its_host_first(monkeypatch):
 @pytest.mark.asyncio
 async def test_an_unsignable_object_is_streamed_through_the_filesystem_api(monkeypatch):
     _object_store(monkeypatch, None)
+    monkeypatch.setattr("agent_env.providers.sandbox_providers.sail.sandbox._STREAM_CHUNK_BYTES", 4)
     sandbox, sailbox = _sandbox(policy=None)
+    writer = MagicMock(write=AsyncMock())
+    stream = MagicMock(__aenter__=AsyncMock(return_value=writer), __aexit__=AsyncMock(return_value=False))
+    sailbox.fs.write_stream.aio = AsyncMock(return_value=stream)
+
     await sandbox.load_s3_file("file:///store/f", "/tmp/f")
-    sailbox.fs.write.aio.assert_awaited_once_with("/tmp/f", b"\x00payload")
+
+    sailbox.fs.write_stream.aio.assert_awaited_once_with("/tmp/f")
+    assert b"".join(call.args[0] for call in writer.write.await_args_list) == b"\x00payload"
+    assert [len(call.args[0]) for call in writer.write.await_args_list] == [4, 4]
+    stream.__aexit__.assert_awaited_once()
     sailbox.exec.aio.assert_not_awaited()
 
 
