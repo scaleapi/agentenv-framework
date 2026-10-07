@@ -240,7 +240,10 @@ _AS_UNIVERSE = "leave out its declared type to write the folder as a file_artifa
 
 def one_file(bundle: Bundle, entry: BundleEntry, remedy: str = _AS_UNIVERSE) -> dict[str, Path]:
     """``entry_files`` of a folder that must hold one file. Raises BundleError otherwise, suggesting ``remedy``."""
-    files = entry_files(bundle, entry)
+    return _only(bundle, entry, entry_files(bundle, entry), remedy)
+
+
+def _only(bundle: Bundle, entry: BundleEntry, files: dict[str, Path], remedy: str) -> dict[str, Path]:
     if len(files) != 1:
         listed = ", ".join(repr(name) for name in files)
         raise BundleError([f"{relative(bundle.root, entry.path)}: {with_article(f'{entry.type} {entry.kind.store}')} "
@@ -248,13 +251,22 @@ def one_file(bundle: Bundle, entry: BundleEntry, remedy: str = _AS_UNIVERSE) -> 
     return files
 
 
+# The keys that name the file an environment artifact wraps: ``file``, and the stored document's names for it, which
+# its toml check refuses with a pointer to ``file``.
+_NAMES_ITS_FILE = ("file", "file_artifact_id", "file_artifact_ref")
+
+
 def environment_files(bundle: Bundle, entry: BundleEntry) -> dict[str, Path]:
     """What an environment artifact's write reads from its folder: its one file, or none when its artifact.toml's
     ``file`` names the artifact to wrap instead. Raises BundleError otherwise."""
-    if not (isinstance(entry.config, dict) and "file" in entry.config):
-        return one_file(bundle, entry, "name the artifact to wrap with file, or give each other file an artifact "
-                                       "folder of its own")
     files = entry_files(bundle, entry, empty_ok=True)
+    if not (isinstance(entry.config, dict) and any(name in entry.config for name in _NAMES_ITS_FILE)):
+        if not files:
+            raise BundleError([f"{relative(bundle.root, entry.path)}: has no file for the environment to wrap "
+                               f"({', '.join(sorted(LEAVINGS))} don't count); put its one file here, or name the "
+                               "artifact to wrap with file"])
+        return _only(bundle, entry, files, "name the artifact to wrap with file, or give each other file an artifact "
+                                           "folder of its own")
     if files:
         listed = ", ".join(repr(name) for name in files)
         raise BundleError([f"{relative(bundle.root, entry.path)}: its file is the artifact file names, so the folder "
@@ -295,7 +307,11 @@ def universe_layout(bundle: Bundle, entry: BundleEntry) -> UniverseLayout:
     ``<universe>__metadata__<key>`` for a metadata file. Raises BundleError listing every problem."""
     files = entry_files(bundle, entry, empty_ok=True)
     where = relative(bundle.root, entry.path)
-    problems, folders = [], {}
+    problems = []
+    # Every folder counts, so one left without its file is refused rather than dropped.
+    folders: dict[tuple[bool, str], list[str]] = {(False, name): [] for name in _folders(entry.path)
+                                                  if name != UNIVERSE_METADATA}
+    folders.update({(True, name): [] for name in _folders(entry.path / UNIVERSE_METADATA)})
     for key in files:
         parts = key.split("/")
         metadata = parts[0] == UNIVERSE_METADATA
@@ -304,23 +320,33 @@ def universe_layout(bundle: Bundle, entry: BundleEntry) -> UniverseLayout:
         elif len(parts) == 1:
             problems.append(f"{where}/{key}: a universe folder holds only artifact.toml and a folder for each "
                             "environment; move it into <environment_name>/, or give it an artifact folder of its own")
-        elif metadata:
+        elif metadata and len(parts) == 2:
             problems.append(f"{where}/{key}: {UNIVERSE_METADATA}/ holds a folder for each key, with that key's one "
                             f"file in it ({UNIVERSE_METADATA}/<key>/<file>); an environment named "
                             f"{UNIVERSE_METADATA} goes in an artifact folder of its own, named in "
                             "environment_artifacts")
         else:
-            problems.append(f"{where}/{key}: an environment's folder holds its one file directly, "
-                            f"{parts[0]}/<file>, with no folders inside")
+            folder = "/".join(parts[:2]) if metadata else parts[0]
+            what = "a metadata key's" if metadata else "an environment's"
+            problems.append(f"{where}/{key}: {what} folder holds its one file directly, {folder}/<file>, with no "
+                            "folders inside")
     environments, metadata_files = [], []
     for (metadata, name), keys in sorted(folders.items()):
         folder = f"{where}/{UNIVERSE_METADATA}/{name}" if metadata else f"{where}/{name}"
         if len(keys) != 1:
-            listed = ", ".join(repr(key.rsplit("/", 1)[-1]) for key in keys)
-            problems.append(f"{folder}: holds one file, and has {len(keys)} ({listed})")
+            listed = f" ({', '.join(repr(key.rsplit('/', 1)[-1]) for key in keys)})" if keys else ""
+            problems.append(f"{folder}: holds one file, and has {len(keys)}{listed}")
+            continue
+        # Renaming an environment's folder renames the environment, so say how to keep its name.
+        rename = "rename the folder" if metadata else (
+            f"rename the folder, which renames the environment, or keep the name by giving the environment an "
+            f'artifact folder of its own, with environment_name = "{name}", named in environment_artifacts')
+        if name != name.strip():
+            problems.append(f"{folder}: a name that opens or closes with a space can't name the artifacts written "
+                            "from it; rename the folder")
             continue
         if "__" in name:
-            problems.append(f"{folder}: a name holding __ could clash with the ids derived from it; rename the folder")
+            problems.append(f"{folder}: a name holding __ could clash with the ids derived from it; {rename}")
             continue
         environment_id = None if metadata else derive_id(entry.id, name)
         if metadata:
@@ -328,15 +354,27 @@ def universe_layout(bundle: Bundle, entry: BundleEntry) -> UniverseLayout:
         else:
             file_id = derive_id(environment_id, "file")
         try:
-            validate_local_id(file_id)
+            for id in (environment_id, file_id):
+                if id is not None:
+                    validate_local_id(id)
         except ValueError as e:
-            problems.append(f"{folder}: can't name the artifacts written from it ({e}); rename the folder")
+            problems.append(f"{folder}: can't name the artifacts written from it ({e}); {rename}")
             continue
         laid = LaidOut(name, keys[0].rsplit("/", 1)[-1], files[keys[0]], file_id, environment_id)
         (metadata_files if metadata else environments).append(laid)
     if problems:
         raise BundleError(problems)
     return UniverseLayout(tuple(environments), tuple(metadata_files), files)
+
+
+def _folders(path: Path) -> list[str]:
+    """The names of the folders directly in ``path``, as the walk spells them, or none when it isn't one."""
+    try:
+        with os.scandir(path) as listing:
+            return [unicodedata.normalize("NFC", child.name) for child in listing
+                    if child.name not in LEAVINGS and child.is_dir()]
+    except OSError:
+        return []  # the walk reports why it can't be listed
 
 
 def universe_files(bundle: Bundle, entry: BundleEntry) -> dict[str, Path]:

@@ -41,13 +41,14 @@ from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGa
 from agent_env.providers.env_providers.env_provider import _env_provider_class
 from agent_env.store import Filter, Sort
 from agent_env.store.base import NotFoundError
-from agent_env.store.ids import LOCAL_PREFIX
+from agent_env.store.ids import LOCAL_PREFIX, derive_id
 from agent_env.store.routing import namespace_routing_enabled
 from agent_env.task import Task
 from agent_env.task_step.registry import get_task_step_registry
 
 from ._fs import fold, relative, with_article
 from .authoring import (
+    UNIVERSE_METADATA,
     AuthoringContext,
     entry_files,
     environment_files,
@@ -171,6 +172,8 @@ class _Planner:
                 claims.append((key, self._path(source.entry), f"the image built for {self._path(source.entry)}"))
             else:
                 claims.append((key, self._path(source.entry), self._path(source.entry)))
+                for id, folder in self._written_beside(source):
+                    claims.append(((BundleKind.ARTIFACT.store, id), folder, f"the artifact written from {folder}"))
         for entry in self.resolved.entries:
             for output in entry.outputs:
                 claims.append(((output.kind.value, output.id), f"{self._path(entry.entry)}: step {output.step_id!r}",
@@ -180,6 +183,26 @@ class _Planner:
                 self.problems.append(f"{where}: {key[1]!r} is also written by {writers[key]}; give each its own id")
             else:
                 writers[key] = writer
+
+    def _written_beside(self, source: ResolvedEntry) -> list[tuple[str, str]]:
+        """The ids an environment or universe artifact writes besides its own, each with the folder it's written
+        from: the file an environment wraps from its folder, and each of a universe's environments and metadata
+        files. A folder that can't be written names none; the file check reports why."""
+        if source.entry.kind is not BundleKind.ARTIFACT:
+            return []
+        walk = folder_walk(get_artifact_registry().get(canonical_type(source.entry.type)))
+        bundle, where = self.resolved.bundle, self._path(source.entry)
+        try:
+            if walk is environment_files:
+                return [(derive_id(source.entry.id, "file"), where)] if environment_files(bundle, source.entry) else []
+            if walk is universe_files:
+                layout = universe_layout(bundle, source.entry)
+                return [*((id, f"{where}/{laid.name}") for laid in layout.environments
+                          for id in (laid.environment_id, laid.file_id)),
+                        *((laid.file_id, f"{where}/{UNIVERSE_METADATA}/{laid.name}") for laid in layout.metadata)]
+        except BundleError:
+            pass
+        return []
 
     def _check_loops(self) -> None:
         for component in _components(self.nodes, self.edges, self.rank):

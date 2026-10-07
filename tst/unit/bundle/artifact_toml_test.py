@@ -275,6 +275,9 @@ def _refused(files):
     (_environment("x", "crm") | {"artifacts/x/a.json": "{}", "artifacts/x/b.json": "{}"},
      "artifacts/x: an environment artifact holds one file, and this folder has 2 ('a.json', 'b.json'); name the "
      "artifact to wrap with file, or give each other file an artifact folder of its own"),
+    (_environment("x", "crm"),
+     "artifacts/x: has no file for the environment to wrap (.DS_Store, Thumbs.db, __pycache__, desktop.ini don't "
+     "count); put its one file here, or name the artifact to wrap with file"),
     ({f"artifacts/x/{TOML}": 'type = "environment"\n', "artifacts/x/a.json": "{}"},
      "artifacts/x: artifact.toml: environment_name is required: the environment the file seeds"),
     (_environment("x", "") | {"artifacts/x/a.json": "{}"},
@@ -303,11 +306,24 @@ def _refused(files):
      "artifacts/x/gmail/inner/a.json: an environment's folder holds its one file directly, gmail/<file>, with no "
      "folders inside"),
     (_universe("x") | {"artifacts/x/g__mail/a.json": "{}"},
-     "artifacts/x/g__mail: a name holding __ could clash with the ids derived from it; rename the folder"),
+     "artifacts/x/g__mail: a name holding __ could clash with the ids derived from it; rename the folder, which "
+     "renames the environment, or keep the name by giving the environment an artifact folder of its own, with "
+     'environment_name = "g__mail", named in environment_artifacts'),
+    (_universe("x") | {"artifacts/x/gmail/a.json": "{}", "artifacts/x/metadata/m__k/m.json": "{}"},
+     "artifacts/x/metadata/m__k: a name holding __ could clash with the ids derived from it; rename the folder"),
+    (_universe("x") | {"artifacts/x/slack /a.json": "{}"},
+     "artifacts/x/slack : a name that opens or closes with a space can't name the artifacts written from it; rename "
+     "the folder"),
+    (_universe("x") | {"artifacts/x/ slack/a.json": "{}"},
+     "artifacts/x/ slack: a name that opens or closes with a space can't name the artifacts written from it; rename "
+     "the folder"),
     (_universe("x") | {"artifacts/x/gmail/a.json": "{}", "artifacts/x/metadata/m.json": "{}"},
      "artifacts/x/metadata/m.json: metadata/ holds a folder for each key, with that key's one file in it "
      "(metadata/<key>/<file>); an environment named metadata goes in an artifact folder of its own, named in "
      "environment_artifacts"),
+    (_universe("x") | {"artifacts/x/gmail/a.json": "{}", "artifacts/x/metadata/k/sub/m.json": "{}"},
+     "artifacts/x/metadata/k/sub/m.json: a metadata key's folder holds its one file directly, metadata/k/<file>, "
+     "with no folders inside"),
     (_universe("x", environment_artifacts='["gmail-data"]') | {"artifacts/x/gmail/a.json": "{}"}
      | _environment("gmail-data", "gmail") | {"artifacts/gmail-data/a.json": "{}"},
      "artifacts/x: environment_artifacts[0]: environment_name 'gmail' is also the gmail/ folder's; a universe's "
@@ -315,15 +331,51 @@ def _refused(files):
     (_universe("x", service_artifact_refs='["a"]', metadata='{ m = "f" }') | {"artifacts/x/gmail/a.json": "{}"},
      "artifacts/x: artifact.toml: service_artifact_refs is what the stored document calls it; write "
      "environment_artifacts instead"),
-], ids=["environment-two-files", "environment-no-name", "environment-empty-name", "environment-service-name",
-        "environment-file-artifact-id", "environment-file-and-description", "environment-file-and-a-file",
-        "environment-over-a-universe", "universe-empty", "universe-root-file", "universe-two-files",
-        "universe-nested-folder", "universe-double-underscore", "universe-flat-metadata", "universe-repeated-name",
-        "universe-stored-names"])
+], ids=["environment-two-files", "environment-no-file", "environment-no-name", "environment-empty-name",
+        "environment-service-name", "environment-file-artifact-id", "environment-file-and-description",
+        "environment-file-and-a-file", "environment-over-a-universe", "universe-empty", "universe-root-file",
+        "universe-two-files", "universe-nested-folder", "universe-double-underscore",
+        "universe-metadata-double-underscore", "universe-trailing-space", "universe-leading-space",
+        "universe-flat-metadata", "universe-nested-metadata", "universe-repeated-name", "universe-stored-names"])
 def test_an_artifact_toml_that_cant_be_written_is_refused_before_any_write(bundle_dir, files, problem):
     layout(bundle_dir, _refused(files))
 
     assert problem in _problems(bundle_dir)
+    assert not local_store().path.exists()
+
+
+def test_an_environment_naming_its_file_by_its_stored_name_is_told_only_to_rename_the_key(bundle_dir):
+    layout(bundle_dir, _refused(_environment("x", "crm", file_artifact_id='"f"')))
+
+    assert _problems(bundle_dir) == ("artifacts/x: artifact.toml: file_artifact_id is what the stored document calls "
+                                     "it; write file instead",)
+
+
+def test_a_universe_folder_left_without_its_file_is_refused_rather_than_dropped(bundle_dir):
+    layout(bundle_dir, _refused(_universe("x") | {"artifacts/x/gmail/a.json": "{}",
+                                                  "artifacts/x/drive/.DS_Store": ""}))
+    for empty in ("slack", "metadata/manifest", "gmail-old/inner"):
+        (bundle_dir / "artifacts/x" / empty).mkdir(parents=True)
+
+    assert sorted(_problems(bundle_dir)) == [
+        "artifacts/x/drive: holds one file, and has 0",
+        "artifacts/x/gmail-old: holds one file, and has 0",
+        "artifacts/x/metadata/manifest: holds one file, and has 0",
+        "artifacts/x/slack: holds one file, and has 0",
+    ]
+    assert not local_store().path.exists()
+
+
+def test_a_universe_folder_named_like_an_image_the_bundle_builds_is_refused(bundle_dir):
+    layout(bundle_dir, {**_refused(_universe("slack") | {"artifacts/slack/env_image/a.json": "{}"}),
+                        "envs/slack/Dockerfile": "FROM scratch\n", "envs/slack/env.toml": 'environment_name = "s"\n',
+                        "tasks/t.json": json.dumps([{"id": "env", "type": "deploy_env", "env_id": "slack"},
+                                                    {"id": "load", "type": "load_artifact", "env_id": "slack",
+                                                     "artifact_id": "slack", "depends_on": ["env"]}])})
+
+    assert _problems(bundle_dir) == (
+        "artifacts/slack/env_image: '@local/~/triage/slack__env_image' is also written by the image built for "
+        "envs/slack; give each its own id",)
     assert not local_store().path.exists()
 
 
