@@ -1002,7 +1002,7 @@ COMPOSE_EOF'''
 
     async def _log_service(self, sandbox: VmSandbox, compose_service: str) -> bool:
         """Log a compose service's container output; False when it has no container. Diagnostics only, so
-        a lookup that keeps losing its exec transport is reported, never raised into the deploy."""
+        a lookup or ``docker logs`` that fails is reported as a warning, never raised into the deploy."""
         try:
             container_id = await self._get_container_id(sandbox, compose_service)
             if not container_id:
@@ -1010,6 +1010,9 @@ COMPOSE_EOF'''
             exit_code, logs, stderr = await sandbox.exec_with_output("sudo", "docker", "logs", container_id)
         except Exception as e:
             logger.warning(f"Skipping {compose_service} logs: {e}")
+            return True
+        if exit_code != 0:
+            logger.warning(f"Skipping {compose_service} logs: docker logs exited {exit_code}: {stderr.strip()[-500:]}")
             return True
         logger.info(f"  stdout:\n{logs}")
         if stderr:

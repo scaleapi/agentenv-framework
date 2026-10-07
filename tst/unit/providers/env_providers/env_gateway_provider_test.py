@@ -1723,3 +1723,14 @@ async def test_a_failing_docker_logs_call_never_stops_a_deploy(caplog):
 
     assert await gp._log_service(sandbox, "gateway") is True
     assert "Skipping gateway logs: logs unavailable" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_docker_logs_call_that_exits_nonzero_is_reported_not_printed_as_logs(caplog):
+    gp = EnvironmentGatewayProvider()
+    sandbox = MagicMock()
+    sandbox.exec_with_output = AsyncMock(side_effect=[(0, "gw\n", ""), (1, "", "Error: No such container: gw\n")])
+
+    assert await gp._log_service(sandbox, "gateway") is True
+    assert "Skipping gateway logs: docker logs exited 1: Error: No such container: gw" in caplog.text
+    assert "stdout:" not in caplog.text
