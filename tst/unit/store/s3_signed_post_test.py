@@ -58,3 +58,22 @@ def test_the_grant_is_the_fields_not_the_url():
 def test_a_backend_that_cannot_sign_returns_none(tmp_path):
     """The ABC default."""
     assert LocalFilesystemObjectStore(str(tmp_path)).signed_post(f"file://{tmp_path}/x/") is None
+
+
+def test_an_upload_policy_is_signed_without_going_through_signed_post():
+    """So a store that builds ``signed_post`` from ``issue_upload_policy`` can't recurse."""
+
+    class _Store(S3ObjectStore):
+        def signed_post(self, *args, **kwargs):
+            raise AssertionError("issue_upload_policy went through signed_post")
+
+    client = _StubClient()
+    store = _Store(client, BUCKET)
+    store._check_sigv4_expiry = store._require_long_term_credentials = lambda expires_in: None
+
+    policy = store.issue_upload_policy(f"s3://{BUCKET}/captures/one", max_object_bytes=1024, expires_in=600)
+
+    (call,) = client.calls
+    assert call["Key"] == "captures/one/${filename}"
+    assert ["content-length-range", 0, 1024] in call["Conditions"]
+    assert policy.write.path_field == "key" and policy.write.file_field == "file"
