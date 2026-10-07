@@ -13,7 +13,12 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 
 from agent_env.config import get_config
-from agent_env.providers.sandbox_providers.sail.model_key import DOCKER_SHIM_PATH, ModelKeyInjection, docker_shim
+from agent_env.providers.sandbox_providers.sail.model_key import (
+    DOCKER_SHIM_PATH,
+    ModelKeyInjection,
+    carries_model_key,
+    docker_shim,
+)
 from agent_env.providers.sandbox_providers.sandbox import CURL_RETRY_FLAGS, NetworkMode, NetworkPolicy, VmSandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_VM
 
@@ -21,6 +26,8 @@ logger = logging.getLogger(__name__)
 
 #: Sail's limit on entries in one egress allowlist.
 MAX_ALLOWLIST_ENTRIES = 128
+_CLEANUP_ATTEMPTS = 3
+_SHELLS = frozenset({"bash", "sh"})
 
 # One lock per Sailbox and event loop, shared by every handle to it while an update is in flight.
 _policy_locks: weakref.WeakValueDictionary[tuple[asyncio.AbstractEventLoop, str], asyncio.Lock] = (
@@ -68,34 +75,60 @@ def _allows_host(policy: NetworkPolicy, host: str) -> bool:
     return any(entry == host or (entry.startswith("*.") and host.endswith(entry[1:])) for entry in policy.allow_hosts)
 
 
+class ModelKeyRefusedError(RuntimeError):
+    """A command or file would have carried a model key Sail doesn't inject for this Sailbox into it."""
+
+
+def policy_name() -> str:
+    return f"agentenv-{uuid.uuid4().hex}"
+
+
+async def create_saved_policy(sdk: Any, name: str, document: dict[str, Any]) -> Any:
+    """Create a saved egress policy. If the create fails or is cancelled, the policy Sail may still have made
+    is found by ``name`` and deleted, so a lost response can't leave one naming a secret behind."""
+    try:
+        return await sdk.EgressPolicy.create.aio(name, document)
+    except BaseException:
+        await delete_policy_named(sdk, name)
+        raise
+
+
+async def delete_policy_named(sdk: Any, name: str) -> None:
+    """Delete the saved policy called ``name``, if Sail made one, retrying through a brief outage; one Sail
+    stays unreachable for is logged by name so it can be swept (``sail egress-policy list``)."""
+    for attempt in range(_CLEANUP_ATTEMPTS):
+        try:
+            for summary in await sdk.EgressPolicy.list.aio(search=name):
+                if summary.name == name:
+                    await _delete_policy_by_id(sdk, summary.id)
+            return
+        except Exception as exc:  # noqa: BLE001 - retried, then reported; never masks the caller's outcome
+            logger.warning("Looking up egress policy %s for cleanup failed (attempt %s): %s", name, attempt + 1, exc)
+            await asyncio.sleep(2 ** attempt)
+    logger.error("Egress policy %s may be left in Sail, naming a model-key secret; delete it by name", name)
+
+
+async def _delete_policy_by_id(sdk: Any, policy_id: str) -> None:
+    try:
+        await (await sdk.EgressPolicy.get.aio(policy_id)).delete.aio()
+    except sdk.NotFoundError:
+        pass
+
+
 async def delete_saved_policy(sdk: Any, policy_id: str | None) -> None:
     """Delete a saved egress policy, best effort: a leftover one names a secret but holds no value."""
     if policy_id is None:
         return
     try:
-        await (await sdk.EgressPolicy.get.aio(policy_id)).delete.aio()
-    except sdk.NotFoundError:
-        pass
+        await _delete_policy_by_id(sdk, policy_id)
     except Exception as exc:  # noqa: BLE001 - reported, never masks the caller's outcome
         logger.warning("Could not delete egress policy %s: %s", policy_id, exc)
 
 
-async def delete_secret(sdk: Any, name: str) -> None:
-    """Delete a model-key secret unless another Sailbox's policy still names it (Sail refuses then)."""
-    try:
-        await (await sdk.Secret.get.aio(name)).delete.aio()
-    except sdk.SecretInUseError:
-        logger.info("Model-key secret %s is still used by another Sailbox; leaving it", name)
-    except sdk.NotFoundError:
-        pass
-    except Exception as exc:  # noqa: BLE001 - the next Sailbox using this key re-sets it; report and go on
-        logger.warning("Could not delete model-key secret %s: %s", name, exc)
-
-
-async def release_injection(sdk: Any, injection: ModelKeyInjection) -> None:
-    """Delete an injection's saved policy, then its secret, in the order Sail requires."""
+async def release_injection(sdk: Any, injection: ModelKeyInjection, holder: str) -> None:
+    """Delete ``holder``'s saved policy; the secret it names stays (see ``model_key``)."""
+    injection.release(holder)
     await delete_saved_policy(sdk, injection.policy_id)
-    await delete_secret(sdk, injection.secret)
 
 
 class _BytesReader:
@@ -189,18 +222,22 @@ class _SailProcess:
 
 class SailSandbox(VmSandbox):
     """A Sailbox from the Docker-capable devbox image; commands run as root. With a model-key ``injection``,
-    the key's value never enters the Sailbox: every command and file is scrubbed of it."""
+    the key's value never enters the Sailbox: every command and file is scrubbed of it. With
+    ``refuse_model_keys``, one that still carries a model key (one Sail doesn't inject here) is refused."""
 
     type = "sail"
     _DOCKER_PROBE_TIMEOUT = 10
 
     def __init__(
         self, sailbox: Any, *, sdk: Any, tunnel_urls: dict[int, str], network_policy: NetworkPolicy | None,
-        injection: ModelKeyInjection | None = None,
+        injection: ModelKeyInjection | None = None, refuse_model_keys: bool = False,
     ):
         self._sailbox = sailbox
         self._sdk = sdk
         self._injection = injection
+        self._refuse_model_keys = refuse_model_keys
+        if injection is not None:
+            injection.hold(sailbox.sailbox_id)
         self.sandbox_id = sailbox.sailbox_id
         self.tunnel_urls = tunnel_urls
         self.vnc_url = None
@@ -208,14 +245,28 @@ class SailSandbox(VmSandbox):
         self.network_policy = network_policy
 
     async def terminate(self) -> None:
-        """Terminate the Sailbox, then delete its model-key policy and, unless another Sailbox's policy
-        still names it, the key's secret."""
+        """Terminate the Sailbox, then delete its model-key policy: the one applied, which another handle may
+        have replaced."""
+        if self._injection is None:
+            await self._terminate_sailbox()
+            return
+        async with self._policy_lock():
+            try:
+                self.adopt_applied_policy((await self._sdk.Sailbox.get.aio(self.sandbox_id)).egress_policy)
+            except Exception as exc:  # noqa: BLE001 - fall back to the policy this handle last applied
+                logger.info("Could not read Sailbox %s's applied policy before terminate: %s", self.sandbox_id, exc)
+            await self._terminate_sailbox()
+            await release_injection(self._sdk, self._injection, self.sandbox_id)
+
+    async def _terminate_sailbox(self) -> None:
         try:
             await self._sailbox.terminate.aio()
         except self._sdk.NotFoundError:
             logger.info("Sailbox %s was already gone at terminate", self.sandbox_id)
-        if self._injection is not None:
-            await release_injection(self._sdk, self._injection)
+
+    def _policy_lock(self) -> asyncio.Lock:
+        """The lock every handle to this Sailbox in this event loop holds to change or tear down its policy."""
+        return _policy_locks.setdefault((asyncio.get_running_loop(), self.sandbox_id), asyncio.Lock())
 
     async def install_container_trust(self) -> None:
         """Have every container started on this Sailbox trust the CA Sail injects the model key behind."""
@@ -239,6 +290,11 @@ class SailSandbox(VmSandbox):
         argv = list(command[1:] if command[:1] == ("sudo",) else command)
         if self._injection is not None:
             argv = [self._injection.scrub(arg) for arg in argv]
+        if self._refuse_model_keys and any(
+            carries_model_key(arg, shell=index > 0 and argv[index - 1] == "-c" and argv[0] in _SHELLS)
+            for index, arg in enumerate(argv)
+        ):
+            raise self._refusal()
         try:
             process = await self._sailbox.exec.aio(
                 argv, timeout=timeout, output_mode="pipe", idempotency_key=uuid.uuid4().hex,
@@ -287,15 +343,29 @@ class SailSandbox(VmSandbox):
     async def _write_bytes_to_vm_path(self, data: bytes, vm_path: str) -> None:
         if self._injection is not None:
             data = self._injection.scrub_bytes(data)
+        if self._refuse_model_keys and carries_model_key(data.decode(errors="replace"), shell=False):
+            raise self._refusal()
         await self._sailbox.fs.write.aio(vm_path, data)
+
+    def _refusal(self) -> ModelKeyRefusedError:
+        return ModelKeyRefusedError(
+            f"Refusing to send a model key into Sailbox {self.sandbox_id}: Sail injects model keys only for an agent "
+            "deployed on its own Sail sandbox, so this one would land on the Sailbox's disk. Deploy the agent on its "
+            "own sandbox, or set inject_model_key = false in [sandbox.providers.sail.config] to pass keys in."
+        )
 
     async def apply_network_policy(self, policy: NetworkPolicy) -> None:
         """Replace the Sailbox's egress policy; applies to new connections. A model-key injection needs a
         saved policy (only those can name a secret), so a new one replaces the old, which is deleted."""
+        async with self._policy_lock():
+            await self._apply_policy(policy)
+
+    async def _apply_policy(self, policy: NetworkPolicy) -> None:
+        """``apply_network_policy`` for a caller already holding ``_policy_lock``."""
         if self._injection is None:
             await self._sailbox.set_egress_policy.aio(egress_document(policy))
         else:
-            saved = await self._sdk.EgressPolicy.create.aio(f"agentenv-{uuid.uuid4().hex}", egress_document(policy, self._injection))
+            saved = await create_saved_policy(self._sdk, policy_name(), egress_document(policy, self._injection))
             try:
                 await self._sailbox.set_egress_policy.aio(saved)
             except BaseException:
@@ -335,8 +405,7 @@ class SailSandbox(VmSandbox):
         cached = self._known_policy(purpose)
         if not cached.restricts_egress or all(_allows_host(cached, host) for host in hosts):
             return
-        lock = _policy_locks.setdefault((asyncio.get_running_loop(), self.sandbox_id), asyncio.Lock())
-        async with lock:
+        async with self._policy_lock():
             self.network_policy = self.adopt_applied_policy((await self._sdk.Sailbox.get.aio(self.sandbox_id)).egress_policy)
             policy = self._known_policy(purpose)
             if not policy.restricts_egress:
@@ -349,7 +418,7 @@ class SailSandbox(VmSandbox):
                     f"Cannot {purpose} in Sailbox {self.sandbox_id}: adding {missing} would exceed "
                     f"Sail's {MAX_ALLOWLIST_ENTRIES}-entry egress allowlist"
                 )
-            await self.apply_network_policy(policy.with_hosts(missing))
+            await self._apply_policy(policy.with_hosts(missing))
 
     async def load_docker_images(self, artifacts: list) -> None:
         """Load images, first adding their signed-download hosts to a restrictive policy."""

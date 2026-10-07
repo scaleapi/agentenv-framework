@@ -17,7 +17,9 @@ from agent_env.providers.sandbox_providers.sail.model_key import ModelKeyInjecti
 from agent_env.providers.sandbox_providers.sail.sandbox import (
     MAX_ALLOWLIST_ENTRIES,
     SailSandbox,
+    create_saved_policy,
     egress_document,
+    policy_name,
     release_injection,
 )
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, NetworkPolicyUnsupportedError
@@ -241,15 +243,24 @@ class SailSandboxProvider(SandboxProvider):
         sdk, app = await self._connect()
         egress: Any = egress_document(effective_policy)
 
-        def wrap(raw: Any) -> SailSandbox:
-            return SailSandbox(raw, sdk=sdk, tunnel_urls={}, network_policy=effective_policy, injection=injection)
+        launch = f"launch-{uuid.uuid4().hex}"
 
-        release = (lambda: release_injection(sdk, injection)) if injection is not None else None
+        def wrap(raw: Any) -> SailSandbox:
+            sandbox = SailSandbox(
+                raw, sdk=sdk, tunnel_urls={}, network_policy=effective_policy, injection=injection,
+                refuse_model_keys=self._inject_model_key,
+            )
+            if injection is not None:
+                injection.release(launch)
+            return sandbox
+
+        release = (lambda: release_injection(sdk, injection, launch)) if injection is not None else None
         creating = False
         try:
             if injection is not None:
+                injection.hold(launch)
                 await sdk.Secret.set.aio(injection.secret, injection.key)
-                egress = await sdk.EgressPolicy.create.aio(f"agentenv-{uuid.uuid4().hex}", egress_document(effective_policy, injection))
+                egress = await create_saved_policy(sdk, policy_name(), egress_document(effective_policy, injection))
                 injection.policy_id = egress.id
             creating = True
             raw = await _create_or_reclaim(sdk.Sailbox.create.aio(
@@ -370,7 +381,10 @@ class SailSandboxProvider(SandboxProvider):
                 injection.recover_key(get_config().get_litellm_api_key())
             except Exception:  # noqa: BLE001 - no configured key to recover; the handle just can't scrub it
                 pass
-        sandbox = SailSandbox(raw, sdk=sdk, tunnel_urls=tunnel_urls, network_policy=None, injection=injection)
+        sandbox = SailSandbox(
+            raw, sdk=sdk, tunnel_urls=tunnel_urls, network_policy=None, injection=injection,
+            refuse_model_keys=self._inject_model_key,
+        )
         sandbox.network_policy = sandbox.adopt_applied_policy(applied)
         if sandbox.network_policy is None:
             logger.warning(

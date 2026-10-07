@@ -571,6 +571,25 @@ async def test_read_trajectory_raises_rather_than_parse_a_read_that_keeps_failin
 
 
 @pytest.mark.asyncio
+async def test_a_container_lookup_whose_transport_keeps_failing_raises_rather_than_read_as_no_container():
+    gp = EnvironmentGatewayProvider()
+    sandbox = MagicMock()
+    sandbox.exec_with_output = AsyncMock(return_value=(-1, "", "host lost"))
+
+    with pytest.raises(RuntimeError, match="Could not look up the .* container: exec transport failed 3 times"):
+        await gp.read_trajectory(sandbox)
+
+
+@pytest.mark.asyncio
+async def test_a_container_lookup_retries_a_failed_transport():
+    gp = EnvironmentGatewayProvider()
+    sandbox = MagicMock()
+    sandbox.exec_with_output = AsyncMock(side_effect=[(-1, "", "host lost"), (0, "gw\n", ""), (0, '{"a": 1}\n', "")])
+
+    assert await gp.read_trajectory(sandbox) == [{"a": 1}]
+
+
+@pytest.mark.asyncio
 async def test_read_trajectory_of_a_gateway_with_no_history_yet_is_empty():
     gp = EnvironmentGatewayProvider()
     gp._get_container_id = AsyncMock(return_value="gw")

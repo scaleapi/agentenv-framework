@@ -1011,10 +1011,17 @@ COMPOSE_EOF'''
         return events
 
     async def _get_container_id(self, sandbox: VmSandbox, compose_service: str) -> str | None:
-        """Get container ID for a docker-compose service (including exited containers)."""
-        exit_code, stdout, stderr = await sandbox.exec_with_output(
-            "sudo", "docker", "compose", "-f", DOCKER_COMPOSE_PATH, "ps", "-a", "-q", compose_service
-        )
+        """Get container ID for a docker-compose service (including exited containers). A lookup whose
+        exec transport failed (exit -1) is retried, then raised: it can't tell "no container" apart."""
+        for attempt in range(_TRAJECTORY_READ_ATTEMPTS):
+            exit_code, stdout, stderr = await sandbox.exec_with_output(
+                "sudo", "docker", "compose", "-f", DOCKER_COMPOSE_PATH, "ps", "-a", "-q", compose_service
+            )
+            if exit_code != -1:
+                break
+            logger.warning(f"Container lookup for {compose_service} lost its exec transport (attempt {attempt + 1}): {stderr[-200:]}")
+        else:
+            raise RuntimeError(f"Could not look up the {compose_service} container: exec transport failed {_TRAJECTORY_READ_ATTEMPTS} times")
         container_id = stdout.strip()
         return container_id if container_id else None
 

@@ -99,7 +99,8 @@ _CLIENT = (
 
 
 async def test_an_agents_model_key_is_injected_by_sail_and_never_enters_the_sailbox(sail_provider):
-    """A throwaway key against a header-echo host stands in for the model endpoint."""
+    """A throwaway key against a header-echo host stands in for the model endpoint. The provider leaves the
+    key's secret in Sail; this test deletes its own."""
     key = f"sk-agentenv-smoke-{secrets.token_hex(16)}"
     env = {"LITELLM_API_KEY": key, "LITELLM_BASE_URL": f"https://{_ECHO_HOST}/v1"}
     sandbox = await sail_provider.create_sandbox(image_name="unused", port=_PORT, env=env, cpu=1.0, memory=2048, timeout=900)
@@ -116,6 +117,5 @@ async def test_an_agents_model_key_is_injected_by_sail_and_never_enters_the_sail
         assert key not in config and PLACEHOLDER in json.dumps(json.loads(config)[0]["Config"]["Env"])
     finally:
         await sandbox.terminate()
-    sdk = sandbox._sdk
-    with pytest.raises(sdk.NotFoundError):
-        await sdk.Secret.get.aio(secret_name(key))
+    secret = await sandbox._sdk.Secret.get.aio(secret_name(key))
+    await secret.delete.aio()
