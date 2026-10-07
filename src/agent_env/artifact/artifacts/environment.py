@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional
 from pydantic import ConfigDict, Field, model_serializer
 
 from agent_env.artifact.artifact import Artifact
+from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.ref import ArtifactRef
 from agent_env.entity_refs import EntityRef
 from agent_env.store.ids import derive_id
@@ -15,7 +16,6 @@ from agent_env.store.ids import derive_id
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from agent_env.artifact.artifacts.file import FileArtifact
     from agent_env.bundle.authoring import AuthoringContext
 
 
@@ -80,20 +80,23 @@ class EnvironmentArtifact(Artifact):
         )
         return get_artifact_store().put_document(instance)
 
+    @staticmethod
+    def derived_file_id(id: str) -> str:
+        """The id an environment's file is written under when it's written with the environment: ``<id>__file``."""
+        return derive_id(id, "file")
+
     @classmethod
     def from_toml(cls, data: dict, ctx: AuthoringContext) -> EnvironmentArtifact:
         """Write the environment authored as ``data`` (its artifact.toml, with ``file`` resolved to a file artifact's
         id) under ``ctx.id`` and return it: over the artifact ``file`` names, or over the folder's one file, written
         as ``<id>__file`` with ``description`` defaulting to its name."""
-        from agent_env.artifact.artifacts.file import FileArtifact
-
         fields = cls.accept_toml(data, ctx)
         if "file" in fields:
             file = ctx.artifact(fields["file"], FileArtifact)
         else:
             filename, path = ctx.file()
-            file = FileArtifact.put_attempt(derive_id(ctx.id, "file"), description=fields.get("description", filename),
-                                            file_path=str(path), filename=filename)
+            file = FileArtifact.put_attempt(cls.derived_file_id(ctx.id), file_path=str(path), filename=filename,
+                                            description=fields.get("description", filename))
         return cls.put(ctx.id, environment_name=fields["environment_name"], file_artifact=file)
 
     @classmethod
@@ -114,8 +117,6 @@ class EnvironmentArtifact(Artifact):
         return fields
 
     def get_file_artifact(self) -> FileArtifact:
-        from agent_env.artifact.artifacts.file import FileArtifact
-
         if self.file_artifact_ref is not None:
             return FileArtifact.get(
                 self.file_artifact_ref.id, version=self.file_artifact_ref.version

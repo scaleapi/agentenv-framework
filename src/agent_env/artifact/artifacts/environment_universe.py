@@ -8,15 +8,16 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional
 
 from pydantic import AliasChoices, ConfigDict, Field, model_serializer
 
+from agent_env.artifact.artifacts.environment import EnvironmentArtifact
+from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.ref import ArtifactRef
 from agent_env.artifact.universe import Universe
 from agent_env.entity_refs import EntityRef
+from agent_env.store.ids import derive_id
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from agent_env.artifact.artifacts.file import FileArtifact
-    from agent_env.artifact.artifacts.environment import EnvironmentArtifact
     from agent_env.bundle.authoring import AuthoringContext
 
 
@@ -34,6 +35,9 @@ class EnvironmentUniverseArtifact(Universe):
         "service_artifact_refs": "environment_artifacts", "environment_artifact_refs": "environment_artifacts",
         "service_artifact_ids": "environment_artifacts", "metadata": "a metadata/<key>/ folder holding its file",
         "metadata_refs": "a metadata/<key>/ folder holding its file"}
+    # What a universe's metadata is called: the folder `environment-universe get --output-dir` writes its files to, and
+    # the segment of the ids they're written under.
+    metadata_name: ClassVar[str] = "metadata"
 
     type: Literal["environment_universe"] = "environment_universe"
     # serialization_alias pins the emitted key: the attribute is renamed, the document is not.
@@ -109,6 +113,16 @@ class EnvironmentUniverseArtifact(Universe):
         )
         return get_artifact_store().put_document(instance)
 
+    @staticmethod
+    def derived_environment_id(id: str, environment_name: str) -> str:
+        """The id an environment is written under when it's written with the universe: ``<id>__<environment_name>``."""
+        return derive_id(id, environment_name)
+
+    @classmethod
+    def derived_metadata_id(cls, id: str, key: str) -> str:
+        """The id a metadata file is written under when it's written with the universe: ``<id>__metadata__<key>``."""
+        return derive_id(derive_id(id, cls.metadata_name), key)
+
     @classmethod
     def from_toml(cls, data: dict, ctx: AuthoringContext) -> EnvironmentUniverseArtifact:
         """Write the universe authored as ``data`` (its artifact.toml, with ``environment_artifacts`` resolved to
@@ -117,9 +131,6 @@ class EnvironmentUniverseArtifact(Universe):
         an environment of that name, ``<id>__<name>`` over ``<id>__<name>__file``, and each ``metadata/<key>/``
         folder's file as ``<id>__metadata__<key>``. Its environments are the folders', in name order, then the ones
         ``environment_artifacts`` names. Nothing is written when it has none, or two of one name."""
-        from agent_env.artifact.artifacts.environment import EnvironmentArtifact
-        from agent_env.artifact.artifacts.file import FileArtifact
-
         fields = cls.accept_toml(data, ctx)
         layout = ctx.universe()
         named = [ctx.artifact(ref, EnvironmentArtifact) for ref in fields.get("environment_artifacts", [])]
@@ -151,8 +162,6 @@ class EnvironmentUniverseArtifact(Universe):
         return fields
 
     def get_environment_artifacts(self) -> list[EnvironmentArtifact]:
-        from agent_env.artifact.artifacts.environment import EnvironmentArtifact
-
         if self.environment_artifact_refs is not None:
             return [
                 EnvironmentArtifact.get(ref.id, version=ref.version)
@@ -192,8 +201,6 @@ class EnvironmentUniverseArtifact(Universe):
         return out
 
     def get_metadata(self) -> dict[str, FileArtifact]:
-        from agent_env.artifact.artifacts.file import FileArtifact
-
         if self.metadata_refs:
             return {
                 k: FileArtifact.get(ref.id, version=ref.version)

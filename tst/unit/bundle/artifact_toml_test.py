@@ -241,6 +241,21 @@ def test_a_universe_the_cli_downloads_is_written_from_a_bundle_equal_to_its_orig
             assert _fields(written.get_file_artifact()) == _fields(cli_written.get_file_artifact())
 
 
+def test_the_cli_names_the_files_it_writes_with_an_environment_and_a_universe_as_a_bundle_does(bundle_dir, tmp_path):
+    (tmp_path / "data.json").write_text("{}\n")
+    (tmp_path / "manifest.json").write_text("{}\n")
+    for argv in (["artifact", "environment", "put", str(tmp_path / "data.json"), "--id", "crm-data", "--description",
+                  "crm", "--environment-name", "crm"],
+                 ["artifact", "environment-universe", "put", "--id", "world", "--environment-artifact", "crm-data",
+                  "--metadata", f"manifest={tmp_path / 'manifest.json'}"]):
+        put = CliRunner().invoke(cli, argv)
+        assert put.exit_code == 0, put.output
+
+    with namespace_routing():
+        assert EnvironmentArtifact.get("crm-data").file_artifact_ref.id == "crm-data__file"
+        assert EnvironmentUniverseArtifact.get("world").metadata_refs["manifest"].id == "world__metadata__manifest"
+
+
 def test_an_environment_written_either_way_equals_the_one_the_cli_writes(bundle_dir, tmp_path):
     (tmp_path / "data.json").write_text('{"rows": 1}\n')
     put = CliRunner().invoke(cli, ["artifact", "environment", "put", str(tmp_path / "data.json"), "--id", "original",
@@ -321,6 +336,9 @@ def _refused(files):
      "artifacts/x/metadata/m.json: metadata/ holds a folder for each key, with that key's one file in it "
      "(metadata/<key>/<file>); an environment named metadata goes in an artifact folder of its own, named in "
      "environment_artifacts"),
+    (_universe("x") | {"artifacts/x/gmail/a.json": "{}", "artifacts/x/Metadata/k/m.json": "{}"},
+     "artifacts/x/Metadata: rename to metadata; names are case-sensitive, and an environment named Metadata goes in "
+     "an artifact folder of its own, named in environment_artifacts"),
     (_universe("x") | {"artifacts/x/gmail/a.json": "{}", "artifacts/x/metadata/k/sub/m.json": "{}"},
      "artifacts/x/metadata/k/sub/m.json: a metadata key's folder holds its one file directly, metadata/k/<file>, "
      "with no folders inside"),
@@ -336,7 +354,8 @@ def _refused(files):
         "environment-file-and-a-file", "environment-over-a-universe", "universe-empty", "universe-root-file",
         "universe-two-files", "universe-nested-folder", "universe-double-underscore",
         "universe-metadata-double-underscore", "universe-trailing-space", "universe-leading-space",
-        "universe-flat-metadata", "universe-nested-metadata", "universe-repeated-name", "universe-stored-names"])
+        "universe-flat-metadata", "universe-metadata-in-another-case", "universe-nested-metadata",
+        "universe-repeated-name", "universe-stored-names"])
 def test_an_artifact_toml_that_cant_be_written_is_refused_before_any_write(bundle_dir, files, problem):
     layout(bundle_dir, _refused(files))
 

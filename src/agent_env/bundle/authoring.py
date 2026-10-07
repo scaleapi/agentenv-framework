@@ -5,22 +5,24 @@ from __future__ import annotations
 import os
 import stat
 import unicodedata
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from collections.abc import Mapping
 from typing import Any, NoReturn, TypeVar, overload
 
 from agent_env.artifact.artifact import Artifact
+from agent_env.artifact.artifacts.environment import EnvironmentArtifact
+from agent_env.artifact.artifacts.environment_universe import EnvironmentUniverseArtifact
 from agent_env.entity_refs import EntityKind, parse_toml_ref
 from agent_env.env.env import Env
 from agent_env.env.envs._deployment import provider_refusal
 from agent_env.providers.env_providers.constants import GATEWAY_SERVICE_NAMES
 from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider
 from agent_env.providers.env_providers.env_provider import _env_provider_class
-from agent_env.store.ids import derive_id, validate_local_id
+from agent_env.store.ids import validate_local_id
 from agent_env.utils.card_naming import card_names_in_files
 
-from ._fs import os_reason, relative, show, with_article
+from ._fs import fold, os_reason, relative, show, with_article
 from .parse import CONFIG_FILES, LEAVINGS, NAMED_BY, Bundle, BundleEntry, BundleError
 
 A = TypeVar("A", bound=Artifact)
@@ -253,7 +255,7 @@ def _only(bundle: Bundle, entry: BundleEntry, files: dict[str, Path], remedy: st
 
 # The keys that name the file an environment artifact wraps: ``file``, and the stored document's names for it, which
 # its toml check refuses with a pointer to ``file``.
-_NAMES_ITS_FILE = ("file", "file_artifact_id", "file_artifact_ref")
+_NAMES_ITS_FILE = ("file", *(stored for stored, key in EnvironmentArtifact.toml_stored_names.items() if key == "file"))
 
 
 def environment_files(bundle: Bundle, entry: BundleEntry) -> dict[str, Path]:
@@ -276,7 +278,7 @@ def environment_files(bundle: Bundle, entry: BundleEntry) -> dict[str, Path]:
 
 
 # The folder of a universe's metadata files, as `environment-universe get --output-dir` writes them.
-UNIVERSE_METADATA = "metadata"
+UNIVERSE_METADATA = EnvironmentUniverseArtifact.metadata_name
 
 
 @dataclass(frozen=True)
@@ -307,13 +309,19 @@ def universe_layout(bundle: Bundle, entry: BundleEntry) -> UniverseLayout:
     ``<universe>__metadata__<key>`` for a metadata file. Raises BundleError listing every problem."""
     files = entry_files(bundle, entry, empty_ok=True)
     where = relative(bundle.root, entry.path)
-    problems = []
+    top = _folders(entry.path)
+    # A metadata/ folder spelled in another case is a typo, as for every reserved name in a bundle.
+    near = sorted(name for name in top if name != UNIVERSE_METADATA and fold(name) == fold(UNIVERSE_METADATA))
+    problems = [f"{where}/{name}: rename to {UNIVERSE_METADATA}; names are case-sensitive, and an environment named "
+                f"{name} goes in an artifact folder of its own, named in environment_artifacts" for name in near]
     # Every folder counts, so one left without its file is refused rather than dropped.
-    folders: dict[tuple[bool, str], list[str]] = {(False, name): [] for name in _folders(entry.path)
-                                                  if name != UNIVERSE_METADATA}
+    folders: dict[tuple[bool, str], list[str]] = {(False, name): [] for name in top
+                                                  if name != UNIVERSE_METADATA and name not in near}
     folders.update({(True, name): [] for name in _folders(entry.path / UNIVERSE_METADATA)})
     for key in files:
         parts = key.split("/")
+        if parts[0] in near:
+            continue
         metadata = parts[0] == UNIVERSE_METADATA
         if len(parts) == (3 if metadata else 2):
             folders.setdefault((metadata, parts[-2]), []).append(key)
@@ -348,11 +356,11 @@ def universe_layout(bundle: Bundle, entry: BundleEntry) -> UniverseLayout:
         if "__" in name:
             problems.append(f"{folder}: a name holding __ could clash with the ids derived from it; {rename}")
             continue
-        environment_id = None if metadata else derive_id(entry.id, name)
         if metadata:
-            file_id = derive_id(derive_id(entry.id, UNIVERSE_METADATA), name)
+            environment_id, file_id = None, EnvironmentUniverseArtifact.derived_metadata_id(entry.id, name)
         else:
-            file_id = derive_id(environment_id, "file")
+            environment_id = EnvironmentUniverseArtifact.derived_environment_id(entry.id, name)
+            file_id = EnvironmentArtifact.derived_file_id(environment_id)
         try:
             for id in (environment_id, file_id):
                 if id is not None:

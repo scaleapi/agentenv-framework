@@ -41,7 +41,7 @@ from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGa
 from agent_env.providers.env_providers.env_provider import _env_provider_class
 from agent_env.store import Filter, Sort
 from agent_env.store.base import NotFoundError
-from agent_env.store.ids import LOCAL_PREFIX, derive_id
+from agent_env.store.ids import LOCAL_PREFIX
 from agent_env.store.routing import namespace_routing_enabled
 from agent_env.task import Task
 from agent_env.task_step.registry import get_task_step_registry
@@ -194,7 +194,8 @@ class _Planner:
         bundle, where = self.resolved.bundle, self._path(source.entry)
         try:
             if walk is environment_files:
-                return [(derive_id(source.entry.id, "file"), where)] if environment_files(bundle, source.entry) else []
+                return ([(EnvironmentArtifact.derived_file_id(source.entry.id), where)]
+                        if environment_files(bundle, source.entry) else [])
             if walk is universe_files:
                 layout = universe_layout(bundle, source.entry)
                 return [*((id, f"{where}/{laid.name}") for laid in layout.environments
