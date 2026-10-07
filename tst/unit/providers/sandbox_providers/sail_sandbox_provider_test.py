@@ -262,12 +262,12 @@ async def test_a_cancelled_create_terminates_the_sailbox_it_produces():
 @pytest.mark.asyncio
 async def test_a_failing_orphan_termination_is_retried_then_reported(monkeypatch, caplog):
     monkeypatch.setattr("agent_env.providers.sandbox_providers.sail.provider.asyncio.sleep", AsyncMock())
-    sailbox = _sailbox()
-    sailbox.terminate.aio = AsyncMock(side_effect=RuntimeError("api down"))
+    sandbox = MagicMock(sandbox_id="sb_1")
+    sandbox.terminate = AsyncMock(side_effect=RuntimeError("api down"))
 
-    await provider_module._reap(sailbox)
+    await provider_module._reap(sandbox)
 
-    assert sailbox.terminate.aio.await_count == provider_module._REAP_ATTEMPTS
+    assert sandbox.terminate.await_count == provider_module._REAP_ATTEMPTS
     assert "Orphaned Sailbox sb_1 is still running" in caplog.text
 
 

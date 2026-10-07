@@ -13,6 +13,7 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 
 from agent_env.config import get_config
+from agent_env.providers.sandbox_providers.sail.model_key import DOCKER_SHIM_PATH, ModelKeyInjection, docker_shim
 from agent_env.providers.sandbox_providers.sandbox import CURL_RETRY_FLAGS, NetworkMode, NetworkPolicy, VmSandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_VM
 
@@ -27,16 +28,24 @@ _policy_locks: weakref.WeakValueDictionary[tuple[asyncio.AbstractEventLoop, str]
 )
 
 
-def egress_document(policy: NetworkPolicy) -> dict[str, Any]:
-    """``policy`` as a Sail egress-policy document: ``{}`` allows everything."""
-    if policy.mode is NetworkMode.ALLOW_ALL:
-        return {}
-    return {"allowlist": [*policy.allow_hosts, *policy.allow_cidrs]}
+def egress_document(policy: NetworkPolicy, injection: ModelKeyInjection | None = None) -> dict[str, Any]:
+    """``policy`` as a Sail egress-policy document (``{}`` allows everything), with ``injection``'s rules."""
+    document: dict[str, Any] = {}
+    if policy.mode is NetworkMode.ALLOWLIST:
+        document["allowlist"] = [*policy.allow_hosts, *policy.allow_cidrs]
+    if injection is not None:
+        document["rules"] = injection.rules()
+    return document
 
 
-def policy_from_document(document: Any) -> NetworkPolicy | None:
-    """The agent-env policy a Sail egress document applies, or None when it can't be represented."""
+def policy_from_document(document: Any, injection: ModelKeyInjection | None = None) -> NetworkPolicy | None:
+    """The agent-env policy a Sail egress document applies, or None when it can't be represented. Rules are
+    representable only as ``injection``'s, which add headers and leave egress alone."""
     if not isinstance(document, dict):
+        return None
+    document = dict(document)
+    rules = document.pop("rules", None)
+    if rules is not None and (injection is None or rules != injection.rules()):
         return None
     if not document:
         return NetworkPolicy()
@@ -57,6 +66,18 @@ def policy_from_document(document: Any) -> NetworkPolicy | None:
 def _allows_host(policy: NetworkPolicy, host: str) -> bool:
     """Whether an allowlist entry already admits ``host``: an exact match, or a ``*.domain`` it sits under."""
     return any(entry == host or (entry.startswith("*.") and host.endswith(entry[1:])) for entry in policy.allow_hosts)
+
+
+async def delete_saved_policy(sdk: Any, policy_id: str | None) -> None:
+    """Delete a saved egress policy, best effort: a leftover one names a secret but holds no value."""
+    if policy_id is None:
+        return
+    try:
+        await (await sdk.EgressPolicy.get.aio(policy_id)).delete.aio()
+    except sdk.NotFoundError:
+        pass
+    except Exception as exc:  # noqa: BLE001 - reported, never masks the caller's outcome
+        logger.warning("Could not delete egress policy %s: %s", policy_id, exc)
 
 
 class _BytesReader:
@@ -149,14 +170,19 @@ class _SailProcess:
 
 
 class SailSandbox(VmSandbox):
-    """A Sailbox from the Docker-capable devbox image; commands run as root."""
+    """A Sailbox from the Docker-capable devbox image; commands run as root. With a model-key ``injection``,
+    the key's value never enters the Sailbox: every command and file is scrubbed of it."""
 
     type = "sail"
     _DOCKER_PROBE_TIMEOUT = 10
 
-    def __init__(self, sailbox: Any, *, sdk: Any, tunnel_urls: dict[int, str], network_policy: NetworkPolicy | None):
+    def __init__(
+        self, sailbox: Any, *, sdk: Any, tunnel_urls: dict[int, str], network_policy: NetworkPolicy | None,
+        injection: ModelKeyInjection | None = None,
+    ):
         self._sailbox = sailbox
         self._sdk = sdk
+        self._injection = injection
         self.sandbox_id = sailbox.sailbox_id
         self.tunnel_urls = tunnel_urls
         self.vnc_url = None
@@ -164,10 +190,32 @@ class SailSandbox(VmSandbox):
         self.network_policy = network_policy
 
     async def terminate(self) -> None:
+        """Terminate the Sailbox, then delete its model-key policy and, unless another Sailbox's policy
+        still names it, the key's secret."""
         try:
             await self._sailbox.terminate.aio()
         except self._sdk.NotFoundError:
             logger.info("Sailbox %s was already gone at terminate", self.sandbox_id)
+        if self._injection is not None:
+            await self._delete_policy(self._injection.policy_id)
+            await self._delete_secret(self._injection.secret)
+
+    async def _delete_policy(self, policy_id: str | None) -> None:
+        await delete_saved_policy(self._sdk, policy_id)
+
+    async def _delete_secret(self, name: str) -> None:
+        try:
+            await (await self._sdk.Secret.get.aio(name)).delete.aio()
+        except self._sdk.SecretInUseError:
+            logger.info("Model-key secret %s is still used by another Sailbox; leaving it", name)
+        except self._sdk.NotFoundError:
+            pass
+        except Exception as exc:  # noqa: BLE001 - the next Sailbox using this key re-sets it; report and go on
+            logger.warning("Could not delete model-key secret %s: %s", name, exc)
+
+    async def install_container_trust(self) -> None:
+        """Have every container started on this Sailbox trust the CA Sail injects the model key behind."""
+        await self._sailbox.fs.write.aio(DOCKER_SHIM_PATH, docker_shim(), mode=0o755)
 
     async def exec(self, *command: str) -> _SailProcess | _CompletedProcess:
         """Run argv to completion. A leading ``sudo`` is dropped (commands already run as root, and the
@@ -185,6 +233,8 @@ class SailSandbox(VmSandbox):
 
     async def _run(self, *command: str, timeout: Optional[int] = None) -> _SailProcess | _CompletedProcess:
         argv = list(command[1:] if command[:1] == ("sudo",) else command)
+        if self._injection is not None:
+            argv = [self._injection.scrub(arg) for arg in argv]
         try:
             process = await self._sailbox.exec.aio(
                 argv, timeout=timeout, output_mode="pipe", idempotency_key=uuid.uuid4().hex,
@@ -231,12 +281,34 @@ class SailSandbox(VmSandbox):
             raise RuntimeError(f"Sailbox {self.sandbox_id} has no Docker Compose v2: {(stderr or stdout).strip()}")
 
     async def _write_bytes_to_vm_path(self, data: bytes, vm_path: str) -> None:
+        if self._injection is not None:
+            data = self._injection.scrub_bytes(data)
         await self._sailbox.fs.write.aio(vm_path, data)
 
     async def apply_network_policy(self, policy: NetworkPolicy) -> None:
-        """Replace the Sailbox's egress policy; applies to new connections."""
-        await self._sailbox.set_egress_policy.aio(egress_document(policy))
+        """Replace the Sailbox's egress policy; applies to new connections. A model-key injection needs a
+        saved policy (only those can name a secret), so a new one replaces the old, which is deleted."""
+        if self._injection is None:
+            await self._sailbox.set_egress_policy.aio(egress_document(policy))
+        else:
+            saved = await self._sdk.EgressPolicy.create.aio(f"agentenv-{uuid.uuid4().hex}", egress_document(policy, self._injection))
+            await self._sailbox.set_egress_policy.aio(saved)
+            previous, self._injection.policy_id = self._injection.policy_id, saved.id
+            await self._delete_policy(previous)
         self.network_policy = policy
+
+    def adopt_applied_policy(self, applied: Any) -> NetworkPolicy | None:
+        """The agent-env policy Sail reports applied (``Sailbox.egress_policy``), or None when it can't be
+        represented: a saved policy counts only when it carries this Sailbox's model-key injection."""
+        if applied is None:
+            return None
+        document = getattr(applied, "document", None)
+        if getattr(applied, "policy_id", None) is not None:
+            saved = ModelKeyInjection.from_document(document, applied.policy_id)
+            if self._injection is None or not self._injection.matches(saved):
+                return None
+            self._injection.policy_id = applied.policy_id
+        return policy_from_document(document, self._injection)
 
     def _known_policy(self, purpose: str) -> NetworkPolicy:
         if self.network_policy is None:
@@ -257,8 +329,7 @@ class SailSandbox(VmSandbox):
             return
         lock = _policy_locks.setdefault((asyncio.get_running_loop(), self.sandbox_id), asyncio.Lock())
         async with lock:
-            applied = (await self._sdk.Sailbox.get.aio(self.sandbox_id)).egress_policy
-            self.network_policy = policy_from_document(applied.document) if applied and applied.policy_id is None else None
+            self.network_policy = self.adopt_applied_policy((await self._sdk.Sailbox.get.aio(self.sandbox_id)).egress_policy)
             policy = self._known_policy(purpose)
             if not policy.restricts_egress:
                 return

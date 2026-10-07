@@ -8,11 +8,14 @@ reason otherwise. The test never reads or prints the API key.
 from __future__ import annotations
 
 import hashlib
+import json
+import secrets
 
 import httpx
 import pytest
 import pytest_asyncio
 
+from agent_env.providers.sandbox_providers.sail.model_key import PLACEHOLDER, secret_name
 from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy
 from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider
 from tst.util.capabilities import skip_without_remote_sandbox
@@ -85,3 +88,34 @@ async def test_an_allowlist_is_enforced_for_containers_in_the_sailbox(sail_provi
         assert reconnected.network_policy == sandbox.network_policy
     finally:
         await sandbox.terminate()
+
+
+_ECHO_HOST = "httpbin.org"
+_CLIENT = (
+    "import json, os, urllib.request; "
+    f"r = urllib.request.Request('https://{_ECHO_HOST}/headers', headers={{'Authorization': 'Bearer ' + os.environ['LITELLM_API_KEY']}}); "
+    "print(json.loads(urllib.request.urlopen(r, timeout=20).read())['headers']['Authorization'])"
+)
+
+
+async def test_an_agents_model_key_is_injected_by_sail_and_never_enters_the_sailbox(sail_provider):
+    """A throwaway key against a header-echo host stands in for the model endpoint."""
+    key = f"sk-agentenv-smoke-{secrets.token_hex(16)}"
+    env = {"LITELLM_API_KEY": key, "LITELLM_BASE_URL": f"https://{_ECHO_HOST}/v1"}
+    sandbox = await sail_provider.create_sandbox(image_name="unused", port=_PORT, env=env, cpu=1.0, memory=2048, timeout=900)
+    try:
+        flags = " ".join(f"-e {name}='{value}'" for name, value in env.items())
+        await sandbox.exec_script(f"docker run -d --name agent-api {flags} public.ecr.aws/docker/library/python:3.12-slim sleep 600 > /dev/null")
+        exit_code, sent, stderr = await sandbox.exec_with_output("docker", "exec", "agent-api", "python", "-c", _CLIENT)
+        assert exit_code == 0, stderr
+        assert sent.strip() == f"Bearer {key}"
+
+        _, inside, _ = await sandbox.exec_with_output("docker", "exec", "agent-api", "printenv", "LITELLM_API_KEY")
+        assert inside.strip() == PLACEHOLDER
+        _, config, _ = await sandbox.exec_with_output("docker", "inspect", "agent-api")
+        assert key not in config and PLACEHOLDER in json.dumps(json.loads(config)[0]["Config"]["Env"])
+    finally:
+        await sandbox.terminate()
+    sdk = sandbox._sdk
+    with pytest.raises(sdk.NotFoundError):
+        await sdk.Secret.get.aio(secret_name(key))
