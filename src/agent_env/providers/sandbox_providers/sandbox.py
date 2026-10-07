@@ -10,6 +10,7 @@ import logging
 import os
 import posixpath
 import shlex
+import stat
 import tempfile
 import time
 import uuid
@@ -17,7 +18,7 @@ import weakref
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import IO, TYPE_CHECKING, Any, AsyncIterator, Iterable, Optional
+from typing import IO, TYPE_CHECKING, Any, AsyncIterator, Callable, Iterable, Optional
 
 from agent_env.config import get_config
 from agent_env.utils.paths import validate_relative_filename
@@ -508,7 +509,7 @@ async def upload_vm_file(sandbox: VmSandbox, vm_path: str, store: ObjectStore, o
 async def push_object_over_exec(sandbox: VmSandbox, store: ObjectStore, object_url: str, vm_path: str) -> None:
     """Write the object at ``object_url`` to ``vm_path`` on the VM host a chunk per exec, the chunk's base64 in the
     script and written at its offset, many execs in flight. The file is checked against the object's sha256."""
-    chunk = sandbox._WFT_CHUNK_BYTES // 4 * 3 // _PUSH_BLOCK * _PUSH_BLOCK
+    chunk = max(_PUSH_BLOCK, sandbox._WFT_CHUNK_BYTES // 4 * 3 // _PUSH_BLOCK * _PUSH_BLOCK)
     quoted = shlex.quote(vm_path)
     await sandbox.exec_script(f": > {quoted}")
     digest = hashlib.sha256()
@@ -553,42 +554,46 @@ async def push_object_over_exec(sandbox: VmSandbox, store: ObjectStore, object_u
 
 
 async def push_object_over_stdin(sandbox: VmSandbox, store: ObjectStore, object_url: str, vm_path: str) -> None:
-    """Write the object at ``object_url`` to ``vm_path`` on the VM host over exec stdin, as up to _PUSH_STREAMS
-    segments at once, or one when the store's reader can't seek. Each segment is written at its offset and checked
-    against its sha256 by the exec that writes it."""
+    """Write the object at ``object_url`` to ``vm_path`` on the VM host over exec stdin. When the store opens it as a
+    file, it goes as up to _PUSH_STREAMS segments at once, all read from that one open file, so one version of it;
+    any other reader goes as one stream. Each segment is written at its offset and checked against its sha256 by the
+    exec that writes it."""
     quoted = shlex.quote(vm_path)
     await sandbox.exec_script(f": > {quoted}")
     with contextlib.closing(await asyncio.to_thread(store.open, object_url)) as source:
-        if not source.seekable():
-            await _push_segment(sandbox, quoted, source, 0, None)
+        descriptor = _file_descriptor(source)
+        if descriptor is None:
+            await _push_segment(sandbox, quoted, lambda size: _read_exactly(source, size), 0, None)
             return
-        size = source.seek(0, os.SEEK_END)
-    segment = max(_PUSH_BLOCK, -(-size // (_PUSH_STREAMS * _PUSH_BLOCK)) * _PUSH_BLOCK)
-
-    async def push(offset: int) -> None:
-        with contextlib.closing(await asyncio.to_thread(store.open, object_url)) as reader:
-            await asyncio.to_thread(reader.seek, offset)
-            await _push_segment(sandbox, quoted, reader, offset, min(segment, size - offset))
-
-    pushes = [asyncio.ensure_future(push(offset)) for offset in range(0, size, segment)]
-    try:
-        await asyncio.gather(*pushes)
-    finally:
-        for pending in pushes:
-            pending.cancel()
-        await asyncio.gather(*pushes, return_exceptions=True)
+        size = os.fstat(descriptor).st_size
+        segment = max(_PUSH_BLOCK, -(-size // (_PUSH_STREAMS * _PUSH_BLOCK)) * _PUSH_BLOCK)
+        pushes = [
+            asyncio.ensure_future(_push_segment(
+                sandbox, quoted, _reader_at(descriptor, offset), offset, min(segment, size - offset)))
+            for offset in range(0, size, segment)
+        ]
+        try:
+            await asyncio.gather(*pushes)
+        finally:
+            for pending in pushes:
+                pending.cancel()
+            await asyncio.gather(*pushes, return_exceptions=True)
 
 
-async def _push_segment(sandbox: VmSandbox, quoted: str, reader: IO[bytes], offset: int, length: int | None) -> None:
-    """Stream ``length`` bytes of ``reader`` (all of it when None) into the VM file at ``offset``, and check them."""
+async def _push_segment(
+    sandbox: VmSandbox, quoted: str, read: Callable[[int], bytes], offset: int, length: int | None,
+) -> None:
+    """Stream ``length`` bytes from ``read`` (all it gives when None) into the VM file at ``offset``, and check them."""
     digest = hashlib.sha256()
 
     async def pieces() -> AsyncIterator[bytes]:
         left = length
         while left is None or left > 0:
-            want = _STDIN_PIECE_BYTES if left is None else min(_STDIN_PIECE_BYTES, left)
-            data = await asyncio.to_thread(_read_exactly, reader, want)
+            data = await asyncio.to_thread(read, _STDIN_PIECE_BYTES if left is None else min(_STDIN_PIECE_BYTES, left))
             if not data:
+                if left is not None:
+                    raise RuntimeError(f"The object ended {left} bytes short of the segment at offset {offset} of "
+                                       f"{quoted}; it changed during the push")
                 return
             digest.update(data)
             if left is not None:
@@ -603,6 +608,32 @@ async def _push_segment(sandbox: VmSandbox, quoted: str, reader: IO[bytes], offs
     if stdout.split()[:1] != [digest.hexdigest()]:
         raise RuntimeError(f"{quoted} on the VM doesn't match at offset {offset}: its sha256 is {stdout.split()[:1]}, "
                            f"the object's {digest.hexdigest()}")
+
+
+def _file_descriptor(reader: IO[bytes]) -> int | None:
+    """The descriptor of the regular file ``reader`` reads, or None when it reads anything else."""
+    try:
+        descriptor = reader.fileno()
+    except (AttributeError, OSError):
+        return None
+    return descriptor if stat.S_ISREG(os.fstat(descriptor).st_mode) else None
+
+
+def _reader_at(descriptor: int, offset: int) -> Callable[[int], bytes]:
+    """Reads the file ``descriptor`` names from ``offset`` on, by position, so readers of one file don't share a
+    file offset."""
+    position = offset
+
+    def read(size: int) -> bytes:
+        nonlocal position
+        parts, got = [], 0
+        while got < size and (part := os.pread(descriptor, size - got, position + got)):
+            parts.append(part)
+            got += len(part)
+        position += got
+        return b"".join(parts)
+
+    return read
 
 
 def _read_exactly(reader: IO[bytes], size: int) -> bytes:

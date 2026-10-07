@@ -93,14 +93,28 @@ class _SilentVm(_ShellVm):
         return 0, "", ""
 
 
-class _UnseekableStore:
+class _StreamStore:
+    """Opens its object as a stream that isn't a file, as a hosted store's reader is."""
+
     def __init__(self, data: bytes) -> None:
         self.data = data
 
     def open(self, object_url: str):
-        stream = io.BytesIO(self.data)
-        stream.seekable = lambda: False
-        return stream
+        return io.BytesIO(self.data)
+
+
+class _ChangingVm(_ShellVm):
+    """Changes the object's file on this machine as the first segment starts, before any of it is read."""
+
+    def __init__(self, change) -> None:
+        super().__init__()
+        self._change = change
+
+    async def _exec_with_stdin(self, script, stdin):
+        if self._change:
+            self._change()
+            self._change = None
+        return await super()._exec_with_stdin(script, stdin)
 
 
 @pytest.fixture
@@ -155,15 +169,52 @@ async def test_an_object_goes_over_stdin_as_that_many_segments_at_once(small, tm
 
 
 @pytest.mark.asyncio
-async def test_a_reader_that_cannot_seek_goes_over_stdin_as_one_stream(small, tmp_path):
+async def test_a_reader_that_isnt_a_file_goes_over_stdin_as_one_stream(small, tmp_path):
     data = os.urandom(5 * BLOCK + 7)
     target = tmp_path / "on the vm.bin"
     vm = _ShellVm()
 
-    await push_object_over_stdin(vm, _UnseekableStore(data), "mem://object", str(target))
+    await push_object_over_stdin(vm, _StreamStore(data), "mem://object", str(target))
 
     assert target.read_bytes() == data
     assert len(vm.stdin_scripts) == 1
+
+
+@pytest.mark.asyncio
+async def test_every_segment_reads_the_version_the_push_opened(small, tmp_path):
+    data = os.urandom(10 * BLOCK)
+    store, url = _stored(tmp_path, data)
+    replacement = tmp_path / "replacement.bin"
+    replacement.write_bytes(os.urandom(10 * BLOCK))
+    target = tmp_path / "on the vm.bin"
+
+    await push_object_over_stdin(
+        _ChangingVm(lambda: os.replace(replacement, store.root / "images" / "object.bin")), store, url, str(target))
+
+    assert target.read_bytes() == data
+
+
+@pytest.mark.asyncio
+async def test_an_object_cut_short_during_the_push_fails_it(small, tmp_path):
+    store, url = _stored(tmp_path, os.urandom(10 * BLOCK))
+
+    with pytest.raises(RuntimeError, match="bytes short of the segment at offset 98304"):
+        await push_object_over_stdin(
+            _ChangingVm(lambda: os.truncate(store.root / "images" / "object.bin", 9 * BLOCK)), store, url,
+            str(tmp_path / "on the vm.bin"))
+
+
+@pytest.mark.asyncio
+async def test_a_command_limit_under_a_block_still_pushes_the_object(small, tmp_path):
+    data = os.urandom(3 * BLOCK + 5)
+    store, url = _stored(tmp_path, data)
+    target = tmp_path / "on the vm.bin"
+    vm = _ShellVm()
+    vm._WFT_CHUNK_BYTES = 1024
+
+    await push_object_over_exec(vm, store, url, str(target))
+
+    assert target.read_bytes() == data
 
 
 @pytest.mark.asyncio
