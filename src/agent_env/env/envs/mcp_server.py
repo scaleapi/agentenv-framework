@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
-import shlex
 import uuid
 from importlib.metadata import version as pkg_version
 from typing import TYPE_CHECKING, Callable, ClassVar, Optional
@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Callable, ClassVar, Optional
 from agentenv_protocol import FilePart, client as protocol_v1
 from agent_env.artifact import Artifact, DockerImageArtifact
 from agent_env.artifact.artifacts.docker_image import GitHubBuildResult, ProgressCallback, refuse_local_github_build
+from agent_env.config import get_config
 from agent_env.entity_refs import EntityRef
 from agent_env.env.env import Env, gateway_url_of
 from agent_env.store.ids import derive_id
@@ -155,11 +156,10 @@ class MCPServerEnv(Env):
         if base_url is not None:
             from agent_env.env.gateway.constants import data_plane_load_timeout_s
             container_path = await self._copy_artifact_into_container(file_artifact)
-            # Sized from the payload actually staged on the VM rather than a flat constant:
-            # a 3.5GB service and a 30KB one were previously given the same 600s, which
-            # killed healthy large loads. Measured after staging so the number reflects real
-            # bytes rather than whatever the artifact document claims.
-            timeout = data_plane_load_timeout_s(await self._staged_artifact_size(container_path))
+            # Sized from the payload rather than a flat constant: a 3.5GB service and a 30KB one
+            # were previously given the same 600s, which killed healthy large loads. The size is
+            # the store's for the object staging copied, not whatever the artifact document claims.
+            timeout = data_plane_load_timeout_s(await self._staged_artifact_size(file_artifact))
             # reset_data previously took the client default (30s), tighter than the load it
             # precedes -- dropping and recreating a large service's schemas can plausibly
             # exceed that. Give it the same budget as the load it belongs to.
@@ -204,26 +204,24 @@ class MCPServerEnv(Env):
             return await self.load_environment_artifact(artifact)
         raise ValueError(f"{type(self).__name__} '{self.id}' cannot load artifact '{getattr(artifact, 'id', '?')}' of type '{getattr(artifact, 'type', '?')}' — expected a EnvironmentArtifact or EnvironmentUniverseArtifact")
 
-    async def _staged_artifact_size(self, container_path: str) -> int | None:
-        """Bytes of the staged payload, or None if it can't be measured.
+    async def _staged_artifact_size(self, file_artifact) -> int | None:
+        """Bytes of the payload staged for ``file_artifact``: its object's size as the store holds it, which
+        staging copies unchanged. None if the store can't say.
 
-        Best-effort on purpose: the size only picks a timeout, so a failed stat should fall
+        Best-effort on purpose: the size only picks a timeout, so a failed lookup should fall
         back to the floor (today's behaviour) rather than fail a load that is fine.
         """
-        if self._sandbox is None:
-            return None
+        object_url = file_artifact.object_url
         try:
-            container_id = await self._env_provider._get_container_id(self._sandbox, self.environment_name)
-            out = await self._sandbox.exec_script(
-                f"docker exec {container_id} stat -c %s {shlex.quote(container_path)}"
-            )
-            return int(out.strip())
+            store = get_config().get_object_store_at(object_url)
+            metadata = await asyncio.to_thread(store.get_object_metadata_at, object_url)
         except Exception as e:  # noqa: BLE001 -- a measurement, not a dependency
             logger.warning(
-                "[%s] could not stat staged payload %s (%s); using the floor timeout",
-                self.environment_name, container_path, e,
+                "[%s] could not size staged payload %s (%s); using the floor timeout",
+                self.environment_name, file_artifact.filename, e,
             )
             return None
+        return metadata.size if metadata is not None else None
 
     async def _copy_artifact_into_container(self, file_artifact) -> str:
         container_path = f"/data/{file_artifact.filename}"

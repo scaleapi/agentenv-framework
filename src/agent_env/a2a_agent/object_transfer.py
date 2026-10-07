@@ -43,7 +43,7 @@ from agent_env.a2a_agent.staging import StagedObjectStore, staged_store
 from agent_env.config import get_config
 from agent_env.store.base import GrantUnavailableError
 from agent_env.store.object_store import DEFAULT_CONTENT_TYPE, ObjectStore
-from agent_env.store.object_store.object_store import readable_url
+from agent_env.store.object_store.object_store import issues_grants_to, readable_url
 from agent_env.store.object_store.local.grant_server import unreachable_hint
 
 if TYPE_CHECKING:
@@ -121,12 +121,7 @@ def choose_transfer(
     (None: unknown). A method without a declared request predates variant negotiation and takes
     the legacy form. None: the agent takes neither form.
     """
-    if (
-        objects is not None
-        and _accepts(method, objects)
-        and store.supports_transfer_grants
-        and store.grants_reach(sandbox_type)
-    ):
+    if objects is not None and _accepts(method, objects) and issues_grants_to(store, sandbox_type):
         return "objects"
     if legacy is not None and (
         method is None or "request" not in method or _accepts(method, legacy)
@@ -152,13 +147,14 @@ def _require_object_form(
     that reach the agent's sandbox, of ``sandbox_type``: agent-env moves objects no other way."""
     if not _accepts(method, _fields(model)):
         raise RuntimeError(f"{operation}: the agent does not advertise the object form")
+    if issues_grants_to(store, sandbox_type):
+        return
     if not store.supports_transfer_grants:
         raise RuntimeError(f"{operation}: the object store does not issue transfer grants")
-    if not store.grants_reach(sandbox_type):
-        raise RuntimeError(
-            f"{operation}: the object store's grants do not reach agents on the "
-            f"{sandbox_type or 'unknown'!r} sandbox provider"
-        )
+    raise RuntimeError(
+        f"{operation}: the object store's grants do not reach agents on the "
+        f"{sandbox_type or 'unknown'!r} sandbox provider"
+    )
 
 
 @dataclass(frozen=True)

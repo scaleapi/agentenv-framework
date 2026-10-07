@@ -1,8 +1,9 @@
 """A server env on the local backend: its one MCP server in a LocalSandbox container, with no gateway and no Modal.
 
 The env deploys, a later process restores its record and loads data into the server, and the teardown step, which
-rebuilds each sandbox from disk, removes the container. Requires a docker daemon; spins up a throwaway ``registry:2``
-and skips if it can't start.
+rebuilds each sandbox from disk, removes the container. A load is timed by the size of the payload it staged, through
+the deploy's own handle and a restored one; and the server's state reads as JSON whether ``data/get`` answers with
+data or with a file bundle. Requires a docker daemon; spins up a throwaway ``registry:2`` and skips if it can't start.
 """
 
 import json
@@ -24,6 +25,7 @@ from agent_env.config import configure, reset_config, set_image_store
 from agent_env.env import legacy_protocol
 from agent_env.env.env import DeployedSandboxEnv, Env
 from agent_env.env.envs.mcp_server import MCPServerEnv
+from agent_env.env.gateway import constants
 from agent_env.store.image_store import LocalRegistryImageStore
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.teardown_sandboxes import TORN_DOWN_KEY, TeardownSandboxesTaskStep
@@ -108,6 +110,30 @@ async def test_a_server_env_deploys_restores_loads_and_tears_down_on_local_conta
     context = await step.execute(TaskStepContext(deployed_envs=[deployed]))
     assert context.metadata[TORN_DOWN_KEY] == [deployed.sandbox_id]
     assert _docker("ps", "-aq", "--filter", f"name=^/{container}$").stdout.strip() == ""
+
+
+@pytest.mark.asyncio
+async def test_a_load_is_timed_by_its_payload_and_the_servers_state_reads_as_json_from_a_file_export(local_stack, monkeypatch):
+    staged_sizes, timeout_for = [], constants.data_plane_load_timeout_s
+    monkeypatch.setattr(constants, "data_plane_load_timeout_s", lambda size: staged_sizes.append(size) or timeout_for(size))
+    uid = uuid.uuid4().hex[:8]
+    env = MCPServerEnv.put(id=f"server-items-{uid}", docker_image_artifact=_put_items_image(f"server-items-{uid}"),
+                           environment_name="items", env_provider_type="server")
+    deployed = await env.deploy(sandbox_type="local", ttl_seconds=900)
+    local_stack.append(f"agent-{deployed.sandbox_id}")
+    artifact = _items_artifact(uid)
+
+    await env.load_environment_artifact(artifact)  # the deploy's container-mode handle
+    await (await Env.from_instance_id(deployed.instance_id)).load_environment_artifact(artifact)  # a restored one
+
+    assert staged_sizes == [len(artifact.get_file_artifact().load())] * 2
+    items = {"items": ["snap-x", "snap-y"]}
+    assert await legacy_protocol.service_state(deployed, None, "items") == items
+    base_url = await legacy_protocol.v1_base_url(deployed, None, "items")
+    card = await protocol_v1.get_card(base_url)
+    await protocol_v1.invoke_extension(base_url, card, "urn:agentenv:export-as-file/v1", {"enabled": True})
+    assert [part.kind for part in (await protocol_v1.get_data(base_url)).parts] == ["file"]
+    assert await legacy_protocol.service_state(deployed, None, "items") == items
 
 
 def _put_items_image(artifact_id: str) -> DockerImageArtifact:

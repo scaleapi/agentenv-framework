@@ -179,6 +179,46 @@ async def test_capture_reads_child_envs_on_the_stored_card_and_takes_legacy_for_
     assert set(json.loads(ctx.metadata["snapshot_json_url"])) == {"calendar", "contacts"}
 
 
+@pytest.mark.asyncio
+async def test_a_service_that_exports_a_file_bundle_is_captured_from_its_export_state(monkeypatch):
+    """calendar answers data/get with a bundle of its database, which is not JSON state: its state is read from
+    /export-state at the card's address rather than skipped. contacts answers with its state."""
+    import httpx
+    from agentenv_protocol import DataPart, uploaded_file_part
+    from agentenv_protocol.client import GetDataResponse
+
+    bodies: dict[str, dict] = {}
+
+    class _BodyS3(_StubS3):
+        def put_object(self, Bucket, Key, Body, ContentType):  # noqa: N803
+            bodies[Key.rsplit("/", 1)[-1]] = json.loads(Body)
+
+    store = S3ObjectStore(_BodyS3(), "artifact-bucket")
+    monkeypatch.setattr(artifact_mod, "EnvironmentUniverseArtifact", type("U", (), {"get": staticmethod(lambda _id: _StubUniverse())}))
+    monkeypatch.setattr(config_mod, "get_config", lambda: type("Cfg", (), {"get_object_store": lambda self: store})())
+
+    async def _get_data(base, timeout=30):
+        if base.endswith("/mcp-calendar"):
+            return GetDataResponse(parts=[uploaded_file_part("calendar.zip", name="calendar.zip", mime_type="application/zip")])
+        return GetDataResponse(parts=[DataPart(data={"contacts": 4})])
+
+    real = httpx.AsyncClient
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == "https://sandbox.example/sb-1/svc/mcp-calendar/export-state":
+            return httpx.Response(200, json={"events": 7})
+        return httpx.Response(404)
+
+    monkeypatch.setattr(protocol_v1, "get_data", _get_data)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.MockTransport(handle)))
+
+    ctx = _carded_ctx(await _card("mcp-calendar", "mcp-contacts"))
+    await _step()._capture_universe_state(ctx, _PREFIX)
+
+    assert bodies == {"calendar.json": {"events": 7}, "contacts.json": {"contacts": 4}}
+    assert set(json.loads(ctx.metadata["snapshot_json_url"])) == {"calendar", "contacts"}
+
+
 async def _card(*keys: str) -> dict:
     """The real gateway's composed card over child envs at the given gateway keys (`mcp-{name}` or `{name}`)."""
     from agent_env.env.gateway.gateway import Gateway
