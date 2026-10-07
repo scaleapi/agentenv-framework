@@ -341,7 +341,7 @@ class RunDockerContainerTaskStep(TaskStep):
         for idx, (filename, fa) in enumerate(file_artifacts.items(), 1):
             dest_path = loaded[filename]
             logger.info(f"  [{idx}/{total}] {fa.object_url} -> {dest_path}")
-            await sandbox.load_s3_file(fa.object_url, dest_path)
+            await sandbox.load_object_file(fa.object_url, dest_path)
 
     @staticmethod
     async def _stage_zip_from_url(sandbox, url: str, work_dir: str) -> None:
@@ -369,7 +369,7 @@ class RunDockerContainerTaskStep(TaskStep):
         archive_path = posixpath.join(work_dir, "_context.zip")
         logger.info(f"Downloading docker context from {url} into {work_dir}")
         if from_store:
-            await sandbox.load_s3_file(url, archive_path)
+            await sandbox.load_object_file(url, archive_path)
         else:
             await sandbox.exec_script(
                 f"curl -fsSL {shlex.quote(url)} -o {shlex.quote(archive_path)}"

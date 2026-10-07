@@ -105,7 +105,7 @@ _KEEPALIVE_CMD = ("sh", "-c", _MAIN_SCRIPT)
 class ModalVmSandbox(VmSandbox):
     """A Modal VM sandbox (vm_runtime) presented through the VmSandbox contract.
 
-    Subclasses VmSandbox so it inherits exec_script / load_docker_images / load_s3_file /
+    Subclasses VmSandbox so it inherits exec_script / load_docker_images / load_object_file /
     write_file_* unchanged — they are built on exec_with_output ->
     exec + an in-VM Docker daemon, which this class provides. Only the Modal-specific
     pieces (raw exec, terminate, dockerd startup) are implemented here.
@@ -194,7 +194,7 @@ class ModalVmSandbox(VmSandbox):
 
     async def _download_object_to_vm(self, object_url: str, vm_path: str) -> None:
         """Presigned objects go through aria2c (see _DL_*); a store that cannot presign keeps the base path."""
-        store = get_config().get_object_store()
+        store = get_config().get_object_store_at(object_url)
         signed = await asyncio.to_thread(store.signed_get_url, object_url)
         signed_at = time.monotonic()
         if signed is None:

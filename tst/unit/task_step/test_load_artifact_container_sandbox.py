@@ -68,12 +68,12 @@ async def test_a_container_sandbox_is_written_directly(universe, monkeypatch):
     assert sorted(c.args for c in sandbox.exec.await_args_list) == [
         ("mkdir", "-p", "/work/inputs"), ("mkdir", "-p", "/work/inputs/kb"),
     ]
-    assert sorted(c.args for c in sandbox.write_file_from_s3.await_args_list) == [
+    assert sorted(c.args for c in sandbox.write_file_from_object.await_args_list) == [
         ("s3://bucket/INDEX.md", "/work/inputs/kb/INDEX.md"),
         ("s3://bucket/task.json", "/work/inputs/task.json"),
     ]
     sandbox.exec_script.assert_not_awaited()
-    sandbox.load_s3_file.assert_not_awaited()
+    sandbox.load_object_file.assert_not_awaited()
     (loaded,) = ctx.metadata["loaded_file_artifact_universes"]
     assert loaded["sandbox_name"] == "bundler"
     assert loaded["destination_path"] == "/work/inputs"
@@ -91,8 +91,8 @@ async def test_a_container_on_a_vm_backed_provider_is_loaded_through_its_contain
 
     scripts = [c.args[0] for c in sandbox.exec_script.await_args_list]
     assert scripts and all(s.startswith("docker exec -u 0 agent-local-1 mkdir -p ") for s in scripts)
-    assert len(sandbox.write_file_from_s3.await_args_list) == 2
-    sandbox.load_s3_file.assert_not_awaited()
+    assert len(sandbox.write_file_from_object.await_args_list) == 2
+    sandbox.load_object_file.assert_not_awaited()
 
 
 @pytest.mark.asyncio

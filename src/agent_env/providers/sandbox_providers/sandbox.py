@@ -11,6 +11,7 @@ import shlex
 import tempfile
 import time
 import uuid
+import warnings
 import weakref
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
@@ -162,9 +163,17 @@ class Sandbox(ABC):
         exit_code = await process.wait()
         return exit_code, stdout.decode(), stderr.decode()
 
+    async def write_file_from_object(self, object_url: str, destination_path: str) -> None:
+        """Write the object store's object at ``object_url`` into the agent process's filesystem at
+        ``destination_path``."""
+        raise NotImplementedError(f"{self.__class__.__name__} does not support write_file_from_object")
+
     async def write_file_from_s3(self, s3_url: str, destination_path: str) -> None:
-        """Write a file from S3 into the agent process's filesystem at destination_path."""
-        raise NotImplementedError(f"{self.__class__.__name__} does not support write_file_from_s3")
+        """Deprecated: ``write_file_from_object``."""
+        warnings.warn(
+            "Sandbox.write_file_from_s3 is deprecated; use write_file_from_object", DeprecationWarning, stacklevel=2
+        )
+        await self.write_file_from_object(s3_url, destination_path)
 
     async def write_file_from_url(self, url: str, destination_path: str) -> None:
         """Download an HTTP(S) URL into the agent process's filesystem at destination_path."""
@@ -269,7 +278,7 @@ class VmSandbox(Sandbox):
         """Each image tarball's signed URL, or None where the store cannot sign one. Signed
         concurrently and off the event loop, since a remote signer is a network round trip."""
         logger.info(f"Loading {len(artifacts)} Docker image(s) into the sandbox...")
-        object_store = get_config().get_object_store()
+        config = get_config()
         slots = _sign_slots.setdefault(asyncio.get_running_loop(), asyncio.Semaphore(_CONCURRENT_SIGNS))
         failed = False
 
@@ -279,7 +288,8 @@ class VmSandbox(Sandbox):
                 if failed:
                     return None
                 try:
-                    return await asyncio.to_thread(object_store.signed_get_url, artifact.tar_gz_object_url)
+                    store = config.get_object_store_at(artifact.tar_gz_object_url)
+                    return await asyncio.to_thread(store.signed_get_url, artifact.tar_gz_object_url)
                 except BaseException:
                     failed = True
                     raise
@@ -315,13 +325,18 @@ class VmSandbox(Sandbox):
                 raise RuntimeError(f"{artifact.image_name} image not found. stdout: {stdout}")
         logger.info("  All images loaded successfully")
 
+    async def load_object_file(self, object_url: str, destination_path: str) -> None:
+        """Download the object store's object at ``object_url`` onto the VM host at ``destination_path``."""
+        await self._download_object_to_vm(object_url, destination_path)
+
     async def load_s3_file(self, s3_url: str, destination_path: str) -> None:
-        """Download an object from the object store into the sandbox."""
-        await self._download_object_to_vm(s3_url, destination_path)
+        """Deprecated: ``load_object_file``."""
+        warnings.warn("VmSandbox.load_s3_file is deprecated; use load_object_file", DeprecationWarning, stacklevel=2)
+        await self.load_object_file(s3_url, destination_path)
 
     async def _download_object_to_vm(self, object_url: str, vm_path: str) -> None:
         """Place object_url onto the VM host at vm_path, backend-agnostically."""
-        object_store = get_config().get_object_store()
+        object_store = get_config().get_object_store_at(object_url)
         signed = await asyncio.to_thread(object_store.signed_get_url, object_url)
         if signed is not None:
             await self.exec_script(f"curl -fsSL {CURL_RETRY_FLAGS} {shlex.quote(signed)} -o {shlex.quote(vm_path)}")
@@ -361,10 +376,10 @@ class VmSandbox(Sandbox):
         host's /tmp, as local ones do."""
         return f"/tmp/_{kind}_{uuid.uuid4().hex[:12]}_{destination_path.replace('/', '_').lstrip('_')}"
 
-    async def write_file_from_s3(self, s3_url: str, destination_path: str) -> None:
-        vm_path = self._staging_path("s3", destination_path)
+    async def write_file_from_object(self, object_url: str, destination_path: str) -> None:
+        vm_path = self._staging_path("obj", destination_path)
         try:
-            await self.load_s3_file(s3_url, vm_path)
+            await self.load_object_file(object_url, vm_path)
             await self._copy_into_container(vm_path, destination_path)
         finally:
             await self._remove_vm_temp_file(vm_path)
@@ -438,7 +453,7 @@ async def stage_files_into_container(sandbox: Sandbox, file_artifacts: dict[str,
     async def _stage(filename: str, file_artifact: Any) -> None:
         async with sem:
             logger.info(f"  {file_artifact.object_url} -> {loaded[filename]}")
-            await sandbox.write_file_from_s3(file_artifact.object_url, loaded[filename])
+            await sandbox.write_file_from_object(file_artifact.object_url, loaded[filename])
 
     await asyncio.gather(*(_stage(fn, fa) for fn, fa in file_artifacts.items()))
     return loaded

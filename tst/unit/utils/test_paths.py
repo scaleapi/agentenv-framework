@@ -41,7 +41,7 @@ async def test_agent_loader_rejects_absolute_filename(monkeypatch):
         async def exec(self, *a):
             raise AssertionError("must not reach the sandbox")
 
-        async def write_file_from_s3(self, *a):
+        async def write_file_from_object(self, *a):
             raise AssertionError("must not write anything")
 
     class _Provider:

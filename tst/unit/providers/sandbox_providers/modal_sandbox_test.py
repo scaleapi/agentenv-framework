@@ -6,7 +6,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
+from agent_env.config import get_config
+from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandbox, ModalSandboxProvider
+from agent_env.store import set_object_store
+from tst.unit.store.fakes import ConfiguredObjectStore
 
 
 class _BareSandboxTimeoutError(Exception):
@@ -245,3 +248,18 @@ async def test_vnc_port_controls_the_tunnel_set_and_the_vnc_url(
 
     assert mock_create.aio.call_args.kwargs["encrypted_ports"] == expected_ports
     assert sandbox.vnc_url == expected_vnc_url
+
+
+@pytest.mark.asyncio
+async def test_write_file_from_object_reads_a_url_from_the_store_that_holds_it(cli_routing):
+    set_object_store(ConfiguredObjectStore())
+    url = get_config().get_object_store_for("@local/~/t").put("objects/a.json", b"LOCAL")
+    sandbox = ModalSandbox(MagicMock(), tunnel_urls={})
+    written = []
+
+    async def collect(chunks, destination_path):
+        written.append((b"".join([chunk async for chunk in chunks]), destination_path))
+
+    sandbox._write_stream_via_exec = collect
+    await sandbox.write_file_from_object(url, "/data/a.json")
+    assert written == [(b"LOCAL", "/data/a.json")]

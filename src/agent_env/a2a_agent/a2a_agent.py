@@ -241,11 +241,11 @@ class A2AAgent:
         entrypoint_path = f"{target_root}/{cli_artifact.entrypoint}"
         env_dir = posixpath.dirname(entrypoint_path)
 
-        # write .env first — write_file_from_text creates the parent dir; write_file_from_s3 does not.
+        # write .env first — write_file_from_text creates the parent dir; write_file_from_object does not.
         await sandbox.write_file_from_text(f"AGENT_ENV_GATEWAY_URL={gateway_url}\n", f"{env_dir}/.env")
 
         for rel_path, file_artifact in cli_artifact.get_cli_files().get_file_artifacts().items():
-            await sandbox.write_file_from_s3(file_artifact.object_url, f"{target_root}/{rel_path}")
+            await sandbox.write_file_from_object(file_artifact.object_url, f"{target_root}/{rel_path}")
 
         if isinstance(sandbox, VmSandbox):
             await sandbox.exec_script(f"docker exec -u 0 {shlex.quote(sandbox.container_name)} chmod +x {entrypoint_path}")

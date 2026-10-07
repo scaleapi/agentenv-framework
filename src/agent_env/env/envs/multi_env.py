@@ -353,9 +353,9 @@ class MultiEnv(Env):
                 dest_path = f"{dest_dir}/{file_artifact.filename}"
                 logger.info(f"Downloading metadata '{key}' -> {dest_path}")
                 if self._sandbox.mode == SANDBOX_MODE_CONTAINER:
-                    await self._sandbox.write_file_from_s3(file_artifact.object_url, dest_path)
+                    await self._sandbox.write_file_from_object(file_artifact.object_url, dest_path)
                 else:
-                    await self._sandbox.load_s3_file(file_artifact.object_url, dest_path)
+                    await self._sandbox.load_object_file(file_artifact.object_url, dest_path)
                 metadata_filepaths[key] = dest_path
                 logger.info(f"Successfully downloaded metadata '{key}'")
         return LoadEnvironmentUniverseArtifactResult(

@@ -24,9 +24,10 @@ import pytest
 from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.task_step.task_steps.verifiers import rubrics_verifier
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
-from agent_env.config import set_object_store
+from agent_env.config import get_config, set_object_store
 from agent_env.task_step.task_steps.verifiers.judge_utils.trajectory_filter import CompactionType, TrajectoryFilter
 from tst.unit.event_loop_probe import on_event_loop
+from tst.unit.store.fakes import ConfiguredObjectStore
 
 
 def _verifier(**kw) -> RubricsVerifierTaskStep:
@@ -187,13 +188,13 @@ async def test_single_turn_does_not_take_multiturn_path(monkeypatch):
 async def test_load_per_turn_trajectories_no_filter_writes_each_turn():
     v = _verifier()
     sandbox = MagicMock()
-    sandbox.write_file_from_s3 = AsyncMock()
+    sandbox.write_file_from_object = AsyncMock()
     sandbox.write_file_from_text = AsyncMock()
 
     await v._load_per_turn_trajectories(
         sandbox, ["s3://a/1.json", "s3://a/2.json"], "/tmp/d", None)
 
-    dests = [call.args[1] for call in sandbox.write_file_from_s3.call_args_list]
+    dests = [call.args[1] for call in sandbox.write_file_from_object.call_args_list]
     assert dests == ["/tmp/d/turn_01.json", "/tmp/d/turn_02.json"]
     sandbox.write_file_from_text.assert_not_called()
 
@@ -204,12 +205,12 @@ async def test_load_per_turn_trajectories_default_filter_compacts_and_namespaces
     v = _verifier()
     monkeypatch.setattr(v, "_read_trajectory_text", lambda uri: spans)
     sandbox = MagicMock()
-    sandbox.write_file_from_s3 = AsyncMock()
+    sandbox.write_file_from_object = AsyncMock()
     sandbox.write_file_from_text = AsyncMock()
 
     await v._load_per_turn_trajectories(sandbox, ["u1", "u2"], "/tmp/d", TrajectoryFilter())
 
-    sandbox.write_file_from_s3.assert_not_called()          # compacted -> written as text
+    sandbox.write_file_from_object.assert_not_called()          # compacted -> written as text
     dests = [call.args[1] for call in sandbox.write_file_from_text.call_args_list]
     assert "/tmp/d/turn_01.json" in dests and "/tmp/d/turn_02.json" in dests
     tool_dests = [d for d in dests if "tool_call_result" in d]
@@ -355,3 +356,17 @@ async def test_the_direct_judge_does_not_hold_the_externalized_tool_results_thro
     await v.execute(TaskStepContext(prompt_responses=[_pr(agent_trajectory_s3_uri="s3://t/raw.json")]))
 
     assert held and alive == [False]
+
+
+def test_a_trajectory_the_local_store_holds_is_read_from_it(cli_routing):
+    """Read from the store holding the handed-in url; the compacted copy is a new object, minted in the
+    configured store."""
+    configured = ConfiguredObjectStore()
+    set_object_store(configured)
+    spans = [_tool_span("t", {"result": "x" * 2000})]
+    url = get_config().get_object_store_for("@local/~/t").put("trajectories/raw.json", json.dumps(spans).encode())
+    v = _verifier(trajectory_filter=TrajectoryFilter())
+
+    assert json.loads(v._read_trajectory_text(url)) == spans
+    compacted, _ = v._filter_trajectory(url, TrajectoryFilter())
+    assert configured.owns(compacted)

@@ -185,7 +185,7 @@ class WebsiteEnv(Env):
         container_path = f"/tmp/data/{filename}"
         compose = f"docker compose -f {DOCKER_COMPOSE_PATH}"
 
-        await self._sandbox.load_s3_file(file_artifact.object_url, vm_path)
+        await self._sandbox.load_object_file(file_artifact.object_url, vm_path)
         await self._sandbox.exec_script(f"{compose} exec -T {backend_service} mkdir -p /tmp/data")
         await self._sandbox.exec_script(f"{compose} cp {vm_path} {backend_service}:{container_path}")
         await self._sandbox.exec_script(f"rm -f {vm_path}")

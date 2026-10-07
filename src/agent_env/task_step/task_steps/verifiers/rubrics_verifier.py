@@ -586,7 +586,7 @@ class RubricsVerifierTaskStep(TaskStep):
                 if multiturn:
                     await self._load_per_turn_trajectories(sandbox, per_turn_uris, multiturn_dir, filter_to_apply)
                 else:
-                    await sandbox.write_file_from_s3(compacted.container_s3_uri, self.TRAJECTORY_CONTAINER_PATH)
+                    await sandbox.write_file_from_object(compacted.container_s3_uri, self.TRAJECTORY_CONTAINER_PATH)
                     if compacted.tool_result_files:
                         await self._load_tool_result_files(sandbox, compacted.tool_result_files)
                         compacted.tool_result_files = []
@@ -816,11 +816,10 @@ class RubricsVerifierTaskStep(TaskStep):
         from agent_env.config import get_config
 
         config = get_config()
-        object_store = config.get_object_store()
-        spans = json.loads(object_store.get(s3_uri))
+        spans = json.loads(config.get_object_store_at(s3_uri).get(s3_uri))
         filtered, tool_result_files = compact_otel_trajectory(spans, trajectory_filter)
         compact_key = f"{config.get_artifact_key_prefix()}compacted-trajectories/{uuid.uuid4().hex}.json"
-        object_url = object_store.put(compact_key, json.dumps(filtered).encode(), content_type="application/json")
+        object_url = config.get_object_store().put(compact_key, json.dumps(filtered).encode(), content_type="application/json")
         return object_url, tool_result_files
 
     async def _load_tool_result_files(self, sandbox, tool_result_files: list[tuple[str, str]]) -> None:
@@ -833,11 +832,11 @@ class RubricsVerifierTaskStep(TaskStep):
         """Load trajectory from S3 into an existing agent's container."""
         from agent_env.providers.sandbox_providers.sandbox_provider import get_agent_sandbox_provider
         sandbox = await get_agent_sandbox_provider().get_sandbox(sandbox_id)
-        await sandbox.write_file_from_s3(s3_uri, self.TRAJECTORY_CONTAINER_PATH)
+        await sandbox.write_file_from_object(s3_uri, self.TRAJECTORY_CONTAINER_PATH)
 
     def _read_trajectory_text(self, s3_uri: str) -> str:
         from agent_env.config import get_config
-        return get_config().get_object_store().get(s3_uri).decode("utf-8", errors="replace")
+        return get_config().get_object_store_at(s3_uri).get(s3_uri).decode("utf-8", errors="replace")
 
     async def _load_per_turn_trajectories(
         self, sandbox, per_turn_uris: list[str], container_dir: str,
@@ -860,7 +859,7 @@ class RubricsVerifierTaskStep(TaskStep):
                 await sandbox.write_file_from_text(content, dest)
                 tool_result_files.extend(turn_files)
             else:
-                await sandbox.write_file_from_s3(uri, dest)
+                await sandbox.write_file_from_object(uri, dest)
         if tool_result_files:
             await self._load_tool_result_files(sandbox, tool_result_files)
         logger.info(

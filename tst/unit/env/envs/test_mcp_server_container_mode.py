@@ -62,8 +62,8 @@ async def test_a_container_deploy_stages_into_the_server_and_records_every_conta
     assert (deployed.sandbox_id, deployed.sandbox_type) == ("gw", "modal")
     assert deployed.sandbox_ids == _RECORDED
     assert {i for i, _ in _env_sandbox_ids(deployed)} == {sb.sandbox_id for sb in env._env_provider._container_sandboxes}
-    sandboxes["srv"].write_file_from_s3.assert_awaited_once_with("s3://bucket/email.json", "/data/email.json")
-    sandboxes["gw"].write_file_from_s3.assert_not_awaited()
+    sandboxes["srv"].write_file_from_object.assert_awaited_once_with("s3://bucket/email.json", "/data/email.json")
+    sandboxes["gw"].write_file_from_object.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -128,8 +128,8 @@ async def test_a_restored_container_env_stages_into_the_server_and_closes_every_
     await env.close()
 
     assert env._sandbox is None
-    reattached["srv"].write_file_from_s3.assert_awaited_once_with("s3://bucket/email.json", "/data/email.json")
-    reattached["gw"].write_file_from_s3.assert_not_awaited()
+    reattached["srv"].write_file_from_object.assert_awaited_once_with("s3://bucket/email.json", "/data/email.json")
+    reattached["gw"].write_file_from_object.assert_not_awaited()
     assert [name for name, sb in reattached.items() if sb.terminate.await_count == 0] == []
 
 
@@ -260,7 +260,7 @@ async def test_a_deploy_without_a_gateway_loads_straight_into_the_server(sent):
     await _deploy(env, sandboxes)
     await env.load_environment_artifact(_artifact())
 
-    sandboxes["srv"].write_file_from_s3.assert_awaited_once_with("s3://bucket/email.json", "/data/email.json")
+    sandboxes["srv"].write_file_from_object.assert_awaited_once_with("s3://bucket/email.json", "/data/email.json")
     assert {str(r.url) for r in sent} == {f"{_SRV}/agentenv"}
 
 
@@ -275,7 +275,7 @@ async def test_a_restored_env_without_a_gateway_loads_into_the_server_and_closes
     await env.load_environment_artifact(_artifact())
     await env.close()
 
-    reattached["srv"].write_file_from_s3.assert_awaited_once_with("s3://bucket/email.json", "/data/email.json")
+    reattached["srv"].write_file_from_object.assert_awaited_once_with("s3://bucket/email.json", "/data/email.json")
     assert {str(r.url) for r in sent} == {f"{_SRV}/agentenv"} and reattached["srv"].mode == SANDBOX_MODE_CONTAINER
     assert reattached["srv"].terminate.await_count > 0
 
@@ -312,7 +312,7 @@ def _env(env_provider_type: str = "gateway") -> MCPServerEnv:
 
 
 def _sandbox(sandbox_id: str, mode: str = SANDBOX_MODE_CONTAINER, sandbox_type: str = "modal") -> MagicMock:
-    return MagicMock(sandbox_id=sandbox_id, mode=mode, type=sandbox_type, terminate=AsyncMock(), write_file_from_s3=AsyncMock())
+    return MagicMock(sandbox_id=sandbox_id, mode=mode, type=sandbox_type, terminate=AsyncMock(), write_file_from_object=AsyncMock())
 
 
 def _containers() -> dict[str, MagicMock]:

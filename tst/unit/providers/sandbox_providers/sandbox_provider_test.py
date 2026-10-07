@@ -320,7 +320,7 @@ class _RecordingVm(VmSandbox):
 
 
 @pytest.mark.asyncio
-async def test_load_s3_file_curl_retries_dns_failures():
+async def test_load_object_file_curl_retries_dns_failures():
     """The in-VM S3 download must use --retry-all-errors so a transient
     `curl: (6) Could not resolve host` is retried locally (curl does not retry
     exit 6 by default, and --retry-connrefused does not cover it)."""
@@ -334,7 +334,7 @@ async def test_load_s3_file_curl_retries_dns_failures():
     set_object_store(_Signing())
     try:
         vm = _RecordingVm()
-        await vm.load_s3_file("s3://artifact-bucket/foo/bar.tar", "/tmp/bar.tar")
+        await vm.load_object_file("s3://artifact-bucket/foo/bar.tar", "/tmp/bar.tar")
     finally:
         reset_config()
 

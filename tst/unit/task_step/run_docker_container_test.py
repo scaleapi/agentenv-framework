@@ -133,7 +133,7 @@ class _StagingSandbox:
         self.loaded: list[tuple[str, str]] = []
         self.scripts: list[str] = []
 
-    async def load_s3_file(self, url, destination_path):
+    async def load_object_file(self, url, destination_path):
         self.loaded.append((url, destination_path))
 
     async def exec_script(self, script):

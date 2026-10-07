@@ -39,11 +39,11 @@ class _Sandbox:
     async def docker_cp(self, source, destination, *, remove_source=False):
         self.commands.append(f"docker cp {source} {destination}")
 
-    async def load_s3_file(self, s3_url, destination_path):
-        self.pulls.append((s3_url, destination_path))
+    async def load_object_file(self, object_url, destination_path):
+        self.pulls.append((object_url, destination_path))
 
-    async def write_file_from_s3(self, s3_url, destination_path):
-        self.pulls.append((s3_url, destination_path))
+    async def write_file_from_object(self, object_url, destination_path):
+        self.pulls.append((object_url, destination_path))
 
 
 def _provider(sandbox: _Sandbox):

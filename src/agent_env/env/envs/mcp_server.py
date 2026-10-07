@@ -226,7 +226,7 @@ class MCPServerEnv(Env):
     async def _copy_artifact_into_container(self, file_artifact) -> str:
         container_path = f"/data/{file_artifact.filename}"
         if self._sandbox.mode == SANDBOX_MODE_CONTAINER:
-            await self._sandbox.write_file_from_s3(file_artifact.object_url, container_path)
+            await self._sandbox.write_file_from_object(file_artifact.object_url, container_path)
         else:
             # Stage on the disk-backed app dir, not /tmp (tmpfs/RAM): a large
             # artifact (github ~8GB) OOM-kills the copy under concurrent loads.
@@ -235,7 +235,7 @@ class MCPServerEnv(Env):
             stage_dir = f"{GATEWAY_APP_DIR}/_artifact_staging"
             vm_temp_path = f"{stage_dir}/{self.environment_name}-{uuid.uuid4().hex[:8]}-{file_artifact.filename}"
             await self._sandbox.exec_script(f"mkdir -p {stage_dir}")
-            await self._sandbox.load_s3_file(file_artifact.object_url, vm_temp_path)
+            await self._sandbox.load_object_file(file_artifact.object_url, vm_temp_path)
             container_id = await self._env_provider._get_container_id(self._sandbox, self.environment_name)
             await self._sandbox.exec_script(f"docker exec {container_id} mkdir -p /data")
             await self._sandbox.docker_cp(vm_temp_path, f"{container_id}:{container_path}")

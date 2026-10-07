@@ -227,7 +227,7 @@ class InstallAgentTaskStep(TaskStep):
         agent_ctx_tar = f"{work_dir}/agent-ctx.tar.gz"
         await sandbox.exec_script(f"rm -rf {shlex.quote(work_dir)} && mkdir -p {shlex.quote(work_dir)}")
         logger.info(f"Downloading agent build context {agent.docker_image_artifact.build_context_object_url} -> {agent_ctx_tar}")
-        await sandbox.load_s3_file(agent.docker_image_artifact.build_context_object_url, agent_ctx_tar)
+        await sandbox.load_object_file(agent.docker_image_artifact.build_context_object_url, agent_ctx_tar)
 
         # Resolve each required_param via the registry, shlex.quote so str.format
         # substitution produces shell-safe tokens.

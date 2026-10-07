@@ -264,7 +264,7 @@ class LoadArtifactTaskStep(TaskStep):
         return _LoadInputs(artifacts=resolved_artifacts, urls=urls, destination_path=destination_path)
 
     async def _load_url_onto_vm(self, sandbox, url: str, destination_path: str) -> None:
-        """Host counterpart of ``sandbox.load_s3_file``; ``write_file_from_url`` targets a container instead."""
+        """Host counterpart of ``sandbox.load_object_file``; ``write_file_from_url`` targets a container instead."""
         from agent_env.providers.sandbox_providers.sandbox import CURL_RETRY_FLAGS
 
         parent = posixpath.dirname(destination_path)
@@ -643,7 +643,7 @@ async def _stage_environment_payload_into_container(
     if isinstance(sandbox, VmSandbox):
         vm_payload = f"/tmp/_svc_{token}_{safe_name}"
         vm_stage = f"/tmp/_svc_stage_{token}"
-        await sandbox.load_s3_file(file_artifact.object_url, vm_payload)
+        await sandbox.load_object_file(file_artifact.object_url, vm_payload)
         try:
             # exec_script raises on a non-zero exit, but only with the raw
             # script output — re-raise with the artifact context so a failed
@@ -679,7 +679,7 @@ async def _stage_environment_payload_into_container(
         # Container-mode sandbox: the sandbox IS the agent container — expand
         # in place at the destination.
         payload_tmp = f"/tmp/_svc_{token}_{safe_name}"
-        await sandbox.write_file_from_s3(file_artifact.object_url, payload_tmp)
+        await sandbox.write_file_from_object(file_artifact.object_url, payload_tmp)
         try:
             exit_code, out, err = await sandbox.exec_with_output(
                 "python3", "-c", _ENVIRONMENT_PAYLOAD_EXPAND_SCRIPT, payload_tmp, destination
@@ -712,7 +712,7 @@ async def _stage_environment_payload_into_container(
 
 
 async def _load_universe_onto_vm(sandbox, universe, destination: str) -> list[str]:
-    """Pull each file in `universe` from S3 straight onto the VM host — no temp file, no copy inward."""
+    """Pull each file in `universe` from the object store straight onto the VM host — no temp file, no copy inward."""
     file_artifacts = universe.get_file_artifacts()
     if not file_artifacts:
         logger.warning(
@@ -734,7 +734,7 @@ async def _load_universe_onto_vm(sandbox, universe, destination: str) -> list[st
         logger.info(f"  [{idx}/{total}] {fa.object_url} -> {dest_path}")
         if parent and parent != destination:
             await sandbox.exec_script(f"mkdir -p {shlex.quote(parent)}")
-        await sandbox.load_s3_file(fa.object_url, dest_path)
+        await sandbox.load_object_file(fa.object_url, dest_path)
         loaded.append(filename)
     return loaded
 
@@ -757,7 +757,7 @@ async def _load_universe_into_sandbox_container(sandbox, universe, destination: 
 
 
 async def _load_universe_into_container(sandbox, container_name: str, universe, destination: str) -> list[str]:
-    """For each file in `universe`: pull from S3 to a VM temp path, then `docker cp` into `container_name` at `destination/<rel_path>`."""
+    """For each file in `universe`: pull from the object store to a VM temp path, then `docker cp` into `container_name` at `destination/<rel_path>`."""
     file_artifacts = universe.get_file_artifacts()
     if not file_artifacts:
         logger.warning(
@@ -780,7 +780,7 @@ async def _load_universe_into_container(sandbox, container_name: str, universe, 
         parent = posixpath.dirname(dest_path)
         vm_temp = f"/tmp/_load_{uuid.uuid4().hex[:8]}_{filename.replace('/', '_')}"
         logger.info(f"  [{idx}/{total}] {fa.object_url} -> {container_name}:{dest_path}")
-        await sandbox.load_s3_file(fa.object_url, vm_temp)
+        await sandbox.load_object_file(fa.object_url, vm_temp)
         if parent and parent != destination:
             await sandbox.exec_script(
                 f"docker exec {shlex.quote(container_name)} mkdir -p {shlex.quote(parent)}"

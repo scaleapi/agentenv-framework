@@ -157,6 +157,27 @@ class FakeObjectStore(ObjectStore):
         return object_url[len(home):]
 
 
+class ConfiguredObjectStore(FakeObjectStore):
+    """The configured store beside the local one under namespace routing. It fails on any url it
+    doesn't own, so a test can prove a handed-in url was read or signed through the store holding it."""
+
+    def _own(self, object_url):
+        if not self.owns(object_url):
+            raise AssertionError(f"the configured store was asked about {object_url}")
+
+    def signed_get_url(self, object_url, expires_in=3600):
+        self._own(object_url)
+        return super().signed_get_url(object_url, expires_in)
+
+    def get(self, object_url):
+        self._own(object_url)
+        return super().get(object_url)
+
+    def open(self, object_url):
+        self._own(object_url)
+        return super().open(object_url)
+
+
 class RecordingObjectStore(FakeObjectStore):
     """A FakeObjectStore that records the keys each key-based read addressed.
 
