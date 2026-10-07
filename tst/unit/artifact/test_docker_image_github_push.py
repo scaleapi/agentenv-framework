@@ -124,12 +124,13 @@ async def test_the_build_tarballs_are_uploaded_under_the_fixture_prefix(build, m
 
 
 @pytest.mark.asyncio
-async def test_a_store_that_signs_nothing_gets_the_build_tarballs_copied_off_the_vm(build, tmp_path):
+@pytest.mark.parametrize("image_id", ["server", "s" * 238], ids=["short-id", "id-as-long-as-a-docker-name-allows"])
+async def test_a_store_that_signs_nothing_gets_the_build_tarballs_copied_off_the_vm(build, tmp_path, image_id):
     _, _, vm = build
     store = LocalFilesystemObjectStore(str(tmp_path / "objects"))
     set_object_store(store)
 
-    result = await DockerImageArtifact.put_from_github("server", "https://github.com/example/repo/blob/main/Dockerfile")
+    result = await DockerImageArtifact.put_from_github(image_id, "https://github.com/example/repo/blob/main/Dockerfile")
 
     assert store.get(result.artifact.tar_gz_s3_url) == vm.files["/tmp/image.tar.gz"]
     assert store.get(result.artifact.build_context_s3_url) == vm.files["/tmp/build-context.tar.gz"]

@@ -291,7 +291,7 @@ class DockerImageArtifact(Artifact):
             log("upload", "Uploading to object store...", 75)
             object_store = config.get_object_store()
             builds = f"{config.get_artifact_key_prefix()}github-builds/{id}"
-            tar_gz_object_url = object_store.object_url(f"{builds}/{image_tag}.tar.gz")
+            tar_gz_object_url = object_store.object_url(f"{builds}/{suffix}.tar.gz")
             await upload_vm_file(sandbox, "/tmp/image.tar.gz", object_store, tar_gz_object_url)
 
             log("upload_context", "Uploading build context...", 80)
@@ -300,7 +300,7 @@ class DockerImageArtifact(Artifact):
             copy_sources = _parse_copy_sources(dockerfile_content, df_rel)
             tar_paths = " ".join(shlex.quote(p) for p in copy_sources)
             await sandbox.exec_script(f"tar czf /tmp/build-context.tar.gz -C {context_abs} {tar_paths}")
-            build_context_object_url = object_store.object_url(f"{builds}/{image_tag}-context.tar.gz")
+            build_context_object_url = object_store.object_url(f"{builds}/{suffix}-context.tar.gz")
             await upload_vm_file(sandbox, "/tmp/build-context.tar.gz", object_store, build_context_object_url)
         finally:
             log("cleanup", "Terminating build VM...", 85)
