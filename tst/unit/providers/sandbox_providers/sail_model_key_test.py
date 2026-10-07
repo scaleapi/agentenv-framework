@@ -1,5 +1,6 @@
 """Model-key injection on Sailboxes: the key stays at Sail, the Sailbox only ever holds a placeholder."""
 
+import asyncio
 import logging
 import subprocess
 from types import SimpleNamespace
@@ -85,6 +86,7 @@ def _sailbox(ports=(8000,)):
 def fresh_key_state(monkeypatch):
     monkeypatch.setattr(_sdk, "_installed_key", None)
     monkeypatch.setattr(_sdk, "_apps", {})
+    monkeypatch.setattr(model_key, "_injected_keys", {})
 
 
 @pytest.fixture(autouse=True)
@@ -138,8 +140,16 @@ def test_an_injection_is_recovered_from_its_saved_policy_only():
     assert ModelKeyInjection.from_document({"allowlist": []}, "ep_3") is None
 
 
-def test_the_key_is_recovered_only_when_it_named_the_secret():
+def test_a_key_injected_by_this_process_is_recovered_even_when_it_is_not_the_configured_one():
     recovered = ModelKeyInjection.from_document({"rules": ModelKeyInjection.for_env(_ENV).rules()}, "ep_1")
+    recovered.recover_key("the-configured-model-key")
+    assert recovered.key == _KEY
+
+
+def test_in_another_process_only_the_configured_key_is_recovered(monkeypatch):
+    rules = ModelKeyInjection.for_env(_ENV).rules()
+    monkeypatch.setattr(model_key, "_injected_keys", {})
+    recovered = ModelKeyInjection.from_document({"rules": rules}, "ep_1")
     recovered.recover_key("some-other-key")
     assert recovered.key is None
     recovered.recover_key(_KEY)
@@ -224,12 +234,60 @@ async def test_a_plain_endpoint_is_refused_before_anything_is_created():
 
 
 @pytest.mark.asyncio
-async def test_a_failed_create_deletes_the_policy_it_made():
-    sdk, saved, _ = _fake_sdk(_sailbox())
+async def test_a_failed_create_deletes_the_policy_and_secret_it_made():
+    sdk, saved, secret = _fake_sdk(_sailbox())
     sdk.Sailbox.create.aio = AsyncMock(side_effect=RuntimeError("no capacity"))
     with pytest.raises(RuntimeError, match="no capacity"):
         await SailSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(image_name="agent:1", port=8000, env=_ENV)
     saved[0].delete.aio.assert_awaited_once()
+    secret.delete.aio.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_create_cancelled_while_saving_the_policy_deletes_the_secret():
+    sdk, _, secret = _fake_sdk(_sailbox())
+    started = asyncio.Event()
+
+    async def hang(name, document):
+        started.set()
+        await asyncio.Event().wait()
+
+    sdk.EgressPolicy.create.aio = AsyncMock(side_effect=hang)
+    task = asyncio.ensure_future(
+        SailSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(image_name="agent:1", port=8000, env=_ENV)
+    )
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    secret.delete.aio.assert_awaited_once()
+    sdk.Sailbox.create.aio.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_create_abandoned_in_flight_that_then_fails_releases_its_policy_and_secret():
+    sdk, saved, secret = _fake_sdk(_sailbox())
+    started, fail = asyncio.Event(), asyncio.Event()
+
+    async def create(**_kwargs):
+        started.set()
+        await fail.wait()
+        raise RuntimeError("no capacity")
+
+    sdk.Sailbox.create.aio = create
+    task = asyncio.ensure_future(
+        SailSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(image_name="agent:1", port=8000, env=_ENV)
+    )
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    saved[0].delete.aio.assert_not_awaited()
+    fail.set()
+    for _ in range(10):
+        await asyncio.sleep(0)
+    saved[0].delete.aio.assert_awaited_once()
+    secret.delete.aio.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -301,12 +359,32 @@ async def test_widening_an_injected_sailbox_replaces_its_saved_policy():
 
 
 @pytest.mark.asyncio
-async def test_reconnect_restores_the_injection_and_scrubs_the_configured_key(monkeypatch):
+async def test_a_failed_policy_swap_deletes_the_replacement_and_keeps_the_old_one():
+    sailbox = _sailbox()
+    sdk, saved, _ = _fake_sdk(sailbox)
+    sandbox = await SailSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(
+        image_name="agent:1", port=8000, env=_ENV,
+        network_policy=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=("pypi.org",)),
+    )
+    sailbox.set_egress_policy.aio = AsyncMock(side_effect=RuntimeError("api down"))
+
+    with pytest.raises(RuntimeError, match="api down"):
+        await sandbox.apply_network_policy(sandbox.network_policy.with_hosts(["bucket.example"]))
+
+    first, second = saved
+    second.delete.aio.assert_awaited_once()
+    first.delete.aio.assert_not_awaited()
+    assert sandbox._injection.policy_id == first.id
+
+
+@pytest.mark.asyncio
+async def test_reconnect_in_another_process_scrubs_the_configured_key(monkeypatch):
     injection = ModelKeyInjection.for_env(_ENV)
     sailbox = _sailbox()
     sailbox.egress_policy = SimpleNamespace(policy_id="ep_9", document={"allowlist": ["llm.example.com"], "rules": injection.rules()})
     sailbox.exec.aio = AsyncMock(return_value=_process())
     sdk, _, _ = _fake_sdk(sailbox)
+    monkeypatch.setattr(model_key, "_injected_keys", {})
     monkeypatch.setattr(
         "agent_env.providers.sandbox_providers.sail.provider.get_config", lambda: MagicMock(get_litellm_api_key=lambda: _KEY)
     )
@@ -326,3 +404,23 @@ async def test_reconnect_treats_someone_elses_saved_policy_as_unknown():
     sdk, _, _ = _fake_sdk(sailbox)
     sandbox = await SailSandboxProvider(api_key="sail-key", sdk=sdk).get_sandbox("sb_1")
     assert sandbox.network_policy is None and sandbox._injection is None
+
+
+@pytest.mark.asyncio
+async def test_reconnect_in_the_deploying_process_scrubs_the_agents_own_key(monkeypatch):
+    agent_key = "sk-agent-override-key-42"
+    sailbox = _sailbox()
+    sdk, _, _ = _fake_sdk(sailbox)
+    provider = SailSandboxProvider(api_key="sail-key", sdk=sdk)
+    created = await provider.create_sandbox(image_name="agent:1", port=8000, env={**_ENV, "LITELLM_API_KEY": agent_key})
+    (policy,) = [c.args[1] for c in sdk.EgressPolicy.create.aio.await_args_list]
+    sailbox.egress_policy = SimpleNamespace(policy_id=created._injection.policy_id, document=policy)
+    sailbox.exec.aio = AsyncMock(return_value=_process())
+    monkeypatch.setattr(
+        "agent_env.providers.sandbox_providers.sail.provider.get_config", lambda: MagicMock(get_litellm_api_key=lambda: _KEY)
+    )
+
+    reconnected = await provider.get_sandbox("sb_1")
+    await reconnected.exec_with_output("docker", "exec", "-e", f"LITELLM_API_KEY={agent_key}", "agent-api", "pytest")
+
+    assert sailbox.exec.aio.await_args.args[0][3] == f"LITELLM_API_KEY={PLACEHOLDER}"

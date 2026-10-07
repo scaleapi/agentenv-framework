@@ -34,6 +34,10 @@ DOCKER_SHIM_PATH = "/usr/local/bin/docker"
 
 _SECRET_REF = re.compile(r"\$\{secrets\.([A-Za-z0-9_]+)\}")
 
+# Keys this process has injected, by secret name, so a handle reconnected here can still scrub its own
+# agent's key. Process memory only: the keys are already held here, and nothing is persisted.
+_injected_keys: dict[str, str] = {}
+
 
 def secret_name(key: str) -> str:
     return SECRET_PREFIX + hashlib.sha256(key.encode()).hexdigest()[:32].upper()
@@ -77,7 +81,9 @@ class ModelKeyInjection:
                 f"Sail injects the model key only into HTTPS requests, but {BASE_URL_ENV} is {base_url!r}; "
                 "use an https endpoint or set inject_model_key = false in [sandbox.providers.sail.config]"
             )
-        return cls(host=parsed.hostname, secret=secret_name(key), key=key)
+        injection = cls(host=parsed.hostname, secret=secret_name(key), key=key)
+        _injected_keys[injection.secret] = key
+        return injection
 
     @classmethod
     def from_document(cls, document: Any, policy_id: str | None) -> ModelKeyInjection | None:
@@ -102,8 +108,10 @@ class ModelKeyInjection:
         return other is not None and (other.host, other.secret) == (self.host, self.secret)
 
     def recover_key(self, candidate: str | None) -> None:
-        """Take ``candidate`` as the key when it is the one this injection's secret was named from."""
-        if candidate and secret_name(candidate) == self.secret:
+        """Recover the key this injection's secret was named from: one this process injected, else
+        ``candidate`` when it is that key."""
+        self.key = _injected_keys.get(self.secret)
+        if self.key is None and candidate and secret_name(candidate) == self.secret:
             self.key = candidate
 
     def scrub(self, text: str) -> str:

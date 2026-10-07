@@ -80,6 +80,24 @@ async def delete_saved_policy(sdk: Any, policy_id: str | None) -> None:
         logger.warning("Could not delete egress policy %s: %s", policy_id, exc)
 
 
+async def delete_secret(sdk: Any, name: str) -> None:
+    """Delete a model-key secret unless another Sailbox's policy still names it (Sail refuses then)."""
+    try:
+        await (await sdk.Secret.get.aio(name)).delete.aio()
+    except sdk.SecretInUseError:
+        logger.info("Model-key secret %s is still used by another Sailbox; leaving it", name)
+    except sdk.NotFoundError:
+        pass
+    except Exception as exc:  # noqa: BLE001 - the next Sailbox using this key re-sets it; report and go on
+        logger.warning("Could not delete model-key secret %s: %s", name, exc)
+
+
+async def release_injection(sdk: Any, injection: ModelKeyInjection) -> None:
+    """Delete an injection's saved policy, then its secret, in the order Sail requires."""
+    await delete_saved_policy(sdk, injection.policy_id)
+    await delete_secret(sdk, injection.secret)
+
+
 class _BytesReader:
     def __init__(self, value: bytes):
         self._value = value
@@ -197,21 +215,7 @@ class SailSandbox(VmSandbox):
         except self._sdk.NotFoundError:
             logger.info("Sailbox %s was already gone at terminate", self.sandbox_id)
         if self._injection is not None:
-            await self._delete_policy(self._injection.policy_id)
-            await self._delete_secret(self._injection.secret)
-
-    async def _delete_policy(self, policy_id: str | None) -> None:
-        await delete_saved_policy(self._sdk, policy_id)
-
-    async def _delete_secret(self, name: str) -> None:
-        try:
-            await (await self._sdk.Secret.get.aio(name)).delete.aio()
-        except self._sdk.SecretInUseError:
-            logger.info("Model-key secret %s is still used by another Sailbox; leaving it", name)
-        except self._sdk.NotFoundError:
-            pass
-        except Exception as exc:  # noqa: BLE001 - the next Sailbox using this key re-sets it; report and go on
-            logger.warning("Could not delete model-key secret %s: %s", name, exc)
+            await release_injection(self._sdk, self._injection)
 
     async def install_container_trust(self) -> None:
         """Have every container started on this Sailbox trust the CA Sail injects the model key behind."""
@@ -292,9 +296,13 @@ class SailSandbox(VmSandbox):
             await self._sailbox.set_egress_policy.aio(egress_document(policy))
         else:
             saved = await self._sdk.EgressPolicy.create.aio(f"agentenv-{uuid.uuid4().hex}", egress_document(policy, self._injection))
-            await self._sailbox.set_egress_policy.aio(saved)
+            try:
+                await self._sailbox.set_egress_policy.aio(saved)
+            except BaseException:
+                await delete_saved_policy(self._sdk, saved.id)
+                raise
             previous, self._injection.policy_id = self._injection.policy_id, saved.id
-            await self._delete_policy(previous)
+            await delete_saved_policy(self._sdk, previous)
         self.network_policy = policy
 
     def adopt_applied_policy(self, applied: Any) -> NetworkPolicy | None:

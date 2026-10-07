@@ -7,7 +7,7 @@ import logging
 import math
 import re
 import uuid
-from typing import Any, Callable, ClassVar, Self
+from typing import Any, Awaitable, Callable, ClassVar, Self
 
 from agent_env.attribution import PIPELINE_STEP_KEY, RUN_ID_KEY, Attribution
 from agent_env.config import get_config
@@ -17,8 +17,8 @@ from agent_env.providers.sandbox_providers.sail.model_key import ModelKeyInjecti
 from agent_env.providers.sandbox_providers.sail.sandbox import (
     MAX_ALLOWLIST_ENTRIES,
     SailSandbox,
-    delete_saved_policy,
     egress_document,
+    release_injection,
 )
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, NetworkPolicyUnsupportedError
 from agent_env.providers.sandbox_providers.sandbox_provider import (
@@ -82,15 +82,22 @@ async def _reap(sandbox: SailSandbox) -> None:
     )
 
 
-async def _create_or_reclaim(create: Any, wrap: Callable[[Any], SailSandbox]) -> Any:
-    """Await a Sailbox create; if the caller is cancelled first, terminate (``wrap``ped, so its model-key
-    policy goes too) the Sailbox it yields, which would otherwise keep running with no handle."""
+async def _create_or_reclaim(
+    create: Any, wrap: Callable[[Any], SailSandbox], release: Callable[[], Awaitable[None]] | None = None,
+) -> Any:
+    """Await a Sailbox create. If the caller is cancelled first, terminate (``wrap``ped, so its model-key
+    policy and secret go too) the Sailbox it yields, which would otherwise keep running with no handle; if
+    that create then fails, ``release`` what it was given."""
     task = asyncio.ensure_future(create)
 
     def terminate_orphan(done: asyncio.Future) -> None:
         if done.cancelled() or done.exception() is not None:
+            cleanup = release() if release is not None else None
+        else:
+            cleanup = _reap(wrap(done.result()))
+        if cleanup is None:
             return
-        reaper = asyncio.ensure_future(_reap(wrap(done.result())))
+        reaper = asyncio.ensure_future(cleanup)
         _reapers.add(reaper)
         reaper.add_done_callback(_reapers.discard)
 
@@ -233,15 +240,18 @@ class SailSandboxProvider(SandboxProvider):
         ports = list(dict.fromkeys(exposed_ports or []))
         sdk, app = await self._connect()
         egress: Any = egress_document(effective_policy)
-        if injection is not None:
-            await sdk.Secret.set.aio(injection.secret, injection.key)
-            egress = await sdk.EgressPolicy.create.aio(f"agentenv-{uuid.uuid4().hex}", egress_document(effective_policy, injection))
-            injection.policy_id = egress.id
 
         def wrap(raw: Any) -> SailSandbox:
             return SailSandbox(raw, sdk=sdk, tunnel_urls={}, network_policy=effective_policy, injection=injection)
 
+        release = (lambda: release_injection(sdk, injection)) if injection is not None else None
+        creating = False
         try:
+            if injection is not None:
+                await sdk.Secret.set.aio(injection.secret, injection.key)
+                egress = await sdk.EgressPolicy.create.aio(f"agentenv-{uuid.uuid4().hex}", egress_document(effective_policy, injection))
+                injection.policy_id = egress.id
+            creating = True
             raw = await _create_or_reclaim(sdk.Sailbox.create.aio(
                 app=app,
                 image=sdk.Image.devbox("amd64"),
@@ -253,10 +263,11 @@ class SailSandboxProvider(SandboxProvider):
                 ingress_ports=ports,
                 auto_sleep=self._auto_sleep_setting(sdk),
                 egress_policy=egress,
-            ), wrap)
-        except Exception:
-            if injection is not None:
-                await delete_saved_policy(sdk, injection.policy_id)
+            ), wrap, release)
+        except BaseException as exc:
+            # A create cancelled in flight is _create_or_reclaim's to clean up once it settles.
+            if release is not None and not (creating and isinstance(exc, asyncio.CancelledError)):
+                await release()
             raise
         sandbox = wrap(raw)
         try:
