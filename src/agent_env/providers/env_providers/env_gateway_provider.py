@@ -757,12 +757,7 @@ COMPOSE_EOF'''
 
         # Print gateway logs for debugging
         logger.info("Gateway logs:")
-        gateway_container_id = await self._get_container_id(sandbox, GATEWAY_SERVICE_NAME)
-        if gateway_container_id:
-            exit_code, logs, stderr = await sandbox.exec_with_output( "sudo", "docker", "logs", gateway_container_id)
-            logger.info(f"  stdout:\n{logs}")
-            if stderr:
-                logger.info(f"  stderr:\n{stderr}")
+        await self._log_service(sandbox, GATEWAY_SERVICE_NAME)
         if not gateway_ready:
             raise RuntimeError("Gateway did not become ready in time")
 
@@ -772,13 +767,8 @@ COMPOSE_EOF'''
             if self._needs_local_postgres else []
         )
         for name in sidecar_names:
-            container_id = await self._get_container_id(sandbox, name)
-            if container_id:
-                exit_code, logs, stderr = await sandbox.exec_with_output("sudo", "docker", "logs", container_id)
-                logger.info(f"{name} logs:\n  stdout:\n{logs}")
-                if stderr:
-                    logger.info(f"  stderr:\n{stderr}")
-            else:
+            logger.info(f"{name} logs:")
+            if not await self._log_service(sandbox, name):
                 logger.warning(f"{name} container not found")
 
         gateway_url = sandbox.tunnel_urls.get(gateway_port)
@@ -1009,6 +999,22 @@ COMPOSE_EOF'''
             if line:
                 events.append(json.loads(line))
         return events
+
+    async def _log_service(self, sandbox: VmSandbox, compose_service: str) -> bool:
+        """Log a compose service's container output; False when it has no container. Diagnostics only, so
+        a lookup that keeps losing its exec transport is reported, never raised into the deploy."""
+        try:
+            container_id = await self._get_container_id(sandbox, compose_service)
+        except RuntimeError as e:
+            logger.warning(f"Skipping {compose_service} logs: {e}")
+            return True
+        if not container_id:
+            return False
+        exit_code, logs, stderr = await sandbox.exec_with_output("sudo", "docker", "logs", container_id)
+        logger.info(f"  stdout:\n{logs}")
+        if stderr:
+            logger.info(f"  stderr:\n{stderr}")
+        return True
 
     async def _get_container_id(self, sandbox: VmSandbox, compose_service: str) -> str | None:
         """Get container ID for a docker-compose service (including exited containers). A lookup whose

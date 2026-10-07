@@ -1694,3 +1694,22 @@ def test_every_mcp_server_gets_the_same_healthcheck_budget():
         assert "      timeout: 5s" in block
         assert "      retries: 30" in block
         assert "      start_period: 60s" in block
+
+
+@pytest.mark.asyncio
+async def test_a_log_lookup_that_keeps_losing_its_transport_never_stops_a_deploy(caplog):
+    gp = EnvironmentGatewayProvider()
+    sandbox = MagicMock()
+    sandbox.exec_with_output = AsyncMock(return_value=(-1, "", "host lost"))
+
+    assert await gp._log_service(sandbox, "gateway") is True
+    assert "Skipping gateway logs" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_service_without_a_container_is_reported_as_missing():
+    gp = EnvironmentGatewayProvider()
+    sandbox = MagicMock()
+    sandbox.exec_with_output = AsyncMock(return_value=(0, "", ""))
+
+    assert await gp._log_service(sandbox, "pgweb") is False
