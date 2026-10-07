@@ -257,7 +257,7 @@ def _tarball_destination(env_id: str, universe_id: str) -> tuple[ObjectStore, st
     tarball never changes under it, and a write-once store takes a second snapshot of the same env and universe."""
     config = get_config()
     store = config.get_object_store_for(env_id)
-    tarball = f"{_image_tag(env_id, universe_id)}-{uuid.uuid4().hex[:8]}.tar.gz"
+    tarball = f"{_image_tag(env_id, universe_id)}-{uuid.uuid4().hex[:16]}.tar.gz"
     key = f"env-snapshots/{key_segment(env_id)}/{key_segment(universe_id)}/{tarball}"
     return store, store.object_url(f"{config.get_artifact_key_prefix()}{key}")
 

@@ -87,7 +87,7 @@ def test_an_env_snapshot_is_uploaded_under_the_prefix(prefixed, tmp_path):
     sandbox = _Sandbox()
     url = asyncio.run(_snapshot_servicedb(sandbox, "slack-env", "acme", lambda *args: None))
     key = get_config().get_object_store().get_object_key(url)
-    assert re.fullmatch(r"fx/env-snapshots/slack-env/acme/env-snapshot-slack-env-acme-[0-9a-f]{8}\.tar\.gz", key)
+    assert re.fullmatch(r"fx/env-snapshots/slack-env/acme/env-snapshot-slack-env-acme-[0-9a-f]{16}\.tar\.gz", key)
     assert any(f"https://objects.example.test/{key}" in script for script in sandbox.scripts)
 
 

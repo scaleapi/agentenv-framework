@@ -167,7 +167,7 @@ def test_an_env_snapshot_is_named_after_its_env(local_stores, tmp_path, monkeypa
     image = _written_by(lambda: EnvSnapshot.create("inst-1"), monkeypatch, DockerImageArtifact, "put_tar")
 
     assert (image["id"], image["image_name"]) == (artifact_id, image_tag)
-    assert re.search(rf"/{re.escape(key)}-[0-9a-f]{{8}}\.tar\.gz$", image["tar_gz_s3_url"])
+    assert re.search(rf"/{re.escape(key)}-[0-9a-f]{{16}}\.tar\.gz$", image["tar_gz_s3_url"])
     assert f"docker build --platform linux/amd64 -t {image_tag} /tmp/snapshot-build" in sandbox.scripts
 
 
