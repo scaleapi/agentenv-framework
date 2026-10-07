@@ -51,10 +51,10 @@ SANDBOX_LABEL = "agentenv.sandbox"
 _CONCURRENT_SIGNS = 8
 _sign_slots: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = weakref.WeakKeyDictionary()
 
-# A VM file is read off its host one range per exec, whose base64 every provider's exec returns in one response, with
-# a few ranges in flight.
+# A VM file is read off its host one range per exec, whose base64 every provider's exec returns in one response. A
+# provider serves each exec a fraction of its bandwidth, so many ranges are in flight.
 _READ_RANGE_BYTES = 4 * 1024 * 1024
-_READS_IN_FLIGHT = 4
+_READS_IN_FLIGHT = 16
 
 
 class NetworkPolicyUnsupportedError(NotImplementedError):
