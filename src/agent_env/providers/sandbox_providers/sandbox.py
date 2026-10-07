@@ -383,8 +383,6 @@ class VmSandbox(Sandbox):
 
     async def _write_bytes_to_vm_path(self, data: bytes, vm_path: str) -> None:
         """Stream bytes from agent-env onto the VM host at vm_path (base64 over exec)."""
-        import base64
-
         encoded = base64.b64encode(data).decode()
         if len(encoded) <= self._WFT_CHUNK_BYTES:
             await self.exec_script(f"base64 -d <<'ENDB64' > {shlex.quote(vm_path)}\n{encoded}\nENDB64")
@@ -450,7 +448,10 @@ async def read_vm_file(sandbox: VmSandbox, vm_path: str, local_path: str) -> Non
     """Copy ``vm_path`` off the VM host into ``local_path``, a range at a time, base64 over exec, so memory holds only
     the ranges in flight. A range shorter than it should be fails the copy rather than leave a truncated file."""
     quoted = shlex.quote(vm_path)
-    size = int((await sandbox.exec_script(f"wc -c < {quoted}")).strip())
+    reported = (await sandbox.exec_script(f"wc -c < {quoted}")).strip()
+    if not reported.isdigit():
+        raise RuntimeError(f"the VM reported {reported!r} as the size of {vm_path}; refusing to copy it")
+    size = int(reported)
     gate = asyncio.Semaphore(_READS_IN_FLIGHT)
     with open(local_path, "wb") as out:
         out.truncate(size)

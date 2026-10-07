@@ -64,6 +64,23 @@ async def test_a_short_range_fails_the_copy(small_ranges, tmp_path):
         await read_vm_file(_ShortRangeVm(), str(source), str(tmp_path / "copy.bin"))
 
 
+class _GoneVm:
+    """Answers every exec with success and no output, as one provider does once its VM is terminated."""
+
+    async def exec_script(self, script: str) -> str:
+        return ""
+
+
+@pytest.mark.asyncio
+async def test_a_vm_that_reports_no_size_fails_the_copy(tmp_path):
+    copy = tmp_path / "copy.bin"
+
+    with pytest.raises(RuntimeError, match="reported '' as the size of /tmp/image.tar.gz"):
+        await read_vm_file(_GoneVm(), "/tmp/image.tar.gz", str(copy))
+
+    assert not copy.exists()
+
+
 class _RecordingVm:
     def __init__(self) -> None:
         self.scripts: list[str] = []

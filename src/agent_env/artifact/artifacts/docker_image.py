@@ -231,7 +231,7 @@ class DockerImageArtifact(Artifact):
         owner, repo, ref = df_parts.owner, df_parts.repo, df_parts.ref
         dockerfile_repo_path = df_parts.path
         config = get_config()
-        suffix = uuid.uuid4().hex[:8]
+        suffix = uuid.uuid4().hex[:16]
         image_tag = f"{id}-{suffix}"
 
         from agent_env.artifact.store import get_artifact_store
