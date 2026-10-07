@@ -118,8 +118,9 @@ def dual_keyed(legacy: str, neutral: str, value: Any) -> dict[str, Any]:
 
 def read_dual_keyed(data: dict[str, Any], legacy: str, neutral: str) -> Any:
     """A renamed run-context key, legacy name first while both are written: a raw-doc writer that knows only the
-    legacy name leaves the neutral one stale."""
-    return data[legacy] if legacy in data else data.get(neutral)
+    legacy name leaves the neutral one stale. A legacy key holding None falls through to the neutral one."""
+    value = data.get(legacy)
+    return value if value is not None else data.get(neutral)
 
 
 # (legacy, neutral) PromptResponse field names. The legacy fields stay real fields, mirrored from the neutral ones at

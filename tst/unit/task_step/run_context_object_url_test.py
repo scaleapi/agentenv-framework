@@ -61,6 +61,12 @@ def test_the_legacy_key_wins_when_the_two_disagree():
     assert response.target_agent_per_turn_trajectory_object_urls == []
 
 
+def test_a_legacy_key_holding_none_falls_through_to_the_neutral_one():
+    response = PromptResponse.from_dict({"prompt_id": "p1", "response": "done", "agent_trajectory_s3_uri": None,
+                                         "agent_trajectory_object_url": _URL})
+    assert response.agent_trajectory_object_url == response.agent_trajectory_s3_uri == _URL
+
+
 def test_the_legacy_keywords_still_work_and_are_counted(caplog):
     with caplog.at_level(logging.WARNING, logger="agent_env.utils.deprecation"), \
             pytest.warns(DeprecationWarning) as caught:
