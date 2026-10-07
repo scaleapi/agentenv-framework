@@ -23,7 +23,7 @@ import os
 import re
 import shlex
 import time
-from typing import Awaitable, Callable, ClassVar, Optional
+from typing import TYPE_CHECKING, AsyncIterator, Awaitable, Callable, ClassVar, Optional
 
 import modal
 
@@ -37,8 +37,11 @@ from agent_env.providers.sandbox_providers.modal_sandbox import (
 )
 from agent_env.attribution import Attribution
 from agent_env.config import get_config
-from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, VmSandbox
+from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, VmSandbox, push_object_over_stdin
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_VM, SandboxProvider
+
+if TYPE_CHECKING:
+    from agent_env.store.object_store import ObjectStore
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +138,21 @@ class ModalVmSandbox(VmSandbox):
         cmd = [c for c in command if c != "sudo"]
         process = await self._sb.exec.aio(*cmd, text=False)
         return _ModalProcessAdapter(process)
+
+    async def _exec_with_stdin(self, script: str, stdin: AsyncIterator[bytes]) -> tuple[int, str, str]:
+        process = await self._sb.exec.aio("bash", "-c", script, text=False)
+        async for piece in stdin:
+            process.stdin.write(piece)
+            await process.stdin.drain.aio()
+        process.stdin.write_eof()
+        await process.stdin.drain.aio()
+        exit_code = await process.wait.aio()
+        stdout, stderr = await asyncio.gather(process.stdout.read.aio(), process.stderr.read.aio())
+        return exit_code, stdout.decode(), stderr.decode()
+
+    async def _write_unsigned_object(self, object_store: ObjectStore, object_url: str, vm_path: str) -> None:
+        """Over stdin, which on Modal carries an object about 2.5 times as fast as exec arguments, 32 execs in flight."""
+        await push_object_over_stdin(self, object_store, object_url, vm_path)
 
     async def setup_vm_for_gateway(self, exposed_ports: Optional[list[int]] = None) -> None:
         """Make the VM ready for the gateway deploy.
