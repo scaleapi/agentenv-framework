@@ -226,19 +226,12 @@ class S3ObjectStore(ObjectStore):
             expires_at=datetime.now(UTC) + timedelta(seconds=expires_in),
         )
 
-    def signed_post(
-        self, url_prefix: str, *, expires_in: int = 3600, max_bytes: int | None = None
-    ) -> dict | None:
-        return self._post_policy(url_prefix, expires_in, max_bytes)
-
-    def _post_policy(self, url_prefix: str, expires_in: int, max_bytes: int | None) -> dict:
+    def _post_policy(self, url_prefix: str, expires_in: int, max_bytes: int) -> dict:
         """A presigned POST for any key below ``url_prefix``: the key is a condition the uploader
         fills in, not part of what is signed. The prefix ends in ``/``, so that ``root`` does not
         admit ``root-evil/``."""
         bucket, prefix = self._split(url_prefix.rstrip("/") + "/")
-        conditions: list = [["starts-with", "$key", prefix]]
-        if max_bytes is not None:
-            conditions.append(["content-length-range", 0, max_bytes])
+        conditions: list = [["starts-with", "$key", prefix], ["content-length-range", 0, max_bytes]]
         # POST policies are default-deny on extra form fields: without this the
         # uploader's Content-Type 403s and objects store as binary/octet-stream.
         conditions.append(["starts-with", "$Content-Type", ""])

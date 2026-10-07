@@ -164,20 +164,6 @@ class ObjectStore(ABC):
         or None if the backend can't produce one (e.g. local filesystem)."""
         return None
 
-    def signed_post(
-        self, url_prefix: str, *, expires_in: int = 3600, max_bytes: int | None = None
-    ) -> dict | None:
-        """Credentials letting a remote party upload objects it names itself, anywhere
-        under ``url_prefix``. None if the backend can't produce them.
-
-        Prefix-scoped so the uploader owns its file layout — the caller bounds where
-        it may write, not what it may call things. That is also why the grant is a
-        dict and not a url: a signed url covers one key, since the key is part of
-        what is signed, so a prefix needs a policy the uploader submits as form
-        fields. Pass the whole value on, not just ``url``.
-        """
-        return None
-
     def shared_credentials_env(self) -> dict[str, str]:
         """Environment variables handing credentials to the agents and env services agent-env
         deploys, so they can use this store directly. None by default; a deployment that wants

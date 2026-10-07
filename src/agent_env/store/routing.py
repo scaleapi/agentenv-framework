@@ -552,9 +552,6 @@ class LocalRunObjectStore(ObjectStore):
     def signed_put_url(self, object_url: str, expires_in: int = 3600) -> str | None:
         return self._writing(object_url).signed_put_url(object_url, expires_in)
 
-    def signed_post(self, url_prefix: str, *, expires_in: int = 3600, max_bytes: int | None = None) -> dict | None:
-        return self._writing(url_prefix).signed_post(url_prefix, expires_in=expires_in, max_bytes=max_bytes)
-
     def shared_credentials_env(self) -> dict[str, str]:
         """None: an ``@local`` run's objects reach its sandboxes through grants, staging or pushed bytes, so the
         configured store's credentials, the caller's own, stay with the caller."""
