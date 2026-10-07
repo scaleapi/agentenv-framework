@@ -4,7 +4,9 @@ reused while its folder is unchanged, and rebuilt when it changes. Through the g
 deploys and answers a verifier calling it: an MCP server built from its folder, one built from a Dockerfile elsewhere
 under a name of its own, one over a store image, a website, and a multi of bundle and store envs, which is rewritten
 when a child is. Environments and a universe the bundle writes load into an MCP server deployed through the gateway,
-and an edit to their files loads anew. Needs a Docker daemon and the local registry."""
+and an edit to their files loads anew. A universe composed every way a bundle composes one seeds each server of a multi
+of bundle and store servers, and a store universe shared across servers seeds the one server it's loaded into. Needs a
+Docker daemon and the local registry."""
 
 import hashlib
 import json
@@ -15,7 +17,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from agent_env.artifact import EnvironmentUniverseArtifact
+from agent_env.artifact import EnvironmentArtifact, EnvironmentUniverseArtifact, FileArtifact
 from agent_env.artifact.store import reset_artifact_store
 from agent_env.bundle import parse_bundle
 from agent_env.cli import cli
@@ -372,6 +374,112 @@ def test_environments_and_a_universe_written_from_a_bundle_load_into_an_env_thro
     assert "envs/items: v1, unchanged" in edited.output, edited.output
     for task in ("folder", "universe"):
         assert f"tasks/{task}.json v1: passed (check: 1)" in edited.output, edited.output
+
+
+# Checks each items server CONFIG names holds exactly the items loaded into it, read from its export-state route behind
+# the multi's gateway. Not over MCP: every items server registers list_items under that one name, which the gateway
+# serves from only one server. CONFIG goes above it.
+VERIFY_SEEDED = '''
+import httpx
+
+
+async def verify(mcp_url):
+    gateway = mcp_url.rsplit("/mcp", 1)[0]
+    results = []
+    async with httpx.AsyncClient(timeout=30) as client:
+        for server, items in CONFIG["servers"].items():
+            response = await client.get(f"{gateway}/svc/mcp-{server}/export-state")
+            listed = response.json() if response.status_code == 200 else {}
+            description = f"{server} holds what it was seeded with, {items}: {response.status_code} {listed}"
+            results.append({"id": server, "result": listed.get("items") == items, "description": description})
+    return results
+'''
+
+
+def _put_store_data(state):
+    """What a user puts in the store before a bundle names it: the items server as the env ledger, built by the CLI;
+    ledger's environment; stock's file; and a universe shared across servers, with environments for items and gmail."""
+    source = state / "ledger-src"
+    _items(source, "v1")
+    for argv in (
+        ["env", "mcp-server", "put", "--id", "ledger", "--environment-name", "ledger", "--dockerfile",
+         str(source / "Dockerfile"), "--context", str(source), "--platform", ""],
+        *(["artifact", "environment", "put", str(_data_file(state, name, items)), "--id", id, "--description", name,
+           "--environment-name", name]
+          for id, name, items in (("ledger-data", "ledger", ["from-a-store-environment"]),
+                                  ("shared-items", "items", ["from-a-shared-universe"]),
+                                  ("shared-gmail", "gmail", ["for-another-server"]))),
+        ["artifact", "environment-universe", "put", "--id", "shared", "--environment-artifact", "shared-items",
+         "--environment-artifact", "shared-gmail"],
+    ):
+        put = CliRunner().invoke(cli, argv)
+        assert put.exit_code == 0, put.output
+    with namespace_routing():
+        FileArtifact.put_bytes("stock-rows", description="stock", filename="stock.json",
+                               content=_seed(["from-a-store-file"]).encode(), content_type="application/json")
+
+
+def _data_file(state, name, items):
+    path = state / "store-data" / f"{name}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_seed(items))
+    return path
+
+
+def _composed_bundle(root):
+    """A multi of two bundle servers, items and stock, and the store server ledger, and a universe composed every way:
+    items' environment from its folder, stock's a bundle environment over a pinned store file, and ledger's a store
+    environment. Task universe loads it into the multi; task shared loads the store's shared universe into items."""
+    envs = root / "envs"
+    _items(envs / "items", "v1")
+    _items(envs / "stock", "v1")
+    (envs / "stock/env.toml").write_text('environment_name = "stock"\n')
+    (envs / "suite").mkdir()
+    (envs / "suite/env.toml").write_text('type = "multi"\nmcp_server_envs = ["items", "stock", "ledger"]\n')
+    _write(root / "artifacts", {
+        "stock-data/artifact.toml": 'type = "environment"\nenvironment_name = "stock"\n'
+                                    'file = { artifact = "stock-rows", version = 1 }\n',
+        "world/artifact.toml": 'type = "environment_universe"\nenvironment_artifacts = ["stock-data", "ledger-data"]\n',
+        "world/items/items.json": _seed(["from-a-universe-folder"]),
+        "check-universe/verify.py": f"CONFIG = {SEEDED!r}\n{VERIFY_SEEDED}",
+    })
+    (root / "tasks").mkdir(exist_ok=True)
+    (root / "tasks/universe.json").write_text(json.dumps([
+        {"id": "env", "type": "deploy_env", "env_id": "suite", "sandbox_type": "local"},
+        {"id": "load", "type": "load_artifact", "env_id": "suite", "artifact_id": "world", "depends_on": ["env"]},
+        {"id": "check", "type": "env_outcome_verifier", "env_id": "suite", "file_artifact_id": "check-universe",
+         "verifier_id": "universe", "depends_on": ["load"]},
+    ]))
+    _load_task(root, "shared", "shared", ["from-a-shared-universe"])
+    return root
+
+
+SEEDED = {"servers": {"items": ["from-a-universe-folder"], "stock": ["from-a-store-file"],
+                      "ledger": ["from-a-store-environment"]}}
+
+
+def test_a_universe_composed_every_way_seeds_each_server_of_a_multi_and_a_shared_one_seeds_its_server(state):
+    _put_store_data(state)
+    root = _composed_bundle(state / "composed-bundle")
+
+    first = _run(root)
+
+    assert first.exit_code == 0, first.output
+    for task in ("universe", "shared"):
+        assert f"tasks/{task}.json v1: passed (check: 1)" in first.output, first.output
+    with namespace_routing():
+        ids = {entry.name: entry.id for entry in parse_bundle(root).entries}
+        environments = EnvironmentUniverseArtifact.get(ids["world"]).get_environment_artifacts()
+        stock = EnvironmentArtifact.get(ids["stock-data"])
+    assert [(env.id, env.environment_name) for env in environments] == [
+        (f"{ids['world']}__items", "items"), (ids["stock-data"], "stock"), ("ledger-data", "ledger")]
+    assert (stock.file_artifact_ref.id, stock.file_artifact_ref.version) == ("stock-rows", 1)
+
+    planned = _run(root, "--dry-run")
+
+    assert planned.exit_code == 0, planned.output
+    for written in ("artifacts/world", "artifacts/stock-data", "envs/suite", "envs/items", "envs/stock"):
+        assert f"{written}: v1, unchanged" in planned.output, planned.output
 
 
 def _files(root):
