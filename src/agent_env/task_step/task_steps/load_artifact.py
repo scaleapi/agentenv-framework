@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from typing import Any, Callable, ClassVar, Optional
 from urllib.parse import unquote, urlparse
 
-from agent_env.env.env import DeployedSandboxEnv
 from agent_env.providers.sandbox_providers.sandbox_provider import reachable_url
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity_refs import EntityRef
@@ -492,10 +491,8 @@ class LoadArtifactTaskStep(TaskStep):
                 if agent is None or not agent.instance_id:
                     raise RuntimeError(f"Agent '{self.agent_name}' not found in context.deployed_agents (or missing instance_id)")
                 deployed_agent = get_a2a_agent_instance_store().get(agent.instance_id)
-                gateway_url = require_gateway_url(deployed, "Installing a CliArtifact")
-                if isinstance(deployed, DeployedSandboxEnv):
-                    gateway_url = reachable_url(gateway_url, from_sandbox_type=deployed.sandbox_type,
-                                                to_sandbox_type=agent.sandbox_type)
+                gateway_url = reachable_url(require_gateway_url(deployed, "Installing a CliArtifact"),
+                                            from_sandbox_type=deployed.sandbox_type, to_sandbox_type=agent.sandbox_type)
                 install_path = await A2AAgent.install_cli(deployed_agent, artifact, gateway_url)
                 agent_clis = context.metadata.setdefault("installed_clis", {}).setdefault(self.agent_name, {})
                 agent_clis[artifact.id] = {
