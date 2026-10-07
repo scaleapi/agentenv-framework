@@ -12,11 +12,11 @@ from typing import Any, Awaitable, Callable, ClassVar, Self
 from agent_env.attribution import PIPELINE_STEP_KEY, RUN_ID_KEY, Attribution
 from agent_env.config import get_config
 from agent_env.config.errors import ConfigError
-from agent_env.providers.sandbox_providers.sail import _sdk
-from agent_env.providers.sandbox_providers.sail.model_key import ModelKeyInjection
-from agent_env.providers.sandbox_providers.sail.sandbox import (
+from agent_env.providers.sandbox_providers.sail_vm import _sdk
+from agent_env.providers.sandbox_providers.sail_vm.model_key import ModelKeyInjection
+from agent_env.providers.sandbox_providers.sail_vm.sandbox import (
     MAX_ALLOWLIST_ENTRIES,
-    SailSandbox,
+    SailVmSandbox,
     create_saved_policy,
     egress_document,
     policy_name,
@@ -31,7 +31,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
 
 logger = logging.getLogger(__name__)
 
-SANDBOX_STARTED_EVENT = "agent_env.sail_sandbox_started"
+SANDBOX_STARTED_EVENT = "agent_env.sail_vm_sandbox_started"
 
 #: (size, vCPU, (min, max) memory GiB, (min, max) disk GiB), smallest first. Memory and disk are
 #: ceilings, not reservations: Sail bills observed usage.
@@ -69,7 +69,7 @@ def sailbox_name(attribution: Attribution) -> str:
     return "-".join(["ae", uuid.uuid4().hex[:8], *filter(None, slugs)])[:_MAX_NAME_LENGTH].rstrip("-")
 
 
-async def _reap(sandbox: SailSandbox) -> None:
+async def _reap(sandbox: SailVmSandbox) -> None:
     for attempt in range(_REAP_ATTEMPTS):
         try:
             await sandbox.terminate()
@@ -85,7 +85,7 @@ async def _reap(sandbox: SailSandbox) -> None:
 
 
 async def _create_or_reclaim(
-    create: Any, wrap: Callable[[Any], SailSandbox], release: Callable[[], Awaitable[None]] | None = None,
+    create: Any, wrap: Callable[[Any], SailVmSandbox], release: Callable[[], Awaitable[None]] | None = None,
 ) -> Any:
     """Await a Sailbox create. If the caller is cancelled first, terminate (``wrap``ped, so its model-key
     policy and secret go too) the Sailbox it yields, which would otherwise keep running with no handle; if
@@ -110,7 +110,7 @@ async def _create_or_reclaim(
         raise
 
 
-class SailSandboxProvider(SandboxProvider):
+class SailVmSandboxProvider(SandboxProvider):
     """Docker-capable Sailboxes. ``api_key`` comes from resolved provider config (a ``secret:`` reference)
     and never reaches a workload. With ``inject_model_key`` (the default) neither does an agent's model key:
     Sail adds it to the agent's requests to the model endpoint (see ``model_key``)."""
@@ -140,11 +140,11 @@ class SailSandboxProvider(SandboxProvider):
         self._app: Any | None = None
 
     def __repr__(self) -> str:
-        return f"SailSandboxProvider(app={self._app_name!r})"
+        return f"SailVmSandboxProvider(app={self._app_name!r})"
 
     @classmethod
     def from_config(cls, **config: Any) -> Self:
-        section = "[sandbox.providers.sail.config]"
+        section = "[sandbox.providers.sail_vm.config]"
         api_key = config.get("api_key")
         if not isinstance(api_key, str) or not api_key.strip():
             raise ConfigError(f"{section} requires a non-empty 'api_key' (e.g. \"secret:sail_api_key\")")
@@ -204,7 +204,7 @@ class SailSandboxProvider(SandboxProvider):
         setup_for_gateway: bool = True,
         attribution: Attribution | None = None,
         network_policy: NetworkPolicy | None = None,
-    ) -> SailSandbox:
+    ) -> SailVmSandbox:
         """Create a Sailbox from the devbox image; ``timeout`` is its hard maximum lifetime."""
         if image is not None:
             raise ValueError("the Sail provider boots its own Docker-capable image; image overrides are unsupported")
@@ -226,7 +226,7 @@ class SailSandboxProvider(SandboxProvider):
         attribution: Attribution | None,
         network_policy: NetworkPolicy | None,
         injection: ModelKeyInjection | None,
-    ) -> SailSandbox:
+    ) -> SailVmSandbox:
         size, memory_gib, disk_gib = sailbox_shape(cpu, memory, disk_size_gb, min_size=self._min_size)
         effective_policy = self.effective_network_policy(network_policy)
         if injection is not None:
@@ -245,8 +245,8 @@ class SailSandboxProvider(SandboxProvider):
 
         launch = f"launch-{uuid.uuid4().hex}"
 
-        def wrap(raw: Any) -> SailSandbox:
-            sandbox = SailSandbox(
+        def wrap(raw: Any) -> SailVmSandbox:
+            sandbox = SailVmSandbox(
                 raw, sdk=sdk, tunnel_urls={}, network_policy=effective_policy, injection=injection,
                 refuse_model_keys=self._inject_model_key,
             )
@@ -287,7 +287,7 @@ class SailSandboxProvider(SandboxProvider):
             sandbox.tunnel_urls = await self._tunnel_urls(raw, ports)
             sandbox.mode = SANDBOX_MODE_VM
             logger.info(
-                "Sail sandbox started: sailbox_id=%s app=%s size=%s memory=%sGiB disk=%sGiB model_key_injected=%s attribution=%s",
+                "Sail VM sandbox started: sailbox_id=%s app=%s size=%s memory=%sGiB disk=%sGiB model_key_injected=%s attribution=%s",
                 raw.sailbox_id, self._app_name, size, memory_gib, disk_gib, injection is not None, resolved_attribution,
                 extra={
                     "event": SANDBOX_STARTED_EVENT,
@@ -343,7 +343,7 @@ class SailSandboxProvider(SandboxProvider):
         timeout: int = 3600 * 2,
         attribution: Attribution | None = None,
         network_policy: NetworkPolicy | None = None,
-    ) -> SailSandbox:
+    ) -> SailVmSandbox:
         """A bare VM the caller loads and starts ``image_name`` in, as on the other VM providers. A model key in
         ``env`` is injected by Sail rather than passed in (unless ``inject_model_key`` is off)."""
         del image_name
@@ -353,7 +353,7 @@ class SailSandboxProvider(SandboxProvider):
             setup_for_gateway=True, attribution=attribution, network_policy=network_policy, injection=injection,
         )
 
-    async def create_container(self, **kwargs: Any) -> SailSandbox:
+    async def create_container(self, **kwargs: Any) -> SailVmSandbox:
         """The inherited login-pull-run, then the registry credentials removed from the VM disk, which Sail
         checkpoints for host-failure recovery."""
         sandbox = await super().create_container(**kwargs)
@@ -364,7 +364,7 @@ class SailSandboxProvider(SandboxProvider):
             raise
         return sandbox
 
-    async def get_sandbox(self, sandbox_id: str) -> SailSandbox:
+    async def get_sandbox(self, sandbox_id: str) -> SailVmSandbox:
         """Reconnect, restoring ports, the applied egress policy and any model-key injection. The key itself
         is recovered only when it is the configured ``[model]`` key, so the reconnected handle scrubs it too."""
         sdk, _ = await self._connect()
@@ -381,7 +381,7 @@ class SailSandboxProvider(SandboxProvider):
                 injection.recover_key(get_config().get_litellm_api_key())
             except Exception:  # noqa: BLE001 - no configured key to recover; the handle just can't scrub it
                 pass
-        sandbox = SailSandbox(
+        sandbox = SailVmSandbox(
             raw, sdk=sdk, tunnel_urls=tunnel_urls, network_policy=None, injection=injection,
             refuse_model_keys=self._inject_model_key,
         )

@@ -9,9 +9,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from agent_env.providers.sandbox_providers.sail import _sdk
-from agent_env.providers.sandbox_providers.sail import model_key
-from agent_env.providers.sandbox_providers.sail.model_key import (
+from agent_env.providers.sandbox_providers.sail_vm import _sdk
+from agent_env.providers.sandbox_providers.sail_vm import model_key
+from agent_env.providers.sandbox_providers.sail_vm.model_key import (
     DOCKER_SHIM_PATH,
     PLACEHOLDER,
     ModelKeyInjection,
@@ -19,10 +19,10 @@ from agent_env.providers.sandbox_providers.sail.model_key import (
     docker_shim,
     secret_name,
 )
-from agent_env.providers.sandbox_providers.sail.provider import SailSandboxProvider
-from agent_env.providers.sandbox_providers.sail.sandbox import (
+from agent_env.providers.sandbox_providers.sail_vm.provider import SailVmSandboxProvider
+from agent_env.providers.sandbox_providers.sail_vm.sandbox import (
     ModelKeyRefusedError,
-    SailSandbox,
+    SailVmSandbox,
     create_saved_policy,
     delete_policy_named,
 )
@@ -95,7 +95,7 @@ def fresh_key_state(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def no_vm_setup(monkeypatch):
-    monkeypatch.setattr(SailSandbox, "setup_vm_for_gateway", AsyncMock())
+    monkeypatch.setattr(SailVmSandbox, "setup_vm_for_gateway", AsyncMock())
 
 
 def _process(stdout=b""):
@@ -191,7 +191,7 @@ async def test_an_agent_sailbox_gets_its_key_through_a_secret_and_a_saved_policy
     sailbox = _sailbox()
     sdk, saved, _ = _fake_sdk(sailbox)
 
-    sandbox = await SailSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(image_name="agent:1", port=8000, env=_ENV)
+    sandbox = await SailVmSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(image_name="agent:1", port=8000, env=_ENV)
 
     sdk.Secret.set.aio.assert_awaited_once_with(secret_name(_KEY), _KEY)
     (policy,) = saved
@@ -209,7 +209,7 @@ async def test_a_restricted_agent_sailbox_allows_the_model_endpoint_it_injects_i
     sdk, saved, _ = _fake_sdk(_sailbox())
     restricted = NetworkPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=("pypi.org",))
 
-    sandbox = await SailSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(
+    sandbox = await SailVmSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(
         image_name="agent:1", port=8000, env=_ENV, network_policy=restricted,
     )
 
@@ -220,7 +220,7 @@ async def test_a_restricted_agent_sailbox_allows_the_model_endpoint_it_injects_i
 @pytest.mark.asyncio
 async def test_injection_can_be_turned_off_to_pass_the_key_in():
     sdk, saved, _ = _fake_sdk(_sailbox())
-    sandbox = await SailSandboxProvider(api_key="sail-key", inject_model_key=False, sdk=sdk).create_sandbox(
+    sandbox = await SailVmSandboxProvider(api_key="sail-key", inject_model_key=False, sdk=sdk).create_sandbox(
         image_name="agent:1", port=8000, env={**_ENV, "LITELLM_BASE_URL": "http://llm.internal:4000"},
     )
     sdk.Secret.set.aio.assert_not_awaited()
@@ -232,7 +232,7 @@ async def test_injection_can_be_turned_off_to_pass_the_key_in():
 async def test_a_plain_endpoint_is_refused_before_anything_is_created():
     sdk, saved, _ = _fake_sdk(_sailbox())
     with pytest.raises(ValueError, match="only into HTTPS requests"):
-        await SailSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(
+        await SailVmSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(
             image_name="agent:1", port=8000, env={**_ENV, "LITELLM_BASE_URL": "http://llm.internal:4000"},
         )
     sdk.Secret.set.aio.assert_not_awaited()
@@ -244,7 +244,7 @@ async def test_a_failed_create_deletes_its_policy_but_never_the_secret():
     sdk, saved, secret = _fake_sdk(_sailbox())
     sdk.Sailbox.create.aio = AsyncMock(side_effect=RuntimeError("no capacity"))
     with pytest.raises(RuntimeError, match="no capacity"):
-        await SailSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(image_name="agent:1", port=8000, env=_ENV)
+        await SailVmSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(image_name="agent:1", port=8000, env=_ENV)
     saved[0].delete.aio.assert_awaited_once()
     secret.delete.aio.assert_not_awaited()
     assert secret_name(_KEY) not in model_key._injected_keys
@@ -261,7 +261,7 @@ async def test_a_create_cancelled_while_saving_the_policy_forgets_the_key():
 
     sdk.EgressPolicy.create.aio = AsyncMock(side_effect=hang)
     task = asyncio.ensure_future(
-        SailSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(image_name="agent:1", port=8000, env=_ENV)
+        SailVmSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(image_name="agent:1", port=8000, env=_ENV)
     )
     await started.wait()
     task.cancel()
@@ -284,7 +284,7 @@ async def test_a_create_abandoned_in_flight_that_then_fails_deletes_its_policy()
 
     sdk.Sailbox.create.aio = create
     task = asyncio.ensure_future(
-        SailSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(image_name="agent:1", port=8000, env=_ENV)
+        SailVmSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(image_name="agent:1", port=8000, env=_ENV)
     )
     await started.wait()
     task.cancel()
@@ -301,7 +301,7 @@ async def test_a_create_abandoned_in_flight_that_then_fails_deletes_its_policy()
 @pytest.mark.asyncio
 async def test_gateway_and_plain_vms_never_inject():
     sdk, saved, _ = _fake_sdk(_sailbox(ports=()))
-    sandbox = await SailSandboxProvider(api_key="sail-key", sdk=sdk).create_vm(exposed_ports=[])
+    sandbox = await SailVmSandboxProvider(api_key="sail-key", sdk=sdk).create_vm(exposed_ports=[])
     assert saved == [] and sandbox._injection is None
 
 
@@ -310,7 +310,7 @@ async def test_commands_and_files_carry_the_placeholder_never_the_key():
     sailbox = _sailbox()
     sailbox.exec.aio = AsyncMock(return_value=_process())
     sdk, _, _ = _fake_sdk(sailbox)
-    sandbox = await SailSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(image_name="agent:1", port=8000, env=_ENV)
+    sandbox = await SailVmSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(image_name="agent:1", port=8000, env=_ENV)
 
     await sandbox.exec_script(f"docker run -d -e LITELLM_API_KEY='{_KEY}' -e ANTHROPIC_API_KEY={_KEY} agent:1")
     await sandbox.write_host_file(f"key: {_KEY}\n".encode(), "/opt/agent/config.yaml")
@@ -326,7 +326,7 @@ async def test_commands_and_files_carry_the_placeholder_never_the_key():
 async def test_terminate_deletes_the_policy_and_keeps_the_secret():
     sailbox = _sailbox()
     sdk, saved, secret = _fake_sdk(sailbox)
-    sandbox = await SailSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(image_name="agent:1", port=8000, env=_ENV)
+    sandbox = await SailVmSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(image_name="agent:1", port=8000, env=_ENV)
 
     await sandbox.terminate()
 
@@ -340,7 +340,7 @@ async def test_terminate_deletes_the_policy_and_keeps_the_secret():
 async def test_widening_an_injected_sailbox_replaces_its_saved_policy():
     sailbox = _sailbox()
     sdk, saved, _ = _fake_sdk(sailbox)
-    sandbox = await SailSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(
+    sandbox = await SailVmSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(
         image_name="agent:1", port=8000, env=_ENV,
         network_policy=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=("pypi.org",)),
     )
@@ -358,7 +358,7 @@ async def test_widening_an_injected_sailbox_replaces_its_saved_policy():
 async def test_a_failed_policy_swap_deletes_the_replacement_and_keeps_the_old_one():
     sailbox = _sailbox()
     sdk, saved, _ = _fake_sdk(sailbox)
-    sandbox = await SailSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(
+    sandbox = await SailVmSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(
         image_name="agent:1", port=8000, env=_ENV,
         network_policy=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=("pypi.org",)),
     )
@@ -382,10 +382,10 @@ async def test_reconnect_in_another_process_scrubs_the_configured_key(monkeypatc
     sdk, _, _ = _fake_sdk(sailbox)
     monkeypatch.setattr(model_key, "_injected_keys", {})
     monkeypatch.setattr(
-        "agent_env.providers.sandbox_providers.sail.provider.get_config", lambda: MagicMock(get_litellm_api_key=lambda: _KEY)
+        "agent_env.providers.sandbox_providers.sail_vm.provider.get_config", lambda: MagicMock(get_litellm_api_key=lambda: _KEY)
     )
 
-    sandbox = await SailSandboxProvider(api_key="sail-key", sdk=sdk).get_sandbox("sb_1")
+    sandbox = await SailVmSandboxProvider(api_key="sail-key", sdk=sdk).get_sandbox("sb_1")
 
     assert sandbox.network_policy == NetworkPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=("llm.example.com",))
     assert sandbox._injection.policy_id == "ep_9"
@@ -398,7 +398,7 @@ async def test_reconnect_treats_someone_elses_saved_policy_as_unknown():
     sailbox = _sailbox()
     sailbox.egress_policy = SimpleNamespace(policy_id="ep_7", document={"allowlist": ["a.example"]})
     sdk, _, _ = _fake_sdk(sailbox)
-    sandbox = await SailSandboxProvider(api_key="sail-key", sdk=sdk).get_sandbox("sb_1")
+    sandbox = await SailVmSandboxProvider(api_key="sail-key", sdk=sdk).get_sandbox("sb_1")
     assert sandbox.network_policy is None and sandbox._injection is None
 
 
@@ -407,13 +407,13 @@ async def test_reconnect_in_the_deploying_process_scrubs_the_agents_own_key(monk
     agent_key = "sk-agent-override-key-42"
     sailbox = _sailbox()
     sdk, _, _ = _fake_sdk(sailbox)
-    provider = SailSandboxProvider(api_key="sail-key", sdk=sdk)
+    provider = SailVmSandboxProvider(api_key="sail-key", sdk=sdk)
     created = await provider.create_sandbox(image_name="agent:1", port=8000, env={**_ENV, "LITELLM_API_KEY": agent_key})
     (policy,) = [c.args[1] for c in sdk.EgressPolicy.create.aio.await_args_list]
     sailbox.egress_policy = SimpleNamespace(policy_id=created._injection.policy_id, document=policy)
     sailbox.exec.aio = AsyncMock(return_value=_process())
     monkeypatch.setattr(
-        "agent_env.providers.sandbox_providers.sail.provider.get_config", lambda: MagicMock(get_litellm_api_key=lambda: _KEY)
+        "agent_env.providers.sandbox_providers.sail_vm.provider.get_config", lambda: MagicMock(get_litellm_api_key=lambda: _KEY)
     )
 
     reconnected = await provider.get_sandbox("sb_1")
@@ -458,7 +458,7 @@ async def test_a_dollar_value_in_a_plain_argument_is_a_literal_key_and_refused()
     sailbox = _sailbox(ports=())
     sailbox.exec.aio = AsyncMock(return_value=_process())
     sdk, _, _ = _fake_sdk(sailbox)
-    sandbox = await SailSandboxProvider(api_key="sail-key", sdk=sdk).create_vm(exposed_ports=[])
+    sandbox = await SailVmSandboxProvider(api_key="sail-key", sdk=sdk).create_vm(exposed_ports=[])
     with pytest.raises(ModelKeyRefusedError):
         await sandbox.exec_with_output("docker", "exec", "-e", "LITELLM_API_KEY=$looks-like-a-var", "agent-api", "true")
     await sandbox.exec_with_output("bash", "-c", 'docker exec -e LITELLM_API_KEY="$LITELLM_API_KEY" agent-api true')
@@ -469,7 +469,7 @@ async def test_a_sailbox_without_injection_refuses_a_model_key_rather_than_take_
     sailbox = _sailbox(ports=())
     sailbox.exec.aio = AsyncMock(return_value=_process())
     sdk, _, _ = _fake_sdk(sailbox)
-    sandbox = await SailSandboxProvider(api_key="sail-key", sdk=sdk).create_vm(exposed_ports=[])
+    sandbox = await SailVmSandboxProvider(api_key="sail-key", sdk=sdk).create_vm(exposed_ports=[])
     sailbox.exec.aio.reset_mock()
 
     with pytest.raises(ModelKeyRefusedError, match="Deploy the agent on its own sandbox"):
@@ -487,7 +487,7 @@ async def test_with_injection_off_keys_pass_through_as_before():
     sailbox = _sailbox(ports=())
     sailbox.exec.aio = AsyncMock(return_value=_process())
     sdk, _, _ = _fake_sdk(sailbox)
-    sandbox = await SailSandboxProvider(api_key="sail-key", inject_model_key=False, sdk=sdk).create_vm(exposed_ports=[])
+    sandbox = await SailVmSandboxProvider(api_key="sail-key", inject_model_key=False, sdk=sdk).create_vm(exposed_ports=[])
     await sandbox.exec_script(f"docker run -e LITELLM_API_KEY='{_KEY}' agent:1")
     assert _KEY in sailbox.exec.aio.await_args.args[0][2]
 
@@ -500,9 +500,9 @@ async def test_a_reconnected_handle_that_cannot_recover_the_key_refuses_it(monke
     sdk, _, _ = _fake_sdk(sailbox)
     monkeypatch.setattr(model_key, "_injected_keys", {})
     monkeypatch.setattr(
-        "agent_env.providers.sandbox_providers.sail.provider.get_config", lambda: MagicMock(get_litellm_api_key=lambda: "other")
+        "agent_env.providers.sandbox_providers.sail_vm.provider.get_config", lambda: MagicMock(get_litellm_api_key=lambda: "other")
     )
-    sandbox = await SailSandboxProvider(api_key="sail-key", sdk=sdk).get_sandbox("sb_1")
+    sandbox = await SailVmSandboxProvider(api_key="sail-key", sdk=sdk).get_sandbox("sb_1")
     with pytest.raises(ModelKeyRefusedError):
         await sandbox.exec_with_output("docker", "exec", "-e", f"LITELLM_API_KEY={_KEY}", "agent-api", "pytest")
     sailbox.exec.aio.assert_not_awaited()
@@ -512,7 +512,7 @@ async def test_a_reconnected_handle_that_cannot_recover_the_key_refuses_it(monke
 async def test_terminate_deletes_the_policy_actually_applied_even_if_another_handle_replaced_it():
     sailbox = _sailbox()
     sdk, saved, _ = _fake_sdk(sailbox)
-    sandbox = await SailSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(image_name="agent:1", port=8000, env=_ENV)
+    sandbox = await SailVmSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(image_name="agent:1", port=8000, env=_ENV)
     replacement = await sdk.EgressPolicy.create.aio("agentenv-replacement", saved[0].document)
     sailbox.egress_policy = SimpleNamespace(policy_id=replacement.id, document=replacement.document)
 
@@ -542,7 +542,7 @@ async def test_the_key_is_remembered_until_the_last_box_here_that_needs_it_is_go
     second.sailbox_id = "sb_2"
     sdk, _, secret = _fake_sdk(first)
     sdk.Sailbox.create.aio = AsyncMock(side_effect=[first, second])
-    provider = SailSandboxProvider(api_key="sail-key", sdk=sdk)
+    provider = SailVmSandboxProvider(api_key="sail-key", sdk=sdk)
     one = await provider.create_sandbox(image_name="agent:1", port=8000, env=_ENV)
     two = await provider.create_sandbox(image_name="agent:1", port=8000, env=_ENV)
 
@@ -570,7 +570,7 @@ async def test_a_failed_launch_never_touches_the_secret_a_concurrent_launch_with
         raise RuntimeError("no capacity")
 
     sdk.Sailbox.create.aio = create
-    provider = SailSandboxProvider(api_key="sail-key", sdk=sdk)
+    provider = SailVmSandboxProvider(api_key="sail-key", sdk=sdk)
     pending = asyncio.ensure_future(provider.create_sandbox(image_name="agent:1", port=8000, env=_ENV))
     await asyncio.wait_for(first_waiting.wait(), timeout=5)
     with pytest.raises(RuntimeError, match="no capacity"):
@@ -586,13 +586,13 @@ async def test_a_failed_launch_never_touches_the_secret_a_concurrent_launch_with
 async def test_terminate_waits_for_a_policy_swap_in_flight_on_another_handle():
     sailbox = _sailbox()
     sdk, saved, _ = _fake_sdk(sailbox)
-    provider = SailSandboxProvider(api_key="sail-key", sdk=sdk)
+    provider = SailVmSandboxProvider(api_key="sail-key", sdk=sdk)
     sandbox = await provider.create_sandbox(
         image_name="agent:1", port=8000, env=_ENV,
         network_policy=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=("pypi.org",)),
     )
     sailbox.egress_policy = SimpleNamespace(policy_id=saved[0].id, document=saved[0].document)
-    other = SailSandbox(sailbox, sdk=sdk, tunnel_urls={}, network_policy=sandbox.network_policy,
+    other = SailVmSandbox(sailbox, sdk=sdk, tunnel_urls={}, network_policy=sandbox.network_policy,
                         injection=ModelKeyInjection.from_document(saved[0].document, saved[0].id))
     swapping, release = asyncio.Event(), asyncio.Event()
 
@@ -617,7 +617,7 @@ async def test_terminate_waits_for_a_policy_swap_in_flight_on_another_handle():
 
 @pytest.mark.asyncio
 async def test_lost_response_cleanup_retries_through_a_brief_outage(monkeypatch, caplog):
-    monkeypatch.setattr("agent_env.providers.sandbox_providers.sail.sandbox.asyncio.sleep", AsyncMock())
+    monkeypatch.setattr("agent_env.providers.sandbox_providers.sail_vm.sandbox.asyncio.sleep", AsyncMock())
     sdk, saved, _ = _fake_sdk(_sailbox())
     await sdk.EgressPolicy.create.aio("agentenv-lost", {"rules": {}})
     listing = sdk.EgressPolicy.list.aio.side_effect
@@ -630,7 +630,7 @@ async def test_lost_response_cleanup_retries_through_a_brief_outage(monkeypatch,
 
 @pytest.mark.asyncio
 async def test_lost_response_cleanup_that_never_reaches_sail_names_the_policy_to_sweep(monkeypatch, caplog):
-    monkeypatch.setattr("agent_env.providers.sandbox_providers.sail.sandbox.asyncio.sleep", AsyncMock())
+    monkeypatch.setattr("agent_env.providers.sandbox_providers.sail_vm.sandbox.asyncio.sleep", AsyncMock())
     sdk, _, _ = _fake_sdk(_sailbox())
     sdk.EgressPolicy.list.aio = AsyncMock(side_effect=RuntimeError("down"))
 
@@ -642,7 +642,7 @@ async def test_lost_response_cleanup_that_never_reaches_sail_names_the_policy_to
 
 @pytest.mark.asyncio
 async def test_lost_response_cleanup_retries_a_failed_delete_too(monkeypatch):
-    monkeypatch.setattr("agent_env.providers.sandbox_providers.sail.sandbox.asyncio.sleep", AsyncMock())
+    monkeypatch.setattr("agent_env.providers.sandbox_providers.sail_vm.sandbox.asyncio.sleep", AsyncMock())
     sdk, saved, _ = _fake_sdk(_sailbox())
     await sdk.EgressPolicy.create.aio("agentenv-lost", {"rules": {}})
     saved[0].delete.aio = AsyncMock(side_effect=[RuntimeError("down"), None])
@@ -656,7 +656,7 @@ async def test_lost_response_cleanup_retries_a_failed_delete_too(monkeypatch):
 async def test_a_direct_policy_update_waits_for_terminate_on_another_handle():
     sailbox = _sailbox()
     sdk, saved, _ = _fake_sdk(sailbox)
-    sandbox = await SailSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(
+    sandbox = await SailVmSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(
         image_name="agent:1", port=8000, env=_ENV,
         network_policy=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=("pypi.org",)),
     )
@@ -668,7 +668,7 @@ async def test_a_direct_policy_update_waits_for_terminate_on_another_handle():
         return SimpleNamespace(egress_policy=SimpleNamespace(policy_id=saved[0].id, document=saved[0].document))
 
     sdk.Sailbox.get.aio = AsyncMock(side_effect=slow_get)
-    other = SailSandbox(sailbox, sdk=sdk, tunnel_urls={}, network_policy=sandbox.network_policy,
+    other = SailVmSandbox(sailbox, sdk=sdk, tunnel_urls={}, network_policy=sandbox.network_policy,
                         injection=ModelKeyInjection.from_document(saved[0].document, saved[0].id))
     teardown = asyncio.ensure_future(sandbox.terminate())
     await asyncio.wait_for(reading.wait(), timeout=5)
@@ -690,7 +690,7 @@ async def test_a_key_with_an_apostrophe_is_scrubbed_in_its_shell_encoded_form(qu
     sailbox = _sailbox()
     sailbox.exec.aio = AsyncMock(return_value=_process())
     sdk, _, _ = _fake_sdk(sailbox)
-    sandbox = await SailSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(
+    sandbox = await SailVmSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(
         image_name="agent:1", port=8000, env={**_ENV, "LITELLM_API_KEY": key},
     )
     encoded = "'" + key.replace("'", "'\\''") + "'" if quoting == "agent" else shlex.quote(key)

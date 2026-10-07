@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from agent_env.providers.sandbox_providers.sail.sandbox import SailSandbox, egress_document, policy_from_document
+from agent_env.providers.sandbox_providers.sail_vm.sandbox import SailVmSandbox, egress_document, policy_from_document
 from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy
 
 
@@ -51,7 +51,7 @@ def _sandbox(*outcomes, policy=NetworkPolicy()):
     sdk = SimpleNamespace(**vars(_SDK), Sailbox=SimpleNamespace(get=SimpleNamespace(aio=AsyncMock(
         side_effect=lambda _id: SimpleNamespace(egress_policy=SimpleNamespace(policy_id=None, document=applied["document"]))
     ))))
-    return SailSandbox(sailbox, sdk=sdk, tunnel_urls={}, network_policy=policy), sailbox
+    return SailVmSandbox(sailbox, sdk=sdk, tunnel_urls={}, network_policy=policy), sailbox
 
 
 @pytest.mark.asyncio
@@ -174,7 +174,7 @@ async def test_other_sdk_errors_propagate():
 
 @pytest.mark.asyncio
 async def test_wait_for_vm_starts_dockerd_once_when_it_is_not_running(monkeypatch):
-    monkeypatch.setattr("agent_env.providers.sandbox_providers.sail.sandbox.asyncio.sleep", AsyncMock())
+    monkeypatch.setattr("agent_env.providers.sandbox_providers.sail_vm.sandbox.asyncio.sleep", AsyncMock())
     sandbox, sailbox = _sandbox(
         _process(stderr=b"Cannot connect to the Docker daemon", exit_code=1),
         _process(),
@@ -188,12 +188,12 @@ async def test_wait_for_vm_starts_dockerd_once_when_it_is_not_running(monkeypatc
     assert commands[0][:2] == ["docker", "info"]
     assert commands[1][:2] == ["bash", "-c"] and "nohup dockerd" in commands[1][2]
     assert [c[:2] for c in commands[2:]] == [["docker", "info"], ["docker", "info"]]
-    assert sailbox.exec.aio.await_args_list[0].kwargs["timeout"] == SailSandbox._DOCKER_PROBE_TIMEOUT
+    assert sailbox.exec.aio.await_args_list[0].kwargs["timeout"] == SailVmSandbox._DOCKER_PROBE_TIMEOUT
 
 
 @pytest.mark.asyncio
 async def test_wait_for_vm_reports_the_last_error_when_docker_never_answers(monkeypatch):
-    monkeypatch.setattr(SailSandbox, "_VM_READY_TIMEOUT", 0)
+    monkeypatch.setattr(SailVmSandbox, "_VM_READY_TIMEOUT", 0)
     sandbox, _ = _sandbox(_process(stderr=b"daemon down", exit_code=1))
     with pytest.raises(RuntimeError, match="Docker not ready in Sailbox sb_1.*daemon down"):
         await sandbox.wait_for_vm()
@@ -201,7 +201,7 @@ async def test_wait_for_vm_reports_the_last_error_when_docker_never_answers(monk
 
 @pytest.mark.asyncio
 async def test_setup_requires_compose_v2(monkeypatch):
-    monkeypatch.setattr(SailSandbox, "wait_for_vm", AsyncMock())
+    monkeypatch.setattr(SailVmSandbox, "wait_for_vm", AsyncMock())
     sandbox, _ = _sandbox(_process(stderr=b"docker: 'compose' is not a docker command", exit_code=1))
     with pytest.raises(RuntimeError, match="no Docker Compose v2"):
         await sandbox.setup_vm_for_gateway([8080])
@@ -232,11 +232,11 @@ async def test_image_loading_fails_closed_when_the_policy_is_unknown():
 async def test_image_loading_widens_an_allowlist_with_the_signed_download_hosts(monkeypatch):
     sandbox, sailbox = _sandbox(policy=_ALLOWLIST)
     monkeypatch.setattr(
-        SailSandbox, "_signed_image_urls",
+        SailVmSandbox, "_signed_image_urls",
         AsyncMock(return_value=["https://bucket.s3.amazonaws.com/a?sig=1", None]),
     )
     load = AsyncMock()
-    monkeypatch.setattr(SailSandbox, "_load_docker_images", load)
+    monkeypatch.setattr(SailVmSandbox, "_load_docker_images", load)
 
     await sandbox.load_docker_images(["a", "b"])
 
@@ -250,8 +250,8 @@ async def test_image_loading_widens_an_allowlist_with_the_signed_download_hosts(
 @pytest.mark.asyncio
 async def test_image_loading_leaves_an_allow_all_policy_alone(monkeypatch):
     sandbox, sailbox = _sandbox()
-    monkeypatch.setattr(SailSandbox, "_signed_image_urls", AsyncMock(return_value=["https://x.example/a"]))
-    monkeypatch.setattr(SailSandbox, "_load_docker_images", AsyncMock())
+    monkeypatch.setattr(SailVmSandbox, "_signed_image_urls", AsyncMock(return_value=["https://x.example/a"]))
+    monkeypatch.setattr(SailVmSandbox, "_load_docker_images", AsyncMock())
     await sandbox.load_docker_images(["a"])
     sailbox.set_egress_policy.aio.assert_not_awaited()
     sandbox._sdk.Sailbox.get.aio.assert_not_awaited()
@@ -261,7 +261,7 @@ async def test_image_loading_leaves_an_allow_all_policy_alone(monkeypatch):
 async def test_widening_past_sails_allowlist_limit_is_refused(monkeypatch):
     full = NetworkPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=tuple(f"h{i}.example" for i in range(128)))
     sandbox, sailbox = _sandbox(policy=full)
-    monkeypatch.setattr(SailSandbox, "_signed_image_urls", AsyncMock(return_value=["https://bucket.example/a"]))
+    monkeypatch.setattr(SailVmSandbox, "_signed_image_urls", AsyncMock(return_value=["https://bucket.example/a"]))
     with pytest.raises(RuntimeError, match="exceed Sail's 128-entry egress allowlist"):
         await sandbox.load_docker_images(["a"])
     sailbox.set_egress_policy.aio.assert_not_awaited()
@@ -273,8 +273,8 @@ async def test_a_host_under_an_allowed_wildcard_needs_no_new_entry(monkeypatch):
         mode=NetworkMode.ALLOWLIST, allow_hosts=("*.s3.amazonaws.com", *(f"h{i}.example" for i in range(127)))
     )
     sandbox, sailbox = _sandbox(policy=full)
-    monkeypatch.setattr(SailSandbox, "_signed_image_urls", AsyncMock(return_value=["https://bucket.s3.amazonaws.com/a"]))
-    monkeypatch.setattr(SailSandbox, "_load_docker_images", AsyncMock())
+    monkeypatch.setattr(SailVmSandbox, "_signed_image_urls", AsyncMock(return_value=["https://bucket.s3.amazonaws.com/a"]))
+    monkeypatch.setattr(SailVmSandbox, "_load_docker_images", AsyncMock())
     await sandbox.load_docker_images(["a"])
     sailbox.set_egress_policy.aio.assert_not_awaited()
     sandbox._sdk.Sailbox.get.aio.assert_not_awaited()
@@ -283,7 +283,7 @@ async def test_a_host_under_an_allowed_wildcard_needs_no_new_entry(monkeypatch):
 @pytest.mark.asyncio
 async def test_concurrent_downloads_through_separate_handles_keep_each_others_hosts():
     sandbox, sailbox = _sandbox(policy=_ALLOWLIST)
-    other_handle = SailSandbox(sailbox, sdk=sandbox._sdk, tunnel_urls={}, network_policy=_ALLOWLIST)
+    other_handle = SailVmSandbox(sailbox, sdk=sandbox._sdk, tunnel_urls={}, network_policy=_ALLOWLIST)
 
     await asyncio.gather(
         sandbox._allow_download_hosts(["https://a.example/x"], "download"),
@@ -296,8 +296,8 @@ async def test_concurrent_downloads_through_separate_handles_keep_each_others_ho
 @pytest.mark.asyncio
 async def test_a_host_already_allowed_is_not_reapplied(monkeypatch):
     sandbox, sailbox = _sandbox(policy=_ALLOWLIST)
-    monkeypatch.setattr(SailSandbox, "_signed_image_urls", AsyncMock(return_value=["https://pypi.org/a"]))
-    monkeypatch.setattr(SailSandbox, "_load_docker_images", AsyncMock())
+    monkeypatch.setattr(SailVmSandbox, "_signed_image_urls", AsyncMock(return_value=["https://pypi.org/a"]))
+    monkeypatch.setattr(SailVmSandbox, "_load_docker_images", AsyncMock())
     await sandbox.load_docker_images(["a"])
     sailbox.set_egress_policy.aio.assert_not_awaited()
 
@@ -308,7 +308,7 @@ def _object_store(monkeypatch, signed):
         open=MagicMock(side_effect=lambda _url: io.BytesIO(b"\x00payload")),
     )
     monkeypatch.setattr(
-        "agent_env.providers.sandbox_providers.sail.sandbox.get_config", lambda: MagicMock(get_object_store=lambda: store)
+        "agent_env.providers.sandbox_providers.sail_vm.sandbox.get_config", lambda: MagicMock(get_object_store=lambda: store)
     )
     return store
 
@@ -330,7 +330,7 @@ async def test_a_signed_object_download_allows_its_host_first(monkeypatch):
 @pytest.mark.asyncio
 async def test_an_unsignable_object_is_streamed_through_the_filesystem_api(monkeypatch):
     _object_store(monkeypatch, None)
-    monkeypatch.setattr("agent_env.providers.sandbox_providers.sail.sandbox._STREAM_CHUNK_BYTES", 4)
+    monkeypatch.setattr("agent_env.providers.sandbox_providers.sail_vm.sandbox._STREAM_CHUNK_BYTES", 4)
     sandbox, sailbox = _sandbox(policy=None)
     writer = MagicMock(write=AsyncMock())
     stream = MagicMock(__aenter__=AsyncMock(return_value=writer), __aexit__=AsyncMock(return_value=False))

@@ -671,8 +671,8 @@ The runtime dependencies of `agentenv-framework` and its `explorer` and `gcp` ex
 
 - License: Apache-2.0
 - Author: Sail
-- Source: <https://github.com/sailresearchco/sail>
-- [License text 1](#license-text-1)
+- Source: <https://pypi.org/project/sail/0.12.8/>
+- License text: not shipped with the package; see its source
 
 ### shellingham 1.5.4
 

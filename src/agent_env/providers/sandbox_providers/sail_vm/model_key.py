@@ -107,7 +107,7 @@ class ModelKeyInjection:
         if parsed.scheme != "https" or not parsed.hostname:
             raise ValueError(
                 f"Sail injects the model key only into HTTPS requests, but {BASE_URL_ENV} is {base_url!r}; "
-                "use an https endpoint or set inject_model_key = false in [sandbox.providers.sail.config]"
+                "use an https endpoint or set inject_model_key = false in [sandbox.providers.sail_vm.config]"
             )
         return cls(host=parsed.hostname, secret=secret_name(key), key=key)
 

@@ -1,6 +1,6 @@
 """Sail Sailbox smoke test.
 
-Runs when the resolved config can build the ``sail`` sandbox provider (``[sandbox.providers.sail.config]``
+Runs when the resolved config can build the ``sail_vm`` sandbox provider (``[sandbox.providers.sail_vm.config]``
 with ``api_key = "secret:sail_api_key"``), the ``remote_sandbox`` capability, and skips with the declared
 reason otherwise. The test never reads or prints the API key.
 """
@@ -15,7 +15,7 @@ import httpx
 import pytest
 import pytest_asyncio
 
-from agent_env.providers.sandbox_providers.sail.model_key import PLACEHOLDER, secret_name
+from agent_env.providers.sandbox_providers.sail_vm.model_key import PLACEHOLDER, secret_name
 from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy
 from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider
 from tst.util.capabilities import skip_without_remote_sandbox
@@ -26,13 +26,13 @@ pytestmark = [
     pytest.mark.integration,
     pytest.mark.int_test_slow,
     pytest.mark.asyncio,
-    skip_without_remote_sandbox("sail"),
+    skip_without_remote_sandbox("sail_vm"),
 ]
 
 
 @pytest.fixture(scope="module")
 def sail_provider():
-    return build_sandbox_provider("sail")
+    return build_sandbox_provider("sail_vm")
 
 
 @pytest_asyncio.fixture(scope="module")
@@ -45,7 +45,7 @@ async def sail_sandbox(sail_provider):
 
 
 async def test_sailbox_runs_docker_serves_its_port_and_reconnects(sail_provider, sail_sandbox):
-    assert (sail_sandbox.type, sail_sandbox.mode) == ("sail", "vm")
+    assert (sail_sandbox.type, sail_sandbox.mode) == ("sail_vm", "vm")
 
     await sail_sandbox.exec_script(
         f"docker run -d --name web -p {_PORT}:80 public.ecr.aws/nginx/nginx:alpine > /dev/null"

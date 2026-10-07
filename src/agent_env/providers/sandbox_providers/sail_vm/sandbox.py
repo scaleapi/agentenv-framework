@@ -14,7 +14,7 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 
 from agent_env.config import get_config
-from agent_env.providers.sandbox_providers.sail.model_key import (
+from agent_env.providers.sandbox_providers.sail_vm.model_key import (
     DOCKER_SHIM_PATH,
     ModelKeyInjection,
     carries_model_key,
@@ -222,12 +222,12 @@ class _SailProcess:
         return exit_code
 
 
-class SailSandbox(VmSandbox):
+class SailVmSandbox(VmSandbox):
     """A Sailbox from the Docker-capable devbox image; commands run as root. With a model-key ``injection``,
     the key's value never enters the Sailbox: every command and file is scrubbed of it. With
     ``refuse_model_keys``, one that still carries a model key (one Sail doesn't inject here) is refused."""
 
-    type = "sail"
+    type = "sail_vm"
     _DOCKER_PROBE_TIMEOUT = 10
 
     def __init__(
@@ -361,7 +361,7 @@ class SailSandbox(VmSandbox):
         return ModelKeyRefusedError(
             f"Refusing to send a model key into Sailbox {self.sandbox_id}: Sail injects model keys only for an agent "
             "deployed on its own Sail sandbox, so this one would land on the Sailbox's disk. Deploy the agent on its "
-            "own sandbox, or set inject_model_key = false in [sandbox.providers.sail.config] to pass keys in."
+            "own sandbox, or set inject_model_key = false in [sandbox.providers.sail_vm.config] to pass keys in."
         )
 
     async def apply_network_policy(self, policy: NetworkPolicy) -> None:

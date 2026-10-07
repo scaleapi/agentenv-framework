@@ -275,9 +275,9 @@ def echo_agent() -> A2AAgent:
         marks=skip_without_remote_sandbox("modal_vm"),
     ),
     pytest.param(
-        "sail",
-        id="sail",
-        marks=skip_without_remote_sandbox("sail"),
+        "sail_vm",
+        id="sail_vm",
+        marks=skip_without_remote_sandbox("sail_vm"),
     ),
 ])
 def sandbox_provider(request):
@@ -301,10 +301,10 @@ def sandbox_provider(request):
         set_sandbox_provider(ModalVmSandboxProvider())
         set_env_sandbox_provider(ModalVmSandboxProvider())
         set_agent_sandbox_provider(ModalVmSandboxProvider())
-    elif request.param == "sail":
-        set_sandbox_provider(build_sandbox_provider("sail"))
-        set_env_sandbox_provider(build_sandbox_provider("sail"))
-        set_agent_sandbox_provider(build_sandbox_provider("sail"))
+    elif request.param == "sail_vm":
+        set_sandbox_provider(build_sandbox_provider("sail_vm"))
+        set_env_sandbox_provider(build_sandbox_provider("sail_vm"))
+        set_agent_sandbox_provider(build_sandbox_provider("sail_vm"))
     try:
         yield request.param
     finally:

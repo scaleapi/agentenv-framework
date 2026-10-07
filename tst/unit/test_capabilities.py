@@ -169,14 +169,14 @@ def test_e2b_other_failures_read_as_present_rather_than_absent(monkeypatch):
 
 @pytest.mark.parametrize(
     ("outcome", "available"),
-    [(ConfigError("[sandbox.providers.sail.config] requires a non-empty 'api_key'"), False), (object(), True), (RuntimeError("boom"), True)],
+    [(ConfigError("[sandbox.providers.sail_vm.config] requires a non-empty 'api_key'"), False), (object(), True), (RuntimeError("boom"), True)],
 )
 def test_sail_availability_follows_the_provider_build(monkeypatch, outcome, available):
     def build(spec):
-        assert spec == "sail"
+        assert spec == "sail_vm"
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
 
     monkeypatch.setattr("agent_env.providers.sandbox_providers.sandbox_provider.build_sandbox_provider", build)
-    assert capabilities.remote_sandbox_is_available("sail") is available
+    assert capabilities.remote_sandbox_is_available("sail_vm") is available

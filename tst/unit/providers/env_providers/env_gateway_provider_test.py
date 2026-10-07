@@ -603,14 +603,14 @@ async def test_read_trajectory_of_a_gateway_with_no_history_yet_is_empty():
 async def test_sail_provider_routes_to_vm_path_not_containers():
     """A Sailbox is a Docker-capable VM: the gateway deploys onto it with docker-compose."""
     from agent_env.env.gateway import GatewayMode
-    from agent_env.providers.sandbox_providers.sail import SailSandboxProvider
+    from agent_env.providers.sandbox_providers.sail_vm import SailVmSandboxProvider
 
     gp = EnvironmentGatewayProvider()
     gp._deploy_via_vm = AsyncMock(return_value="VM_RESULT")
     gp._deploy_via_containers = AsyncMock(return_value="CONTAINER_RESULT")
 
     result = await gp.create_gateway(
-        sandbox_provider=SailSandboxProvider(api_key="sail-test-key"),
+        sandbox_provider=SailVmSandboxProvider(api_key="sail-test-key"),
         mcp_servers=[MCPServerConfig(image="mcp-a", environment_name="a")],
         mcp_server_images=[MagicMock(image_name="mcp-a")],
         gateway_mode=GatewayMode.PERFORMANCE,

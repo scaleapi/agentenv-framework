@@ -10,15 +10,15 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from agent_env.config.errors import ConfigError
-from agent_env.providers.sandbox_providers.sail import _sdk
-from agent_env.providers.sandbox_providers.sail import provider as provider_module
-from agent_env.providers.sandbox_providers.sail.provider import (
+from agent_env.providers.sandbox_providers.sail_vm import _sdk
+from agent_env.providers.sandbox_providers.sail_vm import provider as provider_module
+from agent_env.providers.sandbox_providers.sail_vm.provider import (
     SANDBOX_STARTED_EVENT,
-    SailSandboxProvider,
+    SailVmSandboxProvider,
     sailbox_name,
     sailbox_shape,
 )
-from agent_env.providers.sandbox_providers.sail.sandbox import SailSandbox
+from agent_env.providers.sandbox_providers.sail_vm.sandbox import SailVmSandbox
 from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy, NetworkPolicyUnsupportedError
 
 
@@ -69,12 +69,12 @@ def fresh_key_state(monkeypatch):
 @pytest.fixture
 def setup(monkeypatch):
     setup = AsyncMock()
-    monkeypatch.setattr(SailSandbox, "setup_vm_for_gateway", setup)
+    monkeypatch.setattr(SailVmSandbox, "setup_vm_for_gateway", setup)
     return setup
 
 
 def _provider(sdk, **config):
-    return SailSandboxProvider(api_key="sail-secret", sdk=sdk, **config)
+    return SailVmSandboxProvider(api_key="sail-secret", sdk=sdk, **config)
 
 
 @pytest.mark.parametrize(
@@ -93,12 +93,12 @@ def _provider(sdk, **config):
 )
 def test_from_config_rejects_invalid_config(config, message):
     with pytest.raises(ConfigError, match=message):
-        SailSandboxProvider.from_config(**config)
+        SailVmSandboxProvider.from_config(**config)
 
 
 def test_construction_neither_imports_the_sdk_nor_sets_the_key(monkeypatch):
     monkeypatch.delitem(sys.modules, "sail", raising=False)
-    SailSandboxProvider.from_config(api_key="sail-secret")
+    SailVmSandboxProvider.from_config(api_key="sail-secret")
     assert "sail" not in sys.modules
     assert _sdk.API_KEY_ENV not in os.environ
 
@@ -154,8 +154,8 @@ async def test_create_vm_sends_the_shape_lifetime_ports_and_policy(setup):
     assert kwargs["auto_sleep"] == "never"
     assert kwargs["egress_policy"] == {}
     assert "api_key" not in kwargs and "env" not in kwargs
-    assert isinstance(sandbox, SailSandbox)
-    assert (sandbox.type, sandbox.mode, sandbox.sandbox_id) == ("sail", "vm", "sb_1")
+    assert isinstance(sandbox, SailVmSandbox)
+    assert (sandbox.type, sandbox.mode, sandbox.sandbox_id) == ("sail_vm", "vm", "sb_1")
     assert sandbox.tunnel_urls == {8080: "https://sb-1-8080.sail.box", 9000: "https://sb-1-9000.sail.box"}
     assert sandbox.network_policy == NetworkPolicy()
     setup.assert_awaited_once_with([8080, 9000])
@@ -195,7 +195,7 @@ async def test_allowlist_becomes_a_sail_allowlist_with_the_platform_floor(setup)
 )
 async def test_an_unenforceable_policy_is_refused_before_provisioning(policy):
     sdk = _fake_sdk(_sailbox())
-    assert SailSandboxProvider.supports_network_policy(policy) is False
+    assert SailVmSandboxProvider.supports_network_policy(policy) is False
     with pytest.raises(NetworkPolicyUnsupportedError):
         await _provider(sdk).create_vm(exposed_ports=[], network_policy=policy)
     sdk.Sailbox.create.aio.assert_not_awaited()
@@ -220,7 +220,7 @@ async def test_a_setup_failure_terminates_the_sailbox(setup):
 
 @pytest.mark.asyncio
 async def test_tunnel_urls_wait_until_every_port_is_routed(setup, monkeypatch):
-    monkeypatch.setattr("agent_env.providers.sandbox_providers.sail.provider._LISTENER_POLL_INTERVAL", 0)
+    monkeypatch.setattr("agent_env.providers.sandbox_providers.sail_vm.provider._LISTENER_POLL_INTERVAL", 0)
     sailbox = _sailbox()
     sailbox.listeners.aio = AsyncMock(side_effect=[[_listener(8080, url=False)], [_listener(8080)]])
     sandbox = await _provider(_fake_sdk(sailbox)).create_vm(exposed_ports=[8080])
@@ -229,8 +229,8 @@ async def test_tunnel_urls_wait_until_every_port_is_routed(setup, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_a_port_that_never_routes_fails_the_create(setup, monkeypatch):
-    monkeypatch.setattr("agent_env.providers.sandbox_providers.sail.provider._LISTENER_POLL_INTERVAL", 0)
-    monkeypatch.setattr("agent_env.providers.sandbox_providers.sail.provider._LISTENER_TIMEOUT", 0)
+    monkeypatch.setattr("agent_env.providers.sandbox_providers.sail_vm.provider._LISTENER_POLL_INTERVAL", 0)
+    monkeypatch.setattr("agent_env.providers.sandbox_providers.sail_vm.provider._LISTENER_TIMEOUT", 0)
     sailbox = _sailbox()
     with pytest.raises(RuntimeError, match=r"no public URL for port\(s\) \[8080\]"):
         await _provider(_fake_sdk(sailbox)).create_vm(exposed_ports=[8080])
@@ -261,7 +261,7 @@ async def test_a_cancelled_create_terminates_the_sailbox_it_produces():
 
 @pytest.mark.asyncio
 async def test_a_failing_orphan_termination_is_retried_then_reported(monkeypatch, caplog):
-    monkeypatch.setattr("agent_env.providers.sandbox_providers.sail.provider.asyncio.sleep", AsyncMock())
+    monkeypatch.setattr("agent_env.providers.sandbox_providers.sail_vm.provider.asyncio.sleep", AsyncMock())
     sandbox = MagicMock(sandbox_id="sb_1")
     sandbox.terminate = AsyncMock(side_effect=RuntimeError("api down"))
 
@@ -273,7 +273,7 @@ async def test_a_failing_orphan_termination_is_retried_then_reported(monkeypatch
 
 @pytest.mark.asyncio
 async def test_create_logs_the_attribution_join_event_without_the_key(setup, caplog):
-    caplog.set_level(logging.INFO, logger="agent_env.providers.sandbox_providers.sail.provider")
+    caplog.set_level(logging.INFO, logger="agent_env.providers.sandbox_providers.sail_vm.provider")
     await _provider(_fake_sdk(_sailbox())).create_vm(exposed_ports=[], attribution={"run_id": "inst-1", "team": "t"})
 
     (record,) = [r for r in caplog.records if getattr(r, "event", None) == SANDBOX_STARTED_EVENT]
@@ -301,7 +301,7 @@ async def test_image_overrides_are_refused():
 
 @pytest.mark.asyncio
 async def test_create_container_removes_the_registry_login_from_the_vm(monkeypatch):
-    sandbox = MagicMock(spec=SailSandbox)
+    sandbox = MagicMock(spec=SailVmSandbox)
     sandbox.exec_script = AsyncMock()
     monkeypatch.setattr(
         "agent_env.providers.sandbox_providers.sandbox_provider.SandboxProvider.create_container",

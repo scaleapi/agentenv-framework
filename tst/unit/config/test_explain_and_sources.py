@@ -160,7 +160,7 @@ def test_sources_says_how_the_file_was_found(config_file, tmp_path, monkeypatch)
     assert "walking up" in next(s for s in sources() if s.kind == KIND_FILE).detail
 
 
-# Read for identity (USER), or set from [sandbox.providers.sail.config] for the Sail SDK to read
+# Read for identity (USER), or set from [sandbox.providers.sail_vm.config] for the Sail SDK to read
 # (SAIL_*), never configuration agent-env takes, so none is a layer.
 _NOT_CONFIGURATION = {"USER", "SAIL_API_KEY", "SAIL_RUNTIME_THREADS"}
 
