@@ -134,6 +134,21 @@ class NetworkPolicy:
         )
 
 
+def _object_file_method(legacy: Callable) -> Callable:
+    async def method(self, object_url: str, destination_path: str) -> None:
+        await legacy(self, object_url, destination_path)
+
+    return method
+
+
+def _legacy_file_method(canonical: Callable, old_symbol: str, new_name: str) -> Callable:
+    async def method(self, s3_url: str, destination_path: str) -> None:
+        warn_deprecated(old_symbol, new_name, kind="method")
+        await canonical(self, s3_url, destination_path)
+
+    return method
+
+
 class Sandbox(ABC):
     """Universal sandbox contract — anything that can host a process and expose ports."""
 
@@ -149,6 +164,20 @@ class Sandbox(ABC):
 
     _VM_READY_TIMEOUT = 1200      # wait_for_vm wall-clock budget (s)
     _VM_READY_POLL_INTERVAL = 30  # sparse polling (s)
+
+    def __init_subclass__(cls, **kwargs) -> None:
+        """Keep overrides of either file-method spelling in the dispatch path, including super() calls."""
+        super().__init_subclass__(**kwargs)
+        for legacy, neutral, owner in (
+            ("write_file_from_s3", "write_file_from_object", "Sandbox"),
+            ("load_s3_file", "load_object_file", "VmSandbox"),
+        ):
+            legacy_impl = cls.__dict__.get(legacy)
+            neutral_impl = cls.__dict__.get(neutral)
+            if legacy_impl is not None and neutral_impl is None:
+                setattr(cls, neutral, _object_file_method(legacy_impl))
+            elif neutral_impl is not None and legacy_impl is None:
+                setattr(cls, legacy, _legacy_file_method(neutral_impl, f"{owner}.{legacy}", neutral))
 
     def host_port(self, port: int) -> int:
         """The host-side port a published container port is reachable on.
@@ -182,7 +211,7 @@ class Sandbox(ABC):
     async def write_file_from_s3(self, s3_url: str, destination_path: str) -> None:
         """Deprecated: ``write_file_from_object``."""
         warn_deprecated("Sandbox.write_file_from_s3", "write_file_from_object", kind="method")
-        await self.write_file_from_object(s3_url, destination_path)
+        await Sandbox.write_file_from_object(self, s3_url, destination_path)
 
     async def write_file_from_url(self, url: str, destination_path: str) -> None:
         """Download an HTTP(S) URL into the agent process's filesystem at destination_path."""
@@ -341,7 +370,7 @@ class VmSandbox(Sandbox):
     async def load_s3_file(self, s3_url: str, destination_path: str) -> None:
         """Deprecated: ``load_object_file``."""
         warn_deprecated("VmSandbox.load_s3_file", "load_object_file", kind="method")
-        await self.load_object_file(s3_url, destination_path)
+        await VmSandbox.load_object_file(self, s3_url, destination_path)
 
     async def _download_object_to_vm(self, object_url: str, vm_path: str) -> None:
         """Place object_url onto the VM host at vm_path, backend-agnostically."""

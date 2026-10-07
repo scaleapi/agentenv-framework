@@ -8,7 +8,6 @@ layer works; the full task-DAG no-infra e2e stays gated on images/secrets/seedin
 """
 
 import gzip
-import io
 import re
 from pathlib import Path
 
@@ -20,6 +19,7 @@ from agent_env.artifact.artifacts.cli import CliArtifact
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.artifact.artifacts.skill import SkillArtifact, download_skill
+from agent_env.artifact.store import get_artifact_store
 from agent_env.cli.artifact.file_artifact_universe import file_artifact_universe
 from agent_env.store.ids import fs_safe, key_segment
 from agent_env.config import get_config, set_image_store, set_object_store
@@ -184,15 +184,39 @@ def test_a_local_id_file_artifact_lands_under_its_encoded_segment(local_stores, 
     fb = FileArtifact.put_bytes(id=HOSTILE, description="d", filename="raw.bin", content=b"raw")
 
     store = local_stores.get_object_store()
-    assert store.get_object_key(fa.object_url) == f"artifacts/file/{HOSTILE_SEGMENT}/1/payload.json"
-    assert store.get_object_key(fb.object_url) == f"artifacts/file/{HOSTILE_SEGMENT}/2/raw.bin"
+    assert re.fullmatch(
+        rf"artifacts/file/{re.escape(HOSTILE_SEGMENT)}/1-[0-9a-f]{{8}}/payload.json",
+        store.get_object_key(fa.object_url),
+    )
+    assert re.fullmatch(
+        rf"artifacts/file/{re.escape(HOSTILE_SEGMENT)}/2-[0-9a-f]{{8}}/raw.bin",
+        store.get_object_key(fb.object_url),
+    )
     assert FileArtifact.get(HOSTILE, 1).load() == b'{"hostile": true}'
     assert FileArtifact.get(HOSTILE).load() == b"raw"
 
 
-def test_a_legacy_id_keeps_its_object_key_byte_identical(local_stores, tmp_path):
+def test_a_legacy_id_keeps_its_encoded_segment_in_the_object_key(local_stores, tmp_path):
     fa = FileArtifact.put(id="Legacy/Id v1", description="d", file_path=_write(tmp_path, "p.txt", b"x"))
-    assert local_stores.get_object_store().get_object_key(fa.object_url) == "artifacts/file/Legacy/Id v1/1/p.txt"
+    key = local_stores.get_object_store().get_object_key(fa.object_url)
+    assert re.fullmatch(r"artifacts/file/Legacy/Id v1/1-[0-9a-f]{8}/p.txt", key)
+    assert fa.load() == b"x"
+
+
+def test_a_published_file_with_an_existing_version_locator_still_loads(local_stores, tmp_path):
+    objects = local_stores.get_object_store()
+    old_locator = objects.put_file(
+        "artifacts/file/Legacy/Id v1/1/p.txt", _write(tmp_path, "old.txt", b"published before attempt prefixes")
+    )
+    stored = get_artifact_store().put_document(
+        FileArtifact(
+            id="old-file", version=1, description="old", filename="p.txt",
+            content_type="text/plain", s3_url=old_locator,
+        )
+    )
+
+    assert stored.object_url == old_locator
+    assert FileArtifact.get("old-file").load() == b"published before attempt prefixes"
 
 
 def _cli_dir(tmp_path, name, files):
@@ -222,14 +246,9 @@ def test_a_local_id_bundle_never_lists_another_ids_files(local_stores, cli_routi
         assert sorted(p.name for p in out.rglob("*") if p.is_file()) == ["a"]
 
 
-class _DockerSave:
-    def __init__(self, *args, **kwargs):
-        self.stdout = io.BytesIO(b"image-tar-bytes")
-        self.stderr = io.BytesIO(b"")
-        self.returncode = 0
-
-    def wait(self, timeout=None):
-        return 0
+def _save_fake_docker_image(image_ref, output_path, timeout_seconds):
+    with gzip.open(output_path, "wb") as image_archive:
+        image_archive.write(b"image-tar-bytes")
 
 
 @pytest.mark.parametrize("entity_id, registry, repository, tarball", [
@@ -247,7 +266,7 @@ def test_a_docker_image_names_its_repository_and_tarball_from_the_encoded_id(
     monkeypatch.setattr(LocalRegistryImageStore, "ensure_repository", lambda self, repository: local_registry.append(repository))
     pushed = []
     monkeypatch.setattr(docker_image, "_push_local_image", lambda src, ref, store: pushed.append(ref))
-    monkeypatch.setattr(docker_image.subprocess, "Popen", _DockerSave)
+    monkeypatch.setattr(docker_image, "_save_image_tar_gz", _save_fake_docker_image)
 
     art = docker_image.DockerImageArtifact.put(id=entity_id, description="d", image_name="src:latest")
 
@@ -277,7 +296,6 @@ def test_an_local_id_outside_the_cli_is_refused_before_any_image_or_object_is_wr
     set_image_store(images)
     pushed = []
     monkeypatch.setattr(docker_image, "_push_local_image", lambda src, ref, store: pushed.append(ref))
-    monkeypatch.setattr(docker_image.subprocess, "Popen", _DockerSave)
 
     with pytest.raises(ValueError, match="only the @local namespace's store holds"):
         put(tmp_path)
@@ -326,7 +344,7 @@ def test_a_put_bundled_that_fails_partway_doesnt_block_the_next(local_stores, mo
 def test_a_docker_image_put_that_stops_before_its_document_doesnt_block_the_next(local_stores, monkeypatch):
     set_image_store(FakeImageStore())
     monkeypatch.setattr(docker_image, "_push_local_image", lambda src, ref, store: None)
-    monkeypatch.setattr(docker_image.subprocess, "Popen", _DockerSave)
+    monkeypatch.setattr(docker_image, "_save_image_tar_gz", _save_fake_docker_image)
     put_tar = docker_image.DockerImageArtifact.put_tar
 
     def interrupted(*args, **kwargs):

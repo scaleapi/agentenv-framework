@@ -64,35 +64,11 @@ class FileArtifact(Artifact):
         store = get_artifact_store()
 
         filename = os.path.basename(file_path)
-        content_type, _ = mimetypes.guess_type(file_path)
-        if content_type is None:
-            content_type = "application/octet-stream"
-
-        version = store.next_version(id)
-
-        # Use put_object_file (boto3 managed multipart upload) instead of
-        # put_object (s3.put_object — hard 5 GB single-object limit). Streams
-        # directly from disk so large files don't get loaded into RAM either.
-        stored_url = store.put_object_file(
-            artifact_type="file",
-            id=id,
-            version=version,
-            object_name=filename,
-            file_path=file_path,
-            content_type=content_type,
+        prefix = store.attempt_prefix("file", id)
+        return cls.put_at(
+            id, description=description, file_path=file_path,
+            object_url=f"{prefix}{filename}", filename=filename,
         )
-
-        # Store artifact document in MongoDB
-        instance = cls(
-            id=id,
-            version=version,
-            description=description,
-            filename=filename,
-            content_type=content_type,
-            object_url=stored_url,
-        )
-        return store.put_document(instance)
-
     @classmethod
     def put_bytes(
         cls,
@@ -107,20 +83,16 @@ class FileArtifact(Artifact):
         from agent_env.artifact.store import get_artifact_store
 
         store = get_artifact_store()
-        version = store.next_version(id)
-
-        stored_url = store.put_object(
-            artifact_type="file",
-            id=id,
-            version=version,
-            object_name=filename,
-            data=content,
-            content_type=content_type,
+        prefix = store.attempt_prefix("file", id)
+        object_url = f"{prefix}{filename}"
+        object_store = get_config().get_object_store_to_write(object_url, id)
+        stored_url = object_store.put(
+            object_store.get_object_key(object_url), content, content_type
         )
 
         instance = cls(
             id=id,
-            version=version,
+            version=store.next_version(id),
             description=description,
             filename=filename,
             content_type=content_type,
