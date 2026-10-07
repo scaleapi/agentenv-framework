@@ -356,7 +356,7 @@ class LoadArtifactTaskStep(TaskStep):
                     destination = (destination_path or "/loaded").rstrip("/") or "/"
                     if self.container_name is not None:
                         files = await _load_universe_into_container(
-                            target_sandbox, self.container_name, artifact, destination,
+                            target_sandbox, target_sandbox.scoped_name(self.container_name), artifact, destination,
                         )
                     elif onto_vm_host:
                         files = await _load_universe_onto_vm(target_sandbox, artifact, destination)
@@ -427,7 +427,7 @@ class LoadArtifactTaskStep(TaskStep):
                     if self.sandbox_name is not None:
                         sandbox = target_sandbox
                         # None targets the VM host itself, or a container sandbox directly.
-                        container = self.container_name
+                        container = sandbox.scoped_name(self.container_name) if self.container_name else None
                         if container is None and not onto_vm_host and isinstance(sandbox, VmSandbox):
                             container = sandbox.container_name
                     else:

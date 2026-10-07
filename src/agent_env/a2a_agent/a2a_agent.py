@@ -13,7 +13,12 @@ from agentenv_protocol.a2a_agent import STANDARD_EXTENSIONS
 
 from agent_env.config import get_config
 from agent_env.entity_refs import EntityRef
-from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, NetworkPolicyUnsupportedError, port_bindings
+from agent_env.providers.sandbox_providers.sandbox import (
+    SANDBOX_LABEL,
+    NetworkPolicy,
+    NetworkPolicyUnsupportedError,
+    port_bindings,
+)
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.a2a_agent.object_transfer import (
     TRANSFER_TIMEOUT_SECONDS,
@@ -511,21 +516,25 @@ class A2AAgent:
         network_flag = "".join(f"--add-host {entry} \\\n    " for entry in self._sandbox.extra_hosts)
         if enable_docker:
             logger.info("enable_docker: starting rootless Docker-in-Docker sidecar for the agent (no host socket)")
-            setup_script = self._dind_setup_script()
-            network_flag += f"--network {_DIND_NETWORK} \\\n    "
-            agent_env["DOCKER_HOST"] = f"tcp://{_DIND_CONTAINER}:{_DIND_PORT}"
+            dind, dind_network = self._sandbox.scoped_name(_DIND_CONTAINER), self._sandbox.scoped_name(_DIND_NETWORK)
+            setup_script = self._dind_setup_script(dind, dind_network)
+            network_flag += f"--network {dind_network} \\\n    "
+            agent_env["DOCKER_HOST"] = f"tcp://{dind}:{_DIND_PORT}"
 
         env_flags = []
         for key, value in agent_env.items():
             escaped_value = value.replace("'", "'\\''")
             env_flags.append(f"-e {key}='{escaped_value}'")
         env_str = " \\\n    ".join(env_flags)
-        publish = " ".join(f"-p {spec}" for spec in port_bindings(self._sandbox.host_ips, a2a_port, a2a_port))
+        publish = " ".join(
+            f"-p {spec}" for spec in port_bindings(self._sandbox.host_ips, self._sandbox.host_port(a2a_port), a2a_port)
+        )
 
         run_script = f"""#!/bin/bash
 set -e
 {setup_script}docker {"run -d" if trust_dir is None else "create"} \\
     --name {self._sandbox.container_name} \\
+    --label {shlex.quote(f"{SANDBOX_LABEL}={self._sandbox.sandbox_id}")} \\
     {publish} \\
     {network_flag}{env_str} \\
     {image_name} > /dev/null
@@ -536,20 +545,22 @@ set -e
             await start_trusting(self._sandbox, self._sandbox.container_name, trust_dir)
             await asyncio.sleep(2)
 
-    def _dind_setup_script(self) -> str:
+    def _dind_setup_script(self, container: str, network: str) -> str:
         # Constants become shell vars so the body stays a raw string (no f-string
         # brace escaping). TLS off is safe: the tcp endpoint is only reachable on
         # the VM-local bridge.
         env = (
             f"DIND_IMAGE={_DIND_IMAGE}\n"
-            f"DIND_CONTAINER={_DIND_CONTAINER}\n"
-            f"DIND_NETWORK={_DIND_NETWORK}\n"
+            f"DIND_CONTAINER={container}\n"
+            f"DIND_NETWORK={network}\n"
+            f"DIND_LABEL={shlex.quote(f'{SANDBOX_LABEL}={self._sandbox.sandbox_id}')}\n"
             f"DIND_PORT={_DIND_PORT}\n"
         )
-        return env + r"""docker network create "$DIND_NETWORK" >/dev/null 2>&1 || true
+        return env + r"""docker network create --label "$DIND_LABEL" "$DIND_NETWORK" >/dev/null 2>&1 || true
 docker rm -f "$DIND_CONTAINER" >/dev/null 2>&1 || true
 docker run -d \
     --name "$DIND_CONTAINER" \
+    --label "$DIND_LABEL" \
     --privileged \
     --network "$DIND_NETWORK" \
     -e DOCKER_TLS_CERTDIR="" \

@@ -207,6 +207,9 @@ def test_posix_override_and_stored_env_keys_are_accepted():
 
 
 class _Sandbox:
+    def scoped_name(self, name):
+        return name
+
     async def exec_script(self, script: str) -> str:
         return ""
 

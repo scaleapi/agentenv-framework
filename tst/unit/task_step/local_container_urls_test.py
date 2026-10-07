@@ -104,6 +104,9 @@ async def test_an_agents_own_model_endpoint_is_left_as_it_declares(monkeypatch, 
 
 
 class _VerifierSandbox:
+    def scoped_name(self, name):
+        return name
+
     def __init__(self, sandbox_type: str):
         self.type = sandbox_type
         self.commands: list[str] = []

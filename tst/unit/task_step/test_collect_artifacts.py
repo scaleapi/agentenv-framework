@@ -784,6 +784,7 @@ class TestSandboxContainerPath:
     def test_collects_through_the_named_container(self):
         step = self._step()
         sandbox = MagicMock()
+        sandbox.scoped_name.side_effect = lambda name: name
         provider = MagicMock()
         provider.close = AsyncMock()
 

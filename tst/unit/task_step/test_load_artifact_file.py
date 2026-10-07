@@ -25,6 +25,9 @@ CHECK = FileArtifact(
 class _Sandbox:
     """Records every command and S3 pull a loader sends to a sandbox."""
 
+    def scoped_name(self, name):
+        return name
+
     def __init__(self):
         self.commands: list[str] = []
         self.pulls: list[tuple[str, str]] = []

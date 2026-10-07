@@ -216,6 +216,12 @@ async def test_a_store_context_that_is_not_a_zip_is_refused(fake_store):
 class _RunSandbox:
     sandbox_id = "local-1"
 
+    def scoped_name(self, name):
+        return name
+
+    def host_port(self, port):
+        return port
+
     def __init__(self, extra_hosts: tuple[str, ...] = ()):
         self.scripts: list[str] = []
         self.extra_hosts = extra_hosts

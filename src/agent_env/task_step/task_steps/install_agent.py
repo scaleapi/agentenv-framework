@@ -225,7 +225,7 @@ class InstallAgentTaskStep(TaskStep):
         self._check_tunnel_collision(context, ds.sandbox_id, a2a_url, a2a_port)
 
         # Stage the agent build context onto the VM. The install_commands docker-cp from this dir.
-        work_dir = f"/tmp/install-agent-{self.agent_name}"
+        work_dir = f"/tmp/install-agent-{sandbox.scoped_name(self.agent_name)}"
         agent_ctx_tar = f"{work_dir}/agent-ctx.tar.gz"
         await sandbox.exec_script(f"rm -rf {shlex.quote(work_dir)} && mkdir -p {shlex.quote(work_dir)}")
         logger.info(f"Downloading agent build context {agent.docker_image_artifact.build_context_object_url} -> {agent_ctx_tar}")
@@ -234,10 +234,11 @@ class InstallAgentTaskStep(TaskStep):
         # Resolve each required_param via the registry, shlex.quote so str.format
         # substitution produces shell-safe tokens.
         resolvers = _build_param_resolvers(
-            container_name=self.container_name,
+            container_name=sandbox.scoped_name(self.container_name) if self.container_name else None,
             work_dir=work_dir,
             agent_ctx_tar=agent_ctx_tar,
-            a2a_port=a2a_port,
+            # On the host, the agent listens where the sandbox publishes its port, which is where its URL points.
+            a2a_port=sandbox.host_port(a2a_port) if host_mode else a2a_port,
             config=get_config(),
             workspace_dir=self.workspace_dir,
             agent_name=self.agent_name,
@@ -273,6 +274,8 @@ class InstallAgentTaskStep(TaskStep):
                 )
             logger.info(f"  [{i}/{len(install_commands)}] {formatted.splitlines()[0][:140]}")
             await sandbox.exec_script(formatted)
+        if not host_mode:  # copied into the container; a host install may run from it
+            await sandbox.exec_script(f"rm -rf {shlex.quote(work_dir)}")
 
         agent_card = await self._wait_for_agent_card(a2a_url)
         logger.info(f"Agent '{self.agent_name}' reachable at {a2a_url} (card name={agent_card.get('name')})")

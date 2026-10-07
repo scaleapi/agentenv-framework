@@ -37,6 +37,9 @@ def vm(monkeypatch):
     calls: list[tuple] = []
 
     class _Vm:
+        def scoped_name(self, name):
+            return name
+
         async def exec_script(self, script, **kw):
             calls.append(("exec", script))
             return ""

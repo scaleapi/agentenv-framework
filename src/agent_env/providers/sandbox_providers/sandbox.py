@@ -161,6 +161,11 @@ class Sandbox(ABC):
         """
         return port
 
+    def scoped_name(self, name: str) -> str:
+        """The name a container, network, image or temp path a step calls ``name`` takes on this sandbox's
+        host: ``name`` itself on a host of its own. A backend whose sandboxes share a host overrides this."""
+        return name
+
     @abstractmethod
     async def terminate(self) -> None:
         """Terminate the sandbox."""

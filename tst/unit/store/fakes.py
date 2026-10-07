@@ -249,6 +249,9 @@ class CollectingVm:
 
     mode = "vm"
 
+    def scoped_name(self, name):
+        return name
+
     async def exec_script(self, script: str) -> str:
         return ""
 

@@ -35,3 +35,4 @@ async def test_snapshot_reload_keeps_the_env_name(declared, deployed_as, expecte
 
     assert compose.call_args.kwargs["mcp_server_name"] == expected
     assert compose.call_args.kwargs["host_ips"] == ("127.0.0.1",)
+    assert compose.call_args.kwargs["host_port"] == env._sandbox.host_port

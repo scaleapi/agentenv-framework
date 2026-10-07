@@ -12,6 +12,8 @@ is the key rubrics_verifier reads to tell its judge which files exist.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from agent_env.artifact.artifact import Artifact
@@ -195,4 +197,4 @@ async def _async_none(*a, **kw):
 
 class _FakeProvider:
     async def get_sandbox(self, sandbox_id):
-        return object()
+        return SimpleNamespace(scoped_name=lambda name: name)

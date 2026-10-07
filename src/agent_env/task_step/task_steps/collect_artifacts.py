@@ -879,7 +879,7 @@ class CollectArtifactsTaskStep(TaskStep):
             f"container={self.container_name}"
         )
         return await self._collect_items(
-            provider, sandbox, self.container_name, items, context, store, artifact_id, version,
+            provider, sandbox, sandbox.scoped_name(self.container_name), items, context, store, artifact_id, version,
         )
 
     async def _collect_items(self, provider, sandbox, container, items, context, store,

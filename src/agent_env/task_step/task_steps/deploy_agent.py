@@ -25,6 +25,7 @@ from agent_env.a2a_agent.object_transfer import (
 from agent_env.a2a_agent.staging import StagedObjectStore, transfer_store
 from agent_env.config import get_config
 from agent_env.env.env import DeployedEnv, DeployedSandboxEnv, Env
+from agent_env.providers.sandbox_providers.local_sandbox import host_url_for
 from agent_env.providers.sandbox_providers.sandbox_provider import reachable_url, sandbox_request_headers_for_url
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
@@ -47,9 +48,10 @@ def _mcp_add_body(mcp_ext: dict, url: str, headers: dict | None, card_name: str 
 
 
 def _choose_mcp_url(agent, env) -> str:
-    """The env's MCP URL, as reachable from wherever the agent runs; an env outside our sandboxes gives its own."""
+    """The env's MCP URL, as reachable from wherever the agent runs. An env outside our sandboxes is at a URL this
+    machine reaches."""
     if not isinstance(env, DeployedSandboxEnv):
-        return env.mcp_url
+        return host_url_for(env.mcp_url, agent.sandbox_type)
     return reachable_url(env.mcp_url, from_sandbox_type=env.sandbox_type, to_sandbox_type=agent.sandbox_type)
 
 
@@ -335,7 +337,7 @@ class DeployAgentTaskStep(TaskStep):
                 if not card_name:
                     logger.warning(f"Env {env_id} has no env card name; the agent will pick its own MCP alias")
             else:
-                url = _live_mcp_url(env_id)
+                url = host_url_for(_live_mcp_url(env_id), deployed.sandbox_type)
                 card_name = None
             env_mcp_urls.append((env_id, url, sandbox_request_headers_for_url(url) or None, card_name))
 

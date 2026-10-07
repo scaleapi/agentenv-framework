@@ -267,7 +267,7 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
             )
             await sandbox.exec_script(
                 f"docker exec -u {shlex.quote(self.user)} {env_flags} "
-                f"{shlex.quote(self.container_name)} bash -c {shlex.quote(setup_cmd)}"
+                f"{shlex.quote(sandbox.scoped_name(self.container_name))} bash -c {shlex.quote(setup_cmd)}"
             )
 
         # 4. Run main command, bounded by in-container timeout(1)
@@ -277,7 +277,7 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
         )
         wrapped = (
             f"docker exec -u {shlex.quote(self.user)} {env_flags} "
-            f"{shlex.quote(self.container_name)} "
+            f"{shlex.quote(sandbox.scoped_name(self.container_name))} "
             f"timeout --kill-after=10 {self.timeout_sec} bash -c {shlex.quote(command)}"
         )
         exit_code, stdout, stderr = await sandbox.exec_with_output("sudo", "bash", "-c", wrapped)
@@ -432,7 +432,7 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
     async def _extract_file(self, sandbox, path_in_container: str) -> str:
         """`docker cp` a file out of the container, read it from the VM, return text."""
         vm_temp = f"/tmp/_verifier_out_{uuid.uuid4().hex[:8]}"
-        await sandbox.docker_cp(f"{self.container_name}:{path_in_container}", vm_temp)
+        await sandbox.docker_cp(f"{sandbox.scoped_name(self.container_name)}:{path_in_container}", vm_temp)
         try:
             exit_code, stdout, stderr = await sandbox.exec_with_output("sudo", "cat", vm_temp)
             if exit_code != 0:

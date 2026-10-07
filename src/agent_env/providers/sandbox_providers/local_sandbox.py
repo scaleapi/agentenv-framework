@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import functools
 import glob
+import json
 import logging
 import os
 import platform
@@ -74,6 +75,8 @@ LOCAL_TRUST_ENV = {
 # Marker dropped in the work dir when this sandbox runs a container, so a later get_sandbox()
 # (post-run teardown reconstructs the sandbox from disk) knows it owns that container.
 _CONTAINER_MODE_MARKER = ".agent-container-mode"
+# The sandbox's container port -> host port map, so a sandbox rebuilt from its id publishes and finds the same ports.
+_PORT_MAP_FILE = ".port-map.json"
 
 
 def _local_sandbox_root_path() -> Path:
@@ -178,6 +181,10 @@ class LocalSandbox(VmSandbox):
         make teardown ownership-blind. Deriving it from the sandbox id gives each deploy its own
         container and lets teardown remove only the one this sandbox created."""
         return f"agent-{self.sandbox_id}"
+
+    def scoped_name(self, name: str) -> str:
+        """``name`` made this sandbox's own: every local sandbox shares this machine's Docker and /tmp."""
+        return f"{name}-{self.sandbox_id}"
 
     @property
     def owns_container(self) -> bool:
@@ -398,6 +405,7 @@ class LocalSandboxProvider(SandboxProvider):
         sandbox = LocalSandbox(
             port_map={port: _free_host_port() for port in (exposed_ports or [])},
         )
+        (sandbox.work_dir / _PORT_MAP_FILE).write_text(json.dumps(sandbox._port_map))
         sandbox.network_policy = self.effective_network_policy(network_policy)
         return sandbox
 
@@ -486,8 +494,10 @@ class LocalSandboxProvider(SandboxProvider):
         work_dir = LocalSandbox.find_work_dir(sandbox_id)
         if work_dir is None:
             raise RuntimeError(f"Local sandbox work directory not found for sandbox_id={sandbox_id!r}")
+        port_map = work_dir / _PORT_MAP_FILE
+        ports = {int(c): h for c, h in json.loads(port_map.read_text()).items()} if port_map.exists() else None
         # VM mode even for a container it owns: exec runs on this host, so steps must `docker exec` into it.
-        return LocalSandbox(sandbox_id=sandbox_id, work_dir=work_dir)
+        return LocalSandbox(sandbox_id=sandbox_id, work_dir=work_dir, port_map=ports)
 
     @classmethod
     def shares_network_with(cls, sandbox_type: Optional[str]) -> bool:
