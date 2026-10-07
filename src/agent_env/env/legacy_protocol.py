@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DEFAULT_MCP_MAX_RETRIES = 5
+EXPORT_STATE_TIMEOUT_SECONDS = 60
 
 
 def environment_base_url(gateway_url: Optional[str], environment_name: str, mcp: bool = True) -> str:
@@ -80,7 +81,9 @@ async def add_via_rest(base_url: str, file_path: str, timeout: int = 120, verify
         return result
 
 
-async def export_state(gateway_url: str, environment_name: str, timeout: int = 60, verify: bool = True) -> dict:
+async def export_state(
+    gateway_url: str, environment_name: str, timeout: int = EXPORT_STATE_TIMEOUT_SECONDS, verify: bool = True
+) -> dict:
     """GET ``/svc/mcp-{name}/export-state`` — the legacy state snapshot for one service."""
     return await _export_state_at(environment_base_url(gateway_url, environment_name, mcp=True), timeout, verify)
 
@@ -106,7 +109,7 @@ async def service_state(deployed: Optional[DeployedEnv], gateway_url: Optional[s
         return {}
     if isinstance(response.parts[0], DataPart):
         return response.parts[0].data
-    return await _export_state_at(base_url, timeout=60, verify=True)
+    return await _export_state_at(base_url, timeout=EXPORT_STATE_TIMEOUT_SECONDS, verify=True)
 
 
 async def reset_via_mcp_tool(
