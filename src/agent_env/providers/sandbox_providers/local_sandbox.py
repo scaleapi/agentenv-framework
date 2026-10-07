@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import functools
 import glob
+import json
 import logging
 import os
 import platform
@@ -28,7 +29,7 @@ from uuid import uuid4
 
 from agent_env import config
 from agent_env.attribution import Attribution
-from agent_env.providers.sandbox_providers.sandbox import SANDBOX_LABEL, NetworkPolicy, VmSandbox
+from agent_env.providers.sandbox_providers.sandbox import SANDBOX_LABEL, ContainerLimits, NetworkPolicy, VmSandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_CONTAINER,
     SANDBOX_MODE_VM,
@@ -74,6 +75,52 @@ LOCAL_TRUST_ENV = {
 # Marker dropped in the work dir when this sandbox runs a container, so a later get_sandbox()
 # (post-run teardown reconstructs the sandbox from disk) knows it owns that container.
 _CONTAINER_MODE_MARKER = ".agent-container-mode"
+# What a sandbox's containers are held to, kept in its work dir for a handle get_sandbox() rebuilds.
+_LIMITS_FILE = ".container-limits.json"
+
+
+@functools.cache
+def _engine_cpu_count() -> int:
+    """How many CPUs the Docker engine has: its VM's, on Docker Desktop or Rancher Desktop."""
+    return int(_docker("info", "--format", "{{.NCPU}}"))
+
+
+def _engine_cpus() -> int | None:
+    """The engine's CPU count, or None when Docker can't be asked. A failed ask isn't cached, so it's asked again."""
+    try:
+        return _engine_cpu_count()
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def _container_limits(cpu: float, memory: int) -> ContainerLimits:
+    """``cpu`` and ``memory`` as what a local sandbox's containers are held to. Docker refuses a container more CPUs
+    than its engine has, so cpu is held to that, with a warning; memory beyond the engine's is accepted."""
+    engine_cpus = _engine_cpus()
+    if engine_cpus is not None and cpu > engine_cpus:
+        logger.warning(
+            "Asked for %g CPUs, but the Docker engine has %d; holding this sandbox's containers to %d", cpu, engine_cpus, engine_cpus,
+        )
+        cpu = float(engine_cpus)
+    return ContainerLimits(cpus=cpu, memory_mib=memory)
+
+
+def _write_limits(work_dir: Path, limits: ContainerLimits) -> None:
+    try:
+        (work_dir / _LIMITS_FILE).write_text(json.dumps(limits.to_dict()))
+    except OSError as e:
+        logger.warning("Could not record the container limits in %s (%s); a step that reopens it won't apply them", work_dir, e)
+
+
+def _read_limits(work_dir: Path) -> ContainerLimits | None:
+    path = work_dir / _LIMITS_FILE
+    if not path.exists():
+        return None  # a sandbox created before limits were recorded
+    try:
+        return ContainerLimits.from_dict(json.loads(path.read_text()))
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        logger.warning("Ignoring unreadable container limits at %s: %s", path, e)
+        return None
 
 
 def _local_sandbox_root_path() -> Path:
@@ -126,7 +173,7 @@ class LocalSandbox(VmSandbox):
     extra_hosts = _EXTRA_HOSTS
 
     def __init__(self, exposed_ports: list[int] | None = None, work_dir: Path | None = None, sandbox_id: str | None = None,
-                 port_map: dict[int, int] | None = None):
+                 port_map: dict[int, int] | None = None, container_limits: ContainerLimits | None = None):
         self.sandbox_id = sandbox_id or f"local-{uuid4().hex[:8]}"
         # Container port -> host port. Deployments share one host, so the reserved ports
         # can only be published once; the provider supplies a map to spread them. Callers
@@ -144,6 +191,11 @@ class LocalSandbox(VmSandbox):
         self._work_dir = work_dir or Path(
             tempfile.mkdtemp(prefix=f"agent-env-{self.sandbox_id}-", dir=_local_sandbox_root())
         )
+        if container_limits is not None:
+            self.container_limits = container_limits
+            _write_limits(self._work_dir, container_limits)
+        elif work_dir is not None:
+            self.container_limits = _read_limits(work_dir)
 
     def host_port(self, port: int) -> int:
         """The allocated host port for a published container port (identity if unmapped)."""
@@ -397,6 +449,7 @@ class LocalSandboxProvider(SandboxProvider):
         # is I/O, and callers that only need a handle must not pay for it.
         sandbox = LocalSandbox(
             port_map={port: _free_host_port() for port in (exposed_ports or [])},
+            container_limits=await asyncio.to_thread(_container_limits, cpu, memory),
         )
         sandbox.network_policy = self.effective_network_policy(network_policy)
         return sandbox

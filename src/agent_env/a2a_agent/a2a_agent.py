@@ -13,7 +13,12 @@ from agentenv_protocol.a2a_agent import STANDARD_EXTENSIONS
 
 from agent_env.config import get_config
 from agent_env.entity_refs import EntityRef
-from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, NetworkPolicyUnsupportedError, port_bindings
+from agent_env.providers.sandbox_providers.sandbox import (
+    ContainerLimits,
+    NetworkPolicy,
+    NetworkPolicyUnsupportedError,
+    port_bindings,
+)
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.a2a_agent.object_transfer import (
     TRANSFER_TIMEOUT_SECONDS,
@@ -509,9 +514,11 @@ class A2AAgent:
         agent_env = dict(merged_env) if trust_dir is None else {**LOCAL_TRUST_ENV, **merged_env}
         setup_script = ""
         network_flag = "".join(f"--add-host {entry} \\\n    " for entry in self._sandbox.extra_hosts)
+        limits = self._sandbox.container_limits
+        limit_flag = "".join(f"{shlex.quote(arg)} " for arg in limits.docker_args) + "\\\n    " if limits else ""
         if enable_docker:
             logger.info("enable_docker: starting rootless Docker-in-Docker sidecar for the agent (no host socket)")
-            setup_script = self._dind_setup_script()
+            setup_script = self._dind_setup_script(limits)
             network_flag += f"--network {_DIND_NETWORK} \\\n    "
             agent_env["DOCKER_HOST"] = f"tcp://{_DIND_CONTAINER}:{_DIND_PORT}"
 
@@ -527,7 +534,7 @@ set -e
 {setup_script}docker {"run -d" if trust_dir is None else "create"} \\
     --name {self._sandbox.container_name} \\
     {publish} \\
-    {network_flag}{env_str} \\
+    {network_flag}{limit_flag}{env_str} \\
     {image_name} > /dev/null
 {"sleep 2" if trust_dir is None else ""}
 """
@@ -536,20 +543,23 @@ set -e
             await start_trusting(self._sandbox, self._sandbox.container_name, trust_dir)
             await asyncio.sleep(2)
 
-    def _dind_setup_script(self) -> str:
+    def _dind_setup_script(self, limits: ContainerLimits | None = None) -> str:
         # Constants become shell vars so the body stays a raw string (no f-string
         # brace escaping). TLS off is safe: the tcp endpoint is only reachable on
-        # the VM-local bridge.
+        # the VM-local bridge. DIND_LIMITS is expanded unquoted, so it splits into
+        # flags, or into nothing when the sandbox holds its containers to nothing.
         env = (
             f"DIND_IMAGE={_DIND_IMAGE}\n"
             f"DIND_CONTAINER={_DIND_CONTAINER}\n"
             f"DIND_NETWORK={_DIND_NETWORK}\n"
             f"DIND_PORT={_DIND_PORT}\n"
+            f"DIND_LIMITS={shlex.quote(' '.join(limits.docker_args)) if limits else ''}\n"
         )
         return env + r"""docker network create "$DIND_NETWORK" >/dev/null 2>&1 || true
 docker rm -f "$DIND_CONTAINER" >/dev/null 2>&1 || true
 docker run -d \
     --name "$DIND_CONTAINER" \
+    $DIND_LIMITS \
     --privileged \
     --network "$DIND_NETWORK" \
     -e DOCKER_TLS_CERTDIR="" \
