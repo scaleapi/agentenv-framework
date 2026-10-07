@@ -38,6 +38,8 @@ pytestmark = pytest.mark.integration
 _CHECK_PY = "import pathlib, sys\nsys.exit(0 if 'hello' in pathlib.Path('hello.txt').read_text() else 1)\n"
 # Stands in for an agent's image: a server that stays up, on a Debian userland (bash, GNU find), for any arch.
 _AGENT_IMAGE = "mirror.gcr.io/library/nginx:1.27-bookworm"
+# All an agent's own sandbox keeps on the host: its records, never what a step stages for its container.
+_SANDBOX_RECORDS = [".agent-container-mode", ".container-limits.json"]
 
 
 @pytest.fixture
@@ -161,7 +163,7 @@ async def test_verify_sandbox_probes_a_local_agent_inside_its_container(local_ag
     ctx = await step.execute(context)
 
     assert [r["result"] for r in ctx.metadata["verifications"]["agent"]["results"]] == [True, True]
-    assert list(sandbox.work_dir.iterdir()) == [sandbox.work_dir / ".agent-container-mode"]
+    assert sorted(p.name for p in sandbox.work_dir.iterdir()) == _SANDBOX_RECORDS
 
 
 @pytest.mark.asyncio
@@ -195,7 +197,7 @@ async def test_load_artifact_puts_a_universe_in_a_local_agents_container(local_a
     shown = subprocess.run(["docker", "exec", sandbox.container_name, "cat", "/app/greeting/hello.txt"],
                            capture_output=True, text=True)
     assert (shown.returncode, shown.stdout) == (0, "hello, world\n")
-    assert list(sandbox.work_dir.iterdir()) == [sandbox.work_dir / ".agent-container-mode"]
+    assert sorted(p.name for p in sandbox.work_dir.iterdir()) == _SANDBOX_RECORDS
 
 
 @pytest.mark.asyncio
