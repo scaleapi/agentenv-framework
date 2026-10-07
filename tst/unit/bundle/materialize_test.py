@@ -12,7 +12,7 @@ from typing import Literal
 import pytest
 
 from agent_env.a2a_agent import A2AAgent
-from agent_env.artifact import Artifact
+from agent_env.artifact import Artifact, EnvironmentArtifact, EnvironmentUniverseArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
@@ -109,6 +109,26 @@ class _OwnFile(FileArtifact):
         raise NotImplementedError
 
 
+class _OwnEnvironment(EnvironmentArtifact):
+    """A plugin's environment type with a from_toml of its own."""
+
+    type: Literal["own_environment_materialize_test"] = "own_environment_materialize_test"
+
+    @classmethod
+    def from_toml(cls, data, ctx):
+        raise NotImplementedError
+
+
+class _OwnUniverse(EnvironmentUniverseArtifact):
+    """A plugin's universe type with a from_toml of its own."""
+
+    type: Literal["own_universe_materialize_test"] = "own_universe_materialize_test"
+
+    @classmethod
+    def from_toml(cls, data, ctx):
+        raise NotImplementedError
+
+
 class _OwnEnv(Env):
     """A plugin's env type with a from_toml of its own."""
 
@@ -123,7 +143,7 @@ class _OwnEnv(Env):
 def registries(monkeypatch):
     steps = {**Config().task_step_registry(), **{cls.type: cls for cls in (_Checked, _Writes, _Consuming)}}
     envs = {**Config().env_registry(), _OwnEnv.type: _OwnEnv}
-    plugins = {cls.model_fields["type"].default: cls for cls in (_PluginFile, _OwnFile)}
+    plugins = {cls.model_fields["type"].default: cls for cls in (_PluginFile, _OwnFile, _OwnEnvironment, _OwnUniverse)}
     artifacts = {**Config().artifact_registry(), **plugins}
     monkeypatch.setattr(Config, "task_step_registry", lambda self: steps)
     monkeypatch.setattr(Config, "env_registry", lambda self: envs)
@@ -194,7 +214,7 @@ def test_what_has_no_writer_yet_is_refused_before_anything_is_written(bundle_dir
         "agents/solver/Dockerfile": "FROM scratch\n",
         "skills/pdf/SKILL.md": "---\nname: pdf\n---\n",
         "artifacts/base-mcp/Dockerfile": "FROM scratch\n",
-        "artifacts/snap/artifact.toml": 'type = "environment"\n',
+        "artifacts/vm/artifact.toml": 'type = "vm_image"\nimage_name = "tahoe"\n',
         "evals/regression.toml": 'tasks = ["t"]\n',
     })
     _steps(bundle_dir, [
@@ -203,12 +223,12 @@ def test_what_has_no_writer_yet_is_refused_before_anything_is_written(bundle_dir
         {"id": "agent", "type": "deploy_agent", "env_ids": ["tickets"], "a2a_agent_id": "solver"},
         {"id": "pdf", "type": "load_artifact", "env_id": "tickets", "artifact_id": "pdf"},
         {"id": "image", "type": "load_artifact", "env_id": "tickets", "artifact_id": "base-mcp"},
-        {"id": "snap", "type": "load_artifact", "env_id": "tickets", "artifact_id": "snap"},
+        {"id": "vm", "type": "load_artifact", "env_id": "tickets", "artifact_id": "vm"},
     ])
 
     assert sorted(_problems(lambda: _run(bundle_dir, dry_run))) == [
         "artifacts/base-mcp: writing a docker_image artifact isn't supported yet",
-        "artifacts/snap: writing an environment artifact isn't supported yet",
+        "artifacts/vm: writing a vm_image artifact isn't supported yet",
         "envs/own: writing an own_env_materialize_test env isn't supported yet",
         "skills/pdf: writing a skill isn't supported yet",
     ]
@@ -491,12 +511,15 @@ def test_a_plugin_file_type_is_written_when_it_writes_as_file_artifact_does(bund
     assert _summary(_run(bundle_dir))[f"{ROOT}/greeting"] == (1, True, ())
 
 
-def test_a_plugin_type_with_a_from_toml_of_its_own_is_refused(bundle_dir):
-    (bundle_dir / "artifacts/greeting/artifact.toml").write_text('type = "own_file_materialize_test"\n')
+@pytest.mark.parametrize("type_, written", [
+    ("own_file_materialize_test", "an own_file_materialize_test artifact"),
+    ("own_environment_materialize_test", "an own_environment_materialize_test artifact"),
+    ("own_universe_materialize_test", "an own_universe_materialize_test artifact"),
+])
+def test_a_plugin_type_with_a_from_toml_of_its_own_is_refused(bundle_dir, type_, written):
+    (bundle_dir / "artifacts/greeting/artifact.toml").write_text(f'type = "{type_}"\n')
 
-    assert _problems(lambda: _run(bundle_dir)) == (
-        "artifacts/greeting: writing an own_file_materialize_test artifact isn't supported yet",
-    )
+    assert _problems(lambda: _run(bundle_dir)) == (f"artifacts/greeting: writing {written} isn't supported yet",)
 
 
 def test_an_eval_is_rewritten_only_when_it_changes(bundle_dir):

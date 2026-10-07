@@ -16,7 +16,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from agent_env.a2a_agent import A2AAgent
-from agent_env.artifact import Artifact, FileArtifact, FileArtifactUniverse
+from agent_env.artifact import (
+    Artifact,
+    EnvironmentArtifact,
+    EnvironmentUniverseArtifact,
+    FileArtifact,
+    FileArtifactUniverse,
+)
 from agent_env.artifact.registry import canonical_type, get_artifact_registry
 from agent_env.config import get_config
 from agent_env.entity_refs import EntityKind
@@ -41,7 +47,14 @@ from agent_env.task import Task
 from agent_env.task_step.registry import get_task_step_registry
 
 from ._fs import fold, relative, with_article
-from .authoring import AuthoringContext, entry_file, entry_files
+from .authoring import (
+    AuthoringContext,
+    entry_files,
+    environment_files,
+    one_file,
+    universe_files,
+    universe_layout,
+)
 from .parse import BundleEntry, BundleError, BundleKind
 from .resolve import BuiltImage, Reference, ResolvedBundle, ResolvedEntry, build_step
 
@@ -50,8 +63,9 @@ _Key = tuple[str, str]  # (store, id)
 _GETTERS = {EntityKind.ENV: Env.get, EntityKind.AGENT: A2AAgent.get, EntityKind.ARTIFACT: Artifact.get,
             EntityKind.TASK: Task.get}
 
-# The artifact types written from their folder's files, and how each lists them.
-_FOLDER_WALKS = {FileArtifact: entry_file, FileArtifactUniverse: entry_files}
+# The artifact types written from their folders, and what each one's write reads there, which the ledger hashes.
+_FOLDER_WALKS = {FileArtifact: one_file, FileArtifactUniverse: entry_files, EnvironmentArtifact: environment_files,
+                 EnvironmentUniverseArtifact: universe_files}
 # The env types whose from_toml reads only the toml and what it names, so a type built by one of them is written from
 # its env.toml and the ledger can list what it's made from.
 _ENV_FROM_TOMLS = (Env, MCPServerEnv, WebsiteEnv, MultiEnv)
@@ -111,7 +125,7 @@ class _Planner:
         self.identified = {entry.entry.id: entry.entry for entry in resolved.entries}
         self.outputs = {(output.kind.value, output.id): (entry.entry, output)
                         for entry in resolved.entries for output in entry.outputs}
-        self.accepted: dict[_Key, dict] = {}  # each agent's and env's toml, as its type accepted it
+        self.accepted: dict[_Key, dict] = {}  # each toml a type checks, as it accepted it
 
     def _add(self, key: _Key, source: ResolvedEntry | BuiltImage, needs: list[_Key]) -> None:
         """Record a write in bundle order, a built image just before the entry that builds it."""
@@ -127,6 +141,7 @@ class _Planner:
         self._check_files(closure)
         self._check_env_types(closure)
         self._check_multi_names(closure, store_latest)
+        self._check_universes(closure, store_latest)
         if self.problems:
             raise BundleError(self.problems)
         return Plan(self.resolved, self._ordered(closure), tuple(selected_tasks), tuple(selected_evals), store_refs,
@@ -141,6 +156,7 @@ class _Planner:
         self._check_store_refs(everything, stores=False)
         self._build_tasks(everything)
         self._check_files(everything)
+        self._check_universes(everything, None)
         if self.problems:
             raise BundleError(self.problems)
 
@@ -312,8 +328,13 @@ class _Planner:
                 walk(self.resolved.bundle, source.entry)
             except BundleError as e:
                 self.problems.extend(e.problems)
+            ctx = AuthoringContext(self.resolved.bundle, source.entry)
+            accept = getattr(cls, "accept_toml", None)
             try:
-                AuthoringContext(self.resolved.bundle, source.entry).accept(source.config, **cls.toml_keys)
+                if accept is None:
+                    ctx.accept(source.config, **cls.toml_keys)
+                else:
+                    self.accepted[key] = accept(source.config, ctx)
             except BundleError as e:
                 self.problems.extend(e.problems)
 
@@ -377,14 +398,50 @@ class _Planner:
             if reason is not None:
                 self.problems.append(f"{where}: env_provider_type {provider_type!r} {reason}; rename one")
 
-    def _environment_name(self, ref: Reference, store_latest: dict[tuple[EntityKind, str], int]) -> str | None:
+    def _check_universes(self, closure: set[_Key], store_latest: dict[tuple[EntityKind, str], int] | None) -> None:
+        """A universe needs an environment, and each of its environments a name of its own: one its folder holds is
+        named by its folder, one it names by its toml or, from the store, at the version the plan read. Without
+        ``store_latest`` (a check that reads no store), the store's environments aren't counted."""
+        registry = get_artifact_registry()
+        for key in sorted(closure, key=self.rank.__getitem__):
+            source = self.nodes[key]
+            if isinstance(source, BuiltImage) or source.entry.kind is not BundleKind.ARTIFACT:
+                continue
+            cls = registry.get(canonical_type(source.entry.type))
+            if cls is None or not issubclass(cls, EnvironmentUniverseArtifact) or folder_walk(cls) is None:
+                continue
+            try:
+                layout = universe_layout(self.resolved.bundle, source.entry)
+            except BundleError:
+                continue  # reported by the file check
+            where = self._path(source.entry)
+            taken = {laid.name: f"the {laid.name}/ folder" for laid in layout.environments}  # who has each name
+            for ref in source.references:
+                name = self._environment_name(ref, store_latest)
+                if name is None:
+                    continue
+                if name in taken:
+                    self.problems.append(f"{where}: {ref.where}: environment_name {name!r} is also {taken[name]}'s; "
+                                         "a universe's environments need names of their own")
+                else:
+                    taken[name] = ref.where
+            if not layout.environments and not source.references and not source.config.get("environment_artifacts"):
+                self.problems.append(f"{where}: a universe needs an environment: a folder of its own, named after it "
+                                     "and holding its file, or one environment_artifacts names")
+
+    def _environment_name(self, ref: Reference, store_latest: dict[tuple[EntityKind, str], int] | None) -> str | None:
+        """The environment_name of the env or environment artifact ``ref`` names: a bundle one's from its accepted
+        toml, a store one's at the version the plan read, or None when that's unknown."""
         if ref.local is not None:
             return self.accepted.get(_key(ref.local), {}).get("environment_name")
+        if store_latest is None:
+            return None
         try:
-            env = Env.get(ref.id, ref.version if ref.version is not None else store_latest.get((ref.kind, ref.id)))
+            entity = _GETTERS[ref.kind](ref.id, ref.version if ref.version is not None
+                                        else store_latest.get((ref.kind, ref.id)))
         except (NotFoundError, ValueError, KeyError, TypeError):
             return None  # reported by the store ref check
-        return getattr(env, "environment_name", None)
+        return getattr(entity, "environment_name", None)
 
     def _build_tasks(self, closure: set[_Key]) -> None:
         """Build each task's steps the way a write will, so a bad step fails before anything is written."""

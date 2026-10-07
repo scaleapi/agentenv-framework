@@ -3,7 +3,8 @@ deployed on the local sandbox. An MCP server on the server provider is named by 
 reused while its folder is unchanged, and rebuilt when it changes. Through the gateway, each way of writing an env
 deploys and answers a verifier calling it: an MCP server built from its folder, one built from a Dockerfile elsewhere
 under a name of its own, one over a store image, a website, and a multi of bundle and store envs, which is rewritten
-when a child is. Needs a Docker daemon and the local registry."""
+when a child is. Environments and a universe the bundle writes load into an MCP server deployed through the gateway,
+and an edit to their files loads anew. Needs a Docker daemon and the local registry."""
 
 import hashlib
 import json
@@ -14,6 +15,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+from agent_env.artifact import EnvironmentUniverseArtifact
 from agent_env.artifact.store import reset_artifact_store
 from agent_env.bundle import parse_bundle
 from agent_env.cli import cli
@@ -275,6 +277,103 @@ def test_each_kind_of_bundle_env_deploys_through_the_gateway_and_a_child_edit_re
         assert f"{image}: v{2 if image == IMAGE else 1}, unchanged" in planned.output, planned.output
     for env in GATEWAY_ENVS:
         assert f"envs/{env}: v{versions.get(env, 1)}, unchanged" in planned.output, planned.output
+
+
+# Checks the items server lists exactly the items CONFIG names, the ones the task loaded. CONFIG goes above it.
+VERIFY_LOADED = '''
+import json
+
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
+
+
+async def verify(mcp_url):
+    async with streamablehttp_client(mcp_url) as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            name = next(tool.name for tool in (await session.list_tools()).tools if tool.name.endswith("list_items"))
+            result = await session.call_tool(name, {})
+            listed = json.loads(" ".join(getattr(part, "text", "") for part in result.content))
+    return [{"id": "loaded", "result": listed.get("items") == CONFIG["items"],
+             "description": f"list_items lists what the task loaded, {CONFIG['items']}: {listed}"}]
+'''
+
+
+def _seed(items):
+    return json.dumps({"items": items}) + "\n"
+
+
+def _write(root, files):
+    for rel, text in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text)
+
+
+def _load_task(root, name, artifact, items):
+    """A task deploying the items server, loading ``artifact`` into it and checking it lists ``items``."""
+    (root / f"artifacts/check-{name}").mkdir(parents=True, exist_ok=True)
+    (root / f"artifacts/check-{name}/verify.py").write_text(f"CONFIG = {{'items': {items!r}}}\n{VERIFY_LOADED}")
+    (root / "tasks").mkdir(exist_ok=True)
+    (root / f"tasks/{name}.json").write_text(json.dumps([
+        {"id": "env", "type": "deploy_env", "env_id": "items", "sandbox_type": "local"},
+        {"id": "load", "type": "load_artifact", "env_id": "items", "artifact_id": artifact, "depends_on": ["env"]},
+        {"id": "check", "type": "env_outcome_verifier", "env_id": "items", "file_artifact_id": f"check-{name}",
+         "verifier_id": name, "depends_on": ["load"]},
+    ]))
+
+
+def _data_bundle(root):
+    """The items server, and data for it in each shape a bundle writes: an environment over its folder's file
+    (seed), one naming a file artifact (by-ref over items-file), and a universe laid out as `environment-universe get
+    --output-dir` writes one, with the items server's data in its items/ folder, a metadata file, and an environment
+    for another server (mail-data), which the items server skips."""
+    _items(root / "envs/items", "v1")
+    _write(root / "artifacts", {
+        "seed/artifact.toml": 'type = "environment"\nenvironment_name = "items"\n',
+        "seed/items.json": _seed(["folder"]),
+        "items-file/items.json": _seed(["by-ref"]),
+        "by-ref/artifact.toml": 'type = "environment"\nenvironment_name = "items"\nfile = "items-file"\n',
+        "mail-data/artifact.toml": 'type = "environment"\nenvironment_name = "mail"\n', "mail-data/mail.json": "{}\n",
+        "world/artifact.toml": 'type = "environment_universe"\nenvironment_artifacts = ["mail-data"]\n',
+        "world/items/items.json": _seed(["universe"]), "world/metadata/manifest/manifest.json": '{"m": 1}\n',
+    })
+    _load_task(root, "folder", "seed", ["folder"])
+    _load_task(root, "ref", "by-ref", ["by-ref"])
+    _load_task(root, "universe", "world", ["universe"])
+    return root
+
+
+DATA = {"seed": "environment", "by-ref": "environment", "items-file": "file", "world": "environment_universe"}
+
+
+def test_environments_and_a_universe_written_from_a_bundle_load_into_an_env_through_the_gateway(state):
+    root = _data_bundle(state / "data-bundle")
+
+    first = _run(root)
+
+    assert first.exit_code == 0, first.output
+    for name in DATA:
+        assert f"artifacts/{name}: v1 (new)" in first.output, first.output
+    for task in ("folder", "ref", "universe"):
+        assert f"tasks/{task}.json v1: passed (check: 1)" in first.output, first.output
+    with namespace_routing():
+        ids = {entry.name: entry.id for entry in parse_bundle(root).entries}
+        world = EnvironmentUniverseArtifact.get(ids["world"])
+        assert [env.environment_name for env in world.get_environment_artifacts()] == ["items", "mail"]
+        assert list(world.get_metadata()) == ["manifest"]
+
+    (root / "artifacts/seed/items.json").write_text(_seed(["folder", "edited"]))
+    (root / "artifacts/world/items/items.json").write_text(_seed(["universe", "edited"]))
+    _load_task(root, "folder", "seed", ["folder", "edited"])
+    _load_task(root, "universe", "world", ["universe", "edited"])
+    edited = _run(root, "--task", "folder", "--task", "universe")
+
+    assert edited.exit_code == 0, edited.output
+    assert "artifacts/seed: v2 (files changed: items.json)" in edited.output, edited.output
+    assert "artifacts/world: v2 (files changed: items/items.json)" in edited.output, edited.output
+    assert "artifacts/mail-data: v1, unchanged" in edited.output and "envs/items: v1, unchanged" in edited.output
+    for task in ("folder", "universe"):
+        assert f"tasks/{task}.json v1: passed (check: 1)" in edited.output, edited.output
 
 
 def _files(root):

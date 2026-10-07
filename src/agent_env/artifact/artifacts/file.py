@@ -120,15 +120,21 @@ class FileArtifact(Artifact):
 
     @classmethod
     def from_toml(cls, data: dict, ctx: AuthoringContext) -> Self:
-        """Write the folder's one file under a prefix of its own (``ArtifactStore.attempt_prefix``);
-        ``description`` defaults to the file's name."""
-        from agent_env.artifact.store import get_artifact_store
-
+        """Write the folder's one file (``put_attempt``); ``description`` defaults to the file's name."""
         fields = ctx.accept(data, **cls.toml_keys)
         filename, path = ctx.file()
-        prefix = get_artifact_store().attempt_prefix(cls.model_fields["type"].default, ctx.id)
-        return cls.put_at(ctx.id, description=fields.get("description", filename), file_path=str(path),
-                          object_url=prefix + filename, filename=filename)
+        return cls.put_attempt(ctx.id, description=fields.get("description", filename), file_path=str(path),
+                               filename=filename)
+
+    @classmethod
+    def put_attempt(cls, id: str, *, description: str, file_path: str, filename: str) -> Self:
+        """``put_at`` under a prefix of this attempt's own (``ArtifactStore.attempt_prefix``), so a write that
+        fails partway never blocks the next one."""
+        from agent_env.artifact.store import get_artifact_store
+
+        prefix = get_artifact_store().attempt_prefix(cls.model_fields["type"].default, id)
+        return cls.put_at(id, description=description, file_path=file_path, object_url=prefix + filename,
+                          filename=filename)
 
     def load(self) -> bytes:
         from agent_env.artifact.store import get_artifact_store

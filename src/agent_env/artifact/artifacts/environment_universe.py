@@ -3,24 +3,37 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Literal, Optional
+from collections import Counter
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional
 
 from pydantic import AliasChoices, ConfigDict, Field, model_serializer
 
 from agent_env.artifact.ref import ArtifactRef
 from agent_env.artifact.universe import Universe
+from agent_env.entity_refs import EntityRef
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from agent_env.artifact.artifacts.file import FileArtifact
     from agent_env.artifact.artifacts.environment import EnvironmentArtifact
+    from agent_env.bundle.authoring import AuthoringContext
 
 
 class EnvironmentUniverseArtifact(Universe):
     """A universe artifact that bundles EnvironmentArtifacts together."""
 
     model_config = ConfigDict(populate_by_name=True)
+
+    # An artifact.toml may name environment artifacts to add to the ones its folder holds (see from_toml). The stored
+    # document's own names aren't taken, nor is metadata, which a metadata/<key>/ folder holds.
+    toml_keys: ClassVar[dict[str, type]] = {"environment_artifacts": list}
+    toml_refs: ClassVar[tuple[EntityRef, ...]] = (
+        EntityRef.artifact("environment_artifacts[]", artifact_type="environment"),)
+    toml_stored_names: ClassVar[dict[str, str]] = {
+        "service_artifact_refs": "environment_artifacts", "environment_artifact_refs": "environment_artifacts",
+        "service_artifact_ids": "environment_artifacts", "metadata": "a metadata/<key>/ folder holding its file",
+        "metadata_refs": "a metadata/<key>/ folder holding its file"}
 
     type: Literal["environment_universe"] = "environment_universe"
     # serialization_alias pins the emitted key: the attribute is renamed, the document is not.
@@ -95,6 +108,47 @@ class EnvironmentUniverseArtifact(Universe):
             ),
         )
         return get_artifact_store().put_document(instance)
+
+    @classmethod
+    def from_toml(cls, data: dict, ctx: AuthoringContext) -> EnvironmentUniverseArtifact:
+        """Write the universe authored as ``data`` (its artifact.toml, with ``environment_artifacts`` resolved to
+        environment artifacts' ids) and its folder under ``ctx.id``, and return it. The folder is laid out as
+        ``environment-universe get --output-dir`` writes one: each ``<environment_name>/`` folder's file is written as
+        an environment of that name, ``<id>__<name>`` over ``<id>__<name>__file``, and each ``metadata/<key>/``
+        folder's file as ``<id>__metadata__<key>``. Its environments are the folders', in name order, then the ones
+        ``environment_artifacts`` names. Nothing is written when it has none, or two of one name."""
+        from agent_env.artifact.artifacts.environment import EnvironmentArtifact
+        from agent_env.artifact.artifacts.file import FileArtifact
+
+        fields = cls.accept_toml(data, ctx)
+        layout = ctx.universe()
+        named = [ctx.artifact(ref, EnvironmentArtifact) for ref in fields.get("environment_artifacts", [])]
+        names = Counter([laid.name for laid in layout.environments] + [env.environment_name for env in named])
+        if not names:
+            ctx.refuse([ctx.config_problem("a universe needs an environment: a folder of its own, named after it and "
+                                           "holding its file, or one environment_artifacts names")])
+        if repeated := sorted(name for name, count in names.items() if count > 1):
+            ctx.refuse([ctx.config_problem(f"two of its environments are named {name!r}; a universe's environments "
+                                           "need names of their own") for name in repeated])
+        environments = []
+        for laid in layout.environments:
+            file = FileArtifact.put_attempt(laid.file_id, description=laid.filename, file_path=str(laid.path),
+                                            filename=laid.filename)
+            environments.append(EnvironmentArtifact.put(laid.environment_id, environment_name=laid.name,
+                                                        file_artifact=file))
+        metadata = {laid.name: FileArtifact.put_attempt(laid.file_id, description=laid.filename,
+                                                        file_path=str(laid.path), filename=laid.filename)
+                    for laid in layout.metadata}
+        return cls.put(ctx.id, environment_artifacts=environments + named, metadata=metadata or None)
+
+    @classmethod
+    def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:
+        """The keys of ``data``, an artifact.toml, a universe takes. Raises BundleError listing every problem."""
+        data, problems = ctx.renamed(data, cls.toml_stored_names)
+        fields, more = ctx.accepted(data, **cls.toml_keys)
+        if problems + more:
+            ctx.refuse(problems + more)
+        return fields
 
     def get_environment_artifacts(self) -> list[EnvironmentArtifact]:
         from agent_env.artifact.artifacts.environment import EnvironmentArtifact

@@ -7,6 +7,7 @@ import stat
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any, NoReturn, TypeVar, overload
 
 from agent_env.artifact.artifact import Artifact
@@ -16,6 +17,7 @@ from agent_env.env.envs._deployment import provider_refusal
 from agent_env.providers.env_providers.constants import GATEWAY_SERVICE_NAMES
 from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider
 from agent_env.providers.env_providers.env_provider import _env_provider_class
+from agent_env.store.ids import derive_id, validate_local_id
 from agent_env.utils.card_naming import card_names_in_files
 
 from ._fs import os_reason, relative, show, with_article
@@ -60,6 +62,16 @@ class AuthoringContext:
 
     def file(self) -> tuple[str, Path]:
         return entry_file(self.bundle, self.entry)
+
+    def universe(self) -> UniverseLayout:
+        return universe_layout(self.bundle, self.entry)
+
+    def renamed(self, data: dict, names: Mapping[str, str]) -> tuple[dict, list[str]]:
+        """``data`` less each key ``names`` maps to the key an author writes instead, and a problem for each:
+        the names a stored document uses, which a toml doesn't."""
+        problems = [self.config_problem(f"{key} is what the stored document calls it; write {names[key]} instead")
+                    for key in data if key in names]
+        return {key: value for key, value in data.items() if key not in names}, problems
 
     def card_names(self, image_key: str) -> list[str] | None:
         """The names ``@environment_card(name=...)`` gives in the source of the image ``image_key`` builds from
@@ -199,11 +211,12 @@ class AuthoringContext:
         self.refuse([message])
 
 
-def entry_files(bundle: Bundle, entry: BundleEntry) -> dict[str, Path]:
+def entry_files(bundle: Bundle, entry: BundleEntry, *, empty_ok: bool = False) -> dict[str, Path]:
     """The files in an entry's folder, keyed by POSIX path in NFC and sorted: regular files, dot files
     included, through links that stay inside the bundle, less what the OS or Python leaves behind and
-    the entry's own toml. Raises BundleError listing every problem found."""
-    return _Walk(bundle, entry).files()
+    the entry's own toml. Raises BundleError listing every problem found, a folder with no files among
+    them unless ``empty_ok``."""
+    return _Walk(bundle, entry, empty_ok).files()
 
 
 def build_context_files(bundle: Bundle, entry: BundleEntry) -> dict[str, Path]:
@@ -218,22 +231,126 @@ def build_context_files(bundle: Bundle, entry: BundleEntry) -> dict[str, Path]:
 
 def entry_file(bundle: Bundle, entry: BundleEntry) -> tuple[str, Path]:
     """The one file in an entry's folder, as ``(name, path)``. Raises BundleError otherwise."""
+    key, path = next(iter(one_file(bundle, entry).items()))
+    return key.rsplit("/", 1)[-1], path
+
+
+_AS_UNIVERSE = "leave out its declared type to write the folder as a file_artifact_universe"
+
+
+def one_file(bundle: Bundle, entry: BundleEntry, remedy: str = _AS_UNIVERSE) -> dict[str, Path]:
+    """``entry_files`` of a folder that must hold one file. Raises BundleError otherwise, suggesting ``remedy``."""
     files = entry_files(bundle, entry)
     if len(files) != 1:
         listed = ", ".join(repr(name) for name in files)
-        raise BundleError([f"{relative(bundle.root, entry.path)}: a {entry.type} {entry.kind.store} holds one file, "
-                           f"and this folder has {len(files)} ({listed}); leave out its declared type to write the "
-                           "folder as a file_artifact_universe"])
-    key, path = next(iter(files.items()))
-    return key.rsplit("/", 1)[-1], path
+        raise BundleError([f"{relative(bundle.root, entry.path)}: {with_article(f'{entry.type} {entry.kind.store}')} "
+                           f"holds one file, and this folder has {len(files)} ({listed}); {remedy}"])
+    return files
+
+
+def environment_files(bundle: Bundle, entry: BundleEntry) -> dict[str, Path]:
+    """What an environment artifact's write reads from its folder: its one file, or none when its artifact.toml's
+    ``file`` names the artifact to wrap instead. Raises BundleError otherwise."""
+    if not (isinstance(entry.config, dict) and "file" in entry.config):
+        return one_file(bundle, entry, "name the artifact to wrap with file, or give each other file an artifact "
+                                       "folder of its own")
+    files = entry_files(bundle, entry, empty_ok=True)
+    if files:
+        listed = ", ".join(repr(name) for name in files)
+        raise BundleError([f"{relative(bundle.root, entry.path)}: its file is the artifact file names, so the folder "
+                           f"holds only artifact.toml, and it also has {listed}; give the file an artifact folder of "
+                           "its own, or leave out file to wrap the folder's one file"])
+    return {}
+
+
+# The folder of a universe's metadata files, as `environment-universe get --output-dir` writes them.
+UNIVERSE_METADATA = "metadata"
+
+
+@dataclass(frozen=True)
+class LaidOut:
+    """One file of a universe folder, and the ids it's written under."""
+
+    name: str  # its environment's name, or its metadata key
+    filename: str
+    path: Path
+    file_id: str
+    environment_id: str | None  # None for a metadata file
+
+
+@dataclass(frozen=True)
+class UniverseLayout:
+    """An environment_universe folder, laid out as ``environment-universe get --output-dir`` writes one: each
+    ``<environment_name>/`` folder holds one environment's file, and each ``metadata/<key>/`` folder one metadata
+    file. ``files`` lists them all, as ``entry_files`` does."""
+
+    environments: tuple[LaidOut, ...]
+    metadata: tuple[LaidOut, ...]
+    files: dict[str, Path]
+
+
+def universe_layout(bundle: Bundle, entry: BundleEntry) -> UniverseLayout:
+    """The environments and metadata files an environment_universe's folder holds, each with the ids it's
+    written under: ``<universe>__<name>`` over ``<universe>__<name>__file`` for an environment, and
+    ``<universe>__metadata__<key>`` for a metadata file. Raises BundleError listing every problem."""
+    files = entry_files(bundle, entry, empty_ok=True)
+    where = relative(bundle.root, entry.path)
+    problems, folders = [], {}
+    for key in files:
+        parts = key.split("/")
+        metadata = parts[0] == UNIVERSE_METADATA
+        if len(parts) == (3 if metadata else 2):
+            folders.setdefault((metadata, parts[-2]), []).append(key)
+        elif len(parts) == 1:
+            problems.append(f"{where}/{key}: a universe folder holds only artifact.toml and a folder for each "
+                            "environment; move it into <environment_name>/, or give it an artifact folder of its own")
+        elif metadata:
+            problems.append(f"{where}/{key}: {UNIVERSE_METADATA}/ holds a folder for each key, with that key's one "
+                            f"file in it ({UNIVERSE_METADATA}/<key>/<file>); an environment named "
+                            f"{UNIVERSE_METADATA} goes in an artifact folder of its own, named in "
+                            "environment_artifacts")
+        else:
+            problems.append(f"{where}/{key}: an environment's folder holds its one file directly, "
+                            f"{parts[0]}/<file>, with no folders inside")
+    environments, metadata_files = [], []
+    for (metadata, name), keys in sorted(folders.items()):
+        folder = f"{where}/{UNIVERSE_METADATA}/{name}" if metadata else f"{where}/{name}"
+        if len(keys) != 1:
+            listed = ", ".join(repr(key.rsplit("/", 1)[-1]) for key in keys)
+            problems.append(f"{folder}: holds one file, and has {len(keys)} ({listed})")
+            continue
+        if "__" in name:
+            problems.append(f"{folder}: a name holding __ could clash with the ids derived from it; rename the folder")
+            continue
+        environment_id = None if metadata else derive_id(entry.id, name)
+        if metadata:
+            file_id = derive_id(derive_id(entry.id, UNIVERSE_METADATA), name)
+        else:
+            file_id = derive_id(environment_id, "file")
+        try:
+            validate_local_id(file_id)
+        except ValueError as e:
+            problems.append(f"{folder}: can't name the artifacts written from it ({e}); rename the folder")
+            continue
+        laid = LaidOut(name, keys[0].rsplit("/", 1)[-1], files[keys[0]], file_id, environment_id)
+        (metadata_files if metadata else environments).append(laid)
+    if problems:
+        raise BundleError(problems)
+    return UniverseLayout(tuple(environments), tuple(metadata_files), files)
+
+
+def universe_files(bundle: Bundle, entry: BundleEntry) -> dict[str, Path]:
+    """What an environment_universe's write reads from its folder: every file ``universe_layout`` lays out."""
+    return universe_layout(bundle, entry).files
 
 
 class _Walk:
     """Lists an entry's folder, following a link only when its target is inside the bundle."""
 
-    def __init__(self, bundle: Bundle, entry: BundleEntry):
+    def __init__(self, bundle: Bundle, entry: BundleEntry, empty_ok: bool = False):
         self.bundle = bundle
         self.entry = entry
+        self.empty_ok = empty_ok
         self.root = _identity(bundle.root)
         self.problems: list[str] = []
         self.found: dict[str, Path] = {}
@@ -245,7 +362,7 @@ class _Walk:
             self._problem(top, f"{how} {show(os.path.realpath(top))}, outside the bundle; {_BRING_IT_IN}")
         else:
             self._walk(top)
-        if not self.found and not self.problems:
+        if not self.found and not self.problems and not self.empty_ok:
             self._problem(top, f"has no files to write ({', '.join(sorted(LEAVINGS))} don't count)")
         if self.problems:
             raise BundleError(self.problems)
