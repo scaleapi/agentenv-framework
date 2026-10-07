@@ -21,6 +21,7 @@ import logging
 
 import pytest
 
+import agent_env.task.task as task_module
 import agent_env.task.store as store_mod
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv
 from agent_env.store import LocalSqliteDocumentStore
@@ -930,6 +931,53 @@ def test_validate_dag_rejects_non_ancestor_resume_point():
     c = _FlakyPrompt("c", retry_config=RetryConfig(retry_from_step_id="b"), depends_on=["a"])
     with pytest.raises(ValueError, match="not in the step's dependency ancestry"):
         Task(id="t", version=1, steps=[a, b, c])
+
+
+def test_validate_dag_rejects_unknown_resume_point():
+    step = _FlakyPrompt("step", retry_config=RetryConfig(retry_from_step_id="missing"))
+
+    with pytest.raises(ValueError, match="not in the step's dependency ancestry"):
+        Task(id="t", version=1, steps=[step])
+
+
+def test_validate_dag_rejects_duplicate_ids():
+    with pytest.raises(ValueError, match="Duplicate step id 'same' at position 1"):
+        Task(id="t", version=1, steps=[_FakeDeployEnv("same"), _FakeDeployEnv("same")])
+
+
+@pytest.mark.parametrize("self_retry", [False, True])
+def test_implicit_validation_skips_prefix_slices_and_self_retry_ancestry(monkeypatch, self_retry):
+    class _SliceCountingSteps(list):
+        slice_count = 0
+
+        def __getitem__(self, key):
+            if isinstance(key, slice):
+                self.slice_count += 1
+            return super().__getitem__(key)
+
+    class _Step:
+        def __init__(self, index):
+            self.id = f"s{index}"
+            self.depends_on = None
+            self.retry_config = (
+                RetryConfig(retry_from_step_id=self.id) if self_retry else None
+            )
+
+    ancestry_calls = 0
+    original_ancestor_ids = task_module._ancestor_ids
+
+    def count_ancestry(*args):
+        nonlocal ancestry_calls
+        ancestry_calls += 1
+        return original_ancestor_ids(*args)
+
+    monkeypatch.setattr(task_module, "_ancestor_ids", count_ancestry)
+    steps = _SliceCountingSteps(_Step(i) for i in range(100))
+
+    Task(id="t", version=1, steps=steps)
+
+    assert steps.slice_count == 0
+    assert ancestry_calls == 0
 
 
 def test_validate_dag_accepts_ancestor_resume_point():

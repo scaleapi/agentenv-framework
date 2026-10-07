@@ -279,12 +279,14 @@ async def _roll_back_span(
 class _SchedulerState:
     """Initial state the DAG scheduler needs to drive execution.
 
+    - `dependencies[step_id]`: steps `step_id` waits on; a retry's rearm recounts `pending` from it.
     - `dependents[step_id]`: steps released when `step_id` completes.
     - `pending[step_id]`: count of deps that still need to complete before `step_id` runs.
     - `completed`: seeded with steps skipped by `start_step`.
     - `ready`: steps whose deps are all satisfied and can launch immediately.
     """
     step_by_id: dict[str, "TaskStep"]
+    dependencies: dict[str, set[str]]
     dependents: dict[str, list[str]]
     pending: dict[str, int]
     completed: set[str]
@@ -313,7 +315,7 @@ class Task:
 
     @classmethod
     def _validate_dag(cls, steps: list[TaskStep]) -> None:
-        ids = {s.id for s in steps}
+        ids = {s.id for s in steps} if any(s.depends_on is not None for s in steps) else set()
         seen: set[str] = set()
         for i, step in enumerate(steps):
             if step.id in seen:
@@ -321,18 +323,14 @@ class Task:
                     f"Duplicate step id '{step.id}' at position {i}; step ids must be unique within a task"
                 )
             seen.add(step.id)
-            prior = {s.id for s in steps[:i]}
             retry_config = getattr(step, "retry_config", None)
-            if retry_config is not None:
+            if retry_config is not None and retry_config.retry_from_step_id != step.id:
                 # Trust the task author's resume point, but catch an obviously
                 # invalid one at creation: it must be the step itself (re-run just
                 # this step) or an earlier dependency ancestor. We do not judge
                 # which spanned steps are replay-safe.
                 ancestors = _ancestor_ids(step.id, _dependency_ids(steps[: i + 1]))
-                if (
-                    retry_config.retry_from_step_id != step.id
-                    and retry_config.retry_from_step_id not in ancestors
-                ):
+                if retry_config.retry_from_step_id not in ancestors:
                     raise ValueError(
                         f"Step '{step.id}' at position {i} declares retry_config.retry_from_step_id "
                         f"'{retry_config.retry_from_step_id}' which is not in the step's dependency "
@@ -340,6 +338,7 @@ class Task:
                     )
             if step.depends_on is None:
                 continue
+            prior = {s.id for s in steps[:i]}
             for dep in step.depends_on:
                 if dep.task_step_id in prior:
                     continue
@@ -527,17 +526,7 @@ class Task:
         from agent_env.task import store as _store
 
         index_of = {s.id: i for i, s in enumerate(steps)}
-        # Dependency ids per active step (mirrors _build_scheduler_state), used to
-        # re-arm after a rollback.
         active_ids = set(state.step_by_id)
-        dep_ids: dict[str, set[str]] = {}
-        for i, s in enumerate(steps):
-            if s.id not in active_ids:
-                continue
-            if s.depends_on is None:
-                dep_ids[s.id] = {p.id for p in steps[:i] if p.id in active_ids}
-            else:
-                dep_ids[s.id] = {d.task_step_id for d in s.depends_on}
 
         in_flight: dict[str, asyncio.Task] = {}
         task_to_step_id: dict[asyncio.Task, str] = {}
@@ -577,7 +566,7 @@ class Task:
             re-dispatched span (and any other uncompleted, dep-satisfied step) runs.
             Nothing is in flight here: the drain preceding a rollback emptied it."""
             for sid in state.step_by_id:
-                state.pending[sid] = sum(1 for d in dep_ids[sid] if d not in state.completed)
+                state.pending[sid] = sum(1 for d in state.dependencies[sid] if d not in state.completed)
             state.ready = [
                 state.step_by_id[s.id] for s in steps
                 if s.id in active_ids and s.id not in state.completed and state.pending[s.id] == 0
@@ -733,17 +722,25 @@ class Task:
         # earlier steps, so active steps never reference truncated ones.
         active_steps = steps[:end_step] if end_step is not None else steps
         step_by_id = {s.id: s for s in active_steps}
+        dependencies: dict[str, set[str]] = {}
         dependents: dict[str, list[str]] = {step_id: [] for step_id in step_by_id}
         pending: dict[str, int] = {}
+        implicit_dependencies = all(step.depends_on is None for step in active_steps)
+        previous_step_id: str | None = None
         for i, step in enumerate(active_steps):
-            # When depends_on is None, we assume all prior steps are dependencies.
-            if step.depends_on is None:
+            if implicit_dependencies:
+                # One predecessor has the same reachability as every earlier step here.
+                dependency_step_ids = {previous_step_id} if previous_step_id is not None else set()
+            elif step.depends_on is None:
+                # When depends_on is None, we assume all prior steps are dependencies.
                 dependency_step_ids = {s.id for s in active_steps[:i]}
             else:
                 dependency_step_ids = {d.task_step_id for d in step.depends_on}
+            dependencies[step.id] = dependency_step_ids
             for dependency_step_id in dependency_step_ids:
                 dependents[dependency_step_id].append(step.id)
             pending[step.id] = len(dependency_step_ids)
+            previous_step_id = step.id
 
         completed: set[str] = set()
         for s in active_steps[:start_step]:
@@ -757,6 +754,7 @@ class Task:
         ]
         return _SchedulerState(
             step_by_id=step_by_id,
+            dependencies=dependencies,
             dependents=dependents,
             pending=pending,
             completed=completed,
