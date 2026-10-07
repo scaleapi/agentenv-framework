@@ -14,7 +14,7 @@ marks, or contributor names to endorse or promote Scale AI, or related products.
 
 ## Python dependencies
 
-The runtime dependencies of `agentenv-framework` and its `explorer` and `gcp` extras, at the versions resolved in `uv.lock`. Development-only dependencies are not listed.
+The runtime dependencies of `agentenv-framework` and its `explorer`, `gcp` and `sail` extras, at the versions resolved in `uv.lock`. Development-only dependencies are not listed.
 
 ### a2a-sdk 0.3.26
 

@@ -24,9 +24,12 @@ class Refuse(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, Refuse())
 """
 
-# Not core: the explorer is the explorer extra's own package, the gateway runs only in its
-# container image, and the code runner is a script that reads its arguments on import.
-_NOT_CORE = ("agent_env.explorer", "agent_env.env.gateway", "agent_env.task_step.task_steps.run_code_runner")
+# Not core: the explorer and the sail_vm provider are their extras' own packages, the gateway runs
+# only in its container image, and the code runner is a script that reads its arguments on import.
+_NOT_CORE = (
+    "agent_env.explorer", "agent_env.providers.sandbox_providers.sail_vm", "agent_env.env.gateway",
+    "agent_env.task_step.task_steps.run_code_runner",
+)
 
 _IMPORT_CORE = _BLOCKING + """
 import ast, pkgutil
@@ -123,3 +126,9 @@ def test_core_and_every_store_module_import_without_the_extra(extra):
 def test_a_gcp_impl_without_the_extra_names_the_extra_to_install(impl, base):
     message = _run(_LOAD_IMPL, _only_in("gcp"), impl, base)
     assert "pip install 'agentenv-framework[gcp]'" in message, message
+
+
+def test_the_sail_vm_provider_without_the_extra_names_the_extra_to_install():
+    impl = "agent_env.providers.sandbox_providers.sail_vm.provider:SailVmSandboxProvider"
+    message = _run(_LOAD_IMPL, _only_in("sail"), impl, "agent_env.providers.sandbox_providers.sandbox_provider:SandboxProvider")
+    assert "pip install 'agentenv-framework[sail]'" in message, message

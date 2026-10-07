@@ -62,7 +62,6 @@ dependencies = [
     { name = "pymongo" },
     { name = "python-multipart" },
     { name = "pyyaml" },
-    { name = "sail" },
     { name = "starlette" },
     { name = "uvicorn" },
 ]
@@ -84,6 +83,7 @@ dev = [
     { name = "pytest-timeout" },
     { name = "pytest-xdist" },
     { name = "requests" },
+    { name = "sail" },
     { name = "uvicorn" },
 ]
 explorer = [
@@ -97,11 +97,14 @@ gcp = [
     { name = "google-cloud-storage" },
     { name = "requests" },
 ]
+sail = [
+    { name = "sail" },
+]
 
 [package.metadata]
 requires-dist = [
     { name = "a2a-sdk", specifier = "==0.3.26" },
-    { name = "agentenv-framework", extras = ["explorer", "gcp"], marker = "extra == 'dev'" },
+    { name = "agentenv-framework", extras = ["explorer", "gcp", "sail"], marker = "extra == 'dev'" },
     { name = "agentenv-framework-protocol", editable = "packages/agentenv-protocol" },
     { name = "boto3", specifier = ">=1.35.0" },
     { name = "certifi", specifier = ">=2024.2.2" },
@@ -132,12 +135,12 @@ requires-dist = [
     { name = "python-multipart", specifier = ">=0.0.13" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "requests", marker = "extra == 'gcp'", specifier = ">=2.31" },
-    { name = "sail", specifier = "~=0.12.8" },
+    { name = "sail", marker = "extra == 'sail'", specifier = "~=0.12.8" },
     { name = "starlette", specifier = ">=0.40" },
     { name = "uvicorn", specifier = ">=0.47" },
     { name = "uvicorn", marker = "extra == 'explorer'", specifier = ">=0.29" },
 ]
-provides-extras = ["explorer", "gcp", "dev"]
+provides-extras = ["explorer", "gcp", "sail", "dev"]
 
 [[package]]
 name = "agentenv-framework-protocol"

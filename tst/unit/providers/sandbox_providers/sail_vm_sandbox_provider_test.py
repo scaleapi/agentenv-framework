@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import subprocess
 import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -45,6 +46,7 @@ def _fake_sdk(sailbox):
         Sailbox=SimpleNamespace(
             create=SimpleNamespace(aio=AsyncMock(return_value=sailbox)),
             get=SimpleNamespace(aio=AsyncMock(return_value=sailbox)),
+            list=SimpleNamespace(aio=AsyncMock(return_value=[])),
         ),
         Image=SimpleNamespace(devbox=MagicMock(return_value="devbox-amd64")),
         AutoSleep=SimpleNamespace(
@@ -96,10 +98,17 @@ def test_from_config_rejects_invalid_config(config, message):
         SailVmSandboxProvider.from_config(**config)
 
 
-def test_construction_neither_imports_the_sdk_nor_sets_the_key(monkeypatch):
-    monkeypatch.delitem(sys.modules, "sail", raising=False)
+def test_importing_core_or_the_provider_package_never_loads_the_sail_sdk():
+    script = (
+        "import sys, agent_env, agent_env.providers, agent_env.providers.sandbox_providers.sail_vm; "
+        "print('sail' in sys.modules)"
+    )
+    out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=True).stdout.strip()
+    assert out == "False"
+
+
+def test_construction_never_sets_the_key():
     SailVmSandboxProvider.from_config(api_key="sail-secret")
-    assert "sail" not in sys.modules
     assert _sdk.API_KEY_ENV not in os.environ
 
 

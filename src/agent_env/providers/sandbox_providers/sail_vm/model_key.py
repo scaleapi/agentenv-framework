@@ -13,11 +13,13 @@ import hashlib
 import json
 import re
 import shlex
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 from urllib.parse import urlparse
 
 SECRET_PREFIX = "AGENTENV_LITELLM_"
+POLICY_PREFIX = "agentenv-"
 PLACEHOLDER = "sail-injected-model-key"
 KEY_ENV = "LITELLM_API_KEY"
 BASE_URL_ENV = "LITELLM_BASE_URL"
@@ -36,11 +38,17 @@ DOCKER_SHIM_PATH = "/usr/local/bin/docker"
 
 _SECRET_REF = re.compile(r"\$\{secrets\.([A-Za-z0-9_]+)\}")
 # A model-key env var assignment and the whole shell word assigned: quoted, escaped and bare parts alike.
-_KEY_ASSIGNMENT = re.compile(
-    r"\b(?:LITELLM_API_KEY|ANTHROPIC_API_KEY)=((?:'[^']*'|\"(?:[^\"\\]|\\.)*\"|\\.|[^\s'\"\\])*)"
-)
-# A whole word that is one variable reference a shell expands: $NAME, ${NAME}, "$NAME" or "${NAME}".
+_KEY_NAMES = ("LITELLM_API_KEY", "ANTHROPIC_API_KEY")
+# A shell word: quoted, escaped and bare parts, concatenated.
+_SHELL_WORD = re.compile(r"(?:'[^']*'|\"(?:[^\"\\]|\\.)*\"|\\.|[^\s'\"\\;|&<>()])+")
+# An assigned value, as written, that is wholly one variable reference a shell expands: $NAME, ${NAME}, "$NAME", "${NAME}".
 _REFERENCE = re.compile(r'^"?\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})"?$')
+# In text that isn't a shell script: KEY=value, or a YAML / JSON KEY: value.
+_LITERAL_ASSIGNMENT = re.compile(
+    r"\b(?:LITELLM_API_KEY|ANTHROPIC_API_KEY)['\"]?(?:=|\s*:\s*)['\"]?([^\s'\",}#]*)"
+)
+#: Shorter keys are refused: scrubbing replaces every occurrence, which for a short one hits unrelated text.
+MIN_KEY_LENGTH = 16
 
 # By secret name: the key, so a handle reconnected here can still scrub its agent's key, and the launches
 # and Sailboxes in this process that need it, so the key is forgotten once none does. Process memory only.
@@ -54,21 +62,42 @@ def secret_name(key: str) -> str:
 
 def carries_model_key(text: str, *, shell: bool) -> bool:
     """Whether ``text`` assigns a model-key env var a value other than the placeholder. In a ``shell`` script
-    the assigned word is decoded as the shell would (quotes and escapes), and a word that is wholly one
-    unquoted or double-quoted variable reference is not a value; in any other text, every value is literal."""
-    for word in _KEY_ASSIGNMENT.findall(text):
-        if shell and _REFERENCE.match(word):
+    each word is decoded as the shell would (quotes and escapes, in the name too), and a value that is wholly
+    one unquoted or double-quoted variable reference isn't one; in other text, every value is literal."""
+    if not shell:
+        return any(value and value != PLACEHOLDER for value in _LITERAL_ASSIGNMENT.findall(text))
+    for word in _SHELL_WORD.findall(text):
+        try:
+            decoded = "".join(shlex.split(word))
+        except ValueError:
+            return True
+        name, assigned, value = decoded.partition("=")
+        if not assigned or name not in _KEY_NAMES or not value or value == PLACEHOLDER:
             continue
-        if shell:
-            try:
-                value = "".join(shlex.split(word))
-            except ValueError:
-                return True
-        else:
-            value = word
-        if value and value != PLACEHOLDER:
+        if not _REFERENCE.match(_written_value(word)):
             return True
     return False
+
+
+def _written_value(word: str) -> str:
+    """The part of a shell word after its first ``=`` outside single quotes and escapes, as written."""
+    quote = None
+    index = 0
+    while index < len(word):
+        char = word[index]
+        if quote == "'":
+            if char == "'":
+                quote = None
+        elif char == "=":
+            return word[index + 1:]
+        elif char == "\\":
+            index += 1
+        elif char == '"':
+            quote = None if quote == '"' else '"'
+        elif char == "'":
+            quote = "'"
+        index += 1
+    return ""
 
 
 def docker_shim() -> str:
@@ -95,6 +124,11 @@ class ModelKeyInjection:
     secret: str
     key: str | None = field(default=None, repr=False)
     policy_id: str | None = None
+    #: Saved policies a swap may or may not have applied (Sail couldn't say), deleted once it can.
+    unsettled_policy_ids: list[str] = field(default_factory=list)
+    #: Every saved policy made for one Sailbox is named under this prefix, so teardown from any handle, in
+    #: any process, finds them all; a reconnected handle takes it from the applied policy's name.
+    policy_prefix: str = field(default_factory=lambda: f"{POLICY_PREFIX}{uuid.uuid4().hex[:12]}")
 
     @classmethod
     def for_env(cls, env: Mapping[str, str]) -> ModelKeyInjection | None:
@@ -108,6 +142,11 @@ class ModelKeyInjection:
             raise ValueError(
                 f"Sail injects the model key only into HTTPS requests, but {BASE_URL_ENV} is {base_url!r}; "
                 "use an https endpoint or set inject_model_key = false in [sandbox.providers.sail_vm.config]"
+            )
+        if len(key) < MIN_KEY_LENGTH:
+            raise ValueError(
+                f"Sail model-key injection needs a {KEY_ENV} of at least {MIN_KEY_LENGTH} characters, to scrub it "
+                "safely; set inject_model_key = false in [sandbox.providers.sail_vm.config] to pass it in"
             )
         return cls(host=parsed.hostname, secret=secret_name(key), key=key)
 

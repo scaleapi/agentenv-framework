@@ -84,6 +84,23 @@ async def _reap(sandbox: SailVmSandbox) -> None:
     )
 
 
+async def _terminate_named(sdk: Any, app: Any, name: str) -> bool:
+    """Terminate every live Sailbox in ``app`` called ``name`` (one a create made though it reported failing),
+    retrying through a brief outage; False when that couldn't be confirmed."""
+    for attempt in range(_REAP_ATTEMPTS):
+        try:
+            for box in await sdk.Sailbox.list.aio(app_id=app, search=name):
+                if box.name == name and box.status not in ("terminated", "terminating"):
+                    await box.terminate.aio()
+                    logger.info("Terminated Sailbox %s, created though its create reported a failure", box.sailbox_id)
+            return True
+        except Exception as exc:  # noqa: BLE001 - retried, then reported
+            logger.warning("Checking for a Sailbox %s left by a failed create failed (attempt %s): %s", name, attempt + 1, exc)
+            await asyncio.sleep(2 ** attempt)
+    logger.error("A Sailbox %s may be left by a failed create; it stops at its max lifetime", name)
+    return False
+
+
 async def _create_or_reclaim(
     create: Any, wrap: Callable[[Any], SailVmSandbox], release: Callable[[], Awaitable[None]] | None = None,
 ) -> Any:
@@ -254,19 +271,31 @@ class SailVmSandboxProvider(SandboxProvider):
                 injection.release(launch)
             return sandbox
 
-        release = (lambda: release_injection(sdk, injection, launch)) if injection is not None else None
+        name = sailbox_name(resolved_attribution)
+
+        async def release() -> None:
+            """Undo a create that failed or was abandoned: terminate any Sailbox Sail made under ``name`` (its
+            response may have been lost), then release the injection's policy."""
+            terminated = await _terminate_named(sdk, app, name)
+            if injection is not None:
+                if terminated:
+                    await release_injection(sdk, injection, launch)
+                else:
+                    injection.release(launch)
+                    logger.error("Egress policy %s stays with the unconfirmed Sailbox %s; delete it by name", injection.policy_id, name)
+
         creating = False
         try:
             if injection is not None:
                 injection.hold(launch)
                 await sdk.Secret.set.aio(injection.secret, injection.key)
-                egress = await create_saved_policy(sdk, policy_name(), egress_document(effective_policy, injection))
+                egress = await create_saved_policy(sdk, policy_name(injection), egress_document(effective_policy, injection))
                 injection.policy_id = egress.id
             creating = True
             raw = await _create_or_reclaim(sdk.Sailbox.create.aio(
                 app=app,
                 image=sdk.Image.devbox("amd64"),
-                name=sailbox_name(resolved_attribution),
+                name=name,
                 size=size,
                 memory_limit_gib=memory_gib,
                 disk_limit_gib=disk_gib,
@@ -277,7 +306,7 @@ class SailVmSandboxProvider(SandboxProvider):
             ), wrap, release)
         except BaseException as exc:
             # A create cancelled in flight is _create_or_reclaim's to clean up once it settles.
-            if release is not None and not (creating and isinstance(exc, asyncio.CancelledError)):
+            if not (creating and isinstance(exc, asyncio.CancelledError)):
                 await release()
             raise
         sandbox = wrap(raw)

@@ -18,7 +18,7 @@ DEFAULT_TTL_SECONDS = 7200
 @click.option("--ttl-seconds", type=click.IntRange(min=MIN_TTL_SECONDS, max=MAX_TTL_SECONDS), default=DEFAULT_TTL_SECONDS,
               help=f"VM lifetime in seconds (default {DEFAULT_TTL_SECONDS})")
 @click.option("--sandbox", default=None,
-              help="Sandbox backend(s): a built-in (modal, modal_vm, e2b, sail_vm, local) "
+              help="Sandbox backend(s): a built-in (modal, modal_vm, e2b, local) "
                    "or a name from [sandbox.providers] in .agentenv/config.toml; comma-separated for a "
                    "fallback chain. Defaults to [sandbox].agent_default (else local) when omitted.")
 def deploy(agent_id: str, agent_version: int | None, env_var_pairs: tuple[str, ...], ttl_seconds: int, sandbox: str):

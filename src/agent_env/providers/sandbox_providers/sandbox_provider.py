@@ -222,7 +222,7 @@ _BUILTIN_SANDBOX_PROVIDERS: dict[str, str] = {
     "modal": "agent_env.providers.sandbox_providers.modal_sandbox:ModalSandboxProvider",
     "modal_vm": "agent_env.providers.sandbox_providers.modal_vm_sandbox:ModalVmSandboxProvider",
     "e2b": "agent_env.providers.sandbox_providers.e2b:E2BSandboxProvider",
-    "sail_vm": "agent_env.providers.sandbox_providers.sail_vm:SailVmSandboxProvider",
+    "sail_vm": "agent_env.providers.sandbox_providers.sail_vm.provider:SailVmSandboxProvider",
     "local": "agent_env.providers.sandbox_providers.local_sandbox:LocalSandboxProvider",
 }
 

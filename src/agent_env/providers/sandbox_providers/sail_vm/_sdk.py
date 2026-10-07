@@ -1,4 +1,4 @@
-"""The Sail SDK, imported on first use and authenticated with the provider's configured key.
+"""The Sail SDK (the ``sail`` extra), authenticated with the provider's configured key.
 
 The Python SDK takes its key (and its thread-pool size) only from the environment, read once when it
 builds its process-wide client. Both are set for that one build and restored, so subprocesses never
@@ -12,6 +12,8 @@ import os
 import threading
 from types import ModuleType
 from typing import Any
+
+import sail
 
 from agent_env.config.errors import ConfigError
 
@@ -34,7 +36,7 @@ def connect(api_key: str, app_name: str, *, runtime_threads: int | None = None, 
     """
     global _installed_key
     if sdk is None:
-        import sail as sdk
+        sdk = sail
     fingerprint = _fingerprint(api_key)
     with _lock:
         if _installed_key is None:

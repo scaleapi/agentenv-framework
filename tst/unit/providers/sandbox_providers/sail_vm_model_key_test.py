@@ -57,6 +57,7 @@ def _fake_sdk(sailbox):
         Sailbox=SimpleNamespace(
             create=SimpleNamespace(aio=AsyncMock(return_value=sailbox)),
             get=SimpleNamespace(aio=AsyncMock(return_value=sailbox)),
+            list=SimpleNamespace(aio=AsyncMock(return_value=[])),
         ),
         Image=SimpleNamespace(devbox=MagicMock(return_value="devbox-amd64")),
         AutoSleep=SimpleNamespace(never=lambda: "never", default=lambda: "default", not_before=lambda s: s),
@@ -64,7 +65,7 @@ def _fake_sdk(sailbox):
         EgressPolicy=SimpleNamespace(
             create=SimpleNamespace(aio=AsyncMock(side_effect=create_policy)),
             get=SimpleNamespace(aio=AsyncMock(side_effect=lambda policy_id: next(p for p in saved if p.id == policy_id))),
-            list=SimpleNamespace(aio=AsyncMock(side_effect=lambda search: [p for p in saved if p.name == search])),
+            list=SimpleNamespace(aio=AsyncMock(side_effect=lambda search: [p for p in saved if search in p.name])),
         ),
         reset_transports=MagicMock(),
         NotFoundError=_NotFound,
@@ -331,7 +332,7 @@ async def test_terminate_deletes_the_policy_and_keeps_the_secret():
     await sandbox.terminate()
 
     sailbox.terminate.aio.assert_awaited_once()
-    saved[0].delete.aio.assert_awaited_once()
+    saved[0].delete.aio.assert_awaited()
     secret.delete.aio.assert_not_awaited()
     assert secret_name(_KEY) not in model_key._injected_keys
 
@@ -700,3 +701,189 @@ async def test_a_key_with_an_apostrophe_is_scrubbed_in_its_shell_encoded_form(qu
     script = sailbox.exec.aio.await_args.args[0][2]
     assert "sk-a" not in script and PLACEHOLDER in script
     assert shlex.split(script.split("LITELLM_API_KEY=", 1)[1])[0] == PLACEHOLDER
+
+
+@pytest.mark.parametrize(
+    ("text", "shell", "carries"),
+    [
+        ("docker run -e 'LITELLM_API_KEY'=other-secret img", True, True),
+        ('docker run -e "LITELLM_API_KEY=other-secret" img', True, True),
+        ('docker run -e "LITELLM_API_KEY=$LITELLM_API_KEY" img', True, False),
+        ("LITELLM_API_KEY: other-secret", False, True),
+        ('{"LITELLM_API_KEY": "sk-x"}', False, True),
+        (f'{{"LITELLM_API_KEY": "{PLACEHOLDER}"}}', False, False),
+        ("os.environ['LITELLM_API_KEY']", False, False),
+    ],
+)
+def test_a_quoted_name_and_yaml_or_json_forms_are_detected(text, shell, carries):
+    assert carries_model_key(text, shell=shell) is carries
+
+
+def test_a_key_too_short_to_scrub_safely_is_refused():
+    with pytest.raises(ValueError, match="at least 16 characters"):
+        ModelKeyInjection.for_env({**_ENV, "LITELLM_API_KEY": "docker"})
+
+
+@pytest.mark.asyncio
+async def test_a_swap_whose_response_was_lost_but_applied_keeps_the_replacement_and_deletes_the_old():
+    sailbox = _sailbox()
+    sdk, saved, _ = _fake_sdk(sailbox)
+    sandbox = await SailVmSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(
+        image_name="agent:1", port=8000, env=_ENV,
+        network_policy=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=("pypi.org",)),
+    )
+
+    async def applied_then_lost(policy):
+        sailbox.egress_policy = SimpleNamespace(policy_id=policy.id, document=policy.document)
+        raise TimeoutError("response lost")
+
+    sailbox.set_egress_policy.aio = AsyncMock(side_effect=applied_then_lost)
+    sdk.Sailbox.get.aio = AsyncMock(side_effect=lambda _id: sailbox)
+
+    await sandbox.apply_network_policy(sandbox.network_policy.with_hosts(["bucket.example"]))
+
+    first, second = saved
+    first.delete.aio.assert_awaited_once()
+    second.delete.aio.assert_not_awaited()
+    assert sandbox._injection.policy_id == second.id
+
+
+@pytest.mark.parametrize(
+    ("text", "carries"),
+    [
+        ("docker run -e LITELLM_API_K\\EY=other-secret img", True),
+        ("docker run -e LITELLM_API_KEY=other-secret=$HOME img", True),
+        ('docker run -e "LITELLM_API_KEY=$X-x" img', True),
+        ("docker run -e 'LITELLM_API_KEY=$X' img", True),
+        ('docker run -e "LITELLM_API_KEY=$LITELLM_API_KEY" img', False),
+    ],
+)
+def test_names_are_decoded_and_only_a_whole_reference_passes(text, carries):
+    assert carries_model_key(text, shell=True) is carries
+
+
+async def _restricted_injected_sandbox():
+    sailbox = _sailbox()
+    sdk, saved, _ = _fake_sdk(sailbox)
+    sandbox = await SailVmSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(
+        image_name="agent:1", port=8000, env=_ENV,
+        network_policy=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=("pypi.org",)),
+    )
+    return sandbox, sailbox, sdk, saved
+
+
+@pytest.mark.asyncio
+async def test_a_swap_whose_outcome_sail_cannot_report_keeps_both_policies_until_terminate():
+    sandbox, sailbox, sdk, saved = await _restricted_injected_sandbox()
+    sailbox.set_egress_policy.aio = AsyncMock(side_effect=TimeoutError("response lost"))
+    sdk.Sailbox.get.aio = AsyncMock(side_effect=RuntimeError("api down"))
+
+    with pytest.raises(TimeoutError):
+        await sandbox.apply_network_policy(sandbox.network_policy.with_hosts(["bucket.example"]))
+
+    first, second = saved
+    first.delete.aio.assert_not_awaited()
+    second.delete.aio.assert_not_awaited()
+    assert sandbox._injection.unsettled_policy_ids == [second.id]
+    await sandbox.terminate()
+    first.delete.aio.assert_awaited()
+    second.delete.aio.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_swap_that_applied_still_settles_and_re_raises_the_cancellation():
+    sandbox, sailbox, sdk, saved = await _restricted_injected_sandbox()
+
+    async def applied_then_cancelled(policy):
+        sailbox.egress_policy = SimpleNamespace(policy_id=policy.id, document=policy.document)
+        raise asyncio.CancelledError
+
+    sailbox.set_egress_policy.aio = AsyncMock(side_effect=applied_then_cancelled)
+    sdk.Sailbox.get.aio = AsyncMock(side_effect=lambda _id: sailbox)
+
+    with pytest.raises(asyncio.CancelledError):
+        await sandbox.apply_network_policy(sandbox.network_policy.with_hosts(["bucket.example"]))
+
+    first, second = saved
+    first.delete.aio.assert_awaited_once()
+    assert sandbox._injection.policy_id == second.id
+
+
+@pytest.mark.asyncio
+async def test_teardown_through_a_fresh_handle_deletes_every_policy_made_for_the_box():
+    sandbox, sailbox, sdk, saved = await _restricted_injected_sandbox()
+    sailbox.set_egress_policy.aio = AsyncMock(side_effect=TimeoutError("response lost"))
+    sdk.Sailbox.get.aio = AsyncMock(side_effect=RuntimeError("api down"))
+    with pytest.raises(TimeoutError):
+        await sandbox.apply_network_policy(sandbox.network_policy.with_hosts(["bucket.example"]))
+    first, second = saved
+    assert first.name.rsplit("-", 1)[0] == second.name.rsplit("-", 1)[0] == sandbox._injection.policy_prefix
+
+    sailbox.egress_policy = SimpleNamespace(policy_id=first.id, name=first.name, document=first.document)
+    sdk.Sailbox.get.aio = AsyncMock(side_effect=lambda _id: sailbox)
+    fresh = await SailVmSandboxProvider(api_key="sail-key", sdk=sdk).get_sandbox("sb_1")
+    await fresh.terminate()
+
+    first.delete.aio.assert_awaited()
+    second.delete.aio.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_create_whose_response_was_lost_terminates_the_box_sail_made_then_deletes_its_policy():
+    sailbox = _sailbox()
+    sdk, saved, _ = _fake_sdk(sailbox)
+    made = MagicMock(sailbox_id="sb_lost", status="running")
+    made.terminate.aio = AsyncMock()
+    gone = MagicMock(sailbox_id="sb_old", status="terminated")
+    gone.terminate.aio = AsyncMock()
+
+    async def create_then_lose(**kwargs):
+        made.name = gone.name = kwargs["name"]
+        raise TimeoutError("response lost")
+
+    sdk.Sailbox.create.aio = AsyncMock(side_effect=create_then_lose)
+    sdk.Sailbox.list.aio = AsyncMock(side_effect=lambda **kw: [made, gone] if kw["search"] == made.name else [])
+
+    with pytest.raises(TimeoutError):
+        await SailVmSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(image_name="agent:1", port=8000, env=_ENV)
+
+    made.terminate.aio.assert_awaited_once()
+    gone.terminate.aio.assert_not_awaited()
+    saved[0].delete.aio.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_lost_create_is_reclaimed_through_a_brief_outage_before_its_policy_goes(monkeypatch):
+    monkeypatch.setattr("agent_env.providers.sandbox_providers.sail_vm.provider.asyncio.sleep", AsyncMock())
+    sdk, saved, _ = _fake_sdk(_sailbox())
+    made = MagicMock(sailbox_id="sb_lost", status="running")
+    made.terminate.aio = AsyncMock(side_effect=[RuntimeError("api down"), None])
+
+    async def create_then_lose(**kwargs):
+        made.name = kwargs["name"]
+        raise TimeoutError("response lost")
+
+    sdk.Sailbox.create.aio = AsyncMock(side_effect=create_then_lose)
+    sdk.Sailbox.list.aio = AsyncMock(side_effect=lambda **kw: [made])
+
+    with pytest.raises(TimeoutError):
+        await SailVmSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(image_name="agent:1", port=8000, env=_ENV)
+
+    assert made.terminate.aio.await_count == 2
+    saved[0].delete.aio.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_an_unconfirmed_lost_create_keeps_its_policy_rather_than_fail_deleting_it(monkeypatch, caplog):
+    monkeypatch.setattr("agent_env.providers.sandbox_providers.sail_vm.provider.asyncio.sleep", AsyncMock())
+    sdk, saved, _ = _fake_sdk(_sailbox())
+    sdk.Sailbox.create.aio = AsyncMock(side_effect=TimeoutError("response lost"))
+    sdk.Sailbox.list.aio = AsyncMock(side_effect=RuntimeError("api down"))
+
+    with pytest.raises(TimeoutError):
+        await SailVmSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(image_name="agent:1", port=8000, env=_ENV)
+
+    assert sdk.Sailbox.list.aio.await_count == 3
+    saved[0].delete.aio.assert_not_awaited()
+    assert "stays with the unconfirmed Sailbox" in caplog.text
+    assert secret_name(_KEY) not in model_key._injected_keys

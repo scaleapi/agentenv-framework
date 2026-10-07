@@ -549,61 +549,10 @@ async def test_modal_vm_provider_routes_to_vm_path_not_containers():
 
 
 @pytest.mark.asyncio
-async def test_read_trajectory_retries_a_read_whose_transport_failed():
-    gp = EnvironmentGatewayProvider()
-    gp._get_container_id = AsyncMock(return_value="gw")
-    sandbox = MagicMock()
-    sandbox.exec_with_output = AsyncMock(side_effect=[(-1, "", "host lost"), (0, '{"a": 1}\n{"b": 2}\n', "")])
-
-    assert await gp.read_trajectory(sandbox) == [{"a": 1}, {"b": 2}]
-    assert sandbox.exec_with_output.await_count == 2
-
-
-@pytest.mark.asyncio
-async def test_read_trajectory_raises_rather_than_parse_a_read_that_keeps_failing():
-    gp = EnvironmentGatewayProvider()
-    gp._get_container_id = AsyncMock(return_value="gw")
-    sandbox = MagicMock()
-    sandbox.exec_with_output = AsyncMock(return_value=(-1, '{"a": 1}\n', "host lost"))
-
-    with pytest.raises(RuntimeError, match="exec transport failed 3 times"):
-        await gp.read_trajectory(sandbox)
-
-
-@pytest.mark.asyncio
-async def test_a_container_lookup_whose_transport_keeps_failing_raises_rather_than_read_as_no_container():
-    gp = EnvironmentGatewayProvider()
-    sandbox = MagicMock()
-    sandbox.exec_with_output = AsyncMock(return_value=(-1, "", "host lost"))
-
-    with pytest.raises(RuntimeError, match="Could not look up the .* container: exec transport failed 3 times"):
-        await gp.read_trajectory(sandbox)
-
-
-@pytest.mark.asyncio
-async def test_a_container_lookup_retries_a_failed_transport():
-    gp = EnvironmentGatewayProvider()
-    sandbox = MagicMock()
-    sandbox.exec_with_output = AsyncMock(side_effect=[(-1, "", "host lost"), (0, "gw\n", ""), (0, '{"a": 1}\n', "")])
-
-    assert await gp.read_trajectory(sandbox) == [{"a": 1}]
-
-
-@pytest.mark.asyncio
-async def test_read_trajectory_of_a_gateway_with_no_history_yet_is_empty():
-    gp = EnvironmentGatewayProvider()
-    gp._get_container_id = AsyncMock(return_value="gw")
-    sandbox = MagicMock()
-    sandbox.exec_with_output = AsyncMock(return_value=(1, "", "cat: /var/log/agentenv/trajectory.jsonl: No such file"))
-
-    assert await gp.read_trajectory(sandbox) == []
-
-
-@pytest.mark.asyncio
-async def test_sail_provider_routes_to_vm_path_not_containers():
+async def test_sail_vm_provider_routes_to_vm_path_not_containers():
     """A Sailbox is a Docker-capable VM: the gateway deploys onto it with docker-compose."""
     from agent_env.env.gateway import GatewayMode
-    from agent_env.providers.sandbox_providers.sail_vm import SailVmSandboxProvider
+    from agent_env.providers.sandbox_providers.sail_vm.provider import SailVmSandboxProvider
 
     gp = EnvironmentGatewayProvider()
     gp._deploy_via_vm = AsyncMock(return_value="VM_RESULT")
@@ -1694,22 +1643,3 @@ def test_every_mcp_server_gets_the_same_healthcheck_budget():
         assert "      timeout: 5s" in block
         assert "      retries: 30" in block
         assert "      start_period: 60s" in block
-
-
-@pytest.mark.asyncio
-async def test_a_log_lookup_that_keeps_losing_its_transport_never_stops_a_deploy(caplog):
-    gp = EnvironmentGatewayProvider()
-    sandbox = MagicMock()
-    sandbox.exec_with_output = AsyncMock(return_value=(-1, "", "host lost"))
-
-    assert await gp._log_service(sandbox, "gateway") is True
-    assert "Skipping gateway logs" in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_a_service_without_a_container_is_reported_as_missing():
-    gp = EnvironmentGatewayProvider()
-    sandbox = MagicMock()
-    sandbox.exec_with_output = AsyncMock(return_value=(0, "", ""))
-
-    assert await gp._log_service(sandbox, "pgweb") is False

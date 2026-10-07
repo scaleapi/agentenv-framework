@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 from agent_env.config import get_config
 from agent_env.providers.sandbox_providers.sail_vm.model_key import (
     DOCKER_SHIM_PATH,
+    POLICY_PREFIX,
     ModelKeyInjection,
     carries_model_key,
     docker_shim,
@@ -81,8 +82,8 @@ class ModelKeyRefusedError(RuntimeError):
     """A command or file would have carried a model key Sail doesn't inject for this Sailbox into it."""
 
 
-def policy_name() -> str:
-    return f"agentenv-{uuid.uuid4().hex}"
+def policy_name(injection: ModelKeyInjection) -> str:
+    return f"{injection.policy_prefix}-{uuid.uuid4().hex[:12]}"
 
 
 async def create_saved_policy(sdk: Any, name: str, document: dict[str, Any]) -> Any:
@@ -95,13 +96,14 @@ async def create_saved_policy(sdk: Any, name: str, document: dict[str, Any]) -> 
         raise
 
 
-async def delete_policy_named(sdk: Any, name: str) -> None:
-    """Delete the saved policy called ``name``, if Sail made one, retrying through a brief outage; one Sail
-    stays unreachable for is logged by name so it can be swept (``sail egress-policy list``)."""
+async def delete_policy_named(sdk: Any, name: str, *, family: bool = False) -> None:
+    """Delete the saved policy called ``name`` (with ``family``, every one named ``name-…``), if Sail made
+    any, retrying through a brief outage; one Sail stays unreachable for is logged by name so it can be
+    swept (``sail egress-policy list``)."""
     for attempt in range(_CLEANUP_ATTEMPTS):
         try:
             for summary in await sdk.EgressPolicy.list.aio(search=name):
-                if summary.name == name:
+                if summary.name == name or (family and summary.name.startswith(f"{name}-")):
                     await _delete_policy_by_id(sdk, summary.id)
             return
         except Exception as exc:  # noqa: BLE001 - retried, then reported; never masks the caller's outcome
@@ -258,6 +260,9 @@ class SailVmSandbox(VmSandbox):
             except Exception as exc:  # noqa: BLE001 - fall back to the policy this handle last applied
                 logger.info("Could not read Sailbox %s's applied policy before terminate: %s", self.sandbox_id, exc)
             await self._terminate_sailbox()
+            await delete_policy_named(self._sdk, self._injection.policy_prefix, family=True)
+            for policy_id in self._injection.unsettled_policy_ids:
+                await delete_saved_policy(self._sdk, policy_id)
             await release_injection(self._sdk, self._injection, self.sandbox_id)
 
     async def _terminate_sailbox(self) -> None:
@@ -375,15 +380,41 @@ class SailVmSandbox(VmSandbox):
         if self._injection is None:
             await self._sailbox.set_egress_policy.aio(egress_document(policy))
         else:
-            saved = await create_saved_policy(self._sdk, policy_name(), egress_document(policy, self._injection))
+            saved = await create_saved_policy(self._sdk, policy_name(self._injection), egress_document(policy, self._injection))
+            previous = self._injection.policy_id
             try:
                 await self._sailbox.set_egress_policy.aio(saved)
-            except BaseException:
-                await delete_saved_policy(self._sdk, saved.id)
-                raise
-            previous, self._injection.policy_id = self._injection.policy_id, saved.id
-            await delete_saved_policy(self._sdk, previous)
+            except BaseException as exc:
+                known, applied = await self._applied_policy_id()
+                if not known:
+                    self._injection.unsettled_policy_ids.append(saved.id)
+                    raise
+                if applied != saved.id:
+                    await delete_saved_policy(self._sdk, saved.id)
+                    raise
+                logger.info("Sailbox %s took policy %s though setting it reported a failure", self.sandbox_id, saved.id)
+                await self._settle(saved.id, previous)
+                if not isinstance(exc, Exception):
+                    raise
+            else:
+                await self._settle(saved.id, previous)
         self.network_policy = policy
+
+    async def _applied_policy_id(self) -> tuple[bool, str | None]:
+        """Whether Sail could say which saved policy is applied, and its id."""
+        try:
+            return True, getattr((await self._sdk.Sailbox.get.aio(self.sandbox_id)).egress_policy, "policy_id", None)
+        except Exception as exc:  # noqa: BLE001 - an unknown answer is kept unknown, never guessed
+            logger.info("Could not read Sailbox %s's applied policy: %s", self.sandbox_id, exc)
+            return False, None
+
+    async def _settle(self, applied: str, *superseded: str | None) -> None:
+        """Track ``applied`` as this Sailbox's policy and delete the others it replaced, settled ones included."""
+        stale = [*superseded, *self._injection.unsettled_policy_ids]
+        self._injection.policy_id, self._injection.unsettled_policy_ids = applied, []
+        for policy_id in dict.fromkeys(stale):
+            if policy_id != applied:
+                await delete_saved_policy(self._sdk, policy_id)
 
     def adopt_applied_policy(self, applied: Any) -> NetworkPolicy | None:
         """The agent-env policy Sail reports applied (``Sailbox.egress_policy``), or None when it can't be
@@ -396,6 +427,9 @@ class SailVmSandbox(VmSandbox):
             if self._injection is None or not self._injection.matches(saved):
                 return None
             self._injection.policy_id = applied.policy_id
+            name = getattr(applied, "name", None)
+            if isinstance(name, str) and name.startswith(POLICY_PREFIX) and "-" in name[len(POLICY_PREFIX):]:
+                self._injection.policy_prefix = name.rsplit("-", 1)[0]
         return policy_from_document(document, self._injection)
 
     def _known_policy(self, purpose: str) -> NetworkPolicy:
