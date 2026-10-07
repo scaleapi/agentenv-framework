@@ -61,9 +61,8 @@ def test_default_backend_is_local(monkeypatch, tmp_path):
     assert section["impl"] == "agent_env.store.image_store:LocalRegistryImageStore"
 
 
-def test_ecr_alias_raises_actionable(monkeypatch):
-    # No built-in coordinates: the error names the table AND the overriding env var.
-    monkeypatch.setenv("AGENT_ENV_IMAGE_STORE", "ecr")
+def test_an_unknown_backend_names_the_table_and_the_overriding_env_var(monkeypatch):
+    monkeypatch.setenv("AGENT_ENV_IMAGE_STORE", "hosted")
     with pytest.raises(ConfigError, match=r"\[stores\.image\].*AGENT_ENV_IMAGE_STORE"):
         Config().get_image_store()
 

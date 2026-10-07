@@ -605,8 +605,9 @@ objects are in the store.
 SDK agents advertise only these shapes, and AgentEnv sends no others. It moves
 a skill bundle, snapshot or changelog only through grants, so the call needs an
 agent that advertises the object variant and an object store that issues grants
-(the S3 store does, and namespace grants for changelog capture only when it
-signs with long-term credentials); otherwise it fails before anything is sent.
+(the S3, Cloud Storage and local stores do, though S3 issues the namespace grants
+changelog capture needs only when it signs with long-term credentials); otherwise
+it fails before anything is sent.
 Skills given as SKILL.md text and trajectories returned inline need no grants.
 A snapshot is restored only from the snapshot objects in the table above; one
 that holds the runtime's own files instead cannot be. An

@@ -1,7 +1,6 @@
 """Integration tests for EnvironmentArtifact.
 
 These tests run against the configured object and document stores.
-Requires AWS credentials with access to secrets manager and S3.
 """
 
 import json

@@ -33,7 +33,7 @@ _MIME_TYPE = re.compile(r"^[!#$&^_.+\-|~0-9A-Za-z]+/[!#$&^_.+\-|~0-9A-Za-z]+$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _CHUNK_BYTES = 64 * 1024
 _UTC = timezone.utc  # noqa: UP017 -- datetime.UTC requires Python 3.11.
-# Idle limits, not totals, as long as botocore's: long enough for a slow uplink to drain its
+# Idle limits, not totals, of a minute, as cloud storage SDKs use: long enough for a slow uplink to drain its
 # buffers before the store answers, short enough that a stalled connection is retried within
 # the minutes agent-env waits for an extension call.
 TRANSFER_IDLE_TIMEOUT_SECONDS = 60.0
@@ -271,20 +271,27 @@ def _raise_for_transfer_status(response: httpx.Response) -> None:
     if (
         response.status_code in (408, 429)
         or response.status_code >= 500
-        or _is_s3_request_timeout(response)
+        or _is_store_request_timeout(response)
     ):
         raise TransferError("transfer_unavailable", _UNAVAILABLE)
     raise TransferError("transfer_rejected", "The object store rejected the transfer.")
 
 
-def _is_s3_request_timeout(response: httpx.Response) -> bool:
-    """S3 answers an upload that stalled with a 400 whose error code is RequestTimeout."""
+# Body markers of a stalled upload that a store answers with a 400 rather than a 408.
+_STALLED_UPLOAD_MARKERS = (
+    b"<Code>RequestTimeout</Code>",  # S3
+)
+
+
+def _is_store_request_timeout(response: httpx.Response) -> bool:
+    """An upload that stalled, answered with a 400 by a store that does not send a 408 for it."""
     if response.status_code != 400:
         return False
     try:
-        return b"<Code>RequestTimeout</Code>" in response.content[:1024]
+        head = response.content[:1024]
     except httpx.ResponseNotRead:
         return False
+    return any(marker in head for marker in _STALLED_UPLOAD_MARKERS)
 
 
 @contextmanager

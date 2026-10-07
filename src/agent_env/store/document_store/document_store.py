@@ -440,7 +440,7 @@ class VersionedEntityStore(Generic[T]):
         """Allocate the version a write to ``id`` would land on.
 
         The id is checked here and not only at ``put`` because every artifact
-        helper calls this first and then writes remote data — an object to S3, an image to a
+        helper calls this first and then writes remote data — an object to the object store, an image to a
         registry — before it has a document to store. Refusing the id at the end would leave
         that data orphaned with no artifact record pointing at it.
         """

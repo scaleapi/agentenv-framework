@@ -1,7 +1,6 @@
 """Integration tests for Env persistence.
 
-These tests use real MongoDB (Atlas dev database).
-Requires AWS credentials with access to secrets manager.
+These tests run against the configured stores and build a real Docker image.
 """
 
 import subprocess

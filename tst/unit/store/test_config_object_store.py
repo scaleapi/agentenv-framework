@@ -62,9 +62,8 @@ def test_default_backend_is_local(monkeypatch, tmp_path):
     assert section["impl"] == "agent_env.store.object_store:LocalFilesystemObjectStore"
 
 
-def test_s3_alias_raises_actionable(monkeypatch):
-    # No built-in coordinates: the error names the table AND the overriding env var.
-    monkeypatch.setenv("AGENT_ENV_OBJECT_STORE", "s3")
+def test_an_unknown_backend_names_the_table_and_the_overriding_env_var(monkeypatch):
+    monkeypatch.setenv("AGENT_ENV_OBJECT_STORE", "hosted")
     with pytest.raises(ConfigError, match=r"\[stores\.object\].*AGENT_ENV_OBJECT_STORE"):
         Config().get_object_store()
 

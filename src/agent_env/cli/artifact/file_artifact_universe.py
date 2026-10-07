@@ -209,7 +209,7 @@ def get_many(
     """Mass-download many FileArtifactUniverses in parallel.
 
     Provide either --id (repeatable) or --batch-id. Files are pulled directly
-    from S3 in parallel (no hop through the hub backend), so this scales to
+    from the object store in parallel, with nothing in between, so this scales to
     hundreds of universes.
     """
     import concurrent.futures
