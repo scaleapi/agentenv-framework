@@ -31,6 +31,7 @@ from agentenv_protocol.a2a_agent import (
     TaskObjectTrajectoryRequest,
     TaskRequest,
     TaskResult,
+    TaskTrajectoryRequest,
     TrajectoryWriteObjects,
     a2a_agent,
     card_request_accepts,
@@ -1108,3 +1109,36 @@ def test_the_loopback_url_keeps_the_grants_query_and_reads_the_header_in_any_cas
         transfers.loopback_url(f"{_PUBLIC}{_STAGED}?part=1", headers)
         == f"http://127.0.0.1:8123{_STAGED}?part=1"
     )
+
+
+@a2a_agent(identity=AgentIdentity(name="own-port", description="test", version="1"))
+class _UploadsItsTrajectory(AgentEnvAgent):
+    async def run(self, request: TaskRequest) -> TaskResult:
+        return TaskResult.text("ok")
+
+    @extension(TRAJECTORY_V1.get)
+    async def trajectory(self, request: TaskTrajectoryRequest | TaskObjectTrajectoryRequest):
+        uploaded = await upload(request.objects.trajectory, b"[]")
+        return {"objects": {"trajectory": uploaded.model_dump(exclude_none=True)}}
+
+
+def test_the_sdk_server_reaches_its_staging_on_the_port_it_took_the_request_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("A2A_PORT", "9999")  # not where this server listens
+    sent: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        sent.append(str(request.url))
+        request.read()
+        return httpx.Response(201)
+
+    _route(monkeypatch, handle)
+    write, _, _ = _on_own_staging(b"")
+    payload = {"task_id": "t", "objects": {"trajectory": write.model_dump(mode="json")}}
+
+    with TestClient(_UploadsItsTrajectory().create_app(), base_url="http://127.0.0.1:8456") as client:
+        assert client.post("/ext/trajectory", json=payload).status_code == 200
+
+    assert sent == [f"http://127.0.0.1:8456{_STAGED}"]
+    assert transfers.loopback_url(write.write.url, write.write.headers) == f"http://127.0.0.1:9999{_STAGED}"

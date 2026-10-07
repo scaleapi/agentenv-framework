@@ -53,9 +53,10 @@ TRANSFER_STALL_BUDGET_SECONDS = TRANSFER_ATTEMPTS * (
 _T = TypeVar("_T")
 # A grant naming a path on its holder's own staging carries this header, whose value is that path on
 # the holder's server: a sandbox can't always call its own public URL, so the helpers reach the server
-# over loopback, on the port agent-env deploys it on.
+# over loopback.
 STAGING_PATH_HEADER = "AgentEnv-Staging-Path"
 _SERVER_PORT_ENV = "A2A_PORT"
+_SERVER_PORT: ContextVar[int | None] = ContextVar("agentenv_protocol_server_port", default=None)
 
 
 def _https_url(value: str) -> str:
@@ -286,12 +287,24 @@ def _is_s3_request_timeout(response: httpx.Response) -> bool:
         return False
 
 
+@contextmanager
+def serving_on(port: int) -> Iterator[None]:
+    """Transfers made in this scope serve a request the holder's own server took on ``port``, so they
+    reach its staging over loopback there. The SDK's server sets it for every request it handles."""
+
+    token = _SERVER_PORT.set(port)
+    try:
+        yield
+    finally:
+        _SERVER_PORT.reset(token)
+
+
 def loopback_url(url: str, headers: Mapping[str, str] | None) -> str | None:
     """Where the holder's own server answers a grant's ``url`` over loopback: when the grant names a path
-    on the holder's staging (an ``AgentEnv-Staging-Path`` header ending the URL's path) and ``A2A_PORT``
-    says which port that server listens on. None otherwise."""
+    on the holder's staging (an ``AgentEnv-Staging-Path`` header ending the URL's path) and the server's
+    port is known, from the request being served (``serving_on``) or else ``A2A_PORT``. None otherwise."""
     path = httpx.Headers(headers or {}).get(STAGING_PATH_HEADER)
-    port = os.environ.get(_SERVER_PORT_ENV, "")
+    port = str(_SERVER_PORT.get() or os.environ.get(_SERVER_PORT_ENV, ""))
     if not path or not path.startswith("/") or not port.isdigit() or not 0 < int(port) < 65536:
         return None
     parsed = urlsplit(url)

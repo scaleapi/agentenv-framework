@@ -61,8 +61,8 @@ _TRANSFER_UNAVAILABLE = "transfer_unavailable"  # the SDK's code for a store it 
 _STAGING_UNREACHABLE = (
     "The object store's grants do not reach this agent, so its objects were staged on the agent's own "
     "server, and the agent could not reach them there. An agent on a current SDK reaches its staging over "
-    "loopback, on its A2A_PORT; an older one goes through its own public URL, which its sandbox provider may "
-    "not allow. An object store whose grants reach the agent avoids staging."
+    "loopback; an older one goes through its own public URL, which its sandbox provider may not allow. An "
+    "object store whose grants reach the agent avoids staging."
 )
 
 # The time budget of one transfer, outermost first: a grant (the issuing store's

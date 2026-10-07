@@ -627,10 +627,13 @@ naming staged paths on the agent's own URL, so handlers are unchanged.
 A sandbox can't always call its own public URL, so each of those grants also
 carries an `AgentEnv-Staging-Path` header: the path the agent's own server
 serves the URL at, such as `/ext/staging/{path}`. The helpers send such a
-request to that server over loopback, `http://127.0.0.1:$A2A_PORT/ext/staging/{path}`
-(AgentEnv deploys every agent with `A2A_PORT` set), and to the grant's URL only
-when nothing listens there. An agent with transfer code of its own gets the same
-URL from `transfers.loopback_url(url, headers)`.
+request to that server over loopback, `http://127.0.0.1:{port}/ext/staging/{path}`,
+and to the grant's URL only when nothing listens there. The port is the one the
+SDK's server took the request being served on, or else `A2A_PORT` (set by AgentEnv
+on agents it deploys from an image), as in a separate process such as a hook.
+An agent with transfer code of its own gets the same URL from
+`transfers.loopback_url(url, headers)`, and an agent with a server of its own
+marks each request with `transfers.serving_on(port)`.
 
 | Route | Does |
 | --- | --- |

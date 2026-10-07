@@ -59,7 +59,7 @@ from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
 from tst.util.granting_object_store import GrantingObjectStore
 
-URL = "https://agent.example.test"
+URL = "https://agent.example.test:8443"  # a port, so the agent's server knows the one it took a request on
 
 
 @a2a_agent(identity=AgentIdentity(name="staging-test", description="test", version="1"))
@@ -141,7 +141,9 @@ def _serve(app, monkeypatch) -> None:
 @pytest.fixture(params=["public URL", "loopback"])
 def agent(request, tmp_path, monkeypatch):
     """The agent's app, which every HTTP client in this process reaches at ``URL``: reaching its staging
-    through its public URL, or over loopback from a sandbox that can't call that URL."""
+    through its public URL, as an agent whose helpers don't use loopback does, or over loopback from a
+    sandbox that can't call that URL. A transfer made while the app serves a request uses the port it took
+    the request on; the uploads these tests make themselves, as a hook process would, use ``A2A_PORT``."""
     monkeypatch.setenv("AGENTENV_STAGING_DIR", str(tmp_path / "agent-staging"))
     _Agent.workdir = tmp_path / "agent"
     _Agent.received = {}
@@ -151,7 +153,7 @@ def agent(request, tmp_path, monkeypatch):
         monkeypatch.setenv("A2A_PORT", "8000")
         app = _calling_its_own_url_fails(app)
     else:
-        monkeypatch.delenv("A2A_PORT", raising=False)
+        monkeypatch.setattr(transfers, "loopback_url", lambda url, headers: None)
     _serve(app, monkeypatch)
     return app
 
@@ -349,9 +351,9 @@ def test_each_staged_grant_names_its_path_on_the_agents_own_server(store, monkey
 
 
 @pytest.mark.asyncio
-async def test_an_agent_that_cant_call_its_own_url_and_has_no_loopback_port_fails_saying_why(tmp_path, monkeypatch, store):
+async def test_an_agent_that_cant_call_its_own_url_and_doesnt_use_loopback_fails_saying_why(tmp_path, monkeypatch, store):
     monkeypatch.setenv("AGENTENV_STAGING_DIR", str(tmp_path / "agent-staging"))
-    monkeypatch.delenv("A2A_PORT", raising=False)
+    monkeypatch.setattr(transfers, "loopback_url", lambda url, headers: None)  # an older SDK
     monkeypatch.setattr(transfers, "_RETRY_BACKOFF_SECONDS", 0)
     app = _calling_its_own_url_fails(_Agent().create_app())
     _serve(app, monkeypatch)
@@ -360,7 +362,7 @@ async def test_an_agent_that_cant_call_its_own_url_and_has_no_loopback_port_fail
     _, path = _method(card, TRAJECTORY_V1.uri, "get")
     target = store.object_url("trajectories/t.json")
 
-    with pytest.raises(httpx.HTTPStatusError, match="reaches its staging over loopback, on its A2A_PORT"):
+    with pytest.raises(httpx.HTTPStatusError, match="reaches its staging over loopback; an older one"):
         await fetch_trajectory(URL + path, {"task_id": "t"}, upload=TrajectoryUpload.to(granting, target), store=granting)
     assert store.get_object_metadata_at(target) is None
 
