@@ -182,6 +182,22 @@ function main(): void {
     );
   }
 
+  // Trajectories recorded under the object-store name are listed the same way.
+  {
+    const downloads = buildBarDownloads(
+      [
+        { agent_trajectory_object_url: 'obj://t/1', step_id: 'a' },
+        { agent_trajectory_s3_uri: 'obj://t/2', step_id: 'b' },
+        { agent_trajectory_s3_uri: null, agent_trajectory_object_url: 'obj://t/3', step_id: 'c' },
+      ],
+      undefined,
+    );
+    assert(
+      downloads.map(d => d.s3Uri).join(',') === 'obj://t/1,obj://t/2,obj://t/3',
+      'a trajectory under either key is downloadable',
+    );
+  }
+
   if (failures > 0) {
     console.error(`\n${failures} assertion(s) failed`);
     process.exit(1);

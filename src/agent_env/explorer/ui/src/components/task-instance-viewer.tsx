@@ -81,13 +81,16 @@ import {
   type OtelSpan,
   parseOtelTrajectory,
 } from '../lib/parse-trajectory';
+import {
+  type TrajectoryUrlKeys,
+  perTurnTrajectoryUrls,
+  trajectoryUrl,
+} from '../lib/trajectory-url';
 
-interface PromptResponseData {
+interface PromptResponseData extends TrajectoryUrlKeys {
   prompt_id: string;
   response: string;
   prompt_text?: string;
-  agent_trajectory_s3_uri?: string;
-  target_agent_per_turn_trajectory_s3_uris?: (string | null)[];
   // A null entry means "identical to prompt_text" (the initial prompt is stored once).
   source_agent_per_turn_prompt_parts?: Array<Array<{
     kind: string;
@@ -95,7 +98,6 @@ interface PromptResponseData {
     file?: { name?: string; uri?: string };
     data?: unknown;
   }> | null>;
-  compact_trajectory_s3_uri?: string;
   model?: string;
   // step_id is the human-readable step name (e.g. "run-solver"). Older instances may have only prompt_id.
   step_id?: string;
@@ -248,21 +250,14 @@ export function TaskInstanceViewer({
   // since the parent doesn't memoize.
   const promptResponsesArr = (
     instance.context as Record<string, unknown> | null
-  )?.prompt_responses as
-    | {
-        agent_trajectory_s3_uri?: string;
-        target_agent_per_turn_trajectory_s3_uris?: (string | null)[];
-      }[]
-    | undefined;
+  )?.prompt_responses as TrajectoryUrlKeys[] | undefined;
   const promptResponsesSignature = useMemo(
     () =>
       (promptResponsesArr ?? [])
         .map(pr => {
           // Include per-turn URIs in the signature so the effect re-fires when new turns land between polls.
-          const perTurn = (
-            pr?.target_agent_per_turn_trajectory_s3_uris ?? []
-          ).join(',');
-          return `${pr?.agent_trajectory_s3_uri ?? ''}#${perTurn}`;
+          const perTurn = (perTurnTrajectoryUrls(pr) ?? []).join(',');
+          return `${trajectoryUrl(pr) ?? ''}#${perTurn}`;
         })
         .join('|'),
     [promptResponsesArr],
@@ -285,7 +280,8 @@ export function TaskInstanceViewer({
     };
     const flat: FlatPR[] = [];
     for (const pr of promptResponses) {
-      const perTurn = pr.target_agent_per_turn_trajectory_s3_uris;
+      const perTurn = perTurnTrajectoryUrls(pr);
+      const url = trajectoryUrl(pr);
       if (perTurn && perTurn.length > 0) {
         perTurn.forEach((uri, turnIdx) => {
           if (!uri) return; // skip turns whose trajectory upload failed
@@ -296,8 +292,8 @@ export function TaskInstanceViewer({
             _totalTurns: perTurn.length,
           });
         });
-      } else if (pr.agent_trajectory_s3_uri) {
-        flat.push({ ...pr, _entryS3Uri: pr.agent_trajectory_s3_uri });
+      } else if (url) {
+        flat.push({ ...pr, _entryS3Uri: url });
       }
     }
 
@@ -551,9 +547,7 @@ export function TaskInstanceViewer({
   const promptResponses = context
     ? ((context.prompt_responses ?? []) as PromptResponseData[])
     : [];
-  const hasTrajectories = promptResponses.some(
-    pr => pr.agent_trajectory_s3_uri,
-  );
+  const hasTrajectories = promptResponses.some(pr => trajectoryUrl(pr));
   const deployedEnvs = context
     ? ((context.deployed_envs ?? []) as Record<string, unknown>[])
     : [];

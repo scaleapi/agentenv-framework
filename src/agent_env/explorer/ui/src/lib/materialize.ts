@@ -1,6 +1,8 @@
 // Pure derivation of `materialized` for a task-runner submission. Split out of
 // task-runner-page.tsx, which was ~90 KB.
 
+import { perTurnTrajectoryUrls, trajectoryUrl } from './trajectory-url';
+
 /** Opt-in per-instance fields. Everything else (conversation, prompt, systemPrompt, defaultModel,
  *  environmentId, snapshot id, summary) is derived from the instance record, so it's free. */
 export type MaterializeOptions = {
@@ -85,9 +87,7 @@ function buildConversation(
       turn += 1;
     };
 
-    const innerUris = Array.isArray(resp.target_agent_per_turn_trajectory_s3_uris)
-      ? (resp.target_agent_per_turn_trajectory_s3_uris as unknown[])
-      : null;
+    const innerUris = perTurnTrajectoryUrls(resp) ?? null;
     if (innerUris?.length) {
       const innerParts = Array.isArray(resp.source_agent_per_turn_prompt_parts)
         ? (resp.source_agent_per_turn_prompt_parts as unknown[])
@@ -109,7 +109,7 @@ function buildConversation(
       pushTurn(
         str(resp.prompt_text),
         str(resp.response),
-        str(resp.agent_trajectory_s3_uri),
+        str(trajectoryUrl(resp)),
         typeof resp.tool_call_count === 'number' ? resp.tool_call_count : 0,
       );
     }
@@ -201,7 +201,7 @@ export function materializeInstance(
     // Pure per-turn captures for anything that runs a parser. A turn whose records haven't arrived is OMITTED
     // (not []), so "not fetched" is distinguishable from "empty"; a later submission fills it in.
     const records = responses.flatMap((resp, i) => {
-      const uri = str(resp.agent_trajectory_s3_uri);
+      const uri = str(trajectoryUrl(resp));
       const recs = uri ? trajectoryCache?.get(uri) : undefined;
       return recs ? [[i, recs] as const] : [];
     });

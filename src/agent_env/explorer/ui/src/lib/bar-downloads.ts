@@ -6,9 +6,10 @@
 /** How many downloads may sit inline in the bar before they collapse. */
 export const MAX_INLINE_BAR_DOWNLOADS = 2;
 
+import { type TrajectoryUrlKeys, trajectoryUrl } from './trajectory-url';
+
 /** The subset of a prompt-response the bar needs to label a trajectory. */
-export interface BarDownloadTrajectory {
-  agent_trajectory_s3_uri?: string;
+export interface BarDownloadTrajectory extends TrajectoryUrlKeys {
   step_id?: string;
   prompt_id?: string | null;
   model?: string;
@@ -31,16 +32,14 @@ export function buildBarDownloads(
   promptResponses: BarDownloadTrajectory[],
   resultS3Uri?: string,
 ): BarDownload[] {
-  const withTrajectory = promptResponses.filter(
-    pr => pr.agent_trajectory_s3_uri,
-  );
+  const withTrajectory = promptResponses.filter(pr => trajectoryUrl(pr));
   const single = withTrajectory.length === 1;
 
   const downloads: BarDownload[] = withTrajectory.map((pr, i) => {
     const label = single
       ? 'Trajectory'
       : pr.step_id || pr.prompt_id || `Trajectory ${i + 1}`;
-    const s3Uri = pr.agent_trajectory_s3_uri as string;
+    const s3Uri = trajectoryUrl(pr) as string;
     return {
       key: s3Uri,
       label,
