@@ -514,23 +514,38 @@ async def push_object_over_exec(sandbox: VmSandbox, store: ObjectStore, object_u
     """Write the object at ``object_url`` to ``vm_path`` on the VM host a chunk per exec, the chunk's base64 in the
     script and written at its offset, ``sandbox._PUSHES_IN_FLIGHT`` execs at once; an object of one chunk goes in a
     single exec. The file is checked against the object's sha256."""
-    chunk = max(_PUSH_BLOCK, sandbox._WFT_CHUNK_BYTES // 4 * 3 // _PUSH_BLOCK * _PUSH_BLOCK)
+    chunk = _exec_chunk_bytes(sandbox)
     quoted = shlex.quote(vm_path)
     digest = hashlib.sha256()
     with contextlib.closing(await asyncio.to_thread(store.open, object_url)) as source:
         data = await asyncio.to_thread(_read_exactly, source, chunk)
         digest.update(data)
         if len(data) < chunk:
-            encoded = shlex.quote(base64.b64encode(data).decode())
-            written = await sandbox.exec_script(
-                f"printf %s {encoded} | base64 -d > {quoted} && sha256sum {quoted}", max_retries=2)
+            written = await _write_in_one_exec(sandbox, quoted, data)
         else:
             await sandbox.exec_script(f": > {quoted}")
             await _push_chunks(sandbox, quoted, source, chunk, data, digest)
-            written = await sandbox.exec_script(f"sha256sum {quoted}")
-    if written.split()[:1] != [digest.hexdigest()]:
-        raise RuntimeError(f"{vm_path} on the VM doesn't match {object_url}: its sha256 is {written.split()[:1]}, the "
-                           f"object's {digest.hexdigest()}")
+            written = (await sandbox.exec_script(f"sha256sum {quoted}")).split()[:1]
+    _check_written(vm_path, object_url, written, digest.hexdigest())
+
+
+def _exec_chunk_bytes(sandbox: VmSandbox) -> int:
+    """How much of an object one exec's script carries, as base64, within the sandbox's command limit."""
+    return max(_PUSH_BLOCK, sandbox._WFT_CHUNK_BYTES // 4 * 3 // _PUSH_BLOCK * _PUSH_BLOCK)
+
+
+async def _write_in_one_exec(sandbox: VmSandbox, quoted: str, data: bytes) -> list[str]:
+    """Write ``data`` as the whole VM file in one exec whose script carries it, and return the sha256 it reports."""
+    encoded = shlex.quote(base64.b64encode(data).decode())
+    reported = await sandbox.exec_script(f"printf %s {encoded} | base64 -d > {quoted} && sha256sum {quoted}",
+                                         max_retries=2)
+    return reported.split()[:1]
+
+
+def _check_written(vm_path: str, object_url: str, written: list[str], expected: str) -> None:
+    if written != [expected]:
+        raise RuntimeError(f"{vm_path} on the VM doesn't match {object_url}: its sha256 is {written}, the object's "
+                           f"{expected}")
 
 
 async def _push_chunks(
@@ -576,8 +591,9 @@ async def _push_chunks(
 async def push_object_over_stdin(sandbox: VmSandbox, store: ObjectStore, object_url: str, vm_path: str) -> None:
     """Write the object at ``object_url`` to ``vm_path`` on the VM host over exec stdin. When the store opens it as a
     file, it goes as up to ``sandbox._PUSHES_IN_FLIGHT`` segments at once, all read from that one open file, so one
-    version of it; an object of one segment, or any other reader, goes in a single exec. Each segment is written at its
-    offset and checked against its sha256 by the exec that writes it."""
+    version of it; one that fits an exec's script goes in it, since a stdin exec takes more round trips. An object of
+    one segment, or any other reader, goes in a single stdin exec. Each segment is written at its offset and checked
+    against its sha256 by the exec that writes it."""
     quoted = shlex.quote(vm_path)
     with contextlib.closing(await asyncio.to_thread(store.open, object_url)) as source:
         descriptor = _file_descriptor(source)
@@ -585,6 +601,13 @@ async def push_object_over_stdin(sandbox: VmSandbox, store: ObjectStore, object_
             await _push_segment(sandbox, quoted, lambda size: _read_exactly(source, size), 0, None, whole_file=True)
             return
         size = os.fstat(descriptor).st_size
+        if size < _exec_chunk_bytes(sandbox):
+            data = await asyncio.to_thread(_reader_at(descriptor, 0), size)
+            if len(data) != size:
+                raise RuntimeError(f"{object_url} ended {size - len(data)} bytes short; it changed during the push")
+            written = await _write_in_one_exec(sandbox, quoted, data)
+            _check_written(vm_path, object_url, written, hashlib.sha256(data).hexdigest())
+            return
         segment = max(_MIN_SEGMENT_BYTES, -(-size // (sandbox._PUSHES_IN_FLIGHT * _PUSH_BLOCK)) * _PUSH_BLOCK)
         if size <= segment:
             await _push_segment(sandbox, quoted, _reader_at(descriptor, 0), 0, size, whole_file=True)

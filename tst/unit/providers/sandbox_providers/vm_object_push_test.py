@@ -221,6 +221,19 @@ async def test_an_object_of_one_chunk_goes_over_exec_in_a_single_exec(small, tmp
 
 
 @pytest.mark.asyncio
+async def test_an_object_under_a_chunk_goes_in_one_exec_even_where_stdin_is_taken(small, tmp_path):
+    data = os.urandom(BLOCK - 1)
+    store, url = _stored(tmp_path, data)
+    target = tmp_path / "on the vm.bin"
+    vm = _ShellVm()
+
+    await push_object_over_stdin(vm, store, url, str(target))
+
+    assert target.read_bytes() == data
+    assert len(vm.scripts) == 1 and vm.stdin_scripts == []
+
+
+@pytest.mark.asyncio
 async def test_an_object_of_one_segment_goes_over_stdin_in_a_single_exec(small, tmp_path):
     data = os.urandom(BLOCK)
     store, url = _stored(tmp_path, data)
