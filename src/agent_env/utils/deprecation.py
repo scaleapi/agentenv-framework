@@ -52,14 +52,15 @@ def warn_deprecated(old: str, new: str, *, kind: str = "symbol", stacklevel: int
 OMITTED: Any = object()
 
 
-def renamed_keyword(owner: str, new: str, new_value: Any, old: str, old_value: Any) -> Any:
+def renamed_keyword(owner: str, new: str, new_value: Any, old: str, old_value: Any, *, stacklevel: int = 4) -> Any:
     """The value of keyword ``new``, taking the deprecated keyword ``old`` (default ``OMITTED``) in its place with a
-    warning. Passing both is a TypeError, as a repeated keyword is."""
+    warning. Passing both is a TypeError, as a repeated keyword is. ``stacklevel`` 4 names the caller of a function
+    that calls this directly."""
     if old_value is OMITTED:
         return new_value
     if new_value is not None:
         raise TypeError(f"{owner}() got both {new}= and its deprecated spelling {old}=")
-    warn_deprecated(f"{owner}({old}=)", f"{new}=", kind="keyword", stacklevel=4)
+    warn_deprecated(f"{owner}({old}=)", f"{new}=", kind="keyword", stacklevel=stacklevel)
     return old_value
 
 

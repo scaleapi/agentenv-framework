@@ -5,12 +5,13 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from typing import ClassVar, Optional
 
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity_refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.utils.deprecation import OMITTED, renamed_keyword
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +24,12 @@ class Skill:
 
     A skill can come from three mutually-exclusive sources:
     - **inline**: body + frontmatter fields, rendered into SKILL.md at send time
-    - **s3_url**: object-store prefix containing a skill directory with its own SKILL.md,
+    - **object_url**: object-store prefix containing a skill directory with its own SKILL.md,
       sent as a bundle of read grants
     - **skill_artifact_id**: a SkillArtifact in the store; name/description/skill_object_url
       are resolved from it at send time
+
+    ``s3_url`` is the deprecated spelling of ``object_url``: it still constructs one, and reads as it.
     """
     name: Optional[str] = None
     description: Optional[str] = None
@@ -35,26 +38,31 @@ class Skill:
     compatibility: Optional[str] = None
     metadata: Optional[dict[str, str]] = None
     allowed_tools: Optional[str] = None
-    s3_url: Optional[str] = None
+    s3_url: InitVar[Optional[str]] = OMITTED
     skill_artifact_id: Optional[str] = None
     skill_artifact_version: Optional[int] = None
+    object_url: Optional[str] = None
 
-    def __post_init__(self):
-        modes = [bool(self.body), bool(self.s3_url), bool(self.skill_artifact_id)]
+    def __post_init__(self, s3_url: Optional[str]):
+        if s3_url is not OMITTED and s3_url == self.object_url:
+            s3_url = OMITTED  # how dataclasses.replace copies a Skill: it reads s3_url back off the original
+        # Five frames up: through the dataclass's generated __init__ to its caller.
+        self.object_url = renamed_keyword("Skill", "object_url", self.object_url, "s3_url", s3_url, stacklevel=5)
+        modes = [bool(self.body), bool(self.object_url), bool(self.skill_artifact_id)]
         if sum(modes) != 1:
-            raise ValueError("Skill must have exactly one of: body (inline), s3_url, skill_artifact_id")
+            raise ValueError("Skill must have exactly one of: body (inline), object_url, skill_artifact_id")
         if self.skill_artifact_id is not None:
-            if any([self.body, self.s3_url, self.license, self.compatibility, self.metadata, self.allowed_tools]):
+            if any([self.body, self.object_url, self.license, self.compatibility, self.metadata, self.allowed_tools]):
                 raise ValueError(
-                    "Skill with skill_artifact_id must not have body/s3_url/license/compatibility/metadata/allowed_tools"
+                    "Skill with skill_artifact_id must not have body/object_url/license/compatibility/metadata/allowed_tools"
                 )
         else:
             if not self.name or not self.description:
-                raise ValueError("Inline or s3_url skills require name and description")
-            if self.s3_url and any([self.body, self.license, self.compatibility, self.metadata, self.allowed_tools]):
+                raise ValueError("Inline or object_url skills require name and description")
+            if self.object_url and any([self.body, self.license, self.compatibility, self.metadata, self.allowed_tools]):
                 raise ValueError(
-                    "Skill with s3_url must not have body/license/compatibility/metadata/allowed_tools — "
-                    "the S3 skill directory has its own SKILL.md"
+                    "Skill with object_url must not have body/license/compatibility/metadata/allowed_tools — "
+                    "the skill directory has its own SKILL.md"
                 )
 
     def validate(self) -> None:
@@ -62,8 +70,8 @@ class Skill:
 
         if self.skill_artifact_id is not None:
             return
-        if self.s3_url is not None:
-            SkillArtifact.validate(object_url=self.s3_url, expected_name=self.name)
+        if self.object_url is not None:
+            SkillArtifact.validate(object_url=self.object_url, expected_name=self.name)
             return
         SkillArtifact.validate(skill_md=self.to_skill_md().encode("utf-8"), expected_name=self.name)
 
@@ -87,10 +95,11 @@ class Skill:
         return "\n".join(lines)
 
     def to_dict(self) -> dict:
+        """Both spellings of ``object_url``: a worker on an older version reads only ``s3_url``."""
         d: dict = {}
         for field_name in (
             "name", "description", "body", "license", "compatibility",
-            "metadata", "allowed_tools", "s3_url",
+            "metadata", "allowed_tools", "s3_url", "object_url",
             "skill_artifact_id", "skill_artifact_version",
         ):
             value = getattr(self, field_name)
@@ -104,7 +113,7 @@ class Skill:
             name=data.get("name"), description=data.get("description"),
             body=data.get("body"), license=data.get("license"),
             compatibility=data.get("compatibility"), metadata=data.get("metadata"),
-            allowed_tools=data.get("allowed_tools"), s3_url=data.get("s3_url"),
+            allowed_tools=data.get("allowed_tools"), object_url=data.get("s3_url") or data.get("object_url"),
             skill_artifact_id=data.get("skill_artifact_id"),
             skill_artifact_version=data.get("skill_artifact_version"),
         )
@@ -162,6 +171,12 @@ def _build_skill_for_loaded_file_artifact_universe(universe_id: str, entry: dict
         description=f"Files possibly relevant to the current task are available at {destination_path}.",
         body=f"Files possibly relevant to the current task are available at `{destination_path}`.\n",
     )
+
+
+
+# ``s3_url`` reads and writes ``object_url``. Set once the dataclass is built, so the ``s3_url=`` init argument keeps
+# its default.
+Skill.s3_url = property(lambda self: self.object_url, lambda self, value: setattr(self, "object_url", value))
 
 
 class AddSkillsTaskStep(TaskStep):

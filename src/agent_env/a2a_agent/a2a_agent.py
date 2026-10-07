@@ -177,9 +177,9 @@ class A2AAgent:
                 description=artifact.description,
                 object_url=artifact.skill_object_url,
             )
-        if skill.s3_url is not None:
+        if skill.object_url is not None:
             return await A2AAgent.register_skill(
-                deployed, name=skill.name, description=skill.description, object_url=skill.s3_url
+                deployed, name=skill.name, description=skill.description, object_url=skill.object_url
             )
         return await A2AAgent.register_skill(
             deployed, name=skill.name, description=skill.description, skill_md=skill.to_skill_md()

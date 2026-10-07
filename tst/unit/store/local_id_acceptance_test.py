@@ -204,7 +204,7 @@ def test_validating_an_local_agent_on_a_remote_provider_keeps_its_fixtures_and_t
     skills = f"a2a_validator/validator_skill/{key_segment(agent.id)}-v1"
     assert sorted(get_config().get_object_store_for(agent.id).list("a2a_validator/")) == [
         f"{fixtures}/clip.mp4", f"{fixtures}/red.png",
-        *(f"{skills}/{name}/SKILL.md" for name in ("validator-probe-bundle", "validator-test-s3")),
+        *(f"{skills}/{name}/SKILL.md" for name in ("validator-probe-bundle", "validator-test-object")),
     ]
     assert configured.list("") == []
     assert _local().count("tasks", Filter()) == 1

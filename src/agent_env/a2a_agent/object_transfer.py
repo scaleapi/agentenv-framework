@@ -669,9 +669,4 @@ async def fetch_trajectory(
         return FetchedTrajectory(object_url=upload.object_url)
     if not isinstance(body, Mapping):
         return FetchedTrajectory()
-    if body.get("trajectory") is None and body.get("trajectory_s3_prefix"):
-        raise RuntimeError(
-            "trajectory get answered with trajectory_s3_prefix, which agent-env does not read; "
-            "the agent must return the trajectory inline or take the object form"
-        )
     return FetchedTrajectory(inline=body.get("trajectory"))

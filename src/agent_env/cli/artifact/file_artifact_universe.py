@@ -6,6 +6,7 @@ from typing import Optional, Tuple
 import click
 
 from agent_env.artifact import FileArtifact, FileArtifactUniverse
+from agent_env.cli.utils import deprecated_option, renamed_value
 from agent_env.store.ids import fs_safe, is_local_id, key_segment
 
 
@@ -67,14 +68,16 @@ def put(universe_id: str, file_artifact_ids: Tuple[str, ...]):
     help="Local directory; every file under it is uploaded into the bundle (relative path preserved)",
 )
 @click.option(
-    "--s3-url",
-    "s3_url",
+    "--prefix-url",
+    "prefix_url",
     default=None,
     help="Object-store prefix to upload the bundle under. Defaults to the version's own prefix in the configured "
     "object store (artifacts/file_artifact_universe/<id>/<version>/).",
 )
-def put_bundled(universe_id: str, file_dir: Path, s3_url: Optional[str]):
+@deprecated_option("--s3-url", "s3_url", "--prefix-url")
+def put_bundled(universe_id: str, file_dir: Path, prefix_url: Optional[str], s3_url: Optional[str]):
     """Upload every file under --file-dir as a single bundled FileArtifactUniverse."""
+    prefix_url = renamed_value("--prefix-url", prefix_url, "--s3-url", s3_url)
     files: dict[str, Path] = {}
     for p in sorted(file_dir.rglob("*")):
         if p.is_file():
@@ -83,13 +86,13 @@ def put_bundled(universe_id: str, file_dir: Path, s3_url: Optional[str]):
         click.echo(f"Error: no files found under {file_dir}", err=True)
         raise SystemExit(1)
 
-    click.echo(f"Uploading {len(files)} file(s)" + (f" under {s3_url}..." if s3_url else "..."))
+    click.echo(f"Uploading {len(files)} file(s)" + (f" under {prefix_url}..." if prefix_url else "..."))
     for rel in files:
         click.echo(f"  {rel}")
-    universe = FileArtifactUniverse.put_bundled(id=universe_id, files=files, prefix_url=s3_url)
+    universe = FileArtifactUniverse.put_bundled(id=universe_id, files=files, prefix_url=prefix_url)
     click.echo(
         f"Created FileArtifactUniverse: id={universe.id} version={universe.version} "
-        f"file_count={len(universe.file_artifact_ids)} bundle_s3_url={universe.bundle_object_url}"
+        f"file_count={len(universe.file_artifact_ids)} bundle_object_url={universe.bundle_object_url}"
     )
 
 

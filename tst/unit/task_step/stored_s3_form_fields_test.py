@@ -1,5 +1,5 @@
 """Stored step documents written before the S3 transfer forms were removed: a field that only
-named an S3 location is dropped, and an S3-form changelog source is refused rather than skipped."""
+named an S3 location is dropped, an S3-form changelog source included (none is left in stored tasks)."""
 
 import pytest
 
@@ -15,18 +15,8 @@ def test_a_stored_skill_config_check_with_an_s3_probe_url_still_loads():
     assert VerifyA2ASkillConfigStep.from_dict({**document, "skill_s3_url": "s3://bucket/prefix/"}).to_dict() == document
 
 
-@pytest.mark.parametrize("cutoff", [None, 3], ids=["whole-changelog", "with-cutoff"])
-def test_a_stored_deploy_step_with_an_s3_changelog_source_is_refused(cutoff):
-    document = {
-        **DeployAgentTaskStep(id="d", version=None).to_dict(),
-        "agent_changelog_s3_prefix": "s3://bucket/agent_changelog/run-1/solver",
-        "agent_changelog_toolcall_position_exclusive": cutoff,
-    }
-    with pytest.raises(ValueError, match="agent_changelog_s3_prefix is no longer supported"):
-        DeployAgentTaskStep.from_dict(document)
-
-
-def test_a_stored_deploy_step_with_an_empty_s3_changelog_field_still_loads():
+@pytest.mark.parametrize("prefix", ["s3://bucket/agent_changelog/run-1/solver", None], ids=["set", "empty"])
+def test_a_stored_deploy_step_with_an_s3_changelog_field_loads_without_it(prefix):
     step = DeployAgentTaskStep(id="d", version=None)
     document = step.to_dict()
-    assert DeployAgentTaskStep.from_dict({**document, "agent_changelog_s3_prefix": None}).to_dict() == document
+    assert DeployAgentTaskStep.from_dict({**document, "agent_changelog_s3_prefix": prefix}).to_dict() == document

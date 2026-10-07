@@ -5,7 +5,8 @@ from typing import Optional
 import click
 
 from agent_env.artifact import SkillArtifact
-from agent_env.artifact.artifacts.skill import _parse_skill_md, download_skill
+from agent_env.artifact.artifacts.skill import parse_skill_md, download_skill
+from agent_env.cli.utils import deprecated_option, renamed_value
 
 
 # ---------------------------------------------------------------------------
@@ -42,21 +43,23 @@ def skill():
     help="Local skill directory containing SKILL.md at the root",
 )
 @click.option(
-    "--s3-url",
-    "s3_url",
+    "--prefix-url",
+    "prefix_url",
     default=None,
-    help="S3 prefix containing the skill (s3://bucket/prefix/) — alternative to --skill-dir",
+    help="Object-store prefix containing the skill — alternative to --skill-dir",
 )
-def skill_put(artifact_id: str, skill_dir: Optional[Path], s3_url: Optional[str]):
-    """Upload a skill as a SkillArtifact, from a local directory or an S3 prefix."""
-    if (skill_dir is None) == (s3_url is None):
-        click.echo("Error: specify exactly one of --skill-dir or --s3-url", err=True)
+@deprecated_option("--s3-url", "s3_url", "--prefix-url")
+def skill_put(artifact_id: str, skill_dir: Optional[Path], prefix_url: Optional[str], s3_url: Optional[str]):
+    """Upload a skill as a SkillArtifact, from a local directory or an object-store prefix."""
+    prefix_url = renamed_value("--prefix-url", prefix_url, "--s3-url", s3_url)
+    if (skill_dir is None) == (prefix_url is None):
+        click.echo("Error: specify exactly one of --skill-dir or --prefix-url", err=True)
         raise SystemExit(1)
 
-    source_cm = download_skill(s3_url) if s3_url else contextlib.nullcontext(skill_dir)
+    source_cm = download_skill(prefix_url) if prefix_url else contextlib.nullcontext(skill_dir)
     with source_cm as source_dir:
-        if s3_url:
-            click.echo(f"Downloaded skill from {s3_url} to {source_dir}")
+        if prefix_url:
+            click.echo(f"Downloaded skill from {prefix_url} to {source_dir}")
 
         file_count = sum(1 for p in source_dir.rglob("*") if p.is_file())
         click.echo(f"Uploading SkillArtifact bundle ({file_count} file(s))...")
@@ -65,7 +68,7 @@ def skill_put(artifact_id: str, skill_dir: Optional[Path], s3_url: Optional[str]
             f"Created SkillArtifact: id={result.id} version={result.version} "
             f"spec_version={result.agent_skills_spec_version} "
             f"skill_files_id={result.skill_files_id} "
-            f"skill_s3_url={result.skill_object_url}"
+            f"skill_object_url={result.skill_object_url}"
         )
         click.echo()
         click.secho(_BANNER, fg="magenta", bold=True)
@@ -83,7 +86,7 @@ def skill_put(artifact_id: str, skill_dir: Optional[Path], s3_url: Optional[str]
             for k, v in result.skill_metadata.items():
                 click.echo(f"    {click.style(k, fg='cyan')}: {click.style(v, fg='green')}")
 
-        _, body = _parse_skill_md((source_dir / _SKILL_MD_FILENAME).read_bytes())
+        _, body = parse_skill_md((source_dir / _SKILL_MD_FILENAME).read_bytes())
         preview = body[:_BODY_PREVIEW_CHARS]
         truncated = len(body) > _BODY_PREVIEW_CHARS
         click.secho(f"Body (first {_BODY_PREVIEW_CHARS} chars):", fg="cyan", bold=True)

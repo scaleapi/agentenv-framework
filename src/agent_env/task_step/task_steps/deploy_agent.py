@@ -69,15 +69,15 @@ def _live_mcp_url(env_id: str) -> str:
 
 
 def _skill_fields(skill: dict) -> dict:
-    """A ``skills`` entry as ``A2AAgent.register_skill`` arguments. ``content`` and ``s3_uri`` are
-    older names for ``skill_md`` and ``skill_s3_url``; ``skill_md`` is sent verbatim."""
+    """A ``skills`` entry as ``A2AAgent.register_skill`` arguments. ``content`` is an older name for
+    ``skill_md``, and ``skill_s3_url`` and ``s3_uri`` for ``object_url``; ``skill_md`` is sent verbatim."""
     skill_md = skill.get("skill_md", skill.get("content"))
     return {
         "name": skill.get("name", ""),
         "description": skill.get("description", ""),
         "skill_md": skill_md,
         "object_url": (
-            skill.get("skill_s3_url", skill.get("s3_uri")) if skill_md is None else None
+            skill.get("object_url", skill.get("skill_s3_url", skill.get("s3_uri"))) if skill_md is None else None
         ),
     }
 
@@ -195,11 +195,6 @@ class DeployAgentTaskStep(TaskStep):
 
     @classmethod
     def from_dict(cls, data: dict) -> DeployAgentTaskStep:
-        if data.get("agent_changelog_s3_prefix"):
-            raise ValueError(
-                "agent_changelog_s3_prefix is no longer supported: an S3-form changelog cannot "
-                "be applied; capture it again and set agent_changelog_object_url"
-            )
         return cls(
             **cls._base_from_dict(data),
             env_ids=data.get("env_ids"),
@@ -587,7 +582,7 @@ class DeployAgentTaskStep(TaskStep):
         )
         if not universe.bundle_object_url:
             raise RuntimeError(
-                f"FileArtifactUniverse '{universe.id}' v{universe.version} has no bundle_s3_url; "
+                f"FileArtifactUniverse '{universe.id}' v{universe.version} has no bundle_object_url; "
                 "snapshot universes must be created via put_existing or put_bundled"
             )
         load_method, load_path = A2AAgent.operation(snapshot_ext, "load")

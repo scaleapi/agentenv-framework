@@ -47,7 +47,7 @@ def cli_put(
     click.echo(
         f"Created CliArtifact: id={result.id} version={result.version} "
         f"command_name={result.command_name} entrypoint={result.entrypoint} "
-        f"cli_files_id={result.cli_files_id} cli_s3_url={result.cli_object_url}"
+        f"cli_files_id={result.cli_files_id} cli_object_url={result.cli_object_url}"
     )
 
 

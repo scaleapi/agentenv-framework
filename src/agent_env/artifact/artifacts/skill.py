@@ -72,8 +72,8 @@ class SkillArtifact(Artifact):
         if (skill_md is None) == (object_url is None):
             raise ValueError("specify exactly one of skill_md or object_url")
         if object_url is not None:
-            skill_md = _fetch_skill_md(object_url)
-        frontmatter, _body = _parse_skill_md(skill_md)
+            skill_md = fetch_skill_md(object_url)
+        frontmatter, _body = parse_skill_md(skill_md)
         _validate_frontmatter(frontmatter, expected_name=expected_name)
 
     @classmethod
@@ -87,7 +87,7 @@ class SkillArtifact(Artifact):
 
         skill_md_bytes = skill_md_path.read_bytes()
         cls.validate(skill_md=skill_md_bytes, expected_name=id)
-        frontmatter, _body = _parse_skill_md(skill_md_bytes)
+        frontmatter, _body = parse_skill_md(skill_md_bytes)
 
         files: dict[str, Path] = {}
         for p in sorted(skill_dir.rglob("*")):
@@ -125,7 +125,7 @@ class SkillArtifact(Artifact):
         return FileArtifactUniverse.get(self.skill_files_id)
 
 
-def _parse_skill_md(data: bytes) -> tuple[dict, str]:
+def parse_skill_md(data: bytes) -> tuple[dict, str]:
     text = data.decode("utf-8")
     if not text.startswith("---"):
         raise ValueError("SKILL.md must begin with a YAML frontmatter block delimited by '---'")
@@ -191,7 +191,7 @@ def _validate_frontmatter(fm: dict, expected_name: str) -> None:
                 raise ValueError("SKILL.md frontmatter 'metadata' must map strings to strings")
 
 
-def _fetch_skill_md(object_url: str) -> bytes:
+def fetch_skill_md(object_url: str) -> bytes:
     prefix = object_url if object_url.endswith("/") else object_url + "/"
     skill_md_url = prefix + _SKILL_MD_FILENAME
     try:
@@ -217,3 +217,8 @@ def download_skill(object_url: str) -> Iterator[Path]:
         if count == 0:
             raise ValueError(f"No objects found under {object_url}")
         yield tmp_path
+
+
+# Their former private names, which callers outside agent-env import and patch.
+_parse_skill_md = parse_skill_md
+_fetch_skill_md = fetch_skill_md

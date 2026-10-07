@@ -409,5 +409,5 @@ def create_cli(env_id: str, env_version: int | None, command_name: str | None, f
     click.echo(
         f"Created CliArtifact: id={artifact.id} version={artifact.version} "
         f"command_name={artifact.command_name} entrypoint={artifact.entrypoint} "
-        f"cli_s3_url={artifact.cli_object_url}"
+        f"cli_object_url={artifact.cli_object_url}"
     )
