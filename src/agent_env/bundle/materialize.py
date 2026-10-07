@@ -26,6 +26,7 @@ from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.registry import canonical_type, get_artifact_registry
 from agent_env.entity_refs import EntityRef, RefRole, ref_sites
+from agent_env.env.registry import get_env_registry
 from agent_env.eval import Eval, EvalTask
 from agent_env.store.ids import image_repository
 from agent_env.store.routing import namespace_routing_enabled
@@ -38,7 +39,7 @@ from ._fs import relative, with_article
 from .authoring import AuthoringContext, build_context_files
 from .ledger import Ledger, materializing
 from .parse import BundleError, BundleKind
-from .plan import Plan, Write, folder_walk
+from .plan import Plan, Write, env_writer, folder_walk, unpinned_store_refs
 from .resolve import BuiltImage, build_step
 
 @dataclass(frozen=True)
@@ -99,6 +100,8 @@ def materialize(
             check = ledger.check(write, {need: done[need].version for need in write.needs})
             if check.unchanged:
                 version = check.version
+                if check.adopted and not dry_run:
+                    ledger.adopt(check)
             elif dry_run:
                 version = check.next_version
             else:
@@ -182,12 +185,19 @@ def _write_agent(plan: Plan, write: Write) -> int:
                               AuthoringContext(plan.bundle.bundle, entry)).version
 
 
+def _write_env(plan: Plan, write: Write) -> int:
+    entry = write.source.entry
+    cls = get_env_registry()[entry.type]
+    return cls.from_toml(_pinned(plan, write, cls.toml_refs), AuthoringContext(plan.bundle.bundle, entry)).version
+
+
 def _pinned(plan: Plan, write: Write, refs: tuple[EntityRef, ...]) -> Any:
     """A copy of ``write``'s resolved toml with each store ref that names no version pinned to the version
-    the plan checked, which the ledger hashed, so one the store gains before the write isn't written."""
+    the plan read, which the ledger hashed (``unpinned_store_refs``)."""
     config = copy.deepcopy(write.source.config)
+    pins = unpinned_store_refs(plan, write)
     for site in ref_sites(refs, config, inline_pins=True):
-        planned = plan.store_latest.get((site.ref.kind, site.value)) if site.version is None else None
+        planned = pins.get((site.ref.kind, site.value)) if site.version is None else None
         if planned is None:
             continue
         if site.version_key is None:
@@ -207,7 +217,8 @@ def _write_eval(plan: Plan, write: Write) -> int:
 # The writers this release has, by kind; any other kind is refused before anything is written. Tasks are
 # written separately, once every one of them is preflighted, and evals after them, since they name the tasks.
 _WRITERS: dict[BundleKind, Callable[[Plan, Write], int]] = {
-    BundleKind.ARTIFACT: _write_artifact, BundleKind.AGENT: _write_agent, BundleKind.EVAL: _write_eval,
+    BundleKind.ARTIFACT: _write_artifact, BundleKind.AGENT: _write_agent, BundleKind.ENV: _write_env,
+    BundleKind.EVAL: _write_eval,
 }
 
 
@@ -235,10 +246,11 @@ def _unwritable(write: Write) -> str | None:
         return None
     if write.kind not in _WRITERS:
         return with_article(write.kind.value.removesuffix("s"))
-    if write.kind is BundleKind.ARTIFACT:
-        type_ = write.source.entry.type
-        if folder_walk(get_artifact_registry().get(canonical_type(type_))) is None:
-            return with_article(f"{type_} artifact")
+    type_ = write.source.entry.type
+    if write.kind is BundleKind.ARTIFACT and folder_walk(get_artifact_registry().get(canonical_type(type_))) is None:
+        return with_article(f"{type_} artifact")
+    if write.kind is BundleKind.ENV and not env_writer(get_env_registry().get(type_)):
+        return with_article(f"{type_} env")
     return None
 
 

@@ -29,7 +29,6 @@ from agent_env.providers.sandbox_providers.local_sandbox import (
     start_trusting,
 )
 from agent_env.providers.sandbox_providers.sandbox_provider import all_sandbox_container_env, all_sandbox_url_rewrites
-from agent_env.utils.paths import validate_relative_filename
 from agent_env.attribution import Attribution
 
 if TYPE_CHECKING:
@@ -263,7 +262,7 @@ class A2AAgent:
         destination_path: str,
     ) -> dict[str, str]:
         """Stage every FileArtifact in `universe` into the agent sandbox under destination_path."""
-        from agent_env.providers.sandbox_providers.sandbox import VmSandbox
+        from agent_env.providers.sandbox_providers.sandbox import stage_files_into_container
         from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_agent_sandbox_provider
 
         destination = destination_path.rstrip("/") or "/"
@@ -277,41 +276,11 @@ class A2AAgent:
             )
             return {}
 
-        dirs_to_make: set[str] = {destination}
-        loaded: dict[str, str] = {}
-        for filename in file_artifacts:
-            validate_relative_filename(filename)
-            dest_path = posixpath.join(destination, filename)
-            parent = posixpath.dirname(dest_path)
-            if parent:
-                dirs_to_make.add(parent)
-            loaded[filename] = dest_path
-
-        for d in sorted(dirs_to_make):
-            if isinstance(sandbox, VmSandbox):
-                await sandbox.exec_script(f"docker exec -u 0 {shlex.quote(sandbox.container_name)} mkdir -p {shlex.quote(d)}")
-            else:
-                await sandbox.exec("mkdir", "-p", d)
-
-        total = len(file_artifacts)
         logger.info(
             f"Loading FileArtifactUniverse '{universe.id}' v{universe.version} "
-            f"({total} file(s)) into agent at {destination}"
+            f"({len(file_artifacts)} file(s)) into agent at {destination}"
         )
-        # Stage files in parallel with a bounded semaphore so a universe with
-        # many files doesn't accumulate per-file presign + docker cp latency.
-        # 8 matches the default concurrency used by the FAU `get-many` CLI.
-        sem = asyncio.Semaphore(8)
-
-        async def _stage(filename: str, file_artifact: "Any") -> None:
-            dest_path = loaded[filename]
-            async with sem:
-                logger.info(f"  {file_artifact.object_url} -> {dest_path}")
-                await sandbox.write_file_from_s3(file_artifact.object_url, dest_path)
-
-        await asyncio.gather(*[_stage(fn, fa) for fn, fa in file_artifacts.items()])
-
-        return loaded
+        return await stage_files_into_container(sandbox, file_artifacts, destination)
 
     def __init__(
         self,
@@ -383,7 +352,7 @@ class A2AAgent:
             kinds, described = cls.toml_metadata[name]
             if isinstance(value, bool) or not isinstance(value, kinds):
                 values.append(f"metadata.{name} must be {described}, not {value!r}")
-        problems += [f"agent.toml: {problem}" for problem in values]
+        problems += [ctx.config_problem(problem) for problem in values]
         if problems:
             ctx.refuse(problems)
         return fields

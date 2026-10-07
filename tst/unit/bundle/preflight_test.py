@@ -11,6 +11,7 @@ import pytest
 from click.testing import CliRunner
 
 import agent_env.bundle.preflight as preflight_module
+import agent_env.bundle.run as run_module
 from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store
@@ -380,6 +381,78 @@ def test_a_problem_several_deploys_share_is_reported_once_naming_the_first(bundl
         f"tasks/a.json: step 'env' (and 2 more deploys): deploys the service-db env 'default-db''s image 'db' "
         f"{unreachable}",
     ]
+
+
+# Envs the bundle writes, checked from their planned env.toml
+
+BUNDLE = "@local/~/triage"
+SERVER = 'from agentenv_protocol import environment_card\n\n\n@environment_card(name="{}")\nclass S:\n    pass\n'
+
+
+def _env_folder(root, name, toml="", kind="mcp_server"):
+    files = ({f"envs/{name}/Dockerfile": "FROM scratch\n"} if kind == "mcp_server" else
+             {f"envs/{name}/Dockerfile.backend": "FROM scratch\n", f"envs/{name}/Dockerfile.frontend": "FROM scratch\n"})
+    layout(root, {**files, f"envs/{name}/server.py": SERVER.format(name),
+                  f"envs/{name}/env.toml": f'type = "{kind}"\n{toml}'})
+
+
+def test_an_image_the_bundle_builds_for_an_env_is_refused_on_another_provider(bundle_dir):
+    _env_folder(bundle_dir, "crm")
+    _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
+
+    assert (f"tasks/t.json: step 'env': deploys env '{BUNDLE}/crm''s image '{BUNDLE}/crm__env_image' on the 'modal_vm' "
+            "sandbox provider, which can't reach it: it's built on this machine from envs/crm/Dockerfile; run it with "
+            "--sandbox local") in _problems(lambda: dry_run_bundle(bundle_dir, sandbox="modal_vm"))
+
+
+def test_a_website_the_bundle_writes_is_refused_on_modal_and_a_multi_holding_one_too(bundle_dir):
+    _env_folder(bundle_dir, "shop", kind="website")
+    layout(bundle_dir, {"envs/suite/env.toml": 'type = "multi"\nwebsite_envs = ["shop"]\n'})
+    _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "suite"}])
+
+    assert (f"tasks/t.json: step 'env': deploys env '{BUNDLE}/suite', which has websites, on the 'modal' sandbox "
+            "provider, whose gateway runs in containers and can't serve websites; run it on a VM provider, such as "
+            "--sandbox local") in _problems(lambda: dry_run_bundle(bundle_dir, sandbox="modal"))
+
+
+@pytest.mark.parametrize("folders, deployed, kinds", [
+    ([("crm", "", "mcp_server")], "crm", ["service-db", "gateway"]),
+    ([("shop", "", "website")], "shop", ["service-db", "gateway", "website-browser"]),
+    ([("crm", "", "mcp_server"), ("shop", "", "website"),
+      ("suite", 'mcp_server_envs = ["crm"]\nwebsite_envs = ["shop"]\n', "multi")], "suite",
+     ["service-db", "gateway", "website-browser"]),
+    ([("crm", 'env_provider_type = "server"\n', "mcp_server")], "crm", []),
+], ids=["mcp-server", "website", "multi", "server-provider"])
+def test_an_env_the_bundle_writes_names_the_infra_its_deploy_on_the_local_provider_builds(
+    bundle_dir, folders, deployed, kinds,
+):
+    for name, toml, kind in folders:
+        if kind == "multi":
+            layout(bundle_dir, {f"envs/{name}/env.toml": f'type = "multi"\n{toml}'})
+        else:
+            _env_folder(bundle_dir, name, toml, kind)
+    _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": deployed}])
+
+    assert [build.kind for build in dry_run_bundle(bundle_dir).infra] == kinds
+
+
+def test_a_store_image_an_env_names_without_a_version_is_checked_at_the_version_the_plan_read(
+    bundle_dir, monkeypatch,
+):
+    _image("base", REMOTE)
+    _infra(REMOTE)
+    layout(bundle_dir, {"envs/crm/env.toml": 'image = "base"\nenvironment_name = "crm"\n'})
+    _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
+    planned = run_module.plan_bundle
+
+    def a_local_image_lands_once_planned(*args, **kwargs):
+        plan = planned(*args, **kwargs)
+        _image("base", LOCAL)  # v2, after the plan read v1, which the env is written at
+        return plan
+
+    monkeypatch.setattr(run_module, "plan_bundle", a_local_image_lands_once_planned)
+
+    assert dry_run_bundle(bundle_dir, sandbox="modal_vm").runs
 
 
 def test_the_cli_dry_run_lists_the_infra_it_would_build(bundle_dir, quiet_logs):

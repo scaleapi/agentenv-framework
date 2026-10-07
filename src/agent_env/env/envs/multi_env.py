@@ -22,8 +22,10 @@ def _snapshot_after_load_default() -> bool:
 
 if TYPE_CHECKING:
     from agent_env.artifact import EnvironmentArtifact, EnvironmentUniverseArtifact
+    from agent_env.bundle.authoring import AuthoringContext
     from agent_env.providers.env_state import DatabaseStateProvider
 
+from agent_env.entity_refs import EntityRef
 from agent_env.env.env import Env, gateway_url_of
 from agent_env.env.gateway import GatewayMode
 from agent_env.env.envs._deployment import (
@@ -40,6 +42,10 @@ from agent_env.attribution import Attribution
 class MultiEnv(Env):
     type: ClassVar[str] = "multi"
     description = "Multi environment combining multiple MCP servers and websites, deployed through the environment provider its env_provider_type names"
+    toml_refs: ClassVar[tuple[EntityRef, ...]] = (EntityRef.env("mcp_server_envs[]", env_type=MCPServerEnv.type),
+                                                  EntityRef.env("website_envs[]", env_type=WebsiteEnv.type))
+    toml_keys: ClassVar[dict[str, type]] = {"mcp_server_envs": list, "website_envs": list, "name": str,
+                                            "env_provider_type": str}
 
     def __init__(self, id: str, version: Optional[int], mcp_server_envs: list[MCPServerEnv], website_envs: list[WebsiteEnv] | None = None, metadata: Optional[dict[str, str]] = None, name: Optional[str] = None, env_provider_type: str = "gateway"):
         super().__init__(id, version, metadata=metadata)
@@ -86,6 +92,31 @@ class MultiEnv(Env):
         ]
         return cls(id=data["id"], version=data.get("version"), mcp_server_envs=mcp_server_envs, website_envs=website_envs, metadata=data.get("metadata", {}),
                    name=data.get("name"), env_provider_type=data.get("env_provider_type", "gateway"))
+
+    @classmethod
+    def from_toml(cls, data: dict, ctx: AuthoringContext) -> MultiEnv:
+        """Write the env authored as ``data`` (its env.toml, with ``mcp_server_envs`` and ``website_envs`` resolved to
+        env ids) under ``ctx.id`` and return it, unless deploying it would be refused."""
+        fields = cls.accept_toml(data, ctx)
+        env = dict(mcp_server_envs=[ctx.env(ref, MCPServerEnv) for ref in fields.get("mcp_server_envs", [])],
+                   website_envs=[ctx.env(ref, WebsiteEnv) for ref in fields.get("website_envs", [])],
+                   name=fields.get("name"), env_provider_type=fields["env_provider_type"])
+        if refusal := cls(id=ctx.id, version=None, **env).deploy_refusal():
+            ctx.refuse([refusal])
+        return cls.put(id=ctx.id, **env)
+
+    @classmethod
+    def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:
+        """The keys of ``data``, an env.toml, a multi env takes. Raises BundleError listing every problem."""
+        fields, problems = ctx.accepted_env(data, cls)
+        if not (fields.get("mcp_server_envs") or fields.get("website_envs")):
+            problems.append(ctx.config_problem("a multi env needs at least one env in mcp_server_envs or website_envs"))
+        name = fields.get("name")
+        if name is not None and (not name or any(ch.isspace() for ch in name)):
+            problems.append(ctx.config_problem(f"name must be non-empty with no whitespace, not {name!r}"))
+        if problems:
+            ctx.refuse(problems)
+        return fields
 
     async def deploy(self, ttl_seconds: int = 10800, disk_size_gb: float = 10, gateway_mode: GatewayMode = GatewayMode.PERFORMANCE, cpu: float | None = None, memory_mb: int | None = None, sandbox_type: str | None = None, env_state_type: str | None = None, env_state_instance_id: str | None = None, *, attribution: Optional[Attribution] = None) -> DeployedEnv:
         deployed_env = await deploy_through_provider(

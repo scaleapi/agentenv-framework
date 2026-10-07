@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Callable, ClassVar, Optional
 from agentenv_protocol import FilePart, client as protocol_v1
 from agent_env.artifact import Artifact, DockerImageArtifact
 from agent_env.artifact.artifacts.docker_image import GitHubBuildResult, ProgressCallback, refuse_local_github_build
+from agent_env.entity_refs import EntityRef
 from agent_env.env.env import Env, gateway_url_of
 from agent_env.store.ids import derive_id
 from agent_env.env import legacy_protocol
@@ -26,6 +27,7 @@ from agent_env.attribution import Attribution
 
 if TYPE_CHECKING:
     from agent_env.artifact import CliArtifact, EnvironmentArtifact, EnvironmentUniverseArtifact
+    from agent_env.bundle.authoring import AuthoringContext
     from agent_env.env.env import DeployedEnv
     from agent_env.providers.env_providers.env_provider import EnvironmentProvider
 
@@ -35,6 +37,8 @@ logger = logging.getLogger(__name__)
 class MCPServerEnv(Env):
     type: ClassVar[str] = "mcp_server"
     description = "An MCP server, deployed through the environment provider its env_provider_type names"
+    toml_refs: ClassVar[tuple[EntityRef, ...]] = (EntityRef.artifact("image", artifact_type="docker_image"),)
+    toml_keys: ClassVar[dict[str, type]] = {"image": object, "environment_name": str, "env_provider_type": str}
     _MCP_MAX_RETRIES: ClassVar[int] = 5
 
     def __init__(self, id: str, version: Optional[int], docker_image_artifact: DockerImageArtifact, environment_name: Optional[str] = None, *, metadata: Optional[dict[str, str]] = None, env_provider_type: str = "gateway"):
@@ -78,6 +82,20 @@ class MCPServerEnv(Env):
             metadata=data.get("metadata", {}),
             env_provider_type=data.get("env_provider_type", "gateway"),
         )
+
+    @classmethod
+    def from_toml(cls, data: dict, ctx: AuthoringContext) -> MCPServerEnv:
+        """Write the env authored as ``data`` (its env.toml, with ``image`` resolved to an image artifact's id)
+        under ``ctx.id`` and return it."""
+        fields = cls.accept_toml(data, ctx)
+        return cls.put(id=ctx.id, docker_image_artifact=ctx.artifact(fields["image"], DockerImageArtifact),
+                       environment_name=fields["environment_name"], env_provider_type=fields["env_provider_type"])
+
+    @classmethod
+    def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:
+        """The keys of ``data``, an env.toml, an MCP server env takes, its environment_name read from the image's
+        @environment_card when it isn't set. Raises BundleError listing every problem."""
+        return ctx.accept_env(data, cls, named_by="image")
 
     async def deploy(self, ttl_seconds: int = 10800, disk_size_gb: float = 10, gateway_mode: GatewayMode = GatewayMode.PERFORMANCE, cpu: float | None = None, memory_mb: int | None = None, sandbox_type: str | None = None, env_state_type: str | None = None, env_state_instance_id: str | None = None, *, attribution: Optional[Attribution] = None) -> DeployedEnv:
         # In container mode the server runs in its own container, so loads stage there, as for a MultiEnv child.
@@ -360,7 +378,7 @@ class MCPServerEnv(Env):
         """
         refuse_local_github_build(id)
         docker_image_artifact = await DockerImageArtifact.put_from_github(
-            id=f"mcp-server-{id}",
+            id=derive_id(id, "env_image"),
             dockerfile_github_url=dockerfile_github_url,
             docker_context_github_url=docker_context_github_url,
             on_progress=on_progress,

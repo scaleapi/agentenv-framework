@@ -1,7 +1,9 @@
 """prompt_agent sends the agent an HTTPS URL for each file part naming an object the store owns, on every turn,
 while the run records the object's own URL."""
 
+import httpx
 import pytest
+from agentenv_protocol.a2a_agent import STAGING_V1_URI
 
 from agent_env.config import configure
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
@@ -13,6 +15,7 @@ from tst.util.granting_object_store import GRANT_ORIGIN, GrantingObjectStore
 AGENT_URL = "http://agent.test"
 USER_URL = "http://user.test"
 DONE = [{"kind": "text", "text": "done"}]
+USER_DONE = [{"kind": "text", "text": '{"message": "thanks", "done": true}'}]
 
 
 @pytest.fixture
@@ -96,3 +99,117 @@ async def test_an_object_the_agent_could_not_read_is_never_sent(monkeypatch, sto
 
     assert agents.sent[AGENT_URL] == []
     assert recorded == []  # no turn left waiting for a reply
+
+
+def _replying_with(url):
+    return [{"kind": "text", "text": "here it is"}, _file(url)]
+
+
+def _two_turns(*files):
+    return PromptAgentTaskStep(
+        id="solve", version=None, agent_name="solver", poll_interval_seconds=0, max_conversation_turns=2,
+        parts=[{"kind": "text", "text": "hi"}, *(_file(url) for url in files)],
+    )
+
+
+def _user_sim(url, sandbox_type="local", card=None):
+    return DeployedAgent(
+        agent_name="human_agent", api_url=url, a2a_url=url, sandbox_id="sb-user", sandbox_type=sandbox_type, a2a_card=card,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_user_sim_agent_is_sent_a_file_the_target_passes_on_as_a_grant(monkeypatch, store, recorded):
+    url = store.put("inputs/z.png", b"png")
+    agents = FakeA2AAgents({AGENT_URL: _replying_with(url), USER_URL: USER_DONE}).serve(monkeypatch)
+    context = _context()
+    context.deployed_agents.append(_user_sim(USER_URL))
+
+    await _two_turns(url).execute(context)
+
+    assert agents.sent[USER_URL] == [
+        [{"kind": "text", "text": "here it is"}, _file(f"{GRANT_ORIGIN}/inputs/z.png?sig=read")]
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_user_sim_is_not_made_able_to_read_a_file_the_target_was_never_sent(monkeypatch, store, recorded):
+    sent = store.put("inputs/z.png", b"png")
+    other = store.put("someone-elses/answer.json", b"{}")
+    agents = FakeA2AAgents({AGENT_URL: _replying_with(other), USER_URL: USER_DONE}).serve(monkeypatch)
+    context = _context()
+    context.deployed_agents.append(_user_sim(USER_URL))
+
+    await _two_turns(sent).execute(context)
+
+    assert agents.sent[USER_URL] == [[{"kind": "text", "text": "here it is"}, _file(other)]]
+    assert store.granted == [sent]  # the target's own file, and nothing for the user-sim
+
+
+@pytest.mark.asyncio
+async def test_a_user_sim_the_stores_grants_cannot_reach_is_sent_a_copy_staged_on_it(monkeypatch, store, recorded):
+    url = store.put("inputs/z.png", b"png")
+    user_url = "https://user.test"
+    staging = []  # each staging request, with how many messages the user-sim had been sent by then
+
+    def staging_route(request):
+        staging.append((request.method, len(agents.sent[user_url])))
+        return httpx.Response(201 if request.method == "PUT" else 204)
+
+    agents = FakeA2AAgents({AGENT_URL: _replying_with(url), user_url: USER_DONE}, other=staging_route).serve(monkeypatch)
+    context = _context()
+    card = {"capabilities": {"extensions": [{"uri": STAGING_V1_URI, "params": {"endpoint": "/ext/staging"}}]}}
+    context.deployed_agents.append(_user_sim(user_url, "modal", card))
+
+    await _two_turns(url).execute(context)
+
+    ((text, file),) = agents.sent[user_url]
+    assert file["file"]["uri"].startswith(f"{user_url}/ext/staging/")
+    assert staging == [("PUT", 0), ("DELETE", 1)]  # staged before the message went, cleared once it was answered
+
+
+@pytest.mark.asyncio
+async def test_a_user_sim_that_can_be_sent_no_readable_url_fails_the_step_before_it_is_sent_anything(
+    monkeypatch, store, recorded
+):
+    url = store.put("inputs/z.png", b"png")
+    agents = FakeA2AAgents({AGENT_URL: _replying_with(url), USER_URL: USER_DONE}).serve(monkeypatch)
+    context = _context()
+    context.deployed_agents.append(_user_sim(USER_URL, "modal"))
+
+    with pytest.raises(RuntimeError, match="cannot be sent to the agent"):
+        await _two_turns(url).execute(context)
+
+    assert agents.sent[USER_URL] == []
+    assert recorded == [[{"kind": "text", "text": "hi"}, _file(url)]]  # the solver's turn, which ran
+
+
+@pytest.mark.asyncio
+async def test_a_registered_human_peer_is_sent_the_objects_own_url(monkeypatch, store, recorded):
+    url = store.put("outputs/z.png", b"png")
+    agents = FakeA2AAgents({AGENT_URL: _replying_with(url), USER_URL: DONE}).serve(monkeypatch)
+    context = _context()
+    context.deployed_agents.append(DeployedAgent(agent_name="human_agent", api_url=USER_URL, a2a_url=USER_URL))
+    step = PromptAgentTaskStep(
+        id="solve", version=None, agent_name="solver", prompt="hi", poll_interval_seconds=0, max_conversation_turns=2,
+    )
+
+    await step.execute(context)
+
+    assert agents.sent[USER_URL] == [[{"kind": "text", "text": "here it is"}, _file(url)]]
+    assert store.granted == []
+
+
+@pytest.mark.asyncio
+async def test_a_humans_hub_is_sent_the_objects_own_url(monkeypatch, store, recorded):
+    url = store.put("outputs/z.png", b"png")
+    agents = FakeA2AAgents({AGENT_URL: _replying_with(url), USER_URL: DONE}).serve(monkeypatch)
+    step = PromptAgentTaskStep(
+        id="solve", version=None, agent_name="solver", prompt="hi", poll_interval_seconds=0,
+        max_conversation_turns=2, user_a2a_url=USER_URL,
+    )
+
+    await step.execute(_context())
+
+    assert agents.sent[USER_URL] == [[{"kind": "text", "text": "here it is"}, _file(url)]]
+    assert store.granted == []

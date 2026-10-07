@@ -26,7 +26,7 @@ from uuid import uuid4
 
 from agent_env import config
 from agent_env.attribution import Attribution
-from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, VmSandbox
+from agent_env.providers.sandbox_providers.sandbox import SANDBOX_LABEL, NetworkPolicy, VmSandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_CONTAINER,
     SANDBOX_MODE_VM,
@@ -201,15 +201,44 @@ class LocalSandbox(VmSandbox):
         this, local runs leak their containers/compose stacks, which squat host ports and block the
         next deploy. Prod backends override terminate() to tear the whole VM down.
         """
-        await self.exec_script(f"docker rm -f {shlex.quote(self.container_name)} >/dev/null 2>&1 || true")
-        if self.mode == SANDBOX_MODE_VM and (self._work_dir / "docker-compose.yml").exists():
-            # No `|| true`: `docker compose down` is idempotent (an already-down stack exits 0), so a
-            # non-zero exit is a real failure — surface it (exec_script raises, with the compose output)
-            # instead of silently leaving the stack running and its host ports held. Callers wrap
-            # terminate() in try/except, so a raised teardown failure is caught, not fatal.
-            await self.exec_script(
-                f"cd {shlex.quote(str(self._work_dir))} && docker compose down -v --remove-orphans"
+        try:
+            if self.mode == SANDBOX_MODE_VM and not self.owns_container:
+                await self._remove_labeled()
+        finally:  # a container that wouldn't go must not keep the compose stack up
+            await self.exec_script(f"docker rm -f {shlex.quote(self.container_name)} >/dev/null 2>&1 || true")
+            if self.mode == SANDBOX_MODE_VM and (self._work_dir / "docker-compose.yml").exists():
+                # No `|| true`: `docker compose down` is idempotent (an already-down stack exits 0), so a
+                # non-zero exit is a real failure — surface it (exec_script raises, with the compose output)
+                # instead of silently leaving the stack running and its host ports held. Callers wrap
+                # terminate() in try/except, so a raised teardown failure is caught, not fatal.
+                await self.exec_script(
+                    f"cd {shlex.quote(str(self._work_dir))} && docker compose down -v --remove-orphans"
+                )
+
+    async def _remove_labeled(self) -> None:
+        """Remove what steps started on this host for this sandbox (``run_docker_container``'s containers, their
+        images and networks), which a real VM would take down with it. Images and networks go best-effort: another
+        local sandbox's container can still be using one."""
+        label = f"label={SANDBOX_LABEL}={self.sandbox_id}"
+        try:
+            exit_code, stdout, stderr = await self.exec_with_output("docker", "ps", "-aq", "--filter", label)
+        except FileNotFoundError:  # no Docker installed: nothing could have been started
+            return
+        if exit_code != 0:
+            # No Docker to reach (a run that never needed it) or Docker is down; either way nothing can be removed now.
+            logger.warning(
+                "Could not list %s's containers (%s); anything it started is still there. Remove it with: "
+                "docker rm -f $(docker ps -aq --filter %s)", self.sandbox_id, stderr.strip()[-300:], label,
             )
+            return
+        q = shlex.quote(label)
+        if stdout.split():
+            await self.exec_script(f"docker rm -f {' '.join(stdout.split())} >/dev/null")
+        await self.exec_script(
+            f"ids=$(docker images -q --filter {q} | sort -u); [ -z \"$ids\" ] || docker rmi -f $ids >/dev/null 2>&1; "
+            f"ids=$(docker network ls -q --filter {q}); [ -z \"$ids\" ] || docker network rm $ids >/dev/null 2>&1; "
+            f"exit 0"
+        )
 
     async def exec(self, *command: str) -> Any:
         """Execute a command locally via subprocess.

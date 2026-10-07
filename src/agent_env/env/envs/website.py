@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Callable, ClassVar, Optional
 from agentenv_protocol import FilePart, client as protocol_v1
 from agent_env.artifact import Artifact, DockerImageArtifact, EnvironmentArtifact
 from agent_env.artifact.artifacts.docker_image import GitHubBuildResult, ProgressCallback, refuse_local_github_build
+from agent_env.entity_refs import EntityRef
 from agent_env.env.env import Env, gateway_url_of
 from agent_env.store.ids import derive_id
 from agent_env.env import legacy_protocol
@@ -22,6 +23,7 @@ from agent_env.env.envs._deployment import (
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT, GatewayMode
 from agent_env.attribution import Attribution
 if TYPE_CHECKING:
+    from agent_env.bundle.authoring import AuthoringContext
     from agent_env.env.env import DeployedEnv
     from agent_env.providers.env_providers.env_provider import EnvironmentProvider
 
@@ -33,6 +35,10 @@ logger = logging.getLogger(__name__)
 class WebsiteEnv(Env):
     type: ClassVar[str] = "website"
     description = "Website environment with frontend and backend containers, deployed through the environment provider its env_provider_type names"
+    toml_refs: ClassVar[tuple[EntityRef, ...]] = (EntityRef.artifact("backend_image", artifact_type="docker_image"),
+                                                  EntityRef.artifact("frontend_image", artifact_type="docker_image"))
+    toml_keys: ClassVar[dict[str, type]] = {"backend_image": object, "frontend_image": object, "environment_name": str,
+                                            "env_provider_type": str}
 
     def __init__(
         self,
@@ -93,6 +99,22 @@ class WebsiteEnv(Env):
             metadata=data.get("metadata", {}),
             env_provider_type=data.get("env_provider_type", "gateway"),
         )
+
+    @classmethod
+    def from_toml(cls, data: dict, ctx: AuthoringContext) -> WebsiteEnv:
+        """Write the env authored as ``data`` (its env.toml, with ``backend_image`` and ``frontend_image`` resolved to
+        image artifacts' ids) under ``ctx.id`` and return it."""
+        fields = cls.accept_toml(data, ctx)
+        return cls.put(id=ctx.id,
+                       backend_docker_image_artifact=ctx.artifact(fields["backend_image"], DockerImageArtifact),
+                       frontend_docker_image_artifact=ctx.artifact(fields["frontend_image"], DockerImageArtifact),
+                       environment_name=fields["environment_name"], env_provider_type=fields["env_provider_type"])
+
+    @classmethod
+    def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:
+        """The keys of ``data``, an env.toml, a website env takes, its environment_name read from the backend image's
+        @environment_card when it isn't set. Raises BundleError listing every problem."""
+        return ctx.accept_env(data, cls, named_by="backend_image")
 
     async def deploy(self, ttl_seconds: int = 10800, disk_size_gb: float = 10, gateway_mode: GatewayMode = GatewayMode.PERFORMANCE, cpu: float | None = None, memory_mb: int | None = None, sandbox_type: str | None = None, env_state_type: str | None = None, env_state_instance_id: str | None = None, *, attribution: Optional[Attribution] = None) -> DeployedEnv:
         return await deploy_through_provider(
@@ -247,14 +269,14 @@ class WebsiteEnv(Env):
         refuse_local_github_build(id)
         backend, frontend = await asyncio.gather(
             DockerImageArtifact.put_from_github(
-                id=f"website-backend-{id}",
+                id=derive_id(id, "backend_image"),
                 dockerfile_github_url=backend_dockerfile_github_url,
                 docker_context_github_url=backend_docker_context_github_url,
                 on_progress=on_backend_progress,
                 github_token=github_token,
             ),
             DockerImageArtifact.put_from_github(
-                id=f"website-frontend-{id}",
+                id=derive_id(id, "frontend_image"),
                 dockerfile_github_url=frontend_dockerfile_github_url,
                 docker_context_github_url=frontend_docker_context_github_url,
                 on_progress=on_frontend_progress,

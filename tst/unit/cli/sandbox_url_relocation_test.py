@@ -101,7 +101,7 @@ def test_service_db_put_falls_back_to_the_config_default():
         artifact.put.side_effect = RuntimeError("stop once the id is recorded")
         res = CliRunner().invoke(service_db, ["put"])
 
-    assert artifact.put.call_args.kwargs["id"] == "service-db-svc-db-from-config"
+    assert artifact.put.call_args.kwargs["id"] == "svc-db-from-config__db_image"
     assert res.exit_code != 0
 
 
@@ -126,7 +126,7 @@ def test_website_browser_put_falls_back_to_the_config_default():
         artifact.put.side_effect = RuntimeError("stop once the id is recorded")
         res = CliRunner().invoke(website_browser, ["put"])
 
-    assert artifact.put.call_args.kwargs["id"] == "website-browser-wb-from-config"
+    assert artifact.put.call_args.kwargs["id"] == "wb-from-config__env_image"
     assert res.exit_code != 0
 
 

@@ -11,9 +11,10 @@ import click
 
 from agent_env.cli.banner import print_banner
 from agent_env.cli.identity import get_agent_env_client_id
+from agent_env.cli.teardown_output import echo_teardown
 from agent_env.store.ids import fs_safe
 from agent_env.task.interrupts import Interrupts
-from agent_env.task.teardown import TeardownReport, kind, teardown_run
+from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
 
 
@@ -52,16 +53,6 @@ def _write_context(context, task_id, output_dir, prefix=""):
     click.echo(click.style(f"{prefix}Output written to: {output_path}", fg="blue"))
 
 
-def _echo_teardown(tag: str, report: TeardownReport) -> None:
-    if report.terminated:
-        n = len(report.terminated)
-        click.echo(click.style(f"{tag} Tore down {n} sandbox{'es' if n != 1 else ''}", fg="blue"))
-    for sandbox, why in report.failed:
-        click.echo(click.style(f"{tag} Couldn't tear down {sandbox.sandbox_id}: {why}", fg="red"))
-    for sandbox in report.left:
-        click.echo(click.style(f"{tag} Still up: {sandbox.sandbox_id} ({kind(sandbox)})", fg="red"))
-
-
 async def _run_single(task, tag, output_dir, agent_model=None, agent_artifact_id=None, base_metadata=None):
     """Execute a single task run with logging callbacks, then tear down what it deployed, even when it
     raised or was cancelled."""
@@ -76,7 +67,7 @@ async def _run_single(task, tag, output_dir, agent_model=None, agent_artifact_id
             context=context,
         )
     finally:
-        _echo_teardown(tag, await teardown_run(context))
+        echo_teardown(tag, await teardown_run(context))
     if output_dir:
         _write_context(context, task.id, output_dir, prefix=f"{tag} ")
     return task.id, tag, context

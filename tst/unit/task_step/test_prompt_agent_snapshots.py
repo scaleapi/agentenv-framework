@@ -1270,7 +1270,7 @@ class _Conversation:
         async def send(url, parts, message_id, wire_context_id, timeout_seconds):
             return f"{url}#{message_id}", None
 
-        async def poll(url, task_id, timeout_seconds, poll_interval_seconds):
+        async def poll(url, task_id, timeout_seconds, poll_interval_seconds, **_):
             if url == self.USER_URL:
                 self.user_turns += 1
                 done = self.user_done_at == self.user_turns

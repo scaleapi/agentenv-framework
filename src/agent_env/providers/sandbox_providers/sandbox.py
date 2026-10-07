@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import posixpath
 import shlex
 import time
 import uuid
@@ -15,6 +16,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Iterable, Optional
 
 from agent_env.config import get_config
+from agent_env.utils.paths import validate_relative_filename
 
 if TYPE_CHECKING:
     from agent_env.store.object_store import ObjectStore
@@ -38,6 +40,9 @@ logger = logging.getLogger(__name__)
 # the partial bytes already consumed, corrupting the stream. Pipe consumers must
 # download to a temp file first, then read the file (see load_docker_images).
 CURL_RETRY_FLAGS = "--retry 5 --retry-all-errors --retry-delay 1"
+# Docker label on what a step starts on a sandbox's Docker host (containers, images, networks), valued with the
+# sandbox id, so a sandbox that shares its host (the local one) can remove its own when it terminates.
+SANDBOX_LABEL = "agentenv.sandbox"
 
 # At most this many image signs in flight per event loop: each holds a worker thread, for up to a
 # remote signer's whole retry window, and a connection from its session's pool.
@@ -403,3 +408,32 @@ class VmSandbox(Sandbox):
 def port_bindings(host_ips: Iterable[str], host_port: int, container_port: int) -> list[str]:
     """Docker publish specs for one port: one per host IP, or a bare one (every interface) when there are none."""
     return [f"{ip}:{host_port}:{container_port}" for ip in host_ips] or [f"{host_port}:{container_port}"]
+
+
+async def stage_files_into_container(sandbox: Sandbox, file_artifacts: dict[str, Any], destination: str) -> dict[str, str]:
+    """Write each object-store file into the sandbox's container under ``destination``; returns ``{name: path}``.
+    A VM-backed sandbox stages through its host into ``container_name``; a container sandbox is written directly."""
+    loaded: dict[str, str] = {}
+    dirs_to_make: set[str] = {destination}
+    for filename in file_artifacts:
+        validate_relative_filename(filename)
+        dest_path = posixpath.join(destination, filename)
+        dirs_to_make.add(posixpath.dirname(dest_path))
+        loaded[filename] = dest_path
+
+    for d in sorted(dirs_to_make):
+        if isinstance(sandbox, VmSandbox):
+            await sandbox.exec_script(f"docker exec -u 0 {shlex.quote(sandbox.container_name)} mkdir -p {shlex.quote(d)}")
+        else:
+            await sandbox.exec("mkdir", "-p", d)
+
+    # Bounded so a universe with many files doesn't serialize per-file presign + copy latency.
+    sem = asyncio.Semaphore(8)
+
+    async def _stage(filename: str, file_artifact: Any) -> None:
+        async with sem:
+            logger.info(f"  {file_artifact.object_url} -> {loaded[filename]}")
+            await sandbox.write_file_from_s3(file_artifact.object_url, loaded[filename])
+
+    await asyncio.gather(*(_stage(fn, fa) for fn, fa in file_artifacts.items()))
+    return loaded
