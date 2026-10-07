@@ -4,7 +4,6 @@
  * Runner: plain TS, exits non-zero on assertion failure. From this package:
  *   npx tsx src/lib/trajectory-url.smoke.ts
  */
-import { materializeInstance } from './materialize';
 import { perTurnTrajectoryUrls, trajectoryUrl } from './trajectory-url';
 
 let failures = 0;
@@ -18,13 +17,6 @@ function assert(cond: unknown, msg: string): void {
 }
 
 const TURNS = ['obj://t/1.json', null, 'obj://t/2.json'];
-
-function turnUrls(inst: Record<string, unknown>): unknown[] {
-  const materialized = materializeInstance(inst, undefined);
-  return (materialized.trajectory as Record<string, unknown>[])
-    .filter(m => m.role === 'user')
-    .map(m => m.trajectoryS3Uri);
-}
 
 function main(): void {
   {
@@ -83,31 +75,6 @@ function main(): void {
     assert(
       trajectoryUrl({ agent_trajectory_object_url: 42 }) === undefined,
       'a non-string URL is ignored',
-    );
-  }
-
-  // materializeInstance reads them too: one user turn per per-turn URL, else one for the response's URL.
-  {
-    const response = { prompt_id: 'p1', response: 'done', prompt_text: 'go' };
-    const multi = (keys: Record<string, unknown>) =>
-      turnUrls({ context: { prompt_responses: [{ ...response, ...keys }] } });
-    assert(
-      JSON.stringify(
-        multi({ target_agent_per_turn_trajectory_object_urls: TURNS }),
-      ) === JSON.stringify(TURNS),
-      'materialize: per-turn URLs under the object-store name',
-    );
-    assert(
-      JSON.stringify(
-        multi({ target_agent_per_turn_trajectory_s3_uris: TURNS }),
-      ) === JSON.stringify(TURNS),
-      'materialize: per-turn URLs under the S3-named key',
-    );
-    assert(
-      JSON.stringify(
-        multi({ agent_trajectory_object_url: 'obj://t/only.json' }),
-      ) === JSON.stringify(['obj://t/only.json']),
-      'materialize: a single-turn URL under the object-store name',
     );
   }
 

@@ -54,7 +54,7 @@ import {
 // (byte range), resolved to `/trajectory-image` for lazy loading. Small trajectories carry raw base64.
 const SCREENSHOT_PLACEHOLDER_PREFIX = '__AEHIMG__';
 
-// The trajectory's S3 URI — lets descendants build lazy-image URLs without
+// The trajectory's object URL — lets descendants build lazy-image URLs without
 // prop-drilling through every nested component.
 const ScreenshotBaseUriContext = createContext<string | undefined>(undefined);
 
@@ -1802,7 +1802,7 @@ interface TrajectoryViewerProps {
   trajectory: ParsedTrajectory;
   timelineScrollRef?: React.MutableRefObject<HTMLDivElement | null>;
   isInProgress?: boolean;
-  // S3 URI of this trajectory; only used to lazy-load screenshot-trimmed frames.
+  // Object URL of this trajectory; only used to lazy-load screenshot-trimmed frames.
   screenshotBaseUri?: string;
 }
 

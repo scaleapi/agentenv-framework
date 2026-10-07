@@ -29,7 +29,7 @@ function main(): void {
       },
       '/app',
     );
-    const uris = files.map(f => f.s3Uri);
+    const uris = files.map(f => f.objectUrl);
     assert(uris.length === 3, 'three artifacts have a url');
     assert(uris.includes('file:///state/objects/run/out/data.csv'), 'a local file:// url is included');
     assert(uris.includes('gs://bucket/run/shot.png'), 'another backend\'s url is included');
@@ -46,7 +46,7 @@ function main(): void {
       },
       '/app/',
     );
-    const byUri = Object.fromEntries(files.map(f => [f.s3Uri, f.path]));
+    const byUri = Object.fromEntries(files.map(f => [f.objectUrl, f.path]));
     assert(byUri['fake://home/a'] === 'rel/a.txt', 'a relative key is kept');
     assert(byUri['fake://home/b'] === 'abs/b.txt', 'an absolute key under base_path is made relative');
     assert(byUri['fake://home/c'] === 'elsewhere/c.txt', 'an absolute key elsewhere loses its leading slash');

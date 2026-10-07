@@ -4,7 +4,7 @@
 
 export interface CollectedZipFile {
   path: string;
-  s3Uri: string;
+  objectUrl: string;
 }
 
 /** Artifact keys are absolute source paths or relative ones (joined under base_path). */
@@ -23,6 +23,6 @@ export function collectedZipFiles(
         : key.startsWith(`${base}/`)
         ? key.slice(base.length + 1)
         : key.replace(/^[/\\]+/, ''),
-      s3Uri: uri,
+      objectUrl: uri,
     }));
 }

@@ -84,7 +84,6 @@ export function UniverseDetailPage({
     version?: number;
     content_type?: string;
     object_url?: string;
-    s3_url?: string;
   }[];
   const metadataRefs = (artifact?.metadata_refs ?? null) as Record<
     string,
@@ -240,9 +239,9 @@ export function UniverseDetailPage({
                         {f.content_type ? ` · ${f.content_type}` : ''}
                       </span>
                     </div>
-                    {(f.object_url ?? f.s3_url) && (
+                    {f.object_url && (
                       <a
-                        href={objectContentUrl((f.object_url ?? f.s3_url) as string)}
+                        href={objectContentUrl(f.object_url)}
                         download={f.filename}
                         className="shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--accent)] transition-colors"
                         title={`Download ${f.filename}`}
