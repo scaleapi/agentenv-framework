@@ -313,14 +313,14 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
             text=stdout,
             artifact_id=derive_id(base, f"verifier-stdout-{self.id}-{stamp}"),
             description=f"stdout of {self.verifier_id} from step {self.id}",
-            s3_url=store.object_url(f"{outputs}/stdout.txt"),
+            object_url=store.object_url(f"{outputs}/stdout.txt"),
         )
         stderr_artifact = await asyncio.to_thread(
             self._upload_text_artifact,
             text=stderr,
             artifact_id=derive_id(base, f"verifier-stderr-{self.id}-{stamp}"),
             description=f"stderr of {self.verifier_id} from step {self.id}",
-            s3_url=store.object_url(f"{outputs}/stderr.txt"),
+            object_url=store.object_url(f"{outputs}/stderr.txt"),
         )
 
         # 8. Record on context (shape compatible with aggregate_verifiers).
@@ -406,7 +406,7 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
         return max(0.0, min(1.0, value))
 
     @staticmethod
-    def _upload_text_artifact(text: str, artifact_id: str, description: str, s3_url: str):
+    def _upload_text_artifact(text: str, artifact_id: str, description: str, object_url: str):
         from agent_env.artifact.artifacts.file import FileArtifact
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tmp:
@@ -417,7 +417,7 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
                 id=artifact_id,
                 description=description,
                 file_path=tmp_path,
-                object_url=s3_url,
+                object_url=object_url,
             )
         finally:
             try:

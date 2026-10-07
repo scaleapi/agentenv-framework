@@ -118,7 +118,7 @@ async def test_registry_login_and_upload_signing_run_off_the_event_loop(build):
 async def test_the_build_tarballs_are_uploaded_under_the_fixture_prefix(build, monkeypatch):
     monkeypatch.setattr(get_config(), "fixture_prefix", "fx")
     result = await DockerImageArtifact.put_from_github("server", "https://github.com/example/repo/blob/main/Dockerfile")
-    image, context = result.artifact.tar_gz_s3_url, result.artifact.build_context_s3_url
+    image, context = result.artifact.tar_gz_object_url, result.artifact.build_context_object_url
     assert image.startswith("mem://bucket/fx/github-builds/server/") and image.endswith(".tar.gz")
     assert context.startswith("mem://bucket/fx/github-builds/server/") and context.endswith("-context.tar.gz")
 
@@ -132,8 +132,8 @@ async def test_a_store_that_signs_nothing_gets_the_build_tarballs_copied_off_the
 
     result = await DockerImageArtifact.put_from_github(image_id, "https://github.com/example/repo/blob/main/Dockerfile")
 
-    assert store.get(result.artifact.tar_gz_s3_url) == vm.files["/tmp/image.tar.gz"]
-    assert store.get(result.artifact.build_context_s3_url) == vm.files["/tmp/build-context.tar.gz"]
+    assert store.get(result.artifact.tar_gz_object_url) == vm.files["/tmp/image.tar.gz"]
+    assert store.get(result.artifact.build_context_object_url) == vm.files["/tmp/build-context.tar.gz"]
     assert not any("curl" in script for script in vm.scripts)
 
 

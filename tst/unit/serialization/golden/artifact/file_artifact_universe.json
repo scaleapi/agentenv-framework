@@ -1,4 +1,5 @@
 {
+  "bundle_object_url": "s3://artifact-bucket/artifacts/file_artifact_universe/tutorial-files/4/bundle.tar.gz",
   "bundle_s3_url": "s3://artifact-bucket/artifacts/file_artifact_universe/tutorial-files/4/bundle.tar.gz",
   "file_artifact_ids": {
     "README.md": "readme-file"

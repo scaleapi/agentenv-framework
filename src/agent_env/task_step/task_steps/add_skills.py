@@ -63,7 +63,7 @@ class Skill:
         if self.skill_artifact_id is not None:
             return
         if self.s3_url is not None:
-            SkillArtifact.validate(s3_url=self.s3_url, expected_name=self.name)
+            SkillArtifact.validate(object_url=self.s3_url, expected_name=self.name)
             return
         SkillArtifact.validate(skill_md=self.to_skill_md().encode("utf-8"), expected_name=self.name)
 

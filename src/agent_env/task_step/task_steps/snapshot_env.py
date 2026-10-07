@@ -597,7 +597,7 @@ class SnapshotEnvTaskStep(TaskStep):
                                 description=f"State snapshot of {environment_name} from env {env.id}",
                                 filename=filename,
                                 content_type=content_type,
-                                s3_url=object_url,
+                                object_url=object_url,
                             )
                             fa = store.put_document(fa)
                             return EnvironmentArtifact.put(

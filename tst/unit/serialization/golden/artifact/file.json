@@ -3,6 +3,7 @@
   "description": "Slack universe seed data",
   "filename": "slack.json",
   "id": "slack-universe-data",
+  "object_url": "s3://artifact-bucket/artifacts/file/slack-universe-data/2/slack.json",
   "s3_url": "s3://artifact-bucket/artifacts/file/slack-universe-data/2/slack.json",
   "type": "file",
   "version": 2

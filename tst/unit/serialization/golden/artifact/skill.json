@@ -10,6 +10,7 @@
     "category": "documents"
   },
   "skill_name": "pdf-filler",
+  "skill_object_url": "s3://artifact-bucket/artifacts/skill/pdf-filler/2/",
   "skill_s3_url": "s3://artifact-bucket/artifacts/skill/pdf-filler/2/",
   "type": "skill",
   "version": 2

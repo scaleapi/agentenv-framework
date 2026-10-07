@@ -15,7 +15,6 @@ import stat
 import tempfile
 import time
 import uuid
-import warnings
 import weakref
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
@@ -23,6 +22,7 @@ from enum import Enum
 from typing import IO, TYPE_CHECKING, Any, AsyncIterator, Callable, Iterable, Optional
 
 from agent_env.config import get_config
+from agent_env.utils.deprecation import warn_deprecated
 from agent_env.utils.paths import validate_relative_filename
 
 if TYPE_CHECKING:
@@ -181,9 +181,7 @@ class Sandbox(ABC):
 
     async def write_file_from_s3(self, s3_url: str, destination_path: str) -> None:
         """Deprecated: ``write_file_from_object``."""
-        warnings.warn(
-            "Sandbox.write_file_from_s3 is deprecated; use write_file_from_object", DeprecationWarning, stacklevel=2
-        )
+        warn_deprecated("Sandbox.write_file_from_s3", "write_file_from_object", kind="method")
         await self.write_file_from_object(s3_url, destination_path)
 
     async def write_file_from_url(self, url: str, destination_path: str) -> None:
@@ -342,7 +340,7 @@ class VmSandbox(Sandbox):
 
     async def load_s3_file(self, s3_url: str, destination_path: str) -> None:
         """Deprecated: ``load_object_file``."""
-        warnings.warn("VmSandbox.load_s3_file is deprecated; use load_object_file", DeprecationWarning, stacklevel=2)
+        warn_deprecated("VmSandbox.load_s3_file", "load_object_file", kind="method")
         await self.load_object_file(s3_url, destination_path)
 
     async def _download_object_to_vm(self, object_url: str, vm_path: str) -> None:

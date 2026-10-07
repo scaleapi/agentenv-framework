@@ -140,7 +140,7 @@ class EnvSnapshot:
         log("check_changelog", f"Changelog: {'clean' if is_clean else 'dirty'}", 30)
 
         log("snapshot_db", "Exporting servicedb data...", 40)
-        tar_gz_s3_url = await _snapshot_servicedb(multi_env._sandbox, env_id, universe_id, log)
+        tar_gz_object_url = await _snapshot_servicedb(multi_env._sandbox, env_id, universe_id, log)
 
         log("store_artifact", "Storing Docker image artifact...", 70)
         logger.info("Storing snapshot as DockerImageArtifact...")
@@ -152,7 +152,7 @@ class EnvSnapshot:
                 f"universe={universe_id} v{universe_version}"
             ),
             image_name=image_tag,
-            tar_gz_s3_url=tar_gz_s3_url,
+            tar_gz_object_url=tar_gz_object_url,
         )
         logger.info(f"Artifact: id={artifact.id} version={artifact.version}")
         log("store_artifact", f"Artifact: id={artifact.id} version={artifact.version}", 80)

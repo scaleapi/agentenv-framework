@@ -73,7 +73,7 @@ def _enrich_universe(doc: dict, store, collection: str) -> dict:
                 "artifact_id": rid,
                 "version": ver,
                 "content_type": fa.get("content_type") if fa else None,
-                "object_url": fa.get("s3_url") if fa else None,
+                "object_url": (fa.get("object_url") or fa.get("s3_url")) if fa else None,
             })
         doc["files"] = files
     elif t in _UNIVERSE_ENVIRONMENT_TYPES:

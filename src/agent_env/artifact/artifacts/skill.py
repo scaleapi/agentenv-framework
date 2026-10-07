@@ -12,15 +12,16 @@ import contextlib
 import re
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterator, Literal, Optional
+from typing import TYPE_CHECKING, Any, Iterator, Literal, Optional
 
 import yaml
-from pydantic import Field
+from pydantic import ConfigDict, Field, model_serializer
 
-from agent_env.artifact.artifact import Artifact
+from agent_env.artifact.artifact import Artifact, _write_twin
 from agent_env.config import get_config
 from agent_env.store.base import ObjectNotFoundError
 from agent_env.store.ids import derive_id, key_segment
+from agent_env.utils.deprecation import renamed_keyword
 
 if TYPE_CHECKING:
     from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
@@ -35,6 +36,8 @@ _MAX_COMPATIBILITY_LEN = 500
 
 
 class SkillArtifact(Artifact):
+    model_config = ConfigDict(populate_by_name=True)
+
     type: Literal["skill"] = "skill"
 
     skill_files_id: str = Field(description="ID of the FileArtifactUniverse bundling every file in the skill")
@@ -48,18 +51,27 @@ class SkillArtifact(Artifact):
     allowed_tools: Optional[str] = Field(default=None)
     skill_metadata: Optional[dict[str, str]] = Field(default=None)
 
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: Any) -> dict[str, Any]:
+        # Dual-write, from the attribute: `alias=` emits one spelling, which one depending on the caller's `by_alias`.
+        data = handler(self)
+        _write_twin(data, "skill_s3_url", "skill_object_url", self.skill_object_url)
+        return data
+
     @classmethod
     def validate(
         cls,
         *,
         skill_md: Optional[bytes] = None,
+        object_url: Optional[str] = None,
         s3_url: Optional[str] = None,
         expected_name: str,
     ) -> None:
-        if (skill_md is None) == (s3_url is None):
-            raise ValueError("specify exactly one of skill_md or s3_url")
-        if s3_url is not None:
-            skill_md = _fetch_skill_md(s3_url)
+        object_url = renamed_keyword("SkillArtifact.validate", "object_url", object_url, "s3_url", s3_url)
+        if (skill_md is None) == (object_url is None):
+            raise ValueError("specify exactly one of skill_md or object_url")
+        if object_url is not None:
+            skill_md = _fetch_skill_md(object_url)
         frontmatter, _body = _parse_skill_md(skill_md)
         _validate_frontmatter(frontmatter, expected_name=expected_name)
 
@@ -84,19 +96,19 @@ class SkillArtifact(Artifact):
         store = get_artifact_store()
         version = store.next_version(id)
         key = f"{get_config().get_artifact_key_prefix()}artifacts/skill/{key_segment(id)}/{version}/"
-        skill_s3_url = get_config().get_object_store_for(id).object_url(key)
+        skill_object_url = get_config().get_object_store_for(id).object_url(key)
 
         universe = FileArtifactUniverse.put_bundled(
             id=derive_id(id, "files"),
             files=files,
-            s3_url=skill_s3_url,
+            prefix_url=skill_object_url,
         )
 
         instance = cls(
             id=id,
             version=version,
             skill_files_id=universe.id,
-            skill_s3_url=skill_s3_url,
+            skill_object_url=skill_object_url,
             agent_skills_spec_version=AGENT_SKILLS_SPEC_VERSION,
             skill_name=frontmatter["name"],
             description=frontmatter["description"],

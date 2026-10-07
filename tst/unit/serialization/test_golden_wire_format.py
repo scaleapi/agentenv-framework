@@ -333,7 +333,16 @@ def test_website_env_to_dict_writes_both_name_spellings_and_no_version_key():
     assert "environment_version" not in doc
 
 
-_AE3_TWINS = {"environment_name": "service_name", "environment_artifact_refs": "service_artifact_refs"}
+_AE3_TWINS = {
+    "environment_name": "service_name",
+    "environment_artifact_refs": "service_artifact_refs",
+    "object_url": "s3_url",
+    "tar_gz_object_url": "tar_gz_s3_url",
+    "build_context_object_url": "build_context_s3_url",
+    "bundle_object_url": "bundle_s3_url",
+    "skill_object_url": "skill_s3_url",
+    "cli_object_url": "cli_s3_url",
+}
 
 
 @pytest.mark.parametrize("wire,keys", [(_artifact_wire, ARTIFACT_FIXTURES), (_env_wire, ENV_FIXTURES)])

@@ -1,4 +1,4 @@
-"""Docker image artifact for storing Docker images in S3."""
+"""Docker image artifact for storing Docker images in the object store."""
 
 from __future__ import annotations
 
@@ -16,14 +16,15 @@ import uuid
 from dataclasses import dataclass
 from importlib.metadata import version as pkg_version
 from pathlib import Path
-from typing import Callable, ClassVar, Literal
+from typing import Any, Callable, ClassVar, Literal
 from urllib.parse import urlparse
 
-from pydantic import Field
+from pydantic import ConfigDict, Field, model_serializer
 
-from agent_env.artifact.artifact import Artifact
+from agent_env.artifact.artifact import Artifact, _write_twin
 from agent_env.store.ids import fs_safe, image_repository, is_local_id
 from agent_env.store.image_store.oci_registry_credentials import is_loopback_host, registry_host_from_ref
+from agent_env.utils.deprecation import renamed_keyword
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,9 @@ def _git_clone_commands(owner: str, repo: str, ref: str | None, token: str | Non
     ]
 
 class DockerImageArtifact(Artifact):
-    """A Docker image artifact stored as tar.gz in S3."""
+    """A Docker image artifact stored as tar.gz in the object store."""
+
+    model_config = ConfigDict(populate_by_name=True)
 
     DOCKER_SAVE_TIMEOUT_SECONDS: ClassVar[int] = 900
 
@@ -71,6 +74,14 @@ class DockerImageArtifact(Artifact):
     image_name: str = Field(description="Docker image name/tag")
     tar_gz_object_url: str = Field(alias="tar_gz_s3_url", description="Object-store locator of the tar.gz file")
     build_context_object_url: str | None = Field(default=None, alias="build_context_s3_url", description="Object-store locator of the build context tar.gz")
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: Any) -> dict[str, Any]:
+        # Dual-write, from the attributes: `alias=` emits one spelling, which one depending on the caller's `by_alias`.
+        data = handler(self)
+        _write_twin(data, "tar_gz_s3_url", "tar_gz_object_url", self.tar_gz_object_url)
+        _write_twin(data, "build_context_s3_url", "build_context_object_url", self.build_context_object_url)
+        return data
 
     @classmethod
     def put(
@@ -150,8 +161,8 @@ class DockerImageArtifact(Artifact):
             id,
             description=description,
             image_name=image_ref,
-            tar_gz_s3_url=tar_gz_object_url,
-            build_context_s3_url=build_context_object_url,
+            tar_gz_object_url=tar_gz_object_url,
+            build_context_object_url=build_context_object_url,
         )
 
     @classmethod
@@ -161,13 +172,22 @@ class DockerImageArtifact(Artifact):
         *,
         description: str,
         image_name: str,
-        tar_gz_s3_url: str,
+        tar_gz_object_url: str | None = None,
+        build_context_object_url: str | None = None,
+        tar_gz_s3_url: str | None = None,
         build_context_s3_url: str | None = None,
     ) -> "DockerImageArtifact":
         from agent_env.artifact.store import get_artifact_store
         from agent_env.config import get_config
 
-        for url in (tar_gz_s3_url, build_context_s3_url):
+        owner = "DockerImageArtifact.put_tar"
+        tar_gz_object_url = renamed_keyword(owner, "tar_gz_object_url", tar_gz_object_url, "tar_gz_s3_url", tar_gz_s3_url)
+        build_context_object_url = renamed_keyword(
+            owner, "build_context_object_url", build_context_object_url, "build_context_s3_url", build_context_s3_url
+        )
+        if tar_gz_object_url is None:
+            raise TypeError(f"{owner}() missing required keyword argument: 'tar_gz_object_url'")
+        for url in (tar_gz_object_url, build_context_object_url):
             if url:
                 get_config().check_object_url(id, url)
         store = get_artifact_store()
@@ -177,8 +197,8 @@ class DockerImageArtifact(Artifact):
             version=version,
             description=description,
             image_name=image_name,
-            tar_gz_s3_url=tar_gz_s3_url,
-            build_context_s3_url=build_context_s3_url,
+            tar_gz_object_url=tar_gz_object_url,
+            build_context_object_url=build_context_object_url,
         )
         return store.put_document(instance)
 
@@ -311,8 +331,8 @@ class DockerImageArtifact(Artifact):
             id=id,
             description=f"Built from GitHub: {dockerfile_github_url}",
             image_name=image_ref,
-            tar_gz_s3_url=tar_gz_object_url,
-            build_context_s3_url=build_context_object_url,
+            tar_gz_object_url=tar_gz_object_url,
+            build_context_object_url=build_context_object_url,
         )
         logger.info(f"put_from_github: created artifact id={artifact.id} version={artifact.version}")
 

@@ -70,13 +70,18 @@ def test_file_artifact_put_existing(local_stores, tmp_path):
     assert FileArtifact.get("existing").load() == b"already-here"
 
 
-@pytest.mark.parametrize("url", ["fake://home", "fake://home/", "fake://home/dir/"])
-def test_put_existing_refuses_a_url_that_names_no_object(local_stores, url):
+@pytest.mark.parametrize("url,refusal", [
+    ("fake://home", "does not exist"),
+    ("fake://home/", "not a prefix"),
+    ("fake://home/dir/", "not a prefix"),
+])
+def test_put_existing_refuses_a_url_that_names_no_object(local_stores, url, refusal):
+    """A prefix is refused by its trailing slash; anything else is left to the store, which holds no object there."""
     store = FakeObjectStore()
     store.put("dir/x.bin", b"v")
     set_object_store(store)
 
-    with pytest.raises(ValueError, match="not a prefix"):
+    with pytest.raises(ValueError, match=refusal):
         FileArtifact.put_existing(id="prefix", description="d", object_url=url)
 
 
@@ -123,7 +128,7 @@ def test_universe_put_bundled(local_stores, tmp_path):
     }
     prefix = store.object_url("artifacts/universe/bundled/1/")
 
-    uni = FileArtifactUniverse.put_bundled(id="bundled", files=files, s3_url=prefix)
+    uni = FileArtifactUniverse.put_bundled(id="bundled", files=files, prefix_url=prefix)
     loaded = {rel: fa.load() for rel, fa in FileArtifactUniverse.get(uni.id).get_file_artifacts().items()}
     assert loaded == {"a.txt": b"AAA", "sub/b.txt": b"BBB"}
 
@@ -135,7 +140,7 @@ def test_universe_put_existing_lists_via_list_at(local_stores, tmp_path):
     store.put_file("artifacts/universe/existing/1/nested/two.txt", _write(tmp_path, "two.txt", b"2"))
     prefix = store.object_url("artifacts/universe/existing/1/")
 
-    uni = FileArtifactUniverse.put_existing(id="uni-existing", s3_url=prefix)
+    uni = FileArtifactUniverse.put_existing(id="uni-existing", prefix_url=prefix)
     loaded = {rel: fa.load() for rel, fa in FileArtifactUniverse.get(uni.id).get_file_artifacts().items()}
     assert loaded == {"one.txt": b"1", "nested/two.txt": b"2"}
 
@@ -147,7 +152,7 @@ def test_a_skill_prefix_without_skill_md_is_refused_through_the_stores_not_found
     set_object_store(store)
 
     with pytest.raises(ValueError, match="SKILL.md not found"):
-        SkillArtifact.validate(s3_url=store.object_url("skills/demo"), expected_name="demo")
+        SkillArtifact.validate(object_url=store.object_url("skills/demo"), expected_name="demo")
 
 
 def test_skill_artifact_put_and_download(local_stores, tmp_path):
@@ -341,7 +346,7 @@ def test_get_many_writes_each_local_id_into_its_own_encoded_directory(local_stor
     store = local_stores.get_object_store()
     for uid, name in (("@local/t/A", "1"), ("@local/t/A/1", "f")):
         prefix = store.object_url(f"artifacts/file_artifact_universe/{key_segment(uid)}/1/")
-        FileArtifactUniverse.put_bundled(id=uid, files={name: _write(tmp_path, f"src-{name}", b"x")}, s3_url=prefix)
+        FileArtifactUniverse.put_bundled(id=uid, files={name: _write(tmp_path, f"src-{name}", b"x")}, prefix_url=prefix)
 
     out = tmp_path / "out"
     res = CliRunner().invoke(

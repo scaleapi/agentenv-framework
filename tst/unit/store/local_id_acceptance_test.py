@@ -213,7 +213,7 @@ def test_validating_an_local_agent_on_a_remote_provider_keeps_its_fixtures_and_t
 
 def test_a_put_validates_an_local_entity_like_any_other(local_stores, monkeypatch):
     image_url = local_stores.get_object_store().put("artifacts/docker_image/srv-img/1/x.tar.gz", b"x")
-    image = DockerImageArtifact.put_tar("srv-img", description="d", image_name="reg/srv:v1", tar_gz_s3_url=image_url)
+    image = DockerImageArtifact.put_tar("srv-img", description="d", image_name="reg/srv:v1", tar_gz_object_url=image_url)
     MCPServerEnv.put(id="srv", docker_image_artifact=image, environment_name="svc")
     _validation_runs_nothing(monkeypatch)
 
@@ -285,7 +285,7 @@ def test_a_put_with_an_local_id_builds_and_writes_its_images_under_ids_derived_f
                         lambda dockerfile, context, tag, **kwargs: tags.append(tag))
     tarball = local_stores.get_object_store().put("image.tar.gz", b"x")
     monkeypatch.setattr(DockerImageArtifact, "put", classmethod(lambda cls, id, *, description, image_name, **kwargs: (
-        cls.put_tar(id, description=description, image_name=image_name, tar_gz_s3_url=tarball))))
+        cls.put_tar(id, description=description, image_name=image_name, tar_gz_object_url=tarball))))
     argv = [arg.format(dockerfile=dockerfile) for arg in argv]
     flag = "--frontend-dockerfile" if "--backend-dockerfile" in argv else "--dockerfile"
 

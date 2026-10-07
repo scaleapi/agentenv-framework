@@ -1,7 +1,7 @@
 """CliArtifact — packages a CLI tool (entrypoint + supporting files) as a versioned artifact.
 
 A CliArtifact references one FileArtifactUniverse bundling every file in the CLI
-directory tree, colocated under a single S3 prefix (`artifacts/cli/<key_segment(id)>/<version>/`).
+directory tree, colocated under a single object-store prefix (`artifacts/cli/<key_segment(id)>/<version>/`).
 The `entrypoint` field is a relative path within that prefix that consumers
 (e.g. an agent gateway) chmod +x and symlink onto PATH.
 """
@@ -9,11 +9,11 @@ The `entrypoint` field is a relative path within that prefix that consumers
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
-from pydantic import Field
+from pydantic import ConfigDict, Field, model_serializer
 
-from agent_env.artifact.artifact import Artifact
+from agent_env.artifact.artifact import Artifact, _write_twin
 from agent_env.config import get_config
 from agent_env.store.ids import derive_id, key_segment
 
@@ -22,6 +22,8 @@ if TYPE_CHECKING:
 
 
 class CliArtifact(Artifact):
+    model_config = ConfigDict(populate_by_name=True)
+
     type: Literal["cli"] = "cli"
 
     cli_files_id: str = Field(description="ID of the FileArtifactUniverse bundling every file in the CLI tree")
@@ -31,6 +33,13 @@ class CliArtifact(Artifact):
 
     env_id: Optional[str] = Field(default=None, description="Source env id this CLI was generated from, if any")
     env_version: Optional[int] = Field(default=None, description="Source env version this CLI was generated from, if any")
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: Any) -> dict[str, Any]:
+        # Dual-write, from the attribute: `alias=` emits one spelling, which one depending on the caller's `by_alias`.
+        data = handler(self)
+        _write_twin(data, "cli_s3_url", "cli_object_url", self.cli_object_url)
+        return data
 
     @classmethod
     def put(
@@ -62,15 +71,15 @@ class CliArtifact(Artifact):
         store = get_artifact_store()
         version = store.next_version(id)
         key = f"{get_config().get_artifact_key_prefix()}artifacts/cli/{key_segment(id)}/{version}/"
-        cli_s3_url = get_config().get_object_store_for(id).object_url(key)
+        cli_object_url = get_config().get_object_store_for(id).object_url(key)
 
-        universe = FileArtifactUniverse.put_bundled(id=derive_id(id, "files"), files=files, s3_url=cli_s3_url)
+        universe = FileArtifactUniverse.put_bundled(id=derive_id(id, "files"), files=files, prefix_url=cli_object_url)
 
         instance = cls(
             id=id,
             version=version,
             cli_files_id=universe.id,
-            cli_s3_url=cli_s3_url,
+            cli_object_url=cli_object_url,
             entrypoint=entrypoint,
             command_name=command_name,
             env_id=env_id,

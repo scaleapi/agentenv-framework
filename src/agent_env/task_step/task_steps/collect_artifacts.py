@@ -730,7 +730,7 @@ class CollectArtifactsTaskStep(TaskStep):
 
             try:
                 # The upload owns the file from here: a cancel must not remove it under the upload.
-                s3_url = await finish_on_thread(
+                object_url = await finish_on_thread(
                     functools.partial(
                         _upload_file, store, local_path, artifact_id, version, object_name, content_type,
                     ),
@@ -738,11 +738,11 @@ class CollectArtifactsTaskStep(TaskStep):
                     if_never_run=functools.partial(_remove, local_path),
                 )
 
-                collected[key] = s3_url
+                collected[key] = object_url
                 self._register_file_artifact(
-                    store, file_artifacts, artifact_id, key, object_name, content_type, s3_url, context,
+                    store, file_artifacts, artifact_id, key, object_name, content_type, object_url, context,
                 )
-                logger.info(f"Collected {source_path} -> {s3_url} ({size} bytes) via controller")
+                logger.info(f"Collected {source_path} -> {object_url} ({size} bytes) via controller")
             except Exception as e:
                 logger.warning(f"Failed to collect {source_path} via controller: {e}")
                 hard_failures.append(source_path)
@@ -931,15 +931,15 @@ class CollectArtifactsTaskStep(TaskStep):
                 ext = os.path.splitext(object_name)[1]
                 content_type = _CONTENT_TYPES.get(ext, "application/octet-stream")
 
-                s3_url = await self._collect_file(
+                object_url = await self._collect_file(
                     sandbox, container, source_path, object_name, store, artifact_id, version, content_type,
                 )
 
-                collected[key] = s3_url
+                collected[key] = object_url
                 self._register_file_artifact(
-                    store, file_artifacts, artifact_id, key, object_name, content_type, s3_url, context,
+                    store, file_artifacts, artifact_id, key, object_name, content_type, object_url, context,
                 )
-                logger.info(f"Collected {source_path} -> {s3_url} ({file_size} bytes)")
+                logger.info(f"Collected {source_path} -> {object_url} ({file_size} bytes)")
 
             except Exception as e:
                 logger.warning(f"Failed to collect {source_path}: {e}")
@@ -956,7 +956,7 @@ class CollectArtifactsTaskStep(TaskStep):
         await provider.close()
         return collected, file_artifacts, hard_failures
 
-    def _register_file_artifact(self, store, file_artifacts, artifact_id, key, object_name, content_type, s3_url, context):
+    def _register_file_artifact(self, store, file_artifacts, artifact_id, key, object_name, content_type, object_url, context):
         """Register a FileArtifact document pointing at the already-uploaded S3
         object. We do NOT re-upload the bytes — FileArtifact.object_url is just a URL
         reference, and the object is already in S3 under the collected_artifacts
@@ -973,7 +973,7 @@ class CollectArtifactsTaskStep(TaskStep):
             description=f"Collected artifact '{object_name}' from task instance {context.instance_id or artifact_id}",
             filename=object_name.split("/")[-1],
             content_type=content_type,
-            s3_url=s3_url,
+            object_url=object_url,
         )
         try:
             store.put_document(fa)

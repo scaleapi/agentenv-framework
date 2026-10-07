@@ -14,6 +14,13 @@ if TYPE_CHECKING:
     from agent_env.artifact.store import ArtifactQuery
 
 
+def _write_twin(data: dict[str, Any], legacy: str, neutral: str, value: Any) -> None:
+    """Write a renamed field under both its legacy and its neutral key, when the dump has it under either: readers
+    of either spelling keep working, and a field the dump excluded stays excluded."""
+    if legacy in data or neutral in data:
+        data[legacy] = data[neutral] = value
+
+
 class Artifact(BaseModel):
     """Base class for all environment artifacts. Immutable - each modification creates a new version."""
 

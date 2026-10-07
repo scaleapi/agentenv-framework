@@ -167,7 +167,7 @@ def test_an_env_snapshot_is_named_after_its_env(local_stores, tmp_path, monkeypa
     image = _written_by(lambda: EnvSnapshot.create("inst-1"), monkeypatch, DockerImageArtifact, "put_tar")
 
     assert (image["id"], image["image_name"]) == (artifact_id, image_tag)
-    assert re.search(rf"/{re.escape(key)}-[0-9a-f]{{16}}\.tar\.gz$", image["tar_gz_s3_url"])
+    assert re.search(rf"/{re.escape(key)}-[0-9a-f]{{16}}\.tar\.gz$", image["tar_gz_object_url"])
     assert f"docker build --platform linux/amd64 -t {image_tag} /tmp/snapshot-build" in sandbox.scripts
 
 
@@ -249,9 +249,9 @@ def test_verifier_outputs_are_named_and_keyed_after_the_run(local_stores, monkey
     monkeypatch.setattr(verifier_module.uuid, "uuid4", lambda: uuid.UUID(hex="0123456789ab" + "0" * 20))
     uploads: list[tuple[str, str]] = []
 
-    def record(text, artifact_id, description, s3_url):
-        uploads.append((artifact_id, s3_url))
-        return SimpleNamespace(id=artifact_id, version=1, object_url=s3_url)
+    def record(text, artifact_id, description, object_url):
+        uploads.append((artifact_id, object_url))
+        return SimpleNamespace(id=artifact_id, version=1, object_url=object_url)
 
     monkeypatch.setattr(verifier_module.RunContainerUnitTestsVerifierTaskStep, "_upload_text_artifact", staticmethod(record))
     ctx = TaskStepContext(instance_id=instance_id)
