@@ -5,42 +5,169 @@ Linux VMs booted from Sail's `devbox` image, which ships Docker and Compose v2 a
 `modal_vm` and `e2b`, it is a VM provider: agent-env's docker-in-VM flows run on it unchanged. That covers
 the gateway's docker-compose, an agent's `docker run`, image loading and artifact collection.
 
-## Install
+## Set up
+
+### 1. Install the extra
 
 The Sail SDK is an optional extra:
 
 ```bash
-pip install 'agentenv-framework[sail]'
+pip install 'agentenv-framework[sail]'      # or: uv add 'agentenv-framework[sail]'
 ```
 
 Without it, selecting `sail_vm` fails with a `ConfigError` that names this extra. Nothing else needs it.
 
-## Configure
+### 2. Get a Sail API key
 
-Put the Sail API key in your secret store, then add the provider to `.agentenv/config.toml`:
+Create a key in the [Sail dashboard](https://app.sailresearch.com). For local work, export it:
 
-```toml
-[sandbox.providers.sail_vm.config]
-api_key = "secret:sail_api_key"   # required; env:SAIL_API_KEY for local development
-app = "agent-env"                 # the Sail App every Sailbox belongs to
-min_size = "s"                    # the smallest Sailbox size to pick: s, m or l
-auto_sleep = false                # let Sail sleep idle Sailboxes; off by default
-# auto_sleep_min_idle_seconds = 600   # 1-3600; turns auto_sleep on
-# runtime_threads = 16                # the SDK's network thread pool (1-256)
-inject_model_key = true           # keep an agent's model key out of its Sailbox (below)
+```bash
+export SAIL_API_KEY=sk_...
 ```
 
-Use it for a run with `agent-env run <bundle> --sandbox sail_vm`, or by default with:
+For a shared deployment, put it in your secret store instead, for example as `sail_api_key`, and reference
+it with `secret:sail_api_key`. Never put the key itself in `config.toml`.
+
+### 3. Configure
+
+A complete `.agentenv/config.toml` that runs every environment and agent on Sailboxes, with the local stores:
 
 ```toml
 [sandbox]
-default = "sail_vm"
-agent_default = "sail_vm"
+default       = "sail_vm"   # environments and sandboxes
+agent_default = "sail_vm"   # agents
+
+[sandbox.providers.sail_vm.config]
+api_key = "env:SAIL_API_KEY"   # or "secret:sail_api_key"
+
+# The model endpoint agents call. Sail injects its key into their requests (see below), so it must be HTTPS.
+[model]
+base_url = "https://litellm.example.com"
+api_key  = "env:LITELLM_API_KEY"
 ```
+
+To keep the local default and use Sail per run instead, add only the `[sandbox.providers.sail_vm.config]`
+table and pass `--sandbox sail_vm`. `agent-env config show` prints the file in effect and masks the key.
+
+### 4. Run something
+
+The bundled `hello` task deploys a Sailbox, loads a file into it and checks it, with no model needed:
+
+```console
+$ agent-env run hello --sandbox sail_vm
+[tasks/hello.json] step 1/3 box (deploy_sandbox)
+[tasks/hello.json] step 1/3 box done in 2.4s
+[tasks/hello.json] step 2/3 load (load_artifact)
+[tasks/hello.json] step 3/3 hello (verify_sandbox)
+[tasks/hello.json] passed in 3.1s
+
+Tasks:
+  tasks/hello.json v1: passed (hello: 1), 3.1s
+
+Tore down 1 sandbox.
+```
+
+`agent-env -v run …` also logs each Sailbox as it starts
+(`Sail VM sandbox started: sailbox_id=sb_… app=agent-env size=s …`).
+
+## Configuration reference
+
+All keys go under `[sandbox.providers.sail_vm.config]`. Unknown keys are refused.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `api_key` | required | The Sail API key, as an `env:` or `secret:` reference. |
+| `app` | `"agent-env"` | The Sail App every Sailbox belongs to; Sail groups and bills by App. |
+| `min_size` | `"s"` | The smallest Sailbox size to pick: `s`, `m` or `l`. |
+| `auto_sleep` | `false` | Let Sail sleep an idle Sailbox; the first request after waking waits a few seconds. |
+| `auto_sleep_min_idle_seconds` | unset | 1–3600 seconds of idleness before Sail may sleep a Sailbox; turns `auto_sleep` on. |
+| `runtime_threads` | the SDK's own | The size of the SDK's network thread pool (1–256). |
+| `inject_model_key` | `true` | Keep an agent's model key out of its Sailbox (see "The agent's model key"). |
 
 A process uses one Sail API key: the SDK reads it from `SAIL_API_KEY` when it builds its process-wide
 client. The provider sets that variable only for that one build and then restores it. Workloads never
 see the key.
+
+## Examples
+
+**A shared deployment.** The key comes from the secret store, and costs are grouped under their own App:
+
+```toml
+[sandbox]
+default       = "sail_vm"
+agent_default = "sail_vm"
+attribution   = { team = "env-pod", project_id = "env:PROJECT_ID?unassigned" }
+
+[sandbox.providers.sail_vm.config]
+api_key  = "secret:sail_api_key"
+app      = "agent-env-prod"
+min_size = "m"
+
+[model]
+base_url = "https://litellm.example.com"
+api_key  = "secret:litellm_api_key"
+```
+
+**A per-run model key.** A run's override key is injected the same way as the configured one, so short-lived
+per-run keys never reach a Sailbox either:
+
+```bash
+agent-env task run --id my-task --agent-sandbox sail_vm --env-sandbox sail_vm \
+  --litellm-api-key "$RUN_SCOPED_KEY" --judge-litellm-api-key "$JUDGE_SCOPED_KEY"
+```
+
+**A sandbox with restricted egress.** In a task, `deploy_sandbox` and `deploy_agent` take a
+`network_policy`; Sail enforces it for the VM and its containers:
+
+```json
+{"id": "box", "type": "deploy_sandbox", "sandbox_name": "box", "sandbox_mode": "vm", "sandbox_type": "sail_vm",
+ "network_policy": {"mode": "allowlist", "allow_hosts": ["pypi.org", "*.github.com"], "allow_cidrs": ["10.0.0.0/8"]}}
+```
+
+**Long, mostly idle runs.** Let Sail sleep a Sailbox after 10 idle minutes; it wakes on traffic or a command:
+
+```toml
+[sandbox.providers.sail_vm.config]
+api_key = "secret:sail_api_key"
+auto_sleep_min_idle_seconds = 600
+```
+
+**An internal, non-HTTPS model endpoint.** Injection needs HTTPS, so pass the key into the Sailbox as other
+providers do:
+
+```toml
+[sandbox.providers.sail_vm.config]
+api_key = "secret:sail_api_key"
+inject_model_key = false
+```
+
+**A fallback chain.** Try Sail first and fall back to E2B when a Sailbox can't be created in time:
+
+```toml
+[sandbox]
+default = "sail_vm,e2b"
+```
+
+**From Python.** Build the configured provider and create a VM directly:
+
+```python
+import asyncio
+
+from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider
+
+
+async def main() -> None:
+    provider = build_sandbox_provider("sail_vm")
+    sandbox = await provider.create_vm(cpu=1, memory=2048, exposed_ports=[8080], timeout=900)
+    try:
+        print(await sandbox.exec_with_output("docker", "info", "--format", "{{.ServerVersion}}"))
+        print(sandbox.tunnel_urls[8080])   # https://sb-<id>-8080.sail.box
+    finally:
+        await sandbox.terminate()
+
+
+asyncio.run(main())
+```
 
 ## Resources and lifetime
 
