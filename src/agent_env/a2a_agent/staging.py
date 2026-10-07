@@ -26,8 +26,14 @@ from typing import Any, BinaryIO
 from urllib.parse import quote, urlsplit
 
 import httpx
-from agentenv_protocol.a2a_agent import STAGING_V1_URI
-from agentenv_protocol.transfers import HttpGetGrant, HttpPostPolicyGrant, HttpPutGrant, redacting_request_urls
+from agentenv_protocol.a2a_agent import STAGING_ENDPOINT, STAGING_V1_URI
+from agentenv_protocol.transfers import (
+    STAGING_PATH_HEADER,
+    HttpGetGrant,
+    HttpPostPolicyGrant,
+    HttpPutGrant,
+    redacting_request_urls,
+)
 
 from agent_env.config import get_config
 from agent_env.store.base import ObjectAlreadyExistsError
@@ -89,8 +95,14 @@ def staged_store(store: ObjectStore, a2a_url: str, card: Mapping[str, Any] | Non
 
 
 def _staged(store: ObjectStore, endpoint: str, card: Mapping[str, Any] | None) -> StagedObjectStore:
-    limit = _staging_params(card).get("max_bytes")
-    return StagedObjectStore(store, endpoint, max_bytes=limit if isinstance(limit, int) and limit > 0 else None)
+    params = _staging_params(card)
+    limit = params.get("max_bytes")
+    return StagedObjectStore(
+        store,
+        endpoint,
+        endpoint_path=params["endpoint"].rstrip("/"),
+        max_bytes=limit if isinstance(limit, int) and limit > 0 else None,
+    )
 
 
 @dataclass(frozen=True)
@@ -116,13 +128,20 @@ class StagedObjectStore:
     One serves one extension call: build the call with it, then pass it to ``invoke_transfer``, which
     pushes the reads before the call, pulls the writes after it, and clears the call's staging either
     way. A namespace it issues outlives the call; ``namespaces`` names them for the caller to keep.
+
+    Each grant also names its path on the agent's own server, below ``endpoint_path``, in an
+    ``AgentEnv-Staging-Path`` header: a sandbox can't always call its own public URL, so the agent's
+    transfer helpers reach the path over loopback instead.
     """
 
     supports_transfer_grants = True
 
-    def __init__(self, store: ObjectStore, endpoint: str, *, max_bytes: int | None = None) -> None:
+    def __init__(
+        self, store: ObjectStore, endpoint: str, *, endpoint_path: str = STAGING_ENDPOINT, max_bytes: int | None = None
+    ) -> None:
         self.store = store
         self.endpoint = endpoint
+        self.endpoint_path = endpoint_path  # where the agent's own server serves ``endpoint``
         self.max_bytes = max_bytes  # what the agent's card says its staging holds
         self._call = secrets.token_urlsafe(24)
         self._reads: list[_Staged] = []
@@ -142,20 +161,22 @@ class StagedObjectStore:
         return metadata
 
     def issue_read_grant(self, object_url: str, *, expires_in: int | None = None) -> HttpGetGrant:
-        staged = self._stage(self._reads, object_url)
-        return HttpGetGrant(kind="http-get", url=self._url(staged.path), expires_at=self._expiry(expires_in))
+        url = self._url(self._stage(self._reads, object_url).path)
+        return HttpGetGrant(kind="http-get", url=url, expires_at=self._expiry(expires_in), headers=self._on_agent(url))
 
     def issue_write_grant(
         self, object_url: str, *, media_type: str, max_bytes: int, expires_in: int | None = None
     ) -> HttpPutGrant:
-        staged = self._stage(self._writes, object_url, media_type, max_bytes)
-        return HttpPutGrant(kind="http-put", url=self._url(staged.path), expires_at=self._expiry(expires_in))
+        url = self._url(self._stage(self._writes, object_url, media_type, max_bytes).path)
+        return HttpPutGrant(kind="http-put", url=url, expires_at=self._expiry(expires_in), headers=self._on_agent(url))
 
     def issue_upload_policy(self, prefix_url: str, *, max_object_bytes: int, expires_in: int) -> UploadPolicy:
         url = f"{self.endpoint}/{secrets.token_urlsafe(24)}"
         self.namespaces.append(StagedNamespace(url, prefix_url, max_object_bytes))
         return UploadPolicy(
-            write=HttpPostPolicyGrant(kind="http-post-policy", url=url, fields={}, path_field="key", file_field="file"),
+            write=HttpPostPolicyGrant(
+                kind="http-post-policy", url=url, fields={}, path_field="key", file_field="file", headers=self._on_agent(url)
+            ),
             expires_at=self._expiry(expires_in),
         )
 
@@ -199,6 +220,10 @@ class StagedObjectStore:
 
     def _url(self, path: str) -> str:
         return f"{self.endpoint}/{self._call}" + (f"/{quote(path)}" if path else "")
+
+    def _on_agent(self, url: str) -> dict[str, str]:
+        """The header naming the path the agent's own server serves ``url``, a URL below the endpoint, at."""
+        return {STAGING_PATH_HEADER: self.endpoint_path + url[len(self.endpoint):]}
 
     def _expiry(self, expires_in: int | None) -> datetime:
         seconds = expires_in if expires_in is not None else self.store.grant_lifetime_seconds

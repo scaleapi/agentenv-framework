@@ -964,3 +964,147 @@ async def test_namespace_upload_of_bytes_declares_its_length(
         assert "transfer-encoding" not in request.headers
         assert int(request.headers["content-length"]) == len(request.content)
     assert from_bytes == from_file
+
+
+_PUBLIC = "https://agent.example.test/sandbox/vm-8000"  # the provider routes this prefix to the agent
+_STAGED = "/ext/staging/" + "c" * 32 + "/0"
+_NAMESPACE = "/ext/staging/" + "n" * 32
+
+
+def _on_own_staging(content: bytes) -> tuple[WriteObject, ReadObject, WriteNamespaceGrant]:
+    """Grants naming paths on their holder's own staging, as agent-env stages them."""
+    headers = {transfers.STAGING_PATH_HEADER: _STAGED}
+    write = WriteObject(
+        media_type="application/json",
+        max_bytes=1024,
+        write=HttpPutGrant(kind="http-put", url=_PUBLIC + _STAGED, expires_at=_expiry(), headers=headers),
+    )
+    read = ReadObject(
+        media_type="application/json",
+        max_bytes=1024,
+        size_bytes=len(content),
+        sha256=hashlib.sha256(content).hexdigest(),
+        read=HttpGetGrant(kind="http-get", url=_PUBLIC + _STAGED, expires_at=_expiry(), headers=headers),
+    )
+    namespace = _namespace_grant().model_copy(
+        update={
+            "write": HttpPostPolicyGrant(
+                kind="http-post-policy",
+                url=_PUBLIC + _NAMESPACE,
+                fields={},
+                path_field="key",
+                file_field="file",
+                headers={transfers.STAGING_PATH_HEADER: _NAMESPACE},
+            )
+        }
+    )
+    return write, read, namespace
+
+
+@pytest.mark.asyncio
+async def test_a_grant_on_its_holders_own_staging_goes_to_its_server_over_loopback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("A2A_PORT", "8123")
+    content = b'{"trajectory":[]}'
+    sent: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        sent.append(f"{request.method} {request.url}")
+        if request.url.host != "127.0.0.1":
+            raise httpx.ConnectError("the sandbox can't call its own public URL", request=request)
+        request.read()
+        return _served(content) if request.method == "GET" else httpx.Response(201)
+
+    _route(monkeypatch, handle)
+    write, read, namespace = _on_own_staging(content)
+
+    await upload(write, content)
+    await download(read, tmp_path / "trajectory.json")
+    await NamespaceUploader(namespace).upload("000000.tar", b"increment")
+
+    assert sent == [
+        f"PUT http://127.0.0.1:8123{_STAGED}",
+        f"GET http://127.0.0.1:8123{_STAGED}",
+        f"POST http://127.0.0.1:8123{_NAMESPACE}",
+    ]
+    assert (tmp_path / "trajectory.json").read_bytes() == content
+
+
+@pytest.mark.asyncio
+async def test_a_holder_whose_server_isnt_listening_on_loopback_uses_the_grants_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("A2A_PORT", "8123")
+    content = b'{"trajectory":[]}'
+    sent: list[str] = []
+    bodies: list[bytes] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        sent.append(request.url.host)
+        if request.url.host == "127.0.0.1":
+            raise httpx.ConnectError("refused", request=request)
+        bodies.append(request.read())
+        return _served(content) if request.method == "GET" else httpx.Response(201)
+
+    _route(monkeypatch, handle)
+    write, read, namespace = _on_own_staging(content)
+
+    uploaded = await upload(write, content)
+    await download(read, tmp_path / "trajectory.json")
+    increment = await NamespaceUploader(namespace).upload("000000.tar", b"increment")
+
+    assert sent == ["127.0.0.1", "agent.example.test"] * 3
+    assert bodies[0] == content and uploaded.size_bytes == len(content)
+    assert b"increment" in bodies[2] and increment.size_bytes == len(b"increment")
+    assert (tmp_path / "trajectory.json").read_bytes() == content
+
+
+@pytest.mark.asyncio
+async def test_an_answer_from_the_holders_own_server_is_final(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("A2A_PORT", "8123")
+    requests: list[httpx.Request] = []
+    _route(monkeypatch, _respond(requests, 404))
+    write, _, _ = _on_own_staging(b"")
+
+    with pytest.raises(TransferError) as exc_info:
+        await upload(write, b"{}")
+
+    assert exc_info.value.code == "transfer_rejected"
+    assert [request.url.host for request in requests] == ["127.0.0.1"]
+
+
+@pytest.mark.parametrize(
+    ("port", "path"),
+    [
+        (None, _STAGED),  # agent-env didn't deploy the holder
+        ("http", _STAGED),
+        ("0", _STAGED),
+        ("65536", _STAGED),
+        ("8123", None),  # not staged
+        ("8123", "/ext/staging/" + "d" * 32 + "/0"),  # not this URL's path
+        ("8123", _STAGED.lstrip("/")),
+    ],
+)
+def test_a_grant_goes_to_its_url_unless_it_names_a_path_its_holders_known_port_serves(
+    monkeypatch: pytest.MonkeyPatch, port: str | None, path: str | None
+) -> None:
+    if port is None:
+        monkeypatch.delenv("A2A_PORT", raising=False)
+    else:
+        monkeypatch.setenv("A2A_PORT", port)
+    headers = None if path is None else {transfers.STAGING_PATH_HEADER: path}
+
+    assert transfers.loopback_url(_PUBLIC + _STAGED, headers) is None
+
+
+def test_the_loopback_url_keeps_the_grants_query_and_reads_the_header_in_any_case(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("A2A_PORT", "8123")
+    headers = {transfers.STAGING_PATH_HEADER.lower(): _STAGED}
+
+    assert (
+        transfers.loopback_url(f"{_PUBLIC}{_STAGED}?part=1", headers)
+        == f"http://127.0.0.1:8123{_STAGED}?part=1"
+    )

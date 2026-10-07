@@ -1,7 +1,9 @@
 """An agent the object store's grants cannot reach gets its objects through its own staging routes: pushed
 before a call, pulled after it, and a changelog drained into the store while the agent works and before it
 goes. The agent here is an SDK agent served in-process at an HTTPS URL, so every request agent-env and the
-agent make, the agent's own calls to its staging included, runs without a network."""
+agent make, the agent's own calls to its staging included, runs without a network. Each flow runs twice:
+with the agent reaching its staging through its public URL, and in a sandbox that can't call its own public
+URL, where it reaches its staging over loopback."""
 
 from __future__ import annotations
 
@@ -32,6 +34,9 @@ from agentenv_protocol.a2a_agent import (
     extension,
     upload,
 )
+from agentenv_protocol import transfers
+from agentenv_protocol.transfers import STAGING_PATH_HEADER, loopback_url
+from starlette.responses import PlainTextResponse
 from starlette.testclient import TestClient
 
 import agent_env.a2a_agent.staging as staging
@@ -109,19 +114,45 @@ class _Agent(AgentEnvAgent):
         return {"count": len(request.increments), "context_id": request.target_context_id}
 
 
-@pytest.fixture
-def agent(tmp_path, monkeypatch):
-    """The agent's app, which every HTTP client in this process reaches at ``URL``."""
-    monkeypatch.setenv("AGENTENV_STAGING_DIR", str(tmp_path / "agent-staging"))
-    _Agent.workdir = tmp_path / "agent"
-    _Agent.received = {}
-    _Agent.uploader = None
-    app = _Agent().create_app()
+def _calling_its_own_url_fails(app):
+    """``app`` in a sandbox that can't call its own public URL: a request the agent sends its staging there
+    fails, as one sent over loopback doesn't. Only the agent's own requests carry the staging path header."""
+
+    async def sandboxed(scope, receive, send):
+        headers = dict(scope.get("headers") or ())
+        host = headers.get(b"host", b"").split(b":")[0]
+        if scope["type"] == "http" and STAGING_PATH_HEADER.lower().encode() in headers and host != b"127.0.0.1":
+            await PlainTextResponse("the sandbox can't call its own public URL", status_code=502)(scope, receive, send)
+            return
+        await app(scope, receive, send)
+
+    return sandboxed
+
+
+def _serve(app, monkeypatch) -> None:
+    """Send every HTTP client in this process to ``app``, whatever URL it asks for."""
     real_async_client = httpx.AsyncClient
     monkeypatch.setattr(
         httpx, "AsyncClient", lambda **kwargs: real_async_client(transport=httpx.ASGITransport(app=app), **kwargs)
     )
     monkeypatch.setattr(httpx, "Client", lambda **kwargs: TestClient(app, base_url=URL, follow_redirects=False))
+
+
+@pytest.fixture(params=["public URL", "loopback"])
+def agent(request, tmp_path, monkeypatch):
+    """The agent's app, which every HTTP client in this process reaches at ``URL``: reaching its staging
+    through its public URL, or over loopback from a sandbox that can't call that URL."""
+    monkeypatch.setenv("AGENTENV_STAGING_DIR", str(tmp_path / "agent-staging"))
+    _Agent.workdir = tmp_path / "agent"
+    _Agent.received = {}
+    _Agent.uploader = None
+    app = _Agent().create_app()
+    if request.param == "loopback":
+        monkeypatch.setenv("A2A_PORT", "8000")
+        app = _calling_its_own_url_fails(app)
+    else:
+        monkeypatch.delenv("A2A_PORT", raising=False)
+    _serve(app, monkeypatch)
     return app
 
 
@@ -300,6 +331,38 @@ def test_staging_is_only_for_agents_the_grants_cannot_reach(agent, store):
     assert transfer_store(store, URL, {}, sandbox_type="modal") is store  # no staging: the inline forms, or a refusal
     assert transfer_store(store, "http://agent.example.test", card, sandbox_type="modal") is store  # no HTTPS grant
     assert isinstance(transfer_store(store, URL, card, sandbox_type="modal"), StagedObjectStore)
+
+
+def test_each_staged_grant_names_its_path_on_the_agents_own_server(store, monkeypatch):
+    """The provider routes ``/sandbox/vm-8000`` on its host to the agent, whose server serves ``/ext/staging``."""
+    monkeypatch.setenv("A2A_PORT", "8000")
+    public = f"{URL}/sandbox/vm-8000"
+    granting = transfer_store(store, public, _card(_Agent().create_app()), sandbox_type="modal")
+    read = granting.issue_read_grant(store.put("in/x", b"x"))
+    write = granting.issue_write_grant(store.object_url("out/y"), media_type="application/json", max_bytes=10)
+    policy = granting.issue_upload_policy(store.object_url("ns/"), max_object_bytes=10, expires_in=60).write
+
+    for grant in (read, write, policy):
+        path = grant.headers[STAGING_PATH_HEADER]
+        assert path.startswith("/ext/staging/") and grant.url == public + path
+        assert loopback_url(grant.url, grant.headers) == f"http://127.0.0.1:8000{path}"
+
+
+@pytest.mark.asyncio
+async def test_an_agent_that_cant_call_its_own_url_and_has_no_loopback_port_fails_saying_why(tmp_path, monkeypatch, store):
+    monkeypatch.setenv("AGENTENV_STAGING_DIR", str(tmp_path / "agent-staging"))
+    monkeypatch.delenv("A2A_PORT", raising=False)
+    monkeypatch.setattr(transfers, "_RETRY_BACKOFF_SECONDS", 0)
+    app = _calling_its_own_url_fails(_Agent().create_app())
+    _serve(app, monkeypatch)
+    card = _card(app)
+    granting = transfer_store(store, URL, card, sandbox_type="modal")
+    _, path = _method(card, TRAJECTORY_V1.uri, "get")
+    target = store.object_url("trajectories/t.json")
+
+    with pytest.raises(httpx.HTTPStatusError, match="reaches its staging over loopback, on its A2A_PORT"):
+        await fetch_trajectory(URL + path, {"task_id": "t"}, upload=TrajectoryUpload.to(granting, target), store=granting)
+    assert store.get_object_metadata_at(target) is None
 
 
 @pytest.mark.asyncio

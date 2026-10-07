@@ -622,8 +622,15 @@ itself. Every SDK agent serves the staging extension, `urn:agentenv:staging/v1`,
 a small object store at `/ext/staging` on its own server. Before a call
 AgentEnv pushes what the agent will read into it; after the call it pulls what
 the agent wrote. The grants it sends are the ordinary ones above, with URLs
-naming staged paths on the agent's own URL, so handlers and helpers are
-unchanged.
+naming staged paths on the agent's own URL, so handlers are unchanged.
+
+A sandbox can't always call its own public URL, so each of those grants also
+carries an `AgentEnv-Staging-Path` header: the path the agent's own server
+serves the URL at, such as `/ext/staging/{path}`. The helpers send such a
+request to that server over loopback, `http://127.0.0.1:$A2A_PORT/ext/staging/{path}`
+(AgentEnv deploys every agent with `A2A_PORT` set), and to the grant's URL only
+when nothing listens there. An agent with transfer code of its own gets the same
+URL from `transfers.loopback_url(url, headers)`.
 
 | Route | Does |
 | --- | --- |
