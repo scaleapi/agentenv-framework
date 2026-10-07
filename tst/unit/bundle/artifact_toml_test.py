@@ -1,7 +1,8 @@
 """Environment and environment_universe artifacts written from a bundle's artifact folders: an environment over the
 file its folder holds or the file artifact it names, and a universe laid out as ``environment-universe get
 --output-dir`` writes one, adding the environments it names. Each is checked before any write, rewritten when
-what it records changes, and equal, field for field, to one the CLI writes from the same files."""
+what it records changes, and equal, field for field, to one the CLI writes from the same files. Each environment
+the bundle writes must seed a server of the env a task loads it into."""
 
 import json
 
@@ -9,6 +10,7 @@ import pytest
 from click.testing import CliRunner
 
 from agent_env.artifact import EnvironmentArtifact, EnvironmentUniverseArtifact, FileArtifact
+from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.registry import canonical_type
 from agent_env.artifact.store import get_artifact_store
 from agent_env.bundle import BundleError, parse_bundle
@@ -16,6 +18,8 @@ from agent_env.bundle.materialize import materialize
 from agent_env.bundle.plan import check_bundle
 from agent_env.bundle.resolve import resolve_bundle
 from agent_env.cli import cli
+from agent_env.env.envs.mcp_server import MCPServerEnv
+from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.store.routing import namespace_routing
 from tst.unit.bundle._support import RefusingStore, layout, local_store, plan_of
 
@@ -387,7 +391,8 @@ def test_a_universe_folder_left_without_its_file_is_refused_rather_than_dropped(
 
 def test_a_universe_folder_named_like_an_image_the_bundle_builds_is_refused(bundle_dir):
     layout(bundle_dir, {**_refused(_universe("slack") | {"artifacts/slack/env_image/a.json": "{}"}),
-                        "envs/slack/Dockerfile": "FROM scratch\n", "envs/slack/env.toml": 'environment_name = "s"\n',
+                        "envs/slack/Dockerfile": "FROM scratch\n",
+                        "envs/slack/env.toml": 'environment_name = "env_image"\n',
                         "tasks/t.json": json.dumps([{"id": "env", "type": "deploy_env", "env_id": "slack"},
                                                     {"id": "load", "type": "load_artifact", "env_id": "slack",
                                                      "artifact_id": "slack", "depends_on": ["env"]}])})
@@ -396,6 +401,87 @@ def test_a_universe_folder_named_like_an_image_the_bundle_builds_is_refused(bund
         "artifacts/slack/env_image: '@local/~/triage/slack__env_image' is also written by the image built for "
         "envs/slack; give each its own id",)
     assert not local_store().path.exists()
+
+
+# Loaded into an env
+
+
+def _server(name):
+    return {f"envs/{name}/Dockerfile": "FROM scratch\nCOPY . /app\n",
+            f"envs/{name}/env.toml": f'environment_name = "{name}"\n'}
+
+
+SUITE = {**_server("crm"), **_server("slack"),
+         "envs/suite/env.toml": 'type = "multi"\nmcp_server_envs = ["crm", "slack"]\n'}
+
+
+def _loading(files, artifact, env):
+    return {**files, "tasks/t.json": json.dumps([
+        {"id": "env", "type": "deploy_env", "env_id": env},
+        {"id": "load", "type": "load_artifact", "env_id": env, "artifact_id": artifact, "depends_on": ["env"]},
+    ])}
+
+
+def _store_server(name):
+    image = get_artifact_store().put_document(DockerImageArtifact(
+        id=f"{name}-image", description=name, image_name=f"registry.example/{name}:v1",
+        tar_gz_s3_url=f"s3://bucket/{name}.tar.gz"))
+    return MCPServerEnv.put(id=name, docker_image_artifact=image, environment_name=name)
+
+
+def test_a_universe_folder_named_after_no_server_of_the_env_it_loads_into_is_refused(bundle_dir, monkeypatch):
+    layout(bundle_dir, _loading({**SUITE, **_universe("world"), "artifacts/world/crm/a.json": "{}",
+                                 "artifacts/world/slakc/a.json": "{}"}, "world", "suite"))
+    problem = ("tasks/t.json: step 'load': artifacts/world/slakc seeds an environment named 'slakc', and envs/suite "
+               "has no server by that name ('crm', 'slack'); name it after the server it seeds, or leave it out")
+
+    assert _problems(bundle_dir) == (problem,)
+    monkeypatch.setattr("agent_env.config.runtime.Config.get_document_store", lambda self: RefusingStore())
+    with pytest.raises(BundleError) as caught:
+        check_bundle(resolve_bundle(parse_bundle(bundle_dir)))
+    assert caught.value.problems == (problem,)
+
+
+def test_an_environment_named_after_no_server_of_the_env_it_loads_into_is_refused(bundle_dir):
+    layout(bundle_dir, _loading({**_server("crm"), **_environment("crm-data", "crn"),
+                                 "artifacts/crm-data/a.json": "{}"}, "crm-data", "crm"))
+
+    assert _problems(bundle_dir) == (
+        "tasks/t.json: step 'load': artifacts/crm-data seeds an environment named 'crn', and envs/crm has no server "
+        "by that name ('crm'); name it after the server it seeds, or leave it out",)
+
+
+def test_a_store_environment_a_universe_names_must_seed_a_server_too(bundle_dir):
+    with namespace_routing():
+        EnvironmentArtifact.put("mail-data", environment_name="gmail", file_artifact=_store_file("mail-rows", b"{}"))
+    layout(bundle_dir, _loading({**SUITE, **_universe("world", environment_artifacts='["mail-data"]'),
+                                 "artifacts/world/crm/a.json": "{}"}, "world", "suite"))
+
+    assert _problems(bundle_dir) == (
+        "tasks/t.json: step 'load': artifacts/world: environment_artifacts[0] seeds an environment named 'gmail', and "
+        "envs/suite has no server by that name ('crm', 'slack'); name it after the server it seeds, or leave it out",)
+
+
+def test_a_universe_loaded_into_a_store_multi_is_checked_against_its_servers(bundle_dir):
+    with namespace_routing():
+        MultiEnv.put(id="both", mcp_server_envs=[_store_server("crm"), _store_server("slack")])
+    layout(bundle_dir, _loading({**_universe("world"), "artifacts/world/crm/a.json": "{}",
+                                 "artifacts/world/drive/a.json": "{}"}, "world", "both"))
+
+    assert _problems(bundle_dir) == (
+        "tasks/t.json: step 'load': artifacts/world/drive seeds an environment named 'drive', and env 'both' has no "
+        "server by that name ('crm', 'slack'); name it after the server it seeds, or leave it out",)
+
+
+def test_a_store_universe_loaded_into_one_server_gives_it_its_own_environment(bundle_dir):
+    with namespace_routing():
+        environments = [EnvironmentArtifact.put(f"{name}-data", environment_name=name,
+                                                file_artifact=_store_file(f"{name}-rows", b"{}"))
+                        for name in ("crm", "gmail", "slack")]
+        EnvironmentUniverseArtifact.put("shared", environment_artifacts=environments)
+    layout(bundle_dir, _loading(_server("crm"), "shared", "crm"))
+
+    assert plan_of(bundle_dir).writes
 
 
 def test_a_universe_naming_a_store_environment_with_the_name_of_one_of_its_folders_is_refused(bundle_dir):

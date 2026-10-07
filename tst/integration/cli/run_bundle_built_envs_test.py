@@ -325,16 +325,14 @@ def _load_task(root, name, artifact, items):
 def _data_bundle(root):
     """The items server, and data for it in each shape a bundle writes: an environment over its folder's file
     (seed), one naming a file artifact (by-ref over items-file), and a universe laid out as `environment-universe get
-    --output-dir` writes one, with the items server's data in its items/ folder, a metadata file, and an environment
-    for another server (mail-data), which the items server skips."""
+    --output-dir` writes one, with the items server's data in its items/ folder and a metadata file."""
     _items(root / "envs/items", "v1")
     _write(root / "artifacts", {
         "seed/artifact.toml": 'type = "environment"\nenvironment_name = "items"\n',
         "seed/items.json": _seed(["folder"]),
         "items-file/items.json": _seed(["by-ref"]),
         "by-ref/artifact.toml": 'type = "environment"\nenvironment_name = "items"\nfile = "items-file"\n',
-        "mail-data/artifact.toml": 'type = "environment"\nenvironment_name = "mail"\n', "mail-data/mail.json": "{}\n",
-        "world/artifact.toml": 'type = "environment_universe"\nenvironment_artifacts = ["mail-data"]\n',
+        "world/artifact.toml": 'type = "environment_universe"\n',
         "world/items/items.json": _seed(["universe"]), "world/metadata/manifest/manifest.json": '{"m": 1}\n',
     })
     _load_task(root, "folder", "seed", ["folder"])
@@ -359,7 +357,7 @@ def test_environments_and_a_universe_written_from_a_bundle_load_into_an_env_thro
     with namespace_routing():
         ids = {entry.name: entry.id for entry in parse_bundle(root).entries}
         world = EnvironmentUniverseArtifact.get(ids["world"])
-        assert [env.environment_name for env in world.get_environment_artifacts()] == ["items", "mail"]
+        assert [env.environment_name for env in world.get_environment_artifacts()] == ["items"]
         assert list(world.get_metadata()) == ["manifest"]
 
     (root / "artifacts/seed/items.json").write_text(_seed(["folder", "edited"]))
@@ -371,7 +369,7 @@ def test_environments_and_a_universe_written_from_a_bundle_load_into_an_env_thro
     assert edited.exit_code == 0, edited.output
     assert "artifacts/seed: v2 (files changed: items.json)" in edited.output, edited.output
     assert "artifacts/world: v2 (files changed: items/items.json)" in edited.output, edited.output
-    assert "artifacts/mail-data: v1, unchanged" in edited.output and "envs/items: v1, unchanged" in edited.output
+    assert "envs/items: v1, unchanged" in edited.output, edited.output
     for task in ("folder", "universe"):
         assert f"tasks/{task}.json v1: passed (check: 1)" in edited.output, edited.output
 
