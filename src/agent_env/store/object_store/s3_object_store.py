@@ -214,7 +214,7 @@ class S3ObjectStore(ObjectStore):
     ) -> UploadPolicy:
         self._check_sigv4_expiry(expires_in)
         self._require_long_term_credentials(expires_in)
-        post = self._post_policy(prefix_url.rstrip("/") + "/", expires_in, max_object_bytes)
+        post = self._post_policy(prefix_url, expires_in, max_object_bytes)
         return UploadPolicy(
             write=HttpPostPolicyGrant(
                 kind="http-post-policy",
@@ -233,8 +233,9 @@ class S3ObjectStore(ObjectStore):
 
     def _post_policy(self, url_prefix: str, expires_in: int, max_bytes: int | None) -> dict:
         """A presigned POST for any key below ``url_prefix``: the key is a condition the uploader
-        fills in, not part of what is signed."""
-        bucket, prefix = self._split(url_prefix)
+        fills in, not part of what is signed. The prefix ends in ``/``, so that ``root`` does not
+        admit ``root-evil/``."""
+        bucket, prefix = self._split(url_prefix.rstrip("/") + "/")
         conditions: list = [["starts-with", "$key", prefix]]
         if max_bytes is not None:
             conditions.append(["content-length-range", 0, max_bytes])

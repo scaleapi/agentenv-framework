@@ -17,16 +17,23 @@ class _StubClient:
         return {"url": f"https://{BUCKET}.s3.amazonaws.com/", "fields": {"key": kwargs["Key"]}}
 
 
-def _sign(**kwargs):
+def _sign(prefix: str = "captures/one/", **kwargs):
     client = _StubClient()
     store = S3ObjectStore(client, BUCKET)
-    grant = store.signed_post(f"s3://{BUCKET}/captures/one/", **kwargs)
+    grant = store.signed_post(f"s3://{BUCKET}/{prefix}", **kwargs)
     return client.calls[0], grant
 
 
 def test_the_key_is_a_template_the_uploader_substitutes():
     call, _ = _sign()
     assert call["Bucket"] == BUCKET
+    assert call["Key"] == "captures/one/${filename}"
+    assert ["starts-with", "$key", "captures/one/"] in call["Conditions"]
+
+
+def test_a_prefix_without_a_trailing_slash_is_a_directory():
+    """So ``captures/one`` does not admit ``captures/one-evil/``."""
+    call, _ = _sign("captures/one")
     assert call["Key"] == "captures/one/${filename}"
     assert ["starts-with", "$key", "captures/one/"] in call["Conditions"]
 
