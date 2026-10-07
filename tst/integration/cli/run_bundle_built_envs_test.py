@@ -343,7 +343,7 @@ def _data_bundle(root):
     return root
 
 
-DATA = {"seed": "environment", "by-ref": "environment", "items-file": "file", "world": "environment_universe"}
+WRITTEN = ("seed", "by-ref", "items-file", "world")  # the artifacts the data bundle writes
 
 
 def test_environments_and_a_universe_written_from_a_bundle_load_into_an_env_through_the_gateway(state):
@@ -352,7 +352,7 @@ def test_environments_and_a_universe_written_from_a_bundle_load_into_an_env_thro
     first = _run(root)
 
     assert first.exit_code == 0, first.output
-    for name in DATA:
+    for name in WRITTEN:
         assert f"artifacts/{name}: v1 (new)" in first.output, first.output
     for task in ("folder", "ref", "universe"):
         assert f"tasks/{task}.json v1: passed (check: 1)" in first.output, first.output

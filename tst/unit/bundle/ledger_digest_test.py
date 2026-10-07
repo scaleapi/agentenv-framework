@@ -47,7 +47,10 @@ RECORDED = {
 @pytest.fixture
 def bundle_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
-    return layout(tmp_path / "triage", LAYOUT)
+    root = layout(tmp_path / "triage", LAYOUT)
+    for rel in LAYOUT:  # a built image hashes permission bits other than 0644, which the umask would decide
+        (root / rel).chmod(0o644)
+    return root
 
 
 def test_every_digest_an_earlier_release_recorded_is_unchanged(bundle_dir):
