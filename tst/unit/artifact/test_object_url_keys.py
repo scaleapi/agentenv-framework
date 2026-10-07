@@ -104,10 +104,21 @@ def test_skill_validate_takes_its_s3_named_keyword_with_a_warning(local_stores):
         SkillArtifact.validate(s3_url=store.object_url("skills/demo"), expected_name="demo")
 
 
-def test_both_spellings_of_a_keyword_is_an_error(local_stores):
+@pytest.mark.parametrize("old", ["url", None], ids=["old-set", "old-none"])
+def test_both_spellings_of_a_keyword_is_an_error(local_stores, old):
     url = local_stores.get_object_store().object_url("images/i.tar.gz")
     with pytest.raises(TypeError, match="got both tar_gz_object_url= and its deprecated spelling tar_gz_s3_url="):
-        DockerImageArtifact.put_tar("img", description="d", image_name="img:1", tar_gz_object_url=url, tar_gz_s3_url=url)
+        DockerImageArtifact.put_tar("img", description="d", image_name="img:1", tar_gz_object_url=url,
+                                    tar_gz_s3_url=url if old else None)
+
+
+def test_an_old_keyword_passed_as_none_is_still_counted(local_stores):
+    """A caller passing an optional old keyword through, as None, still breaks when the keyword is removed."""
+    url = local_stores.get_object_store().object_url("images/i.tar.gz")
+    with pytest.warns(DeprecationWarning, match=r"put_tar\(build_context_s3_url=\)"):
+        artifact = DockerImageArtifact.put_tar("img", description="d", image_name="img:1", tar_gz_object_url=url,
+                                               build_context_s3_url=None)
+    assert artifact.build_context_object_url is None
 
 
 def test_a_required_keyword_is_still_required():

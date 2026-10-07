@@ -226,7 +226,7 @@ class TestFileArtifactUniversePinning:
         universe = FileArtifactUniverse.put_bundled(
             id=_unique_id("fau_bundled"),
             files={"nested/a.json": EMAIL_ARTIFACT_PATH},
-            s3_url=get_config().get_object_store().object_url(f"test/{uuid.uuid4().hex}/"),
+            prefix_url=get_config().get_object_store().object_url(f"test/{uuid.uuid4().hex}/"),
         )
         assert universe.file_artifact_refs is not None
         ref = universe.file_artifact_refs["nested/a.json"]
@@ -242,7 +242,7 @@ class TestFileArtifactUniversePinning:
 
         universe = FileArtifactUniverse.put_existing(
             id=_unique_id("fau_existing"),
-            s3_url=store.object_url(prefix),
+            prefix_url=store.object_url(prefix),
         )
 
         assert universe.file_artifact_refs is not None

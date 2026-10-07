@@ -24,7 +24,7 @@ from pydantic import ConfigDict, Field, model_serializer
 from agent_env.artifact.artifact import Artifact, _write_twin
 from agent_env.store.ids import fs_safe, image_repository, is_local_id
 from agent_env.store.image_store.oci_registry_credentials import is_loopback_host, registry_host_from_ref
-from agent_env.utils.deprecation import renamed_keyword
+from agent_env.utils.deprecation import OMITTED, renamed_keyword
 
 logger = logging.getLogger(__name__)
 
@@ -175,8 +175,8 @@ class DockerImageArtifact(Artifact):
         image_name: str,
         tar_gz_object_url: str | None = None,
         build_context_object_url: str | None = None,
-        tar_gz_s3_url: str | None = None,
-        build_context_s3_url: str | None = None,
+        tar_gz_s3_url: str | None = OMITTED,
+        build_context_s3_url: str | None = OMITTED,
     ) -> "DockerImageArtifact":
         from agent_env.artifact.store import get_artifact_store
         from agent_env.config import get_config

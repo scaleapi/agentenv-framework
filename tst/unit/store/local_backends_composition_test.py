@@ -269,7 +269,7 @@ def test_a_docker_image_names_its_repository_and_tarball_from_the_encoded_id(
     ),
     lambda tmp_path: FileArtifactUniverse.put_bundled(
         id=HOSTILE, files={"p.txt": Path(_write(tmp_path, "p.txt", b"x"))},
-        s3_url=get_config().get_object_store().object_url("bundle/"),
+        prefix_url=get_config().get_object_store().object_url("bundle/"),
     ),
 ], ids=["docker_image", "file", "file_put_at", "universe_put_bundled"])
 def test_an_local_id_outside_the_cli_is_refused_before_any_image_or_object_is_written(local_stores, monkeypatch, tmp_path, put):

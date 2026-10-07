@@ -48,10 +48,14 @@ def warn_deprecated(old: str, new: str, *, kind: str = "symbol", stacklevel: int
     )
 
 
+# The default of a deprecated keyword, so passing it as None still counts as passing it.
+OMITTED: Any = object()
+
+
 def renamed_keyword(owner: str, new: str, new_value: Any, old: str, old_value: Any) -> Any:
-    """The value of keyword ``new``, taking the deprecated keyword ``old`` in its place with a warning. Passing both
-    is a TypeError, as a repeated keyword is."""
-    if old_value is None:
+    """The value of keyword ``new``, taking the deprecated keyword ``old`` (default ``OMITTED``) in its place with a
+    warning. Passing both is a TypeError, as a repeated keyword is."""
+    if old_value is OMITTED:
         return new_value
     if new_value is not None:
         raise TypeError(f"{owner}() got both {new}= and its deprecated spelling {old}=")
