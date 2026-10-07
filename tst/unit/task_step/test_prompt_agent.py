@@ -263,7 +263,7 @@ async def test_sdk_agent_on_the_local_store_still_records_its_trajectory(monkeyp
 
     result = await step.execute(context)
 
-    uri = result.prompt_responses[-1].agent_trajectory_s3_uri
+    uri = result.prompt_responses[-1].agent_trajectory_object_url
     assert trajectory_requests == [{"task_id": "task-1"}]
     assert store.get_object_key(uri).startswith("prompt_agent_trajectories/trajectory-")
     assert json.loads(store.get(uri)) == [{"type": "echo", "output": "Echo: hi"}]

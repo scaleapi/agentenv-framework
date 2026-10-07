@@ -38,7 +38,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     registered_sandbox_provider_classes,
 )
 from agent_env.store.ids import derive_id, is_local_id, key_segment, validate_local_id
-from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.context import TaskStepContext, dual_keyed
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)
@@ -362,12 +362,12 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
             "stdout_artifact": {
                 "id": stdout_artifact.id,
                 "version": stdout_artifact.version,
-                "s3_url": stdout_artifact.object_url,
+                **dual_keyed("s3_url", "object_url", stdout_artifact.object_url),
             },
             "stderr_artifact": {
                 "id": stderr_artifact.id,
                 "version": stderr_artifact.version,
-                "s3_url": stderr_artifact.object_url,
+                **dual_keyed("s3_url", "object_url", stderr_artifact.object_url),
             },
             "stdout_head": stdout[:_OUTPUT_PREVIEW_CHARS],
             "stderr_head": stderr[:_OUTPUT_PREVIEW_CHARS],

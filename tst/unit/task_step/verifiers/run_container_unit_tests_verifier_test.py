@@ -235,6 +235,10 @@ def test_stdout_and_stderr_are_kept_under_the_fixture_prefix(local_stores, monke
     outputs = get_config().get_object_store().object_url("fx/verifier-outputs/scrape/")
     assert [url.rsplit("/", 1)[-1] for url in uploaded] == ["stdout.txt", "stderr.txt"]
     assert all(url.startswith(outputs) for url in uploaded)
+    [recorded] = ctx.metadata["verifications"].values()
+    assert [(recorded[k]["s3_url"], recorded[k]["object_url"]) for k in ("stdout_artifact", "stderr_artifact")] == [
+        (url, url) for url in uploaded
+    ]
 
 
 def test_stdout_and_stderr_upload_off_the_event_loop(local_stores, monkeypatch):

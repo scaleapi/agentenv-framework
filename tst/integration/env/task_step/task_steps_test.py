@@ -498,13 +498,13 @@ async def test_task_steps_e2e(sandbox_provider, multi_env, email_service_artifac
     logger.info(f"PromptAgentTaskStep response: {prompt_response.response[:200]}")
 
     # 16. Verify trajectory was uploaded to the configured object store
-    assert prompt_response.agent_trajectory_s3_uri is not None, "Expected agent_trajectory_s3_uri to be set"
+    assert prompt_response.agent_trajectory_object_url is not None, "Expected agent_trajectory_object_url to be set"
     object_store = get_config().get_object_store()
-    assert _scheme(prompt_response.agent_trajectory_s3_uri) == _scheme(object_store.object_url("probe")), \
-        f"trajectory URI not on the configured object store: {prompt_response.agent_trajectory_s3_uri}"
-    logger.info(f"Trajectory URI: {prompt_response.agent_trajectory_s3_uri}")
+    assert _scheme(prompt_response.agent_trajectory_object_url) == _scheme(object_store.object_url("probe")), \
+        f"trajectory URI not on the configured object store: {prompt_response.agent_trajectory_object_url}"
+    logger.info(f"Trajectory URI: {prompt_response.agent_trajectory_object_url}")
 
-    trajectory = json.loads(object_store.get(prompt_response.agent_trajectory_s3_uri))
+    trajectory = json.loads(object_store.get(prompt_response.agent_trajectory_object_url))
     assert isinstance(trajectory, list), f"Expected trajectory to be a list, got {type(trajectory)}"
     assert len(trajectory) > 0, "Expected non-empty trajectory"
     logger.info(f"Trajectory has {len(trajectory)} messages")
@@ -779,7 +779,7 @@ async def test_an_agent_uploads_its_trajectory_through_a_local_grant(mcp_server_
         await PromptAgentTaskStep(
             id=f"grant-traj-prompt-{suffix}", version=None, prompt="hello through a grant", timeout_seconds=120,
         ).execute(context)
-        uri = context.prompt_responses[-1].agent_trajectory_s3_uri
+        uri = context.prompt_responses[-1].agent_trajectory_object_url
         assert uri, "the agent did not upload its trajectory through the grant"
         assert "hello through a grant" in store.get(uri).decode()
     finally:
@@ -869,9 +869,9 @@ async def test_cli_install_e2e(sandbox_provider, multi_env, a2a_agent):
         logger.info(f"CLI e2e prompt response: {prompt_response.response[:300]}")
         assert prompt_response.tool_call_count and prompt_response.tool_call_count > 0, \
             f"Expected agent to make at least one tool call; got {prompt_response.tool_call_count}"
-        assert prompt_response.agent_trajectory_s3_uri, "Expected trajectory to be uploaded"
+        assert prompt_response.agent_trajectory_object_url, "Expected trajectory to be uploaded"
 
-        trajectory_json = get_config().get_object_store().get(prompt_response.agent_trajectory_s3_uri).decode()
+        trajectory_json = get_config().get_object_store().get(prompt_response.agent_trajectory_object_url).decode()
         assert installed["install_path"] in trajectory_json, (
             f"Expected install_path '{installed['install_path']}' to appear in agent trajectory "
             f"(would prove CLI was invoked); not found in {len(trajectory_json)} bytes of trajectory"
@@ -1039,10 +1039,10 @@ async def test_task_e2e(multi_env, environment_universe_artifact):
     logger.info(f"Task prompt response: {prompt_response.response}")
 
     # Verify the trajectory exists in the configured object store
-    assert prompt_response.agent_trajectory_s3_uri is not None, "Expected agent_trajectory_s3_uri to be set"
-    trajectory = json.loads(get_config().get_object_store().get(prompt_response.agent_trajectory_s3_uri))
+    assert prompt_response.agent_trajectory_object_url is not None, "Expected agent_trajectory_object_url to be set"
+    trajectory = json.loads(get_config().get_object_store().get(prompt_response.agent_trajectory_object_url))
     assert isinstance(trajectory, list) and len(trajectory) > 0, "Expected non-empty trajectory list"
-    logger.info(f"Task trajectory: {len(trajectory)} messages at {prompt_response.agent_trajectory_s3_uri}")
+    logger.info(f"Task trajectory: {len(trajectory)} messages at {prompt_response.agent_trajectory_object_url}")
 
     # Verify both verifier results coexist in context.metadata["verifications"]
     verifications = context.metadata.get("verifications", {})
@@ -1632,7 +1632,7 @@ async def test_multi_turn_done_signal_terminates_early():
 
     assert context.prompt_responses, "expected at least one PromptResponse"
     pr = context.prompt_responses[-1]
-    traj_uris = pr.target_agent_per_turn_trajectory_s3_uris
+    traj_uris = pr.target_agent_per_turn_trajectory_object_urls
     prompts = pr.source_agent_per_turn_prompt_parts
     assert traj_uris is not None and len(traj_uris) >= 1
     assert prompts is not None and len(prompts) == len(traj_uris), \
@@ -1645,8 +1645,8 @@ async def test_multi_turn_done_signal_terminates_early():
                 f"trajectory URI not on the configured object store: {uri!r}"
 
     last_successful = next((u for u in reversed(traj_uris) if u is not None), None)
-    assert pr.agent_trajectory_s3_uri == last_successful, \
-        "agent_trajectory_s3_uri should equal the last successful per-turn URI"
+    assert pr.agent_trajectory_object_url == last_successful, \
+        "agent_trajectory_object_url should equal the last successful per-turn URI"
     assert pr.prompt_text == _MULTI_TURN_INITIAL_PROMPT
     assert pr.response, "expected non-empty final response"
 
@@ -1676,7 +1676,7 @@ async def test_multi_turn_max_turns_cap_terminates_loop():
     context = await task.run(instance_id=instance_id)
 
     pr = context.prompt_responses[-1]
-    traj_uris = pr.target_agent_per_turn_trajectory_s3_uris
+    traj_uris = pr.target_agent_per_turn_trajectory_object_urls
     prompts = pr.source_agent_per_turn_prompt_parts
     assert traj_uris is not None and len(traj_uris) == max_turns, \
         f"expected exactly {max_turns} turns (cap), got {len(traj_uris) if traj_uris else None}"

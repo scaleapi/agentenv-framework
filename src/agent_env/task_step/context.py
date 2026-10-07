@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from agent_env.env.env import DeployedEnv
+from agent_env.utils.deprecation import warn_deprecated
 
 _REDACTED_KEYS = {
     "litellm_api_key", "judge_litellm_api_key", "usersim_api_key", "remote_tokens", "cf_access_client_secret",
@@ -110,6 +111,26 @@ class DeployedSandbox:
         )
 
 
+def dual_keyed(legacy: str, neutral: str, value: Any) -> dict[str, Any]:
+    """A renamed run-context key under both its names: readers on older versions read the legacy one."""
+    return {legacy: value, neutral: value}
+
+
+def read_dual_keyed(data: dict[str, Any], legacy: str, neutral: str) -> Any:
+    """A renamed run-context key, legacy name first while both are written: a raw-doc writer that knows only the
+    legacy name leaves the neutral one stale."""
+    return data[legacy] if legacy in data else data.get(neutral)
+
+
+# (legacy, neutral) PromptResponse field names. The legacy fields stay real fields, mirrored from the neutral ones at
+# construction, so asdict (which persists prompt responses) writes both keys.
+_PROMPT_RESPONSE_TWINS = (
+    ("agent_trajectory_s3_uri", "agent_trajectory_object_url"),
+    ("agent_trajectory_s3_prefix", "agent_trajectory_object_prefix"),
+    ("target_agent_per_turn_trajectory_s3_uris", "target_agent_per_turn_trajectory_object_urls"),
+)
+
+
 @dataclass
 class PromptResponse:
     prompt_id: str
@@ -133,6 +154,22 @@ class PromptResponse:
     agent_name: str | None = None
     step_id: str | None = None
     structured_output: Any = None
+    # Neutral names for the S3-named fields above, which are deprecated mirrors of them; appended, so positional
+    # construction is unchanged.
+    agent_trajectory_object_url: str | None = None
+    agent_trajectory_object_prefix: str | None = None
+    target_agent_per_turn_trajectory_object_urls: list[str | None] | None = None
+
+    def __post_init__(self):
+        for legacy, neutral in _PROMPT_RESPONSE_TWINS:
+            old, new = getattr(self, legacy), getattr(self, neutral)
+            if old is None:
+                setattr(self, legacy, list(new) if isinstance(new, list) else new)
+            elif new is None:
+                warn_deprecated(f"PromptResponse({legacy}=)", f"{neutral}=", kind="keyword", stacklevel=4)
+                setattr(self, neutral, list(old) if isinstance(old, list) else old)
+            elif old != new:
+                raise ValueError(f"PromptResponse got {legacy}={old!r} and {neutral}={new!r}, which disagree")
 
     @classmethod
     def from_dict(cls, data: dict) -> PromptResponse:
@@ -140,10 +177,14 @@ class PromptResponse:
             prompt_id=data["prompt_id"],
             response=data["response"],
             prompt_text=data.get("prompt_text"),
-            agent_trajectory_s3_uri=data.get("agent_trajectory_s3_uri"),
-            agent_trajectory_s3_prefix=data.get("agent_trajectory_s3_prefix"),
+            agent_trajectory_object_url=read_dual_keyed(data, "agent_trajectory_s3_uri", "agent_trajectory_object_url"),
+            agent_trajectory_object_prefix=read_dual_keyed(
+                data, "agent_trajectory_s3_prefix", "agent_trajectory_object_prefix"
+            ),
             agent_trajectory_file_path=data.get("agent_trajectory_file_path"),
-            target_agent_per_turn_trajectory_s3_uris=data.get("target_agent_per_turn_trajectory_s3_uris"),
+            target_agent_per_turn_trajectory_object_urls=read_dual_keyed(
+                data, "target_agent_per_turn_trajectory_s3_uris", "target_agent_per_turn_trajectory_object_urls"
+            ),
             source_agent_per_turn_prompt_parts=data.get("source_agent_per_turn_prompt_parts"),
             compact_trajectory_s3_uri=data.get("compact_trajectory_s3_uri"),
             tool_call_count=data.get("tool_call_count"),

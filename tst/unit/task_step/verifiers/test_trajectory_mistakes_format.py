@@ -226,7 +226,7 @@ async def test_a_grading_policy_restores_the_autocomplete_rule_on_the_trajectory
         return ([{**c, "score": 1.0, "result": True, "justification": "j"} for c in criteria], 0, [], None)
     monkeypatch.setattr(v, "_run_judge_with_output_retries", fake_run)
     ctx = TaskStepContext(prompt_responses=[PromptResponse(prompt_id="p1", response="done", prompt_text="reserve",
-                                                           agent_trajectory_s3_uri="s3://b/raw.json")])
+                                                           agent_trajectory_object_url="s3://b/raw.json")])
     await v.execute(ctx)
     text = captured["eval_prompt"]
     assert text.count("## Grading policy") == 1 and text.count(_AUTOCOMPLETE_POLICY) == 1

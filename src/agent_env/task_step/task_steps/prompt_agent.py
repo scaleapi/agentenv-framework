@@ -474,11 +474,11 @@ class PromptAgentTaskStep(TaskStep):
         current_user_parts = initial_parts
         final_terminal = protocol.TerminalResponse(response_text="")
         final_task_id = ""
-        per_turn_trajectory_s3_uris: list[str | None] = []
+        per_turn_trajectory_urls: list[str | None] = []
         source_agent_per_turn_prompt_parts: list[list[dict] | None] = []
         traj_ext_cached = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
         final_state: str = TaskState.completed.value
-        trajectory_s3_uri: Optional[str] = None
+        trajectory_url: Optional[str] = None
         # What the target has been sent: of the files its replies name, the only ones a user-sim is made able
         # to read, so a reply naming any other object a store owns can't read it out through the user-sim.
         sent_to_target: set[str] = set()
@@ -534,7 +534,7 @@ class PromptAgentTaskStep(TaskStep):
                     )
                 except Exception as e:
                     logger.warning(f"Turn {turn+1} trajectory fetch failed (continuing): {e}")
-                per_turn_trajectory_s3_uris.append(turn_traj_uri)
+                per_turn_trajectory_urls.append(turn_traj_uri)
 
             final_task_id = sent_task_id
             final_state = target_state
@@ -639,8 +639,8 @@ class PromptAgentTaskStep(TaskStep):
             except Exception as e:
                 logger.warning(f"agent-trigger state readback failed (continuing): {e}")
 
-        trajectory_s3_uri = next(
-            (uri for uri in reversed(per_turn_trajectory_s3_uris) if uri is not None),
+        trajectory_url = next(
+            (uri for uri in reversed(per_turn_trajectory_urls) if uri is not None),
             None,
         )
 
@@ -678,9 +678,9 @@ class PromptAgentTaskStep(TaskStep):
             prompt_id=self.prompt_id,
             response=final_terminal.response_text,
             prompt_text=prompt_text,
-            agent_trajectory_s3_uri=trajectory_s3_uri,
-            agent_trajectory_s3_prefix=trajectory_output_prefix,
-            target_agent_per_turn_trajectory_s3_uris=per_turn_trajectory_s3_uris or None,
+            agent_trajectory_object_url=trajectory_url,
+            agent_trajectory_object_prefix=trajectory_output_prefix,
+            target_agent_per_turn_trajectory_object_urls=per_turn_trajectory_urls or None,
             source_agent_per_turn_prompt_parts=source_agent_per_turn_prompt_parts or None,
             tool_call_count=final_terminal.tool_call_count,
             model=model,

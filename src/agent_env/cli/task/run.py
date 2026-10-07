@@ -18,6 +18,7 @@ from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox
 from agent_env.store.ids import derive_id, fs_safe, is_local_id, validate_local_id
 from agent_env.task.interrupts import Interrupts
 from agent_env.task.teardown import TeardownReport, kind, teardown_run
+from agent_env.task_step.context import read_dual_keyed
 from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTaskStep
 
 
@@ -100,12 +101,10 @@ def _format_prompt_response(pr) -> str:
         "  response: |",
         indented_response,
     ]
-    if pr.agent_trajectory_s3_uri:
-        lines.append(f"  agent_trajectory_s3_uri: {pr.agent_trajectory_s3_uri}")
-    if pr.agent_trajectory_s3_prefix:
-        lines.append(f"  agent_trajectory_s3_prefix: {pr.agent_trajectory_s3_prefix}")
-    if pr.compact_trajectory_s3_uri:
-        lines.append(f"  compact_trajectory_s3_uri: {pr.compact_trajectory_s3_uri}")
+    if pr.agent_trajectory_object_url:
+        lines.append(f"  agent_trajectory_object_url: {pr.agent_trajectory_object_url}")
+    if pr.agent_trajectory_object_prefix:
+        lines.append(f"  agent_trajectory_object_prefix: {pr.agent_trajectory_object_prefix}")
     if pr.agent_trajectory_file_path:
         lines.append(f"  agent_trajectory_file_path: {pr.agent_trajectory_file_path}")
     if pr.tool_call_count is not None:
@@ -192,12 +191,12 @@ def _step_output_lines(step, context) -> list[str]:
 
 def _format_verifier_output(vid: str, vdata: dict) -> list[str]:
     lines: list[str] = []
-    compact_uri = vdata.get("compact_trajectory_s3_uri")
-    if compact_uri:
-        lines.append(f"compact_trajectory_s3_uri (verifier_id={vid}): {compact_uri}")
-    judge_uri = vdata.get("judge_trajectory_s3_uri")
-    if judge_uri:
-        lines.append(f"judge_trajectory_s3_uri (verifier_id={vid}): {judge_uri}")
+    compact_url = read_dual_keyed(vdata, "compact_trajectory_s3_uri", "compact_trajectory_object_url")
+    if compact_url:
+        lines.append(f"compact_trajectory_object_url (verifier_id={vid}): {compact_url}")
+    judge_url = read_dual_keyed(vdata, "judge_trajectory_s3_uri", "judge_trajectory_object_url")
+    if judge_url:
+        lines.append(f"judge_trajectory_object_url (verifier_id={vid}): {judge_url}")
     command = vdata.get("command")
     if command is not None:
         lines.append(f"command (verifier_id={vid}): {command}")
@@ -209,7 +208,8 @@ def _format_verifier_output(vid: str, vdata: dict) -> list[str]:
     if stdout_artifact:
         lines.append(
             f"stdout_artifact (verifier_id={vid}): "
-            f"{stdout_artifact.get('id')} v{stdout_artifact.get('version')} -> {stdout_artifact.get('s3_url')}"
+            f"{stdout_artifact.get('id')} v{stdout_artifact.get('version')} -> "
+            f"{read_dual_keyed(stdout_artifact, 's3_url', 'object_url')}"
         )
     stdout_head = vdata.get("stdout_head")
     if stdout_head:
@@ -220,7 +220,8 @@ def _format_verifier_output(vid: str, vdata: dict) -> list[str]:
     if stderr_artifact:
         lines.append(
             f"stderr_artifact (verifier_id={vid}): "
-            f"{stderr_artifact.get('id')} v{stderr_artifact.get('version')} -> {stderr_artifact.get('s3_url')}"
+            f"{stderr_artifact.get('id')} v{stderr_artifact.get('version')} -> "
+            f"{read_dual_keyed(stderr_artifact, 's3_url', 'object_url')}"
         )
     stderr_head = vdata.get("stderr_head")
     if stderr_head:

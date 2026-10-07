@@ -166,7 +166,7 @@ def _verifier(**kw) -> RubricsVerifierTaskStep:
 
 
 def _ctx(**pr) -> TaskStepContext:
-    base = dict(prompt_id="p1", response="done", prompt_text="reserve", agent_trajectory_s3_uri="s3://b/raw.json")
+    base = dict(prompt_id="p1", response="done", prompt_text="reserve", agent_trajectory_object_url="s3://b/raw.json")
     base.update(pr)
     return TaskStepContext(prompt_responses=[PromptResponse(**base)])
 

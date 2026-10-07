@@ -300,7 +300,7 @@ async def test_execute_screenshot_compaction_attaches_frames_and_strips_text(mon
 
     ctx = TaskStepContext(prompt_responses=[
         PromptResponse(prompt_id="prompt-1", response="done", prompt_text="do it",
-                       agent_trajectory_s3_uri=raw_uri),
+                       agent_trajectory_object_url=raw_uri),
     ])
 
     await verifier.execute(ctx)
@@ -341,7 +341,7 @@ async def test_execute_truncation_keeps_the_tail(monkeypatch):
 
     ctx = TaskStepContext(prompt_responses=[
         PromptResponse(prompt_id="prompt-1", response="done", prompt_text="do it",
-                       agent_trajectory_s3_uri=raw_uri),
+                       agent_trajectory_object_url=raw_uri),
     ])
     await verifier.execute(ctx)
 
@@ -380,7 +380,7 @@ async def test_execute_honors_apply_trajectory_filter_false(monkeypatch):
 
     ctx = TaskStepContext(
         prompt_responses=[PromptResponse(prompt_id="prompt-1", response="done",
-                                         prompt_text="do it", agent_trajectory_s3_uri=raw_uri)],
+                                         prompt_text="do it", agent_trajectory_object_url=raw_uri)],
         metadata={"user_overrides": {"apply_trajectory_filter": False}},
     )
     await verifier.execute(ctx)

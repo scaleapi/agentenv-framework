@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from agent_env.store.ids import derive_id, is_local_id, validate_local_id
-from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.context import TaskStepContext, dual_keyed
 from agent_env.task_step.snapshot_utils import agent_state_capture as capture
 
 logger = logging.getLogger(__name__)
@@ -434,7 +434,7 @@ class SnapshotSeries:
         row["bundle_object_url"] = workspace.bundle_object_url
 
         # Every point reads its trajectory the same way, cumulatively.
-        # `PromptResponse.agent_trajectory_s3_uri` is only the LAST turn's, so using
+        # `PromptResponse.agent_trajectory_object_url` is only the LAST turn's, so using
         # it for the final row would make that point narrower than its predecessors.
         # It stays the fallback: on a failed run the live read may be gone while the
         # per-turn upload already landed.
@@ -448,18 +448,19 @@ class SnapshotSeries:
         )
         if traj.reason and is_final:
             recorded = self._recorded_trajectory_uri(context)
-            row["trajectory_s3_uri"] = recorded
+            row.update(dual_keyed("trajectory_s3_uri", "trajectory_object_url", recorded))
             reasons.append(traj.reason if recorded else f"{traj.reason}; trajectory_missing")
         elif traj.reason:
             reasons.append(traj.reason)
         elif traj.object_url:
-            row["trajectory_s3_uri"] = traj.object_url
+            row.update(dual_keyed("trajectory_s3_uri", "trajectory_object_url", traj.object_url))
         else:
             try:
-                row["trajectory_s3_uri"] = await asyncio.to_thread(
+                uploaded = await asyncio.to_thread(
                     capture.upload_trajectory, traj.trajectory,
                     self.trajectory_output_prefix,
                 )
+                row.update(dual_keyed("trajectory_s3_uri", "trajectory_object_url", uploaded))
             except Exception as exc:
                 logger.warning("%s: trajectory upload failed: %s", self.step_id, exc)
                 reasons.append("trajectory_upload_failed")
@@ -534,7 +535,7 @@ class SnapshotSeries:
                 prompt.prompt_id == self.prompt_id
                 and prompt.a2a_context_id == self.a2a_context_id
             ):
-                return prompt.agent_trajectory_s3_uri
+                return prompt.agent_trajectory_object_url
         # None is legitimate: the response is recorded only after the turn loop, so
         # a capture during an in-flight or failed run has no entry yet.
         return None
@@ -564,7 +565,7 @@ class SnapshotSeries:
             "is_final": is_final,
             "capture_status": status,
             "capture_reason": reason,
-            "trajectory_s3_uri": None,
+            **dual_keyed("trajectory_s3_uri", "trajectory_object_url", None),
             "env_universe_id": None,
             "env_universe_version": None,
         }
