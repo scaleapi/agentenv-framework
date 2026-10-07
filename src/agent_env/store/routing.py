@@ -556,7 +556,9 @@ class LocalRunObjectStore(ObjectStore):
         return self._writing(url_prefix).signed_post(url_prefix, expires_in=expires_in, max_bytes=max_bytes)
 
     def shared_credentials_env(self) -> dict[str, str]:
-        return self.configured.shared_credentials_env()
+        """None: an ``@local`` run's objects reach its sandboxes through grants, staging or pushed bytes, so the
+        configured store's credentials, the caller's own, stay with the caller."""
+        return {}
 
     def issue_read_grant(self, object_url: str, *, expires_in: int | None = None) -> HttpGetGrant:
         return self._at(object_url).issue_read_grant(object_url, **_lifetime(expires_in))
