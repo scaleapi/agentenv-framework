@@ -75,8 +75,9 @@ class DockerImageArtifact(Artifact):
     tar_gz_object_url: str = Field(alias="tar_gz_s3_url", description="Object-store locator of the tar.gz file")
     build_context_object_url: str | None = Field(default=None, alias="build_context_s3_url", description="Object-store locator of the build context tar.gz")
 
+    # No return annotation: pydantic builds the serialization schema from one, and a dict drops the fields.
     @model_serializer(mode="wrap")
-    def _serialize(self, handler: Any) -> dict[str, Any]:
+    def _serialize(self, handler: Any):
         # Dual-write, from the attributes: `alias=` emits one spelling, which one depending on the caller's `by_alias`.
         data = handler(self)
         _write_twin(data, "tar_gz_s3_url", "tar_gz_object_url", self.tar_gz_object_url)

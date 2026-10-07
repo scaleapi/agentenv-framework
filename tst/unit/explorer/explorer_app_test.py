@@ -150,11 +150,15 @@ def test_type_filter_matches_documents_stored_under_an_aliased_spelling(tmp_path
         reset_config()
 
 
-@pytest.mark.parametrize("url_key", ["s3_url", "object_url"])
-def test_detail_route_enriches_a_universe_stored_under_an_aliased_spelling(tmp_path, monkeypatch, url_key):
+@pytest.mark.parametrize("stored", [
+    {"s3_url": "s3://b/a.txt"},
+    {"object_url": "s3://b/a.txt"},
+    {"s3_url": "s3://b/a.txt", "object_url": "s3://b/stale.txt"},
+], ids=["legacy-key", "neutral-key", "legacy-wins"])
+def test_detail_route_enriches_a_universe_stored_under_an_aliased_spelling(tmp_path, monkeypatch, stored):
     """Enrichment picks its branch from the type, so a renamed universe must still
     resolve its refs — otherwise the detail response silently loses `files`. Its files
-    keep their url whichever key their documents store it under."""
+    keep their url whichever key their documents store it under, the legacy one first."""
     cfg = tmp_path / ".agentenv" / "config.toml"
     cfg.parent.mkdir(parents=True, exist_ok=True)
     cfg.write_text(
@@ -168,7 +172,7 @@ def test_detail_route_enriches_a_universe_stored_under_an_aliased_spelling(tmp_p
     set_document_store(store)
     set_runner(LocalRunner(workers=1))
     run_store.ensure_indexes()
-    store.insert("artifacts", {"id": "f1", "version": 1, "type": "file", url_key: "s3://b/a.txt",
+    store.insert("artifacts", {"id": "f1", "version": 1, "type": "file", **stored,
                                "content_type": "text/plain", "created_at_utc": "2026-01-01T00:00:00Z"})
     store.insert("artifacts", {"id": "u1", "version": 1, "type": "old_universe",
                                "file_artifact_refs": {"a.txt": {"id": "f1", "version": 1}},

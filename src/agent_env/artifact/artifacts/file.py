@@ -43,8 +43,9 @@ class FileArtifact(Artifact):
     content_type: str = Field(description="MIME type of the file")
     object_url: str = Field(alias="s3_url", description="Object-store locator where the file is stored")
 
+    # No return annotation: pydantic builds the serialization schema from one, and a dict drops the fields.
     @model_serializer(mode="wrap")
-    def _serialize(self, handler: Any) -> dict[str, Any]:
+    def _serialize(self, handler: Any):
         # Dual-write, from the attribute: `alias=` emits one spelling, which one depending on the caller's `by_alias`.
         data = handler(self)
         _write_twin(data, "s3_url", "object_url", self.object_url)

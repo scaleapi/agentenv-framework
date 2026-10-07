@@ -264,6 +264,8 @@ class S3ObjectStore(ObjectStore):
         return self._url(bucket, key)
 
     def _head(self, bucket: str, key: str) -> ObjectMetadata | None:
+        if not key:  # a bucket, which S3 would refuse as a malformed request rather than report missing
+            return None
         try:
             head = self._s3.head_object(Bucket=bucket, Key=key)
         except ClientError as e:

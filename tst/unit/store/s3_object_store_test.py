@@ -6,7 +6,8 @@ from botocore.exceptions import ClientError
 from botocore.stub import Stubber
 from moto import mock_aws
 
-from agent_env.store import S3ObjectStore
+from agent_env.artifact.artifacts.file import FileArtifact
+from agent_env.store import S3ObjectStore, set_object_store
 from tst.store import object_conformance
 
 BUCKET = "conformance"
@@ -58,3 +59,15 @@ def test_a_read_error_other_than_a_missing_object_is_not_mapped(operation, read,
 
 def test_the_client_keeps_a_connection_for_every_default_executor_thread(store):
     assert store._s3.meta.config.max_pool_connections == 32
+
+
+@pytest.mark.parametrize("url", [f"s3://{BUCKET}", f"s3://{BUCKET}/"])
+def test_a_bucket_url_names_no_object(url):
+    """Without a HEAD: S3 refuses an empty key as a malformed request, not as a missing object."""
+    client = boto3.client("s3", region_name="us-east-1")
+    with Stubber(client):  # nothing queued, so any request fails the test
+        store = S3ObjectStore(client, BUCKET)
+        assert store.get_object_metadata_at(url) is None
+        set_object_store(store)
+        with pytest.raises(ValueError, match="does not exist"):
+            FileArtifact.put_existing(id="bucket-root", description="d", object_url=url.rstrip("/"))

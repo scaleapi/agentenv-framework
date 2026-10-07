@@ -51,8 +51,9 @@ class SkillArtifact(Artifact):
     allowed_tools: Optional[str] = Field(default=None)
     skill_metadata: Optional[dict[str, str]] = Field(default=None)
 
+    # No return annotation: pydantic builds the serialization schema from one, and a dict drops the fields.
     @model_serializer(mode="wrap")
-    def _serialize(self, handler: Any) -> dict[str, Any]:
+    def _serialize(self, handler: Any):
         # Dual-write, from the attribute: `alias=` emits one spelling, which one depending on the caller's `by_alias`.
         data = handler(self)
         _write_twin(data, "skill_s3_url", "skill_object_url", self.skill_object_url)

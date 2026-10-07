@@ -10,6 +10,8 @@ import pytest
 
 from agent_env.artifact.artifacts.cli import CliArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
+from agent_env.artifact.artifacts.environment import EnvironmentArtifact
+from agent_env.artifact.artifacts.environment_universe import EnvironmentUniverseArtifact
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.artifact.artifacts.skill import SkillArtifact
@@ -39,6 +41,20 @@ def test_a_doc_keyed_either_way_loads_and_dumps_both_keys(case, spelling):
     for by_alias in (True, False):
         dumped = artifact.model_dump(by_alias=by_alias)
         assert all(dumped[legacy] == dumped[neutral] == urls[neutral] for legacy, neutral in pairs)
+
+
+def test_the_legacy_key_wins_when_the_two_disagree():
+    """Only a raw-doc writer outside the model can make them differ, and today's know only the legacy key."""
+    doc = {"id": "x", "version": 1, "description": "d", "filename": "a", "content_type": "t"}
+    assert FileArtifact.model_validate({**doc, "s3_url": "mem://b/new", "object_url": "mem://b/stale"}).object_url == "mem://b/new"
+
+
+@pytest.mark.parametrize("cls", [*(case[0] for case in _CASES.values()), EnvironmentArtifact, EnvironmentUniverseArtifact],
+                         ids=lambda cls: cls.__name__)
+def test_the_serialization_schema_keeps_the_fields(cls):
+    """A wrap serializer's return annotation would replace the schema; an annotated dict leaves no fields."""
+    serialization = cls.model_json_schema(mode="serialization")
+    assert set(serialization.get("properties", {})) == set(cls.model_json_schema(mode="validation")["properties"])
 
 
 def test_an_excluded_field_stays_excluded():

@@ -34,8 +34,9 @@ class CliArtifact(Artifact):
     env_id: Optional[str] = Field(default=None, description="Source env id this CLI was generated from, if any")
     env_version: Optional[int] = Field(default=None, description="Source env version this CLI was generated from, if any")
 
+    # No return annotation: pydantic builds the serialization schema from one, and a dict drops the fields.
     @model_serializer(mode="wrap")
-    def _serialize(self, handler: Any) -> dict[str, Any]:
+    def _serialize(self, handler: Any):
         # Dual-write, from the attribute: `alias=` emits one spelling, which one depending on the caller's `by_alias`.
         data = handler(self)
         _write_twin(data, "cli_s3_url", "cli_object_url", self.cli_object_url)

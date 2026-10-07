@@ -63,8 +63,9 @@ class EnvironmentUniverseArtifact(Universe):
         description="Legacy unpinned metadata FileArtifact ids",
     )
 
+    # No return annotation: pydantic builds the serialization schema from one, and a dict drops the fields.
     @model_serializer(mode="wrap")
-    def _serialize(self, handler: Any) -> dict[str, Any]:
+    def _serialize(self, handler: Any):
         # `@model_serializer(mode="wrap")` is the only hook invoked by both
         # `model_dump` and the Rust-implemented `model_dump_json`.
         data = handler(self)
