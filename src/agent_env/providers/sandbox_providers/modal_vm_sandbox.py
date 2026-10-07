@@ -211,7 +211,7 @@ class ModalVmSandbox(VmSandbox):
         )
 
     async def _download_object_to_vm(self, object_url: str, vm_path: str) -> None:
-        """Presigned objects go through aria2c (see _DL_*); a store that cannot presign keeps the base path."""
+        """Presigned objects go through aria2c (see _DL_*); one a store cannot presign goes over stdin."""
         store = get_config().get_object_store()
         signed = await asyncio.to_thread(store.signed_get_url, object_url)
         signed_at = time.monotonic()
