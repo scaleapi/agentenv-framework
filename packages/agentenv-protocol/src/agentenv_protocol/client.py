@@ -136,10 +136,10 @@ def find_child(card: dict, name: str) -> dict | None:
     """Return the nested child EnvironmentCard named `name`, or None.
 
     A composed card (e.g. a gateway fronting one or more MCP servers) nests each backing
-    environment's card under `children_environments`, with that child's url and extension
-    endpoints under `RPC_PATH` rewritten to be reachable from the composed card's base_url, and
-    any other endpoint as the child advertised it. Callers resolve a service by name here, then
-    use the child card with `find_extension`/`invoke_extension`. Tolerates a missing/null
+    environment's card under `children_environments`. agent-env's gateway prefixes the child's
+    `url` and each extension's `params.endpoint` with the child's path on the gateway
+    (`/svc/<key>`) when they are `RPC_PATH` or under it, and leaves every other endpoint, a
+    method's own included, as the child advertised it. Tolerates a missing/null
     `children_environments` so single/leaf cards return None rather than raising.
     """
     for child in card.get("children_environments") or []:
