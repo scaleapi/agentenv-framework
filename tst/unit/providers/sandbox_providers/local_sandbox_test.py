@@ -845,9 +845,24 @@ async def test_teardown_sends_sigterm_then_sigkill_to_what_outlives_it(monkeypat
             del running[pid]
 
     monkeypatch.setattr(ls.os, "kill", kill)
-    await ls._stop_marked("local-a")
+    assert await ls._stop_marked("local-a")
 
     assert sent == [(11, signal.SIGTERM), (12, signal.SIGTERM), (12, signal.SIGKILL)]
+
+
+@pytest.mark.asyncio
+async def test_teardown_keeps_the_staging_a_surviving_process_runs_from(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(ls, "_REAP_SECONDS", 1)
+    monkeypatch.setattr(ls, "_marked_pids", lambda sandbox_id: [13])  # never stops
+    monkeypatch.setattr(ls.os, "kill", lambda pid, sig: None)
+    sandbox = _RecordingLocalSandbox(work_dir=tmp_path)
+    staged = Path(tempfile.mkdtemp(prefix="install-agent-solver-", suffix=f"-{sandbox.sandbox_id}", dir="/tmp"))
+    try:
+        await sandbox.terminate()
+
+        assert staged.exists()
+    finally:
+        shutil.rmtree(staged, ignore_errors=True)
 
 
 def _running(pid: int) -> bool:

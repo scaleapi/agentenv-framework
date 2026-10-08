@@ -220,11 +220,11 @@ class LocalSandbox(VmSandbox):
         this, local runs leak their containers/compose stacks, which squat host ports and block the
         next deploy. Prod backends override terminate() to tear the whole VM down.
         Processes its commands left running on this machine are stopped first (on Linux; see ``_marked_pids``),
-        then what its steps staged in /tmp is removed.
+        then, once none is left to run from it, what its steps staged in /tmp is removed.
         """
         try:
-            await _stop_marked(self.sandbox_id)
-            await asyncio.to_thread(_remove_staged, self.sandbox_id)
+            if await _stop_marked(self.sandbox_id):
+                await asyncio.to_thread(_remove_staged, self.sandbox_id)
             if self.mode == SANDBOX_MODE_VM and not self.owns_container:
                 await self._remove_labeled()
         finally:  # a container that wouldn't go must not keep the compose stack up
@@ -360,11 +360,11 @@ def _marked_pids(sandbox_id: str) -> list[int]:
     return pids
 
 
-async def _stop_marked(sandbox_id: str) -> None:
+async def _stop_marked(sandbox_id: str) -> bool:
     """Stop the processes ``sandbox_id``'s commands left running, which a real VM would take down with it: SIGTERM,
-    then SIGKILL for any still there a few seconds later."""
+    then SIGKILL for any still there a few seconds later. False if some are still running."""
     if not (pids := await asyncio.to_thread(_marked_pids, sandbox_id)):
-        return
+        return True
     logger.info("Stopping %d process(es) sandbox %s left running on this machine", len(pids), sandbox_id)
     for sig in (signal.SIGTERM, signal.SIGKILL):
         for pid in pids:
@@ -373,8 +373,10 @@ async def _stop_marked(sandbox_id: str) -> None:
         for _ in range(_REAP_SECONDS * 10):
             await asyncio.sleep(0.1)
             if not (pids := await asyncio.to_thread(_marked_pids, sandbox_id)):
-                return
-    logger.warning("Processes %s that sandbox %s started are still running", pids, sandbox_id)
+                return True
+    logger.warning("Processes %s that sandbox %s started are still running; keeping what it staged in /tmp",
+                   pids, sandbox_id)
+    return False
 
 
 def _remove_staged(sandbox_id: str) -> None:
