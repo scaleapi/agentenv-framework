@@ -9,7 +9,6 @@ from typing import Any
 from agent_env.env.env import DeployedEnv
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, host_url_for
 from agent_env.providers.sandbox_providers.sandbox_provider import reachable_url
-from agent_env.utils.deprecation import warn_deprecated
 
 _REDACTED_KEYS = {
     "litellm_api_key", "judge_litellm_api_key", "usersim_api_key", "remote_tokens", "cf_access_client_secret",
@@ -136,9 +135,9 @@ def read_dual_keyed(data: dict[str, Any], legacy: str, neutral: str) -> Any:
     return value if value is not None else data.get(neutral)
 
 
-# (legacy, neutral) PromptResponse field names. The legacy fields stay real fields, mirrored from the neutral ones at
-# construction, so asdict (which persists prompt responses) writes both keys.
-_PROMPT_RESPONSE_TWINS = (
+# (legacy, neutral) keys of the PromptResponse fields that were renamed. Stored documents and raw-doc readers use the
+# legacy keys, so to_dict writes each beside its neutral one and from_dict reads either.
+_PROMPT_RESPONSE_LEGACY_KEYS = (
     ("agent_trajectory_s3_uri", "agent_trajectory_object_url"),
     ("agent_trajectory_s3_prefix", "agent_trajectory_object_prefix"),
     ("target_agent_per_turn_trajectory_s3_uris", "target_agent_per_turn_trajectory_object_urls"),
@@ -150,14 +149,10 @@ class PromptResponse:
     prompt_id: str
     response: str
     prompt_text: str | None = None
-    agent_trajectory_s3_uri: str | None = None
-    agent_trajectory_s3_prefix: str | None = None
     agent_trajectory_file_path: str | None = None
-    target_agent_per_turn_trajectory_s3_uris: list[str | None] | None = None
     # A None entry means "identical to prompt_text" — the first turn of a
     # prompt-mode step is not stored twice.
     source_agent_per_turn_prompt_parts: list[list[dict] | None] | None = None
-    compact_trajectory_s3_uri: str | None = None
     tool_call_count: int | None = None
     model: str | None = None
     error_type: str | None = None
@@ -168,22 +163,17 @@ class PromptResponse:
     agent_name: str | None = None
     step_id: str | None = None
     structured_output: Any = None
-    # Neutral names for the S3-named fields above, which are deprecated mirrors of them; appended, so positional
-    # construction is unchanged.
     agent_trajectory_object_url: str | None = None
     agent_trajectory_object_prefix: str | None = None
     target_agent_per_turn_trajectory_object_urls: list[str | None] | None = None
 
-    def __post_init__(self):
-        for legacy, neutral in _PROMPT_RESPONSE_TWINS:
-            old, new = getattr(self, legacy), getattr(self, neutral)
-            if old is None:
-                setattr(self, legacy, list(new) if isinstance(new, list) else new)
-            elif new is None:
-                warn_deprecated(f"PromptResponse({legacy}=)", f"{neutral}=", kind="keyword", stacklevel=4)
-                setattr(self, neutral, list(old) if isinstance(old, list) else old)
-            elif old != new:
-                raise ValueError(f"PromptResponse got {legacy}={old!r} and {neutral}={new!r}, which disagree")
+    def to_dict(self) -> dict[str, Any]:
+        """The stored form: every field, plus the legacy key of each renamed one."""
+        data = dataclasses.asdict(self)
+        for legacy, neutral in _PROMPT_RESPONSE_LEGACY_KEYS:
+            value = data[neutral]
+            data[legacy] = list(value) if isinstance(value, list) else value
+        return data
 
     @classmethod
     def from_dict(cls, data: dict) -> PromptResponse:
@@ -200,7 +190,6 @@ class PromptResponse:
                 data, "target_agent_per_turn_trajectory_s3_uris", "target_agent_per_turn_trajectory_object_urls"
             ),
             source_agent_per_turn_prompt_parts=data.get("source_agent_per_turn_prompt_parts"),
-            compact_trajectory_s3_uri=data.get("compact_trajectory_s3_uri"),
             tool_call_count=data.get("tool_call_count"),
             model=data.get("model"),
             error_type=data.get("error_type"),
@@ -227,9 +216,15 @@ class TaskStepContext:
     agent_harness: str | None = None
     instance_id: str | None = None
 
+    def to_dict(self) -> dict[str, Any]:
+        """The stored form: ``asdict``, with each prompt response's legacy keys (``PromptResponse.to_dict``)."""
+        d = dataclasses.asdict(self)
+        d["prompt_responses"] = [response.to_dict() for response in self.prompt_responses]
+        return d
+
     def to_safe_dict(self) -> dict[str, Any]:
         """Return a dict representation with sensitive keys recursively removed."""
-        d = dataclasses.asdict(self)
+        d = self.to_dict()
         if "metadata" in d:
             d["metadata"] = _strip_redacted_keys(d["metadata"])
         return d

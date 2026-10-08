@@ -1,10 +1,7 @@
-"""The S3-named artifact keys and keywords get neutral twins.
+"""The S3-named artifact keys get neutral twins, and the put helpers take only the neutral keywords.
 
 A stored doc keyed either way loads, and every dump writes both keys (the additive wire contract: old readers keep
-reading the legacy key). The S3-named keywords of the put helpers still work for one window, warning through
-``warn_deprecated``, whose log line is what counts their remaining callers."""
-
-import logging
+reading the legacy key)."""
 
 import pytest
 
@@ -68,72 +65,41 @@ def _bundle(tmp_path, local_stores):
     return {"a.txt": path}, local_stores.get_object_store().object_url("bundles/one/")
 
 
-def test_the_universe_helpers_take_their_s3_named_keywords_with_a_warning(local_stores, tmp_path):
+def test_the_put_helpers_take_their_object_store_keywords(local_stores, tmp_path):
     files, prefix = _bundle(tmp_path, local_stores)
+    store = local_stores.get_object_store()
+    image, context = store.object_url("images/i.tar.gz"), store.object_url("images/context.tar.gz")
+    store.put("skills/demo/SKILL.md", b"---\nname: demo\ndescription: A demo skill.\n---\nBody\n")
 
-    with pytest.warns(DeprecationWarning, match=r"put_bundled\(s3_url=\)"):
-        bundled = FileArtifactUniverse.put_bundled(id="bundled", files=files, s3_url=prefix)
-    with pytest.warns(DeprecationWarning, match=r"put_existing\(s3_url=\)"):
-        existing = FileArtifactUniverse.put_existing(id="existing", s3_url=prefix)
-    with pytest.warns(DeprecationWarning, match=r"FileArtifactUniverse.put\(bundle_s3_url=\)"):
-        put = FileArtifactUniverse.put(id="put", file_artifacts=bundled.get_file_artifacts(), bundle_s3_url=prefix)
+    bundled = FileArtifactUniverse.put_bundled(id="bundled", files=files, prefix_url=prefix)
+    existing = FileArtifactUniverse.put_existing(id="existing", prefix_url=prefix)
+    put = FileArtifactUniverse.put(id="put", file_artifacts=bundled.get_file_artifacts(), bundle_object_url=prefix)
+    image_artifact = DockerImageArtifact.put_tar("img", description="d", image_name="img:1", tar_gz_object_url=image,
+                                                 build_context_object_url=context)
+    SkillArtifact.validate(object_url=store.object_url("skills/demo"), expected_name="demo")
 
     assert bundled.bundle_object_url == existing.bundle_object_url == prefix.rstrip("/") + "/"
     assert put.bundle_object_url == prefix
+    assert (image_artifact.tar_gz_object_url, image_artifact.build_context_object_url) == (image, context)
 
 
-def test_put_tar_takes_its_s3_named_keywords_with_a_warning(local_stores):
-    store = local_stores.get_object_store()
-    image, context = store.object_url("images/i.tar.gz"), store.object_url("images/context.tar.gz")
-
-    with pytest.warns(DeprecationWarning) as caught:
-        artifact = DockerImageArtifact.put_tar("img", description="d", image_name="img:1", tar_gz_s3_url=image,
-                                               build_context_s3_url=context)
-
-    assert (artifact.tar_gz_object_url, artifact.build_context_object_url) == (image, context)
-    assert [str(w.message).split(" is deprecated")[0] for w in caught] == [
-        "DockerImageArtifact.put_tar(tar_gz_s3_url=)", "DockerImageArtifact.put_tar(build_context_s3_url=)"
-    ]
-
-
-def test_skill_validate_takes_its_s3_named_keyword_with_a_warning(local_stores):
-    store = local_stores.get_object_store()
-    store.put("skills/demo/SKILL.md", b"---\nname: demo\ndescription: A demo skill.\n---\nBody\n")
-
-    with pytest.warns(DeprecationWarning, match=r"validate\(s3_url=\)"):
-        SkillArtifact.validate(s3_url=store.object_url("skills/demo"), expected_name="demo")
+@pytest.mark.parametrize("call", [
+    lambda url: FileArtifactUniverse.put_bundled(id="u", files={}, s3_url=url),
+    lambda url: FileArtifactUniverse.put_existing(id="u", prefix_url=url, s3_url=url),
+    lambda url: FileArtifactUniverse.put(id="u", file_artifacts={}, bundle_s3_url=url),
+    lambda url: DockerImageArtifact.put_tar("img", description="d", image_name="img:1", tar_gz_object_url=url,
+                                            tar_gz_s3_url=url),
+    lambda url: DockerImageArtifact.put_tar("img", description="d", image_name="img:1", tar_gz_object_url=url,
+                                            build_context_s3_url=url),
+    lambda url: SkillArtifact.validate(s3_url=url, expected_name="demo"),
+], ids=["put_bundled", "put_existing", "put", "put_tar-tar_gz", "put_tar-build_context", "skill-validate"])
+def test_an_s3_named_keyword_is_refused(local_stores, call):
+    with pytest.raises(TypeError, match="unexpected keyword argument '(s3_url|bundle_s3_url|tar_gz_s3_url|build_context_s3_url)'"):
+        call(local_stores.get_object_store().object_url("a/"))
 
 
-@pytest.mark.parametrize("old", ["url", None], ids=["old-set", "old-none"])
-def test_both_spellings_of_a_keyword_is_an_error(local_stores, old):
-    url = local_stores.get_object_store().object_url("images/i.tar.gz")
-    with pytest.raises(TypeError, match="got both tar_gz_object_url= and its deprecated spelling tar_gz_s3_url="):
-        DockerImageArtifact.put_tar("img", description="d", image_name="img:1", tar_gz_object_url=url,
-                                    tar_gz_s3_url=url if old else None)
-
-
-def test_an_old_keyword_passed_as_none_is_still_counted(local_stores):
-    """A caller passing an optional old keyword through, as None, still breaks when the keyword is removed."""
-    url = local_stores.get_object_store().object_url("images/i.tar.gz")
-    with pytest.warns(DeprecationWarning, match=r"put_tar\(build_context_s3_url=\)"):
-        artifact = DockerImageArtifact.put_tar("img", description="d", image_name="img:1", tar_gz_object_url=url,
-                                               build_context_s3_url=None)
-    assert artifact.build_context_object_url is None
-
-
-def test_a_required_keyword_is_still_required():
-    with pytest.raises(TypeError, match="missing required keyword argument: 'tar_gz_object_url'"):
+def test_the_object_url_a_helper_needs_is_required():
+    with pytest.raises(TypeError, match="missing 1 required keyword-only argument: 'tar_gz_object_url'"):
         DockerImageArtifact.put_tar("img", description="d", image_name="img:1")
-    with pytest.raises(TypeError, match="missing required keyword argument: 'prefix_url'"):
+    with pytest.raises(TypeError, match="missing 1 required keyword-only argument: 'prefix_url'"):
         FileArtifactUniverse.put_existing(id="u")
-
-
-def test_a_deprecated_keyword_is_counted_in_the_log(local_stores, caplog):
-    url = local_stores.get_object_store().object_url("images/i.tar.gz")
-    with caplog.at_level(logging.WARNING, logger="agent_env.utils.deprecation"), pytest.warns(DeprecationWarning):
-        DockerImageArtifact.put_tar("img", description="d", image_name="img:1", tar_gz_s3_url=url)
-
-    [record] = [r for r in caplog.records if getattr(r, "event", None) == "agent_env_deprecated_symbol"]
-    assert (record.deprecated_symbol, record.replacement, record.kind) == (
-        "DockerImageArtifact.put_tar(tar_gz_s3_url=)", "tar_gz_object_url=", "keyword"
-    )

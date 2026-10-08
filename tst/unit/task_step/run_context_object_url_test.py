@@ -1,11 +1,9 @@
-"""The S3-named run-context keys get neutral twins.
+"""PromptResponse names its trajectory fields for the object store; its stored form keeps the S3-named keys.
 
-Stored instances carry the S3-named keys, so they are read forever and written beside the neutral ones while workers
-on older versions read only them. The S3-named ``PromptResponse`` keywords still work, with a warning."""
+Stored instances and raw-doc readers use the S3-named keys, so the stored form writes each beside its neutral one,
+and from_dict reads either. The S3-named keywords and attributes are gone."""
 
 import dataclasses
-import logging
-import warnings
 
 import pytest
 
@@ -21,18 +19,14 @@ _PAIRS = {
 }
 
 
-def _neutral(**kw) -> PromptResponse:
+def _neutral() -> PromptResponse:
     return PromptResponse(prompt_id="p1", response="done", agent_trajectory_object_url=_URL,
-                          agent_trajectory_object_prefix=_PREFIX, target_agent_per_turn_trajectory_object_urls=_TURNS,
-                          **kw)
+                          agent_trajectory_object_prefix=_PREFIX, target_agent_per_turn_trajectory_object_urls=_TURNS)
 
 
-def test_a_response_built_with_the_neutral_keywords_carries_both_spellings_without_a_warning():
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", DeprecationWarning)
-        response = _neutral()
-    dumped = dataclasses.asdict(response)
-    assert all(dumped[legacy] == dumped[neutral] == value for legacy, (neutral, value) in _PAIRS.items())
+def test_the_stored_form_carries_both_keys():
+    stored = _neutral().to_dict()
+    assert all(stored[legacy] == stored[neutral] == value for legacy, (neutral, value) in _PAIRS.items())
 
 
 def test_a_persisted_response_carries_both_keys():
@@ -42,13 +36,22 @@ def test_a_persisted_response_carries_both_keys():
     assert all(pushed[legacy] == pushed[neutral] == value for legacy, (neutral, value) in _PAIRS.items())
 
 
+@pytest.mark.parametrize("serialize", [TaskStepContext.to_dict, TaskStepContext.to_safe_dict])
+def test_a_saved_context_carries_both_keys(serialize):
+    [saved] = serialize(TaskStepContext(prompt_responses=[_neutral()]))["prompt_responses"]
+    assert all(saved[legacy] == saved[neutral] == value for legacy, (neutral, value) in _PAIRS.items())
+
+
 @pytest.mark.parametrize("spelling", ["legacy", "neutral"])
 def test_a_stored_response_loads_keyed_either_way(spelling):
     keyed = {(legacy if spelling == "legacy" else neutral): value for legacy, (neutral, value) in _PAIRS.items()}
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", DeprecationWarning)
-        response = PromptResponse.from_dict({"prompt_id": "p1", "response": "done", **keyed})
-    assert dataclasses.asdict(response) == dataclasses.asdict(_neutral())
+    response = PromptResponse.from_dict({"prompt_id": "p1", "response": "done", **keyed})
+    assert response == _neutral()
+
+
+def test_the_stored_form_round_trips():
+    response = _neutral()
+    assert PromptResponse.from_dict(response.to_dict()) == response
 
 
 def test_the_legacy_key_wins_when_the_two_disagree():
@@ -64,29 +67,14 @@ def test_the_legacy_key_wins_when_the_two_disagree():
 def test_a_legacy_key_holding_none_falls_through_to_the_neutral_one():
     response = PromptResponse.from_dict({"prompt_id": "p1", "response": "done", "agent_trajectory_s3_uri": None,
                                          "agent_trajectory_object_url": _URL})
-    assert response.agent_trajectory_object_url == response.agent_trajectory_s3_uri == _URL
+    assert response.agent_trajectory_object_url == _URL
 
 
-def test_the_legacy_keywords_still_work_and_are_counted(caplog):
-    with caplog.at_level(logging.WARNING, logger="agent_env.utils.deprecation"), \
-            pytest.warns(DeprecationWarning) as caught:
-        response = PromptResponse(prompt_id="p1", response="done", agent_trajectory_s3_uri=_URL,
-                                  agent_trajectory_s3_prefix=_PREFIX, target_agent_per_turn_trajectory_s3_uris=_TURNS)
-    assert dataclasses.asdict(response) == dataclasses.asdict(_neutral())
-    symbols = [f"PromptResponse({legacy}=)" for legacy in _PAIRS]
-    assert [str(w.message).split(" is deprecated")[0] for w in caught] == symbols
-    assert [r.deprecated_symbol for r in caplog.records if getattr(r, "event", None) == "agent_env_deprecated_symbol"] \
-        == symbols
-
-
-def test_the_two_spellings_disagreeing_is_an_error_and_agreeing_is_a_copy():
-    with pytest.raises(ValueError, match="agent_trajectory_s3_uri='mem://b/other.json' and agent_trajectory_object_url"):
-        _neutral(agent_trajectory_s3_uri="mem://b/other.json")
-    response = _neutral()
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", DeprecationWarning)
-        assert dataclasses.replace(response) == response
-        assert PromptResponse(**dataclasses.asdict(response)) == response
+@pytest.mark.parametrize("legacy", [*_PAIRS, "compact_trajectory_s3_uri"])
+def test_the_s3_named_fields_are_gone(legacy):
+    assert legacy not in {f.name for f in dataclasses.fields(PromptResponse)}
+    with pytest.raises(TypeError, match=f"unexpected keyword argument '{legacy}'"):
+        PromptResponse(prompt_id="p1", response="done", **{legacy: _URL})
 
 
 def test_the_run_output_prints_the_neutral_labels():

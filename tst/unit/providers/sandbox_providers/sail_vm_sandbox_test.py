@@ -336,7 +336,7 @@ async def test_a_signed_object_download_allows_its_host_first(monkeypatch):
     _object_store(monkeypatch, "https://bucket.s3.amazonaws.com/f?sig=1")
     sandbox, sailbox = _sandbox(_process(), policy=_ALLOWLIST)
 
-    await sandbox.load_s3_file("s3://bucket/f", "/tmp/f")
+    await sandbox.load_object_file("s3://bucket/f", "/tmp/f")
 
     sailbox.set_egress_policy.aio.assert_awaited_once_with(
         {"allowlist": ["pypi.org", "bucket.s3.amazonaws.com", "10.0.0.0/8"]}
@@ -354,7 +354,7 @@ async def test_an_unsignable_object_is_streamed_through_the_filesystem_api(monke
     stream = MagicMock(__aenter__=AsyncMock(return_value=writer), __aexit__=AsyncMock(return_value=False))
     sailbox.fs.write_stream.aio = AsyncMock(return_value=stream)
 
-    await sandbox.load_s3_file("file:///store/f", "/tmp/f")
+    await sandbox.load_object_file("file:///store/f", "/tmp/f")
 
     sailbox.fs.write_stream.aio.assert_awaited_once_with("/tmp/f")
     assert b"".join(call.args[0] for call in writer.write.await_args_list) == b"\x00payload"

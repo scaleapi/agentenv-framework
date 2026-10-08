@@ -28,9 +28,6 @@ __all__ = [
     "FileArtifactUniverse",
     "EnvironmentArtifact",
     "EnvironmentUniverseArtifact",
-    # Deprecated aliases. Kept in __all__ so `from agent_env.artifact import *`
-    # still binds them; served by __getattr__ below rather than imported eagerly, so
-    # importing this package does not itself trip the deprecation counter.
     "SkillArtifact",
     "AGENT_SKILLS_SPEC_VERSION",
     "Universe",

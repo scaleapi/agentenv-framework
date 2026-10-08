@@ -14,7 +14,6 @@ from agent_env.artifact.ref import ArtifactRef
 from agent_env.artifact.universe import Universe
 from agent_env.config import get_config
 from agent_env.store.ids import derive_id
-from agent_env.utils.deprecation import OMITTED, renamed_keyword
 
 logger = logging.getLogger(__name__)
 
@@ -82,13 +81,9 @@ class FileArtifactUniverse(Universe):
         *,
         file_artifacts: dict[str, "FileArtifact"],
         bundle_object_url: str | None = None,
-        bundle_s3_url: str | None = OMITTED,
     ) -> "FileArtifactUniverse":
         from agent_env.artifact.store import get_artifact_store
 
-        bundle_object_url = renamed_keyword(
-            "FileArtifactUniverse.put", "bundle_object_url", bundle_object_url, "bundle_s3_url", bundle_s3_url
-        )
         if not file_artifacts:
             raise ValueError("file_artifacts must be non-empty")
         if bundle_object_url:
@@ -144,14 +139,12 @@ class FileArtifactUniverse(Universe):
         *,
         files: dict[str, Path],
         prefix_url: str | None = None,
-        s3_url: str | None = OMITTED,
     ) -> "FileArtifactUniverse":
         """Upload ``files`` (bundle key -> local path) under ``prefix_url`` and register them as one universe.
         Without ``prefix_url``, each call writes under a prefix of its own (``ArtifactStore.attempt_prefix``)."""
         from agent_env.artifact.artifacts.file import FileArtifact
         from agent_env.artifact.store import get_artifact_store
 
-        prefix_url = renamed_keyword("FileArtifactUniverse.put_bundled", "prefix_url", prefix_url, "s3_url", s3_url)
         if not files:
             raise ValueError("files must be non-empty")
         if prefix_url is None:
@@ -188,8 +181,7 @@ class FileArtifactUniverse(Universe):
         cls,
         id: str,
         *,
-        prefix_url: str | None = None,
-        s3_url: str | None = OMITTED,
+        prefix_url: str,
     ) -> "FileArtifactUniverse":
         """Wrap files that already exist under an object-store prefix as a universe.
 
@@ -201,9 +193,6 @@ class FileArtifactUniverse(Universe):
         """
         from agent_env.artifact.artifacts.file import FileArtifact
 
-        prefix_url = renamed_keyword("FileArtifactUniverse.put_existing", "prefix_url", prefix_url, "s3_url", s3_url)
-        if prefix_url is None:
-            raise TypeError("FileArtifactUniverse.put_existing() missing required keyword argument: 'prefix_url'")
         if not prefix_url.endswith("/"):
             prefix_url += "/"
 

@@ -145,6 +145,9 @@ orchestrators call it the same way. What callers rely on:
 - Every persisted or transmitted context snapshot passes through `TaskStepContext.to_safe_dict()`
   or the context-ops diff, which strip `_REDACTED_KEYS` (`task_step/context.py`);
   `regraft_redacted_keys` restores live values when a context is rebuilt from a stored document.
+  Both write each prompt response through `PromptResponse.to_dict()`, which adds the S3-named key
+  of every renamed trajectory field, since stored documents and raw-doc readers use them; serialize
+  a context with `TaskStepContext.to_dict()`, not `dataclasses.asdict`.
 - A run is resumable: pass a previously persisted `context`, a `start_step` and the existing
   `instance_id`; completed steps are seeded as SUCCESS.
 

@@ -8,7 +8,6 @@ from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts.skill import fetch_skill_md, parse_skill_md
 from agent_env.a2a_agent.store import get_a2a_agent_instance_store
 from agent_env.store.base import NotFoundError
-from agent_env.cli.utils import deprecated_option, renamed_value
 from agent_env.task_step.task_steps.add_skills import Skill
 
 
@@ -47,17 +46,14 @@ from agent_env.task_step.task_steps.add_skills import Skill
     default=None,
     help="Object-store prefix containing a skill directory",
 )
-@deprecated_option("--skill-s3-url", "skill_s3_url", "--skill-object-url")
 def add_skill(
     instance_id: str,
     skill_artifact_id: Optional[str],
     skill_artifact_version: Optional[int],
     skill_md_path: Optional[Path],
     skill_object_url: Optional[str],
-    skill_s3_url: Optional[str],
 ):
     """Register a skill against a deployed A2A agent's /ext/skill-config endpoint."""
-    skill_object_url = renamed_value("--skill-object-url", skill_object_url, "--skill-s3-url", skill_s3_url)
     sources = [bool(skill_artifact_id), bool(skill_md_path), bool(skill_object_url)]
     if sum(sources) != 1:
         click.echo(

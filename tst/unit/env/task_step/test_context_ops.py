@@ -127,7 +127,7 @@ def test_response_history_diff_uses_linear_comparisons(monkeypatch, append_new):
     ops = build_context_update_ops(pre, post)
 
     if append_new:
-        assert ops.add_to_sets["context.prompt_responses"] == [dataclasses.asdict(_response("new"))]
+        assert ops.add_to_sets["context.prompt_responses"] == [_response("new").to_dict()]
     else:
         assert ops.is_empty()
     assert comparisons <= 2 * len(pre.prompt_responses)

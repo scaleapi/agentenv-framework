@@ -23,7 +23,6 @@ from typing import IO, TYPE_CHECKING, Any, AsyncIterator, Callable, Iterable, Op
 
 from agent_env.config import get_config
 from agent_env.store.image_store.oci_registry_credentials import registry_host_from_ref
-from agent_env.utils.deprecation import warn_deprecated
 from agent_env.utils.paths import validate_relative_filename
 
 if TYPE_CHECKING:
@@ -186,11 +185,6 @@ class Sandbox(ABC):
         """Write the object store's object at ``object_url`` into the agent process's filesystem at
         ``destination_path``."""
         raise NotImplementedError(f"{self.__class__.__name__} does not support write_file_from_object")
-
-    async def write_file_from_s3(self, s3_url: str, destination_path: str) -> None:
-        """Deprecated: ``write_file_from_object``."""
-        warn_deprecated("Sandbox.write_file_from_s3", "write_file_from_object", kind="method")
-        await self.write_file_from_object(s3_url, destination_path)
 
     async def write_file_from_url(self, url: str, destination_path: str) -> None:
         """Download an HTTP(S) URL into the agent process's filesystem at destination_path."""
@@ -380,11 +374,6 @@ class VmSandbox(Sandbox):
     async def load_object_file(self, object_url: str, destination_path: str) -> None:
         """Download the object store's object at ``object_url`` onto the VM host at ``destination_path``."""
         await self._download_object_to_vm(object_url, destination_path)
-
-    async def load_s3_file(self, s3_url: str, destination_path: str) -> None:
-        """Deprecated: ``load_object_file``."""
-        warn_deprecated("VmSandbox.load_s3_file", "load_object_file", kind="method")
-        await self.load_object_file(s3_url, destination_path)
 
     async def _download_object_to_vm(self, object_url: str, vm_path: str) -> None:
         """Place object_url onto the VM host at vm_path, backend-agnostically."""

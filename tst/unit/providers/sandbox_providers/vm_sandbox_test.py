@@ -1,7 +1,6 @@
 import asyncio
 import hashlib
 import io
-import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -565,21 +564,6 @@ async def test_docker_cp_passes_its_paths_as_arguments(remove_source, script):
 async def test_a_failed_docker_cp_raises_with_its_stderr():
     with pytest.raises(RuntimeError, match="(?s)exit 1.*no such container"):
         await _ArgsRecorder(exit_code=1).docker_cp("/tmp/a", "c:/x")
-
-
-@pytest.mark.asyncio
-async def test_the_s3_named_methods_are_deprecated_aliases(signing_store, caplog):
-    """They delegate, and each use is counted: the log line, not the warning, is what reaches production logs."""
-    sandbox = _RecordingVmSandbox()
-    with caplog.at_level(logging.WARNING, logger="agent_env.utils.deprecation"):
-        with pytest.warns(DeprecationWarning, match="use load_object_file"):
-            await sandbox.load_s3_file("s3://bucket/a.json", "/tmp/a.json")
-        with pytest.warns(DeprecationWarning, match="use write_file_from_object"):
-            await sandbox.write_file_from_s3("s3://bucket/b.json", "/work/b.json")
-    assert any("https://signed/a.json" in s for s in sandbox.scripts)
-    assert any("https://signed/b.json" in s for s in sandbox.scripts)
-    counted = [r.deprecated_symbol for r in caplog.records if getattr(r, "event", None) == "agent_env_deprecated_symbol"]
-    assert counted == ["VmSandbox.load_s3_file", "Sandbox.write_file_from_s3"]
 
 
 @pytest.mark.asyncio

@@ -24,7 +24,6 @@ from pydantic import ConfigDict, Field, model_serializer
 from agent_env.artifact.artifact import Artifact, _write_twin
 from agent_env.store.ids import fs_safe, image_repository, is_local_id
 from agent_env.store.image_store.oci_registry_credentials import is_loopback_host, names_registry, registry_host_from_ref
-from agent_env.utils.deprecation import OMITTED, renamed_keyword
 
 logger = logging.getLogger(__name__)
 
@@ -176,21 +175,13 @@ class DockerImageArtifact(Artifact):
         *,
         description: str,
         image_name: str,
-        tar_gz_object_url: str | None = None,
+        tar_gz_object_url: str,
         build_context_object_url: str | None = None,
-        tar_gz_s3_url: str | None = OMITTED,
-        build_context_s3_url: str | None = OMITTED,
     ) -> "DockerImageArtifact":
         from agent_env.artifact.store import get_artifact_store
         from agent_env.config import get_config
 
         owner = "DockerImageArtifact.put_tar"
-        tar_gz_object_url = renamed_keyword(owner, "tar_gz_object_url", tar_gz_object_url, "tar_gz_s3_url", tar_gz_s3_url)
-        build_context_object_url = renamed_keyword(
-            owner, "build_context_object_url", build_context_object_url, "build_context_s3_url", build_context_s3_url
-        )
-        if tar_gz_object_url is None:
-            raise TypeError(f"{owner}() missing required keyword argument: 'tar_gz_object_url'")
         if not tar_gz_object_url:
             raise ValueError(f"{owner}(): tar_gz_object_url is empty")
         for url in (tar_gz_object_url, build_context_object_url):

@@ -227,7 +227,7 @@ def _fresh_run_state(start_step: int, completed_step_docs: list[dict]) -> dict:
     have to agree on them; ``rev`` and the generation are bumped there instead and live in
     ``_new_instance_doc``."""
     return {
-        "context": dataclasses.asdict(TaskStepContext()),
+        "context": TaskStepContext().to_dict(),
         "completed_steps": completed_step_docs,
         "status": "running",
         "error": None,

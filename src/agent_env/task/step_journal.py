@@ -3,7 +3,6 @@ that reconstructs. Pure — the store owns the collection, the sequence, and the
 
 from __future__ import annotations
 
-import dataclasses
 from typing import Iterable
 
 from agent_env.task_step.context import TaskStepContext
@@ -89,7 +88,7 @@ def replay_context(entries: list[dict], rerecorded_steps: Iterable[str]) -> dict
     ``rerecorded_steps`` is the instance's own list, the only record of which steps re-recorded:
     a flag on the entry would be a pre-CAS read and can disagree with the write that landed."""
     flagged = set(rerecorded_steps)
-    doc = {"context": dataclasses.asdict(TaskStepContext())}
+    doc = {"context": TaskStepContext().to_dict()}
     for e in entries:
         ops = ContextUpdateOps.from_journal_dict(e["ops"])
         _apply_forward(doc, ops, move_to_end=e["step_id"] in flagged)

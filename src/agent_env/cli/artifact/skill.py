@@ -6,7 +6,6 @@ import click
 
 from agent_env.artifact import SkillArtifact
 from agent_env.artifact.artifacts.skill import parse_skill_md, download_skill
-from agent_env.cli.utils import deprecated_option, renamed_value
 
 
 # ---------------------------------------------------------------------------
@@ -48,10 +47,8 @@ def skill():
     default=None,
     help="Object-store prefix containing the skill — alternative to --skill-dir",
 )
-@deprecated_option("--s3-url", "s3_url", "--prefix-url")
-def skill_put(artifact_id: str, skill_dir: Optional[Path], prefix_url: Optional[str], s3_url: Optional[str]):
+def skill_put(artifact_id: str, skill_dir: Optional[Path], prefix_url: Optional[str]):
     """Upload a skill as a SkillArtifact, from a local directory or an object-store prefix."""
-    prefix_url = renamed_value("--prefix-url", prefix_url, "--s3-url", s3_url)
     if (skill_dir is None) == (prefix_url is None):
         click.echo("Error: specify exactly one of --skill-dir or --prefix-url", err=True)
         raise SystemExit(1)

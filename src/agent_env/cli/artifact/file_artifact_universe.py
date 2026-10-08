@@ -6,7 +6,6 @@ from typing import Optional, Tuple
 import click
 
 from agent_env.artifact import FileArtifact, FileArtifactUniverse
-from agent_env.cli.utils import deprecated_option, renamed_value
 from agent_env.store.ids import fs_safe, is_local_id, key_segment
 
 
@@ -74,10 +73,8 @@ def put(universe_id: str, file_artifact_ids: Tuple[str, ...]):
     help="Object-store prefix to upload the bundle under. Defaults to the version's own prefix in the configured "
     "object store (artifacts/file_artifact_universe/<id>/<version>/).",
 )
-@deprecated_option("--s3-url", "s3_url", "--prefix-url")
-def put_bundled(universe_id: str, file_dir: Path, prefix_url: Optional[str], s3_url: Optional[str]):
+def put_bundled(universe_id: str, file_dir: Path, prefix_url: Optional[str]):
     """Upload every file under --file-dir as a single bundled FileArtifactUniverse."""
-    prefix_url = renamed_value("--prefix-url", prefix_url, "--s3-url", s3_url)
     files: dict[str, Path] = {}
     for p in sorted(file_dir.rglob("*")):
         if p.is_file():

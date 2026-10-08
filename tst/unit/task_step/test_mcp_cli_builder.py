@@ -127,14 +127,14 @@ def test_add_skills_step_roundtrip_with_cli_artifact_ids():
 
 
 def test_build_skill_for_installed_cli():
-    from agent_env.artifact.artifacts.skill import _parse_skill_md, _validate_frontmatter
+    from agent_env.artifact.artifacts.skill import _validate_frontmatter, parse_skill_md
     skill = _build_skill_for_installed_cli(
         "cli-slack-mcp",
         {"command_name": "slack", "install_path": "/opt/cli/slack/bin/slack"},
     )
     assert skill.name == "slack-cli"
     skill_md = skill.to_skill_md()
-    fm, body = _parse_skill_md(skill_md.encode("utf-8"))
+    fm, body = parse_skill_md(skill_md.encode("utf-8"))
     _validate_frontmatter(fm, expected_name="slack-cli")
     assert "/opt/cli/slack/bin/slack" in body
     assert "--help" in body

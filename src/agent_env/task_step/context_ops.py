@@ -12,7 +12,7 @@ import types
 from dataclasses import dataclass, field
 from typing import Any, Union, get_args, get_origin, get_type_hints
 
-from agent_env.task_step.context import TaskStepContext, _REDACTED_KEYS, _strip_redacted_keys
+from agent_env.task_step.context import PromptResponse, TaskStepContext, _REDACTED_KEYS, _strip_redacted_keys
 
 
 @dataclass
@@ -145,15 +145,19 @@ def build_context_update_ops(
         candidates = post_items[len(pre_items):] if _is_prefix(pre_items, post_items) else post_items
         new_items = [x for x in candidates if x not in pre_items]
         if new_items:
-            ops.add_to_sets[f"context.{name}"] = [
-                dataclasses.asdict(x) if dataclasses.is_dataclass(x) else x
-                for x in new_items
-            ]
+            ops.add_to_sets[f"context.{name}"] = [_stored(x) for x in new_items]
 
     for name in _FIELDS.dicts:
         _diff_dict(f"context.{name}", getattr(pre_ctx, name), getattr(post, name), ops)
 
     return ops
+
+
+def _stored(item: Any) -> Any:
+    """A list item as it is stored: a prompt response with its legacy keys, any other dataclass as ``asdict``."""
+    if isinstance(item, PromptResponse):
+        return item.to_dict()
+    return dataclasses.asdict(item) if dataclasses.is_dataclass(item) else item
 
 
 def _diff_dict(

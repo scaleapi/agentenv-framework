@@ -21,7 +21,6 @@ from agent_env.artifact.artifact import Artifact, _write_twin
 from agent_env.config import get_config
 from agent_env.store.base import ObjectNotFoundError
 from agent_env.store.ids import derive_id, key_segment
-from agent_env.utils.deprecation import OMITTED, renamed_keyword
 
 if TYPE_CHECKING:
     from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
@@ -65,10 +64,8 @@ class SkillArtifact(Artifact):
         *,
         skill_md: Optional[bytes] = None,
         object_url: Optional[str] = None,
-        s3_url: Optional[str] = OMITTED,
         expected_name: str,
     ) -> None:
-        object_url = renamed_keyword("SkillArtifact.validate", "object_url", object_url, "s3_url", s3_url)
         if (skill_md is None) == (object_url is None):
             raise ValueError("specify exactly one of skill_md or object_url")
         if object_url is not None:
@@ -217,8 +214,3 @@ def download_skill(object_url: str) -> Iterator[Path]:
         if count == 0:
             raise ValueError(f"No objects found under {object_url}")
         yield tmp_path
-
-
-# Their former private names, which callers outside agent-env import and patch.
-_parse_skill_md = parse_skill_md
-_fetch_skill_md = fetch_skill_md
