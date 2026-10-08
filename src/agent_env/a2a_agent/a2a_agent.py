@@ -31,6 +31,7 @@ from agent_env.providers.sandbox_providers.local_sandbox import (
     LocalSandbox,
     LocalSandboxProvider,
     local_grant_trust,
+    transfer_sandbox_type,
     start_trusting,
 )
 from agent_env.providers.sandbox_providers.sandbox_provider import all_sandbox_container_env, all_sandbox_url_rewrites
@@ -72,6 +73,8 @@ class DeployedA2AAgent:
     created_at_utc: str | None = None
     expires_at_utc: str | None = None
     network_policy: dict | None = None
+    # Installed straight onto the sandbox host (install_agent host mode), not into a container.
+    on_host: bool = False
 
     @classmethod
     def from_dict(cls, data: dict) -> "DeployedA2AAgent":
@@ -86,6 +89,7 @@ class DeployedA2AAgent:
             created_at_utc=data.get("created_at_utc"),
             expires_at_utc=data.get("expires_at_utc"),
             network_policy=data.get("network_policy"),
+            on_host=bool(data.get("on_host", False)),
         )
 
 
@@ -203,7 +207,8 @@ class A2AAgent:
         bundle of read grants; returns the agent's answer."""
         add_method, add_path = A2AAgent.operation(A2AAgent._skill_extension(deployed), "add")
         store = transfer_store(
-            get_config().get_object_store(), deployed.a2a_url, deployed.agent_card, sandbox_type=deployed.sandbox_type
+            get_config().get_object_store(), deployed.a2a_url, deployed.agent_card,
+            sandbox_type=transfer_sandbox_type(deployed),
         )
         call = await asyncio.to_thread(
             skill_add_call,
@@ -213,7 +218,7 @@ class A2AAgent:
             description=description,
             skill_md=skill_md,
             object_url=object_url,
-            sandbox_type=deployed.sandbox_type,
+            sandbox_type=transfer_sandbox_type(deployed),
         )
         return await invoke_transfer(
             deployed.a2a_url + add_path,

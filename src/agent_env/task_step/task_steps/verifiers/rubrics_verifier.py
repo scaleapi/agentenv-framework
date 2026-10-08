@@ -16,6 +16,7 @@ from agent_env.a2a_agent.object_transfer import (
     trajectory_mode,
 )
 from agent_env.a2a_agent.staging import transfer_store
+from agent_env.providers.sandbox_providers.local_sandbox import transfer_sandbox_type
 from agent_env.config import get_config
 from agent_env.config.model import ModelParam
 from agent_env.task_step.context import TaskStepContext, dual_keyed
@@ -1055,7 +1056,7 @@ class RubricsVerifierTaskStep(TaskStep):
             judge_a2a_url=judge_a2a_url,
             judge_agent_card=judge_agent_card,
             a2a_server_task_id=task_id,
-            sandbox_type=getattr(judge_agent, "sandbox_type", None),
+            sandbox_type=transfer_sandbox_type(judge_agent) if judge_agent is not None else None,
         )
         return {"response": tr.response_text, "trajectory_object_url": judge_trajectory_url}
 

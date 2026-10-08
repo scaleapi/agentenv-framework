@@ -6,6 +6,7 @@ import json
 import logging
 from typing import ClassVar, Optional
 
+from agent_env.providers.sandbox_providers.local_sandbox import transfer_sandbox_type
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity_refs import EntityRef, RefRole
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
@@ -117,7 +118,7 @@ class SnapshotAgentStateTaskStep(TaskStep):
             a2a_context_id=a2a_context_id,
             artifact_id=self.artifact_id,
             timeout_seconds=self.timeout_seconds,
-            sandbox_type=deployed.sandbox_type,
+            sandbox_type=transfer_sandbox_type(deployed),
         )
 
         snapshots = context.metadata.setdefault("agent_snapshots", [])

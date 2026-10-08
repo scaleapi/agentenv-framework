@@ -59,6 +59,28 @@ def test_installed_agent_is_registered_in_the_instance_store():
     assert created.agent_card == card
 
 
+def test_the_instance_records_whether_the_agent_runs_on_the_sandbox_host():
+    agent = MagicMock()
+    agent.id, agent.version = "claude-code-cli", 7
+    store = _FakeInstanceStore()
+
+    with patch("agent_env.a2a_agent.store.get_a2a_agent_instance_store", return_value=store):
+        _step()._register_instance(agent, "https://a2a.example", _sandbox_record(), {})
+        InstallAgentTaskStep(id="i", version=None, sandbox_name="sb", container_name="task-container",
+                             a2a_agent_id="claude-code-cli")._register_instance(
+            agent, "https://a2a.example", _sandbox_record(), {})
+
+    assert [created.on_host for created, _ttl in store.created] == [True, False]
+
+
+def test_on_host_survives_the_instance_store_and_an_older_record_reads_as_in_a_container():
+    deployed = DeployedA2AAgent(agent_id="a", agent_version=1, a2a_url="u", sandbox_id="s", agent_card={}, on_host=True)
+    doc = dataclasses.asdict(deployed)
+    assert DeployedA2AAgent.from_dict(doc).on_host is True
+    del doc["on_host"]
+    assert DeployedA2AAgent.from_dict(doc).on_host is False
+
+
 def test_instance_ttl_mirrors_the_sandbox_expiry():
     expires = datetime.now(timezone.utc) + timedelta(minutes=90)
     ds = _sandbox_record(expires_at_utc=expires.strftime("%Y-%m-%d %H:%M UTC"))

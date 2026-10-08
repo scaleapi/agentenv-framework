@@ -21,6 +21,7 @@ from agent_env.a2a_agent.object_transfer import (
     trajectory_mode,
 )
 from agent_env.a2a_agent.staging import draining, staged_changelogs, transfer_store
+from agent_env.providers.sandbox_providers.local_sandbox import transfer_sandbox_type
 from agent_env.config.model import MODEL_PARAMS_RESERVED
 from agent_env.env.gateway.constants import EXT_CLOCK_URI, EXT_TRIGGERS_URI, TRIGGER_IN_FLIGHT_STATUSES
 from agent_env.store import DuplicateKeyError, get_config
@@ -530,7 +531,7 @@ class PromptAgentTaskStep(TaskStep):
                 try:
                     turn_traj_uri = await self._fetch_trajectory(
                         target_url, traj_ext_cached, sent_task_id, trajectory_output_prefix,
-                        target_a2a_task_id, card=card, sandbox_type=agent.sandbox_type,
+                        target_a2a_task_id, card=card, sandbox_type=transfer_sandbox_type(agent),
                     )
                 except Exception as e:
                     logger.warning(f"Turn {turn+1} trajectory fetch failed (continuing): {e}")

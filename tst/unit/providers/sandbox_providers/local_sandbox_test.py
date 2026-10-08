@@ -17,7 +17,9 @@ from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, Lo
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER, SANDBOX_MODE_VM
 from agent_env.store import LocalFilesystemObjectStore
 from agent_env.store.object_store.local.tls import local_ca
+from agent_env.store.object_store.object_store import issues_grants_to
 from agent_env.store.routing import LocalRunObjectStore
+from agent_env.task_step.context import DeployedAgent
 from agent_env.a2a_agent import a2a_agent as a2a_agent_module
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from tst.unit.store.fakes import FakeObjectStore
@@ -467,6 +469,27 @@ async def test_create_container_marker_failure_escalates_when_removal_also_fails
         with pytest.raises(OSError):  # the original marker error, not swallowed by the rm failure
             await _RecordingProvider().create_container(image_name="img:v1", port=8000, env={})
     assert any("remove it manually" in r.message for r in caplog.records)  # escalated, not hidden
+
+
+@pytest.mark.parametrize(
+    "sandbox_type, on_host, judged_as",
+    [("local", True, None), ("local", False, "local"), ("modal_vm", True, "modal_vm"), (None, False, None)],
+)
+def test_only_a_host_agent_on_a_local_sandbox_is_judged_unknown_for_transfers(sandbox_type, on_host, judged_as):
+    assert ls.transfer_sandbox_type(SimpleNamespace(sandbox_type=sandbox_type, on_host=on_host)) == judged_as
+
+
+def test_local_grants_reach_a_local_container_agent_but_not_a_host_agent_while_public_grants_reach_both(tmp_path):
+    class _PublicGrants(FakeObjectStore):
+        supports_transfer_grants = True
+
+    on_host, in_container = (DeployedAgent(agent_name="a", api_url="http://127.0.0.1:1", sandbox_type="local",
+                                           on_host=placed) for placed in (True, False))
+    local = LocalFilesystemObjectStore(root=str(tmp_path))
+
+    assert not issues_grants_to(local, ls.transfer_sandbox_type(on_host))
+    assert issues_grants_to(local, ls.transfer_sandbox_type(in_container))
+    assert issues_grants_to(_PublicGrants(), ls.transfer_sandbox_type(on_host))
 
 
 def test_local_never_shares_network_and_externalizes_localhost():

@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from agent_env.store.ids import derive_id, is_local_id, validate_local_id
+from agent_env.providers.sandbox_providers.local_sandbox import transfer_sandbox_type
 from agent_env.task_step.context import TaskStepContext, dual_keyed
 from agent_env.task_step.snapshot_utils import agent_state_capture as capture
 
@@ -427,7 +428,7 @@ class SnapshotSeries:
             a2a_context_id=self.a2a_context_id,
             artifact_id=self.workspace_artifact_id,
             timeout_seconds=remaining(),
-            sandbox_type=agent.sandbox_type,
+            sandbox_type=transfer_sandbox_type(agent),
         )
         row["id"] = workspace.universe_id
         row["version"] = workspace.universe_version
@@ -444,7 +445,7 @@ class SnapshotSeries:
             context_id=self.a2a_context_id,
             timeout_seconds=remaining(),
             trajectory_output_prefix=self.trajectory_output_prefix,
-            sandbox_type=agent.sandbox_type,
+            sandbox_type=transfer_sandbox_type(agent),
         )
         if traj.reason and is_final:
             recorded = self._recorded_trajectory_uri(context)

@@ -314,6 +314,7 @@ class InstallAgentTaskStep(TaskStep):
                 sandbox_id=ds.sandbox_id,
                 agent_card=agent_card,
                 sandbox_type=ds.sandbox_type,
+                on_host=self.container_name is None,
             ),
             ttl_seconds=self._instance_ttl_seconds(ds),
         )

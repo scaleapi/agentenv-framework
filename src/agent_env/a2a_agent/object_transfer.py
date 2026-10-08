@@ -40,6 +40,7 @@ from pydantic import BaseModel, ValidationError
 from agent_env.a2a_agent import protocol
 from agent_env.a2a_agent.protocol import raise_for_extension_status
 from agent_env.a2a_agent.staging import StagedObjectStore, staged_store
+from agent_env.providers.sandbox_providers.local_sandbox import transfer_sandbox_type
 from agent_env.config import get_config
 from agent_env.store.base import GrantUnavailableError
 from agent_env.store.object_store import DEFAULT_CONTENT_TYPE, ObjectStore
@@ -369,7 +370,7 @@ async def send_and_wait(
     watched while it works, so one that dies is given up on (``poll_a2a_task``)."""
     sending = (
         readable_parts(
-            parts, a2a_url=a2a_url, card=agent.a2a_card, sandbox_type=agent.sandbox_type,
+            parts, a2a_url=a2a_url, card=agent.a2a_card, sandbox_type=transfer_sandbox_type(agent),
             expires_in=timeout_seconds, shareable=shareable,
         )
         if agent is not None

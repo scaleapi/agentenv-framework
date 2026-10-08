@@ -23,7 +23,7 @@ import subprocess
 import tempfile
 from ipaddress import ip_address
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, Protocol
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -573,6 +573,18 @@ def host_url_for(url: str, sandbox_type: Optional[str]) -> str:
     """``url``, which this machine reaches, as a container on ``sandbox_type`` reaches it: only a local
     sandbox's containers run on this machine, and they reach its loopback by another name."""
     return LocalSandboxProvider.get_external_url(url) if sandbox_type == LocalSandbox.type else url
+
+
+class _PlacedAgent(Protocol):
+    sandbox_type: Optional[str]
+    on_host: bool
+
+
+def transfer_sandbox_type(agent: _PlacedAgent) -> Optional[str]:
+    """The sandbox type a store judges by whether its grants reach ``agent``: the agent's own, except None (unknown)
+    for an agent installed on a local sandbox's host. That agent is a process on this machine, outside the containers
+    the local store's grants are made for, so its transfers take the forms that carry no grants."""
+    return None if agent.on_host and agent.sandbox_type == LocalSandbox.type else agent.sandbox_type
 
 
 def _is_loopback(host: Optional[str]) -> bool:
