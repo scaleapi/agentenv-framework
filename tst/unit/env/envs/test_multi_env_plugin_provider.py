@@ -586,18 +586,26 @@ async def test_a_deploy_onto_the_state_instance_the_env_s_deployment_holds_is_re
     assert (sandboxes.called, "deploys" in SEEN) == (False, False)
 
 
+@pytest.mark.parametrize("make_env", [
+    pytest.param(lambda: _multi(), id="multi"),
+    pytest.param(lambda: MCPServerEnv(id="mcp-slack", version=1, environment_name="slack",
+                                      docker_image_artifact=MagicMock(image_name="mcp-slack"),
+                                      env_provider_type="plugin_pods"), id="mcp_server"),
+    pytest.param(lambda: _site("shop", "plugin_pods"), id="website"),
+])
 @pytest.mark.asyncio
-async def test_a_built_in_env_forwards_the_universe_artifact_to_its_provider():
+async def test_every_built_in_env_forwards_the_universe_artifact_to_its_provider(make_env):
     """A warm pool keys on env *and* universe, so the provider has to be told which universe
-    the run will load. Absent, both arrive as None — the pool then treats the env as unpooled
-    rather than guessing, and every existing caller is unaffected."""
+    the run will load. All three envs carry it the same way, so all three are checked: a value
+    dropped in one would otherwise go unnoticed. Absent, both arrive as None — the pool then
+    treats the env as unpooled rather than guessing, and every existing caller is unaffected."""
     SEEN.clear()
     SEEN["deploys"] = []
-    await _deploy(_multi(), artifact_id="hg4_real", artifact_version=5)
+    await _deploy(make_env(), artifact_id="hg4_real", artifact_version=5)
     [(_, options)] = SEEN["deploys"]
     assert (options["artifact_id"], options["artifact_version"]) == ("hg4_real", 5)
 
     SEEN["deploys"] = []
-    await _deploy(_multi())
+    await _deploy(make_env())
     [(_, options)] = SEEN["deploys"]
     assert (options["artifact_id"], options["artifact_version"]) == (None, None)
