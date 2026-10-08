@@ -40,17 +40,14 @@ def pin_digest(ref: str, auth: RegistryAuth | None) -> str:
     without it, a registry's anonymous token is. Raises ValueError naming what the registry answered.
     """
     image = _parse(ref)
-    if image.digest is not None:
-        _check(image, image.digest, auth)
-        if image.tag is None:
-            return ref
-        served = _check(image, image.tag, auth)
-        if served != image.digest:
-            raise ValueError(f"{ref}: the tag {image.tag!r} names {served} now, not {image.digest}; give the tag or the "
-                             "digest alone")
-        return ref
-    tag = image.tag or "latest"
-    return f"{image.name}:{tag}@{_check(image, tag, auth)}"
+    if image.digest is None:
+        tag = image.tag or "latest"
+        return f"{image.name}:{tag}@{_check(image, tag, auth)}"
+    served = _check(image, image.tag or image.digest, auth)
+    if image.tag and served != image.digest:
+        raise ValueError(f"{ref}: the tag {image.tag!r} names {served} now, not {image.digest}; give the tag or the "
+                         "digest alone")
+    return ref
 
 
 def _parse(ref: str) -> _ImageRef:
