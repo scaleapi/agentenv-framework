@@ -40,8 +40,6 @@ class DeployEnvTaskStep(TaskStep):
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
         metadata: Optional[dict] = None,
-        # Appended, not slotted next to env_version: an existing positional argument would
-        # otherwise change meaning.
         artifact_id: Optional[str] = None,
         artifact_version: Optional[int] = None,
     ):
