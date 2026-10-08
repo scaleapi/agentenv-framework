@@ -218,7 +218,7 @@ class TaskStepContext:
 
     def to_dict(self) -> dict[str, Any]:
         """The stored form: ``asdict``, with each prompt response's legacy keys (``PromptResponse.to_dict``)."""
-        d = dataclasses.asdict(self)
+        d = dataclasses.asdict(dataclasses.replace(self, prompt_responses=[]))
         d["prompt_responses"] = [response.to_dict() for response in self.prompt_responses]
         return d
 
