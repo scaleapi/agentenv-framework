@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -10,6 +11,7 @@ from agentenv_protocol import RPC_PATH, WELL_KNOWN_PATH, DataPart, uploaded_file
 from agentenv_protocol.client import GetDataResponse
 
 from agent_env.env import legacy_protocol
+from agent_env.env.env import DeployedEnv, DeployedGatewayEnv
 
 
 @pytest.mark.asyncio
@@ -126,6 +128,34 @@ async def test_a_gateway_path_without_a_gateway_fails_readably():
         await legacy_protocol.child_env_card(record, None, "slack")
     with pytest.raises(EnvNeedsGateway, match=message):
         await legacy_protocol.export_state(None, "slack")
+
+
+@pytest.mark.asyncio
+async def test_a_stored_child_card_resolves_against_the_childs_path_and_leaves_the_record_as_stored():
+    child = {"name": "slack", "url": "/svc/mcp-slack/agentenv", "capabilities": {"extensions": [
+        {"uri": "urn:agentenv:set-errors/v1", "params": {"endpoint": "/svc/mcp-slack/agentenv/ext/set_errors"}},
+        {"uri": "urn:agentenv:clock/v1", "params": {"endpoint": "/ext/clock/sync-time"}},
+    ]}}
+    card = {"name": "gw", "url": RPC_PATH, "children_environments": [child]}
+    record = DeployedGatewayEnv(env_id="e", env_version=1, gateway_url="http://gw", sandbox_id="sb-1",
+                                environment_card_url=f"https://sandbox.example/sb-1{WELL_KNOWN_PATH}", environment_card=copy.deepcopy(card))
+
+    base, resolved = await legacy_protocol.child_env_card(record, "http://gw", "slack")
+
+    assert base == "https://sandbox.example/sb-1/svc/mcp-slack"
+    assert [e["params"]["endpoint"] for e in resolved["capabilities"]["extensions"]] == ["/agentenv/ext/set_errors", "/ext/clock/sync-time"]
+    assert record.environment_card == card
+
+
+@pytest.mark.asyncio
+async def test_a_stored_leaf_card_resolves_against_the_envs_address_unchanged():
+    card = {"name": "slack", "url": RPC_PATH, "capabilities": {"extensions": [
+        {"uri": "urn:agentenv:set-errors/v1", "params": {"endpoint": "/agentenv/ext/set_errors"}},
+    ]}}
+    record = DeployedEnv(env_id="e", env_version=1, environment_card_url=f"https://sandbox.example/sb-1{WELL_KNOWN_PATH}",
+                         environment_card=card)
+
+    assert await legacy_protocol.child_env_card(record, None, "slack") == ("https://sandbox.example/sb-1", card)
 
 
 def _v1_service(monkeypatch, answer: list, export_state: dict) -> list[str]:

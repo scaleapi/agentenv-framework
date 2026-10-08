@@ -8,6 +8,7 @@ Standalone async helpers for the current gateway endpoints: ``POST /api/reset``
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 from typing import TYPE_CHECKING, Optional
 
@@ -39,7 +40,7 @@ async def v1_base_url(deployed: Optional[DeployedEnv], gateway_url: Optional[str
         base_url = environment_base_url(gateway_url, environment_name, mcp=mcp)
         return base_url if await protocol_v1.supports_v1(base_url) else None
     child = deployed.get_child_env_card(environment_name)
-    return deployed.environment_url + child.get("url", RPC_PATH).removesuffix(RPC_PATH) if child else None
+    return deployed.environment_url + _child_path(child) if child else None
 
 
 
@@ -53,7 +54,28 @@ async def child_env_card(deployed: Optional[DeployedEnv], gateway_url: Optional[
             if e.response.status_code == 404:
                 return base_url, None
             raise
-    return deployed.environment_url, deployed.get_child_env_card(environment_name)
+    child = deployed.get_child_env_card(environment_name)
+    if child is None:
+        return deployed.environment_url, None
+    path = _child_path(child)
+    return deployed.environment_url + path, _endpoints_relative_to(path, child)
+
+
+def _child_path(child: dict) -> str:
+    """A child env's path under the env's address, such as ``/svc/mcp-<name>``; empty for a leaf card."""
+    return child.get("url", RPC_PATH).removesuffix(RPC_PATH)
+
+
+def _endpoints_relative_to(path: str, child: dict) -> dict:
+    """The child card with its extension endpoints relative to the child at `path`. A composing gateway prefixes only
+    the child's ``/agentenv`` endpoints with that path and leaves the rest as the child advertised them."""
+    card = copy.deepcopy(child)
+    for ext in (card.get("capabilities") or {}).get("extensions") or []:
+        params = ext.get("params") or {}
+        if (params.get("endpoint") or "").startswith(f"{path}/"):
+            params["endpoint"] = params["endpoint"].removeprefix(path)
+    return card
+
 
 async def reset_via_rest(
     base_url: str,

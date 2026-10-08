@@ -7,10 +7,10 @@ gateway. Extensions are advertised on the server's ``EnvironmentCard`` (served a
 at their advertised REST endpoint (e.g. ``/agentenv/ext/set_errors``).
 
 Config lives on the backing server, not on the gateway itself. Each server's card
-comes from the env card stored on the deployed record, whose extension endpoints the
-gateway has already rewritten to its ``/svc/mcp-{service}`` proxy; a record without a
-stored card reads it live there. The agent never sees the card or these endpoints;
-only this harness step invokes them.
+comes from the env card stored on the deployed record, and its endpoints are invoked
+through the gateway's ``/svc/mcp-{service}`` proxy; a record without a stored card
+reads it live there. The agent never sees the card or these endpoints; only this
+harness step invokes them.
 """
 
 from __future__ import annotations

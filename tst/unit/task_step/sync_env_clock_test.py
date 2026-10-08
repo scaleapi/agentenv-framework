@@ -81,6 +81,26 @@ async def test_sync_one_invokes_at_the_stored_child_card_with_no_card_read(monke
 
 
 @pytest.mark.asyncio
+async def test_sync_one_resolves_a_child_endpoint_outside_the_rpc_path_against_the_child(monkeypatch):
+    sent = _mock_http(monkeypatch)
+    ext = {"uri": EXT_CLOCK_URI, "params": {"endpoint": "/ext/clock/sync-time", "methods": {"sync_time": {"method": "POST"}}}}
+    record = _carded(await _composed_card({"mcp-email": [ext]}))
+
+    assert (await _step()._sync_one(record, "http://gw", "email", CLOCK_URL))["synced"] is True
+    assert [(r.method, str(r.url)) for r in sent] == [("POST", f"{_CARD}/svc/mcp-email/ext/clock/sync-time")]
+
+
+@pytest.mark.asyncio
+async def test_sync_one_resolves_a_method_endpoint_against_the_child(monkeypatch):
+    sent = _mock_http(monkeypatch)
+    ext = {"uri": EXT_CLOCK_URI, "params": {"methods": {"sync_time": {"method": "POST", "endpoint": "/agentenv/ext/sync_time"}}}}
+    record = _carded(await _composed_card({"mcp-email": [ext]}))
+
+    await _step()._sync_one(record, "http://gw", "email", CLOCK_URL)
+    assert [str(r.url) for r in sent] == [f"{_CARD}/svc/mcp-email/agentenv/ext/sync_time"]
+
+
+@pytest.mark.asyncio
 async def test_sync_one_skips_or_raises_for_a_child_env_missing_from_the_stored_card(monkeypatch):
     sent = _mock_http(monkeypatch)
     record = _carded(await _composed_card({"mcp-slack": [_CLOCK_EXT]}))
