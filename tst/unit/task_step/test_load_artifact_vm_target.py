@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from agent_env.artifact.artifact import Artifact
@@ -230,21 +232,22 @@ class TestContainerPathUnchanged:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("cleanup_fails", [False, True])
-    async def test_a_failed_url_load_reports_its_own_error_and_cleans_up(self, cleanup_fails):
+    @pytest.mark.parametrize("failure", [RuntimeError("curl: (22) 404"), asyncio.CancelledError()], ids=["error", "cancel"])
+    async def test_a_failed_url_load_reports_its_own_error_and_cleans_up(self, cleanup_fails, failure):
         scripts = []
 
         class _Vm:
             async def exec_script(self, script, **kw):
                 scripts.append(script)
                 if script.startswith("curl "):
-                    raise RuntimeError("curl: (22) 404")
+                    raise failure
                 if script.startswith("rm -f ") and cleanup_fails:
                     raise RuntimeError("exec transport closed")
                 return ""
 
         step = LoadArtifactTaskStep(id="s", version=None, sandbox_name="mk", container_name="c", urls=["https://x/y"])
 
-        with pytest.raises(RuntimeError, match="404"):
+        with pytest.raises(type(failure)):
             await step._load_url_into_container(_Vm(), "c", "https://x/y", "/work/y")
 
         assert scripts[-1].startswith("rm -f /tmp/_load_url_")

@@ -367,7 +367,7 @@ class LoadArtifactTaskStep(TaskStep):
                 f"docker exec -u 0 {shlex.quote(container)} mkdir -p {shlex.quote(posixpath.dirname(destination_path))}"
             )
             await sandbox.docker_cp(vm_temp, f"{container}:{destination_path}", remove_source=True)
-        except Exception:
+        except BaseException:  # a cancelled load leaves nothing on the host either
             with contextlib.suppress(Exception):  # best effort: the load's own error is the one to report
                 await sandbox.exec_script(f"rm -f {shlex.quote(vm_temp)}")
             raise
