@@ -909,6 +909,22 @@ async def test_export_reads_the_child_env_from_the_stored_card(monkeypatch, tmp_
 
 
 @pytest.mark.asyncio
+async def test_export_pushes_s3_credentials_to_a_child_endpoint_outside_the_rpc_path(monkeypatch, tmp_path):
+    s3_ext = {"uri": "urn:agentenv:add-s3-credentials/v1",
+              "params": {"endpoint": "/ext/add_s3_credentials", "methods": {"add_s3_credentials": {"method": "POST"}}}}
+    record = _carded(await _card({"mcp-gdrive": [s3_ext]}))
+    sent = _mock_http(monkeypatch, rpc_result={"parts": [{"kind": "data", "data": {"rows": 1}}]})
+    _fake_aws(monkeypatch)
+
+    await SnapshotEnvTaskStep._export_environment_to_file("https://gw-1", "gdrive", str(tmp_path / "export-tmp"), 30, record)
+
+    assert [(r.method, str(r.url)) for r in sent] == [
+        ("POST", f"{_CARD}/svc/mcp-gdrive/ext/add_s3_credentials"),
+        ("POST", f"{_CARD}/svc/mcp-gdrive/agentenv"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_export_of_a_child_env_missing_from_the_card_streams_legacy_export_state(monkeypatch, tmp_path):
     from agent_env.task_step.task_steps import snapshot_env as mod
 
