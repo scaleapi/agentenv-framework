@@ -83,7 +83,7 @@ To cite AgentEnv Framework, use the metadata in [`CITATION.cff`](https://github.
 
 ```bibtex
 @software{agentenv_framework,
-  author = {Arakelyan, Edgar},
+  author = {Arakelyan, Edgar and Polakam, Tejas and Singhal, Pratyush},
   title = {AgentEnv Framework},
   year = {2026},
   url = {https://github.com/scaleapi/agentenv-framework},

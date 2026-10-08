@@ -7,6 +7,12 @@ authors:
   - family-names: "Arakelyan"
     given-names: "Edgar"
     affiliation: "Scale AI"
+  - family-names: "Polakam"
+    given-names: "Tejas"
+    affiliation: "Scale AI"
+  - family-names: "Singhal"
+    given-names: "Pratyush"
+    affiliation: "Scale AI"
 repository-code: "https://github.com/scaleapi/agentenv-framework"
 license: Apache-2.0
 date-released: 2026-09-30
