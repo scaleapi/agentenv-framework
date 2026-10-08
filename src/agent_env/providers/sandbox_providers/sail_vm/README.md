@@ -226,7 +226,8 @@ with `sailbox_id`, the App and the full attribution. To attribute cost, join Sai
 
 - **Automatic checkpoints:** Sail checkpoints every Sailbox's disk for host-failure recovery, and this
   can't be turned off. Anything a workload's container env holds lands there, apart from the injected
-  model key. With the S3 object store, keep `share_credentials` off for Sail runs.
+  model key. Agent containers never receive the object store's credentials; with the S3 object store,
+  keep `share_credentials` off for Sail runs too, so `snapshot_env` pushes none to env services.
 - **Docker-in-Docker:** containers an agent starts with its own Docker-in-Docker don't get the CA bundle.
 - **No `SAIL_MODE`:** the provider talks to Sail's production endpoints.
 

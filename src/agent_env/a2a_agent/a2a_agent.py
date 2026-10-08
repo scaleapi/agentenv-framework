@@ -490,10 +490,6 @@ class A2AAgent:
         merged_env = dict(self.default_env_vars)
         merged_env.update(resolved_env)
         merged_env["A2A_PORT"] = str(a2a_port)
-        shared = get_config().get_object_store().shared_credentials_env()
-        if shared.keys().isdisjoint(merged_env):
-            merged_env.update(shared)
-
         merged_env.update(all_sandbox_container_env())
         rewrites = all_sandbox_url_rewrites()
         if rewrites:

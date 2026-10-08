@@ -561,21 +561,20 @@ def test_a_routing_wrapper_says_how_every_store_method_routes(base, wrapper):
 
 
 class _SharingStore(LocalFilesystemObjectStore):
-    """A configured store that hands its credentials to the workloads agent-env deploys."""
+    """A configured store that shares its credentials, which agent-env pushes only to env services."""
 
     def shared_credentials_env(self) -> dict[str, str]:
         return {"AWS_ACCESS_KEY_ID": "configured-id", "AWS_SECRET_ACCESS_KEY": "configured-secret"}
 
 
-def test_an_agent_deployed_in_an_at_local_run_gets_none_of_the_configured_stores_credentials(tmp_path):
+def test_an_agent_gets_none_of_the_configured_stores_credentials_in_or_out_of_an_at_local_run(tmp_path):
     configured = _SharingStore(str(tmp_path / "configured"))
     routed = LocalRunObjectStore(configured, LocalFilesystemObjectStore(str(tmp_path / "local")))
     agent = A2AAgent(id="solver", version=1, docker_image_artifact=SimpleNamespace(image_name="img"))
     try:
-        set_object_store(configured)
-        assert agent._build_merged_env({}, 8000)["AWS_ACCESS_KEY_ID"] == "configured-id"
-        set_object_store(routed)
+        for store in (configured, routed):
+            set_object_store(store)
+            assert "AWS_ACCESS_KEY_ID" not in agent._build_merged_env({}, 8000)
         assert routed.shared_credentials_env() == {}
-        assert "AWS_ACCESS_KEY_ID" not in agent._build_merged_env({}, 8000)
     finally:
         reset_config()

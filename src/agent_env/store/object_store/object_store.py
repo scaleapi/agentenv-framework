@@ -165,9 +165,10 @@ class ObjectStore(ABC):
         return None
 
     def shared_credentials_env(self) -> dict[str, str]:
-        """Environment variables handing credentials to the agents and env services agent-env
-        deploys, so they can use this store directly. None by default; a deployment that wants
-        it overrides this, and the workloads get whatever scope those credentials carry."""
+        """Credentials ``snapshot_env`` pushes to an env service that uploads its own snapshot to this
+        store. Agents never receive them: an agent reaches the store's objects through transfer grants.
+        None by default; a deployment that wants the push overrides this, and the service gets whatever
+        scope those credentials carry."""
         return {}
 
     def grants_reach(self, sandbox_type: str | None) -> bool:
