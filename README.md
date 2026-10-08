@@ -147,6 +147,29 @@ def browser_timeout() -> int:
 - Uninstalling a plugin leaves its table in the config file.
 - A top-level table one letter from `[plugins]`, such as `[plugin]`, gets a warning in `config show`: nothing reads it, so the plugin would get no settings.
 
+### Recorded runs
+
+Every run of a task, whether from `agent-env run`, `task run`, an eval or the explorer, is recorded as a task instance. A plugin reads them with three functions:
+
+```python
+from agent_env.task.store import count_task_instances, find_task_instance, task_instances
+
+task_id = "@local/mycorp-demo/triage/route-ticket"                 # a task of the installed bundle triage
+runs = task_instances(task_id)                                      # newest first
+page = task_instances(task_id, task_version=2, limit=50, offset=50)  # version 2's second page of 50
+total = count_task_instances(task_id, task_version=2)
+run = find_task_instance("@local/mycorp-demo/triage/route-ticket-7f3a9c2e")  # None when there is no such run
+
+for run in runs:
+    verifications = (run.context or {}).get("metadata", {}).get("verifications", {})
+    print(run.instance_id, run.status, run.created_at_utc, {v: e.get("score") for v, e in verifications.items()})
+```
+
+- Each returns `agent_env.task.store.TaskInstance` records: `instance_id`, `task_id`, `task_version`, `status` (`running`, `completed`, `failed` or `cancelled`), the step progress, `error`, `created_at_utc` and `completed_at_utc`, and `context`. `context` is the run's `TaskStepContext` as a dict, with the API keys and access tokens AgentEnv keeps in its `metadata` removed. It still holds deployment details such as endpoints and agent cards, so a plugin that publishes runs picks the fields it needs.
+- A run records the minute it started, so runs that started in the same minute come in no set order.
+- They read the configured document store. Inside an `agent-env` command, such as a CLI plugin's, that includes the `@local` store `agent-env run` records bundle runs in. A bundle's task ids are `<id root>/<task name>`, as in [Bundles from installed packages](#bundles-from-installed-packages).
+- `run.context["metadata"]["run_group_id"]` is shared by the runs one `agent-env run`, `task run --k` or `task run-batch` started.
+
 ### Manage plugins
 
 <!-- tst/installer/test_container_journey.py runs the commands in the first bash block below. -->
@@ -299,6 +322,7 @@ What a plugin can build on, how to declare the agent-env it needs, and what agen
 - The entry-point groups and their rules, in [Register types from an installed package](#register-types-from-an-installed-package) and [CLI plugins, root options, explorer routes](#cli-plugins-root-options-explorer-routes).
 - The base class each group names, with its public methods and attributes: `agent_env.env.env.Env`, `agent_env.task_step.task_step.TaskStep` and the `agent_env.task_step.context.TaskStepContext` a step runs with, `agent_env.artifact.artifact.Artifact`, `agent_env.providers.sandbox_providers.sandbox_provider.SandboxProvider`, `agent_env.providers.env_state.env_state_provider.EnvStateProvider`, `agent_env.providers.env_providers.env_provider.EnvironmentProvider`, and `agent_env.explorer.plugin.ExplorerPlugin`.
 - The two functions an env that uses an environment provider calls: `agent_env.providers.env_providers.env_provider.build_env_provider` and `agent_env.env.store.register_env_instance`.
+- What a plugin reads of recorded runs ([Recorded runs](#recorded-runs)): `agent_env.task.store.task_instances`, `agent_env.task.store.count_task_instances` and `agent_env.task.store.find_task_instance`, and the `agent_env.task.store.TaskInstance` they return.
 - What an environment provider reads to deploy a built-in env: `agent_env.env.envs.mcp_server.MCPServerEnv.docker_image_artifact` and `agent_env.env.envs.mcp_server.MCPServerEnv.environment_name`; `agent_env.env.envs.website.WebsiteEnv.backend_docker_image_artifact`, `agent_env.env.envs.website.WebsiteEnv.frontend_docker_image_artifact` and `agent_env.env.envs.website.WebsiteEnv.environment_name`; `agent_env.env.envs.multi_env.MultiEnv.mcp_server_envs`, `agent_env.env.envs.multi_env.MultiEnv.website_envs` and `agent_env.env.envs.multi_env.MultiEnv.name`; and each image's `agent_env.artifact.artifacts.docker_image.DockerImageArtifact.image_name`.
 - The top level of `agent_env.plugins`, including `settings`, and the `[plugins.<package>]` table it reads ([Plugin settings](#plugin-settings)).
 - The `plugin --json` output, which has its own rules: [Plugin report format](#plugin-report-format).
@@ -307,7 +331,7 @@ The classes a config `impl` names, such as stores and runners, are not on the li
 
 **Changes before 1.0.** Every merged change can ship as a release, several a day. A change that breaks the plugin surface is marked with `!` after the scope in its pull request title, which becomes its commit title, as in `feat(plugins)!: …`. Where the old behaviour can be kept for a while, it is deprecated first: it keeps working and emits a `DeprecationWarning` that names what replaces it. How long that lasts is not fixed before 1.0.
 
-The `plugin-api` CI job holds pull requests to this. It compares the listed base classes, `TaskStepContext`, the two functions, the env attributes and the top level of `agent_env.plugins` with the pull request's base (`.github/scripts/check_plugin_api.py`), and fails on a break the title does not mark; with the `!`, it lists the breaks and passes, and editing the title re-runs it. A break is what fails code written against the old surface:
+The `plugin-api` CI job holds pull requests to this. It compares the listed base classes, `TaskStepContext`, the two functions, the recorded-run reads and `TaskInstance`, the env attributes and the top level of `agent_env.plugins` with the pull request's base (`.github/scripts/check_plugin_api.py`), and fails on a break the title does not mark; with the `!`, it lists the breaks and passes, and editing the title re-runs it. A break is what fails code written against the old surface:
 
 - for a caller, a name, parameter or `__all__` entry that is removed or renamed, a new required parameter, a parameter that can no longer be passed as before, or a changed default or constant, including the group-name constants `agent_env.plugins` exports, compared by value;
 - for a subclass of a base class, a new abstract or required method, a method that becomes abstract or required, a new `ClassVar` with no value, a method that changes between plain, `async`, `classmethod`, `staticmethod` and property, and a base-class method that accepts more than before: a new parameter, even an optional one, a parameter that stops being required, a new `*args` or `**kwargs`, or a keyword-only parameter that can now be passed by position, since an override written for the old signature fails when core passes it;

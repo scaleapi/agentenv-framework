@@ -36,6 +36,9 @@ BASES = (
 USED = (
     "agent_env.task_step.context.TaskStepContext", "agent_env.plugins",
     "agent_env.providers.env_providers.env_provider.build_env_provider", "agent_env.env.store.register_env_instance",
+    # What a plugin reads of recorded runs.
+    "agent_env.task.store.task_instances", "agent_env.task.store.count_task_instances",
+    "agent_env.task.store.find_task_instance", "agent_env.task.store.TaskInstance",
     # What an environment provider reads to deploy a built-in env.
     "agent_env.env.envs.mcp_server.MCPServerEnv.docker_image_artifact", "agent_env.env.envs.mcp_server.MCPServerEnv.environment_name",
     "agent_env.env.envs.website.WebsiteEnv.backend_docker_image_artifact",

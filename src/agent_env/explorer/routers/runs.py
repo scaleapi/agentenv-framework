@@ -8,6 +8,7 @@ locally-minted run id.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import uuid
@@ -20,8 +21,8 @@ from agent_env.config import get_config, get_runner
 from agent_env.explorer.entity_ids import EntityId
 from agent_env.explorer.routers.common import PaginatedResponse, docs
 from agent_env.runner.runner import RunStatus
-from agent_env.store import Filter, Sort
-from agent_env.task.store import TaskStepStatus
+from agent_env.store import Filter
+from agent_env.task.store import TaskStepStatus, count_task_instances, find_task_instance, task_instances
 
 logger = logging.getLogger(__name__)
 
@@ -248,25 +249,18 @@ def list_instances(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ) -> PaginatedResponse:
-    conditions = {"task_id": task_id}
-    if task_version is not None:
-        conditions["task_version"] = task_version
-    filt = Filter.of(**conditions)
-    store = docs()
-    items = store.query(TASK_INSTANCES_COLLECTION, filt,
-                        sort=Sort.by("created_at_utc", descending=True),
-                        limit=limit, offset=offset)
-    total = store.count(TASK_INSTANCES_COLLECTION, filt)
-    return PaginatedResponse(items=items, total=total, limit=limit, offset=offset,
+    items = task_instances(task_id, task_version=task_version, limit=limit, offset=offset)
+    total = count_task_instances(task_id, task_version=task_version)
+    return PaginatedResponse(items=[dataclasses.asdict(i) for i in items], total=total, limit=limit, offset=offset,
                              has_more=offset + len(items) < total)
 
 
 @router.get("/{task_id}/instances/{instance_id}")
 def get_instance(task_id: EntityId, instance_id: EntityId) -> dict:
-    doc = docs().find_one(TASK_INSTANCES_COLLECTION, Filter.of(instance_id=instance_id))
-    if doc is None:
+    instance = find_task_instance(instance_id)
+    if instance is None:
         raise HTTPException(status_code=404, detail=f"instance {instance_id} not found")
-    return doc
+    return dataclasses.asdict(instance)
 
 
 # --- run groups -------------------------------------------------------------

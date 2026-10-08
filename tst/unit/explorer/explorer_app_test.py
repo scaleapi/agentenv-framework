@@ -340,6 +340,29 @@ def test_a_bundle_runs_namespaced_instance_id_is_one_encoded_segment(client):
     assert len(client.get(f"/api/v1/task-instances/{instance}/conversations").json()["conversations"]) == 1
 
 
+def test_the_instance_routes_page_newest_first_and_answer_404_for_an_unknown_run(client):
+    task_id = "@local/~/triage/route-ticket"
+    store = get_config().get_document_store()
+    for minute in range(3):
+        for version in (1, 2):
+            store.insert("task_instances", {
+                "instance_id": f"{task_id}-v{version}m{minute}", "task_id": task_id, "task_version": version,
+                "status": "completed", "total_steps": 1, "current_step": 1, "completed_steps": [],
+                "created_at_utc": f"2026-10-08 10:0{minute} UTC", "journal_seq": 4,
+            })
+    base = f"/api/v1/tasks/{quote(task_id, safe='')}/instances"
+
+    page = client.get(base, params={"task_version": 2, "limit": 2}).json()
+    last = client.get(base, params={"offset": 5}).json()
+
+    assert [i["instance_id"] for i in page["items"]] == [f"{task_id}-v2m2", f"{task_id}-v2m1"]
+    assert (page["total"], page["has_more"]) == (3, True)
+    assert "journal_seq" not in page["items"][0]
+    assert (len(last["items"]), last["total"], last["has_more"]) == (1, 6, False)
+    assert client.get(f"{base}/{quote(f'{task_id}-v1m0', safe='')}").json()["task_version"] == 1
+    assert client.get(f"{base}/{quote(f'{task_id}-gone', safe='')}").status_code == 404
+
+
 def test_start_runs_caps_the_batch_size(client, monkeypatch):
     from agent_env.task import Task
 
