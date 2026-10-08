@@ -2,7 +2,9 @@
 
 After each tool call the capture uploads one increment, ``NNNNNN.tar`` named by the tool call's zero-based
 position: the files under the roots that changed since the previous increment (``files/<absolute path>``),
-the paths that disappeared, and the conversation's pi session as it stood (``session.jsonl``).
+the paths that disappeared, and the conversation's pi session as it stood (``session.jsonl``). A failed
+upload leaves its changes for the next increment, so positions may be sparse, as the protocol allows; the
+last failed one is retried by ``flush`` when the task ends, since no later increment may follow it.
 """
 
 from __future__ import annotations
@@ -10,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import logging
 import os
 import tarfile
 from collections.abc import Iterable, Sequence
@@ -21,6 +24,7 @@ from agentenv_protocol.a2a_agent import NamespaceUploader, WriteNamespaceGrant
 META = "meta.json"
 SESSION = "session.jsonl"
 FILES = "files/"
+logger = logging.getLogger(__name__)
 _SKIPPED_DIRS = frozenset({"__pycache__", ".git"})
 
 Signature = tuple[int, int, int]
@@ -67,19 +71,22 @@ class Applied:
     session: bytes | None
 
 
-def apply(path: Path) -> Applied:
-    """Replay one increment onto the filesystem; only paths under the roots it names are touched."""
+def apply(path: Path, roots: Sequence[str]) -> Applied:
+    """Replay one increment onto the filesystem. Every path it touches must resolve, symlinks followed, under
+    one of ``roots``, the replaying agent's own: the roots an increment names are not trusted."""
+    allowed = [Path(os.path.realpath(root)) for root in roots]
+
+    def within(target: Path) -> bool:
+        resolved = Path(os.path.realpath(target))
+        return any(resolved.is_relative_to(root) for root in allowed)
+
     with tarfile.open(path) as archive:
         meta = json.load(archive.extractfile(META))
-        roots = [Path(root) for root in meta["roots"]]
-
-        def within(target: Path) -> bool:
-            return any(target.is_relative_to(root) for root in roots)
-
         for name in meta["deleted"]:
-            target = Path(os.path.normpath(name))
-            if within(target):
-                target.unlink(missing_ok=True)
+            target = Path(os.path.normpath("/" + name.lstrip("/")))
+            if not within(target.parent):
+                raise ValueError(f"increment deletes outside the agent's roots: {target}")
+            target.unlink(missing_ok=True)
         session = None
         for member in archive.getmembers():
             if member.name == SESSION:
@@ -87,7 +94,7 @@ def apply(path: Path) -> Applied:
             elif member.name.startswith(FILES) and member.isfile():
                 target = Path(os.path.normpath("/" + member.name.removeprefix(FILES)))
                 if not within(target):
-                    raise ValueError(f"increment writes outside its roots: {target}")
+                    raise ValueError(f"increment writes outside the agent's roots: {target}")
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(archive.extractfile(member).read())
                 target.chmod(member.mode & 0o7777)
@@ -101,18 +108,38 @@ class ChangelogCapture:
         self._lock = asyncio.Lock()
         self._position = 0
         self._state: dict[str, Signature] = {}
+        self._pending: tuple[int, dict] | None = None
 
     async def start(self) -> None:
         self._state = await asyncio.to_thread(scan, self.roots)
 
     async def capture(self, session: Path | None, *, context_id: str, session_id: str) -> None:
+        """Upload the increment for the next tool call. A failure is logged and left pending, not raised: the
+        scanned state only advances on success, so a later increment, or ``flush``, carries the changes."""
         async with self._lock:
             position = self._position
             self._position += 1
+            meta = {"position": position, "context_id": context_id, "session_id": session_id}
+            self._pending = (position, meta)
+            await self._upload(session)
+
+    async def flush(self, session: Path | None) -> bool:
+        """Retry the pending increment, if any; whether every increment so far is uploaded."""
+        async with self._lock:
+            if self._pending is not None:
+                await self._upload(session)
+            return self._pending is None
+
+    async def _upload(self, session: Path | None) -> None:
+        position, meta = self._pending
+        try:
             current = await asyncio.to_thread(scan, self.roots)
             changed = [path for path, signature in current.items() if self._state.get(path) != signature]
             deleted = [path for path in self._state if path not in current]
-            self._state = current
-            meta = {"position": position, "context_id": context_id, "session_id": session_id}
             body = await asyncio.to_thread(increment, changed, deleted, self.roots, session, meta)
             await self._uploader.upload(f"{position:06d}.tar", body)
+        except Exception:  # noqa: BLE001 -- a lost increment must not fail the tool call; flush reports it
+            logger.exception("changelog increment %06d was not uploaded", position)
+            return
+        self._state = current
+        self._pending = None

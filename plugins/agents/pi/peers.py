@@ -1,7 +1,9 @@
 """Peer A2A agents exposed to pi as MCP tools, served by the agent itself at ``/mcp`` over loopback.
 
 A minimal streamable-HTTP MCP server: JSON responses to POSTed requests, 202 for notifications, and no
-server-to-client stream (405 on GET), which is all pi's MCP client needs for tool calls.
+server-to-client stream (405 on GET), which is all pi's MCP client needs for tool calls. It answers loopback
+clients only, and each task's ``mcp.json`` names its context in the URL (``?context=``), so every A2A
+context holds its own conversation with each peer.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from starlette.responses import JSONResponse, Response
 PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 PEER_TIMEOUT_SECONDS = 900
 _LOOPBACK = frozenset({"127.0.0.1", "localhost"})
+_LOOPBACK_CLIENTS = frozenset({"127.0.0.1", "::1"})
 # Seen from inside a container, a peer published on the host's loopback is at the host gateway.
 _HOST_FROM_CONTAINER = "host.docker.internal"
 
@@ -32,8 +35,8 @@ TOOLS = [
     {
         "name": "peer_send_message",
         "description": (
-            "Send a message to a peer agent and return its reply. Messages to the same peer continue one "
-            "conversation unless new_conversation is true."
+            "Send a message to a peer agent and return its reply. Messages to the same peer within this task's "
+            "conversation continue one peer conversation unless new_conversation is true."
         ),
         "inputSchema": {
             "type": "object",
@@ -72,22 +75,24 @@ def _reply_text(result: Mapping[str, Any]) -> str:
 class Peers:
     def __init__(self) -> None:
         self.agents: dict[str, PeerAgent] = {}
-        self._contexts: dict[str, str] = {}
+        self._contexts: dict[tuple[str, str], str] = {}
 
     def set(self, peers: list[PeerAgent]) -> None:
         self.agents = {peer.name: peer for peer in peers}
-        self._contexts = {name: context for name, context in self._contexts.items() if name in self.agents}
+        self._contexts = {key: context for key, context in self._contexts.items() if key[1] in self.agents}
 
     def listing(self) -> list[dict[str, Any]]:
         return [{"name": peer.name, "url": peer.url, "description": peer.description} for peer in self.agents.values()]
 
-    async def send(self, peer_name: str, message: str, *, new_conversation: bool = False) -> str:
+    async def send(self, origin: str, peer_name: str, message: str, *, new_conversation: bool = False) -> str:
+        """Message ``peer_name`` in the conversation the A2A context ``origin`` holds with it."""
         peer = self.agents.get(peer_name)
         if peer is None:
             raise ValueError(f"unknown peer {peer_name!r}; known peers: {sorted(self.agents)}")
+        key = (origin, peer_name)
         if new_conversation:
-            self._contexts.pop(peer_name, None)
-        context_id = self._contexts.setdefault(peer_name, uuid.uuid4().hex)
+            self._contexts.pop(key, None)
+        context_id = self._contexts.setdefault(key, uuid.uuid4().hex)
         payload = {
             "jsonrpc": "2.0",
             "id": uuid.uuid4().hex,
@@ -119,16 +124,19 @@ class Peers:
         return _reply_text(body["result"])
 
     async def mcp(self, request: Request) -> Response:
+        if request.client is None or request.client.host not in _LOOPBACK_CLIENTS:
+            return Response(status_code=403)
         if request.method != "POST":
             return Response(status_code=405)
+        origin = request.query_params.get("context", "")
         body = await request.json()
         messages = body if isinstance(body, list) else [body]
-        replies = [reply for message in messages if (reply := await self._answer(message)) is not None]
+        replies = [reply for message in messages if (reply := await self._answer(message, origin)) is not None]
         if not replies:
             return Response(status_code=202)
         return JSONResponse(replies if isinstance(body, list) else replies[0])
 
-    async def _answer(self, message: Mapping[str, Any]) -> dict[str, Any] | None:
+    async def _answer(self, message: Mapping[str, Any], origin: str) -> dict[str, Any] | None:
         if "id" not in message:
             return None
         method, params = message.get("method"), message.get("params") or {}
@@ -144,17 +152,18 @@ class Peers:
         elif method == "tools/list":
             result = {"tools": TOOLS}
         elif method == "tools/call":
-            result = await self._call(params.get("name"), params.get("arguments") or {})
+            result = await self._call(params.get("name"), params.get("arguments") or {}, origin)
         else:
             return {"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32601, "message": f"unknown method {method}"}}
         return {"jsonrpc": "2.0", "id": message["id"], "result": result}
 
-    async def _call(self, name: str | None, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    async def _call(self, name: str | None, arguments: Mapping[str, Any], origin: str) -> dict[str, Any]:
         try:
             if name == "peer_list":
                 text = json.dumps(self.listing())
             elif name == "peer_send_message":
                 text = await self.send(
+                    origin,
                     str(arguments["peer_name"]),
                     str(arguments["message"]),
                     new_conversation=bool(arguments.get("new_conversation")),
