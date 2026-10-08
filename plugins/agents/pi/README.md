@@ -24,16 +24,20 @@ Sessions live in `~/.pi-a2a/sessions` and skills in `~/.pi-a2a/skills/<name>`.
 | `skill-config/v1` | inline and bundle skills installed as `SKILL.md` directories, passed with `--skill` |
 | `trajectory/v1` | the task's pi JSON events, with `message_update` / `tool_execution_update` deltas dropped (format `pi-json-events/v1`) |
 | `snapshot/v1` | `save` uploads the context's pi session (JSONL) and, when asked, the workspace as a gzipped tar; `load` restores both and binds the session to the target context |
-| `snapshot/v1` changelog | after enable, every tool result uploads `NNNNNN.tar`: the files that changed under the roots (default `/workspace` and `/app`), the deleted paths and the session so far. `apply` replays them in order, writing only under each increment's roots, and with `resume_conversation` binds the last session to the target context |
-| `peer-agents/v1` | setting peers registers a loopback MCP server (`peers` at `http://127.0.0.1:$A2A_PORT/mcp`) whose `peer_list` and `peer_send_message` tools send A2A messages, one conversation per peer. A peer on the host's loopback is retried at `host.docker.internal` |
-| `install/v1` | copies this directory into the task container as `/opt/pi-a2a`, runs `install.sh` (Debian or Ubuntu, as root, with network access) and starts `start.sh` |
+| `snapshot/v1` changelog | after enable, every tool result uploads `NNNNNN.tar`: the files that changed under the roots, the deleted paths and the session so far. A failed upload is carried by the next increment, and the last one is retried when the task ends, which fails as `pi.changelog_incomplete` if it still cannot upload. `apply` replays them in order, writing only under the replaying agent's own roots (symlinks resolved), and with `resume_conversation` binds the last session to the target context |
+| `peer-agents/v1` | setting peers registers a loopback MCP server (`peers` at `http://127.0.0.1:$A2A_PORT/mcp`, refusing other clients) whose `peer_list` and `peer_send_message` tools send A2A messages, one conversation per A2A context and peer. A peer on the host's loopback is retried at `host.docker.internal` |
+| `install/v1` | copies this directory into the task container as `/opt/pi-a2a`, runs `install.sh` (Debian or Ubuntu, as root, with network access), writes the LiteLLM credentials to a 0600 `agent.env` through a heredoc and starts `start.sh`, which sources it. The credentials stay off each command's first line, the only one the installer logs, but core's install contract substitutes them into the script text, so a sandbox that logs whole scripts records them |
 | `triggers/v1` | SDK default |
 
 Model requests carry `model_params`, merged into the request body through pi's `samplingParams`. agent-env
 reserves some request fields, such as `user` and `metadata`, and does not forward them as
 `model_params`. A deployment that needs one, for example a LiteLLM key that requires project
 attribution, sets it at registration through `PI_A2A_MODEL_PARAMS`, a JSON object that config
-values override:
+values override. Two more registration variables: `PI_A2A_MODEL`, the model when agent-config sets
+none (as for a peer that other agents message directly), and `PI_A2A_CHANGELOG_ROOTS`, the
+colon-separated changelog roots (default `/workspace:/app`). Roots an enable request names must lie
+within them, replay writes only under them, and a replaying agent must share them with the capturing
+one. While a changelog is enabled, tasks run one at a time:
 
 ```bash
 agent-env a2a-agent put --id pi --dockerfile plugins/agents/pi/Dockerfile --context plugins/agents/pi \

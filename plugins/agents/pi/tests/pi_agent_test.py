@@ -1,6 +1,8 @@
 import base64
 import io
 import json
+import os
+import re
 import sys
 import tarfile
 from pathlib import Path
@@ -30,7 +32,7 @@ def record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 @pytest.fixture
 def client(tmp_path: Path, record: Path):
     agent = PiAgent(home=tmp_path / "home", workspace=tmp_path / "ws", pi_command=(sys.executable, str(FAKE_PI)))
-    with TestClient(agent.create_app()) as client:
+    with TestClient(agent.create_app(), client=("127.0.0.1", 50000)) as client:
         client.post("/ext/agent-config", json={"model": "anthropic/claude-sonnet", "effort": "high"})
         yield client
 
@@ -92,8 +94,20 @@ def test_a_context_keeps_one_pi_session(client: TestClient, record: Path) -> Non
     _send(client, [{"kind": "text", "text": "two"}], context_id="ctx/a b")
     second = json.loads(record.read_text())["argv"]
 
-    assert first[first.index("--session-id") + 1] == "ctx-a-b"
-    assert second[second.index("--session-id") + 1] == "ctx-a-b"
+    session = first[first.index("--session-id") + 1]
+    assert session.startswith("ctx-a-b_")
+    assert second[second.index("--session-id") + 1] == session
+
+
+def test_distinct_contexts_never_share_a_session() -> None:
+    derived = pi_agent._session_id("ctx/a b")
+    contexts = ("ctx/a b", "ctx-a-b", "ctx a/b", "", "a.b", derived)
+    ids = [pi_agent._session_id(context) for context in contexts]
+
+    assert len(set(ids)) == len(contexts)
+    assert pi_agent._session_id("0bb51130-47e1-43b4") == "0bb51130-47e1-43b4"
+    valid = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
+    assert all(valid.fullmatch(session) for session in ids)
 
 
 def test_mcp_servers_are_direct_and_headers_stay_off_disk(client: TestClient, record: Path) -> None:
@@ -306,16 +320,18 @@ def test_changelog_captures_each_tool_call_and_replays_it(
     FakeNamespace.uploads = {}
     monkeypatch.setattr(changelog, "NamespaceUploader", FakeNamespace)
     workspace = tmp_path / "ws"
+    workspace.mkdir()
+    monkeypatch.setenv("PI_A2A_CHANGELOG_ROOTS", str(tmp_path))
     enabled = client.post("/ext/snapshot/changelog", json={"write_namespace": NAMESPACE, "roots": [str(workspace)]})
     monkeypatch.setenv("FAKE_PI_WRITE", "marker.txt=CHANGELOG-TOKEN")
 
     _send(client, [{"kind": "text", "text": "write the marker"}], context_id="capture")
 
-    assert enabled.json() == {"roots": [str(workspace)]}
+    assert enabled.json() == {"roots": [os.path.realpath(workspace)]}
     assert list(FakeNamespace.uploads) == ["000000.tar"]
     with tarfile.open(fileobj=io.BytesIO(FakeNamespace.uploads["000000.tar"])) as archive:
         names = archive.getnames()
-    assert "files/" + str(workspace / "marker.txt").lstrip("/") in names
+    assert "files/" + os.path.realpath(workspace / "marker.txt").lstrip("/") in names
     assert "session.jsonl" in names
 
     (workspace / "marker.txt").unlink()
@@ -331,18 +347,140 @@ def test_changelog_captures_each_tool_call_and_replays_it(
     assert any("write the marker" in line for line in json.loads(record.read_text())["history"])
 
 
-def test_changelog_increment_cannot_write_outside_its_roots(tmp_path: Path) -> None:
+def _increment(path: Path, files: dict[str, bytes], deleted: list[str] = (), roots: list[str] = ("/",)) -> Path:
     buffer = io.BytesIO()
+    entries = {"meta.json": json.dumps({"roots": list(roots), "deleted": list(deleted)}).encode(), **files}
     with tarfile.open(fileobj=buffer, mode="w") as archive:
-        for name, body in (("meta.json", json.dumps({"roots": [str(tmp_path / "ws")], "deleted": []}).encode()),
-                           ("files/etc/passwd", b"x")):
+        for name, body in entries.items():
             info = tarfile.TarInfo(name)
             info.size = len(body)
             archive.addfile(info, io.BytesIO(body))
-    (tmp_path / "evil.tar").write_bytes(buffer.getvalue())
+    path.write_bytes(buffer.getvalue())
+    return path
 
-    with pytest.raises(ValueError, match="outside its roots"):
-        changelog.apply(tmp_path / "evil.tar")
+
+def test_changelog_apply_ignores_the_roots_an_increment_claims(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    evil = _increment(tmp_path / "evil.tar", {"files" + str(tmp_path / "outside.txt"): b"x"}, roots=["/"])
+
+    with pytest.raises(ValueError, match="outside the agent's roots"):
+        changelog.apply(evil, [str(workspace)])
+    assert not (tmp_path / "outside.txt").exists()
+
+
+def test_changelog_apply_does_not_follow_symlinks_out_of_a_root(tmp_path: Path) -> None:
+    workspace, outside = tmp_path / "ws", tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    (workspace / "link").symlink_to(outside)
+    write = _increment(tmp_path / "w.tar", {"files" + str(workspace / "link" / "x.txt"): b"x"})
+    delete = _increment(tmp_path / "d.tar", {}, deleted=[str(workspace / "link" / "keep.txt")])
+    (outside / "keep.txt").write_text("keep")
+
+    with pytest.raises(ValueError, match="writes outside"):
+        changelog.apply(write, [str(workspace)])
+    with pytest.raises(ValueError, match="deletes outside"):
+        changelog.apply(delete, [str(workspace)])
+    assert not (outside / "x.txt").exists()
+    assert (outside / "keep.txt").read_text() == "keep"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_increment_upload_is_carried_by_the_next(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    uploads: dict[str, bytes] = {}
+    attempts = iter([RuntimeError("store down"), None])
+
+    class FlakyNamespace:
+        def __init__(self, grant) -> None:
+            pass
+
+        async def upload(self, relative_path: str, source: bytes) -> None:
+            failure = next(attempts)
+            if failure is not None:
+                raise failure
+            uploads[relative_path] = source
+
+    monkeypatch.setattr(changelog, "NamespaceUploader", FlakyNamespace)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    capture = changelog.ChangelogCapture(None, [str(workspace)])
+    await capture.start()
+    (workspace / "a.txt").write_text("a")
+    await capture.capture(None, context_id="c", session_id="s")
+    await capture.capture(None, context_id="c", session_id="s")
+
+    assert list(uploads) == ["000001.tar"]
+    with tarfile.open(fileobj=io.BytesIO(uploads["000001.tar"])) as archive:
+        assert "files" + str(workspace / "a.txt") in archive.getnames()
+    assert await capture.flush(None) is True
+
+
+@pytest.mark.asyncio
+async def test_flush_retries_a_failed_last_increment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    uploads: dict[str, bytes] = {}
+    attempts = iter([RuntimeError("store down"), RuntimeError("still down"), None])
+
+    class FlakyNamespace:
+        def __init__(self, grant) -> None:
+            pass
+
+        async def upload(self, relative_path: str, source: bytes) -> None:
+            failure = next(attempts)
+            if failure is not None:
+                raise failure
+            uploads[relative_path] = source
+
+    monkeypatch.setattr(changelog, "NamespaceUploader", FlakyNamespace)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    capture = changelog.ChangelogCapture(None, [str(workspace)])
+    await capture.start()
+    (workspace / "a.txt").write_text("a")
+    await capture.capture(None, context_id="c", session_id="s")
+
+    assert await capture.flush(None) is False
+    assert await capture.flush(None) is True
+    assert list(uploads) == ["000000.tar"]
+
+
+def test_an_unuploadable_changelog_fails_the_task(
+    client: TestClient, record: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class DownNamespace:
+        def __init__(self, grant) -> None:
+            pass
+
+        async def upload(self, relative_path: str, source: bytes) -> None:
+            raise RuntimeError("store down")
+
+    monkeypatch.setattr(changelog, "NamespaceUploader", DownNamespace)
+    client.post("/ext/snapshot/changelog", json={"write_namespace": NAMESPACE})
+
+    task = _send(client, [{"kind": "text", "text": "go"}])
+
+    _, data = _reply(task)
+    assert task["status"]["state"] == "failed"
+    assert (data["error_type"], data["error_code"]) == ("infra_error", "pi.changelog_incomplete")
+
+
+def test_registration_sets_the_changelog_roots(client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PI_A2A_CHANGELOG_ROOTS", f"{tmp_path / 'a'}:{tmp_path / 'b'}")
+
+    enabled = client.post("/ext/snapshot/changelog", json={"write_namespace": NAMESPACE})
+
+    assert enabled.json() == {"roots": [os.path.realpath(tmp_path / "a"), os.path.realpath(tmp_path / "b")]}
+
+
+@pytest.mark.parametrize("roots", [["relative/dir"], ["/etc"]])
+def test_requested_changelog_roots_must_be_absolute_and_within_the_registration(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, roots: list[str]
+) -> None:
+    monkeypatch.setenv("PI_A2A_CHANGELOG_ROOTS", str(tmp_path))
+
+    response = client.post("/ext/snapshot/changelog", json={"write_namespace": NAMESPACE, "roots": roots})
+
+    assert response.status_code == 400
 
 
 def test_peers_register_the_loopback_mcp_server_and_relay_messages(
@@ -364,14 +502,15 @@ def test_peers_register_the_loopback_mcp_server_and_relay_messages(
 
     listed = client.get("/ext/peer-agents").json()
     servers = client.get("/ext/mcp-config").json()["mcp_servers"]
-    init = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "initialize",
+    init = client.post("/mcp?context=ctx-1", json={"jsonrpc": "2.0", "id": 1, "method": "initialize",
                                      "params": {"protocolVersion": "2025-06-18", "capabilities": {}}})
     notified = client.post("/mcp", json={"jsonrpc": "2.0", "method": "notifications/initialized"})
     tools = client.post("/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"}).json()["result"]["tools"]
-    called = client.post("/mcp", json={"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
-        "name": "peer_send_message", "arguments": {"peer_name": "helper", "message": "say PEER-OK"}}}).json()
-    again = client.post("/mcp", json={"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {
-        "name": "peer_send_message", "arguments": {"peer_name": "helper", "message": "again"}}}).json()
+    call = {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+        "name": "peer_send_message", "arguments": {"peer_name": "helper", "message": "say PEER-OK"}}}
+    called = client.post("/mcp?context=ctx-1", json=call).json()
+    again = client.post("/mcp?context=ctx-1", json=call).json()
+    other = client.post("/mcp?context=ctx-2", json=call).json()
 
     assert listed == {"peers": [{"name": "helper", "url": "http://127.0.0.1:9100", "description": "Helps"}]}
     assert servers["peers"]["url"] == "http://127.0.0.1:8000/mcp"
@@ -381,9 +520,26 @@ def test_peers_register_the_loopback_mcp_server_and_relay_messages(
     assert [tool["name"] for tool in tools] == ["peer_list", "peer_send_message"]
     assert called["result"] == {"content": [{"type": "text", "text": "PEER-OK"}], "isError": False}
     assert sent[0]["url"] == "http://host.docker.internal:9100/a2a"
-    first, second = (item["body"]["params"]["message"]["contextId"] for item in sent)
-    assert first == second
-    assert again["result"]["isError"] is False
+    first, second, third = (item["body"]["params"]["message"]["contextId"] for item in sent)
+    assert first == second != third
+    assert again["result"]["isError"] is False and other["result"]["isError"] is False
+
+
+def test_peer_mcp_refuses_non_loopback_clients(tmp_path: Path) -> None:
+    agent = PiAgent(home=tmp_path / "home", workspace=tmp_path / "ws")
+    with TestClient(agent.create_app(), client=("172.17.0.1", 50000)) as client:
+        response = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+
+    assert response.status_code == 403
+
+
+def test_each_task_names_its_context_on_the_peer_mcp_url(client: TestClient, record: Path) -> None:
+    client.post("/ext/peer-agents", json={"peers": [{"name": "helper", "url": "http://peer.test"}]})
+
+    _send(client, [{"kind": "text", "text": "go"}], context_id="ctx/1")
+
+    servers = json.loads(record.read_text())["mcp"]["mcpServers"]
+    assert servers["peers"]["url"] == "http://127.0.0.1:8000/mcp?context=ctx%2F1"
 
 
 def test_unknown_peer_is_a_tool_error(client: TestClient) -> None:
@@ -401,9 +557,11 @@ def test_install_extension_is_declared_on_the_card(client: TestClient) -> None:
     assert install["a2a_port"] == 8000
     assert set(install["required_params"]) == {"container", "agent_ctx_tar", "a2a_port", "litellm_api_key",
                                                "litellm_base_url"}
-    formatted = [command.format(container="c", agent_ctx_tar="/t.tar", a2a_port="8000", litellm_api_key="k",
+    formatted = [command.format(container="c", agent_ctx_tar="/t.tar", a2a_port="8000", litellm_api_key="'sk-secret'",
                                 litellm_base_url="u") for command in install["install_commands"]]
     assert formatted[-1].endswith("c sh /opt/pi-a2a/start.sh")
+    assert all("sk-secret" not in command.splitlines()[0] for command in formatted)
+    assert "LITELLM_API_KEY='sk-secret'" in formatted[-2].splitlines()
     assert all(command.startswith("$(sudo -n true 2>/dev/null && echo sudo) docker ") for command in formatted)
 
 

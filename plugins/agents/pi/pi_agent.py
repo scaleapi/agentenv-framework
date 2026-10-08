@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import mimetypes
 import os
@@ -23,7 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 from agentenv_protocol.a2a_agent import (
@@ -73,16 +74,23 @@ TRAJECTORY_FORMAT = "pi-json-events/v1"
 MODEL_PARAMS_ENV = "PI_A2A_MODEL_PARAMS"
 # The model when agent-config sets none, as for a peer that other agents message directly.
 DEFAULT_MODEL_ENV = "PI_A2A_MODEL"
+# Colon-separated directories changelog capture watches and replay may write; a replay agent trusts only these.
+CHANGELOG_ROOTS_ENV = "PI_A2A_CHANGELOG_ROOTS"
 A2A_PORT = int(os.environ.get("A2A_PORT", "8000"))
 PEER_MCP_NAME = "peers"
 PEER_MCP_PATH = "/mcp"
+PEER_MCP_URL = f"http://127.0.0.1:{A2A_PORT}{PEER_MCP_PATH}"
 INSTALL_DIR = "/opt/pi-a2a"
+ENV_FILE = "agent.env"
 STREAM_LIMIT_BYTES = 64 * 1024 * 1024
 STDERR_TAIL_BYTES = 8 * 1024
 FETCH_TIMEOUT_SECONDS = 120
 # Deltas are reconstructible from the message_end records, so they are left out of the trajectory.
 _UNRECORDED_EVENTS = frozenset({"message_update", "tool_execution_update"})
-_SESSION_ID_UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
+# A context id passes through as its session id only when it has none of pi's ``.`` and ``_``; every derived id
+# contains ``_``, so the two never meet.
+_SESSION_ID_PLAIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?")
+_SESSION_ID_UNSAFE = re.compile(r"[^A-Za-z0-9-]")
 # pi attaches images as images and inlines text; any other file is left on disk for its tools.
 _TEXT_MEDIA_TYPES = frozenset({"application/json", "application/xml", "application/yaml", "application/x-yaml"})
 
@@ -93,8 +101,13 @@ INSTALL_COMMANDS = [
     f"{_DOCKER} exec {{container}} sh -c 'mkdir -p {INSTALL_DIR} && tar -xf /tmp/pi-a2a-ctx.tar.gz -C {INSTALL_DIR}"
     " && rm /tmp/pi-a2a-ctx.tar.gz'",
     f"{_DOCKER} exec {{container}} sh {INSTALL_DIR}/install.sh",
-    f"{_DOCKER} exec -d -e LITELLM_API_KEY={{litellm_api_key}} -e LITELLM_BASE_URL={{litellm_base_url}}"
-    f" -e A2A_PORT={{a2a_port}} {{container}} sh {INSTALL_DIR}/start.sh",
+    # The credentials travel on a heredoc into a 0600 file: the installer logs only a command's first line,
+    # and neither a command line nor the container's config ever holds them.
+    f"{_DOCKER} exec -i {{container}} sh -c 'umask 077 && cat > {INSTALL_DIR}/{ENV_FILE}' <<'PI_A2A_ENV'\n"
+    "LITELLM_API_KEY={litellm_api_key}\n"
+    "LITELLM_BASE_URL={litellm_base_url}\n"
+    "PI_A2A_ENV",
+    f"{_DOCKER} exec -d -e A2A_PORT={{a2a_port}} {{container}} sh {INSTALL_DIR}/start.sh",
 ]
 
 
@@ -119,9 +132,12 @@ class _Run:
 
 
 def _session_id(context_id: str) -> str:
-    """A pi session id (``[A-Za-z0-9._-]``, alphanumeric at both ends) derived from the context."""
-    cleaned = _SESSION_ID_UNSAFE.sub("-", context_id).strip("._-")
-    return cleaned or uuid.uuid4().hex
+    """A pi session id (``[A-Za-z0-9._-]``, alphanumeric at both ends), one-to-one with the context: a plain
+    context id as-is, anything else a readable prefix and a hash of the context id."""
+    if _SESSION_ID_PLAIN.fullmatch(context_id):
+        return context_id
+    prefix = _SESSION_ID_UNSAFE.sub("-", context_id).strip("-")[:48].rstrip("-") or "context"
+    return f"{prefix}_{hashlib.sha256(context_id.encode()).hexdigest()[:32]}"
 
 
 def _models_json(config: PiConfig, base_url: str, default_params: Mapping[str, Any]) -> dict[str, Any]:
@@ -149,7 +165,9 @@ def _models_json(config: PiConfig, base_url: str, default_params: Mapping[str, A
     }
 
 
-def _mcp_json(mcp_servers: Mapping[str, Any], timeout_seconds: int) -> tuple[dict[str, Any], dict[str, str]]:
+def _mcp_json(
+    mcp_servers: Mapping[str, Any], timeout_seconds: int, context_id: str
+) -> tuple[dict[str, Any], dict[str, str]]:
     """pi's ``mcp.json`` and the env vars carrying its header values.
 
     Header values are passed as ``${VAR}`` references so they never reach disk and a value starting
@@ -163,7 +181,10 @@ def _mcp_json(mcp_servers: Mapping[str, Any], timeout_seconds: int) -> tuple[dic
             variable = f"AGENTENV_MCP_{index}_HEADER_{header_index}"
             env[variable] = value
             headers[header] = "${" + variable + "}"
-        servers[name] = {"type": "http", "url": registration["url"], "exposure": "direct", "timeout": timeout_seconds}
+        url = registration["url"]
+        if url == PEER_MCP_URL:
+            url = f"{url}?{urlencode({'context': context_id})}"
+        servers[name] = {"type": "http", "url": url, "exposure": "direct", "timeout": timeout_seconds}
         if headers:
             servers[name]["headers"] = headers
     return {"mcpServers": servers}, env
@@ -264,6 +285,15 @@ def _result(run: _Run, returncode: int, stderr: str, session_id: str) -> TaskRes
     return builder.add_text(message).build()
 
 
+async def _tail(stream: asyncio.StreamReader, limit: int) -> bytes:
+    """Drain ``stream``, keeping only its last ``limit`` bytes."""
+    kept = bytearray()
+    while chunk := await stream.read(64 * 1024):
+        kept += chunk
+        del kept[:-limit]
+    return bytes(kept)
+
+
 def _kill(process: asyncio.subprocess.Process) -> None:
     if process.returncode is None:
         try:
@@ -340,6 +370,8 @@ class PiAgent(AgentEnvAgent):
         self.sessions_dir = self.home / "sessions"
         self.peers = Peers()
         self.changelog: ChangelogCapture | None = None
+        # A changelog is one sequence of tool calls, so while one is captured, runs take turns.
+        self._changelog_turn = asyncio.Lock()
 
     def create_app(self) -> Starlette:
         app = super().create_app()
@@ -365,7 +397,10 @@ class PiAgent(AgentEnvAgent):
         cwd = request.workspace or self.workspace
         cwd.mkdir(parents=True, exist_ok=True)
         try:
-            return await self._run_pi(request, config, base_url, agent_dir, files_dir, cwd)
+            if self.changelog is None:
+                return await self._run_pi(request, config, base_url, agent_dir, files_dir, cwd)
+            async with self._changelog_turn:
+                return await self._run_pi(request, config, base_url, agent_dir, files_dir, cwd)
         finally:
             shutil.rmtree(run_dir, ignore_errors=True)
 
@@ -378,7 +413,7 @@ class PiAgent(AgentEnvAgent):
         files_dir: Path,
         cwd: Path,
     ) -> TaskResult:
-        mcp_config, mcp_env = _mcp_json(request.mcp_servers, config.timeout_seconds)
+        mcp_config, mcp_env = _mcp_json(request.mcp_servers, config.timeout_seconds, request.context_id)
         default_params = json.loads(os.environ.get(MODEL_PARAMS_ENV) or "{}")
         (agent_dir / "models.json").write_text(json.dumps(_models_json(config, base_url, default_params)))
         (agent_dir / "mcp.json").write_text(json.dumps(mcp_config))
@@ -440,7 +475,7 @@ class PiAgent(AgentEnvAgent):
             limit=STREAM_LIMIT_BYTES,
         )
         run = _Run()
-        stderr_task = asyncio.create_task(process.stderr.read())
+        stderr_task = asyncio.create_task(_tail(process.stderr, STDERR_TAIL_BYTES))
         try:
             async with asyncio.timeout(config.timeout_seconds):
                 process.stdin.write(_prompt_text(request.parts, unattached).encode())
@@ -460,7 +495,21 @@ class PiAgent(AgentEnvAgent):
                             self._session_file(session_id), context_id=request.context_id, session_id=session_id
                         )
                 returncode = await process.wait()
-                stderr = (await stderr_task)[-STDERR_TAIL_BYTES:].decode(errors="replace").strip()
+                stderr = (await stderr_task).decode(errors="replace").strip()
+                if self.changelog is not None and not await self.changelog.flush(self._session_file(session_id)):
+                    return (
+                        TaskResult.builder()
+                        .failed(
+                            "pi.changelog_incomplete",
+                            "a changelog increment could not be uploaded",
+                            error_type="infra_error",
+                        )
+                        .add_text("a changelog increment could not be uploaded")
+                        .session_ref(run.session_id or session_id)
+                        .usage(_usage(run))
+                        .native_trajectory(format=TRAJECTORY_FORMAT, payload=run.events)
+                        .build()
+                    )
         except TimeoutError:
             _kill(process)
             stderr_task.cancel()
@@ -479,6 +528,12 @@ class PiAgent(AgentEnvAgent):
             stderr_task.cancel()
             raise
         return _result(run, returncode, stderr, session_id)
+
+    def _changelog_roots(self) -> list[str]:
+        """The registration's changelog roots, absolute and canonical: all a capture may watch and a replay write."""
+        configured = os.environ.get(CHANGELOG_ROOTS_ENV)
+        roots = configured.split(":") if configured else [str(self.workspace), "/app"]
+        return [os.path.realpath(root) for root in roots]
 
     def _session_file(self, session_id: str) -> Path | None:
         if not self.sessions_dir.is_dir():
@@ -534,7 +589,16 @@ class PiAgent(AgentEnvAgent):
 
     @extension(SNAPSHOT_V1.changelog.enable)
     async def enable_changelog(self, request: NamespaceChangelogEnableRequest) -> dict[str, Any]:
-        roots = [str(Path(root)) for root in (request.roots or [str(self.workspace), "/app"])]
+        allowed = self._changelog_roots()
+        if request.roots is None:
+            roots = allowed
+        else:
+            if not all(os.path.isabs(root) for root in request.roots):
+                raise HTTPException(status_code=400, detail="changelog roots must be absolute paths")
+            roots = [os.path.realpath(root) for root in request.roots]
+            outside = [root for root in roots if not any(Path(root).is_relative_to(base) for base in allowed)]
+            if outside:
+                raise HTTPException(status_code=400, detail=f"changelog roots outside this agent's roots: {outside}")
         capture = ChangelogCapture(request.write_namespace, roots)
         await capture.start()
         self.changelog = capture
@@ -547,7 +611,7 @@ class PiAgent(AgentEnvAgent):
             for item in request.increments:
                 path = Path(scratch) / f"{item.sequence:06d}.tar"
                 await download(item.object, path)
-                applied = await asyncio.to_thread(apply_increment, path)
+                applied = await asyncio.to_thread(apply_increment, path, self._changelog_roots())
                 session = applied.session or session
         if not request.resume_conversation:
             return {"count": len(request.increments)}
@@ -559,10 +623,9 @@ class PiAgent(AgentEnvAgent):
     @extension(PEER_AGENTS_V1.set)
     async def set_peers(self, request: PeerAgentsSetRequest) -> dict[str, Any]:
         self.peers.set(request.peers)
-        url = f"http://127.0.0.1:{A2A_PORT}{PEER_MCP_PATH}"
         listed = await self.default_handlers.call(MCP_CONFIG_V1.list)
         if request.peers and PEER_MCP_NAME not in listed["mcp_servers"]:
-            await self.default_handlers.call(MCP_CONFIG_V1.add, McpAddRequest(name=PEER_MCP_NAME, url=url))
+            await self.default_handlers.call(MCP_CONFIG_V1.add, McpAddRequest(name=PEER_MCP_NAME, url=PEER_MCP_URL))
         return {"status": "updated", "peers": [peer.name for peer in request.peers]}
 
     @extension(PEER_AGENTS_V1.list)
