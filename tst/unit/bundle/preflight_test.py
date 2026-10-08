@@ -401,6 +401,19 @@ def test_a_gateway_deploy_on_another_provider_needs_infra_it_can_reach(bundle_di
     assert len(problems) == 4  # the gateway's image, and the service-db's three
 
 
+def test_infra_on_another_provider_with_no_tarball_and_no_registry_to_pull_it_from_is_refused(bundle_dir):
+    _env("crm", REMOTE)
+    _infra(("img:v1", None))
+    _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
+
+    problems = _problems(lambda: dry_run_bundle(bundle_dir, sandbox="modal_vm"))
+
+    assert problems[0] == ("tasks/t.json: step 'env': deploys the gateway env 'default''s image 'gateway-default', which "
+                           "no sandbox can get: 'gateway-default' v1 has no tar.gz, and its image name 'img:v1' doesn't "
+                           "name a registry to pull it from")
+    assert len(problems) == 4  # the gateway's image, and the service-db's three
+
+
 def test_a_problem_several_deploys_share_is_reported_once_naming_the_first(bundle_dir):
     _env("crm")
     with namespace_routing():

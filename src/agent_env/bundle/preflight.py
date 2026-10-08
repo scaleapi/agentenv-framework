@@ -348,10 +348,11 @@ class _Walk:
                                      f"{env_id!r}, and the store doesn't hold it; agent-env builds it only for the local "
                                      f"sandbox provider, so put it in a store that provider can reach (`{put_command(kind)}`)")
                 continue
-            images = ([env.db_docker_image_artifact, env.db_web_docker_image_artifact, env.db_mcp_docker_image_artifact]
-                      if isinstance(env, ServiceDBEnv) else [env.docker_image_artifact])
-            self._reachable(where, [provider], [_image(f"the {kind} env {env_id!r}'s image {image.id!r}", image)
-                                                for image in images])
+            artifacts = ([env.db_docker_image_artifact, env.db_web_docker_image_artifact,
+                          env.db_mcp_docker_image_artifact] if isinstance(env, ServiceDBEnv) else [env.docker_image_artifact])
+            images = [_image(f"the {kind} env {env_id!r}'s image {image.id!r}", image) for image in artifacts]
+            self._loadable(where, images)
+            self._reachable(where, [provider], images)
 
     def _default_agent(self) -> None:
         if not self.default_agent_users:
