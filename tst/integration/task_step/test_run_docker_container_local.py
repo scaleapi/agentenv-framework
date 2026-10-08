@@ -96,24 +96,26 @@ async def test_two_local_runs_use_the_same_container_name_network_and_port_at_on
                                        file_path=str(local_backends / "Dockerfile")),
     })
 
-    async def run(name: str) -> TaskStepContext:
-        context = TaskStepContext(instance_id=f"rdc2-{name}-{suffix}")
-        context = await DeploySandboxTaskStep(
+    # Made up front and filled in place, so a run that fails partway is still torn down.
+    contexts = [TaskStepContext(instance_id=f"rdc2-{name}-{suffix}") for name in "ab"]
+
+    async def run(context: TaskStepContext) -> None:
+        await DeploySandboxTaskStep(
             id="box", version=None, sandbox_name="box", sandbox_mode="vm", sandbox_type="local", exposed_ports=[80],
         ).execute(context)
-        return await RunDockerContainerTaskStep(
+        await RunDockerContainerTaskStep(
             id="ctr", version=None, sandbox_name="box", docker_context_artifact_id=build_context.id,
             network="task-net", ports=[80],
         ).execute(context)
 
-    contexts = await asyncio.gather(run("a"), run("b"), return_exceptions=True)
+    outcomes = await asyncio.gather(*(run(c) for c in contexts), return_exceptions=True)
     try:
-        assert not [c for c in contexts if isinstance(c, BaseException)], contexts
+        assert not [o for o in outcomes if isinstance(o, BaseException)], outcomes
         urls = [c.deployed_sandboxes[0].tunnel_urls["80"] for c in contexts]
         assert len(set(urls)) == 2
         assert [await _status_once_up(url) for url in urls] == [200, 200]
     finally:
-        reports = [await teardown_run(c) for c in contexts if isinstance(c, TaskStepContext)]
+        reports = [await teardown_run(c) for c in contexts]
 
     assert not any(r.still_up for r in reports)
     sandbox_ids = [c.deployed_sandboxes[0].sandbox_id for c in contexts]

@@ -45,19 +45,21 @@ def local_backends(monkeypatch, tmp_path):
 async def test_agents_placed_on_local_sandboxes_answer_at_their_own_ports(local_backends):
     agent = put_test_agent(f"placed-agent-{uuid.uuid4().hex[:8]}")
 
-    async def place(name: str) -> TaskStepContext:
-        context = TaskStepContext(instance_id=f"placed-{name}-{uuid.uuid4().hex[:8]}")
-        context = await DeploySandboxTaskStep(
+    # Made up front and filled in place, so a run that fails partway is still torn down.
+    contexts = [TaskStepContext(instance_id=f"placed-{name}-{uuid.uuid4().hex[:8]}") for name in "ab"]
+
+    async def place(context: TaskStepContext) -> None:
+        await DeploySandboxTaskStep(
             id="box", version=None, sandbox_name="box", sandbox_mode="vm", sandbox_type="local",
             exposed_ports=[DEFAULT_A2A_PORT],
         ).execute(context)
-        return await DeployAgentTaskStep(
+        await DeployAgentTaskStep(
             id="agent", version=None, env_ids=[], a2a_agent_id=agent.id, agent_name="solver", sandbox_name="box",
         ).execute(context)
 
-    contexts = await asyncio.gather(place("a"), place("b"), return_exceptions=True)
+    outcomes = await asyncio.gather(*(place(c) for c in contexts), return_exceptions=True)
     try:
-        assert not [c for c in contexts if isinstance(c, BaseException)], contexts
+        assert not [o for o in outcomes if isinstance(o, BaseException)], outcomes
         urls = [c.deployed_agents[0].a2a_url for c in contexts]
         assert urls == [c.deployed_sandboxes[0].tunnel_urls[str(DEFAULT_A2A_PORT)] for c in contexts]
         assert len(set(urls)) == 2
@@ -65,7 +67,7 @@ async def test_agents_placed_on_local_sandboxes_answer_at_their_own_ports(local_
             assert [(await client.get(f"{url}/.well-known/agent.json", timeout=30)).status_code for url in urls] == [
                 200, 200]
     finally:
-        reports = [await teardown_run(c) for c in contexts if isinstance(c, TaskStepContext)]
+        reports = [await teardown_run(c) for c in contexts]
 
     assert not any(r.still_up for r in reports)
     for context in contexts:
