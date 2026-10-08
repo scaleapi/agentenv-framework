@@ -49,7 +49,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# The AWS store backends (S3, Secrets Manager, ECR), selected by impl pointer in config.toml.
+# The AWS store backends (S3, Secrets Manager, DynamoDB, ECR), selected by impl pointer in config.toml.
 aws = [
     "boto3>=1.35.0",
     "botocore>=1.35.0",

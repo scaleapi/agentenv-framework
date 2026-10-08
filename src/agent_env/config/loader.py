@@ -178,11 +178,11 @@ def _missing_module(error: ImportError) -> str | None:
 
 def install_hint(error: ImportError) -> str:
     """How to install the module ``error`` failed to find, when an extra of this distribution has it."""
-    extra = missing_extra(error)
+    extra = _missing_extra(error)
     return f"; it needs the {extra!r} extra, as in pip install '{DISTRIBUTION}[{extra}]'" if extra else ""
 
 
-def missing_extra(error: ImportError) -> str | None:
+def _missing_extra(error: ImportError) -> str | None:
     """The smallest extra of this distribution with a requirement named for the module ``error``
     failed to find: by name, because the missing distribution's files are not installed to read.
     Separators are dropped before comparing, as ``google-cloud-secret-manager`` installs
