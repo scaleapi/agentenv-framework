@@ -23,7 +23,9 @@ from pydantic import ConfigDict, Field, model_serializer
 
 from agent_env.artifact.artifact import Artifact, _write_twin
 from agent_env.store.ids import fs_safe, image_repository, is_local_id
+from agent_env.store.image_store.local_registry_image_store import LocalRegistryImageStore
 from agent_env.store.image_store.oci_registry_credentials import is_loopback_host, names_registry, registry_host_from_ref
+from agent_env.store.image_store.registry_api import pin_digest
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +200,31 @@ class DockerImageArtifact(Artifact):
             build_context_object_url=build_context_object_url,
         )
         return store.put_document(instance)
+
+    @classmethod
+    def put_ref(cls, id: str, *, description: str, image_name: str) -> "DockerImageArtifact":
+        """Register ``image_name``, an image already in a registry, writing this document only: nothing is pushed,
+        saved or uploaded, and a sandbox pulls the image. A tag is pinned to the digest the registry serves for it
+        now, recorded as ``name:tag@sha256:...``, so every run gets the same image; a digest is checked to exist.
+
+        ``image_name`` must name its registry. The registry is read with the configured image store's credentials
+        where it holds that registry, anonymously otherwise. One on this machine is refused unless ``id``'s image
+        store is the local registry, since nothing else could pull from it."""
+        from agent_env.artifact.store import get_artifact_store
+        from agent_env.config import get_config
+
+        if not names_registry(image_name):
+            raise ValueError(f"{image_name!r} doesn't name its registry; spell it out, as in "
+                             f"docker.io/library/{image_name}")
+        config = get_config()
+        if (is_loopback_host(registry_host_from_ref(image_name))
+                and not isinstance(config.get_image_store_for(id), LocalRegistryImageStore)):
+            raise ValueError(f"{image_name} is in a registry on this machine, which only an image in the local "
+                             "registry's store, such as an @local one, can name")
+        pinned = pin_digest(image_name, config.get_image_store().auth(image_name))
+        store = get_artifact_store()
+        version = store.next_version(id)
+        return store.put_document(cls(id=id, version=version, description=description, image_name=pinned))
 
     def load(self) -> bytes:
         from agent_env.artifact.store import get_artifact_store

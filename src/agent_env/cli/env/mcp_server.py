@@ -111,6 +111,9 @@ def _gate_release(env, report_dirs, override: bool) -> None:
 @click.option("--context", "context_path", default=None, type=click.Path(exists=True), help="Docker build context (defaults to Dockerfile's directory)")
 @click.option("--dockerfile-github-url", "dockerfile_github_url", default=None, help="GitHub URL to Dockerfile (e.g. https://github.com/owner/repo/tree/main/path/Dockerfile)")
 @click.option("--docker-context-github-url", "docker_context_github_url", default=None, help="GitHub URL to build context directory (defaults to Dockerfile's parent)")
+@click.option("--image-ref", "image_ref", default=None,
+              help="An image already in a registry, e.g. ghcr.io/org/server:v1: registered as it is, with its tag pinned "
+                   "to the digest the registry serves now, and pulled by sandboxes (needs --environment-name)")
 @environment_name_options
 @env_provider_type_option("What deploys the env: 'gateway' (a gateway and service database in front of the server), 'server' (the "
                           "server on its own), or the type of an installed agent_env.env_providers plugin")
@@ -120,19 +123,21 @@ def _gate_release(env, report_dirs, override: bool) -> None:
 @click.option("--override", "override", is_flag=True, default=False,
               help="Run the release gate but publish even if it fails (records an audited override); implies --validate")
 @build_platform_option
-def put(env_id: str, dockerfile: str | None, context_path: str | None, dockerfile_github_url: str | None, docker_context_github_url: str | None, environment_name: str | None, env_provider_type: str, metadata_pairs: tuple[str, ...], run_validation: bool, override: bool, build_platform: str):
-    """Build and upload an MCP server environment."""
+def put(env_id: str, dockerfile: str | None, context_path: str | None, dockerfile_github_url: str | None, docker_context_github_url: str | None, image_ref: str | None, environment_name: str | None, env_provider_type: str, metadata_pairs: tuple[str, ...], run_validation: bool, override: bool, build_platform: str):
+    """Build and upload an MCP server environment, or register one over an image already in a registry."""
 
     environment_name = resolve_environment_name(environment_name, allow_missing=True)
 
-    if dockerfile and dockerfile_github_url:
-        click.echo("Error: --dockerfile and --dockerfile-github-url are mutually exclusive", err=True)
+    sources = [flag for flag, value in (("--dockerfile", dockerfile), ("--dockerfile-github-url", dockerfile_github_url),
+                                        ("--image-ref", image_ref)) if value]
+    if len(sources) > 1:
+        click.echo(f"Error: {' and '.join(sources)} are mutually exclusive", err=True)
         sys.exit(1)
-    if not dockerfile and not dockerfile_github_url:
-        click.echo("Error: either --dockerfile or --dockerfile-github-url is required", err=True)
+    if not sources:
+        click.echo("Error: one of --dockerfile, --dockerfile-github-url or --image-ref is required", err=True)
         sys.exit(1)
-    if context_path and dockerfile_github_url:
-        click.echo("Error: --context cannot be used with --dockerfile-github-url", err=True)
+    if context_path and not dockerfile:
+        click.echo("Error: --context needs --dockerfile", err=True)
         sys.exit(1)
     if docker_context_github_url and not dockerfile_github_url:
         click.echo("Error: --docker-context-github-url requires --dockerfile-github-url", err=True)
@@ -182,32 +187,43 @@ def put(env_id: str, dockerfile: str | None, context_path: str | None, dockerfil
             _gate_release(env, [], override)
         return
 
-    dockerfile_path = Path(dockerfile)
-    context = Path(context_path) if context_path else dockerfile_path.parent
-    if environment_name is None:
-        environment_name = card_name_from_source(str(dockerfile_path), str(context))
-        if not environment_name:
-            click.echo("Error: no @environment_card(name=...) found in the build source; pass --environment-name.", err=True)
-            sys.exit(1)
-        click.echo(f"Derived environment_name={environment_name!r} from the environment card.")
     image_id = derive_id(env_id, "env_image")
-    image_tag = image_repository(image_id)
     refuse_unwritable_ids(env_id, image_id)
+    if image_ref:
+        if environment_name is None:
+            click.echo("Error: --image-ref needs --environment-name: an image in a registry has no environment card to "
+                       "read it from", err=True)
+            sys.exit(1)
+        if build_platform != DEFAULT_BUILD_PLATFORM:
+            click.echo(f"Warning: --platform {build_platform!r} is ignored for --image-ref, which builds nothing", err=True)
+        artifact = DockerImageArtifact.put_ref(image_id, description="Registered from agent-env CLI", image_name=image_ref)
+        click.echo(f"Registered image: id={artifact.id} version={artifact.version} image={artifact.image_name}")
+        metadata, report_dirs = {}, []
+    else:
+        dockerfile_path = Path(dockerfile)
+        context = Path(context_path) if context_path else dockerfile_path.parent
+        if environment_name is None:
+            environment_name = card_name_from_source(str(dockerfile_path), str(context))
+            if not environment_name:
+                click.echo("Error: no @environment_card(name=...) found in the build source; pass --environment-name.", err=True)
+                sys.exit(1)
+            click.echo(f"Derived environment_name={environment_name!r} from the environment card.")
+        image_tag = image_repository(image_id)
+        click.echo(f"Building MCP server Docker image...")
+        build_image(dockerfile_path, context, image_tag, platform=build_platform)
 
-    click.echo(f"Building MCP server Docker image...")
-    build_image(dockerfile_path, context, image_tag, platform=build_platform)
-
-    click.echo(f"Creating DockerImageArtifact...")
-    artifact = DockerImageArtifact.put(
-        id=image_id,
-        description="Created from agent-env CLI",
-        image_name=image_tag,
-        build_context_path=str(context),
-        dockerfile_path=str(dockerfile_path),
-    )
-    click.echo(f"Created artifact: id={artifact.id} version={artifact.version}")
-
-    metadata = detect_env_metadata(dockerfile_path, context)
+        click.echo(f"Creating DockerImageArtifact...")
+        artifact = DockerImageArtifact.put(
+            id=image_id,
+            description="Created from agent-env CLI",
+            image_name=image_tag,
+            build_context_path=str(context),
+            dockerfile_path=str(dockerfile_path),
+        )
+        click.echo(f"Created artifact: id={artifact.id} version={artifact.version}")
+        metadata = detect_env_metadata(dockerfile_path, context)
+        # Local build: look for the env-build handoff report next to the build context.
+        report_dirs = [str(context), str(dockerfile_path.parent)]
     metadata.update(user_metadata)
 
     click.echo(f"Creating MCPServerEnv...")
@@ -220,8 +236,7 @@ def put(env_id: str, dockerfile: str | None, context_path: str | None, dockerfil
     )
     click.echo(f"Created MCPServerEnv: id={env.id} version={env.version} environment_name={env.environment_name} env_provider_type={env.env_provider_type}")
     if run_validation or override:
-        # Local build: look for the env-build handoff report next to the build context.
-        _gate_release(env, [str(context), str(dockerfile_path.parent)], override)
+        _gate_release(env, report_dirs, override)
 
 
 _SPEC_FINDING_LIMIT = 20
