@@ -68,7 +68,7 @@ must name it (`agentenv-capability-missing: <name>`, see `tst/util/capabilities.
   target as received`. Types in use: `feat`, `fix`, `refactor`, `docs`, `test`, `build`, `ci`,
   `chore`, `perf`, `security`. The title becomes the commit title.
 - Mark a breaking change with `!` after the scope: `feat(plugins)!: summary`. The `plugin-api` job
-  fails a pull request that breaks the plugin surface (README "Plugin compatibility") without it,
+  fails a pull request that breaks the plugin surface (PLUGINS.md "Plugin compatibility") without it,
   lists what broke, and runs again when you edit the title. To run it before you push:
   `.venv/bin/python .github/scripts/check_plugin_api.py --base origin/main --title "<title>"`.
 - Commit with an email address you are comfortable publishing; the history of this repository is

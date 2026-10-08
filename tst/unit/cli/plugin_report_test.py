@@ -4,7 +4,7 @@ The goldens pin every key, status and code for scenarios that between them produ
 code. Reason text is replaced by a placeholder: it may change in any release, and a reword should
 not touch the goldens. ``_SCHEMA`` is the format's keys and types, so a key added to the report
 fails here until it is added there too; that edit is where to decide whether the format version
-moves (README "Plugin report format"). After an intended change, regenerate and review the diff:
+moves (PLUGINS.md "Plugin report format"). After an intended change, regenerate and review the diff:
 
     AGENT_ENV_REGENERATE_GOLDENS=1 python -m pytest tst/unit/cli/plugin_report_test.py
 """
@@ -34,7 +34,7 @@ from tst.unit.plugins_test import _EP, _HERE, _Dist, _fresh, _install, _use_conf
 _THIS = "tst.unit.cli.plugin_report_test"
 _GOLDEN = Path(__file__).parent / "golden" / "plugin_report"
 _REGENERATE = os.environ.get("AGENT_ENV_REGENERATE_GOLDENS") == "1"
-_README = Path(__file__).parents[3] / "README.md"
+_PLUGINS_MD = Path(__file__).parents[3] / "PLUGINS.md"
 _COMMANDS = cli_plugins_mod.CLI_PLUGINS_GROUP
 _OPTIONS = cli_plugins_mod.CLI_ROOT_OPTIONS_GROUP
 
@@ -286,7 +286,7 @@ def test_codes_are_kebab_case():
 
 
 def _readme_section() -> str:
-    return _README.read_text().split("#### Plugin report format", 1)[1].split("\n#### ", 1)[0]
+    return _PLUGINS_MD.read_text().split("### Plugin report format", 1)[1].split("\n### ", 1)[0]
 
 
 def test_the_readme_lists_every_code():

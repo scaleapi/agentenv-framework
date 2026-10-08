@@ -236,8 +236,8 @@ def test_a_table_is_named_as_the_file_writes_it(tmp_path, monkeypatch, body, war
 
 
 def _documented_configs() -> list[str]:
-    readme = (_REPO / "README.md").read_text()
-    blocks = re.findall(r"```toml\n(.*?)```", readme, re.S)
+    docs = "".join((_REPO / name).read_text() for name in ("README.md", "PLUGINS.md"))
+    blocks = re.findall(r"```toml\n(.*?)```", docs, re.S)
     # the pyproject.toml blocks declare entry points, and a block headed by a bundle path
     # (`# agents/solver/agent.toml`) is an entity's toml; neither is a config file
     entity_tomls = tuple(f"# {kind.value}/" for kind in CONFIG_FILES)

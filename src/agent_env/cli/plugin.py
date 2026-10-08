@@ -179,7 +179,7 @@ def _bundle_contribution(bundle: InstalledBundle, bundles: tuple[InstalledBundle
 
 
 def _as_dict(report: Report) -> dict:
-    """The document `list --json` prints; `show` and `check` add to it. See "Plugin report format"."""
+    """The document `list --json` prints; `show` and `check` add to it. See PLUGINS.md "Plugin report format"."""
     error = report.inventory.config_error
     return {
         "format_version": FORMAT_VERSION,
