@@ -166,18 +166,35 @@ def test_an_image_with_no_tarball_is_pulled_so_it_runs_on_any_provider(bundle_di
     assert [entry.name for entry in dry_run_bundle(bundle_dir, sandbox=sandbox).runs] == ["t"]
 
 
-@pytest.mark.parametrize("sandbox", ["local", "modal"])
-def test_an_image_with_no_tarball_and_no_registry_to_pull_it_from_is_refused_on_every_provider(bundle_dir, sandbox):
-    _agent("solver", ("img:v1", None))
-    _env("crm", ("crm:v1", None))
-    _task(bundle_dir, [AGENT, {"id": "env", "type": "deploy_env", "env_id": "crm"}])
+NO_REGISTRY = ("img:v1", None)
+CANT_LOAD = ("on the {sandbox!r} sandbox provider, which can't load it: '{id}' v1 has no tar.gz, and its image name "
+             "'img:v1' doesn't name a registry to pull it from")
 
-    problems = _problems(lambda: dry_run_bundle(bundle_dir, sandbox=sandbox))
 
-    assert ("tasks/t.json: step 'agent': deploys agent 'solver''s image, which no sandbox can get: 'solver-image' v1 has "
-            "no tar.gz, and its image name 'img:v1' doesn't name a registry to pull it from") in problems
-    assert ("tasks/t.json: step 'env': deploys env 'crm''s image 'crm-image', which no sandbox can get: 'crm-image' v1 "
-            "has no tar.gz, and its image name 'crm:v1' doesn't name a registry to pull it from") in problems
+@pytest.mark.parametrize("sandbox, refused", [("modal_vm", True), ("local", False), ("modal", False)])
+def test_an_agent_image_with_no_tarball_and_no_registry_is_refused_where_a_vm_loads_it(bundle_dir, sandbox, refused):
+    """The local and Modal providers run an agent in a container, by image name, whether or not it has a tar.gz."""
+    _agent("solver", NO_REGISTRY)
+    _task(bundle_dir, [AGENT])
+
+    if refused:
+        assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox=sandbox)) == [
+            "tasks/t.json: step 'agent': deploys agent 'solver''s image " + CANT_LOAD.format(sandbox=sandbox,
+                                                                                             id="solver-image")]
+    else:
+        assert [entry.name for entry in dry_run_bundle(bundle_dir, sandbox=sandbox).runs] == ["t"]
+
+
+def test_an_env_image_with_no_tarball_and_no_registry_is_refused_where_a_gateway_vm_loads_it(bundle_dir):
+    """The local provider's gateway is a VM, which loads the env's images; Modal's runs each server by image name."""
+    _env("crm", NO_REGISTRY)
+    _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
+
+    assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox="local")) == [
+        "tasks/t.json: step 'env': deploys env 'crm''s image 'crm-image' " + CANT_LOAD.format(sandbox="local",
+                                                                                              id="crm-image")]
+    _infra(REMOTE)
+    assert [entry.name for entry in dry_run_bundle(bundle_dir, sandbox="modal").runs] == ["t"]
 
 
 # What a provider can create
@@ -408,10 +425,11 @@ def test_infra_on_another_provider_with_no_tarball_and_no_registry_to_pull_it_fr
 
     problems = _problems(lambda: dry_run_bundle(bundle_dir, sandbox="modal_vm"))
 
-    assert problems[0] == ("tasks/t.json: step 'env': deploys the gateway env 'default''s image 'gateway-default', which "
-                           "no sandbox can get: 'gateway-default' v1 has no tar.gz, and its image name 'img:v1' doesn't "
-                           "name a registry to pull it from")
+    assert problems[0] == ("tasks/t.json: step 'env': deploys the gateway env 'default''s image 'gateway-default' "
+                           + CANT_LOAD.format(sandbox="modal_vm", id="gateway-default"))
     assert len(problems) == 4  # the gateway's image, and the service-db's three
+    # Modal's container gateway runs the gateway by image name and swaps out service-db images the store doesn't hold
+    assert [entry.name for entry in dry_run_bundle(bundle_dir, sandbox="modal").runs] == ["t"]
 
 
 def test_a_problem_several_deploys_share_is_reported_once_naming_the_first(bundle_dir):

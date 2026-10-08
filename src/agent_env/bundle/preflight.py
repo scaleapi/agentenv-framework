@@ -180,7 +180,9 @@ class _Walk:
         else:  # a plugin's provider, or one deploy_env's own preflight refuses for this env
             return
         env_id, images = step.env_id, deployment.images
-        self._loadable(where, images)
+        if GATEWAY in kinds and (loaders := [link for link in _links(provider)
+                                             if not isinstance(link, ModalSandboxProvider)]):
+            self._loadable(where, loaders, images)  # a gateway VM loads its images; Modal's runs each by name
         if _local_link(provider):
             self.infra |= kinds
             self.docker_users.append(where)
@@ -289,10 +291,13 @@ class _Walk:
         if agent_id is None:
             self.default_agent_users.append((where, unnamed))
             agent_id = get_config().get_default_a2a_agent_id()
-        if (image := self._agent_image(agent_id, version)) is None:
+        loaders = [link for link in _links(provider) if not isinstance(link, (LocalSandboxProvider, ModalSandboxProvider))]
+        remote = _remote_links(provider)
+        if not (loaders or remote) or (image := self._agent_image(agent_id, version)) is None:
             return
-        self._loadable(where, [image])
-        if remote := _remote_links(provider):
+        if loaders:
+            self._loadable(where, loaders, [image])  # those two run an agent in a container, by image name
+        if remote:
             self._reachable(where, remote, [image])
 
     def _sandbox(self, where: str, step: DeploySandboxTaskStep) -> None:
@@ -327,10 +332,13 @@ class _Walk:
         except (NotFoundError, ValueError, KeyError, TypeError):
             return None
 
-    def _loadable(self, where: str, images: list[_Image]) -> None:
+    def _loadable(self, where: str, loaders: list[SandboxProvider], images: list[_Image]) -> None:
+        """Refuse each of ``images`` a VM on ``loaders`` can't get: it loads an image's tar.gz, or pulls an image with
+        none by name."""
         for image in images:
             if image.unloadable:
-                self._problem(where, f"deploys {image.what}, which no sandbox can get: {image.unloadable}")
+                self._problem(where, f"deploys {image.what} on the {_shown(loaders[0])} sandbox provider, which can't "
+                                     f"load it: {image.unloadable}")
 
     def _reachable(self, where: str, remote: list[SandboxProvider], images: list[_Image]) -> None:
         for image in images:
@@ -351,7 +359,8 @@ class _Walk:
             artifacts = ([env.db_docker_image_artifact, env.db_web_docker_image_artifact,
                           env.db_mcp_docker_image_artifact] if isinstance(env, ServiceDBEnv) else [env.docker_image_artifact])
             images = [_image(f"the {kind} env {env_id!r}'s image {image.id!r}", image) for image in artifacts]
-            self._loadable(where, images)
+            if not isinstance(provider, ModalSandboxProvider):  # whose containers run by name, or are swapped out
+                self._loadable(where, [provider], images)
             self._reachable(where, [provider], images)
 
     def _default_agent(self) -> None:
