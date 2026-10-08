@@ -183,8 +183,7 @@ skips for the allowed capabilities pass, and the fast job allows no skips under
 touches the plugin CLI, `agent_env/plugins`, the tier itself or the lockfile, and allows no skips; a
 `changes` job decides. `.github/workflows/plugin-api.yml` runs the `plugin-api` job on every pull
 request, title edits included, and on `main`: `.github/scripts/check_plugin_api.py` compares the
-plugin surface (its `BASES` and `USED`, which a unit test holds to the PLUGINS.md "Plugin compatibility"
-list) between `HEAD^1` and `HEAD` with griffe, pinned in the `dev` extra, and fails on a break the
+plugin surface (its `BASES` and `USED`) between `HEAD^1` and `HEAD` with griffe, pinned in the `dev` extra, and fails on a break the
 title does not mark with `!`. `.github/workflows/clean-install.yml` runs the `clean-install` job on
 every pull request and on `main`: `.github/scripts/clean_install.py` builds both distributions as the
 release does, fails if the wheel leaves out a file tracked under `src/agent_env/examples` or a
@@ -215,5 +214,5 @@ Actions are pinned to commit SHAs.
 ## Docs
 
 `README.md` is the user-facing front door (configuration, custom envs, steps, artifacts and
-providers, the CLI). `PLUGINS.md` is the plugin contract. `packages/agentenv-protocol/README.md`
-documents the protocol and the A2A agent framework.
+providers, the CLI). `packages/agentenv-protocol/README.md` documents the
+protocol and the A2A agent framework.

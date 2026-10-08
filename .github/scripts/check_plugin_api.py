@@ -1,9 +1,9 @@
 """Fail a change that breaks the plugin surface, unless its title marks the break with ``!``.
 
-The surface is ``BASES`` and ``USED``, the list in PLUGINS.md "Plugin compatibility"; a unit test
-holds the two together. Both trees are read statically with griffe, which reports what breaks a
-caller, and the subclass rules below add what breaks a plugin's subclass of a base. A title in the
-form ``type(scope)!: summary`` marks the break deliberate: the breaks are printed and the check passes.
+The surface is ``BASES`` and ``USED``. Both trees are read statically with griffe, which reports what
+breaks a caller, and the subclass rules below add what breaks a plugin's subclass of a base. A title in
+the form ``type(scope)!: summary`` marks the break deliberate: the breaks are printed and the check
+passes.
 """
 
 from __future__ import annotations
@@ -617,7 +617,7 @@ def main() -> int:
         print("plugin API: the title has a ! but not in the form type(scope)!: summary, with the type one of "
               + ", ".join(TYPES))
     print("plugin API: if the break is deliberate, mark it with ! in the pull request title, as in "
-          "feat(plugins)!: …; see \"Plugin compatibility\" in PLUGINS.md")
+          "feat(plugins)!: …")
     _report("error", f"{count}; mark it with ! in the title if it is deliberate", found)
     return 1
 

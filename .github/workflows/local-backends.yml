@@ -186,7 +186,7 @@ jobs:
           # moves; diffing against base.sha would count the base's own later commits as changes.
           BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || github.event.before }}
         run: |
-          paths='^(src/agent_env/cli/(__init__|__main__|_installers|_plugin_changes|plugin)\.py|src/agent_env/(plugins|config)/|src/agent_env/py\.typed|packages/agentenv-protocol/|tst/installer/|tst/util/capabilities\.py|pyproject\.toml|uv\.lock|Makefile|PLUGINS\.md|\.github/(workflows/local-backends\.yml|scripts/check_skip_policy\.py))'
+          paths='^(src/agent_env/cli/(__init__|__main__|_installers|_plugin_changes|plugin)\.py|src/agent_env/(plugins|config)/|src/agent_env/py\.typed|packages/agentenv-protocol/|tst/installer/|tst/util/capabilities\.py|pyproject\.toml|uv\.lock|Makefile|\.github/(workflows/local-backends\.yml|scripts/check_skip_policy\.py))'
           if ! changed=$(git diff --name-only "$BASE" HEAD 2>/dev/null); then
             echo "plugins=true" >> "$GITHUB_OUTPUT"
           elif grep -qE "$paths" <<< "$changed"; then
