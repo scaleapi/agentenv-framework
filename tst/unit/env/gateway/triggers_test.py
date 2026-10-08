@@ -96,6 +96,39 @@ def _registration(**overrides):
     return base
 
 
+@pytest.mark.asyncio
+async def test_stop_driver_cancels_and_awaits_pending_action_before_client_teardown(engine):
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def slow_call(_tool_name, _arguments):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    engine._internal_call = slow_call
+    engine.register({"watch_roles": ["default"], "triggers": [
+        {"id": "shutdown", "when": {"type": "action", "tool": "provoking_tool"},
+         "actions": [{"type": "tool", "tool": "slack_send_message", "args": {}}]}
+    ]})
+    engine.start_driver()
+    engine.on_tool_call("default", "provoking_tool", {}, _result())
+    await asyncio.wait_for(started.wait(), 1)
+    tracked = tuple(engine._tasks)
+    assert tracked
+
+    await engine.stop_driver()
+
+    assert cancelled.is_set()
+    assert all(task.done() for task in tracked)
+    assert not engine._tasks
+    await engine.stop_driver()
+    assert not engine._tasks
+
+
 @pytest.mark.parametrize("bad,fragment", [
     ({"triggers": "nope"}, "triggers must be a list"),
     ({"triggers": [{"id": "x", "when": {"type": "step"}, "actions": []}]}, "when.type"),

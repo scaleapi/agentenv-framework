@@ -538,12 +538,17 @@ class TriggerEngine:
                 logger.exception("clock time-driver tick failed")
 
     async def stop_driver(self) -> None:
-        """Cancel the background poller on gateway teardown (idempotent)."""
+        """Cancel the poller and drain trigger work before gateway clients close."""
         task, self._driver_task = self._driver_task, None
         if task is not None:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        while self._tasks:
+            tasks = tuple(self._tasks)
+            for pending in tasks:
+                pending.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def _resolve_watch_roles(self, body: dict) -> set[str]:
         raw = body.get("watch_roles")

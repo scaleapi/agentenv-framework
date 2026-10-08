@@ -47,6 +47,8 @@ logger = logging.getLogger(__name__)
 # the partial bytes already consumed, corrupting the stream. Pipe consumers must
 # download to a temp file first, then read the file (see load_docker_images).
 CURL_RETRY_FLAGS = "--retry 5 --retry-all-errors --retry-delay 1"
+_DOCKER_IMAGE_INSPECT_FORMAT = "{{.Id}}"
+_DOCKER_IMAGE_LOAD_EXEC_RETRIES = 2
 # Docker label on what a step starts on a sandbox's Docker host (containers, images, networks), valued with the
 # sandbox id, so a sandbox that shares its host (the local one) can remove its own when it terminates.
 SANDBOX_LABEL = "agentenv.sandbox"
@@ -134,6 +136,21 @@ class NetworkPolicy:
         )
 
 
+def _object_file_method(legacy: Callable) -> Callable:
+    async def method(self, object_url: str, destination_path: str) -> None:
+        await legacy(self, object_url, destination_path)
+
+    return method
+
+
+def _legacy_file_method(canonical: Callable, old_symbol: str, new_name: str) -> Callable:
+    async def method(self, s3_url: str, destination_path: str) -> None:
+        warn_deprecated(old_symbol, new_name, kind="method")
+        await canonical(self, s3_url, destination_path)
+
+    return method
+
+
 class Sandbox(ABC):
     """Universal sandbox contract — anything that can host a process and expose ports."""
 
@@ -151,6 +168,20 @@ class Sandbox(ABC):
 
     _VM_READY_TIMEOUT = 1200      # wait_for_vm wall-clock budget (s)
     _VM_READY_POLL_INTERVAL = 30  # sparse polling (s)
+
+    def __init_subclass__(cls, **kwargs) -> None:
+        """Keep overrides of either file-method spelling in the dispatch path, including super() calls."""
+        super().__init_subclass__(**kwargs)
+        for legacy, neutral, owner in (
+            ("write_file_from_s3", "write_file_from_object", "Sandbox"),
+            ("load_s3_file", "load_object_file", "VmSandbox"),
+        ):
+            legacy_impl = cls.__dict__.get(legacy)
+            neutral_impl = cls.__dict__.get(neutral)
+            if legacy_impl is not None and neutral_impl is None:
+                setattr(cls, neutral, _object_file_method(legacy_impl))
+            elif neutral_impl is not None and legacy_impl is None:
+                setattr(cls, legacy, _legacy_file_method(neutral_impl, f"{owner}.{legacy}", neutral))
 
     def host_port(self, port: int) -> int:
         """The host-side port a published container port is reachable on.
@@ -189,7 +220,7 @@ class Sandbox(ABC):
     async def write_file_from_s3(self, s3_url: str, destination_path: str) -> None:
         """Deprecated: ``write_file_from_object``."""
         warn_deprecated("Sandbox.write_file_from_s3", "write_file_from_object", kind="method")
-        await self.write_file_from_object(s3_url, destination_path)
+        await Sandbox.write_file_from_object(self, s3_url, destination_path)
 
     async def write_file_from_url(self, url: str, destination_path: str) -> None:
         """Download an HTTP(S) URL into the agent process's filesystem at destination_path."""
@@ -314,31 +345,51 @@ class VmSandbox(Sandbox):
 
     async def _load_docker_images(self, artifacts: list, signed_urls: list[str | None]) -> None:
         load_commands = []
+        staging_paths = [f"/tmp/_docker_image_{self.sandbox_id}_{idx}.tar.gz" for idx in range(len(artifacts))]
         for idx, (artifact, signed) in enumerate(zip(artifacts, signed_urls, strict=True)):
-            tmp_tar = f"/tmp/_docker_image_{self.sandbox_id}_{idx}.tar.gz"
+            tmp_tar = staging_paths[idx]
             if signed is not None:
                 # Download to a file first (retry-safe with -o); a `curl | ... docker load`
                 # pipe can't be retried without corrupting the stream (curl won't rewind).
                 load_commands.append(
-                    f'(curl -fsSL {CURL_RETRY_FLAGS} "{signed}" -o {shlex.quote(tmp_tar)} '
-                    f"&& gunzip -c {shlex.quote(tmp_tar)} | docker load && rm -f {shlex.quote(tmp_tar)})"
+                    f'(curl -fsSL {CURL_RETRY_FLAGS} {shlex.quote(signed)} -o {shlex.quote(tmp_tar)} '
+                    f"&& gunzip -c {shlex.quote(tmp_tar)} | docker load)"
                 )
             else:
-                await self._download_object_to_vm(artifact.tar_gz_object_url, tmp_tar)
                 load_commands.append(
-                    f"(gunzip -c {shlex.quote(tmp_tar)} | docker load && rm -f {shlex.quote(tmp_tar)})"
+                    f"(gunzip -c {shlex.quote(tmp_tar)} | docker load)"
                 )
             logger.info(f"  Queued: {artifact.image_name}")
-        await self.exec_script(" & ".join(load_commands) + " & wait", max_retries=2)
+        try:
+            for idx, (artifact, signed) in enumerate(zip(artifacts, signed_urls, strict=True)):
+                if signed is None:
+                    await self._download_object_to_vm(artifact.tar_gz_object_url, staging_paths[idx])
+            # exec_script explicitly invokes `bash -c`; pipefail and wait-status
+            # collection therefore use the shell the provider actually guarantees.
+            workers = "\n".join(
+                f"{command} & pid_{idx}=$!" for idx, command in enumerate(load_commands)
+            )
+            waits = "\n".join(f"wait $pid_{idx} || status=1" for idx in range(len(load_commands)))
+            script = (
+                "set -o pipefail\n"
+                f"{workers}\n"
+                "status=0\n"
+                f"{waits}\n"
+                "exit $status"
+            )
+            # Signed archives are downloaded per attempt; keep unsigned archives staged until retries finish.
+            await self.exec_script(script, max_retries=_DOCKER_IMAGE_LOAD_EXEC_RETRIES)
+        finally:
+            await self._remove_vm_temp_file(*staging_paths)
 
         logger.info("Verifying Docker images...")
-        exit_code, stdout, stderr = await self.exec_with_output("sudo", "docker", "images")
+        image_refs = [artifact.image_name for artifact in artifacts]
+        exit_code, _, stderr = await self.exec_with_output(
+            "sudo", "docker", "image", "inspect", "--format", _DOCKER_IMAGE_INSPECT_FORMAT,
+            *image_refs,
+        )
         if exit_code != 0:
-            raise RuntimeError(f"docker images failed: {stderr}")
-        for artifact in artifacts:
-            base_name = artifact.image_name.split(":")[0]
-            if base_name not in stdout:
-                raise RuntimeError(f"{artifact.image_name} image not found. stdout: {stdout}")
+            raise RuntimeError(f"Docker image reference verification failed for {image_refs}: {stderr}")
         logger.info("  All images loaded successfully")
 
     async def load_object_file(self, object_url: str, destination_path: str) -> None:
@@ -348,7 +399,7 @@ class VmSandbox(Sandbox):
     async def load_s3_file(self, s3_url: str, destination_path: str) -> None:
         """Deprecated: ``load_object_file``."""
         warn_deprecated("VmSandbox.load_s3_file", "load_object_file", kind="method")
-        await self.load_object_file(s3_url, destination_path)
+        await VmSandbox.load_object_file(self, s3_url, destination_path)
 
     async def _download_object_to_vm(self, object_url: str, vm_path: str) -> None:
         """Place object_url onto the VM host at vm_path, backend-agnostically."""
@@ -429,10 +480,13 @@ class VmSandbox(Sandbox):
             return
         # Too big for one heredoc arg: append the (shell-safe) base64 in bounded chunks.
         vm_b64 = f"{vm_path}.b64"
-        await self.exec_script(f": > {shlex.quote(vm_b64)}")
-        for i in range(0, len(encoded), self._WFT_CHUNK_BYTES):
-            await self.exec_script(f"printf '%s' {shlex.quote(encoded[i:i + self._WFT_CHUNK_BYTES])} >> {shlex.quote(vm_b64)}")
-        await self.exec_script(f"base64 -d {shlex.quote(vm_b64)} > {shlex.quote(vm_path)} && rm -f {shlex.quote(vm_b64)}")
+        try:
+            await self.exec_script(f": > {shlex.quote(vm_b64)}")
+            for i in range(0, len(encoded), self._WFT_CHUNK_BYTES):
+                await self.exec_script(f"printf '%s' {shlex.quote(encoded[i:i + self._WFT_CHUNK_BYTES])} >> {shlex.quote(vm_b64)}")
+            await self.exec_script(f"base64 -d {shlex.quote(vm_b64)} > {shlex.quote(vm_path)}")
+        finally:
+            await self._remove_vm_temp_file(vm_b64)
 
     async def write_host_file(self, data: bytes, vm_path: str) -> None:
         """Write bytes to vm_path on the VM host itself, not into the agent container."""
@@ -447,7 +501,7 @@ class VmSandbox(Sandbox):
             await self._write_bytes_to_vm_path(content.encode(), vm_path)
             await self._copy_into_container(vm_path, destination_path)
         finally:
-            await self._remove_vm_temp_file(vm_path, f"{vm_path}.b64")
+            await self._remove_vm_temp_file(vm_path)
 
 
 def port_bindings(host_ips: Iterable[str], host_port: int, container_port: int) -> list[str]:
