@@ -47,9 +47,7 @@ def engine_answers(monkeypatch):
         monkeypatch.setattr(ls.subprocess, "run", run)
         return asked
 
-    ls._engine_cpu_count.cache_clear()
-    yield answer
-    ls._engine_cpu_count.cache_clear()
+    return answer
 
 
 class _RecordingLocalSandbox(LocalSandbox):
@@ -107,13 +105,21 @@ async def test_cpu_within_the_engines_is_kept(monkeypatch):
     assert sandbox.container_limits == ContainerLimits(cpus=1.5, memory_mib=2048)
 
 
-def test_the_engine_is_asked_once_and_a_failed_ask_is_asked_again(engine_answers):
-    asked = engine_answers(None, "6\n")
+def test_the_engine_is_asked_each_time_so_a_resized_one_is_seen(engine_answers):
+    asked = engine_answers("6\n", None, "2\n")
 
-    assert _real_engine_cpus() is None
-    assert _real_engine_cpus() == 6
-    assert _real_engine_cpus() == 6
-    assert asked == [["docker", "info", "--format", "{{.NCPU}}"]] * 2
+    assert [_real_engine_cpus() for _ in range(3)] == [6, None, 2]
+    assert asked == [["docker", "info", "--format", "{{.NCPU}}"]] * 3
+
+
+@pytest.mark.asyncio
+async def test_one_cpu_or_less_is_not_checked_against_the_engine(monkeypatch):
+    def asked():
+        raise AssertionError("every engine has at least one CPU")
+
+    monkeypatch.setattr(ls, "_engine_cpus", asked)
+    sandbox = await LocalSandboxProvider().create_vm(cpu=1, memory=1024)
+    assert sandbox.container_limits == ContainerLimits(cpus=1, memory_mib=1024)
 
 
 def test_no_docker_means_no_cpu_count(monkeypatch, engine_answers):
@@ -122,6 +128,12 @@ def test_no_docker_means_no_cpu_count(monkeypatch, engine_answers):
 
     monkeypatch.setattr(ls.subprocess, "run", missing)
     assert _real_engine_cpus() is None
+
+
+def test_a_sandbox_whose_limits_cant_be_recorded_is_not_made(sandbox_root):
+    """A handle a later step rebuilds would start its containers unheld."""
+    with pytest.raises(FileNotFoundError):
+        LocalSandbox(sandbox_id="local-gone", work_dir=sandbox_root / "missing", container_limits=ContainerLimits(1, 512))
 
 
 def test_a_sandbox_from_before_limits_were_recorded_holds_nothing(sandbox_root):

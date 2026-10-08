@@ -79,16 +79,11 @@ _CONTAINER_MODE_MARKER = ".agent-container-mode"
 _LIMITS_FILE = ".container-limits.json"
 
 
-@functools.cache
-def _engine_cpu_count() -> int:
-    """How many CPUs the Docker engine has: its VM's, on Docker Desktop or Rancher Desktop."""
-    return int(_docker("info", "--format", "{{.NCPU}}"))
-
-
 def _engine_cpus() -> int | None:
-    """The engine's CPU count, or None when Docker can't be asked. A failed ask isn't cached, so it's asked again."""
+    """How many CPUs the Docker engine has now (its VM's, on Docker Desktop or Rancher Desktop), or None when Docker
+    can't be asked. Not cached: the engine can be resized while a process runs."""
     try:
-        return _engine_cpu_count()
+        return int(_docker("info", "--format", "{{.NCPU}}"))
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
         return None
 
@@ -96,20 +91,13 @@ def _engine_cpus() -> int | None:
 def _container_limits(cpu: float, memory: int) -> ContainerLimits:
     """``cpu`` and ``memory`` as what a local sandbox's containers are held to. Docker refuses a container more CPUs
     than its engine has, so cpu is held to that, with a warning; memory beyond the engine's is accepted."""
-    engine_cpus = _engine_cpus()
+    engine_cpus = _engine_cpus() if cpu > 1 else None  # every engine has at least one CPU
     if engine_cpus is not None and cpu > engine_cpus:
         logger.warning(
             "Asked for %g CPUs, but the Docker engine has %d; holding this sandbox's containers to %d", cpu, engine_cpus, engine_cpus,
         )
         cpu = float(engine_cpus)
     return ContainerLimits(cpus=cpu, memory_mib=memory)
-
-
-def _write_limits(work_dir: Path, limits: ContainerLimits) -> None:
-    try:
-        (work_dir / _LIMITS_FILE).write_text(json.dumps(limits.to_dict()))
-    except OSError as e:
-        logger.warning("Could not record the container limits in %s (%s); a step that reopens it won't apply them", work_dir, e)
 
 
 def _read_limits(work_dir: Path) -> ContainerLimits | None:
@@ -193,7 +181,8 @@ class LocalSandbox(VmSandbox):
         )
         if container_limits is not None:
             self.container_limits = container_limits
-            _write_limits(self._work_dir, container_limits)
+            # Unrecorded, a handle a later step rebuilds would start containers unheld, so a failed write fails here.
+            (self._work_dir / _LIMITS_FILE).write_text(json.dumps(container_limits.to_dict()))
         elif work_dir is not None:
             self.container_limits = _read_limits(work_dir)
 
