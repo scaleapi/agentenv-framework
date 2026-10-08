@@ -29,8 +29,6 @@ class DeployEnvTaskStep(TaskStep):
         version: Optional[int],
         env_id: str,
         env_version: Optional[int] = None,
-        artifact_id: Optional[str] = None,
-        artifact_version: Optional[int] = None,
         ttl_seconds: int = TaskStep.DEFAULT_TTL_SECONDS,
         disk_size_gb: float = 10,
         gateway_mode: str = GatewayMode.PERFORMANCE.value,
@@ -42,6 +40,10 @@ class DeployEnvTaskStep(TaskStep):
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
         metadata: Optional[dict] = None,
+        # Appended, not slotted next to env_version: an existing positional argument would
+        # otherwise change meaning.
+        artifact_id: Optional[str] = None,
+        artifact_version: Optional[int] = None,
     ):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
         self.env_id = env_id
@@ -174,6 +176,7 @@ class DeployEnvTaskStep(TaskStep):
         # these is inert for every env that has not opted in.
         if self.artifact_id is not None and ("artifact_id" in params or accepts_kwargs):
             deploy_kwargs["artifact_id"] = self.artifact_id
+        if self.artifact_version is not None and ("artifact_version" in params or accepts_kwargs):
             deploy_kwargs["artifact_version"] = self.artifact_version
         deployed_env = await env.deploy(**deploy_kwargs)
         # create_instance runs inside env.deploy(), so an annotation set after it
