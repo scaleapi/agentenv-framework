@@ -67,8 +67,8 @@ def _child_path(child: dict) -> str:
 
 
 def _endpoints_relative_to(path: str, child: dict) -> dict:
-    """The child card with its extension endpoints relative to the child at `path`. A composing gateway prefixes only
-    the child's ``/agentenv`` endpoints with that path and leaves the rest as the child advertised them."""
+    """The child card with its extension endpoints relative to the child at `path`. A composing gateway prefixes an
+    extension's ``params.endpoint`` with that path only when it is at or under ``RPC_PATH``, and never a method's own."""
     card = copy.deepcopy(child)
     for ext in (card.get("capabilities") or {}).get("extensions") or []:
         params = ext.get("params")
