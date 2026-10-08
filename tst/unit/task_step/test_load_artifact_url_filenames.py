@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
+from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep, _url_downloads
 
 OPAQUE_URL = "https://files.example/objects/obj-4f9c2a"
 
@@ -44,3 +44,26 @@ def test_a_filename_given_twice_fails():
 def test_a_bare_url_named_like_an_explicit_filename_fails():
     with pytest.raises(ValueError, match=r"'https://a.example/data.csv' would be saved as 'data.csv'"):
         _step(["https://a.example/data.csv", {"url": OPAQUE_URL, "filename": "data.csv"}])
+
+
+@pytest.mark.parametrize(
+    "url, name",
+    [
+        ("https://a.example/x/%2e%2e%2fetc%2fpasswd", "passwd"),
+        ("https://storage.example/b/bucket/o/path%2Fto%2Ffile.csv?alt=media", "file.csv"),
+        ("https://a.example/x/dir%2F", "downloaded"),
+    ],
+)
+def test_an_escaped_slash_in_a_bare_url_separates_like_a_slash(url, name):
+    assert _url_downloads("load", [url]) == [(url, name)]
+
+
+@pytest.mark.parametrize("url", ["https://a.example/x/%2e%2e", "https://a.example/x/..", "https://a.example/x/..%5Cevil"])
+def test_a_bare_url_whose_name_is_no_plain_file_name_fails_at_construction(url):
+    with pytest.raises(ValueError, match="give it a 'filename'"):
+        _step([url])
+
+
+def test_a_repeated_bare_url_name_skips_suffixes_already_taken():
+    urls = ["https://a.example/x-1.txt", "https://b.example/x.txt", "https://c.example/x.txt"]
+    assert [name for _, name in _url_downloads("load", urls)] == ["x-1.txt", "x.txt", "x-2.txt"]

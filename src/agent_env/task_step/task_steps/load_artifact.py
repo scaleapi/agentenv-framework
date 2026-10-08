@@ -52,22 +52,28 @@ def _named_download(step_id: str, entry: dict) -> tuple[str, str]:
             f"load_artifact '{step_id}': urls entry {entry!r} needs a non-empty string 'filename' "
             f"(a bare URL string is saved under the name its path ends in)"
         )
+    if problem := _plain_name_problem(filename):
+        raise ValueError(f"load_artifact '{step_id}': urls entry {entry!r}: {problem}")
+    return url, filename
+
+
+def _plain_name_problem(filename: str) -> Optional[str]:
+    """Why ``filename`` can't be saved directly in the destination, or None when it can."""
     try:
         validate_relative_filename(filename)
     except ValueError as e:
-        raise ValueError(f"load_artifact '{step_id}': urls entry {entry!r}: {e}") from e
+        return str(e)
     if "/" in filename or "\\" in filename or filename == ".":
-        raise ValueError(
-            f"load_artifact '{step_id}': urls entry {entry!r}: filename must be a plain file name, not a path"
-        )
-    return url, filename
+        return "filename must be a plain file name, not a path"
+    return None
 
 
 def _url_downloads(step_id: str, urls: list[UrlEntry]) -> list[tuple[str, str]]:
     """Each ``urls`` entry as ``(url, filename)``, the name it is saved under in the destination.
 
-    A bare URL takes its last path segment, a repeat suffixed ``-1``, ``-2``, ...; an explicit
-    filename is never renamed, so one given twice, or matching a bare URL's name, raises.
+    A bare URL takes the last segment of its decoded path, a repeat the first of ``-1``, ``-2``, ...
+    no other bare URL has; an explicit filename is never renamed, so one given twice, or matching a
+    bare URL's name, raises.
     """
     explicit: dict[str, str] = {}
     for entry in urls:
@@ -86,19 +92,23 @@ def _url_downloads(step_id: str, urls: list[UrlEntry]) -> list[tuple[str, str]]:
             )
 
     downloads: list[tuple[str, str]] = []
-    seen: dict[str, int] = {}
+    taken: set[str] = set()
     for entry in urls:
         if isinstance(entry, dict):
             downloads.append((entry["url"], entry["filename"]))
             continue
-        base = unquote(os.path.basename(urlparse(entry).path)) or "downloaded"
-        count = seen.get(base, 0)
-        seen[base] = count + 1
-        if count == 0:
-            filename = base
-        else:
-            stem, ext = os.path.splitext(base)
+        # Decoded first, so an escaped slash separates too and the name can't climb out of the destination.
+        base = posixpath.basename(unquote(urlparse(entry).path)) or "downloaded"
+        if problem := _plain_name_problem(base):
+            raise ValueError(
+                f"load_artifact '{step_id}': {entry!r} would be saved as {base!r}: {problem}; give it a 'filename'"
+            )
+        stem, ext = os.path.splitext(base)
+        filename, count = base, 0
+        while filename in taken:
+            count += 1
             filename = f"{stem}-{count}{ext}"
+        taken.add(filename)
         if filename in explicit:
             raise ValueError(
                 f"load_artifact '{step_id}': {entry!r} would be saved as {filename!r}, the filename given to "
