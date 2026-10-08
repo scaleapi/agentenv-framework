@@ -95,20 +95,24 @@ def _prefix_child_endpoints(env_card: dict, child: dict) -> dict:
 
 
 def _extensions(card: dict) -> Iterator[dict]:
-    """The card's own extensions whose ``params`` is an object, the only ones that can name an endpoint."""
+    """The card's own extensions that can be invoked: those with a text ``uri`` and object ``params``."""
     for ext in (card.get("capabilities") or {}).get("extensions") or []:
-        if isinstance(ext.get("params"), dict):
+        if isinstance(ext.get("uri"), str) and isinstance(ext.get("params"), dict):
             yield ext
 
 
 def _operations(ext: dict) -> list[tuple[Optional[str], Optional[dict], str, str]]:
-    """Each operation an extension offers, as ``invoke_extension`` calls it: (method name, method, HTTP verb, endpoint). A
-    method's endpoint is its own, else the extension's; an extension that lists no methods offers a POST to its endpoint."""
+    """Each operation an extension offers, as ``invoke_extension`` calls it: (method name, method, HTTP verb, endpoint), the endpoint being the method's
+    own, else the extension's; an extension listing no methods offers a POST to its endpoint. Badly shaped ones (a ``methods`` or method that isn't an
+    object, a verb or endpoint that isn't text) are skipped, so they stay as stored and can't break calls to the card's other extensions."""
     params = ext["params"]
     methods = params.get("methods") or {}
+    if not isinstance(methods, dict):
+        return []
     operations = [(name, method, method.get("method") or "POST", method.get("endpoint") or params.get("endpoint"))
-                  for name, method in methods.items()] if methods else [(None, None, "POST", params.get("endpoint"))]
-    return [(name, method, verb.upper(), endpoint) for name, method, verb, endpoint in operations if endpoint]
+                  for name, method in methods.items() if isinstance(method, dict)] if methods else [(None, None, "POST", params.get("endpoint"))]
+    return [(name, method, verb.upper(), endpoint) for name, method, verb, endpoint in operations
+            if isinstance(verb, str) and isinstance(endpoint, str) and endpoint]
 
 
 async def reset_via_rest(

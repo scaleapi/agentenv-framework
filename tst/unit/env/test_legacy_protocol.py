@@ -214,6 +214,27 @@ async def test_a_child_extension_endpoint_shared_by_a_gateway_operation_and_a_ch
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("broken", [
+    {"uri": "urn:example:broken/v1", "params": {"endpoint": "/ext/broken", "methods": ["sync"]}},
+    {"uri": "urn:example:broken/v1", "params": {"endpoint": "/ext/broken", "methods": "sync"}},
+    {"uri": "urn:example:broken/v1", "params": {"endpoint": "/ext/broken", "methods": {"sync": "POST"}}},
+    {"uri": "urn:example:broken/v1", "params": {"endpoint": "/ext/broken", "methods": {"sync": {"method": 1}}}},
+    {"uri": "urn:example:broken/v1", "params": {"methods": {"sync": {"method": "POST", "endpoint": 1}}}},
+    {"uri": ["urn:example:broken/v1"], "params": {"endpoint": "/ext/broken"}},
+], ids=["methods-a-list", "methods-a-string", "a-method-not-an-object", "a-verb-not-text", "an-endpoint-not-text", "a-uri-not-text"])
+async def test_a_badly_shaped_extension_is_left_as_stored_and_does_not_block_the_childs_other_calls(monkeypatch, broken):
+    record = _composed_record({"name": "slack", "url": RPC_PATH, "capabilities": {"extensions": [
+        broken, {"uri": "urn:agentenv:clock/v1", "params": {"endpoint": "/ext/clock/sync-time"}}]}})
+    requests = _record_requests(monkeypatch)
+
+    base_url, card = await legacy_protocol.child_env_card(record, "http://gw", "slack")
+    await protocol_v1.invoke_extension(base_url, card, "urn:agentenv:clock/v1")
+
+    assert card["capabilities"]["extensions"][0] == broken
+    assert requests == ["POST http://gw/svc/mcp-slack/ext/clock/sync-time"]
+
+
+@pytest.mark.asyncio
 async def test_a_child_endpoint_its_composer_already_put_under_the_childs_path_is_left_as_it_is():
     child = {"name": "x", "url": "/envs/x/agentenv", "capabilities": {"extensions": [
         {"uri": "urn:agentenv:clock/v1", "params": {"endpoint": "/envs/x/ext/clock", "methods": {
