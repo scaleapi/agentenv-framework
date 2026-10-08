@@ -35,7 +35,6 @@ from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniv
 from agent_env.artifact.artifacts.environment import EnvironmentArtifact
 from agent_env.artifact.artifacts.environment_universe import EnvironmentUniverseArtifact
 from agent_env.artifact.artifacts.skill import SkillArtifact
-from agent_env.artifact.artifacts.vm_image import VMImageArtifact
 from agent_env.artifact.ref import ArtifactRef
 from agent_env.artifact.registry import get_artifact_registry
 from agent_env.env.envs.gateway_server import GatewayEnv
@@ -139,15 +138,6 @@ ARTIFACT_FIXTURES = {
         compatibility="claude-code",
         allowed_tools="Read,Write",
         skill_metadata={"category": "documents"},
-    ),
-    "vm_image": lambda: VMImageArtifact(
-        id="ubuntu-vm",
-        version=6,
-        description="Ubuntu VM image",
-        ecr_url="123456789012.dkr.ecr.us-west-2.amazonaws.com/vm/ubuntu:v6",
-        disk_size_gb=30.0,
-        cpu=4.0,
-        memory_mb=8192,
     ),
 }
 

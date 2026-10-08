@@ -18,7 +18,6 @@ from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniv
 from agent_env.artifact.artifacts.environment import EnvironmentArtifact
 from agent_env.artifact.artifacts.environment_universe import EnvironmentUniverseArtifact
 from agent_env.artifact.artifacts.skill import SkillArtifact
-from agent_env.artifact.artifacts.vm_image import VMImageArtifact
 
 if TYPE_CHECKING:
     from agent_env.config.runtime import Config
@@ -38,7 +37,6 @@ ARTIFACT_REGISTRY: dict[str, type[Artifact]] = {
     _get_type(EnvironmentArtifact): EnvironmentArtifact,
     _get_type(EnvironmentUniverseArtifact): EnvironmentUniverseArtifact,
     _get_type(SkillArtifact): SkillArtifact,
-    _get_type(VMImageArtifact): VMImageArtifact,
 }
 
 

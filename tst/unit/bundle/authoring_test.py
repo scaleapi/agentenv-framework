@@ -7,7 +7,7 @@ import pytest
 
 from agent_env.artifact.artifact import Artifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
-from agent_env.artifact.artifacts.vm_image import VMImageArtifact
+from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.store import reset_artifact_store
 from agent_env.bundle import BundleError, parse_bundle
 from agent_env.bundle.authoring import AuthoringContext
@@ -20,7 +20,7 @@ LAYOUT = {
     "envs/tickets/Dockerfile": "FROM scratch\n",
     "envs/tickets/env.toml": 'environment_name = "tickets"\n',
     "envs/both/env.toml": 'type = "multi"\n',
-    "artifacts/golden/artifact.toml": 'type = "vm_image"\n',
+    "artifacts/golden/artifact.toml": 'type = "note_artifact_test"\n',
 }
 
 
@@ -67,6 +67,10 @@ def ctx(tmp_path, monkeypatch):
     return lambda name: AuthoringContext(bundle, next(e for e in bundle.entries if e.name == name))
 
 
+def _put_file(id: str, description: str) -> FileArtifact:
+    return FileArtifact.put_bytes(id, description=description, filename="g.txt", content=b"g", content_type="text/plain")
+
+
 def problem(call) -> str:
     with pytest.raises(BundleError) as caught:
         call()
@@ -81,8 +85,8 @@ def test_an_entry_gives_its_id_name_and_folder(ctx):
 
 
 def test_the_default_writes_a_document_only_artifact_as_put_would(ctx):
-    authored = VMImageArtifact.from_toml({"type": "vm_image", "description": "golden", "ecr_url": "ecr/x"}, ctx("golden"))
-    direct = VMImageArtifact.put(id="direct", description="golden", ecr_url="ecr/x")
+    authored = _NoteArtifact.from_toml({"type": "note_artifact_test", "note": "golden"}, ctx("golden"))
+    direct = _NoteArtifact.put(id="direct", note="golden")
     assert (authored.id, authored.version) == ("@local/~/triage/golden", 1)
     assert authored.model_dump(exclude={"id"}) == direct.model_dump(exclude={"id"})
 
@@ -101,18 +105,18 @@ def test_the_default_writes_an_env_that_from_dict_reads_back(ctx):
 
 
 def test_an_artifact_loads_at_latest_or_at_its_pin(ctx):
-    VMImageArtifact.put(id="golden-image", description="v1", ecr_url="ecr/x")
-    VMImageArtifact.put(id="golden-image", description="v2", ecr_url="ecr/x")
+    _put_file("golden-image", "v1")
+    _put_file("golden-image", "v2")
     both = ctx("both")
     assert both.artifact("golden-image").description == "v2"
-    assert both.artifact({"artifact": "golden-image", "version": 1}, expect=VMImageArtifact).description == "v1"
+    assert both.artifact({"artifact": "golden-image", "version": 1}, expect=FileArtifact).description == "v1"
     assert both.artifact({"artifact": "golden-image"}).description == "v2"
 
 
 def test_a_loaded_ref_of_the_wrong_type_is_refused(ctx):
-    VMImageArtifact.put(id="golden-image", description="v1", ecr_url="ecr/x")
+    _put_file("golden-image", "v1")
     assert problem(lambda: ctx("tickets").artifact("golden-image", expect=DockerImageArtifact)) == (
-        "envs/tickets: golden-image is a vm_image artifact, not a DockerImageArtifact"
+        "envs/tickets: golden-image is a file artifact, not a DockerImageArtifact"
     )
 
 

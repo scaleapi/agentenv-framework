@@ -7,7 +7,6 @@ from typing import Literal
 import pytest
 
 from agent_env.artifact.artifacts.file import FileArtifact
-from agent_env.artifact.artifacts.vm_image import VMImageArtifact
 from agent_env.artifact.store import reset_artifact_store
 from agent_env.bundle import BundleError, BundleKind, parse_bundle
 from agent_env.bundle import plan as plan_module
@@ -268,7 +267,8 @@ def test_a_store_id_must_exist(make, steps, problem):
 
 def test_another_bundles_local_id_is_read_from_the_local_namespace_like_a_store_id(make, local_stores, cli_routing):
     put_env("@local/~/other/crm")
-    VMImageArtifact.put(id="@local/~/other/golden", description="golden", ecr_url="ecr/x")
+    FileArtifact.put_bytes("@local/~/other/golden", description="golden", filename="g.txt", content=b"g",
+                           content_type="text/plain")
     configure(document_store=RefusingStore())
 
     plan = plan_bundle(make(tasks={"t": [deploy("@local/~/other/crm")]}))
@@ -280,7 +280,7 @@ def test_another_bundles_local_id_is_read_from_the_local_namespace_like_a_store_
     )
     assert problems(make(tasks={"t": [deploy("both")]}, files={
         "envs/both/env.toml": composite(image="@local/~/other/golden")})) == (
-        "envs/both: image: '@local/~/other/golden' is a vm_image in the store, but this field takes docker_image",
+        "envs/both: image: '@local/~/other/golden' is a file in the store, but this field takes docker_image",
     )
 
 
@@ -311,10 +311,10 @@ def test_an_output_is_only_readable_in_its_own_task(make):
 
 
 def test_a_store_artifact_must_have_the_type_its_field_takes(make):
-    VMImageArtifact.put(id="golden-image", description="golden", ecr_url="ecr/x")
+    FileArtifact.put_bytes("golden-image", description="golden", filename="g.txt", content=b"g", content_type="text/plain")
     resolved = make(tasks={"t": [deploy("both")]}, files={"envs/both/env.toml": composite(image="golden-image")})
     assert problems(resolved) == (
-        "envs/both: image: 'golden-image' is a vm_image in the store, but this field takes docker_image",
+        "envs/both: image: 'golden-image' is a file in the store, but this field takes docker_image",
     )
 
 

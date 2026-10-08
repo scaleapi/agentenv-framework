@@ -129,6 +129,12 @@ class _OwnUniverse(EnvironmentUniverseArtifact):
         raise NotImplementedError
 
 
+class _DocumentOnly(Artifact):
+    """A plugin's artifact type that is only a document, which a bundle has no writer for yet."""
+
+    type: Literal["document_only_materialize_test"] = "document_only_materialize_test"
+
+
 class _OwnEnv(Env):
     """A plugin's env type with a from_toml of its own."""
 
@@ -143,7 +149,8 @@ class _OwnEnv(Env):
 def registries(monkeypatch):
     steps = {**Config().task_step_registry(), **{cls.type: cls for cls in (_Checked, _Writes, _Consuming)}}
     envs = {**Config().env_registry(), _OwnEnv.type: _OwnEnv}
-    plugins = {cls.model_fields["type"].default: cls for cls in (_PluginFile, _OwnFile, _OwnEnvironment, _OwnUniverse)}
+    plugins = {cls.model_fields["type"].default: cls
+               for cls in (_PluginFile, _OwnFile, _OwnEnvironment, _OwnUniverse, _DocumentOnly)}
     artifacts = {**Config().artifact_registry(), **plugins}
     monkeypatch.setattr(Config, "task_step_registry", lambda self: steps)
     monkeypatch.setattr(Config, "env_registry", lambda self: envs)
@@ -214,7 +221,7 @@ def test_what_has_no_writer_yet_is_refused_before_anything_is_written(bundle_dir
         "agents/solver/Dockerfile": "FROM scratch\n",
         "skills/pdf/SKILL.md": "---\nname: pdf\n---\n",
         "artifacts/base-mcp/Dockerfile": "FROM scratch\n",
-        "artifacts/vm/artifact.toml": 'type = "vm_image"\nimage_name = "tahoe"\n',
+        "artifacts/doc/artifact.toml": 'type = "document_only_materialize_test"\n',
         "evals/regression.toml": 'tasks = ["t"]\n',
     })
     _steps(bundle_dir, [
@@ -223,12 +230,12 @@ def test_what_has_no_writer_yet_is_refused_before_anything_is_written(bundle_dir
         {"id": "agent", "type": "deploy_agent", "env_ids": ["tickets"], "a2a_agent_id": "solver"},
         {"id": "pdf", "type": "load_artifact", "env_id": "tickets", "artifact_id": "pdf"},
         {"id": "image", "type": "load_artifact", "env_id": "tickets", "artifact_id": "base-mcp"},
-        {"id": "vm", "type": "load_artifact", "env_id": "tickets", "artifact_id": "vm"},
+        {"id": "doc", "type": "load_artifact", "env_id": "tickets", "artifact_id": "doc"},
     ])
 
     assert sorted(_problems(lambda: _run(bundle_dir, dry_run))) == [
         "artifacts/base-mcp: writing a docker_image artifact isn't supported yet",
-        "artifacts/vm: writing a vm_image artifact isn't supported yet",
+        "artifacts/doc: writing a document_only_materialize_test artifact isn't supported yet",
         "envs/own: writing an own_env_materialize_test env isn't supported yet",
         "skills/pdf: writing a skill isn't supported yet",
     ]
