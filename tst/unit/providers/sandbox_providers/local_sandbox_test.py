@@ -874,9 +874,15 @@ def _running(pid: int) -> bool:
 
 
 async def _detached(sandbox: LocalSandbox, command: str = "sleep 300") -> int:
-    """Start ``command`` the way a host install starts its agent, outliving the exec that started it."""
+    """Start ``command`` the way a host install starts its agent, outliving the exec that started it, and wait until
+    it reads as marked: while a process execs, /proc shows it no environment, which on a loaded machine can last."""
     _, stdout, _ = await sandbox.exec_with_output("bash", "-c", f"nohup {command} >/dev/null 2>&1 </dev/null & echo $!")
-    return int(stdout)
+    pid = int(stdout)
+    for _ in range(100):
+        if pid in ls._marked_pids(sandbox.sandbox_id):
+            break
+        await asyncio.sleep(0.1)
+    return pid
 
 
 @pytest.mark.asyncio
@@ -904,7 +910,7 @@ async def test_teardown_stops_what_a_command_left_running_and_only_that(tmp_path
     ours, theirs = LocalSandbox(work_dir=tmp_path / "a"), LocalSandbox(work_dir=tmp_path / "b")
     left, other = await _detached(ours), await _detached(theirs)
     try:
-        assert ls._marked_pids(ours.sandbox_id) == [left]
+        assert ls._marked_pids(ours.sandbox_id) == [left], f"running={_running(left)}"
 
         await _RecordingLocalSandbox(work_dir=ours.work_dir, sandbox_id=ours.sandbox_id).terminate()
 
