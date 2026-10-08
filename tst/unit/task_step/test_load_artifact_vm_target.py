@@ -55,7 +55,7 @@ def vm(monkeypatch):
             calls.append(("container_url", url, destination_path))
 
         async def docker_cp(self, source, destination, *, remove_source=False):
-            calls.append(("cp", source, destination))
+            calls.append(("cp", source, destination, remove_source))
 
     from agent_env.providers.sandbox_providers import sandbox_provider as sp_mod
 
@@ -224,11 +224,30 @@ class TestContainerPathUnchanged:
         await step.execute(ctx)
 
         [curl] = [c[1] for c in calls if c[0] == "exec" and c[1].startswith("curl ")]
-        [cp] = [c for c in calls if c[0] == "cp"]
-        assert cp[1] == curl.rsplit(" -o ", 1)[1] and cp[2] == "task-container:/work/data.csv"
+        assert ("cp", curl.rsplit(" -o ", 1)[1], "task-container:/work/data.csv", True) in calls
         assert ("exec", "docker exec -u 0 task-container mkdir -p /work") in calls
-        assert ("exec", f"rm -f {cp[1]}") in calls
         assert not [c for c in calls if c[0] == "container_url"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("cleanup_fails", [False, True])
+    async def test_a_failed_url_load_reports_its_own_error_and_cleans_up(self, cleanup_fails):
+        scripts = []
+
+        class _Vm:
+            async def exec_script(self, script, **kw):
+                scripts.append(script)
+                if script.startswith("curl "):
+                    raise RuntimeError("curl: (22) 404")
+                if script.startswith("rm -f ") and cleanup_fails:
+                    raise RuntimeError("exec transport closed")
+                return ""
+
+        step = LoadArtifactTaskStep(id="s", version=None, sandbox_name="mk", container_name="c", urls=["https://x/y"])
+
+        with pytest.raises(RuntimeError, match="404"):
+            await step._load_url_into_container(_Vm(), "c", "https://x/y", "/work/y")
+
+        assert scripts[-1].startswith("rm -f /tmp/_load_url_")
 
 
 class TestUrlHelper:

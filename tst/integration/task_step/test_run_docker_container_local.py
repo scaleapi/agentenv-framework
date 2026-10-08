@@ -5,8 +5,11 @@ carries its label. Needs Docker and a pull of a small public image.
 """
 
 import asyncio
+import functools
+import http.server
 import shutil
 import subprocess
+import threading
 import uuid
 
 import httpx
@@ -131,6 +134,9 @@ async def test_urls_load_into_a_run_docker_container_container(local_backends):
     suffix = uuid.uuid4().hex[:8]
     (local_backends / "Dockerfile").write_text("FROM mirror.gcr.io/library/nginx:1.27-bookworm\n")
     (local_backends / "data.csv").write_text("a,b\n1,2\n")
+    server = http.server.ThreadingHTTPServer(
+        ("127.0.0.1", 0), functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(local_backends)))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
     build_context = FileArtifactUniverse.put(id=f"rdc3-ctx-{suffix}", file_artifacts={
         "Dockerfile": FileArtifact.put(id=f"rdc3-df-{suffix}", description="Dockerfile",
                                        file_path=str(local_backends / "Dockerfile")),
@@ -146,11 +152,12 @@ async def test_urls_load_into_a_run_docker_container_container(local_backends):
         ).execute(context)
         await LoadArtifactTaskStep(
             id="load", version=None, sandbox_name="box", container_name="worker", destination_path="/work",
-            urls=[(local_backends / "data.csv").as_uri()],
+            urls=[f"http://127.0.0.1:{server.server_address[1]}/data.csv"],
         ).execute(context)
         container = f"worker-{context.deployed_sandboxes[0].sandbox_id}"
         assert _docker("exec", container, "cat", "/work/data.csv") == "a,b\n1,2"
     finally:
+        server.shutdown()
         report = await teardown_run(context)
 
     assert not report.still_up
