@@ -8,15 +8,18 @@ currently spread across the individual ``*/store.py`` modules.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
+import threading
+from collections.abc import Callable, Iterator
+from concurrent.futures import Future, wait
 from contextlib import contextmanager
+from functools import partial
 from typing import Optional
 
 from pymongo import ASCENDING, DESCENDING, MongoClient, ReturnDocument
 from pymongo.collection import Collection
 from pymongo.database import Database
 from pymongo.errors import DuplicateKeyError as PyMongoDuplicateKeyError
-from pymongo.errors import OperationFailure
+from pymongo.errors import NetworkTimeout, OperationFailure
 
 from agent_env.store.document_store.document_store import (
     AbsentOrNull,
@@ -36,6 +39,9 @@ from agent_env.store.document_store.document_store import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Not pymongo.timeout: that sends maxTimeMS, and MongoDB aborts a build whose createIndexes runs out of it.
+_INDEX_BUILD_WAIT_SECONDS = 5
 
 
 def _field_cond(mongo: dict, field: str) -> dict:
@@ -114,6 +120,31 @@ def _unique_violations() -> Iterator[None]:
         yield
     except PyMongoDuplicateKeyError as e:
         raise DuplicateKeyError(str(e)) from e
+
+
+def _index_spec(fields: list[str], unique: bool) -> tuple[list[tuple[str, int]], str]:
+    return [(f, ASCENDING) for f in fields], "_".join(fields) + ("_unique" if unique else "_index")
+
+
+def _settle(build: Future[None], create: Callable[[], None]) -> None:
+    try:
+        create()
+    except BaseException as exc:
+        build.set_exception(exc)
+    else:
+        build.set_result(None)
+
+
+def _report_late_build(collection: str, name: str, build: Future[None]) -> None:
+    error = build.exception()
+    if error is None:
+        logger.info("MongoDB finished building index %s on %s", name, collection)
+    elif isinstance(error, NetworkTimeout):
+        logger.info(
+            "Stopped waiting for index %s on %s (%s); MongoDB finishes a build it has started", name, collection, error
+        )
+    else:
+        logger.error("MongoDB did not build index %s on %s: %s", name, collection, error)
 
 
 def _strip_id(doc: Optional[dict]) -> Optional[dict]:
@@ -248,16 +279,38 @@ class MongoDocumentStore(DocumentStore):
         unique: bool = False,
         ttl_seconds: Optional[int] = None,
     ) -> None:
+        """Wait at most ``_INDEX_BUILD_WAIT_SECONDS``, or the client's socket timeout if shorter, for MongoDB to
+        build a missing index, then leave the build to finish on the server: over a large collection it takes
+        minutes, and holding up the write that asked for it fails that write. An index already listed under this
+        name or over these keys is kept."""
+        keys, name = _index_spec(fields, unique)
+        existing = self._c(collection).index_information()
+        if name in existing or any(spec["key"] == keys for spec in existing.values()):
+            return
+        build: Future[None] = Future()
+        create = partial(self._create_index, collection, fields, unique, ttl_seconds)
+        thread_name = f"ensure-index-{collection}.{name}"
+        threading.Thread(target=_settle, args=(build, create), name=thread_name, daemon=True).start()
+        finished = wait([build], timeout=_INDEX_BUILD_WAIT_SECONDS).done
+        if finished and not isinstance(build.exception(), NetworkTimeout):
+            build.result()
+            return
+        logger.warning("MongoDB is still building index %s on %s; going on without waiting for it", name, collection)
+        build.add_done_callback(partial(_report_late_build, collection, name))
+
+    def _create_index(
+        self,
+        collection: str,
+        fields: list[str],
+        unique: bool = False,
+        ttl_seconds: Optional[int] = None,
+    ) -> None:
+        keys, name = _index_spec(fields, unique)
         kwargs: dict = {}
         if ttl_seconds is not None:
             kwargs["expireAfterSeconds"] = ttl_seconds
         try:
-            self._c(collection).create_index(
-                [(f, ASCENDING) for f in fields],
-                unique=unique,
-                name="_".join(fields) + ("_unique" if unique else "_index"),
-                **kwargs,
-            )
+            self._c(collection).create_index(keys, unique=unique, name=name, **kwargs)
         except OperationFailure as e:
             # 85=IndexOptionsConflict, 86=IndexKeySpecsConflict: an equivalent index
             # already exists under a different name/spec (pre-refactor). Tolerate it.

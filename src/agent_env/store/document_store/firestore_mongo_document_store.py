@@ -200,7 +200,7 @@ class FirestoreMongoDocumentStore(MongoDocumentStore):
             if key in _built_indexes:
                 return
             with pymongo.timeout(_INDEX_BUILD_SECONDS):
-                super().ensure_index(collection, fields, unique=unique, ttl_seconds=ttl_seconds)
+                self._create_index(collection, fields, unique=unique, ttl_seconds=ttl_seconds)
             _built_indexes.add(key)
 
     def _stamped(self, update: UpdateSpec) -> tuple[dict, str]:
