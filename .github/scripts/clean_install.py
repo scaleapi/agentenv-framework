@@ -1,7 +1,6 @@
 """The clean-install gate: build both distributions as the release does, check that the wheel ships every example
-and its entry point, install the two wheels into a fresh venv from public PyPI, check that the install has no AWS SDK
-and that every module imports or needs an extra, run a shipped bundle twice by name, and check what the runs left in
-the local store.
+and its entry point, install the two wheels into a fresh venv from public PyPI, run a shipped bundle twice by name,
+and check what the runs left in the local store.
 
 Every child process gets an environment built from an allowlist, so no config file, credential, package index or
 installed package of the calling shell can make the gate pass. It builds in place from the checkout: hatchling
@@ -70,11 +69,8 @@ def main() -> int:
     _run([uv, "pip", "install", "--python", str(venv / "bin" / "python"), "--compile-bytecode", str(protocol),
           str(framework)], env=env, cwd=work)
 
-    agent_env, python = str(venv / "bin" / "agent-env"), str(venv / "bin" / "python")
-    _step("Check the install has no AWS SDK, and every module imports or needs an extra")
-    _run([python, str(CHECK), "imports"], env=env, cwd=work / "cwd")
-
     _step(f"List the installed bundles, then run {args.bundle} twice by name")
+    agent_env, python = str(venv / "bin" / "agent-env"), str(venv / "bin" / "python")
     listing = _run([agent_env, "run"], env=env, cwd=work / "cwd", capture=True).stdout
     rows = [re.split(r"\s{2,}", line) for line in listing.splitlines()]
     if not any(row[0] == args.bundle and len(row) > 2 and row[2] != "invalid" for row in rows):

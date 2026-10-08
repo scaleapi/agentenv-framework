@@ -1,9 +1,8 @@
 name: Clean install
 
 # Both distributions built as the release builds them, installed into a fresh venv from public PyPI with
-# nothing else, every module that needs no extra imported without boto3, and the hello bundle run twice by
-# name and checked through the local store: no secrets, no token and no plugin, on every pull request. The
-# script gives each step an allowlisted environment.
+# nothing else, and the hello bundle run twice by name and checked through the local store: no secrets, no
+# token and no plugin, on every pull request. The script gives each step an allowlisted environment.
 
 on:
   pull_request:

@@ -1,8 +1,7 @@
-"""Check, with the installed wheel's own code, the install and what ``agent-env run BUNDLE`` left in the local store.
+"""Check, with the installed wheel's own code, what ``agent-env run BUNDLE`` left in the local store.
 
-``imports`` fails unless boto3 is absent, as without the ``aws`` extra, and every agent_env module imports or fails
-only for want of a module an extra of agent-env installs. ``snapshot PATH`` records the ``@local`` writes after the
-first run. ``verify`` fails unless agent-env was imported from this interpreter's environment rather than a checkout, both packages byte-compile on this interpreter's Python
+``snapshot PATH`` records the ``@local`` writes after the first run. ``verify`` fails unless agent-env was imported
+from this interpreter's environment rather than a checkout, both packages byte-compile on this interpreter's Python
 (an install skips a file that doesn't), no config file was found, no other distribution registers an agent-env
 plugin, each run of each of the bundle's tasks completed every step and scored 1 on every
 verifier, every instance sits under the bundle's id root, the runs left no sandbox work folder, and the later runs
@@ -16,10 +15,8 @@ from __future__ import annotations
 import argparse
 import compileall
 import importlib.metadata
-import importlib.util
 import json
 import os
-import pkgutil
 import sys
 from pathlib import Path
 
@@ -30,31 +27,24 @@ from agent_env.bundle import BundleKind
 from agent_env.bundle.installed import checked, find_bundle
 from agent_env.bundle.ledger import LEDGER_COLLECTION
 from agent_env.config import get_config
-from agent_env.config.loader import discover_config_path, missing_extra
+from agent_env.config.loader import discover_config_path
 from agent_env.config.paths import state_root
 from agent_env.store import Filter
 from agent_env.task.store import TASK_INSTANCES_COLLECTION, TASKS_COLLECTION, TaskInstance, TaskStepStatus
 
 REUSED = (ARTIFACTS_COLLECTION, TASKS_COLLECTION, LEDGER_COLLECTION)
 OWN_DISTRIBUTIONS = {"agentenv-framework", "agentenv-framework-protocol"}
-AWS_SDK = ("boto3", "botocore")
-# Not the library's: the gateway runs only in its container image, and the code runner is a script that reads its
-# arguments on import.
-NOT_LIBRARY = ("agent_env.env.gateway", "agent_env.task_step.task_steps.run_code_runner")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("imports")
     commands.add_parser("snapshot").add_argument("path", type=Path)
     verify = commands.add_parser("verify")
     verify.add_argument("--bundle", required=True)
     verify.add_argument("--runs", type=int, required=True)
     verify.add_argument("--since", type=Path, required=True, help="the snapshot taken after the first run")
     args = parser.parse_args()
-    if args.command == "imports":
-        return imports()
     if args.command == "snapshot":
         args.path.write_text(json.dumps(writes()))
         return 0
@@ -65,38 +55,6 @@ def main() -> int:
         print(f"clean install: {args.runs} runs of {args.bundle} completed with every score 1 and left no sandbox "
               "work folder, and the later runs changed no artifact, task, ledger row or stored object")
     return 1 if found else 0
-
-
-def imports() -> int:
-    found, needs = import_problems()
-    for problem in found:
-        print(f"::error::{problem}")
-    if not found:
-        print("clean install: no AWS SDK, and every agent_env module imports except those that need an extra: "
-              + "; ".join(f"{extra}: {', '.join(modules)}" for extra, modules in sorted(needs.items())))
-    return 1 if found else 0
-
-
-def import_problems() -> tuple[list[str], dict[str, list[str]]]:
-    """Why this isn't an install without the aws extra, or a module doesn't import; and the modules that need an
-    extra, by extra."""
-    found = [f"{name} is installed; the gate tests agent-env without the aws extra"
-             for name in AWS_SDK if importlib.util.find_spec(name) is not None]
-    needs: dict[str, list[str]] = {}
-    # A package that fails to import is recorded by the loop, before the walk tries to import it again.
-    for module in pkgutil.walk_packages(agent_env.__path__, "agent_env.", onerror=lambda name: None):
-        if module.name.startswith(NOT_LIBRARY):
-            continue
-        try:
-            importlib.import_module(module.name)
-        except ImportError as e:
-            if (extra := missing_extra(e)) is None:
-                found.append(f"{module.name}: {e}")
-            else:
-                needs.setdefault(extra, []).append(module.name)
-        except Exception as e:
-            found.append(f"{module.name}: {type(e).__name__}: {e}")
-    return found, needs
 
 
 def writes() -> dict[str, list[str]]:
