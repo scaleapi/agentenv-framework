@@ -7,11 +7,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-from agentenv_protocol import RPC_PATH, WELL_KNOWN_PATH, DataPart, uploaded_file_part
+from agentenv_protocol import RPC_PATH, WELL_KNOWN_PATH, DataPart, client as protocol_v1, uploaded_file_part
 from agentenv_protocol.client import GetDataResponse
 
 from agent_env.env import legacy_protocol
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv
+from agent_env.env.gateway.gateway import Gateway
 
 
 @pytest.mark.asyncio
@@ -156,6 +157,63 @@ async def test_a_stored_leaf_card_resolves_against_the_envs_address_unchanged():
                          environment_card=card)
 
     assert await legacy_protocol.child_env_card(record, None, "slack") == ("https://sandbox.example/sb-1", card)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("params, served_at", [
+    ({"endpoint": "/agentenv/ext/set_errors"}, "/agentenv/ext/set_errors"),
+    ({"endpoint": "/ext/clock/sync-time"}, "/ext/clock/sync-time"),
+    ({"endpoint": "/agentenv/ext/clock", "methods": {"sync_time": {"endpoint": "/agentenv/ext/sync_time"}}}, "/agentenv/ext/sync_time"),
+], ids=["under-the-rpc-path", "outside-the-rpc-path", "a-methods-own"])
+async def test_a_child_env_endpoint_resolves_to_the_child_from_the_stored_card_as_from_a_live_read(monkeypatch, params, served_at):
+    own_card = {"name": "slack", "url": RPC_PATH, "capabilities": {"extensions": [{"uri": "urn:agentenv:clock/v1", "params": params}]}}
+    called = _child_behind_gateway(monkeypatch, own_card)
+
+    for record in (_composed_record(own_card), None):
+        base_url, card = await legacy_protocol.child_env_card(record, "http://gw", "slack")
+        await protocol_v1.invoke_extension(base_url, card, "urn:agentenv:clock/v1")
+
+    assert called == [f"http://gw/svc/mcp-slack{served_at}"] * 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fields", [
+    {},
+    {"capabilities": None},
+    {"capabilities": {"extensions": None}},
+    {"capabilities": {"extensions": [{"uri": "urn:agentenv:clock/v1"}]}},
+    {"capabilities": {"extensions": [{"uri": "urn:agentenv:clock/v1", "params": None}]}},
+    {"capabilities": {"extensions": [{"uri": "urn:agentenv:clock/v1", "params": "/ext/clock/sync-time"}]}},
+], ids=["no-capabilities", "null-capabilities", "null-extensions", "no-params", "null-params", "params-not-an-object"])
+async def test_a_stored_child_card_without_endpoints_comes_back_as_stored(fields):
+    record = _composed_record({"name": "slack", "url": RPC_PATH, **fields})
+    (stored,) = record.environment_card["children_environments"]
+
+    assert await legacy_protocol.child_env_card(record, "http://gw", "slack") == ("http://gw/svc/mcp-slack", stored)
+
+
+def _composed_record(own_card: dict) -> DeployedGatewayEnv:
+    """The record of a deploy at http://gw whose stored card composes `own_card` as the gateway does, under mcp-<name>."""
+    gateway = Gateway(host="127.0.0.1", port=0, server_name="gw", internal_mcp_servers=[], rest_proxy_urls={})
+    child = gateway._rewrite_child_card(f"mcp-{own_card['name']}", own_card)
+    return DeployedGatewayEnv(env_id="e", env_version=1, gateway_url="http://gw", sandbox_id="sb-1",
+                              environment_card_url=f"http://gw{WELL_KNOWN_PATH}",
+                              environment_card={"name": "gw", "url": RPC_PATH, "children_environments": [child]})
+
+
+def _child_behind_gateway(monkeypatch, own_card: dict) -> list[str]:
+    """http://gw proxying /svc/mcp-slack to a child that serves `own_card` and answers anything else with {};
+    returns the URL of each request other than a card read."""
+    called, real = [], httpx.AsyncClient
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == f"/svc/mcp-slack{WELL_KNOWN_PATH}":
+            return httpx.Response(200, json=own_card)
+        called.append(str(request.url))
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.MockTransport(handle)))
+    return called
 
 
 def _v1_service(monkeypatch, answer: list, export_state: dict) -> list[str]:

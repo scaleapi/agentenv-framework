@@ -71,8 +71,8 @@ def _endpoints_relative_to(path: str, child: dict) -> dict:
     the child's ``/agentenv`` endpoints with that path and leaves the rest as the child advertised them."""
     card = copy.deepcopy(child)
     for ext in (card.get("capabilities") or {}).get("extensions") or []:
-        params = ext.get("params") or {}
-        if (params.get("endpoint") or "").startswith(f"{path}/"):
+        params = ext.get("params")
+        if isinstance(params, dict) and (params.get("endpoint") or "").startswith(f"{path}/"):
             params["endpoint"] = params["endpoint"].removeprefix(path)
     return card
 
