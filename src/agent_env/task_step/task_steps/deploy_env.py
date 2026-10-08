@@ -18,7 +18,10 @@ logger = logging.getLogger(__name__)
 
 class DeployEnvTaskStep(TaskStep):
     type: ClassVar[str] = "deploy_env"
-    entity_refs = (EntityRef.env("env_id", version_field="env_version"),)
+    entity_refs = (
+        EntityRef.env("env_id", version_field="env_version"),
+        EntityRef.artifact("artifact_id", version_field="artifact_version"),
+    )
 
     def __init__(
         self,
@@ -26,6 +29,8 @@ class DeployEnvTaskStep(TaskStep):
         version: Optional[int],
         env_id: str,
         env_version: Optional[int] = None,
+        artifact_id: Optional[str] = None,
+        artifact_version: Optional[int] = None,
         ttl_seconds: int = TaskStep.DEFAULT_TTL_SECONDS,
         disk_size_gb: float = 10,
         gateway_mode: str = GatewayMode.PERFORMANCE.value,
@@ -41,6 +46,10 @@ class DeployEnvTaskStep(TaskStep):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
         self.env_id = env_id
         self.env_version = env_version
+        # The universe this deployment is for. Carried so a provider can see which artifact the
+        # run will load, without inferring it from the taxonomy; load_artifact still loads it.
+        self.artifact_id = artifact_id
+        self.artifact_version = artifact_version
         self.ttl_seconds = ttl_seconds
         self.disk_size_gb = disk_size_gb
         self.gateway_mode = gateway_mode
@@ -56,6 +65,8 @@ class DeployEnvTaskStep(TaskStep):
         base = super().to_dict()
         base["env_id"] = self.env_id
         base["env_version"] = self.env_version
+        base["artifact_id"] = self.artifact_id
+        base["artifact_version"] = self.artifact_version
         base["ttl_seconds"] = self.ttl_seconds
         base["disk_size_gb"] = self.disk_size_gb
         base["gateway_mode"] = self.gateway_mode
@@ -73,6 +84,8 @@ class DeployEnvTaskStep(TaskStep):
             **cls._base_from_dict(data),
             env_id=data["env_id"],
             env_version=data.get("env_version"),
+            artifact_id=data.get("artifact_id"),
+            artifact_version=data.get("artifact_version"),
             ttl_seconds=data.get("ttl_seconds", TaskStep.DEFAULT_TTL_SECONDS),
             disk_size_gb=data.get("disk_size_gb", 10),
             gateway_mode=data.get("gateway_mode", GatewayMode.PERFORMANCE.value),
@@ -157,6 +170,11 @@ class DeployEnvTaskStep(TaskStep):
         model_api_key = user_overrides.get("litellm_api_key")
         if model_api_key and ("litellm_api_key" in params or accepts_kwargs):
             deploy_kwargs["litellm_api_key"] = model_api_key
+        # Same signature guard: an env that does not take the artifact never sees it, so adding
+        # these is inert for every env that has not opted in.
+        if self.artifact_id is not None and ("artifact_id" in params or accepts_kwargs):
+            deploy_kwargs["artifact_id"] = self.artifact_id
+            deploy_kwargs["artifact_version"] = self.artifact_version
         deployed_env = await env.deploy(**deploy_kwargs)
         # create_instance runs inside env.deploy(), so an annotation set after it
         # returns has to be persisted explicitly to reach the instance record.
