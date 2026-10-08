@@ -171,14 +171,14 @@ class A2AAgentValidator:
         skill_object_url = await asyncio.to_thread(
             A2AAgentValidator._upload_skill_fixture,
             agent,
-            name="validator-test-s3",
+            name="validator-test-object",
             description=(
                 "Validator test skill with project codename. "
                 "Use when asked about the project codename."
             ),
             body=(
                 "When asked for the project codename, respond with: "
-                "VALIDATOR-S3-99"
+                "VALIDATOR-OBJ-99"
             ),
         )
         skill_bundle_probe_url = await asyncio.to_thread(
@@ -255,7 +255,7 @@ class A2AAgentValidator:
             VerifyA2ATrajectoryStep(id=f"{task_id}-trajectory", version=None, a2a_agent_id=agent.id, depends_on=[TaskStepDependency(task_step_id=mcp_step_id)], fail_task_on_error=False),
             AddSkillsTaskStep(id=skill_chain_id, version=None, depends_on=deploy_agent_dep, fail_task_on_error=False, skills=[
                 Skill(name="validator-test", description="Validator test skill with secret code. Use when asked about the company secret code.", body="When asked for the company secret code, respond with: VALIDATOR-42"),
-                Skill(name="validator-test-s3", description="Validator test skill with project codename. Use when asked about the project codename.", s3_url=skill_object_url),
+                Skill(name="validator-test-object", description="Validator test skill with project codename. Use when asked about the project codename.", object_url=skill_object_url),
             ]),
             PromptAgentTaskStep(id=skill_prompt_id, version=None, prompt="What is the company secret code? What is the project codename?", prompt_id=skill_prompt_id, timeout_seconds=120,
                 depends_on=[TaskStepDependency(task_step_id=skill_chain_id)], fail_task_on_error=False),
@@ -263,7 +263,7 @@ class A2AAgentValidator:
                 depends_on=[TaskStepDependency(task_step_id=skill_prompt_id)], fail_task_on_error=False,
                 criteria=[
                     {"id": "secret_code_inline", "description": "Response contains VALIDATOR-42"},
-                    {"id": "secret_code_s3", "description": "Response contains VALIDATOR-S3-99"},
+                    {"id": "secret_code_object", "description": "Response contains VALIDATOR-OBJ-99"},
                 ]),
             VerifyA2ASkillConfigStep(
                 id=f"{task_id}-skill-config",
@@ -727,7 +727,7 @@ class A2AAgentValidator:
         ts = int(time.time())
         universe_id = derive_id(agent.id, f"validate-install-image-v{agent.version}-{ts}")
         config = get_config()
-        s3_url = config.get_object_store_for(universe_id).object_url(f"{config.get_artifact_key_prefix()}a2a_validator/install_test_image/{ts}/")
+        prefix_url = config.get_object_store_for(universe_id).object_url(f"{config.get_artifact_key_prefix()}a2a_validator/install_test_image/{ts}/")
 
         with tempfile.NamedTemporaryFile("w", suffix=".Dockerfile", delete=False) as f:
             f.write("FROM ubuntu:24.04\n")
@@ -736,9 +736,9 @@ class A2AAgentValidator:
             universe = FileArtifactUniverse.put_bundled(
                 id=universe_id,
                 files={"Dockerfile": Path(tmp_path)},
-                s3_url=s3_url,
+                prefix_url=prefix_url,
             )
-            logger.info(f"Uploaded install-test image universe '{universe.id}' v{universe.version} to {s3_url}")
+            logger.info(f"Uploaded install-test image universe '{universe.id}' v{universe.version} to {prefix_url}")
             return universe
         finally:
             try:

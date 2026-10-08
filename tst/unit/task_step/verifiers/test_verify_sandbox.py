@@ -157,9 +157,9 @@ async def test_agent_source_probes_inside_the_agent_container(provide):
 
     assert sandbox.calls == [
         ("sudo", "docker", "ps", "--format", "{{.Names}}"),
-        ("sudo", "docker", "exec", "agent-api", "test", "-e", "/app/greeting/hello.txt"),
-        ("sudo", "docker", "exec", "agent-api", "test", "-e", "/etc/hosts"),
-        ("sudo", "docker", "exec", "agent-api", "cat", "/app/greeting/hello.txt"),
+        ("sudo", "docker", "exec", "-u", "0", "agent-api", "test", "-e", "/app/greeting/hello.txt"),
+        ("sudo", "docker", "exec", "-u", "0", "agent-api", "test", "-e", "/etc/hosts"),
+        ("sudo", "docker", "exec", "-u", "0", "agent-api", "cat", "/app/greeting/hello.txt"),
         ("sudo", "docker", "exec", "-w", "/app/greeting", "agent-api", "bash", "-c", "python3 check.py"),
     ]
     assert ctx.metadata["verifications"]["hello"]["score"] == 1.0
@@ -174,9 +174,9 @@ async def test_a_reattached_local_agent_is_probed_inside_its_own_container(provi
 
     assert calls == [
         ("sudo", "docker", "ps", "--format", "{{.Names}}"),
-        ("sudo", "docker", "exec", "agent-local-agent1", "test", "-e", "/app/greeting/hello.txt"),
-        ("sudo", "docker", "exec", "agent-local-agent1", "test", "-e", "/etc/hosts"),
-        ("sudo", "docker", "exec", "agent-local-agent1", "cat", "/app/greeting/hello.txt"),
+        ("sudo", "docker", "exec", "-u", "0", "agent-local-agent1", "test", "-e", "/app/greeting/hello.txt"),
+        ("sudo", "docker", "exec", "-u", "0", "agent-local-agent1", "test", "-e", "/etc/hosts"),
+        ("sudo", "docker", "exec", "-u", "0", "agent-local-agent1", "cat", "/app/greeting/hello.txt"),
         ("sudo", "docker", "exec", "-w", "/app/greeting", "agent-local-agent1", "bash", "-c", "python3 check.py"),
     ]
 

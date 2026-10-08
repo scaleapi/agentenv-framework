@@ -11,14 +11,14 @@ built in:
   document_store/documents.db under the per-user state root (``paths.state_root``).
   MongoDB has no built-in coordinates; configure it via a [stores.document] table.
 - Object store (AGENT_ENV_OBJECT_STORE): "local" (or unset): filesystem under
-  object_store/ in the per-user state root. S3 has no built-in coordinates; configure
-  it via a [stores.object] table.
+  object_store/ in the per-user state root. A hosted backend (S3, Cloud Storage) has no
+  built-in coordinates; configure it via a [stores.object] table.
 - Image store (AGENT_ENV_IMAGE_STORE): "local" (or unset): an OCI registry at
-  localhost:5000. ECR has no built-in coordinates; configure it via a
+  localhost:5000. A hosted registry (ECR) has no built-in coordinates; configure it via a
   [stores.image] table.
 - Secret store (AGENT_ENV_SECRET_STORE): "local" (or unset): process env vars /
-  optional local file. AWS Secrets Manager has no built-in coordinates; configure
-  it via a [stores.secret] table.
+  optional local file. A hosted secret manager (AWS Secrets Manager, Google Cloud Secret
+  Manager) has no built-in coordinates; configure it via a [stores.secret] table.
 
 AGENT_ENV_FIXTURE_PREFIX (default ""): prepends <prefix>/ to the keys of artifact
 objects, image builds, env and agent snapshots, changelogs, default agent and judge
@@ -64,12 +64,8 @@ logger = logging.getLogger(__name__)
 _STORE_BACKEND_MONGO = "mongo"
 _STORE_BACKEND_LOCAL = "local"
 
-_OBJECT_BACKEND_S3 = "s3"
-_SECRET_BACKEND_AWS = "aws"
-
 _RUNNER_BACKEND_LOCAL = "local"
 
-_IMAGE_BACKEND_ECR = "ecr"
 _DEFAULT_LOCAL_REGISTRY_HOST = "localhost:5000"
 
 
@@ -309,7 +305,7 @@ class Config:
             if not callable(load):
                 raise ConfigError(
                     f"{type(store).__name__} exposes no combined secret mapping; "
-                    "_get_secret() needs a bundle-backed secret store (aws/local)."
+                    "_get_secret() needs a bundle-backed secret store, one whose _load() returns every secret."
                 )
             bundle = load()
             if not bundle:
@@ -700,18 +696,14 @@ class Config:
         return self.trace_section("object").value
 
     def _object_alias(self, name: str) -> dict:
-        if name == _OBJECT_BACKEND_S3:
-            raise ConfigError(
-                "The 's3' object backend has no built-in coordinates: configure a "
-                "[stores.object] table (and unset AGENT_ENV_OBJECT_STORE, which overrides it)."
-            )
         if name == _STORE_BACKEND_LOCAL:
             return {
                 "impl": "agent_env.store.object_store:LocalFilesystemObjectStore",
                 "config": {"root": self._local_object_store_path()},
             }
         raise ConfigError(
-            f"Unknown AGENT_ENV_OBJECT_STORE={name!r} (expected 'local', or a [stores.object] table for a hosted backend)"
+            f"Unknown AGENT_ENV_OBJECT_STORE={name!r}: expected 'local', or a [stores.object] table for a "
+            "hosted backend (and unset AGENT_ENV_OBJECT_STORE, which overrides it)"
         )
 
     def _local_object_store_path(self) -> str:
@@ -771,18 +763,14 @@ class Config:
         return self.trace_section("image").value
 
     def _image_alias(self, name: str) -> dict:
-        if name == _IMAGE_BACKEND_ECR:
-            raise ConfigError(
-                "The 'ecr' image backend has no built-in coordinates: configure a "
-                "[stores.image] table (and unset AGENT_ENV_IMAGE_STORE, which overrides it)."
-            )
         if name == _STORE_BACKEND_LOCAL:
             return {
                 "impl": "agent_env.store.image_store:LocalRegistryImageStore",
                 "config": {"registry_host": _DEFAULT_LOCAL_REGISTRY_HOST},
             }
         raise ConfigError(
-            f"Unknown AGENT_ENV_IMAGE_STORE={name!r} (expected 'local', or a [stores.image] table for ecr)"
+            f"Unknown AGENT_ENV_IMAGE_STORE={name!r}: expected 'local', or a [stores.image] table for a "
+            "hosted registry (and unset AGENT_ENV_IMAGE_STORE, which overrides it)"
         )
 
     def _local_store(self, kind: str) -> Any:
@@ -924,15 +912,11 @@ class Config:
         return self.trace_section("secret").value
 
     def _secret_alias(self, name: str) -> dict:
-        if name == _SECRET_BACKEND_AWS:
-            raise ConfigError(
-                "The 'aws' secret backend has no built-in coordinates: configure a [stores.secret] "
-                "table (and unset AGENT_ENV_SECRET_STORE, which overrides it)."
-            )
         if name == _STORE_BACKEND_LOCAL:
             return {"impl": "agent_env.store.secret_store:LocalSecretStore", "config": {}}
         raise ConfigError(
-            f"Unknown AGENT_ENV_SECRET_STORE={name!r} (expected 'local', or a [stores.secret] table for a hosted backend)"
+            f"Unknown AGENT_ENV_SECRET_STORE={name!r}: expected 'local', or a [stores.secret] table for a "
+            "hosted backend (and unset AGENT_ENV_SECRET_STORE, which overrides it)"
         )
 
     def get_artifact_key_prefix(self) -> str:

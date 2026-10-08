@@ -11,6 +11,7 @@ fake implements it.
 
 from __future__ import annotations
 
+import re
 import asyncio
 import base64
 from datetime import datetime, timezone
@@ -156,6 +157,27 @@ class FakeObjectStore(ObjectStore):
         return object_url[len(home):]
 
 
+class ConfiguredObjectStore(FakeObjectStore):
+    """The configured store beside the local one under namespace routing. It fails on any url it
+    doesn't own, so a test can prove a handed-in url was read or signed through the store holding it."""
+
+    def _own(self, object_url):
+        if not self.owns(object_url):
+            raise AssertionError(f"the configured store was asked about {object_url}")
+
+    def signed_get_url(self, object_url, expires_in=3600):
+        self._own(object_url)
+        return super().signed_get_url(object_url, expires_in)
+
+    def get(self, object_url):
+        self._own(object_url)
+        return super().get(object_url)
+
+    def open(self, object_url):
+        self._own(object_url)
+        return super().open(object_url)
+
+
 class RecordingObjectStore(FakeObjectStore):
     """A FakeObjectStore that records the keys each key-based read addressed.
 
@@ -242,15 +264,22 @@ class CollectingVm:
 
 
 class SnapshotSandbox:
-    """A VM whose servicedb answers the changelog count and the container lookup; records every script."""
+    """A VM whose servicedb answers the changelog count and the container lookup, and whose saved snapshot image
+    answers the size and range reads that copy it off; records every script."""
 
     mode = "vm"
+    tarball = b"snapshot image " * 1000
 
     def __init__(self) -> None:
         self.scripts: list[str] = []
 
     async def exec_script(self, script: str) -> str:
         self.scripts.append(script)
+        if script.startswith("wc -c < "):
+            return f"{len(self.tarball)}\n"
+        if read := re.fullmatch(r"tail -c \+(\d+) \S+ \| head -c (\d+) \| base64", script):
+            start, length = int(read[1]) - 1, int(read[2])
+            return base64.b64encode(self.tarball[start:start + length]).decode()
         return "0\n" if "_changelog" in script else "container-1\n"
 
 

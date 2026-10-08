@@ -29,7 +29,6 @@ from agent_env.providers.sandbox_providers.local_sandbox import (
     start_trusting,
 )
 from agent_env.providers.sandbox_providers.sandbox_provider import all_sandbox_container_env, all_sandbox_url_rewrites
-from agent_env.utils.paths import validate_relative_filename
 from agent_env.attribution import Attribution
 
 if TYPE_CHECKING:
@@ -178,9 +177,9 @@ class A2AAgent:
                 description=artifact.description,
                 object_url=artifact.skill_object_url,
             )
-        if skill.s3_url is not None:
+        if skill.object_url is not None:
             return await A2AAgent.register_skill(
-                deployed, name=skill.name, description=skill.description, object_url=skill.s3_url
+                deployed, name=skill.name, description=skill.description, object_url=skill.object_url
             )
         return await A2AAgent.register_skill(
             deployed, name=skill.name, description=skill.description, skill_md=skill.to_skill_md()
@@ -242,11 +241,11 @@ class A2AAgent:
         entrypoint_path = f"{target_root}/{cli_artifact.entrypoint}"
         env_dir = posixpath.dirname(entrypoint_path)
 
-        # write .env first — write_file_from_text creates the parent dir; write_file_from_s3 does not.
+        # write .env first — write_file_from_text creates the parent dir; write_file_from_object does not.
         await sandbox.write_file_from_text(f"AGENT_ENV_GATEWAY_URL={gateway_url}\n", f"{env_dir}/.env")
 
         for rel_path, file_artifact in cli_artifact.get_cli_files().get_file_artifacts().items():
-            await sandbox.write_file_from_s3(file_artifact.object_url, f"{target_root}/{rel_path}")
+            await sandbox.write_file_from_object(file_artifact.object_url, f"{target_root}/{rel_path}")
 
         if isinstance(sandbox, VmSandbox):
             await sandbox.exec_script(f"docker exec -u 0 {shlex.quote(sandbox.container_name)} chmod +x {entrypoint_path}")
@@ -263,7 +262,7 @@ class A2AAgent:
         destination_path: str,
     ) -> dict[str, str]:
         """Stage every FileArtifact in `universe` into the agent sandbox under destination_path."""
-        from agent_env.providers.sandbox_providers.sandbox import VmSandbox
+        from agent_env.providers.sandbox_providers.sandbox import stage_files_into_container
         from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_agent_sandbox_provider
 
         destination = destination_path.rstrip("/") or "/"
@@ -277,41 +276,11 @@ class A2AAgent:
             )
             return {}
 
-        dirs_to_make: set[str] = {destination}
-        loaded: dict[str, str] = {}
-        for filename in file_artifacts:
-            validate_relative_filename(filename)
-            dest_path = posixpath.join(destination, filename)
-            parent = posixpath.dirname(dest_path)
-            if parent:
-                dirs_to_make.add(parent)
-            loaded[filename] = dest_path
-
-        for d in sorted(dirs_to_make):
-            if isinstance(sandbox, VmSandbox):
-                await sandbox.exec_script(f"docker exec -u 0 {shlex.quote(sandbox.container_name)} mkdir -p {shlex.quote(d)}")
-            else:
-                await sandbox.exec("mkdir", "-p", d)
-
-        total = len(file_artifacts)
         logger.info(
             f"Loading FileArtifactUniverse '{universe.id}' v{universe.version} "
-            f"({total} file(s)) into agent at {destination}"
+            f"({len(file_artifacts)} file(s)) into agent at {destination}"
         )
-        # Stage files in parallel with a bounded semaphore so a universe with
-        # many files doesn't accumulate per-file presign + docker cp latency.
-        # 8 matches the default concurrency used by the FAU `get-many` CLI.
-        sem = asyncio.Semaphore(8)
-
-        async def _stage(filename: str, file_artifact: "Any") -> None:
-            dest_path = loaded[filename]
-            async with sem:
-                logger.info(f"  {file_artifact.object_url} -> {dest_path}")
-                await sandbox.write_file_from_s3(file_artifact.object_url, dest_path)
-
-        await asyncio.gather(*[_stage(fn, fa) for fn, fa in file_artifacts.items()])
-
-        return loaded
+        return await stage_files_into_container(sandbox, file_artifacts, destination)
 
     def __init__(
         self,
@@ -383,7 +352,7 @@ class A2AAgent:
             kinds, described = cls.toml_metadata[name]
             if isinstance(value, bool) or not isinstance(value, kinds):
                 values.append(f"metadata.{name} must be {described}, not {value!r}")
-        problems += [f"agent.toml: {problem}" for problem in values]
+        problems += [ctx.config_problem(problem) for problem in values]
         if problems:
             ctx.refuse(problems)
         return fields
@@ -444,18 +413,22 @@ class A2AAgent:
             disk_size_gb = float(self.metadata.get("min_disk_size_gb") or 10)
 
         config = get_config()
+        provider = None if sandbox is not None else (
+            build_sandbox_provider(sandbox_type) if sandbox_type else get_agent_sandbox_provider()
+        )
         resolved_env = dict(env_vars) if env_vars else {}
         if "LITELLM_API_KEY" not in resolved_env and "LITELLM_API_KEY" not in self.default_env_vars:
             resolved_env["LITELLM_API_KEY"] = config.get_litellm_api_key()
         if "LITELLM_BASE_URL" not in resolved_env and "LITELLM_BASE_URL" not in self.default_env_vars:
             resolved_env["LITELLM_BASE_URL"] = config.get_litellm_base_url()
+        if "LITELLM_BASE_URL" in resolved_env and isinstance(provider or sandbox, (LocalSandboxProvider, LocalSandbox)):
+            resolved_env["LITELLM_BASE_URL"] = LocalSandboxProvider.get_external_url(resolved_env["LITELLM_BASE_URL"])
 
         merged_env = await asyncio.to_thread(self._build_merged_env, resolved_env, a2a_port)
         image_name = self.docker_image_artifact.image_name
 
         try:
-            if sandbox is None:
-                provider = build_sandbox_provider(sandbox_type) if sandbox_type else get_agent_sandbox_provider()
+            if provider is not None:
                 logger.info(f"Provisioning sandbox for A2A agent '{self.id}' via {type(provider).__name__}...")
                 self._sandbox = await provider.create_sandbox(
                     image_name=image_name, port=a2a_port, env=merged_env,
@@ -535,9 +508,7 @@ class A2AAgent:
         trust_dir = await asyncio.to_thread(local_grant_trust) if isinstance(self._sandbox, LocalSandbox) else None
         agent_env = dict(merged_env) if trust_dir is None else {**LOCAL_TRUST_ENV, **merged_env}
         setup_script = ""
-        network_flag = "" if trust_dir is None or not LocalSandboxProvider.EXTRA_CONTAINER_RUN_ARGS else (
-            f"{LocalSandboxProvider.EXTRA_CONTAINER_RUN_ARGS} \\\n    "
-        )
+        network_flag = "".join(f"--add-host {entry} \\\n    " for entry in self._sandbox.extra_hosts)
         if enable_docker:
             logger.info("enable_docker: starting rootless Docker-in-Docker sidecar for the agent (no host socket)")
             setup_script = self._dind_setup_script()

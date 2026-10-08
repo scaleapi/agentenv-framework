@@ -1,5 +1,6 @@
 """The explorer over a real SQLite store: list/get/versions semantics and a real run."""
 
+import asyncio
 import dataclasses
 import gzip
 import json
@@ -19,8 +20,10 @@ from agent_env.config import configure, get_config, reset_config, set_document_s
 from agent_env.config.errors import ConfigError
 from agent_env.runner import store as run_store
 from agent_env.runner.local_runner import LocalRunner
+from agent_env.runner.runner import RunRecord, RunStatus
 from agent_env.store.object_store.local.store import LocalFilesystemObjectStore
 from agent_env.store.document_store.sqlite_document_store import LocalSqliteDocumentStore
+from agent_env.store.routing import RoutingDocumentStore
 from agent_env.task import Task
 from agent_env.explorer.routers import objects as objects_router
 from agent_env.explorer.routers import triggers as triggers_router
@@ -147,9 +150,15 @@ def test_type_filter_matches_documents_stored_under_an_aliased_spelling(tmp_path
         reset_config()
 
 
-def test_detail_route_enriches_a_universe_stored_under_an_aliased_spelling(tmp_path, monkeypatch):
+@pytest.mark.parametrize("stored", [
+    {"s3_url": "s3://b/a.txt"},
+    {"object_url": "s3://b/a.txt"},
+    {"s3_url": "s3://b/a.txt", "object_url": "s3://b/stale.txt"},
+], ids=["legacy-key", "neutral-key", "legacy-wins"])
+def test_detail_route_enriches_a_universe_stored_under_an_aliased_spelling(tmp_path, monkeypatch, stored):
     """Enrichment picks its branch from the type, so a renamed universe must still
-    resolve its refs — otherwise the detail response silently loses `files`."""
+    resolve its refs — otherwise the detail response silently loses `files`. Its files
+    keep their url whichever key their documents store it under, the legacy one first."""
     cfg = tmp_path / ".agentenv" / "config.toml"
     cfg.parent.mkdir(parents=True, exist_ok=True)
     cfg.write_text(
@@ -163,7 +172,7 @@ def test_detail_route_enriches_a_universe_stored_under_an_aliased_spelling(tmp_p
     set_document_store(store)
     set_runner(LocalRunner(workers=1))
     run_store.ensure_indexes()
-    store.insert("artifacts", {"id": "f1", "version": 1, "type": "file", "s3_url": "s3://b/a.txt",
+    store.insert("artifacts", {"id": "f1", "version": 1, "type": "file", **stored,
                                "content_type": "text/plain", "created_at_utc": "2026-01-01T00:00:00Z"})
     store.insert("artifacts", {"id": "u1", "version": 1, "type": "old_universe",
                                "file_artifact_refs": {"a.txt": {"id": "f1", "version": 1}},
@@ -353,8 +362,6 @@ def test_cors_default_is_loopback_only(client):
 
 
 def test_run_groups_are_not_truncated_at_500(client):
-    from agent_env.runner.runner import RunRecord, RunStatus
-
     gid = "rg-big"
     for i in range(600):
         run_store.insert_run(RunRecord(
@@ -366,9 +373,151 @@ def test_run_groups_are_not_truncated_at_500(client):
     assert group["total"] == 600          # paged past the 500 fetch limit, not truncated
 
 
+def test_run_group_list_uses_one_run_snapshot_and_only_page_instances(client, monkeypatch):
+    store = get_config().get_document_store()
+    query_calls = []
+    original_query = store.find_many_by_id
+    run_pages = []
+    original_list_runs = run_store.list_runs
+
+    def counted_query(collection, id_field, ids):
+        if collection == "task_instances":
+            query_calls.append(len(ids))
+        return original_query(collection, id_field, ids)
+
+    def counted_list_runs(*args, **kwargs):
+        run_pages.append(kwargs.get("offset", 0))
+        return original_list_runs(*args, **kwargs)
+
+    monkeypatch.setattr(store, "find_many_by_id", counted_query)
+    monkeypatch.setattr(run_store, "list_runs", counted_list_runs)
+    for i in range(1000):
+        run_store.insert_run(RunRecord(
+            run_id=f"paged-{i}", runner="local", task_id="t1", task_version=1,
+            instance_id=f"paged-i{i}", status=RunStatus.COMPLETED,
+            created_at_utc=f"2026-01-{(i // 100) + 1:02d}T00:00:{i % 60:02d}Z",
+            overrides={"metadata": {"run_group_id": f"rg-page-{i // 10}"}},
+        ))
+        store.insert("task_instances", {"instance_id": f"paged-i{i}", "completed_steps": []})
+
+    response = client.get("/api/v1/tasks/t1/run-groups?limit=20")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 100
+    assert len(body["items"]) == 20
+    assert all(group["total"] == 10 for group in body["items"])
+    assert query_calls == [200]
+    assert run_pages == [0, 500, 1000]
+
+
+def test_run_group_list_preserves_routed_instance_precedence(client, tmp_path):
+    configured = get_config().get_document_store()
+    local = LocalSqliteDocumentStore(str(tmp_path / "local.db"))
+    router = RoutingDocumentStore(configured, local, tmp_path / "local.db")
+    configured.insert("task_instances", {"instance_id": "shared", "current_step": 2, "total_steps": 4})
+    local.insert("task_instances", {"instance_id": "shared", "current_step": 7, "total_steps": 9})
+    run_store.insert_run(RunRecord(
+        run_id="shared-run", runner="local", task_id="t1", task_version=1,
+        instance_id="shared", status=RunStatus.RUNNING, created_at_utc="2026-01-01T00:00:00Z",
+    ))
+    set_document_store(router)
+
+    group = client.get("/api/v1/tasks/t1/run-groups").json()["items"][0]
+    assert (group["instances"][0]["current_step"], group["instances"][0]["total_steps"]) == (2, 4)
+
+
+def test_run_group_list_batches_a_selected_group_larger_than_500(client, monkeypatch):
+    gid = "rg-list-big"
+    store = get_config().get_document_store()
+    query_calls = []
+    original_query = store.find_many_by_id
+
+    def counted_query(collection, id_field, ids):
+        if collection == "task_instances":
+            query_calls.append(len(ids))
+        return original_query(collection, id_field, ids)
+
+    monkeypatch.setattr(store, "find_many_by_id", counted_query)
+    for i in range(600):
+        run_store.insert_run(RunRecord(
+            run_id=f"list-big-{i}", runner="local", task_id="t1", task_version=1,
+            instance_id=f"list-big-i{i}", status=RunStatus.COMPLETED,
+            created_at_utc=f"2026-01-01T00:{i // 60:02d}:{i % 60:02d}Z",
+            overrides={"metadata": {"run_group_id": gid}},
+        ))
+        store.insert("task_instances", {"instance_id": f"list-big-i{i}", "completed_steps": []})
+
+    group = client.get("/api/v1/tasks/t1/run-groups?limit=1").json()["items"][0]
+    assert group["run_group_id"] == gid
+    assert group["total"] == 600
+    assert len(group["instances"]) == 600
+    assert query_calls == [500, 100]
+
+
+def test_run_group_list_keeps_missing_instances_ties_and_cross_version_membership(client):
+    first = "rg-tied-cross-version"
+    for run_id, version, instance_id in (("cross-v1", 1, "cross-i1"), ("cross-v2", 2, "cross-i2")):
+        run_store.insert_run(RunRecord(
+            run_id=run_id, runner="local", task_id="t1", task_version=version,
+            instance_id=instance_id, status=RunStatus.COMPLETED,
+            created_at_utc="2026-01-04T00:00:00Z",
+            overrides={"metadata": {"run_group_id": first}},
+        ))
+    get_config().get_document_store().insert("task_instances", {
+        "instance_id": "cross-i1", "current_step": 2, "total_steps": 3,
+    })
+    run_store.insert_run(RunRecord(
+        run_id="cross-tied-other", runner="local", task_id="t1", task_version=2,
+        instance_id="missing-instance", status=RunStatus.COMPLETED,
+        created_at_utc="2026-01-04T00:00:00Z",
+        overrides={"metadata": {"run_group_id": "rg-tied-other"}},
+    ))
+
+    groups = client.get("/api/v1/tasks/t1/run-groups?task_version=2").json()["items"]
+    assert [group["run_group_id"] for group in groups] == [first, "rg-tied-other"]
+    selected = groups[0]
+    assert selected["task_version"] == 2
+    assert selected["total"] == 2
+    assert {instance["instance_id"] for instance in selected["instances"]} == {"cross-i1", "cross-i2"}
+    missing = next(instance for instance in selected["instances"] if instance["instance_id"] == "cross-i2")
+    assert missing["current_step"] is None and missing["total_steps"] is None
+    other = groups[1]
+    assert other["total"] == 1
+    assert other["instances"][0]["current_step"] is None
+
+
+def test_run_group_stream_reloads_status_for_each_snapshot(client, monkeypatch):
+    from agent_env.explorer.routers import runs as runs_router
+
+    run_id = "stream-fresh"
+    run_store.insert_run(RunRecord(
+        run_id=run_id, runner="local", task_id="t1", task_version=1,
+        instance_id="stream-instance", status=RunStatus.RUNNING,
+        overrides={"metadata": {"run_group_id": "rg-stream"}},
+    ))
+    poll_count = 0
+
+    async def finish_between_polls(_seconds):
+        nonlocal poll_count
+        poll_count += 1
+        run_store.mark_terminal(run_id, RunStatus.COMPLETED)
+
+    monkeypatch.setattr(runs_router.asyncio, "sleep", finish_between_polls)
+
+    async def read_events():
+        response = await runs_router.stream_run_group("t1", "rg-stream")
+        return "".join([chunk async for chunk in response.body_iterator])
+
+    events = asyncio.run(read_events())
+    assert events.count("event: snapshot") == 2
+    snapshots = [json.loads(line.removeprefix("data: ")) for line in events.splitlines() if line.startswith("data: ")]
+    assert snapshots[0]["running"] == 1
+    assert snapshots[1]["completed"] == 1
+    assert poll_count == 1
+
+
 def test_run_groups_tally_step_progress_for_the_batch_funnel(client):
     """The Batch progress strip reads `step_counts`; without it every step reads 0/N."""
-    from agent_env.runner.runner import RunRecord, RunStatus
 
     gid = "rg-funnel"
     outcomes = {

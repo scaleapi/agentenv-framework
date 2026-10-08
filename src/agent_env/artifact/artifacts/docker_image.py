@@ -1,4 +1,4 @@
-"""Docker image artifact for storing Docker images in S3."""
+"""Docker image artifact for storing Docker images in the object store."""
 
 from __future__ import annotations
 
@@ -16,13 +16,15 @@ import uuid
 from dataclasses import dataclass
 from importlib.metadata import version as pkg_version
 from pathlib import Path
-from typing import Callable, ClassVar, Literal
+from typing import Any, Callable, ClassVar, Literal
 from urllib.parse import urlparse
 
-from pydantic import Field
+from pydantic import ConfigDict, Field, model_serializer
 
-from agent_env.artifact.artifact import Artifact
+from agent_env.artifact.artifact import Artifact, _write_twin
 from agent_env.store.ids import fs_safe, image_repository, is_local_id
+from agent_env.store.image_store.oci_registry_credentials import is_loopback_host, registry_host_from_ref
+from agent_env.utils.deprecation import OMITTED, renamed_keyword
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +63,9 @@ def _git_clone_commands(owner: str, repo: str, ref: str | None, token: str | Non
     ]
 
 class DockerImageArtifact(Artifact):
-    """A Docker image artifact stored as tar.gz in S3."""
+    """A Docker image artifact stored as tar.gz in the object store."""
+
+    model_config = ConfigDict(populate_by_name=True)
 
     DOCKER_SAVE_TIMEOUT_SECONDS: ClassVar[int] = 900
 
@@ -70,6 +74,15 @@ class DockerImageArtifact(Artifact):
     image_name: str = Field(description="Docker image name/tag")
     tar_gz_object_url: str = Field(alias="tar_gz_s3_url", description="Object-store locator of the tar.gz file")
     build_context_object_url: str | None = Field(default=None, alias="build_context_s3_url", description="Object-store locator of the build context tar.gz")
+
+    # No return annotation: pydantic builds the serialization schema from one, and a dict drops the fields.
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: Any):
+        # Dual-write, from the attributes: `alias=` emits one spelling, which one depending on the caller's `by_alias`.
+        data = handler(self)
+        _write_twin(data, "tar_gz_s3_url", "tar_gz_object_url", self.tar_gz_object_url)
+        _write_twin(data, "build_context_s3_url", "build_context_object_url", self.build_context_object_url)
+        return data
 
     @classmethod
     def put(
@@ -149,8 +162,8 @@ class DockerImageArtifact(Artifact):
             id,
             description=description,
             image_name=image_ref,
-            tar_gz_s3_url=tar_gz_object_url,
-            build_context_s3_url=build_context_object_url,
+            tar_gz_object_url=tar_gz_object_url,
+            build_context_object_url=build_context_object_url,
         )
 
     @classmethod
@@ -160,13 +173,22 @@ class DockerImageArtifact(Artifact):
         *,
         description: str,
         image_name: str,
-        tar_gz_s3_url: str,
-        build_context_s3_url: str | None = None,
+        tar_gz_object_url: str | None = None,
+        build_context_object_url: str | None = None,
+        tar_gz_s3_url: str | None = OMITTED,
+        build_context_s3_url: str | None = OMITTED,
     ) -> "DockerImageArtifact":
         from agent_env.artifact.store import get_artifact_store
         from agent_env.config import get_config
 
-        for url in (tar_gz_s3_url, build_context_s3_url):
+        owner = "DockerImageArtifact.put_tar"
+        tar_gz_object_url = renamed_keyword(owner, "tar_gz_object_url", tar_gz_object_url, "tar_gz_s3_url", tar_gz_s3_url)
+        build_context_object_url = renamed_keyword(
+            owner, "build_context_object_url", build_context_object_url, "build_context_s3_url", build_context_s3_url
+        )
+        if tar_gz_object_url is None:
+            raise TypeError(f"{owner}() missing required keyword argument: 'tar_gz_object_url'")
+        for url in (tar_gz_object_url, build_context_object_url):
             if url:
                 get_config().check_object_url(id, url)
         store = get_artifact_store()
@@ -176,8 +198,8 @@ class DockerImageArtifact(Artifact):
             version=version,
             description=description,
             image_name=image_name,
-            tar_gz_s3_url=tar_gz_s3_url,
-            build_context_s3_url=build_context_s3_url,
+            tar_gz_object_url=tar_gz_object_url,
+            build_context_object_url=build_context_object_url,
         )
         return store.put_document(instance)
 
@@ -197,14 +219,16 @@ class DockerImageArtifact(Artifact):
         """Build a Docker image from a GitHub repo on a temporary VM.
 
         Clones the repo (with ``github_token`` when the repository is private), runs docker
-        build, saves the image, uploads to S3, and creates a DockerImageArtifact. Returns a GitHubBuildResult with
-        the artifact and git metadata.
+        build, saves the image, uploads it to the object store, and creates a DockerImageArtifact. Returns a
+        GitHubBuildResult with the artifact and git metadata.
 
         Note: Branch names containing slashes (e.g. feature/fix-bug) are not
         supported in GitHub URLs due to path ambiguity. Use branches/tags
         without slashes, or the default branch.
         """
         from agent_env.providers import get_sandbox_provider
+        from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
+        from agent_env.providers.sandbox_providers.sandbox import upload_vm_file
         from agent_env.config import get_config
 
         refuse_local_github_build(id)
@@ -228,7 +252,7 @@ class DockerImageArtifact(Artifact):
         owner, repo, ref = df_parts.owner, df_parts.repo, df_parts.ref
         dockerfile_repo_path = df_parts.path
         config = get_config()
-        suffix = uuid.uuid4().hex[:8]
+        suffix = uuid.uuid4().hex[:16]
         image_tag = f"{id}-{suffix}"
 
         from agent_env.artifact.store import get_artifact_store
@@ -237,12 +261,18 @@ class DockerImageArtifact(Artifact):
         image_store = config.get_image_store()
         repository = image_repository(id)
         image_ref = image_store.image_ref(repository, f"v{version}")
+        provider = get_sandbox_provider()
+        if is_loopback_host(registry_host_from_ref(image_ref)) and not isinstance(provider, LocalSandboxProvider):
+            raise ValueError(
+                f"{image_ref} is in a registry on this machine, which a {type(provider).__name__} build VM can't push to; "
+                "build on the local sandbox provider, or configure an image store a remote VM can reach"
+            )
         await asyncio.to_thread(image_store.ensure_repository, repository)
         auth = await asyncio.to_thread(image_store.auth, image_ref)
 
         log("create_vm", "Creating VM...", 10)
         logger.info(f"put_from_github: cloning {owner}/{repo} ref={ref} dockerfile={dockerfile_repo_path} context={context_repo_path}")
-        sandbox = await get_sandbox_provider().create_vm(disk_size_gb=20, timeout=1800, exposed_ports=[])
+        sandbox = await provider.create_vm(disk_size_gb=20, timeout=1800, exposed_ports=[])
         try:
             log("install_git", "Installing git...", 20)
             await sandbox.exec_script("apt-get update -qq && apt-get install -y -qq git >/dev/null 2>&1")
@@ -281,18 +311,9 @@ class DockerImageArtifact(Artifact):
 
             log("upload", "Uploading to object store...", 75)
             object_store = config.get_object_store()
-
-            def _signed_put(key: str) -> tuple[str, str]:
-                url = object_store.object_url(f"{config.get_artifact_key_prefix()}{key}")
-                put = object_store.signed_put_url(url)
-                if put is None:
-                    raise RuntimeError(
-                        f"{type(object_store).__name__} can't presign uploads; GitHub image builds need a signable object store."
-                    )
-                return url, put
-
-            tar_gz_object_url, image_put_url = await asyncio.to_thread(_signed_put, f"github-builds/{id}/{image_tag}.tar.gz")
-            await sandbox.exec_script(f'curl -fsSL -X PUT --upload-file /tmp/image.tar.gz "{image_put_url}"')
+            builds = f"{config.get_artifact_key_prefix()}github-builds/{id}"
+            tar_gz_object_url = object_store.object_url(f"{builds}/{suffix}.tar.gz")
+            await upload_vm_file(sandbox, "/tmp/image.tar.gz", object_store, tar_gz_object_url)
 
             log("upload_context", "Uploading build context...", 80)
             dockerfile_content = await sandbox.exec_script(f"cat {dockerfile_abs}")
@@ -300,10 +321,8 @@ class DockerImageArtifact(Artifact):
             copy_sources = _parse_copy_sources(dockerfile_content, df_rel)
             tar_paths = " ".join(shlex.quote(p) for p in copy_sources)
             await sandbox.exec_script(f"tar czf /tmp/build-context.tar.gz -C {context_abs} {tar_paths}")
-            build_context_object_url, context_put_url = await asyncio.to_thread(
-                _signed_put, f"github-builds/{id}/{image_tag}-context.tar.gz"
-            )
-            await sandbox.exec_script(f'curl -fsSL -X PUT --upload-file /tmp/build-context.tar.gz "{context_put_url}"')
+            build_context_object_url = object_store.object_url(f"{builds}/{suffix}-context.tar.gz")
+            await upload_vm_file(sandbox, "/tmp/build-context.tar.gz", object_store, build_context_object_url)
         finally:
             log("cleanup", "Terminating build VM...", 85)
             await sandbox.terminate()
@@ -313,8 +332,8 @@ class DockerImageArtifact(Artifact):
             id=id,
             description=f"Built from GitHub: {dockerfile_github_url}",
             image_name=image_ref,
-            tar_gz_s3_url=tar_gz_object_url,
-            build_context_s3_url=build_context_object_url,
+            tar_gz_object_url=tar_gz_object_url,
+            build_context_object_url=build_context_object_url,
         )
         logger.info(f"put_from_github: created artifact id={artifact.id} version={artifact.version}")
 

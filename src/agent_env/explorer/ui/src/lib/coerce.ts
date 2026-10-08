@@ -1,4 +1,4 @@
-/** Narrowing helpers for payloads that arrive as `unknown`. Trigger state comes from a gateway response or an S3 object, so every field is a claim — coercing beats asserting. */
+/** Narrowing helpers for payloads that arrive as `unknown`. Trigger state comes from a gateway response or a stored object, so every field is a claim — coercing beats asserting. */
 
 export function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)

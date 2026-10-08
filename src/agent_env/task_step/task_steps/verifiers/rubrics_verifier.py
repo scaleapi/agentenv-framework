@@ -18,7 +18,7 @@ from agent_env.a2a_agent.object_transfer import (
 from agent_env.a2a_agent.staging import transfer_store
 from agent_env.config import get_config
 from agent_env.config.model import ModelParam
-from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.context import TaskStepContext, dual_keyed
 from agent_env.task_step.task_steps.verifiers.judge_utils.judge_output_format import (
     SCREENSHOT_GROUNDING,
     JudgeOutputFormat,
@@ -206,11 +206,11 @@ def _image_url_block(frame: ImageFrame) -> dict:
 class _CompactedTrajectory:
     """Every representation the filter produced; the caller picks what its judge consumes."""
 
-    container_s3_uri: Optional[str] = None       # trajectory file (loaded into an agent-judge container)
+    container_object_url: Optional[str] = None       # trajectory file (loaded into an agent-judge container)
     tool_result_files: list[tuple[str, str]] = field(default_factory=list)
     inline_text: Optional[str] = None            # pre-rendered text (screenshot); None for DEFAULT (read lazily)
     image_blocks: list[dict] = field(default_factory=list)  # frame images (screenshot); a label text block before each per-criterion
-    compact_s3_uri: Optional[str] = None         # compacted URI, if produced; recorded on the result only
+    compact_object_url: Optional[str] = None         # compacted URI, if produced; recorded on the result only
     per_criterion: bool = False                  # labelled per-criterion frames were attached (False when that selection found none)
 
     @classmethod
@@ -219,19 +219,19 @@ class _CompactedTrajectory:
 
     @classmethod
     def for_default(
-        cls, container_s3_uri: Optional[str], tool_result_files: list[tuple[str, str]],
-        compact_s3_uri: Optional[str] = None,
+        cls, container_object_url: Optional[str], tool_result_files: list[tuple[str, str]],
+        compact_object_url: Optional[str] = None,
     ) -> "_CompactedTrajectory":
-        return cls(container_s3_uri=container_s3_uri, tool_result_files=tool_result_files,
-                   compact_s3_uri=compact_s3_uri)
+        return cls(container_object_url=container_object_url, tool_result_files=tool_result_files,
+                   compact_object_url=compact_object_url)
 
     @classmethod
     def for_screenshot(
         cls, inline_text: Optional[str], image_blocks: list[dict],
-        container_s3_uri: Optional[str] = None, per_criterion: bool = False,
+        container_object_url: Optional[str] = None, per_criterion: bool = False,
     ) -> "_CompactedTrajectory":
-        # container_s3_uri = raw file, kept so an agent judge (no inline frames) can still load it.
-        return cls(inline_text=inline_text, image_blocks=image_blocks or [], container_s3_uri=container_s3_uri,
+        # container_object_url = raw file, kept so an agent judge (no inline frames) can still load it.
+        return cls(inline_text=inline_text, image_blocks=image_blocks or [], container_object_url=container_object_url,
                    per_criterion=per_criterion)
 
 
@@ -463,8 +463,8 @@ class RubricsVerifierTaskStep(TaskStep):
                 context, "prompt_error", f"Skipped: prompt had error_type={prompt_response.error_type}")
             return context
 
-        per_turn_uris = [u for u in (prompt_response.target_agent_per_turn_trajectory_s3_uris or []) if u]
-        if self.use_trajectory and not (per_turn_uris or prompt_response.agent_trajectory_s3_uri):
+        per_turn_uris = [u for u in (prompt_response.target_agent_per_turn_trajectory_object_urls or []) if u]
+        if self.use_trajectory and not (per_turn_uris or prompt_response.agent_trajectory_object_url):
             raise RuntimeError(f"No trajectory available for prompt_id='{self.prompt_id}'")
 
         overrides = context.metadata.get("user_overrides", {})
@@ -586,7 +586,7 @@ class RubricsVerifierTaskStep(TaskStep):
                 if multiturn:
                     await self._load_per_turn_trajectories(sandbox, per_turn_uris, multiturn_dir, filter_to_apply)
                 else:
-                    await sandbox.write_file_from_s3(compacted.container_s3_uri, self.TRAJECTORY_CONTAINER_PATH)
+                    await sandbox.write_file_from_object(compacted.container_object_url, self.TRAJECTORY_CONTAINER_PATH)
                     if compacted.tool_result_files:
                         await self._load_tool_result_files(sandbox, compacted.tool_result_files)
                         compacted.tool_result_files = []
@@ -599,7 +599,7 @@ class RubricsVerifierTaskStep(TaskStep):
             ]
             criteria_json = json.dumps(criteria_for_prompt, indent=2)
             agent_prompt_text = prompt_response.prompt_text or ""
-            judge_trajectory_s3_uri: Optional[str] = None
+            judge_trajectory_url: Optional[str] = None
             judge_effort = overrides.get("judge_effort") or self.effort
             judge_max_thinking_tokens = overrides.get("judge_max_thinking_tokens") or self.max_thinking_tokens
             loaded_for_judge: list[dict] = []
@@ -639,8 +639,8 @@ class RubricsVerifierTaskStep(TaskStep):
                     trajectory_inline = await asyncio.to_thread(self._merge_per_turn_text, per_turn_uris, filter_to_apply)
                 else:
                     trajectory_inline = compacted.inline_text
-                    if trajectory_inline is None and compacted.container_s3_uri:
-                        trajectory_inline = await asyncio.to_thread(self._read_trajectory_text, compacted.container_s3_uri)
+                    if trajectory_inline is None and compacted.container_object_url:
+                        trajectory_inline = await asyncio.to_thread(self._read_trajectory_text, compacted.container_object_url)
                 eval_prompt = self._build_eval_prompt(
                     agent_prompt=agent_prompt_text,
                     agent_response=prompt_response.response,
@@ -657,7 +657,7 @@ class RubricsVerifierTaskStep(TaskStep):
                         f"eval prompt {len(eval_prompt)} chars (~{len(eval_prompt) // 4} tokens)."
                     )
 
-            verification_results, judge_output_retries, judge_output_discrepancies, judge_trajectory_s3_uri = (
+            verification_results, judge_output_retries, judge_output_discrepancies, judge_trajectory_url = (
                 await self._run_judge_with_output_retries(
                     eval_prompt=eval_prompt,
                     context=context,
@@ -690,8 +690,8 @@ class RubricsVerifierTaskStep(TaskStep):
                     logger.warning(f"Failed to terminate auto-deployed judge sandbox: {e}")
 
         judge_call_fields: dict = {
-            "compact_trajectory_s3_uri": compacted.compact_s3_uri,
-            "judge_trajectory_s3_uri": judge_trajectory_s3_uri,
+            **dual_keyed("compact_trajectory_s3_uri", "compact_trajectory_object_url", compacted.compact_object_url),
+            **dual_keyed("judge_trajectory_s3_uri", "judge_trajectory_object_url", judge_trajectory_url),
         }
         if judge_output_retries:
             judge_call_fields["judge_output_retries"] = judge_output_retries
@@ -753,10 +753,10 @@ class RubricsVerifierTaskStep(TaskStep):
         if not self.use_trajectory:
             return _CompactedTrajectory.empty()
 
-        # Fall back to the last per-turn URI when agent_trajectory_s3_uri is unset (the value
+        # Fall back to the last per-turn URI when agent_trajectory_object_url is unset (the value
         # it normally holds). The execute() guard guarantees one source exists; the raise only narrows the type.
-        raw_uri = prompt_response.agent_trajectory_s3_uri or next(
-            (u for u in reversed(prompt_response.target_agent_per_turn_trajectory_s3_uris or []) if u),
+        raw_uri = prompt_response.agent_trajectory_object_url or next(
+            (u for u in reversed(prompt_response.target_agent_per_turn_trajectory_object_urls or []) if u),
             None,
         )
         if raw_uri is None:
@@ -767,15 +767,15 @@ class RubricsVerifierTaskStep(TaskStep):
             raw_text = self._read_trajectory_text(raw_uri)
             return self._compact_screenshot(raw_text, raw_uri, filter_to_apply, criteria or [], label_ids or {})
 
-        s3_uri, tool_files = raw_uri, []
-        compact_s3_uri: Optional[str] = None
+        object_url, tool_files = raw_uri, []
+        compact_object_url: Optional[str] = None
         if filter_to_apply and ctype == CompactionType.DEFAULT:
-            s3_uri, tool_files = self._filter_trajectory(raw_uri, filter_to_apply)
+            object_url, tool_files = self._filter_trajectory(raw_uri, filter_to_apply)
             # Return the URI; never write it back onto prompt_response. It's an appended
             # item in context.prompt_responses ($addToSet, immutable) — mutating it re-adds
             # a duplicate (hub renders the trajectory twice). Recorded on the result instead.
-            compact_s3_uri = s3_uri
-        return _CompactedTrajectory.for_default(s3_uri, tool_files, compact_s3_uri)
+            compact_object_url = object_url
+        return _CompactedTrajectory.for_default(object_url, tool_files, compact_object_url)
 
     def _compact_screenshot(
         self, raw_text: str, raw_uri: str, tf: TrajectoryFilter, criteria: list[dict],
@@ -803,25 +803,24 @@ class RubricsVerifierTaskStep(TaskStep):
         else:
             inline_text = strip_trajectory_images(raw_text, attached=attached)
         # A trajectory with no screenshots selects nothing: the judge gets the text alone, with no frame rules.
-        return _CompactedTrajectory.for_screenshot(inline_text, image_blocks, container_s3_uri=raw_uri,
+        return _CompactedTrajectory.for_screenshot(inline_text, image_blocks, container_object_url=raw_uri,
                                                    per_criterion=per_criterion and bool(image_blocks))
 
-    def _filter_trajectory(self, s3_uri: str, trajectory_filter: TrajectoryFilter) -> tuple[str, list[tuple[str, str]]]:
-        """Download trajectory from S3, apply compact filter, re-upload as a compact version.
+    def _filter_trajectory(self, object_url: str, trajectory_filter: TrajectoryFilter) -> tuple[str, list[tuple[str, str]]]:
+        """Download the trajectory, apply the compact filter, and upload the compact version.
 
         Returns:
-            (compact_s3_uri, tool_result_files) where tool_result_files is a list of
+            (compact_object_url, tool_result_files) where tool_result_files is a list of
             (container_path, content_json) pairs for externalized tool results.
         """
         from agent_env.config import get_config
 
         config = get_config()
-        object_store = config.get_object_store()
-        spans = json.loads(object_store.get(s3_uri))
+        spans = json.loads(config.get_object_store_at(object_url).get(object_url))
         filtered, tool_result_files = compact_otel_trajectory(spans, trajectory_filter)
         compact_key = f"{config.get_artifact_key_prefix()}compacted-trajectories/{uuid.uuid4().hex}.json"
-        object_url = object_store.put(compact_key, json.dumps(filtered).encode(), content_type="application/json")
-        return object_url, tool_result_files
+        compact_url = config.get_object_store().put(compact_key, json.dumps(filtered).encode(), content_type="application/json")
+        return compact_url, tool_result_files
 
     async def _load_tool_result_files(self, sandbox, tool_result_files: list[tuple[str, str]]) -> None:
         """Write externalized tool result files into the agent container."""
@@ -829,15 +828,15 @@ class RubricsVerifierTaskStep(TaskStep):
             await sandbox.write_file_from_text(content, container_path)
         logger.info(f"Loaded {len(tool_result_files)} tool result files into container")
 
-    async def _load_trajectory_into_container(self, sandbox_id: str, s3_uri: str) -> None:
-        """Load trajectory from S3 into an existing agent's container."""
+    async def _load_trajectory_into_container(self, sandbox_id: str, object_url: str) -> None:
+        """Load the trajectory from the object store into an existing agent's container."""
         from agent_env.providers.sandbox_providers.sandbox_provider import get_agent_sandbox_provider
         sandbox = await get_agent_sandbox_provider().get_sandbox(sandbox_id)
-        await sandbox.write_file_from_s3(s3_uri, self.TRAJECTORY_CONTAINER_PATH)
+        await sandbox.write_file_from_object(object_url, self.TRAJECTORY_CONTAINER_PATH)
 
-    def _read_trajectory_text(self, s3_uri: str) -> str:
+    def _read_trajectory_text(self, object_url: str) -> str:
         from agent_env.config import get_config
-        return get_config().get_object_store().get(s3_uri).decode("utf-8", errors="replace")
+        return get_config().get_object_store_at(object_url).get(object_url).decode("utf-8", errors="replace")
 
     async def _load_per_turn_trajectories(
         self, sandbox, per_turn_uris: list[str], container_dir: str,
@@ -845,7 +844,7 @@ class RubricsVerifierTaskStep(TaskStep):
     ) -> None:
         """Load each turn into the judge container as turn_NN.json under ``container_dir``.
 
-        No filter → direct S3 pull per turn. DEFAULT filter → compact each turn in memory and
+        No filter → direct object-store pull per turn. DEFAULT filter → compact each turn in memory and
         write as text, its externalized tool-result files namespaced ``turn_NN_`` to avoid
         collisions, then loaded into the sandbox. The write methods create ``container_dir``
         inside the container, so no separate mkdir is needed.
@@ -860,7 +859,7 @@ class RubricsVerifierTaskStep(TaskStep):
                 await sandbox.write_file_from_text(content, dest)
                 tool_result_files.extend(turn_files)
             else:
-                await sandbox.write_file_from_s3(uri, dest)
+                await sandbox.write_file_from_object(uri, dest)
         if tool_result_files:
             await self._load_tool_result_files(sandbox, tool_result_files)
         logger.info(
@@ -872,7 +871,7 @@ class RubricsVerifierTaskStep(TaskStep):
         self, per_turn_uris: list[str], trajectory_filter: Optional[TrajectoryFilter] = None,
     ) -> str:
         """Concatenate every turn's trajectory text, turn-marked, for the direct-LLM judge
-        (embedded inline; in-memory, no S3 write). A DEFAULT filter compacts each turn; its
+        (embedded inline; in-memory, no object-store write). A DEFAULT filter compacts each turn; its
         externalized files are dropped, as on the single-turn direct-judge path (no container)."""
         parts = []
         for i, uri in enumerate(per_turn_uris, start=1):
@@ -884,13 +883,13 @@ class RubricsVerifierTaskStep(TaskStep):
         return "\n\n".join(parts)
 
     def _filter_trajectory_content(
-        self, s3_uri: str, trajectory_filter: TrajectoryFilter, result_file_prefix: str = "",
+        self, object_url: str, trajectory_filter: TrajectoryFilter, result_file_prefix: str = "",
     ) -> tuple[str, list[tuple[str, str]]]:
-        """DEFAULT-compact one trajectory in memory (no S3 re-upload), returning
+        """DEFAULT-compact one trajectory in memory (no re-upload), returning
         (compacted_json_text, tool_result_files). ``result_file_prefix`` namespaces the
         externalized filenames so per-turn files don't collide. In-memory sibling of
-        ``_filter_trajectory`` (which re-uploads to S3 for the single-file path)."""
-        spans = json.loads(self._read_trajectory_text(s3_uri))
+        ``_filter_trajectory`` (which re-uploads for the single-file path)."""
+        spans = json.loads(self._read_trajectory_text(object_url))
         filtered, tool_result_files = compact_otel_trajectory(
             spans, trajectory_filter, result_file_prefix=result_file_prefix,
         )
@@ -904,7 +903,7 @@ class RubricsVerifierTaskStep(TaskStep):
         context: TaskStepContext,
         image_blocks: Optional[list[dict]] = None,
     ) -> dict:
-        """Direct LiteLLM judge — no agent boot, no tools. Returns {response, trajectory_s3_uri}.
+        """Direct LiteLLM judge — no agent boot, no tools. Returns {response, trajectory_object_url}.
 
         When ``image_blocks`` are provided the user message becomes multimodal
         (text + images); otherwise it stays a plain string, identical to before."""
@@ -951,7 +950,7 @@ class RubricsVerifierTaskStep(TaskStep):
                     request_kwargs[ModelParam.RESPONSE_FORMAT] = response_format
                 response = await litellm.acompletion(**request_kwargs)
                 content = response.choices[0].message.content or ""
-                return {"response": content, "trajectory_s3_uri": None}
+                return {"response": content, "trajectory_object_url": None}
             except Exception as exc:
                 last_exc = exc
                 if image_blocks and use_response_format and _looks_like_response_format_error(exc):
@@ -1022,6 +1021,7 @@ class RubricsVerifierTaskStep(TaskStep):
             task_id,
             timeout_seconds=self.judge_timeout_seconds,
             poll_interval_seconds=self.DEFAULT_POLL_INTERVAL_SECONDS,
+            sandbox_id=getattr(judge_agent, "sandbox_id", None),
         )
         state = result["status"]["state"]
         status_msg = (result.get("status") or {}).get("message") or {}
@@ -1051,13 +1051,13 @@ class RubricsVerifierTaskStep(TaskStep):
                 )
                 body = f"{body}\n{container_logs}" if body else container_logs
             raise RuntimeError(f"Judge A2A task failed ({detail}): {body}")
-        judge_trajectory_s3_uri = await self._fetch_judge_trajectory(
+        judge_trajectory_url = await self._fetch_judge_trajectory(
             judge_a2a_url=judge_a2a_url,
             judge_agent_card=judge_agent_card,
             a2a_server_task_id=task_id,
             sandbox_type=getattr(judge_agent, "sandbox_type", None),
         )
-        return {"response": tr.response_text, "trajectory_s3_uri": judge_trajectory_s3_uri}
+        return {"response": tr.response_text, "trajectory_object_url": judge_trajectory_url}
 
     async def _fetch_judge_trajectory(
         self,
@@ -1149,7 +1149,7 @@ class RubricsVerifierTaskStep(TaskStep):
         spec = self._spec()
         prompt = eval_prompt
         discrepancy_log: list[dict] = []
-        judge_trajectory_s3_uri: Optional[str] = None
+        judge_trajectory_url: Optional[str] = None
 
         if use_agent_judge:
             if not judge_a2a_url:
@@ -1179,12 +1179,12 @@ class RubricsVerifierTaskStep(TaskStep):
                 data = await self._prompt_llm_judge(prompt, model=model, context=context)
 
             logger.info(f"Judge response: {data['response'][:200]}...")
-            judge_trajectory_s3_uri = data.get("trajectory_s3_uri")
+            judge_trajectory_url = data.get("trajectory_object_url")
 
             results, discrepancy = spec.diagnose_response(data["response"], criteria)
             if discrepancy is None:
                 assert results is not None
-                return results, attempt - 1, discrepancy_log, judge_trajectory_s3_uri
+                return results, attempt - 1, discrepancy_log, judge_trajectory_url
 
             logger.warning(
                 "Judge rubric output discrepancy (attempt %d/%d, verifier_id=%s): %s",

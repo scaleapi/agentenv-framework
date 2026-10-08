@@ -28,7 +28,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
 )
 from agent_env.store import Filter, LocalSqliteDocumentStore, VersionedEntityStore
 from agent_env.store.base import NotFoundError
-from agent_env.store.ids import fs_safe, key_segment
+from agent_env.store.ids import fs_safe, image_repository, key_segment
 from agent_env.store.routing import LocalNamespaceDocumentStore
 from agent_env.task import Task
 from tst.unit.store.fakes import FakeDocumentStore, FakeImageStore, SigningObjectStore, reattach_for_snapshot
@@ -204,7 +204,7 @@ def test_validating_an_local_agent_on_a_remote_provider_keeps_its_fixtures_and_t
     skills = f"a2a_validator/validator_skill/{key_segment(agent.id)}-v1"
     assert sorted(get_config().get_object_store_for(agent.id).list("a2a_validator/")) == [
         f"{fixtures}/clip.mp4", f"{fixtures}/red.png",
-        *(f"{skills}/{name}/SKILL.md" for name in ("validator-probe-bundle", "validator-test-s3")),
+        *(f"{skills}/{name}/SKILL.md" for name in ("validator-probe-bundle", "validator-test-object")),
     ]
     assert configured.list("") == []
     assert _local().count("tasks", Filter()) == 1
@@ -213,7 +213,7 @@ def test_validating_an_local_agent_on_a_remote_provider_keeps_its_fixtures_and_t
 
 def test_a_put_validates_an_local_entity_like_any_other(local_stores, monkeypatch):
     image_url = local_stores.get_object_store().put("artifacts/docker_image/srv-img/1/x.tar.gz", b"x")
-    image = DockerImageArtifact.put_tar("srv-img", description="d", image_name="reg/srv:v1", tar_gz_s3_url=image_url)
+    image = DockerImageArtifact.put_tar("srv-img", description="d", image_name="reg/srv:v1", tar_gz_object_url=image_url)
     MCPServerEnv.put(id="srv", docker_image_artifact=image, environment_name="svc")
     _validation_runs_nothing(monkeypatch)
 
@@ -224,18 +224,20 @@ def test_a_put_validates_an_local_entity_like_any_other(local_stores, monkeypatc
     assert [d["id"] for d in _local().query("tasks", Filter())] == ["@local/~/bundle/envs/m__validate-v1"]
 
 
-def test_snapshotting_an_local_env_stops_at_the_local_store_it_cannot_presign_before_the_sandbox_runs_anything(
+def test_snapshotting_an_local_env_copies_its_image_off_the_sandbox_into_the_local_store(
     local_stores, cli_routing, tmp_path, monkeypatch,
 ):
     configured = SigningObjectStore(str(tmp_path / "configured-objects"))
     set_object_store(configured)
     sandbox = reattach_for_snapshot(monkeypatch, LOCAL_ENV, 1, UNIVERSE, 1)
 
-    with pytest.raises(RuntimeError, match="LocalFilesystemObjectStore can't presign uploads"):
-        asyncio.run(EnvSnapshot.create("instance-1"))
+    snapshot = asyncio.run(EnvSnapshot.create("instance-1"))
 
-    assert sandbox.scripts == []
-    assert configured.list("") == [] and get_config().get_object_store_for(LOCAL_ENV).list("") == []
+    local = get_config().get_object_store_for(LOCAL_ENV)
+    image = DockerImageArtifact.get(snapshot.db_image_artifact_id, snapshot.db_image_artifact_version)
+    assert local.get(image.tar_gz_object_url) == sandbox.tarball
+    assert configured.list("") == []
+    assert not any("curl" in script for script in sandbox.scripts)
 
 
 @pytest.mark.parametrize("env_id, universe_id", [(LOCAL_ENV, "registry-universe"), ("registry-env", UNIVERSE)],
@@ -259,6 +261,61 @@ def test_under_the_cli_a_bare_id_derived_from_an_local_one_is_refused_before_any
 
     assert local_stores.get_object_store().list("") == []
     LocalSqliteDocumentStore(str(state_root() / "services.db")).check_id(derived)
+
+
+LOCAL_AGENT = "@local/~/bundle/agents/a"
+
+
+@pytest.mark.parametrize("module, argv, images", [
+    ("agent_env.cli.a2a_agent.put", ["a2a-agent", "put", "--id", LOCAL_AGENT, "--skip-validation"],
+     [f"{LOCAL_AGENT}__agent_image"]),
+    ("agent_env.cli.env.mcp_server", ["env", "mcp-server", "put", "--id", LOCAL_ENV, "--environment-name", "items"],
+     [f"{LOCAL_ENV}__env_image"]),
+    ("agent_env.cli.env.website", ["env", "website", "put", "--id", LOCAL_ENV, "--environment-name", "shop",
+                                   "--skip-validation", "--backend-dockerfile", "{dockerfile}"],
+     [f"{LOCAL_ENV}__backend_image", f"{LOCAL_ENV}__frontend_image"]),
+], ids=["a2a-agent", "mcp-server", "website"])
+def test_a_put_with_an_local_id_builds_and_writes_its_images_under_ids_derived_from_it(
+    local_stores, tmp_path, monkeypatch, module, argv, images,
+):
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text("FROM scratch\n")
+    tags = []
+    monkeypatch.setattr(importlib.import_module(module), "build_image",
+                        lambda dockerfile, context, tag, **kwargs: tags.append(tag))
+    tarball = local_stores.get_object_store().put("image.tar.gz", b"x")
+    monkeypatch.setattr(DockerImageArtifact, "put", classmethod(lambda cls, id, *, description, image_name, **kwargs: (
+        cls.put_tar(id, description=description, image_name=image_name, tar_gz_object_url=tarball))))
+    argv = [arg.format(dockerfile=dockerfile) for arg in argv]
+    flag = "--frontend-dockerfile" if "--backend-dockerfile" in argv else "--dockerfile"
+
+    result = CliRunner().invoke(cli, [*argv, flag, str(dockerfile)])
+
+    assert result.exit_code == 0, result.output
+    assert tags == [image_repository(image) for image in images] and all(tag.startswith("local/") for tag in tags)
+    saved = {d["id"]: d["image_name"] for d in _local().query("artifacts", Filter())}
+    assert saved == {image: image_repository(image) for image in images}
+    (owner,) = _local().query("a2a_agents" if module.endswith(".put") else "envs", Filter())
+    assert sorted(ref["id"] for ref in owner.values() if isinstance(ref, dict) and "id" in ref) == images
+    assert not _documents().path.exists() or _documents().count("artifacts", Filter()) == 0
+
+
+@pytest.mark.parametrize("module, argv", [
+    ("agent_env.cli.a2a_agent.put", ["a2a-agent", "put", "--skip-validation"]),
+    ("agent_env.cli.env.mcp_server", ["env", "mcp-server", "put", "--environment-name", "items"]),
+], ids=["a2a-agent", "mcp-server"])
+def test_a_put_whose_image_id_would_be_too_long_is_refused_before_it_builds(
+    local_stores, tmp_path, monkeypatch, module, argv,
+):
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text("FROM scratch\n")
+    monkeypatch.setattr(importlib.import_module(module), "build_image", lambda *args, **kwargs: pytest.fail("it built"))
+    longest = "@local/~/" + "x" * (4096 - len("@local/~/"))  # as long as an @local id may be, so a suffix can't fit
+
+    result = CliRunner().invoke(cli, [*argv, "--id", longest, "--dockerfile", str(dockerfile)])
+
+    assert result.exit_code == 1 and "Error:" in result.output, result.output
+    assert not _local().path.exists() or _local().count("artifacts", Filter()) == 0
 
 
 class _Deployable:

@@ -553,10 +553,10 @@ class TestAgentContainerPath:
 
         assert calls == [
             ("sudo", "docker", "ps", "--format", "{{.Names}}"),
-            ("sudo", "docker", "exec", "agent-local-agent1", "find", "/app/artifact", "-type", "f", "-printf", "%P\n"),
+            ("sudo", "docker", "exec", "-u", "0", "agent-local-agent1", "find", "/app/artifact", "-type", "f", "-printf", "%P\n"),
         ]
         assert _exec_args(sandbox, container, ("bash", "-c", "base64 < /app/artifact/a.txt")) == (
-            "sudo", "docker", "exec", "agent-local-agent1", "bash", "-c", "base64 < /app/artifact/a.txt")
+            "sudo", "docker", "exec", "-u", "0", "agent-local-agent1", "bash", "-c", "base64 < /app/artifact/a.txt")
 
     def test_a_reattached_local_agent_never_borrows_another_runs_container(self, tmp_path, monkeypatch):
         sandbox, calls = _reattached_local_agent(tmp_path, monkeypatch, running="a2a-agent-other\n")

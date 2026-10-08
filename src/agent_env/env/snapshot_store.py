@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import logging
 import re
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
+from agent_env.providers.sandbox_providers.sandbox import upload_vm_file
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER
 from agent_env.config import get_config
 from agent_env.store.document_store import AbsentOrNull, Filter, Sort
@@ -132,8 +133,6 @@ class EnvSnapshot:
                 f"(this env's state backend does not support it: {type(state_provider).__name__ if state_provider else None}). "
                 "Remote-backed deploys use the normal per-service load."
             )
-        # Fail on an unsignable store before any command runs on the sandbox; the upload presigns a fresh url.
-        await asyncio.to_thread(_presigned_put_url, *_tarball_destination(env_id, universe_id))
 
         log("check_changelog", "Checking changelog...", 20)
         is_clean = await _check_changelog_empty(multi_env._sandbox)
@@ -141,7 +140,7 @@ class EnvSnapshot:
         log("check_changelog", f"Changelog: {'clean' if is_clean else 'dirty'}", 30)
 
         log("snapshot_db", "Exporting servicedb data...", 40)
-        tar_gz_s3_url = await _snapshot_servicedb(multi_env._sandbox, env_id, universe_id, log)
+        tar_gz_object_url = await _snapshot_servicedb(multi_env._sandbox, env_id, universe_id, log)
 
         log("store_artifact", "Storing Docker image artifact...", 70)
         logger.info("Storing snapshot as DockerImageArtifact...")
@@ -153,7 +152,7 @@ class EnvSnapshot:
                 f"universe={universe_id} v{universe_version}"
             ),
             image_name=image_tag,
-            tar_gz_s3_url=tar_gz_s3_url,
+            tar_gz_object_url=tar_gz_object_url,
         )
         logger.info(f"Artifact: id={artifact.id} version={artifact.version}")
         log("store_artifact", f"Artifact: id={artifact.id} version={artifact.version}", 80)
@@ -191,9 +190,9 @@ async def _check_changelog_empty(sandbox) -> bool:
 
 
 async def _snapshot_servicedb(sandbox, env_id: str, environment_universe_id: str, log: ProgressCallback) -> str:
-    """Export pgdata from sandbox servicedb, build Docker image on sandbox, upload to S3.
+    """Export pgdata from sandbox servicedb, build Docker image on sandbox, upload it to the object store.
 
-    Returns the S3 URL of the uploaded tar.gz.
+    Returns the object URL of the uploaded tar.gz.
     """
     from agent_env.env.envs.service_db import DATABASE_SERVICE_NAME
     from agent_env.providers.env_providers.constants import DOCKER_COMPOSE_PATH
@@ -230,12 +229,9 @@ async def _snapshot_servicedb(sandbox, env_id: str, environment_universe_id: str
     await sandbox.exec_script(f"docker save {image_tag} | gzip > /tmp/snapshot-image.tar.gz")
 
     object_store, object_url = _tarball_destination(env_id, environment_universe_id)
-    put_url = await asyncio.to_thread(_presigned_put_url, object_store, object_url)
     log("snapshot_db", "Uploading Docker image...", 60)
     logger.info(f"Uploading Docker image to {object_url}...")
-    await sandbox.exec_script(
-        f'curl -fsSL -X PUT --upload-file /tmp/snapshot-image.tar.gz "{put_url}"'
-    )
+    await upload_vm_file(sandbox, "/tmp/snapshot-image.tar.gz", object_store, object_url)
 
     await sandbox.exec_script(f"rm -rf /tmp/snapshot-build /tmp/snapshot-image.tar.gz && docker rmi {image_tag}")
 
@@ -257,20 +253,13 @@ def _image_tag(env_id: str, universe_id: str) -> str:
 
 
 def _tarball_destination(env_id: str, universe_id: str) -> tuple[ObjectStore, str]:
-    """The object store the snapshot image's tarball is uploaded to, and its url there."""
+    """The object store a snapshot image's tarball is uploaded to, and a url there of its own: an artifact version's
+    tarball never changes under it, and a write-once store takes a second snapshot of the same env and universe."""
     config = get_config()
     store = config.get_object_store_for(env_id)
-    key = f"env-snapshots/{key_segment(env_id)}/{key_segment(universe_id)}/{_image_tag(env_id, universe_id)}.tar.gz"
+    tarball = f"{_image_tag(env_id, universe_id)}-{uuid.uuid4().hex[:16]}.tar.gz"
+    key = f"env-snapshots/{key_segment(env_id)}/{key_segment(universe_id)}/{tarball}"
     return store, store.object_url(f"{config.get_artifact_key_prefix()}{key}")
-
-
-def _presigned_put_url(object_store: ObjectStore, object_url: str) -> str:
-    put_url = object_store.signed_put_url(object_url)
-    if put_url is None:
-        raise RuntimeError(
-            f"{type(object_store).__name__} can't presign uploads; env snapshots need a signable object store or local execution."
-        )
-    return put_url
 
 
 class EnvSnapshotStore:

@@ -65,7 +65,7 @@ def _verifier(**kw) -> RubricsVerifierTaskStep:
 
 
 def _ctx(**pr) -> TaskStepContext:
-    base = dict(prompt_id="p1", response="done", prompt_text="reserve", agent_trajectory_s3_uri="s3://b/raw.json")
+    base = dict(prompt_id="p1", response="done", prompt_text="reserve", agent_trajectory_object_url="s3://b/raw.json")
     base.update(pr)
     return TaskStepContext(prompt_responses=[PromptResponse(**base)])
 
@@ -192,8 +192,10 @@ async def test_execute_writes_the_mistakes_entry_from_the_same_call_under_the_de
     # The second entry: trajectory_mistakes shape, the same pointers, provenance.
     assert second["format"] == "trajectory_mistakes" and "judge_output_format" not in second
     assert second["source_verifier_id"] == "rubric"
-    assert second["judge_trajectory_s3_uri"] == main["judge_trajectory_s3_uri"] == "s3://judge/trajectory.json"
-    assert second["compact_trajectory_s3_uri"] == main["compact_trajectory_s3_uri"]
+    for legacy, neutral in (("judge_trajectory_s3_uri", "judge_trajectory_object_url"),
+                            ("compact_trajectory_s3_uri", "compact_trajectory_object_url")):
+        assert second[legacy] == second[neutral] == main[legacy] == main[neutral]
+    assert main["judge_trajectory_object_url"] == "s3://judge/trajectory.json"
     assert not {"reasoning", "checks"} & set(second)
 
     # ...its rows are exactly what the standalone parser builds for the same findings + derived coverage

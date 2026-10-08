@@ -13,7 +13,7 @@ from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, Lo
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandbox, ModalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandbox, ModalVmSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import Sandbox, VmSandbox
-from agent_env.providers.sandbox_providers.sandbox_provider import _BUILTIN_SANDBOX_PROVIDERS, SandboxProvider, build_sandbox_provider
+from agent_env.providers.sandbox_providers.sandbox_provider import _BUILTIN_SANDBOX_PROVIDERS, SandboxProvider, _pull, build_sandbox_provider
 from agent_env.store import ImageStore, RegistryAuth
 from tst.util.exec_scripts import script_run
 
@@ -117,6 +117,45 @@ async def test_default_create_container_mutates_mode_to_container():
     )
     assert result is fake_vm
     assert result.mode == "container"
+
+
+@pytest.mark.asyncio
+async def test_a_create_container_cancelled_during_the_pull_terminates_the_vm():
+    pulling = asyncio.Event()
+
+    class _HangingVm(VmSandbox):
+        type = "fake-vm"
+
+        def __init__(self):
+            self.sandbox_id = "vm-fake"
+            self.tunnel_urls = {}
+            self.vnc_url = None
+            self.mode = "vm"
+            self.terminated = False
+
+        async def terminate(self) -> None:
+            self.terminated = True
+
+        async def exec_script(self, script: str) -> str:
+            pulling.set()
+            await asyncio.Event().wait()
+            return ""
+
+    vm = _HangingVm()
+
+    class _VmStyleProvider(SandboxProvider):
+        async def create_vm(self, **kwargs):
+            return vm
+
+        async def create_sandbox(self, **kwargs):
+            raise NotImplementedError
+
+    task = asyncio.ensure_future(_VmStyleProvider().create_container(image_name="nginx:latest", port=8080, env={}))
+    await pulling.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert vm.terminated
 
 
 @pytest.mark.asyncio
@@ -320,7 +359,7 @@ class _RecordingVm(VmSandbox):
 
 
 @pytest.mark.asyncio
-async def test_load_s3_file_curl_retries_dns_failures():
+async def test_load_object_file_curl_retries_dns_failures():
     """The in-VM S3 download must use --retry-all-errors so a transient
     `curl: (6) Could not resolve host` is retried locally (curl does not retry
     exit 6 by default, and --retry-connrefused does not cover it)."""
@@ -334,7 +373,7 @@ async def test_load_s3_file_curl_retries_dns_failures():
     set_object_store(_Signing())
     try:
         vm = _RecordingVm()
-        await vm.load_s3_file("s3://artifact-bucket/foo/bar.tar", "/tmp/bar.tar")
+        await vm.load_object_file("s3://artifact-bucket/foo/bar.tar", "/tmp/bar.tar")
     finally:
         reset_config()
 
@@ -422,3 +461,37 @@ def test_cpu_floor_differs_between_container_and_vm_backends():
     assert cpu_default(ModalSandboxProvider, "create_sandbox") == 0.125
     assert cpu_default(ModalSandboxProvider, "create_container") == 0.125
     assert cpu_default(ModalVmSandboxProvider, "create_sandbox") == 0.5
+
+
+class _PullingVm(VmSandbox):
+    def __init__(self, first_pull_error: str | None):
+        self.scripts: list[str] = []
+        self._first_pull_error = first_pull_error
+
+    async def terminate(self) -> None:
+        pass
+
+    async def exec_script(self, script: str, *, max_retries: int = 0) -> str:
+        self.scripts.append(script)
+        if self._first_pull_error and len(self.scripts) == 1:
+            raise RuntimeError(f"Script failed (exit 1):\nstdout: \nstderr: {self._first_pull_error}")
+        return ""
+
+
+@pytest.mark.asyncio
+async def test_an_image_with_nothing_for_this_platform_is_pulled_for_amd64():
+    """An Apple Silicon host has no arm64 variant of an amd64-only image; its Docker runs the amd64 one emulated."""
+    sandbox = _PullingVm("Error response from daemon: no matching manifest for linux/arm64/v8 in the manifest list entries")
+
+    await _pull(sandbox, "registry/agent:v1")
+
+    assert sandbox.scripts == ["docker pull registry/agent:v1", "docker pull --platform linux/amd64 registry/agent:v1"]
+
+
+@pytest.mark.asyncio
+async def test_any_other_pull_failure_is_raised_as_it_was():
+    sandbox = _PullingVm("Error response from daemon: pull access denied for registry/agent")
+
+    with pytest.raises(RuntimeError, match="pull access denied"):
+        await _pull(sandbox, "registry/agent:v1")
+    assert sandbox.scripts == ["docker pull registry/agent:v1"]

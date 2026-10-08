@@ -117,7 +117,7 @@ async def test_add_skill_negotiates_bundle_from_legacy_config_spelling(
 ) -> None:
     await A2AAgent.add_skill(
         _deployed(bundle=True, config_key="config"),
-        Skill(name="review", description="Review work", s3_url=prefix),
+        Skill(name="review", description="Review work", object_url=prefix),
     )
 
     assert agent.requests[0]["url"] == "https://agent.example.test/custom/skills"
@@ -177,7 +177,7 @@ async def test_an_object_skill_is_refused_by_an_agent_without_the_bundle_form(
     with pytest.raises(RuntimeError, match="skill add: the agent does not advertise the object form"):
         await A2AAgent.add_skill(
             _deployed(bundle=False),
-            Skill(name="review", description="Review work", s3_url=prefix),
+            Skill(name="review", description="Review work", object_url=prefix),
         )
 
     assert agent.requests == []
@@ -194,7 +194,7 @@ async def test_an_object_skill_on_a_store_without_grants_is_refused_before_any_r
     with pytest.raises(RuntimeError, match="does not issue transfer grants"):
         await A2AAgent.add_skill(
             _deployed(bundle=True, legacy=legacy),
-            Skill(name="review", description="Review work", s3_url=prefix),
+            Skill(name="review", description="Review work", object_url=prefix),
         )
 
     assert agent.requests == []
@@ -207,7 +207,7 @@ async def test_an_object_skill_is_refused_when_the_stores_grants_do_not_reach_th
     with pytest.raises(RuntimeError, match="grants do not reach agents on the 'modal' sandbox provider"):
         await A2AAgent.add_skill(
             _deployed(bundle=True, sandbox_type="modal"),
-            Skill(name="review", description="Review work", s3_url=prefix),
+            Skill(name="review", description="Review work", object_url=prefix),
         )
 
     assert agent.requests == []
@@ -241,12 +241,14 @@ async def test_inline_skill_does_not_require_bundle_support(
 
 
 @pytest.mark.asyncio
-async def test_legacy_deploy_skill_dict_negotiates_a_portable_bundle(
-    store: GrantingObjectStore, prefix: str, agent: _Agent
+@pytest.mark.parametrize("key", ["object_url", "skill_s3_url", "s3_uri"])
+async def test_a_deploy_skill_dict_naming_an_object_negotiates_a_portable_bundle(
+    store: GrantingObjectStore, prefix: str, agent: _Agent, key: str
 ) -> None:
+    """``object_url``, or either of its older names, which stored steps may still carry."""
     await A2AAgent.register_skill(
         _deployed(bundle=True),
-        **_skill_fields({"name": "review", "description": "Review work", "s3_uri": prefix}),
+        **_skill_fields({"name": "review", "description": "Review work", key: prefix}),
     )
 
     assert set(agent.requests[0]["json"]) == {"name", "description", "skill_bundle"}
@@ -317,7 +319,7 @@ async def test_a_bundle_skill_error_keeps_the_agents_body_out_of_logs(
     with pytest.raises(httpx.HTTPStatusError) as raised:
         await A2AAgent.add_skill(
             _deployed(bundle=True),
-            Skill(name="review", description="Review work", s3_url=prefix),
+            Skill(name="review", description="Review work", object_url=prefix),
         )
 
     assert str(raised.value) == "skill add (review) failed with HTTP 400"
@@ -384,6 +386,6 @@ async def test_an_s3_url_skill_s_skill_md_is_read_off_the_event_loop(
 
     monkeypatch.setattr(httpx.AsyncClient, "post", post)
 
-    await A2AAgent.add_skill(_deployed(bundle=True), Skill(name="review", description="Review work", s3_url=prefix))
+    await A2AAgent.add_skill(_deployed(bundle=True), Skill(name="review", description="Review work", object_url=prefix))
 
     assert on_loop and not any(on_loop)

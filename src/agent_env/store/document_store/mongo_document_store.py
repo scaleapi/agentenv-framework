@@ -168,6 +168,12 @@ class MongoDocumentStore(DocumentStore):
         )
         return _strip_id(doc)
 
+    def find_many_by_id(self, collection: str, id_field: str, ids: list[str]) -> list[dict]:
+        found = {}
+        for doc in self.query(collection, Filter().where(id_field, In(list(dict.fromkeys(ids))))):
+            found.setdefault(doc[id_field], doc)
+        return [found[identity] for identity in dict.fromkeys(ids) if identity in found]
+
     def query(
         self,
         collection: str,

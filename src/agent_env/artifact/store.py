@@ -94,7 +94,7 @@ class ArtifactQuery(QueryBuilder["Artifact"]):
 
 
 class ArtifactStore:
-    """Store for artifact persistence in MongoDB and S3."""
+    """Store for artifact persistence in the configured document and object stores."""
 
     def __init__(self) -> None:
         self._versioned_cache: VersionedEntityStoreCache["Artifact"] = VersionedEntityStoreCache(

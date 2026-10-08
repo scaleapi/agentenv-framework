@@ -221,9 +221,9 @@ def test_stdout_and_stderr_are_kept_under_the_fixture_prefix(local_stores, monke
     monkeypatch.setattr(sandbox_provider, "get_sandbox_provider", lambda: provider)
     uploaded: list[str] = []
 
-    def record(text, artifact_id, description, s3_url):
-        uploaded.append(s3_url)
-        return SimpleNamespace(id=artifact_id, version=1, object_url=s3_url)
+    def record(text, artifact_id, description, object_url):
+        uploaded.append(object_url)
+        return SimpleNamespace(id=artifact_id, version=1, object_url=object_url)
 
     monkeypatch.setattr(Step, "_upload_text_artifact", staticmethod(record))
     ctx = TaskStepContext()
@@ -235,6 +235,10 @@ def test_stdout_and_stderr_are_kept_under_the_fixture_prefix(local_stores, monke
     outputs = get_config().get_object_store().object_url("fx/verifier-outputs/scrape/")
     assert [url.rsplit("/", 1)[-1] for url in uploaded] == ["stdout.txt", "stderr.txt"]
     assert all(url.startswith(outputs) for url in uploaded)
+    [recorded] = ctx.metadata["verifications"].values()
+    assert [(recorded[k]["s3_url"], recorded[k]["object_url"]) for k in ("stdout_artifact", "stderr_artifact")] == [
+        (url, url) for url in uploaded
+    ]
 
 
 def test_stdout_and_stderr_upload_off_the_event_loop(local_stores, monkeypatch):
@@ -243,9 +247,9 @@ def test_stdout_and_stderr_upload_off_the_event_loop(local_stores, monkeypatch):
     monkeypatch.setattr(sandbox_provider, "get_sandbox_provider", lambda: provider)
     on_loop: list[bool] = []
 
-    def record(text, artifact_id, description, s3_url):
+    def record(text, artifact_id, description, object_url):
         on_loop.append(on_event_loop())
-        return SimpleNamespace(id=artifact_id, version=1, object_url=s3_url)
+        return SimpleNamespace(id=artifact_id, version=1, object_url=object_url)
 
     monkeypatch.setattr(Step, "_upload_text_artifact", staticmethod(record))
     ctx = TaskStepContext()
@@ -268,9 +272,9 @@ def test_runs_and_retries_in_one_second_keep_their_outputs_apart(local_stores, m
     monkeypatch.setattr(verifier_module.time, "time", lambda: 1_790_000_000.0)
     uploads: list[tuple[str, str]] = []
 
-    def record(text, artifact_id, description, s3_url):
-        uploads.append((artifact_id, s3_url))
-        return SimpleNamespace(id=artifact_id, version=1, object_url=s3_url)
+    def record(text, artifact_id, description, object_url):
+        uploads.append((artifact_id, object_url))
+        return SimpleNamespace(id=artifact_id, version=1, object_url=object_url)
 
     monkeypatch.setattr(Step, "_upload_text_artifact", staticmethod(record))
 

@@ -1,6 +1,8 @@
 """What the bundle tests share: laying out and planning a folder, the @local namespace's store, and a
 configured store that fails any test reaching it."""
 
+from pathlib import Path
+
 from agent_env.bundle import parse_bundle
 from agent_env.bundle.plan import plan_bundle
 from agent_env.bundle.resolve import resolve_bundle
@@ -13,6 +15,12 @@ def layout(root, files):
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
         (root / rel).write_text(text)
     return root
+
+
+def listing(folder):
+    """The files under ``folder``, as POSIX paths relative to it, a link marked with a trailing ``@``."""
+    return sorted(path.relative_to(folder).as_posix() + ("@" if path.is_symlink() else "")
+                  for path in Path(folder).rglob("*") if not path.is_dir() or path.is_symlink())
 
 
 def plan_of(root):

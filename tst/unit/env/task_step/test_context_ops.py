@@ -1,5 +1,6 @@
 """Unit tests for context_ops — path-level diff + UpdateSpec compilation."""
 
+import copy
 import dataclasses
 
 import pytest
@@ -105,6 +106,31 @@ def test_agents_and_responses_lists_use_add_to_set():
     ops = build_context_update_ops(pre, post)
     assert "context.deployed_agents" in ops.add_to_sets
     assert "context.prompt_responses" in ops.add_to_sets
+
+
+@pytest.mark.parametrize("append_new", [False, True])
+def test_response_history_diff_uses_linear_comparisons(monkeypatch, append_new):
+    pre = TaskStepContext(prompt_responses=[_response(f"p{i}") for i in range(100)])
+    post = copy.deepcopy(pre)
+    if append_new:
+        post.prompt_responses.append(_response("new"))
+
+    comparisons = 0
+    original_eq = PromptResponse.__eq__
+
+    def count_equal(self, other):
+        nonlocal comparisons
+        comparisons += 1
+        return original_eq(self, other)
+
+    monkeypatch.setattr(PromptResponse, "__eq__", count_equal)
+    ops = build_context_update_ops(pre, post)
+
+    if append_new:
+        assert ops.add_to_sets["context.prompt_responses"] == [dataclasses.asdict(_response("new"))]
+    else:
+        assert ops.is_empty()
+    assert comparisons <= 2 * len(pre.prompt_responses)
 
 
 def test_scalar_nil_to_value_emits_set():
@@ -325,7 +351,6 @@ def test_filename_keyed_output_urls_falls_back_to_wholesale_set():
 
 def _apply_ops_to_mirror(doc: dict, ops: ContextUpdateOps) -> dict:
     """Apply ops to an in-memory dict, modeling Mongo's $set / $unset / $addToSet."""
-    import copy
     out = copy.deepcopy(doc)
 
     def descend(d: dict, path: list[str]) -> dict:
@@ -356,8 +381,8 @@ def test_in_place_mutation_of_appended_list_item_duplicates_in_doc():
     """Regression: mutating an item already present in a top-level $addToSet list
     re-adds it as a NEW element instead of updating in place.
 
-    Reproduces the production bug where ``rubrics_verifier`` set
-    ``compact_trajectory_s3_uri`` on a ``prompt_response`` that ``prompt_agent``
+    Reproduces the production bug where ``rubrics_verifier`` set the compacted
+    trajectory's URL on a ``prompt_response`` that ``prompt_agent``
     had already appended to ``context.prompt_responses``. The mutated item is
     BSON-unequal to the stored one, so the diff emits it via ``$addToSet`` and
     the instance ends up with two near-identical prompt_responses — the hub then
@@ -370,7 +395,7 @@ def test_in_place_mutation_of_appended_list_item_duplicates_in_doc():
 
     # Model the (now-fixed) in-place mutation: same logical item, one field changed.
     mutated = _response("p1")
-    mutated.compact_trajectory_s3_uri = "s3://bucket/compact.json"
+    mutated.tool_call_count = (mutated.tool_call_count or 0) + 1
     post = TaskStepContext(prompt_responses=[mutated])
 
     ops = build_context_update_ops(pre, post)

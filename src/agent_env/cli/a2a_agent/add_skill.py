@@ -5,15 +5,17 @@ from typing import Optional
 import click
 
 from agent_env.a2a_agent import A2AAgent
+from agent_env.artifact.artifacts.skill import fetch_skill_md, parse_skill_md
 from agent_env.a2a_agent.store import get_a2a_agent_instance_store
 from agent_env.store.base import NotFoundError
+from agent_env.cli.utils import deprecated_option, renamed_value
 from agent_env.task_step.task_steps.add_skills import Skill
 
 
 # ---------------------------------------------------------------------------
 #   agent-env a2a-agent add-skill --instance-id <id> --skill-artifact-id code-review
 #   agent-env a2a-agent add-skill --instance-id <id> --skill-md-path ./SKILL.md
-#   agent-env a2a-agent add-skill --instance-id <id> --skill-s3-url s3://bucket/prefix/
+#   agent-env a2a-agent add-skill --instance-id <id> --skill-object-url s3://bucket/prefix/
 # ---------------------------------------------------------------------------
 
 
@@ -40,23 +42,26 @@ from agent_env.task_step.task_steps.add_skills import Skill
     help="Local SKILL.md file to register inline",
 )
 @click.option(
-    "--skill-s3-url",
-    "skill_s3_url",
+    "--skill-object-url",
+    "skill_object_url",
     default=None,
-    help="S3 prefix containing a skill directory",
+    help="Object-store prefix containing a skill directory",
 )
+@deprecated_option("--skill-s3-url", "skill_s3_url", "--skill-object-url")
 def add_skill(
     instance_id: str,
     skill_artifact_id: Optional[str],
     skill_artifact_version: Optional[int],
     skill_md_path: Optional[Path],
+    skill_object_url: Optional[str],
     skill_s3_url: Optional[str],
 ):
     """Register a skill against a deployed A2A agent's /ext/skill-config endpoint."""
-    sources = [bool(skill_artifact_id), bool(skill_md_path), bool(skill_s3_url)]
+    skill_object_url = renamed_value("--skill-object-url", skill_object_url, "--skill-s3-url", skill_s3_url)
+    sources = [bool(skill_artifact_id), bool(skill_md_path), bool(skill_object_url)]
     if sum(sources) != 1:
         click.echo(
-            "Error: specify exactly one of --skill-artifact-id, --skill-md-path, --skill-s3-url",
+            "Error: specify exactly one of --skill-artifact-id, --skill-md-path, --skill-object-url",
             err=True,
         )
         raise SystemExit(1)
@@ -72,16 +77,12 @@ def add_skill(
     if skill_artifact_id is not None:
         skill = Skill(skill_artifact_id=skill_artifact_id, skill_artifact_version=skill_artifact_version)
         click.echo(f"Registering SkillArtifact '{skill_artifact_id}' v{skill_artifact_version or 'latest'}...")
-    elif skill_s3_url is not None:
-        from agent_env.artifact.artifacts.skill import _fetch_skill_md, _parse_skill_md
-
-        frontmatter, _ = _parse_skill_md(_fetch_skill_md(skill_s3_url))
-        skill = Skill(name=frontmatter["name"], description=frontmatter["description"], s3_url=skill_s3_url)
-        click.echo(f"Registering skill from {skill_s3_url} (name={skill.name})...")
+    elif skill_object_url is not None:
+        frontmatter, _ = parse_skill_md(fetch_skill_md(skill_object_url))
+        skill = Skill(name=frontmatter["name"], description=frontmatter["description"], object_url=skill_object_url)
+        click.echo(f"Registering skill from {skill_object_url} (name={skill.name})...")
     else:
-        from agent_env.artifact.artifacts.skill import _parse_skill_md
-
-        frontmatter, body = _parse_skill_md(skill_md_path.read_bytes())
+        frontmatter, body = parse_skill_md(skill_md_path.read_bytes())
         skill = Skill(
             name=frontmatter["name"],
             description=frontmatter["description"],

@@ -6,7 +6,7 @@ Validates what unit tests structurally can't — that
 they are intact and parseable *from inside* the sandbox (the deterministic
 ceiling for "loaded by the agent").
 
-Uses a **bare Modal sandbox**: ``ModalSandbox.write_file_from_s3`` streams into
+Uses a **bare Modal sandbox**: ``ModalSandbox.write_file_from_object`` streams into
 the sandbox FS directly, so no agent needs to be deployed. The VM-provider path
 (``docker cp … agent-api:…`` + the container ``mkdir -p`` fix) requires a
 deployed agent's container and is covered by the full-agent e2e / manual runs.
@@ -62,7 +62,7 @@ _TOTAL_EVENTS = len(TURN1_SPANS) + len(TURN2_SPANS)
 def per_turn_uris():
     """Upload two per-turn OTel-span trajectories through the configured object store.
 
-    The verifier hands them to the sandbox as S3 objects (``Sandbox.write_file_from_s3``), so a store
+    The verifier hands them to the sandbox as S3 objects (``Sandbox.write_file_from_object``), so a store
     that mints another scheme fails here rather than inside the container. The objects stay behind:
     the ObjectStore API has no delete, and the prefix is unique per run."""
     store = get_config().get_object_store()

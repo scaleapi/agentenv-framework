@@ -130,9 +130,10 @@ def test_provider_init_is_self_contained():
 
 # ── object downloads: the aria2c range pool ───────────────────────────────────────
 
-from agent_env.config import reset_config  # noqa: E402
+from agent_env.config import get_config, reset_config  # noqa: E402
 from agent_env.providers.sandbox_providers import modal_vm_sandbox as mvs  # noqa: E402
 from agent_env.store import set_object_store  # noqa: E402
+from tst.unit.store.fakes import ConfiguredObjectStore  # noqa: E402
 
 URL = "https://bucket.s3.amazonaws.com/artifacts/file/x/1/x.zip?X-Amz-Signature=abc&X-Amz-Expires=3600"
 
@@ -230,7 +231,7 @@ def test_parse_download_summary():
 async def test_download_first_attempt_ok(store):
     """The URL signed to pick the path is the first attempt's."""
     vm = _ScriptedVm([_summary()])
-    await vm.load_s3_file("s3://b/x.zip", "/app/x.zip")
+    await vm.load_object_file("s3://b/x.zip", "/app/x.zip")
     assert len(vm.downloads()) == 1
     assert store.minted == 1
 
@@ -238,7 +239,7 @@ async def test_download_first_attempt_ok(store):
 @pytest.mark.asyncio
 async def test_download_retries_with_a_fresh_url(store):
     vm = _ScriptedVm([_summary(rc=22, msg="status=403 <url>"), _summary()])
-    await vm.load_s3_file("s3://b/x.zip", "/app/x.zip")
+    await vm.load_object_file("s3://b/x.zip", "/app/x.zip")
     first, second = vm.downloads()
     assert "?n=1" in first and "?n=2" in second
     assert 'rm -f "$out" "$out.aria2"' in first and 'rm -f "$out"' not in second  # attempt 2 resumes
@@ -249,7 +250,7 @@ async def test_a_stale_probe_url_is_re_signed(store, monkeypatch):
     """A download that queued for a slot can outlive the URL signed to pick its path."""
     monkeypatch.setattr(mvs, "_FRESH_URL_SECONDS", -1)
     vm = _ScriptedVm([_summary()])
-    await vm.load_s3_file("s3://b/x.zip", "/app/x.zip")
+    await vm.load_object_file("s3://b/x.zip", "/app/x.zip")
     assert "?n=2" in vm.downloads()[0]
 
 
@@ -260,7 +261,7 @@ async def test_the_first_script_to_run_clears_stale_state_even_after_a_failed_si
     signs = iter([store.signed_get_url, _refuse, store.signed_get_url])
     monkeypatch.setattr(store, "signed_get_url", lambda url, expires_in=3600: next(signs)(url))
     vm = _ScriptedVm([_summary()])
-    await vm.load_s3_file("s3://b/x.zip", "/app/x.zip")
+    await vm.load_object_file("s3://b/x.zip", "/app/x.zip")
     [first] = vm.downloads()
     assert 'rm -f "$out" "$out.aria2"' in first
 
@@ -270,7 +271,7 @@ async def test_a_failed_re_sign_costs_one_attempt(store, monkeypatch):
     signs = iter([store.signed_get_url, _refuse, store.signed_get_url])
     monkeypatch.setattr(store, "signed_get_url", lambda url, expires_in=3600: next(signs)(url))
     vm = _ScriptedVm([_summary(rc=1, msg="recv failure"), _summary()])
-    await vm.load_s3_file("s3://b/x.zip", "/app/x.zip")
+    await vm.load_object_file("s3://b/x.zip", "/app/x.zip")
     assert len(vm.downloads()) == 2
 
 
@@ -282,14 +283,14 @@ def _refuse(url):
 async def test_download_not_found_raises_immediately(store):
     vm = _ScriptedVm([_summary(rc=3, msg="Resource not found"), _summary()])
     with pytest.raises(RuntimeError, match="not found"):
-        await vm.load_s3_file("s3://b/missing.zip", "/app/missing.zip")
+        await vm.load_object_file("s3://b/missing.zip", "/app/missing.zip")
     assert len(vm.downloads()) == 1
 
 
 @pytest.mark.asyncio
 async def test_download_transport_drop_then_deadline_then_ok(store):
     vm = _ScriptedVm([-1, -1, _summary(rc=124, nbytes=1000), _summary()])  # exec_script retries -1 once itself
-    await vm.load_s3_file("s3://b/x.zip", "/app/x.zip")
+    await vm.load_object_file("s3://b/x.zip", "/app/x.zip")
     assert len(vm.downloads()) == 4
 
 
@@ -298,27 +299,70 @@ async def test_download_attempts_exhausted_cleans_up_and_raises(store, monkeypat
     monkeypatch.setenv("AGENT_ENV_MODAL_VM_DOWNLOAD_ATTEMPTS", "2")
     vm = _ScriptedVm([_summary(rc=1, msg="recv failure"), _summary(rc=1, msg="recv failure again")])
     with pytest.raises(RuntimeError, match="failed after 2 attempts.*recv failure again"):
-        await vm.load_s3_file("s3://b/x.zip", "/app/x.zip")
+        await vm.load_object_file("s3://b/x.zip", "/app/x.zip")
     assert any(s.startswith("rm -f /app/x.zip") for s in vm.scripts)
     assert any(s.startswith("rm -f /app/x.zip.aria2") for s in vm.scripts)
 
 
 @pytest.mark.asyncio
-async def test_unsigned_store_keeps_the_base_class_path():
+async def test_an_object_the_store_cannot_sign_goes_over_stdin(monkeypatch):
     class _Local:
         def signed_get_url(self, object_url, expires_in=3600):
             return None
 
-        def get(self, object_url):
-            return b"BYTES"
+    pushed = []
 
-    set_object_store(_Local())
+    async def push(sandbox, store, object_url, vm_path):
+        pushed.append((sandbox, store, object_url, vm_path))
+
+    monkeypatch.setattr(mvs, "push_object_over_stdin", push)
+    store = _Local()
+    set_object_store(store)
     try:
         vm = _ScriptedVm([])
-        await vm.load_s3_file("file:///store/x", "/app/x")
+        await vm.load_object_file("file:///store/x", "/app/x")
     finally:
         reset_config()
-    assert not vm.downloads() and any("base64 -d" in s for s in vm.scripts)
+    assert pushed == [(vm, store, "file:///store/x", "/app/x")]
+    assert not vm.downloads()
+
+
+@pytest.mark.asyncio
+async def test_a_stdin_exec_feeds_the_script_and_returns_what_it_printed():
+    process = MagicMock()
+    process.stdin.drain.aio = AsyncMock()
+    process.wait.aio = AsyncMock(return_value=0)
+    process.stdout.read.aio = AsyncMock(return_value=b"abc123  -\n")
+    process.stderr.read.aio = AsyncMock(return_value=b"2+0 records in\n")
+    sb = MagicMock()
+    sb.exec.aio = AsyncMock(return_value=process)
+
+    async def pieces():
+        yield b"QUJD"
+        yield b"REVG"
+
+    result = await _sandbox(sb)._exec_with_stdin("base64 -d | dd of=/tmp/x && sha256sum /tmp/x", pieces())
+
+    assert result == (0, "abc123  -\n", "2+0 records in\n")
+    sb.exec.aio.assert_awaited_once_with("bash", "-c", "base64 -d | dd of=/tmp/x && sha256sum /tmp/x", text=False)
+    assert [c.args for c in process.stdin.write.call_args_list] == [(b"QUJD",), (b"REVG",)]
+    process.stdin.write_eof.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_a_url_the_local_store_holds_is_read_from_it_not_the_configured_store(cli_routing, monkeypatch):
+    set_object_store(ConfiguredObjectStore())
+    local = get_config().get_object_store_for("@local/~/t")
+    url = local.put("objects/x.zip", b"LOCAL")
+    pushed = []
+
+    async def push(sandbox, store, object_url, vm_path):
+        pushed.append((store, object_url))
+
+    monkeypatch.setattr(mvs, "push_object_over_stdin", push)
+    vm = _ScriptedVm([])
+    await vm.load_object_file(url, "/app/x.zip")
+    assert pushed == [(local, url)] and not vm.downloads()
 
 
 @pytest.mark.asyncio

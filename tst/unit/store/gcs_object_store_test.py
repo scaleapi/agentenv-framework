@@ -511,24 +511,12 @@ def test_an_upload_policy_lasts_at_most_what_its_signer_can_sign(store, client):
 def test_without_a_signer_there_is_no_upload_policy(unsigned):
     with pytest.raises(GrantUnavailableError, match="no signer"):
         unsigned.issue_upload_policy(f"gs://{BUCKET}/ns/", max_object_bytes=8, expires_in=600)
-    assert unsigned.signed_post(f"gs://{BUCKET}/ns/") is None
 
 
-def test_signed_post_is_shaped_as_the_s3_store_s_and_clamped_to_the_signer(store, client):
-    post = store.signed_post(f"gs://{BUCKET}/snap/", expires_in=10**7)
-    assert set(post) == {"url", "fields"} and post["fields"]["key"] == "snap/${filename}"
-    document = _policy(post["fields"])
-    assert _expiration(document) <= datetime.now(UTC) + timedelta(seconds=43200)
-    assert not any(isinstance(c, list) and c[0] == "content-length-range" for c in document["conditions"])
-    slashless = _policy(store.signed_post(f"gs://{BUCKET}/snap")["fields"])
-    assert ["starts-with", "$key", "snap/"] in slashless["conditions"]
-    root = store.signed_post(f"gs://{BUCKET}/")["fields"]
-    assert root["key"] == "${filename}" and ["starts-with", "$key", ""] in _policy(root)["conditions"]
-    bounded = _policy(store.signed_post(f"gs://{BUCKET}/snap/", max_bytes=5)["fields"])
-    assert ["content-length-range", 0, 5] in bounded["conditions"]
-    keyed = GcsObjectStore(client, BUCKET, signer=_key_credentials())
-    expiration = _expiration(_policy(keyed.signed_post(f"gs://{BUCKET}/snap/", expires_in=10**7)["fields"]))
-    assert datetime.now(UTC) + timedelta(seconds=43200) < expiration <= datetime.now(UTC) + timedelta(seconds=604800)
+def test_an_upload_policy_at_the_bucket_root_admits_every_key(store, signer):
+    write = store.issue_upload_policy(f"gs://{BUCKET}/", max_object_bytes=8, expires_in=600).write
+    assert write.fields["key"] == "${filename}"
+    assert ["starts-with", "$key", ""] in _policy(write.fields)["conditions"]
 
 
 def test_changelog_capture_gets_the_object_form(store):

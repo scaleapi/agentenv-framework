@@ -22,9 +22,11 @@ from pydantic.json_schema import GenerateJsonSchema, JsonSchemaValue
 from pydantic_core import core_schema
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException
+from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ._triggers import TriggerEngine, TriggerError
 from .extensions import (
@@ -63,9 +65,26 @@ from .tasks.v1 import (
 from .tasks.v1 import (
     TextPart as TaskTextPart,
 )
-from ..transfers import TransferError, upload
+from ..transfers import TransferError, serving_on, upload
 
 logger = logging.getLogger(__name__)
+
+
+class _ServingOnItsPort:
+    """Each request is served ``serving_on`` the port this server took it on, so the transfers it makes
+    reach the server's own staging over loopback there, whatever ``A2A_PORT`` says."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        server = scope.get("server") if scope["type"] == "http" else None
+        port = server[1] if server else None
+        if not isinstance(port, int):
+            await self.app(scope, receive, send)
+            return
+        with serving_on(port):
+            await self.app(scope, receive, send)
 
 _AGENT_DEFINITION = "_agentenv_a2a_definition"
 _AgentT = TypeVar("_AgentT", bound="AgentEnvAgent")
@@ -918,7 +937,7 @@ class A2AAgentApplication:
                 )
         if self.staging.max_bytes:
             routes.extend(staging_routes(self.staging))
-        kwargs = {"routes": routes}
+        kwargs = {"routes": routes, "middleware": [Middleware(_ServingOnItsPort)]}
         if definition.lifespan is not None:
             kwargs["lifespan"] = definition.lifespan
         self.app = Starlette(**kwargs)
@@ -1226,12 +1245,12 @@ class _StandardExecutor:
                 "streaming TaskStatusUpdateEvent must be non-terminal and final=False"
             )
 
-    async def cancel(self, _context: Any, _event_queue: Any) -> None:
-        """Satisfy the upstream executor interface without offering cancellation."""
-        from a2a.types import UnsupportedOperationError
-        from a2a.utils.errors import ServerError
+    async def cancel(self, context: Any, event_queue: Any) -> None:
+        """Mark the task canceled. The SDK then cancels the coroutine running it, so ``agent.run`` gets
+        ``CancelledError`` at its next ``await`` and should stop whatever it started, such as a CLI process."""
+        from a2a.server.tasks import TaskUpdater
 
-        raise ServerError(error=UnsupportedOperationError())
+        await TaskUpdater(event_queue, context.task_id, context.context_id).cancel()
 
 
 def _from_a2a_part(part: Any) -> Any:

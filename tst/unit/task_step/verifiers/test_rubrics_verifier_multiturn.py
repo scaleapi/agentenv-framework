@@ -1,7 +1,7 @@
 """Unit tests for multi-turn trajectory handling in rubrics_verifier.
 
 The verifier judges every turn of a multi-turn prompt_agent run, fed from the
-per-turn URIs already on the PromptResponse (target_agent_per_turn_trajectory_s3_uris):
+per-turn URIs already on the PromptResponse (target_agent_per_turn_trajectory_object_urls):
 
 - direct LLM judge  -> turns concatenated inline (``_merge_per_turn_text``)
 - agent judge       -> turns loaded into a container dir (``_load_per_turn_trajectories``)
@@ -24,9 +24,10 @@ import pytest
 from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.task_step.task_steps.verifiers import rubrics_verifier
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
-from agent_env.config import set_object_store
+from agent_env.config import get_config, set_object_store
 from agent_env.task_step.task_steps.verifiers.judge_utils.trajectory_filter import CompactionType, TrajectoryFilter
 from tst.unit.event_loop_probe import on_event_loop
+from tst.unit.store.fakes import ConfiguredObjectStore
 
 
 def _verifier(**kw) -> RubricsVerifierTaskStep:
@@ -81,8 +82,8 @@ async def test_direct_judge_multiturn_inlines_all_turns_marked(monkeypatch):
     monkeypatch.setattr(v, "_read_trajectory_text", lambda uri: fixtures[uri])
     captured = _capture_judge(monkeypatch, v)
     ctx = TaskStepContext(prompt_responses=[_pr(
-        target_agent_per_turn_trajectory_s3_uris=["s3://t/1.json", "s3://t/2.json"],
-        agent_trajectory_s3_uri="s3://t/2.json",
+        target_agent_per_turn_trajectory_object_urls=["s3://t/1.json", "s3://t/2.json"],
+        agent_trajectory_object_url="s3://t/2.json",
     )])
 
     await v.execute(ctx)
@@ -114,23 +115,23 @@ def test_merge_per_turn_text_default_filter_compacts_each_turn(monkeypatch):
 
 def test_compact_trajectory_prefers_agent_trajectory_uri():
     v = _verifier()
-    pr = _pr(agent_trajectory_s3_uri="s3://a/last.json",
-             target_agent_per_turn_trajectory_s3_uris=["s3://a/1.json", "s3://a/last.json"])
-    assert v._compact_trajectory(pr, None).container_s3_uri == "s3://a/last.json"
+    pr = _pr(agent_trajectory_object_url="s3://a/last.json",
+             target_agent_per_turn_trajectory_object_urls=["s3://a/1.json", "s3://a/last.json"])
+    assert v._compact_trajectory(pr, None).container_object_url == "s3://a/last.json"
 
 
 def test_compact_trajectory_falls_back_to_last_per_turn_uri():
     v = _verifier()
-    pr = _pr(agent_trajectory_s3_uri=None,
-             target_agent_per_turn_trajectory_s3_uris=["s3://a/1.json", "s3://a/2.json"])
-    assert v._compact_trajectory(pr, None).container_s3_uri == "s3://a/2.json"
+    pr = _pr(agent_trajectory_object_url=None,
+             target_agent_per_turn_trajectory_object_urls=["s3://a/1.json", "s3://a/2.json"])
+    assert v._compact_trajectory(pr, None).container_object_url == "s3://a/2.json"
 
 
 def test_compact_trajectory_fallback_skips_none_entries():
     v = _verifier()
-    pr = _pr(agent_trajectory_s3_uri=None,
-             target_agent_per_turn_trajectory_s3_uris=["s3://a/1.json", None])
-    assert v._compact_trajectory(pr, None).container_s3_uri == "s3://a/1.json"
+    pr = _pr(agent_trajectory_object_url=None,
+             target_agent_per_turn_trajectory_object_urls=["s3://a/1.json", None])
+    assert v._compact_trajectory(pr, None).container_object_url == "s3://a/1.json"
 
 
 # --- gate / guard fail-fast (via execute; raises before judge/sandbox) --------
@@ -140,8 +141,8 @@ async def test_screenshot_plus_multiturn_raises():
     v = _verifier(trajectory_filter=TrajectoryFilter(
         compaction_type=CompactionType.SCREENSHOT, screenshot_last_n=3))
     ctx = TaskStepContext(prompt_responses=[_pr(
-        target_agent_per_turn_trajectory_s3_uris=["s3://a/1.json", "s3://a/2.json"],
-        agent_trajectory_s3_uri="s3://a/2.json",
+        target_agent_per_turn_trajectory_object_urls=["s3://a/1.json", "s3://a/2.json"],
+        agent_trajectory_object_url="s3://a/2.json",
     )])
     with pytest.raises(RuntimeError, match="SCREENSHOT"):
         await v.execute(ctx)
@@ -151,7 +152,7 @@ async def test_screenshot_plus_multiturn_raises():
 async def test_guard_raises_when_all_trajectory_sources_empty():
     v = _verifier()
     ctx = TaskStepContext(prompt_responses=[_pr(
-        target_agent_per_turn_trajectory_s3_uris=[None], agent_trajectory_s3_uri=None,
+        target_agent_per_turn_trajectory_object_urls=[None], agent_trajectory_object_url=None,
     )])
     with pytest.raises(RuntimeError, match="No trajectory available"):
         await v.execute(ctx)
@@ -170,8 +171,8 @@ async def test_single_turn_does_not_take_multiturn_path(monkeypatch):
     monkeypatch.setattr(v, "_merge_per_turn_text", _no_merge)
     captured = _capture_judge(monkeypatch, v)
     ctx = TaskStepContext(prompt_responses=[_pr(
-        target_agent_per_turn_trajectory_s3_uris=["s3://t/only.json"],
-        agent_trajectory_s3_uri="s3://t/only.json",
+        target_agent_per_turn_trajectory_object_urls=["s3://t/only.json"],
+        agent_trajectory_object_url="s3://t/only.json",
     )])
 
     await v.execute(ctx)
@@ -187,13 +188,13 @@ async def test_single_turn_does_not_take_multiturn_path(monkeypatch):
 async def test_load_per_turn_trajectories_no_filter_writes_each_turn():
     v = _verifier()
     sandbox = MagicMock()
-    sandbox.write_file_from_s3 = AsyncMock()
+    sandbox.write_file_from_object = AsyncMock()
     sandbox.write_file_from_text = AsyncMock()
 
     await v._load_per_turn_trajectories(
         sandbox, ["s3://a/1.json", "s3://a/2.json"], "/tmp/d", None)
 
-    dests = [call.args[1] for call in sandbox.write_file_from_s3.call_args_list]
+    dests = [call.args[1] for call in sandbox.write_file_from_object.call_args_list]
     assert dests == ["/tmp/d/turn_01.json", "/tmp/d/turn_02.json"]
     sandbox.write_file_from_text.assert_not_called()
 
@@ -204,12 +205,12 @@ async def test_load_per_turn_trajectories_default_filter_compacts_and_namespaces
     v = _verifier()
     monkeypatch.setattr(v, "_read_trajectory_text", lambda uri: spans)
     sandbox = MagicMock()
-    sandbox.write_file_from_s3 = AsyncMock()
+    sandbox.write_file_from_object = AsyncMock()
     sandbox.write_file_from_text = AsyncMock()
 
     await v._load_per_turn_trajectories(sandbox, ["u1", "u2"], "/tmp/d", TrajectoryFilter())
 
-    sandbox.write_file_from_s3.assert_not_called()          # compacted -> written as text
+    sandbox.write_file_from_object.assert_not_called()          # compacted -> written as text
     dests = [call.args[1] for call in sandbox.write_file_from_text.call_args_list]
     assert "/tmp/d/turn_01.json" in dests and "/tmp/d/turn_02.json" in dests
     tool_dests = [d for d in dests if "tool_call_result" in d]
@@ -233,7 +234,7 @@ async def test_the_direct_judge_reads_trajectories_off_the_event_loop(monkeypatc
     monkeypatch.setattr(v, "_read_trajectory_text", read)
     _capture_judge(monkeypatch, v)
     uris = [f"s3://t/{i}.json" for i in range(1, turns + 1)]
-    ctx = TaskStepContext(prompt_responses=[_pr(target_agent_per_turn_trajectory_s3_uris=uris, agent_trajectory_s3_uri=uris[-1])])
+    ctx = TaskStepContext(prompt_responses=[_pr(target_agent_per_turn_trajectory_object_urls=uris, agent_trajectory_object_url=uris[-1])])
 
     await v.execute(ctx)
 
@@ -278,7 +279,7 @@ async def test_default_compaction_reads_compacts_and_rewrites_off_the_event_loop
     v = _verifier(trajectory_filter=TrajectoryFilter())
     _capture_judge(monkeypatch, v)
 
-    await v.execute(TaskStepContext(prompt_responses=[_pr(agent_trajectory_s3_uri="s3://t/raw.json")]))
+    await v.execute(TaskStepContext(prompt_responses=[_pr(agent_trajectory_object_url="s3://t/raw.json")]))
 
     assert len(store.on_loop) >= 2 and not any(store.on_loop)
     assert compactions == [False]
@@ -299,7 +300,7 @@ async def test_screenshot_compaction_reads_and_parses_off_the_event_loop(monkeyp
     v = _verifier(trajectory_filter=TrajectoryFilter(compaction_type=CompactionType.SCREENSHOT, screenshot_last_n=1))
     _capture_judge(monkeypatch, v)
 
-    await v.execute(TaskStepContext(prompt_responses=[_pr(agent_trajectory_s3_uri="s3://t/raw.json")]))
+    await v.execute(TaskStepContext(prompt_responses=[_pr(agent_trajectory_object_url="s3://t/raw.json")]))
 
     assert store.on_loop == [False] and parses == [False]
 
@@ -352,6 +353,20 @@ async def test_the_direct_judge_does_not_hold_the_externalized_tool_results_thro
 
     monkeypatch.setattr(v, "_run_judge_with_output_retries", judge)
 
-    await v.execute(TaskStepContext(prompt_responses=[_pr(agent_trajectory_s3_uri="s3://t/raw.json")]))
+    await v.execute(TaskStepContext(prompt_responses=[_pr(agent_trajectory_object_url="s3://t/raw.json")]))
 
     assert held and alive == [False]
+
+
+def test_a_trajectory_the_local_store_holds_is_read_from_it(cli_routing):
+    """Read from the store holding the handed-in url; the compacted copy is a new object, minted in the
+    configured store."""
+    configured = ConfiguredObjectStore()
+    set_object_store(configured)
+    spans = [_tool_span("t", {"result": "x" * 2000})]
+    url = get_config().get_object_store_for("@local/~/t").put("trajectories/raw.json", json.dumps(spans).encode())
+    v = _verifier(trajectory_filter=TrajectoryFilter())
+
+    assert json.loads(v._read_trajectory_text(url)) == spans
+    compacted, _ = v._filter_trajectory(url, TrajectoryFilter())
+    assert configured.owns(compacted)

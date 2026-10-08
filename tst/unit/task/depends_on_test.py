@@ -107,3 +107,67 @@ async def test_bare_and_object_entries_gate_the_scheduler_alike(local_stores):
     assert sorted(_Step.log[2:4]) == ["start b", "start c"]
     assert sorted(_Step.log[4:6]) == ["end b", "end c"]
     assert _Step.log[6:] == ["start d", "end d"]
+
+
+def test_implicit_scheduler_graph_is_a_predecessor_chain():
+    task = Task(id="t", version=None, steps=[_step(str(i)) for i in range(5)])
+
+    state = task._build_scheduler_state(task.steps, start_step=0)
+
+    assert state.dependencies == {"0": set(), "1": {"0"}, "2": {"1"}, "3": {"2"}, "4": {"3"}}
+    assert state.dependents == {"0": ["1"], "1": ["2"], "2": ["3"], "3": ["4"], "4": []}
+    assert state.pending == {"0": 0, "1": 1, "2": 1, "3": 1, "4": 1}
+
+
+def test_mixed_scheduler_graph_keeps_implicit_all_prior_edges():
+    task = Task(id="t", version=None, steps=[
+        _step("a"), _step("b", []), _step("c"),
+    ])
+
+    state = task._build_scheduler_state(task.steps, start_step=0)
+
+    assert state.dependencies == {"a": set(), "b": set(), "c": {"a", "b"}}
+    assert state.dependents == {"a": ["c"], "b": ["c"], "c": []}
+    assert state.pending == {"a": 0, "b": 0, "c": 2}
+
+
+@pytest.mark.asyncio
+async def test_implicit_run_resume_end_boundary_and_callbacks(local_stores):
+    task = Task(id="t", version=None, steps=[_step(str(i)) for i in range(4)])
+    starts = []
+    completes = []
+
+    await task.run(
+        start_step=1,
+        end_step=3,
+        on_step_start=lambda idx, total, step, context: starts.append((idx, total, step.id)),
+        on_step_complete=lambda idx, total, step, context, duration: completes.append((idx, total, step.id)),
+    )
+
+    assert starts == [(1, 4, "1"), (2, 4, "2")]
+    assert [entry[2] for entry in completes] == ["1", "2"]
+    assert _Step.log == ["start 1", "end 1", "start 2", "end 2"]
+
+
+@pytest.mark.asyncio
+async def test_implicit_run_cancellation_drains_the_active_step(local_stores):
+    entered = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class _BlockingStep(_Step):
+        async def execute(self, context):
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+    task = Task(id="t", version=None, steps=[_BlockingStep(id="a", version=None), _step("b")])
+    running = asyncio.create_task(task.run())
+    await entered.wait()
+    running.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    assert cancelled.is_set()
+    assert _Step.log == []

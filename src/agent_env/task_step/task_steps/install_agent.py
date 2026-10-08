@@ -21,6 +21,7 @@ from typing import Any, Callable, ClassVar, Optional
 
 import httpx
 
+from agent_env.providers.sandbox_providers.local_sandbox import host_url_for
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
 from agent_env.entity_refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
@@ -43,6 +44,7 @@ def _build_param_resolvers(
     agent_name: str,
     workspace_dir: Optional[str] = None,
     litellm_api_key_override: Optional[str] = None,
+    sandbox_type: Optional[str] = None,
 ) -> dict[str, Callable[[], str]]:
     """Per-install registry: required_params name -> zero-arg resolver returning the raw value.
 
@@ -81,7 +83,7 @@ def _build_param_resolvers(
         "workspace_dir":  _resolve_workspace_dir,
         # Config-sourced (from agent-env config)
         "litellm_api_key":   lambda: litellm_api_key_override or config.get_litellm_api_key(),
-        "litellm_base_url":  lambda: config.get_litellm_base_url(),
+        "litellm_base_url":  lambda: host_url_for(config.get_litellm_base_url(), sandbox_type),
     }
 
 
@@ -227,7 +229,7 @@ class InstallAgentTaskStep(TaskStep):
         agent_ctx_tar = f"{work_dir}/agent-ctx.tar.gz"
         await sandbox.exec_script(f"rm -rf {shlex.quote(work_dir)} && mkdir -p {shlex.quote(work_dir)}")
         logger.info(f"Downloading agent build context {agent.docker_image_artifact.build_context_object_url} -> {agent_ctx_tar}")
-        await sandbox.load_s3_file(agent.docker_image_artifact.build_context_object_url, agent_ctx_tar)
+        await sandbox.load_object_file(agent.docker_image_artifact.build_context_object_url, agent_ctx_tar)
 
         # Resolve each required_param via the registry, shlex.quote so str.format
         # substitution produces shell-safe tokens.
@@ -240,6 +242,8 @@ class InstallAgentTaskStep(TaskStep):
             workspace_dir=self.workspace_dir,
             agent_name=self.agent_name,
             litellm_api_key_override=user_overrides.get("litellm_api_key"),
+            # A host install on a local sandbox runs on this machine itself, not in a container.
+            sandbox_type=None if host_mode else sandbox.type,
         )
         resolved: dict[str, str] = {}
         for name in required_params:

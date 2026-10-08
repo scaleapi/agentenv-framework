@@ -100,7 +100,7 @@ def test_a_path_no_layer_supplies_is_unset_not_attributed_to_a_default(config_fi
 
 
 def test_explain_agrees_with_the_resolver_about_an_unresolvable_section(config_file, monkeypatch):
-    monkeypatch.setenv("AGENT_ENV_OBJECT_STORE", "s3")
+    monkeypatch.setenv("AGENT_ENV_OBJECT_STORE", "hosted")
     report = explain_path("stores.object")
     assert report.error is not None                    # reported, not raised
     assert report.winner.where == "$AGENT_ENV_OBJECT_STORE"
@@ -160,8 +160,9 @@ def test_sources_says_how_the_file_was_found(config_file, tmp_path, monkeypatch)
     assert "walking up" in next(s for s in sources() if s.kind == KIND_FILE).detail
 
 
-# Read for identity, never for configuration, so it is not a layer.
-_NOT_CONFIGURATION = {"USER"}
+# Read for identity (USER), or set from [sandbox.providers.sail_vm.config] for the Sail SDK to read
+# (SAIL_*), never configuration agent-env takes, so none is a layer.
+_NOT_CONFIGURATION = {"USER", "SAIL_API_KEY", "SAIL_RUNTIME_THREADS"}
 
 
 def _env_vars_read_by(root):
@@ -295,7 +296,7 @@ def test_a_child_that_cannot_resolve_is_not_shown_as_merely_empty(tmp_path, monk
     path = tmp_path / "config.toml"
     path.write_text(CONFIG)
     monkeypatch.setenv(config_loader.ENV_CONFIG_PATH, str(path))
-    monkeypatch.setenv("AGENT_ENV_OBJECT_STORE", "s3")   # a backend with no coordinates
+    monkeypatch.setenv("AGENT_ENV_OBJECT_STORE", "hosted")   # not a backend name
 
     report = explain_path("stores")
     broken = next(c for c in report.children if c.path == "stores.object")

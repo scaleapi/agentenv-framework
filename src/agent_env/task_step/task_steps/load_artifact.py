@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, ClassVar, Optional
 from urllib.parse import unquote, urlparse
 
+from agent_env.providers.sandbox_providers.sandbox_provider import reachable_url
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity_refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
@@ -264,7 +265,7 @@ class LoadArtifactTaskStep(TaskStep):
         return _LoadInputs(artifacts=resolved_artifacts, urls=urls, destination_path=destination_path)
 
     async def _load_url_onto_vm(self, sandbox, url: str, destination_path: str) -> None:
-        """Host counterpart of ``sandbox.load_s3_file``; ``write_file_from_url`` targets a container instead."""
+        """Host counterpart of ``sandbox.load_object_file``; ``write_file_from_url`` targets a container instead."""
         from agent_env.providers.sandbox_providers.sandbox import CURL_RETRY_FLAGS
 
         parent = posixpath.dirname(destination_path)
@@ -288,6 +289,7 @@ class LoadArtifactTaskStep(TaskStep):
         from agent_env.env.env import Env, require_gateway_url
         from agent_env.providers.sandbox_providers.sandbox import VmSandbox
         from agent_env.providers.sandbox_providers.sandbox_provider import (
+            SANDBOX_MODE_VM,
             build_sandbox_provider,
             get_agent_sandbox_provider,
             get_sandbox_provider,
@@ -329,6 +331,10 @@ class LoadArtifactTaskStep(TaskStep):
                 build_sandbox_provider(ds.sandbox_type) if ds.sandbox_type else get_sandbox_provider()
             )
             target_sandbox = await provider.get_sandbox(ds.sandbox_id)
+        # A VM-mode sandbox with no container_name is loaded onto its host; a container-mode one, into its container.
+        onto_vm_host = (
+            self.sandbox_name is not None and self.container_name is None and ds.sandbox_mode == SANDBOX_MODE_VM
+        )
 
         env = None
         for ref in resolved_artifacts:
@@ -352,8 +358,10 @@ class LoadArtifactTaskStep(TaskStep):
                         files = await _load_universe_into_container(
                             target_sandbox, self.container_name, artifact, destination,
                         )
-                    else:
+                    elif onto_vm_host:
                         files = await _load_universe_onto_vm(target_sandbox, artifact, destination)
+                    else:
+                        files = await _load_universe_into_sandbox_container(target_sandbox, artifact, destination)
                     context.metadata.setdefault("loaded_file_artifact_universes", []).append({
                         "id": artifact.id,
                         "version": artifact.version,
@@ -418,8 +426,10 @@ class LoadArtifactTaskStep(TaskStep):
                     # involved.
                     if self.sandbox_name is not None:
                         sandbox = target_sandbox
-                        # None targets the VM host itself.
+                        # None targets the VM host itself, or a container sandbox directly.
                         container = self.container_name
+                        if container is None and not onto_vm_host and isinstance(sandbox, VmSandbox):
+                            container = sandbox.container_name
                     else:
                         agent = next((a for a in context.deployed_agents if a.agent_name == self.agent_name), None)
                         if agent is None or not agent.sandbox_id:
@@ -481,7 +491,8 @@ class LoadArtifactTaskStep(TaskStep):
                 if agent is None or not agent.instance_id:
                     raise RuntimeError(f"Agent '{self.agent_name}' not found in context.deployed_agents (or missing instance_id)")
                 deployed_agent = get_a2a_agent_instance_store().get(agent.instance_id)
-                gateway_url = require_gateway_url(deployed, "Installing a CliArtifact")
+                gateway_url = reachable_url(require_gateway_url(deployed, "Installing a CliArtifact"),
+                                            from_sandbox_type=deployed.sandbox_type, to_sandbox_type=agent.sandbox_type)
                 install_path = await A2AAgent.install_cli(deployed_agent, artifact, gateway_url)
                 agent_clis = context.metadata.setdefault("installed_clis", {}).setdefault(self.agent_name, {})
                 agent_clis[artifact.id] = {
@@ -523,15 +534,11 @@ class LoadArtifactTaskStep(TaskStep):
             async def _load_one(url: str, filename: str) -> None:
                 async with semaphore:
                     dest = f"{destination}/{filename}"
-                    if self.sandbox_name is not None and self.container_name is None:
+                    if onto_vm_host:
                         await self._load_url_onto_vm(sandbox, url, dest)
                     else:
                         await sandbox.write_file_from_url(url, dest)
-                    target_desc = (
-                        f"VM sandbox '{self.sandbox_name}'"
-                        if self.sandbox_name is not None and self.container_name is None
-                        else "agent"
-                    )
+                    target_desc = f"VM sandbox '{self.sandbox_name}'" if onto_vm_host else "agent"
                     logger.info(f"Loaded URL into {target_desc}: {url} -> {dest}")
 
             await asyncio.gather(*(_load_one(u, f) for u, f in zip(urls, files)))
@@ -638,7 +645,7 @@ async def _stage_environment_payload_into_container(
     if isinstance(sandbox, VmSandbox):
         vm_payload = f"/tmp/_svc_{token}_{safe_name}"
         vm_stage = f"/tmp/_svc_stage_{token}"
-        await sandbox.load_s3_file(file_artifact.object_url, vm_payload)
+        await sandbox.load_object_file(file_artifact.object_url, vm_payload)
         try:
             # exec_script raises on a non-zero exit, but only with the raw
             # script output — re-raise with the artifact context so a failed
@@ -674,7 +681,7 @@ async def _stage_environment_payload_into_container(
         # Container-mode sandbox: the sandbox IS the agent container — expand
         # in place at the destination.
         payload_tmp = f"/tmp/_svc_{token}_{safe_name}"
-        await sandbox.write_file_from_s3(file_artifact.object_url, payload_tmp)
+        await sandbox.write_file_from_object(file_artifact.object_url, payload_tmp)
         try:
             exit_code, out, err = await sandbox.exec_with_output(
                 "python3", "-c", _ENVIRONMENT_PAYLOAD_EXPAND_SCRIPT, payload_tmp, destination
@@ -707,7 +714,7 @@ async def _stage_environment_payload_into_container(
 
 
 async def _load_universe_onto_vm(sandbox, universe, destination: str) -> list[str]:
-    """Pull each file in `universe` from S3 straight onto the VM host — no temp file, no copy inward."""
+    """Pull each file in `universe` from the object store straight onto the VM host — no temp file, no copy inward."""
     file_artifacts = universe.get_file_artifacts()
     if not file_artifacts:
         logger.warning(
@@ -729,13 +736,30 @@ async def _load_universe_onto_vm(sandbox, universe, destination: str) -> list[st
         logger.info(f"  [{idx}/{total}] {fa.object_url} -> {dest_path}")
         if parent and parent != destination:
             await sandbox.exec_script(f"mkdir -p {shlex.quote(parent)}")
-        await sandbox.load_s3_file(fa.object_url, dest_path)
+        await sandbox.load_object_file(fa.object_url, dest_path)
         loaded.append(filename)
     return loaded
 
 
+async def _load_universe_into_sandbox_container(sandbox, universe, destination: str) -> list[str]:
+    """Stage each file in `universe` into a container-mode sandbox, as an agent's container is loaded."""
+    from agent_env.providers.sandbox_providers.sandbox import stage_files_into_container
+
+    file_artifacts = universe.get_file_artifacts()
+    if not file_artifacts:
+        logger.warning(
+            f"FileArtifactUniverse '{universe.id}' v{universe.version} has no files; nothing to load"
+        )
+        return []
+    logger.info(
+        f"Loading FileArtifactUniverse '{universe.id}' v{universe.version} ({len(file_artifacts)} file(s)) "
+        f"into the container sandbox at {destination}"
+    )
+    return list(await stage_files_into_container(sandbox, file_artifacts, destination))
+
+
 async def _load_universe_into_container(sandbox, container_name: str, universe, destination: str) -> list[str]:
-    """For each file in `universe`: pull from S3 to a VM temp path, then `docker cp` into `container_name` at `destination/<rel_path>`."""
+    """For each file in `universe`: pull from the object store to a VM temp path, then `docker cp` into `container_name` at `destination/<rel_path>`."""
     file_artifacts = universe.get_file_artifacts()
     if not file_artifacts:
         logger.warning(
@@ -758,7 +782,7 @@ async def _load_universe_into_container(sandbox, container_name: str, universe, 
         parent = posixpath.dirname(dest_path)
         vm_temp = f"/tmp/_load_{uuid.uuid4().hex[:8]}_{filename.replace('/', '_')}"
         logger.info(f"  [{idx}/{total}] {fa.object_url} -> {container_name}:{dest_path}")
-        await sandbox.load_s3_file(fa.object_url, vm_temp)
+        await sandbox.load_object_file(fa.object_url, vm_temp)
         if parent and parent != destination:
             await sandbox.exec_script(
                 f"docker exec {shlex.quote(container_name)} mkdir -p {shlex.quote(parent)}"

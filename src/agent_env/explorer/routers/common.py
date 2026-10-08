@@ -1,7 +1,4 @@
-"""Shared pieces for the explorer's read routers: every list endpoint is
-``DocumentStore.latest_per_id`` + ``count_distinct`` behind one factory, so no route
-depends on a backend query language.
-"""
+"""Shared pieces for the explorer's read routers, using backend-agnostic store calls."""
 
 from __future__ import annotations
 
@@ -76,7 +73,8 @@ def _enrich_universe(doc: dict, store, collection: str) -> dict:
                 "artifact_id": rid,
                 "version": ver,
                 "content_type": fa.get("content_type") if fa else None,
-                "object_url": fa.get("s3_url") if fa else None,
+                # Legacy key first, as the model reads it: a raw-doc writer that knows only s3_url leaves the twin stale.
+                "object_url": (fa.get("s3_url") or fa.get("object_url")) if fa else None,
             })
         doc["files"] = files
     elif t in _UNIVERSE_ENVIRONMENT_TYPES:
@@ -139,12 +137,10 @@ def versioned_router(
             total = len(matched)
             items = matched[offset: offset + limit] if limit else matched[offset:]
         else:
-            items = store.latest_per_id(
+            items, total = store.latest_per_id_page(
                 collection, Filter({}), id_field=id_field,
                 sort=Sort.by(sort_by, descending=descending), limit=limit, offset=offset,
             )
-            # Count distinct ids, not rows — one entity (N versions) is one result.
-            total = store.count_distinct(collection, Filter({}), id_field=id_field)
         return PaginatedResponse(
             items=items, total=total, limit=limit, offset=offset,
             has_more=offset + len(items) < total,

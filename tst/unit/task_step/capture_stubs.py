@@ -50,10 +50,10 @@ CONTEXT_ID_GET = {"request": {"oneOf": [{"required": ["task_id"]}, {"required": 
 
 
 class _StubUniverse:
-    def __init__(self, id: str, version: int, s3_url: str):
+    def __init__(self, id: str, version: int, prefix_url: str):
         self.id = id
         self.version = version
-        self.bundle_object_url = s3_url
+        self.bundle_object_url = prefix_url
 
 
 class _StubObjectStore:
@@ -153,11 +153,11 @@ def install_capture_stubs(monkeypatch) -> CaptureRecorder:
 
     class _FAU:
         @staticmethod
-        def put_existing(*, id: str, s3_url: str):
+        def put_existing(*, id: str, prefix_url: str):
             # Mirrors the real one: version is minted by the store, and the
             # bundle url is the prefix that was actually written.
-            rec.universes.append(s3_url)
-            return _StubUniverse(id=id, version=rec._version, s3_url=s3_url)
+            rec.universes.append(prefix_url)
+            return _StubUniverse(id=id, version=rec._version, prefix_url=prefix_url)
 
     monkeypatch.setattr(fau_mod, "FileArtifactUniverse", _FAU)
 

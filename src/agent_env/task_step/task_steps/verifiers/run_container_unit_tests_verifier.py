@@ -33,12 +33,13 @@ import time
 import uuid
 from typing import Any, ClassVar, Optional
 
+from agent_env.providers.sandbox_providers.local_sandbox import host_url_for
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     all_sandbox_container_env,
     registered_sandbox_provider_classes,
 )
 from agent_env.store.ids import derive_id, is_local_id, key_segment, validate_local_id
-from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.context import TaskStepContext, dual_keyed
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,7 @@ _RESERVED_ENV_KEYS = frozenset({
     "LITELLM_BASE_URL", "ANTHROPIC_BASE_URL",
     "PATH", "HOME",
 })
+_MODEL_URL_KEYS = frozenset({"LITELLM_BASE_URL", "ANTHROPIC_BASE_URL"})
 
 
 class RunContainerUnitTestsVerifierTaskStep(TaskStep):
@@ -253,6 +255,8 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
         command, extra_env = self._resolve_command(context)
         merged_env.update(self.env_vars)
         merged_env.update(extra_env)
+        for key in _MODEL_URL_KEYS & merged_env.keys():
+            merged_env[key] = host_url_for(merged_env[key], sandbox.type)
         env_flags = " ".join(f"-e {k}={shlex.quote(v)}" for k, v in merged_env.items())
 
         # 3. Run setup_commands (fail loud)
@@ -313,14 +317,14 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
             text=stdout,
             artifact_id=derive_id(base, f"verifier-stdout-{self.id}-{stamp}"),
             description=f"stdout of {self.verifier_id} from step {self.id}",
-            s3_url=store.object_url(f"{outputs}/stdout.txt"),
+            object_url=store.object_url(f"{outputs}/stdout.txt"),
         )
         stderr_artifact = await asyncio.to_thread(
             self._upload_text_artifact,
             text=stderr,
             artifact_id=derive_id(base, f"verifier-stderr-{self.id}-{stamp}"),
             description=f"stderr of {self.verifier_id} from step {self.id}",
-            s3_url=store.object_url(f"{outputs}/stderr.txt"),
+            object_url=store.object_url(f"{outputs}/stderr.txt"),
         )
 
         # 8. Record on context (shape compatible with aggregate_verifiers).
@@ -362,12 +366,12 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
             "stdout_artifact": {
                 "id": stdout_artifact.id,
                 "version": stdout_artifact.version,
-                "s3_url": stdout_artifact.object_url,
+                **dual_keyed("s3_url", "object_url", stdout_artifact.object_url),
             },
             "stderr_artifact": {
                 "id": stderr_artifact.id,
                 "version": stderr_artifact.version,
-                "s3_url": stderr_artifact.object_url,
+                **dual_keyed("s3_url", "object_url", stderr_artifact.object_url),
             },
             "stdout_head": stdout[:_OUTPUT_PREVIEW_CHARS],
             "stderr_head": stderr[:_OUTPUT_PREVIEW_CHARS],
@@ -406,7 +410,7 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
         return max(0.0, min(1.0, value))
 
     @staticmethod
-    def _upload_text_artifact(text: str, artifact_id: str, description: str, s3_url: str):
+    def _upload_text_artifact(text: str, artifact_id: str, description: str, object_url: str):
         from agent_env.artifact.artifacts.file import FileArtifact
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tmp:
@@ -417,7 +421,7 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
                 id=artifact_id,
                 description=description,
                 file_path=tmp_path,
-                object_url=s3_url,
+                object_url=object_url,
             )
         finally:
             try:

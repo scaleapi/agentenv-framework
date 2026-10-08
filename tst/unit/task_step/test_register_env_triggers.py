@@ -77,6 +77,27 @@ async def test_resolves_executor_agent_to_a2a_url(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("in_our_sandbox, expected", [
+    (True, "http://host.docker.internal:41234"), (False, "http://127.0.0.1:41234"),
+], ids=["local-gateway", "env-outside-our-sandboxes"])
+async def test_a_local_gateway_reaches_a_local_executor_through_the_host(monkeypatch, in_our_sandbox, expected):
+    sent = _mock_gateway(monkeypatch, {"ok": True, "added": ["t1"], "all": ["t1"]})
+    env = _record()
+    if in_our_sandbox:
+        env.sandbox_type = "local"
+    else:
+        env = DeployedEnv(env_id=env.env_id, env_version=1, mcp_url="", environment_card_url=env.environment_card_url,
+                          environment_card=env.environment_card)
+    executor = DeployedAgent(agent_name="exec-1", api_url="http://127.0.0.1:41234", a2a_url="http://127.0.0.1:41234",
+                             sandbox_id="local-a", sandbox_type="local", role="executor")
+    context = TaskStepContext(deployed_envs=[env], deployed_agents=[executor], metadata={})
+
+    await _step(executor_agent_name="exec-1", watch_roles=["default"]).execute(context)
+
+    assert json.loads(sent[0].content)["executor"]["a2a_url"] == expected
+
+
+@pytest.mark.asyncio
 async def test_missing_executor_agent_raises():
     ctx = _context()  # no agents deployed
     with pytest.raises(RuntimeError, match="Executor agent 'exec-1' not found"):

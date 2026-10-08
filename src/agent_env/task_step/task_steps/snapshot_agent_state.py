@@ -21,15 +21,15 @@ class SnapshotAgentStateTaskStep(TaskStep):
     Looks up the deployed agent (by ``agent_name``) and the source ``context_id``
     via a previously-recorded ``PromptResponse`` (by ``prompt_id``). Calls the
     agent's ``/ext/snapshot`` extension to write the conversation transcript to
-    S3, then wraps that S3 prefix as a ``FileArtifactUniverse`` via
+    the object store, then wraps that prefix as a ``FileArtifactUniverse`` via
     ``put_existing`` (no download/re-upload). Appends an entry recording
     ``{id, version, bundle_object_url, source_agent_name, source_context_id}`` to
     ``context.metadata['agent_snapshots']`` (a list of such entries).
 
-    When ``env_id`` is set, the step ALSO dumps each MCP service's current
-    state by hitting ``{gateway_url}/svc/mcp-{service}/export-state`` on the
-    deployed env, uploads each as JSON alongside the workspace tarball, and
-    writes a JSON-stringified ``{service: s3_url}`` (unsigned ``s3://`` object
+    When ``env_id`` is set, the step ALSO reads each MCP service's current
+    state from the deployed env (its ``data/get`` JSON, else its
+    ``/export-state``), uploads each as JSON alongside the workspace tarball, and
+    writes a JSON-stringified ``{service: object_url}`` (unsigned object-store
     references) to ``context.metadata['snapshot_json_url']``. A downstream
     verifier re-signs each value before handing the map to its test script, so
     the script can fetch each service's state and assert against it. Without this, only the
@@ -133,7 +133,7 @@ class SnapshotAgentStateTaskStep(TaskStep):
         # universe_artifact_id are both configured. Mirrors the export-state
         # pattern in `multienv_validator/verify_universe_roundtrip.py:_export_all`.
         # Result lands in `context.metadata['snapshot_json_url']` as a
-        # JSON-stringified `{service: s3_url}` (unsigned `s3://` references).
+        # JSON-stringified `{service: object_url}` (unsigned object-store references).
         # A downstream verifier re-signs each value and hands the map to its test
         # script, which accepts either a single URL or this map.
         if self.env_id and self.universe_artifact_id:
@@ -144,7 +144,8 @@ class SnapshotAgentStateTaskStep(TaskStep):
     async def _capture_universe_state(
         self, context: TaskStepContext, capture_prefix: str
     ) -> None:
-        """GET /svc/mcp-<name>/export-state for each service, upload, publish `s3://` refs."""
+        """Read each service's state as JSON, upload it beside the workspace capture, and publish the
+        object URLs."""
         from agent_env.artifact import EnvironmentUniverseArtifact
         from agent_env.config import get_config
 
@@ -170,23 +171,17 @@ class SnapshotAgentStateTaskStep(TaskStep):
             )
             return
 
-        # Reuse the workspace capture's S3 prefix — services land in a
+        # Reuse the workspace capture's prefix, in the store that holds it — services land in a
         # `services/` subdir alongside the workspace tarball.
-        store = get_config().get_object_store()
+        store = get_config().get_object_store_at(capture_prefix)
         key_prefix = store.get_object_key(capture_prefix).rstrip("/") + "/"
 
         from agent_env.env import legacy_protocol
         from agent_env.env.env import gateway_url_of
-        from agentenv_protocol import client as protocol_v1
         urls: dict[str, str] = {}
         for name in environment_names:
             try:
-                base_url = await legacy_protocol.v1_base_url(deployed_env, gateway_url_of(deployed_env), name, mcp=True)
-                if base_url is not None:
-                    resp = await protocol_v1.get_data(base_url)
-                    state = resp.parts[0].data if resp.parts else {}
-                else:
-                    state = await legacy_protocol.export_state(gateway_url_of(deployed_env), name)
+                state = await legacy_protocol.service_state(deployed_env, gateway_url_of(deployed_env), name)
                 urls[name] = await asyncio.to_thread(
                     store.put, f"{key_prefix}services/{name}.json", json.dumps(state).encode(),
                     content_type="application/json", allow_overwrite=True,

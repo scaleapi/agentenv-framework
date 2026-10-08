@@ -152,7 +152,8 @@ def _exec_args(sandbox, container: Optional[str], cmd: tuple) -> tuple:
     if sandbox.mode != SANDBOX_MODE_VM:
         return cmd  # container-mode sandboxes are the runtime and already root
     if container is not None:
-        return ("sudo", "docker", "exec", container, *cmd)
+        # As root, like the steps that write into the container: a non-root image user can't read their files.
+        return ("sudo", "docker", "exec", "-u", "0", container, *cmd)
     return ("sudo", *cmd)  # host-mode agents write as uid 0, so read them back as root
 
 
@@ -729,7 +730,7 @@ class CollectArtifactsTaskStep(TaskStep):
 
             try:
                 # The upload owns the file from here: a cancel must not remove it under the upload.
-                s3_url = await finish_on_thread(
+                object_url = await finish_on_thread(
                     functools.partial(
                         _upload_file, store, local_path, artifact_id, version, object_name, content_type,
                     ),
@@ -737,11 +738,11 @@ class CollectArtifactsTaskStep(TaskStep):
                     if_never_run=functools.partial(_remove, local_path),
                 )
 
-                collected[key] = s3_url
+                collected[key] = object_url
                 self._register_file_artifact(
-                    store, file_artifacts, artifact_id, key, object_name, content_type, s3_url, context,
+                    store, file_artifacts, artifact_id, key, object_name, content_type, object_url, context,
                 )
-                logger.info(f"Collected {source_path} -> {s3_url} ({size} bytes) via controller")
+                logger.info(f"Collected {source_path} -> {object_url} ({size} bytes) via controller")
             except Exception as e:
                 logger.warning(f"Failed to collect {source_path} via controller: {e}")
                 hard_failures.append(source_path)
@@ -786,8 +787,13 @@ class CollectArtifactsTaskStep(TaskStep):
         )
 
     async def _collect_via_vm_host(self, context, store, artifact_id, version):
-        """Collect off the VM's own filesystem — host-mode agents leave no container to exec into."""
-        from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_sandbox_provider
+        """Collect off a deploy_sandbox sandbox: a VM's own filesystem, or a container-mode sandbox's container."""
+        from agent_env.providers.sandbox_providers.sandbox import VmSandbox
+        from agent_env.providers.sandbox_providers.sandbox_provider import (
+            SANDBOX_MODE_VM,
+            build_sandbox_provider,
+            get_sandbox_provider,
+        )
 
         ds = next(
             (sb for sb in context.deployed_sandboxes if sb.sandbox_name == self.sandbox_name), None
@@ -806,10 +812,18 @@ class CollectArtifactsTaskStep(TaskStep):
 
         provider = build_sandbox_provider(ds.sandbox_type) if ds.sandbox_type else get_sandbox_provider()
         sandbox = await self._resolve_live_sandbox(provider, ds.sandbox_id)
-        logger.info(f"Collecting from the VM host of sandbox '{self.sandbox_name}' ({ds.sandbox_id})")
+        # A container-mode sandbox on a VM-backed provider runs its image beside the host: read from the container.
+        container = (
+            sandbox.container_name
+            if ds.sandbox_mode != SANDBOX_MODE_VM and isinstance(sandbox, VmSandbox)
+            else None
+        )
+        logger.info(
+            f"Collecting from sandbox '{self.sandbox_name}' ({ds.sandbox_id}, {container or ds.sandbox_mode})"
+        )
 
         return await self._collect_items(
-            provider, sandbox, None, items, context, store, artifact_id, version,
+            provider, sandbox, container, items, context, store, artifact_id, version,
         )
 
     async def _collect_via_sandbox_container(self, context, store, artifact_id, version):
@@ -917,15 +931,15 @@ class CollectArtifactsTaskStep(TaskStep):
                 ext = os.path.splitext(object_name)[1]
                 content_type = _CONTENT_TYPES.get(ext, "application/octet-stream")
 
-                s3_url = await self._collect_file(
+                object_url = await self._collect_file(
                     sandbox, container, source_path, object_name, store, artifact_id, version, content_type,
                 )
 
-                collected[key] = s3_url
+                collected[key] = object_url
                 self._register_file_artifact(
-                    store, file_artifacts, artifact_id, key, object_name, content_type, s3_url, context,
+                    store, file_artifacts, artifact_id, key, object_name, content_type, object_url, context,
                 )
-                logger.info(f"Collected {source_path} -> {s3_url} ({file_size} bytes)")
+                logger.info(f"Collected {source_path} -> {object_url} ({file_size} bytes)")
 
             except Exception as e:
                 logger.warning(f"Failed to collect {source_path}: {e}")
@@ -942,7 +956,7 @@ class CollectArtifactsTaskStep(TaskStep):
         await provider.close()
         return collected, file_artifacts, hard_failures
 
-    def _register_file_artifact(self, store, file_artifacts, artifact_id, key, object_name, content_type, s3_url, context):
+    def _register_file_artifact(self, store, file_artifacts, artifact_id, key, object_name, content_type, object_url, context):
         """Register a FileArtifact document pointing at the already-uploaded S3
         object. We do NOT re-upload the bytes — FileArtifact.object_url is just a URL
         reference, and the object is already in S3 under the collected_artifacts
@@ -959,7 +973,7 @@ class CollectArtifactsTaskStep(TaskStep):
             description=f"Collected artifact '{object_name}' from task instance {context.instance_id or artifact_id}",
             filename=object_name.split("/")[-1],
             content_type=content_type,
-            s3_url=s3_url,
+            object_url=object_url,
         )
         try:
             store.put_document(fa)

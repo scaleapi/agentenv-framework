@@ -43,7 +43,7 @@ http-server = [
 
 [[package]]
 name = "agentenv-framework"
-version = "0.9.1273"
+version = "0.9.1290"
 source = { editable = "." }
 dependencies = [
     { name = "a2a-sdk" },
@@ -88,6 +88,7 @@ dev = [
     { name = "pytest-timeout" },
     { name = "pytest-xdist" },
     { name = "requests" },
+    { name = "sail" },
     { name = "uvicorn" },
 ]
 explorer = [
@@ -101,11 +102,14 @@ gcp = [
     { name = "google-cloud-storage" },
     { name = "requests" },
 ]
+sail = [
+    { name = "sail" },
+]
 
 [package.metadata]
 requires-dist = [
     { name = "a2a-sdk", specifier = "==0.3.26" },
-    { name = "agentenv-framework", extras = ["aws", "explorer", "gcp"], marker = "extra == 'dev'" },
+    { name = "agentenv-framework", extras = ["aws", "explorer", "gcp", "sail"], marker = "extra == 'dev'" },
     { name = "agentenv-framework-protocol", editable = "packages/agentenv-protocol" },
     { name = "boto3", marker = "extra == 'aws'", specifier = ">=1.35.0" },
     { name = "botocore", marker = "extra == 'aws'", specifier = ">=1.35.0" },
@@ -137,15 +141,16 @@ requires-dist = [
     { name = "python-multipart", specifier = ">=0.0.13" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "requests", marker = "extra == 'gcp'", specifier = ">=2.31" },
+    { name = "sail", marker = "extra == 'sail'", specifier = "~=0.12.8" },
     { name = "starlette", specifier = ">=0.40" },
     { name = "uvicorn", specifier = ">=0.47" },
     { name = "uvicorn", marker = "extra == 'explorer'", specifier = ">=0.29" },
 ]
-provides-extras = ["aws", "explorer", "gcp", "dev"]
+provides-extras = ["aws", "explorer", "gcp", "sail", "dev"]
 
 [[package]]
 name = "agentenv-framework-protocol"
-version = "0.1.288"
+version = "0.1.305"
 source = { editable = "packages/agentenv-protocol" }
 dependencies = [
     { name = "httpx" },
@@ -627,6 +632,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/c7/0e/7fa0ef50764b67090eca4114772a2abf8b6148198475e54c660b97caeee6/click-8.5.0.tar.gz", hash = "sha256:ba0d2089de75ea0310e2dde03160e6ca10009947fb95a182f9b54021bb272e34", size = 382235, upload-time = "2026-08-26T13:33:14.56Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/58/50/6c0d534c5f134586a8e1ba4e330569e32f057e33372ae556463212fb4cd3/click-8.5.0-py3-none-any.whl", hash = "sha256:255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360", size = 125251, upload-time = "2026-08-26T13:33:12.928Z" },
+]
+
+[[package]]
+name = "cloudpickle"
+version = "3.1.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/27/fb/576f067976d320f5f0114a8d9fa1215425441bb35627b1993e5afd8111e5/cloudpickle-3.1.2.tar.gz", hash = "sha256:7fda9eb655c9c230dab534f1983763de5835249750e85fbcef43aaa30a9a2414", size = 22330, upload-time = "2025-11-03T09:25:26.604Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/88/39/799be3f2f0f38cc727ee3b4f1445fe6d5e4133064ec2e4115069418a5bb6/cloudpickle-3.1.2-py3-none-any.whl", hash = "sha256:9acb47f6afd73f60dc1df93bb801b472f05ff42fa6c84167d25cb206be1fbf4a", size = 22228, upload-time = "2025-11-03T09:25:25.534Z" },
 ]
 
 [[package]]
@@ -2890,6 +2904,22 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/f6/94/dcdaeb1713cab9c84def276cfac7388b17c7d9855bbcfe88d77e4dbafd44/s3transfer-0.19.0.tar.gz", hash = "sha256:ce436931687addc4c1712d52d40b32f53e88315723f107ffa20ba82b05a0f685", size = 165171, upload-time = "2026-06-16T19:44:51.599Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/46/5f/4c174edad94f82de888ac00a5ddd8d07b35609b6c94f0bdf4d74af57703e/s3transfer-0.19.0-py3-none-any.whl", hash = "sha256:777cc2415536f1debadb5c2ef7779275d0fc0fe0e042411cdd6caebeb2685262", size = 90101, upload-time = "2026-06-16T19:44:50.439Z" },
+]
+
+[[package]]
+name = "sail"
+version = "0.12.8"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cloudpickle" },
+    { name = "protobuf" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/51/63/8bb772e93ee9bdeab0a68a37b88b567015590468c9474b878e6f3c6fc7db/sail-0.12.8-cp39-abi3-macosx_10_12_x86_64.whl", hash = "sha256:43d12688928065e5dde17e72e7fea65bf49733df0a6f9819bb4760ef91d4b667", size = 15361157, upload-time = "2026-10-06T17:37:52.987Z" },
+    { url = "https://files.pythonhosted.org/packages/4c/ee/b138d5fe3be97e3b6285214a76bdf2881eeb31afbab11f2f69618cd2a9ea/sail-0.12.8-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:aac5b20e428b52da2dac65534f06a0af267c67e7dc821bcc160ec7f1557c4696", size = 14649143, upload-time = "2026-10-06T17:37:56.09Z" },
+    { url = "https://files.pythonhosted.org/packages/06/d1/8a2c5baf5a3ee9edee66ea65aebe1ee5237401b8b13bf8a3737622d9f094/sail-0.12.8-cp39-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:8a8dbd1f3659941caf1567859ed7285cedb2b8d5bf64c18395fe6daec635ff91", size = 16525128, upload-time = "2026-10-06T17:37:58.789Z" },
+    { url = "https://files.pythonhosted.org/packages/b0/d8/11778c650c67d479f0bea86082a6edbca44b66a6520807798a3509892559/sail-0.12.8-cp39-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:9589e149a8cf1f6847042b658b17e3764b1e1366ee5b44c47a83578d496c8022", size = 16246879, upload-time = "2026-10-06T17:38:01.375Z" },
+    { url = "https://files.pythonhosted.org/packages/1e/5d/6070a931a2ff9247ad8c548be7b74929262e8dee2fe613bf460dac313a97/sail-0.12.8-cp39-abi3-win_amd64.whl", hash = "sha256:c9602dcc17c69b2d783433d62d207ea30e009c4470627554abc1a5ce3a533d82", size = 13017169, upload-time = "2026-10-06T17:38:04.133Z" },
 ]
 
 [[package]]

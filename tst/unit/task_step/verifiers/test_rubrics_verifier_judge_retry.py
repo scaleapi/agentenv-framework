@@ -41,12 +41,12 @@ async def test_retries_then_succeeds_on_second_attempt(monkeypatch):
     async def fake_prompt_llm_judge(prompt: str, *, model: str, context: TaskStepContext) -> dict:
         prompts.append(prompt)
         if len(prompts) == 1:
-            return {"response": bad, "trajectory_s3_uri": None}
-        return {"response": _valid_response(["c1", "c2"]), "trajectory_s3_uri": None}
+            return {"response": bad, "trajectory_object_url": "mem://judge/rejected.json"}
+        return {"response": _valid_response(["c1", "c2"]), "trajectory_object_url": "mem://judge/accepted.json"}
 
     monkeypatch.setattr(verifier, "_prompt_llm_judge", fake_prompt_llm_judge)
 
-    results, retries, discrepancies, _ = await verifier._run_judge_with_output_retries(
+    results, retries, discrepancies, judge_trajectory_url = await verifier._run_judge_with_output_retries(
         eval_prompt="Evaluate the agent.",
         criteria=verifier.criteria,
         context=TaskStepContext(),
@@ -61,6 +61,7 @@ async def test_retries_then_succeeds_on_second_attempt(monkeypatch):
 
     assert len(results) == 2
     assert retries == 1
+    assert judge_trajectory_url == "mem://judge/accepted.json"
     assert len(discrepancies) == 1
     assert discrepancies[0]["missing_ids"] == ["c2"]
     assert len(prompts) == 2
@@ -77,7 +78,7 @@ async def test_raises_after_max_retries(monkeypatch):
     monkeypatch.setattr(
         verifier,
         "_prompt_llm_judge",
-        AsyncMock(return_value={"response": bad, "trajectory_s3_uri": None}),
+        AsyncMock(return_value={"response": bad, "trajectory_object_url": None}),
     )
 
     with pytest.raises(ValueError, match=r"expected 2 criteria"):
@@ -109,8 +110,8 @@ async def test_a2a_path_retries_with_correction(monkeypatch):
     async def fake_invoke(*, eval_prompt: str, judge_a2a_url: str, judge_agent_card: dict, judge_agent) -> dict:
         prompts.append(eval_prompt)
         if len(prompts) == 1:
-            return {"response": bad, "trajectory_s3_uri": None}
-        return {"response": _valid_response(["c1", "c2"]), "trajectory_s3_uri": None}
+            return {"response": bad, "trajectory_object_url": None}
+        return {"response": _valid_response(["c1", "c2"]), "trajectory_object_url": None}
 
     monkeypatch.setattr(verifier, "_invoke_judge_a2a", fake_invoke)
 
@@ -142,8 +143,8 @@ async def test_retries_on_malformed_json(monkeypatch):
     async def fake_prompt_llm_judge(prompt: str, *, model: str, context: TaskStepContext) -> dict:
         prompts.append(prompt)
         if len(prompts) == 1:
-            return {"response": "Sure! ```json\nnot valid", "trajectory_s3_uri": None}
-        return {"response": _valid_response(["c1", "c2"]), "trajectory_s3_uri": None}
+            return {"response": "Sure! ```json\nnot valid", "trajectory_object_url": None}
+        return {"response": _valid_response(["c1", "c2"]), "trajectory_object_url": None}
 
     monkeypatch.setattr(verifier, "_prompt_llm_judge", fake_prompt_llm_judge)
 

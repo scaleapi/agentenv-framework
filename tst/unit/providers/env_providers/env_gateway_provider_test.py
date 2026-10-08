@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 import uvicorn
+import yaml
 from mcp.server.fastmcp import FastMCP
 from pytest_socket import enable_socket
 
@@ -25,6 +26,7 @@ from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.service_db import SERVICE_DB_PORT
 from agent_env.env.envs.website import WebsiteEnv
 from agent_env.providers.env_providers import env_gateway_provider, env_provider
+from agent_env.providers.env_providers.constants import GATEWAY_SERVICE_NAME
 from agent_env.providers.env_providers.env_gateway_provider import (
     DeployedGateway,
     MCPServerConfig,
@@ -549,6 +551,28 @@ async def test_modal_vm_provider_routes_to_vm_path_not_containers():
 
 
 @pytest.mark.asyncio
+async def test_sail_vm_provider_routes_to_vm_path_not_containers():
+    """A Sailbox is a Docker-capable VM: the gateway deploys onto it with docker-compose."""
+    from agent_env.env.gateway import GatewayMode
+    from agent_env.providers.sandbox_providers.sail_vm.provider import SailVmSandboxProvider
+
+    gp = EnvironmentGatewayProvider()
+    gp._deploy_via_vm = AsyncMock(return_value="VM_RESULT")
+    gp._deploy_via_containers = AsyncMock(return_value="CONTAINER_RESULT")
+
+    result = await gp.create_gateway(
+        sandbox_provider=SailVmSandboxProvider(api_key="sail-test-key"),
+        mcp_servers=[MCPServerConfig(image="mcp-a", environment_name="a")],
+        mcp_server_images=[MagicMock(image_name="mcp-a")],
+        gateway_mode=GatewayMode.PERFORMANCE,
+        ttl_seconds=60,
+        disk_size_gb=10,
+    )
+    assert result == "VM_RESULT"
+    gp._deploy_via_containers.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_build_local_store_no_services():
     """No services at all (and website_configs left unset, as the container path calls it) must
     self-build local Postgres without raising — guards the empty service list + website_configs=None
@@ -691,6 +715,24 @@ def test_compose_local_still_renders_servicedb():
     )
     assert "  servicedb:" in compose
     assert "condition: service_healthy" in compose
+
+
+@pytest.mark.parametrize("extra_hosts", [(), ("host.docker.internal:host-gateway",)])
+def test_compose_maps_extra_hosts_into_the_gateway(extra_hosts):
+    """The gateway calls out to agents, as a trigger's executor, so it carries the sandbox's host mappings."""
+    from agent_env.env.envs.service_db import ServiceDBConfig
+
+    compose = EnvironmentGatewayProvider().create_docker_compose(
+        mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")],
+        gateway_image="agent-gateway",
+        state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
+        state_instance=LocalPostgresStateProvider.default_instance(),
+        extra_hosts=extra_hosts,
+    )
+
+    services = yaml.safe_load(compose)["services"]
+    mapped = {name: service["extra_hosts"] for name, service in services.items() if "extra_hosts" in service}
+    assert mapped == ({GATEWAY_SERVICE_NAME: list(extra_hosts)} if extra_hosts else {})
 
 
 # --- sidecar rendering --------------------------------------------------------

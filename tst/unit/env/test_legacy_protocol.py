@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
+from agentenv_protocol import RPC_PATH, WELL_KNOWN_PATH, DataPart, uploaded_file_part
+from agentenv_protocol.client import GetDataResponse
 
 from agent_env.env import legacy_protocol
 
@@ -123,3 +126,33 @@ async def test_a_gateway_path_without_a_gateway_fails_readably():
         await legacy_protocol.child_env_card(record, None, "slack")
     with pytest.raises(EnvNeedsGateway, match=message):
         await legacy_protocol.export_state(None, "slack")
+
+
+def _v1_service(monkeypatch, answer: list, export_state: dict) -> list[str]:
+    """A v1 service at http://gw/svc/mcp-slack that answers data/get with ``answer`` and serves ``export_state``;
+    returns each request it got, as ``METHOD path``."""
+    asked, real = [], httpx.AsyncClient
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        asked.append(f"{request.method} {request.url.path}")
+        if request.url.path.endswith(WELL_KNOWN_PATH):
+            return httpx.Response(200, json={"name": "slack", "url": RPC_PATH})
+        if request.url.path.endswith("/export-state"):
+            return httpx.Response(200, json=export_state)
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": GetDataResponse(parts=answer).model_dump(mode="json")})
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.MockTransport(handle)))
+    return asked
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer, state, reads_export_state", [
+    ([DataPart(data={"messages": 2})], {"messages": 2}, False),
+    ([uploaded_file_part("slack.zip", name="slack.zip", mime_type="application/zip")], {"messages": 3}, True),
+    ([], {}, False),
+], ids=["data", "file-bundle", "nothing"])
+async def test_a_v1_services_state_is_the_data_it_answers_with_else_its_export_state(monkeypatch, answer, state, reads_export_state):
+    asked = _v1_service(monkeypatch, answer, export_state={"messages": 3})
+
+    assert await legacy_protocol.service_state(None, "http://gw", "slack") == state
+    assert ("GET /svc/mcp-slack/export-state" in asked) is reads_export_state

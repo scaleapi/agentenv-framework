@@ -6,7 +6,8 @@ comma-separated provider is a chain whose deploys fall back from one provider to
 pass. A run is refused when a deploy would fail on its provider: an image only this machine has (in its local registry,
 or saved in its local object store) on a provider that isn't the local one, a VM asked of a provider that can't create
 one, or containers on the local provider without a Docker daemon. A deploy_agent step that names no agent, and a judge
-that names none, deploy the configured default agent, which must be in the store.
+that names none, deploy the configured default agent, which must be in the store. An env the bundle writes is
+checked from its planned env.toml: an image the bundle builds is one only this machine has.
 
 A gateway deploy on the local provider runs on infra envs the store may not hold yet: the gateway, the service-db its
 local Postgres state runs from, and the website browser it adds for websites. The run builds those once its writes are
@@ -39,7 +40,9 @@ from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.service_db import ServiceDBEnv
 from agent_env.env.envs.website import WebsiteEnv
+from agent_env.env.registry import get_env_registry
 from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider, _gateway_topology
+from agent_env.providers.env_providers.env_provider import _env_provider_class
 from agent_env.providers.env_providers.env_server_provider import EnvironmentServerProvider
 from agent_env.providers.env_state.env_state_provider import LOCAL_POSTGRES_STATE_TYPE
 from agent_env.providers.env_state.store import get_env_state_instance_store
@@ -54,7 +57,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     get_sandbox_provider,
 )
 from agent_env.store.base import NotFoundError
-from agent_env.store.image_store.oci_registry_credentials import registry_host_from_ref
+from agent_env.store.image_store.oci_registry_credentials import is_loopback_host, registry_host_from_ref
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.deploy_sandbox import DeploySandboxTaskStep
@@ -64,7 +67,7 @@ from agent_env.utils.docker_build import docker_unreachable
 from ._fs import relative
 from .parse import BundleError, BundleKind
 from .plan import Plan
-from .resolve import BuiltImage, ResolvedEntry, build_step
+from .resolve import BuiltImage, Reference, ResolvedEntry, build_step
 
 _SHOWN_DOCKER_USERS = 3
 
@@ -94,6 +97,16 @@ class _Image:
     local_only: str | None  # why only this machine has it, or None
 
 
+@dataclass(frozen=True)
+class _Deployment:
+    """How a deploy_env step's env deploys, as far as the walk checks it."""
+
+    provider: type  # the provider class its env_provider_type names
+    images: list[_Image]  # what it runs, its children's included
+    websites: bool
+    one_server: bool  # a single MCP server, which a provider that deploys one server can take
+
+
 class _Walk:
     def __init__(self, plan: Plan, sandbox: str | None):
         self.plan, self.sandbox = plan, sandbox
@@ -105,6 +118,7 @@ class _Walk:
         self.default_agent_users: list[tuple[str, str]] = []  # (where, what names no agent)
         self.written = {write.id for write in plan.writes}
         self.agents = {write.id: write.source for write in plan.writes if write.kind is BundleKind.AGENT}
+        self.envs = {write.id: write.source for write in plan.writes if write.kind is BundleKind.ENV}
         self.built = {write.id: write.source for write in plan.writes if isinstance(write.source, BuiltImage)}
 
     def task(self, task: ResolvedEntry) -> None:
@@ -151,48 +165,105 @@ class _Walk:
 
     def _env(self, where: str, step: DeployEnvTaskStep) -> None:
         provider = _provider(self.sandbox or step.sandbox_type, get_env_sandbox_provider)
-        if step.env_id in self.written:
-            return  # a bundle env, refused at materialize until envs can be written
-        try:
-            env = Env.get(step.env_id, step.env_version)
-        except NotFoundError:
-            return  # the plan reports a store env that isn't there
-        if not isinstance(env, (MCPServerEnv, WebsiteEnv, MultiEnv)):
-            return  # an env type that deploys itself, as deploy_env's own preflight leaves it
-        try:
-            provider_class = provider_or_class(env)
-        except (ValueError, KeyError):
-            return  # deploy_env's own preflight reports a provider type this process can't load
-        if not isinstance(provider_class, type):
-            provider_class = type(provider_class)
-        if issubclass(provider_class, EnvironmentGatewayProvider):
-            topology = _gateway_topology(env)
-            images = [*topology.mcp_server_images, *(topology.website_images or [])]
+        deployment = self._planned(step.env_id) if step.env_id in self.envs else self._stored(step)
+        if deployment is None:
+            return
+        if issubclass(deployment.provider, EnvironmentGatewayProvider):
             kinds = {GATEWAY}
             if _state_type(step) == LOCAL_POSTGRES_STATE_TYPE:
                 kinds.add(SERVICE_DB)
-            if topology.website_configs:
+            if deployment.websites:
                 kinds.add(WEBSITE_BROWSER)
-        elif issubclass(provider_class, EnvironmentServerProvider) and isinstance(env, MCPServerEnv):
-            images, kinds = [env.docker_image_artifact], set()
+        elif issubclass(deployment.provider, EnvironmentServerProvider) and deployment.one_server:
+            kinds = set()
         else:  # a plugin's provider, or one deploy_env's own preflight refuses for this env
             return
+        env_id, images = step.env_id, deployment.images
         if _local_link(provider):
             self.infra |= kinds
             self.docker_users.append(where)
         if remote := _remote_links(provider):
-            self._reachable(where, remote, [_Image(f"env {env.id!r}'s image {image.id!r}", _local_only(image)) for image in images])
+            self._reachable(where, remote, images)
             # Modal's gateway runs each server in a container of its own, and can't serve websites.
             containers = [link for link in remote if isinstance(link, ModalSandboxProvider)]
             vms = [link for link in remote if link not in containers]
             if WEBSITE_BROWSER in kinds and containers:
-                self._problem(where, f"deploys env {env.id!r}, which has websites, on the {_shown(containers[0])} "
+                self._problem(where, f"deploys env {env_id!r}, which has websites, on the {_shown(containers[0])} "
                                      "sandbox provider, whose gateway runs in containers and can't serve websites; run it "
                                      "on a VM provider, such as --sandbox local")
             if containers:
                 self.remote_infra.append((where, containers[0], kinds - {WEBSITE_BROWSER}))
             if vms:
                 self.remote_infra.append((where, vms[0], kinds))
+
+    def _stored(self, step: DeployEnvTaskStep) -> _Deployment | None:
+        """How a store env deploys, or None when the walk leaves it to deploy_env's own preflight."""
+        try:
+            env = Env.get(step.env_id, step.env_version)
+        except NotFoundError:
+            return None  # the plan reports a store env that isn't there
+        if not isinstance(env, (MCPServerEnv, WebsiteEnv, MultiEnv)):
+            return None  # an env type that deploys itself, as deploy_env's own preflight leaves it
+        try:
+            provider_class = provider_or_class(env)
+        except (ValueError, KeyError):
+            return None  # deploy_env's own preflight reports a provider type this process can't load
+        if not isinstance(provider_class, type):
+            provider_class = type(provider_class)
+        images, websites = _stored_images(env)
+        return _Deployment(provider_class, images, websites, isinstance(env, MCPServerEnv))
+
+    def _planned(self, env_id: str) -> _Deployment | None:
+        """How an env the bundle writes deploys, from its planned config: what deploys it, and its images and its
+        children's. None for a type the walk doesn't model, or a provider type the plan has refused."""
+        cls = get_env_registry().get(self.envs[env_id].entry.type)
+        if cls is None or not issubclass(cls, (MCPServerEnv, WebsiteEnv, MultiEnv)):
+            return None
+        provider_type = self.envs[env_id].config.get("env_provider_type", EnvironmentGatewayProvider.type)
+        try:
+            provider_class = _env_provider_class(provider_type)
+        except ValueError:
+            return None
+        images, websites = self._planned_images(env_id)
+        return _Deployment(provider_class, images, websites, issubclass(cls, MCPServerEnv))
+
+    def _planned_images(self, env_id: str) -> tuple[list[_Image], bool]:
+        """The images an env the bundle writes runs, its children's included, and whether it has websites."""
+        source = self.envs[env_id]
+        cls = get_env_registry().get(source.entry.type)
+        images, websites = [], cls is not None and issubclass(cls, WebsiteEnv)
+        for ref in source.references:
+            if ref.kind is EntityKind.ARTIFACT and (image := self._planned_image(env_id, ref)) is not None:
+                images.append(image)
+            elif ref.kind is EntityKind.ENV:
+                if ref.id in self.envs:
+                    child_images, child_websites = self._planned_images(ref.id)
+                else:
+                    try:
+                        child = Env.get(ref.id, self._planned_version(ref.kind, ref.id, ref.version))
+                        child_images, child_websites = _stored_images(child)
+                    except NotFoundError:
+                        continue  # the plan reports a store env that isn't there
+                images += child_images
+                websites |= child_websites
+        return images, websites
+
+    def _planned_image(self, env_id: str, ref: Reference) -> _Image | None:
+        what = f"env {env_id!r}'s image {ref.id!r}"
+        if (built := self.built.get(ref.id)) is not None:
+            path = relative(self.plan.bundle.bundle.root, built.entry.path)
+            return _Image(what, f"it's built on this machine from {path}/{built.dockerfile}")
+        if ref.id in self.written:
+            return None  # another of the bundle's writes, which materialize refuses or writes first
+        try:
+            return _Image(what, _local_only(DockerImageArtifact.get(ref.id, self._planned_version(ref.kind, ref.id,
+                                                                                                    ref.version))))
+        except NotFoundError:
+            return None  # the plan reports a store image that isn't there
+
+    def _planned_version(self, kind: EntityKind, entity_id: str, version: int | None) -> int | None:
+        """The version a write names a store entity at: its pin, else the one the plan read, which the writer pins."""
+        return version if version is not None else self.plan.store_latest.get((kind, entity_id))
 
     def _agent(self, where: str, step: DeployAgentTaskStep, sandboxes: dict[str, DeploySandboxTaskStep]) -> None:
         if step.sandbox_name:
@@ -247,7 +318,8 @@ class _Walk:
                 return _Image(what, f"it's built on this machine from {path}/{built.dockerfile}")
             if image_id in self.written:
                 return None  # another of the bundle's writes, which materialize refuses or writes first
-            return _Image(what, _local_only(DockerImageArtifact.get(image_id, image_version)))
+            planned = self._planned_version(EntityKind.ARTIFACT, image_id, image_version)
+            return _Image(what, _local_only(DockerImageArtifact.get(image_id, planned)))
         try:
             return _Image(what, _local_only(A2AAgent.get(agent_id, version).docker_image_artifact))
         except NotFoundError:
@@ -295,6 +367,14 @@ class _Walk:
         """Record ``problem`` at the deploy ``where``. One found at several deploys, such as an infra env's image every
         gateway deploy runs, is reported once, naming the first of them."""
         self.problems.setdefault(problem, {})[where] = None
+
+
+def _stored_images(env: Env) -> tuple[list[_Image], bool]:
+    """The images a store env runs through a gateway, and whether it has websites."""
+    topology = _gateway_topology(env)
+    images = [*topology.mcp_server_images, *(topology.website_images or [])]
+    return [_Image(f"env {env.id!r}'s image {image.id!r}", _local_only(image)) for image in images], bool(
+        topology.website_configs)
 
 
 def _state_type(step: DeployEnvTaskStep) -> str | None:
@@ -346,16 +426,8 @@ def _local_only(image: DockerImageArtifact | str) -> str | None:
     """Why only this machine has ``image``: its reference names a registry on this machine, or it's saved in this
     machine's object store. None when neither."""
     ref = image if isinstance(image, str) else image.image_name
-    if _loopback(registry_host_from_ref(ref)):
+    if is_loopback_host(registry_host_from_ref(ref)):
         return f"{ref} is in a registry on this machine"
     if not isinstance(image, str) and urlparse(image.tar_gz_object_url).scheme == "file":
         return f"{image.id!r} is saved in this machine's object store"
     return None
-
-
-def _loopback(host: str | None) -> bool:
-    if not host:
-        return False
-    name = host[1:host.find("]")] if host.startswith("[") else host.rsplit(":", 1)[0]
-    return name == "localhost" or name.startswith("127.") or name == "::1"
-

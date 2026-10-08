@@ -152,8 +152,8 @@ class ModalSandbox(Sandbox):
             stderr = await proc.stderr.read.aio()
             raise RuntimeError(f"write to {destination_path} failed (exit={rc}): {stderr!r}")
 
-    async def write_file_from_s3(self, s3_url: str, destination_path: str) -> None:
-        body = await asyncio.to_thread(get_config().get_object_store().open, s3_url)
+    async def write_file_from_object(self, object_url: str, destination_path: str) -> None:
+        body = await asyncio.to_thread(get_config().get_object_store_at(object_url).open, object_url)
         with contextlib.closing(body):
 
             async def _aiter() -> AsyncIterator[bytes]:

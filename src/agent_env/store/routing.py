@@ -254,6 +254,36 @@ class RoutingDocumentStore(DocumentStore):
         ]
         return _merge_sort(found, sort)[0] if found else None
 
+    def find_many_by_id(self, collection: str, id_field: str, ids: list[str]) -> list[dict]:
+        identities = list(dict.fromkeys(ids))
+        readers_by_id = {
+            identity: self._readers(collection, Filter.of(**{id_field: identity}))
+            for identity in identities
+        }
+        batches: dict[int, tuple[DocumentStore, list[str]]] = {}
+        for identity, readers in readers_by_id.items():
+            for store in readers:
+                _, batch = batches.setdefault(id(store), (store, []))
+                batch.append(identity)
+        found = {}
+        for store, batch in batches.values():
+            found[id(store)] = {
+                doc[id_field]: doc
+                for doc in self._read(store, lambda: store.find_many_by_id(collection, id_field, batch))
+            }
+        return [
+            doc for identity, readers in readers_by_id.items()
+            if (doc := next((found[id(store)][identity] for store in readers if identity in found[id(store)]), None)) is not None
+        ]
+
+    def latest_version(self, collection: str, entity_id: str) -> Optional[dict]:
+        filter = Filter.of(id=entity_id)
+        found = [
+            doc for store in self._readers(collection, filter)
+            if (doc := self._read(store, lambda: store.latest_version(collection, entity_id))) is not None
+        ]
+        return _merge_sort(found, Sort.by("version", descending=True))[0] if found else None
+
     def query(
         self,
         collection: str,
@@ -295,6 +325,44 @@ class RoutingDocumentStore(DocumentStore):
         else:
             merged = self._latest_across(readers, collection, filter, id_field, version_field)
         return _window(_merge_sort(merged, sort, absent_last=True), limit, offset)
+
+    def latest_per_id_page(
+        self,
+        collection: str,
+        filter: Filter,
+        *,
+        id_field: str = "id",
+        version_field: str = "version",
+        sort: Optional[Sort] = None,
+        limit: Optional[int] = None,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        """Combine latest-per-id pages and totals across the selected sources."""
+        readers = self._readers(collection, filter)
+        if len(readers) == 1:
+            return self._read(
+                readers[0], lambda: readers[0].latest_per_id_page(
+                    collection, filter, id_field=id_field, version_field=version_field,
+                    sort=sort, limit=limit, offset=offset,
+                )
+            )
+        if _ids_split_by_namespace(collection, id_field):
+            window = (offset or 0) + limit if limit else None
+            pages_and_totals = [
+                self._read(store, lambda: store.latest_per_id_page(
+                    collection, filter, id_field=id_field, version_field=version_field,
+                    sort=sort, limit=window, offset=0,
+                ))
+                for store in readers
+            ]
+            docs = [doc for page, _ in pages_and_totals for doc in page]
+            docs = _merge_sort(docs, sort, absent_last=True)
+            total = sum(total for _, total in pages_and_totals)
+        else:
+            docs = self._latest_across(readers, collection, filter, id_field, version_field)
+            docs = _merge_sort(docs, sort, absent_last=True)
+            total = len(docs)
+        return _window(docs, limit, offset), total
 
     def count_distinct(self, collection: str, filter: Filter, *, id_field: str = "id") -> int:
         readers = self._readers(collection, filter)
@@ -552,11 +620,10 @@ class LocalRunObjectStore(ObjectStore):
     def signed_put_url(self, object_url: str, expires_in: int = 3600) -> str | None:
         return self._writing(object_url).signed_put_url(object_url, expires_in)
 
-    def signed_post(self, url_prefix: str, *, expires_in: int = 3600, max_bytes: int | None = None) -> dict | None:
-        return self._writing(url_prefix).signed_post(url_prefix, expires_in=expires_in, max_bytes=max_bytes)
-
     def shared_credentials_env(self) -> dict[str, str]:
-        return self.configured.shared_credentials_env()
+        """None: an ``@local`` run's objects reach its sandboxes through grants, staging or pushed bytes, so the
+        configured store's credentials, the caller's own, stay with the caller."""
+        return {}
 
     def issue_read_grant(self, object_url: str, *, expires_in: int | None = None) -> HttpGetGrant:
         return self._at(object_url).issue_read_grant(object_url, **_lifetime(expires_in))

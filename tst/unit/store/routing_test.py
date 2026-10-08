@@ -4,17 +4,19 @@ everything else to the configured ones, and an ``@local`` run can't write to a c
 import inspect
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import click
 import pytest
 from click.testing import CliRunner
 
+from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.artifact.store import get_artifact_store
 from agent_env.cli import cli
-from agent_env.config import configure, get_config
+from agent_env.config import configure, get_config, reset_config, set_object_store
 from agent_env.config.errors import ConfigError
 from agent_env.config.paths import state_root
 from agent_env.store import DuplicateKeyError, Filter, LocalSqliteDocumentStore, Sort, UpdateSpec, VersionedEntityStore
@@ -253,6 +255,9 @@ def test_default_local_users_keep_the_local_namespace_in_its_own_file(cli_routin
     router.insert("envs", {"id": "rocket", "version": 1})
     assert _ids(router.local, "envs") == {LOCAL_ENV}
     assert _ids(router.configured, "envs") == {"rocket"}
+    page, total = router.latest_per_id_page("envs", Filter(), limit=0)
+    assert {doc["id"] for doc in page} == {LOCAL_ENV, "rocket"}
+    assert total == 2
     with run_scope(LOCAL_TASK):
         assert isinstance(config.get_object_store(), LocalFilesystemObjectStore)
         with pytest.raises(LocalRunWriteError):
@@ -429,9 +434,9 @@ def test_registering_a_bare_artifact_at_a_local_url_is_refused(object_stores):
     _, local = object_stores
     url = local.put("k/image.tar.gz", b"x")
     with pytest.raises(ValueError, match="configured object store"):
-        DockerImageArtifact.put_tar("bare-image", description="d", image_name="img:v1", tar_gz_s3_url=url)
+        DockerImageArtifact.put_tar("bare-image", description="d", image_name="img:v1", tar_gz_object_url=url)
     with pytest.raises(ValueError, match="configured object store"):
-        FileArtifactUniverse.put("bare-universe", file_artifacts={"a": object()}, bundle_s3_url=local.object_url("k/"))
+        FileArtifactUniverse.put("bare-universe", file_artifacts={"a": object()}, bundle_object_url=local.object_url("k/"))
 
 
 def test_a_key_both_namespaces_recorded_reads_as_the_readers_own(stores):
@@ -465,8 +470,24 @@ def test_an_id_recorded_in_both_stores_reduces_to_one_latest_row(stores):
     ]
     assert [d["id"] for d in router.latest_per_id("env_snapshots", Filter(), sort=by_time, limit=1, offset=1)] == ["local-only"]
     assert router.count_distinct("env_snapshots", Filter()) == 3
+    page, total = router.latest_per_id_page(
+        "env_snapshots", Filter(), sort=by_time, limit=1, offset=1,
+    )
+    assert [doc["id"] for doc in page] == ["local-only"]
+    assert total == 3
     with run_scope(LOCAL_TASK):
         assert {d["id"]: d.get("from") for d in router.latest_per_id("env_snapshots", Filter())}["tied"] == "local"
+
+
+def test_latest_version_lookup_uses_the_routed_namespace(stores):
+    router, _, _ = stores
+    versioned = VersionedEntityStore(router, "env_snapshots", dict, dict)
+    router.insert("env_snapshots", {"id": "shared", "version": 1})
+    local_id = "@local/~/bundle/env_snapshots/local-only"
+    with run_scope(LOCAL_TASK):
+        router.insert("env_snapshots", {"id": local_id, "version": 3})
+    assert versioned.get("shared")["version"] == 1
+    assert versioned.get(local_id)["version"] == 3
 
 
 def test_the_local_namespace_file_cant_be_the_configured_store(tmp_path, cli_routing):
@@ -498,6 +519,19 @@ def test_a_raw_entity_write_is_checked_like_a_versioned_one(stores, entity_id, r
     assert not (state_root() / "document_store" / "local.db").exists()
 
 
+def test_batch_instance_lookup_keeps_the_first_routed_copy(stores):
+    router, configured, local = stores
+    configured.ensure_index("task_instances", ["instance_id"], unique=True)
+    local.ensure_index("task_instances", ["instance_id"], unique=True)
+    configured.insert("task_instances", {"instance_id": "shared", "current_step": 2})
+    local.insert("task_instances", {"instance_id": "shared", "current_step": 7})
+
+    for scope in (nullcontext(), run_scope(LOCAL_TASK)):
+        with scope:
+            expected = router.find_one("task_instances", Filter.of(instance_id="shared"))
+            assert router.find_many_by_id("task_instances", "instance_id", ["shared"]) == [expected]
+
+
 def test_an_entity_store_defined_outside_core_is_routed_by_id(stores):
     router, configured, local = stores
     plugin_things = VersionedEntityStore(router, "plugin_things", serialize=dict, deserialize=dict)
@@ -524,3 +558,24 @@ def test_a_routing_wrapper_says_how_every_store_method_routes(base, wrapper):
         if not name.startswith("_") and (callable(member) or isinstance(member, property))
     }
     assert public - set(vars(wrapper)) == _NOT_ROUTED
+
+
+class _SharingStore(LocalFilesystemObjectStore):
+    """A configured store that hands its credentials to the workloads agent-env deploys."""
+
+    def shared_credentials_env(self) -> dict[str, str]:
+        return {"AWS_ACCESS_KEY_ID": "configured-id", "AWS_SECRET_ACCESS_KEY": "configured-secret"}
+
+
+def test_an_agent_deployed_in_an_at_local_run_gets_none_of_the_configured_stores_credentials(tmp_path):
+    configured = _SharingStore(str(tmp_path / "configured"))
+    routed = LocalRunObjectStore(configured, LocalFilesystemObjectStore(str(tmp_path / "local")))
+    agent = A2AAgent(id="solver", version=1, docker_image_artifact=SimpleNamespace(image_name="img"))
+    try:
+        set_object_store(configured)
+        assert agent._build_merged_env({}, 8000)["AWS_ACCESS_KEY_ID"] == "configured-id"
+        set_object_store(routed)
+        assert routed.shared_credentials_env() == {}
+        assert "AWS_ACCESS_KEY_ID" not in agent._build_merged_env({}, 8000)
+    finally:
+        reset_config()

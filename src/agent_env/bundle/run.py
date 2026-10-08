@@ -422,7 +422,9 @@ def _task_run_command(ref: Reference) -> str:
 
 def _written(plan: Plan, done: Materialized) -> str:
     what = f"{_label(plan, done.write)}: v{done.version}"
-    return f"{what}, unchanged" if done.reused else f"{what} ({'; '.join(done.reasons)})"
+    if done.reused:
+        return f"{what}, unchanged" + (f" ({'; '.join(done.reasons)})" if done.reasons else "")
+    return f"{what} ({'; '.join(done.reasons)})"
 
 
 def _label(plan: Plan, write: Write) -> str:

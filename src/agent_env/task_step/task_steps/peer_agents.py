@@ -79,7 +79,7 @@ class PeerAgentsTaskStep(TaskStep):
         a2a_url = src.a2a_url or src.api_url
         ext = a2a_agent_cls.find_extension(src.a2a_card or {}, a2a_agent_cls.EXT_PEER_AGENTS)
         endpoint = (ext.get("params") or {}).get("endpoint", "/ext/peer-agents")
-        peers = [self._record(deployed_by_name[n]) for n in peering.peer_agent_names]
+        peers = [self._record(deployed_by_name[n], src) for n in peering.peer_agent_names]
         async with httpx.AsyncClient() as client:
             resp = await client.post(a2a_url + endpoint, json={"peers": peers}, timeout=_POST_TIMEOUT_SECONDS)
         if resp.status_code >= 400:
@@ -87,6 +87,8 @@ class PeerAgentsTaskStep(TaskStep):
         logger.info("PeerAgentsTaskStep: peered '%s' with %s", peering.source_agent_name, peering.peer_agent_names)
 
     @staticmethod
-    def _record(peer: DeployedAgent) -> dict:
+    def _record(peer: DeployedAgent, source: DeployedAgent) -> dict:
+        """``peer``'s entry in ``source``'s table."""
         card = peer.a2a_card or {}
-        return {"name": peer.agent_name, "url": peer.a2a_url or peer.api_url, "card": card, "description": card.get("description")}
+        url = peer.url_for(source.sandbox_type, on_host=source.on_host)
+        return {"name": peer.agent_name, "url": url, "card": card, "description": card.get("description")}

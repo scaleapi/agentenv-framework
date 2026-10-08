@@ -233,11 +233,10 @@ def _answering(monkeypatch, body: dict) -> None:
 
 
 @pytest.mark.asyncio
-async def test_fetch_trajectory_refuses_an_answer_that_only_names_an_s3_prefix(monkeypatch):
+async def test_fetch_trajectory_reads_no_trajectory_from_an_answer_that_only_names_an_s3_prefix(monkeypatch):
     _answering(monkeypatch, {"trajectory_s3_prefix": "s3://b/t/"})
 
-    with pytest.raises(RuntimeError, match="answered with trajectory_s3_prefix"):
-        await fetch_trajectory("https://agent.test/ext/trajectory", {"task_id": "t"})
+    assert await fetch_trajectory("https://agent.test/ext/trajectory", {"task_id": "t"}) == FetchedTrajectory()
 
 
 @pytest.mark.asyncio

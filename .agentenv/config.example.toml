@@ -17,6 +17,11 @@ agent_default = "local"   # agents too
 [agents]
 default_a2a_agent_id = "a2a-default"   # what a deploy_agent step that names no agent deploys
 
+# [model]
+# base_url = "http://localhost:4000"   # a model proxy on this machine; local containers reach it as host.docker.internal
+#                                      # on Linux, bind it to the Docker bridge address and use that: http://172.17.0.1:4000
+# api_key  = "env:MY_PROXY_KEY"
+
 [runner]
 impl = "agent_env.runner.local_runner:LocalRunner"
 

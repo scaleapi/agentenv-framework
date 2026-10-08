@@ -326,9 +326,9 @@ class Env(ABC):
 
         Files land at ``<destination>/<filename>``. Nested relative paths
         (e.g. ``subdir/file.txt``) are supported — parent dirs are created
-        as needed. Each file is fetched directly from S3 by the sandbox via
-        a presigned URL, so we never round-trip the bytes through this
-        process.
+        as needed. The sandbox fetches each file directly from the object
+        store through a signed URL where the store can sign one, so the bytes
+        don't round-trip through this process.
 
         Default implementation uses ``self._sandbox`` (set by ``deploy()`` /
         ``from_deployed_env()`` on most env subclasses). Subclasses that
@@ -373,7 +373,7 @@ class Env(ABC):
         for idx, (filename, file_artifact) in enumerate(file_artifacts.items(), 1):
             dest_path = loaded[filename]
             logger.info(f"  [{idx}/{total}] {file_artifact.object_url} -> {dest_path}")
-            await sandbox.load_s3_file(file_artifact.object_url, dest_path)
+            await sandbox.load_object_file(file_artifact.object_url, dest_path)
 
         logger.info(
             f"Loaded FileArtifactUniverse '{file_artifact_universe.id}' "

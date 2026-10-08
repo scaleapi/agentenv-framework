@@ -62,7 +62,12 @@ or one of them only where it is used.
   sandboxes for envs and agents. MongoDB, S3, Cloud Storage, ECR, AWS Secrets Manager, Google Cloud
   Secret Manager, Modal and E2B exist as implementations and are selected by config.
 - The model endpoint is unset until `[model] base_url` / `api_key` (or `LITELLM_BASE_URL` /
-  `LITELLM_API_KEY`) is configured.
+  `LITELLM_API_KEY`) is configured. A loopback URL handed into a `local` container (the model
+  endpoint, an agent, peer or gateway on this machine) becomes `host.docker.internal`. On Linux that
+  name is the Docker bridge address (`docker0`, usually `172.17.0.1`), not loopback, so a service on
+  this machine that local containers call, a model proxy say, has to listen there: bind it to the
+  bridge address and use that address in its URL. Binding `0.0.0.0` also works, but exposes the
+  service to the network.
 - `[agents] default_a2a_agent_id`: the agent a `deploy_agent` step without an id deploys; built-in
   `a2a-default`, overridable by `configure(default_a2a_agent_id=...)`.
 - Secrets never live in the file: use `secret:KEY` or `env:NAME` references, resolved through
@@ -85,7 +90,7 @@ and deserialized through a registry.
 | `task/`, `task_step/` | A `Task` holds its `TaskStep`s inline; `Task.run()` executes them as a DAG. `depends_on` (None means all prior steps) gates a step, independent steps run concurrently, `fail_task_on_error` makes a failure fatal or tolerated, `retry_config` rolls a failed span back through the step journal and re-dispatches it. Built-in steps live in `task_step/task_steps/` (`deploy_env`, `deploy_agent`, `prompt_agent`, the verifiers under `verifiers/`, and more). |
 | `store/` | Four store ABCs with local and cloud implementations: `DocumentStore` (SQLite, MongoDB), `ObjectStore` (filesystem, S3, Cloud Storage), `ImageStore` (local OCI registry, ECR), `SecretStore` (env vars or file, AWS Secrets Manager, Google Cloud Secret Manager). `VersionedEntityStore` implements the shared versioned get/put logic, `QueryBuilder` is the immutable chained query API, `store/base.py` holds the error types. A new backend must pass the conformance kits in `tst/store/`. |
 | `config/` | The `Config` singleton (`get_config`, `configure`, `reset_config`) in `config/runtime.py`, file discovery in `config/loader.py`, and `load_impl`, which resolves `module:Class` pointers. `agent_env.store` re-exports the config names for compatibility. |
-| `providers/` | `providers/sandbox_providers/` holds the sandbox providers `local`, `modal`, `modal_vm`, `e2b`; `[sandbox] default` and `agent_default` accept a comma-separated fallback chain. `providers/env_providers/` holds the environment providers: `EnvironmentProvider` (an env's containers and state store) and `EnvironmentGatewayProvider`, which renders a docker-compose for the gateway and its MCP servers inside the sandbox; `providers/env_state/` holds env-state providers (`local_postgres` built in). |
+| `providers/` | `providers/sandbox_providers/` holds the sandbox providers `local`, `modal`, `modal_vm`, `e2b`, `sail_vm` (the `sail` extra); `[sandbox] default` and `agent_default` accept a comma-separated fallback chain. `providers/env_providers/` holds the environment providers: `EnvironmentProvider` (an env's containers and state store) and `EnvironmentGatewayProvider`, which renders a docker-compose for the gateway and its MCP servers inside the sandbox; `providers/env_state/` holds env-state providers (`local_postgres` built in). |
 | `a2a_agent/` | The `A2AAgent` entity (`a2a_agent`), its stores and the validator steps. The protocol package provides the agent-side framework. |
 | `runner/` | The `[runner]` seam: `Runner.submit()` returns `(run_id, instance_id)`; `LocalRunner` is built in. |
 | `explorer/` | Optional local web UI: `agent-env up`, needs the `explorer` extra, binds loopback `:8234`. |

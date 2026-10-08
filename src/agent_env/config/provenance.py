@@ -24,7 +24,7 @@ KIND_INSTALLED: LayerKind = "installed"
 
 
 def class_name(impl: Any) -> Optional[str]:
-    """The class alone — ``S3ObjectStore``, not the dotted path."""
+    """The class alone — ``LocalFilesystemObjectStore``, not the dotted path."""
     return impl.rpartition(":")[2] if isinstance(impl, str) else None
 
 

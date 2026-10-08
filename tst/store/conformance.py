@@ -313,6 +313,41 @@ def latest_per_id_sort_offset_limit_apply_after_grouping(store, coll):
     assert store.count_distinct(coll, Filter()) == 3
 
 
+def find_many_by_id_preserves_first_documents_and_request_order(store, coll):
+    store.insert(coll, {"identity": "a", "value": "first"})
+    store.insert(coll, {"identity": "b", "value": "second"})
+    store.insert(coll, {"identity": "a", "value": "later"})
+
+    assert store.find_many_by_id(coll, "identity", ["b", "missing", "a", "b"]) == [
+        store.find_one(coll, Filter.of(identity="b")),
+        store.find_one(coll, Filter.of(identity="a")),
+    ]
+    assert store.find_many_by_id(coll, "identity", []) == []
+
+
+def latest_per_id_page_returns_entity_total_and_window(store, coll):
+    for doc in [
+        {"eid": "a", "rev": 1, "rank": 99},
+        {"eid": "a", "rev": 2, "rank": 30},
+        {"eid": "b", "rev": 1, "rank": 20},
+        {"eid": "c", "rev": 1, "rank": 10},
+        {"rank": 100},
+    ]:
+        store.insert(coll, doc)
+
+    for limit, expected in [(1, ["b"]), (0, ["b", "c"]), (None, ["b", "c"])]:
+        page, total = store.latest_per_id_page(
+            coll, Filter(), id_field="eid", version_field="rev",
+            sort=Sort.by("rank", descending=True), offset=1, limit=limit,
+        )
+        assert [doc["eid"] for doc in page] == expected
+        assert total == 3
+
+    page, total = store.latest_per_id_page(coll, Filter(), id_field="eid", offset=10, limit=1)
+    assert page == []
+    assert total == 3
+
+
 def latest_per_id_orders_absent_last_in_both_directions(store, coll):
     """A missing sort field lands last for ascending and descending alike; otherwise
     offset/limit page the wrong entities."""
@@ -450,6 +485,8 @@ CASES = [
     versioned_entity_store_roundtrip,
     latest_per_id_reduces_to_newest_version,
     latest_per_id_sort_offset_limit_apply_after_grouping,
+    latest_per_id_page_returns_entity_total_and_window,
+    find_many_by_id_preserves_first_documents_and_request_order,
     latest_per_id_orders_absent_last_in_both_directions,
     latest_per_id_skips_docs_without_identity,
     latest_per_id_missing_version_sorts_lowest,

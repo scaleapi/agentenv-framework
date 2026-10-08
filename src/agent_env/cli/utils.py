@@ -2,6 +2,7 @@ import asyncio
 
 import click
 
+from agent_env.config import get_config
 from agent_env.env import Env
 from agent_env.providers.env_providers.env_provider import _env_provider_class
 from agent_env.providers.env_providers.env_server_provider import EnvironmentServerProvider
@@ -29,6 +30,35 @@ def build_platform_option(f):
             "Apple Silicon; pass an empty string to omit --platform entirely."
         ),
     )(f)
+
+
+def deprecated_option(old: str, dest: str, replacement: str):
+    """A hidden `old` flag, the deprecated spelling of `replacement`: using it notes the replacement on stderr.
+    Merge the two with :func:`renamed_value`."""
+    def note(ctx: click.Context, param: click.Parameter, value: str | None) -> str | None:
+        if value is not None:
+            click.echo(f"Warning: {old} is deprecated and will be removed; use {replacement}.", err=True)
+        return value
+
+    return click.option(old, dest, default=None, hidden=True, callback=note)
+
+
+def renamed_value(new: str, new_value: str | None, old: str, old_value: str | None) -> str | None:
+    """The value of flag `new`, or of its deprecated spelling `old`; giving both is a usage error."""
+    if new_value is not None and old_value is not None:
+        raise click.UsageError(f"{old} is the deprecated spelling of {new}; give only {new}")
+    return old_value if new_value is None else new_value
+
+
+def refuse_unwritable_ids(*ids: str) -> None:
+    """Refuse, before anything is built, an id the store a put writes it to wouldn't take, such as an @local id the
+    image's suffix makes too long."""
+    store = get_config().get_document_store()
+    for entity_id in ids:
+        try:
+            store.check_id(entity_id)
+        except ValueError as e:
+            raise click.ClickException(str(e)) from None
 
 
 def env_provider_type_option(help: str, env_type: str = "mcp_server"):

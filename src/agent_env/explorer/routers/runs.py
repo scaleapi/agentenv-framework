@@ -25,6 +25,9 @@ from agent_env.task.store import TaskStepStatus
 
 logger = logging.getLogger(__name__)
 
+INSTANCE_READ_BATCH_SIZE = 500
+TASK_RUN_PAGE_SIZE = 500
+
 router = APIRouter(prefix="/api/v1/tasks", tags=["runs"])
 
 TASK_INSTANCES_COLLECTION = "task_instances"
@@ -278,39 +281,33 @@ def _all_task_runs(task_id: str) -> list:
 
     out, offset = [], 0
     while True:
-        page = run_store.list_runs(task_id=task_id, limit=500, offset=offset)
+        page = run_store.list_runs(task_id=task_id, limit=TASK_RUN_PAGE_SIZE, offset=offset)
         out.extend(page)
-        if len(page) < 500:
+        if len(page) < TASK_RUN_PAGE_SIZE:
             return out
-        offset += 500
+        offset += TASK_RUN_PAGE_SIZE
 
 
-def _group_id_of(record) -> str:
-    """The group a run belongs to.
+def _instances_for_runs(records: list) -> dict[str, dict]:
+    """Load instance documents for a selected set of runs in bounded query batches."""
+    instance_ids = list(dict.fromkeys(record.instance_id for record in records))
+    instances: dict[str, dict] = {}
+    store = docs()
+    for start in range(0, len(instance_ids), INSTANCE_READ_BATCH_SIZE):
+        batch = instance_ids[start:start + INSTANCE_READ_BATCH_SIZE]
+        for instance in store.find_many_by_id(TASK_INSTANCES_COLLECTION, "instance_id", batch):
+            instance_id = instance.get("instance_id")
+            if instance_id is not None:
+                instances.setdefault(instance_id, instance)
+    return instances
 
-    A batch (``POST /runs``) stamps ``metadata.run_group_id`` on every run it starts.
-    A single run (``POST /run``, the "Start 1 Run" button) stamps nothing, so it is its
-    own group, keyed by its run id. ``list_run_groups`` and ``_instances_for_group``
-    MUST agree on this — when only the former applied the fallback, every single run
-    produced a group row that the join could never match, so the Rollouts table showed
-    the group with "0 runs" and no instance, for every non-batch run.
-    """
-    return (record.overrides.get("metadata") or {}).get("run_group_id") or record.run_id
 
-
-def _instances_for_group(run_group_id: str, task_id: str) -> tuple[list[dict], dict]:
-    """Every run in the group, joined to its task instance for live status, plus the
-    per-step ``{"done", "failed"}`` tally the Batch progress strip draws."""
+def _group_instances(records: list, instances: dict[str, dict]) -> tuple[list[dict], dict]:
+    """Join selected runs to one instance snapshot and tally each run's final step outcomes."""
     out: list[dict] = []
     step_counts: dict[str, dict[str, int]] = {}
-    for record in _all_task_runs(task_id):
-        if _group_id_of(record) != run_group_id:
-            continue
-        instance = docs().find_one(
-            TASK_INSTANCES_COLLECTION, Filter.of(instance_id=record.instance_id)
-        ) or {}
-        # One outcome per step per run. A completion callback that raises records a
-        # failure beside the step's success, and the failure is the final verdict.
+    for record in records:
+        instance = instances.get(record.instance_id) or {}
         outcome: dict[str, str] = {}
         for step in instance.get("completed_steps") or []:
             step_id, status = step.get("step_id"), step.get("status")
@@ -335,6 +332,26 @@ def _instances_for_group(run_group_id: str, task_id: str) -> tuple[list[dict], d
     return out, step_counts
 
 
+def _group_id_of(record) -> str:
+    """The group a run belongs to.
+
+    A batch (``POST /runs``) stamps ``metadata.run_group_id`` on every run it starts.
+    A single run (``POST /run``, the "Start 1 Run" button) stamps nothing, so it is its
+    own group, keyed by its run id. ``list_run_groups`` and ``_instances_for_group``
+    MUST agree on this — when only the former applied the fallback, every single run
+    produced a group row that the join could never match, so the Rollouts table showed
+    the group with "0 runs" and no instance, for every non-batch run.
+    """
+    return (record.overrides.get("metadata") or {}).get("run_group_id") or record.run_id
+
+
+def _instances_for_group(run_group_id: str, task_id: str) -> tuple[list[dict], dict]:
+    """Every run in the group, joined to its task instance for live status, plus the
+    per-step ``{"done", "failed"}`` tally the Batch progress strip draws."""
+    records = [record for record in _all_task_runs(task_id) if _group_id_of(record) == run_group_id]
+    return _group_instances(records, _instances_for_runs(records))
+
+
 # Run-group funnel buckets keyed by RunStatus, so the tally tracks the enum — adding a
 # status is a deliberate edit here, not a silent fall-through. CANCELED folds into
 # "failed"; QUEUED is "provisioning" (accepted, not yet picked up by a worker).
@@ -349,6 +366,18 @@ _FUNNEL_BUCKET: dict[RunStatus, str] = {
 
 def _group_status(task_id: str, run_group_id: str) -> dict:
     instances, step_counts = _instances_for_group(run_group_id, task_id)
+    return {
+        "run_group_id": run_group_id,
+        "task_id": task_id,
+        "total": len(instances),
+        **_funnel_counts(instances),
+        "step_counts": step_counts,
+        "instances": instances,
+    }
+
+
+def _funnel_counts(instances: list[dict]) -> dict[str, int]:
+    """Tally current run statuses into the UI's four funnel buckets."""
     tally = {"completed": 0, "failed": 0, "running": 0, "provisioning": 0}
     for inst in instances:
         try:
@@ -356,14 +385,7 @@ def _group_status(task_id: str, run_group_id: str) -> dict:
         except ValueError:
             run_status = None
         tally[_FUNNEL_BUCKET.get(run_status, "provisioning")] += 1
-    return {
-        "run_group_id": run_group_id,
-        "task_id": task_id,
-        "total": len(instances),
-        **tally,
-        "step_counts": step_counts,
-        "instances": instances,
-    }
+    return tally
 
 
 @router.get("/{task_id}/run-groups", response_model=PaginatedResponse)
@@ -375,10 +397,13 @@ def list_run_groups(
 ) -> PaginatedResponse:
     """Run groups for a task, newest first — the Rollouts table."""
     groups: dict[str, dict] = {}
-    for record in _all_task_runs(task_id):
+    records = _all_task_runs(task_id)
+    group_records: dict[str, list] = {}
+    for record in records:
+        gid = _group_id_of(record)
+        group_records.setdefault(gid, []).append(record)
         if task_version is not None and record.task_version != task_version:
             continue
-        gid = _group_id_of(record)
         group = groups.setdefault(gid, {
             "run_group_id": gid,
             "task_id": task_id,
@@ -391,9 +416,13 @@ def list_run_groups(
 
     ordered = sorted(groups.values(), key=lambda g: g["created_at_utc"] or "", reverse=True)
     page = ordered[offset: offset + limit]
+    selected_records = [record for group in page for record in group_records[group["run_group_id"]]]
+    instance_snapshot = _instances_for_runs(selected_records)
     items = []
     for group in page:
-        status = _group_status(task_id, group["run_group_id"])
+        selected = group_records[group["run_group_id"]]
+        instances, step_counts = _group_instances(selected, instance_snapshot)
+        tally = _funnel_counts(instances)
         # The list row nests the tally under `counts` and names its timestamp
         # `earliest_created_at_utc` — unlike the flat shape /run-groups/{id} returns.
         items.append({
@@ -401,16 +430,16 @@ def list_run_groups(
             "task_id": task_id,
             "task_version": group["task_version"],
             "earliest_created_at_utc": group["created_at_utc"],
-            "total": status["total"],
+            "total": len(instances),
             "counts": {
-                "completed": status["completed"],
-                "failed": status["failed"],
-                "running": status["running"],
-                "provisioning": status["provisioning"],
+                "completed": tally["completed"],
+                "failed": tally["failed"],
+                "running": tally["running"],
+                "provisioning": tally["provisioning"],
                 "waiting": 0,
             },
-            "step_counts": status["step_counts"],
-            "instances": status["instances"],
+            "step_counts": step_counts,
+            "instances": instances,
         })
     return PaginatedResponse(items=items, total=len(ordered), limit=limit, offset=offset,
                              has_more=offset + len(items) < len(ordered))

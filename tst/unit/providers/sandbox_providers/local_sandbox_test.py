@@ -146,13 +146,18 @@ async def test_get_sandbox_raises_when_work_dir_missing(tmp_path: Path, monkeypa
 
 
 class _RecordingLocalSandbox(LocalSandbox):
-    def __init__(self, work_dir):
-        super().__init__(work_dir=work_dir)
+    def __init__(self, work_dir, *, listed=(0, "", ""), **kwargs):
+        super().__init__(work_dir=work_dir, **kwargs)
         self.scripts: list[str] = []
+        self._listed = listed
 
     async def exec_script(self, script, *, max_retries=0):
         self.scripts.append(script)
         return ""
+
+    async def exec_with_output(self, *args):
+        self.scripts.append(" ".join(args))
+        return self._listed
 
 
 @pytest.mark.asyncio
@@ -281,7 +286,58 @@ async def test_terminate_vm_without_compose_removes_only_an_agent_placed_on_it(t
     sandbox = _RecordingLocalSandbox(work_dir=tmp_path)
     await sandbox.terminate()
 
+    assert sandbox.scripts[0] == f"docker ps -aq --filter label=agentenv.sandbox={sandbox.sandbox_id}"
+    assert sandbox.scripts[-1] == f"docker rm -f {sandbox.container_name} >/dev/null 2>&1 || true"
+
+
+@pytest.mark.asyncio
+async def test_terminate_removes_what_steps_started_for_this_sandbox_only(tmp_path: Path):
+    """run_docker_container's containers, images and networks carry the sandbox's label; a VM would take them down
+    with it, but the laptop's Docker is shared, so the local sandbox removes its own."""
+    sandbox = _RecordingLocalSandbox(tmp_path, sandbox_id="local-abc", listed=(0, "c1\nc2\n", ""))
+    await sandbox.terminate()
+
+    assert sandbox.scripts[:2] == ["docker ps -aq --filter label=agentenv.sandbox=local-abc", "docker rm -f c1 c2 >/dev/null"]
+    for listing in ("docker images -q", "docker network ls -q"):
+        assert f"{listing} --filter label=agentenv.sandbox=local-abc" in sandbox.scripts[2]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_lookup_is_reported_with_the_command_that_cleans_up(tmp_path: Path, caplog):
+    sandbox = _RecordingLocalSandbox(tmp_path, sandbox_id="local-abc", listed=(1, "", "Cannot connect to the Docker daemon"))
+    await sandbox.terminate()
+
+    assert "docker rm -f $(docker ps -aq --filter label=agentenv.sandbox=local-abc)" in caplog.text
+    assert not any(s.startswith("docker rm -f c") for s in sandbox.scripts)
+
+
+@pytest.mark.asyncio
+async def test_teardown_without_docker_installed_finishes(tmp_path: Path):
+    class _NoDocker(_RecordingLocalSandbox):
+        async def exec_with_output(self, *args):
+            raise FileNotFoundError(2, "No such file or directory", "docker")
+
+    sandbox = _NoDocker(tmp_path, sandbox_id="local-abc")
+    await sandbox.terminate()
+
     assert sandbox.scripts == [f"docker rm -f {sandbox.container_name} >/dev/null 2>&1 || true"]
+
+
+@pytest.mark.asyncio
+async def test_a_container_that_wont_go_still_lets_the_compose_stack_come_down(tmp_path: Path):
+    (tmp_path / "docker-compose.yml").write_text("")
+
+    class _StuckContainer(_RecordingLocalSandbox):
+        async def exec_script(self, script, *, max_retries=0):
+            self.scripts.append(script)
+            if script.startswith("docker rm -f c1"):
+                raise RuntimeError("container is stuck")
+            return ""
+
+    sandbox = _StuckContainer(tmp_path, sandbox_id="local-abc", listed=(0, "c1\n", ""))
+    with pytest.raises(RuntimeError, match="container is stuck"):
+        await sandbox.terminate()
+    assert any("docker compose down" in s for s in sandbox.scripts)
 
 
 @pytest.mark.asyncio
@@ -417,8 +473,9 @@ def test_local_never_shares_network_and_externalizes_localhost():
 
 def test_host_gateway_flag_only_where_nothing_provides_the_alias():
     """Only Linux lacks a native host.docker.internal; on Rancher an explicit mapping would break it."""
-    expected = "--add-host host.docker.internal:host-gateway" if platform.system() == "Linux" else ""
-    assert LocalSandboxProvider.EXTRA_CONTAINER_RUN_ARGS == expected
+    linux = platform.system() == "Linux"
+    assert LocalSandboxProvider.EXTRA_CONTAINER_RUN_ARGS == ("--add-host host.docker.internal:host-gateway" if linux else "")
+    assert LocalSandbox.extra_hosts == (("host.docker.internal:host-gateway",) if linux else ())
 
 
 @pytest.mark.asyncio
@@ -878,6 +935,22 @@ async def test_an_agent_placed_on_a_local_vm_sandbox_gets_the_local_ca(tmp_path,
         assert (LocalSandboxProvider.EXTRA_CONTAINER_RUN_ARGS in script) if LocalSandboxProvider.EXTRA_CONTAINER_RUN_ARGS else True
     else:
         assert copies == [] and "sleep 2" in script
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trusted", [True, False])
+async def test_an_agent_placed_on_a_local_vm_sandbox_maps_the_host_alias(tmp_path, monkeypatch, trusted):
+    """Whether or not the store hands out local grants, the agent reaches this machine by name on Linux."""
+    monkeypatch.setattr(a2a_agent_module, "local_grant_trust", (lambda: local_ca().trust_dir) if trusted else (lambda: None))
+    monkeypatch.setattr(a2a_agent_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(_RecordingLocalSandbox, "extra_hosts", ("host.docker.internal:host-gateway",))
+    sandbox = _RecordingLocalSandbox(work_dir=tmp_path)
+    agent = A2AAgent.__new__(A2AAgent)
+    agent._sandbox = sandbox
+
+    await agent._run_container("img:v1", 8000, {"K": "v"})
+
+    assert "--add-host host.docker.internal:host-gateway" in sandbox.scripts[0]
 
 
 async def _no_sleep(_seconds):

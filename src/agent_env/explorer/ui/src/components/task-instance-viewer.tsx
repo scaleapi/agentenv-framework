@@ -81,13 +81,16 @@ import {
   type OtelSpan,
   parseOtelTrajectory,
 } from '../lib/parse-trajectory';
+import {
+  type TrajectoryUrlKeys,
+  perTurnTrajectoryUrls,
+  trajectoryUrl,
+} from '../lib/trajectory-url';
 
-interface PromptResponseData {
+interface PromptResponseData extends TrajectoryUrlKeys {
   prompt_id: string;
   response: string;
   prompt_text?: string;
-  agent_trajectory_s3_uri?: string;
-  target_agent_per_turn_trajectory_s3_uris?: (string | null)[];
   // A null entry means "identical to prompt_text" (the initial prompt is stored once).
   source_agent_per_turn_prompt_parts?: Array<Array<{
     kind: string;
@@ -95,7 +98,6 @@ interface PromptResponseData {
     file?: { name?: string; uri?: string };
     data?: unknown;
   }> | null>;
-  compact_trajectory_s3_uri?: string;
   model?: string;
   // step_id is the human-readable step name (e.g. "run-solver"). Older instances may have only prompt_id.
   step_id?: string;
@@ -104,28 +106,11 @@ interface PromptResponseData {
 interface TrajectoryState {
   // Lazy-load: trajectories start 'idle' so a multi-step task doesn't fire N parallel fetches on mount.
   status: 'idle' | 'loading' | 'loaded' | 'error';
-  s3Uri: string;
+  objectUrl: string;
   // The prompt the agent received for this step. Multi-step tasks each have a distinct prompt, rendered above their trajectory section.
   promptText?: string;
   trajectory?: ParsedTrajectory;
   error?: string;
-}
-
-interface FetchState {
-  status: 'idle' | 'loading' | 'loaded' | 'error';
-  data?: unknown;
-  error?: string;
-}
-
-interface UsersimModelData {
-  modelName: string;
-  trajectory: FetchState;
-  milestones: FetchState;
-  conversationLog: FetchState;
-  usersimResult: FetchState;
-  outputUrls: Record<string, string>;
-  snapshotS3Uri: string | null;
-  score: { overall_score: number; overall_score_rationale: string } | null;
 }
 
 export interface TaskStepRef {
@@ -176,13 +161,10 @@ export function TaskInstanceViewer({
       nextTurnPromptText?: string;
     }[]
   >([]);
-  const [usersimModels, setUsersimModels] = useState<UsersimModelData[]>([]);
-  const instanceGenRef = useRef(0);
   const [copiedContext, setCopiedContext] = useState(false);
   const [selectedOverviewFile, setSelectedOverviewFile] = useState<
     string | null
   >(null);
-  const [copiedUsersim, setCopiedUsersim] = useState<string | null>(null);
   // Per-deployment A2A cards for the Agent Card tab. The registered agent doc carries no card; it lives in
   // context.deployed_agents[].a2a_card, which the list endpoint strips — fall back to the single-instance GET.
   const deployedAgentsForCard = ((instance.context as Record<string, unknown> | null)
@@ -233,36 +215,21 @@ export function TaskInstanceViewer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taskId, instanceId, agentCardSig]);
 
-  const handleCopyJson = useCallback((key: string, data: unknown) => {
-    navigator.clipboard.writeText(JSON.stringify(data, null, 2));
-    setCopiedUsersim(key);
-    setTimeout(() => setCopiedUsersim(null), 1500);
-  }, []);
-  const [expandedTriggers, setExpandedTriggers] = useState<Set<string>>(
-    new Set(),
-  );
 
-  // Build trajectory entries (one per prompt_response with an S3 URI), all 'idle' — no eager fetch (a
+  // Build trajectory entries (one per prompt_response with a trajectory URL), all 'idle' — no eager fetch (a
   // multi-step task can have 5+). Auto-load only when there's exactly one. Re-run when the prompt_responses
   // array reference changes (task-detail swaps a thin row for the full doc), keyed on a content signature
   // since the parent doesn't memoize.
   const promptResponsesArr = (
     instance.context as Record<string, unknown> | null
-  )?.prompt_responses as
-    | {
-        agent_trajectory_s3_uri?: string;
-        target_agent_per_turn_trajectory_s3_uris?: (string | null)[];
-      }[]
-    | undefined;
+  )?.prompt_responses as TrajectoryUrlKeys[] | undefined;
   const promptResponsesSignature = useMemo(
     () =>
       (promptResponsesArr ?? [])
         .map(pr => {
           // Include per-turn URIs in the signature so the effect re-fires when new turns land between polls.
-          const perTurn = (
-            pr?.target_agent_per_turn_trajectory_s3_uris ?? []
-          ).join(',');
-          return `${pr?.agent_trajectory_s3_uri ?? ''}#${perTurn}`;
+          const perTurn = (perTurnTrajectoryUrls(pr) ?? []).join(',');
+          return `${trajectoryUrl(pr) ?? ''}#${perTurn}`;
         })
         .join('|'),
     [promptResponsesArr],
@@ -279,25 +246,26 @@ export function TaskInstanceViewer({
 
     // Fan-out: each PromptResponse becomes 1+ entries — one per non-null turn URI for multi-turn, else one.
     type FlatPR = PromptResponseData & {
-      _entryS3Uri: string;
+      _entryObjectUrl: string;
       _turnIndex?: number;
       _totalTurns?: number;
     };
     const flat: FlatPR[] = [];
     for (const pr of promptResponses) {
-      const perTurn = pr.target_agent_per_turn_trajectory_s3_uris;
+      const perTurn = perTurnTrajectoryUrls(pr);
+      const url = trajectoryUrl(pr);
       if (perTurn && perTurn.length > 0) {
         perTurn.forEach((uri, turnIdx) => {
           if (!uri) return; // skip turns whose trajectory upload failed
           flat.push({
             ...pr,
-            _entryS3Uri: uri,
+            _entryObjectUrl: uri,
             _turnIndex: turnIdx,
             _totalTurns: perTurn.length,
           });
         });
-      } else if (pr.agent_trajectory_s3_uri) {
-        flat.push({ ...pr, _entryS3Uri: pr.agent_trajectory_s3_uri });
+      } else if (url) {
+        flat.push({ ...pr, _entryObjectUrl: url });
       }
     }
 
@@ -321,14 +289,14 @@ export function TaskInstanceViewer({
     });
 
     setTrajectories(prev => {
-      // Index prior loaded/loading state by s3Uri so a re-fire (e.g. taskSteps arriving late) doesn't undo
+      // Index prior loaded/loading state by objectUrl so a re-fire (e.g. taskSteps arriving late) doesn't undo
       // in-progress work — only label/order is recomputed, payloads preserved.
       const prevByUri = new Map<string, TrajectoryState>();
-      for (const t of prev) prevByUri.set(t.state.s3Uri, t.state);
+      for (const t of prev) prevByUri.set(t.state.objectUrl, t.state);
 
       return ordered.map((pr, i) => {
         const resolvedStepId = stepIdByPrompt[pr.prompt_id] ?? pr.step_id;
-        const carryover = prevByUri.get(pr._entryS3Uri);
+        const carryover = prevByUri.get(pr._entryObjectUrl);
         const initialStatus: TrajectoryState['status'] =
           carryover?.status ?? (ordered.length === 1 ? 'loading' : 'idle');
         const turnSuffix =
@@ -377,7 +345,7 @@ export function TaskInstanceViewer({
           nextTurnPromptText,
           state: {
             status: initialStatus,
-            s3Uri: pr._entryS3Uri,
+            objectUrl: pr._entryObjectUrl,
             promptText,
             trajectory: carryover?.trajectory,
             error: carryover?.error,
@@ -391,7 +359,7 @@ export function TaskInstanceViewer({
     let cancelled = false;
     if (ordered.length === 1) {
       const pr = ordered[0]!;
-      fetchTrajectory(pr._entryS3Uri, pr.model)
+      fetchTrajectory(pr._entryObjectUrl, pr.model)
         .then(parsed => {
           if (cancelled) return;
           setTrajectories(prev =>
@@ -424,20 +392,20 @@ export function TaskInstanceViewer({
     (index: number) => {
       const target = trajectories[index];
       if (!target) return;
-      // Commit by s3Uri, not array index: `trajectories` can be rebuilt/reordered while a load is in flight.
-      const s3Uri = target.state.s3Uri;
+      // Commit by objectUrl, not array index: `trajectories` can be rebuilt/reordered while a load is in flight.
+      const objectUrl = target.state.objectUrl;
       setTrajectories(prev =>
         prev.map(t =>
-          t.state.s3Uri === s3Uri
+          t.state.objectUrl === objectUrl
             ? { ...t, state: { ...t.state, status: 'loading' } }
             : t,
         ),
       );
-      fetchTrajectory(s3Uri)
+      fetchTrajectory(objectUrl)
         .then(parsed => {
           setTrajectories(prev =>
             prev.map(t =>
-              t.state.s3Uri === s3Uri
+              t.state.objectUrl === objectUrl
                 ? {
                     ...t,
                     state: { ...t.state, status: 'loaded', trajectory: parsed },
@@ -449,7 +417,7 @@ export function TaskInstanceViewer({
         .catch(err => {
           setTrajectories(prev =>
             prev.map(t =>
-              t.state.s3Uri === s3Uri
+              t.state.objectUrl === objectUrl
                 ? {
                     ...t,
                     state: {
@@ -467,93 +435,11 @@ export function TaskInstanceViewer({
     [trajectories],
   );
 
-  useEffect(() => {
-    const context = instance.context as Record<string, unknown> | null;
-    if (!context) return;
-    const meta = context.metadata as Record<string, unknown> | undefined;
-    if (!meta) return;
-    const trajectoryUrls = meta.trajectory_urls as
-      | Record<string, string>
-      | undefined;
-    if (!trajectoryUrls || Object.keys(trajectoryUrls).length === 0) return;
-
-    const outputUrls = meta.output_urls as
-      | Record<string, Record<string, string>>
-      | undefined;
-    const snapshotUrls = meta.snapshot_urls as
-      | Record<string, string>
-      | undefined;
-    const delivery = meta.delivery as Record<string, unknown> | undefined;
-    const deliveryTrajectories = (delivery?.trajectories ?? []) as {
-      model: string;
-      overall_score: number;
-      overall_score_rationale: string;
-    }[];
-    const scoreByModel = new Map(
-      deliveryTrajectories.map(t => [
-        t.model,
-        {
-          overall_score: t.overall_score,
-          overall_score_rationale: t.overall_score_rationale,
-        },
-      ]),
-    );
-
-    const models = Object.keys(trajectoryUrls);
-    instanceGenRef.current += 1;
-    setUsersimModels(
-      models.map(modelName => ({
-        modelName,
-        trajectory: { status: 'loading' },
-        milestones: { status: 'idle' },
-        conversationLog: { status: 'idle' },
-        usersimResult: { status: 'idle' },
-        outputUrls: outputUrls?.[modelName] ?? {},
-        snapshotS3Uri: snapshotUrls?.[modelName] ?? null,
-        score: scoreByModel.get(modelName) ?? null,
-      })),
-    );
-
-    // Only fetch trajectories eagerly (default subtab)
-    const controller = new AbortController();
-    models.forEach((modelName, i) => {
-      fetchRawS3Json(trajectoryUrls[modelName]!, controller.signal)
-        .then(data => {
-          if (!controller.signal.aborted)
-            setUsersimModels(prev =>
-              prev.map((m, j) =>
-                j === i ? { ...m, trajectory: { status: 'loaded', data } } : m,
-              ),
-            );
-        })
-        .catch(err => {
-          if (!controller.signal.aborted)
-            setUsersimModels(prev =>
-              prev.map((m, j) =>
-                j === i
-                  ? {
-                      ...m,
-                      trajectory: {
-                        status: 'error',
-                        error:
-                          err instanceof Error ? err.message : 'Failed to load',
-                      },
-                    }
-                  : m,
-              ),
-            );
-        });
-    });
-    return () => controller.abort();
-  }, [instanceId]);
-
   const context = instance.context as Record<string, unknown> | null;
   const promptResponses = context
     ? ((context.prompt_responses ?? []) as PromptResponseData[])
     : [];
-  const hasTrajectories = promptResponses.some(
-    pr => pr.agent_trajectory_s3_uri,
-  );
+  const hasTrajectories = promptResponses.some(pr => trajectoryUrl(pr));
   const deployedEnvs = context
     ? ((context.deployed_envs ?? []) as Record<string, unknown>[])
     : [];
@@ -617,7 +503,7 @@ export function TaskInstanceViewer({
     verifications && Object.keys(verifications).length > 0;
 
   // `collect_artifacts` writes a structured map context.metadata.collected_artifacts[step_id] = { artifacts:
-  // { filename: s3_uri }, file_artifact_universe }, plus a legacy flat context.metadata.artifacts mirror.
+  // { filename: object_url }, file_artifact_universe }, plus a legacy flat context.metadata.artifacts mirror.
   // Prefer the structured map; fall back to the flat mirror for older instances.
   const collectedArtifactsByStep = (metadata?.collected_artifacts ??
     null) as Record<string, { artifacts?: Record<string, string> }> | null;
@@ -655,7 +541,7 @@ export function TaskInstanceViewer({
           : [];
       })();
 
-  // Flat merged map (filename -> s3_uri) for inline presigned links elsewhere
+  // Flat merged map (filename -> object_url) for inline content links elsewhere
   // (verifier-card path chips, reviewer-overview lookup).
   const collectedArtifacts: Record<string, string> | null =
     collectedArtifactSections.length > 0
@@ -677,7 +563,7 @@ export function TaskInstanceViewer({
         k.endsWith('reviewer_overview.html'),
       )
     : undefined;
-  const reviewerOverviewS3 =
+  const reviewerOverviewUrl =
     reviewerOverviewKey && collectedArtifacts
       ? collectedArtifacts[reviewerOverviewKey]
       : null;
@@ -701,130 +587,24 @@ export function TaskInstanceViewer({
   );
   const hasAggregateOrSandbox =
     aggregateVerifiers.length > 0 || sandboxVerifiers.length > 0;
-  const resultS3Uri = verifications
-    ? ((
-        Object.values(verifications).find(
-          v => (v as Record<string, unknown>)?.result_s3_uri,
-        ) as Record<string, unknown> | undefined
-      )?.result_s3_uri as string | undefined)
-    : undefined;
-  const hasUsersimModels = usersimModels.length > 0;
-  const taskData = metadata?.task_data as Record<string, unknown> | undefined;
-  const completedRuns = (metadata?.completed_runs ?? []) as {
-    task_id: string;
-    run_epoch: number;
-    run_id: string;
-    model_label: string;
-    result: string;
-    s3_prefix: string;
-    trajectory_url?: string;
-    output_urls?: Record<string, string>;
-  }[];
-  const hasCompletedRuns = completedRuns.length > 0;
 
-  const handleDownloadS3 = useCallback((s3Uri: string) => {
-    window.open(objectContentUrl(s3Uri), '_blank');
+  const handleDownloadTrajectory = useCallback((objectUrl: string) => {
+    window.open(objectContentUrl(objectUrl), '_blank');
   }, []);
 
-  const userIntent = taskData?.user_intent as
-    | Record<string, unknown>
-    | undefined;
-  const taskMilestones = (userIntent?.milestones ?? []) as {
-    milestone_id: string;
-    prompt: string;
-    continuation_criteria: string;
-    planned_interactions_list: { trigger: string; reaction: string }[];
-  }[];
-  const hasTaskMilestones = taskMilestones.length > 0;
-
-  const lazyFetchField = useCallback(
-    (
-      modelIndex: number,
-      field: 'milestones' | 'conversationLog' | 'usersimResult',
-    ) => {
-      const model = usersimModels[modelIndex];
-      if (!model || model[field].status !== 'idle') return;
-
-      const fileKey = {
-        milestones: 'milestone_progress.jsonl',
-        conversationLog: 'conversation_log.jsonl',
-        usersimResult: 'usersim_result.txt',
-      }[field];
-      const s3Uri = model.outputUrls[fileKey];
-      if (!s3Uri) {
-        setUsersimModels(prev =>
-          prev.map((m, j) =>
-            j === modelIndex
-              ? { ...m, [field]: { status: 'loaded', data: null } }
-              : m,
-          ),
-        );
-        return;
-      }
-
-      const gen = instanceGenRef.current;
-      setUsersimModels(prev =>
-        prev.map((m, j) =>
-          j === modelIndex ? { ...m, [field]: { status: 'loading' } } : m,
-        ),
-      );
-      fetchRawS3Json(s3Uri)
-        .then(data => {
-          if (instanceGenRef.current !== gen) return;
-          setUsersimModels(prev =>
-            prev.map((m, j) =>
-              j === modelIndex
-                ? { ...m, [field]: { status: 'loaded', data } }
-                : m,
-            ),
-          );
-        })
-        .catch(err => {
-          if (instanceGenRef.current !== gen) return;
-          setUsersimModels(prev =>
-            prev.map((m, j) =>
-              j === modelIndex
-                ? {
-                    ...m,
-                    [field]: {
-                      status: 'error',
-                      error:
-                        err instanceof Error ? err.message : 'Failed to load',
-                    },
-                  }
-                : m,
-            ),
-          );
-        });
-    },
-    [usersimModels],
-  );
-
-  const handleDownloadTrajectory = useCallback((s3Uri: string) => {
-    window.open(objectContentUrl(s3Uri), '_blank');
-  }, []);
-
-  const handleDownloadResults = useCallback(() => {
-    if (!resultS3Uri) return;
-    window.open(objectContentUrl(resultS3Uri), '_blank');
-  }, [resultS3Uri]);
 
   // One list for both renderings, so the inline row and the collapsed dropdown
   // always show the same entries in the same order.
   const barDownloads = useMemo(
-    () => buildBarDownloads(promptResponses, resultS3Uri),
-    [promptResponses, resultS3Uri],
+    () => buildBarDownloads(promptResponses),
+    [promptResponses],
   );
   const collapseBarDownloads = shouldCollapseBarDownloads(barDownloads.length);
   const runBarDownload = useCallback(
     (download: BarDownload) => {
-      if (download.kind === 'results') {
-        void handleDownloadResults();
-        return;
-      }
-      void handleDownloadTrajectory(download.s3Uri);
+      void handleDownloadTrajectory(download.objectUrl);
     },
-    [handleDownloadResults, handleDownloadTrajectory],
+    [handleDownloadTrajectory],
   );
 
   // Initial tab by status: for terminal runs lead to the most diagnostic view — verifier verdict
@@ -863,15 +643,13 @@ export function TaskInstanceViewer({
       : undefined;
   const reviewerOverviewSrc = activeCollectedUri
     ? objectContentUrl(activeCollectedUri)
-    : reviewerOverviewS3
-    ? objectContentUrl(reviewerOverviewS3)
+    : reviewerOverviewUrl
+    ? objectContentUrl(reviewerOverviewUrl)
     : null;
   const showReviewerOverview =
-    collectedFiles.length > 0 || !!reviewerOverviewS3;
+    collectedFiles.length > 0 || !!reviewerOverviewUrl;
   const liveDefaultValue = hasTrajectories
     ? 'trajectory'
-    : hasUsersimModels
-    ? `model-${usersimModels[0]!.modelName}`
     : hasVerifications
     ? 'verifier'
     : 'context';
@@ -999,15 +777,6 @@ export function TaskInstanceViewer({
                 Trajectory Viewer
               </Tabs.Trigger>
             )}
-            {usersimModels.map(m => (
-              <Tabs.Trigger
-                key={m.modelName}
-                value={`model-${m.modelName}`}
-                className="my-1"
-              >
-                {m.modelName}
-              </Tabs.Trigger>
-            ))}
             {hasVerifications && (
               <Tabs.Trigger value="verifier" className="my-1">
                 {hasAggregateOrSandbox
@@ -1025,16 +794,6 @@ export function TaskInstanceViewer({
             {hasCollectedArtifacts && (
               <Tabs.Trigger value="collected-artifacts" className="my-1">
                 Collected Artifacts ({collectedArtifactsCount})
-              </Tabs.Trigger>
-            )}
-            {hasCompletedRuns && (
-              <Tabs.Trigger value="completed-runs" className="my-1">
-                Completed Runs
-              </Tabs.Trigger>
-            )}
-            {hasTaskMilestones && (
-              <Tabs.Trigger value="task-milestones" className="my-1">
-                Milestones
               </Tabs.Trigger>
             )}
             {hasServerConfig && (
@@ -1129,7 +888,7 @@ export function TaskInstanceViewer({
                         </h4>
                         <button
                           onClick={() =>
-                            handleDownloadTrajectory(t.state.s3Uri)
+                            handleDownloadTrajectory(t.state.objectUrl)
                           }
                           title={`Download ${t.label}`}
                           className="flex items-center gap-1 px-2 py-1 rounded text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--accent)] transition-colors"
@@ -1195,7 +954,7 @@ export function TaskInstanceViewer({
                         <div className="border-t border-[var(--border)] p-3">
                           <TrajectoryViewer
                             trajectory={t.state.trajectory}
-                            screenshotBaseUri={t.state.s3Uri}
+                            screenshotBaseUri={t.state.objectUrl}
                           />
                         </div>
                       </details>
@@ -1213,291 +972,6 @@ export function TaskInstanceViewer({
             )}
           </Tabs.Content>
         )}
-
-        {usersimModels.map((m, mi) => (
-          <Tabs.Content
-            key={m.modelName}
-            value={`model-${m.modelName}`}
-            className="p-4"
-          >
-            {m.snapshotS3Uri && (
-              <div className="mb-3">
-                <button
-                  onClick={() =>
-                    window.open(objectContentUrl(m.snapshotS3Uri!), '_blank')
-                  }
-                  className="inline-flex items-center gap-1.5 text-sm text-blue-500 hover:underline cursor-pointer"
-                >
-                  <Download size={14} />
-                  Download workspace&apos;s final state snapshot
-                </button>
-              </div>
-            )}
-            <Tabs.Root
-              defaultValue="trajectory"
-              onValueChange={val => {
-                if (val === 'score') lazyFetchField(mi, 'usersimResult');
-                if (val === 'milestones') lazyFetchField(mi, 'milestones');
-                if (val === 'conversation-log')
-                  lazyFetchField(mi, 'conversationLog');
-              }}
-            >
-              <Tabs.List>
-                <Tabs.Trigger value="trajectory" className="my-1">
-                  Trajectory
-                </Tabs.Trigger>
-                <Tabs.Trigger value="score" className="my-1">
-                  Score
-                </Tabs.Trigger>
-                <Tabs.Trigger value="milestones" className="my-1">
-                  Milestones
-                </Tabs.Trigger>
-                <Tabs.Trigger value="conversation-log" className="my-1">
-                  Conversation Log
-                </Tabs.Trigger>
-              </Tabs.List>
-
-              <Tabs.Content value="trajectory" className="pt-4">
-                <RawJsonPanel
-                  state={m.trajectory}
-                  copied={copiedUsersim === `${m.modelName}-trajectory`}
-                  onCopy={() =>
-                    handleCopyJson(
-                      `${m.modelName}-trajectory`,
-                      m.trajectory.data,
-                    )
-                  }
-                />
-              </Tabs.Content>
-
-              <Tabs.Content value="score" className="pt-4">
-                {m.score ? (
-                  <div className="flex flex-col gap-3">
-                    <div className="flex items-center gap-3">
-                      <span className="text-sm font-semibold">
-                        Overall Score
-                      </span>
-                      <span className="text-xs font-semibold px-1.5 py-0.5 rounded bg-[var(--secondary)] border border-[var(--border)]">
-                        {m.score.overall_score}
-                      </span>
-                    </div>
-                    <p className="text-sm text-[var(--muted-foreground)]">
-                      {m.score.overall_score_rationale}
-                    </p>
-                  </div>
-                ) : (
-                  <p className="text-sm text-[var(--muted-foreground)]">
-                    No score data available.
-                  </p>
-                )}
-                {m.usersimResult.status === 'loading' && (
-                  <div className="flex items-center gap-2 text-sm text-[var(--muted-foreground)] mt-4">
-                    <Loader2 size={14} className="animate-spin" />
-                    Loading usersim result...
-                  </div>
-                )}
-                {m.usersimResult.status === 'error' && (
-                  <p className="text-sm text-red-500 mt-4">
-                    {m.usersimResult.error}
-                  </p>
-                )}
-                {m.usersimResult.status === 'loaded' &&
-                  m.usersimResult.data != null && (
-                    <div className="mt-4">
-                      <h4 className="text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)] mb-2">
-                        Usersim Result
-                      </h4>
-                      <div className="rounded-md border border-[var(--border)] bg-[var(--secondary)] p-4">
-                        <pre className="text-sm whitespace-pre-wrap">
-                          {typeof (
-                            m.usersimResult.data as Record<string, unknown>
-                          )?.text === 'string'
-                            ? String(
-                                (
-                                  m.usersimResult.data as Record<
-                                    string,
-                                    unknown
-                                  >
-                                ).text,
-                              )
-                            : JSON.stringify(m.usersimResult.data, null, 2)}
-                        </pre>
-                      </div>
-                    </div>
-                  )}
-              </Tabs.Content>
-
-              <Tabs.Content value="milestones" className="pt-4">
-                {taskMilestones.length > 0 &&
-                  (() => {
-                    const progressEntries =
-                      m.milestones.status === 'loaded' &&
-                      Array.isArray(m.milestones.data)
-                        ? (m.milestones.data as {
-                            milestone_id: string;
-                            status: string;
-                            turn: number;
-                          }[])
-                        : [];
-                    const progressByMilestone = new Map<
-                      string,
-                      { startTurn?: number; endTurn?: number; status: string }
-                    >();
-                    for (const entry of progressEntries) {
-                      const existing = progressByMilestone.get(
-                        entry.milestone_id,
-                      ) ?? { status: 'unknown' };
-                      if (entry.status === 'in_progress') {
-                        existing.startTurn = entry.turn;
-                        if (existing.status !== 'completed')
-                          existing.status = 'in_progress';
-                      }
-                      if (entry.status === 'completed') {
-                        existing.endTurn = entry.turn;
-                        existing.status = 'completed';
-                      }
-                      progressByMilestone.set(entry.milestone_id, existing);
-                    }
-                    return (
-                      <div className="flex flex-col gap-6 mb-6">
-                        {taskMilestones.map(ms => {
-                          const progress = progressByMilestone.get(
-                            ms.milestone_id,
-                          );
-                          return (
-                            <div key={ms.milestone_id}>
-                              <div className="flex items-center gap-2 mb-1">
-                                <h4 className="text-sm font-semibold">
-                                  {ms.milestone_id}
-                                </h4>
-                                {progress ? (
-                                  <>
-                                    <span
-                                      className={`text-xs font-semibold px-1.5 py-0.5 rounded ${
-                                        progress.status === 'completed'
-                                          ? 'bg-green-500/10 text-green-500'
-                                          : 'bg-yellow-500/10 text-yellow-500'
-                                      }`}
-                                    >
-                                      {progress.status}
-                                    </span>
-                                    <span className="text-xs text-[var(--muted-foreground)]">
-                                      turns {progress.startTurn ?? '?'}
-                                      {'\u2013'}
-                                      {progress.endTurn ?? '?'}
-                                    </span>
-                                  </>
-                                ) : m.milestones.status === 'loaded' ? (
-                                  <span className="text-xs font-semibold px-1.5 py-0.5 rounded bg-[var(--secondary)] text-[var(--muted-foreground)]">
-                                    not reached
-                                  </span>
-                                ) : null}
-                              </div>
-                              <p className="text-xs text-[var(--muted-foreground)] mb-3">
-                                {ms.continuation_criteria}
-                              </p>
-                              {ms.planned_interactions_list.length > 0 &&
-                                (() => {
-                                  const isExpanded = expandedTriggers.has(
-                                    ms.milestone_id,
-                                  );
-                                  const PREVIEW_COUNT = 2;
-                                  const visible = isExpanded
-                                    ? ms.planned_interactions_list
-                                    : ms.planned_interactions_list.slice(
-                                        0,
-                                        PREVIEW_COUNT,
-                                      );
-                                  const hiddenCount =
-                                    ms.planned_interactions_list.length -
-                                    PREVIEW_COUNT;
-                                  return (
-                                    <div className="flex flex-col gap-2">
-                                      {visible.map((interaction, idx) => (
-                                        <div
-                                          key={idx}
-                                          className="rounded-md border border-[var(--border)] overflow-hidden text-sm"
-                                        >
-                                          <div className="p-3 bg-blue-500/5">
-                                            <span className="text-xs font-semibold uppercase tracking-wider text-blue-500">
-                                              Trigger
-                                            </span>
-                                            <p className="mt-0.5">
-                                              {interaction.trigger}
-                                            </p>
-                                          </div>
-                                          <div className="p-3 bg-amber-500/5 border-t border-[var(--border)]">
-                                            <span className="text-xs font-semibold uppercase tracking-wider text-amber-500">
-                                              Reaction
-                                            </span>
-                                            <p className="mt-0.5">
-                                              {interaction.reaction}
-                                            </p>
-                                          </div>
-                                        </div>
-                                      ))}
-                                      {hiddenCount > 0 && (
-                                        <Button
-                                          variant="soft"
-                                          size="1"
-                                          onClick={() => {
-                                            setExpandedTriggers(prev => {
-                                              const next = new Set(prev);
-                                              if (isExpanded)
-                                                next.delete(ms.milestone_id);
-                                              else next.add(ms.milestone_id);
-                                              return next;
-                                            });
-                                          }}
-                                          style={{
-                                            cursor: 'pointer',
-                                            alignSelf: 'flex-start',
-                                          }}
-                                        >
-                                          {isExpanded
-                                            ? 'Show less'
-                                            : `Show ${hiddenCount} more`}
-                                        </Button>
-                                      )}
-                                    </div>
-                                  );
-                                })()}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    );
-                  })()}
-                <h4 className="text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)] mb-2">
-                  Milestone Progress
-                </h4>
-                <RawJsonPanel
-                  state={m.milestones}
-                  copied={copiedUsersim === `${m.modelName}-milestones`}
-                  onCopy={() =>
-                    handleCopyJson(
-                      `${m.modelName}-milestones`,
-                      m.milestones.data,
-                    )
-                  }
-                />
-              </Tabs.Content>
-
-              <Tabs.Content value="conversation-log" className="pt-4">
-                <RawJsonPanel
-                  state={m.conversationLog}
-                  copied={copiedUsersim === `${m.modelName}-conversationLog`}
-                  onCopy={() =>
-                    handleCopyJson(
-                      `${m.modelName}-conversationLog`,
-                      m.conversationLog.data,
-                    )
-                  }
-                />
-              </Tabs.Content>
-            </Tabs.Root>
-          </Tabs.Content>
-        ))}
 
         {hasVerifications && (
           <Tabs.Content
@@ -1715,92 +1189,6 @@ export function TaskInstanceViewer({
           </Tabs.Content>
         )}
 
-        {hasCompletedRuns && (
-          <Tabs.Content value="completed-runs" className="p-4">
-            <div className="space-y-3">
-              {completedRuns.map((run, i) => (
-                <div
-                  key={i}
-                  className="rounded-md border border-[var(--border)] p-4 flex items-center justify-between"
-                >
-                  <div className="flex items-center gap-3">
-                    <span className="text-xs font-medium px-2 py-0.5 rounded bg-[var(--secondary)]">
-                      {run.model_label}
-                    </span>
-                    <span className="text-sm font-mono text-[var(--muted-foreground)]">
-                      {run.run_id}
-                    </span>
-                    <span
-                      className={`text-xs px-2 py-0.5 rounded-full ${
-                        run.result === 'done'
-                          ? 'bg-green-100 text-green-700'
-                          : 'bg-[var(--secondary)] text-[var(--muted-foreground)]'
-                      }`}
-                    >
-                      {run.result}
-                    </span>
-                  </div>
-                  {(run.trajectory_url ||
-                    run.output_urls?.['trajectory.json']) && (
-                    <button
-                      onClick={() =>
-                        handleDownloadS3(
-                          run.trajectory_url ||
-                            run.output_urls?.['trajectory.json'] ||
-                            '',
-                        )
-                      }
-                      className="flex items-center gap-1 px-2 py-1 rounded text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--accent)] transition-colors"
-                    >
-                      <Download size={12} />
-                      Trajectory
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
-          </Tabs.Content>
-        )}
-
-        {hasTaskMilestones && (
-          <Tabs.Content value="task-milestones" className="p-4">
-            <div className="space-y-4">
-              {taskMilestones.map((milestone, index) => (
-                <div
-                  key={`${milestone.milestone_id}-${index}`}
-                  className="rounded-md border border-[var(--border)] p-4"
-                >
-                  <div className="flex items-center gap-2 mb-3">
-                    <span className="text-xs font-medium px-2 py-0.5 rounded bg-[var(--secondary)]">
-                      {milestone.milestone_id}
-                    </span>
-                  </div>
-                  <div className="space-y-3 text-sm">
-                    <div>
-                      <h4 className="text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)] mb-1">
-                        Prompt
-                      </h4>
-                      <p className="whitespace-pre-wrap break-words">
-                        {milestone.prompt}
-                      </p>
-                    </div>
-                    {milestone.continuation_criteria && (
-                      <div>
-                        <h4 className="text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)] mb-1">
-                          Continuation Criteria
-                        </h4>
-                        <p className="whitespace-pre-wrap break-words text-[var(--muted-foreground)]">
-                          {milestone.continuation_criteria}
-                        </p>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </Tabs.Content>
-        )}
-
         {hasServerConfig && (
           <Tabs.Content value="server-config" className="p-4">
             <ServerConfigPanel
@@ -1890,71 +1278,6 @@ export function TaskInstanceViewer({
   );
 }
 
-function RawJsonPanel({
-  state,
-  copied,
-  onCopy,
-}: {
-  state: FetchState;
-  copied: boolean;
-  onCopy: () => void;
-}) {
-  if (state.status === 'idle') {
-    return null;
-  }
-  if (state.status === 'loading') {
-    return (
-      <div className="flex items-center gap-2 text-sm text-[var(--muted-foreground)]">
-        <Loader2 size={14} className="animate-spin" />
-        Loading...
-      </div>
-    );
-  }
-  if (state.status === 'error') {
-    return <p className="text-sm text-red-500">{state.error}</p>;
-  }
-  if (state.data == null) {
-    return (
-      <p className="text-sm text-[var(--muted-foreground)]">
-        No data available.
-      </p>
-    );
-  }
-  return (
-    <div>
-      <div className="mb-2">
-        <Button
-          variant="outline"
-          size="1"
-          onClick={onCopy}
-          style={{ cursor: 'pointer' }}
-        >
-          {copied ? (
-            <>
-              <Check size={12} className="text-green-500" />
-              Copied
-            </>
-          ) : (
-            <>
-              <Copy size={12} />
-              Copy
-            </>
-          )}
-        </Button>
-      </div>
-      <ScrollArea
-        scrollbars="both"
-        style={{ maxHeight: 500 }}
-        className="rounded-md border border-[var(--border)] bg-[var(--secondary)]"
-      >
-        <pre className="p-4 text-xs font-mono">
-          {JSON.stringify(state.data, null, 2)}
-        </pre>
-      </ScrollArea>
-    </div>
-  );
-}
-
 // Surface the backend's structured `detail` (e.g. the 413 "too large" message)
 // instead of a bare status code.
 async function trajectoryFetchError(
@@ -1968,29 +1291,15 @@ async function trajectoryFetchError(
   return new Error(detail || `${fallback} (${res.status})`);
 }
 
-async function fetchRawS3Json(
-  s3Uri: string,
-  signal?: AbortSignal,
-): Promise<unknown> {
-  const res = await apiFetch(
-    objectContentUrl(s3Uri),
-    signal ? { signal } : undefined,
-  );
-  if (!res.ok) {
-    throw await trajectoryFetchError(res, 'Failed to fetch');
-  }
-  return res.json();
-}
-
 async function fetchTrajectory(
-  s3Uri: string,
+  objectUrl: string,
   modelHint?: string,
 ): Promise<ParsedTrajectory> {
-  const base = objectContentUrl(s3Uri);
+  const base = objectContentUrl(objectUrl);
   let res = await apiFetch(base);
   // Too large to inline? Retry the screenshot-trimmed stream (frames become lazy-loaded placeholders).
   // Only .json is trimmable, so a non-JSON 413 keeps its message rather than retrying into an identical 413.
-  if (res.status === 413 && s3Uri.endsWith('.json')) {
+  if (res.status === 413 && objectUrl.endsWith('.json')) {
     res = await apiFetch(`${base}&trim=screenshots`);
   }
   if (!res.ok) {
@@ -2133,22 +1442,22 @@ function parseContainsOutcome(
 }
 
 /** Open a collected-artifact path chip via the /objects/content seam in a new tab, mirroring the Collected Artifacts download. */
-function openCollectedArtifact(s3Uri: string): void {
-  window.open(objectContentUrl(s3Uri), '_blank');
+function openCollectedArtifact(objectUrl: string): void {
+  window.open(objectContentUrl(objectUrl), '_blank');
 }
 
-/** Path chip in the Sandbox Verifier card: a link when `s3Uri` is set (a collect step uploaded the file),
+/** Path chip in the Sandbox Verifier card: a link when `objectUrl` is set (a collect step uploaded the file),
  *  green/red when a "Missing: …" set was parsed (`hasMissingSet`), else neutral. */
 function SandboxPathChip({
   path,
   isMissing,
   hasMissingSet,
-  s3Uri,
+  objectUrl,
 }: {
   path: string;
   isMissing: boolean;
   hasMissingSet: boolean;
-  s3Uri: string | undefined;
+  objectUrl: string | undefined;
 }) {
   const stateClasses = hasMissingSet
     ? isMissing
@@ -2164,11 +1473,11 @@ function SandboxPathChip({
     )
   ) : null;
 
-  if (s3Uri) {
+  if (objectUrl) {
     return (
       <button
         type="button"
-        onClick={() => openCollectedArtifact(s3Uri)}
+        onClick={() => openCollectedArtifact(objectUrl)}
         className={`${baseClasses} cursor-pointer hover:underline hover:bg-[var(--accent)]`}
         title={
           hasMissingSet && isMissing
@@ -2199,7 +1508,7 @@ function SandboxVerifierCard({
 }: {
   verifierId: string;
   verifier: Record<string, unknown>;
-  /** Map of filename → s3_uri from a sibling `collect_artifacts` step; when set, matching path chips link
+  /** Map of filename → object_url from a sibling `collect_artifacts` step; when set, matching path chips link
    *  to the object. Null when nothing was collected. */
   collectedArtifacts: Record<string, string> | null;
 }) {
@@ -2340,7 +1649,7 @@ function SandboxVerifierCard({
                       path={p}
                       isMissing={missing?.has(p) ?? false}
                       hasMissingSet={!!missing}
-                      s3Uri={collectedArtifacts?.[p]}
+                      objectUrl={collectedArtifacts?.[p]}
                     />
                   ))}
                 </div>
@@ -2443,7 +1752,7 @@ function SandboxVerifierCard({
 }
 
 // Collected Artifacts — files pulled off the sandbox by a `collect_artifacts` step. The instance carries
-// metadata.artifacts = { filename: s3_uri }; the source path derives from the step's base_path config.
+// metadata.artifacts = { filename: object_url }; the source path derives from the step's base_path config.
 
 type ArtifactKind =
   | 'image'
@@ -2538,7 +1847,7 @@ function CollectedArtifactsZipButton({
   files,
 }: {
   instanceId: string;
-  files: { path: string; s3Uri: string }[];
+  files: { path: string; objectUrl: string }[];
 }) {
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<{
@@ -2562,7 +1871,7 @@ function CollectedArtifactsZipButton({
       return seen.add(c), c;
     };
     const jobs = files.map(f => ({
-      s3Uri: f.s3Uri,
+      objectUrl: f.objectUrl,
       zipPath: uniquePath(f.path),
     }));
     if (jobs.length === 0) return;
@@ -2579,7 +1888,7 @@ function CollectedArtifactsZipButton({
         const job = jobs[next++]!;
         for (let attempt = 0; attempt <= 2; attempt++) {
           try {
-            const r = await apiFetch(objectContentUrl(job.s3Uri));
+            const r = await apiFetch(objectContentUrl(job.objectUrl));
             if (!r.ok) throw new Error(`HTTP ${r.status}`);
             zip.file(job.zipPath, await r.blob());
             break;
@@ -2670,7 +1979,7 @@ function CollectedArtifactsList({
   const cards = Object.entries(artifacts).map(([path, uri]) => ({
     key: path,
     filename: basename(path),
-    s3Uri: uri,
+    objectUrl: uri,
     sourcePath: isAbsoluteArtifactPath(path)
       ? path
       : `${basePath.replace(/\/+$/, '')}/${path}`,
@@ -2699,7 +2008,7 @@ function CollectedArtifactsList({
           <ArtifactCard
             key={c.key}
             filename={c.filename}
-            s3Uri={c.s3Uri}
+            objectUrl={c.objectUrl}
             sourcePath={c.sourcePath}
           />
         ))}
@@ -2718,15 +2027,15 @@ function formatBytes(bytes: number): string {
 
 function ArtifactCard({
   filename,
-  s3Uri,
+  objectUrl,
   sourcePath,
 }: {
   filename: string;
-  s3Uri: string;
+  objectUrl: string;
   sourcePath: string;
 }) {
   const kind = classifyArtifact(filename);
-  const [presignedUrl, setPresignedUrl] = useState<string | null>(null);
+  const [contentUrl, setContentUrl] = useState<string | null>(null);
   const [sizeBytes, setSizeBytes] = useState<number | null>(null);
   const [resolveError, setResolveError] = useState<string | null>(null);
   const [textPreview, setTextPreview] = useState<string | null>(null);
@@ -2734,35 +2043,35 @@ function ArtifactCard({
   const [loadingText, setLoadingText] = useState(false);
   const [expanded, setExpanded] = useState(false);
 
-  // Lazy-resolve the presigned URL on first need. Returns url + size so
+  // Lazy-resolve the content URL on first need. Returns url + size so
   // callers can gate on size without waiting for a second state flush.
-  const ensurePresigned = useCallback(async (): Promise<{
+  const ensureContentUrl = useCallback(async (): Promise<{
     url: string;
     sizeBytes: number;
   } | null> => {
-    if (presignedUrl !== null && sizeBytes !== null)
-      return { url: presignedUrl, sizeBytes };
+    if (contentUrl !== null && sizeBytes !== null)
+      return { url: contentUrl, sizeBytes };
     try {
       const res = await apiFetch(
-        `${BACKEND_URL}/api/v1/objects/metadata?object_url=${encodeURIComponent(s3Uri)}`,
+        `${BACKEND_URL}/api/v1/objects/metadata?object_url=${encodeURIComponent(objectUrl)}`,
       );
       if (!res.ok) throw new Error(`metadata HTTP ${res.status}`);
       const data = (await res.json()) as { size_bytes: number | null };
-      const url = objectContentUrl(s3Uri);
+      const url = objectContentUrl(objectUrl);
       const size = data.size_bytes ?? 0;
-      setPresignedUrl(url);
+      setContentUrl(url);
       setSizeBytes(size);
       return { url, sizeBytes: size };
     } catch (e) {
-      setResolveError(e instanceof Error ? e.message : 'presign failed');
+      setResolveError(e instanceof Error ? e.message : 'could not resolve the file');
       return null;
     }
-  }, [presignedUrl, sizeBytes, s3Uri]);
+  }, [contentUrl, sizeBytes, objectUrl]);
 
   const handleDownload = useCallback(async () => {
-    const result = await ensurePresigned();
+    const result = await ensureContentUrl();
     if (result) window.open(result.url, '_blank');
-  }, [ensurePresigned]);
+  }, [ensureContentUrl]);
 
   const handleToggle = useCallback(async () => {
     if (expanded) {
@@ -2770,12 +2079,12 @@ function ArtifactCard({
       return;
     }
     setExpanded(true);
-    const result = await ensurePresigned();
+    const result = await ensureContentUrl();
     if (!result) return;
     // Files over the threshold show a download-only message — skip the
     // content fetch to avoid loading large payloads into the browser.
     if (result.sizeBytes > LARGE_FILE_BYTES) return;
-    // image/pdf/docx render directly from the presigned URL; only text is
+    // image/pdf/docx render directly from the content URL; only text is
     // fetched-and-inlined here.
     if (kind !== 'text') return;
     if (!textPreview && !previewError) {
@@ -2800,7 +2109,7 @@ function ArtifactCard({
         setLoadingText(false);
       }
     }
-  }, [expanded, kind, ensurePresigned, textPreview, previewError]);
+  }, [expanded, kind, ensureContentUrl, textPreview, previewError]);
 
   const Icon =
     kind === 'image'
@@ -2887,10 +2196,10 @@ function ArtifactCard({
           ) : (
             <>
               {kind === 'image' && (
-                <ArtifactImagePreview presignedUrl={presignedUrl} />
+                <ArtifactImagePreview contentUrl={contentUrl} />
               )}
               {kind === 'pdf' && (
-                <ArtifactPdfPreview presignedUrl={presignedUrl} />
+                <ArtifactPdfPreview contentUrl={contentUrl} />
               )}
               {/* docx/xlsx fetch the file bytes on mount, so gate them on a
                   known size — otherwise they'd fetch before the large-file
@@ -2899,19 +2208,19 @@ function ArtifactCard({
                   files take the "too large" branch above. */}
               {kind === 'docx' &&
                 (sizeBytes !== null ? (
-                  <ArtifactDocxPreview s3Uri={s3Uri} />
+                  <ArtifactDocxPreview objectUrl={objectUrl} />
                 ) : (
                   <ArtifactResolving />
                 ))}
               {kind === 'xlsx' &&
                 (sizeBytes !== null ? (
-                  <ArtifactXlsxPreview s3Uri={s3Uri} />
+                  <ArtifactXlsxPreview objectUrl={objectUrl} />
                 ) : (
                   <ArtifactResolving />
                 ))}
               {kind === 'pptx' &&
                 (sizeBytes !== null ? (
-                  <ArtifactPptxPreview s3Uri={s3Uri} />
+                  <ArtifactPptxPreview objectUrl={objectUrl} />
                 ) : (
                   <ArtifactResolving />
                 ))}
@@ -2937,11 +2246,11 @@ function ArtifactCard({
 }
 
 function ArtifactImagePreview({
-  presignedUrl,
+  contentUrl,
 }: {
-  presignedUrl: string | null;
+  contentUrl: string | null;
 }) {
-  if (!presignedUrl) {
+  if (!contentUrl) {
     return (
       <div className="flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
         <Loader2 size={12} className="animate-spin" />
@@ -2951,7 +2260,7 @@ function ArtifactImagePreview({
   }
   return (
     <img
-      src={presignedUrl}
+      src={contentUrl}
       alt=""
       className="max-w-full max-h-[600px] rounded border border-[var(--border)] bg-white object-contain"
     />
@@ -2967,8 +2276,8 @@ function ArtifactResolving() {
   );
 }
 
-function ArtifactPdfPreview({ presignedUrl }: { presignedUrl: string | null }) {
-  if (!presignedUrl) {
+function ArtifactPdfPreview({ contentUrl }: { contentUrl: string | null }) {
+  if (!contentUrl) {
     return (
       <div className="flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
         <Loader2 size={12} className="animate-spin" />
@@ -2976,9 +2285,8 @@ function ArtifactPdfPreview({ presignedUrl }: { presignedUrl: string | null }) {
       </div>
     );
   }
-  // Browsers render PDFs natively in an <iframe>. The url is same-origin -- it is the
-  // `/api/v1/objects/content` proxy, not a presigned bucket url; the `presignedUrl`
-  // name is a leftover from when it was one.
+  // Browsers render PDFs natively in an <iframe>. The url is same-origin: the
+  // `/api/v1/objects/content` proxy.
   //
   // Sandboxed like the other previews: a PDF is agent-produced bytes rendered in an
   // unauthenticated origin, and while Chrome and Firefox both isolate PDF scripting
@@ -2986,7 +2294,7 @@ function ArtifactPdfPreview({ presignedUrl }: { presignedUrl: string | null }) {
   // keeps the built-in viewer's download and print affordances working.
   return (
     <iframe
-      src={presignedUrl}
+      src={contentUrl}
       title="PDF preview"
       sandbox="allow-popups"
       className="w-full h-[600px] rounded border border-[var(--border)] bg-white"
@@ -3070,7 +2378,7 @@ function measureSandboxFrame(frame: HTMLIFrameElement): number {
   return Math.min(content, SANDBOX_FRAME_MAX_HEIGHT);
 }
 
-function ArtifactDocxPreview({ s3Uri }: { s3Uri: string }) {
+function ArtifactDocxPreview({ objectUrl }: { objectUrl: string }) {
   const frameRef = useRef<HTMLIFrameElement>(null);
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>(
     'loading',
@@ -3084,8 +2392,8 @@ function ArtifactDocxPreview({ s3Uri }: { s3Uri: string }) {
     setError(null);
     void (async () => {
       try {
-        // docx isn't browser-native: fetch the bytes (through the backend, same-origin, so bucket CORS doesn't block) and render with docx-preview.
-        const res = await fetch(objectContentUrl(s3Uri));
+        // docx isn't browser-native: fetch the bytes (through the backend, same-origin, so the store's CORS doesn't block) and render with docx-preview.
+        const res = await fetch(objectContentUrl(objectUrl));
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const blob = await res.blob();
         if (cancelled || !frameRef.current) return;
@@ -3112,7 +2420,7 @@ function ArtifactDocxPreview({ s3Uri }: { s3Uri: string }) {
     return () => {
       cancelled = true;
     };
-  }, [s3Uri]);
+  }, [objectUrl]);
 
   return (
     <div>
@@ -3147,7 +2455,7 @@ function ArtifactDocxPreview({ s3Uri }: { s3Uri: string }) {
   );
 }
 
-function ArtifactXlsxPreview({ s3Uri }: { s3Uri: string }) {
+function ArtifactXlsxPreview({ objectUrl }: { objectUrl: string }) {
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>(
     'loading',
   );
@@ -3161,9 +2469,9 @@ function ArtifactXlsxPreview({ s3Uri }: { s3Uri: string }) {
     setError(null);
     void (async () => {
       try {
-        // Fetch via the backend (same-origin) so bucket CORS doesn't block the
+        // Fetch via the backend (same-origin) so the store's CORS doesn't block the
         // read, then parse + render to an HTML table with SheetJS client-side.
-        const res = await fetch(objectContentUrl(s3Uri));
+        const res = await fetch(objectContentUrl(objectUrl));
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const buf = await res.arrayBuffer();
         const XLSX = await import('@e965/xlsx');
@@ -3201,7 +2509,7 @@ function ArtifactXlsxPreview({ s3Uri }: { s3Uri: string }) {
     return () => {
       cancelled = true;
     };
-  }, [s3Uri]);
+  }, [objectUrl]);
 
   if (status === 'loading') {
     return (
@@ -3270,7 +2578,7 @@ function ArtifactXlsxPreview({ s3Uri }: { s3Uri: string }) {
   );
 }
 
-function ArtifactPptxPreview({ s3Uri }: { s3Uri: string }) {
+function ArtifactPptxPreview({ objectUrl }: { objectUrl: string }) {
   const frameRef = useRef<HTMLIFrameElement>(null);
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>(
     'loading',
@@ -3285,7 +2593,7 @@ function ArtifactPptxPreview({ s3Uri }: { s3Uri: string }) {
     void (async () => {
       try {
         // pptx isn't browser-native: fetch the bytes through the backend (same-origin) and render with pptx-preview.
-        const res = await fetch(objectContentUrl(s3Uri));
+        const res = await fetch(objectContentUrl(objectUrl));
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const buf = await res.arrayBuffer();
         if (cancelled || !frameRef.current) return;
@@ -3314,7 +2622,7 @@ function ArtifactPptxPreview({ s3Uri }: { s3Uri: string }) {
     return () => {
       cancelled = true;
     };
-  }, [s3Uri]);
+  }, [objectUrl]);
 
   return (
     <div>
@@ -3367,7 +2675,7 @@ function ArtifactTextPreview({
     );
   }
   if (error) {
-    // Common cause: bucket CORS blocks cross-origin reads of presigned URLs. The file still downloads (CORS isn't enforced on navigation / <a download>).
+    // Common cause: CORS blocks a cross-origin read. The file still downloads (CORS isn't enforced on navigation / <a download>).
     return (
       <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
         Inline preview unavailable ({error}). Use Download to fetch the file

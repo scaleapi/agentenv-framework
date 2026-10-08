@@ -50,6 +50,7 @@ _PATH_RE = re.compile(r"[A-Za-z0-9_.]+")
 
 _BUSY_TIMEOUT_SECONDS = 5.0
 _WAL_SWITCH_RETRY_DELAY_SECONDS = 0.01
+_ID_LOOKUP_BATCH_SIZE = 500
 
 
 def _enable_wal(conn: sqlite3.Connection) -> None:
@@ -116,6 +117,29 @@ class LocalSqliteDocumentStore(DocumentStore):
             matches = evaluation.sort_docs(matches, sort)
             return matches[0] if matches else None
 
+    def latest_version(self, collection: str, entity_id: str) -> Optional[dict]:
+        """Read one scalar-id, integer-version entity through the compound index."""
+        if not isinstance(entity_id, str):
+            return super().latest_version(collection, entity_id)
+        with self._lock:
+            tbl = self._table(collection)
+            if tbl not in self._tables and not self._adopt_if_created(tbl):
+                return None
+            if not any(unique and fields == ["id", "version"] for unique, fields in self._indexes_of(tbl)):
+                return super().latest_version(collection, entity_id)
+            row = self._conn.execute(
+                # nosemgrep: sqlalchemy-execute-raw-query -- tbl and JSON paths are fixed/validated; id is bound
+                f'SELECT doc, json_type(doc, \'$.version\'), typeof({_field_expr("version")}) FROM "{tbl}" '
+                f'WHERE {_field_expr("id")} = json_extract(?, \'$\') '
+                f'ORDER BY {_field_expr("version")} DESC LIMIT 1',
+                (json.dumps(entity_id),),
+            ).fetchone()
+            if row is None:
+                return None
+            if row[1] != "integer" or row[2] != "integer":
+                return super().latest_version(collection, entity_id)
+            return json.loads(row[0])
+
     def query(
         self,
         collection: str,
@@ -132,6 +156,28 @@ class LocalSqliteDocumentStore(DocumentStore):
             if limit:
                 docs = docs[:limit]
             return docs
+
+    def find_many_by_id(self, collection: str, id_field: str, ids: list[str]) -> list[dict]:
+        identities = list(dict.fromkeys(ids))
+        if not identities:
+            return []
+        with self._lock:
+            tbl = self._table(collection)
+            if tbl not in self._tables and not self._adopt_if_created(tbl):
+                return []
+            field = self._safe_path(id_field)
+            found = {}
+            for start in range(0, len(identities), _ID_LOOKUP_BATCH_SIZE):
+                batch = identities[start:start + _ID_LOOKUP_BATCH_SIZE]
+                placeholders = ", ".join(["?"] * len(batch))
+                rows = self._conn.execute(
+                    # nosemgrep: sqlalchemy-execute-raw-query -- identifiers are validated; values are bound
+                    f'SELECT rowid, doc FROM "{tbl}" WHERE {_field_expr(field)} IN ({placeholders}) ORDER BY rowid', batch,
+                )
+                for _, blob in rows:
+                    doc = json.loads(blob)
+                    found.setdefault(doc[id_field], doc)
+            return [found[identity] for identity in identities if identity in found]
 
     def count(self, collection: str, filter: Filter) -> int:
         with self._lock:

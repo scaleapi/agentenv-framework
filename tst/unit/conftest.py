@@ -23,6 +23,7 @@ from agent_env.config import configure, get_config, reset_config
 from agent_env.store import LocalFilesystemObjectStore
 from agent_env.store.document_store.sqlite_document_store import LocalSqliteDocumentStore
 from agent_env.store.routing import enable_namespace_routing
+from agent_env.utils.deprecation import reset_deprecation_state
 
 _PLACEHOLDER_AWS_ENV = {
     "AWS_ACCESS_KEY_ID": "testing",
@@ -52,6 +53,12 @@ def _docker_answers(monkeypatch):
     tests never reach a daemon, so it answers. Tests of the probe itself patch ``subprocess.run``."""
     monkeypatch.setattr("agent_env.bundle.preflight.docker_unreachable", lambda: None)
     monkeypatch.setattr("agent_env.env.bootstrap.docker_unreachable", lambda: None)
+
+
+@pytest.fixture(autouse=True)
+def deprecations_fire_again():
+    """``warn_deprecated`` warns once per process; each test sees its own first use."""
+    reset_deprecation_state()
 
 
 @pytest.fixture(autouse=True)

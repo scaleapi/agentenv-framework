@@ -1,6 +1,6 @@
 """The in-process HTTPS server that honours local object-transfer grants.
 
-One route, ``/v1/grants/{token}``, with the semantics of the S3 requests the grants stand in for:
+One route, ``/v1/grants/{token}``, with the semantics of the hosted-store requests the grants stand in for:
 GET returns an object's exact bytes; PUT writes one object of the claimed type and size; a
 multipart POST writes one object anywhere under the claimed prefix. A token that does not verify,
 has expired or names another method is a 403; a request outside the grant's bounds is a 4xx.
@@ -52,7 +52,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_ADVERTISE_HOST = "host.docker.internal"
 _START_TIMEOUT_SECONDS = 10
 _OPS_BY_METHOD = {"GET": "get", "HEAD": "get", "PUT": "put", "POST": "post"}
-_UPLOAD_KEY_FIELD = "key"  # the form fields a policy upload names its key and file by, as S3's do
+_UPLOAD_KEY_FIELD = "key"  # the form fields a policy upload names its key and file by (HttpPostPolicyGrant's path/file fields)
 _UPLOAD_FILE_FIELD = "file"
 _MAX_FORM_FIELDS = 32
 _MAX_FORM_FIELD_BYTES = 64 * 1024
@@ -328,7 +328,7 @@ async def _post(store: LocalFilesystemObjectStore, claims: GrantClaims, request:
 
 
 class _PolicyUpload:
-    """One multipart POST under a policy grant, read as S3 reads one: form fields, then the file,
+    """One multipart POST under a policy grant, read as a hosted store reads one: form fields, then the file,
     which is written to a staged file as it arrives. Fields after the file are ignored."""
 
     def __init__(self, store: LocalFilesystemObjectStore, claims: GrantClaims, stack: contextlib.ExitStack) -> None:

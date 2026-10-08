@@ -8,6 +8,7 @@ The factory table is keyed off _BUILTIN_SANDBOX_PROVIDERS, so a new backend fail
 test_every_builtin_backend_is_covered until someone drives it here.
 """
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -16,6 +17,8 @@ from agent_env.providers.sandbox_providers.e2b.provider import E2BSandboxProvide
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandboxProvider
+from agent_env.providers.sandbox_providers.sail_vm import _sdk as sail_sdk
+from agent_env.providers.sandbox_providers.sail_vm.provider import SailVmSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import Sandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import _BUILTIN_SANDBOX_PROVIDERS
 
@@ -73,10 +76,21 @@ async def _e2b() -> Sandbox:
     return await provider.create_vm(exposed_ports=[], setup_for_gateway=False)
 
 
+async def _sail() -> Sandbox:
+    sailbox = MagicMock(sailbox_id="sb_test", status="running")
+    sailbox.listeners.aio = AsyncMock(return_value=[])
+    sdk = MagicMock()
+    sdk.Sailbox.create.aio = AsyncMock(return_value=sailbox)
+    with patch.object(sail_sdk, "connect", return_value=(sdk, SimpleNamespace(id="app_test"))):
+        provider = SailVmSandboxProvider(api_key="test-key", sdk=sdk)
+        return await provider.create_vm(exposed_ports=[], setup_for_gateway=False)
+
+
 FACTORIES = {
     "modal": _modal,
     "modal_vm": _modal_vm,
     "e2b": _e2b,
+    "sail_vm": _sail,
     "local": _local,
 }
 

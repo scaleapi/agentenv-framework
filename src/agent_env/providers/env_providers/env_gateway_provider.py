@@ -211,6 +211,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         state_instance: "EnvStateInstance",
         host_port: Optional[Callable[[int], int]] = None,
         host_ips: tuple[str, ...] = (),
+        extra_hosts: tuple[str, ...] = (),
         mcp_server_name: str | None = None,
     ) -> str:
         """Generate docker-compose.yml content for a gateway deployment onto a VM/laptop/arbitrary machine.
@@ -420,10 +421,13 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 "    ports:",
                 *(f'      - "{spec}"' for spec in port_bindings(host_ips, publish(gateway_port), gateway_port)),
             ])
+        # The gateway calls out to agents, as a trigger's executor, through the host.
+        gateway_extra_hosts = ["    extra_hosts:", *(f'      - "{entry}"' for entry in extra_hosts)] if extra_hosts else []
         lines.extend([
             "    environment:",
             *gateway_env,
             *exposed_gateway_ports,
+            *gateway_extra_hosts,
             "    restart: on-failure",
             "    healthcheck:",
             f'      test: ["CMD-SHELL", "python3 -c \\"import socket; s=socket.create_connection((\'localhost\',{gateway_port}),2); s.close()\\""]',
@@ -704,6 +708,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             state_instance=state_instance,
             host_port=sandbox.host_port,
             host_ips=sandbox.host_ips,
+            extra_hosts=sandbox.extra_hosts,
             mcp_server_name=mcp_server_name,
         )
         logger.info(f"Generated docker-compose.yml:\n{_redact_compose_secrets(compose_content)}")

@@ -10,11 +10,13 @@ import agent_env.artifact as artifact_mod
 import agent_env.config as config_mod
 from agent_env.env import legacy_protocol
 from agent_env.env.env import DeployedGatewayEnv
+from agent_env.store import set_object_store
 from agent_env.store.object_store import S3ObjectStore
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps import snapshot_agent_state as mod
 from agentenv_protocol import client as protocol_v1
 from tst.unit.event_loop_probe import on_event_loop
+from tst.unit.store.fakes import ConfiguredObjectStore
 
 _PREFIX = "s3://artifact-bucket/agent_snapshots/oc_post_run_workspace_T/3-deadbeef/"
 
@@ -87,7 +89,7 @@ async def test_capture_universe_state_publishes_unsigned_s3_urls(monkeypatch):
     import agent_env.config as config_mod
 
     class _Cfg:
-        def get_object_store(self):
+        def get_object_store_at(self, object_url):
             return store
 
     monkeypatch.setattr(config_mod, "get_config", lambda: _Cfg())
@@ -125,7 +127,7 @@ async def test_each_service_state_uploads_off_the_event_loop(monkeypatch):
 
     store = S3ObjectStore(_LoopCheckingS3(), "artifact-bucket")
     monkeypatch.setattr(artifact_mod, "EnvironmentUniverseArtifact", type("U", (), {"get": staticmethod(lambda _id: _StubUniverse())}))
-    monkeypatch.setattr(config_mod, "get_config", lambda: type("Cfg", (), {"get_object_store": lambda self: store})())
+    monkeypatch.setattr(config_mod, "get_config", lambda: type("Cfg", (), {"get_object_store_at": lambda self, object_url: store})())
 
     async def _no_v1(_base):
         return False
@@ -151,7 +153,7 @@ async def test_capture_reads_child_envs_on_the_stored_card_and_takes_legacy_for_
 
     store = S3ObjectStore(_StubS3(), "artifact-bucket")
     monkeypatch.setattr(artifact_mod, "EnvironmentUniverseArtifact", type("U", (), {"get": staticmethod(lambda _id: _StubUniverse())}))
-    monkeypatch.setattr(config_mod, "get_config", lambda: type("Cfg", (), {"get_object_store": lambda self: store})())
+    monkeypatch.setattr(config_mod, "get_config", lambda: type("Cfg", (), {"get_object_store_at": lambda self, object_url: store})())
 
     async def _no_probe(_base):
         raise AssertionError("a stored card means no live probe")
@@ -179,6 +181,46 @@ async def test_capture_reads_child_envs_on_the_stored_card_and_takes_legacy_for_
     assert set(json.loads(ctx.metadata["snapshot_json_url"])) == {"calendar", "contacts"}
 
 
+@pytest.mark.asyncio
+async def test_a_service_that_exports_a_file_bundle_is_captured_from_its_export_state(monkeypatch):
+    """calendar answers data/get with a bundle of its database, which is not JSON state: its state is read from
+    /export-state at the card's address rather than skipped. contacts answers with its state."""
+    import httpx
+    from agentenv_protocol import DataPart, uploaded_file_part
+    from agentenv_protocol.client import GetDataResponse
+
+    bodies: dict[str, dict] = {}
+
+    class _BodyS3(_StubS3):
+        def put_object(self, Bucket, Key, Body, ContentType):  # noqa: N803
+            bodies[Key.rsplit("/", 1)[-1]] = json.loads(Body)
+
+    store = S3ObjectStore(_BodyS3(), "artifact-bucket")
+    monkeypatch.setattr(artifact_mod, "EnvironmentUniverseArtifact", type("U", (), {"get": staticmethod(lambda _id: _StubUniverse())}))
+    monkeypatch.setattr(config_mod, "get_config", lambda: type("Cfg", (), {"get_object_store_at": lambda self, object_url: store})())
+
+    async def _get_data(base, timeout=30):
+        if base.endswith("/mcp-calendar"):
+            return GetDataResponse(parts=[uploaded_file_part("calendar.zip", name="calendar.zip", mime_type="application/zip")])
+        return GetDataResponse(parts=[DataPart(data={"contacts": 4})])
+
+    real = httpx.AsyncClient
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == "https://sandbox.example/sb-1/svc/mcp-calendar/export-state":
+            return httpx.Response(200, json={"events": 7})
+        return httpx.Response(404)
+
+    monkeypatch.setattr(protocol_v1, "get_data", _get_data)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.MockTransport(handle)))
+
+    ctx = _carded_ctx(await _card("mcp-calendar", "mcp-contacts"))
+    await _step()._capture_universe_state(ctx, _PREFIX)
+
+    assert bodies == {"calendar.json": {"events": 7}, "contacts.json": {"contacts": 4}}
+    assert set(json.loads(ctx.metadata["snapshot_json_url"])) == {"calendar", "contacts"}
+
+
 async def _card(*keys: str) -> dict:
     """The real gateway's composed card over child envs at the given gateway keys (`mcp-{name}` or `{name}`)."""
     from agent_env.env.gateway.gateway import Gateway
@@ -201,3 +243,24 @@ def _carded_ctx(card: dict) -> TaskStepContext:
     ctx.deployed_envs[0].environment_card_url = f"https://sandbox.example/sb-1{WELL_KNOWN_PATH}"
     ctx.deployed_envs[0].environment_card = card
     return ctx
+
+
+@pytest.mark.asyncio
+async def test_services_land_beside_a_capture_the_local_store_holds(monkeypatch, cli_routing):
+    set_object_store(ConfiguredObjectStore())
+    local = config_mod.get_config().get_object_store_for("@local/~/t")
+    prefix = local.object_url("agent_snapshots/oc/3-deadbeef/")
+    monkeypatch.setattr(artifact_mod, "EnvironmentUniverseArtifact", type("U", (), {"get": staticmethod(lambda _id: _StubUniverse())}))
+
+    async def _state(_deployed, _gateway, name):
+        return {"service": name}
+
+    monkeypatch.setattr(legacy_protocol, "service_state", _state)
+    ctx = _ctx()
+    await _step()._capture_universe_state(ctx, prefix)
+
+    published = json.loads(ctx.metadata["snapshot_json_url"])
+    assert published == {
+        name: local.object_url(f"agent_snapshots/oc/3-deadbeef/services/{name}.json") for name in ("calendar", "contacts")
+    }
+    assert json.loads(local.get(published["calendar"])) == {"service": "calendar"}

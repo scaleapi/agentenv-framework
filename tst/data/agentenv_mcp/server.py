@@ -1,4 +1,8 @@
-"""Minimal in-memory MCP server built on AgentEnvEnvironment, for integration testing."""
+"""Minimal in-memory MCP server built on AgentEnvEnvironment, for integration testing.
+
+It also serves its state as JSON at ``GET /export-state``, and with ``urn:agentenv:export-as-file/v1`` enabled it
+answers ``data/get`` with a file bundle of that state, as a service that exports its database does."""
+import base64
 import json
 import random
 from typing import Annotated
@@ -6,8 +10,9 @@ from urllib.parse import urlparse
 
 import httpx
 from pydantic import Field
+from starlette.responses import JSONResponse
 
-from agentenv_protocol import AgentEnvEnvironment, DataPart, EnvironmentCapabilities, EnvironmentExtension, add_data, environment_card, extension, get_data, reset_data, tool
+from agentenv_protocol import AgentEnvEnvironment, DataPart, EnvironmentCapabilities, EnvironmentExtension, FilePart, add_data, environment_card, extension, get_data, reset_data, tool
 
 
 @environment_card(
@@ -39,7 +44,9 @@ class ItemsEnv(AgentEnvEnvironment):
         self.store: list = []
         self.errors: dict = {}
         self.env_get_time_url: str | None = None
+        self.export_as_file = False
         self.create_app()
+        self.mcp.custom_route("/export-state", methods=["GET"])(self._export_state)
         # list_items stays imperatively registered — @tool is additive; both styles coexist.
         self.mcp.tool(name="list_items")(self.list_items)
 
@@ -67,7 +74,18 @@ class ItemsEnv(AgentEnvEnvironment):
 
     @get_data
     async def _state(self) -> list:
+        if self.export_as_file:
+            bundle = base64.b64encode(json.dumps({"items": self.store}).encode()).decode()
+            return [FilePart(file={"bytes": bundle, "name": "items.json", "mimeType": "application/json"})]
         return [DataPart(data={"items": self.store})]
+
+    async def _export_state(self, request) -> JSONResponse:
+        return JSONResponse({"items": self.store})
+
+    @extension(uri="urn:agentenv:export-as-file/v1", description="Answer data/get with a file bundle of the state.")
+    async def set_export_as_file(self, enabled: bool) -> dict:
+        self.export_as_file = enabled
+        return {"export_as_file": enabled}
 
     @extension(uri="urn:agentenv:set-errors/v1", description="Make a tool start raising at a given error rate.")
     async def set_errors(self, tool_name: str, error_rate: float) -> dict:

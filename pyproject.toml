@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentenv-framework"
-version = "0.9.1273"
+version = "0.9.1290"
 description = "SDK and CLI for building, deploying and running agent environments and the tasks that grade agents in them."
 readme = "README.md"
 license = "Apache-2.0"
@@ -68,8 +68,12 @@ gcp = [
     "google-cloud-storage>=3.0",
     "requests>=2.31",
 ]
+# The sail_vm sandbox provider (Sail Research Sailboxes), selected with --sandbox sail_vm.
+sail = [
+    "sail~=0.12.8",  # Sailbox exec/fs/listener/egress APIs validated against the 0.12 line
+]
 dev = [
-    "agentenv-framework[aws,explorer,gcp]",  # so the AWS, explorer and GCP backend tests run in CI
+    "agentenv-framework[aws,explorer,gcp,sail]",  # so the AWS, explorer, GCP backend and Sail provider tests run in CI
     "griffelib==2.3.0",  # the plugin API check; exact, since what it reports as a break changes between releases
     "moto>=5.0.0",
     "psycopg2-binary>=2.9.0",  # the gateway server module's driver; outside its container only the tests import it

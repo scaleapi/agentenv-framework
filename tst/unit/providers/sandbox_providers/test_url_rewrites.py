@@ -7,7 +7,7 @@ import pytest
 
 from agent_env.config import reset_config
 from agent_env.env.env import DeployedEnv, DeployedSandboxEnv
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
+from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider, host_url_for
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SandboxProvider,
@@ -87,6 +87,38 @@ def test_local_provider_isolates_network_and_externalizes_localhost():
         LocalSandboxProvider.get_external_url("http://localhost:8080")
         == "http://host.docker.internal:8080"
     )
+
+
+@pytest.mark.parametrize("url, expected", [
+    ("http://localhost:4000/v1", "http://host.docker.internal:4000/v1"),
+    ("http://127.0.0.1:41000", "http://host.docker.internal:41000"),
+    ("http://127.0.1.1:41000/a2a", "http://host.docker.internal:41000/a2a"),
+    ("http://0.0.0.0:4000", "http://host.docker.internal:4000"),
+    ("http://[::1]:4000/v1", "http://host.docker.internal:4000/v1"),
+    ("https://LOCALHOST/v1", "https://host.docker.internal/v1"),
+    ("http://agent@localhost:4000/v1?next=/x#top", "http://agent@host.docker.internal:4000/v1?next=/x#top"),
+])
+def test_local_provider_externalizes_a_loopback_host(url, expected):
+    assert LocalSandboxProvider.get_external_url(url) == expected
+
+
+@pytest.mark.parametrize("url", [
+    "https://llm.example.com/proxy/localhost/127.0.0.1",
+    "https://localhost.example.com/v1",
+    "http://mylocalhost:4000",
+    "https://api.example.com/?next=http://localhost:4000",
+    "http://10.0.0.5:4000",
+    "http://host.docker.internal:4000",
+])
+def test_local_provider_leaves_a_url_whose_host_is_not_loopback(url):
+    assert LocalSandboxProvider.get_external_url(url) == url
+
+
+@pytest.mark.parametrize("sandbox_type, expected", [
+    ("local", "http://host.docker.internal:4000"), ("modal", "http://localhost:4000"), (None, "http://localhost:4000"),
+])
+def test_only_a_local_container_reaches_this_machine_by_another_name(sandbox_type, expected):
+    assert host_url_for("http://localhost:4000", sandbox_type) == expected
 
 
 def test_nested_rewrite_keys_apply_longest_first():

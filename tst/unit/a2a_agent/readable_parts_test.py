@@ -53,6 +53,17 @@ async def test_parts_that_name_no_owned_object_are_sent_as_they_are(store):
 
 
 @pytest.mark.asyncio
+async def test_only_the_owned_objects_named_shareable_are_made_readable(store):
+    shared, other = store.put("seeds/x.png", b"png"), store.put("answers/y.png", b"png")
+    parts = [_file(shared), _file(other)]
+
+    async with readable_parts(parts, a2a_url=URL, card=None, sandbox_type="local", expires_in=600, shareable={shared}) as sent:
+        assert sent == [_file(f"{GRANT_ORIGIN}/seeds/x.png?sig=read"), _file(other)]
+
+    assert store.granted == [shared]
+
+
+@pytest.mark.asyncio
 async def test_an_owned_object_the_agent_can_be_given_no_url_for_is_not_sent(store):
     url = store.put("seeds/s1/x.png", b"png")
 

@@ -1,14 +1,14 @@
-"""Generic file artifact for storing arbitrary files in S3."""
+"""Generic file artifact for storing arbitrary files in the object store."""
 
 from __future__ import annotations
 
 import mimetypes
 import os
-from typing import TYPE_CHECKING, ClassVar, Literal, Self
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
 
-from pydantic import Field
+from pydantic import ConfigDict, Field, model_serializer
 
-from agent_env.artifact.artifact import Artifact
+from agent_env.artifact.artifact import Artifact, _write_twin
 from agent_env.config import get_config
 
 if TYPE_CHECKING:
@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 
 class FileArtifact(Artifact):
-    """A generic file artifact that stores any file in S3.
+    """A generic file artifact that stores any file in the object store.
 
     Clients define their own schemas and upload files (JSON, images, etc.).
     When loaded, returns raw bytes for the client to parse as needed.
@@ -34,12 +34,22 @@ class FileArtifact(Artifact):
         emails = json.loads(data)  # Client parses as needed
     """
 
+    model_config = ConfigDict(populate_by_name=True)
+
     toml_keys: ClassVar[dict[str, type]] = {"description": str}  # what an artifact.toml may set
     type: Literal["file"] = "file"
     description: str = Field(description="Human-readable description of the artifact contents")
     filename: str = Field(description="Original filename (preserved for reference)")
     content_type: str = Field(description="MIME type of the file")
     object_url: str = Field(alias="s3_url", description="Object-store locator where the file is stored")
+
+    # No return annotation: pydantic builds the serialization schema from one, and a dict drops the fields.
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: Any):
+        # Dual-write, from the attribute: `alias=` emits one spelling, which one depending on the caller's `by_alias`.
+        data = handler(self)
+        _write_twin(data, "s3_url", "object_url", self.object_url)
+        return data
 
     @classmethod
     def put(
@@ -60,10 +70,10 @@ class FileArtifact(Artifact):
 
         version = store.next_version(id)
 
-        # Use put_object_file (boto3 managed multipart upload) instead of
-        # put_object (s3.put_object — hard 5 GB single-object limit). Streams
-        # directly from disk so large files don't get loaded into RAM either.
-        s3_url = store.put_object_file(
+        # put_object_file, not put_object: a hosted store uploads a file in parts, where a
+        # single put is capped (5 GB on S3). It streams from disk, so large files don't get
+        # loaded into RAM either.
+        stored_url = store.put_object_file(
             artifact_type="file",
             id=id,
             version=version,
@@ -79,7 +89,7 @@ class FileArtifact(Artifact):
             description=description,
             filename=filename,
             content_type=content_type,
-            s3_url=s3_url,
+            object_url=stored_url,
         )
         return store.put_document(instance)
 
@@ -99,7 +109,7 @@ class FileArtifact(Artifact):
         store = get_artifact_store()
         version = store.next_version(id)
 
-        s3_url = store.put_object(
+        stored_url = store.put_object(
             artifact_type="file",
             id=id,
             version=version,
@@ -114,21 +124,27 @@ class FileArtifact(Artifact):
             description=description,
             filename=filename,
             content_type=content_type,
-            s3_url=s3_url,
+            object_url=stored_url,
         )
         return store.put_document(instance)
 
     @classmethod
     def from_toml(cls, data: dict, ctx: AuthoringContext) -> Self:
-        """Write the folder's one file under a prefix of its own (``ArtifactStore.attempt_prefix``);
-        ``description`` defaults to the file's name."""
-        from agent_env.artifact.store import get_artifact_store
-
+        """Write the folder's one file (``put_attempt``); ``description`` defaults to the file's name."""
         fields = ctx.accept(data, **cls.toml_keys)
         filename, path = ctx.file()
-        prefix = get_artifact_store().attempt_prefix(cls.model_fields["type"].default, ctx.id)
-        return cls.put_at(ctx.id, description=fields.get("description", filename), file_path=str(path),
-                          object_url=prefix + filename, filename=filename)
+        return cls.put_attempt(ctx.id, description=fields.get("description", filename), file_path=str(path),
+                               filename=filename)
+
+    @classmethod
+    def put_attempt(cls, id: str, *, description: str, file_path: str, filename: str) -> Self:
+        """``put_at`` under a prefix of this attempt's own (``ArtifactStore.attempt_prefix``), so a write that
+        fails partway never blocks the next one."""
+        from agent_env.artifact.store import get_artifact_store
+
+        prefix = get_artifact_store().attempt_prefix(cls.model_fields["type"].default, id)
+        return cls.put_at(id, description=description, file_path=file_path, object_url=prefix + filename,
+                          filename=filename)
 
     def load(self) -> bytes:
         from agent_env.artifact.store import get_artifact_store
@@ -168,7 +184,7 @@ class FileArtifact(Artifact):
             description=description,
             filename=filename,
             content_type=content_type,
-            s3_url=stored_url,
+            object_url=stored_url,
         )
         return artifact_store.put_document(instance)
 
@@ -190,8 +206,7 @@ class FileArtifact(Artifact):
         from agent_env.artifact.store import get_artifact_store
 
         store = get_config().get_object_store_to_write(object_url, id)
-        location = object_url.partition("://")[2] or object_url
-        if "/" not in location or location.endswith("/"):
+        if object_url.endswith("/"):
             raise ValueError(f"object_url must point at an object, not a prefix: {object_url!r}")
         metadata = store.get_object_metadata_at(object_url)
         if metadata is None:
@@ -209,6 +224,6 @@ class FileArtifact(Artifact):
             description=description,
             filename=filename,
             content_type=content_type,
-            s3_url=object_url,
+            object_url=object_url,
         )
         return artifact_store.put_document(instance)

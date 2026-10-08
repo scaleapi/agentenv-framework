@@ -289,14 +289,7 @@ class GcsObjectStore(ObjectStore):
             expires_at=expires_at,
         )
 
-    def signed_post(
-        self, url_prefix: str, *, expires_in: int = 3600, max_bytes: int | None = None
-    ) -> dict | None:
-        if not self._can_sign():
-            return None
-        return self._post_policy(url_prefix, min(expires_in, self._max_signed_seconds), max_bytes)
-
-    def _post_policy(self, url_prefix: str, expires_in: int, max_bytes: int | None) -> dict:
+    def _post_policy(self, url_prefix: str, expires_in: int, max_bytes: int) -> dict:
         """Built by hand: the client library's helper adds an exact-key condition, which would
         confine the policy to one object. The prefix ends in ``/``, so that ``root`` does not
         admit ``root-evil/``."""
@@ -304,10 +297,10 @@ class GcsObjectStore(ObjectStore):
         now = datetime.now(UTC).replace(microsecond=0)
         timestamp = now.strftime("%Y%m%dT%H%M%SZ")
         credential = f"{self._signer.signer_email}/{now:%Y%m%d}/auto/storage/goog4_request"
-        conditions: list = [["starts-with", "$key", prefix], ["starts-with", "$Content-Type", ""]]
-        if max_bytes is not None:
-            conditions.append(["content-length-range", 0, max_bytes])
-        conditions += [
+        conditions: list = [
+            ["starts-with", "$key", prefix],
+            ["starts-with", "$Content-Type", ""],
+            ["content-length-range", 0, max_bytes],
             {"bucket": bucket},
             {"x-goog-date": timestamp},
             {"x-goog-credential": credential},

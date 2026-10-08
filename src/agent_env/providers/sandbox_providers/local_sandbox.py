@@ -20,13 +20,15 @@ import signal
 import socket
 import subprocess
 import tempfile
+from ipaddress import ip_address
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
+from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 from agent_env import config
 from agent_env.attribution import Attribution
-from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, VmSandbox
+from agent_env.providers.sandbox_providers.sandbox import SANDBOX_LABEL, NetworkPolicy, VmSandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_CONTAINER,
     SANDBOX_MODE_VM,
@@ -41,6 +43,11 @@ if TYPE_CHECKING:
     from agent_env.store.object_store import ObjectStore
 
 logger = logging.getLogger(__name__)
+
+# The name a container on this machine reaches it by. Only Linux lacks it natively; on Rancher Desktop an explicit
+# mapping would point it at the VM.
+_HOST_ALIAS = "host.docker.internal"
+_EXTRA_HOSTS = (f"{_HOST_ALIAS}:host-gateway",) if platform.system() == "Linux" else ()
 
 _APP_PATH_PATTERN = re.compile(r"(?<![A-Za-z0-9_./~})$-])/app(?=(?:/|:|[\s'\";)&|]|$))")
 _IN_CONTAINER_SCRIPT = re.compile(r"\s*(?:sudo\s+)?docker\s+exec\b")
@@ -116,6 +123,7 @@ class LocalSandbox(VmSandbox):
     """
 
     type = "local"
+    extra_hosts = _EXTRA_HOSTS
 
     def __init__(self, exposed_ports: list[int] | None = None, work_dir: Path | None = None, sandbox_id: str | None = None,
                  port_map: dict[int, int] | None = None):
@@ -201,15 +209,44 @@ class LocalSandbox(VmSandbox):
         this, local runs leak their containers/compose stacks, which squat host ports and block the
         next deploy. Prod backends override terminate() to tear the whole VM down.
         """
-        await self.exec_script(f"docker rm -f {shlex.quote(self.container_name)} >/dev/null 2>&1 || true")
-        if self.mode == SANDBOX_MODE_VM and (self._work_dir / "docker-compose.yml").exists():
-            # No `|| true`: `docker compose down` is idempotent (an already-down stack exits 0), so a
-            # non-zero exit is a real failure — surface it (exec_script raises, with the compose output)
-            # instead of silently leaving the stack running and its host ports held. Callers wrap
-            # terminate() in try/except, so a raised teardown failure is caught, not fatal.
-            await self.exec_script(
-                f"cd {shlex.quote(str(self._work_dir))} && docker compose down -v --remove-orphans"
+        try:
+            if self.mode == SANDBOX_MODE_VM and not self.owns_container:
+                await self._remove_labeled()
+        finally:  # a container that wouldn't go must not keep the compose stack up
+            await self.exec_script(f"docker rm -f {shlex.quote(self.container_name)} >/dev/null 2>&1 || true")
+            if self.mode == SANDBOX_MODE_VM and (self._work_dir / "docker-compose.yml").exists():
+                # No `|| true`: `docker compose down` is idempotent (an already-down stack exits 0), so a
+                # non-zero exit is a real failure — surface it (exec_script raises, with the compose output)
+                # instead of silently leaving the stack running and its host ports held. Callers wrap
+                # terminate() in try/except, so a raised teardown failure is caught, not fatal.
+                await self.exec_script(
+                    f"cd {shlex.quote(str(self._work_dir))} && docker compose down -v --remove-orphans"
+                )
+
+    async def _remove_labeled(self) -> None:
+        """Remove what steps started on this host for this sandbox (``run_docker_container``'s containers, their
+        images and networks), which a real VM would take down with it. Images and networks go best-effort: another
+        local sandbox's container can still be using one."""
+        label = f"label={SANDBOX_LABEL}={self.sandbox_id}"
+        try:
+            exit_code, stdout, stderr = await self.exec_with_output("docker", "ps", "-aq", "--filter", label)
+        except FileNotFoundError:  # no Docker installed: nothing could have been started
+            return
+        if exit_code != 0:
+            # No Docker to reach (a run that never needed it) or Docker is down; either way nothing can be removed now.
+            logger.warning(
+                "Could not list %s's containers (%s); anything it started is still there. Remove it with: "
+                "docker rm -f $(docker ps -aq --filter %s)", self.sandbox_id, stderr.strip()[-300:], label,
             )
+            return
+        q = shlex.quote(label)
+        if stdout.split():
+            await self.exec_script(f"docker rm -f {' '.join(stdout.split())} >/dev/null")
+        await self.exec_script(
+            f"ids=$(docker images -q --filter {q} | sort -u); [ -z \"$ids\" ] || docker rmi -f $ids >/dev/null 2>&1; "
+            f"ids=$(docker network ls -q --filter {q}); [ -z \"$ids\" ] || docker network rm $ids >/dev/null 2>&1; "
+            f"exit 0"
+        )
 
     async def exec(self, *command: str) -> Any:
         """Execute a command locally via subprocess.
@@ -339,8 +376,7 @@ def remove_local_work_dir(sandbox_id: str) -> Path | None:
 class LocalSandboxProvider(SandboxProvider):
     """SandboxProvider that runs VM-style gateway deployments on local Docker."""
 
-    # Only Linux lacks a native host.docker.internal; on Rancher Desktop this mapping would point it at the VM.
-    EXTRA_CONTAINER_RUN_ARGS = "--add-host host.docker.internal:host-gateway" if platform.system() == "Linux" else ""
+    EXTRA_CONTAINER_RUN_ARGS = " ".join(f"--add-host {entry}" for entry in _EXTRA_HOSTS)
 
     async def create_vm(
         self,
@@ -463,10 +499,34 @@ class LocalSandboxProvider(SandboxProvider):
 
     @classmethod
     def get_external_url(cls, url: str) -> str:
-        """Rewrite a ``localhost`` URL (a published host port) to the form a workload reaches from
-        inside a container: ``host.docker.internal``. Docker Desktop and Rancher Desktop (macOS/Windows)
-        resolve this themselves; on Linux ``EXTRA_CONTAINER_RUN_ARGS`` maps it via ``--add-host …:host-gateway``."""
-        return url.replace("localhost", "host.docker.internal").replace("127.0.0.1", "host.docker.internal")
+        """``url`` as a container on this machine reaches it: a loopback host (a published host port, or a
+        service on this machine) becomes ``host.docker.internal``, and anything else is left alone. Docker
+        Desktop and Rancher Desktop resolve that name themselves; on Linux ``extra_hosts`` maps it to the
+        bridge gateway, so a service there must listen on more than loopback."""
+        parts = urlsplit(url)
+        if not _is_loopback(parts.hostname):
+            return url
+        userinfo, at, _ = parts.netloc.rpartition("@")
+        port = f":{parts.port}" if parts.port is not None else ""
+        return urlunsplit(parts._replace(netloc=f"{userinfo}{at}{_HOST_ALIAS}{port}"))
+
+
+def host_url_for(url: str, sandbox_type: Optional[str]) -> str:
+    """``url``, which this machine reaches, as a container on ``sandbox_type`` reaches it: only a local
+    sandbox's containers run on this machine, and they reach its loopback by another name."""
+    return LocalSandboxProvider.get_external_url(url) if sandbox_type == LocalSandbox.type else url
+
+
+def _is_loopback(host: Optional[str]) -> bool:
+    """Whether ``host`` names this machine from itself: ``localhost``, a loopback address, or the unspecified
+    address a server listening everywhere prints."""
+    if host == "localhost":
+        return True
+    try:
+        address = ip_address(host or "")
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_unspecified
 
 
 @functools.cache

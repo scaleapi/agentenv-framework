@@ -1,4 +1,4 @@
-"""Deprecation shims for the service_* -> environment_* rename.
+"""Deprecation shims for renamed names: the service_* -> environment_* rename and the S3-named ones.
 
 Two things make this less trivial than ``warnings.warn``:
 
@@ -46,6 +46,22 @@ def warn_deprecated(old: str, new: str, *, kind: str = "symbol", stacklevel: int
         message,
         extra={"event": _DEPRECATION_EVENT, "deprecated_symbol": old, "replacement": new, "kind": kind},
     )
+
+
+# The default of a deprecated keyword, so passing it as None still counts as passing it.
+OMITTED: Any = object()
+
+
+def renamed_keyword(owner: str, new: str, new_value: Any, old: str, old_value: Any, *, stacklevel: int = 4) -> Any:
+    """The value of keyword ``new``, taking the deprecated keyword ``old`` (default ``OMITTED``) in its place with a
+    warning. Passing both is a TypeError, as a repeated keyword is. ``stacklevel`` 4 names the caller of a function
+    that calls this directly."""
+    if old_value is OMITTED:
+        return new_value
+    if new_value is not None:
+        raise TypeError(f"{owner}() got both {new}= and its deprecated spelling {old}=")
+    warn_deprecated(f"{owner}({old}=)", f"{new}=", kind="keyword", stacklevel=stacklevel)
+    return old_value
 
 
 def deprecated_names(mapping: dict[str, Any], *, kind: str = "symbol") -> Callable[[str], Any]:

@@ -41,8 +41,8 @@ def vm(monkeypatch):
             calls.append(("exec", script))
             return ""
 
-        async def load_s3_file(self, s3_url, destination_path):
-            calls.append(("s3", s3_url, destination_path))
+        async def load_object_file(self, object_url, destination_path):
+            calls.append(("object", object_url, destination_path))
 
         async def load_url_file(self, url, destination_path):  # pragma: no cover
             # Deliberately present: the step must NOT depend on a sandbox method.
@@ -101,11 +101,11 @@ class TestUniverseOntoVm:
         ctx = await step.execute(ctx)
 
         assert not any("docker" in c[1] for c in calls if c[0] == "exec"), calls
-        # Pulled straight from S3 to the final path — no VM temp file, no copy inward.
-        s3 = [c for c in calls if c[0] == "s3"]
-        assert s3 == [
-            ("s3", "s3://bucket/instruction.md", "/app/bundle/instruction.md"),
-            ("s3", "s3://bucket/test.sh", "/app/bundle/tests/test.sh"),
+        # Pulled straight from the object store to the final path — no VM temp file, no copy inward.
+        objects = [c for c in calls if c[0] == "object"]
+        assert objects == [
+            ("object", "s3://bucket/instruction.md", "/app/bundle/instruction.md"),
+            ("object", "s3://bucket/test.sh", "/app/bundle/tests/test.sh"),
         ]
         assert ("exec", "mkdir -p /app/bundle") in calls
         assert ("exec", "mkdir -p /app/bundle/tests") in calls

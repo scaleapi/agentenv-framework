@@ -7,6 +7,7 @@ from typing import ClassVar, Optional
 
 import httpx
 
+from agent_env.env.env import DeployedSandboxEnv
 from agent_env.env.gateway.constants import EXT_TRIGGERS_URI
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity_refs import EntityRef
@@ -80,7 +81,10 @@ class RegisterEnvTriggersStep(TaskStep):
                 raise RuntimeError(
                     f"Executor agent role '{agent.role}' is in watch_roles {self.watch_roles} — "
                     f"the executor's own tool calls would fire triggers (cascade).")
-            body["executor"] = {"a2a_url": agent.a2a_url or agent.api_url,
+            # The env's gateway calls the executor; an env outside our sandboxes gets its URL as it is.
+            executor_url = (agent.url_for(deployed.sandbox_type) if isinstance(deployed, DeployedSandboxEnv)
+                            else agent.a2a_url or agent.api_url)
+            body["executor"] = {"a2a_url": executor_url,
                                 "timeout_seconds": self.executor_timeout_seconds,
                                 "role": agent.role}
         try:

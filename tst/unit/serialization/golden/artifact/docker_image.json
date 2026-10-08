@@ -1,8 +1,10 @@
 {
+  "build_context_object_url": null,
   "build_context_s3_url": null,
   "description": "slack-mcp:v5 image",
   "id": "slack-mcp-image",
   "image_name": "slack-mcp:v5",
+  "tar_gz_object_url": "s3://artifact-bucket/artifacts/docker_image/slack-mcp-image/5/image.tar.gz",
   "tar_gz_s3_url": "s3://artifact-bucket/artifacts/docker_image/slack-mcp-image/5/image.tar.gz",
   "type": "docker_image",
   "version": 5

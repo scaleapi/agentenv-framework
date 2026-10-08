@@ -12,11 +12,13 @@ from agent_env.cli.utils import (
     detect_env_metadata,
     env_provider_type_option,
     environment_name_options,
+    refuse_unwritable_ids,
     resolve_environment_name,
 )
 from agent_env.utils.card_naming import card_name_from_github, card_name_from_source
 from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM, build_image
 from agent_env.env import Env, MCPServerEnv
+from agent_env.store.ids import derive_id, image_repository
 
 
 @click.group(name="mcp-server")
@@ -188,14 +190,16 @@ def put(env_id: str, dockerfile: str | None, context_path: str | None, dockerfil
             click.echo("Error: no @environment_card(name=...) found in the build source; pass --environment-name.", err=True)
             sys.exit(1)
         click.echo(f"Derived environment_name={environment_name!r} from the environment card.")
-    image_tag = f"mcp-server-{env_id}"
+    image_id = derive_id(env_id, "env_image")
+    image_tag = image_repository(image_id)
+    refuse_unwritable_ids(env_id, image_id)
 
     click.echo(f"Building MCP server Docker image...")
     build_image(dockerfile_path, context, image_tag, platform=build_platform)
 
     click.echo(f"Creating DockerImageArtifact...")
     artifact = DockerImageArtifact.put(
-        id=f"mcp-server-{env_id}",
+        id=image_id,
         description="Created from agent-env CLI",
         image_name=image_tag,
         build_context_path=str(context),
@@ -405,5 +409,5 @@ def create_cli(env_id: str, env_version: int | None, command_name: str | None, f
     click.echo(
         f"Created CliArtifact: id={artifact.id} version={artifact.version} "
         f"command_name={artifact.command_name} entrypoint={artifact.entrypoint} "
-        f"cli_s3_url={artifact.cli_object_url}"
+        f"cli_object_url={artifact.cli_object_url}"
     )

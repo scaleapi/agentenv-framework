@@ -82,6 +82,14 @@ def registry_host_from_ref(ref: str) -> str | None:
         return None
 
 
+def is_loopback_host(host: str | None) -> bool:
+    """Whether a registry ``host``, with or without its port, names this machine."""
+    if not host:
+        return False
+    name = host[1:host.find("]")] if host.startswith("[") else host.rsplit(":", 1)[0]
+    return name == "localhost" or name.startswith("127.") or name == "::1"
+
+
 class SecretStoreCredentials(OciRegistryCredentials):
     """Read inline Docker-config credentials from the configured secret store."""
 

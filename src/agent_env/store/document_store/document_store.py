@@ -245,6 +245,13 @@ class DocumentStore(ABC):
     def count(self, collection: str, filter: Filter) -> int:
         """Return the number of matching documents."""
 
+    def find_many_by_id(self, collection: str, id_field: str, ids: list[str]) -> list[dict]:
+        """First document for each distinct top-level string identity, in requested order; missing IDs are omitted."""
+        return [
+            doc for identity in dict.fromkeys(ids)
+            if (doc := self.find_one(collection, Filter.of(**{id_field: identity}))) is not None
+        ]
+
     def latest_per_id(
         self,
         collection: str,
@@ -273,6 +280,37 @@ class DocumentStore(ABC):
             docs = docs[:limit]
         return docs
 
+    def latest_per_id_page(
+        self,
+        collection: str,
+        filter: Filter,
+        *,
+        id_field: str = "id",
+        version_field: str = "version",
+        sort: Optional[Sort] = None,
+        limit: Optional[int] = None,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        """Return a latest-per-id page and its total, sharing generic query work.
+
+        Backends with custom pagination or counts retain those implementations
+        unless they override this combined operation.
+        """
+        if (
+            type(self).latest_per_id is not DocumentStore.latest_per_id
+            or type(self).count_distinct is not DocumentStore.count_distinct
+        ):
+            page = self.latest_per_id(
+                collection, filter, id_field=id_field, version_field=version_field,
+                sort=sort, limit=limit, offset=offset,
+            )
+            return page, self.count_distinct(collection, filter, id_field=id_field)
+        docs = _reduce_to_latest(self.query(collection, filter), id_field, version_field)
+        docs = _apply_sort(docs, sort)
+        total = len(docs)
+        end = offset + limit if limit else None
+        return docs[offset:end], total
+
     def count_distinct(self, collection: str, filter: Filter, *, id_field: str = "id") -> int:
         """Number of distinct ``id_field`` values among matching documents.
 
@@ -285,6 +323,12 @@ class DocumentStore(ABC):
             if found:
                 keys.add(value)
         return len(keys)
+
+    def latest_version(self, collection: str, entity_id: str) -> Optional[dict]:
+        """Return the latest versioned entity; backends may optimize the generic sorted lookup."""
+        return self.find_one(
+            collection, Filter.of(id=entity_id), sort=Sort.by("version", descending=True)
+        )
 
     @abstractmethod
     def insert(self, collection: str, doc: dict) -> None:
@@ -389,23 +433,19 @@ class VersionedEntityStore(Generic[T]):
         if version is not None:
             doc = self._doc_store.find_one(self._collection, Filter.of(id=id, version=version))
         else:
-            doc = self._doc_store.find_one(
-                self._collection, Filter.of(id=id), sort=Sort.by("version", descending=True)
-            )
+            doc = self._doc_store.latest_version(self._collection, id)
         return self._deserialize(doc) if doc is not None else None
 
     def next_version(self, id: str) -> int:
         """Allocate the version a write to ``id`` would land on.
 
         The id is checked here and not only at ``put`` because every artifact
-        helper calls this first and then writes remote data — an object to S3, an image to a
+        helper calls this first and then writes remote data — an object to the object store, an image to a
         registry — before it has a document to store. Refusing the id at the end would leave
         that data orphaned with no artifact record pointing at it.
         """
         self._doc_store.check_id(id)
-        doc = self._doc_store.find_one(
-            self._collection, Filter.of(id=id), sort=Sort.by("version", descending=True)
-        )
+        doc = self._doc_store.latest_version(self._collection, id)
         return (doc["version"] + 1) if doc is not None else 1
 
     def put(self, entity: T, max_retries: int = 5) -> int:

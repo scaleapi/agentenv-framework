@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import io
 import zipfile
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from agent_env.config import set_object_store
+from agent_env.providers.sandbox_providers import sandbox_provider
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox
+from agent_env.task_step.context import DeployedSandbox, TaskStepContext
 from agent_env.task_step.task_steps.run_docker_container import (
     RunDockerContainerTaskStep as Step,
 )
@@ -129,7 +133,7 @@ class _StagingSandbox:
         self.loaded: list[tuple[str, str]] = []
         self.scripts: list[str] = []
 
-    async def load_s3_file(self, url, destination_path):
+    async def load_object_file(self, url, destination_path):
         self.loaded.append((url, destination_path))
 
     async def exec_script(self, script):
@@ -207,3 +211,51 @@ async def test_a_store_context_that_is_not_a_zip_is_refused(fake_store):
     with pytest.raises(ValueError, match="Unsupported archive format"):
         await Step._stage_zip_from_url(sandbox, fake_store.object_url("ctx.bin"), "/work")
     assert sandbox.loaded == []
+
+
+class _RunSandbox:
+    sandbox_id = "local-1"
+
+    def __init__(self, extra_hosts: tuple[str, ...] = ()):
+        self.scripts: list[str] = []
+        self.extra_hosts = extra_hosts
+
+    async def exec_script(self, script):
+        self.scripts.append(script)
+        return ""
+
+
+@pytest.mark.asyncio
+async def test_what_it_starts_is_labeled_with_its_sandbox(monkeypatch):
+    """A local sandbox shares the laptop's Docker, so it finds what to remove at teardown by this label."""
+    sandbox = _RunSandbox()
+    monkeypatch.setattr(sandbox_provider, "build_sandbox_provider",
+                        lambda _type: SimpleNamespace(get_sandbox=AsyncMock(return_value=sandbox)))
+    monkeypatch.setattr(Step, "_stage_from_universe", AsyncMock())
+    context = TaskStepContext(deployed_sandboxes=[
+        DeployedSandbox(sandbox_name="h", sandbox_id="local-1", sandbox_mode="vm", sandbox_type="local"),
+    ])
+
+    await _step(network="task-net").execute(context)
+
+    for command in ("docker build", "docker run -d", "docker network create"):
+        (script,) = [s for s in sandbox.scripts if command in s]
+        assert "--label agentenv.sandbox=local-1" in script, command
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("extra_hosts", [(), ("host.docker.internal:host-gateway",)])
+async def test_what_it_starts_maps_the_sandboxs_extra_hosts(monkeypatch, extra_hosts):
+    """On Linux a local sandbox maps host.docker.internal, so the container reaches URLs on this machine."""
+    sandbox = _RunSandbox(extra_hosts)
+    monkeypatch.setattr(sandbox_provider, "build_sandbox_provider",
+                        lambda _type: SimpleNamespace(get_sandbox=AsyncMock(return_value=sandbox)))
+    monkeypatch.setattr(Step, "_stage_from_universe", AsyncMock())
+    context = TaskStepContext(deployed_sandboxes=[
+        DeployedSandbox(sandbox_name="h", sandbox_id="local-1", sandbox_mode="vm", sandbox_type="local"),
+    ])
+
+    await _step().execute(context)
+
+    (run,) = [s for s in sandbox.scripts if "docker run -d" in s]
+    assert ("--add-host host.docker.internal:host-gateway" in run) is bool(extra_hosts)

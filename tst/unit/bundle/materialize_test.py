@@ -12,7 +12,7 @@ from typing import Literal
 import pytest
 
 from agent_env.a2a_agent import A2AAgent
-from agent_env.artifact import Artifact
+from agent_env.artifact import Artifact, EnvironmentArtifact, EnvironmentUniverseArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
@@ -21,6 +21,8 @@ from agent_env.bundle import BundleError
 from agent_env.bundle import materialize as materialize_module
 from agent_env.bundle.ledger import LEDGER_COLLECTION, Ledger
 from agent_env.bundle.materialize import materialize
+from agent_env.bundle.parse import BundleKind
+from agent_env.bundle.run import _written
 from agent_env.config import configure
 from agent_env.config.paths import state_root
 from agent_env.config.runtime import Config
@@ -107,18 +109,41 @@ class _OwnFile(FileArtifact):
         raise NotImplementedError
 
 
-class _Imaged(Env):
-    """An env type whose image is built from the folder's Dockerfile."""
+class _OwnEnvironment(EnvironmentArtifact):
+    """A plugin's environment type with a from_toml of its own."""
 
-    type = "imaged_materialize_test"
-    toml_refs = (EntityRef.artifact("image", artifact_type="docker_image"),)
+    type: Literal["own_environment_materialize_test"] = "own_environment_materialize_test"
+
+    @classmethod
+    def from_toml(cls, data, ctx):
+        raise NotImplementedError
+
+
+class _OwnUniverse(EnvironmentUniverseArtifact):
+    """A plugin's universe type with a from_toml of its own."""
+
+    type: Literal["own_universe_materialize_test"] = "own_universe_materialize_test"
+
+    @classmethod
+    def from_toml(cls, data, ctx):
+        raise NotImplementedError
+
+
+class _OwnEnv(Env):
+    """A plugin's env type with a from_toml of its own."""
+
+    type = "own_env_materialize_test"
+
+    @classmethod
+    def from_toml(cls, data, ctx):
+        raise NotImplementedError
 
 
 @pytest.fixture(autouse=True)
 def registries(monkeypatch):
     steps = {**Config().task_step_registry(), **{cls.type: cls for cls in (_Checked, _Writes, _Consuming)}}
-    envs = {**Config().env_registry(), _Imaged.type: _Imaged}
-    plugins = {cls.model_fields["type"].default: cls for cls in (_PluginFile, _OwnFile)}
+    envs = {**Config().env_registry(), _OwnEnv.type: _OwnEnv}
+    plugins = {cls.model_fields["type"].default: cls for cls in (_PluginFile, _OwnFile, _OwnEnvironment, _OwnUniverse)}
     artifacts = {**Config().artifact_registry(), **plugins}
     monkeypatch.setattr(Config, "task_step_registry", lambda self: steps)
     monkeypatch.setattr(Config, "env_registry", lambda self: envs)
@@ -184,28 +209,27 @@ def test_a_rerun_reuses_every_version_and_an_edit_rewrites_only_what_it_changed(
 def test_what_has_no_writer_yet_is_refused_before_anything_is_written(bundle_dir, dry_run):
     layout(bundle_dir, {
         "envs/tickets/Dockerfile": "FROM scratch\n",
-        "envs/imaged/env.toml": 'type = "imaged_materialize_test"\n',
-        "envs/imaged/Dockerfile": "FROM scratch\n",
+        "envs/tickets/env.toml": 'environment_name = "tickets"\n',
+        "envs/own/env.toml": 'type = "own_env_materialize_test"\n',
         "agents/solver/Dockerfile": "FROM scratch\n",
         "skills/pdf/SKILL.md": "---\nname: pdf\n---\n",
         "artifacts/base-mcp/Dockerfile": "FROM scratch\n",
-        "artifacts/snap/artifact.toml": 'type = "environment"\n',
+        "artifacts/vm/artifact.toml": 'type = "vm_image"\nimage_name = "tahoe"\n',
         "evals/regression.toml": 'tasks = ["t"]\n',
     })
     _steps(bundle_dir, [
         {"id": "tickets", "type": "deploy_env", "env_id": "tickets"},
-        {"id": "imaged", "type": "deploy_env", "env_id": "imaged"},
+        {"id": "own", "type": "deploy_env", "env_id": "own"},
         {"id": "agent", "type": "deploy_agent", "env_ids": ["tickets"], "a2a_agent_id": "solver"},
         {"id": "pdf", "type": "load_artifact", "env_id": "tickets", "artifact_id": "pdf"},
         {"id": "image", "type": "load_artifact", "env_id": "tickets", "artifact_id": "base-mcp"},
-        {"id": "snap", "type": "load_artifact", "env_id": "tickets", "artifact_id": "snap"},
+        {"id": "vm", "type": "load_artifact", "env_id": "tickets", "artifact_id": "vm"},
     ])
 
     assert sorted(_problems(lambda: _run(bundle_dir, dry_run))) == [
         "artifacts/base-mcp: writing a docker_image artifact isn't supported yet",
-        "artifacts/snap: writing an environment artifact isn't supported yet",
-        "envs/imaged: writing an env isn't supported yet",
-        "envs/tickets: writing an env isn't supported yet",
+        "artifacts/vm: writing a vm_image artifact isn't supported yet",
+        "envs/own: writing an own_env_materialize_test env isn't supported yet",
         "skills/pdf: writing a skill isn't supported yet",
     ]
     assert not local_store().path.exists()
@@ -309,35 +333,6 @@ def test_another_bundles_entities_are_read_like_store_ids_and_an_agent_pins_the_
         f"{ROOT}/t": (1, True, ()),
     }
     assert A2AAgent.get(f"{ROOT}/solver").docker_image_artifact.version == 2
-
-
-@pytest.fixture
-def docker_on_path(monkeypatch):
-    monkeypatch.setattr(materialize_module.shutil, "which", lambda name: f"/usr/bin/{name}")
-
-
-@pytest.fixture
-def builds(monkeypatch, docker_on_path):
-    """Stands in for docker: each build is recorded with the files of its context, a link marked with a
-    trailing ``@``, and the image written as a docker_image document."""
-    calls = []
-
-    def build(dockerfile, context, tag, *, platform):
-        calls.append({"build": (dockerfile.relative_to(context).as_posix(), _listing(context), tag, platform)})
-
-    def put(id, *, description, image_name, build_context_path=None, dockerfile_path=None):
-        calls[-1]["put"] = (id, image_name, _listing(build_context_path), dockerfile_path)
-        return get_artifact_store().put_document(DockerImageArtifact(
-            id=id, description=description, image_name=image_name, tar_gz_s3_url=f"file:///{id}.tar.gz"))
-
-    monkeypatch.setattr(materialize_module, "build_image", build)
-    monkeypatch.setattr(materialize_module.DockerImageArtifact, "put", put)
-    return calls
-
-
-def _listing(folder):
-    return sorted(path.relative_to(folder).as_posix() + ("@" if path.is_symlink() else "")
-                  for path in Path(folder).rglob("*") if not path.is_dir() or path.is_symlink())
 
 
 def test_an_agent_folder_with_a_dockerfile_is_built_and_the_agent_written_over_its_image(bundle_dir, builds):
@@ -516,12 +511,15 @@ def test_a_plugin_file_type_is_written_when_it_writes_as_file_artifact_does(bund
     assert _summary(_run(bundle_dir))[f"{ROOT}/greeting"] == (1, True, ())
 
 
-def test_a_plugin_type_with_a_from_toml_of_its_own_is_refused(bundle_dir):
-    (bundle_dir / "artifacts/greeting/artifact.toml").write_text('type = "own_file_materialize_test"\n')
+@pytest.mark.parametrize("type_, written", [
+    ("own_file_materialize_test", "an own_file_materialize_test artifact"),
+    ("own_environment_materialize_test", "an own_environment_materialize_test artifact"),
+    ("own_universe_materialize_test", "an own_universe_materialize_test artifact"),
+])
+def test_a_plugin_type_with_a_from_toml_of_its_own_is_refused(bundle_dir, type_, written):
+    (bundle_dir / "artifacts/greeting/artifact.toml").write_text(f'type = "{type_}"\n')
 
-    assert _problems(lambda: _run(bundle_dir)) == (
-        "artifacts/greeting: writing an own_file_materialize_test artifact isn't supported yet",
-    )
+    assert _problems(lambda: _run(bundle_dir)) == (f"artifacts/greeting: writing {written} isn't supported yet",)
 
 
 def test_an_eval_is_rewritten_only_when_it_changes(bundle_dir):
@@ -710,6 +708,39 @@ def test_a_dry_run_predicts_what_materializing_then_writes(bundle_dir):
     assert agree()[f"{ROOT}/docs"] == (2, False, ("files changed: b.md",))
     FileArtifact.put_bytes(f"{ROOT}/greeting", description="by hand", filename="hello.txt", content=b"by hand")
     assert agree()[f"{ROOT}/greeting"] == (3, False, ("the store's latest, v2, wasn't recorded by this bundle",))
+
+
+def test_a_version_a_run_wrote_before_it_was_interrupted_is_kept_by_the_next_run_and_its_dry_run(
+    bundle_dir, monkeypatch,
+):
+    interrupted, write_artifact, digest = [], materialize_module._WRITERS[BundleKind.ARTIFACT], Ledger.digest
+
+    def written(plan, write):  # the greeting's write lands, and then the run is interrupted
+        version = write_artifact(plan, write)
+        interrupted.append(write.id == f"{ROOT}/greeting")
+        return version
+
+    def digest_until_interrupted(self, *args):
+        if any(interrupted):
+            raise KeyboardInterrupt
+        return digest(self, *args)
+
+    monkeypatch.setitem(materialize_module._WRITERS, BundleKind.ARTIFACT, written)
+    monkeypatch.setattr(Ledger, "digest", digest_until_interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        _run(bundle_dir)
+    monkeypatch.setitem(materialize_module._WRITERS, BundleKind.ARTIFACT, write_artifact)
+    monkeypatch.setattr(Ledger, "digest", digest)
+
+    kept = (1, True, ("written by an interrupted run that didn't record it",))
+    assert _summary(_run(bundle_dir, dry_run=True))[f"{ROOT}/greeting"] == kept
+    done = _run(bundle_dir)
+    assert _summary(done)[f"{ROOT}/greeting"] == kept
+    greeting = next(item for item in done.writes if item.write.id == f"{ROOT}/greeting")
+    assert _written(done.plan, greeting) == (
+        "artifacts/greeting: v1, unchanged (written by an interrupted run that didn't record it)")
+    assert _summary(_run(bundle_dir))[f"{ROOT}/greeting"] == (1, True, ())
+    assert [d["version"] for d in local_store().query("artifacts", Filter.of(id=f"{ROOT}/greeting"))] == [1]
 
 
 def test_a_dry_run_calls_no_writer_and_takes_no_lock(bundle_dir, monkeypatch):

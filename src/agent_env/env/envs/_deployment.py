@@ -15,6 +15,8 @@ from agent_env.env.store import register_env_instance
 from agent_env.store.base import ObjectNotFoundError
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from agent_env.artifact import FileArtifact
     from agent_env.env.env import DeployedEnv, Env
     from agent_env.env.envs.mcp_server import MCPServerEnv
@@ -122,7 +124,7 @@ async def load_by_signed_url(env: MCPServerEnv | WebsiteEnv, file_artifact: File
     url = await asyncio.to_thread(store.signed_get_url, file_artifact.object_url, len(LOAD_OPERATIONS) * timeout)
     if url is None:
         raise RuntimeError(f"{deployed_by}, so its server fetches {file_artifact.object_url} itself, and {type(store).__name__} "
-                           "can't sign a URL for it; loading into such an env needs an object store that signs URLs, such as S3")
+                           "can't sign a URL for it; loading into such an env needs an object store that signs URLs (S3, Cloud Storage)")
     await protocol_v1.reset_data(base_url, timeout=timeout)
     await protocol_v1.add_data(base_url, [FilePart(file={
         "uri": url,
@@ -247,23 +249,34 @@ def provider_or_class(env: Env) -> EnvironmentProvider | type[EnvironmentProvide
 
 
 def deploy_refusal(env: Env, provider: EnvironmentProvider | type[EnvironmentProvider], options: dict) -> str | None:
-    """Why deploying env through provider, or a provider of that class, is refused before anything is built, or None: the server provider
-    for an env other than one MCP server, a plugin's MultiEnv with an MCP server and a website of one name, or an option it can't take."""
+    """Why deploying env through provider, or a provider of that class, is refused before anything is built, or None: the provider
+    can't deploy an env like it (see ``provider_refusal``), or an option it can't take."""
+    provider_class = provider if isinstance(provider, type) else type(provider)
+    reason = provider_refusal(provider_class, type(env),
+                              mcp_names=[child.environment_name for child in getattr(env, "mcp_server_envs", ())],
+                              website_names=[child.environment_name for child in getattr(env, "website_envs", ())])
+    if reason is not None:
+        return f"env '{env.id}' has env_provider_type '{env.env_provider_type}', which {reason}"
+    return option_refusal(env, provider, options)
+
+
+def provider_refusal(provider_class: type[EnvironmentProvider], env_class: type[Env], *, mcp_names: Iterable[str] = (),
+                     website_names: Iterable[str] = ()) -> str | None:
+    """Why a provider of provider_class can't deploy an env of env_class, a multi's with children of these environment_names, worded
+    to follow the provider's type, or None: the server provider deploys one MCP server, and a plugin's provider gives a multi one
+    env card, which can't tell an MCP server and a website of one name apart. It needs no env, so a bundle checks it before writing one."""
     from agent_env.env.envs.mcp_server import MCPServerEnv
     from agent_env.env.envs.multi_env import MultiEnv
     from agent_env.providers.env_providers.env_provider import _SandboxEnvironmentProvider
     from agent_env.providers.env_providers.env_server_provider import EnvironmentServerProvider
 
-    provider_class = provider if isinstance(provider, type) else type(provider)
-    refused = f"env '{env.id}' has env_provider_type '{env.env_provider_type}'"
-    if issubclass(provider_class, EnvironmentServerProvider) and not isinstance(env, MCPServerEnv):
-        return f"{refused}, which deploys one MCP server, not a {env.type} env"
-    if isinstance(env, MultiEnv) and not issubclass(provider_class, _SandboxEnvironmentProvider):
-        shared = {c.environment_name for c in env.mcp_server_envs} & {c.environment_name for c in env.website_envs}
-        if shared:
-            return (f"{refused}, whose one env card can't tell an MCP server and a website apart by name, and both are named "
+    if issubclass(provider_class, EnvironmentServerProvider) and not issubclass(env_class, MCPServerEnv):
+        return f"deploys one MCP server, not a {env_class.type} env"
+    if issubclass(env_class, MultiEnv) and not issubclass(provider_class, _SandboxEnvironmentProvider):
+        if shared := set(mcp_names) & set(website_names):
+            return (f"gives a multi one env card, so it can't tell an MCP server and a website apart by name, and both are named "
                     f"{', '.join(map(repr, sorted(shared)))}")
-    return option_refusal(env, provider, options)
+    return None
 
 
 def option_refusal(env: Env, provider: EnvironmentProvider | type[EnvironmentProvider], options: dict) -> str | None:

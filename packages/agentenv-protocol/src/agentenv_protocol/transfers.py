@@ -10,14 +10,14 @@ import random
 import re
 import io
 import tempfile
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from typing import Annotated, BinaryIO, Literal, TypeVar
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from pydantic import (
@@ -33,7 +33,7 @@ _MIME_TYPE = re.compile(r"^[!#$&^_.+\-|~0-9A-Za-z]+/[!#$&^_.+\-|~0-9A-Za-z]+$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _CHUNK_BYTES = 64 * 1024
 _UTC = timezone.utc  # noqa: UP017 -- datetime.UTC requires Python 3.11.
-# Idle limits, not totals, as long as botocore's: long enough for a slow uplink to drain its
+# Idle limits, not totals, of a minute, as cloud storage SDKs use: long enough for a slow uplink to drain its
 # buffers before the store answers, short enough that a stalled connection is retried within
 # the minutes agent-env waits for an extension call.
 TRANSFER_IDLE_TIMEOUT_SECONDS = 60.0
@@ -51,6 +51,12 @@ TRANSFER_STALL_BUDGET_SECONDS = TRANSFER_ATTEMPTS * (
     _CONNECT_TIMEOUT_SECONDS + TRANSFER_IDLE_TIMEOUT_SECONDS
 ) + sum(_RETRY_BACKOFF_SECONDS * 2**attempt for attempt in range(TRANSFER_ATTEMPTS - 1))
 _T = TypeVar("_T")
+# A grant naming a path on its holder's own staging carries this header, whose value is that path on
+# the holder's server: a sandbox can't always call its own public URL, so the helpers reach the server
+# over loopback.
+STAGING_PATH_HEADER = "AgentEnv-Staging-Path"
+_SERVER_PORT_ENV = "A2A_PORT"
+_SERVER_PORT: ContextVar[int | None] = ContextVar("agentenv_protocol_server_port", default=None)
 
 
 def _https_url(value: str) -> str:
@@ -265,20 +271,84 @@ def _raise_for_transfer_status(response: httpx.Response) -> None:
     if (
         response.status_code in (408, 429)
         or response.status_code >= 500
-        or _is_s3_request_timeout(response)
+        or _is_store_request_timeout(response)
     ):
         raise TransferError("transfer_unavailable", _UNAVAILABLE)
     raise TransferError("transfer_rejected", "The object store rejected the transfer.")
 
 
-def _is_s3_request_timeout(response: httpx.Response) -> bool:
-    """S3 answers an upload that stalled with a 400 whose error code is RequestTimeout."""
+# Body markers of a stalled upload that a store answers with a 400 rather than a 408.
+_STALLED_UPLOAD_MARKERS = (
+    b"<Code>RequestTimeout</Code>",  # S3
+)
+
+
+def _is_store_request_timeout(response: httpx.Response) -> bool:
+    """An upload that stalled, answered with a 400 by a store that does not send a 408 for it."""
     if response.status_code != 400:
         return False
     try:
-        return b"<Code>RequestTimeout</Code>" in response.content[:1024]
+        head = response.content[:1024]
     except httpx.ResponseNotRead:
         return False
+    return any(marker in head for marker in _STALLED_UPLOAD_MARKERS)
+
+
+@contextmanager
+def serving_on(port: int) -> Iterator[None]:
+    """Transfers made in this scope serve a request the holder's own server took on ``port``, so they
+    reach its staging over loopback there. The SDK's server sets it for every request it handles."""
+
+    token = _SERVER_PORT.set(port)
+    try:
+        yield
+    finally:
+        _SERVER_PORT.reset(token)
+
+
+def loopback_url(url: str, headers: Mapping[str, str] | None) -> str | None:
+    """Where the holder's own server answers a grant's ``url`` over loopback: when the grant names a path
+    on the holder's staging (an ``AgentEnv-Staging-Path`` header ending the URL's path) and the server's
+    port is known, from the request being served (``serving_on``) or else ``A2A_PORT``. None otherwise."""
+    path = httpx.Headers(headers or {}).get(STAGING_PATH_HEADER)
+    port = str(_SERVER_PORT.get() or os.environ.get(_SERVER_PORT_ENV, ""))
+    if not path or not path.startswith("/") or not port.isdigit() or not 0 < int(port) < 65536:
+        return None
+    parsed = urlsplit(url)
+    if not parsed.path.endswith(path):
+        return None
+    return urlunsplit(("http", f"127.0.0.1:{int(port)}", path, parsed.query, ""))
+
+
+def _destinations(url: str, headers: Mapping[str, str] | None) -> tuple[str, ...]:
+    """Where a grant's request goes: the holder's own server over loopback first when the grant names a
+    path on its staging, then the grant's URL, for a server that isn't listening there."""
+    loopback = loopback_url(url, headers)
+    return (url,) if loopback is None else (loopback, url)
+
+
+async def _send_to_first_listening(
+    urls: tuple[str, ...], send: Callable[[str], Awaitable[_T]]
+) -> _T:
+    """``send`` to the first of ``urls`` whose server takes the connection."""
+    *earlier, last = urls
+    for url in earlier:
+        try:
+            return await send(url)
+        except httpx.ConnectError:
+            pass
+    return await send(last)
+
+
+def _send_to_first_listening_sync(urls: tuple[str, ...], send: Callable[[str], _T]) -> _T:
+    """``_send_to_first_listening`` for a sync client."""
+    *earlier, last = urls
+    for url in earlier:
+        try:
+            return send(url)
+        except httpx.ConnectError:
+            pass
+    return send(last)
 
 
 def _check_unexpired(expires_at: datetime) -> None:
@@ -401,20 +471,21 @@ async def upload(target: WriteObject, source: Path | bytes) -> Uploaded:
     headers = httpx.Headers(target.write.headers or {})
     headers.setdefault("content-type", target.media_type)
     headers.setdefault("content-length", str(size_bytes))
+    urls = _destinations(target.write.url, target.write.headers)
 
     async def put() -> Uploaded:
-        with (
-            _SourceStream(source, size_bytes) as stream,
-            _transfer_request(target.write.expires_at),
-        ):
+        with _transfer_request(target.write.expires_at):
             async with httpx.AsyncClient(
                 follow_redirects=False, timeout=_TRANSFER_TIMEOUT
             ) as client:
-                response = await client.put(
-                    target.write.url, headers=headers, content=stream
-                )
-        _raise_for_transfer_status(response)
-        return stream.uploaded()
+
+                async def to(url: str) -> Uploaded:
+                    with _SourceStream(source, size_bytes) as stream:
+                        response = await client.put(url, headers=headers, content=stream)
+                    _raise_for_transfer_status(response)
+                    return stream.uploaded()
+
+                return await _send_to_first_listening(urls, to)
 
     return await _retrying(target.write.expires_at, put)
 
@@ -434,28 +505,35 @@ async def download(source: ReadObject, destination: Path) -> None:
     temporary = Path(filename)
     headers = httpx.Headers(source.read.headers or {})
     headers["accept-encoding"] = "identity"
+    urls = _destinations(source.read.url, source.read.headers)
 
     async def get() -> tuple[int, str]:
         size_bytes = 0
         digest = hashlib.sha256()
         with _transfer_request(source.read.expires_at):
-            async with (
-                httpx.AsyncClient(
-                    follow_redirects=False, timeout=_TRANSFER_TIMEOUT
-                ) as client,
-                client.stream("GET", source.read.url, headers=headers) as response,
-            ):
-                _raise_for_transfer_status(response)
-                stream = await asyncio.to_thread(temporary.open, "wb")
+            async with httpx.AsyncClient(
+                follow_redirects=False, timeout=_TRANSFER_TIMEOUT
+            ) as client:
+                response = await _send_to_first_listening(
+                    urls,
+                    lambda url: client.send(
+                        client.build_request("GET", url, headers=headers), stream=True
+                    ),
+                )
                 try:
-                    async for chunk in response.aiter_raw(_CHUNK_BYTES):
-                        size_bytes += len(chunk)
-                        if size_bytes > source.max_bytes:
-                            raise TransferError("transfer_too_large", _TOO_LARGE)
-                        digest.update(chunk)
-                        await asyncio.to_thread(stream.write, chunk)
+                    _raise_for_transfer_status(response)
+                    stream = await asyncio.to_thread(temporary.open, "wb")
+                    try:
+                        async for chunk in response.aiter_raw(_CHUNK_BYTES):
+                            size_bytes += len(chunk)
+                            if size_bytes > source.max_bytes:
+                                raise TransferError("transfer_too_large", _TOO_LARGE)
+                            digest.update(chunk)
+                            await asyncio.to_thread(stream.write, chunk)
+                    finally:
+                        await asyncio.to_thread(stream.close)
                 finally:
-                    await asyncio.to_thread(stream.close)
+                    await response.aclose()
         return size_bytes, digest.hexdigest()
 
     try:
@@ -485,24 +563,28 @@ def _post_to_namespace(
     fields = {**grant.fields, grant.path_field: object_path}
     fields.setdefault("Content-Type", "application/octet-stream")
     with (
-        _SourceStream(source, size_bytes) as stream,
         _transfer_request(target.expires_at),
         httpx.Client(follow_redirects=False, timeout=_TRANSFER_TIMEOUT) as client,
     ):
-        response = client.post(
-            grant.url,
-            data=fields,
-            files={
-                grant.file_field: (
-                    object_path.rsplit("/", 1)[-1],
-                    stream,
-                    "application/octet-stream",
+
+        def to(url: str) -> Uploaded:
+            with _SourceStream(source, size_bytes) as stream:
+                response = client.post(
+                    url,
+                    data=fields,
+                    files={
+                        grant.file_field: (
+                            object_path.rsplit("/", 1)[-1],
+                            stream,
+                            "application/octet-stream",
+                        )
+                    },
+                    headers=grant.headers,
                 )
-            },
-            headers=grant.headers,
-        )
-    _raise_for_transfer_status(response)
-    return stream.uploaded()
+            _raise_for_transfer_status(response)
+            return stream.uploaded()
+
+        return _send_to_first_listening_sync(_destinations(grant.url, grant.headers), to)
 
 
 class NamespaceUploader:

@@ -1,6 +1,7 @@
 """Unit tests for config.toml-declared custom sandbox providers + the deploy-time type guard."""
 
 import asyncio
+import os
 import textwrap
 
 import pytest
@@ -10,6 +11,7 @@ from agent_env.providers.sandbox_providers import sandbox_provider
 from agent_env.config import reset_config
 from agent_env.providers.sandbox_providers.e2b.provider import E2BSandboxProvider
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
+from agent_env.providers.sandbox_providers.sail_vm.provider import SailVmSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import Sandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SandboxProvider,
@@ -211,6 +213,38 @@ def test_e2b_missing_base_template_is_a_config_error(monkeypatch, tmp_path):
 
     with pytest.raises(ConfigError, match="requires a non-empty 'base_template'"):
         build_sandbox_provider("e2b")
+
+
+def test_sail_builtin_receives_interpolated_key_without_touching_the_sdk(monkeypatch, tmp_path):
+    cfg = _write_config(tmp_path, """
+        [sandbox.providers.sail_vm.config]
+        api_key = "env:SAIL_TEST_API_KEY"
+        app = "agent-env-test"
+        auto_sleep_min_idle_seconds = 600
+    """)
+    monkeypatch.setenv("AGENT_ENV_CONFIG", str(cfg))
+    monkeypatch.setenv("SAIL_TEST_API_KEY", "resolved-sail-key")
+    monkeypatch.delenv("SAIL_API_KEY", raising=False)
+
+    provider = build_sandbox_provider("sail_vm")
+
+    assert isinstance(provider, SailVmSandboxProvider)
+    assert provider._api_key == "resolved-sail-key"
+    assert provider._app_name == "agent-env-test"
+    assert provider._auto_sleep_min_idle_seconds == 600
+    assert "SAIL_API_KEY" not in os.environ
+    assert "resolved-sail-key" not in repr(provider)
+
+
+def test_sail_missing_api_key_is_a_config_error(monkeypatch, tmp_path):
+    cfg = _write_config(tmp_path, """
+        [sandbox.providers.sail_vm.config]
+        app = "agent-env-test"
+    """)
+    monkeypatch.setenv("AGENT_ENV_CONFIG", str(cfg))
+
+    with pytest.raises(ConfigError, match="requires a non-empty 'api_key'"):
+        build_sandbox_provider("sail_vm")
 
 
 def test_builtin_config_reaches_chain_members(monkeypatch, tmp_path):

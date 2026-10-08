@@ -64,6 +64,69 @@ def test_threaded_cas_converges(store_coll):
     assert doc["rev"] == n
 
 
+def test_latest_per_id_page_reads_rows_once(store_coll, monkeypatch):
+    store, coll = store_coll
+    for entity_id, version in (("a", 1), ("a", 2), ("b", 1), ("c", 1)):
+        store.insert(coll, {"id": entity_id, "version": version, "created_at_utc": f"{entity_id}{version}"})
+
+    calls = 0
+    original_query = store.query
+
+    def counted_query(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_query(*args, **kwargs)
+
+    monkeypatch.setattr(store, "query", counted_query)
+    page, total = store.latest_per_id_page(
+        coll, Filter(), sort=Sort.by("created_at_utc", descending=False), limit=1, offset=1,
+    )
+    assert [doc["id"] for doc in page] == ["b"]
+    assert total == 3
+    assert calls == 1
+
+
+def test_latest_per_id_page_preserves_backend_override(store_coll, monkeypatch):
+    store, coll = store_coll
+
+    class NativePaginationStore(LocalSqliteDocumentStore):
+        def latest_per_id(self, collection, filter, **kwargs):
+            self.native_page = kwargs
+            return [{"id": "native"}]
+
+    native = NativePaginationStore(str(store.path))
+    monkeypatch.setattr(native, "count_distinct", lambda *args, **kwargs: 17)
+    page, total = native.latest_per_id_page(
+        coll, Filter(), sort=Sort.by("id"), limit=4, offset=8,
+    )
+    assert page == [{"id": "native"}]
+    assert total == 17
+    assert native.native_page["limit"] == 4
+    assert native.native_page["offset"] == 8
+
+    class NativeCountStore(LocalSqliteDocumentStore):
+        def count_distinct(self, collection, filter, *, id_field="id"):
+            self.native_count = (collection, id_field)
+            return 23
+
+    native_count = NativeCountStore(str(store.path))
+    native_count.insert(coll, {"id": "counted", "version": 1})
+    page, total = native_count.latest_per_id_page(coll, Filter(), limit=1)
+    assert len(page) == 1
+    assert total == 23
+    assert native_count.native_count == (coll, "id")
+
+
+def test_latest_per_id_page_zero_limit_keeps_unlimited_semantics(store_coll):
+    store, coll = store_coll
+    for entity_id in ("a", "b", "c"):
+        store.insert(coll, {"id": entity_id, "version": 1})
+
+    page, total = store.latest_per_id_page(coll, Filter(), limit=0, offset=1)
+    assert len(page) == 2
+    assert total == 3
+
+
 def test_reader_sees_a_collection_created_by_another_connection(tmp_path):
     """A long-lived reader must see a collection another connection creates after it opened,
     without reopening. Covers several primitives, not one."""
@@ -148,6 +211,28 @@ def test_other_filters_scan(filter, store_coll):
     assert _plans(store, lambda: store.query(coll, filter)) == ["SCAN docs_coll"]
 
 
+def test_batch_identity_lookup_searches_the_index_and_decodes_only_requested_rows(store_coll, monkeypatch):
+    store, coll = store_coll
+    store.ensure_index(coll, ["instance_id"], unique=True)
+    for i in range(1000):
+        store.insert(coll, {"instance_id": f"i{i}"})
+
+    decoded = []
+    original_loads = sqlite_document_store.json.loads
+
+    def counted_loads(blob, *args, **kwargs):
+        decoded.append(blob)
+        return original_loads(blob, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite_document_store.json, "loads", counted_loads)
+    plans = _plans(store, lambda: store.find_many_by_id(coll, "instance_id", ["i500", "i2", "missing"]))
+    assert any("USING INDEX docs_coll_instance_id_unique" in plan for plan in plans)
+    assert len(decoded) == 2
+    assert store.find_many_by_id(coll, "instance_id", ["i500", "i2", "missing"]) == [
+        {"instance_id": "i500"}, {"instance_id": "i2"},
+    ]
+
+
 @pytest.mark.parametrize("same_store", [False, True], ids=["another connection", "the same store"])
 def test_a_reader_searches_an_index_created_after_its_first_read(tmp_path, same_store):
     path = str(tmp_path / "shared.db")
@@ -158,6 +243,44 @@ def test_a_reader_searches_an_index_created_after_its_first_read(tmp_path, same_
     assert _plans(reader, read) == ["SCAN docs_coll"]
     writer.ensure_index("coll", ["id", "version"], unique=True)
     assert "USING INDEX docs_coll_id_version_unique (<expr>=?)" in _plans(reader, read)[0]
+
+
+def test_latest_version_uses_indexed_top_one_and_reads_existing_table(tmp_path):
+    store = LocalSqliteDocumentStore(str(tmp_path / "latest.db"))
+    store.insert("coll", {"id": "a", "version": 1})
+    store.insert("coll", {"id": "a", "version": 2})
+    store.ensure_index("coll", ["id", "version"], unique=True)
+    statements = []
+    store._conn.set_trace_callback(statements.append)
+    view = VersionedEntityStore(store, "coll", dict, dict)
+    statements.clear()
+    assert view.get("a")["version"] == 2
+    assert view.next_version("a") == 3
+    reads = [sql for sql in statements if sql.startswith("SELECT doc, json_type")]
+    assert len(reads) == 2
+    plan = store._conn.execute("EXPLAIN QUERY PLAN " + reads[0]).fetchall()
+    assert any("docs_coll_id_version_unique" in row[3] for row in plan), plan
+    assert all("LIMIT 1" in sql for sql in reads)
+
+
+def test_latest_version_does_not_create_an_absent_table(tmp_path):
+    store = LocalSqliteDocumentStore(str(tmp_path / "absent.db"))
+    assert store.latest_version("coll", "missing") is None
+    assert store._conn.execute("SELECT 1 FROM sqlite_master WHERE name='docs_coll'").fetchone() is None
+
+
+def test_latest_version_falls_back_for_non_integer_entity_version(tmp_path):
+    store = LocalSqliteDocumentStore(str(tmp_path / "malformed-version.db"))
+    view = VersionedEntityStore(store, "coll", dict, dict)
+    store.insert("coll", {"id": "a", "version": "legacy"})
+    assert view.get("a")["version"] == "legacy"
+
+
+def test_latest_version_falls_back_for_versions_outside_sqlite_integer_range(tmp_path):
+    store = LocalSqliteDocumentStore(str(tmp_path / "large-version.db"))
+    view = VersionedEntityStore(store, "coll", dict, dict)
+    store.insert("coll", {"id": "a", "version": 10**30})
+    assert view.get("a")["version"] == 10**30
 
 
 def test_indexed_reads_and_writes_match_a_full_scan(tmp_path):
@@ -320,5 +443,5 @@ def _plans(store, call) -> list[str]:
         call()
     finally:
         store._conn.set_trace_callback(None)
-    reads = [sql for sql in statements if sql.startswith("SELECT rowid, doc")]
+    reads = [sql for sql in statements if sql.startswith(("SELECT rowid, doc", "SELECT doc, json_type"))]
     return [" ".join(row[3] for row in store._conn.execute(f"EXPLAIN QUERY PLAN {sql}")) for sql in reads]
