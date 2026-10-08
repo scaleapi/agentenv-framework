@@ -3,7 +3,9 @@
 Each check runs in a subprocess that refuses every module only the extra installs: ``dev``
 installs every extra, so installed state cannot show what an install without one would do."""
 
+import ast
 import importlib.metadata
+import importlib.util
 import json
 import subprocess
 import sys
@@ -198,3 +200,18 @@ def test_the_sail_vm_provider_without_the_extra_names_the_extra_to_install():
     impl = "agent_env.providers.sandbox_providers.sail_vm.provider:SailVmSandboxProvider"
     message = _run(_LOAD_IMPL, _only_in("sail"), impl, "agent_env.providers.sandbox_providers.sandbox_provider:SandboxProvider")
     assert "pip install 'agentenv-framework[sail]'" in message, message
+
+
+@pytest.mark.parametrize("package", _STORE_PACKAGES)
+def test_a_backend_imported_on_first_use_is_visible_to_type_checkers(package):
+    """A name only __getattr__ serves is Any to a type checker, which a strict consumer cannot subclass, so each one
+    is also imported under TYPE_CHECKING, in the ``X as X`` form strict mode counts as a re-export."""
+    tree = ast.parse(open(importlib.util.find_spec(package).origin, encoding="utf-8").read())
+    lazy = {key.value for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "lazy_backends"
+            for key in node.args[1].keys}
+    typed = {alias.name for node in tree.body
+             if isinstance(node, ast.If) and getattr(node.test, "id", None) == "TYPE_CHECKING"
+             for imp in node.body if isinstance(imp, ast.ImportFrom)
+             for alias in imp.names if alias.asname == alias.name}
+    assert lazy == typed

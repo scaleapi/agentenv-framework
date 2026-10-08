@@ -8,6 +8,8 @@ AwsSecretsManagerSecretStore is imported on first use and left out of ``__all__`
 modules.
 """
 
+from typing import TYPE_CHECKING
+
 from agent_env.store._lazy import lazy_backends
 from agent_env.store.secret_store.local_secret_store import LocalSecretStore
 from agent_env.store.secret_store.secret_store import SecretStore
@@ -16,6 +18,11 @@ __all__ = [
     "SecretStore",
     "LocalSecretStore",
 ]
+
+if TYPE_CHECKING:  # type checkers see the class; at runtime __getattr__ imports it on first use
+    from agent_env.store.secret_store.aws_secrets_manager_secret_store import (
+        AwsSecretsManagerSecretStore as AwsSecretsManagerSecretStore,
+    )
 
 __getattr__ = lazy_backends(
     __name__, {"AwsSecretsManagerSecretStore": "agent_env.store.secret_store.aws_secrets_manager_secret_store"}

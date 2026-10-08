@@ -8,8 +8,9 @@ extra, so DynamoDbDocumentStore is imported on first use and left out of ``__all
 extra. Future backends (Cosmos DB, ...) live alongside as new modules.
 """
 
-from agent_env.store._lazy import lazy_backends
+from typing import TYPE_CHECKING
 
+from agent_env.store._lazy import lazy_backends
 from agent_env.store.document_store.document_store import (
     AbsentOrNull,
     DocumentStore,
@@ -59,5 +60,8 @@ __all__ = [
     "SortKey",
     "UpdateSpec",
 ]
+
+if TYPE_CHECKING:  # type checkers see the class; at runtime __getattr__ imports it on first use
+    from agent_env.store.document_store.dynamodb_document_store import DynamoDbDocumentStore as DynamoDbDocumentStore
 
 __getattr__ = lazy_backends(__name__, {"DynamoDbDocumentStore": "agent_env.store.document_store.dynamodb_document_store"})
