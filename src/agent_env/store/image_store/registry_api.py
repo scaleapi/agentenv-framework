@@ -17,7 +17,8 @@ _MANIFEST_TYPES = ", ".join([
     "application/vnd.oci.image.manifest.v1+json",
     "application/vnd.docker.distribution.manifest.v2+json",
 ])
-_DIGEST = re.compile(r"^[a-z0-9]+(?:[.+_-][a-z0-9]+)*:[0-9a-fA-F]{32,}$")
+# The digests Docker pulls by: the algorithm, then its full-length lowercase hex.
+_DIGEST = re.compile(r"^(?:sha256:[a-f0-9]{64}|sha384:[a-f0-9]{96}|sha512:[a-f0-9]{128})$")
 _DOCKER_HUB_API = "registry-1.docker.io"
 _TIMEOUT_SECONDS = 30
 
@@ -55,7 +56,7 @@ def pin_digest(ref: str, auth: RegistryAuth | None) -> str:
 def _parse(ref: str) -> _ImageRef:
     name, _, digest = ref.partition("@")
     if digest and not _DIGEST.match(digest):
-        raise ValueError(f"{ref}: {digest!r} isn't a digest (algorithm:hex)")
+        raise ValueError(f"{ref}: {digest!r} isn't a sha256, sha384 or sha512 digest")
     head, slash, tail = name.rpartition("/")
     tag = None
     if ":" in tail:

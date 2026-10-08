@@ -117,10 +117,11 @@ def test_the_manifest_is_fetched_with_the_credentials_the_registry_took(requests
     assert [r.method for r in seen] == ["HEAD", "GET"]
 
 
-def test_a_digest_header_that_isnt_a_digest_is_refused(requests):
-    requests(lambda request: _served("sha256:xyz"))
+@pytest.mark.parametrize("header", ["sha256:xyz", "sha256:" + "a" * 32, "sha256:" + "A" * 64])
+def test_a_digest_header_docker_couldnt_pull_by_is_refused(requests, header):
+    requests(lambda request: _served(header))
 
-    with pytest.raises(ValueError, match="ghcr.io answered with 'sha256:xyz', which isn't a digest"):
+    with pytest.raises(ValueError, match=f"ghcr.io answered with '{header}', which isn't a digest"):
         pin_digest("ghcr.io/org/tool:v1", None)
 
 
@@ -146,9 +147,10 @@ def test_an_unreachable_registry_is_named(requests):
         pin_digest("ghcr.io/org/tool:v1", None)
 
 
-def test_a_malformed_digest_is_refused_before_any_request(requests):
+@pytest.mark.parametrize("digest", ["sha256:xyz", "sha256:" + "a" * 32, "sha256:" + "A" * 64, "md5:" + "a" * 32])
+def test_a_digest_docker_couldnt_pull_by_is_refused_before_any_request(requests, digest):
     seen = requests(lambda request: _served())
 
-    with pytest.raises(ValueError, match="'sha256:xyz' isn't a digest"):
-        pin_digest("ghcr.io/org/tool@sha256:xyz", None)
+    with pytest.raises(ValueError, match=f"'{digest}' isn't a sha256, sha384 or sha512 digest"):
+        pin_digest(f"ghcr.io/org/tool@{digest}", None)
     assert seen == []
