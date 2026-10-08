@@ -8,12 +8,8 @@ their own interpreter so they are unaffected (e.g. generated CLI scripts).
 
 A test that genuinely needs a socket can opt out with @pytest.mark.enable_socket.
 
-Unit tests that touch AWS run against moto, which still makes botocore resolve credentials;
-without any, botocore probes the instance-metadata endpoint and trips the socket guard. So
-placeholder credentials are set for the session when the environment has none.
+The AWS backends' tests live in store/aws, whose conftest gives them placeholder credentials.
 """
-
-import os
 
 import pytest
 from pytest_socket import disable_socket, enable_socket
@@ -24,21 +20,6 @@ from agent_env.store import LocalFilesystemObjectStore
 from agent_env.store.document_store.sqlite_document_store import LocalSqliteDocumentStore
 from agent_env.store.routing import enable_namespace_routing
 from agent_env.utils.deprecation import reset_deprecation_state
-
-_PLACEHOLDER_AWS_ENV = {
-    "AWS_ACCESS_KEY_ID": "testing",
-    "AWS_SECRET_ACCESS_KEY": "testing",
-    "AWS_DEFAULT_REGION": "us-west-2",
-    "AWS_EC2_METADATA_DISABLED": "true",
-}
-
-
-@pytest.fixture(scope="session", autouse=True)
-def _placeholder_aws_credentials():
-    if not (os.environ.get("AWS_ACCESS_KEY_ID") or os.environ.get("AWS_PROFILE")):
-        for name, value in _PLACEHOLDER_AWS_ENV.items():
-            os.environ.setdefault(name, value)
-
 
 @pytest.fixture(autouse=True)
 def _disable_network():

@@ -14,23 +14,23 @@ import time
 import pytest
 
 from agent_env.config import set_object_store
-from agent_env.store.object_store import S3ObjectStore
 from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.task_step.snapshot_utils import agent_state_capture as mod
 from agent_env.task_step.snapshot_utils import snapshot_series as ps
 from agent_env.task_step.task_steps import prompt_agent as pa_mod
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
+from tst.unit.store.fakes import FakeObjectStore
 
 from .capture_stubs import BUCKET, context
 
-TRAJ_PREFIX = f"s3://{BUCKET}/traj/"
+TRAJ_PREFIX = f"fake://{BUCKET}/traj/"
 
 
 @pytest.fixture(autouse=True)
-def _s3_store_backs_prefix_minting():
-    # Trajectory prefixes are minted by the configured object store; pin an S3 one so
-    # they stay s3://BUCKET/... instead of resolving a filesystem path under cwd.
-    set_object_store(S3ObjectStore(client=object(), bucket=BUCKET))
+def _store_backs_prefix_minting():
+    # Trajectory prefixes are minted by the configured object store; pin a fake one so
+    # they stay fake://BUCKET/... instead of resolving a filesystem path under cwd.
+    set_object_store(FakeObjectStore(root=BUCKET))
 INSTANCE_ID = "solve-run-0123456789abcdef"
 # The env universe a `_series()` capture versions into.
 SNAPSHOT_ID = f"{INSTANCE_ID}__snapshot-solve"
@@ -99,7 +99,7 @@ class _FakeWorkspace:
             await self.gate.wait()
         if self.fail_after is not None and self.calls > self.fail_after:
             raise RuntimeError("sidecar exploded")
-        prefix = f"s3://{BUCKET}/agent_snapshots/{artifact_id}/{self.calls}-abc/"
+        prefix = f"fake://{BUCKET}/agent_snapshots/{artifact_id}/{self.calls}-abc/"
         return mod.WorkspaceCapture(
             universe_id=artifact_id,
             universe_version=self.calls,
@@ -139,10 +139,10 @@ def _pending(series: ps.SnapshotSeries) -> list[dict]:
 @pytest.mark.asyncio
 async def test_object_mode_trajectory_is_not_uploaded_twice(monkeypatch):
     _install(monkeypatch)
-    direct_url = f"s3://{BUCKET}/prompt_agent_trajectories/direct.json"
+    direct_url = f"fake://{BUCKET}/prompt_agent_trajectories/direct.json"
 
     async def direct_trajectory(**kwargs):
-        assert kwargs["trajectory_output_prefix"].startswith(f"s3://{BUCKET}/")
+        assert kwargs["trajectory_output_prefix"].startswith(f"fake://{BUCKET}/")
         return mod.TrajectoryCapture(object_url=direct_url)
 
     def unexpected_upload(*args, **kwargs):
@@ -614,7 +614,7 @@ async def test_the_reads_share_one_capture_budget(monkeypatch):
         await asyncio.sleep(0.1)
         return mod.WorkspaceCapture(
             universe_id="wsp", universe_version=1,
-            bundle_object_url=f"s3://{BUCKET}/b/", capture_prefix=f"s3://{BUCKET}/b/",
+            bundle_object_url=f"fake://{BUCKET}/b/", capture_prefix=f"fake://{BUCKET}/b/",
         )
 
     async def traj(**kwargs):

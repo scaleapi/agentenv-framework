@@ -151,8 +151,9 @@ orchestrators call it the same way. What callers rely on:
 ## Tests
 
 - Tiers are by path. `tst/unit/` runs offline: `tst/unit/conftest.py` blocks IP sockets with
-  pytest-socket and AWS goes to moto, so anything that needs the network is either missing a mock or
-  belongs in `tst/integration/`. Opt out per test with `@pytest.mark.enable_socket`, or override the
+  pytest-socket, so anything that needs the network is either missing a mock or belongs in
+  `tst/integration/`. The AWS backends' tests live in `tst/unit/store/aws/` and run against moto or
+  stubbed clients, and the directory is skipped without the `aws` extra. Opt out per test with `@pytest.mark.enable_socket`, or override the
   `_disable_network` fixture in a closer conftest when a loopback server is the point.
 - `tst/integration/` needs Docker and the local registry on `:5000` and runs on the local default
   backends. Minutes-long tests (real image builds, sandbox VMs, gateways, agents) carry

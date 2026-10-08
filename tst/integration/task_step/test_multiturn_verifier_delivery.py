@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import uuid
-from urllib.parse import urlparse
 
 import pytest
 import pytest_asyncio
@@ -62,16 +61,15 @@ _TOTAL_EVENTS = len(TURN1_SPANS) + len(TURN2_SPANS)
 def per_turn_uris():
     """Upload two per-turn OTel-span trajectories through the configured object store.
 
-    The verifier hands them to the sandbox as S3 objects (``Sandbox.write_file_from_object``), so a store
-    that mints another scheme fails here rather than inside the container. The objects stay behind:
-    the ObjectStore API has no delete, and the prefix is unique per run."""
+    The verifier hands them to the sandbox with ``Sandbox.write_file_from_object``, which reads each
+    through the store that holds it. The objects stay behind: the ObjectStore API has no delete, and
+    the prefix is unique per run."""
     store = get_config().get_object_store()
     prefix = f"agent_snapshots/it-mt-{uuid.uuid4().hex[:12]}"
     uris = [
         store.put(f"{prefix}/turn_{i}.json", json.dumps(spans).encode(), content_type="application/json")
         for i, spans in enumerate((TURN1_SPANS, TURN2_SPANS), start=1)
     ]
-    assert all(urlparse(u).scheme == "s3" for u in uris), f"per-turn files need an S3-backed store; got {uris!r}"
     return uris
 
 

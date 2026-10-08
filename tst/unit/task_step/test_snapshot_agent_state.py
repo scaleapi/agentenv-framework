@@ -1,4 +1,4 @@
-"""``_capture_universe_state`` publishes unsigned ``s3://`` refs to
+"""``_capture_universe_state`` publishes unsigned object URLs to
 ``context.metadata['snapshot_json_url']``, and reads each child env's route from the stored env card."""
 from __future__ import annotations
 
@@ -11,26 +11,30 @@ import agent_env.config as config_mod
 from agent_env.env import legacy_protocol
 from agent_env.env.env import DeployedGatewayEnv
 from agent_env.store import set_object_store
-from agent_env.store.object_store import S3ObjectStore
+from agent_env.store.object_store import DEFAULT_CONTENT_TYPE
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps import snapshot_agent_state as mod
 from agentenv_protocol import client as protocol_v1
 from tst.unit.event_loop_probe import on_event_loop
-from tst.unit.store.fakes import ConfiguredObjectStore
+from tst.unit.store.fakes import ConfiguredObjectStore, FakeObjectStore
 
-_PREFIX = "s3://artifact-bucket/agent_snapshots/oc_post_run_workspace_T/3-deadbeef/"
+_PREFIX = "fake://artifact-bucket/agent_snapshots/oc_post_run_workspace_T/3-deadbeef/"
 
 
-class _StubS3:
+class _Store(FakeObjectStore):
+    """Records each upload's key, and fails if asked to sign: the capture publishes plain object URLs."""
+
     def __init__(self):
-        self.puts: list[dict] = []
+        super().__init__(root="artifact-bucket")
+        self.puts: list[str] = []
 
-    def put_object(self, Bucket, Key, Body, ContentType):  # noqa: N803
-        self.puts.append({"Bucket": Bucket, "Key": Key})
+    def put(self, key, data, content_type=DEFAULT_CONTENT_TYPE, allow_overwrite=False):
+        self.puts.append(key)
+        return super().put(key, data, content_type, allow_overwrite)
 
-    def generate_presigned_url(self, *a, **k):
+    def signed_get_url(self, *a, **k):
         raise AssertionError(
-            "snapshot_agent_state must not presign — publish s3:// and let the "
+            "snapshot_agent_state must not presign — publish the object URL and let the "
             "consumer sign it"
         )
 
@@ -73,9 +77,8 @@ def _ctx():
 
 
 @pytest.mark.asyncio
-async def test_capture_universe_state_publishes_unsigned_s3_urls(monkeypatch):
-    stub_s3 = _StubS3()
-    store = S3ObjectStore(stub_s3, "artifact-bucket")
+async def test_capture_universe_state_publishes_unsigned_object_urls(monkeypatch):
+    store = _Store()
 
     import agent_env.artifact as artifact_mod
 
@@ -112,20 +115,19 @@ async def test_capture_universe_state_publishes_unsigned_s3_urls(monkeypatch):
         "calendar": f"{_PREFIX}services/calendar.json",
         "contacts": f"{_PREFIX}services/contacts.json",
     }
-    assert all(url.startswith("s3://") and "?" not in url for url in published.values())
-    assert {p["Key"].rsplit("/", 1)[-1] for p in stub_s3.puts} == {"calendar.json", "contacts.json"}
+    assert {key.rsplit("/", 1)[-1] for key in store.puts} == {"calendar.json", "contacts.json"}
 
 
 @pytest.mark.asyncio
 async def test_each_service_state_uploads_off_the_event_loop(monkeypatch):
     on_loop: list[bool] = []
 
-    class _LoopCheckingS3(_StubS3):
-        def put_object(self, **kw):
+    class _LoopCheckingStore(_Store):
+        def put(self, *a, **kw):
             on_loop.append(on_event_loop())
-            super().put_object(**kw)
+            return super().put(*a, **kw)
 
-    store = S3ObjectStore(_LoopCheckingS3(), "artifact-bucket")
+    store = _LoopCheckingStore()
     monkeypatch.setattr(artifact_mod, "EnvironmentUniverseArtifact", type("U", (), {"get": staticmethod(lambda _id: _StubUniverse())}))
     monkeypatch.setattr(config_mod, "get_config", lambda: type("Cfg", (), {"get_object_store_at": lambda self, object_url: store})())
 
@@ -151,7 +153,7 @@ async def test_capture_reads_child_envs_on_the_stored_card_and_takes_legacy_for_
     from agentenv_protocol import DataPart
     from agentenv_protocol.client import GetDataResponse
 
-    store = S3ObjectStore(_StubS3(), "artifact-bucket")
+    store = _Store()
     monkeypatch.setattr(artifact_mod, "EnvironmentUniverseArtifact", type("U", (), {"get": staticmethod(lambda _id: _StubUniverse())}))
     monkeypatch.setattr(config_mod, "get_config", lambda: type("Cfg", (), {"get_object_store_at": lambda self, object_url: store})())
 
@@ -189,13 +191,7 @@ async def test_a_service_that_exports_a_file_bundle_is_captured_from_its_export_
     from agentenv_protocol import DataPart, uploaded_file_part
     from agentenv_protocol.client import GetDataResponse
 
-    bodies: dict[str, dict] = {}
-
-    class _BodyS3(_StubS3):
-        def put_object(self, Bucket, Key, Body, ContentType):  # noqa: N803
-            bodies[Key.rsplit("/", 1)[-1]] = json.loads(Body)
-
-    store = S3ObjectStore(_BodyS3(), "artifact-bucket")
+    store = _Store()
     monkeypatch.setattr(artifact_mod, "EnvironmentUniverseArtifact", type("U", (), {"get": staticmethod(lambda _id: _StubUniverse())}))
     monkeypatch.setattr(config_mod, "get_config", lambda: type("Cfg", (), {"get_object_store_at": lambda self, object_url: store})())
 
@@ -217,6 +213,7 @@ async def test_a_service_that_exports_a_file_bundle_is_captured_from_its_export_
     ctx = _carded_ctx(await _card("mcp-calendar", "mcp-contacts"))
     await _step()._capture_universe_state(ctx, _PREFIX)
 
+    bodies = {url.rsplit("/", 1)[-1]: json.loads(data) for url, data in store.objects.items()}
     assert bodies == {"calendar.json": {"events": 7}, "contacts.json": {"contacts": 4}}
     assert set(json.loads(ctx.metadata["snapshot_json_url"])) == {"calendar", "contacts"}
 

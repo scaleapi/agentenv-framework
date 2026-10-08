@@ -15,7 +15,6 @@ from agent_env.artifact.store import reset_artifact_store
 from agent_env.config import set_object_store
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, DeployedSandboxEnv
 from agent_env.env.gateway.constants import EXT_STATE_URI, GATEWAY_EXTENSIONS, WELL_KNOWN_PATH
-from agent_env.store.object_store import S3ObjectStore
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_steps import snapshot_env as snapshot_mod
@@ -1236,12 +1235,16 @@ def _mock_http(monkeypatch, *, rpc_result: dict | None = None, body: bytes = b"{
     return sent
 
 
-class _SharingS3Store(S3ObjectStore):
-    def shared_credentials_env(self) -> dict[str, str]:
-        return {"AWS_ACCESS_KEY_ID": "AK", "AWS_SECRET_ACCESS_KEY": "SK"}
-
-
 def _fake_aws(monkeypatch):
-    """An S3 object store that shares AWS creds, so the S3-credentials push actually sends."""
+    """An S3 object store that shares AWS creds, so the S3-credentials push actually sends.
+
+    The push only runs on an S3ObjectStore, which needs the ``aws`` extra."""
+    pytest.importorskip("boto3")
+    from agent_env.store.object_store import S3ObjectStore
+
+    class _SharingS3Store(S3ObjectStore):
+        def shared_credentials_env(self) -> dict[str, str]:
+            return {"AWS_ACCESS_KEY_ID": "AK", "AWS_SECRET_ACCESS_KEY": "SK"}
+
     store = _SharingS3Store(client=object(), bucket="bucket")
     monkeypatch.setattr(snapshot_mod, "get_config", lambda: type("Cfg", (), {"get_object_store": lambda self: store})())

@@ -71,3 +71,20 @@ def test_a_bucket_url_names_no_object(url):
         set_object_store(store)
         with pytest.raises(ValueError, match="does not exist"):
             FileArtifact.put_existing(id="bucket-root", description="d", object_url=url.rstrip("/"))
+
+
+def test_s3_object_store_from_config_builds_adaptive_client(monkeypatch):
+    captured: dict = {}
+
+    def _fake_client(service, **kwargs):
+        captured["service"] = service
+        captured["config"] = kwargs.get("config")
+        return object()
+
+    monkeypatch.setattr("agent_env.store.object_store.s3_object_store.boto3.client", _fake_client)
+    store = S3ObjectStore.from_config(bucket="my-bucket")
+
+    assert isinstance(store, S3ObjectStore)
+    assert store._bucket == "my-bucket"
+    assert captured["service"] == "s3"
+    assert captured["config"].retries == {"max_attempts": 10, "mode": "adaptive"}
