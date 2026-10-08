@@ -1,7 +1,6 @@
 """Loading a group's plugins into its registry, and recording each one that did not take effect.
 
-Internal: the public contract is ``agent_env.plugins`` and the README section "Register types
-from an installed package". Each registry calls ``merge`` when it is built, so a group's plugins
+Internal: the public contract is ``agent_env.plugins``. Each registry calls ``merge`` when it is built, so a group's plugins
 are imported then and not before.
 """
 

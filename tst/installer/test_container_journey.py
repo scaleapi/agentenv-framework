@@ -1,9 +1,8 @@
 """The open-source user journey, replayed in fresh containers with no network.
 
 A new user on `python:3.12-slim` installs agent-env as a uv tool, adds two plugins, runs a task
-that uses their steps, and removes them; the README's plugin commands run on the way, so the
-docs cannot drift from the CLI. A second container uses Ubuntu's system Python, which carries
-the PEP 668 marker, and `plugin add` must refuse it. Linux wheels for the dependencies are
+that uses their steps, and removes them; every `agent-env plugin` command runs on the way. A second
+container uses Ubuntu's system Python, which carries the PEP 668 marker, and `plugin add` must refuse it. Linux wheels for the dependencies are
 downloaded once, inside a container, and cached; the journey itself runs with `--network none`.
 """
 
@@ -124,15 +123,6 @@ def journey(tmp_path, checkout_wheels, linux_wheels) -> Journey:
     return Journey(mounts, work, f"/plugins/{grader.name}", f"/plugins/{browser.name}")
 
 
-def _readme_plugin_commands() -> list[list[str]]:
-    """The commands in the README's "Manage plugins" block, as a user would type them."""
-    section = (REPO / "README.md").read_text().split("### Manage plugins", 1)[1]
-    block = section.split("```bash\n", 1)[1].split("```", 1)[0]
-    lines = [line.split("#", 1)[0].split() for line in block.splitlines() if line.startswith("agent-env plugin")]
-    assert [line[2] for line in lines] == ["list", "show", "check", "add", "remove"], lines
-    return lines
-
-
 def test_a_new_user_installs_agent_env_adds_plugins_runs_a_task_and_removes_them(journey):
     grader, browser = journey.grader, journey.browser
     offline = {"UV_OFFLINE": "1", "UV_FIND_LINKS": "/checkout,/wheels", "UV_TOOL_BIN_DIR": "/usr/local/bin"}
@@ -148,10 +138,9 @@ def test_a_new_user_installs_agent_env_adds_plugins_runs_a_task_and_removes_them
         added = container.ok("agent-env", "plugin", "add", browser, grader, "--yes")
         assert "toy_navigate active" in added.stdout and "toy_grade active" in added.stdout
 
-        # The README's commands, verbatim but for their placeholders; --yes because there is no terminal.
-        for line in _readme_plugin_commands():
-            command = [{"PACKAGE": GRADER, "SPEC...": grader}.get(word, word) for word in line]
-            container.ok(*command, *(["--yes"] if line[2] in ("add", "remove") else []))
+        # Every plugin command; --yes because there is no terminal.
+        for command in (["list"], ["show", GRADER], ["check"], ["add", grader, "--yes"], ["remove", GRADER, "--yes"]):
+            container.ok("agent-env", "plugin", *command)
         assert GRADER not in container.ok("agent-env", "plugin", "list").stdout
         container.ok("agent-env", "plugin", "add", grader, "--yes")
 

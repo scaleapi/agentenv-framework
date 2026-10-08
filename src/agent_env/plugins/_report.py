@@ -1,6 +1,6 @@
 """The plugin report's format version and reason codes.
 
-Internal: the contract is the README section "Plugin report format". A code says why a
+Internal. A code says why a
 contribution has its status, or why a group, the config or discovery failed. Codes are never
 removed or reused; a new one needs no format bump.
 """

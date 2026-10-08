@@ -1,6 +1,6 @@
 name: Plugin API
 
-# Fails a change that breaks the plugin surface (README "Plugin compatibility") unless its title
+# Fails a change that breaks the plugin surface unless its title
 # marks the break with `!`. A workflow of its own, so that a title edit re-runs only this check.
 # On main it checks the squash commit against its parent, a record of what reached history.
 

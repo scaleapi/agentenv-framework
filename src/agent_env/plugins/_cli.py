@@ -4,7 +4,6 @@
 ``agent_env.cli_root_options`` entries to ``click.Option`` instances that attach to the
 root ``agent-env`` group. Broken plugins warn and are skipped; core names win over plugins;
 two different root options on the same flag are both left off and reported as a conflict.
-Full contract in the README ("Extending the CLI (plugins)").
 """
 
 import sys

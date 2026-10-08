@@ -1,6 +1,6 @@
 """Whether an installed plugin's requirements admit the agent-env installed next to it.
 
-Internal: the contract is the README section "Plugin compatibility". Reads installed metadata only,
+Internal. Reads installed metadata only,
 so it runs before a plugin is imported, and for ``inventory(load=False)``.
 """
 

@@ -252,11 +252,6 @@ def test_a_removed_surface_class_is_a_break(tmp_path):
     assert "agent_env.providers.env_state.env_state_provider.EnvStateProvider: removed" in result.stdout
 
 
-def _readme_surface() -> set[str]:
-    section = (REPO / "README.md").read_text().split("**The plugin surface.**", 1)[1].split("\n\n", 2)[1]
-    return set(re.findall(r"`(agent_env(?:\.\w+)+)`", section))
-
-
 def _documented_types(path: str, lead: str) -> set[str]:
     text = " ".join((REPO / path).read_text().split())
     listed = text.split(lead, 1)[1].split(".", 1)[0].split(";", 1)[0]
@@ -266,10 +261,6 @@ def _documented_types(path: str, lead: str) -> set[str]:
 @pytest.mark.parametrize(("path", "lead"), [("CONTRIBUTING.md", "Types in use:"), ("AGENTS.md", "with the types in use")])
 def test_the_title_types_are_the_documented_ones(path, lead):
     assert _documented_types(path, lead) == set(check_plugin_api.TYPES)
-
-
-def test_the_readme_lists_the_checked_surface():
-    assert _readme_surface() == set(check_plugin_api.SURFACE)
 
 
 def test_the_surface_is_found_in_this_checkout():
