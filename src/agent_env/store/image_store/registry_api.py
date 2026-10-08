@@ -80,18 +80,24 @@ def _check(image: _ImageRef, reference: str, auth: RegistryAuth | None) -> str:
     try:
         with httpx.Client(timeout=_TIMEOUT_SECONDS, follow_redirects=True) as client:
             headers = {"Accept": _MANIFEST_TYPES}
-            response = client.head(url, headers=headers, auth=basic)
+            # Basic credentials go with every request until a Bearer token replaces them.
+            credentials = basic
+            response = client.head(url, headers=headers, auth=credentials)
             if response.status_code == 401 and (token := _bearer_token(client, response, basic)) is not None:
                 headers["Authorization"] = f"Bearer {token}"
+                credentials = None
                 response = client.head(url, headers=headers)
             if response.status_code == 200 and not response.headers.get("docker-content-digest"):
-                response = client.get(url, headers=headers)
+                response = client.get(url, headers=headers, auth=credentials)
                 if response.status_code == 200:
                     return f"sha256:{hashlib.sha256(response.content).hexdigest()}"
     except httpx.HTTPError as e:
         raise ValueError(f"{what}: couldn't read its manifest from {image.host}: {type(e).__name__}: {e}") from e
     if response.status_code == 200:
-        return response.headers["docker-content-digest"]
+        served = response.headers["docker-content-digest"]
+        if not _DIGEST.match(served):
+            raise ValueError(f"{what}: {image.host} answered with {served!r}, which isn't a digest")
+        return served
     if response.status_code == 404:
         raise ValueError(f"{what}: {image.host} has no such image")
     if response.status_code in (401, 403):

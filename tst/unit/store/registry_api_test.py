@@ -100,6 +100,30 @@ def test_a_registry_that_omits_the_digest_header_is_hashed_from_the_manifest(req
     assert pin_digest("ghcr.io/org/tool:v1", None) == f"ghcr.io/org/tool:v1@sha256:{hashlib.sha256(body).hexdigest()}"
 
 
+def test_the_manifest_is_fetched_with_the_credentials_the_registry_took(requests):
+    body = b'{"schemaVersion": 2}'
+    expected = "Basic " + base64.b64encode(b"AWS:token").decode()
+
+    def private(request):
+        if request.headers.get("authorization") != expected:
+            return httpx.Response(401)
+        return httpx.Response(200, content=body if request.method == "GET" else b"")
+
+    seen = requests(private)
+
+    ref = "123456789012.dkr.ecr.us-west-2.amazonaws.com/team/app:v2"
+    auth = RegistryAuth("123456789012.dkr.ecr.us-west-2.amazonaws.com", "AWS", "token")
+    assert pin_digest(ref, auth) == f"{ref}@sha256:{hashlib.sha256(body).hexdigest()}"
+    assert [r.method for r in seen] == ["HEAD", "GET"]
+
+
+def test_a_digest_header_that_isnt_a_digest_is_refused(requests):
+    requests(lambda request: _served("sha256:xyz"))
+
+    with pytest.raises(ValueError, match="ghcr.io answered with 'sha256:xyz', which isn't a digest"):
+        pin_digest("ghcr.io/org/tool:v1", None)
+
+
 @pytest.mark.parametrize("status, message", [
     (404, "ghcr.io/org/tool:v9: ghcr.io has no such image"),
     (401, "ghcr.io/org/tool:v9: ghcr.io refused to serve it \\(HTTP 401\\); agent-env reaches a private registry only"),
