@@ -11,7 +11,7 @@ image    = "local"   # local OCI registry (registry:2 at localhost:5000)
 secret   = "local"   # process env vars, or an optional flat YAML file
 
 [sandbox]
-default       = "local"   # envs run as containers on the host Docker daemon
+default       = "local"   # envs run as containers on the host Docker daemon, each held to the cpu and memory it was deployed with
 agent_default = "local"   # agents too
 
 [agents]

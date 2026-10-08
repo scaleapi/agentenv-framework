@@ -134,6 +134,35 @@ class NetworkPolicy:
         )
 
 
+@dataclass(frozen=True)
+class ContainerLimits:
+    """The cpu (cores) and memory (MiB) one container started on a sandbox's host is held to."""
+
+    cpus: float
+    memory_mib: int
+
+    def __post_init__(self) -> None:
+        if self.cpus <= 0 or self.memory_mib <= 0:
+            raise ValueError(f"cpus and memory_mib must be positive; got cpus={self.cpus!r}, memory_mib={self.memory_mib!r}")
+
+    @property
+    def docker_args(self) -> tuple[str, ...]:
+        """The ``docker run`` / ``docker create`` flags. Swap is held to the memory limit, so a container can't page past it."""
+        return ("--cpus", f"{self.cpus:g}", "--memory", f"{self.memory_mib}m", "--memory-swap", f"{self.memory_mib}m")
+
+    @property
+    def compose_keys(self) -> tuple[str, ...]:
+        """The same limits as compose service keys, which ``docker compose up`` applies outside swarm mode."""
+        return (f"cpus: {self.cpus:g}", f"mem_limit: {self.memory_mib}m", f"memswap_limit: {self.memory_mib}m")
+
+    def to_dict(self) -> dict:
+        return {"cpus": self.cpus, "memory_mib": self.memory_mib}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ContainerLimits":
+        return cls(cpus=float(data["cpus"]), memory_mib=int(data["memory_mib"]))
+
+
 class Sandbox(ABC):
     """Universal sandbox contract — anything that can host a process and expose ports."""
 
@@ -148,6 +177,8 @@ class Sandbox(ABC):
     host_ips: tuple[str, ...] = ()
     # ``name:address`` entries the containers started on this sandbox add to their hosts file.
     extra_hosts: tuple[str, ...] = ()
+    # What each container started on this sandbox is held to; None where the sandbox itself (a VM) is the bound.
+    container_limits: ContainerLimits | None = None
 
     _VM_READY_TIMEOUT = 1200      # wait_for_vm wall-clock budget (s)
     _VM_READY_POLL_INTERVAL = 30  # sparse polling (s)

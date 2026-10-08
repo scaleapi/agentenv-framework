@@ -37,7 +37,7 @@ from agent_env.providers.env_providers.env_gateway_provider import (
 )
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
-from agent_env.providers.sandbox_providers.sandbox import Sandbox
+from agent_env.providers.sandbox_providers.sandbox import ContainerLimits, Sandbox
 from agent_env.providers.env_state import LocalPostgresStateProvider
 from agent_env.config import get_config, set_document_store
 from agent_env.store import EcrImageStore, NotFoundError
@@ -784,6 +784,35 @@ def test_compose_maps_extra_hosts_into_the_gateway(extra_hosts):
     services = yaml.safe_load(compose)["services"]
     mapped = {name: service["extra_hosts"] for name, service in services.items() if "extra_hosts" in service}
     assert mapped == ({GATEWAY_SERVICE_NAME: list(extra_hosts)} if extra_hosts else {})
+
+
+def test_compose_holds_every_service_to_the_sandboxs_container_limits():
+    """A local sandbox has no VM bounding its stack, so every service it renders, the store's and websites'
+    included, carries the sandbox's cpu and memory; a VM's sandbox (no limits) renders exactly as before."""
+    from agent_env.env.envs.service_db import ServiceDBConfig
+
+    def render(**limits):
+        return EnvironmentGatewayProvider().create_docker_compose(
+            mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack"),
+                         MCPServerConfig(image="mcp-crm", environment_name="crm")],
+            gateway_image="agent-gateway",
+            website_configs=[WebsiteConfig(backend_image="shop-be", frontend_image="shop-fe", environment_name="shop")],
+            sidecars=[_sidecar_with_secret()],
+            state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
+            state_instance=LocalPostgresStateProvider.default_instance(),
+            **limits,
+        )
+
+    unlimited = render()
+    limited = yaml.safe_load(render(container_limits=ContainerLimits(cpus=2, memory_mib=4096)))
+
+    assert render(container_limits=None) == unlimited
+    assert not any("cpus" in service or "mem_limit" in service for service in yaml.safe_load(unlimited)["services"].values())
+    assert set(limited["services"]) == set(yaml.safe_load(unlimited)["services"])
+    assert {name: (s["cpus"], s["mem_limit"], s["memswap_limit"]) for name, s in limited["services"].items()} == {
+        name: (2, "4096m", "4096m") for name in limited["services"]
+    }
+    assert limited["networks"] == yaml.safe_load(unlimited)["networks"]
 
 
 # --- sidecar rendering --------------------------------------------------------

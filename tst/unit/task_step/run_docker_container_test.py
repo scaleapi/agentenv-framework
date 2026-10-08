@@ -12,6 +12,7 @@ import pytest
 from agent_env.config import set_object_store
 from agent_env.providers.sandbox_providers import sandbox_provider
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox
+from agent_env.providers.sandbox_providers.sandbox import ContainerLimits
 from agent_env.task_step.context import DeployedSandbox, TaskStepContext
 from agent_env.task_step.task_steps.run_docker_container import (
     RunDockerContainerTaskStep as Step,
@@ -216,9 +217,10 @@ async def test_a_store_context_that_is_not_a_zip_is_refused(fake_store):
 class _RunSandbox:
     sandbox_id = "local-1"
 
-    def __init__(self, extra_hosts: tuple[str, ...] = ()):
+    def __init__(self, extra_hosts: tuple[str, ...] = (), container_limits: ContainerLimits | None = None):
         self.scripts: list[str] = []
         self.extra_hosts = extra_hosts
+        self.container_limits = container_limits
 
     async def exec_script(self, script):
         self.scripts.append(script)
@@ -259,3 +261,24 @@ async def test_what_it_starts_maps_the_sandboxs_extra_hosts(monkeypatch, extra_h
 
     (run,) = [s for s in sandbox.scripts if "docker run -d" in s]
     assert ("--add-host host.docker.internal:host-gateway" in run) is bool(extra_hosts)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limits", [None, ContainerLimits(cpus=2, memory_mib=4096)])
+async def test_what_it_starts_is_held_to_the_sandboxs_container_limits(monkeypatch, limits):
+    """A local sandbox has no VM bounding it, so each container it starts carries the sandbox's cpu and memory."""
+    sandbox = _RunSandbox(container_limits=limits)
+    monkeypatch.setattr(sandbox_provider, "build_sandbox_provider",
+                        lambda _type: SimpleNamespace(get_sandbox=AsyncMock(return_value=sandbox)))
+    monkeypatch.setattr(Step, "_stage_from_universe", AsyncMock())
+    context = TaskStepContext(deployed_sandboxes=[
+        DeployedSandbox(sandbox_name="h", sandbox_id="local-1", sandbox_mode="vm", sandbox_type="local"),
+    ])
+
+    await _step().execute(context)
+
+    (run,) = [s for s in sandbox.scripts if "docker run -d" in s]
+    if limits is None:
+        assert "--cpus" not in run and "--memory" not in run
+    else:
+        assert "--cpus 2 --memory 4096m --memory-swap 4096m" in run

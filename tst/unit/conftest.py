@@ -50,9 +50,11 @@ def _disable_network():
 @pytest.fixture(autouse=True)
 def _docker_answers(monkeypatch):
     """A bundle run asks whether Docker answers before it deploys containers locally or builds an infra env; unit
-    tests never reach a daemon, so it answers. Tests of the probe itself patch ``subprocess.run``."""
+    tests never reach a daemon, so it answers. Tests of the probe itself patch ``subprocess.run``. A local sandbox
+    asks the engine how many CPUs it has; here it can't tell, so nothing is held below what was asked for."""
     monkeypatch.setattr("agent_env.bundle.preflight.docker_unreachable", lambda: None)
     monkeypatch.setattr("agent_env.env.bootstrap.docker_unreachable", lambda: None)
+    monkeypatch.setattr("agent_env.providers.sandbox_providers.local_sandbox._engine_cpus", lambda: None)
 
 
 @pytest.fixture(autouse=True)

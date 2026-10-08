@@ -139,9 +139,11 @@ class SandboxProvider(ABC):
         """The ``docker run`` / ``docker create`` arguments for the sandbox's container."""
         env_flags = " \\\n    ".join(f"-e {shlex.quote(k)}={shlex.quote(v)}" for k, v in env.items())
         extra_args = f"{self.EXTRA_CONTAINER_RUN_ARGS} " if self.EXTRA_CONTAINER_RUN_ARGS else ""
+        limits = sandbox.container_limits
+        limit_args = "".join(f"{shlex.quote(arg)} " for arg in limits.docker_args) if limits else ""
         publish = " ".join(f"-p {spec}" for spec in port_bindings(sandbox.host_ips, sandbox.host_port(port), port))
         return (
-            f"--name {shlex.quote(sandbox.container_name)} {publish} {extra_args}\\\n    "
+            f"--name {shlex.quote(sandbox.container_name)} {publish} {extra_args}{limit_args}\\\n    "
             f"{env_flags} \\\n    {shlex.quote(image_name)}"
         )
 

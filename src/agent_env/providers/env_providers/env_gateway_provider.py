@@ -34,7 +34,7 @@ from agent_env.providers.env_providers.constants import (
 )
 from agent_env.providers.env_providers.env_provider import _SandboxEnvironmentProvider, _size_kwargs, _tool_names
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
-from agent_env.providers.sandbox_providers.sandbox import Sandbox, VmSandbox, port_bindings
+from agent_env.providers.sandbox_providers.sandbox import ContainerLimits, Sandbox, VmSandbox, port_bindings
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER, SandboxProvider
 
 if TYPE_CHECKING:
@@ -215,6 +215,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         host_ips: tuple[str, ...] = (),
         extra_hosts: tuple[str, ...] = (),
         mcp_server_name: str | None = None,
+        container_limits: ContainerLimits | None = None,
     ) -> str:
         """Generate docker-compose.yml content for a gateway deployment onto a VM/laptop/arbitrary machine.
 
@@ -226,6 +227,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             gateway_image: Docker image for the gateway.
             gateway_port: Port to expose for the gateway.
             website_configs: Optional list of website configurations (frontend + backend pairs).
+            container_limits: What every service's container is held to, for a sandbox that is not a VM
+                bounding them all (the local one); None adds nothing.
 
         Returns:
             docker-compose.yml content as a string.
@@ -506,6 +509,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             "  env-network:",
             "    driver: bridge",
         ])
+        if container_limits is not None:
+            lines = _with_container_limits(lines, container_limits)
         return "\n".join(lines)
 
     async def deploy(
@@ -712,6 +717,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             host_ips=sandbox.host_ips,
             extra_hosts=sandbox.extra_hosts,
             mcp_server_name=mcp_server_name,
+            container_limits=sandbox.container_limits,
         )
         logger.info(f"Generated docker-compose.yml:\n{_redact_compose_secrets(compose_content)}")
 
@@ -1327,6 +1333,20 @@ def _gateway_topology(env: Env) -> _GatewayTopology:
 # rendered compose is logged. Matches the key to the left of the first '=' on an
 # `      - KEY=VALUE` env line.
 _SECRET_ENV_KEY_RE = re.compile(r"^(\s*-\s*)([A-Za-z0-9_]*(?:SECRET|PASSWORD|TOKEN|API_KEY)[A-Za-z0-9_]*)=.*$")
+
+
+def _with_container_limits(lines: list[str], limits: ContainerLimits) -> list[str]:
+    """``lines`` with ``limits`` under every service, each a two-space key in the top-level ``services`` section."""
+    limited: list[str] = []
+    section = None
+    for line in "\n".join(lines).split("\n"):  # an entry may hold several lines
+        limited.append(line)
+        if line and not line[0].isspace():
+            section = line.rstrip().removesuffix(":")
+        elif (section == "services" and len(line) > 2 and line.startswith("  ") and not line[2].isspace()
+              and line.rstrip().endswith(":")):
+            limited.extend(f"    {key}" for key in limits.compose_keys)
+    return limited
 
 
 def _redact_compose_secrets(compose_content: str) -> str:
