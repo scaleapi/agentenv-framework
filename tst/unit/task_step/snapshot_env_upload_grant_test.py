@@ -9,7 +9,8 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
-from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI, client as protocol_v1, uploaded_file_part
+from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI, uploaded_file_part
+from agentenv_protocol import client as protocol_v1
 
 from agent_env.artifact import EnvironmentUniverseArtifact
 from agent_env.config import set_object_store

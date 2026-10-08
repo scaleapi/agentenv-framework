@@ -7,7 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-from agentenv_protocol import RPC_PATH, WELL_KNOWN_PATH, DataPart, client as protocol_v1, uploaded_file_part
+from agentenv_protocol import RPC_PATH, WELL_KNOWN_PATH, DataPart, uploaded_file_part
+from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.client import GetDataResponse
 
 from agent_env.env import legacy_protocol
