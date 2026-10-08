@@ -253,6 +253,54 @@ async def test_terminate_removes_this_sandboxs_own_container():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reattached", [False, True])
+@pytest.mark.parametrize("error, should_raise", [
+    ("Error response from daemon: No such container: {container}", False),
+    ("Cannot connect to the Docker daemon", True),
+])
+async def test_owned_container_removal_reports_real_failures(tmp_path: Path, reattached: bool,
+                                                            error: str, should_raise: bool):
+    if reattached:
+        (tmp_path / ".agent-container-mode").write_text("agent-local-test")
+
+    class _FailingSandbox(_RecordingLocalSandbox):
+        async def exec_script(self, script, *, max_retries=0):
+            self.scripts.append(script)
+            if "|| true" not in script:
+                raise RuntimeError(error.format(container=self.container_name))
+            return ""
+
+    sandbox = _FailingSandbox(work_dir=tmp_path, sandbox_id="local-test")
+    if not reattached:
+        sandbox.mode = SANDBOX_MODE_CONTAINER
+
+    if should_raise:
+        with pytest.raises(RuntimeError, match="Cannot connect"):
+            await sandbox.terminate()
+    else:
+        await sandbox.terminate()
+    assert sandbox.scripts == [f"docker rm -f {sandbox.container_name} >/dev/null"]
+
+
+@pytest.mark.asyncio
+async def test_failed_owned_container_removal_still_downs_compose(tmp_path: Path):
+    (tmp_path / ".agent-container-mode").write_text("agent-local-test")
+    (tmp_path / "docker-compose.yml").write_text("")
+
+    class _FailingSandbox(_RecordingLocalSandbox):
+        async def exec_script(self, script, *, max_retries=0):
+            self.scripts.append(script)
+            if script.startswith("docker rm"):
+                raise RuntimeError("Cannot connect to the Docker daemon")
+            return ""
+
+    sandbox = _FailingSandbox(work_dir=tmp_path, sandbox_id="local-test")
+    with pytest.raises(RuntimeError, match="Cannot connect"):
+        await sandbox.terminate()
+    assert any("docker compose down" in script for script in sandbox.scripts)
+
+
+@pytest.mark.asyncio
 async def test_terminate_compose_downs_vm_stack(tmp_path: Path):
     """A VM-mode sandbox with a compose file tears the stack down (scoped to its own work dir)."""
     (tmp_path / "docker-compose.yml").write_text("")
@@ -388,7 +436,7 @@ async def test_a_started_container_is_removed_by_a_teardown_rebuilt_from_disk(tm
     del scripts[:]
     await rebuilt.terminate()
     assert created.owns_container and rebuilt.owns_container and rebuilt.mode == SANDBOX_MODE_VM
-    assert scripts == [f"docker rm -f {created.container_name} >/dev/null 2>&1 || true"]
+    assert scripts == [f"docker rm -f {created.container_name} >/dev/null"]
 
 
 @pytest.mark.asyncio

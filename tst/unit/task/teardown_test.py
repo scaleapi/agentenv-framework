@@ -206,7 +206,7 @@ def test_a_reattached_local_agent_has_its_container_and_work_folder_removed(sand
     report = _run(context)
 
     assert report.terminated == (RecordedSandbox(agent.sandbox_id, "local", "agent"),)
-    assert scripts == [f"docker rm -f {agent.container_name} >/dev/null 2>&1 || true"]
+    assert scripts == [f"docker rm -f {agent.container_name} >/dev/null"]
     assert list(sandbox_root.iterdir()) == []
 
 

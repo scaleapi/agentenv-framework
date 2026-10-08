@@ -213,15 +213,22 @@ class LocalSandbox(VmSandbox):
             if self.mode == SANDBOX_MODE_VM and not self.owns_container:
                 await self._remove_labeled()
         finally:  # a container that wouldn't go must not keep the compose stack up
-            await self.exec_script(f"docker rm -f {shlex.quote(self.container_name)} >/dev/null 2>&1 || true")
-            if self.mode == SANDBOX_MODE_VM and (self._work_dir / "docker-compose.yml").exists():
-                # No `|| true`: `docker compose down` is idempotent (an already-down stack exits 0), so a
-                # non-zero exit is a real failure — surface it (exec_script raises, with the compose output)
-                # instead of silently leaving the stack running and its host ports held. Callers wrap
-                # terminate() in try/except, so a raised teardown failure is caught, not fatal.
-                await self.exec_script(
-                    f"cd {shlex.quote(str(self._work_dir))} && docker compose down -v --remove-orphans"
-                )
+            try:
+                if self.mode == SANDBOX_MODE_CONTAINER or self.owns_container:
+                    try:
+                        await self.exec_script(f"docker rm -f {shlex.quote(self.container_name)} >/dev/null")
+                    except RuntimeError as e:
+                        if f"No such container: {self.container_name}" not in str(e):
+                            raise
+                else:
+                    await self.exec_script(f"docker rm -f {shlex.quote(self.container_name)} >/dev/null 2>&1 || true")
+            finally:
+                if self.mode == SANDBOX_MODE_VM and (self._work_dir / "docker-compose.yml").exists():
+                    # No `|| true`: a non-zero exit is a real failure. Always attempt this even if
+                    # container removal failed, so its compose stack does not stay up.
+                    await self.exec_script(
+                        f"cd {shlex.quote(str(self._work_dir))} && docker compose down -v --remove-orphans"
+                    )
 
     async def _remove_labeled(self) -> None:
         """Remove what steps started on this host for this sandbox (``run_docker_container``'s containers, their
@@ -434,10 +441,8 @@ class LocalSandboxProvider(SandboxProvider):
             try:
                 (sandbox.work_dir / _CONTAINER_MODE_MARKER).write_text(sandbox.container_name)
             except OSError as e:
-                # Can't persist the marker → a reconstructed teardown couldn't find/remove this
-                # container. Remove it now, but do NOT go through terminate() (its `docker rm … || true`
-                # would mask a failed removal): run the removal so a genuinely stuck container is
-                # escalated (ERROR) rather than silently leaked with its host port held.
+                # Without the marker, a later get_sandbox() would miss this container.
+                # Remove it now; if that fails too, log it before re-raising the marker error.
                 logger.warning(
                     "Could not persist container-mode marker for %s: %s; removing the container",
                     sandbox.sandbox_id, e,
