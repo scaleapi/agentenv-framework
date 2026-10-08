@@ -355,3 +355,17 @@ A release is a version bump in both `pyproject.toml` files plus a `vX.Y.Z` tag. 
 ### Support, security, license
 
 Ask questions in [Discussions Q&A](https://github.com/scaleapi/agentenv-framework/discussions/categories/q-a), and report bugs with the [bug report form](https://github.com/scaleapi/agentenv-framework/issues/new?template=bug_report.yml). Report vulnerabilities privately through the contact in [SECURITY.md](https://github.com/scaleapi/agentenv-framework/blob/main/SECURITY.md), not in public issues; only the latest release is supported, so reproduce against it first. Contributors follow [CONTRIBUTING.md](https://github.com/scaleapi/agentenv-framework/blob/main/CONTRIBUTING.md) and the [Code of Conduct](https://github.com/scaleapi/agentenv-framework/blob/main/CODE_OF_CONDUCT.md); every pull request needs a code-owner review. agent-env and agentenv-framework-protocol are licensed under the Apache License 2.0; see [`LICENSE`](https://github.com/scaleapi/agentenv-framework/blob/main/LICENSE) and [`NOTICE`](https://github.com/scaleapi/agentenv-framework/blob/main/NOTICE). Their third-party dependencies and those dependencies' licenses are listed in [`THIRD_PARTY_NOTICES.md`](https://github.com/scaleapi/agentenv-framework/blob/main/THIRD_PARTY_NOTICES.md).
+
+## Citation
+
+To cite AgentEnv Framework, use the metadata in [`CITATION.cff`](https://github.com/scaleapi/agentenv-framework/blob/main/CITATION.cff). GitHub's **Cite this repository** button in the repository sidebar exports it as APA or BibTeX:
+
+```bibtex
+@software{agentenv_framework,
+  author = {{Scale AI}},
+  title = {AgentEnv Framework},
+  year = {2026},
+  url = {https://github.com/scaleapi/agentenv-framework},
+  license = {Apache-2.0}
+}
+```

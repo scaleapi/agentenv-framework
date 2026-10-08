@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use AgentEnv Framework in your work, please cite it as below."
+type: software
+title: "AgentEnv Framework"
+abstract: "AgentEnv Framework is a Python SDK and CLI for building, deploying and running agentic environments and the tasks that grade agents inside them."
+authors:
+  - name: "Scale AI"
+repository-code: "https://github.com/scaleapi/agentenv-framework"
+license: Apache-2.0
+date-released: 2026-09-30
+keywords:
+  - reinforcement-learning
+  - rl-environments
+  - ai-agents
+  - llm-agents
+  - agent-evaluation
+  - mcp
+  - model-context-protocol
+  - a2a
+  - sandbox
