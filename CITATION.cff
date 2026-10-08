@@ -4,7 +4,9 @@ type: software
 title: "AgentEnv Framework"
 abstract: "AgentEnv Framework is a Python SDK and CLI for building, deploying and running agentic environments and the tasks that grade agents inside them."
 authors:
-  - name: "Scale AI"
+  - family-names: "Arakelyan"
+    given-names: "Edgar"
+    affiliation: "Scale AI"
 repository-code: "https://github.com/scaleapi/agentenv-framework"
 license: Apache-2.0
 date-released: 2026-09-30
