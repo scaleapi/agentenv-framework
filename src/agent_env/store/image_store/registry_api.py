@@ -84,7 +84,7 @@ def _check(image: _ImageRef, reference: str, auth: RegistryAuth | None) -> str:
             # Basic credentials go with every request until a Bearer token replaces them.
             credentials = basic
             response = client.head(url, headers=headers, auth=credentials)
-            if response.status_code == 401 and (token := _bearer_token(client, response, basic)) is not None:
+            if response.status_code == 401 and (token := _bearer_token(client, response, basic, what)) is not None:
                 headers["Authorization"] = f"Bearer {token}"
                 credentials = None
                 response = client.head(url, headers=headers)
@@ -107,9 +107,10 @@ def _check(image: _ImageRef, reference: str, auth: RegistryAuth | None) -> str:
     raise ValueError(f"{what}: {image.host} answered HTTP {response.status_code}")
 
 
-def _bearer_token(client: httpx.Client, challenged: httpx.Response, basic: tuple[str, str] | None) -> str | None:
+def _bearer_token(client: httpx.Client, challenged: httpx.Response, basic: tuple[str, str] | None,
+                  what: str) -> str | None:
     """A token from the realm a ``Bearer`` challenge names, asked for with ``basic`` when given. None for any other
-    challenge, or when the realm grants none."""
+    challenge, or when the realm refuses; a ValueError when it answers 200 without a token, as a sign-in page does."""
     challenge = challenged.headers.get("www-authenticate", "")
     if not challenge.lower().startswith("bearer "):
         return None
@@ -120,5 +121,10 @@ def _bearer_token(client: httpx.Client, challenged: httpx.Response, basic: tuple
     response = client.get(realm, params=params, auth=basic)
     if response.status_code != 200:
         return None
-    body = response.json()
-    return body.get("token") or body.get("access_token")
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    if not isinstance(body, dict) or not (token := body.get("token") or body.get("access_token")):
+        raise ValueError(f"{what}: the token service at {realm} answered without a token")
+    return token

@@ -125,6 +125,36 @@ def test_a_digest_header_docker_couldnt_pull_by_is_refused(requests, header):
         pin_digest("ghcr.io/org/tool:v1", None)
 
 
+@pytest.mark.parametrize("answer", [
+    httpx.Response(200, html="<html>Sign in</html>"),
+    httpx.Response(200, json=[]),
+    httpx.Response(200, json={"error": "denied"}),
+])
+def test_a_token_service_that_answers_without_a_token_is_named(requests, answer):
+    def registry(request):
+        if request.url.path == "/token":
+            return answer
+        return httpx.Response(401, headers={"WWW-Authenticate": 'Bearer realm="https://ghcr.io/token",service="ghcr.io"'})
+
+    requests(registry)
+
+    with pytest.raises(ValueError, match="ghcr.io/org/tool:v1: the token service at https://ghcr.io/token answered "
+                                         "without a token"):
+        pin_digest("ghcr.io/org/tool:v1", None)
+
+
+def test_a_token_service_that_refuses_leaves_the_registrys_refusal(requests):
+    def registry(request):
+        if request.url.path == "/token":
+            return httpx.Response(403)
+        return httpx.Response(401, headers={"WWW-Authenticate": 'Bearer realm="https://ghcr.io/token",service="ghcr.io"'})
+
+    requests(registry)
+
+    with pytest.raises(ValueError, match="ghcr.io refused to serve it \\(HTTP 401\\)"):
+        pin_digest("ghcr.io/org/tool:v1", None)
+
+
 @pytest.mark.parametrize("status, message", [
     (404, "ghcr.io/org/tool:v9: ghcr.io has no such image"),
     (401, "ghcr.io/org/tool:v9: ghcr.io refused to serve it \\(HTTP 401\\); agent-env reaches a private registry only"),
