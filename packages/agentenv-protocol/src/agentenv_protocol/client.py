@@ -138,10 +138,12 @@ def find_child(card: dict, name: str) -> dict | None:
     A composed card (e.g. a gateway fronting one or more MCP servers) nests each backing
     environment's card under `children_environments`. agent-env's gateway prefixes the child's
     `url` and each extension's `params.endpoint` with the child's path on the gateway
-    (`/svc/<key>`) when they are `RPC_PATH` or under it, and passes every other endpoint through:
-    the ones the composed card also advertises are the gateway's own routes, and the rest, a
-    method's own included, the child serves under its path. Tolerates a missing/null
-    `children_environments` so single/leaf cards return None rather than raising.
+    (`/svc/<key>`) when they are `RPC_PATH` or under it, and passes every other endpoint through.
+    An operation the composed card's own extensions also offer (same extension, HTTP verb and
+    endpoint, and the same method unless the child's extension lists none) is one of the gateway's
+    routes; the child serves every other one, a method's own endpoint included, under its path.
+    Tolerates a missing/null `children_environments` so single/leaf cards return None rather than
+    raising.
     """
     for child in card.get("children_environments") or []:
         if child.get("name") == name:

@@ -161,6 +161,59 @@ async def test_a_stored_child_card_gets_the_childs_path_on_each_endpoint_the_chi
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("extension, method, sent", [
+    ({"uri": "urn:agentenv:clock/v1", "params": {"endpoint": "/clock/time", "methods": {"sync_time": {"method": "POST"}}}},
+     "sync_time", "POST http://gw/svc/mcp-slack/clock/time"),
+    ({"uri": "urn:agentenv:clock/v1", "params": {"endpoint": "/clock/time", "methods": {"get_time": {"method": "GET"}}}},
+     "get_time", "GET http://gw/clock/time"),
+    ({"uri": "urn:agentenv:clock/v1", "params": {"endpoint": "/clock/time", "methods": {"get_time": {"method": "POST"}}}},
+     "get_time", "POST http://gw/svc/mcp-slack/clock/time"),
+    ({"uri": "urn:example:clock/v1", "params": {"endpoint": "/clock/time", "methods": {"get_time": {"method": "GET"}}}},
+     "get_time", "GET http://gw/svc/mcp-slack/clock/time"),
+    ({"uri": "urn:agentenv:triggers/v1", "params": {"methods": {"forget": {"method": "POST", "endpoint": "/triggers/remove"}}}},
+     "forget", "POST http://gw/svc/mcp-slack/triggers/remove"),
+    ({"uri": "urn:agentenv:clock/v1", "params": {"endpoint": "/clock/time", "methods": {"get_time": {"method": "GET", "endpoint": "/ext/time"}}}},
+     "get_time", "GET http://gw/svc/mcp-slack/ext/time"),
+    ({"uri": "urn:agentenv:clock/v1", "params": {"endpoint": "/clock/state", "methods": {"state": {"method": "get"}}}},
+     "state", "GET http://gw/clock/state"),
+    ({"uri": "urn:agentenv:clock/v1", "params": {"endpoint": "/clock/clear", "methods": {"clear": {}}}},
+     "clear", "POST http://gw/clock/clear"),
+    ({"uri": "urn:agentenv:clock/v1", "params": {"endpoint": "/clock/time"}}, None, "POST http://gw/svc/mcp-slack/clock/time"),
+    ({"uri": "urn:agentenv:triggers/v1", "params": {"endpoint": "/triggers/remove"}}, None, "POST http://gw/triggers/remove"),
+    ({"uri": "urn:example:tools/v1", "params": {"endpoint": "/tools/disable"}}, None, "POST http://gw/svc/mcp-slack/tools/disable"),
+], ids=[
+    "another-method-and-verb", "the-gateways-own-operation", "another-verb", "another-extension", "another-method",
+    "the-methods-own-endpoint", "a-lower-case-verb", "no-verb-is-post",
+    "no-methods-post-where-the-gateway-serves-get", "no-methods-post-the-gateway-serves", "no-methods-on-another-extension",
+])
+async def test_a_child_operation_stays_at_the_gateway_only_when_the_env_card_advertises_the_same_operation(monkeypatch, extension, method, sent):
+    record = _composed_record({"name": "slack", "url": RPC_PATH, "capabilities": {"extensions": [extension]}})
+    requests = _record_requests(monkeypatch)
+
+    base_url, card = await legacy_protocol.child_env_card(record, "http://gw", "slack")
+    await protocol_v1.invoke_extension(base_url, card, extension["uri"], method=method)
+
+    assert requests == [sent]
+
+
+@pytest.mark.asyncio
+async def test_a_child_extension_endpoint_shared_by_a_gateway_operation_and_a_child_one_resolves_each_to_its_server(monkeypatch):
+    record = _composed_record({"name": "slack", "url": RPC_PATH, "capabilities": {"extensions": [
+        {"uri": "urn:agentenv:clock/v1", "params": {"endpoint": "/clock/time", "methods": {
+            "get_time": {"method": "GET"}, "sync_time": {"method": "POST"}}}},
+    ]}})
+    requests = _record_requests(monkeypatch)
+
+    base_url, card = await legacy_protocol.child_env_card(record, "http://gw", "slack")
+    for method in ("get_time", "sync_time"):
+        await protocol_v1.invoke_extension(base_url, card, "urn:agentenv:clock/v1", method=method)
+
+    assert requests == ["GET http://gw/clock/time", "POST http://gw/svc/mcp-slack/clock/time"]
+    assert card["capabilities"]["extensions"][0]["params"] == {"endpoint": "/clock/time", "methods": {
+        "get_time": {"method": "GET"}, "sync_time": {"method": "POST", "endpoint": "/svc/mcp-slack/clock/time"}}}
+
+
+@pytest.mark.asyncio
 async def test_a_child_endpoint_its_composer_already_put_under_the_childs_path_is_left_as_it_is():
     child = {"name": "x", "url": "/envs/x/agentenv", "capabilities": {"extensions": [
         {"uri": "urn:agentenv:clock/v1", "params": {"endpoint": "/envs/x/ext/clock", "methods": {
@@ -267,6 +320,18 @@ def _child_behind_gateway(monkeypatch, own_card: dict) -> list[str]:
 
     monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.MockTransport(handle)))
     return called
+
+
+def _record_requests(monkeypatch) -> list[str]:
+    """Answer every request with an empty object; returns each request as ``METHOD url``."""
+    sent, real = [], httpx.AsyncClient
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        sent.append(f"{request.method} {request.url}")
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.MockTransport(handle)))
+    return sent
 
 
 def _v1_service(monkeypatch, answer: list, export_state: dict) -> list[str]:

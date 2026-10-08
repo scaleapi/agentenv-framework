@@ -67,26 +67,48 @@ def _child_path(child: dict) -> str:
 
 
 def _prefix_child_endpoints(env_card: dict, child: dict) -> dict:
-    """A copy of the child card whose endpoints all resolve against the env's address. A composing gateway puts the child's
-    path only on the child's paths at or under ``RPC_PATH``. Of the rest, the endpoints the env card also advertises are its
-    own routes, as all of a leaf card's are, and stay as they are; the child serves the others under its path."""
+    """A copy of the child card in which each operation resolves against the env's address. One the env card's own extensions offer too (same
+    extension, verb and endpoint, and the same method unless the child's extension lists none) stays as it is; the child serves the rest under its
+    path. An extension endpoint an env operation falls back to keeps its value, and each child method falling back to it gets an endpoint of its own."""
     path = _child_path(child)
-    env_routes = {entry.get("endpoint") for entry in _endpoint_entries(env_card)}
+    env_operations = {(ext.get("uri"), name, verb, endpoint) for ext in _extensions(env_card) for name, _, verb, endpoint in _operations(ext)}
+    env_requests = {(uri, verb, endpoint) for uri, _, verb, endpoint in env_operations}
     card = copy.deepcopy(child)
-    for entry in _endpoint_entries(card):
-        endpoint = entry.get("endpoint")
-        if endpoint and not endpoint.startswith(f"{path}/") and endpoint not in env_routes:
-            entry["endpoint"] = path + endpoint
+    for ext in _extensions(card):
+        uri, params = ext.get("uri"), ext["params"]
+        env_falls_back, child_falling_back = False, []
+        for name, method, verb, endpoint in _operations(ext):
+            falls_back = method is None or not method.get("endpoint")
+            if (uri, name, verb, endpoint) in env_operations or (method is None and (uri, verb, endpoint) in env_requests):
+                env_falls_back |= falls_back
+            elif not endpoint.startswith(f"{path}/"):
+                if falls_back:
+                    child_falling_back.append(method)
+                else:
+                    method["endpoint"] = path + endpoint
+        if child_falling_back and not env_falls_back:
+            params["endpoint"] = path + params["endpoint"]
+        else:
+            for method in child_falling_back:
+                method["endpoint"] = path + params["endpoint"]
     return card
 
 
-def _endpoint_entries(card: dict) -> Iterator[dict]:
-    """The parts of a card that can name an ``endpoint``: each extension's ``params`` and each of its methods."""
+def _extensions(card: dict) -> Iterator[dict]:
+    """The card's own extensions whose ``params`` is an object, the only ones that can name an endpoint."""
     for ext in (card.get("capabilities") or {}).get("extensions") or []:
-        params = ext.get("params")
-        if isinstance(params, dict):
-            yield params
-            yield from (params.get("methods") or {}).values()
+        if isinstance(ext.get("params"), dict):
+            yield ext
+
+
+def _operations(ext: dict) -> list[tuple[Optional[str], Optional[dict], str, str]]:
+    """Each operation an extension offers, as ``invoke_extension`` calls it: (method name, method, HTTP verb, endpoint). A
+    method's endpoint is its own, else the extension's; an extension that lists no methods offers a POST to its endpoint."""
+    params = ext["params"]
+    methods = params.get("methods") or {}
+    operations = [(name, method, method.get("method") or "POST", method.get("endpoint") or params.get("endpoint"))
+                  for name, method in methods.items()] if methods else [(None, None, "POST", params.get("endpoint"))]
+    return [(name, method, verb.upper(), endpoint) for name, method, verb, endpoint in operations if endpoint]
 
 
 async def reset_via_rest(
