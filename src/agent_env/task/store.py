@@ -258,7 +258,9 @@ def _new_instance_doc(
 
 
 # A run records only the minute it started, so the instance id orders runs of one minute and pages never overlap.
-_NEWEST_FIRST = Sort((SortKey("created_at_utc", descending=True), SortKey("instance_id", descending=False)))
+# Both keys descend so Mongo reads the sort from the (task_id, created_at_utc, instance_id) index scanned backward;
+# a mixed-direction sort matches no index and sorts every run's whole document in memory.
+_NEWEST_FIRST = Sort((SortKey("created_at_utc", descending=True), SortKey("instance_id", descending=True)))
 
 
 def _task_filter(task_id: str, task_version: int | None) -> Filter:
@@ -279,8 +281,8 @@ class TaskInstanceStore:
         if self._indexed is not store:
             store.ensure_index(TASK_INSTANCES_COLLECTION, ["instance_id"], unique=True)
             store.ensure_index(TASK_INSTANCES_COLLECTION, ["task_id"])
-            store.ensure_index(TASK_INSTANCES_COLLECTION, ["task_id", "created_at_utc"])
-            store.ensure_index(TASK_INSTANCES_COLLECTION, ["task_id", "task_version", "created_at_utc"])
+            store.ensure_index(TASK_INSTANCES_COLLECTION, ["task_id", "created_at_utc", "instance_id"])
+            store.ensure_index(TASK_INSTANCES_COLLECTION, ["task_id", "task_version", "created_at_utc", "instance_id"])
             store.ensure_index(TASK_STEP_JOURNAL_COLLECTION, ["instance_id", "step_id"], unique=True)
             store.ensure_index(TASK_STEP_JOURNAL_COLLECTION, ["instance_id", "seq"])
             self._indexed = store
@@ -787,7 +789,7 @@ def task_instances(
     task_id: str, *, task_version: int | None = None, limit: int | None = None, offset: int = 0,
 ) -> list[TaskInstance]:
     """A task's recorded runs, newest first, from the configured document store. A run keeps only the minute it
-    started, so runs of one minute come in instance-id order, which keeps pages from overlapping."""
+    started, so runs of one minute come in descending instance-id order, which keeps pages from overlapping."""
     return get_task_instance_store().find(task_id, task_version=task_version, limit=limit, offset=offset)
 
 

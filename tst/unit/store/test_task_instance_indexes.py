@@ -6,6 +6,10 @@ index Mongo falls back to an in-memory sort over every instance for the task,
 which on large pass@k/batch tasks ran 60-300s and tripped ``socketTimeoutMS``.
 These tests pin that the store *declares* those compound indexes (via the
 backend-agnostic ``ensure_index``) so the regression can't silently come back.
+``task_instances`` also breaks ties within a minute by ``instance_id``, so each
+index ends in it: both sort keys descend and Mongo reads them from the index
+scanned backward, and the leading fields still serve a sort on
+``created_at_utc`` alone.
 
 Direction is no longer asserted: the store declares ASC compound indexes, which
 serve the DESC sort too (Mongo scans backward); a pre-existing DESC index is
@@ -33,12 +37,12 @@ def _declared_indexes(monkeypatch) -> list[tuple[list[str], bool]]:
 
 def test_task_instance_has_task_id_created_at_compound_index(monkeypatch):
     keys = [fields for fields, _ in _declared_indexes(monkeypatch)]
-    assert ["task_id", "created_at_utc"] in keys
+    assert ["task_id", "created_at_utc", "instance_id"] in keys
 
 
 def test_task_instance_has_task_id_version_created_at_compound_index(monkeypatch):
     keys = [fields for fields, _ in _declared_indexes(monkeypatch)]
-    assert ["task_id", "task_version", "created_at_utc"] in keys
+    assert ["task_id", "task_version", "created_at_utc", "instance_id"] in keys
 
 
 def test_task_instance_preserves_existing_indexes(monkeypatch):
