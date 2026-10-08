@@ -302,10 +302,10 @@ class VmSandbox(Sandbox):
 
     async def pull_images(self, image_names: list[str]) -> None:
         """``docker pull`` each of ``image_names``, concurrently, after logging in to each registry the image store
-        holds credentials for: once per registry, since minting a login can be a network round trip. Every pull runs
-        to its end and the first failure is raised after: cancelling an exec doesn't stop its command on the VM, and
-        some providers leave its connection open. A network policy restricting egress isn't widened for them: it must
-        allow the registries itself."""
+        holds credentials for: once per registry, since minting a login can be a network round trip. The first pull
+        to fail cancels the rest, since one that stalls would otherwise hold the failure back; the command a cancelled
+        exec started keeps running on the VM until it ends or the VM does. A network policy restricting egress isn't
+        widened for them: it must allow the registries itself."""
         image_names = list(dict.fromkeys(image_names))
         store = get_config().get_image_store()
         one_per_registry = {registry_host_from_ref(image_name): image_name for image_name in reversed(image_names)}
@@ -316,9 +316,14 @@ class VmSandbox(Sandbox):
                     f"echo {shlex.quote(auth.password)} | docker login "
                     f"--username {shlex.quote(auth.username)} --password-stdin {shlex.quote(auth.registry)}"
                 )
-        pulls = await asyncio.gather(*(_pull(self, image_name) for image_name in image_names), return_exceptions=True)
-        if failures := [pull for pull in pulls if isinstance(pull, BaseException)]:
-            raise failures[0]
+        pulls = [asyncio.ensure_future(_pull(self, image_name)) for image_name in image_names]
+        try:
+            await asyncio.gather(*pulls)
+        except BaseException:
+            for pull in pulls:
+                pull.cancel()
+            await asyncio.gather(*pulls, return_exceptions=True)
+            raise
 
     @staticmethod
     async def _signed_image_urls(artifacts: list) -> list[str | None]:
