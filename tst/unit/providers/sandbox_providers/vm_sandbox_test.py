@@ -208,35 +208,32 @@ async def test_a_login_is_minted_once_per_registry():
 
 
 class _OnePullFailsVm(_RecordingVmSandbox):
-    """``docker pull`` of BAD fails; every other pull waits until it's cancelled."""
+    """``docker pull`` of BAD fails at once; every other pull finishes a moment later."""
 
     BAD = "ghcr.io/team/bad:v1"
 
     def __init__(self):
         super().__init__()
-        self.cancelled: list[str] = []
+        self.finished: list[str] = []
 
     async def exec_script(self, script, *, max_retries=0):
         if script == f"docker pull {self.BAD}":
-            await asyncio.sleep(0)
             raise RuntimeError("Script failed (exit 1):\nstderr: manifest unknown")
         if script.startswith("docker pull"):
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                self.cancelled.append(script)
-                raise
+            await asyncio.sleep(0.01)
+            self.finished.append(script)
         return ""
 
 
 @pytest.mark.asyncio
-async def test_the_first_pull_to_fail_cancels_the_rest(registry):
+async def test_a_failed_pull_is_raised_once_the_others_have_finished(registry):
+    """Cancelling an exec wouldn't stop its command on the VM, so the other pulls run to their end."""
     sandbox = _OnePullFailsVm()
 
     with pytest.raises(RuntimeError, match="manifest unknown"):
         await sandbox.pull_images([PUBLIC, _OnePullFailsVm.BAD, PRIVATE])
 
-    assert sorted(sandbox.cancelled) == sorted([f"docker pull {PUBLIC}", f"docker pull {PRIVATE}"])
+    assert sorted(sandbox.finished) == sorted([f"docker pull {PUBLIC}", f"docker pull {PRIVATE}"])
 
 
 class _ScriptRecorder(VmSandbox):
