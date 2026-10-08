@@ -182,7 +182,12 @@ class LocalSandbox(VmSandbox):
         if container_limits is not None:
             self.container_limits = container_limits
             # Unrecorded, a handle a later step rebuilds would start containers unheld, so a failed write fails here.
-            (self._work_dir / _LIMITS_FILE).write_text(json.dumps(container_limits.to_dict()))
+            try:
+                (self._work_dir / _LIMITS_FILE).write_text(json.dumps(container_limits.to_dict()))
+            except OSError:
+                if work_dir is None:  # no handle is returned to tear down the folder just made
+                    shutil.rmtree(self._work_dir, ignore_errors=True)
+                raise
         elif work_dir is not None:
             self.container_limits = _read_limits(work_dir)
 

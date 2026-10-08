@@ -136,6 +136,16 @@ def test_a_sandbox_whose_limits_cant_be_recorded_is_not_made(sandbox_root):
         LocalSandbox(sandbox_id="local-gone", work_dir=sandbox_root / "missing", container_limits=ContainerLimits(1, 512))
 
 
+def test_a_new_sandbox_whose_limits_cant_be_recorded_leaves_no_folder(monkeypatch, sandbox_root):
+    def full(self, *args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(ls.Path, "write_text", full)
+    with pytest.raises(OSError, match="No space left"):
+        LocalSandbox(container_limits=ContainerLimits(1, 512))
+    assert list(sandbox_root.iterdir()) == []
+
+
 def test_a_sandbox_from_before_limits_were_recorded_holds_nothing(sandbox_root):
     work_dir = sandbox_root / "agent-env-local-old-x"
     work_dir.mkdir()
