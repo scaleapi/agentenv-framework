@@ -168,7 +168,7 @@ class RunDockerContainerTaskStep(TaskStep):
         sandbox = await provider.get_sandbox(ds.sandbox_id)
 
         container = sandbox.scoped_name(self.container_name)
-        image_tag = self.image_tag or f"{container}:latest"
+        image_tag = sandbox.scoped_name(self.image_tag) if self.image_tag else f"{container}:latest"
 
         work_dir = f"/tmp/docker-context-{container}"
         await sandbox.exec_script(
@@ -288,8 +288,10 @@ class RunDockerContainerTaskStep(TaskStep):
 
     async def _ensure_network(self, sandbox, name: str) -> str:
         # host / none / bridge / container:<name> are Docker built-in modes, not user bridges -- nothing to create.
-        if name in ("host", "none", "bridge") or name.startswith("container:"):
+        if name in ("host", "none", "bridge"):
             return shlex.quote(name)
+        if name.startswith("container:"):
+            return shlex.quote(f"container:{sandbox.scoped_name(name.removeprefix('container:'))}")
         net = shlex.quote(sandbox.scoped_name(name))
         await sandbox.exec_script(
             f"docker network inspect {net} >/dev/null 2>&1 "    # already exists -> reuse it

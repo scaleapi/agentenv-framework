@@ -99,6 +99,23 @@ async def test_a_step_container_on_a_local_sandbox_is_the_sandboxs_own(tmp_path,
 
 
 @pytest.mark.asyncio
+async def test_a_tag_and_a_container_network_named_by_the_step_are_the_sandboxs_own(tmp_path, monkeypatch):
+    sandbox = _RecordingSandbox(tmp_path)
+    context = _on(monkeypatch, sandbox)
+    monkeypatch.setattr(RunDockerContainerTaskStep, "_stage_from_universe", AsyncMock())
+
+    await RunDockerContainerTaskStep(
+        id="box", version=None, sandbox_name="h", docker_context_artifact_id="u", docker_context_artifact_version=1,
+        container_name="sidecar", image_tag="mine:1.0", network="container:worker",
+    ).execute(context)
+
+    [build] = [s for s in sandbox.scripts if "docker build " in s]
+    [run] = [s for s in sandbox.scripts if "docker run -d" in s]
+    assert f"-t mine:1.0-{SANDBOX_ID} " in build and f"mine:1.0-{SANDBOX_ID}" in run
+    assert f"--network container:worker-{SANDBOX_ID} " in run
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("error, falls_back", [
     ("ERROR: failed to solve: no match for platform in manifest: not found", True),
     ("no matching manifest for linux/arm64/v8 in the manifest list entries", True),

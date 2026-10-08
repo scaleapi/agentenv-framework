@@ -161,7 +161,7 @@ async def test_verify_sandbox_probes_a_local_agent_inside_its_container(local_ag
     ctx = await step.execute(context)
 
     assert [r["result"] for r in ctx.metadata["verifications"]["agent"]["results"]] == [True, True]
-    assert list(sandbox.work_dir.iterdir()) == [sandbox.work_dir / ".agent-container-mode"]
+    assert sorted(p.name for p in sandbox.work_dir.iterdir()) == [".agent-container-mode", ".port-map.json"]
 
 
 @pytest.mark.asyncio
@@ -195,7 +195,7 @@ async def test_load_artifact_puts_a_universe_in_a_local_agents_container(local_a
     shown = subprocess.run(["docker", "exec", sandbox.container_name, "cat", "/app/greeting/hello.txt"],
                            capture_output=True, text=True)
     assert (shown.returncode, shown.stdout) == (0, "hello, world\n")
-    assert list(sandbox.work_dir.iterdir()) == [sandbox.work_dir / ".agent-container-mode"]
+    assert sorted(p.name for p in sandbox.work_dir.iterdir()) == [".agent-container-mode", ".port-map.json"]
 
 
 @pytest.mark.asyncio
@@ -213,7 +213,7 @@ async def test_load_artifact_stages_an_environment_payload_in_a_local_container(
         file_artifact=FileArtifact.put(id=f"payload-{suffix}-zip", description="payload", file_path=str(tmp_path / "payload.zip")),
     )
     step = LoadArtifactTaskStep(
-        id="load", version=None, artifact_id=artifact.id, sandbox_name="box", container_name=sandbox.container_name,
+        id="load", version=None, artifact_id=artifact.id, sandbox_name="box", container_name="agent",
         destination_path="/app/my files",
     )
 
@@ -230,7 +230,7 @@ async def test_the_unit_tests_verifier_runs_in_a_local_container(local_agent):
     _as_deployed_container(sandbox, context)
     _write_in_container(sandbox, "/app/data/hello.txt", "hello")
     step = RunContainerUnitTestsVerifierTaskStep(
-        id="verify", version=None, sandbox_name="box", container_name=sandbox.container_name,
+        id="verify", version=None, sandbox_name="box", container_name="agent",
         setup_commands=["mkdir -p /logs && touch /logs/setup-ran"],
         command="test -f /logs/setup-ran && grep -q hello /app/data/hello.txt && echo '{\"reward\": 1}' > /logs/reward.json",
         result_paths=["/logs/reward.json"],
@@ -243,12 +243,13 @@ async def test_the_unit_tests_verifier_runs_in_a_local_container(local_agent):
 
 
 def _as_deployed_container(sandbox, context):
-    """Record the agent's container as a ``run_docker_container`` container on the deployed sandbox ``box``."""
+    """Record the agent's container as a ``run_docker_container`` container on the deployed sandbox ``box``: it is
+    the sandbox's own ``agent``, as a step container is its own name."""
     context.deployed_sandboxes.append(
         DeployedSandbox(sandbox_name="box", sandbox_id=sandbox.sandbox_id, sandbox_mode="vm", sandbox_type="local"),
     )
     context.metadata.setdefault("deployed_docker_containers", []).append(
-        {"container_name": sandbox.container_name, "sandbox_name": "box", "sandbox_id": sandbox.sandbox_id},
+        {"container_name": "agent", "sandbox_name": "box", "sandbox_id": sandbox.sandbox_id},
     )
 
 

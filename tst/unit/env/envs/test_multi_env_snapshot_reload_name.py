@@ -8,6 +8,7 @@ import pytest
 
 from agent_env.artifact import DockerImageArtifact
 from agent_env.env.envs.multi_env import MultiEnv
+from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT
 from agent_env.providers.env_providers import EnvironmentGatewayProvider
 
 
@@ -36,3 +37,23 @@ async def test_snapshot_reload_keeps_the_env_name(declared, deployed_as, expecte
     assert compose.call_args.kwargs["mcp_server_name"] == expected
     assert compose.call_args.kwargs["host_ips"] == ("127.0.0.1",)
     assert compose.call_args.kwargs["host_port"] == env._sandbox.host_port
+
+
+@pytest.mark.asyncio
+async def test_snapshot_reload_waits_for_the_gateway_where_it_is_published():
+    env = MultiEnv(id="crm-suite", version=1, mcp_server_envs=[], name="crm")
+    env._sandbox = MagicMock(mode="vm", load_docker_images=AsyncMock(), exec_script=AsyncMock(return_value=""),
+                             host_ips=("127.0.0.1",), host_port=lambda port: port + 1000)
+    db_image = MagicMock(spec=DockerImageArtifact, image_name="snap:1")
+    snapshot = MagicMock(db_image_artifact_id="snap", db_image_artifact_version=1)
+
+    with patch("agent_env.artifact.Artifact.get", return_value=db_image), \
+         patch("agent_env.env.env.Env.get", return_value=MagicMock()), \
+         patch("agent_env.config.get_config", return_value=MagicMock(default_gateway_env_id="gw-id", default_service_db_env_id="db-id")), \
+         patch("agent_env.providers.env_state.LocalPostgresStateProvider"), \
+         patch.object(EnvironmentGatewayProvider, "create_docker_compose", return_value="services:\n"), \
+         patch.object(EnvironmentGatewayProvider, "_wait_for_gateway", side_effect=_Stop) as wait:
+        with pytest.raises(_Stop):
+            await env._load_from_snapshot(snapshot)
+
+    assert wait.call_args.args[1] == AGENT_ENV_GATEWAY_MCP_PORT + 1000

@@ -655,7 +655,7 @@ COMPOSE_EOF'''
         await self._sandbox.exec_script(
             f"cd {GATEWAY_APP_DIR} && docker compose up -d --force-recreate {svc_list}"
         )
-        await gw._wait_for_gateway(self._sandbox, AGENT_ENV_GATEWAY_MCP_PORT)
+        await gw._wait_for_gateway(self._sandbox, self._sandbox.host_port(AGENT_ENV_GATEWAY_MCP_PORT))
 
         # Install changelog triggers for each service
         for name in environment_names:

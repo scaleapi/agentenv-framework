@@ -180,7 +180,7 @@ class LocalSandbox(VmSandbox):
         host, so a fixed name (the VmSandbox default) would collide across concurrent deploys and
         make teardown ownership-blind. Deriving it from the sandbox id gives each deploy its own
         container and lets teardown remove only the one this sandbox created."""
-        return f"agent-{self.sandbox_id}"
+        return self.scoped_name("agent")
 
     def scoped_name(self, name: str) -> str:
         """``name`` made this sandbox's own: every local sandbox shares this machine's Docker and /tmp."""
