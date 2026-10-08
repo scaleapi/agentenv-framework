@@ -62,8 +62,8 @@ async def child_env_card(deployed: Optional[DeployedEnv], gateway_url: Optional[
 
 
 def _child_path(child: dict) -> str:
-    """A child env's path under the env's address, such as ``/svc/mcp-<name>``; empty for a leaf card."""
-    return child.get("url", RPC_PATH).removesuffix(RPC_PATH)
+    """A child env's path under the env's address, such as ``/svc/mcp-<name>``; empty for a card whose url is ``RPC_PATH`` or none."""
+    return (child.get("url") or RPC_PATH).rstrip("/").removesuffix(RPC_PATH)
 
 
 def _prefix_child_endpoints(env_card: dict, child: dict) -> dict:

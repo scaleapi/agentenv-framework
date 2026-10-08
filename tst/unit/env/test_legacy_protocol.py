@@ -186,6 +186,32 @@ async def test_a_stored_leaf_card_resolves_against_the_envs_address_unchanged(ur
 
 
 @pytest.mark.asyncio
+async def test_a_stored_child_whose_url_ends_in_a_slash_resolves_under_its_path():
+    record = _composed_record({"name": "slack", "url": "/agentenv/", "capabilities": {"extensions": [
+        {"uri": "urn:agentenv:set-errors/v1", "params": {"endpoint": "/agentenv/ext/set_errors"}},
+        {"uri": "urn:agentenv:clock/v1", "params": {"endpoint": "/ext/clock/sync-time"}},
+    ]}})
+
+    base, card = await legacy_protocol.child_env_card(record, "http://gw", "slack")
+
+    assert [base + e["params"]["endpoint"] for e in card["capabilities"]["extensions"]] == [
+        "http://gw/svc/mcp-slack/agentenv/ext/set_errors", "http://gw/svc/mcp-slack/ext/clock/sync-time"]
+    assert await legacy_protocol.v1_base_url(record, "http://gw", "slack") == "http://gw/svc/mcp-slack"
+
+
+@pytest.mark.asyncio
+async def test_a_stored_child_with_a_null_url_resolves_as_one_without_a_url():
+    record = _composed_record({"name": "slack", "url": None, "capabilities": {"extensions": [
+        {"uri": "urn:agentenv:set-errors/v1", "params": {"endpoint": "/agentenv/ext/set_errors"}},
+    ]}})
+
+    base, card = await legacy_protocol.child_env_card(record, "http://gw", "slack")
+
+    assert base + card["capabilities"]["extensions"][0]["params"]["endpoint"] == "http://gw/svc/mcp-slack/agentenv/ext/set_errors"
+    assert await legacy_protocol.v1_base_url(record, "http://gw", "slack") == "http://gw"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("params, served_at", [
     ({"endpoint": "/agentenv/ext/set_errors"}, "/agentenv/ext/set_errors"),
     ({"endpoint": "/ext/clock/sync-time"}, "/ext/clock/sync-time"),
