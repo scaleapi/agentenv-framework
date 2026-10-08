@@ -63,6 +63,10 @@ def _runs_in_container(cmd: list[str]) -> bool:
 
 _REAP_SECONDS = 5
 
+# Every command a local sandbox runs carries this, set to the sandbox's id, and so does whatever the command starts, so
+# teardown can find a process left running on this machine, such as the agent a host-mode install started.
+_SANDBOX_ENV = "AGENTENV_SANDBOX"
+
 # Where a container finds the local transfer CA's trust files, and the variables that point TLS clients at them:
 # SSL_CERT_FILE replaces a client's roots, so it gets the public roots plus the CA; NODE_EXTRA_CA_CERTS adds.
 _TRUST_DIR = "/etc/agentenv"
@@ -215,8 +219,12 @@ class LocalSandbox(VmSandbox):
         newer one; and the compose-down is scoped to this sandbox's project via its work dir. Without
         this, local runs leak their containers/compose stacks, which squat host ports and block the
         next deploy. Prod backends override terminate() to tear the whole VM down.
+        Processes its commands left running on this machine are stopped first (on Linux; see ``_marked_pids``),
+        then what its steps staged in /tmp is removed.
         """
         try:
+            await _stop_marked(self.sandbox_id)
+            await asyncio.to_thread(_remove_staged, self.sandbox_id)
             if self.mode == SANDBOX_MODE_VM and not self.owns_container:
                 await self._remove_labeled()
         finally:  # a container that wouldn't go must not keep the compose stack up
@@ -259,7 +267,8 @@ class LocalSandbox(VmSandbox):
         """Execute a command locally via subprocess.
 
         Strips 'sudo' and points /app at the local work directory, both as a path argument and
-        inside the script of a top-level ``bash -c``, unless the command runs in a container.
+        inside the script of a top-level ``bash -c``, unless the command runs in a container. The
+        command carries ``_SANDBOX_ENV``, so teardown can stop whatever it leaves running.
         Returns an object with .stdout, .stderr streams and .wait() method, matching the
         interface expected by exec_with_output().
         """
@@ -275,6 +284,7 @@ class LocalSandbox(VmSandbox):
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, _SANDBOX_ENV: self.sandbox_id},
         )
         return process
 
@@ -336,6 +346,42 @@ def _kill_tree(root: int) -> None:
     for pid in tree:
         with contextlib.suppress(ProcessLookupError):
             os.kill(pid, signal.SIGKILL)
+
+
+def _marked_pids(sandbox_id: str) -> list[int]:
+    """The processes carrying ``sandbox_id``'s ``_SANDBOX_ENV``. Read from /proc, so Linux only: macOS doesn't let
+    one process read another's environment, and finds none."""
+    marker = f"{_SANDBOX_ENV}={sandbox_id}".encode()
+    pids = []
+    for environ in glob.glob("/proc/[0-9]*/environ"):
+        with contextlib.suppress(OSError):  # gone, or another user's
+            if marker in Path(environ).read_bytes().split(b"\0"):
+                pids.append(int(environ.split("/")[2]))
+    return pids
+
+
+async def _stop_marked(sandbox_id: str) -> None:
+    """Stop the processes ``sandbox_id``'s commands left running, which a real VM would take down with it: SIGTERM,
+    then SIGKILL for any still there a few seconds later."""
+    if not (pids := await asyncio.to_thread(_marked_pids, sandbox_id)):
+        return
+    logger.info("Stopping %d process(es) sandbox %s left running on this machine", len(pids), sandbox_id)
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        for pid in pids:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, sig)
+        for _ in range(_REAP_SECONDS * 10):
+            await asyncio.sleep(0.1)
+            if not (pids := await asyncio.to_thread(_marked_pids, sandbox_id)):
+                return
+    logger.warning("Processes %s that sandbox %s started are still running", pids, sandbox_id)
+
+
+def _remove_staged(sandbox_id: str) -> None:
+    """Remove what steps staged in /tmp for ``sandbox_id``, such as a host install's work dir, which a host agent may
+    run from until it is stopped. Steps name these with ``scoped_name``, so they end in the sandbox's id."""
+    for path in glob.glob(f"/tmp/*-{glob.escape(sandbox_id)}"):
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def local_grant_trust() -> Path | None:

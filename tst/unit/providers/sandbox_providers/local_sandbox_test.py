@@ -1,6 +1,8 @@
 import asyncio
 import os
 import platform
+import shutil
+import signal
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -820,6 +822,94 @@ async def test_a_command_cancelled_while_it_spawns_is_still_stopped(tmp_path: Pa
 
     with pytest.raises(ProcessLookupError):
         os.kill(int(pid_file.read_text()), 0)
+
+
+@pytest.mark.asyncio
+async def test_a_command_carries_its_sandboxs_id(tmp_path: Path):
+    sandbox = LocalSandbox(work_dir=tmp_path)
+
+    _, stdout, _ = await sandbox.exec_with_output("bash", "-c", "echo $AGENTENV_SANDBOX")
+
+    assert stdout.strip() == sandbox.sandbox_id
+
+
+@pytest.mark.asyncio
+async def test_teardown_sends_sigterm_then_sigkill_to_what_outlives_it(monkeypatch):
+    sent, running = [], {11: signal.SIGTERM, 12: signal.SIGKILL}  # pid -> the signal that stops it
+    monkeypatch.setattr(ls, "_REAP_SECONDS", 1)
+    monkeypatch.setattr(ls, "_marked_pids", lambda sandbox_id: sorted(running) if sandbox_id == "local-a" else [])
+
+    def kill(pid, sig):
+        sent.append((pid, sig))
+        if running.get(pid) == sig:
+            del running[pid]
+
+    monkeypatch.setattr(ls.os, "kill", kill)
+    await ls._stop_marked("local-a")
+
+    assert sent == [(11, signal.SIGTERM), (12, signal.SIGTERM), (12, signal.SIGKILL)]
+
+
+def _running(pid: int) -> bool:
+    """Whether ``pid`` is still running: a killed process another parent hasn't reaped yet is a zombie."""
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] not in "ZX"
+    except FileNotFoundError:
+        return False
+
+
+async def _detached(sandbox: LocalSandbox, command: str = "sleep 300") -> int:
+    """Start ``command`` the way a host install starts its agent, outliving the exec that started it."""
+    _, stdout, _ = await sandbox.exec_with_output("bash", "-c", f"nohup {command} >/dev/null 2>&1 </dev/null & echo $!")
+    return int(stdout)
+
+
+@pytest.mark.asyncio
+async def test_teardown_removes_what_steps_staged_in_tmp_for_this_sandbox_only(tmp_path: Path):
+    sandbox = _RecordingLocalSandbox(work_dir=tmp_path)
+    ours = Path(tempfile.mkdtemp(prefix="install-agent-solver-", suffix=f"-{sandbox.sandbox_id}", dir="/tmp"))
+    (ours / "agent-ctx.tar.gz").write_bytes(b"ctx")
+    theirs = Path(tempfile.mkdtemp(prefix="install-agent-solver-", suffix="-local-0ther000", dir="/tmp"))
+    try:
+        await sandbox.terminate()
+
+        assert not ours.exists()
+        assert theirs.exists()
+    finally:
+        shutil.rmtree(ours, ignore_errors=True)
+        shutil.rmtree(theirs, ignore_errors=True)
+
+
+linux_only = pytest.mark.skipif(platform.system() != "Linux", reason="a process's environment is read from /proc")
+
+
+@linux_only
+@pytest.mark.asyncio
+async def test_teardown_stops_what_a_command_left_running_and_only_that(tmp_path: Path):
+    ours, theirs = LocalSandbox(work_dir=tmp_path / "a"), LocalSandbox(work_dir=tmp_path / "b")
+    left, other = await _detached(ours), await _detached(theirs)
+    try:
+        assert ls._marked_pids(ours.sandbox_id) == [left]
+
+        await _RecordingLocalSandbox(work_dir=ours.work_dir, sandbox_id=ours.sandbox_id).terminate()
+
+        assert not _running(left)
+        assert _running(other)
+    finally:
+        await ls._stop_marked(theirs.sandbox_id)
+
+
+@linux_only
+@pytest.mark.asyncio
+async def test_teardown_kills_a_process_that_ignores_sigterm(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(ls, "_REAP_SECONDS", 1)
+    sandbox = LocalSandbox(work_dir=tmp_path)
+    stubborn = await _detached(sandbox, "bash -c 'trap \"\" TERM; sleep 300'")
+
+    await ls._stop_marked(sandbox.sandbox_id)
+
+    assert not _running(stubborn)
+    assert not ls._marked_pids(sandbox.sandbox_id)
 
 
 @pytest.mark.asyncio

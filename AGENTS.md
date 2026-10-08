@@ -68,6 +68,11 @@ or one of them only where it is used.
   this machine that local containers call, a model proxy say, has to listen there: bind it to the
   bridge address and use that address in its URL. Binding `0.0.0.0` also works, but exposes the
   service to the network.
+- A host-mode `install_agent` (no `container_name`) on a `local` sandbox runs the agent's
+  `install_commands_host` on this machine, with your privileges. Every command a local sandbox runs
+  carries `AGENTENV_SANDBOX=<sandbox id>`, and teardown stops the processes that carry it, then removes
+  what steps staged in `/tmp` under that id. Those processes are found through `/proc`, so on macOS
+  they keep running; files the install wrote elsewhere (`/opt`, packages) stay.
 - `[agents] default_a2a_agent_id`: the agent a `deploy_agent` step without an id deploys; built-in
   `a2a-default`, overridable by `configure(default_a2a_agent_id=...)`.
 - Secrets never live in the file: use `secret:KEY` or `env:NAME` references, resolved through
