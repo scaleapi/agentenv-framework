@@ -356,6 +356,19 @@ class LoadArtifactTaskStep(TaskStep):
             f"curl -fsSL {CURL_RETRY_FLAGS} {shlex.quote(url)} -o {shlex.quote(destination_path)}"
         )
 
+    async def _load_url_into_container(self, sandbox, container: str, url: str, destination_path: str) -> None:
+        """Download ``url`` onto the VM host, then copy it into ``container`` at ``destination_path``:
+        ``write_file_from_url`` reaches only the sandbox's own agent container."""
+        vm_temp = f"/tmp/_load_url_{uuid.uuid4().hex[:8]}"
+        try:
+            await self._load_url_onto_vm(sandbox, url, vm_temp)
+            await sandbox.exec_script(
+                f"docker exec -u 0 {shlex.quote(container)} mkdir -p {shlex.quote(posixpath.dirname(destination_path))}"
+            )
+            await sandbox.docker_cp(vm_temp, f"{container}:{destination_path}")
+        finally:
+            await sandbox.exec_script(f"rm -f {shlex.quote(vm_temp)}")
+
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         from agent_env.a2a_agent import A2AAgent
         from agent_env.a2a_agent.store import get_a2a_agent_instance_store
@@ -599,14 +612,22 @@ class LoadArtifactTaskStep(TaskStep):
             destination = (destination_path or "/tmp/file_artifacts").rstrip("/") or "/"
             semaphore = asyncio.Semaphore(8)
 
+            if onto_vm_host:
+                target_desc = f"VM sandbox '{self.sandbox_name}'"
+            elif self.container_name is not None:
+                target_desc = f"container '{self.container_name}'"
+            else:
+                target_desc = "agent"
+
             async def _load_one(url: str, filename: str) -> None:
                 async with semaphore:
                     dest = f"{destination}/{filename}"
                     if onto_vm_host:
                         await self._load_url_onto_vm(sandbox, url, dest)
+                    elif self.container_name is not None:
+                        await self._load_url_into_container(sandbox, sandbox.scoped_name(self.container_name), url, dest)
                     else:
                         await sandbox.write_file_from_url(url, dest)
-                    target_desc = f"VM sandbox '{self.sandbox_name}'" if onto_vm_host else "agent"
                     logger.info(f"Loaded URL into {target_desc}: {url} -> {dest}")
 
             await asyncio.gather(*(_load_one(u, f) for u, f in downloads))

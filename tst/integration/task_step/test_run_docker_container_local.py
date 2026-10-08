@@ -18,6 +18,7 @@ from agent_env.config import configure, reset_config
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.deploy_sandbox import DeploySandboxTaskStep
+from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
 from agent_env.task_step.task_steps.run_docker_container import RunDockerContainerTaskStep
 from tst.util.capabilities import missing_capability_reason
 
@@ -122,3 +123,34 @@ async def test_two_local_runs_use_the_same_container_name_network_and_port_at_on
     for sandbox_id in sandbox_ids:
         assert not _docker("ps", "-aq", "--filter", f"label=agentenv.sandbox={sandbox_id}")
         assert not _docker("network", "ls", "-q", "--filter", f"name=^task-net-{sandbox_id}$")
+
+
+@pytest.mark.asyncio
+async def test_urls_load_into_a_run_docker_container_container(local_backends):
+    """A URL given with container_name lands in that container, not the sandbox's agent container."""
+    suffix = uuid.uuid4().hex[:8]
+    (local_backends / "Dockerfile").write_text("FROM mirror.gcr.io/library/nginx:1.27-bookworm\n")
+    (local_backends / "data.csv").write_text("a,b\n1,2\n")
+    build_context = FileArtifactUniverse.put(id=f"rdc3-ctx-{suffix}", file_artifacts={
+        "Dockerfile": FileArtifact.put(id=f"rdc3-df-{suffix}", description="Dockerfile",
+                                       file_path=str(local_backends / "Dockerfile")),
+    })
+    context = TaskStepContext(instance_id=f"rdc3-{suffix}")
+    try:
+        await DeploySandboxTaskStep(
+            id="box", version=None, sandbox_name="box", sandbox_mode="vm", sandbox_type="local",
+        ).execute(context)
+        await RunDockerContainerTaskStep(
+            id="ctr", version=None, sandbox_name="box", docker_context_artifact_id=build_context.id,
+            container_name="worker",
+        ).execute(context)
+        await LoadArtifactTaskStep(
+            id="load", version=None, sandbox_name="box", container_name="worker", destination_path="/work",
+            urls=[(local_backends / "data.csv").as_uri()],
+        ).execute(context)
+        container = f"worker-{context.deployed_sandboxes[0].sandbox_id}"
+        assert _docker("exec", container, "cat", "/work/data.csv") == "a,b\n1,2"
+    finally:
+        report = await teardown_run(context)
+
+    assert not report.still_up

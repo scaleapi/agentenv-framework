@@ -54,6 +54,9 @@ def vm(monkeypatch):
         async def write_file_from_url(self, url, destination_path):  # pragma: no cover
             calls.append(("container_url", url, destination_path))
 
+        async def docker_cp(self, source, destination, *, remove_source=False):
+            calls.append(("cp", source, destination))
+
     from agent_env.providers.sandbox_providers import sandbox_provider as sp_mod
 
     async def _get_sandbox(sandbox_id):
@@ -208,6 +211,24 @@ class TestContainerPathUnchanged:
 
         assert seen == [{"container": "task-container", "destination": "/loaded"}]
         assert ctx.metadata["loaded_file_artifact_universes"][0]["container_name"] == "task-container"
+
+    @pytest.mark.asyncio
+    async def test_urls_go_into_the_named_container_not_the_agents(self, vm):
+        ctx, calls = vm
+        ctx.metadata["deployed_docker_containers"] = [{"container_name": "task-container", "sandbox_name": "mk"}]
+        step = LoadArtifactTaskStep(
+            id="stage", version=None, sandbox_name="mk", container_name="task-container",
+            urls=["https://example.com/data.csv"], destination_path="/work",
+        )
+
+        await step.execute(ctx)
+
+        [curl] = [c[1] for c in calls if c[0] == "exec" and c[1].startswith("curl ")]
+        [cp] = [c for c in calls if c[0] == "cp"]
+        assert cp[1] == curl.rsplit(" -o ", 1)[1] and cp[2] == "task-container:/work/data.csv"
+        assert ("exec", "docker exec -u 0 task-container mkdir -p /work") in calls
+        assert ("exec", f"rm -f {cp[1]}") in calls
+        assert not [c for c in calls if c[0] == "container_url"]
 
 
 class TestUrlHelper:
