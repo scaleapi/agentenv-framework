@@ -352,7 +352,7 @@ def test_an_agent_folder_with_a_dockerfile_is_built_and_the_agent_written_over_i
 
     tag = f"{image_repository(image)}:bundle"
     assert builds == [{"build": ("Dockerfile", ["Dockerfile", "run.sh"], tag, None),
-                       "put": (image, tag, ["Dockerfile", "run.sh"], None)}]
+                       "put": (image, tag, ["Dockerfile", "run.sh"], "Dockerfile")}]
     assert announced == [image]
     assert {id: summary[:2] for id, summary in _summary(first).items() if "solver" in id} == {
         image: (1, False), f"{ROOT}/solver": (1, False)}

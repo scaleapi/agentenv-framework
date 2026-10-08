@@ -10,7 +10,6 @@ import posixpath
 import re
 import shlex
 import subprocess
-import tarfile
 import tempfile
 import uuid
 from dataclasses import dataclass
@@ -22,10 +21,12 @@ from urllib.parse import urlparse
 from pydantic import ConfigDict, Field, model_serializer
 
 from agent_env.artifact.artifact import Artifact, _write_twin
-from agent_env.store.ids import fs_safe, image_repository, is_local_id
+from agent_env.store.ids import fs_safe, image_repository, is_local_id, local_image_repository
 from agent_env.store.image_store.local_registry_image_store import LocalRegistryImageStore
 from agent_env.store.image_store.oci_registry_credentials import is_loopback_host, names_registry, registry_host_from_ref
 from agent_env.store.image_store.registry_api import pin_digest
+from agent_env.utils.build_context import BuildContext
+from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM
 
 logger = logging.getLogger(__name__)
 
@@ -64,8 +65,8 @@ def _git_clone_commands(owner: str, repo: str, ref: str | None, token: str | Non
     ]
 
 class DockerImageArtifact(Artifact):
-    """A Docker image artifact: a tar.gz of the image in the object store, or, without one, a registry reference a
-    sandbox pulls."""
+    """A Docker image artifact: a tar.gz of the image in the object store; without one, a registry reference a
+    sandbox pulls; or, with neither, only its build context."""
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -78,6 +79,11 @@ class DockerImageArtifact(Artifact):
         default=None, alias="tar_gz_s3_url", description="Object-store locator of the tar.gz file, if it has one"
     )
     build_context_object_url: str | None = Field(default=None, alias="build_context_s3_url", description="Object-store locator of the build context tar.gz")
+    dockerfile_path: str | None = Field(default=None, description="The Dockerfile's path in the build context, POSIX")
+    platform: str | None = Field(default=None, description="The platform the image is built for, as `docker build --platform` names it")
+    source_digest: str | None = Field(
+        default=None, description="sha256 over the build context's files and modes, the Dockerfile's path and the platform"
+    )
 
     # No return annotation: pydantic builds the serialization schema from one, and a dict drops the fields.
     @model_serializer(mode="wrap")
@@ -97,10 +103,15 @@ class DockerImageArtifact(Artifact):
         image_name: str,
         build_context_path: str | None = None,
         dockerfile_path: str | None = None,
+        platform: str | None = None,
     ) -> "DockerImageArtifact":
         from agent_env.artifact.store import get_artifact_store
         from agent_env.config import get_config
 
+        context = None
+        if build_context_path:
+            context_dir = Path(build_context_path)
+            context = BuildContext.of(context_dir, _resolve_dockerfile(context_dir, dockerfile_path))
         store = get_artifact_store()
         version = store.next_version(id)
         # Objects are written once, so each attempt writes under a prefix of its own: one that stopped
@@ -143,31 +154,15 @@ class DockerImageArtifact(Artifact):
             if tmp_path.exists():
                 tmp_path.unlink()
 
-        build_context_object_url = None
-        if build_context_path:
-            context_dir = Path(build_context_path)
-            paths_to_include = _get_dockerfile_copy_sources(context_dir, dockerfile_path)
-            with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as ctx_tmp:
-                ctx_tmp_path = Path(ctx_tmp.name)
-            try:
-                with tarfile.open(ctx_tmp_path, "w:gz") as tar:
-                    for rel_path in paths_to_include:
-                        full_path = context_dir / rel_path
-                        if full_path.exists():
-                            tar.add(str(full_path), arcname=rel_path)
-                build_context_object_url = objects.put_file_at(
-                    f"{prefix}build-context.tar.gz", str(ctx_tmp_path), "application/gzip"
-                )
-            finally:
-                if ctx_tmp_path.exists():
-                    ctx_tmp_path.unlink()
-
         return cls.put_tar(
             id,
             description=description,
             image_name=image_ref,
             tar_gz_object_url=tar_gz_object_url,
-            build_context_object_url=build_context_object_url,
+            build_context_object_url=_upload_context(objects, prefix, context) if context else None,
+            dockerfile_path=context.dockerfile if context else None,
+            platform=platform,
+            source_digest=context.source_digest(platform) if context else None,
         )
 
     @classmethod
@@ -179,6 +174,9 @@ class DockerImageArtifact(Artifact):
         image_name: str,
         tar_gz_object_url: str,
         build_context_object_url: str | None = None,
+        dockerfile_path: str | None = None,
+        platform: str | None = None,
+        source_digest: str | None = None,
     ) -> "DockerImageArtifact":
         from agent_env.artifact.store import get_artifact_store
         from agent_env.config import get_config
@@ -198,6 +196,9 @@ class DockerImageArtifact(Artifact):
             image_name=image_name,
             tar_gz_object_url=tar_gz_object_url,
             build_context_object_url=build_context_object_url,
+            dockerfile_path=dockerfile_path,
+            platform=platform,
+            source_digest=source_digest,
         )
         return store.put_document(instance)
 
@@ -226,17 +227,53 @@ class DockerImageArtifact(Artifact):
         version = store.next_version(id)
         return store.put_document(cls(id=id, version=version, description=description, image_name=pinned))
 
+    @classmethod
+    def put_context(cls, id: str, *, description: str, context_path: str, dockerfile_path: str,
+                    platform: str = DEFAULT_BUILD_PLATFORM) -> "DockerImageArtifact":
+        """Register an image by its build context alone, to be built where it runs: the context is uploaded and
+        nothing is built, pushed or saved, so no Docker is needed here. Its ``image_name``,
+        ``local/<slug>-<hash>:v<version>``, names no registry: it's the tag the build gives the image.
+        ``source_digest`` is equal for equal sources, so one build can serve both."""
+        from agent_env.artifact.store import get_artifact_store
+        from agent_env.config import get_config
+
+        root = Path(context_path)
+        dockerfile = _resolve_dockerfile(root, dockerfile_path)
+        if not dockerfile.is_file():
+            raise ValueError(f"no Dockerfile at {dockerfile}")
+        context = BuildContext.of(root, dockerfile)
+        if context.dockerfile is None:
+            raise ValueError(f"{dockerfile} is outside the build context {root}; the image is built from the context "
+                             "alone, so the Dockerfile must be in it")
+        store = get_artifact_store()
+        version = store.next_version(id)
+        prefix = store.attempt_prefix("docker_image", id)
+        build_context_object_url = _upload_context(get_config().get_object_store_to_write(prefix, id), prefix, context)
+        return store.put_document(cls(
+            id=id,
+            version=version,
+            description=description,
+            image_name=f"{local_image_repository(id)}:v{version}",
+            build_context_object_url=build_context_object_url,
+            dockerfile_path=context.dockerfile,
+            platform=platform,
+            source_digest=context.source_digest(platform),
+        ))
+
     def load(self) -> bytes:
         from agent_env.artifact.store import get_artifact_store
         if not self.tar_gz_object_url:
-            raise ValueError(f"{self.id!r} v{self.version} has no tar.gz; its image is pulled from {self.image_name}")
+            raise ValueError(self.load_problem() or f"{self.id!r} v{self.version} has no tar.gz; its image is pulled "
+                             f"from {self.image_name}")
         return get_artifact_store().get_object(self.tar_gz_object_url)
 
     def load_problem(self) -> str | None:
         """Why no sandbox can get this image, or None when one can: a tar.gz is loaded, and with none, ``image_name``
-        is pulled, so it must name its registry."""
+        is pulled, so it must name its registry. One registered by its build context alone isn't built yet."""
         if self.tar_gz_object_url or names_registry(self.image_name):
             return None
+        if self.build_context_object_url:
+            return f"{self.id!r} v{self.version} is only a build context, and sandboxes don't build images from one yet"
         return (f"{self.id!r} v{self.version} has no tar.gz, and its image name {self.image_name!r} doesn't name a "
                 "registry to pull it from")
 
@@ -482,19 +519,17 @@ def _parse_copy_sources(dockerfile_text: str, dockerfile_rel_path: str | None = 
     return paths if paths else ["."]
 
 
-def _get_dockerfile_copy_sources(context_dir: Path, dockerfile_path: str | None) -> list[str]:
-    """Parse COPY source paths from a local Dockerfile and return relative paths to include in the build context tar."""
+def _resolve_dockerfile(context_dir: Path, dockerfile_path: str | None) -> Path | None:
+    """``dockerfile_path`` as given, or under ``context_dir`` when it's relative and not found from here."""
     if not dockerfile_path:
-        return ["."]
+        return None
+    dockerfile = Path(dockerfile_path)
+    return dockerfile if dockerfile.is_absolute() or dockerfile.exists() else context_dir / dockerfile
 
-    df = Path(dockerfile_path)
-    if not df.is_absolute() and not df.exists():
-        df = context_dir / df
 
-    try:
-        df_rel = str(df.relative_to(context_dir))
-    except ValueError:
-        df_rel = None
-
-    paths = _parse_copy_sources(df.read_text(), df_rel)
-    return [p for p in paths if (context_dir / p).exists()] or ["."]
+def _upload_context(objects, prefix: str, context: BuildContext) -> str:
+    """Write ``context`` under ``prefix`` as a tar.gz and return its object URL."""
+    with tempfile.TemporaryDirectory(prefix="agent-env-context-") as tmp:
+        path = Path(tmp) / "build-context.tar.gz"
+        context.write(path)
+        return objects.put_file_at(f"{prefix}build-context.tar.gz", str(path), "application/gzip")

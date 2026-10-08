@@ -114,6 +114,12 @@ def image_repository(entity_id: str) -> str:
     return key_segment(entity_id)
 
 
+def local_image_repository(entity_id: str) -> str:
+    """A repository for ``entity_id`` that is a valid OCI repository path and names no registry, whatever the id:
+    ``local/<slug>-<hash>``, the name an image built where it runs is tagged with."""
+    return _local_segment(entity_id)
+
+
 def fs_safe(entity_id: str) -> str:
     """A filename for an ``@local`` id: its key segment with no ``/``. Any other id is returned
     unchanged, so it is only as filename-safe as it already was."""

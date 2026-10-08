@@ -1,5 +1,7 @@
 """Fixtures the bundle tests share."""
 
+from pathlib import Path
+
 import pytest
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
@@ -22,8 +24,9 @@ def builds(monkeypatch, docker_on_path):
     def build(dockerfile, context, tag, *, platform):
         calls.append({"build": (dockerfile.relative_to(context).as_posix(), listing(context), tag, platform)})
 
-    def put(id, *, description, image_name, build_context_path=None, dockerfile_path=None):
-        calls[-1]["put"] = (id, image_name, listing(build_context_path), dockerfile_path)
+    def put(id, *, description, image_name, build_context_path=None, dockerfile_path=None, platform=None):
+        dockerfile = Path(dockerfile_path).relative_to(build_context_path).as_posix() if dockerfile_path else None
+        calls[-1]["put"] = (id, image_name, listing(build_context_path), dockerfile)
         return get_artifact_store().put_document(DockerImageArtifact(
             id=id, description=description, image_name=image_name, tar_gz_s3_url=f"file:///{id}.tar.gz"))
 
