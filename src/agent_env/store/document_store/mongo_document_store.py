@@ -279,10 +279,12 @@ class MongoDocumentStore(DocumentStore):
         unique: bool = False,
         ttl_seconds: Optional[int] = None,
     ) -> None:
-        """Wait at most ``_INDEX_BUILD_WAIT_SECONDS``, or the client's socket timeout if shorter, for MongoDB to
-        build a missing index, then leave the build to finish on the server: over a large collection it takes
-        minutes, and holding up the write that asked for it fails that write. An index already listed under this
-        name or over these keys is kept."""
+        """Wait at most ``_INDEX_BUILD_WAIT_SECONDS`` for MongoDB to build a missing plain index, then leave the
+        build to finish on the server: over a large collection it takes minutes, and holding up the write that asked
+        for it fails that write. A unique index is awaited in full, since writes rely on its constraint."""
+        if unique:
+            self._create_index(collection, fields, unique, ttl_seconds)
+            return
         keys, name = _index_spec(fields, unique)
         existing = self._c(collection).index_information()
         if name in existing or any(spec["key"] == keys for spec in existing.values()):
@@ -291,10 +293,12 @@ class MongoDocumentStore(DocumentStore):
         create = partial(self._create_index, collection, fields, unique, ttl_seconds)
         thread_name = f"ensure-index-{collection}.{name}"
         threading.Thread(target=_settle, args=(build, create), name=thread_name, daemon=True).start()
-        finished = wait([build], timeout=_INDEX_BUILD_WAIT_SECONDS).done
-        if finished and not isinstance(build.exception(), NetworkTimeout):
-            build.result()
-            return
+        if wait([build], timeout=_INDEX_BUILD_WAIT_SECONDS).done:
+            error = build.exception()
+            if error is None:
+                return
+            if not isinstance(error, NetworkTimeout) or name not in self._c(collection).index_information():
+                raise error
         logger.warning("MongoDB is still building index %s on %s; going on without waiting for it", name, collection)
         build.add_done_callback(partial(_report_late_build, collection, name))
 

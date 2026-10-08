@@ -44,20 +44,24 @@ def test_a_unique_violation_is_the_stores_duplicate_key_error(write):
 
 
 class _Indexing:
-    """A pymongo collection whose index builds run until the test releases them."""
+    """A pymongo collection whose index builds run until the test releases them; MongoDB lists a build once it
+    has started it."""
 
-    def __init__(self, existing: dict | None = None, error: Exception | None = None) -> None:
+    def __init__(self, existing: dict | None = None, error: Exception | None = None, started: bool = True) -> None:
         self.existing = existing or {"_id_": {"key": [("_id", 1)]}}
         self.error = error
+        self.started = started
         self.release = threading.Event()
         self.asked: list[str] = []
         self.built: list[str] = []
 
     def index_information(self) -> dict:
-        return self.existing
+        return dict(self.existing)
 
     def create_index(self, keys, *, name, **kwargs):
         self.asked.append(name)
+        if self.started:
+            self.existing[name] = {"key": keys}
         self.release.wait(5)
         if self.error is not None:
             raise self.error
@@ -73,14 +77,19 @@ def _finish_builds() -> None:
         thread.join(5)
 
 
+@pytest.fixture
+def short_wait(monkeypatch):
+    monkeypatch.setattr(mongo_document_store, "_INDEX_BUILD_WAIT_SECONDS", 0.05)
+
+
 @pytest.mark.parametrize(
     "existing",
-    [{"id_version_unique": {"key": [("other", 1)]}}, {"legacy": {"key": [("id", 1), ("version", 1)]}}],
+    [{"id_version_index": {"key": [("other", 1)]}}, {"legacy": {"key": [("id", 1), ("version", 1)]}}],
     ids=["same-name", "same-keys"],
 )
-def test_an_index_already_there_is_not_built_again(existing):
+def test_an_index_already_listed_is_not_built_again(existing):
     coll = _Indexing(existing)
-    MongoDocumentStore({"c": coll}).ensure_index("c", ["id", "version"], unique=True)
+    MongoDocumentStore({"c": coll}).ensure_index("c", ["id", "version"])
     assert coll.asked == []
 
 
@@ -93,14 +102,13 @@ def test_a_build_within_the_wait_tolerates_an_equivalent_index(code):
 
 
 def test_a_build_that_fails_within_the_wait_raises():
-    coll = _Indexing(error=OperationFailure("E11000 duplicate key", code=11000))
+    coll = _Indexing(error=OperationFailure("cannot create index", code=67))
     coll.release.set()
-    with pytest.raises(OperationFailure, match="E11000"):
-        MongoDocumentStore({"c": coll}).ensure_index("c", ["id"], unique=True)
+    with pytest.raises(OperationFailure, match="cannot create index"):
+        MongoDocumentStore({"c": coll}).ensure_index("c", ["id"])
 
 
-def test_a_slow_build_is_left_to_finish_without_the_caller(monkeypatch, caplog):
-    monkeypatch.setattr(mongo_document_store, "_INDEX_BUILD_WAIT_SECONDS", 0.05)
+def test_a_slow_build_is_left_to_finish_without_the_caller(short_wait, caplog):
     coll = _Indexing()
     with caplog.at_level(logging.INFO, logger=mongo_document_store.__name__):
         started = time.monotonic()
@@ -115,28 +123,43 @@ def test_a_slow_build_is_left_to_finish_without_the_caller(monkeypatch, caplog):
     assert "finished building index task_id_created_at_utc_index" in caplog.text
 
 
+def test_a_unique_index_is_awaited_however_long_it_builds(short_wait):
+    coll = _Indexing()
+    threading.Timer(0.3, coll.release.set).start()
+    started = time.monotonic()
+    MongoDocumentStore({"c": coll}).ensure_index("c", ["instance_id"], unique=True)
+    assert time.monotonic() - started >= 0.3
+    assert coll.built == ["instance_id_unique"]
+
+
 @pytest.mark.parametrize(
     ("error", "level", "message"),
     [
-        (OperationFailure("E11000 duplicate key", code=11000), logging.ERROR, "did not build index id_unique"),
-        (NetworkTimeout("timed out"), logging.INFO, "Stopped waiting for index id_unique"),
+        (OperationFailure("Index build failed", code=276), logging.ERROR, "did not build index id_index"),
+        (NetworkTimeout("timed out"), logging.INFO, "Stopped waiting for index id_index"),
     ],
     ids=["build-failed", "client-timed-out"],
 )
-def test_a_build_that_ends_after_the_wait_is_logged_not_raised(monkeypatch, caplog, error, level, message):
-    monkeypatch.setattr(mongo_document_store, "_INDEX_BUILD_WAIT_SECONDS", 0.05)
+def test_a_build_that_ends_after_the_wait_is_logged_not_raised(short_wait, caplog, error, level, message):
     coll = _Indexing(error=error)
     with caplog.at_level(logging.INFO, logger=mongo_document_store.__name__):
-        MongoDocumentStore({"c": coll}).ensure_index("c", ["id"], unique=True)
+        MongoDocumentStore({"c": coll}).ensure_index("c", ["id"])
         coll.release.set()
         _finish_builds()
     assert any(r.levelno == level and message in r.getMessage() for r in caplog.records)
 
 
-def test_a_client_timeout_within_the_wait_leaves_the_build_to_the_server(caplog):
+def test_a_client_timeout_within_the_wait_leaves_a_started_build_to_the_server(caplog):
     coll = _Indexing(error=NetworkTimeout("timed out"))
     coll.release.set()
     with caplog.at_level(logging.INFO, logger=mongo_document_store.__name__):
         MongoDocumentStore({"c": coll}).ensure_index("c", ["id"])
     assert "still building index id_index" in caplog.text
     assert "Stopped waiting for index id_index" in caplog.text
+
+
+def test_a_client_timeout_before_mongodb_started_the_build_raises():
+    coll = _Indexing(error=NetworkTimeout("timed out"), started=False)
+    coll.release.set()
+    with pytest.raises(NetworkTimeout):
+        MongoDocumentStore({"c": coll}).ensure_index("c", ["id"])
