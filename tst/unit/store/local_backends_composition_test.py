@@ -247,6 +247,7 @@ def test_a_docker_image_names_its_repository_and_tarball_from_the_encoded_id(
     monkeypatch.setattr(LocalRegistryImageStore, "ensure_repository", lambda self, repository: local_registry.append(repository))
     pushed = []
     monkeypatch.setattr(docker_image, "_push_local_image", lambda src, ref, store: pushed.append(ref))
+    monkeypatch.setattr(docker_image, "_image_platform", lambda ref: None)
     monkeypatch.setattr(docker_image.subprocess, "Popen", _DockerSave)
 
     art = docker_image.DockerImageArtifact.put(id=entity_id, description="d", image_name="src:latest")
@@ -277,6 +278,7 @@ def test_an_local_id_outside_the_cli_is_refused_before_any_image_or_object_is_wr
     set_image_store(images)
     pushed = []
     monkeypatch.setattr(docker_image, "_push_local_image", lambda src, ref, store: pushed.append(ref))
+    monkeypatch.setattr(docker_image, "_image_platform", lambda ref: None)
     monkeypatch.setattr(docker_image.subprocess, "Popen", _DockerSave)
 
     with pytest.raises(ValueError, match="only the @local namespace's store holds"):
@@ -326,6 +328,7 @@ def test_a_put_bundled_that_fails_partway_doesnt_block_the_next(local_stores, mo
 def test_a_docker_image_put_that_stops_before_its_document_doesnt_block_the_next(local_stores, monkeypatch):
     set_image_store(FakeImageStore())
     monkeypatch.setattr(docker_image, "_push_local_image", lambda src, ref, store: None)
+    monkeypatch.setattr(docker_image, "_image_platform", lambda ref: None)
     monkeypatch.setattr(docker_image.subprocess, "Popen", _DockerSave)
     put_tar = docker_image.DockerImageArtifact.put_tar
 

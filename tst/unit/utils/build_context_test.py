@@ -4,6 +4,7 @@ import gzip
 import io
 import os
 import tarfile
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -177,3 +178,37 @@ def test_the_written_tar_extracts_to_the_context(tmp_path):
 
     assert (out / "app" / "main.py").read_text() == "print(1)\n" and os.access(out / "app" / "run.sh", os.X_OK)
     assert (out / "data" / "empty" / ".keep").exists()
+
+
+def test_a_dockerfile_that_is_a_link_keeps_its_own_name_and_brings_its_target(tmp_path):
+    root = _tree(tmp_path / "ctx", {**SERVER, "docker/real.Dockerfile": "FROM python:3.12\n", ".dockerignore": "docker\n",
+                                    "Dockerfile.dockerignore": "app\n", "docker/real.Dockerfile.dockerignore": "data\n"})
+    (root / "Dockerfile").unlink()
+    (root / "Dockerfile").symlink_to("docker/real.Dockerfile")
+
+    context = BuildContext.of(root, root / "Dockerfile")
+
+    names = {entry.name for entry in context.entries}
+    assert context.dockerfile == "Dockerfile"
+    assert {"Dockerfile", "docker/real.Dockerfile", "Dockerfile.dockerignore", "data/empty/.keep"} <= names
+    assert not any(name.startswith("app") for name in names)
+
+
+def test_a_dockerfile_that_links_out_of_the_context_is_recorded_as_none(tmp_path):
+    root = _tree(tmp_path / "ctx", SERVER)
+    (tmp_path / "Dockerfile.real").write_text("FROM python:3.12\n")
+    (root / "Dockerfile").unlink()
+    (root / "Dockerfile").symlink_to(tmp_path / "Dockerfile.real")
+
+    assert BuildContext.of(root, root / "Dockerfile").dockerfile is None
+
+
+def test_two_folders_one_name_once_normalized_are_refused(tmp_path):
+    root = _tree(tmp_path / "ctx", SERVER)
+    (root / "café").mkdir()
+    (root / "café").mkdir(exist_ok=True)
+    if sum(unicodedata.normalize("NFC", name) == "caf\u00e9" for name in os.listdir(root)) < 2:
+        pytest.skip("this filesystem, such as APFS, holds one of two names equal once normalized")
+
+    with pytest.raises(ValueError, match="café: two entries have this name once normalized to NFC"):
+        BuildContext.of(root, root / "Dockerfile")

@@ -52,9 +52,13 @@ class BuildContext:
         if not root.is_dir():
             raise ValueError(f"build context {root} is not a folder")
         top = Path(os.path.realpath(root))
-        named = _inside(top, dockerfile) if dockerfile is not None else None
         ignore_file = _ignore_file(top, dockerfile)
-        kept = {name for name in (named, _inside(top, ignore_file) if ignore_file else None) if name}
+        # Sent whatever the ignore file says, and through any link to them, so a build finds them in the context.
+        sent = [path for path in (dockerfile, ignore_file) if path is not None]
+        kept = {name for path in sent for name in (_inside(top, path), _inside(top, Path(os.path.realpath(path)))) if name}
+        named = None
+        if dockerfile is not None and _inside(top, Path(os.path.realpath(dockerfile))):
+            named = _inside(top, dockerfile)
         matcher = FilePatternMatcher.from_file(ignore_file) if ignore_file else None
         walk = _Walk(top, matcher, kept)
         walk.run()
@@ -104,6 +108,7 @@ class _Walk:
         self.kept = kept
         self.found: dict[str, _Entry] = {}
         self.folders: set[str] = set()
+        self.names: set[str] = set()
         self.problems: list[str] = []
 
     def run(self) -> None:
@@ -123,10 +128,11 @@ class _Walk:
                 name = "/".join(child_parts)
                 excluded = name not in self.kept and self._excluded(name)
                 if child.is_dir(follow_symlinks=False):
+                    if (excluded and self._prunable(name)) or not self._claim(name):
+                        continue
                     if not excluded:
                         self.folders.add(name)
-                    if not excluded or not self._prunable(name):
-                        pending.append((Path(child.path), child_parts))
+                    pending.append((Path(child.path), child_parts))
                 elif excluded:
                     continue
                 elif child.is_symlink():
@@ -152,10 +158,16 @@ class _Walk:
         return self.matcher.can_prune_directories() and not any(kept.startswith(f"{name}/") for kept in self.kept)
 
     def _add(self, entry: _Entry) -> None:
-        if entry.name in self.found:
-            self.problems.append(f"{entry.name}: two entries have this name once normalized to NFC; rename one")
-        else:
+        if self._claim(entry.name):
             self.found[entry.name] = entry
+
+    def _claim(self, name: str) -> bool:
+        """Whether ``name`` is still free: two names on disk can be one once normalized to NFC."""
+        if name in self.names:
+            self.problems.append(f"{name}: two entries have this name once normalized to NFC; rename one")
+            return False
+        self.names.add(name)
+        return True
 
     def _file(self, name: str, path: Path) -> None:
         try:
@@ -194,9 +206,10 @@ def _ignore_file(top: Path, dockerfile: Path | None) -> Path | None:
 
 
 def _inside(top: Path, path: Path) -> str | None:
-    """``path``'s name in the context at ``top``, links resolved, or None when it resolves outside it."""
-    resolved = Path(os.path.realpath(path))
-    return unicodedata.normalize("NFC", resolved.relative_to(top).as_posix()) if resolved.is_relative_to(top) else None
+    """``path``'s name in the context at ``top``, the folders above it resolved but not the file itself, so a link
+    keeps its own name; None when it's outside the context."""
+    named = Path(os.path.realpath(path.parent)) / path.name
+    return unicodedata.normalize("NFC", named.relative_to(top).as_posix()) if named.is_relative_to(top) else None
 
 
 def _show(parts: tuple[str, ...]) -> str:

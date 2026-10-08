@@ -117,6 +117,7 @@ class _DockerSave:
 def test_put_keeps_the_whole_context_and_records_how_to_build_it(local_stores, context, monkeypatch):
     monkeypatch.setattr(LocalRegistryImageStore, "ensure_repository", lambda self, repository: None)
     monkeypatch.setattr(docker_image, "_push_local_image", lambda src, ref, store: None)
+    monkeypatch.setattr(docker_image, "_image_platform", lambda ref: None)
     monkeypatch.setattr(docker_image.subprocess, "Popen", _DockerSave)
 
     image = DockerImageArtifact.put("server", description="d", image_name="server:latest",
@@ -131,8 +132,35 @@ def test_put_keeps_the_whole_context_and_records_how_to_build_it(local_stores, c
 def test_put_refuses_a_context_it_cant_take_before_pushing_anything(local_stores, context, monkeypatch):
     pushed = []
     monkeypatch.setattr(docker_image, "_push_local_image", lambda src, ref, store: pushed.append(ref))
+    monkeypatch.setattr(docker_image, "_image_platform", lambda ref: None)
     os.mkfifo(context / "pipe")
 
     with pytest.raises(ValueError, match="pipe: neither a regular file"):
         DockerImageArtifact.put("server", description="d", image_name="server:latest", build_context_path=str(context))
     assert pushed == []
+
+
+@pytest.mark.parametrize("inspected, platform", [
+    ("linux/arm64/v8\n", "linux/arm64"), ("linux/amd64/\n", "linux/amd64"), ("linux/arm/v7\n", "linux/arm/v7"),
+])
+def test_the_platform_of_an_image_is_named_as_docker_build_takes_it(monkeypatch, inspected, platform):
+    monkeypatch.setattr(docker_image.subprocess, "run",
+                        lambda *a, **k: docker_image.subprocess.CompletedProcess(a, 0, stdout=inspected, stderr=""))
+
+    assert docker_image._image_platform("x:v1") == platform
+
+
+def test_put_records_the_platform_it_built_for_when_none_is_given(local_stores, context, monkeypatch):
+    monkeypatch.setattr(LocalRegistryImageStore, "ensure_repository", lambda self, repository: None)
+    monkeypatch.setattr(docker_image, "_push_local_image", lambda src, ref, store: None)
+    monkeypatch.setattr(docker_image, "_image_platform", lambda ref: "linux/arm64")
+    monkeypatch.setattr(docker_image.subprocess, "Popen", _DockerSave)
+
+    native = DockerImageArtifact.put("server", description="d", image_name="server:latest",
+                                     build_context_path=str(context), dockerfile_path="Dockerfile")
+    explicit = DockerImageArtifact.put("server", description="d", image_name="server:latest",
+                                       build_context_path=str(context), dockerfile_path="Dockerfile",
+                                       platform="linux/amd64")
+
+    assert (native.platform, explicit.platform) == ("linux/arm64", "linux/amd64")
+    assert native.source_digest != explicit.source_digest

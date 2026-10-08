@@ -125,6 +125,7 @@ class DockerImageArtifact(Artifact):
         image_ref = image_store.image_ref(repository, f"v{version}")
         image_store.ensure_repository(repository)
         _push_local_image(image_name, image_ref, image_store)
+        platform = platform or _image_platform(image_ref)
 
         with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
             tmp_path = Path(tmp.name)
@@ -517,6 +518,18 @@ def _parse_copy_sources(dockerfile_text: str, dockerfile_rel_path: str | None = 
                 paths.append(top_dir)
 
     return paths if paths else ["."]
+
+
+def _image_platform(image_ref: str) -> str | None:
+    """The platform of the local image ``image_ref`` as ``docker build --platform`` names it, or None when docker
+    can't say."""
+    result = subprocess.run(["docker", "image", "inspect", "--format", "{{.Os}}/{{.Architecture}}/{{.Variant}}", image_ref],
+                            capture_output=True, text=True)
+    if result.returncode != 0 or result.stdout.count("/") != 2:
+        return None
+    os_name, architecture, variant = result.stdout.strip().split("/")
+    # arm64 has one variant, so it goes unnamed as in `--platform linux/arm64`; 32-bit arm's v6 and v7 differ.
+    return f"{os_name}/{architecture}/{variant}" if architecture == "arm" and variant else f"{os_name}/{architecture}"
 
 
 def _resolve_dockerfile(context_dir: Path, dockerfile_path: str | None) -> Path | None:
