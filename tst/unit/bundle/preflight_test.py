@@ -17,6 +17,7 @@ from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store
 from agent_env.bundle import BundleError, dry_run_bundle, run_bundle
 from agent_env.cli import cli
+from agent_env.config import get_config
 from agent_env.config.runtime import Config
 from agent_env.env import Env, GatewayEnv, MCPServerEnv, MultiEnv
 from agent_env.env import bootstrap
@@ -152,6 +153,33 @@ def test_a_sandbox_image_in_this_machines_registry_is_refused_on_another_provide
     ]
 
 
+# Images with no tarball, which a sandbox pulls by name
+
+PULLED = ("ghcr.io/team/img@sha256:" + "0" * 64, None)
+
+
+@pytest.mark.parametrize("sandbox", ["local", "modal", "modal_vm"])
+def test_an_image_with_no_tarball_is_pulled_so_it_runs_on_any_provider(bundle_dir, sandbox):
+    _agent("solver", PULLED)
+    _task(bundle_dir, [AGENT])
+
+    assert [entry.name for entry in dry_run_bundle(bundle_dir, sandbox=sandbox).runs] == ["t"]
+
+
+@pytest.mark.parametrize("sandbox", ["local", "modal"])
+def test_an_image_with_no_tarball_and_no_registry_to_pull_it_from_is_refused_on_every_provider(bundle_dir, sandbox):
+    _agent("solver", ("img:v1", None))
+    _env("crm", ("crm:v1", None))
+    _task(bundle_dir, [AGENT, {"id": "env", "type": "deploy_env", "env_id": "crm"}])
+
+    problems = _problems(lambda: dry_run_bundle(bundle_dir, sandbox=sandbox))
+
+    assert ("tasks/t.json: step 'agent': deploys agent 'solver''s image, which no sandbox can get: 'solver-image' v1 has "
+            "no tar.gz, and its image name 'img:v1' doesn't name a registry to pull it from") in problems
+    assert ("tasks/t.json: step 'env': deploys env 'crm''s image 'crm-image', which no sandbox can get: 'crm-image' v1 "
+            "has no tar.gz, and its image name 'crm:v1' doesn't name a registry to pull it from") in problems
+
+
 # What a provider can create
 
 
@@ -279,6 +307,17 @@ def test_a_step_that_names_no_agent_needs_the_default_in_the_store(bundle_dir, m
     ]
     _agent("house-agent")
     dry_run_bundle(bundle_dir)
+
+
+def test_a_default_agent_the_store_cant_read_is_reported_not_raised(bundle_dir, monkeypatch):
+    monkeypatch.setattr("agent_env.config.runtime.Config.get_default_a2a_agent_id", lambda self: "house-agent")
+    get_config().get_document_store().insert("a2a_agents", {"id": "house-agent", "version": 1, "type": "a2a_agent"})
+    _task(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": []}])
+
+    (problem,) = _problems(lambda: dry_run_bundle(bundle_dir))
+
+    assert problem.startswith("tasks/t.json: step 'agent': names no agent, so it deploys the default, 'house-agent', "
+                              "and agent 'house-agent' can't be read (KeyError:")
 
 
 def test_a_judge_the_task_deploys_itself_or_the_direct_llm_judge_needs_no_default_agent(bundle_dir, monkeypatch):

@@ -9,6 +9,7 @@ import pytest
 
 import agent_env.providers.sandbox_providers.local_sandbox as ls
 from agent_env.a2a_agent.a2a_agent import A2AAgent
+from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.config import reset_config, set_object_store
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER, SANDBOX_MODE_VM
@@ -18,6 +19,10 @@ from agent_env.store.routing import LocalRunObjectStore
 from agent_env.a2a_agent import a2a_agent as a2a_agent_module
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from tst.unit.store.fakes import FakeObjectStore
+
+
+def _image(tar_gz_object_url: str | None, image_name: str = "img:1") -> DockerImageArtifact:
+    return DockerImageArtifact(id="img", description="", image_name=image_name, tar_gz_object_url=tar_gz_object_url)
 
 _real_copy_into_container = ls._copy_into_container  # before the fixtures below replace them
 _real_local_grant_trust = ls.local_grant_trust
@@ -214,7 +219,7 @@ async def test_load_docker_images_stages_tarballs_per_sandbox(tmp_path):
         def download_to_file(self, url, dest_path):
             self.staged.append(dest_path)
 
-    artifact = SimpleNamespace(tar_gz_object_url="file:///store/svc.tar.gz", image_name="svc:latest")
+    artifact = _image("file:///store/svc.tar.gz", "svc:latest")
     store = _Local()
     set_object_store(store)
     try:

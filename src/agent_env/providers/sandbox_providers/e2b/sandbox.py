@@ -291,8 +291,8 @@ class E2BSandbox(VmSandbox):
         await self._sandbox.update_network(network)
         self.network_policy = policy
 
-    async def load_docker_images(self, artifacts: list) -> None:
-        """Load images after adding their signed-download hosts to the policy.
+    async def _load_tarballs(self, artifacts: list) -> None:
+        """Load image tarballs after adding their signed-download hosts to the policy.
 
         With a restrictive policy, the object store that supplies image tarballs
         is infrastructure rather than a workload destination.  E2B replaces an
@@ -301,8 +301,6 @@ class E2BSandbox(VmSandbox):
         :meth:`NetworkPolicy.with_hosts`.
         """
         policy = self.network_policy
-        if not artifacts:
-            return
         if policy is None:
             raise RuntimeError(
                 f"Cannot load Docker images in reconnected E2B sandbox {self.sandbox_id}: "
@@ -310,7 +308,7 @@ class E2BSandbox(VmSandbox):
                 "be added safely"
             )
         if not policy.restricts_egress:
-            await super().load_docker_images(artifacts)
+            await super()._load_tarballs(artifacts)
             return
 
         signed_urls = await self._signed_image_urls(artifacts)

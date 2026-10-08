@@ -12,8 +12,8 @@ from agent_env.providers.sandbox_providers.chained_sandbox_provider import Chain
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandbox, ModalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandbox, ModalVmSandboxProvider
-from agent_env.providers.sandbox_providers.sandbox import Sandbox, VmSandbox
-from agent_env.providers.sandbox_providers.sandbox_provider import _BUILTIN_SANDBOX_PROVIDERS, SandboxProvider, _pull, build_sandbox_provider
+from agent_env.providers.sandbox_providers.sandbox import Sandbox, VmSandbox, _pull
+from agent_env.providers.sandbox_providers.sandbox_provider import _BUILTIN_SANDBOX_PROVIDERS, SandboxProvider, build_sandbox_provider
 from agent_env.store import ImageStore, RegistryAuth
 from tst.util.exec_scripts import script_run
 

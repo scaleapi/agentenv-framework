@@ -16,6 +16,7 @@ from agent_env.store.image_store.oci_registry_credentials import (
     OciRegistryCredentials,
     RegistryAuth,
     SecretStoreCredentials,
+    names_registry,
     normalize_registry_host,
     registry_host_from_ref,
 )
@@ -25,6 +26,7 @@ __all__ = [
     "OciRegistryImageStore",
     "RegistryAuth",
     "OciRegistryCredentials",
+    "names_registry",
     "normalize_registry_host",
     "registry_host_from_ref",
     "EcrCredentials",

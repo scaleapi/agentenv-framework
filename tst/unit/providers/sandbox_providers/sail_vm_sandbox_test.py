@@ -7,8 +7,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.providers.sandbox_providers.sail_vm.sandbox import SailVmSandbox, egress_document, policy_from_document
 from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy
+
+
+def _image(tar_gz_object_url: str | None, image_name: str = "img:1") -> DockerImageArtifact:
+    return DockerImageArtifact(id="img", description="", image_name=image_name, tar_gz_object_url=tar_gz_object_url)
 
 
 class _HostLost(Exception):
@@ -225,7 +230,19 @@ async def test_terminate_tolerates_an_already_deleted_sailbox():
 async def test_image_loading_fails_closed_when_the_policy_is_unknown():
     sandbox, _ = _sandbox(policy=None)
     with pytest.raises(RuntimeError, match="applied egress policy is unknown"):
-        await sandbox.load_docker_images([object()])
+        await sandbox.load_docker_images([_image("s3://bucket/a.tar.gz")])
+
+
+@pytest.mark.asyncio
+async def test_an_image_pulled_by_name_leaves_the_policy_alone_even_when_it_is_unknown(monkeypatch):
+    sandbox, sailbox = _sandbox(policy=None)
+    pull = AsyncMock()
+    monkeypatch.setattr(SailVmSandbox, "pull_images", pull)
+
+    await sandbox.load_docker_images([_image(None, "ghcr.io/team/tool:v1")])
+
+    pull.assert_awaited_once_with(["ghcr.io/team/tool:v1"])
+    sailbox.set_egress_policy.aio.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -237,14 +254,15 @@ async def test_image_loading_widens_an_allowlist_with_the_signed_download_hosts(
     )
     load = AsyncMock()
     monkeypatch.setattr(SailVmSandbox, "_load_docker_images", load)
+    images = [_image("s3://bucket/a.tar.gz"), _image("file:///store/b.tar.gz")]
 
-    await sandbox.load_docker_images(["a", "b"])
+    await sandbox.load_docker_images(images)
 
     sailbox.set_egress_policy.aio.assert_awaited_once_with(
         {"allowlist": ["pypi.org", "bucket.s3.amazonaws.com", "10.0.0.0/8"]}
     )
     assert sandbox.network_policy.allow_hosts == ("pypi.org", "bucket.s3.amazonaws.com")
-    load.assert_awaited_once_with(["a", "b"], ["https://bucket.s3.amazonaws.com/a?sig=1", None])
+    load.assert_awaited_once_with(images, ["https://bucket.s3.amazonaws.com/a?sig=1", None])
 
 
 @pytest.mark.asyncio
@@ -252,7 +270,7 @@ async def test_image_loading_leaves_an_allow_all_policy_alone(monkeypatch):
     sandbox, sailbox = _sandbox()
     monkeypatch.setattr(SailVmSandbox, "_signed_image_urls", AsyncMock(return_value=["https://x.example/a"]))
     monkeypatch.setattr(SailVmSandbox, "_load_docker_images", AsyncMock())
-    await sandbox.load_docker_images(["a"])
+    await sandbox.load_docker_images([_image("s3://bucket/a.tar.gz")])
     sailbox.set_egress_policy.aio.assert_not_awaited()
     sandbox._sdk.Sailbox.get.aio.assert_not_awaited()
 
@@ -263,7 +281,7 @@ async def test_widening_past_sails_allowlist_limit_is_refused(monkeypatch):
     sandbox, sailbox = _sandbox(policy=full)
     monkeypatch.setattr(SailVmSandbox, "_signed_image_urls", AsyncMock(return_value=["https://bucket.example/a"]))
     with pytest.raises(RuntimeError, match="exceed Sail's 128-entry egress allowlist"):
-        await sandbox.load_docker_images(["a"])
+        await sandbox.load_docker_images([_image("s3://bucket/a.tar.gz")])
     sailbox.set_egress_policy.aio.assert_not_awaited()
 
 
@@ -275,7 +293,7 @@ async def test_a_host_under_an_allowed_wildcard_needs_no_new_entry(monkeypatch):
     sandbox, sailbox = _sandbox(policy=full)
     monkeypatch.setattr(SailVmSandbox, "_signed_image_urls", AsyncMock(return_value=["https://bucket.s3.amazonaws.com/a"]))
     monkeypatch.setattr(SailVmSandbox, "_load_docker_images", AsyncMock())
-    await sandbox.load_docker_images(["a"])
+    await sandbox.load_docker_images([_image("s3://bucket/a.tar.gz")])
     sailbox.set_egress_policy.aio.assert_not_awaited()
     sandbox._sdk.Sailbox.get.aio.assert_not_awaited()
 
@@ -298,7 +316,7 @@ async def test_a_host_already_allowed_is_not_reapplied(monkeypatch):
     sandbox, sailbox = _sandbox(policy=_ALLOWLIST)
     monkeypatch.setattr(SailVmSandbox, "_signed_image_urls", AsyncMock(return_value=["https://pypi.org/a"]))
     monkeypatch.setattr(SailVmSandbox, "_load_docker_images", AsyncMock())
-    await sandbox.load_docker_images(["a"])
+    await sandbox.load_docker_images([_image("s3://bucket/a.tar.gz")])
     sailbox.set_egress_policy.aio.assert_not_awaited()
 
 

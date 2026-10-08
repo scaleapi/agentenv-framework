@@ -284,10 +284,38 @@ class VmSandbox(Sandbox):
         )
 
     async def load_docker_images(self, artifacts: list) -> None:
-        """Load Docker images from DockerImageArtifacts into the sandbox in parallel."""
+        """Put each DockerImageArtifact's image on the VM: those with a tar.gz are loaded from it, in parallel, and the
+        rest are pulled by image name. An image no sandbox can get is refused before anything is loaded."""
         if not artifacts:
             return
+        if problems := [problem for artifact in artifacts if (problem := artifact.load_problem())]:
+            raise RuntimeError(f"Can't load images: {'; '.join(problems)}")
+        if tarballs := [artifact for artifact in artifacts if artifact.tar_gz_object_url]:
+            await self._load_tarballs(tarballs)
+        if pulled := [artifact.image_name for artifact in artifacts if not artifact.tar_gz_object_url]:
+            await self.pull_images(pulled)
+
+    async def _load_tarballs(self, artifacts: list) -> None:
+        """Load the images of ``artifacts``, each with a tar.gz, in parallel."""
         await self._load_docker_images(artifacts, await self._signed_image_urls(artifacts))
+
+    async def pull_images(self, image_names: list[str]) -> None:
+        """``docker pull`` each of ``image_names``, concurrently, after logging in to each registry the image store
+        holds credentials for. A network policy restricting egress isn't widened for them: it must allow the
+        registries itself."""
+        image_names = list(dict.fromkeys(image_names))
+        config = get_config()
+        logins: dict[str, Any] = {}
+        for image_name in image_names:
+            auth = await asyncio.to_thread(config.get_image_store().auth, image_name)
+            if auth is not None:
+                logins.setdefault(auth.registry, auth)
+        for auth in logins.values():
+            await self.exec_script(
+                f"echo {shlex.quote(auth.password)} | docker login "
+                f"--username {shlex.quote(auth.username)} --password-stdin {shlex.quote(auth.registry)}"
+            )
+        await asyncio.gather(*(_pull(self, image_name) for image_name in image_names))
 
     @staticmethod
     async def _signed_image_urls(artifacts: list) -> list[str | None]:
@@ -453,6 +481,19 @@ class VmSandbox(Sandbox):
 def port_bindings(host_ips: Iterable[str], host_port: int, container_port: int) -> list[str]:
     """Docker publish specs for one port: one per host IP, or a bare one (every interface) when there are none."""
     return [f"{ip}:{host_port}:{container_port}" for ip in host_ips] or [f"{host_port}:{container_port}"]
+
+
+async def _pull(sandbox: VmSandbox, image_name: str) -> None:
+    """``docker pull image_name``. An image built for linux/amd64 only has nothing for an arm64 host (an
+    Apple Silicon Mac running the local provider), so that pull falls back to the amd64 image, which the
+    host's Docker runs emulated."""
+    try:
+        await sandbox.exec_script(f"docker pull {shlex.quote(image_name)}")
+    except RuntimeError as e:
+        if "no matching manifest" not in str(e):
+            raise
+        logger.warning("%s has no image for this host's platform; pulling linux/amd64, which runs emulated", image_name)
+        await sandbox.exec_script(f"docker pull --platform linux/amd64 {shlex.quote(image_name)}")
 
 
 async def stage_files_into_container(sandbox: Sandbox, file_artifacts: dict[str, Any], destination: str) -> dict[str, str]:

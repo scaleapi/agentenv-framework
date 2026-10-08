@@ -95,6 +95,7 @@ class _Image:
 
     what: str
     local_only: str | None  # why only this machine has it, or None
+    unloadable: str | None = None  # why no sandbox can get it, or None
 
 
 @dataclass(frozen=True)
@@ -179,6 +180,7 @@ class _Walk:
         else:  # a plugin's provider, or one deploy_env's own preflight refuses for this env
             return
         env_id, images = step.env_id, deployment.images
+        self._loadable(where, images)
         if _local_link(provider):
             self.infra |= kinds
             self.docker_users.append(where)
@@ -256,8 +258,7 @@ class _Walk:
         if ref.id in self.written:
             return None  # another of the bundle's writes, which materialize refuses or writes first
         try:
-            return _Image(what, _local_only(DockerImageArtifact.get(ref.id, self._planned_version(ref.kind, ref.id,
-                                                                                                    ref.version))))
+            return _image(what, DockerImageArtifact.get(ref.id, self._planned_version(ref.kind, ref.id, ref.version)))
         except NotFoundError:
             return None  # the plan reports a store image that isn't there
 
@@ -288,10 +289,11 @@ class _Walk:
         if agent_id is None:
             self.default_agent_users.append((where, unnamed))
             agent_id = get_config().get_default_a2a_agent_id()
+        if (image := self._agent_image(agent_id, version)) is None:
+            return
+        self._loadable(where, [image])
         if remote := _remote_links(provider):
-            image = self._agent_image(agent_id, version)
-            if image is not None:
-                self._reachable(where, remote, [image])
+            self._reachable(where, remote, [image])
 
     def _sandbox(self, where: str, step: DeploySandboxTaskStep) -> None:
         provider = _provider(self.sandbox or step.sandbox_type, get_sandbox_provider)
@@ -308,8 +310,8 @@ class _Walk:
     # What a deploy runs
 
     def _agent_image(self, agent_id: str, version: int | None) -> _Image | None:
-        """The image the agent ``agent_id`` runs, or None when the store doesn't hold the agent, which the plan or
-        ``_default_agent`` reports."""
+        """The image the agent ``agent_id`` runs, or None when the store doesn't hold the agent or can't read it, which
+        the plan or ``_default_agent`` reports."""
         what = f"agent {agent_id!r}'s image"
         if (agent := self.agents.get(agent_id)) is not None:
             image_id, image_version = parse_toml_ref(EntityKind.ARTIFACT, agent.config.get("image"))
@@ -319,11 +321,16 @@ class _Walk:
             if image_id in self.written:
                 return None  # another of the bundle's writes, which materialize refuses or writes first
             planned = self._planned_version(EntityKind.ARTIFACT, image_id, image_version)
-            return _Image(what, _local_only(DockerImageArtifact.get(image_id, planned)))
+            return _image(what, DockerImageArtifact.get(image_id, planned))
         try:
-            return _Image(what, _local_only(A2AAgent.get(agent_id, version).docker_image_artifact))
-        except NotFoundError:
+            return _image(what, A2AAgent.get(agent_id, version).docker_image_artifact)
+        except (NotFoundError, ValueError, KeyError, TypeError):
             return None
+
+    def _loadable(self, where: str, images: list[_Image]) -> None:
+        for image in images:
+            if image.unloadable:
+                self._problem(where, f"deploys {image.what}, which no sandbox can get: {image.unloadable}")
 
     def _reachable(self, where: str, remote: list[SandboxProvider], images: list[_Image]) -> None:
         for image in images:
@@ -343,7 +350,7 @@ class _Walk:
                 continue
             images = ([env.db_docker_image_artifact, env.db_web_docker_image_artifact, env.db_mcp_docker_image_artifact]
                       if isinstance(env, ServiceDBEnv) else [env.docker_image_artifact])
-            self._reachable(where, [provider], [_Image(f"the {kind} env {env_id!r}'s image {image.id!r}", _local_only(image))
+            self._reachable(where, [provider], [_image(f"the {kind} env {env_id!r}'s image {image.id!r}", image)
                                                 for image in images])
 
     def _default_agent(self) -> None:
@@ -373,8 +380,7 @@ def _stored_images(env: Env) -> tuple[list[_Image], bool]:
     """The images a store env runs through a gateway, and whether it has websites."""
     topology = _gateway_topology(env)
     images = [*topology.mcp_server_images, *(topology.website_images or [])]
-    return [_Image(f"env {env.id!r}'s image {image.id!r}", _local_only(image)) for image in images], bool(
-        topology.website_configs)
+    return [_image(f"env {env.id!r}'s image {image.id!r}", image) for image in images], bool(topology.website_configs)
 
 
 def _state_type(step: DeployEnvTaskStep) -> str | None:
@@ -422,12 +428,16 @@ def _name(provider: SandboxProvider) -> str:
     return cls.__name__
 
 
+def _image(what: str, image: DockerImageArtifact) -> _Image:
+    return _Image(what, _local_only(image), image.load_problem())
+
+
 def _local_only(image: DockerImageArtifact | str) -> str | None:
     """Why only this machine has ``image``: its reference names a registry on this machine, or it's saved in this
     machine's object store. None when neither."""
     ref = image if isinstance(image, str) else image.image_name
     if is_loopback_host(registry_host_from_ref(ref)):
         return f"{ref} is in a registry on this machine"
-    if not isinstance(image, str) and urlparse(image.tar_gz_object_url).scheme == "file":
+    if not isinstance(image, str) and image.tar_gz_object_url and urlparse(image.tar_gz_object_url).scheme == "file":
         return f"{image.id!r} is saved in this machine's object store"
     return None

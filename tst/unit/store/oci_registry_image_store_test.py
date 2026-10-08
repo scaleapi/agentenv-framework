@@ -3,7 +3,7 @@
 import pytest
 
 from agent_env.store import ImageStore, OciRegistryCredentials, OciRegistryImageStore, RegistryAuth
-from agent_env.store.image_store import registry_host_from_ref
+from agent_env.store.image_store import names_registry, registry_host_from_ref
 
 
 class _Credentials(OciRegistryCredentials):
@@ -52,6 +52,22 @@ def test_unqualified_references_resolve_to_docker_hub():
     assert registry_host_from_ref("LOCALHOST/image:v1") == "localhost"
     assert registry_host_from_ref("ghcr.io/example/image:v1") == "ghcr.io"
     assert registry_host_from_ref("/invalid:v1") is None
+
+
+@pytest.mark.parametrize("ref, named", [
+    ("ghcr.io/example/image:v1", True),
+    ("registry.example:5000/image@sha256:" + "0" * 64, True),
+    ("localhost/image:v1", True),
+    ("LOCALHOST:5000/image", True),
+    ("docker.io/library/ubuntu:24.04", True),
+    ("ubuntu:24.04", False),
+    ("library/ubuntu:24.04", False),
+    ("team/image:v1", False),
+    ("", False),
+    ("https://ghcr.io/example/image:v1", False),
+])
+def test_a_reference_names_its_registry_only_as_docker_reads_one(ref, named):
+    assert names_registry(ref) is named
 
 
 @pytest.mark.parametrize("host", ["", "   ", "https://ghcr.io", "ghcr.io/team"])

@@ -464,10 +464,8 @@ class SailVmSandbox(VmSandbox):
                 )
             await self._apply_policy(policy.with_hosts(missing))
 
-    async def load_docker_images(self, artifacts: list) -> None:
-        """Load images, first adding their signed-download hosts to a restrictive policy."""
-        if not artifacts:
-            return
+    async def _load_tarballs(self, artifacts: list) -> None:
+        """Load image tarballs, first adding their signed-download hosts to a restrictive policy."""
         self._known_policy("load Docker images")
         signed_urls = await self._signed_image_urls(artifacts)
         await self._allow_download_hosts(signed_urls, "load Docker images")

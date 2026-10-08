@@ -23,7 +23,7 @@ from pydantic import ConfigDict, Field, model_serializer
 
 from agent_env.artifact.artifact import Artifact, _write_twin
 from agent_env.store.ids import fs_safe, image_repository, is_local_id
-from agent_env.store.image_store.oci_registry_credentials import is_loopback_host, registry_host_from_ref
+from agent_env.store.image_store.oci_registry_credentials import is_loopback_host, names_registry, registry_host_from_ref
 from agent_env.utils.deprecation import OMITTED, renamed_keyword
 
 logger = logging.getLogger(__name__)
@@ -63,7 +63,8 @@ def _git_clone_commands(owner: str, repo: str, ref: str | None, token: str | Non
     ]
 
 class DockerImageArtifact(Artifact):
-    """A Docker image artifact stored as tar.gz in the object store."""
+    """A Docker image artifact: a tar.gz of the image in the object store, or, without one, a registry reference a
+    sandbox pulls."""
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -71,8 +72,10 @@ class DockerImageArtifact(Artifact):
 
     type: Literal["docker_image"] = "docker_image"
     description: str = Field(description="Description of the Docker image")
-    image_name: str = Field(description="Docker image name/tag")
-    tar_gz_object_url: str = Field(alias="tar_gz_s3_url", description="Object-store locator of the tar.gz file")
+    image_name: str = Field(description="Docker image name/tag; with no tar.gz, the registry reference pulled")
+    tar_gz_object_url: str | None = Field(
+        default=None, alias="tar_gz_s3_url", description="Object-store locator of the tar.gz file, if it has one"
+    )
     build_context_object_url: str | None = Field(default=None, alias="build_context_s3_url", description="Object-store locator of the build context tar.gz")
 
     # No return annotation: pydantic builds the serialization schema from one, and a dict drops the fields.
@@ -188,6 +191,8 @@ class DockerImageArtifact(Artifact):
         )
         if tar_gz_object_url is None:
             raise TypeError(f"{owner}() missing required keyword argument: 'tar_gz_object_url'")
+        if not tar_gz_object_url:
+            raise ValueError(f"{owner}(): tar_gz_object_url is empty")
         for url in (tar_gz_object_url, build_context_object_url):
             if url:
                 get_config().check_object_url(id, url)
@@ -205,7 +210,17 @@ class DockerImageArtifact(Artifact):
 
     def load(self) -> bytes:
         from agent_env.artifact.store import get_artifact_store
+        if not self.tar_gz_object_url:
+            raise ValueError(f"{self.id!r} v{self.version} has no tar.gz; its image is pulled from {self.image_name}")
         return get_artifact_store().get_object(self.tar_gz_object_url)
+
+    def load_problem(self) -> str | None:
+        """Why no sandbox can get this image, or None when one can: a tar.gz is loaded, and with none, ``image_name``
+        is pulled, so it must name its registry."""
+        if self.tar_gz_object_url or names_registry(self.image_name):
+            return None
+        return (f"{self.id!r} v{self.version} has no tar.gz, and its image name {self.image_name!r} doesn't name a "
+                "registry to pull it from")
 
     @classmethod
     async def put_from_github(

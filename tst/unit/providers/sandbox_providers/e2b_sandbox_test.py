@@ -7,10 +7,15 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.providers.sandbox_providers.e2b.sandbox import E2BSandbox
 from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy, VmSandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_VM
 from agent_env.store import set_object_store
+
+
+def _image(tar_gz_object_url: str | None, image_name: str = "img:1") -> DockerImageArtifact:
+    return DockerImageArtifact(id="img", description="", image_name=image_name, tar_gz_object_url=tar_gz_object_url)
 
 
 def _inner() -> MagicMock:
@@ -219,7 +224,7 @@ async def test_restricted_image_loading_adds_signed_host_to_applied_policy(
         allow_cidrs=("10.0.0.0/8",),
     )
     sandbox = E2BSandbox(inner, network_policy=policy)
-    artifact = SimpleNamespace(tar_gz_object_url="s3://bucket/image.tar.gz")
+    artifact = _image("s3://bucket/image.tar.gz")
     store = MagicMock()
     store.signed_get_url.return_value = "https://downloads.example/path?signature=x"
     set_object_store(store)
@@ -258,7 +263,7 @@ async def test_restricted_image_loading_retains_extended_policy_after_failure(
     monkeypatch.setattr(VmSandbox, "_load_docker_images", fail_load)
 
     with pytest.raises(RuntimeError, match="download failed"):
-        await sandbox.load_docker_images([SimpleNamespace(tar_gz_object_url="s3://bucket/img")])
+        await sandbox.load_docker_images([_image("s3://bucket/img")])
 
     inner.update_network.assert_awaited_once_with(
         {
@@ -273,10 +278,33 @@ async def test_restricted_image_loading_retains_extended_policy_after_failure(
 @pytest.mark.asyncio
 async def test_reconnected_sandbox_with_unknown_policy_refuses_image_load():
     sandbox = E2BSandbox(_inner(), network_policy=None)
-    artifact = SimpleNamespace(tar_gz_object_url="s3://bucket/image.tar.gz")
+    artifact = _image("s3://bucket/image.tar.gz")
 
     with pytest.raises(RuntimeError, match="applied network policy is unknown"):
         await sandbox.load_docker_images([artifact])
+
+
+@pytest.mark.asyncio
+async def test_restricted_image_loading_widens_the_policy_for_tarballs_only_and_pulls_the_rest_through_it(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    inner = _inner()
+    inner.update_network = AsyncMock()
+    policy = NetworkPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=("workload.example",))
+    sandbox = E2BSandbox(inner, network_policy=policy)
+    tarball, pulled = _image("s3://bucket/image.tar.gz"), _image(None, "ghcr.io/team/tool:v1")
+    store = MagicMock()
+    store.signed_get_url.return_value = "https://downloads.example/image.tar.gz"
+    set_object_store(store)
+    base_load, pull = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(VmSandbox, "_load_docker_images", base_load)
+    monkeypatch.setattr(VmSandbox, "pull_images", pull)
+
+    await sandbox.load_docker_images([tarball, pulled])
+
+    assert sandbox.network_policy == policy.with_hosts(["downloads.example"])
+    base_load.assert_awaited_once_with([tarball], ["https://downloads.example/image.tar.gz"])
+    pull.assert_awaited_once_with(["ghcr.io/team/tool:v1"])
 
 
 @pytest.mark.asyncio
