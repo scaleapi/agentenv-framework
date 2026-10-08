@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Optional
 
 import httpx
@@ -57,8 +58,7 @@ async def child_env_card(deployed: Optional[DeployedEnv], gateway_url: Optional[
     child = deployed.get_child_env_card(environment_name)
     if child is None:
         return deployed.environment_url, None
-    path = _child_path(child)
-    return deployed.environment_url + path, _endpoints_relative_to(path, child)
+    return deployed.environment_url, _prefix_child_endpoints(deployed.environment_card, child)
 
 
 def _child_path(child: dict) -> str:
@@ -66,15 +66,27 @@ def _child_path(child: dict) -> str:
     return child.get("url", RPC_PATH).removesuffix(RPC_PATH)
 
 
-def _endpoints_relative_to(path: str, child: dict) -> dict:
-    """The child card with its extension endpoints relative to the child at `path`. A composing gateway prefixes an
-    extension's ``params.endpoint`` with that path only when it is at or under ``RPC_PATH``, and never a method's own."""
+def _prefix_child_endpoints(env_card: dict, child: dict) -> dict:
+    """A copy of the child card whose endpoints all resolve against the env's address. A composing gateway puts the child's
+    path only on the child's paths at or under ``RPC_PATH``. Of the rest, the endpoints the env card also advertises are its
+    own routes, as all of a leaf card's are, and stay as they are; the child serves the others under its path."""
+    path = _child_path(child)
+    env_routes = {entry.get("endpoint") for entry in _endpoint_entries(env_card)}
     card = copy.deepcopy(child)
+    for entry in _endpoint_entries(card):
+        endpoint = entry.get("endpoint")
+        if endpoint and not endpoint.startswith(f"{path}/") and endpoint not in env_routes:
+            entry["endpoint"] = path + endpoint
+    return card
+
+
+def _endpoint_entries(card: dict) -> Iterator[dict]:
+    """The parts of a card that can name an ``endpoint``: each extension's ``params`` and each of its methods."""
     for ext in (card.get("capabilities") or {}).get("extensions") or []:
         params = ext.get("params")
-        if isinstance(params, dict) and (params.get("endpoint") or "").startswith(f"{path}/"):
-            params["endpoint"] = params["endpoint"].removeprefix(path)
-    return card
+        if isinstance(params, dict):
+            yield params
+            yield from (params.get("methods") or {}).values()
 
 
 async def reset_via_rest(

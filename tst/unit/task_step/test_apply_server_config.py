@@ -547,6 +547,17 @@ async def test_stored_card_applies_a_child_endpoint_outside_the_rpc_path_at_the_
 
 
 @pytest.mark.asyncio
+async def test_stored_card_applies_a_gateway_route_a_child_advertises_at_the_gateway():
+    gw = _MockGateway({})
+    ctx = _carded_context(await _composed_card({"mcp-slack": [_ext("urn:agentenv:disable-tool/v1", "/tools/disable")]}))
+    directive = {"service": "slack", "uri": "urn:agentenv:disable-tool/v1", "args": {"role": "default", "tools": ["slack_send_message"]}}
+    with _patch_httpx(gw):
+        await _step(directives=[directive]).execute(ctx)
+
+    assert gw.post_calls == [(f"{_CARD}/tools/disable", {"role": "default", "tools": ["slack_send_message"]})]
+
+
+@pytest.mark.asyncio
 async def test_stored_card_skips_a_child_env_missing_from_it_under_tolerate():
     gw = _MockGateway({})
     ctx = _carded_context(await _composed_card({"mcp-email": []}))

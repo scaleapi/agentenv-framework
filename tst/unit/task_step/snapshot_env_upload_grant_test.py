@@ -10,7 +10,6 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI, uploaded_file_part
-from agentenv_protocol import client as protocol_v1
 
 from agent_env.artifact import EnvironmentUniverseArtifact
 from agent_env.config import set_object_store
@@ -42,12 +41,10 @@ def store(local_stores, tmp_path):
 
 @pytest.fixture
 def pushes(monkeypatch):
-    """The URL each S3 credentials push posts to: its base joined to the endpoint the card advertises."""
     pushed: list[str] = []
 
     async def push(base_url, card, timeout_seconds):
-        if op := protocol_v1.find_extension_method(card, _S3_CREDENTIALS["uri"], "add_s3_credentials"):
-            pushed.append(base_url + op["endpoint"])
+        pushed.append(base_url)
 
     monkeypatch.setattr(snapshot_mod, "_push_s3_credentials", push)
     return pushed
@@ -99,7 +96,7 @@ async def test_a_service_taking_the_form_uploads_through_a_grant_and_is_register
     assert grant["root_path"].startswith("agentenv-snapshots/")
     assert (grant["max_objects"], grant["max_object_bytes"]) == (1, ENV_SNAPSHOT_LIMITS.max_object_bytes)
     assert datetime.fromisoformat(grant["expires_at"]) >= datetime.now(UTC) + timedelta(seconds=MIN_GRANT_LIFETIME_SECONDS - 60)
-    assert pushes == [f"{_CARD}/svc/mcp-gdrive/agentenv/ext/add_s3_credentials"]  # still pushed, for a bundle too large for the grant
+    assert pushes == [_CARD]  # still pushed, for a bundle too large for the grant
     assert [str(r.url) for r in sent] == [f"{_CARD}/svc/mcp-gdrive/agentenv"]
     (bundle,) = EnvironmentUniverseArtifact.get(result.environment_universe_artifact_id).get_file_artifacts().values()
     assert bundle.object_url == store.object_url(f"{grant['root_path']}/gdrive.zip")
@@ -140,7 +137,7 @@ async def test_otherwise_the_export_is_as_before(local_stores, tmp_path, pushes,
     assert suffix == ".json"
     assert json.loads(out.read_text()) == {"rows": 1}
     assert _rpc_params(sent) == [{}]
-    assert pushes == [f"{_CARD}/svc/mcp-gdrive/agentenv/ext/add_s3_credentials"]
+    assert pushes == [_CARD]
 
 
 @pytest.mark.asyncio

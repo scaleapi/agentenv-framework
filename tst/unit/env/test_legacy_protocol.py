@@ -133,26 +133,51 @@ async def test_a_gateway_path_without_a_gateway_fails_readably():
 
 
 @pytest.mark.asyncio
-async def test_a_stored_child_card_resolves_against_the_childs_path_and_leaves_the_record_as_stored():
-    child = {"name": "slack", "url": "/svc/mcp-slack/agentenv", "capabilities": {"extensions": [
-        {"uri": "urn:agentenv:set-errors/v1", "params": {"endpoint": "/svc/mcp-slack/agentenv/ext/set_errors"}},
-        {"uri": "urn:agentenv:clock/v1", "params": {"endpoint": "/ext/clock/sync-time"}},
-    ]}}
-    card = {"name": "gw", "url": RPC_PATH, "children_environments": [child]}
-    record = DeployedGatewayEnv(env_id="e", env_version=1, gateway_url="http://gw", sandbox_id="sb-1",
-                                environment_card_url=f"https://sandbox.example/sb-1{WELL_KNOWN_PATH}", environment_card=copy.deepcopy(card))
+async def test_a_stored_child_card_gets_the_childs_path_on_each_endpoint_the_child_serves_and_leaves_the_record_as_stored():
+    record = _composed_record({"name": "slack", "url": RPC_PATH, "capabilities": {"extensions": [
+        {"uri": "urn:agentenv:set-errors/v1", "params": {"endpoint": "/agentenv/ext/set_errors"}},
+        {"uri": "urn:agentenv:clock/v1", "params": {"endpoint": "/ext/clock/sync-time", "methods": {
+            "sync_time": {"method": "POST", "endpoint": "/agentenv/ext/sync_time"}, "state": {"method": "GET"}}}},
+        {"uri": "urn:agentenv:disable-tool/v1", "params": {"endpoint": "/tools/disable"}},
+        {"uri": "urn:agentenv:triggers/v1", "params": {"methods": {"remove": {"method": "POST", "endpoint": "/triggers/remove"}}}},
+        {"uri": "urn:agentenv:set-acting-user/v1", "params": {"endpoint": "/svc/mcp-slackbot/ext/set_acting_user"}},
+        {"uri": "urn:agentenv:export-as-file/v1", "params": {"endpoint": "/agentenv/ext/set_export_as_file"}},
+    ]}})
+    stored = copy.deepcopy(record.environment_card)
 
-    base, resolved = await legacy_protocol.child_env_card(record, "http://gw", "slack")
+    base, card = await legacy_protocol.child_env_card(record, "http://gw", "slack")
 
-    assert base == "https://sandbox.example/sb-1/svc/mcp-slack"
-    assert [e["params"]["endpoint"] for e in resolved["capabilities"]["extensions"]] == ["/agentenv/ext/set_errors", "/ext/clock/sync-time"]
-    assert record.environment_card == card
+    assert base == "http://gw"
+    assert [e["params"] for e in card["capabilities"]["extensions"]] == [
+        {"endpoint": "/svc/mcp-slack/agentenv/ext/set_errors"},
+        {"endpoint": "/svc/mcp-slack/ext/clock/sync-time", "methods": {
+            "sync_time": {"method": "POST", "endpoint": "/svc/mcp-slack/agentenv/ext/sync_time"}, "state": {"method": "GET"}}},
+        {"endpoint": "/tools/disable"},
+        {"methods": {"remove": {"method": "POST", "endpoint": "/triggers/remove"}}},
+        {"endpoint": "/svc/mcp-slack/svc/mcp-slackbot/ext/set_acting_user"},
+        {"endpoint": "/svc/mcp-slack/agentenv/ext/set_export_as_file"},
+    ]
+    assert record.environment_card == stored
 
 
 @pytest.mark.asyncio
-async def test_a_stored_leaf_card_resolves_against_the_envs_address_unchanged():
-    card = {"name": "slack", "url": RPC_PATH, "capabilities": {"extensions": [
+async def test_a_child_endpoint_its_composer_already_put_under_the_childs_path_is_left_as_it_is():
+    child = {"name": "x", "url": "/envs/x/agentenv", "capabilities": {"extensions": [
+        {"uri": "urn:agentenv:clock/v1", "params": {"endpoint": "/envs/x/ext/clock", "methods": {
+            "sync_time": {"method": "POST", "endpoint": "/envs/x/ext/clock/sync"}}}},
+    ]}}
+    record = DeployedEnv(env_id="e", env_version=1, environment_card_url=f"http://plugin.example{WELL_KNOWN_PATH}",
+                         environment_card={"name": "suite", "children_environments": [child]})
+
+    assert await legacy_protocol.child_env_card(record, None, "x") == ("http://plugin.example", child)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url", [RPC_PATH, "/prefix/agentenv"], ids=["rpc-path", "rpc-path-under-a-prefix"])
+async def test_a_stored_leaf_card_resolves_against_the_envs_address_unchanged(url):
+    card = {"name": "slack", "url": url, "capabilities": {"extensions": [
         {"uri": "urn:agentenv:set-errors/v1", "params": {"endpoint": "/agentenv/ext/set_errors"}},
+        {"uri": "urn:agentenv:clock/v1", "params": {"endpoint": "/ext/clock/sync-time"}},
     ]}}
     record = DeployedEnv(env_id="e", env_version=1, environment_card_url=f"https://sandbox.example/sb-1{WELL_KNOWN_PATH}",
                          environment_card=card)
@@ -190,16 +215,17 @@ async def test_a_stored_child_card_without_endpoints_comes_back_as_stored(fields
     record = _composed_record({"name": "slack", "url": RPC_PATH, **fields})
     (stored,) = record.environment_card["children_environments"]
 
-    assert await legacy_protocol.child_env_card(record, "http://gw", "slack") == ("http://gw/svc/mcp-slack", stored)
+    assert await legacy_protocol.child_env_card(record, "http://gw", "slack") == ("http://gw", stored)
 
 
 def _composed_record(own_card: dict) -> DeployedGatewayEnv:
-    """The record of a deploy at http://gw whose stored card composes `own_card` as the gateway does, under mcp-<name>."""
+    """The record of a deploy at http://gw whose stored card composes `own_card` as the gateway does, under mcp-<name>,
+    beside the gateway's own extensions."""
     gateway = Gateway(host="127.0.0.1", port=0, server_name="gw", internal_mcp_servers=[], rest_proxy_urls={})
     child = gateway._rewrite_child_card(f"mcp-{own_card['name']}", own_card)
+    card = {"name": "gw", "url": RPC_PATH, "capabilities": {"extensions": gateway._gateway_extensions()}, "children_environments": [child]}
     return DeployedGatewayEnv(env_id="e", env_version=1, gateway_url="http://gw", sandbox_id="sb-1",
-                              environment_card_url=f"http://gw{WELL_KNOWN_PATH}",
-                              environment_card={"name": "gw", "url": RPC_PATH, "children_environments": [child]})
+                              environment_card_url=f"http://gw{WELL_KNOWN_PATH}", environment_card=card)
 
 
 def _child_behind_gateway(monkeypatch, own_card: dict) -> list[str]:
