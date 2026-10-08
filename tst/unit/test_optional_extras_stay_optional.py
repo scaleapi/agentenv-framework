@@ -159,8 +159,13 @@ def test_core_and_every_store_module_import_without_the_extra(extra):
         ),
         ("aws", "agent_env.store.object_store:S3ObjectStore", "agent_env.store.object_store:ObjectStore"),
         ("aws", "agent_env.store.secret_store:AwsSecretsManagerSecretStore", "agent_env.store.secret_store:SecretStore"),
+        (
+            "aws", "agent_env.store.document_store.dynamodb_document_store:DynamoDbDocumentStore",
+            "agent_env.store.document_store:DocumentStore",
+        ),
+        ("aws", "agent_env.store.document_store:DynamoDbDocumentStore", "agent_env.store.document_store:DocumentStore"),
     ],
-    ids=["gcs", "secret-manager", "s3", "s3-reexport", "secrets-manager-reexport"],
+    ids=["gcs", "secret-manager", "s3", "s3-reexport", "secrets-manager-reexport", "dynamodb", "dynamodb-reexport"],
 )
 def test_an_impl_without_its_extra_names_the_extra_to_install(extra, impl, base):
     message = _run(_LOAD_IMPL, _only_in(extra), impl, base)
@@ -172,8 +177,10 @@ def test_an_impl_without_its_extra_names_the_extra_to_install(extra, impl, base)
     [
         "agent_env.store:S3ObjectStore",
         "agent_env.store:AwsSecretsManagerSecretStore",
+        "agent_env.store:DynamoDbDocumentStore",
         "agent_env.store.object_store:S3ObjectStore",
         "agent_env.store.secret_store:AwsSecretsManagerSecretStore",
+        "agent_env.store.document_store:DynamoDbDocumentStore",
     ],
 )
 def test_the_store_packages_import_whole_without_boto3_and_an_aws_backend_names_the_extra(name):

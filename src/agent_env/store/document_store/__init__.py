@@ -1,10 +1,14 @@
 """Backend-agnostic document store abstraction + its implementations.
 
 ``document_store`` defines the abstraction (Filter/UpdateSpec/Sort/DocumentStore/
-VersionedEntityStore); ``mongo_document_store`` and ``sqlite_document_store`` are
-implementations. ``firestore_mongo_document_store`` is one too, not re-exported here because
-it needs the ``gcp`` extra. Future backends (Cosmos DB, ...) live alongside as new modules.
+VersionedEntityStore); ``mongo_document_store``, ``sqlite_document_store`` and
+``dynamodb_document_store`` are implementations. ``dynamodb_document_store`` needs the ``aws``
+extra, so DynamoDbDocumentStore is imported on first use and left out of ``__all__``.
+``firestore_mongo_document_store`` is one too, not re-exported here because it needs the ``gcp``
+extra. Future backends (Cosmos DB, ...) live alongside as new modules.
 """
+
+from agent_env.store._lazy import lazy_backends
 
 from agent_env.store.document_store.document_store import (
     AbsentOrNull,
@@ -55,3 +59,5 @@ __all__ = [
     "SortKey",
     "UpdateSpec",
 ]
+
+__getattr__ = lazy_backends(__name__, {"DynamoDbDocumentStore": "agent_env.store.document_store.dynamodb_document_store"})

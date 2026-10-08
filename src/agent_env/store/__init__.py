@@ -122,6 +122,7 @@ __all__ = [
 
 # The backends that need the aws extra: imported on first use, and left out of __all__.
 __getattr__ = lazy_backends(__name__, {
+    "DynamoDbDocumentStore": "agent_env.store.document_store.dynamodb_document_store",
     "S3ObjectStore": "agent_env.store.object_store.s3_object_store",
     "AwsSecretsManagerSecretStore": "agent_env.store.secret_store.aws_secrets_manager_secret_store",
 })
