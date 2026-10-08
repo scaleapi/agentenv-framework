@@ -166,7 +166,7 @@ for run in runs:
 ```
 
 - Each returns `agent_env.task.store.TaskInstance` records: `instance_id`, `task_id`, `task_version`, `status` (`running`, `completed`, `failed` or `cancelled`), the step progress, `error`, `created_at_utc` and `completed_at_utc`, and `context`. `context` is the run's `TaskStepContext` as a dict, with the API keys and access tokens AgentEnv keeps in its `metadata` removed. It still holds deployment details such as endpoints and agent cards, so a plugin that publishes runs picks the fields it needs.
-- A run records the minute it started, so runs that started in the same minute come in no set order.
+- A run records only the minute it started, so runs that started in the same minute come in instance-id order. Paging with `limit` and `offset` therefore neither repeats nor skips a run, as long as no run is added in between.
 - They read the configured document store. Inside an `agent-env` command, such as a CLI plugin's, that includes the `@local` store `agent-env run` records bundle runs in. A bundle's task ids are `<id root>/<task name>`, as in [Bundles from installed packages](#bundles-from-installed-packages).
 - `run.context["metadata"]["run_group_id"]` is shared by the runs one `agent-env run`, `task run --k` or `task run-batch` started.
 

@@ -77,3 +77,13 @@ def test_a_registered_run_reads_back(docs):
 
     assert (found.task_id, found.task_version, found.status, found.total_steps) == (TASK, 4, "running", 3)
     assert [r.instance_id for r in task_instances(TASK)] == [registered.instance_id]
+
+
+def test_runs_of_one_minute_page_in_instance_id_order_without_overlap(docs):
+    for instance_id in ("c", "a", "d", "b"):
+        _run(docs, instance_id, "2026-10-08 10:00 UTC")
+    _run(docs, "later", "2026-10-08 10:01 UTC")
+
+    pages = [task_instances(TASK, limit=2, offset=offset) for offset in (0, 2, 4)]
+
+    assert [[r.instance_id for r in page] for page in pages] == [["later", "a"], ["b", "c"], ["d"]]

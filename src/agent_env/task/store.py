@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Callable, Optional, Self
 
 from agent_env.store.base import NotFoundError
 from agent_env.config import get_config
-from agent_env.store.document_store import DocumentStore, DuplicateKeyError, Filter, Lte, Ne, Sort, UpdateSpec, VersionedEntityStore, VersionedEntityStoreCache, compare_and_swap
+from agent_env.store.document_store import DocumentStore, DuplicateKeyError, Filter, Lte, Ne, Sort, SortKey, UpdateSpec, VersionedEntityStore, VersionedEntityStoreCache, compare_and_swap
 from agent_env.store.query import QueryBuilder, to_document_query
 from agent_env.task.step_journal import (
     _RESERVED_STEP_IDS,
@@ -257,6 +257,10 @@ def _new_instance_doc(
     }
 
 
+# A run records only the minute it started, so the instance id orders runs of one minute and pages never overlap.
+_NEWEST_FIRST = Sort((SortKey("created_at_utc", descending=True), SortKey("instance_id", descending=False)))
+
+
 def _task_filter(task_id: str, task_version: int | None) -> Filter:
     return Filter.of(task_id=task_id) if task_version is None else Filter.of(task_id=task_id, task_version=task_version)
 
@@ -384,7 +388,7 @@ class TaskInstanceStore:
     ) -> list[TaskInstance]:
         docs = self._doc_store.query(
             TASK_INSTANCES_COLLECTION, _task_filter(task_id, task_version),
-            sort=Sort.by("created_at_utc", descending=True), limit=limit, offset=offset,
+            sort=_NEWEST_FIRST, limit=limit, offset=offset,
         )
         return [TaskInstance.from_dict(doc) for doc in docs]
 
@@ -782,8 +786,8 @@ def reset_task_instance_store() -> None:
 def task_instances(
     task_id: str, *, task_version: int | None = None, limit: int | None = None, offset: int = 0,
 ) -> list[TaskInstance]:
-    """A task's recorded runs, newest first, from the configured document store. A run keeps the minute it started,
-    so runs started in the same minute come in no set order."""
+    """A task's recorded runs, newest first, from the configured document store. A run keeps only the minute it
+    started, so runs of one minute come in instance-id order, which keeps pages from overlapping."""
     return get_task_instance_store().find(task_id, task_version=task_version, limit=limit, offset=offset)
 
 
