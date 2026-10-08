@@ -22,6 +22,7 @@ from enum import Enum
 from typing import IO, TYPE_CHECKING, Any, AsyncIterator, Callable, Iterable, Optional
 
 from agent_env.config import get_config
+from agent_env.store.image_store.oci_registry_credentials import registry_host_from_ref
 from agent_env.utils.deprecation import warn_deprecated
 from agent_env.utils.paths import validate_relative_filename
 
@@ -301,21 +302,27 @@ class VmSandbox(Sandbox):
 
     async def pull_images(self, image_names: list[str]) -> None:
         """``docker pull`` each of ``image_names``, concurrently, after logging in to each registry the image store
-        holds credentials for. A network policy restricting egress isn't widened for them: it must allow the
+        holds credentials for: once per registry, since minting a login can be a network round trip. The first pull
+        to fail cancels the rest. A network policy restricting egress isn't widened for them: it must allow the
         registries itself."""
         image_names = list(dict.fromkeys(image_names))
-        config = get_config()
-        logins: dict[str, Any] = {}
-        for image_name in image_names:
-            auth = await asyncio.to_thread(config.get_image_store().auth, image_name)
+        store = get_config().get_image_store()
+        one_per_registry = {registry_host_from_ref(image_name): image_name for image_name in reversed(image_names)}
+        for image_name in one_per_registry.values():
+            auth = await asyncio.to_thread(store.auth, image_name)
             if auth is not None:
-                logins.setdefault(auth.registry, auth)
-        for auth in logins.values():
-            await self.exec_script(
-                f"echo {shlex.quote(auth.password)} | docker login "
-                f"--username {shlex.quote(auth.username)} --password-stdin {shlex.quote(auth.registry)}"
-            )
-        await asyncio.gather(*(_pull(self, image_name) for image_name in image_names))
+                await self.exec_script(
+                    f"echo {shlex.quote(auth.password)} | docker login "
+                    f"--username {shlex.quote(auth.username)} --password-stdin {shlex.quote(auth.registry)}"
+                )
+        pulls = [asyncio.ensure_future(_pull(self, image_name)) for image_name in image_names]
+        try:
+            await asyncio.gather(*pulls)
+        except BaseException:
+            for pull in pulls:
+                pull.cancel()
+            await asyncio.gather(*pulls, return_exceptions=True)
+            raise
 
     @staticmethod
     async def _signed_image_urls(artifacts: list) -> list[str | None]:

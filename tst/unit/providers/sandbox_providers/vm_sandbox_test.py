@@ -186,6 +186,59 @@ async def test_an_image_no_sandbox_can_get_is_refused_before_anything_is_loaded(
     assert sandbox.scripts == []
 
 
+@pytest.mark.asyncio
+async def test_a_login_is_minted_once_per_registry():
+    minted = []
+
+    class _Counting(_Registry):
+        def auth(self, ref):
+            minted.append(ref)
+            return super().auth(ref)
+
+    get_config().set_image_store(_Counting())
+    try:
+        sandbox = _RecordingVmSandbox()
+        await sandbox.pull_images([PRIVATE, "registry.example/team/other:v1", PUBLIC, "ghcr.io/team/more:v2"])
+    finally:
+        reset_config()
+
+    assert len(minted) == 2  # registry.example's and ghcr.io's
+    assert sum("docker login" in script for script in sandbox.scripts) == 1
+    assert sum(script.startswith("docker pull") for script in sandbox.scripts) == 4
+
+
+class _OnePullFailsVm(_RecordingVmSandbox):
+    """``docker pull`` of BAD fails; every other pull waits until it's cancelled."""
+
+    BAD = "ghcr.io/team/bad:v1"
+
+    def __init__(self):
+        super().__init__()
+        self.cancelled: list[str] = []
+
+    async def exec_script(self, script, *, max_retries=0):
+        if script == f"docker pull {self.BAD}":
+            await asyncio.sleep(0)
+            raise RuntimeError("Script failed (exit 1):\nstderr: manifest unknown")
+        if script.startswith("docker pull"):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled.append(script)
+                raise
+        return ""
+
+
+@pytest.mark.asyncio
+async def test_the_first_pull_to_fail_cancels_the_rest(registry):
+    sandbox = _OnePullFailsVm()
+
+    with pytest.raises(RuntimeError, match="manifest unknown"):
+        await sandbox.pull_images([PUBLIC, _OnePullFailsVm.BAD, PRIVATE])
+
+    assert sorted(sandbox.cancelled) == sorted([f"docker pull {PUBLIC}", f"docker pull {PRIVATE}"])
+
+
 class _ScriptRecorder(VmSandbox):
     """Records exec_script invocations, running the real write_file_from_text."""
 
