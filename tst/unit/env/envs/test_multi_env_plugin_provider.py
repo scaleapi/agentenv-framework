@@ -166,7 +166,8 @@ async def test_deploy_env_deploys_a_stock_multi_env_through_the_plugin_and_the_r
     [deployed] = context.deployed_envs
     [(deployed_env, options)] = SEEN["deploys"]
     assert deployed_env is env and set(options) == {"ttl_seconds", "disk_size_gb", "gateway_mode", "cpu", "memory_mb",
-                                                     "env_state_type", "env_state_instance_id", "attribution"}
+                                                     "env_state_type", "env_state_instance_id", "attribution",
+                                                     "artifact_id", "artifact_version"}
     assert (deployed.instance_id, deployed.mcp_url, env._sandbox, env._deployed) == ("inst-7", f"{_URL}/mcp", None, deployed)
     for child in [*env.mcp_server_envs, *env.website_envs]:
         assert (child._env_provider, child._deployed, child._sandbox) == (env._env_provider, deployed, None)
@@ -583,3 +584,20 @@ async def test_a_deploy_onto_the_state_instance_the_env_s_deployment_holds_is_re
          pytest.raises(ValueError, match="already has a deployment, instance 'inst-1', on env state instance 'esi-1'"):
         await env.deploy(env_state_instance_id="esi-1")
     assert (sandboxes.called, "deploys" in SEEN) == (False, False)
+
+
+@pytest.mark.asyncio
+async def test_a_built_in_env_forwards_the_universe_artifact_to_its_provider():
+    """A warm pool keys on env *and* universe, so the provider has to be told which universe
+    the run will load. Absent, both arrive as None — the pool then treats the env as unpooled
+    rather than guessing, and every existing caller is unaffected."""
+    SEEN.clear()
+    SEEN["deploys"] = []
+    await _deploy(_multi(), artifact_id="hg4_real", artifact_version=5)
+    [(_, options)] = SEEN["deploys"]
+    assert (options["artifact_id"], options["artifact_version"]) == ("hg4_real", 5)
+
+    SEEN["deploys"] = []
+    await _deploy(_multi())
+    [(_, options)] = SEEN["deploys"]
+    assert (options["artifact_id"], options["artifact_version"]) == (None, None)

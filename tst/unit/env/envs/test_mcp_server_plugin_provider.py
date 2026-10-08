@@ -113,7 +113,8 @@ async def test_a_plugin_provider_gets_every_option_and_its_record_is_registered(
     [(sandbox_provider, options)] = SEEN["deploys"]
     assert sandbox_provider == "SANDBOXES"
     assert options == {"ttl_seconds": 60, "disk_size_gb": 10, "gateway_mode": GatewayMode.CONSISTENT, "cpu": 2.0, "memory_mb": None,
-                       "env_state_type": None, "env_state_instance_id": None, "attribution": {"team": "t"}}
+                       "env_state_type": None, "env_state_instance_id": None, "attribution": {"team": "t"},
+                       "artifact_id": None, "artifact_version": None}
     assert (record.instance_id, env._instance_id, env._deployed, env._sandbox, env._gateway_url) == ("inst-1", "inst-1", record, None, None)
 
 

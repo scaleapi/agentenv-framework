@@ -36,6 +36,10 @@ class EnvironmentServerProvider(_SandboxEnvironmentProvider):
         cpu: float | None = None,
         memory_mb: int | None = None,
         attribution: Optional[Attribution] = None,
+        # Which universe the run will load. Built-ins do not use it; it is declared so an env can
+        # map it for providers that key on env + universe, such as a warm pool.
+        artifact_id: str | None = None,
+        artifact_version: int | None = None,
     ) -> DeployedSandboxEnv:
         """The env's MCP server in its own container; returns the record once it serves its card and its tools."""
         from agent_env.env.envs.multi_env import MultiEnv
