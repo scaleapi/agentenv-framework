@@ -41,6 +41,17 @@ def local_backends(monkeypatch, tmp_path):
         reset_config()
 
 
+async def _status_once_up(url: str) -> int:
+    """The status ``url`` answers with, once the server behind it has started."""
+    async with httpx.AsyncClient() as client:
+        for _ in range(30):
+            try:
+                return (await client.get(url, timeout=10)).status_code
+            except httpx.TransportError:
+                await asyncio.sleep(1)
+    return (await httpx.AsyncClient().get(url, timeout=10)).status_code
+
+
 def _docker(*args: str) -> str:
     return subprocess.run(["docker", *args], capture_output=True, text=True, check=True).stdout.strip()
 
@@ -100,8 +111,7 @@ async def test_two_local_runs_use_the_same_container_name_network_and_port_at_on
         assert not [c for c in contexts if isinstance(c, BaseException)], contexts
         urls = [c.deployed_sandboxes[0].tunnel_urls["80"] for c in contexts]
         assert len(set(urls)) == 2
-        async with httpx.AsyncClient() as client:
-            assert [(await client.get(url, timeout=30)).status_code for url in urls] == [200, 200]
+        assert [await _status_once_up(url) for url in urls] == [200, 200]
     finally:
         reports = [await teardown_run(c) for c in contexts if isinstance(c, TaskStepContext)]
 
