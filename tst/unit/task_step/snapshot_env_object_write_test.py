@@ -3,9 +3,11 @@ the object from what it reports, and registers it there; every other reply abort
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 import logging
+import threading
 from urllib.parse import unquote, urlsplit
 
 import httpx
@@ -45,6 +47,26 @@ class _WatchedStore(GrantingObjectStore):
         complete, abort, ended = write.complete, write.abort, self.ended
         write.complete = lambda uploaded: (complete(uploaded), ended.append("completed"))[0]
         write.abort = lambda: (ended.append("aborted") if not write._settled else None, abort())[1]
+        return write
+
+
+class _GatedStore(_WatchedStore):
+    """Holds the export at ``at`` (beginning the write, pushing creds, completing it) until released."""
+
+    def __init__(self, root, at):
+        super().__init__(root)
+        self.at, self.reached, self.release = at, threading.Event(), threading.Event()
+
+    def hold(self, at):
+        if at == self.at:
+            self.reached.set()
+            self.release.wait(5)
+
+    def begin_write(self, object_url, **kwargs):
+        self.hold("begin")
+        write = super().begin_write(object_url, **kwargs)
+        complete = write.complete
+        write.complete = lambda uploaded: (self.hold("complete"), complete(uploaded))[1]
         return write
 
 
@@ -191,3 +213,26 @@ async def test_otherwise_the_export_is_offered_as_before(
     assert list(sent_params) == ([] if params is None else [params])
     assert pushes == [_CARD]
     assert "gdrive exported through data in" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("at", "ended"), [("begin", ["aborted"]), ("push", ["aborted"]), ("complete", ["completed"])])
+async def test_an_export_cancelled_midway_leaves_no_write_open_or_aborted_mid_completion(
+    local_stores, tmp_path, monkeypatch, at, ended
+):
+    store = _GatedStore(str(tmp_path / "objects"), at)
+    set_object_store(store)
+    monkeypatch.setattr(snapshot_mod, "_push_s3_credentials", lambda *_: asyncio.to_thread(store.hold, "push"))
+    record = await _record({"mcp-gdrive": [_PARTS]})
+    _serve(monkeypatch, {"gdrive": _uploading(store)})
+
+    export = asyncio.ensure_future(
+        SnapshotEnvTaskStep._export_environment_to_file("https://gw-1", "gdrive", str(tmp_path / "out"), 30, record)
+    )
+    assert await asyncio.to_thread(store.reached.wait, 5)
+    export.cancel()
+    await asyncio.sleep(0.05)
+    store.release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await export
+    assert store.ended == ended

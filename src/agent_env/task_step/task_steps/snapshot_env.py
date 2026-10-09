@@ -121,6 +121,19 @@ def _snapshot_write(
         return None
 
 
+async def _finish_in_thread(fn, *args):
+    """``await asyncio.to_thread(fn, *args)``, except that a caller cancelled meanwhile first waits for ``fn`` to
+    return, and aborts a write it began, so neither a write nor its completion outlives the caller's cleanup."""
+    task = asyncio.ensure_future(asyncio.to_thread(fn, *args))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await asyncio.wait([task])
+        if task.exception() is None and isinstance(task.result(), PendingWrite):
+            await asyncio.to_thread(task.result().abort)
+        raise
+
+
 async def _push_s3_credentials(base_url: str, card: dict, timeout_seconds: float) -> None:
     """Best-effort: push the object store's shared AWS creds + bucket to a service
     advertising add_s3_credentials, if the store shares any. Never raises (get_data falls back).
@@ -469,22 +482,23 @@ class SnapshotEnvTaskStep(TaskStep):
         if base_url is not None:
             card_base, card = await legacy_protocol.child_env_card(deployed, gateway_url, environment_name)
             sandbox_type = getattr(deployed, "sandbox_type", None)
-            write = await asyncio.to_thread(_snapshot_write, card or {}, environment_name, timeout_seconds, sandbox_type)
-            upload = None if write is not None else await asyncio.to_thread(
-                _snapshot_upload, card or {}, timeout_seconds, sandbox_type
-            )
-            # Push S3 creds (no-op unless the service advertises the extension) beside either grant: a
-            # bundle the grant cannot hold, or an upload through it that fails, can still use them.
-            await _push_s3_credentials(card_base, card or {}, timeout_seconds)
-            if write is not None:
-                grant = {"write_object": write.grant}
-            else:
-                grant = {} if upload is None else {"write_namespace": upload.grant}
+            write = None
             try:
+                write = await _finish_in_thread(_snapshot_write, card or {}, environment_name, timeout_seconds, sandbox_type)
+                upload = None if write is not None else await asyncio.to_thread(
+                    _snapshot_upload, card or {}, timeout_seconds, sandbox_type
+                )
+                # Push S3 creds (no-op unless the service advertises the extension) beside either grant: a
+                # bundle the grant cannot hold, or an upload through it that fails, can still use them.
+                await _push_s3_credentials(card_base, card or {}, timeout_seconds)
+                if write is not None:
+                    grant = {"write_object": write.grant}
+                else:
+                    grant = {} if upload is None else {"write_namespace": upload.grant}
                 resp = await protocol_v1.get_data(base_url, timeout=int(timeout_seconds), **grant)
                 part = resp.parts[0] if resp.parts else None
                 if write is not None and (uploaded := uploaded_object(part)) is not None:
-                    await asyncio.to_thread(write.complete, uploaded)
+                    await _finish_in_thread(write.complete, uploaded)
                     parts = max(1, math.ceil(uploaded.size_bytes / write.grant.write.part_bytes))
                     return exported("parts", write.object_url, f" ({uploaded.size_bytes} bytes in {parts} parts)")
             finally:
