@@ -612,25 +612,27 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         try:
             await _probe_tools(env_id, result)
         except BaseException:  # a cancellation: the probe itself never raises
-            await self._terminate_new_vm(
+            await self._terminate_new_sandbox(
                 earlier_sandbox=earlier_sandbox, existing_sandbox=gateway.get("existing_sandbox"))
             await self.close()
             raise
         return result
 
-    async def _terminate_new_vm(self, *, earlier_sandbox: Sandbox | None, existing_sandbox: Sandbox | None) -> None:
-        """Terminate the VM a deploy that failed or was cancelled created: no record names it yet, so nothing else
-        would. Leaves alone an earlier deploy's sandbox, the caller's existing_sandbox, and containers, which close()
-        ends."""
-        new_vm, self._sandbox = self._sandbox, earlier_sandbox
-        if (new_vm is None or new_vm is earlier_sandbox or new_vm is existing_sandbox
-                or new_vm in self._container_sandboxes):
+    async def _terminate_new_sandbox(
+        self, *, earlier_sandbox: Sandbox | None, existing_sandbox: Sandbox | None,
+    ) -> None:
+        """Terminate the sandbox a deploy that failed or was cancelled created: no record names it yet, so nothing else
+        would. Leaves alone an earlier deploy's sandbox, the caller's existing_sandbox, and the container sandboxes
+        close() ends."""
+        new_sandbox, self._sandbox = self._sandbox, earlier_sandbox
+        if (new_sandbox is None or new_sandbox is earlier_sandbox or new_sandbox is existing_sandbox
+                or new_sandbox in self._container_sandboxes):
             return
         try:
-            await new_vm.terminate()
+            await new_sandbox.terminate()
         except Exception as e:
             logger.warning(
-                f"Failed to terminate {type(new_vm).__name__} {new_vm.sandbox_id} after a failed deploy: {e}")
+                f"Failed to terminate {type(new_sandbox).__name__} {new_sandbox.sandbox_id} after a failed deploy: {e}")
 
     async def _deploy_via_vm(
         self,
@@ -1232,7 +1234,7 @@ COMPOSE_EOF'''
                 mcp_server_name=mcp_server_name, **deploy_kwargs,
             )
         except BaseException:
-            await self._terminate_new_vm(earlier_sandbox=earlier_sandbox, existing_sandbox=existing_sandbox)
+            await self._terminate_new_sandbox(earlier_sandbox=earlier_sandbox, existing_sandbox=existing_sandbox)
             raise
 
     def _sandbox_ids(self, always_name_gateway: bool = False) -> dict[str, str | dict[str, str]]:
