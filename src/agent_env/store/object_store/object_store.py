@@ -102,7 +102,10 @@ class _OnePutWrite(PendingWrite):
         self._store = store
 
     def _complete(self, uploaded: Uploaded) -> None:
-        metadata = self._store.get_object_metadata_at(self.object_url)
+        try:
+            metadata = self._store.get_object_metadata_at(self.object_url)
+        except Exception as e:  # a provider's own error type: this base class cannot name it
+            raise UploadFailedError(f"could not read what was uploaded to {self.object_url} ({type(e).__name__})") from e
         if metadata is None or metadata.size != uploaded.size_bytes:
             stored = "nothing" if metadata is None else f"{metadata.size} bytes"
             raise UploadFailedError(f"{self.object_url} holds {stored}, not the {uploaded.size_bytes} bytes reported")
