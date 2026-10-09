@@ -748,6 +748,53 @@ async def test_a_rejected_part_fails_the_upload_without_a_retry(
     assert sent.count(2) == 1
 
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content", [b"0123456789", b"012"], ids=["parts", "one-part"])
+async def test_a_parts_upload_refuses_a_source_that_grows_while_it_uploads(
+    content: bytes, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _write(tmp_path / "bundle.zip", content)
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if _part_number(request) == 1:
+            with source.open("ab") as appended:
+                appended.write(b"more")
+        return httpx.Response(200)
+
+    _route(monkeypatch, handle)
+    with pytest.raises(TransferError) as exc_info:
+        await upload(_parts_write_object(part_bytes=4, parts=4), source)
+    assert exc_info.value.code == "invalid_transfer"
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_part_cancels_the_parts_still_in_flight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started: list[int] = []
+    finished: list[int] = []
+    never = asyncio.Event()
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        number = _part_number(request)
+        started.append(number)
+        if number == 2:
+            await asyncio.sleep(0.01)
+            return httpx.Response(403)
+        await never.wait()
+        finished.append(number)
+        return httpx.Response(200)
+
+    _route(monkeypatch, handle)
+    with pytest.raises(TransferError) as exc_info:
+        await asyncio.wait_for(
+            upload(_parts_write_object(part_bytes=4, parts=3), _write(tmp_path / "bundle.zip", b"0123456789")), 5
+        )
+    assert exc_info.value.code == "transfer_rejected"
+    assert sorted(started) == [1, 2, 3]
+    assert finished == []
+
 @pytest.mark.asyncio
 async def test_a_parts_upload_keeps_a_bounded_number_of_parts_in_flight(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

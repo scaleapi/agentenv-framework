@@ -211,6 +211,7 @@ _ERROR_STATUS: dict[str, tuple[int, bool]] = {
 }
 _TOO_LARGE = "The transfer exceeds its configured size limit."
 _UNREADABLE = "The transfer source could not be read."
+_CHANGED = "The transfer source changed during upload."
 _UNAVAILABLE = "The object store is temporarily unavailable."
 
 
@@ -473,9 +474,7 @@ class _SourceStream:
         if self.size_bytes > self._declared_bytes or (
             not chunk and self.size_bytes < self._declared_bytes
         ):
-            raise TransferError(
-                "invalid_transfer", "The transfer source changed during upload."
-            )
+            raise TransferError("invalid_transfer", _CHANGED)
         self._digest.update(chunk)
         return chunk
 
@@ -511,12 +510,21 @@ class _PartStream(_SourceStream):
             raise TransferError("invalid_transfer", _UNREADABLE) from exc
         self.size_bytes += len(chunk)
         if not chunk and self.size_bytes < self._declared_bytes:
-            raise TransferError("invalid_transfer", "The transfer source changed during upload.")
+            raise TransferError("invalid_transfer", _CHANGED)
         return chunk
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
         while chunk := await asyncio.to_thread(self.read, _PART_CHUNK_BYTES):
             yield chunk
+
+
+def _still_sized(source: Path, size_bytes: int) -> bool:
+    """Whether ``source`` is still the ``size_bytes`` it was sized at: a part reads only its own range, so
+    bytes appended after sizing would otherwise go unsent."""
+    try:
+        return source.stat().st_size == size_bytes
+    except OSError:
+        return False
 
 
 def _as_source(source: Path | str | bytes) -> Path | bytes:
@@ -563,6 +571,8 @@ async def _upload_parts(grant: HttpPartsPutGrant, source: Path | bytes, size_byt
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
+    if not isinstance(source, bytes) and not _still_sized(source, size_bytes):
+        raise TransferError("invalid_transfer", _CHANGED)
     return Uploaded(size_bytes=size_bytes, sha256=checksum[0])
 
 
