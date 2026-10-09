@@ -95,4 +95,4 @@ def test_the_builtin_floor_is_pinned(builtin_registry):
     """Every restricted sandbox gets these, so an empty allowlist is not total denial.
     Pinned rather than counted: a new entry should be argued for in review. Platforms
     registered from config add theirs on top."""
-    assert set(all_sandbox_egress_hosts()) == {"*.modal.host", "*.w.modal.host", "*.e2b.app", "*.sail.box"}
+    assert set(all_sandbox_egress_hosts()) == {"*.modal.host", "*.w.modal.host", "*.e2b.app", "*.sail.box", "*.style.dev"}

@@ -44,6 +44,13 @@ uv sync --extra dev
 source .venv/bin/activate
 ```
 
+## Freestyle sandboxes
+
+Freestyle is available as the `freestyle` sandbox backend for environments and agents.
+It boots Docker-capable VM snapshots, exposes requested ports over HTTPS, and supports
+file transfer, reconnection, and teardown. See the [Freestyle provider guide](src/agent_env/providers/sandbox_providers/freestyle/README.md)
+for configuration, resource sizing, and command/network limits.
+
 ## Plugins
 
 A package of your own can add env types, providers, task steps and stores to agent-env, and `agent-env plugin` lists, checks, adds and removes installed plugins. The [plugin docs](https://www.agentenvframework.com/docs/plugins) show how.

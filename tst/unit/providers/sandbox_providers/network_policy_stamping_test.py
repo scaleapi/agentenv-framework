@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from agent_env.providers.sandbox_providers.e2b.provider import E2BSandboxProvider
+from agent_env.providers.sandbox_providers.freestyle.provider import FreestyleSandboxProvider
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandboxProvider
@@ -86,11 +87,20 @@ async def _sail() -> Sandbox:
         return await provider.create_vm(exposed_ports=[], setup_for_gateway=False)
 
 
+async def _freestyle() -> Sandbox:
+    provider = FreestyleSandboxProvider(api_key="test-key")
+    provider._client.request = AsyncMock(return_value={
+        "id": "vm-test", "resources": {"cpu": 1, "memory": 8192, "storage": 10240},
+    })
+    return await provider.create_vm(exposed_ports=[], setup_for_gateway=False)
+
+
 FACTORIES = {
     "modal": _modal,
     "modal_vm": _modal_vm,
     "e2b": _e2b,
     "sail_vm": _sail,
+    "freestyle": _freestyle,
     "local": _local,
 }
 
