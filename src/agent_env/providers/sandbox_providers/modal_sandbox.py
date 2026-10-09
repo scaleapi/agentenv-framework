@@ -279,6 +279,16 @@ class ModalSandboxProvider(SandboxProvider):
     ) -> Sandbox:
         if private_network:  # i6pn, Modal's private network between sandboxes, in the configured region
             i6pn, region = True, region or get_config().modal_default_region
+        # GPU sandboxes need the V1 ``Sandbox.create`` factory: the V2
+        # ``_experimental_create`` has no ``gpu`` parameter and cannot attach one. V1 in
+        # turn has no ``i6pn``, so reject that combination up front — before any Modal
+        # call — rather than silently returning one whose i6pn_address is None
+        # and failing downstream (e.g. the gateway's "service-db has no i6pn address").
+        if self._gpu and i6pn:
+            raise ValueError(
+                "i6pn is unavailable on GPU sandboxes: the GPU-capable factory "
+                "(modal.Sandbox.create) has no i6pn parameter."
+            )
         effective = self.effective_network_policy(network_policy)
         attribution = dict(attribution or {})
 
@@ -309,17 +319,6 @@ class ModalSandboxProvider(SandboxProvider):
             f"image={image_name} port={port} cpu={cpu} memory={memory}MB "
             f"app={app_name} region={region} i6pn={i6pn}"
         )
-
-        # GPU sandboxes need the V1 ``Sandbox.create`` factory: the V2
-        # ``_experimental_create`` has no ``gpu`` parameter and cannot attach one. V1 in
-        # turn has no ``i6pn``, so reject that combination up front — before a billed
-        # sandbox exists — rather than silently returning one whose i6pn_address is None
-        # and failing downstream (e.g. the gateway's "service-db has no i6pn address").
-        if self._gpu and i6pn:
-            raise ValueError(
-                "i6pn is unavailable on GPU sandboxes: the GPU-capable factory "
-                "(modal.Sandbox.create) has no i6pn parameter."
-            )
 
         # ``i6pn`` is threaded per-factory below (V2 only); everything else is shared.
         create_kwargs = dict(
