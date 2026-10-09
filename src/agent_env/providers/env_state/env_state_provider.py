@@ -377,7 +377,9 @@ BEGIN
         SELECT schemaname, tablename
         FROM pg_tables
         WHERE schemaname = _schema_name
-          AND tablename != '_changelog'
+          -- Names starting with an underscore are a service's internal tables
+          -- (file bytes, caches), not domain rows; _changelog itself is one.
+          AND tablename NOT LIKE '\\_%'
     LOOP
         EXECUTE format(
             'DROP TRIGGER IF EXISTS _changelog_trigger ON %I.%I',

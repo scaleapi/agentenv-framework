@@ -180,6 +180,10 @@ def test_get_init_script_changelog_components():
     for op in ("TG_OP = 'INSERT'", "TG_OP = 'DELETE'", "TG_OP = 'UPDATE'"):
         assert op in script
     assert "_install_changelog_triggers(_schema_name TEXT)" in script
+    # Internal tables (a leading underscore, like _changelog itself) carry no
+    # domain rows and get no trigger.
+    assert "tablename NOT LIKE '\\_%'" in script
+    assert "tablename != '_changelog'" not in script
     assert "WHERE schemaname = _schema_name" in script
 
 
