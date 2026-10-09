@@ -5,7 +5,6 @@ import asyncio
 import base64
 import json
 import logging
-import math
 import mimetypes
 import os
 import tempfile
@@ -20,7 +19,7 @@ import httpx
 
 from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI, FilePart, uploaded_object, uploaded_object_path
 from agentenv_protocol.client import find_extension, write_kinds
-from agentenv_protocol.transfers import WriteNamespaceGrant
+from agentenv_protocol.transfers import WriteNamespaceGrant, part_ranges
 
 from agent_env.a2a_agent.object_transfer import ObjectLimits, namespace_grant
 from agent_env.env.gateway.constants import EXT_TRAJECTORY_URI
@@ -499,7 +498,7 @@ class SnapshotEnvTaskStep(TaskStep):
                 part = resp.parts[0] if resp.parts else None
                 if write is not None and (uploaded := uploaded_object(part)) is not None:
                     await _finish_in_thread(write.complete, uploaded)
-                    parts = max(1, math.ceil(uploaded.size_bytes / write.grant.write.part_bytes))
+                    parts = len(part_ranges(uploaded.size_bytes, write.grant.write.part_bytes))
                     return exported("parts", write.object_url, f" ({uploaded.size_bytes} bytes in {parts} parts)")
             finally:
                 if write is not None:
