@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import tarfile
+from collections import deque
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -108,38 +109,37 @@ class ChangelogCapture:
         self._lock = asyncio.Lock()
         self._position = 0
         self._state: dict[str, Signature] = {}
-        self._pending: tuple[int, dict] | None = None
+        self._pending: deque[tuple[str, bytes]] = deque()
 
     async def start(self) -> None:
         self._state = await asyncio.to_thread(scan, self.roots)
 
     async def capture(self, session: Path | None, *, context_id: str, session_id: str) -> None:
-        """Upload the increment for the next tool call. A failure is logged and left pending, not raised: the
-        scanned state only advances on success, so a later increment, or ``flush``, carries the changes."""
+        """Build the increment for the next tool call and upload it with any still pending, in order. A failed
+        upload is logged and kept, not raised, for the next capture or ``flush``."""
         async with self._lock:
-            position = self._position
-            self._position += 1
-            meta = {"position": position, "context_id": context_id, "session_id": session_id}
-            self._pending = (position, meta)
-            await self._upload(session)
-
-    async def flush(self, session: Path | None) -> bool:
-        """Retry the pending increment, if any; whether every increment so far is uploaded."""
-        async with self._lock:
-            if self._pending is not None:
-                await self._upload(session)
-            return self._pending is None
-
-    async def _upload(self, session: Path | None) -> None:
-        position, meta = self._pending
-        try:
             current = await asyncio.to_thread(scan, self.roots)
             changed = [path for path, signature in current.items() if self._state.get(path) != signature]
             deleted = [path for path in self._state if path not in current]
+            meta = {"position": self._position, "context_id": context_id, "session_id": session_id}
             body = await asyncio.to_thread(increment, changed, deleted, self.roots, session, meta)
-            await self._uploader.upload(f"{position:06d}.tar", body)
-        except Exception:  # noqa: BLE001 -- a lost increment must not fail the tool call; flush reports it
-            logger.exception("changelog increment %06d was not uploaded", position)
-            return
-        self._state = current
-        self._pending = None
+            self._pending.append((f"{self._position:06d}.tar", body))
+            self._position += 1
+            self._state = current
+            await self._drain()
+
+    async def flush(self) -> bool:
+        """Retry the pending increments; whether every increment so far is uploaded."""
+        async with self._lock:
+            await self._drain()
+            return not self._pending
+
+    async def _drain(self) -> None:
+        while self._pending:
+            name, body = self._pending[0]
+            try:
+                await self._uploader.upload(name, body)
+            except Exception:  # noqa: BLE001 -- a lost increment must not fail the tool call; flush reports it
+                logger.exception("changelog increment %s was not uploaded", name)
+                return
+            self._pending.popleft()
