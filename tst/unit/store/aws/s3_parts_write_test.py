@@ -7,7 +7,7 @@ from urllib.parse import parse_qs, urlsplit
 import boto3
 import pytest
 from agentenv_protocol.transfers import HttpPartsPutGrant, HttpPutGrant, Uploaded, WriteObject
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, EndpointConnectionError
 from moto import mock_aws
 
 from agent_env.store import GrantUnavailableError, UploadFailedError
@@ -96,6 +96,17 @@ def test_parts_that_are_not_the_reported_object_are_refused_and_discarded(s3, st
     assert "Contents" not in s3.list_objects_v2(Bucket=BUCKET)
 
 
+def test_an_upload_over_the_grants_limit_is_refused_and_discarded(s3, store):
+    write = _begin(store)
+    _receive(s3, write.grant, b"x" * 13 * MIB)
+
+    with pytest.raises(UploadFailedError, match="limit"):
+        write.complete(Uploaded(size_bytes=13 * MIB))
+
+    assert _upload_is_gone(s3, write)
+    assert "Contents" not in s3.list_objects_v2(Bucket=BUCKET)
+
+
 def test_leaving_the_write_unfinished_aborts_it(s3, store):
     with _begin(store) as write:
         _receive(s3, write.grant, b"x" * MIB)
@@ -126,6 +137,22 @@ def test_a_store_that_refuses_to_finish_fails_the_write_and_discards_it(s3, stor
     with pytest.raises(UploadFailedError, match="AccessDenied"):
         write.complete(Uploaded(size_bytes=MIB))
     assert _upload_is_gone(s3, write)
+
+
+def test_an_abort_that_cannot_reach_s3_does_not_hide_why_the_write_failed(s3, store, monkeypatch):
+    write = _begin(store)
+    _receive(s3, write.grant, b"x" * MIB)
+
+    def denied(**_):
+        raise ClientError({"Error": {"Code": "AccessDenied", "Message": "no"}}, "CompleteMultipartUpload")
+
+    def unreachable(**_):
+        raise EndpointConnectionError(endpoint_url="https://s3.us-east-1.amazonaws.com")
+
+    monkeypatch.setattr(write._s3, "complete_multipart_upload", denied)
+    monkeypatch.setattr(write._s3, "abort_multipart_upload", unreachable)
+    with pytest.raises(UploadFailedError, match="AccessDenied"):
+        write.complete(Uploaded(size_bytes=MIB))
 
 
 @pytest.mark.parametrize(("bucket", "host"), [

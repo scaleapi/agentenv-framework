@@ -48,8 +48,10 @@ class UploadPolicy:
 
 
 class PendingWrite(ABC):
-    """An object a remote party uploads through ``grant``. It exists once ``complete`` accepts what the
-    party says it uploaded; leaving the ``with`` block without completing it discards the upload."""
+    """An object a remote party uploads through ``grant``, for the caller to use only once ``complete``
+    accepts what the party says it uploaded. Leaving the ``with`` block without completing aborts the write:
+    a staged upload (an S3 multipart upload) is discarded, but a one-PUT write lands as the PUT finishes and
+    stays, since object stores do not delete, so begin a write at a fresh URL nothing else refers to."""
 
     def __init__(self, object_url: str, grant: WriteObject) -> None:
         self.object_url = object_url
@@ -57,9 +59,15 @@ class PendingWrite(ABC):
         self._settled = False
 
     def complete(self, uploaded: Uploaded) -> None:
-        """Make the object from what was uploaded; raise UploadFailedError, discarding it, when the stored
-        bytes are not the ``uploaded.size_bytes`` the party reported or the store cannot finish it."""
+        """Make the object from what was uploaded; raise UploadFailedError, aborting the write, when the
+        party reports more than ``grant.max_bytes``, the stored bytes are not the ``uploaded.size_bytes`` it
+        reported, or the store cannot finish it."""
         try:
+            if uploaded.size_bytes > self.grant.max_bytes:
+                raise UploadFailedError(
+                    f"{uploaded.size_bytes} bytes were reported uploaded to {self.object_url}, "
+                    f"over its {self.grant.max_bytes}-byte limit"
+                )
             self._complete(uploaded)
         except BaseException:
             self.abort()
@@ -85,7 +93,7 @@ class PendingWrite(ABC):
 
 
 class _OnePutWrite(PendingWrite):
-    """A write through one PUT, which makes the object as it lands."""
+    """A write through one PUT, which makes the object as it lands, so aborting it leaves the object."""
 
     def __init__(self, store: ObjectStore, object_url: str, grant: WriteObject) -> None:
         super().__init__(object_url, grant)
