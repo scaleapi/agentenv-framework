@@ -185,7 +185,7 @@ class GithubEnv(AgentEnvEnvironment):
         bundle = self.write_bundle()
         if write_object is not None and bundle.stat().st_size <= write_object.max_bytes:
             uploaded = await upload(write_object, bundle)
-            return [uploaded_object_part(uploaded, name="slack.zip", mime_type="application/zip")]
+            return [uploaded_object_part(uploaded, name="github.zip", mime_type="application/zip")]
         return [DataPart(data=self.state())]
 ```
 
@@ -652,7 +652,8 @@ describe the stored bytes. Through a parts grant, part `k` (from 1) is bytes
 `[(k-1)*part_bytes, min(k*part_bytes, size))`, PUT to `urls[k-1]` with exact
 `Content-Length` and the grant's `headers` as given; every part but the last is
 exactly `part_bytes`, and `max_bytes` is at most `part_bytes` times the number of
-URLs. `upload()` sends `PARTS_IN_FLIGHT` parts at once and retries each on its own;
+URLs. `agentenv_protocol.transfers.part_ranges(size_bytes, part_bytes)` gives each
+part's offset and length, for issuers and receivers alike. `upload()` sends `PARTS_IN_FLIGHT` parts at once and retries each on its own;
 the object exists once the issuer completes it, and only a one-part upload reports
 `sha256`. The extensions use them as follows (`?` marks an
 optional field, `|` an alternative request):

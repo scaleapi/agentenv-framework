@@ -1,10 +1,15 @@
 """Minimal in-memory MCP server built on AgentEnvEnvironment, for integration testing.
 
 It also serves its state as JSON at ``GET /export-state``, and with ``urn:agentenv:export-as-file/v1`` enabled it
-answers ``data/get`` with a file bundle of that state, as a service that exports its database does."""
+answers ``data/get`` with a file bundle of that state, as a service that exports its database does. Handed an object
+to upload to (``write_object``), ``data/get`` uploads the state as a zip bundle through it instead, and ``data/add``
+loads such a bundle back."""
 import base64
 import json
 import random
+import tempfile
+import zipfile
+from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlparse
 
@@ -12,7 +17,8 @@ import httpx
 from pydantic import Field
 from starlette.responses import JSONResponse
 
-from agentenv_protocol import AgentEnvEnvironment, DataPart, EnvironmentCapabilities, EnvironmentExtension, FilePart, add_data, environment_card, extension, get_data, reset_data, tool
+from agentenv_protocol import AgentEnvEnvironment, DataPart, EnvironmentCapabilities, EnvironmentExtension, FilePart, add_data, environment_card, extension, get_data, reset_data, tool, uploaded_object_part
+from agentenv_protocol.transfers import WriteObject, upload
 
 
 @environment_card(
@@ -62,7 +68,10 @@ class ItemsEnv(AgentEnvEnvironment):
             elif part.kind == "file" and part.file.uri.startswith("file://"):
                 path = urlparse(part.file.uri).path
                 mt = getattr(part.file, "mimeType", None)
-                if mt == "application/json" or path.endswith(".json"):
+                if mt == "application/zip" or path.endswith(".zip"):
+                    with zipfile.ZipFile(path) as bundle:
+                        self.store.extend(json.loads(bundle.read("items.json")).get("items", []))
+                elif mt == "application/json" or path.endswith(".json"):
                     with open(path, encoding="utf-8") as f:
                         self.store.extend(json.load(f).get("items", []))
                 else:
@@ -73,7 +82,14 @@ class ItemsEnv(AgentEnvEnvironment):
                     self.store.append(f"file:{mt}:{text}")
 
     @get_data
-    async def _state(self) -> list:
+    async def _state(self, write_object: WriteObject | None = None) -> list:
+        if write_object is not None:
+            with tempfile.TemporaryDirectory() as tmp:
+                bundle = Path(tmp) / "items.zip"
+                with zipfile.ZipFile(bundle, "w") as zf:
+                    zf.writestr("items.json", json.dumps({"items": self.store}))
+                uploaded = await upload(write_object, bundle)
+            return [uploaded_object_part(uploaded, name="items.zip", mime_type="application/zip")]
         if self.export_as_file:
             bundle = base64.b64encode(json.dumps({"items": self.store}).encode()).decode()
             return [FilePart(file={"bytes": bundle, "name": "items.json", "mimeType": "application/json"})]

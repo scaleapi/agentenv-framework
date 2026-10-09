@@ -7,6 +7,7 @@ import logging
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import agentenv_protocol.a2a_agent as sdk
 import httpx
@@ -634,6 +635,17 @@ async def test_upload_streams_with_bound_and_returns_integrity(
     assert "secret" not in str(exc_info.value)
 
 
+@pytest.mark.parametrize(
+    ("size_bytes", "ranges"),
+    [(10, [(0, 4), (4, 4), (8, 2)]), (8, [(0, 4), (4, 4)]), (3, [(0, 3)]), (0, [(0, 0)])],
+    ids=["remainder", "exact-multiple", "one-short-part", "empty"],
+)
+def test_part_ranges_cut_an_object_into_full_parts_and_a_last_short_one(
+    size_bytes: int, ranges: list[tuple[int, int]]
+) -> None:
+    assert transfers.part_ranges(size_bytes, 4) == ranges
+
+
 def test_a_parts_grant_is_told_apart_from_a_put_grant_and_bounded_by_its_parts() -> None:
     parts = _parts_write_object(part_bytes=4, parts=3)
     assert WriteObject.model_validate(parts.model_dump(mode="json")) == parts
@@ -685,7 +697,6 @@ async def test_a_one_part_upload_reports_its_checksum(tmp_path: Path, monkeypatc
     assert result == Uploaded(size_bytes=4, sha256=hashlib.sha256(b"tiny").hexdigest())
 
 
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("content", "hashed"), [(b"0123456789", 0), (b"tiny", 4)], ids=["parts", "one-part"])
 async def test_only_a_one_part_upload_spends_cpu_on_a_checksum(
@@ -705,11 +716,12 @@ async def test_only_a_one_part_upload_spends_cpu_on_a_checksum(
         def hexdigest(self) -> str:
             return self._digest.hexdigest()
 
-    monkeypatch.setattr(transfers.hashlib, "sha256", _Counting)
+    monkeypatch.setattr(transfers, "hashlib", SimpleNamespace(sha256=_Counting))
     _route(monkeypatch, _respond([], 200))
     await upload(_parts_write_object(part_bytes=4, parts=4), _write(tmp_path / "bundle.zip", content))
 
     assert fed[0] == hashed
+
 
 @pytest.mark.asyncio
 async def test_a_parts_upload_larger_than_its_grant_sends_nothing(
@@ -727,10 +739,15 @@ async def test_a_parts_upload_larger_than_its_grant_sends_nothing(
 @pytest.mark.asyncio
 async def test_a_failed_part_is_retried_on_its_own(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     sent: list[int] = []
+    failures = {2: 1}
 
     def handle(request: httpx.Request) -> httpx.Response:
-        sent.append(_part_number(request))
-        return httpx.Response(503) if sent.count(2) == 1 and sent[-1] == 2 else httpx.Response(200)
+        number = _part_number(request)
+        sent.append(number)
+        if failures.get(number):
+            failures[number] -= 1
+            return httpx.Response(503)
+        return httpx.Response(200)
 
     _route(monkeypatch, handle)
     await upload(_parts_write_object(part_bytes=4, parts=3), _write(tmp_path / "bundle.zip", b"0123456789"))
@@ -754,7 +771,6 @@ async def test_a_rejected_part_fails_the_upload_without_a_retry(
     assert exc_info.value.code == "transfer_rejected"
     assert "secret" not in str(exc_info.value)
     assert sent.count(2) == 1
-
 
 
 @pytest.mark.asyncio
@@ -802,6 +818,7 @@ async def test_a_rejected_part_cancels_the_parts_still_in_flight(
     assert exc_info.value.code == "transfer_rejected"
     assert sorted(started) == [1, 2, 3]
     assert finished == []
+
 
 @pytest.mark.asyncio
 async def test_a_parts_upload_keeps_a_bounded_number_of_parts_in_flight(
@@ -1253,6 +1270,37 @@ async def test_a_grant_on_its_holders_own_staging_goes_to_its_server_over_loopba
         f"POST http://127.0.0.1:8123{_NAMESPACE}",
     ]
     assert (tmp_path / "trajectory.json").read_bytes() == content
+
+
+@pytest.mark.asyncio
+async def test_each_part_of_a_parts_grant_on_its_holders_own_staging_goes_over_loopback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("A2A_PORT", "8123")
+    received: dict[str, bytes] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.host != "127.0.0.1":
+            raise httpx.ConnectError("the sandbox can't call its own public URL", request=request)
+        received[f"{request.url.path}?{request.url.query.decode()}"] = request.read()
+        return httpx.Response(200)
+
+    _route(monkeypatch, handle)
+    write = WriteObject(
+        media_type="application/zip",
+        max_bytes=8,
+        write=HttpPartsPutGrant(
+            kind="http-put-parts",
+            part_bytes=4,
+            urls=[f"{_PUBLIC}{_STAGED}?partNumber={n}" for n in (1, 2)],
+            expires_at=_expiry(),
+            headers={transfers.STAGING_PATH_HEADER: _STAGED},
+        ),
+    )
+
+    await upload(write, b"01234567")
+
+    assert received == {f"{_STAGED}?partNumber=1": b"0123", f"{_STAGED}?partNumber=2": b"4567"}
 
 
 @pytest.mark.asyncio
