@@ -14,7 +14,7 @@ from agent_env.env.env import DeployedSandboxEnv
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT
 from agent_env.env.gateway.constants import WELL_KNOWN_PATH
 from agent_env.providers.env_providers.env_provider import _SandboxEnvironmentProvider, _size_kwargs, _tool_names
-from agent_env.providers.sandbox_providers.sandbox_provider import Creation, Runs, SandboxProvider, image_problem
+from agent_env.providers.sandbox_providers.sandbox_provider import Accepts, SandboxProvider
 
 if TYPE_CHECKING:
     from agent_env.env.env import Env
@@ -25,6 +25,11 @@ class EnvironmentServerProvider(_SandboxEnvironmentProvider):
 
     type: ClassVar[str] = "server"
     record_class = DeployedSandboxEnv
+
+    @staticmethod
+    def accepts(sandbox_provider: SandboxProvider) -> Accepts:
+        """The images a server deploys from on ``sandbox_provider``: those its containers run (``create_container``)."""
+        return sandbox_provider.CONTAINER_ACCEPTS
 
     async def deploy(
         self,
@@ -70,11 +75,10 @@ class EnvironmentServerProvider(_SandboxEnvironmentProvider):
 
         name = env.environment_name
         image = env.docker_image_artifact
-        runs = sandbox_provider.runs(Creation.CONTAINER)
-        if problem := image_problem(image, runs):
+        if problem := self.accepts(sandbox_provider).problem(image):
             raise ValueError(f"Can't deploy {name!r} as a server on {type(sandbox_provider).__name__}, which runs its "
                              f"image by name: {problem}")
-        if runs is Runs.BUILDS:
+        if image.context_only:
             await sandbox_provider.prepare_image(image, attribution=attribution)
         server = await sandbox_provider.create_container(
             image_name=env.docker_image_artifact.image_name,

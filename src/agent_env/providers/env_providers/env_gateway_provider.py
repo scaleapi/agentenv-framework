@@ -34,7 +34,7 @@ from agent_env.providers.env_providers.constants import (
 )
 from agent_env.providers.env_providers.env_provider import _SandboxEnvironmentProvider, _size_kwargs, _tool_names
 from agent_env.providers.sandbox_providers.sandbox import Sandbox, VmSandbox, port_bindings
-from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER, SandboxProvider
+from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER, Accepts, SandboxProvider
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -123,6 +123,33 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
 
     type = "gateway"
     record_class = DeployedGatewayEnv
+
+    @staticmethod
+    def in_vm(sandbox_provider: SandboxProvider) -> bool:
+        """Whether a deploy on ``sandbox_provider`` runs in a VM, as one on a provider that creates VMs does; on one
+        that doesn't, the gateway and each server run in a container of their own, on the provider's private network."""
+        return sandbox_provider.CREATES_VMS
+
+    @classmethod
+    def accepts(cls, sandbox_provider: SandboxProvider, *, prepared: bool = True) -> Accepts:
+        """The images a deploy on ``sandbox_provider`` runs: in a VM, any it loads; in containers, those the provider's
+        containers run, of the images the deploy prepares (its servers' and the gateway's), and the rest (its
+        service-db's) by name."""
+        if cls.in_vm(sandbox_provider):
+            return Accepts.LOADABLE
+        return sandbox_provider.CONTAINER_ACCEPTS if prepared else Accepts.NAME
+
+    @classmethod
+    def sandbox_problem(cls, sandbox_provider: SandboxProvider, *, websites: bool) -> str | None:
+        """Why a deploy, with ``websites`` or without, can't run on ``sandbox_provider``, or None when it can: in
+        containers, it needs their private network, and serves no websites."""
+        if cls.in_vm(sandbox_provider):
+            return None
+        if not sandbox_provider.PRIVATE_NETWORK:
+            return "creates no VM, and can't put the gateway's containers on a private network"
+        if websites:
+            return "runs the gateway in containers, and they can't serve websites"
+        return None
 
     def __init__(self):
         super().__init__()
@@ -1204,7 +1231,9 @@ COMPOSE_EOF'''
             else LocalPostgresStateProvider()
         )
         deploy_kwargs = {"attribution": dict(attribution or {})}
-        if not sandbox_provider.creates_vms():
+        if not self.in_vm(sandbox_provider):
+            if problem := self.sandbox_problem(sandbox_provider, websites=bool(website_configs)):
+                raise ValueError(f"Can't deploy a gateway on {type(sandbox_provider).__name__}, which {problem}")
             if existing_sandbox is not None:
                 raise ValueError("existing_sandbox is only supported for VM-mode providers")
             if sidecars:

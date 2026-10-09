@@ -28,8 +28,8 @@ from agent_env.a2a_agent.object_transfer import (
 from agent_env.a2a_agent.staging import transfer_store
 from agent_env.providers.sandbox_providers.local_sandbox import LOCAL_TRUST_ENV, local_grant_trust, start_trusting
 from agent_env.providers.sandbox_providers.sandbox_provider import (
-    Creation,
-    Runs,
+    Accepts,
+    SandboxProvider,
     all_sandbox_container_env,
     all_sandbox_url_rewrites,
 )
@@ -118,6 +118,11 @@ class A2AAgent:
     # extension_method() rather than a separate extension.
     SNAPSHOT_METHOD_ENABLE_CHANGELOG: ClassVar[str] = "enable-changelog"
     SNAPSHOT_METHOD_APPLY_CHANGELOG: ClassVar[str] = "apply-changelog"
+
+    @staticmethod
+    def accepts(sandbox_provider: SandboxProvider) -> Accepts:
+        """The images an agent deploys from on ``sandbox_provider``: those its sandboxes run (``create_sandbox``)."""
+        return sandbox_provider.SANDBOX_ACCEPTS
 
     @staticmethod
     def find_extension(card: dict, uri: str) -> dict | None:
@@ -435,7 +440,7 @@ class A2AAgent:
                 raise ValueError(f"Can't deploy agent {self.id!r} on the container sandbox {sandbox.sandbox_id!r}, which "
                                  f"runs its own image, never the agent's: {problem}")
             links = provider.links if provider else ()
-            if by_name := [link for link in links if link.runs(Creation.SANDBOX) is Runs.BY_NAME]:
+            if by_name := [link for link in links if self.accepts(link).problem(self.docker_image_artifact)]:
                 raise ValueError(f"Can't deploy agent {self.id!r} with {type(by_name[0]).__name__}, which runs an "
                                  f"agent's image by name: {problem}")
 

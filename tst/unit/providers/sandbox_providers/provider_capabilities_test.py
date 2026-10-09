@@ -1,6 +1,6 @@
 """What each sandbox provider declares it runs, and that nothing outside the providers asks which provider it has: every
-choice that depends on a provider reads what it declares (``ON_THIS_MACHINE``, ``runs``, ``links``, ``creates_vms``,
-``url_from_sandbox``, ``create_container(private_network=)`` and its sandboxes' ``private_host``)."""
+choice that depends on a provider reads what it declares (``ON_THIS_MACHINE``, ``CREATES_VMS``, ``SANDBOX_ACCEPTS``,
+``CONTAINER_ACCEPTS``, ``PRIVATE_NETWORK``, ``links`` and ``url_from_sandbox``) and its sandboxes' ``private_host``."""
 
 import ast
 from pathlib import Path
@@ -16,25 +16,33 @@ from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProv
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandbox, ModalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandboxProvider
 from agent_env.providers.sandbox_providers.sail_vm.provider import SailVmSandboxProvider
-from agent_env.providers.sandbox_providers.sandbox_provider import Creation, Runs, SandboxProvider, image_problem
+from agent_env.providers.sandbox_providers.sandbox_provider import Accepts, SandboxProvider
 
 SRC = Path(__file__).resolve().parents[4] / "src" / "agent_env"
 PROVIDERS = SRC / "providers" / "sandbox_providers"
 
-IN_VM, BY_NAME, BUILDS = Runs.IN_VM, Runs.BY_NAME, Runs.BUILDS
+LOADABLE, NAME, NAME_OR_CONTEXT = Accepts.LOADABLE, Accepts.NAME, Accepts.NAME_OR_CONTEXT
+PROVIDER_CLASSES = [LocalSandboxProvider, ModalSandboxProvider, ModalVmSandboxProvider, E2BSandboxProvider,
+                    SailVmSandboxProvider, ChainedSandboxProvider]
 
 
-@pytest.mark.parametrize("cls, on_this_machine, creates_vms, sandbox, container", [
-    (LocalSandboxProvider, True, True, BY_NAME, BY_NAME),
-    (ModalSandboxProvider, False, False, BUILDS, BUILDS),
-    (ModalVmSandboxProvider, False, True, IN_VM, BY_NAME),
-    (E2BSandboxProvider, False, True, IN_VM, BY_NAME),
-    (SailVmSandboxProvider, False, True, IN_VM, BY_NAME),
+@pytest.mark.parametrize("cls, on_this_machine, creates_vms, sandbox, container, private_network", [
+    (LocalSandboxProvider, True, True, NAME, NAME, False),
+    (ModalSandboxProvider, False, False, NAME_OR_CONTEXT, NAME_OR_CONTEXT, True),
+    (ModalVmSandboxProvider, False, True, LOADABLE, NAME, False),
+    (E2BSandboxProvider, False, True, LOADABLE, NAME, False),
+    (SailVmSandboxProvider, False, True, LOADABLE, NAME, False),
 ], ids=["local", "modal", "modal_vm", "e2b", "sail_vm"])
-def test_each_provider_declares_where_it_runs_and_how_it_runs_an_image(cls, on_this_machine, creates_vms, sandbox,
-                                                                       container):
-    assert (cls.ON_THIS_MACHINE, cls.creates_vms()) == (on_this_machine, creates_vms)
-    assert [cls.runs(Creation.SANDBOX), cls.runs(Creation.CONTAINER)] == [sandbox, container]
+def test_each_provider_declares_where_it_runs_and_the_images_it_runs(cls, on_this_machine, creates_vms, sandbox,
+                                                                    container, private_network):
+    assert (cls.ON_THIS_MACHINE, cls.CREATES_VMS, cls.PRIVATE_NETWORK) == (on_this_machine, creates_vms, private_network)
+    assert (cls.SANDBOX_ACCEPTS, cls.CONTAINER_ACCEPTS) == (sandbox, container)
+
+
+@pytest.mark.parametrize("cls", PROVIDER_CLASSES, ids=lambda cls: cls.__name__)
+def test_a_provider_declares_vms_and_a_private_network_only_where_it_implements_them(cls):
+    assert cls.CREATES_VMS == (cls.create_vm is not SandboxProvider.create_vm)
+    assert not cls.PRIVATE_NETWORK or cls.create_container is not SandboxProvider.create_container
 
 
 class _Vms(SandboxProvider):
@@ -45,16 +53,11 @@ class _Vms(SandboxProvider):
         raise NotImplementedError
 
 
-class _Containers(SandboxProvider):
-    async def create_sandbox(self, **_):
-        raise NotImplementedError
-
-
-def test_a_provider_that_declares_nothing_runs_images_as_the_base_class_does():
-    """A sandbox is a VM it creates, which loads the image, and a container pulls it by name; with no VM, by name."""
-    assert [_Vms.runs(creation) for creation in Creation] == [IN_VM, BY_NAME]
-    assert [_Containers.runs(creation) for creation in Creation] == [BY_NAME, BY_NAME]
-    assert (_Vms.ON_THIS_MACHINE, _Vms().url_from_sandbox("http://localhost:4000")) == (False, "http://localhost:4000")
+def test_a_provider_that_declares_nothing_runs_images_by_name_and_creates_no_vm():
+    """Implementing create_vm declares nothing: a provider says it creates VMs, as it says everything else."""
+    assert (_Vms.ON_THIS_MACHINE, _Vms.CREATES_VMS, _Vms.PRIVATE_NETWORK) == (False, False, False)
+    assert (_Vms.SANDBOX_ACCEPTS, _Vms.CONTAINER_ACCEPTS) == (NAME, NAME)
+    assert _Vms().url_from_sandbox("http://localhost:4000") == "http://localhost:4000"
 
 
 def test_a_chain_is_its_providers_in_order_and_one_provider_is_itself():
@@ -62,7 +65,6 @@ def test_a_chain_is_its_providers_in_order_and_one_provider_is_itself():
 
     assert ChainedSandboxProvider([first, second]).links == (first, second)
     assert first.links == (first,)
-    assert ChainedSandboxProvider.creates_vms() is False
 
 
 @pytest.mark.asyncio
@@ -105,12 +107,12 @@ CONTEXT_ONLY = DockerImageArtifact(id="img", version=2, description="d", image_n
 NO_REGISTRY = DockerImageArtifact(id="img", version=2, description="d", image_name="img:v2")
 
 
-@pytest.mark.parametrize("image, runs, problem", [
-    (CONTEXT_ONLY, IN_VM, None), (CONTEXT_ONLY, BUILDS, None), (CONTEXT_ONLY, BY_NAME, "only a build context"),
-    (NO_REGISTRY, IN_VM, "doesn't name a registry"), (NO_REGISTRY, BY_NAME, None), (NO_REGISTRY, BUILDS, None),
+@pytest.mark.parametrize("image, accepts, problem", [
+    (CONTEXT_ONLY, LOADABLE, None), (CONTEXT_ONLY, NAME_OR_CONTEXT, None), (CONTEXT_ONLY, NAME, "only a build context"),
+    (NO_REGISTRY, LOADABLE, "doesn't name a registry"), (NO_REGISTRY, NAME, None), (NO_REGISTRY, NAME_OR_CONTEXT, None),
 ])
-def test_an_image_is_refused_by_how_its_provider_runs_it(image, runs, problem):
-    found = image_problem(image, runs)
+def test_an_image_is_refused_by_the_form_its_provider_accepts(image, accepts, problem):
+    found = accepts.problem(image)
     assert (found is None) if problem is None else (problem in found)
 
 

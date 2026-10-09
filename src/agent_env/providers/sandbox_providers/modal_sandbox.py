@@ -20,8 +20,7 @@ from agent_env.config import get_config
 from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy, Sandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_CONTAINER,
-    Creation,
-    Runs,
+    Accepts,
     SandboxProvider,
     apply_default_attribution,
 )
@@ -190,10 +189,10 @@ class ModalSandboxProvider(SandboxProvider):
     # sandbox's ``.type`` to match the config key.
     _sandbox_cls: type[ModalSandbox] = ModalSandbox
 
-    @classmethod
-    def runs(cls, creation: Creation) -> Runs:
-        """Each image in a container of its own, built first when it is only a build context (``prepare_image``)."""
-        return Runs.BUILDS
+    # Each image in a container of its own, built first when it is only a build context (prepare_image); its
+    # containers share i6pn, Modal's private network.
+    SANDBOX_ACCEPTS = CONTAINER_ACCEPTS = Accepts.NAME_OR_CONTEXT
+    PRIVATE_NETWORK = True
 
     @classmethod
     def supports_network_policy(cls, policy: NetworkPolicy) -> bool:

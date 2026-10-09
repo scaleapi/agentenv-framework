@@ -39,7 +39,7 @@ from agent_env.providers.env_providers.env_gateway_provider import (
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import Sandbox
-from agent_env.providers.sandbox_providers.sandbox_provider import Runs
+from agent_env.providers.sandbox_providers.sandbox_provider import Accepts
 from agent_env.providers.env_state import LocalPostgresStateProvider
 from agent_env.config import get_config, set_document_store
 from agent_env.store import EcrImageStore, NotFoundError
@@ -101,6 +101,45 @@ class _FakeSandbox(Sandbox):
         self.write_calls.append((destination_path, content))
 
 
+@pytest.mark.parametrize("facts, in_vm, accepts, by_name_otherwise", [
+    ({"CREATES_VMS": True, "CONTAINER_ACCEPTS": Accepts.NAME}, True, Accepts.LOADABLE, Accepts.LOADABLE),
+    ({"CREATES_VMS": False, "CONTAINER_ACCEPTS": Accepts.NAME_OR_CONTEXT}, False, Accepts.NAME_OR_CONTEXT, Accepts.NAME),
+    ({"CREATES_VMS": False, "CONTAINER_ACCEPTS": Accepts.NAME}, False, Accepts.NAME, Accepts.NAME),
+], ids=["vm", "containers-that-build", "containers-by-name"])
+def test_a_gateway_runs_in_a_vm_where_its_provider_creates_them_and_else_in_containers(facts, in_vm, accepts,
+                                                                                         by_name_otherwise):
+    """In containers, the images the deploy prepares (its servers' and the gateway's) run as the provider's containers
+    run them, and the rest (its service-db's) by name."""
+    provider = MagicMock(**facts)
+
+    assert EnvironmentGatewayProvider.in_vm(provider) is in_vm
+    assert EnvironmentGatewayProvider.accepts(provider) is accepts
+    assert EnvironmentGatewayProvider.accepts(provider, prepared=False) is by_name_otherwise
+
+
+@pytest.mark.parametrize("facts, websites, problem", [
+    ({"CREATES_VMS": True, "PRIVATE_NETWORK": False}, True, None),
+    ({"CREATES_VMS": False, "PRIVATE_NETWORK": True}, False, None),
+    ({"CREATES_VMS": False, "PRIVATE_NETWORK": True}, True, "they can't serve websites"),
+    ({"CREATES_VMS": False, "PRIVATE_NETWORK": False}, False, "can't put the gateway's containers on a private network"),
+], ids=["vm-with-websites", "containers", "containers-with-websites", "containers-without-a-private-network"])
+def test_a_gateway_in_containers_needs_their_private_network_and_serves_no_websites(facts, websites, problem):
+    found = EnvironmentGatewayProvider.sandbox_problem(MagicMock(**facts), websites=websites)
+    assert (found is None) if problem is None else (problem in found)
+
+
+@pytest.mark.asyncio
+async def test_a_gateway_deploy_on_a_provider_with_no_vm_and_no_private_network_creates_nothing():
+    provider = MagicMock(CREATES_VMS=False, PRIVATE_NETWORK=False, create_container=AsyncMock())
+
+    with pytest.raises(ValueError, match="private network"):
+        await EnvironmentGatewayProvider()._deploy_gateway(provider, state_instance=None, mcp_servers=[],
+                                                          mcp_server_images=[])
+
+    provider.create_container.assert_not_called()
+    provider.prepare_image.assert_not_called()
+
+
 @pytest.mark.asyncio
 async def test_container_mode_rejects_websites():
     provider = ModalSandboxProvider()
@@ -121,10 +160,8 @@ async def test_container_mode_rejects_websites():
 
 def _vm_provider(**attrs) -> MagicMock:
     """A sandbox provider that creates VMs, where a gateway runs, as every VM provider does."""
-    provider = MagicMock(ON_THIS_MACHINE=False, **attrs)
+    provider = MagicMock(ON_THIS_MACHINE=False, CREATES_VMS=True, SANDBOX_ACCEPTS=Accepts.LOADABLE, **attrs)
     provider.links = (provider,)
-    provider.creates_vms.return_value = True
-    provider.runs.return_value = Runs.IN_VM
     return provider
 
 

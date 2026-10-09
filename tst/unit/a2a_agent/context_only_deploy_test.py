@@ -9,7 +9,7 @@ from agent_env.providers.sandbox_providers import sandbox_provider
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
-from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
+from agent_env.providers.sandbox_providers.sandbox_provider import Accepts, SandboxProvider
 
 
 class _Created(Exception):
@@ -22,6 +22,9 @@ class _LocalProvider(LocalSandboxProvider):
 
 
 class _VmProvider(SandboxProvider):
+    CREATES_VMS = True
+    SANDBOX_ACCEPTS = Accepts.LOADABLE
+
     async def create_sandbox(self, **_):
         raise _Created
 

@@ -34,8 +34,6 @@ from agent_env.providers.sandbox_providers.sandbox import SANDBOX_LABEL, Network
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_CONTAINER,
     SANDBOX_MODE_VM,
-    Creation,
-    Runs,
     SandboxProvider,
     refuse_unenforceable_policy,
 )
@@ -499,12 +497,9 @@ class LocalSandboxProvider(SandboxProvider):
 
     EXTRA_CONTAINER_RUN_ARGS = " ".join(f"--add-host {entry}" for entry in _EXTRA_HOSTS)
     ON_THIS_MACHINE = True
-
-    @classmethod
-    def runs(cls, creation: Creation) -> Runs:
-        """A container from the image's name either way, which this machine's Docker pulls or already holds; the VMs it
-        creates (``create_vm``) load images of their own."""
-        return Runs.BY_NAME
+    # A sandbox or a container is a container from the image's name, which this machine's Docker pulls or already
+    # holds; a VM it creates (create_vm) loads images of its own.
+    CREATES_VMS = True
 
     def url_from_sandbox(self, url: str) -> str:
         return self.get_external_url(url)

@@ -37,28 +37,20 @@ class SandboxProviderTypeError(ConfigError):
     """A config-registered provider produced a Sandbox whose ``.type`` != its ``[sandbox.providers.<name>]`` key."""
 
 
-class Creation(Enum):
-    """How a provider is asked to run an image."""
+class Accepts(Enum):
+    """The images a sandbox provider can run, by the form the store keeps an image in."""
 
-    SANDBOX = "sandbox"  # create_sandbox: a sandbox to run it in
-    CONTAINER = "container"  # create_container: a container started from it
+    LOADABLE = "loadable"  # any a VM can get: a tar.gz it loads, a registry name it pulls, a build context it builds
+    NAME = "name"  # one it starts by its name, which an image that is only a build context gets only from a build
+    NAME_OR_CONTEXT = "name_or_context"  # one it starts by its name, or a build context it builds first (prepare_image)
 
-
-class Runs(Enum):
-    """How a provider runs an image."""
-
-    IN_VM = "in_vm"  # in a VM it creates, which loads the image's tar.gz, pulls its name or builds its context
-    BY_NAME = "by_name"  # in a container started from the image's name, which has to name a registry
-    BUILDS = "builds"  # in a container, building it first when it is only a build context (prepare_image)
-
-
-def image_problem(image: DockerImageArtifact, runs: Runs) -> str | None:
-    """Why a provider that runs images as ``runs`` can't run ``image``, or None when it can."""
-    if runs is Runs.IN_VM:
-        return image.load_problem()
-    if runs is Runs.BY_NAME:
-        return image.by_name_problem()
-    return None
+    def problem(self, image: DockerImageArtifact) -> str | None:
+        """Why a provider that accepts these can't run ``image``, or None when it can."""
+        if self is Accepts.LOADABLE:
+            return image.load_problem()
+        if self is Accepts.NAME:
+            return image.by_name_problem()
+        return None
 
 
 class SandboxProvider(ABC):
@@ -173,23 +165,19 @@ class SandboxProvider(ABC):
     # Internal→external host rewrites for URLs issued on this platform ({} = none).
     URL_REWRITES: ClassVar[dict[str, str]] = {}
 
+    # What it declares, which nothing outside the providers reads any other way. A provider that declares nothing runs
+    # each image from its name, in a sandbox that isn't on this machine, and creates no VM and no private network.
+    #
     # Whether its sandboxes run on this machine: an image only this machine holds (in a registry or object store on
     # it) reaches them, its containers need this machine's Docker, and a gateway's infra envs are built here for it.
     ON_THIS_MACHINE: ClassVar[bool] = False
-
-    @classmethod
-    def creates_vms(cls) -> bool:
-        """Whether it creates VM sandboxes, as a provider that implements ``create_vm`` does."""
-        return cls.create_vm is not SandboxProvider.create_vm
-
-    @classmethod
-    def runs(cls, creation: Creation) -> Runs:
-        """How it runs an image it's given through ``creation``. One that creates VMs gives ``create_sandbox`` a VM,
-        which loads the image, and pulls the image by name for ``create_container``; one that doesn't runs it from its
-        name either way. A provider that runs images otherwise says so here."""
-        if cls.creates_vms() and creation is Creation.SANDBOX:
-            return Runs.IN_VM
-        return Runs.BY_NAME
+    # Whether create_vm gives a VM sandbox, as a provider that implements it does.
+    CREATES_VMS: ClassVar[bool] = False
+    # The images create_sandbox and create_container run.
+    SANDBOX_ACCEPTS: ClassVar[Accepts] = Accepts.NAME
+    CONTAINER_ACCEPTS: ClassVar[Accepts] = Accepts.NAME
+    # Whether create_container(private_network=True) puts containers on a network they share.
+    PRIVATE_NETWORK: ClassVar[bool] = False
 
     @property
     def links(self) -> tuple[SandboxProvider, ...]:

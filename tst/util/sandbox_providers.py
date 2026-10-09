@@ -1,17 +1,16 @@
 """A sandbox provider for unit tests that stand one in with a MagicMock: it declares what a real provider declares, that
-it is its own only link, how it runs an image it's given, whether it creates VMs, and that its sandboxes reach a URL
-as it is."""
+it is its own only link, and that its sandboxes reach a URL as it is."""
 
 from unittest.mock import MagicMock
 
-from agent_env.providers.sandbox_providers.sandbox_provider import Runs
+from agent_env.providers.sandbox_providers.sandbox_provider import Accepts
 
 
-def mock_provider(runs: Runs = Runs.IN_VM, *, on_this_machine: bool = False, **attrs) -> MagicMock:
-    """A MagicMock provider that runs every image as ``runs``: in a VM it creates, by default."""
-    provider = MagicMock(ON_THIS_MACHINE=on_this_machine, **attrs)
+def mock_provider(*, on_this_machine: bool = False, **attrs) -> MagicMock:
+    """A MagicMock provider that declares what a VM provider does, unless ``attrs`` declare otherwise."""
+    facts = {"CREATES_VMS": True, "SANDBOX_ACCEPTS": Accepts.LOADABLE, "CONTAINER_ACCEPTS": Accepts.NAME,
+             "PRIVATE_NETWORK": False}
+    provider = MagicMock(ON_THIS_MACHINE=on_this_machine, **(facts | attrs))
     provider.links = (provider,)
-    provider.runs.return_value = runs
-    provider.creates_vms.return_value = runs is Runs.IN_VM
     provider.url_from_sandbox.side_effect = lambda url: url
     return provider

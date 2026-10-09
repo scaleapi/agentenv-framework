@@ -38,7 +38,7 @@ from agent_env.providers.sandbox_providers.modal_sandbox import (
 from agent_env.attribution import Attribution
 from agent_env.config import get_config
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, VmSandbox, push_object_over_stdin
-from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_VM, SandboxProvider
+from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_VM, Accepts, SandboxProvider
 
 if TYPE_CHECKING:
     from agent_env.store.object_store import ObjectStore
@@ -274,6 +274,8 @@ class ModalVmSandbox(VmSandbox):
 
 class ModalVmSandboxProvider(SandboxProvider):
     EGRESS_HOSTS: ClassVar[tuple[str, ...]] = ("*.modal.host", "*.w.modal.host")
+    CREATES_VMS = True
+    SANDBOX_ACCEPTS = Accepts.LOADABLE  # a sandbox is a VM, which loads the image; a container pulls it by name
 
     @classmethod
     def supports_network_policy(cls, policy: NetworkPolicy) -> bool:
