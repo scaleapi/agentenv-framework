@@ -836,6 +836,9 @@ COMPOSE_EOF'''
 
         config = get_config()
         gateway_env = Env.get(config.default_gateway_env_id)
+        if problems := [problem for image in [gateway_env.docker_image_artifact, *mcp_server_images]
+                        if (problem := image.by_name_problem())]:
+            raise ValueError(f"Can't deploy on Modal, whose gateway runs each image by name: {'; '.join(problems)}")
 
         i6pn_kwargs = {"i6pn": True, "region": config.modal_default_region} if isinstance(sandbox_provider, ModalSandboxProvider) else {}
         deploy = _ContainerDeploy(
@@ -1192,9 +1195,6 @@ COMPOSE_EOF'''
                 raise ValueError("existing_sandbox is only supported for VM-mode providers")
             if sidecars:
                 raise NotImplementedError("sidecars are only supported for VM-mode gateway deploys")
-            if problems := [problem for image in [*mcp_server_images, *(website_images or [])]
-                            if (problem := image.by_name_problem())]:
-                raise ValueError(f"Can't deploy on Modal, whose gateway runs each image by name: {'; '.join(problems)}")
             return await self._deploy_via_containers(
                 sandbox_provider, mcp_servers, mcp_server_images,
                 gateway_port=gateway_port, website_configs=website_configs, gateway_mode=gateway_mode,

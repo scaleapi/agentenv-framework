@@ -13,6 +13,7 @@ import asyncio
 import logging
 import shlex
 import time
+import weakref
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
@@ -27,6 +28,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 E2B_ALL_TRAFFIC = "0.0.0.0/0"
+
+
+# One lock per E2B sandbox in each event loop, held to widen its egress policy, so concurrent downloads don't each widen
+# a stale copy and drop the other's host.
+_policy_locks: weakref.WeakValueDictionary[tuple[asyncio.AbstractEventLoop, str], asyncio.Lock] = (
+    weakref.WeakValueDictionary()
+)
 
 
 class _BytesReader:
@@ -313,13 +321,7 @@ class E2BSandbox(VmSandbox):
             return
 
         signed_urls = await self._signed_image_urls(artifacts)
-        signed_hosts = {
-            parsed.hostname
-            for signed_url in signed_urls
-            if signed_url and (parsed := urlparse(signed_url)).hostname
-        }
-        if signed_hosts:
-            await self.apply_network_policy(policy.with_hosts(sorted(signed_hosts)))
+        await self._allow_download_hosts(signed_urls)
         await self._load_docker_images(artifacts, signed_urls)
 
     async def _download_object_to_vm(self, object_url: str, vm_path: str) -> None:
@@ -329,9 +331,19 @@ class E2BSandbox(VmSandbox):
         policy = self.network_policy
         if policy is not None and policy.restricts_egress:
             signed = await asyncio.to_thread(get_config().get_object_store_at(object_url).signed_get_url, object_url)
-            if signed and (host := urlparse(signed).hostname):
-                await self.apply_network_policy(policy.with_hosts([host]))
+            await self._allow_download_hosts([signed])
         await super()._download_object_to_vm(object_url, vm_path)
+
+    async def _allow_download_hosts(self, signed_urls: list[str | None]) -> None:
+        """Add the hosts of ``signed_urls`` to a restrictive applied policy, reading the policy under the sandbox's
+        lock, so a concurrent download's host isn't dropped."""
+        hosts = {parsed.hostname for url in signed_urls if url and (parsed := urlparse(url)).hostname}
+        if not hosts:
+            return
+        async with _policy_locks.setdefault((asyncio.get_running_loop(), self.sandbox_id), asyncio.Lock()):
+            policy = self.network_policy
+            if policy is not None and policy.restricts_egress and not hosts <= set(policy.allow_hosts):
+                await self.apply_network_policy(policy.with_hosts(sorted(hosts)))
 
     @classmethod
     async def reconnect(

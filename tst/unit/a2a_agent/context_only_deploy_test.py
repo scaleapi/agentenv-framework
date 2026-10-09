@@ -52,3 +52,16 @@ async def test_a_vm_provider_is_asked_for_a_sandbox(monkeypatch, local_stores, l
 
     with pytest.raises(_Created):
         await A2AAgent(id="solver", version=1, docker_image_artifact=IMAGE).deploy(sandbox_type="any")
+
+
+class _ContainerSandbox:
+    sandbox_id = "sb-container"
+    mode = "container"
+    tunnel_urls = {}
+
+
+@pytest.mark.asyncio
+async def test_an_existing_container_sandbox_refuses_it_since_it_never_runs_the_agents_image(local_stores, litellm):
+    with pytest.raises(ValueError, match="Can't deploy agent 'solver' on the container sandbox 'sb-container', which runs its "
+                                         "own image, never the agent's: 'solver-image' v2 is only a build context"):
+        await A2AAgent(id="solver", version=1, docker_image_artifact=IMAGE).deploy(sandbox=_ContainerSandbox())
