@@ -310,7 +310,8 @@ async def test_a_child_env_endpoint_resolves_to_the_child_from_the_stored_card_a
     {"capabilities": {"extensions": [{"uri": "urn:agentenv:clock/v1"}]}},
     {"capabilities": {"extensions": [{"uri": "urn:agentenv:clock/v1", "params": None}]}},
     {"capabilities": {"extensions": [{"uri": "urn:agentenv:clock/v1", "params": "/ext/clock/sync-time"}]}},
-], ids=["no-capabilities", "null-capabilities", "null-extensions", "no-params", "null-params", "params-not-an-object"])
+    {"capabilities": {"extensions": [{"uri": "urn:agentenv:clock/v1", "params": {"endpoint": "", "methods": {"sync_time": {"method": "POST"}}}}]}},
+], ids=["no-capabilities", "null-capabilities", "null-extensions", "no-params", "null-params", "params-not-an-object", "an-empty-endpoint"])
 async def test_a_stored_child_card_without_endpoints_comes_back_as_stored(fields):
     record = _composed_record({"name": "slack", "url": RPC_PATH, **fields})
     (stored,) = record.environment_card["children_environments"]
