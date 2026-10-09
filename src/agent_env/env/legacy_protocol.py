@@ -101,7 +101,7 @@ def _extensions(card: dict) -> Iterator[dict]:
             yield ext
 
 
-def _operations(ext: dict) -> list[tuple[Optional[str], Optional[dict], str, str]]:
+def _operations(ext: dict) -> list[tuple[str | None, dict | None, str, str]]:
     """Each operation an extension offers, as ``invoke_extension`` calls it: (method name, method, HTTP verb, endpoint), the endpoint being the method's
     own, else the extension's; an extension listing no methods offers a POST to its endpoint. Badly shaped ones (a ``methods`` or method that isn't an
     object, a verb or endpoint that isn't text) are skipped, so they stay as stored and can't break calls to the card's other extensions."""
