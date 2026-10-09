@@ -3,9 +3,9 @@
 Materializing first refuses every write this release has no writer for, so nothing is written for a bundle
 that can't be written whole. It needs the CLI's namespace routing, which sends ``@local`` writes to the
 ``@local`` namespace's store. Holding the bundle's lock, it writes the entities in the plan's order, an image
-built from an entry's Dockerfile just before the entry, with ``docker build`` on this machine; then it
-builds and preflights every task before writing any of them, and writes the evals last, since they name the
-tasks. Each write goes through the ledger, so one whose inputs haven't changed reuses the version the bundle
+built from an entry's Dockerfile just before the entry: with ``docker build`` on this machine, or, for one
+whose deploys build it in their VMs, as its build context alone. Then it builds and preflights every task
+before writing any of them, and writes the evals last, since they name the tasks. Each write goes through the ledger, so one whose inputs haven't changed reuses the version the bundle
 last wrote. A reused task keeps whatever its steps took from config when it was first written, such as a
 rubrics verifier's default judge model. A dry run takes the same path, refusals, checks and preflights
 included, without the lock or a single write.
@@ -59,6 +59,7 @@ class Materialization:
 
     plan: Plan
     writes: tuple[Materialized, ...]  # in the plan's order
+    contexts: frozenset[str] = frozenset()  # the ids of the built images written as build contexts
     # A dry run's steps with a preflight that read what it would write first, so the store can't check them yet.
     not_preflighted: tuple[tuple[Write, TaskStep], ...] = ()
 
@@ -76,11 +77,13 @@ def materialize(
     on_wait: Callable[[], None] | None = None,
     on_build: Callable[[Write], None] | None = None,
     on_write: Callable[[Materialized], None] | None = None,
+    contexts: frozenset[str] = frozenset(),
 ) -> Materialization:
     """Write ``plan``'s entities, tasks and evals. The first write that fails stops it, and every earlier
     one stays: they're in the ledger, so the next run reuses them. ``on_wait`` is called when another run
     holds a lock this one needs, ``on_build`` before an image is built, and ``on_write`` after each write,
-    reused or not.
+    reused or not. An image the bundle builds whose id is in ``contexts`` is written as its build context
+    alone, for the VM sandboxes that deploy it to build (``preflight_run`` decides which).
 
     ``dry_run`` checks and preflights what a run would, and writes nothing: no entity, ledger row or lock.
     Each write gets the version it would reuse or the store's next, which another run can take first. A step
@@ -89,7 +92,7 @@ def materialize(
     if not namespace_routing_enabled():
         raise RuntimeError("materializing a bundle needs namespace routing, which the agent-env CLI turns on; "
                            "call it inside agent_env.store.routing.namespace_routing()")
-    ledger = Ledger.for_plan(plan)
+    ledger = Ledger.for_plan(plan, contexts)
     entities = [write for write in plan.writes if write.kind not in (BundleKind.TASK, BundleKind.EVAL)]
     tasks = [write for write in plan.writes if write.kind is BundleKind.TASK]
     evals = [write for write in plan.writes if write.kind is BundleKind.EVAL]
@@ -111,9 +114,9 @@ def materialize(
             on_write(done[_key(write)])
 
     with nullcontext() if dry_run else materializing(plan.bundle.bundle, on_wait):
-        _refuse_builds_without_docker(plan, ledger)  # once another run writing these ids is done
+        _refuse_builds_without_docker(plan, ledger, contexts)  # once another run writing these ids is done
         for write in entities:
-            through_ledger(write, lambda: _write_entity(plan, write, on_build))
+            through_ledger(write, lambda: _write_entity(plan, write, on_build, contexts))
         unwritten = {_key(item.write) for item in done.values() if not item.reused} if dry_run else set()
         built, problems, unchecked = {}, [], []
         for write in tasks:
@@ -128,29 +131,52 @@ def materialize(
             through_ledger(write, lambda: Task.put(id=write.id, steps=built[write.id].steps).version)
         for write in evals:
             through_ledger(write, lambda: _WRITERS[write.kind](plan, write))
-    return Materialization(plan, tuple(done[_key(write)] for write in plan.writes), tuple(unchecked))
+    return Materialization(plan, tuple(done[_key(write)] for write in plan.writes), contexts, tuple(unchecked))
 
 
-def _write_entity(plan: Plan, write: Write, on_build: Callable[[Write], None] | None) -> int:
+def _write_entity(plan: Plan, write: Write, on_build: Callable[[Write], None] | None,
+                  contexts: frozenset[str]) -> int:
     if not isinstance(write.source, BuiltImage):
         return _WRITERS[write.kind](plan, write)
+    if write.id in contexts:
+        return _write_build_context(plan, write)
     if on_build is not None:
         on_build(write)
     return _write_built_image(plan, write)
 
 
-def _write_built_image(plan: Plan, write: Write) -> int:
-    """Build the image an entry's Dockerfile describes and write it as a docker_image artifact: pushed to the
-    image store, saved as a tarball, and its build context kept for installing it into a running container.
-    The build context is a copy of the files the ledger hashes, ``build_context_files``, so an image the
-    ledger reuses was built from what it hashed."""
-    image = write.source
-    tag = f"{image_repository(write.id)}:bundle"
+@contextmanager
+def _staged(plan: Plan, image: BuiltImage) -> Iterator[Path]:
+    """A copy of the files the ledger hashes, ``build_context_files``, so an image the ledger reuses was made from
+    what it hashed."""
     with tempfile.TemporaryDirectory(prefix="agent-env-build-") as staged:
         context = Path(staged)
         for key, path in build_context_files(plan.bundle.bundle, image.entry).items():
             (context / key).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, context / key)
+        yield context
+
+
+def _write_build_context(plan: Plan, write: Write) -> int:
+    """Write the image an entry's Dockerfile describes as a docker_image artifact holding its build context alone,
+    which each VM sandbox that deploys it builds."""
+    image = write.source
+    with _staged(plan, image) as context:
+        try:
+            return DockerImageArtifact.put_context(
+                write.id, description=f"built from {_path(plan, write)}/{image.dockerfile}", context_path=str(context),
+                dockerfile_path=str(context / image.dockerfile),
+            ).version
+        except (ValueError, RuntimeError) as e:  # a context it can't write, or the object store
+            raise BundleError([f"{_path(plan, write)}: {e}"]) from None
+
+
+def _write_built_image(plan: Plan, write: Write) -> int:
+    """Build the image an entry's Dockerfile describes and write it as a docker_image artifact: pushed to the
+    image store, saved as a tarball, and its build context kept for installing it into a running container."""
+    image = write.source
+    tag = f"{image_repository(write.id)}:bundle"
+    with _staged(plan, image) as context:
         try:
             build_image(context / image.dockerfile, context, tag, platform=None)
         except DockerBuildError as e:
@@ -229,13 +255,15 @@ def _refuse_unwritable(plan: Plan) -> None:
         raise BundleError(problems)
 
 
-def _refuse_builds_without_docker(plan: Plan, ledger: Ledger) -> None:
-    """An image the ledger will reuse needs no docker, so only the ones it would build are refused."""
+def _refuse_builds_without_docker(plan: Plan, ledger: Ledger, contexts: frozenset[str]) -> None:
+    """An image the ledger will reuse, or one written as its build context, needs no docker, so only the ones it
+    would build are refused."""
     if shutil.which("docker") is not None:
         return
     problems = [f"{_path(plan, write)}: building its image from {write.source.dockerfile} needs docker, and it isn't "
                 "on PATH" for write in plan.writes
-                if isinstance(write.source, BuiltImage) and not ledger.check(write, {}).unchanged]
+                if isinstance(write.source, BuiltImage) and write.id not in contexts
+                and not ledger.check(write, {}).unchanged]
     if problems:
         raise BundleError(problems)
 

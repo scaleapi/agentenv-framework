@@ -587,6 +587,29 @@ async def test_a_url_the_local_store_holds_is_read_from_it_not_the_configured_st
     assert pushed == [(local, data), (local, image)]
 
 
+@pytest.mark.asyncio
+async def test_a_build_context_the_local_store_holds_is_pushed_over_exec_and_built(cli_routing, monkeypatch, tmp_path):
+    """A bundle run writes an @local image's context to this machine's store, which signs no url."""
+    set_object_store(ConfiguredObjectStore())
+    (tmp_path / "Dockerfile").write_text("FROM scratch\n")
+    image = DockerImageArtifact.put_context("@local/~/t/img", description="", context_path=str(tmp_path),
+                                            dockerfile_path=str(tmp_path / "Dockerfile"))
+    pushed = []
+
+    async def push(sandbox, store, object_url, vm_path):
+        pushed.append((object_url, vm_path))
+
+    monkeypatch.setattr(sandbox_module, "push_object_over_exec", push)
+    sandbox = _RecordingVmSandbox()
+
+    await sandbox.load_docker_images([image])
+
+    work = _work(image.source_digest)
+    assert image.build_context_object_url.startswith("file://")
+    assert pushed == [(image.build_context_object_url, f"{work}/context.tar.gz")]
+    assert f"docker build --platform linux/amd64 -f Dockerfile -t {image.image_name} ." in sandbox.scripts[-2]
+
+
 def _context_image(id: str, digest: str | None, *, platform: str | None = "linux/amd64",
                    dockerfile: str | None = "Dockerfile") -> DockerImageArtifact:
     return DockerImageArtifact(id=id, version=1, description="", image_name=f"local/{id}-0123456789ab:v1",
