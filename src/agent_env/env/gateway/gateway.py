@@ -738,7 +738,10 @@ class Gateway:
             try:
                 sessions = await ready
             except BaseException:
-                close.set()  # the owner exits whatever it opened (also a success that lands after we left)
+                # Nobody will use this generation: an open still in progress is abandoned (its stack unwinds what
+                # it entered), not finished in the background to hold connections nobody waits on.
+                close.set()
+                owner.cancel()
                 raise
             self._child_sessions, self._child_owner, self._child_close = sessions, owner, close
             return sessions

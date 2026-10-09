@@ -330,12 +330,16 @@ async def test_startup_discovery_is_bounded_and_a_hung_open_leaves_no_generation
     assert sent == [{"type": "lifespan.startup.complete"}] and not gw._trigger_engine._driver_task.done()
     assert gw._child_owner is None and gw._child_sessions == {} and not gw._tools_discovered
     assert not gw._child_lock.locked() and not gw._discover_lock.locked()
-    gate.set()  # the hung open now returns to an owner nobody waits on; it exits what it opened
+    await asyncio.sleep(0)
+    # the abandoned open was cancelled, not left running to finish for nobody
+    assert not [t for t in asyncio.all_tasks() if t.get_name() == "gateway-child-sessions" and not t.done()]
+    assert opener.attempts == 1 and opener.opened == 0
+    gate.set()
     try:
         assert (await gw._ensure_child_sessions())[URL] is opener.session
         await asyncio.sleep(0.01)
-        assert opener.attempts == 2 and opener.opened == 2 and opener.exited == [opener.entered[0]]
-        assert opener.entered[1] is gw._child_owner and not gw._child_owner.done()
+        assert opener.attempts == 2 and opener.opened == 1 and opener.exited == []
+        assert opener.entered[0] is gw._child_owner and not gw._child_owner.done()
         await gw._ensure_tools_discovered()
         assert gw._tools_discovered
     finally:
