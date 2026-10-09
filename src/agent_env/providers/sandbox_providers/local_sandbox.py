@@ -64,9 +64,9 @@ def _runs_in_container(cmd: list[str]) -> bool:
 
 _REAP_SECONDS = 5
 # How long a finished command's output is still read, for a job it left in the background that holds it open; and
-# how much of each stream is kept, the end of it.
+# how much of each stream is kept, the end of it: above the largest output core reads whole, run_code's 50 MiB result.
 _OUTPUT_GRACE_SECONDS = 1
-_OUTPUT_TAIL_BYTES = 16 * 1024 * 1024
+_OUTPUT_TAIL_BYTES = 64 * 1024 * 1024
 
 # Every command a local sandbox runs carries this, set to the sandbox's id, and so does whatever the command starts, so
 # teardown can find a process left running on this machine, such as the agent a host-mode install started.
@@ -322,9 +322,9 @@ class LocalSandbox(VmSandbox):
             process._transport.close()
         output = stdout.text(), stderr.text()
         for name, tail in (("stdout", stdout), ("stderr", stderr)):
-            if tail.dropped:
-                logger.warning("Kept the last %d bytes of the %s of %r; %d before them were dropped",
-                               _OUTPUT_TAIL_BYTES, name, " ".join(args)[:120], tail.dropped)
+            if tail.dropped:  # not the command itself: it can carry secrets
+                logger.warning("Kept the last %d bytes of a command's %s on sandbox %s; %d before them were dropped",
+                               _OUTPUT_TAIL_BYTES, name, self.sandbox_id, tail.dropped)
         return exit_code, *output
 
     async def _write_unsigned_object(self, object_store: ObjectStore, object_url: str, vm_path: str) -> None:

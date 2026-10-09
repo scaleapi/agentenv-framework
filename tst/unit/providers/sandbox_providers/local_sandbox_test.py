@@ -20,6 +20,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_
 from agent_env.store import LocalFilesystemObjectStore
 from agent_env.store.object_store.local.tls import local_ca
 from agent_env.store.routing import LocalRunObjectStore
+from agent_env.task_step.task_steps.run_code import RunCodeTaskStep
 from agent_env.a2a_agent import a2a_agent as a2a_agent_module
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from tst.unit.store.fakes import FakeObjectStore
@@ -882,6 +883,10 @@ async def test_output_that_isnt_utf8_is_kept_with_replacement_characters(tmp_pat
     assert (exit_code, stdout) == (0, "ok \ufffd")
 
 
+def test_a_run_code_result_at_its_limit_is_kept_whole():
+    assert ls._OUTPUT_TAIL_BYTES > RunCodeTaskStep.MAX_OUTPUT_BYTES
+
+
 @pytest.mark.asyncio
 async def test_only_the_end_of_a_long_output_is_kept(monkeypatch, tmp_path: Path, caplog):
     monkeypatch.setattr(ls, "_OUTPUT_TAIL_BYTES", 1000)
@@ -891,6 +896,7 @@ async def test_only_the_end_of_a_long_output_is_kept(monkeypatch, tmp_path: Path
 
     assert len(stdout) == 1000 and stdout.endswith("xEND\n")
     assert "199004 before them were dropped" in caplog.text
+    assert "head -c" not in caplog.text  # the command is left out: it can carry secrets
 
 
 @pytest.mark.asyncio
