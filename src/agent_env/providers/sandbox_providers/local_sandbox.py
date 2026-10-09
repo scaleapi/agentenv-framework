@@ -74,11 +74,11 @@ _SANDBOX_ENV = "AGENTENV_SANDBOX"
 
 # Where a container finds the local transfer CA's trust files, and the variables that point TLS clients at them:
 # SSL_CERT_FILE replaces a client's roots, so it gets the public roots plus the CA; NODE_EXTRA_CA_CERTS adds.
-_TRUST_DIR = "/etc/agentenv"
+LOCAL_TRUST_DIR = "/etc/agentenv"
 LOCAL_TRUST_ENV = {
-    "SSL_CERT_FILE": f"{_TRUST_DIR}/ca-bundle.pem",
-    "REQUESTS_CA_BUNDLE": f"{_TRUST_DIR}/ca-bundle.pem",
-    "NODE_EXTRA_CA_CERTS": f"{_TRUST_DIR}/ca.pem",
+    "SSL_CERT_FILE": f"{LOCAL_TRUST_DIR}/ca-bundle.pem",
+    "REQUESTS_CA_BUNDLE": f"{LOCAL_TRUST_DIR}/ca-bundle.pem",
+    "NODE_EXTRA_CA_CERTS": f"{LOCAL_TRUST_DIR}/ca.pem",
 }
 
 # Marker dropped in the work dir when this sandbox runs a container, so a later get_sandbox()
@@ -460,7 +460,7 @@ async def start_trusting(sandbox: VmSandbox, container: str, trust_dir: Path) ->
     """Copy ``trust_dir`` into the created ``container`` where ``LOCAL_TRUST_ENV`` points, then start it. A container
     that cannot be given the files or started is removed, so its name is free for the next attempt."""
     try:
-        await asyncio.to_thread(_copy_into_container, trust_dir, container, _TRUST_DIR)
+        await asyncio.to_thread(_copy_into_container, trust_dir, container, LOCAL_TRUST_DIR)
         await sandbox.exec_script(f"docker start {shlex.quote(container)} > /dev/null")
     except Exception:
         await sandbox.exec_script(f"docker rm -f {shlex.quote(container)} >/dev/null 2>&1 || true")
