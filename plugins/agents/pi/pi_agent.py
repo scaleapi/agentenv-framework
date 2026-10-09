@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import urlsplit
 
 import httpx
 from agentenv_protocol.a2a_agent import (
@@ -85,6 +85,10 @@ ENV_FILE = "agent.env"
 STREAM_LIMIT_BYTES = 64 * 1024 * 1024
 STDERR_TAIL_BYTES = 8 * 1024
 FETCH_TIMEOUT_SECONDS = 120
+MAX_ATTACHMENT_BYTES = 256 * 1024 * 1024
+# The peer MCP server's header naming the run, whose value pi reads from its environment, never from disk.
+PEER_RUN_HEADER = "X-Pi-A2A-Run"
+PEER_RUN_ENV = "AGENTENV_MCP_PEER_RUN"
 # Deltas are reconstructible from the message_end records, so they are left out of the trajectory.
 _UNRECORDED_EVENTS = frozenset({"message_update", "tool_execution_update"})
 # A context id passes through as its session id only when it has none of pi's ``.`` and ``_``; every derived id
@@ -166,7 +170,7 @@ def _models_json(config: PiConfig, base_url: str, default_params: Mapping[str, A
 
 
 def _mcp_json(
-    mcp_servers: Mapping[str, Any], timeout_seconds: int, context_id: str
+    mcp_servers: Mapping[str, Any], timeout_seconds: int, peer_run: str
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """pi's ``mcp.json`` and the env vars carrying its header values.
 
@@ -181,10 +185,10 @@ def _mcp_json(
             variable = f"AGENTENV_MCP_{index}_HEADER_{header_index}"
             env[variable] = value
             headers[header] = "${" + variable + "}"
-        url = registration["url"]
-        if url == PEER_MCP_URL:
-            url = f"{url}?{urlencode({'context': context_id})}"
-        servers[name] = {"type": "http", "url": url, "exposure": "direct", "timeout": timeout_seconds}
+        if registration["url"] == PEER_MCP_URL:
+            env[PEER_RUN_ENV] = peer_run
+            headers[PEER_RUN_HEADER] = "${" + PEER_RUN_ENV + "}"
+        servers[name] = {"type": "http", "url": registration["url"], "exposure": "direct", "timeout": timeout_seconds}
         if headers:
             servers[name]["headers"] = headers
     return {"mcpServers": servers}, env
@@ -218,10 +222,18 @@ async def _materialize(part: FilePart, index: int, directory: Path) -> Path:
         return destination
     if urlsplit(part.uri).scheme not in {"http", "https"}:
         raise ValueError(f"unsupported file URI scheme for {name or 'file'}")
-    async with httpx.AsyncClient(timeout=FETCH_TIMEOUT_SECONDS, follow_redirects=True) as client:
-        response = await client.get(part.uri)
+    received = 0
+    async with (
+        httpx.AsyncClient(timeout=FETCH_TIMEOUT_SECONDS, follow_redirects=True) as client,
+        client.stream("GET", part.uri) as response,
+    ):
         response.raise_for_status()
-    destination.write_bytes(response.content)
+        with destination.open("wb") as handle:
+            async for chunk in response.aiter_bytes():
+                received += len(chunk)
+                if received > MAX_ATTACHMENT_BYTES:
+                    raise ValueError(f"{name or 'file'} is larger than {MAX_ATTACHMENT_BYTES} bytes")
+                handle.write(chunk)
     return destination
 
 
@@ -319,7 +331,13 @@ def _pack(directory: Path, archive: Path) -> None:
 
 
 def _unpack(archive: Path, directory: Path) -> None:
+    """Replace ``directory``'s contents with the archive's."""
     with tarfile.open(archive) as tar:
+        for child in directory.iterdir():
+            if child.is_dir() and not child.is_symlink():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
         tar.extractall(directory, filter="data")
 
 
@@ -397,10 +415,11 @@ class PiAgent(AgentEnvAgent):
         cwd = request.workspace or self.workspace
         cwd.mkdir(parents=True, exist_ok=True)
         try:
-            if self.changelog is None:
-                return await self._run_pi(request, config, base_url, agent_dir, files_dir, cwd)
-            async with self._changelog_turn:
-                return await self._run_pi(request, config, base_url, agent_dir, files_dir, cwd)
+            with self.peers.run(request.context_id) as peer_run:
+                if self.changelog is None:
+                    return await self._run_pi(request, config, base_url, agent_dir, files_dir, cwd, peer_run)
+                async with self._changelog_turn:
+                    return await self._run_pi(request, config, base_url, agent_dir, files_dir, cwd, peer_run)
         finally:
             shutil.rmtree(run_dir, ignore_errors=True)
 
@@ -412,8 +431,9 @@ class PiAgent(AgentEnvAgent):
         agent_dir: Path,
         files_dir: Path,
         cwd: Path,
+        peer_run: str,
     ) -> TaskResult:
-        mcp_config, mcp_env = _mcp_json(request.mcp_servers, config.timeout_seconds, request.context_id)
+        mcp_config, mcp_env = _mcp_json(request.mcp_servers, config.timeout_seconds, peer_run)
         default_params = json.loads(os.environ.get(MODEL_PARAMS_ENV) or "{}")
         (agent_dir / "models.json").write_text(json.dumps(_models_json(config, base_url, default_params)))
         (agent_dir / "mcp.json").write_text(json.dumps(mcp_config))
@@ -496,7 +516,7 @@ class PiAgent(AgentEnvAgent):
                         )
                 returncode = await process.wait()
                 stderr = (await stderr_task).decode(errors="replace").strip()
-                if self.changelog is not None and not await self.changelog.flush(self._session_file(session_id)):
+                if self.changelog is not None and not await self.changelog.flush():
                     return (
                         TaskResult.builder()
                         .failed(

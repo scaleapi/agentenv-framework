@@ -7,7 +7,7 @@ agent's environment both for the image and for `install/v1`.
 
 Each task runs `pi --mode json` once in `/workspace`. The prompt goes in on stdin. Images and text
 files are attached as `@path`; any other file is saved to disk and its path is added to the prompt,
-for pi's tools to use. The pi config dir is built fresh for each task:
+for pi's tools to use. A file fetched from a URL may be at most 256 MiB. The pi config dir is built fresh for each task:
 
 - `models.json` points provider `agentenv` at `LITELLM_BASE_URL`. The key stays a `${LITELLM_API_KEY}`
   reference, so it is never written to disk.
@@ -23,9 +23,9 @@ Sessions live in `~/.pi-a2a/sessions` and skills in `~/.pi-a2a/skills/<name>`.
 | `mcp-config/v1` | SDK default; written to `mcp.json` per task |
 | `skill-config/v1` | inline and bundle skills installed as `SKILL.md` directories, passed with `--skill` |
 | `trajectory/v1` | the task's pi JSON events, with `message_update` / `tool_execution_update` deltas dropped (format `pi-json-events/v1`) |
-| `snapshot/v1` | `save` uploads the context's pi session (JSONL) and, when asked, the workspace as a gzipped tar; `load` restores both and binds the session to the target context |
-| `snapshot/v1` changelog | after enable, every tool result uploads `NNNNNN.tar`: the files that changed under the roots, the deleted paths and the session so far. A failed upload is carried by the next increment, and the last one is retried when the task ends, which fails as `pi.changelog_incomplete` if it still cannot upload. `apply` replays them in order, writing only under the replaying agent's own roots (symlinks resolved), and with `resume_conversation` binds the last session to the target context |
-| `peer-agents/v1` | setting peers registers a loopback MCP server (`peers` at `http://127.0.0.1:$A2A_PORT/mcp`, refusing other clients) whose `peer_list` and `peer_send_message` tools send A2A messages, one conversation per A2A context and peer. A peer on the host's loopback is retried at `host.docker.internal` |
+| `snapshot/v1` | `save` uploads the context's pi session (JSONL) and, when asked, the workspace as a gzipped tar; `load` replaces the workspace's contents with the saved ones, restores the session and binds it to the target context |
+| `snapshot/v1` changelog | after enable, every tool result builds `NNNNNN.tar`: the files that changed under the roots, the deleted paths and the session so far. Increments upload in order; a failed one is kept, with those after it, and retried at the next tool result and when the task ends, which fails as `pi.changelog_incomplete` if any is still not uploaded. `apply` replays them in order, writing only under the replaying agent's own roots (symlinks resolved), and with `resume_conversation` binds the last session to the target context |
+| `peer-agents/v1` | setting peers registers a loopback MCP server (`peers` at `http://127.0.0.1:$A2A_PORT/mcp`) whose `peer_list` and `peer_send_message` tools send A2A messages, one conversation per A2A context and peer. It answers only loopback clients that send a running task's token, which each task gets in its environment and pi sends as a header, so a task speaks only in its own context's conversations. A peer on the host's loopback is retried at `host.docker.internal` |
 | `install/v1` | copies this directory into the task container as `/opt/pi-a2a`, runs `install.sh` (Debian or Ubuntu, as root, with network access), writes the LiteLLM credentials to a 0600 `agent.env` through a heredoc and starts `start.sh`, which sources it. The credentials stay off each command's first line, the only one the installer logs, but core's install contract substitutes them into the script text, so a sandbox that logs whole scripts records them |
 | `triggers/v1` | SDK default |
 

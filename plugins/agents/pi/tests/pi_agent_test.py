@@ -51,6 +51,10 @@ def _send(client: TestClient, parts: list[dict[str, Any]], context_id: str = "ct
     return response.json()["result"]
 
 
+def _peers(client: TestClient) -> peers.Peers:
+    return next(route.endpoint.__self__ for route in client.app.routes if getattr(route, "path", None) == "/mcp")
+
+
 def _reply(task: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     parts = task["status"]["message"]["parts"]
     text = "".join(part.get("text", "") for part in parts if part["kind"] == "text")
@@ -132,6 +136,23 @@ def test_file_parts_are_attached(client: TestClient, record: Path) -> None:
     attachments = json.loads(record.read_text())["attachments"]
     assert list(attachments.values()) == ["col\n1\n"]
     assert all(Path(name).name == "1-data.csv" for name in attachments)
+
+
+def test_an_oversized_attachment_is_refused(
+    client: TestClient, record: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(pi_agent, "MAX_ATTACHMENT_BYTES", 8)
+    monkeypatch.setattr(pi_agent.httpx, "AsyncClient", lambda **kwargs: real_client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, content=b"x" * 64)), **kwargs))
+
+    task = _send(client, [{"kind": "text", "text": "read it"},
+                          {"kind": "file", "file": {"name": "big.txt", "uri": "https://files.test/big.txt"}}])
+
+    _, data = _reply(task)
+    assert task["status"]["state"] == "failed"
+    assert data["error_code"] == "pi.attachment"
+    assert not record.exists()
 
 
 def test_inline_skill_is_passed_to_pi(client: TestClient, record: Path, tmp_path: Path) -> None:
@@ -279,6 +300,8 @@ def test_snapshot_round_trip_restores_conversation_and_workspace(
     assert saved.status_code == 200, saved.text
     assert saved.json()["context_id"] == "source"
     (tmp_path / "ws" / "notes.txt").unlink()
+    (tmp_path / "ws" / "later").mkdir()
+    (tmp_path / "ws" / "later" / "after.txt").write_text("written after the snapshot")
     monkeypatch.delenv("FAKE_PI_WRITE")
 
     loaded = client.put("/ext/snapshot", json={"objects": {
@@ -287,6 +310,7 @@ def test_snapshot_round_trip_restores_conversation_and_workspace(
 
     assert loaded.json() == {"context_id": "target"}
     assert (tmp_path / "ws" / "notes.txt").read_text() == "remember TOKEN-1"
+    assert not (tmp_path / "ws" / "later").exists()
     invocation = json.loads(record.read_text())
     assert invocation["argv"][invocation["argv"].index("--session-id") + 1] == "target"
     assert any("remember TOKEN-1" in line for line in invocation["history"])
@@ -387,9 +411,9 @@ def test_changelog_apply_does_not_follow_symlinks_out_of_a_root(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_a_failed_increment_upload_is_carried_by_the_next(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_failed_increment_upload_is_retried_before_the_next(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     uploads: dict[str, bytes] = {}
-    attempts = iter([RuntimeError("store down"), None])
+    attempts = iter([RuntimeError("store down"), None, None])
 
     class FlakyNamespace:
         def __init__(self, grant) -> None:
@@ -410,10 +434,52 @@ async def test_a_failed_increment_upload_is_carried_by_the_next(tmp_path: Path, 
     await capture.capture(None, context_id="c", session_id="s")
     await capture.capture(None, context_id="c", session_id="s")
 
-    assert list(uploads) == ["000001.tar"]
-    with tarfile.open(fileobj=io.BytesIO(uploads["000001.tar"])) as archive:
+    assert list(uploads) == ["000000.tar", "000001.tar"]
+    with tarfile.open(fileobj=io.BytesIO(uploads["000000.tar"])) as archive:
         assert "files" + str(workspace / "a.txt") in archive.getnames()
-    assert await capture.flush(None) is True
+    assert await capture.flush() is True
+
+
+@pytest.mark.asyncio
+async def test_a_pending_increment_keeps_its_own_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    uploads: dict[str, bytes] = {}
+    attempts = iter([RuntimeError("store down"), RuntimeError("still down"), None, None])
+
+    class FlakyNamespace:
+        def __init__(self, grant) -> None:
+            pass
+
+        async def upload(self, relative_path: str, source: bytes) -> None:
+            failure = next(attempts)
+            if failure is not None:
+                raise failure
+            uploads[relative_path] = source
+
+    monkeypatch.setattr(changelog, "NamespaceUploader", FlakyNamespace)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    first, second = tmp_path / "first.jsonl", tmp_path / "second.jsonl"
+    first.write_text("first session")
+    second.write_text("second session")
+    capture = changelog.ChangelogCapture(None, [str(workspace)])
+    await capture.start()
+    (workspace / "a.txt").write_text("a")
+    await capture.capture(first, context_id="c1", session_id="s1")
+    assert await capture.flush() is False
+    (workspace / "b.txt").write_text("b")
+    await capture.capture(second, context_id="c2", session_id="s2")
+
+    def members(name: str) -> tuple[dict, set[str], bytes]:
+        with tarfile.open(fileobj=io.BytesIO(uploads[name])) as archive:
+            meta = json.load(archive.extractfile(changelog.META))
+            return meta, set(archive.getnames()), archive.extractfile(changelog.SESSION).read()
+
+    first_meta, first_names, first_session = members("000000.tar")
+    second_meta, second_names, second_session = members("000001.tar")
+    assert (first_meta["context_id"], first_session) == ("c1", b"first session")
+    assert (second_meta["context_id"], second_session) == ("c2", b"second session")
+    assert "files" + str(workspace / "b.txt") not in first_names
+    assert "files" + str(workspace / "a.txt") not in second_names
 
 
 @pytest.mark.asyncio
@@ -439,8 +505,8 @@ async def test_flush_retries_a_failed_last_increment(tmp_path: Path, monkeypatch
     (workspace / "a.txt").write_text("a")
     await capture.capture(None, context_id="c", session_id="s")
 
-    assert await capture.flush(None) is False
-    assert await capture.flush(None) is True
+    assert await capture.flush() is False
+    assert await capture.flush() is True
     assert list(uploads) == ["000000.tar"]
 
 
@@ -502,22 +568,25 @@ def test_peers_register_the_loopback_mcp_server_and_relay_messages(
 
     listed = client.get("/ext/peer-agents").json()
     servers = client.get("/ext/mcp-config").json()["mcp_servers"]
-    init = client.post("/mcp?context=ctx-1", json={"jsonrpc": "2.0", "id": 1, "method": "initialize",
-                                     "params": {"protocolVersion": "2025-06-18", "capabilities": {}}})
-    notified = client.post("/mcp", json={"jsonrpc": "2.0", "method": "notifications/initialized"})
-    tools = client.post("/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"}).json()["result"]["tools"]
     call = {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
         "name": "peer_send_message", "arguments": {"peer_name": "helper", "message": "say PEER-OK"}}}
-    called = client.post("/mcp?context=ctx-1", json=call).json()
-    again = client.post("/mcp?context=ctx-1", json=call).json()
-    other = client.post("/mcp?context=ctx-2", json=call).json()
+    with _peers(client).run("ctx-1") as run_1, _peers(client).run("ctx-2") as run_2:
+        as_1, as_2 = {"X-Pi-A2A-Run": run_1}, {"X-Pi-A2A-Run": run_2}
+        init = client.post("/mcp", headers=as_1, json={"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                                       "params": {"protocolVersion": "2025-06-18", "capabilities": {}}})
+        notified = client.post("/mcp", headers=as_1, json={"jsonrpc": "2.0", "method": "notifications/initialized"})
+        tools = client.post("/mcp", headers=as_1, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        get = client.get("/mcp", headers=as_1)
+        called = client.post("/mcp", headers=as_1, json=call).json()
+        again = client.post("/mcp", headers=as_1, json=call).json()
+        other = client.post("/mcp", headers=as_2, json=call).json()
 
     assert listed == {"peers": [{"name": "helper", "url": "http://127.0.0.1:9100", "description": "Helps"}]}
     assert servers["peers"]["url"] == "http://127.0.0.1:8000/mcp"
     assert init.json()["result"]["protocolVersion"] == "2025-06-18"
     assert notified.status_code == 202
-    assert client.get("/mcp").status_code == 405
-    assert [tool["name"] for tool in tools] == ["peer_list", "peer_send_message"]
+    assert get.status_code == 405
+    assert [tool["name"] for tool in tools.json()["result"]["tools"]] == ["peer_list", "peer_send_message"]
     assert called["result"] == {"content": [{"type": "text", "text": "PEER-OK"}], "isError": False}
     assert sent[0]["url"] == "http://host.docker.internal:9100/a2a"
     first, second, third = (item["body"]["params"]["message"]["contextId"] for item in sent)
@@ -533,18 +602,31 @@ def test_peer_mcp_refuses_non_loopback_clients(tmp_path: Path) -> None:
     assert response.status_code == 403
 
 
-def test_each_task_names_its_context_on_the_peer_mcp_url(client: TestClient, record: Path) -> None:
+@pytest.mark.parametrize("headers", [{}, {"X-Pi-A2A-Run": "made-up"}])
+def test_peer_mcp_refuses_callers_without_a_running_task(client: TestClient, headers: dict[str, str]) -> None:
+    response = client.post("/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+
+    assert response.status_code == 403
+
+
+def test_each_task_gets_its_own_peer_token_off_disk(client: TestClient, record: Path) -> None:
     client.post("/ext/peer-agents", json={"peers": [{"name": "helper", "url": "http://peer.test"}]})
 
     _send(client, [{"kind": "text", "text": "go"}], context_id="ctx/1")
 
-    servers = json.loads(record.read_text())["mcp"]["mcpServers"]
-    assert servers["peers"]["url"] == "http://127.0.0.1:8000/mcp?context=ctx%2F1"
+    invocation = json.loads(record.read_text())
+    server = invocation["mcp"]["mcpServers"]["peers"]
+    assert server["url"] == "http://127.0.0.1:8000/mcp"
+    assert server["headers"] == {"X-Pi-A2A-Run": "${AGENTENV_MCP_PEER_RUN}"}
+    assert invocation["env"]["AGENTENV_MCP_PEER_RUN"]
+    assert _peers(client)._runs == {}
 
 
 def test_unknown_peer_is_a_tool_error(client: TestClient) -> None:
-    called = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
-        "name": "peer_send_message", "arguments": {"peer_name": "ghost", "message": "hi"}}}).json()
+    with _peers(client).run("ctx-1") as run:
+        called = client.post("/mcp", headers={"X-Pi-A2A-Run": run}, json={
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "peer_send_message", "arguments": {"peer_name": "ghost", "message": "hi"}}}).json()
 
     assert called["result"]["isError"] is True
     assert "unknown peer" in called["result"]["content"][0]["text"]

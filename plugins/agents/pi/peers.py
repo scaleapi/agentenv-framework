@@ -2,15 +2,18 @@
 
 A minimal streamable-HTTP MCP server: JSON responses to POSTed requests, 202 for notifications, and no
 server-to-client stream (405 on GET), which is all pi's MCP client needs for tool calls. It answers loopback
-clients only, and each task's ``mcp.json`` names its context in the URL (``?context=``), so every A2A
-context holds its own conversation with each peer.
+clients only, and only for a running task: each run gets a random token, which pi sends as a header whose value
+it reads from its environment, and the token names the run's A2A context, so every context holds its own
+conversation with each peer and a task cannot speak in another's.
 """
 
 from __future__ import annotations
 
 import json
+import secrets
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from typing import Any
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
@@ -21,6 +24,7 @@ from starlette.responses import JSONResponse, Response
 
 PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 PEER_TIMEOUT_SECONDS = 900
+RUN_HEADER = "x-pi-a2a-run"
 _LOOPBACK = frozenset({"127.0.0.1", "localhost"})
 _LOOPBACK_CLIENTS = frozenset({"127.0.0.1", "::1"})
 # Seen from inside a container, a peer published on the host's loopback is at the host gateway.
@@ -76,6 +80,17 @@ class Peers:
     def __init__(self) -> None:
         self.agents: dict[str, PeerAgent] = {}
         self._contexts: dict[tuple[str, str], str] = {}
+        self._runs: dict[str, str] = {}
+
+    @contextmanager
+    def run(self, context_id: str) -> Iterator[str]:
+        """A token that speaks for ``context_id`` until the run ends."""
+        token = secrets.token_urlsafe(32)
+        self._runs[token] = context_id
+        try:
+            yield token
+        finally:
+            del self._runs[token]
 
     def set(self, peers: list[PeerAgent]) -> None:
         self.agents = {peer.name: peer for peer in peers}
@@ -126,9 +141,11 @@ class Peers:
     async def mcp(self, request: Request) -> Response:
         if request.client is None or request.client.host not in _LOOPBACK_CLIENTS:
             return Response(status_code=403)
+        origin = self._runs.get(request.headers.get(RUN_HEADER, ""))
+        if origin is None:
+            return Response(status_code=403)
         if request.method != "POST":
             return Response(status_code=405)
-        origin = request.query_params.get("context", "")
         body = await request.json()
         messages = body if isinstance(body, list) else [body]
         replies = [reply for message in messages if (reply := await self._answer(message, origin)) is not None]
