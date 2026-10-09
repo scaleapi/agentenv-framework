@@ -324,3 +324,20 @@ async def test_closing_after_the_server_is_gone_does_not_raise(monkeypatch):
     async with ToolSession(_URL) as session:
         assert session.session_id == "s-9"
     await session.close()
+
+
+@pytest.mark.asyncio
+async def test_closing_waits_for_the_server_no_longer_than_the_sessions_timeout(monkeypatch):
+    async def stalls_on_delete(request: httpx.Request) -> httpx.Response:
+        if request.method == "DELETE":
+            await asyncio.sleep(30)
+        message = json.loads(request.content or b"{}")
+        if "id" not in message:
+            return httpx.Response(202)
+        return httpx.Response(200, headers={"mcp-session-id": "s-2"}, json=_reply(message, {"protocolVersion": "2025-11-25"}))
+    _route_clients_to(monkeypatch, httpx.MockTransport(stalls_on_delete))
+
+    session = await ToolSession(_URL, timeout=0.3).open()
+    started = time.monotonic()
+    await session.close()
+    assert time.monotonic() - started < 1
