@@ -408,11 +408,12 @@ class _Walk:
                 for link in links:
                     if isinstance(link, LocalSandboxProvider):
                         local.append((where, what, links, link))
-                    elif link in by_name:
-                        self._problem(where, f"deploys {what} on the {_shown(link)} sandbox provider, which runs it by "
-                                             f"name, and the bundle builds it from {source}, which a sandbox runs only "
-                                             "once built on this machine or in its VM; run it with --sandbox local, or "
-                                             "on a provider whose VMs build it, such as --sandbox modal_vm")
+                    elif link in by_name or not _creates_vms(link):
+                        how = "runs it by name" if link in by_name else "creates no VM to build it in"
+                        self._problem(where, f"deploys {what} on the {_shown(link)} sandbox provider, which {how}, and "
+                                             f"the bundle builds it from {source}, which a sandbox runs only once built "
+                                             "on this machine or in its VM; run it with --sandbox local, or on a "
+                                             "provider whose VMs build it, such as --sandbox modal_vm")
                     else:
                         vms.append((where, what, links, link))
             if local and vms:

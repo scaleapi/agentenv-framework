@@ -28,6 +28,7 @@ from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGa
 from agent_env.providers.env_state.env_state_provider import EnvStateInstance
 from agent_env.providers.env_state.store import register_env_state_instance
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
+from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 from agent_env.store.routing import namespace_routing
 from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
@@ -162,6 +163,28 @@ def test_an_agent_the_bundle_builds_is_refused_on_a_provider_that_runs_it_by_nam
         "which runs it by name, and the bundle builds it from agents/solver/Dockerfile, which a sandbox runs only once "
         "built on this machine or in its VM; run it with --sandbox local, or on a provider whose VMs build it, such as "
         "--sandbox modal_vm",
+    ]
+
+
+class _ContainersOnly(SandboxProvider):
+    """A plugin's provider that runs an agent's image in a container of its own, and creates no VM."""
+
+    async def create_sandbox(self, **kwargs):
+        raise AssertionError("preflight creates nothing")
+
+
+def test_an_agent_the_bundle_builds_is_refused_on_a_provider_that_creates_no_vm_to_build_it_in(bundle_dir,
+                                                                                            monkeypatch):
+    registry = Config.sandbox_registry
+    monkeypatch.setattr(Config, "sandbox_registry", lambda self: {**registry(self), "containers": {"impl": _ContainersOnly}})
+    layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\n"})
+    _task(bundle_dir, [AGENT])
+
+    assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox="containers")) == [
+        "tasks/t.json: step 'agent': deploys agent '@local/~/triage/solver''s image on the 'containers' sandbox "
+        "provider, which creates no VM to build it in, and the bundle builds it from agents/solver/Dockerfile, which a "
+        "sandbox runs only once built on this machine or in its VM; run it with --sandbox local, or on a provider whose "
+        "VMs build it, such as --sandbox modal_vm",
     ]
 
 
