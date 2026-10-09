@@ -22,7 +22,7 @@ from agentenv_protocol.transfers import (
 )
 from boto3.s3.transfer import TransferConfig
 from botocore.config import Config as BotocoreConfig
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from agent_env.store.base import GrantUnavailableError, ObjectAlreadyExistsError, ObjectNotFoundError, UploadFailedError
 from agent_env.store.object_store.object_store import (
@@ -484,3 +484,5 @@ def _abort_quietly(s3, bucket: str, key: str, upload_id: str) -> None:
     except ClientError as e:
         if _code(e) != "NoSuchUpload":
             logger.warning("Could not abort the upload to s3://%s/%s (%s)", bucket, key, _code(e))
+    except BotoCoreError as e:
+        logger.warning("Could not abort the upload to s3://%s/%s (%s)", bucket, key, e)

@@ -61,6 +61,17 @@ def test_completing_checks_the_object_landed_at_the_reported_size(store):
                           kinds=KINDS).complete(Uploaded(size_bytes=1))
 
 
+def test_a_reported_upload_over_the_limit_is_refused(store):
+    store.put("at.zip", b"x" * 64)
+    store.put("over.zip", b"x" * 65)
+
+    store.begin_write(store.object_url("at.zip"), media_type="application/zip", max_bytes=64,
+                      kinds=KINDS).complete(Uploaded(size_bytes=64))
+    with pytest.raises(UploadFailedError, match="limit"):
+        store.begin_write(store.object_url("over.zip"), media_type="application/zip", max_bytes=64,
+                          kinds=KINDS).complete(Uploaded(size_bytes=65))
+
+
 def test_leaving_an_unfinished_one_url_write_does_nothing(store):
     url = store.object_url("snapshots/github.zip")
     with store.begin_write(url, media_type="application/zip", max_bytes=64, kinds=KINDS):
