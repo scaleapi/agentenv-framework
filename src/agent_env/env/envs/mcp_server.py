@@ -129,12 +129,12 @@ class MCPServerEnv(Env):
         if self._env_provider is not None:
             try:
                 await self._env_provider.close()
-            except BaseException as e:
+            except Exception as e:
                 logger.warning(f"Failed to close env provider: {e}")
         if self._sandbox is not None:
             try:
                 await self._sandbox.terminate()
-            except BaseException as e:
+            except Exception as e:  # a cancellation propagates, and keeps the sandbox for the next close()
                 logger.warning(f"Failed to terminate sandbox {self._sandbox.sandbox_id}: {e}")
             self._sandbox = None
 

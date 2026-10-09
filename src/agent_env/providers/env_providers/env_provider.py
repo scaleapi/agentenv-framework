@@ -147,7 +147,8 @@ class _SandboxEnvironmentProvider(EnvironmentProvider):
         return [sandbox_provider]
 
     async def _run(self, sandbox_provider: SandboxProvider, env_id: str | None, attempt: Callable[[SandboxProvider], Awaitable[Any]]) -> Any:
-        """Run ``attempt`` on the sandbox provider, or on each chained member until one succeeds; a failed deploy is closed."""
+        """Run ``attempt`` on the sandbox provider, or on each chained member until one succeeds; a deploy that fails or is
+        cancelled is closed."""
         try:
             sandbox_providers = self._sandbox_providers(sandbox_provider, env_id)
             if len(sandbox_providers) == 1:
@@ -161,7 +162,7 @@ class _SandboxEnvironmentProvider(EnvironmentProvider):
                     await self.close()
             detail = "; ".join(f"{n}: {e!r}" for n, e in errors)
             raise RuntimeError(f"All {len(sandbox_providers)} chained providers failed to deploy: {detail}")
-        except Exception:
+        except BaseException:
             await self.close()
             raise
 
