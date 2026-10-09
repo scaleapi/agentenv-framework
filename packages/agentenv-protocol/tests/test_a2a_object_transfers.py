@@ -41,7 +41,10 @@ from agentenv_protocol.a2a_agent import (
 )
 from agentenv_protocol.a2a_agent.framework import _SdkServices
 from agentenv_protocol.transfers import (
+    MAX_PARTS,
+    PARTS_IN_FLIGHT,
     HttpGetGrant,
+    HttpPartsPutGrant,
     HttpPostPolicyGrant,
     HttpPutGrant,
     NamespaceUploader,
@@ -136,6 +139,26 @@ def _write_object(
     )
 
 
+def _parts_write_object(
+    *, part_bytes: int = 4, parts: int = 4, max_bytes: int | None = None, headers: dict[str, str] | None = None
+) -> WriteObject:
+    return WriteObject(
+        media_type="application/zip",
+        max_bytes=part_bytes * parts if max_bytes is None else max_bytes,
+        write=HttpPartsPutGrant(
+            kind="http-put-parts",
+            part_bytes=part_bytes,
+            urls=[f"https://objects.example.test/part/{n}?{_SIGNED_QUERY}" for n in range(1, parts + 1)],
+            expires_at=_expiry(),
+            headers=headers,
+        ),
+    )
+
+
+def _part_number(request: httpx.Request) -> int:
+    return int(request.url.path.rsplit("/", 1)[-1])
+
+
 def _opaque_write_object() -> WriteObject:
     return _write_object().model_copy(update={"media_type": "application/octet-stream"})
 
@@ -182,6 +205,7 @@ def test_transfer_timeout_allows_large_streams_without_being_unbounded() -> None
 def test_a2a_agent_reexports_the_transfer_module() -> None:
     for name in (
         "HttpGetGrant",
+        "HttpPartsPutGrant",
         "HttpPostPolicyGrant",
         "HttpPutGrant",
         "NamespaceUploader",
@@ -600,6 +624,149 @@ async def test_upload_streams_with_bound_and_returns_integrity(
         await upload(_write_object(max_bytes=1), source)
     assert exc_info.value.code == "transfer_too_large"
     assert "secret" not in str(exc_info.value)
+
+
+def test_a_parts_grant_is_told_apart_from_a_put_grant_and_bounded_by_its_parts() -> None:
+    parts = _parts_write_object(part_bytes=4, parts=3)
+    assert WriteObject.model_validate(parts.model_dump(mode="json")) == parts
+    assert WriteObject.model_validate(_write_object().model_dump(mode="json")).write.kind == "http-put"
+    with pytest.raises(ValidationError, match="part_bytes times") as exc_info:
+        _parts_write_object(part_bytes=4, parts=3, max_bytes=13)
+    assert "secret" not in str(exc_info.value)
+    with pytest.raises(ValidationError, match="union_tag_invalid") as exc_info:
+        WriteObject.model_validate(
+            {**parts.model_dump(mode="json"), "write": {**parts.write.model_dump(mode="json"), "kind": "http-put-chunks"}}
+        )
+    assert "secret" not in str(exc_info.value)
+    for urls in ([], [parts.write.urls[0]] * (MAX_PARTS + 1)):
+        with pytest.raises(ValidationError):
+            HttpPartsPutGrant(kind="http-put-parts", part_bytes=4, urls=urls, expires_at=_expiry())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("in_memory", [False, True], ids=["file", "bytes"])
+async def test_a_parts_upload_puts_each_range_to_its_own_url(
+    in_memory: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    content = b"0123456789"
+    received: dict[int, httpx.Request] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        received[_part_number(request)] = request
+        return httpx.Response(200)
+
+    _route(monkeypatch, handle)
+    source = content if in_memory else _write(tmp_path / "bundle.zip", content)
+    result = await upload(_parts_write_object(part_bytes=4, parts=4, headers={"x-grant": "kept"}), source)
+
+    assert sorted(received) == [1, 2, 3]
+    assert [received[n].content for n in (1, 2, 3)] == [b"0123", b"4567", b"89"]
+    assert [received[n].headers["content-length"] for n in (1, 2, 3)] == ["4", "4", "2"]
+    assert all(r.headers["x-grant"] == "kept" and "content-type" not in r.headers for r in received.values())
+    assert result == Uploaded(size_bytes=len(content), sha256=None)
+
+
+@pytest.mark.asyncio
+async def test_a_one_part_upload_reports_its_checksum(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    requests: list[httpx.Request] = []
+    _route(monkeypatch, _respond(requests, 200))
+
+    result = await upload(_parts_write_object(part_bytes=64, parts=2), _write(tmp_path / "small.zip", b"tiny"))
+
+    assert [_part_number(r) for r in requests] == [1]
+    assert result == Uploaded(size_bytes=4, sha256=hashlib.sha256(b"tiny").hexdigest())
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("content", "hashed"), [(b"0123456789", 0), (b"tiny", 4)], ids=["parts", "one-part"])
+async def test_only_a_one_part_upload_spends_cpu_on_a_checksum(
+    content: bytes, hashed: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fed = [0]
+    real_sha256 = hashlib.sha256
+
+    class _Counting:
+        def __init__(self) -> None:
+            self._digest = real_sha256()
+
+        def update(self, data: bytes) -> None:
+            fed[0] += len(data)
+            self._digest.update(data)
+
+        def hexdigest(self) -> str:
+            return self._digest.hexdigest()
+
+    monkeypatch.setattr(transfers.hashlib, "sha256", _Counting)
+    _route(monkeypatch, _respond([], 200))
+    await upload(_parts_write_object(part_bytes=4, parts=4), _write(tmp_path / "bundle.zip", content))
+
+    assert fed[0] == hashed
+
+@pytest.mark.asyncio
+async def test_a_parts_upload_larger_than_its_grant_sends_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    requests: list[httpx.Request] = []
+    _route(monkeypatch, _respond(requests, 200))
+
+    with pytest.raises(TransferError) as exc_info:
+        await upload(_parts_write_object(part_bytes=4, parts=2), _write(tmp_path / "big.zip", b"123456789"))
+    assert exc_info.value.code == "transfer_too_large"
+    assert requests == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_part_is_retried_on_its_own(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sent: list[int] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        sent.append(_part_number(request))
+        return httpx.Response(503) if sent.count(2) == 1 and sent[-1] == 2 else httpx.Response(200)
+
+    _route(monkeypatch, handle)
+    await upload(_parts_write_object(part_bytes=4, parts=3), _write(tmp_path / "bundle.zip", b"0123456789"))
+
+    assert sorted(sent) == [1, 2, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_part_fails_the_upload_without_a_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sent: list[int] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        sent.append(_part_number(request))
+        return httpx.Response(403 if sent[-1] == 2 else 200)
+
+    _route(monkeypatch, handle)
+    with pytest.raises(TransferError) as exc_info:
+        await upload(_parts_write_object(part_bytes=4, parts=3), _write(tmp_path / "bundle.zip", b"0123456789"))
+    assert exc_info.value.code == "transfer_rejected"
+    assert "secret" not in str(exc_info.value)
+    assert sent.count(2) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_parts_upload_keeps_a_bounded_number_of_parts_in_flight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    in_flight = peak = 0
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await asyncio.sleep(0.01)
+        in_flight -= 1
+        return httpx.Response(200)
+
+    _route(monkeypatch, handle)
+    parts = 3 * PARTS_IN_FLIGHT
+    await upload(_parts_write_object(part_bytes=1, parts=parts), _write(tmp_path / "bundle.zip", b"x" * parts))
+
+    assert 1 < peak <= PARTS_IN_FLIGHT
 
 
 @pytest.mark.asyncio

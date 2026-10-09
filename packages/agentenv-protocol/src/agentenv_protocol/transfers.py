@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import math
 import os
 import random
 import re
@@ -32,12 +33,18 @@ from pydantic import (
 _MIME_TYPE = re.compile(r"^[!#$&^_.+\-|~0-9A-Za-z]+/[!#$&^_.+\-|~0-9A-Za-z]+$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _CHUNK_BYTES = 64 * 1024
+# How much of a part each read takes: large enough that a parallel upload spends little CPU on thread hops.
+_PART_CHUNK_BYTES = 1024 * 1024
 _UTC = timezone.utc  # noqa: UP017 -- datetime.UTC requires Python 3.11.
 # Idle limits, not totals, of a minute, as cloud storage SDKs use: long enough for a slow uplink to drain its
 # buffers before the store answers, short enough that a stalled connection is retried within
 # the minutes agent-env waits for an extension call.
 TRANSFER_IDLE_TIMEOUT_SECONDS = 60.0
 TRANSFER_ATTEMPTS = 3
+# How many parts of one parts-grant upload are in flight at once.
+PARTS_IN_FLIGHT = 8
+# The most parts one parts grant may name.
+MAX_PARTS = 10_000
 _CONNECT_TIMEOUT_SECONDS = 30.0
 _RETRY_BACKOFF_SECONDS = 1.0
 _TRANSFER_TIMEOUT = httpx.Timeout(
@@ -46,7 +53,8 @@ _TRANSFER_TIMEOUT = httpx.Timeout(
     write=TRANSFER_IDLE_TIMEOUT_SECONDS,
     pool=_CONNECT_TIMEOUT_SECONDS,
 )
-# The longest the helpers take to give up on a transfer whose every connection stalls.
+# The longest the helpers take to give up on a request whose every connection stalls; a parts upload
+# spends it per part.
 TRANSFER_STALL_BUDGET_SECONDS = TRANSFER_ATTEMPTS * (
     _CONNECT_TIMEOUT_SECONDS + TRANSFER_IDLE_TIMEOUT_SECONDS
 ) + sum(_RETRY_BACKOFF_SECONDS * 2**attempt for attempt in range(TRANSFER_ATTEMPTS - 1))
@@ -120,6 +128,19 @@ class HttpPutGrant(TransferModel):
     headers: dict[str, str] | None = Field(default=None, repr=False)
 
 
+class HttpPartsPutGrant(TransferModel):
+    """One object as consecutive byte ranges: part k (from 1) is bytes ``[(k-1)*part_bytes,
+    min(k*part_bytes, size))``, PUT to ``urls[k-1]``. Every part but the last is exactly
+    ``part_bytes``, so an object of ``size`` bytes uses the first ``max(1, ceil(size/part_bytes))``
+    URLs. The object exists once the issuer completes it."""
+
+    kind: Literal["http-put-parts"]
+    part_bytes: StrictInt = Field(gt=0)
+    urls: list[HttpsUrl] = Field(min_length=1, max_length=MAX_PARTS, repr=False)
+    expires_at: UtcTimestamp
+    headers: dict[str, str] | None = Field(default=None, repr=False)
+
+
 class HttpPostPolicyGrant(TransferModel):
     kind: Literal["http-post-policy"]
     url: HttpsUrl = Field(repr=False)
@@ -155,7 +176,14 @@ class ReadObject(TransferModel):
 class WriteObject(TransferModel):
     media_type: MediaType
     max_bytes: StrictInt = Field(gt=0)
-    write: HttpPutGrant
+    write: Annotated[HttpPutGrant | HttpPartsPutGrant, Field(discriminator="kind")]
+
+    @model_validator(mode="after")
+    def _parts_hold_max_bytes(self) -> WriteObject:
+        write = self.write
+        if isinstance(write, HttpPartsPutGrant) and self.max_bytes > write.part_bytes * len(write.urls):
+            raise ValueError("max_bytes must not exceed part_bytes times the number of part URLs")
+        return self
 
 
 class Uploaded(TransferModel):
@@ -459,15 +487,93 @@ class _SourceStream:
         return Uploaded(size_bytes=self.size_bytes, sha256=self._digest.hexdigest())
 
 
+class _PartStream(_SourceStream):
+    """``length`` bytes of a source from ``offset``: the body of one part's PUT, read a part chunk at a
+    time and hashed only when ``hashed`` (a part that is the whole object)."""
+
+    def __init__(self, source: Path | bytes, offset: int, length: int, *, hashed: bool) -> None:
+        super().__init__(source, length)
+        self._hashed = hashed
+        try:
+            self._file.seek(offset)
+        except OSError as exc:
+            self._file.close()
+            raise TransferError("invalid_transfer", _UNREADABLE) from exc
+
+    def read(self, size: int = -1) -> bytes:
+        remaining = self._declared_bytes - self.size_bytes
+        size = remaining if size < 0 else min(size, remaining)
+        if self._hashed:
+            return super().read(size)
+        try:
+            chunk = self._file.read(size)
+        except OSError as exc:
+            raise TransferError("invalid_transfer", _UNREADABLE) from exc
+        self.size_bytes += len(chunk)
+        if not chunk and self.size_bytes < self._declared_bytes:
+            raise TransferError("invalid_transfer", "The transfer source changed during upload.")
+        return chunk
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        while chunk := await asyncio.to_thread(self.read, _PART_CHUNK_BYTES):
+            yield chunk
+
+
 def _as_source(source: Path | str | bytes) -> Path | bytes:
     return source if isinstance(source, bytes) else Path(source)
 
 
+async def _upload_parts(grant: HttpPartsPutGrant, source: Path | bytes, size_bytes: int) -> Uploaded:
+    """Upload ``source`` as the grant's consecutive parts, ``PARTS_IN_FLIGHT`` at a time, each
+    retried on its own. Only a one-part upload reports a checksum: the parts are sent out of order."""
+
+    count = max(1, math.ceil(size_bytes / grant.part_bytes))
+    in_flight = asyncio.Semaphore(PARTS_IN_FLIGHT)
+    checksum: list[str | None] = [None]
+
+    async with httpx.AsyncClient(follow_redirects=False, timeout=_TRANSFER_TIMEOUT) as client:
+
+        async def send_part(number: int) -> None:
+            offset = (number - 1) * grant.part_bytes
+            length = min(grant.part_bytes, size_bytes - offset)
+            headers = httpx.Headers(grant.headers or {})
+            headers["content-length"] = str(length)
+            urls = _destinations(grant.urls[number - 1], grant.headers)
+
+            async def put() -> None:
+                with _transfer_request(grant.expires_at):
+
+                    async def to(url: str) -> None:
+                        with _PartStream(source, offset, length, hashed=count == 1) as stream:
+                            response = await client.put(url, headers=headers, content=stream)
+                        _raise_for_transfer_status(response)
+                        if count == 1:
+                            checksum[0] = stream.uploaded().sha256
+
+                    await _send_to_first_listening(urls, to)
+
+            async with in_flight:
+                await _retrying(grant.expires_at, put)
+
+        tasks = [asyncio.ensure_future(send_part(number)) for number in range(1, count + 1)]
+        try:
+            await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+    return Uploaded(size_bytes=size_bytes, sha256=checksum[0])
+
+
 async def upload(target: WriteObject, source: Path | bytes) -> Uploaded:
-    """Upload one file, or bytes already in memory, using an opaque exact-object PUT grant."""
+    """Upload one file, or bytes already in memory, using an opaque exact-object grant: one PUT,
+    or a parts grant's parts."""
 
     source = _as_source(source)
     size_bytes = _check_source(source, target.max_bytes)
+    if isinstance(target.write, HttpPartsPutGrant):
+        return await _upload_parts(target.write, source, size_bytes)
     headers = httpx.Headers(target.write.headers or {})
     headers.setdefault("content-type", target.media_type)
     headers.setdefault("content-length", str(size_bytes))
