@@ -253,15 +253,18 @@ class ModalSandboxProvider(SandboxProvider):
             self._context_images[image.image_name] = image
             await self._context_image(image)
 
-    async def _context_image(self, image: DockerImageArtifact) -> modal.Image:
-        """The Modal image built from ``image``'s build context: built now unless one built from the same sources is."""
+    async def _context_image(self, image: DockerImageArtifact, *,
+                             stale: str | None = None) -> tuple[modal.Image, str]:
+        """The Modal image built from ``image``'s build context, and its id: built now unless one built from the same
+        sources is, other than ``stale``, an id Modal no longer holds."""
         client = await self._get_client()
         app = await self._get_app(self._app_name, _attribution_tags({}))
         key = (self._token_id, self._app_name, image.source_digest or image.build_context_object_url)
         async with _build_locks.setdefault((asyncio.get_running_loop(), key), asyncio.Lock()):
-            if (image_id := _built_image_ids.get(key)) is None:
+            image_id = _built_image_ids.get(key)
+            if image_id is None or image_id == stale:
                 image_id = _built_image_ids[key] = await self._build(image, app)
-        return modal.Image.from_id(image_id, client=client)
+        return modal.Image.from_id(image_id, client=client), image_id
 
     async def _build(self, image: DockerImageArtifact, app: modal.App) -> str:
         """Build ``image`` from its build context, with the context's own ignore file; returns the image's id."""
@@ -312,8 +315,9 @@ class ModalSandboxProvider(SandboxProvider):
         app_name = self._app_name
         app = await self._get_app(app_name, app_tags)
 
+        built_id = None
         if (context_only := self._context_images.get(image_name)) is not None:
-            image = await self._context_image(context_only)
+            image, built_id = await self._context_image(context_only)
         else:
             image = await self._registry_image(image_name)
 
@@ -345,7 +349,7 @@ class ModalSandboxProvider(SandboxProvider):
 
         # ``i6pn`` is threaded per-factory below (V2 only); everything else is shared.
         create_kwargs = dict(
-            app=app, image=image, cpu=cpu, memory=memory, timeout=timeout,
+            app=app, cpu=cpu, memory=memory, timeout=timeout,
             env=env or {}, client=client, **port_kwargs,
             tags=sandbox_tags or None,
             readiness_probe=modal.Probe.with_exec("true"),
@@ -354,18 +358,28 @@ class ModalSandboxProvider(SandboxProvider):
         if region is not None:
             create_kwargs["region"] = region
 
-        try:
+        async def create(image: modal.Image) -> modal.Sandbox:
             if self._gpu:
-                sb = await modal.Sandbox.create.aio(
+                return await modal.Sandbox.create.aio(
                     *(command or []),
                     gpu=self._gpu,
                     experimental_options={"enable_docker_in_gvisor": True},
+                    image=image,
                     **create_kwargs,
                 )
-            else:
-                sb = await modal.Sandbox._experimental_create.aio(
-                    *(command or []), i6pn=i6pn, **create_kwargs
-                )
+            return await modal.Sandbox._experimental_create.aio(
+                *(command or []), i6pn=i6pn, image=image, **create_kwargs
+            )
+
+        try:
+            try:
+                sb = await create(image)
+            except modal.exception.NotFoundError:
+                if built_id is None:
+                    raise
+                # Modal no longer holds the image this process built from the context, so it's built again, once.
+                image, built_id = await self._context_image(context_only, stale=built_id)
+                sb = await create(image)
         except Exception as e:
             raise RuntimeError(
                 f"Modal sandbox create failed [{_fmt_exc(e)}]: {call_context}"

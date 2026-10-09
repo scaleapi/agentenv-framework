@@ -151,6 +151,41 @@ async def test_a_container_runs_the_built_image_and_builds_it_on_a_miss(local_st
 
 
 @pytest.mark.asyncio
+async def test_a_built_image_modal_no_longer_holds_is_built_again_once_for_every_deploy_waiting_on_it(local_stores,
+                                                                                                      context, builds):
+    image = _context_image("solver-image", context)
+    provider = _provider()
+    await provider.prepare_image(image)
+    created = []
+
+    async def create(*args, image, **kwargs):
+        created.append(image)
+        if image == ("from_id", "im-1"):
+            raise modal.exception.NotFoundError("No Image with ID 'im-1' found")
+        raise RuntimeError("stop")
+
+    with _fake_create() as fake:
+        fake.aio.side_effect = create
+        for result in await asyncio.gather(*(provider.create_container(image_name=image.image_name, port=8000, env={})
+                                             for _ in range(2)), return_exceptions=True):
+            assert isinstance(result, RuntimeError) and "stop" in str(result)
+
+    assert len(builds.calls) == 2
+    assert created.count(("from_id", "im-2")) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_missing_image_it_was_not_built_from_a_context_is_not_rebuilt(local_stores, builds, monkeypatch):
+    monkeypatch.setattr(modal.Image, "from_registry", lambda name, **kwargs: ("pulled", name))
+
+    with _fake_create() as fake, pytest.raises(RuntimeError, match="No Image"):
+        fake.aio.side_effect = modal.exception.NotFoundError("No Image with ID 'im-9' found")
+        await _provider().create_container(image_name="registry.example/solver:v2", port=8000, env={})
+
+    assert builds.calls == [] and fake.aio.call_count == 1
+
+
+@pytest.mark.asyncio
 async def test_a_container_of_an_image_it_wasnt_told_of_is_pulled(local_stores, builds, monkeypatch):
     pulled = MagicMock()
     monkeypatch.setattr(modal.Image, "from_registry", lambda name, **kwargs: (pulled, name))
