@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator, Iterable
 from typing import Any, Literal
 
 import httpx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .types import PROTOCOL_VERSION, ROLE_HEADER, EnvironmentTool
 
@@ -35,6 +35,13 @@ class ToolSessionError(RuntimeError):
 class ToolResult(BaseModel):
     content: list[dict] = Field(default_factory=list)
     isError: bool = False
+
+    @field_validator("content")
+    @classmethod
+    def _text_blocks_carry_text(cls, content: list[dict]) -> list[dict]:
+        if any(block.get("type") == "text" and not isinstance(block.get("text"), str) for block in content):
+            raise ValueError("a text block has no string text")
+        return content
 
     @property
     def text(self) -> str:
@@ -66,6 +73,8 @@ class ToolSession:
         await self.close()
 
     async def open(self) -> ToolSession:
+        """Start a new MCP session, ending the one this object holds, if any."""
+        await self.close()
         self.session_id = self.protocol_version = None
         self._client = httpx.AsyncClient(headers=self._headers, timeout=self.timeout, verify=self._verify,
                                          follow_redirects=True)
