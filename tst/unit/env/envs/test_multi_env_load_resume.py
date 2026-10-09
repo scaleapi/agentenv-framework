@@ -192,6 +192,7 @@ async def test_a_snapshot_restore_clears_resume_state():
     )
     with patch("agent_env.env.store.get_env_instance_store", return_value=store), \
          patch("agent_env.env.snapshot_store.get_env_snapshot_store", return_value=snap_store), \
+         patch("agent_env.env.envs.multi_env.environments_with_file_trees", MagicMock(return_value=[])), \
          patch("agent_env.env.store.update_env_instance_environment_universe", MagicMock()):
         await env.load_environment_universe_artifact(_universe(ALL))
     store.clear_loaded_environments.assert_called_once_with("inst-1")

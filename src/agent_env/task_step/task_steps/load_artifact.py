@@ -263,7 +263,10 @@ class LoadArtifactTaskStep(TaskStep):
             "version": artifact.version,
             "restored_from_snapshot": getattr(load_result, "restored_from_snapshot", False),
         }
-        for key in ("snapshot_db_image_artifact_id", "snapshot_baked", "snapshot_bake_error"):
+        for key in (
+            "snapshot_db_image_artifact_id", "snapshot_baked", "snapshot_bake_error",
+            "snapshot_reingested_environments",
+        ):
             value = getattr(load_result, key, None)
             if value is not None:
                 entry[key] = value

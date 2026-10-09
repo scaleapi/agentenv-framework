@@ -138,6 +138,10 @@ def load_environment_universe_artifact(env_instance_id: str, environment_univers
     # reliably faster -- it is bounded, which is the part that matters.
     if getattr(result, "restored_from_snapshot", False):
         click.echo(f"Restored from snapshot image: {result.snapshot_db_image_artifact_id}")
+        reingested = getattr(result, "snapshot_reingested_environments", None)
+        if reingested:
+            click.echo(f"Re-ingested {len(reingested)} file-backed service(s) over HTTP, since the "
+                       f"snapshot holds the database only: {', '.join(reingested)}")
     else:
         click.echo("Re-ingested every service over HTTP (no clean snapshot matched); each "
                    "service was racing its own 600s timeout")

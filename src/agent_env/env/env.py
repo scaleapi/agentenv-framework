@@ -200,6 +200,9 @@ class LoadEnvironmentUniverseArtifactResult:
     # the *next* load can restore instead. None means no bake was attempted.
     snapshot_baked: bool | None = None
     snapshot_bake_error: str | None = None
+    # Set only on the restore path: the services loaded again over HTTP because their
+    # bundles ship file trees the servicedb image does not carry.
+    snapshot_reingested_environments: list[str] | None = None
 
 
 @dataclass

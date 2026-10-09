@@ -1,8 +1,10 @@
 """Multi environment combining multiple MCP servers and websites."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import time
 from typing import TYPE_CHECKING, Callable, ClassVar, Optional
 
 logger = logging.getLogger(__name__)
@@ -36,6 +38,7 @@ from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.website import WebsiteEnv
 from agent_env.store.ids import derive_id
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER
+from agent_env.artifact.bundle_inspect import environments_with_file_trees
 from agent_env.attribution import Attribution
 
 
@@ -191,6 +194,11 @@ class MultiEnv(Env):
         and pushes a multi-GB servicedb image (~5min, ~2.3GB stored) — worth it to make a
         universe cheap to re-serve, not worth it on a one-off deploy. The bake is
         best-effort and never fails a load that already succeeded.
+
+        The snapshot is the database alone. A service whose bundle ships a ``root/`` tree
+        (file bytes it serves from its own container) is re-ingested over HTTP after the
+        image swap, exactly as on a miss, because the swap gives it rows with no bytes
+        behind them. Which services those are is read off each bundle's zip directory.
         """
         import uuid
         from agent_env.env.env import LoadEnvironmentUniverseArtifactResult
@@ -221,6 +229,25 @@ class MultiEnv(Env):
         snapshot_baked: bool | None = None
         snapshot_bake_error: str | None = None
 
+        file_tree_environments: list[str] = []
+        if snapshot:
+            # Not knowing which services keep bytes outside the database means not
+            # restoring: a blind swap would serve those services' rows with nothing
+            # behind them, and look healthy from every other tool.
+            try:
+                file_tree_environments = await asyncio.to_thread(
+                    environments_with_file_trees, environment_universe_artifact
+                )
+            except Exception as e:  # noqa: BLE001 — fall back to the path that cannot be wrong
+                logger.warning(
+                    "Could not read which services of %s v%s ship file trees (%s: %s); "
+                    "re-ingesting every service instead of restoring from snapshot %s",
+                    environment_universe_artifact.id, environment_universe_artifact.version,
+                    type(e).__name__, e, snapshot.db_image_artifact_id,
+                )
+                snapshot = None
+
+        snapshot_reingested_environments: list[str] | None = None
         if snapshot:
             logger.info(f"Found clean snapshot for env={self.id} universe={environment_universe_artifact.id}: artifact={snapshot.db_image_artifact_id} v{snapshot.db_image_artifact_version} instance={snapshot.instance_id}")
             await self._load_from_snapshot(snapshot)
@@ -233,9 +260,19 @@ class MultiEnv(Env):
                     get_env_instance_store().clear_loaded_environments(self._instance_id)
                 except Exception as e:  # noqa: BLE001
                     logger.warning("Could not clear resume state after a snapshot restore: %s", e)
+            reingest = [
+                a for a in environment_universe_artifact.get_environment_artifacts()
+                if a.environment_name in file_tree_environments
+            ]
+            snapshot_reingested_environments = [a.environment_name for a in reingest]
+            if reingest:
+                logger.info(
+                    "Snapshot restored the database of %s; re-ingesting %d service(s) %s "
+                    "whose bundles ship root/ trees the servicedb image does not carry",
+                    self.id, len(reingest), snapshot_reingested_environments,
+                )
+                await self._ingest_environment_artifacts(environment_universe_artifact, reingest)
         else:
-            import asyncio
-            import time
             environment_artifacts = environment_universe_artifact.get_environment_artifacts()
             total = len(environment_artifacts)
             # WARNING, not info: this is the path that can FAIL. Every service is
@@ -279,52 +316,7 @@ class MultiEnv(Env):
                 if not environment_artifacts:
                     logger.info("Every service was already loaded; nothing to re-ingest")
 
-            limit = await self._load_concurrency_limit(total) if total else 1
-            semaphore = asyncio.Semaphore(limit)
-
-            async def _load_one(idx: int, artifact):
-                name = artifact.environment_name
-                async with semaphore:
-                    # Timed inside the semaphore: the per-service timeout only starts once
-                    # the work does, so queue time must not be charged against it. A
-                    # duration here is comparable to DATA_PLANE_LOAD_TIMEOUT_S.
-                    t0 = time.monotonic()
-                    logger.info(f"[{idx}/{total}] loading {name} ...")
-                    print(f"[{idx}/{total}] loading {name} ...", flush=True)
-                    try:
-                        await self.load_environment_artifact(artifact)
-                    except BaseException as e:  # noqa: BLE001 — includes CancelledError
-                        dt = time.monotonic() - t0
-                        logger.error(f"[{idx}/{total}] FAIL {name} after {dt:.0f}s: {type(e).__name__}: {e}")
-                        print(f"[{idx}/{total}] ✗ {name} FAILED after {dt:.0f}s: {type(e).__name__}: {e}", flush=True)
-                        raise
-                    dt = time.monotonic() - t0
-                    # Recorded per service, immediately, rather than once at the end: the
-                    # whole point is that a load which dies partway leaves usable progress.
-                    self._record_loaded_environment(environment_universe_artifact, name)
-                    logger.info(f"[{idx}/{total}] OK {name} in {dt:.0f}s")
-                    print(f"[{idx}/{total}] ✓ {name} loaded in {dt:.0f}s", flush=True)
-                    return dt
-
-            # Key failures by position, not environment_name: a duplicate service
-            # must not let one success mask another's failure.
-            outcomes = await asyncio.gather(
-                *(_load_one(i, a) for i, a in enumerate(environment_artifacts, 1)),
-                return_exceptions=True,
-            )
-            failed = [
-                (i, environment_artifacts[i - 1].environment_name, outcome)
-                for i, outcome in enumerate(outcomes, 1)
-                if isinstance(outcome, BaseException)
-            ]
-            if failed:
-                raise RuntimeError(
-                    f"Failed to load {len(failed)}/{total} services: "
-                    + ", ".join(
-                        f"[{i}/{total}] {name} ({type(e).__name__}: {e})"
-                        for i, name, e in failed
-                    )
-                )
+            await self._ingest_environment_artifacts(environment_universe_artifact, environment_artifacts)
         if self._instance_id:
             from agent_env.env.store import update_env_instance_environment_universe
             update_env_instance_environment_universe(self._instance_id, environment_universe_artifact.id, environment_universe_artifact.version)
@@ -364,7 +356,62 @@ class MultiEnv(Env):
             snapshot_db_image_artifact_id=snapshot.db_image_artifact_id if snapshot else None,
             snapshot_baked=snapshot_baked,
             snapshot_bake_error=snapshot_bake_error,
+            snapshot_reingested_environments=snapshot_reingested_environments,
         )
+
+    async def _ingest_environment_artifacts(self, environment_universe_artifact, environment_artifacts) -> None:
+        """Load each service's bundle over HTTP, a bounded number at a time, and fail the
+        load as a whole if any service fails. Shared by the full re-ingest and by the
+        file-backed services a snapshot restore has to load again."""
+        total = len(environment_artifacts)
+        if not total:
+            return
+        limit = await self._load_concurrency_limit(total)
+        semaphore = asyncio.Semaphore(limit)
+
+        async def _load_one(idx: int, artifact):
+            name = artifact.environment_name
+            async with semaphore:
+                # Timed inside the semaphore: the per-service timeout only starts once
+                # the work does, so queue time must not be charged against it. A
+                # duration here is comparable to DATA_PLANE_LOAD_TIMEOUT_S.
+                t0 = time.monotonic()
+                logger.info(f"[{idx}/{total}] loading {name} ...")
+                print(f"[{idx}/{total}] loading {name} ...", flush=True)
+                try:
+                    await self.load_environment_artifact(artifact)
+                except BaseException as e:  # noqa: BLE001 — includes CancelledError
+                    dt = time.monotonic() - t0
+                    logger.error(f"[{idx}/{total}] FAIL {name} after {dt:.0f}s: {type(e).__name__}: {e}")
+                    print(f"[{idx}/{total}] ✗ {name} FAILED after {dt:.0f}s: {type(e).__name__}: {e}", flush=True)
+                    raise
+                dt = time.monotonic() - t0
+                # Recorded per service, immediately, rather than once at the end: the
+                # whole point is that a load which dies partway leaves usable progress.
+                self._record_loaded_environment(environment_universe_artifact, name)
+                logger.info(f"[{idx}/{total}] OK {name} in {dt:.0f}s")
+                print(f"[{idx}/{total}] ✓ {name} loaded in {dt:.0f}s", flush=True)
+                return dt
+
+        # Key failures by position, not environment_name: a duplicate service
+        # must not let one success mask another's failure.
+        outcomes = await asyncio.gather(
+            *(_load_one(i, a) for i, a in enumerate(environment_artifacts, 1)),
+            return_exceptions=True,
+        )
+        failed = [
+            (i, environment_artifacts[i - 1].environment_name, outcome)
+            for i, outcome in enumerate(outcomes, 1)
+            if isinstance(outcome, BaseException)
+        ]
+        if failed:
+            raise RuntimeError(
+                f"Failed to load {len(failed)}/{total} services: "
+                + ", ".join(
+                    f"[{i}/{total}] {name} ({type(e).__name__}: {e})"
+                    for i, name, e in failed
+                )
+            )
 
     async def _resumable_environments(self, environment_universe_artifact, total: int) -> set[str]:
         """Services safe to skip because a previous attempt already loaded them.
@@ -559,7 +606,10 @@ class MultiEnv(Env):
         raise ValueError(f"{type(self).__name__} '{self.id}' cannot load artifact '{getattr(artifact, 'id', '?')}' of type '{getattr(artifact, 'type', '?')}' — expected a EnvironmentArtifact or EnvironmentUniverseArtifact")
 
     async def _load_from_snapshot(self, snapshot) -> None:
-        """Swap the servicedb container with a pre-loaded snapshot image. Only supported when both the current deploy and the snapshot has env_state_type set to local_postgres"""
+        """Swap the servicedb container with a pre-loaded snapshot image. Only supported when both the current deploy and the snapshot has env_state_type set to local_postgres.
+
+        Restores the database only. The caller re-ingests the services whose bundles ship
+        file trees, since those bytes live in the service containers this recreates."""
         import asyncio
         from agent_env.artifact import Artifact, DockerImageArtifact
         from agent_env.env.env import Env
