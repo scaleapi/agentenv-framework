@@ -83,6 +83,35 @@ environment-prefixed tools without knowing the name at class-definition time; an
 FastMCP; since those apps have no MCP tool registry, constructing one with `@tool` methods
 raises.
 
+### Who is calling
+
+A tool that needs the caller declares a parameter annotated `ToolContext` (any name) and receives
+it on every call. The SDK fills it, never the client: it is absent from the advertised
+`inputSchema` and from `tools/list`. Tools that declare no such parameter are registered unchanged.
+
+```python
+from agentenv_protocol import ToolContext
+
+    @tool(name="{environment_name}_list_inbox")
+    def list_inbox(self, ctx: ToolContext) -> list[dict]:
+        """Messages addressed to the caller."""
+        return [m for m in self.messages if m["to"] == ctx.caller.role]
+```
+
+`ctx.caller.role` is the role the agent was deployed with, as the gateway forwarded it (`None` when
+nothing was forwarded; the gateway's `default` role counts as nothing). `ctx.caller.session` tells
+callers apart when the gateway shares one connection to the server. `ctx.tool`, `ctx.arguments`,
+`ctx.call_id` and `ctx.transport` (`"mcp"` or `"rest"`) describe the call. Code that runs on behalf
+of the call without a parameter of its own, such as a database method, reads the same object through
+`ToolContext.current()`, which returns an empty context outside any call. The binding is per call
+and follows the request's task, so concurrent callers never see each other's context.
+
+To answer a call before the tool runs, override `on_tool_call(self, context)`: return `None` to let
+it proceed, or an `mcp.types.CallToolResult` (`isError=True` for a refusal) to send that as the
+tool's reply. An `@extension` method may declare the same parameter; it is filled from the request's
+`AgentEnv-Role` header. In tests, `agentenv_protocol.testing.tool_context(role=...)` binds a caller
+around a direct call to a handler method.
+
 ## Serving
 
 `serve()` builds the FastMCP app via `create_fastmcp_app()`, which encodes the agent-env deploy

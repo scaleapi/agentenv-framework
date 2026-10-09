@@ -12,8 +12,18 @@ from .agent_env_environment import (
     environment_card,
     extension,
     get_data,
+    injecting,
     reset_data,
     tool,
+)
+from .tool_context import (
+    DEFAULT_ROLE,
+    ROLE_HEADER,
+    ROLE_META_KEY,
+    SESSION_META_KEY,
+    Caller,
+    ToolContext,
+    normalize_role,
 )
 from .manifest import (
     CLI_COMMANDS,
@@ -78,6 +88,14 @@ __all__ = [
     "get_data",
     "extension",
     "tool",
+    "injecting",
+    "ToolContext",
+    "Caller",
+    "normalize_role",
+    "ROLE_META_KEY",
+    "SESSION_META_KEY",
+    "ROLE_HEADER",
+    "DEFAULT_ROLE",
     "EnvironmentCapabilities",
     "EnvironmentCard",
     "EnvironmentExtension",

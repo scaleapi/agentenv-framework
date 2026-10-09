@@ -1,13 +1,15 @@
-"""Server SDK: decorate a handler's methods with @reset_data/@add_data/@get_data (JSON-RPC data plane at /agentenv; each optional, advertised as capabilities.operations), @extension (card-advertised REST routes), and @tool (MCP tools; FastMCP-backed apps only). Mount onto a FastMCP, Starlette, or FastAPI app via a per-framework AgentEnvApplication subclass — or subclass AgentEnvEnvironment, configure its card with @environment_card(...), and serve() it."""
+"""Server SDK: decorate a handler's methods with @reset_data/@add_data/@get_data (JSON-RPC data plane at /agentenv; each optional, advertised as capabilities.operations), @extension (card-advertised REST routes), and @tool (MCP tools; FastMCP-backed apps only; a parameter annotated ToolContext receives the caller and is never advertised). Mount onto a FastMCP, Starlette, or FastAPI app via a per-framework AgentEnvApplication subclass — or subclass AgentEnvEnvironment, configure its card with @environment_card(...), and serve() it."""
 from __future__ import annotations
 
 import datetime
 import decimal
 import enum
+import functools
 import inspect
 import json
 import logging
 import os
+import sys
 import types
 import uuid
 from abc import ABC, abstractmethod
@@ -19,6 +21,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.routing import Route
 
+from .tool_context import EMPTY, ToolContext, bound, context_from_http, context_from_mcp
 from .transfers import WriteNamespaceGrant
 from .types import DATA_OBJECTS_EXTENSION_URI, MCP_TRANSPORT, METHOD_ADD, METHOD_GET, METHOD_RESET, RPC_PATH, WELL_KNOWN_PATH, AddDataRequest, AddDataResponse, EnvironmentCapabilities, EnvironmentCard, EnvironmentExtension, EnvironmentInterface, EnvironmentTool, GetDataResponse, ResetDataResponse, error_body
 
@@ -29,6 +32,8 @@ _EXT_ATTR = "_aee_ext"
 _EXT_ROUTE_ATTR = "_aee_ext_route"
 _TOOL_ATTR = "_aee_tool"
 _CARD_CONFIG_ATTR = "_aee_card_config"
+#: Set on the tool dispatch installed by ``_bind_tool_calls``; a guard downstream checks it at boot.
+_TOOL_CONTEXT_BOUND_ATTR = "__agentenv_tool_context__"
 
 OP_RESET_DATA = "reset_data"
 OP_ADD_DATA = "add_data"
@@ -111,6 +116,11 @@ def tool(name: str | None = None, *, description: str | None = None) -> Callable
     the card and the registration. Requires a FastMCP-backed application (non-FastMCP apps raise
     at construction). Duplicate resolved names raise; a card-declared name wins the advertisement
     while the method is still registered.
+
+    A parameter annotated ``ToolContext`` (or ``Optional[ToolContext]``; any name) is filled by the
+    SDK with the caller of the current call and is omitted from the advertised ``inputSchema`` and
+    from tools/list; a FastMCP ``Context`` parameter is likewise omitted from the card while FastMCP
+    keeps injecting it.
     """
     if callable(name):
         raise TypeError("use @tool(...) with parentheses, not bare @tool")
@@ -180,6 +190,9 @@ class AgentEnvApplication(ABC):
             self._add_route(app, path, [method], handler)
         for descriptor, fn in self._tools:
             self._register_tool(app, descriptor, fn)
+        # Last, so it is the outermost layer: a dispatch guard the handler installed before mounting
+        # then runs under the bound ToolContext instead of outside it.
+        self._bind_tool_calls(app)
 
     @abstractmethod
     def _add_route(self, app: Any, path: str, methods: list, handler: Callable) -> None:
@@ -187,6 +200,10 @@ class AgentEnvApplication(ABC):
 
     def _register_tool(self, app: Any, descriptor: EnvironmentTool, fn: Callable) -> None:
         raise NotImplementedError(f"{type(self).__name__} does not serve MCP tools")
+
+    def _bind_tool_calls(self, app: Any) -> None:
+        """Frameworks with a tool dispatch chokepoint bind a ToolContext around every call there; the others serve no tools."""
+        return None
 
     def _card_for(self, app: Any) -> EnvironmentCard:
         return self.environment_card
@@ -199,7 +216,41 @@ class AgentEnvFastMCPApplication(AgentEnvApplication):
         app.custom_route(path, methods=methods)(handler)
 
     def _register_tool(self, app: Any, descriptor: EnvironmentTool, fn: Callable) -> None:
-        app.tool(name=descriptor.name, description=descriptor.description)(fn)
+        app.tool(name=descriptor.name, description=descriptor.description)(injecting(fn))
+
+    def _bind_tool_calls(self, app: Any) -> None:
+        """Wrap ``app._tool_manager.call_tool``, which every tools/call resolves at call time, so each call
+        of a registered tool runs under its ToolContext and the handler's ``on_tool_call`` may answer
+        it first. An unknown tool name goes straight to the dispatch, whose error answers it.
+
+        The installed callable carries ``__agentenv_tool_context__ = True`` and ``__wrapped__`` (the
+        dispatch it wraps): the handles a downstream guard uses to assert the ordering contract. One
+        handler per app: a second binding would run its hook on the first handler's tools.
+        """
+        manager = getattr(app, "_tool_manager", None)
+        inner = getattr(manager, "call_tool", None)
+        if not callable(inner):
+            return
+        if getattr(inner, _TOOL_CONTEXT_BOUND_ATTR, False):
+            raise RuntimeError("this FastMCP app already carries an AgentEnv tool dispatch; mount one handler per app")
+        hook = _tool_call_hook(self.handler)
+        get_tool = getattr(manager, "get_tool", None)
+
+        async def call_tool(name: str, arguments: dict, *args: Any, **kwargs: Any) -> Any:
+            if get_tool is not None and get_tool(name) is None:
+                return await inner(name, arguments, *args, **kwargs)
+            context = kwargs.get("context", args[0] if args else None)
+            with bound(context_from_mcp(context, name, arguments)) as tool_context:
+                if hook is not None:
+                    answer = await _maybe_await(hook(tool_context))
+                    if answer is not None:
+                        _check_call_tool_result(answer)
+                        return answer
+                return await inner(name, arguments, *args, **kwargs)
+
+        functools.update_wrapper(call_tool, inner)
+        setattr(call_tool, _TOOL_CONTEXT_BOUND_ATTR, True)
+        manager.call_tool = call_tool
 
     def _card_for(self, app: Any) -> EnvironmentCard:
         """Declare the MCP endpoint only when the app says where it serves it; FastMCP-shaped targets may not."""
@@ -263,6 +314,16 @@ class AgentEnvEnvironment:
             self.mount(self.mcp)
         self.mcp.run(transport=transport)
 
+    def on_tool_call(self, context: ToolContext) -> Any:
+        """Runs before every tools/call on this environment's app, under the bound ``context``.
+
+        Return None to let the call proceed, or an ``mcp.types.CallToolResult`` (``isError=True`` for
+        a refusal) to answer the call without running the tool; it reaches the wire verbatim, before
+        output validation. Anything else raises TypeError. May be ``async``. Not invoked for
+        extension (REST) routes.
+        """
+        return None
+
 
 _SCALAR_TYPES = {str: "string", int: "integer", float: "number", bool: "boolean", list: "array", dict: "object"}
 _STRING_FORMATS = {datetime.datetime: "date-time", datetime.date: "date", datetime.time: "time", uuid.UUID: "uuid"}
@@ -307,19 +368,179 @@ def _schema_for_annotation(annotation: Any) -> dict:
     return {"type": json_type} if json_type is not None else {}
 
 
-def _schema_from_signature(fn: Callable) -> dict:
-    """Derive a JSON-Schema object for a handler's call params from its signature (Annotated[Field] descriptions included)."""
-    sig = inspect.signature(fn)
+def _unwrap_annotation(annotation: Any) -> list:
+    """The concrete types an annotation names: Annotated metadata and None peeled off Optional/Union."""
+    origin = get_origin(annotation)
+    if origin is Annotated:
+        return _unwrap_annotation(get_args(annotation)[0])
+    if origin is Union or origin is getattr(types, "UnionType", None):
+        return [t for arg in get_args(annotation) if arg is not type(None) for t in _unwrap_annotation(arg)]
+    return [annotation]
+
+
+def _split_top_level(text: str, sep: str) -> list:
+    parts: list = []
+    depth = 0
+    start = 0
+    for i, ch in enumerate(text):
+        if ch in "[(":
+            depth += 1
+        elif ch in "])":
+            depth -= 1
+        elif ch == sep and depth == 0:
+            parts.append(text[start:i])
+            start = i + 1
+    parts.append(text[start:])
+    return [p.strip() for p in parts]
+
+
+def _string_annotation_names(text: str) -> list:
+    """The type names a string annotation spells out, unwrapped like ``_unwrap_annotation``: the fallback
+    under ``from __future__ import annotations`` when the function's hints cannot be resolved."""
+    text = text.strip().strip("'\"")
+    parts = _split_top_level(text, "|")
+    if len(parts) > 1:
+        return [n for part in parts for n in _string_annotation_names(part)]
+    head, bracket, rest = text.partition("[")
+    if bracket and text.endswith("]"):
+        args = _split_top_level(rest[:-1], ",")
+        wrapper = head.rsplit(".", 1)[-1]
+        if wrapper == "Annotated":
+            return _string_annotation_names(args[0])
+        if wrapper in ("Optional", "Union"):
+            return [n for arg in args for n in _string_annotation_names(arg)]
+        return [text]
+    return [] if text == "None" else [text.rsplit(".", 1)[-1]]
+
+
+def _is_tool_context_annotation(annotation: Any) -> bool:
+    if isinstance(annotation, str):
+        return ToolContext.__name__ in _string_annotation_names(annotation)
+    return any(t is ToolContext for t in _unwrap_annotation(annotation))
+
+
+def _fastmcp_context_type() -> type | None:
+    """FastMCP's Context class when mcp is loaded, else None. mcp is an optional dependency, so it is
+    looked up rather than imported; a Context-annotated handler has necessarily imported it already."""
+    return getattr(sys.modules.get("mcp.server.fastmcp.server"), "Context", None)
+
+
+def _is_fastmcp_context_annotation(annotation: Any) -> bool:
+    context_type = _fastmcp_context_type()
+    if context_type is None:
+        return False
+    if isinstance(annotation, str):
+        return context_type.__name__ in _string_annotation_names(annotation)
+    return any(isinstance(t, type) and issubclass(t, context_type) for t in _unwrap_annotation(annotation))
+
+
+def _resolved_hints(fn: Callable) -> dict:
     try:
-        hints = get_type_hints(fn, include_extras=True)
+        return get_type_hints(fn, include_extras=True)
     except Exception:
-        hints = {}
+        return {}
+
+
+def _callable_name(fn: Callable) -> str:
+    return getattr(fn, "__qualname__", None) or getattr(fn, "__name__", None) or repr(fn)
+
+
+def _tool_context_slot(fn: Callable) -> str | None:
+    """Name of the parameter annotated ``ToolContext`` / ``Optional[ToolContext]`` (any name), or None.
+    The slot is filled by keyword, so a positional-only one is refused here rather than on every call."""
+    hints = _resolved_hints(fn)
+    slots = []
+    for name, param in inspect.signature(fn).parameters.items():
+        if name in ("self", "cls") or param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+            continue
+        if not _is_tool_context_annotation(hints.get(name, param.annotation)):
+            continue
+        if param.kind is inspect.Parameter.POSITIONAL_ONLY:
+            raise TypeError(f"{_callable_name(fn)}: ToolContext parameter {name!r} must not be positional-only")
+        slots.append(name)
+    if len(slots) > 1:
+        raise TypeError(f"{_callable_name(fn)} declares more than one ToolContext parameter: {slots}")
+    return slots[0] if slots else None
+
+
+def _tool_call_hook(handler: Any) -> Callable | None:
+    """The handler's ``on_tool_call`` when it has one of its own (the base class's no-op does not count),
+    checked at mount to take the ToolContext as its one argument so a mismatch fails here, not per call."""
+    hook = getattr(handler, "on_tool_call", None)
+    if hook is None or getattr(type(handler), "on_tool_call", None) is AgentEnvEnvironment.on_tool_call:
+        return None
+    try:
+        inspect.signature(hook).bind(EMPTY)
+    except TypeError as e:
+        raise TypeError(f"{_callable_name(hook)} must take the ToolContext as its only argument") from e
+    return hook
+
+
+def _reduced_signature(fn: Callable, slot: str) -> tuple:
+    """``fn``'s signature and annotations without ``slot``, every annotation resolved: the registry
+    reads ``__signature__`` verbatim and cannot evaluate a string left in it."""
+    sig = inspect.signature(fn)
+    hints = _resolved_hints(fn)
+    params = [p.replace(annotation=hints.get(p.name, p.annotation)) for p in sig.parameters.values() if p.name != slot]
+    returns = hints.get("return", sig.return_annotation)
+    unresolved = [p.name for p in params if isinstance(p.annotation, str)] + (["return"] if isinstance(returns, str) else [])
+    if unresolved:
+        raise TypeError(
+            f"{_callable_name(fn)}: cannot resolve the annotations of {unresolved}; "
+            "a function that declares a ToolContext parameter must have resolvable annotations"
+        )
+    annotations = {p.name: p.annotation for p in params if p.annotation is not inspect.Parameter.empty}
+    if returns is not inspect.Signature.empty:
+        annotations["return"] = returns
+    return sig.replace(parameters=params, return_annotation=returns), annotations
+
+
+def _inject_tool_context(fn: Callable, slot: str) -> Callable:
+    # Two bodies so the registry's sync/async detection sees the same kind as ``fn``.
+    if inspect.iscoroutinefunction(fn):
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            kwargs[slot] = ToolContext.current()
+            return await fn(*args, **kwargs)
+    else:
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            kwargs[slot] = ToolContext.current()
+            return fn(*args, **kwargs)
+    functools.update_wrapper(wrapper, fn)
+    wrapper.__signature__, wrapper.__annotations__ = _reduced_signature(fn, slot)
+    return wrapper
+
+
+def injecting(fn: Callable) -> Callable:
+    """``fn`` as an MCP tool registry should see it: unchanged when it declares no ``ToolContext``
+    parameter, else a twin of the same name, doc and sync/async nature whose signature and annotations
+    omit that parameter and which fills it with ``ToolContext.current()`` on every call. ``@tool``
+    methods get this at mount; use it for a slotted function registered any other way
+    (``app.tool()(fn)``, a separate ``ToolManager``), which otherwise fails at registration."""
+    slot = _tool_context_slot(fn)
+    return _inject_tool_context(fn, slot) if slot else fn
+
+
+def _check_call_tool_result(value: Any) -> None:
+    # The value goes to the wire as-is, so anything else would be emitted as a successful result.
+    result_type = getattr(sys.modules.get("mcp.types"), "CallToolResult", None)
+    if result_type is None or not isinstance(value, result_type):
+        raise TypeError(f"on_tool_call must return None or mcp.types.CallToolResult, got {type(value).__name__}")
+
+
+def _schema_from_signature(fn: Callable) -> dict:
+    """Derive a JSON-Schema object for a handler's call params from its signature (Annotated[Field] descriptions
+    included). Injected parameters (``ToolContext``, FastMCP ``Context``) are not wire parameters and are left out."""
+    sig = inspect.signature(fn)
+    hints = _resolved_hints(fn)
     properties: dict = {}
     required: list = []
     for name, param in sig.parameters.items():
         if name in ("self", "cls") or param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
             continue
-        prop = _schema_for_annotation(hints.get(name, param.annotation))
+        annotation = hints.get(name, param.annotation)
+        if _is_tool_context_annotation(annotation) or _is_fastmcp_context_annotation(annotation):
+            continue
+        prop = _schema_for_annotation(annotation)
         if param.default is inspect.Parameter.empty:
             required.append(name)
         else:
@@ -601,7 +822,15 @@ def _coerce_params(fn: Callable, params: dict) -> dict:
 
 
 def _extension_handler(fn: Callable, http_method: str) -> Callable:
-    """REST handler for an @extension route: bind request params to the handler and return JSON."""
+    """REST handler for an @extension route: bind request params to the handler and return JSON. A
+    ``ToolContext`` parameter is filled from the request headers (transport ``"rest"``) and never bound
+    from the params."""
+    slot = _tool_context_slot(fn)
+    signature = inspect.signature(fn)
+    if slot:
+        signature = signature.replace(parameters=[p for p in signature.parameters.values() if p.name != slot])
+    op = fn.__name__ or "invoke"
+
     async def handler(request: Request) -> Response:
         try:
             if http_method == "GET":
@@ -615,14 +844,16 @@ def _extension_handler(fn: Callable, http_method: str) -> Callable:
         except Exception as e:
             return _json_response(error_body("invalid_params", str(e)), 400)
         try:
-            inspect.signature(fn).bind(**params)
+            signature.bind(**params)
         except TypeError as e:
             return _json_response(error_body("invalid_params", str(e)), 400)
-        try:
-            result = await _maybe_await(fn(**params))
-        except Exception as e:
-            logger.exception("extension invocation failed")
-            return _json_response(error_body("extension_failed", str(e)), 500)
+        with bound(context_from_http(request, op, params)) as tool_context:
+            call_kwargs = {**params, slot: tool_context} if slot else params
+            try:
+                result = await _maybe_await(fn(**call_kwargs))
+            except Exception as e:
+                logger.exception("extension invocation failed")
+                return _json_response(error_body("extension_failed", str(e)), 500)
         return _json_response(result if result is not None else {})
     return handler
 
