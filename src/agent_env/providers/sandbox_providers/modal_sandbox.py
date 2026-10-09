@@ -287,10 +287,8 @@ class ModalSandboxProvider(SandboxProvider):
                 )
                 await built.build.aio(app)
             except Exception as e:
-                log = (f"; Modal's build log for {e.image_id} has the cause"
-                       if isinstance(e, modal.exception.ImageBuildError) and getattr(e, "image_id", None) else "")
                 raise RuntimeError(f"Building {image.image_name} on Modal from its build context failed: "
-                                   f"{_fmt_exc(e)}{log}") from e
+                                   f"{_fmt_exc(e)}") from e
         logger.info(f"Built {image.image_name} on Modal as {built.object_id}")
         return built.object_id
 

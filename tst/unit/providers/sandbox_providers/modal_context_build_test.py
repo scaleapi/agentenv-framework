@@ -125,10 +125,11 @@ async def test_a_failed_build_names_the_image_and_the_next_deploy_builds_it_agai
 
 
 @pytest.mark.asyncio
-async def test_a_failed_modal_build_points_at_its_build_log(local_stores, context, builds):
-    builds.fail = modal.exception.ImageBuildError("Image build for im-abc failed.", "im-abc")
+async def test_a_failed_modal_build_keeps_modals_pointer_to_its_build_log(local_stores, context, builds):
+    builds.fail = modal.exception.ImageBuildError(
+        "Image build for im-abc failed.\nView the build logs:\n  modal image logs im-abc", "im-abc")
 
-    with pytest.raises(RuntimeError, match="Image build for im-abc failed.; Modal's build log for im-abc has the cause"):
+    with pytest.raises(RuntimeError, match="(?s)Image build for im-abc failed.*modal image logs im-abc"):
         await _provider().prepare_image(_context_image("solver-image", context))
 
 
