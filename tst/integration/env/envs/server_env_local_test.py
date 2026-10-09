@@ -2,10 +2,12 @@
 
 The env deploys, a later process restores its record and loads data into the server, and the teardown step, which
 rebuilds each sandbox from disk, removes the container. A load is timed by the size of the payload it staged, through
-the deploy's own handle and a restored one; and the server's state reads as JSON whether ``data/get`` answers with
-data or with a file bundle. Requires a docker daemon; spins up a throwaway ``registry:2`` and skips if it can't start.
+the deploy's own handle and a restored one; the server's state reads as JSON whether ``data/get`` answers with data or
+with a file bundle; and handed an object to upload to, the server sends its bundle from its container in parts over the
+local grant server. Requires a docker daemon; spins up a throwaway ``registry:2`` and skips if it can't start.
 """
 
+import io
 import json
 import shutil
 import socket
@@ -13,11 +15,14 @@ import subprocess
 import tempfile
 import time
 import uuid
+import zipfile
 from pathlib import Path
 
 import httpx
 import pytest
+from agentenv_protocol import DataPart, uploaded_object
 from agentenv_protocol import client as protocol_v1
+from agentenv_protocol.transfers import PARTS_IN_FLIGHT, HttpPartsPutGrant, WriteObject, part_ranges
 
 from agent_env.artifact import DockerImageArtifact, EnvironmentArtifact, FileArtifact
 from agent_env.artifact.store import reset_artifact_store
@@ -26,6 +31,7 @@ from agent_env.env import legacy_protocol
 from agent_env.env.env import DeployedSandboxEnv, Env
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.gateway import constants
+from agent_env.store import get_config
 from agent_env.store.image_store import LocalRegistryImageStore
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.teardown_sandboxes import TORN_DOWN_KEY, TeardownSandboxesTaskStep
@@ -134,6 +140,40 @@ async def test_a_load_is_timed_by_its_payload_and_the_servers_state_reads_as_jso
     await protocol_v1.invoke_extension(base_url, card, "urn:agentenv:export-as-file/v1", {"enabled": True})
     assert [part.kind for part in (await protocol_v1.get_data(base_url)).parts] == ["file"]
     assert await legacy_protocol.service_state(deployed, None, "items") == items
+
+
+@pytest.mark.asyncio
+async def test_a_server_handed_an_object_uploads_its_bundle_in_parts_from_its_container(local_stack):
+    uid = uuid.uuid4().hex[:8]
+    env = MCPServerEnv.put(id=f"server-items-{uid}", docker_image_artifact=_put_items_image(f"server-items-{uid}"),
+                           environment_name="items", env_provider_type="server")
+    deployed = await env.deploy(sandbox_type="local", ttl_seconds=900)
+    local_stack.append(f"agent-{deployed.sandbox_id}")
+    base_url = await legacy_protocol.v1_base_url(deployed, None, "items")
+    items = [f"item-{n:03d}-{uid}" for n in range(60)]
+    await protocol_v1.add_data(base_url, [DataPart(data={"items": items})])
+    assert "http-put-parts" in protocol_v1.write_kinds(await protocol_v1.get_card(base_url))
+
+    # Part URLs on the local grant server, more than the bundle needs: the server uses the first ones its size takes.
+    store, part_bytes, prefix = get_config().get_object_store(), 100, f"parts-e2e/{uid}"
+    puts = [store.issue_write_grant(store.object_url(f"{prefix}/{n}"), media_type="application/zip",
+                                    max_bytes=part_bytes, expires_in=900) for n in range(1, 41)]
+    write_object = WriteObject(
+        media_type="application/zip",
+        max_bytes=part_bytes * len(puts),
+        write=HttpPartsPutGrant(kind="http-put-parts", part_bytes=part_bytes, urls=[put.url for put in puts],
+                                expires_at=min(put.expires_at for put in puts), headers={"Content-Type": "application/zip"}),
+    )
+
+    uploaded = uploaded_object((await protocol_v1.get_data(base_url, write_object=write_object)).parts[0])
+
+    ranges = part_ranges(uploaded.size_bytes, part_bytes)
+    assert PARTS_IN_FLIGHT < len(ranges) < len(puts) and uploaded.sha256 is None
+    parts = [store.get(store.object_url(f"{prefix}/{n}")) for n in range(1, len(ranges) + 1)]
+    assert [len(part) for part in parts] == [length for _, length in ranges]
+    assert not store.exists(f"{prefix}/{len(ranges) + 1}")
+    with zipfile.ZipFile(io.BytesIO(b"".join(parts))) as bundle:
+        assert json.loads(bundle.read("items.json")) == {"items": items}
 
 
 def _put_items_image(artifact_id: str) -> DockerImageArtifact:

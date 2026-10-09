@@ -185,7 +185,7 @@ class GithubEnv(AgentEnvEnvironment):
         bundle = self.write_bundle()
         if write_object is not None and bundle.stat().st_size <= write_object.max_bytes:
             uploaded = await upload(write_object, bundle)
-            return [uploaded_object_part(uploaded, name="slack.zip", mime_type="application/zip")]
+            return [uploaded_object_part(uploaded, name="github.zip", mime_type="application/zip")]
         return [DataPart(data=self.state())]
 ```
 
