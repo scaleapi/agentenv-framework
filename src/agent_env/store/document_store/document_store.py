@@ -369,7 +369,7 @@ class DocumentStore(ABC):
         unique: bool = False,
         ttl_seconds: Optional[int] = None,
     ) -> None:
-        """Register an index over ``fields`` (idempotent); ``unique=True`` is enforced by ``insert`` and upserts via ``DuplicateKeyError``. ``ttl_seconds`` requests server-side expiry off the single indexed datetime field (backends without TTL may ignore it)."""
+        """Register an index over ``fields`` (idempotent); ``unique=True`` is enforced by ``insert`` and upserts via ``DuplicateKeyError``. ``ttl_seconds`` requests server-side expiry off the single indexed datetime field (backends without TTL may ignore it). A backend may return while a long build is still running; the index applies once built."""
 
     def check_id(self, entity_id: str) -> None:
         """Raise ValueError unless an entity with ``entity_id`` may be written here. No store takes an id
