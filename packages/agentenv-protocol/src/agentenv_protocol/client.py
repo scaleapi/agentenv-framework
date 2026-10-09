@@ -6,8 +6,8 @@ import logging
 import httpx
 
 from .manifest import INTERFACE_MANIFEST_PATH
-from .transfers import WriteNamespaceGrant
-from .types import INTAKE_EXTENSION_URI, MCP_PATH, MCP_TRANSPORT, METHOD_ADD, METHOD_GET, METHOD_RESET, RPC_PATH, WELL_KNOWN_PATH, AddDataResponse, GetDataResponse, Part, ResetDataResponse
+from .transfers import WriteNamespaceGrant, WriteObject
+from .types import DATA_OBJECTS_EXTENSION_URI, INTAKE_EXTENSION_URI, MCP_PATH, MCP_TRANSPORT, METHOD_ADD, METHOD_GET, METHOD_RESET, RPC_PATH, TRANSFERS_EXTENSION_URI, WELL_KNOWN_PATH, AddDataResponse, GetDataResponse, Part, ResetDataResponse
 
 logger = logging.getLogger(__name__)
 
@@ -34,12 +34,32 @@ async def add_data(base_url: str, parts: list[Part], timeout: int = 120, verify:
 
 
 async def get_data(
-    base_url: str, timeout: int = 30, verify: bool = True, *, write_namespace: WriteNamespaceGrant | None = None
+    base_url: str,
+    timeout: int = 30,
+    verify: bool = True,
+    *,
+    write_namespace: WriteNamespaceGrant | None = None,
+    write_object: WriteObject | None = None,
 ) -> GetDataResponse:
     """`data/get`. A server advertising `DATA_OBJECTS_EXTENSION_URI` may be handed `write_namespace` to upload
-    its export under; `uploaded_object_path` reads from the answer where it did."""
-    params = {} if write_namespace is None else {"write_namespace": write_namespace.model_dump(mode="json", exclude_none=True)}
+    its export under, and one whose `TRANSFERS_EXTENSION_URI` lists the grant's kind `write_object` to upload
+    it to; `uploaded_object_path` and `uploaded_object` read from the answer what it uploaded."""
+    params = {}
+    if write_namespace is not None:
+        params["write_namespace"] = write_namespace.model_dump(mode="json", exclude_none=True)
+    if write_object is not None:
+        params["write_object"] = write_object.model_dump(mode="json", exclude_none=True)
     return GetDataResponse.model_validate(await _rpc(base_url, METHOD_GET, params, timeout, verify))
+
+
+def write_kinds(card: dict) -> frozenset[str]:
+    """The write grant kinds a server's `data/get` takes: what its `TRANSFERS_EXTENSION_URI` declares, else
+    `http-post-policy` alone for a server advertising `DATA_OBJECTS_EXTENSION_URI`, else none."""
+    if find_extension(card, TRANSFERS_EXTENSION_URI) is not None:
+        return frozenset(extension_params(card, TRANSFERS_EXTENSION_URI).get("write") or ())
+    if find_extension(card, DATA_OBJECTS_EXTENSION_URI) is not None:
+        return frozenset({"http-post-policy"})
+    return frozenset()
 
 
 async def get_card(base_url: str, timeout: int = 10, verify: bool = True) -> dict:

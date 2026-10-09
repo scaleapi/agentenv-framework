@@ -162,6 +162,33 @@ class SlackEnv(AgentEnvEnvironment):
         return [DataPart(data=self.state())]
 ```
 
+A handler that takes a `write_object` parameter (a `transfers.WriteObject`) is handed one object to
+upload its export to, named by the caller; it uploads with `transfers.upload(write_object, path)`,
+which sends a parts grant's ranges in parallel, and answers with `uploaded_object_part(uploaded,
+name=..., mime_type=...)`, read back with `uploaded_object(part)`. Each grant parameter a handler
+takes is declared under `urn:agentenv:transfers/v1` (`TRANSFERS_EXTENSION_URI`) as the write grant
+kinds it uploads through, `{"write": [...]}`: `write_namespace` adds `http-post-policy`, and
+`write_object` adds `http-put` and `http-put-parts`. `client.write_kinds(card)` reads them, taking a
+card without the declaration to accept `http-post-policy` alone when it advertises
+`DATA_OBJECTS_EXTENSION_URI`, and nothing otherwise; a caller sends only a grant whose kind the card
+lists.
+
+```python
+from agentenv_protocol import AgentEnvEnvironment, DataPart, environment_card, get_data, uploaded_object_part
+from agentenv_protocol.transfers import WriteObject, upload
+
+
+@environment_card(name="github")
+class GithubEnv(AgentEnvEnvironment):
+    @get_data
+    async def _state(self, write_object: WriteObject | None = None):
+        bundle = self.write_bundle()
+        if write_object is not None and bundle.stat().st_size <= write_object.max_bytes:
+            uploaded = await upload(write_object, bundle)
+            return [uploaded_object_part(uploaded, name="github.zip", mime_type="application/zip")]
+        return [DataPart(data=self.state())]
+```
+
 Dependencies are intentionally light (`pydantic`, `starlette`) so the package can be added to environment server images without pulling a heavier framework — `mcp` is imported lazily inside `create_fastmcp_app()` and is deliberately not a dependency.
 
 ## A2A agent framework
