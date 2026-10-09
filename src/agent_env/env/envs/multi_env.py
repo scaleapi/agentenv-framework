@@ -195,10 +195,10 @@ class MultiEnv(Env):
         universe cheap to re-serve, not worth it on a one-off deploy. The bake is
         best-effort and never fails a load that already succeeded.
 
-        The snapshot is the database alone. A service whose bundle ships a ``root/`` tree
-        (file bytes it serves from its own container) is re-ingested over HTTP after the
-        image swap, exactly as on a miss, because the swap gives it rows with no bytes
-        behind them. Which services those are is read off each bundle's zip directory.
+        The snapshot is the database alone. A service whose bundle ships file bytes (a
+        ``root/`` tree, or inline ``files[]`` in its data.json) is re-ingested over HTTP
+        after the image swap, exactly as on a miss, because the swap gives it rows with no
+        bytes behind them. Which services those are is read off each bundle in place.
         """
         import uuid
         from agent_env.env.env import LoadEnvironmentUniverseArtifactResult
