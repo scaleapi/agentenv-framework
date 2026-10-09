@@ -26,6 +26,7 @@ from agent_env.store.image_store import LocalRegistryImageStore
 from agent_env.task import Task
 from agent_env.task.store import get_task_instance_store
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
+from agent_env.store.object_store.local.grant_server import grant_server
 from tst.task import journal_invariants as journal
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
@@ -81,6 +82,9 @@ def local_stack(monkeypatch, tmp_path):
     finally:
         for cid in _docker("ps", "-aq", "--filter", "name=agent-env-local-").stdout.split():
             _docker("rm", "-f", cid)
+        # Grants handed out here came from this process's grant server, whose certificate is from this test's state
+        # root; a later test's containers trust another root's CA, so it must start afresh.
+        grant_server(None, None).close()
         reset_artifact_store()
         reset_config()
         _docker("rm", "-f", reg_name)
