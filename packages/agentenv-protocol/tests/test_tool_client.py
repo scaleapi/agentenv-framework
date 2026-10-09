@@ -24,8 +24,6 @@ from agentenv_protocol import (
     tool_definitions,
 )
 
-pytest.importorskip("mcp.server.fastmcp")
-
 _URL = "http://env/mcp"
 
 
@@ -64,6 +62,8 @@ def _route_clients_to(monkeypatch, transport: httpx.AsyncBaseTransport) -> None:
 @pytest.fixture
 def serve_items(monkeypatch):
     """Serve an _Items env with create_fastmcp_app in the given mode, in process; yields the handler."""
+    pytest.importorskip("mcp.server.fastmcp")
+
     async def serve(**fastmcp_kwargs):
         handler = _Items()
         app = create_fastmcp_app(handler, card=EnvironmentCard(name="items"), **fastmcp_kwargs).streamable_http_app()
@@ -228,6 +228,19 @@ async def test_a_closed_session_opens_again_as_a_new_session(scripted):
 
 
 @pytest.mark.asyncio
+async def test_opening_an_open_session_ends_the_one_it_held_first(scripted):
+    session = await ToolSession(_URL).open()
+    scripted.answers["initialize"] = lambda m: httpx.Response(200, headers={"mcp-session-id": "s-2"}, json=_reply(m, {
+        "protocolVersion": "2025-06-18"}))
+    scripted.sessions.add("s-2")
+    await session.open()
+    await session.close()
+
+    deletes = [r.headers["mcp-session-id"] for r in scripted.requests if r.method == "DELETE"]
+    assert deletes == ["s-1", "s-2"] and scripted.sessions == set()
+
+
+@pytest.mark.asyncio
 async def test_tools_list_follows_cursors_until_the_last_page(scripted):
     pages = {None: (["a", "b"], "p2"), "p2": (["c"], "p3"), "p3": (["d"], None)}
 
@@ -285,8 +298,12 @@ async def test_a_session_the_server_dropped_raises_and_says_the_state_may_be_gon
     (lambda m: httpx.Response(200, json={"jsonrpc": "2.0", "id": m["id"], "result": "ok"}),
      "tools/call: the reply has no result object"),
     (lambda m: httpx.Response(200, json=_reply(m, {"content": "not a list"})), "tools/call: unreadable result"),
+    (lambda m: httpx.Response(200, json=_reply(m, {"content": [{"type": "text"}]})), "tools/call: unreadable result"),
+    (lambda m: httpx.Response(200, json=_reply(m, {"content": [{"type": "text", "text": 7}]})),
+     "tools/call: unreadable result"),
 ], ids=["jsonrpc-error", "http-500", "bad-json", "bad-event-json", "no-reply-in-stream", "unterminated-event",
-        "wrong-content-type", "batch-reply", "result-not-object", "result-wrong-shape"])
+        "wrong-content-type", "batch-reply", "result-not-object", "result-wrong-shape", "text-block-without-text",
+        "text-block-with-a-number"])
 async def test_a_failure_at_the_mcp_level_raises_a_tool_session_error(scripted, answer, match):
     scripted.answers["tools/call"] = answer
     async with ToolSession(_URL) as session:
