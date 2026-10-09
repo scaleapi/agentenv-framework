@@ -42,7 +42,7 @@ LEDGER_COLLECTION = "bundle_ledger"
 SCHEME = 1
 
 _CONTEXT = "build context"
-_FORMS = {None: "an image built on this machine", _CONTEXT: "a build context, which its VMs build"}
+_FORMS = {None: "an image built on this machine", _CONTEXT: "a build context, built where it runs"}
 
 _COLLECTIONS = {"env": ENVS_COLLECTION, "agent": A2A_AGENTS_COLLECTION, "artifact": ARTIFACTS_COLLECTION,
                 "task": TASKS_COLLECTION, "eval": EVALS_COLLECTION}
@@ -53,7 +53,7 @@ _LISTED = 5
 class Digest:
     value: str
     inputs: dict[str, Any]  # type, config, files {key: sha256}, needs and store_refs {"<kind> <id>": version}, and
-    # for an image written as its build context, its form and the platform its VMs build it for
+    # for an image written as its build context, its form and the platform it's built for
 
 
 @dataclass(frozen=True)

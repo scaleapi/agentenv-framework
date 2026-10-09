@@ -861,9 +861,10 @@ COMPOSE_EOF'''
 
         config = get_config()
         gateway_env = Env.get(config.default_gateway_env_id)
-        if problems := [problem for image in [gateway_env.docker_image_artifact, *mcp_server_images]
-                        if (problem := image.by_name_problem())]:
-            raise ValueError(f"Can't deploy on Modal, whose gateway runs each image by name: {'; '.join(problems)}")
+        # Images that are only a build context are built before anything is created, so a failed build leaves nothing.
+        images = [gateway_env.docker_image_artifact, *mcp_server_images]
+        await asyncio.gather(*(sandbox_provider.prepare_image(image, attribution=attribution)
+                               for image in images if image.context_only))
 
         i6pn_kwargs = {"i6pn": True, "region": config.modal_default_region} if isinstance(sandbox_provider, ModalSandboxProvider) else {}
         deploy = _ContainerDeploy(

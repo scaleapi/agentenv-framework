@@ -162,7 +162,7 @@ class DryRun:
         plan, contexts = self.materialization.plan, self.materialization.contexts
         return tuple(
             f"{_label(plan, done.write)} v{done.version}: "
-            + (f"a build context, which each VM deploying it builds for {DEFAULT_BUILD_PLATFORM}"
+            + (f"a build context, which each deploy builds where it runs, for {DEFAULT_BUILD_PLATFORM}"
                if done.write.id in contexts else "built on this machine")
             for done in self.materialization.writes if isinstance(done.write.source, BuiltImage)
         )

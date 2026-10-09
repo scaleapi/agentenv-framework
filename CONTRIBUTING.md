@@ -16,7 +16,7 @@ you agree that it is licensed under the same terms.
 
 ## Development setup
 
-You need Python 3.11 or newer, [uv](https://docs.astral.sh/uv/) and, for the integration tiers,
+You need Python 3.11.4 or newer, [uv](https://docs.astral.sh/uv/) and, for the integration tiers,
 Docker.
 
 ```bash

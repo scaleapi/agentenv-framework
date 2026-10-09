@@ -138,32 +138,22 @@ def test_a_remote_image_runs_anywhere_and_a_local_one_on_the_local_provider(bund
 BUILT = "@local/~/triage/solver__agent_image"
 
 
+CONTEXT = "a build context, which each deploy builds where it runs, for linux/amd64"
+
+
 @pytest.mark.parametrize("sandbox, form", [
-    ("local", "built on this machine"),
-    ("modal_vm", "a build context, which each VM deploying it builds for linux/amd64"),
+    ("local", "built on this machine"), ("modal_vm", CONTEXT), ("modal", CONTEXT), ("modal_vm,modal", CONTEXT),
 ])
-def test_an_agent_the_bundle_builds_is_built_here_for_the_local_provider_and_a_build_context_for_vms(
+def test_an_agent_the_bundle_builds_is_built_here_for_the_local_provider_and_a_build_context_for_those_that_build_it(
         bundle_dir, docker_on_path, sandbox, form):
+    """A VM builds it, and Modal builds it before creating the container that runs it."""
     layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\n"})
     _task(bundle_dir, [AGENT])
 
     dry = dry_run_bundle(bundle_dir, sandbox=sandbox)
 
-    assert dry.materialization.contexts == ({BUILT} if sandbox == "modal_vm" else set())
+    assert dry.materialization.contexts == (set() if sandbox == "local" else {BUILT})
     assert dry.images() == (f"agents/solver (Dockerfile image) v1: {form}",)
-
-
-@pytest.mark.parametrize("sandbox", ["modal", "modal_vm,modal"])
-def test_an_agent_the_bundle_builds_is_refused_on_a_provider_that_runs_it_by_name(bundle_dir, sandbox):
-    layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\n"})
-    _task(bundle_dir, [AGENT])
-
-    assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox=sandbox)) == [
-        "tasks/t.json: step 'agent': deploys agent '@local/~/triage/solver''s image on the 'modal' sandbox provider, "
-        "which runs it by name, and the bundle builds it from agents/solver/Dockerfile, which a sandbox runs only once "
-        "built on this machine or in its VM; run it with --sandbox local, or on a provider whose VMs build it, such as "
-        "--sandbox modal_vm",
-    ]
 
 
 class _ContainersOnly(SandboxProvider):
@@ -173,8 +163,7 @@ class _ContainersOnly(SandboxProvider):
         raise AssertionError("preflight creates nothing")
 
 
-def test_an_agent_the_bundle_builds_is_refused_on_a_provider_that_creates_no_vm_to_build_it_in(bundle_dir,
-                                                                                            monkeypatch):
+def test_an_agent_the_bundle_builds_is_refused_on_a_provider_that_cant_build_it(bundle_dir, monkeypatch):
     registry = Config.sandbox_registry
     monkeypatch.setattr(Config, "sandbox_registry", lambda self: {**registry(self), "containers": {"impl": _ContainersOnly}})
     layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\n"})
@@ -182,14 +171,14 @@ def test_an_agent_the_bundle_builds_is_refused_on_a_provider_that_creates_no_vm_
 
     assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox="containers")) == [
         "tasks/t.json: step 'agent': deploys agent '@local/~/triage/solver''s image on the 'containers' sandbox "
-        "provider, which creates no VM to build it in, and the bundle builds it from agents/solver/Dockerfile, which a "
-        "sandbox runs only once built on this machine or in its VM; run it with --sandbox local, or on a provider whose "
-        "VMs build it, such as --sandbox modal_vm",
+        "provider, which can't build it from its build context, and the bundle builds it from agents/solver/Dockerfile, "
+        "which a sandbox runs only once it's built on this machine or by the provider it runs on; run it with --sandbox "
+        "local, or on a provider that builds it, such as --sandbox modal",
     ]
 
 
 MIXED = ("the bundle builds it from agents/solver/Dockerfile on this machine for the local provider, and as a build "
-         "context for one whose VMs build it, and a run writes it one way; run its deploys on one kind, such as "
+         "context for one that builds it, and a run writes it one way; run its deploys on one kind, such as "
          "--sandbox local or --sandbox modal_vm")
 
 
@@ -269,7 +258,7 @@ def test_an_env_image_with_no_tarball_and_no_registry_is_refused_where_a_gateway
     assert [entry.name for entry in dry_run_bundle(bundle_dir, sandbox="modal").runs] == ["t"]
 
 
-# Images with only a build context, which a VM sandbox builds and nothing else can run
+# Images with only a build context, which a VM sandbox or Modal builds and nothing else can run
 
 
 def _context_image(id):
@@ -279,12 +268,13 @@ def _context_image(id):
             dockerfile_path="Dockerfile", platform="linux/amd64", source_digest="sha256:" + "1" * 64))
 
 
-BY_NAME = ("on the {sandbox!r} sandbox provider, which runs it by name: '{id}' v1 is only a build context, which only a "
-           "VM sandbox builds; run it on a provider whose VMs build it, such as --sandbox modal_vm")
+BY_NAME = ("on the {sandbox!r} sandbox provider, which runs it by name: '{id}' v1 is only a build context, which has to "
+           "be built, not pulled; run it on a provider that builds it, such as --sandbox modal")
 
 
-@pytest.mark.parametrize("sandbox, refused", [("modal_vm", False), ("local", True), ("modal", True), ("modal_vm,local", True)])
-def test_an_agent_image_that_is_only_a_build_context_runs_where_a_vm_builds_it(bundle_dir, sandbox, refused):
+@pytest.mark.parametrize("sandbox, refused", [("modal_vm", False), ("modal", False), ("modal_vm,modal", False),
+                                              ("local", True), ("modal_vm,local", True)])
+def test_an_agent_image_that_is_only_a_build_context_runs_where_a_vm_or_modal_builds_it(bundle_dir, sandbox, refused):
     with namespace_routing():
         A2AAgent.put(id="solver", docker_image_artifact=_context_image("solver-image"))
     _task(bundle_dir, [AGENT])
@@ -298,19 +288,18 @@ def test_an_agent_image_that_is_only_a_build_context_runs_where_a_vm_builds_it(b
         assert [entry.name for entry in dry_run_bundle(bundle_dir, sandbox=sandbox).runs] == ["t"]
 
 
-def test_an_env_image_that_is_only_a_build_context_runs_on_a_gateway_vm_and_not_on_modals_containers(bundle_dir):
+def test_an_env_image_that_is_only_a_build_context_runs_on_a_gateway_vm_and_on_modals_containers(bundle_dir):
     with namespace_routing():
         MCPServerEnv.put(id="crm", docker_image_artifact=_context_image("crm-image"), environment_name="crm")
     _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
 
     assert [entry.name for entry in dry_run_bundle(bundle_dir, sandbox="local").runs] == ["t"]
     _infra(REMOTE)
-    assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox="modal")) == [
-        "tasks/t.json: step 'env': deploys env 'crm''s image 'crm-image' " + BY_NAME.format(sandbox="modal", id="crm-image")]
+    assert [entry.name for entry in dry_run_bundle(bundle_dir, sandbox="modal").runs] == ["t"]
 
 
 @pytest.mark.parametrize("sandbox", ["local", "modal_vm"])
-def test_a_lone_server_whose_image_is_only_a_build_context_is_refused_on_any_provider(bundle_dir, sandbox):
+def test_a_lone_server_whose_image_is_only_a_build_context_is_refused_on_any_provider_but_modal(bundle_dir, sandbox):
     with namespace_routing():
         MCPServerEnv.put(id="crm", docker_image_artifact=_context_image("crm-image"), environment_name="crm",
                          env_provider_type="server")
@@ -318,6 +307,26 @@ def test_a_lone_server_whose_image_is_only_a_build_context_is_refused_on_any_pro
 
     assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox=sandbox)) == [
         "tasks/t.json: step 'env': deploys env 'crm''s image 'crm-image' " + BY_NAME.format(sandbox=sandbox, id="crm-image")]
+    assert [entry.name for entry in dry_run_bundle(bundle_dir, sandbox="modal").runs] == ["t"]
+
+
+def test_modal_builds_a_gateway_image_that_is_only_a_build_context_but_not_a_service_db_one(bundle_dir):
+    with namespace_routing():
+        MCPServerEnv.put(id="crm", docker_image_artifact=_image("crm-image", REMOTE), environment_name="crm")
+    _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
+    _infra(REMOTE)
+    with namespace_routing():
+        GatewayEnv.put(id="default", docker_image_artifact=_context_image("gateway-default"))
+    assert [entry.name for entry in dry_run_bundle(bundle_dir, sandbox="modal").runs] == ["t"]
+
+    with namespace_routing():
+        ServiceDBEnv.put(id="default-db", db_docker_image_artifact=_context_image("service-db-default-db"),
+                         db_web_docker_image_artifact=_image("db-web-default-db", REMOTE),
+                         db_mcp_docker_image_artifact=_image("db-mcp-default-db", REMOTE))
+    assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox="modal")) == [
+        "tasks/t.json: step 'env': deploys the service-db env 'default-db''s image 'service-db-default-db' on the 'modal' "
+        "sandbox provider, which runs it by name: 'service-db-default-db' v2 is only a build context, which has to be "
+        "built, not pulled; run it on a provider whose VMs build it, such as --sandbox modal_vm"]
 
 
 # What a provider can create
@@ -589,28 +598,28 @@ def _env_folder(root, name, toml="", kind="mcp_server"):
                   f"envs/{name}/env.toml": f'type = "{kind}"\n{toml}'})
 
 
-def test_an_image_the_bundle_builds_for_an_env_is_a_build_context_on_a_gateway_vm(bundle_dir):
-    _env_folder(bundle_dir, "crm")
-    _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
-    _infra(REMOTE)
-
-    dry = dry_run_bundle(bundle_dir, sandbox="modal_vm")
-
-    assert dry.materialization.contexts == {f"{BUNDLE}/crm__env_image"}
-
-
-@pytest.mark.parametrize("sandbox, toml", [("modal", ""), ("modal_vm", 'env_provider_type = "server"\n')])
-def test_an_image_the_bundle_builds_for_an_env_is_refused_where_its_server_runs_by_name(bundle_dir, sandbox, toml):
-    """Modal's gateway runs each server in a container from its image's name, and a lone server does on any provider."""
+@pytest.mark.parametrize("sandbox, toml", [("modal_vm", ""), ("modal", ""), ("modal", 'env_provider_type = "server"\n')])
+def test_an_image_the_bundle_builds_for_an_env_is_a_build_context_where_its_server_is_built(bundle_dir, sandbox, toml):
+    """A gateway VM builds it, and Modal builds it for its gateway's container or a lone server's."""
     _env_folder(bundle_dir, "crm", toml)
     _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
     _infra(REMOTE)
 
-    assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox=sandbox)) == [
-        f"tasks/t.json: step 'env': deploys env '{BUNDLE}/crm''s image '{BUNDLE}/crm__env_image' on the {sandbox!r} "
+    dry = dry_run_bundle(bundle_dir, sandbox=sandbox)
+
+    assert dry.materialization.contexts == {f"{BUNDLE}/crm__env_image"}
+
+
+def test_an_image_the_bundle_builds_for_a_lone_server_is_refused_where_the_server_runs_by_name(bundle_dir):
+    """A lone server runs in a container from its image's name everywhere but on Modal."""
+    _env_folder(bundle_dir, "crm", 'env_provider_type = "server"\n')
+    _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
+
+    assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox="modal_vm")) == [
+        f"tasks/t.json: step 'env': deploys env '{BUNDLE}/crm''s image '{BUNDLE}/crm__env_image' on the 'modal_vm' "
         "sandbox provider, which runs it by name, and the bundle builds it from envs/crm/Dockerfile, which a sandbox "
-        "runs only once built on this machine or in its VM; run it with --sandbox local, or on a provider whose VMs "
-        "build it, such as --sandbox modal_vm",
+        "runs only once it's built on this machine or by the provider it runs on; run it with --sandbox local, or on a "
+        "provider that builds it, such as --sandbox modal",
     ]
 
 

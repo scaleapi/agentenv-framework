@@ -125,19 +125,21 @@ _CONTEXT_ONLY = DockerImageArtifact(id="slack-image", version=2, description="d"
 @pytest.mark.parametrize("gateway_image, server_image", [(_CONTEXT_ONLY, _image("mcp-slack")),
                                                          (_image("agent-gateway"), _CONTEXT_ONLY)],
                          ids=["gateway", "server"])
-async def test_container_mode_refuses_a_context_only_image_before_creating_anything(gateway_image, server_image):
+async def test_container_mode_builds_a_context_only_image_before_creating_anything(gateway_image, server_image):
     provider = ModalSandboxProvider()
     gp = EnvironmentGatewayProvider()
     gp._build_local_store = AsyncMock()
-    with patch.object(provider, "create_container", side_effect=AssertionError("created a container")), \
+    with patch.object(provider, "prepare_image", side_effect=RuntimeError("the build failed")) as prepare, \
+         patch.object(provider, "create_container", side_effect=AssertionError("created a container")), \
          patch("agent_env.env.env.Env.get", return_value=MagicMock(docker_image_artifact=gateway_image)):
-        with pytest.raises(ValueError, match="Can't deploy on Modal, whose gateway runs each image by name: 'slack-image' v2 "
-                                             "is only a build context"):
+        with pytest.raises(RuntimeError, match="the build failed"):
             await gp._deploy_via_containers(
                 sandbox_provider=provider, mcp_servers=[MCPServerConfig(image=server_image.image_name, environment_name="slack")],
                 mcp_server_images=[server_image], gateway_port=18765, website_configs=None,
                 gateway_mode=MagicMock(value="performance"), ttl_seconds=60, disk_size_gb=10,
+                attribution={"project_id": "0123456789abcdef01234567"},
             )
+    prepare.assert_awaited_once_with(_CONTEXT_ONLY, attribution={"project_id": "0123456789abcdef01234567"})
     gp._build_local_store.assert_not_awaited()
 
 

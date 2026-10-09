@@ -431,11 +431,11 @@ def test_an_image_switched_between_built_here_and_a_build_context_is_rewritten_w
     as_context = _summary(materialize(plan_of(bundle_dir), contexts=frozenset({image})))
     built_again = _summary(_run(bundle_dir))
 
-    assert as_context[image] == (2, False, ("now written as a build context, which its VMs build, not an image built "
+    assert as_context[image] == (2, False, ("now written as a build context, built where it runs, not an image built "
                                             "on this machine",))
     assert as_context[f"{ROOT}/solver"] == (2, False, (f"artifact {image} is written anew (v1 → v2)",))
     assert built_again[image] == (3, False, ("now written as an image built on this machine, not a build context, "
-                                             "which its VMs build",))
+                                             "built where it runs",))
     assert len(builds) == 2
 
 
