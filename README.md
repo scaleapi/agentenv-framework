@@ -38,10 +38,12 @@ The distribution is named `agentenv-framework`, the import package is `agent_env
 
 ### Sandbox providers
 
-The default provider runs environments and agents as containers on the local Docker daemon. The `vercel` provider runs each environment or agent in an ephemeral, Docker-capable Vercel Sandbox and exposes declared ports through public `*.vercel.run` routes. Install it with the optional extra and select it in `.agentenv/config.toml`:
+For a complete evaluation using your existing Vercel login, follow the [Vercel Sandbox demo](examples/vercel-sandbox/README.md).
+
+The default provider runs environments and agents as containers on the local Docker daemon. The `vercel` provider runs each environment or agent in an ephemeral, Docker-capable Vercel Sandbox and exposes declared ports through public `*.vercel.run` routes. From this source checkout, install the optional extra and select it in `.agentenv/config.toml`. This provider is not yet in a published PyPI release:
 
 ```bash
-uv tool install 'agentenv-framework[vercel]'
+uv sync --frozen --extra vercel
 ```
 
 ```toml
@@ -62,9 +64,9 @@ image = "vercel/sandbox/universal"
 # project_id = "your-project"
 ```
 
-Credentials are resolved by AgentEnv's `env:` and `secret:` references before the provider builds its scoped Vercel SDK client; the provider never changes the process environment or uses an ambient SDK session. Each sandbox is ephemeral, its execution time follows AgentEnv's timeout, and teardown destroys the sandbox and its orphan snapshots. Vercel currently provisions 64 GB of ephemeral disk: requests above 64 GB are rejected rather than silently ignored. Resource sizing uses the smallest supported even vCPU count (or one vCPU) that covers both the requested CPU and memory (2048 MB per vCPU), up to 32 vCPUs and 64 GB at the provider-wide ceiling; the account's plan may impose lower limits.
+Credentials are resolved by AgentEnv's `env:` and `secret:` references before the provider builds its scoped Vercel SDK client; the provider never changes the process environment or makes its SDK session the active one. Each sandbox is ephemeral, its execution time follows AgentEnv's timeout, and teardown destroys the sandbox and its orphan snapshots. Vercel currently provisions 64 GB of ephemeral disk: requests above 64 GB are rejected rather than silently ignored. Resource sizing uses the smallest supported even vCPU count (or one vCPU) that covers both the requested CPU and memory (2048 MB per vCPU), up to 32 vCPUs and 64 GB at the provider-wide ceiling; the account's plan may impose lower limits.
 
-The provider treats CPU and memory requests as minimums. If a request does not already match a supported shape, AgentEnv logs both the requested and allocated CPU and memory before provisioning. For example, `cpu = 0.5` and `memory = 5000` allocate four vCPUs and 8192 MB. A disk request below 64 GB is also ignored: every sandbox receives the fixed 64 GB disk, and the provider logs the ignored request. Configure all three of `token`, `team_id`, and `project_id` for an explicit scoped token, or omit all three to continue using the SDK's OIDC credentials.
+See the [Vercel resource limits](https://vercel.com/docs/sandbox/pricing#resource-limits) and [firewall policy](https://vercel.com/docs/sandbox/concepts/firewall) documentation. The provider treats CPU and memory requests as minimums. If a request does not already match a supported shape, AgentEnv logs both the requested and allocated CPU and memory before provisioning. For example, `cpu = 0.5` and `memory = 5000` allocate four vCPUs and 8192 MB. A disk request below 64 GB is also ignored: every sandbox receives the fixed 64 GB disk, and the provider logs the ignored request. Configure all three of `token`, `team_id`, and `project_id` for an explicit scoped token, or omit all three to continue using the SDK's OIDC credentials.
 
 Outbound policy supports AgentEnv's allow-all and allowlist forms, including hostname and CIDR entries. Vercel's custom transforms, forwarding rules, and denied CIDR exceptions are not reconstructed as ordinary allowlists: reconnect leaves such a policy unknown and image loading fails closed. At creation, public Vercel routes are added to a restricted workload's platform egress floor so it can reach another Vercel sandbox's declared route. Image and file downloads add their exact signed-URL hostnames to the current allowlist; these hosts remain allowed until the policy is replaced. A CIDR-only Vercel policy allows unrestricted DNS resolution; use domain rules to restrict DNS, or deny-all to block it.
 

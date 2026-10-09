@@ -332,9 +332,7 @@ exit 1
                 await self._sandbox.update_network_policy(vercel_network_policy(widened))
                 self.network_policy = widened
 
-    async def load_docker_images(self, artifacts: list) -> None:
-        if not artifacts:
-            return
+    async def _load_tarballs(self, artifacts: list) -> None:
         signed_urls = await self._signed_image_urls(artifacts)
         await self._allow_download_hosts(signed_urls)
         await self._load_docker_images(artifacts, signed_urls)

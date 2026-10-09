@@ -19,6 +19,7 @@ from vercel.sandbox import (
     SandboxStreamError,
 )
 
+from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.providers.sandbox_providers import vercel as vercel_module
 from agent_env.providers.sandbox_providers.vercel import sandbox as vercel_sandbox_module
 from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy
@@ -96,6 +97,11 @@ def _sandbox(raw=None, policy=NetworkPolicy()):
     return VercelSandbox(raw, client=client, tunnel_urls={}, network_policy=policy)
 
 
+def _tarball():
+    return DockerImageArtifact(id="image", description="", image_name="image:v1",
+                               tar_gz_object_url="file:///store/image.tar.gz")
+
+
 @pytest.mark.asyncio
 async def test_exec_returns_exact_unicode_bytes_and_nonzero_exit():
     raw = _raw()
@@ -171,7 +177,7 @@ async def test_restrictive_image_loading_adds_only_signed_download_hosts(monkeyp
         lambda policy: policy.with_hosts(["bucket.example"]),
     )
 
-    await sandbox.load_docker_images(["artifact"])
+    await sandbox.load_docker_images([_tarball()])
 
     raw.update_network_policy.assert_awaited_once()
     applied = raw.update_network_policy.await_args.args[0]
@@ -184,7 +190,7 @@ async def test_unknown_reconnected_policy_stays_unknown_for_image_loading():
     sandbox = _sandbox(policy=None)
     sandbox._signed_image_urls = AsyncMock(return_value=["https://bucket.example/image"])
     with pytest.raises(RuntimeError, match="applied network policy is unknown"):
-        await sandbox.load_docker_images(["artifact"])
+        await sandbox.load_docker_images([_tarball()])
 
 
 @pytest.mark.asyncio
@@ -497,7 +503,7 @@ async def test_image_fallback_can_download_an_unsigned_object_without_deadlock(m
         await sandbox._download_object_to_vm("file:///store/image", "/tmp/image")
     sandbox._load_docker_images = load
 
-    await asyncio.wait_for(sandbox.load_docker_images(["image"]), 1)
+    await asyncio.wait_for(sandbox.load_docker_images([_tarball()]), 1)
 
     sandbox._write_unsigned_object.assert_awaited_once_with(store, "file:///store/image", "/tmp/image")
     sandbox._sandbox.update_network_policy.assert_not_awaited()
@@ -538,3 +544,45 @@ async def test_interrupted_chunk_upload_retries_without_appending_partial_bytes(
         assert len(uploads) == 3
         assert destination.read_bytes() == payload
     assert all(not Path(path).exists() for path in uploads)
+
+
+@pytest.mark.asyncio
+async def test_registry_and_context_images_use_the_vm_loading_contract(monkeypatch):
+    sandbox = _sandbox(policy=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=("registry.example",)))
+    sandbox.exec_script = AsyncMock(return_value="")
+    sandbox._signed_image_urls = AsyncMock(side_effect=AssertionError("non-tarball image was signed"))
+    store = MagicMock(signed_get_url=MagicMock(return_value="https://bucket.example/context.tar.gz"))
+    registry = MagicMock(auth=MagicMock(return_value=None))
+    config = MagicMock(get_object_store_at=MagicMock(return_value=store),
+                       get_image_store=MagicMock(return_value=registry))
+    monkeypatch.setattr(vercel_sandbox_module, "get_config", lambda: config)
+    monkeypatch.setattr("agent_env.providers.sandbox_providers.sandbox.get_config", lambda: config)
+    reference = DockerImageArtifact(id="ref", description="", image_name="registry.example/tool:v1")
+    context = DockerImageArtifact(id="context", description="", image_name="context:v1",
+                                  build_context_object_url="file:///store/context.tar.gz")
+
+    await sandbox.load_docker_images([reference, context])
+
+    scripts = [call.args[0] for call in sandbox.exec_script.await_args_list]
+    assert "docker pull registry.example/tool:v1" in scripts
+    assert any("docker build --platform linux/amd64 -f Dockerfile -t context:v1 ." in script for script in scripts)
+    assert any("https://bucket.example/context.tar.gz" in script and "curl -fsSL" in script for script in scripts)
+    store.signed_get_url.assert_called_once_with("file:///store/context.tar.gz")
+    sandbox._signed_image_urls.assert_not_awaited()
+    assert sandbox.network_policy.allow_hosts == ("registry.example", "bucket.example")
+
+
+@pytest.mark.asyncio
+async def test_unobtainable_image_is_refused_before_loading_any_image():
+    sandbox = _sandbox()
+    sandbox._signed_image_urls = AsyncMock(side_effect=AssertionError("validation was bypassed"))
+    sandbox.exec_script = AsyncMock()
+    tarball = DockerImageArtifact(id="tar", description="", image_name="tar:v1",
+                                  tar_gz_object_url="file:///store/image.tar.gz")
+    missing = DockerImageArtifact(id="missing", description="", image_name="missing:v1")
+
+    with pytest.raises(RuntimeError, match="Can't load images: 'missing'"):
+        await sandbox.load_docker_images([tarball, missing])
+
+    sandbox._signed_image_urls.assert_not_awaited()
+    sandbox.exec_script.assert_not_awaited()
