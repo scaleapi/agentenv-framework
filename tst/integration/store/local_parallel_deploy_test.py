@@ -23,10 +23,10 @@ from agent_env.artifact.store import reset_artifact_store
 from agent_env.config import configure, reset_config, set_image_store
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.store.image_store import LocalRegistryImageStore
+from agent_env.store.object_store.local.grant_server import grant_server
 from agent_env.task import Task
 from agent_env.task.store import get_task_instance_store
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
-from agent_env.store.object_store.local.grant_server import grant_server
 from tst.task import journal_invariants as journal
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
