@@ -52,14 +52,14 @@ class BuildContext:
         if not root.is_dir():
             raise ValueError(f"build context {root} is not a folder")
         top = Path(os.path.realpath(root))
-        ignore_file = _ignore_file(top, dockerfile)
+        ignores = ignore_file(top, dockerfile)
         # Sent whatever the ignore file says, and through any link to them, so a build finds them in the context.
-        sent = [path for path in (dockerfile, ignore_file) if path is not None]
+        sent = [path for path in (dockerfile, ignores) if path is not None]
         kept = {name for path in sent for name in (_inside(top, path), _inside(top, Path(os.path.realpath(path)))) if name}
         named = None
         if dockerfile is not None and _inside(top, Path(os.path.realpath(dockerfile))):
             named = _inside(top, dockerfile)
-        matcher = FilePatternMatcher.from_file(ignore_file) if ignore_file else None
+        matcher = FilePatternMatcher.from_file(ignores) if ignores else None
         walk = _Walk(top, matcher, kept)
         walk.run()
         if walk.problems:
@@ -97,6 +97,14 @@ class BuildContext:
                     tar.addfile(info, reader)
                 if reader.hexdigest() != entry.sha256:
                     raise RuntimeError(f"{entry.name} changed while its build context was being written")
+
+
+def extract(archive: Path, out: Path) -> None:
+    """Unpack a build context's tar.gz into the folder ``out``: its files, folders and links. A link that leads out
+    of ``out`` is left out, as nothing there is the build's. Raises ValueError on anything else, which no context
+    written by ``BuildContext.write`` holds: a hard link, a device, a name that leads out of ``out``."""
+    with tarfile.open(archive, "r:gz") as tar:
+        tar.extractall(out, filter=_context_member)
 
 
 class _Walk:
@@ -198,7 +206,23 @@ class _Hashing:
         return self._digest.hexdigest()
 
 
-def _ignore_file(top: Path, dockerfile: Path | None) -> Path | None:
+def _context_member(member: tarfile.TarInfo, out: str) -> tarfile.TarInfo | None:
+    """``member`` as ``extract`` writes it, None to leave it out."""
+    if not (member.isreg() or member.isdir() or member.issym()):
+        raise ValueError(f"{member.name!r} in the build context is neither a file, a folder nor a link")
+    try:
+        member = tarfile.tar_filter(member, out)
+    except tarfile.FilterError as e:
+        raise ValueError(f"{member.name!r} in the build context: {e}") from e
+    if member.issym():
+        top = os.path.realpath(out)
+        target = os.path.realpath(os.path.join(top, os.path.dirname(member.name), member.linkname))
+        if os.path.commonpath([top, target]) != top:
+            return None
+    return member
+
+
+def ignore_file(top: Path, dockerfile: Path | None) -> Path | None:
     """The ignore file ``docker build`` reads: ``<Dockerfile>.dockerignore`` beside the Dockerfile, else the
     context's ``.dockerignore``."""
     candidates = [dockerfile.with_name(f"{dockerfile.name}.dockerignore")] if dockerfile is not None else []

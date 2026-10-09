@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_env.utils.build_context import BuildContext
+from agent_env.utils.build_context import BuildContext, extract, ignore_file
 
 
 def _tree(root: Path, files: dict[str, str], executable: tuple[str, ...] = ()) -> Path:
@@ -178,6 +178,63 @@ def test_the_written_tar_extracts_to_the_context(tmp_path):
 
     assert (out / "app" / "main.py").read_text() == "print(1)\n" and os.access(out / "app" / "run.sh", os.X_OK)
     assert (out / "data" / "empty" / ".keep").exists()
+
+
+def test_extract_unpacks_files_folders_and_links_inside_and_leaves_out_links_leading_out(tmp_path):
+    root = _tree(tmp_path / "ctx", SERVER, executable=("app/run.sh",))
+    (root / "lib").symlink_to("app", target_is_directory=True)
+    (root / "app" / "up").symlink_to("../data")
+    (root / ".venv-python").symlink_to("/usr/bin/python3")
+    (root / "app" / "escape").symlink_to("../../outside")
+    (root / "app" / "loop").symlink_to(root, target_is_directory=True)
+    archive = tmp_path / "ctx.tar.gz"
+    BuildContext.of(root, root / "Dockerfile").write(archive)
+
+    extract(archive, tmp_path / "out")
+
+    out = tmp_path / "out"
+    assert (out / "app" / "main.py").read_text() == "print(1)\n" and os.access(out / "app" / "run.sh", os.X_OK)
+    assert (out / "data" / "empty").is_dir()
+    assert (os.readlink(out / "lib"), os.readlink(out / "app" / "up")) == ("app", "../data")
+    assert not any(os.path.lexists(out / name) for name in (".venv-python", "app/escape", "app/loop"))
+
+
+def _archive(tmp_path: Path, *members: tuple[tarfile.TarInfo, bytes]) -> Path:
+    archive = tmp_path / "odd.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        for info, data in members:
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return archive
+
+
+def _member(name: str, kind: bytes = tarfile.REGTYPE, linkname: str = "") -> tarfile.TarInfo:
+    info = tarfile.TarInfo(name)
+    info.type, info.linkname = kind, linkname
+    return info
+
+
+@pytest.mark.parametrize("member, problem", [
+    (_member("hard", tarfile.LNKTYPE, "Dockerfile"), "is neither a file, a folder nor a link"),
+    (_member("pipe", tarfile.FIFOTYPE), "is neither a file, a folder nor a link"),
+    (_member("../outside"), "would be extracted to"),
+], ids=["hard link", "fifo", "name leading out"])
+def test_extract_refuses_what_no_build_context_holds(tmp_path, member, problem):
+    archive = _archive(tmp_path, (_member("Dockerfile"), b"FROM scratch\n"), (member, b""))
+
+    with pytest.raises(ValueError, match=problem):
+        extract(archive, tmp_path / "out")
+
+
+def test_ignore_file_is_the_dockerfiles_own_else_the_contexts(tmp_path):
+    root = _tree(tmp_path / "ctx", {**SERVER, "docker/app.Dockerfile": "FROM python:3.12\n"})
+    assert ignore_file(root, root / "Dockerfile") is None
+
+    (root / ".dockerignore").write_text("*.log\n")
+    assert ignore_file(root, root / "docker" / "app.Dockerfile") == root / ".dockerignore"
+
+    (root / "docker" / "app.Dockerfile.dockerignore").write_text("data\n")
+    assert ignore_file(root, root / "docker" / "app.Dockerfile") == root / "docker" / "app.Dockerfile.dockerignore"
 
 
 def test_a_dockerfile_that_is_a_link_keeps_its_own_name_and_brings_its_target(tmp_path):
