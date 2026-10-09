@@ -34,6 +34,7 @@ from agent_env.store.routing import (
     run_scope,
 )
 from tst.store import conformance
+from tst.util.granting_object_store import GrantingObjectStore
 
 LOCAL_TASK = "@local/~/bundle/tasks/t"
 LOCAL_ENV = "@local/~/bundle/envs/e"
@@ -579,3 +580,19 @@ def test_an_agent_deployed_in_an_at_local_run_gets_none_of_the_configured_stores
         assert "AWS_ACCESS_KEY_ID" not in agent._build_merged_env({}, 8000)
     finally:
         reset_config()
+
+
+def test_a_write_begins_on_the_store_that_holds_the_object(tmp_path, cli_routing):
+    configured = GrantingObjectStore(str(tmp_path / "configured"))
+    local = GrantingObjectStore(str(tmp_path / "local"))
+    routed = LocalRunObjectStore(configured, local)
+    kinds = frozenset({"http-put", "http-put-parts"})
+
+    routed.begin_write(local.object_url("snapshots/x.zip"), media_type="application/zip", max_bytes=8, kinds=kinds)
+    routed.begin_write(configured.object_url("shared/x.zip"), media_type="application/zip", max_bytes=8, kinds=kinds)
+
+    assert local.granted == [local.object_url("snapshots/x.zip")]
+    assert configured.granted == [configured.object_url("shared/x.zip")]
+    with run_scope(LOCAL_TASK), pytest.raises(LocalRunWriteError):
+        routed.begin_write(configured.object_url("shared/y.zip"), media_type="application/zip", max_bytes=8,
+                           kinds=kinds)

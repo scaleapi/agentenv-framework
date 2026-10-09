@@ -10,11 +10,14 @@ from typing import BinaryIO
 
 from agentenv_protocol.transfers import (
     HttpGetGrant,
+    HttpPartsPutGrant,
     HttpPostPolicyGrant,
     HttpPutGrant,
+    Uploaded,
+    WriteObject,
 )
 
-from agent_env.store.base import GrantUnavailableError
+from agent_env.store.base import GrantUnavailableError, UploadFailedError
 
 DEFAULT_CONTENT_TYPE = "application/octet-stream"
 DEFAULT_GRANT_LIFETIME_SECONDS = 12 * 60 * 60
@@ -42,6 +45,60 @@ class UploadPolicy:
     """A signed multipart POST that uploads any object under one prefix, and when it stops working."""
     write: HttpPostPolicyGrant
     expires_at: datetime
+
+
+class PendingWrite(ABC):
+    """An object a remote party uploads through ``grant``. It exists once ``complete`` accepts what the
+    party says it uploaded; leaving the ``with`` block without completing it discards the upload."""
+
+    def __init__(self, object_url: str, grant: WriteObject) -> None:
+        self.object_url = object_url
+        self.grant = grant
+        self._settled = False
+
+    def complete(self, uploaded: Uploaded) -> None:
+        """Make the object from what was uploaded; raise UploadFailedError, discarding it, when the stored
+        bytes are not the ``uploaded.size_bytes`` the party reported or the store cannot finish it."""
+        try:
+            self._complete(uploaded)
+        except BaseException:
+            self.abort()
+            raise
+        self._settled = True
+
+    def abort(self) -> None:
+        if not self._settled:
+            self._settled = True
+            self._abort()
+
+    @abstractmethod
+    def _complete(self, uploaded: Uploaded) -> None: ...
+
+    @abstractmethod
+    def _abort(self) -> None: ...
+
+    def __enter__(self) -> PendingWrite:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.abort()
+
+
+class _OnePutWrite(PendingWrite):
+    """A write through one PUT, which makes the object as it lands."""
+
+    def __init__(self, store: ObjectStore, object_url: str, grant: WriteObject) -> None:
+        super().__init__(object_url, grant)
+        self._store = store
+
+    def _complete(self, uploaded: Uploaded) -> None:
+        metadata = self._store.get_object_metadata_at(self.object_url)
+        if metadata is None or metadata.size != uploaded.size_bytes:
+            stored = "nothing" if metadata is None else f"{metadata.size} bytes"
+            raise UploadFailedError(f"{self.object_url} holds {stored}, not the {uploaded.size_bytes} bytes reported")
+
+    def _abort(self) -> None:
+        pass
 
 
 @dataclass(frozen=True)
@@ -199,6 +256,31 @@ class ObjectStore(ABC):
         raise NotImplementedError(
             f"{type(self).__name__} cannot issue remote object-transfer grants"
         )
+
+    def begin_write(
+        self,
+        object_url: str,
+        *,
+        media_type: str,
+        max_bytes: int,
+        kinds: frozenset[str],
+        expires_in: int | None = None,
+    ) -> PendingWrite:
+        """Start a write a remote party makes to ``object_url`` through a grant of one of ``kinds``,
+        preferring ``http-put-parts``. This default issues one PUT, bounded by one upload; a store that
+        can take an object in parallel parts overrides it."""
+        if self.max_single_upload_bytes is not None:
+            max_bytes = min(max_bytes, self.max_single_upload_bytes)
+        put = self.issue_write_grant(object_url, media_type=media_type, max_bytes=max_bytes, expires_in=expires_in)
+        if "http-put-parts" in kinds:
+            write = HttpPartsPutGrant(
+                kind="http-put-parts", part_bytes=max_bytes, urls=[put.url], expires_at=put.expires_at, headers=put.headers
+            )
+        elif "http-put" in kinds:
+            write = put
+        else:
+            raise GrantUnavailableError(f"{type(self).__name__} issues no write grant of the kinds {sorted(kinds)}")
+        return _OnePutWrite(self, object_url, WriteObject(media_type=media_type, max_bytes=max_bytes, write=write))
 
     def issue_upload_policy(
         self, prefix_url: str, *, max_object_bytes: int, expires_in: int

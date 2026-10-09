@@ -10,6 +10,7 @@ namespace case its ``issue_upload_policy`` declines with ``GrantUnavailableError
 the grants to the provider over HTTPS, so they run against a real store only.
 """
 
+import asyncio
 import contextlib
 import os
 import shutil
@@ -18,8 +19,9 @@ from pathlib import Path
 
 import httpx
 import pytest
+from agentenv_protocol.transfers import Uploaded, upload
 
-from agent_env.store import NotFoundError, ObjectAlreadyExistsError, ObjectNotFoundError
+from agent_env.store import NotFoundError, ObjectAlreadyExistsError, ObjectNotFoundError, UploadFailedError
 
 
 def put_get_roundtrip(store, ns):
@@ -203,6 +205,32 @@ def namespace_grant_confines_uploads_to_its_root(store, ns):
     assert not store.exists(f"{ns}grant/namespace/000001")
 
 
+def object_write_completes_through_its_grant(store, ns):
+    url = store.object_url(f"{ns}grant/object.zip")
+    with store.begin_write(url, media_type="application/zip", max_bytes=1024, kinds=_OBJECT_KINDS, expires_in=900) as write:
+        write.complete(asyncio.run(upload(write.grant, b"PK\x03\x04object")))
+    assert store.get(url) == b"PK\x03\x04object"
+    assert store.get_object_metadata_at(url).content_type == "application/zip"
+
+
+def a_misreported_object_write_is_refused(store, ns):
+    url = store.object_url(f"{ns}grant/misreported.zip")
+    with store.begin_write(url, media_type="application/zip", max_bytes=1024, kinds=_OBJECT_KINDS, expires_in=900) as write:
+        sent = asyncio.run(upload(write.grant, b"data"))
+        with pytest.raises(UploadFailedError):
+            write.complete(Uploaded(size_bytes=sent.size_bytes + 1))
+
+
+def an_abandoned_object_write_leaves_no_object(store, ns):
+    url = store.object_url(f"{ns}grant/abandoned.zip")
+    with store.begin_write(url, media_type="application/zip", max_bytes=1024, kinds=_OBJECT_KINDS, expires_in=900):
+        pass
+    assert not store.exists(f"{ns}grant/abandoned.zip")
+
+
+_OBJECT_KINDS = frozenset({"http-put", "http-put-parts"})
+
+
 def _write_temp(data: bytes) -> str:
     fd, path = tempfile.mkstemp()
     with os.fdopen(fd, "wb") as f:
@@ -234,4 +262,7 @@ GRANT_CASES = [
     read_grant_fetches_the_object,
     write_grant_uploads_with_the_signed_content_type,
     namespace_grant_confines_uploads_to_its_root,
+    object_write_completes_through_its_grant,
+    a_misreported_object_write_is_refused,
+    an_abandoned_object_write_leaves_no_object,
 ]

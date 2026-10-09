@@ -36,8 +36,8 @@ from agentenv_protocol.transfers import (
 )
 
 from agent_env.config import get_config
-from agent_env.store.base import ObjectAlreadyExistsError
-from agent_env.store.object_store import DEFAULT_CONTENT_TYPE, ObjectMetadata, ObjectStore, UploadPolicy
+from agent_env.store.base import GrantUnavailableError, ObjectAlreadyExistsError
+from agent_env.store.object_store import DEFAULT_CONTENT_TYPE, ObjectMetadata, ObjectStore, PendingWrite, UploadPolicy
 from agent_env.store.object_store.object_store import issues_grants_to
 
 logger = logging.getLogger(__name__)
@@ -169,6 +169,11 @@ class StagedObjectStore:
     ) -> HttpPutGrant:
         url = self._url(self._stage(self._writes, object_url, media_type, max_bytes).path)
         return HttpPutGrant(kind="http-put", url=url, expires_at=self._expiry(expires_in), headers=self._on_agent(url))
+
+    def begin_write(self, object_url: str, **_: Any) -> PendingWrite:
+        """Not offered: this store stages a write through ``issue_write_grant``, and forwarding would hand the
+        agent a grant on ``store`` itself."""
+        raise GrantUnavailableError(f"a staged store issues no begin_write grant for {object_url}")
 
     def issue_upload_policy(self, prefix_url: str, *, max_object_bytes: int, expires_in: int) -> UploadPolicy:
         url = f"{self.endpoint}/{secrets.token_urlsafe(24)}"
