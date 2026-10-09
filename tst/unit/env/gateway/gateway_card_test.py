@@ -87,8 +87,8 @@ _CLOCK_SYNC = {"uri": "urn:agentenv:clock/v1",
 
 
 def test_rewrite_child_card_prefixes_every_child_path_but_the_gateways_routes():
-    """A path outside `/agentenv`, or a method's own, is the child's too; a path stays on the gateway only when
-    the gateway's extension with the same uri names it."""
+    """A path outside `/agentenv`, or a method's own, is the child's too; a path stays on the gateway only for
+    an operation the gateway's extension with the same uri offers."""
     child = {"name": "slack", "url": "/agentenv", "capabilities": {"extensions": [
         _CLOCK_SYNC,
         {"uri": "urn:example:export/v1",
@@ -107,6 +107,31 @@ def test_rewrite_child_card_prefixes_every_child_path_but_the_gateways_routes():
     assert state["params"]["endpoint"] == "/svc/mcp-slack/state"  # the gateway's /state belongs to state/v1
     assert enable["params"]["endpoint"] == "/tools/enable"
     assert remote["params"]["endpoint"] == "https://example.com/hook"
+
+
+def test_a_child_operation_on_a_gateway_path_with_another_verb_is_the_childs():
+    """The gateway's `/clock/time` is a GET, so a child's POST there is the child's. When a gateway operation
+    falls back to the same extension endpoint, the endpoint stays and the child's method gets its own."""
+    child = {"name": "slack", "url": "/agentenv", "capabilities": {"extensions": [
+        {"uri": "urn:agentenv:clock/v1", "params": {"endpoint": "/clock/time", "methods": {"sync_time": {"method": "POST"}}}},
+        {"uri": "urn:agentenv:clock/v1", "params": {"endpoint": "/clock/time", "methods": {
+            "get_time": {"method": "GET"}, "sync_time": {"method": "POST"}}}},
+    ]}}
+
+    rewritten = _gateway({"mcp-slack": "http://slack:18765"})._rewrite_child_card("mcp-slack", child)
+
+    child_only, shared = rewritten["capabilities"]["extensions"]
+    assert child_only["params"]["endpoint"] == "/svc/mcp-slack/clock/time"
+    assert shared["params"]["endpoint"] == "/clock/time"
+    assert "endpoint" not in shared["params"]["methods"]["get_time"]
+    assert shared["params"]["methods"]["sync_time"]["endpoint"] == "/svc/mcp-slack/clock/time"
+
+
+def test_a_slash_ended_child_url_comes_back_without_its_slash():
+    """`v1_base_url` strips `/agentenv` off the child's url to reach its data plane, so `/agentenv/` must not
+    become `/svc/<key>/agentenv/`."""
+    child = {**_SLACK_CARD, "url": "/agentenv/"}
+    assert _gateway({"mcp-slack": "http://slack:18765"})._rewrite_child_card("mcp-slack", child)["url"] == "/svc/mcp-slack/agentenv"
 
 
 @pytest.mark.asyncio
