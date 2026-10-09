@@ -93,7 +93,9 @@ class PendingWrite(ABC):
 
 
 class _OnePutWrite(PendingWrite):
-    """A write through one PUT, which makes the object as it lands, so aborting it leaves the object."""
+    """A write through one PUT, which makes the object as it lands, so aborting it leaves the object. Its grant
+    stays good until it expires, so the receiver, which chose the bytes anyway, can replace an accepted object
+    until then; an S3 parts write cannot, since completing it ends the upload its part URLs name."""
 
     def __init__(self, store: ObjectStore, object_url: str, grant: WriteObject) -> None:
         super().__init__(object_url, grant)
