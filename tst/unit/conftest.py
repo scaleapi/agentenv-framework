@@ -44,8 +44,10 @@ def deprecations_fire_again():
 
 @pytest.fixture(autouse=True)
 def isolated_state_root(tmp_path_factory, monkeypatch):
-    """A fresh per-user state root for every unit test, overriding the run's."""
+    """A fresh per-user state root and local sandbox root for every unit test, overriding the run's: a sandbox a test
+    creates would otherwise be left in ~/.agent-env-sandboxes."""
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("state")))
+    monkeypatch.setenv("AGENT_ENV_LOCAL_SANDBOX_DIR", str(tmp_path_factory.mktemp("sandboxes")))
 
 
 @pytest.fixture
