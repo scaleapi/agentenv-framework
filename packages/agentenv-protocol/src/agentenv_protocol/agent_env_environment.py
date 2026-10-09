@@ -183,6 +183,7 @@ class AgentEnvApplication(ABC):
         self._tools = [(advertised.get(descriptor.name, descriptor), fn) for descriptor, fn in tool_handlers]
 
     def add_routes_to_app(self, app: Any, *, rpc_url: str = RPC_PATH, card_url: str = WELL_KNOWN_PATH) -> None:
+        self._check_tool_binding(app)
         self.environment_card = self._card_for(app)
         self._add_route(app, rpc_url, ["POST"], self._dispatch)
         self._add_route(app, card_url, ["GET"], _card_handler(self.environment_card))
@@ -201,6 +202,10 @@ class AgentEnvApplication(ABC):
     def _register_tool(self, app: Any, descriptor: EnvironmentTool, fn: Callable) -> None:
         raise NotImplementedError(f"{type(self).__name__} does not serve MCP tools")
 
+    def _check_tool_binding(self, app: Any) -> None:
+        """Everything that can refuse the mount, before the app is touched; nothing to refuse without a tool dispatch."""
+        return None
+
     def _bind_tool_calls(self, app: Any) -> None:
         """Frameworks with a tool dispatch chokepoint bind a ToolContext around every call there; the others serve no tools."""
         return None
@@ -211,6 +216,7 @@ class AgentEnvApplication(ABC):
 
 class AgentEnvFastMCPApplication(AgentEnvApplication):
     supports_tools: ClassVar[bool] = True
+    _hook: Callable | None = None
 
     def _add_route(self, app: Any, path: str, methods: list, handler: Callable) -> None:
         app.custom_route(path, methods=methods)(handler)
@@ -218,22 +224,28 @@ class AgentEnvFastMCPApplication(AgentEnvApplication):
     def _register_tool(self, app: Any, descriptor: EnvironmentTool, fn: Callable) -> None:
         app.tool(name=descriptor.name, description=descriptor.description)(injecting(fn))
 
+    def _check_tool_binding(self, app: Any) -> None:
+        """Refuse before any route or tool is added: a dispatch this protocol already wraps (one handler per
+        app, or the second hook would answer the first handler's tools) and an ``on_tool_call`` of the wrong
+        shape. The hook is kept for ``_bind_tool_calls``."""
+        inner = getattr(getattr(app, "_tool_manager", None), "call_tool", None)
+        if callable(inner) and getattr(inner, _TOOL_CONTEXT_BOUND_ATTR, False):
+            raise RuntimeError("this FastMCP app already carries an AgentEnv tool dispatch; mount one handler per app")
+        self._hook = _tool_call_hook(self.handler)
+
     def _bind_tool_calls(self, app: Any) -> None:
         """Wrap ``app._tool_manager.call_tool``, which every tools/call resolves at call time, so each call
         of a registered tool runs under its ToolContext and the handler's ``on_tool_call`` may answer
         it first. An unknown tool name goes straight to the dispatch, whose error answers it.
 
         The installed callable carries ``__agentenv_tool_context__ = True`` and ``__wrapped__`` (the
-        dispatch it wraps): the handles a downstream guard uses to assert the ordering contract. One
-        handler per app: a second binding would run its hook on the first handler's tools.
+        dispatch it wraps): the handles a downstream guard uses to assert the ordering contract.
         """
         manager = getattr(app, "_tool_manager", None)
         inner = getattr(manager, "call_tool", None)
         if not callable(inner):
             return
-        if getattr(inner, _TOOL_CONTEXT_BOUND_ATTR, False):
-            raise RuntimeError("this FastMCP app already carries an AgentEnv tool dispatch; mount one handler per app")
-        hook = _tool_call_hook(self.handler)
+        hook = self._hook
         get_tool = getattr(manager, "get_tool", None)
 
         async def call_tool(name: str, arguments: dict, *args: Any, **kwargs: Any) -> Any:

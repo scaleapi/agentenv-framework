@@ -28,6 +28,7 @@ from agentenv_protocol import (  # noqa: E402
     ROLE_META_KEY,
     SESSION_META_KEY,
     AgentEnvEnvironment,
+    AgentEnvFastMCPApplication,
     Caller,
     EnvironmentCard,
     ToolContext,
@@ -421,11 +422,24 @@ async def test_direct_caller_over_streamable_http_gets_the_header_role_and_its_o
     assert proxied.caller == Caller("bob", None, "bob")  # a _meta role entry: the connection's id is not the caller's
 
 
-def test_a_second_handler_on_the_same_app_is_refused_at_mount():
+def _app_shape(app: FastMCP) -> tuple:
+    return (sorted(t.name for t in app._tool_manager.list_tools()), len(app._custom_starlette_routes), app._tool_manager.call_tool)
+
+
+def test_a_second_handler_on_the_same_app_is_refused_before_the_app_is_touched():
     app = FastMCP("shared")
     _Env().mount(app)
+    before = _app_shape(app)
+
+    @environment_card(name="other")
+    class _Other(AgentEnvEnvironment):
+        @tool(name="other_tool")
+        def other_tool(self, q: str) -> str:
+            return q
+
     with pytest.raises(RuntimeError, match="one handler per app"):
-        _Env().mount(app)
+        _Other().mount(app)
+    assert _app_shape(app) == before
 
 
 def test_positional_only_slot_and_mismatched_hook_fail_at_mount():
@@ -447,6 +461,12 @@ def test_positional_only_slot_and_mismatched_hook_fail_at_mount():
 
     with pytest.raises(TypeError, match="must take the ToolContext as its only argument"):
         create_fastmcp_app(_Arity(), card=EnvironmentCard(name="arity"))
+
+    app = FastMCP("untouched")
+    before = _app_shape(app)
+    with pytest.raises(TypeError, match="must take the ToolContext as its only argument"):
+        AgentEnvFastMCPApplication(EnvironmentCard(name="arity"), _Arity()).add_routes_to_app(app)
+    assert _app_shape(app) == before
 
 
 @pytest.mark.asyncio

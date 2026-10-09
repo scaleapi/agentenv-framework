@@ -98,8 +98,10 @@ class ToolContext:
     """What the protocol knows about one tool call.
 
     Hashable, so per-call state can be keyed on the context itself: ``call_id``
-    identifies the call, and ``arguments`` (a read-only mapping) and ``mcp``
-    stay out of the hash.
+    identifies the call; ``arguments`` and ``mcp`` stay out of the hash. The
+    protocol's builders and :meth:`for_test` snapshot ``arguments`` into a
+    read-only mapping; a context constructed directly keeps the mapping it is
+    given.
     """
 
     caller: Caller = Caller()

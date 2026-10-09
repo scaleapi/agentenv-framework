@@ -99,7 +99,11 @@ from agentenv_protocol import ToolContext
 ```
 
 `ctx.caller.role` is the role the agent was deployed with, as the gateway forwarded it (`None` when
-nothing was forwarded; the gateway's `default` role counts as nothing). `ctx.caller.session` tells
+nothing was forwarded; the gateway's `default` role counts as nothing). It is the caller's side's
+assertion, trusted exactly as far as that side is: behind a gateway it is the gateway's view of the
+agent it deployed; a caller that reaches the server directly chooses it in `AgentEnv-Role`. It says
+whose data a call acts on, not that the caller was authenticated, so a server exposed to untrusted
+direct callers keeps access control on its own boundary. `ctx.caller.session` tells
 callers apart when the gateway shares one connection to the server. `ctx.tool`, `ctx.arguments`,
 `ctx.call_id` and `ctx.transport` (`"mcp"` or `"rest"`) describe the call. Code that runs on behalf
 of the call without a parameter of its own, such as a database method, reads the same object through
