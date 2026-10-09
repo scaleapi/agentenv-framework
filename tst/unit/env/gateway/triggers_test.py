@@ -15,6 +15,8 @@ class _FakeGateway:
     def __init__(self, responses: dict) -> None:
         self.responses = responses
         self.calls: list[tuple[str, dict]] = []
+        self.roles: list[tuple[str, str | None]] = []  # the `role` each _internal_call carried
+        self.events: list[dict] = []
         self.rules: list[tuple[str, str, bool]] = []
         self._role_rules_lock = asyncio.Lock()
         self._server_tools: dict = {}
@@ -29,7 +31,8 @@ class _FakeGateway:
         return 42
 
     async def _log_event(self, event):
-        return "event_test"
+        self.events.append(dict(event))
+        return f"event_{len(self.events)}"
 
     async def _ensure_tools_discovered(self):
         pass
@@ -53,8 +56,9 @@ def engine(monkeypatch):
     }
     gw = _FakeGateway(responses)
 
-    async def fake_internal_call(self, tool_name, arguments):
+    async def fake_internal_call(self, tool_name, arguments, role=None):
         gw.calls.append((tool_name, dict(arguments)))
+        gw.roles.append((tool_name, role))
         fn = gw.responses.get(tool_name)
         if fn is None:
             raise RuntimeError(f"unknown tool {tool_name}")
@@ -113,6 +117,16 @@ def _registration(**overrides):
     ({"executor": {"a2a_url": "http://e"}, "triggers": []}, "executor.role must be"),
     ({"watch_roles": ["default", "executor"], "executor": {"a2a_url": "http://e", "role": "executor"},
       "triggers": []}, "must not be in watch_roles"),
+    *[({"triggers": [{"id": "x", "when": {"type": "action", "tool": "t"},
+                      "actions": [{"type": "tool", "tool": "t2", "as": acting}]}]}, fragment)
+      for acting, fragment in [("", "'as' must be a non-empty"), ("default", "'as' must be a non-empty"),
+                               (5, "'as' must be a non-empty"), ("${args.owner}", "not templated")]],
+    ({"triggers": [{"id": "x", "when": {"type": "action", "tool": "t"},
+                    "actions": [{"type": "permission", "action": "enable", "role": "r", "tools": ["t"], "as": "x"}]}]},
+     "only valid on tool actions"),
+    ({"executor": {"a2a_url": "http://e", "role": "executor"},
+      "triggers": [{"id": "x", "when": {"type": "action", "tool": "t"},
+                    "actions": [{"type": "nl", "instruction": "hi", "as": "x"}]}]}, "only valid on tool actions"),
 ])
 def test_registration_fails_loud(engine, bad, fragment):
     with pytest.raises(TriggerError, match=".*"):
@@ -254,6 +268,28 @@ async def test_state_trigger_pipeline_tool_action_and_verify(engine):
 
 
 @pytest.mark.asyncio
+async def test_a_tool_action_s_as_role_reaches_its_call_and_verify_but_not_the_state_check(engine):
+    reg = _registration()
+    rate = reg["triggers"][1]
+    rate["actions"][0]["as"] = "carol@example.com"
+    rate["actions"].append({"type": "tool", "tool": "slack_send_message", "args": {"channel": "#c", "text": "plain"}})
+    engine.register(reg)
+    engine._test_state["doc_text"] = "Budget Fit: fine."
+    engine.on_tool_call("default", "gdocs_batch_update", {"documentId": "doc-1"}, _result())
+    await asyncio.sleep(0.3)
+    assert engine._triggers["rate"]["status"] == "fired"
+    gw = engine._test_gw
+    assert all(role is None for tool, role in gw.roles if tool.startswith("gdocs_"))  # when.check reads as the pin
+    assert [role for tool, role in gw.roles if tool == "slack_send_message"] == ["carol@example.com", None]
+    assert [role for tool, role in gw.roles if tool == "slack_conversations_history"] == ["carol@example.com"]
+    oks = [e for e in engine._events if e["kind"] == "action_ok"]
+    assert [e["detail"].get("as") for e in oks] == ["carol@example.com", None]
+    assert any(e["kind"] == "verify_ok" for e in engine._events)
+    internal = [e for e in gw.events if e["event_type"] == "internal_tool_call"]
+    assert [(e["as"], e["ok"]) for e in internal] == [("carol@example.com", True), (None, True)]
+
+
+@pytest.mark.asyncio
 async def test_sensor_trigger_and_state_shape(engine):
     engine.register(_registration())
     engine._test_state["doc_text"] = "rate is $26/hr now"
@@ -348,14 +384,10 @@ def _step_gateway():
                  internal_mcp_servers=[], rest_proxy_urls={})
     gw._tool_server_urls = {"gdocs_create_document": "http://svc/mcp"}
 
-    class _FakeSession:
-        async def call_tool(self, name, arguments):
-            return _result()
+    async def _fake_call_child_tool(server_url, tool_name, arguments, *, meta=None):
+        return _result()
 
-    async def _fake_get_step_session(server_url):
-        return _FakeSession()
-
-    gw._get_step_session = _fake_get_step_session  # type: ignore[assignment]
+    gw._call_child_tool = _fake_call_child_tool  # type: ignore[assignment]
     return gw
 
 

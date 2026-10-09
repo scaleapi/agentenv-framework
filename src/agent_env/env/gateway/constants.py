@@ -96,6 +96,10 @@ GATEWAY_TRAJECTORY_FILE = os.environ.get(
 )
 
 AGENT_ENV_ROLE_HEADER = "AgentEnv-Role"
+# MCP request `_meta` keys the gateway stamps on every child tools/call: the caller's role, and on the MCP path a
+# key naming the inbound session, so a child can keep per-caller state behind the gateway's one shared session.
+AGENT_ENV_ROLE_META_KEY = "agentenv.io/role"
+AGENT_ENV_SESSION_META_KEY = "agentenv.io/session"
 DEFAULT_ROLE = "default"
 WILDCARD = "*"
 TOOL_DISABLE_ACTION = "disable"

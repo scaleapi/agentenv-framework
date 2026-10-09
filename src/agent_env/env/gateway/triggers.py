@@ -20,7 +20,7 @@ import httpx
 from mcp.types import CallToolResult, TextContent
 
 from .clock import ClockError, _advance, _iso, _parse_duration, _parse_rfc3339
-from .constants import TRIGGER_IN_FLIGHT_STATUSES, TRIGGER_STATUSES
+from .constants import AGENT_ENV_ROLE_META_KEY, DEFAULT_ROLE, TRIGGER_IN_FLIGHT_STATUSES, TRIGGER_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -520,7 +520,8 @@ class TriggerEngine:
             self._time_trigger_gate.clear()
 
     def start_driver(self) -> None:
-        """Start the background poller (idempotent; requires a running loop)."""
+        """Start the background poller (idempotent; requires a running loop). The gateway's process lifespan starts
+        it once at startup."""
         if self._driver_task is None or self._driver_task.done():
             self._driver_task = asyncio.get_running_loop().create_task(self._drive_time())
 
@@ -538,7 +539,7 @@ class TriggerEngine:
                 logger.exception("clock time-driver tick failed")
 
     async def stop_driver(self) -> None:
-        """Cancel the background poller on gateway teardown (idempotent)."""
+        """Cancel the background poller at process shutdown (idempotent)."""
         task, self._driver_task = self._driver_task, None
         if task is not None:
             task.cancel()
@@ -644,10 +645,12 @@ class TriggerEngine:
 
     @staticmethod
     def _normalize_action(action: Any, w: str, has_ctx: bool, executor: dict | None) -> None:
-        """Validate one fire-action in place, plus its optional `verify` check."""
+        """Validate one fire-action in place, plus its optional `verify` check and `as` role."""
         atype = action.get("type") if isinstance(action, dict) else None
         if atype not in _ACTION_TYPES:
             raise TriggerError(f"{w}: type must be one of {_ACTION_TYPES}")
+        if "as" in action and atype != "tool":
+            raise TriggerError(f"{w}: 'as' is only valid on tool actions")
         if atype == "nl":
             if not isinstance(action.get("instruction"), str) or not action["instruction"]:
                 raise TriggerError(f"{w}: instruction must be a non-empty string")
@@ -664,6 +667,13 @@ class TriggerEngine:
             if not isinstance(action.get("args", {}), dict):
                 raise TriggerError(f"{w}: args must be an object")
             _validate_placeholders(action.get("args", {}), f"{w}.args", allow_ctx=has_ctx)
+            acting = action.get("as")
+            if acting is not None:
+                # the default role means "not forwarded" to the child, so naming it can only be a mistake
+                if not isinstance(acting, str) or not acting.strip() or acting == DEFAULT_ROLE:
+                    raise TriggerError(f"{w}: 'as' must be a non-empty AgentEnv-Role other than {DEFAULT_ROLE!r}")
+                if _VAR_LOOSE_RE.search(acting):  # never run through _template, so a placeholder would be sent verbatim
+                    raise TriggerError(f"{w}: 'as' is not templated; name the role literally")
         else:
             if action.get("action") not in ("enable", "disable"):
                 raise TriggerError(f"{w}: action must be 'enable' or 'disable'")
@@ -1010,10 +1020,10 @@ class TriggerEngine:
         if matched and trig["status"] == "armed":
             self._mark_detected(tid, trig, provoking)
 
-    async def _run_check(self, check: dict, ctx: dict | None = None) -> bool:
+    async def _run_check(self, check: dict, ctx: dict | None = None, role: str | None = None) -> bool:
         bindings: dict[str, Any] = {}
         for step in check["steps"]:
-            result = await self._internal_call(step["tool"], _template(step.get("args", {}), bindings, ctx))
+            result = await self._internal_call(step["tool"], _template(step.get("args", {}), bindings, ctx), role=role)
             if getattr(result, "isError", False):
                 return False
             raw_text = "\n".join(c.text for c in result.content if getattr(c, "type", None) == "text")
@@ -1031,7 +1041,9 @@ class TriggerEngine:
                 return False
         return True
 
-    async def _internal_call(self, tool_name: str, arguments: dict) -> CallToolResult:
+    async def _internal_call(self, tool_name: str, arguments: dict, role: str | None = None) -> CallToolResult:
+        """A child call stamped as `role` when one is given (a tool action's `as`); the pin otherwise. Gateway-native
+        tools have no child and no identity, so the role is ignored there."""
         gw = self._gw
         await gw._ensure_tools_discovered()
         server_url = gw._tool_server_urls.get(tool_name)
@@ -1044,8 +1056,8 @@ class TriggerEngine:
                 return result
             text = result if isinstance(result, str) else json.dumps(result, default=str)
             return CallToolResult(content=[TextContent(type="text", text=text)], isError=False)
-        session = await gw._get_step_session(server_url)
-        return await asyncio.wait_for(session.call_tool(tool_name, arguments), timeout=gw.TOOL_CALL_TIMEOUT_S)
+        meta = {AGENT_ENV_ROLE_META_KEY: role} if role is not None else None
+        return await gw._call_child_tool(server_url, tool_name, arguments, meta=meta)
 
     async def _fire(self, tid: str, trig: dict, ctx: dict) -> None:
         """Run the actions for one provoking call, then drain any calls queued while firing (repeat
@@ -1099,33 +1111,36 @@ class TriggerEngine:
                         self._gw._apply_rule(action["role"], tool, action["action"] == "disable")
                 detail = {"role": action["role"], "action": action["action"], "tools": tools}
             elif action["type"] == "tool":
+                role = action.get("as")
+                acting = {"as": role} if role else {}
                 try:
                     args = _template(action.get("args", {}), {}, ctx)
                 except TemplateError as e:
                     self._emit("action_failed", tid, action_index=index, detail=str(e)[:300], tool=action["tool"])
                     return False
-                result = await self._internal_call(action["tool"], args)
+                result = await self._internal_call(action["tool"], args, role=role)
                 text = _result_text(result)
                 failed = bool(getattr(result, "isError", False))
                 # The write itself, not just the trigger_fired marker: a Harbor grader has no timeline.
                 await self._gw._log_event({
                     "event_type": "internal_tool_call", "source": "trigger_engine", "trigger_id": tid,
-                    "action_index": index, "tool": action["tool"], "arguments": _echo_args(args),
+                    "action_index": index, "tool": action["tool"], "arguments": _echo_args(args), "as": role,
                     "ok": not failed, "result_len": len(text),
                     "result_sha256": hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:_ECHO_DIGEST_CHARS],
                     "changelog_id_before": changelog_before, "changelog_id_after": self._gw._query_changelog_id()})
                 if failed:
                     # The refusal text is the only account of why a mirror broke; counters cannot replace it.
                     self._emit("action_failed", tid, action_index=index, detail=text[:300],
-                               tool=action["tool"], args=_echo_args(args))
+                               tool=action["tool"], args=_echo_args(args), **acting)
                     return False
-                detail = {"tool": action["tool"], "args": _echo_args(args)}
+                detail = {"tool": action["tool"], "args": _echo_args(args), **acting}
             else:
                 if not await self._run_nl(tid, index, action, ctx):
                     return False
                 detail = {"nl": action["instruction"][:120]}
             if "verify" in action and action["type"] != "nl":
-                if not await self._run_verify(tid, index, action["verify"], ctx):
+                # only an action's own verify inherits its `as`; when.check state probes read as the pin
+                if not await self._run_verify(tid, index, action["verify"], ctx, role=action.get("as")):
                     return False
             self._emit("action_ok", tid, action_index=index, detail=detail,
                        changelog_id_before=changelog_before, changelog_id_after=self._gw._query_changelog_id())
@@ -1134,8 +1149,9 @@ class TriggerEngine:
             self._emit("action_failed", tid, action_index=index, detail=str(e)[:300])
             return False
 
-    async def _run_verify(self, tid: str, index: int, verify: dict, ctx: dict | None = None) -> bool:
-        if await self._run_check(verify, ctx):
+    async def _run_verify(self, tid: str, index: int, verify: dict, ctx: dict | None = None,
+                          role: str | None = None) -> bool:
+        if await self._run_check(verify, ctx, role=role):
             self._emit("verify_ok", tid, action_index=index)
             return True
         self._emit("verify_failed", tid, action_index=index)
