@@ -21,6 +21,7 @@ from agent_env.providers.sandbox_providers.sail_vm import _sdk as sail_sdk
 from agent_env.providers.sandbox_providers.sail_vm.provider import SailVmSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import Sandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import _BUILTIN_SANDBOX_PROVIDERS
+from agent_env.providers.sandbox_providers.vercel.provider import VercelSandboxProvider
 
 
 def _modal_provider(cls):
@@ -86,11 +87,25 @@ async def _sail() -> Sandbox:
         return await provider.create_vm(exposed_ports=[], setup_for_gateway=False)
 
 
+async def _vercel() -> Sandbox:
+    raw = MagicMock(name="vercel-test")
+    raw.name = "vercel-test"
+    raw.routes = ()
+    raw.network_policy = SimpleNamespace(mode="allow-all", allow={})
+    client = MagicMock()
+    client.create_sandbox = AsyncMock(return_value=raw)
+    provider = VercelSandboxProvider(client_factory=lambda: client)
+    sandbox = await provider.create_vm(exposed_ports=[], setup_for_gateway=False)
+    assert sandbox._client is client
+    return sandbox
+
+
 FACTORIES = {
     "modal": _modal,
     "modal_vm": _modal_vm,
     "e2b": _e2b,
     "sail_vm": _sail,
+    "vercel": _vercel,
     "local": _local,
 }
 

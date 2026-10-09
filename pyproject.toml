@@ -72,8 +72,13 @@ gcp = [
 sail = [
     "sail~=0.12.8",  # Sailbox exec/fs/listener/egress APIs validated against the 0.12 line
 ]
+vercel = [
+    "anyio>=4,<5",
+    "httpx2>=2.13.1,<3",
+    "vercel-sandbox>=0.7.0,<0.8",  # provides the vercel.sandbox namespace without the full vercel bundle
+]
 dev = [
-    "agentenv-framework[aws,explorer,gcp,sail]",  # so the AWS, explorer, GCP backend and Sail provider tests run in CI
+    "agentenv-framework[aws,explorer,gcp,sail,vercel]",  # so the optional backends and their tests run in CI
     "griffelib==2.3.0",  # the plugin API check; exact, since what it reports as a break changes between releases
     "moto>=5.0.0",
     "psycopg2-binary>=2.9.0",  # the gateway server module's driver; outside its container only the tests import it
