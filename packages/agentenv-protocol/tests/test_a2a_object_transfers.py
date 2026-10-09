@@ -263,6 +263,14 @@ def test_transfer_models_are_closed_and_validate_contract_constraints() -> None:
         )
 
 
+def test_the_object_write_wire_shape_is_frozen() -> None:
+    """Receivers refuse fields they do not know, so a field added to these breaks every receiver on an earlier
+    release: a new capability is a new grant kind."""
+    assert set(HttpPartsPutGrant.model_fields) == {"kind", "part_bytes", "urls", "expires_at", "headers"}
+    assert set(HttpPutGrant.model_fields) == {"kind", "url", "expires_at", "headers"}
+    assert set(WriteObject.model_fields) == {"media_type", "max_bytes", "write"}
+    assert set(Uploaded.model_fields) == {"size_bytes", "sha256"}
+
 def test_transfer_errors_derive_status_and_retryability_from_their_code() -> None:
     unavailable = TransferError("transfer_unavailable", "Try again.")
     assert (unavailable.status_code, unavailable.retryable) == (502, True)

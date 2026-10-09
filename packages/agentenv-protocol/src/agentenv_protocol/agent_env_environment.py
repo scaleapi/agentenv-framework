@@ -19,8 +19,8 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.routing import Route
 
-from .transfers import WriteNamespaceGrant
-from .types import DATA_OBJECTS_EXTENSION_URI, MCP_TRANSPORT, METHOD_ADD, METHOD_GET, METHOD_RESET, RPC_PATH, WELL_KNOWN_PATH, AddDataRequest, AddDataResponse, EnvironmentCapabilities, EnvironmentCard, EnvironmentExtension, EnvironmentInterface, EnvironmentTool, GetDataResponse, ResetDataResponse, error_body
+from .transfers import WriteNamespaceGrant, WriteObject
+from .types import DATA_OBJECTS_EXTENSION_URI, MCP_TRANSPORT, METHOD_ADD, METHOD_GET, METHOD_RESET, RPC_PATH, TRANSFERS_EXTENSION_URI, WELL_KNOWN_PATH, AddDataRequest, AddDataResponse, EnvironmentCapabilities, EnvironmentCard, EnvironmentExtension, EnvironmentInterface, EnvironmentTool, GetDataResponse, ResetDataResponse, error_body
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,9 @@ def add_data(fn: Callable) -> Callable:
 def get_data(fn: Callable) -> Callable:
     """Mark the ``data/get`` handler. One that takes a ``write_namespace`` parameter is advertised under
     ``DATA_OBJECTS_EXTENSION_URI`` and called with the grant a caller sends, else None; it may upload its
-    export under the grant and return ``uploaded_file_part``."""
+    export under the grant and return ``uploaded_file_part``. One that takes ``write_object`` is advertised
+    under ``TRANSFERS_EXTENSION_URI``, and may upload its export to that object and return
+    ``uploaded_object_part``."""
     setattr(fn, _OP_ATTR, OP_GET_DATA)
     return fn
 
@@ -442,12 +444,30 @@ def _takes_write_namespace(fn: Callable) -> bool:
     return "write_namespace" in inspect.signature(fn).parameters
 
 
+def _takes_write_object(fn: Callable) -> bool:
+    return "write_object" in inspect.signature(fn).parameters
+
+
 def _merge_data_objects(card: EnvironmentCard, methods: dict) -> EnvironmentCard:
-    """Advertise the data-objects extension when the ``data/get`` handler takes a ``write_namespace``."""
+    """Advertise the data-objects extension when the ``data/get`` handler takes a ``write_namespace``, and
+    the transfers extension with the write grant kinds its grant parameters take."""
     entry = methods.get(METHOD_GET)
-    if entry is None or not _takes_write_namespace(entry[1]):
+    if entry is None:
         return card
-    return _merge_extensions(card, [(_DATA_OBJECTS_EXTENSION,)])
+    declared = []
+    kinds = []
+    if _takes_write_namespace(entry[1]):
+        declared.append((_DATA_OBJECTS_EXTENSION,))
+        kinds.append("http-post-policy")
+    if _takes_write_object(entry[1]):
+        kinds.extend(["http-put", "http-put-parts"])
+    if kinds:
+        declared.append((EnvironmentExtension(
+            uri=TRANSFERS_EXTENSION_URI,
+            description="The write grant kinds this server uploads through.",
+            params={"write": kinds},
+        ),))
+    return _merge_extensions(card, declared)
 
 
 def _merge_mcp_interface(card: EnvironmentCard, path: str) -> EnvironmentCard:
@@ -506,6 +526,15 @@ async def _invoke_get(fn: Callable, params: dict) -> dict:
             # Name the fields only: the values carry the grant's signature.
             fields = ", ".join(".".join(map(str, error["loc"])) or "write_namespace" for error in e.errors())
             raise _InvalidParams(f"write_namespace is not a valid namespace grant ({fields})")
+    if _takes_write_object(fn):
+        if not isinstance(params, dict):
+            raise _InvalidParams("data/get takes its params by name")
+        raw = params.get("write_object")
+        try:
+            kwargs["write_object"] = None if raw is None else WriteObject.model_validate(raw)
+        except ValidationError as e:
+            fields = ", ".join(".".join(map(str, error["loc"])) or "write_object" for error in e.errors())
+            raise _InvalidParams(f"write_object is not a valid object grant ({fields})")
     try:
         parts = await _maybe_await(fn(**kwargs))
         return GetDataResponse(parts=parts).model_dump(exclude_none=True)
