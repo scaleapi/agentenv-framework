@@ -6,12 +6,18 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from agentenv_protocol import ROLE_HEADER
 
+from agent_env.env.gateway import AGENT_ENV_ROLE_HEADER
 from agent_env.env.gateway.gateway import Gateway
 
 
 def _gw() -> Gateway:
     return Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[])
+
+
+def test_the_gateway_reads_the_role_header_the_protocol_tool_client_sends():
+    assert AGENT_ENV_ROLE_HEADER == ROLE_HEADER
 
 
 def test_default_is_enabled_and_role_rules_are_scoped():

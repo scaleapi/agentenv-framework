@@ -162,7 +162,39 @@ class SlackEnv(AgentEnvEnvironment):
         return [DataPart(data=self.state())]
 ```
 
-Dependencies are intentionally light (`pydantic`, `starlette`) so the package can be added to environment server images without pulling a heavier framework — `mcp` is imported lazily inside `create_fastmcp_app()` and is deliberately not a dependency.
+Dependencies are intentionally light (`pydantic`, `starlette`, `httpx`) so the package can be added to environment server images without pulling a heavier framework — `mcp` is imported lazily inside `create_fastmcp_app()` and is deliberately not a dependency.
+
+## Calling an env's tools
+
+A loop of your own, such as a trainer's rollout or an eval harness, reaches an env's tools through `ToolSession`. It
+is an MCP client for the env's streamable-HTTP endpoint, written on `httpx`, so it works wherever this package
+installs, whichever `mcp` version the loop's own environment pins.
+
+```python
+from agentenv_protocol import ToolSession, tool_definitions
+
+async with ToolSession(mcp_url, role="default") as session:
+    tools = await session.list_tools()                 # EnvironmentTool: name, description, inputSchema
+    declared = tool_definitions(tools, "openai_chat")  # or "openai_responses", "anthropic"
+    result = await session.call_tool("slack_send_message", {"channel": "general", "text": "hi"})
+    print(result.text, result.isError)
+```
+
+- **The URL:** `mcp_url` is `DeployedEnv.mcp_url` in agent-env, or the address a card was fetched from joined with
+  `client.mcp_path(card)`.
+- **Sessions:** a `ToolSession` is one MCP session, and calls on it may run concurrently. `async with` opens and ends
+  it; `open()` and `close()` do the same for a session held across calls.
+- **Roles:** `role` is sent as `AgentEnv-Role` (`ROLE_HEADER`). A gateway lists only the tools that role may use, and
+  answers a call to a hidden one with an error result. `headers` adds any others.
+- **Errors:**
+  - A tool that fails returns a result with `isError` set and the server's text.
+  - `ToolSessionError` means the request failed at the MCP level: a JSON-RPC error, an HTTP error status, a reply
+    that can't be read, or a session the server no longer knows. After a restart, the env's state is usually gone too.
+  - `httpx.TransportError` means the connection failed, and `TimeoutError` that a request outlived `timeout`
+    (600 s by default, the gateway's own limit on a tool call).
+  - Nothing is retried; the caller decides what a lost session means for its episode.
+- **Declarations:** `tool_definitions` also takes a card's `capabilities.tools`. It copies each schema, so a caller
+  can tighten one (for OpenAI's strict mode, say) without changing the source.
 
 ## A2A agent framework
 
