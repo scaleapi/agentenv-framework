@@ -52,7 +52,7 @@ class ChainedSandboxProvider(SandboxProvider):
     def supports_network_policy(self, policy: NetworkPolicy) -> bool:
         return any(p.supports_network_policy(policy) for p in self._providers)
 
-    async def prepare_image(self, image: DockerImageArtifact) -> None:
+    async def prepare_image(self, image: DockerImageArtifact, *, attribution: Attribution | None = None) -> None:
         """Remember ``image``, so each provider is prepared for it just before it's tried, and only that one."""
         self._images[image.image_name] = image
 
@@ -69,7 +69,8 @@ class ChainedSandboxProvider(SandboxProvider):
             name = type(p).__name__
             try:
                 if image is not None:
-                    await p.prepare_image(image)  # outside the deadline, which bounds creating the sandbox, not a build
+                    # outside the deadline, which bounds creating the sandbox, not a build
+                    await p.prepare_image(image, attribution=attribution)
                 async with asyncio.timeout(_PROVISION_DEADLINE_SECONDS):
                     sandbox = await p.create_sandbox(attribution=attribution, **kwargs)
             except Exception as e:

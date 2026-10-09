@@ -80,10 +80,11 @@ class _ModalProvider(ModalSandboxProvider):
 
     def __init__(self):
         super().__init__()
-        self.steps = []
+        self.steps, self.attributions = [], []
 
-    async def prepare_image(self, image):
+    async def prepare_image(self, image, *, attribution=None):
         self.steps.append(("prepare", image.image_name))
+        self.attributions.append(attribution)
 
     async def create_container(self, **kwargs):
         self.steps.append(("create", kwargs["image_name"]))
@@ -93,9 +94,11 @@ class _ModalProvider(ModalSandboxProvider):
 @pytest.mark.asyncio
 async def test_modal_builds_a_server_whose_image_is_only_a_build_context_before_its_container():
     modal = _ModalProvider()
-    await _run_server_deploy(modal, env=SimpleNamespace(**{**vars(_ENV), "docker_image_artifact": _CONTEXT_ONLY}))
+    await _run_server_deploy(modal, env=SimpleNamespace(**{**vars(_ENV), "docker_image_artifact": _CONTEXT_ONLY}),
+                             attribution={"project_id": "0123456789abcdef01234567"})
 
     assert modal.steps == [("prepare", "local/slack-0123456789ab:v3"), ("create", "local/slack-0123456789ab:v3")]
+    assert modal.attributions == [{"project_id": "0123456789abcdef01234567"}]
 
 
 @pytest.mark.asyncio

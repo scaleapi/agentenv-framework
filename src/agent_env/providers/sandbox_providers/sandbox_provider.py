@@ -109,10 +109,10 @@ class SandboxProvider(ABC):
                 pass
             raise
 
-    async def prepare_image(self, image: DockerImageArtifact) -> None:
+    async def prepare_image(self, image: DockerImageArtifact, *, attribution: Optional[Attribution] = None) -> None:
         """Get ready to run ``image`` by its name, before create_sandbox or create_container is asked for it and outside
-        any deadline on creating one. Does nothing here; a provider that builds a context-only image itself builds
-        it."""
+        any deadline on creating one, for the deploy ``attribution`` describes, as it describes the sandbox. Does
+        nothing here; a provider that builds a context-only image itself builds it."""
 
     async def _start_container(self, sandbox: VmSandbox, *, image_name: str, port: int, env: dict[str, str]) -> None:
         """Run the pulled ``image_name`` as the sandbox's container, publishing ``port``."""

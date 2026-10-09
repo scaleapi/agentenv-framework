@@ -247,7 +247,7 @@ class ModalSandboxProvider(SandboxProvider):
             self._apps[app_name] = app
         return app
 
-    async def prepare_image(self, image: DockerImageArtifact) -> None:
+    async def prepare_image(self, image: DockerImageArtifact, *, attribution: Optional[Attribution] = None) -> None:
         """Build ``image`` when it's only a build context, unless this process has already built its sources."""
         if image.context_only:
             self._context_images[image.image_name] = image

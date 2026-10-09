@@ -70,7 +70,7 @@ class EnvironmentServerProvider(_SandboxEnvironmentProvider):
         name = env.environment_name
         image = env.docker_image_artifact
         if isinstance(sandbox_provider, ModalSandboxProvider):  # which builds an image that's only a build context
-            await sandbox_provider.prepare_image(image)
+            await sandbox_provider.prepare_image(image, attribution=attribution)
         elif problem := image.by_name_problem():
             raise ValueError(f"Can't deploy {name!r} as a server on {type(sandbox_provider).__name__}, which runs its "
                              f"image by name: {problem}")

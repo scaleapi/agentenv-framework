@@ -137,8 +137,9 @@ async def test_container_mode_builds_a_context_only_image_before_creating_anythi
                 sandbox_provider=provider, mcp_servers=[MCPServerConfig(image=server_image.image_name, environment_name="slack")],
                 mcp_server_images=[server_image], gateway_port=18765, website_configs=None,
                 gateway_mode=MagicMock(value="performance"), ttl_seconds=60, disk_size_gb=10,
+                attribution={"project_id": "0123456789abcdef01234567"},
             )
-    prepare.assert_awaited_once_with(_CONTEXT_ONLY)
+    prepare.assert_awaited_once_with(_CONTEXT_ONLY, attribution={"project_id": "0123456789abcdef01234567"})
     gp._build_local_store.assert_not_awaited()
 
 

@@ -292,10 +292,12 @@ class _PreparingProvider(_StubProvider):
 
     def __init__(self, *, prepare_seconds: float = 0, prepare_raises: Exception | None = None, **kwargs):
         super().__init__(**kwargs)
-        self.prepare_seconds, self.prepare_raises, self.prepared = prepare_seconds, prepare_raises, []
+        self.prepare_seconds, self.prepare_raises, self.prepared, self.attributions = (
+            prepare_seconds, prepare_raises, [], [])
 
-    async def prepare_image(self, image):
+    async def prepare_image(self, image, *, attribution=None):
         self.prepared.append(image.image_name)
+        self.attributions.append(attribution)
         await asyncio.sleep(self.prepare_seconds)
         if self.prepare_raises:
             raise self.prepare_raises
@@ -324,6 +326,18 @@ async def test_chain_prepares_only_the_providers_it_tries_and_falls_through_a_fa
     assert (await _chain_create(ChainedSandboxProvider([fails, second, third]))).sandbox_id == "second"
     assert (fails.create_sandbox_calls, fails.prepared) == (0, [_CONTEXT_ONLY.image_name])
     assert (second.prepared, third.prepared) == ([_CONTEXT_ONLY.image_name], [])
+
+
+@pytest.mark.asyncio
+async def test_chain_prepares_each_provider_for_the_deploy_its_sandbox_is_for():
+    provider = _PreparingProvider()
+    chain = ChainedSandboxProvider([provider])
+
+    await chain.prepare_image(_CONTEXT_ONLY)
+    await chain.create_sandbox(image_name=_CONTEXT_ONLY.image_name, port=8000, env={},
+                               attribution={"project_id": "0123456789abcdef01234567"})
+
+    assert provider.attributions == [{"project_id": "0123456789abcdef01234567"}]
 
 
 @pytest.mark.asyncio

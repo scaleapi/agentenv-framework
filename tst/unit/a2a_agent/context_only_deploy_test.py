@@ -31,13 +31,15 @@ class _ModalProvider(ModalSandboxProvider):
 
     def __init__(self):
         super().__init__()
-        self.steps = []
+        self.steps, self.attributions = [], []
 
-    async def prepare_image(self, image):
+    async def prepare_image(self, image, *, attribution=None):
         self.steps.append(("prepare", image.image_name))
+        self.attributions.append(attribution)
 
     async def create_container(self, **kwargs):
         self.steps.append(("create", kwargs["image_name"]))
+        self.attributions.append(kwargs["attribution"])
         raise _Created
 
 
@@ -77,8 +79,11 @@ async def test_modal_is_told_of_the_image_before_it_is_asked_for_a_sandbox(monke
     monkeypatch.setattr(sandbox_provider, "build_sandbox_provider", lambda name: modal)
 
     with pytest.raises(_Created):
-        await A2AAgent(id="solver", version=1, docker_image_artifact=IMAGE).deploy(sandbox_type="any")
+        await A2AAgent(id="solver", version=1, docker_image_artifact=IMAGE).deploy(
+            sandbox_type="any", attribution={"project_id": "0123456789abcdef01234567"})
     assert modal.steps == [("prepare", IMAGE.image_name), ("create", IMAGE.image_name)]
+    prepared, created = modal.attributions
+    assert prepared == created and prepared["project_id"] == "0123456789abcdef01234567"
 
 
 @pytest.mark.asyncio

@@ -445,7 +445,7 @@ class A2AAgent:
             if provider is not None:
                 logger.info(f"Provisioning sandbox for A2A agent '{self.id}' via {type(provider).__name__}...")
                 if self.docker_image_artifact.context_only:
-                    await provider.prepare_image(self.docker_image_artifact)
+                    await provider.prepare_image(self.docker_image_artifact, attribution=attribution)
                 self._sandbox = await provider.create_sandbox(
                     image_name=image_name, port=a2a_port, env=merged_env,
                     cpu=cpu, memory=memory, disk_size_gb=disk_size_gb, timeout=ttl_seconds,
