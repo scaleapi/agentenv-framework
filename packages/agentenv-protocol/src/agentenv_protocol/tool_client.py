@@ -83,14 +83,16 @@ class ToolSession:
         return self
 
     async def close(self) -> None:
-        """End the session on the server, then close the connection; a server that is already gone is not an error."""
+        """End the session on the server, waiting at most 5 s (or ``timeout``, if shorter), then close the connection; a
+        server that is already gone is not an error."""
         client, self._client = self._client, None
         if client is None:
             return
         try:
             if self.session_id:
                 with contextlib.suppress(httpx.HTTPError, asyncio.TimeoutError, TimeoutError):
-                    await asyncio.wait_for(client.delete(self.url, headers=self._session_headers()), _CLOSE_TIMEOUT_S)
+                    await asyncio.wait_for(client.delete(self.url, headers=self._session_headers()),
+                                           min(self.timeout, _CLOSE_TIMEOUT_S))
         finally:
             await client.aclose()
 
