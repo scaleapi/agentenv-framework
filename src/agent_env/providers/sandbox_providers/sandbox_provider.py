@@ -23,6 +23,7 @@ from agent_env.providers.sandbox_providers.sandbox import (
 )
 
 if TYPE_CHECKING:
+    from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
     from agent_env.config.runtime import Config
 
 logger = logging.getLogger(__name__)
@@ -107,6 +108,11 @@ class SandboxProvider(ABC):
             except Exception:
                 pass
             raise
+
+    async def prepare_image(self, image: DockerImageArtifact) -> None:
+        """Get ready to run ``image`` by its name, before create_sandbox or create_container is asked for it and outside
+        any deadline on creating one. Does nothing here; a provider that builds a context-only image itself builds
+        it."""
 
     async def _start_container(self, sandbox: VmSandbox, *, image_name: str, port: int, env: dict[str, str]) -> None:
         """Run the pulled ``image_name`` as the sandbox's container, publishing ``port``."""

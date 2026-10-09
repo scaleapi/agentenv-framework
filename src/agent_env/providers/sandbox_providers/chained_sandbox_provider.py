@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import TYPE_CHECKING
 
 from agent_env.attribution import Attribution
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, NetworkPolicyUnsupportedError, Sandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
+
+if TYPE_CHECKING:
+    from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +21,7 @@ class ChainedSandboxProvider(SandboxProvider):
         if not providers:
             raise ValueError("ChainedSandboxProvider requires at least one provider")
         self._providers = providers
+        self._images: dict[str, DockerImageArtifact] = {}
 
     @property
     def providers(self) -> tuple[SandboxProvider, ...]:
@@ -47,6 +52,10 @@ class ChainedSandboxProvider(SandboxProvider):
     def supports_network_policy(self, policy: NetworkPolicy) -> bool:
         return any(p.supports_network_policy(policy) for p in self._providers)
 
+    async def prepare_image(self, image: DockerImageArtifact) -> None:
+        """Remember ``image``, so each provider is prepared for it just before it's tried, and only that one."""
+        self._images[image.image_name] = image
+
     async def create_sandbox(
         self,
         *,
@@ -54,10 +63,13 @@ class ChainedSandboxProvider(SandboxProvider):
         **kwargs,
     ) -> Sandbox:
         sandbox_providers = self.filter_sandbox_providers(self._providers, kwargs.get("network_policy"))
+        image = self._images.get(kwargs.get("image_name"))
         errors: list[tuple[str, Exception]] = []
         for p in sandbox_providers:
             name = type(p).__name__
             try:
+                if image is not None:
+                    await p.prepare_image(image)  # outside the deadline, which bounds creating the sandbox, not a build
                 async with asyncio.timeout(_PROVISION_DEADLINE_SECONDS):
                     sandbox = await p.create_sandbox(attribution=attribution, **kwargs)
             except Exception as e:

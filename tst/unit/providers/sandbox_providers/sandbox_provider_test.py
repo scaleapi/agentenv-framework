@@ -6,6 +6,9 @@ import asyncio
 
 import pytest
 
+import agent_env.providers.sandbox_providers.chained_sandbox_provider as chained_module
+
+from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.config import get_config
 from agent_env.config.loader import load_impl
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
@@ -278,6 +281,57 @@ async def test_chain_create_sandbox_all_fail_raises_with_all_names():
     assert "_StubProvider" in msg
     assert "first boom" in msg
     assert "second boom" in msg
+
+
+_CONTEXT_ONLY = DockerImageArtifact(id="solver-image", version=2, description="d", image_name="local/solver-0123456789ab:v2",
+                                    build_context_object_url="s3://bucket/ctx.tar.gz")
+
+
+class _PreparingProvider(_StubProvider):
+    """A stub whose prepare_image takes ``prepare_seconds``, or raises ``prepare_raises``, recording each image."""
+
+    def __init__(self, *, prepare_seconds: float = 0, prepare_raises: Exception | None = None, **kwargs):
+        super().__init__(**kwargs)
+        self.prepare_seconds, self.prepare_raises, self.prepared = prepare_seconds, prepare_raises, []
+
+    async def prepare_image(self, image):
+        self.prepared.append(image.image_name)
+        await asyncio.sleep(self.prepare_seconds)
+        if self.prepare_raises:
+            raise self.prepare_raises
+
+
+async def _chain_create(chain: ChainedSandboxProvider) -> Sandbox:
+    await chain.prepare_image(_CONTEXT_ONLY)
+    return await chain.create_sandbox(image_name=_CONTEXT_ONLY.image_name, port=8000, env={})
+
+
+@pytest.mark.asyncio
+async def test_chain_prepares_a_provider_outside_the_deadline_on_creating_its_sandbox(monkeypatch):
+    monkeypatch.setattr(chained_module, "_PROVISION_DEADLINE_SECONDS", 0.05)
+    builds = _PreparingProvider(prepare_seconds=0.2)
+
+    assert await _chain_create(ChainedSandboxProvider([builds])) is builds._sandbox
+    assert builds.prepared == [_CONTEXT_ONLY.image_name]
+
+
+@pytest.mark.asyncio
+async def test_chain_prepares_only_the_providers_it_tries_and_falls_through_a_failed_prepare():
+    fails = _PreparingProvider(prepare_raises=RuntimeError("the build failed"))
+    second = _PreparingProvider(sandbox=_FakeSandbox("second"))
+    third = _PreparingProvider()
+
+    assert (await _chain_create(ChainedSandboxProvider([fails, second, third]))).sandbox_id == "second"
+    assert (fails.create_sandbox_calls, fails.prepared) == (0, [_CONTEXT_ONLY.image_name])
+    assert (second.prepared, third.prepared) == ([_CONTEXT_ONLY.image_name], [])
+
+
+@pytest.mark.asyncio
+async def test_chain_prepares_nothing_for_an_image_it_wasnt_told_of():
+    provider = _PreparingProvider()
+
+    await ChainedSandboxProvider([provider]).create_sandbox(image_name="registry.example/solver:v2", port=8000, env={})
+    assert provider.prepared == []
 
 
 @pytest.mark.asyncio
