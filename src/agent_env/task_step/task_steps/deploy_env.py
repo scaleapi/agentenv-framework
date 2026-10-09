@@ -46,8 +46,6 @@ class DeployEnvTaskStep(TaskStep):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
         self.env_id = env_id
         self.env_version = env_version
-        # The universe this deployment is for. Carried so a provider can see which artifact the
-        # run will load, without inferring it from the taxonomy; load_artifact still loads it.
         self.artifact_id = artifact_id
         self.artifact_version = artifact_version
         self.ttl_seconds = ttl_seconds
@@ -170,8 +168,6 @@ class DeployEnvTaskStep(TaskStep):
         model_api_key = user_overrides.get("litellm_api_key")
         if model_api_key and ("litellm_api_key" in params or accepts_kwargs):
             deploy_kwargs["litellm_api_key"] = model_api_key
-        # Same signature guard: an env that does not take the artifact never sees it, so adding
-        # these is inert for every env that has not opted in.
         if self.artifact_id is not None and ("artifact_id" in params or accepts_kwargs):
             deploy_kwargs["artifact_id"] = self.artifact_id
         if self.artifact_version is not None and ("artifact_version" in params or accepts_kwargs):
