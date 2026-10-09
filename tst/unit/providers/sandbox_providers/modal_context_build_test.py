@@ -5,6 +5,7 @@ Modal's build and sandbox calls are faked; the context is a real one on the loca
 from __future__ import annotations
 
 import asyncio
+import tarfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -23,7 +24,7 @@ class _Builds:
     """Stands in for ``modal.Image.from_dockerfile``: each image it returns records its context when built."""
 
     def __init__(self, fail: Exception | None = None):
-        self.fail, self.calls, self.contexts = fail, [], []
+        self.fail, self.calls, self.contexts, self.dockerfiles = fail, [], [], []
 
     def __call__(self, path, *, context_dir, ignore):
         self.calls.append((Path(path), Path(context_dir), ignore))
@@ -31,6 +32,7 @@ class _Builds:
 
         async def build(app):
             self.contexts.append(sorted(p.relative_to(context_dir).as_posix() for p in Path(context_dir).rglob("*")))
+            self.dockerfiles.append(Path(path).read_text())
             await asyncio.sleep(0.01)  # long enough for a second deploy to wait on the first
             if self.fail:
                 raise self.fail
@@ -80,7 +82,8 @@ async def test_an_image_is_built_from_its_unpacked_context_with_the_contexts_ign
     await _provider().prepare_image(image)
 
     [(dockerfile, context_dir, ignore)] = builds.calls
-    assert dockerfile == context_dir / "Dockerfile"
+    assert dockerfile == context_dir.parent / "Dockerfile"  # beside the context, as Modal reads it
+    assert builds.dockerfiles == [SERVER["Dockerfile"]]
     assert builds.contexts == [[".dockerignore", "Dockerfile", "src", "src/app.py"]]
     assert ignore == ["*.log"]
     assert not context_dir.exists()  # unpacked only for the build
@@ -119,6 +122,46 @@ async def test_a_failed_build_names_the_image_and_the_next_deploy_builds_it_agai
     await _provider().prepare_image(image)
 
     assert len(builds.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_failed_modal_build_points_at_its_build_log(local_stores, context, builds):
+    builds.fail = modal.exception.ImageBuildError("Image build for im-abc failed.", "im-abc")
+
+    with pytest.raises(RuntimeError, match="Image build for im-abc failed.; Modal's build log for im-abc has the cause"):
+        await _provider().prepare_image(_context_image("solver-image", context))
+
+
+@pytest.mark.parametrize("line, built", [
+    ('COPY ["a.txt", "/x/a.txt"]', "COPY a.txt /x/a.txt"),
+    ('copy --chown=1:1 ["a.txt", "sub", "/y/"]', "COPY --chown=1:1 a.txt sub /y/"),
+    ("ADD a.txt /added/", "COPY a.txt /added/"),
+    ("ADD sub \\\n    /added/sub/", "COPY sub /added/sub/"),
+    ("ADD *.txt /globbed/", "COPY *.txt /globbed/"),
+    ('ADD ["a.txt", "/j/"]', "COPY a.txt /j/"),
+    ("ADD --chmod=755 a.txt /c", "COPY --chmod=755 a.txt /c"),
+], ids=["json-copy", "json-copy-flags", "add-file", "add-folder-continued", "add-glob", "json-add", "add-chmod"])
+def test_what_modal_cant_take_is_written_as_its_docker_equivalent(tmp_path, line, built):
+    (tmp_path / "a.txt").write_text("a")
+    (tmp_path / "sub").mkdir()
+
+    assert modal_sandbox.modal_dockerfile(f"FROM python\n{line}\nRUN true\n", tmp_path) == \
+        f"FROM python\n{built}\nRUN true\n"
+
+
+@pytest.mark.parametrize("line", [
+    'COPY ["with space.txt", "/z/"]', "ADD archive.tar.gz /unpacked/", "ADD https://example.com/f /f",
+    "ADD --checksum=sha256:abc a.txt /c", "ADD missing.txt /m", "COPY --from=build /out /out", "COPY a.txt /x/",
+    'ADD "a.txt" /q/', "ADD <<EOF /h\nhi\nEOF",
+], ids=["json-with-space", "add-archive", "add-url", "add-checksum", "add-missing", "copy-from", "shell-copy",
+        "add-quoted", "add-heredoc"])
+def test_everything_else_is_left_as_written(tmp_path, line):
+    (tmp_path / "a.txt").write_text("a")
+    with tarfile.open(tmp_path / "archive.tar.gz", "w:gz") as tar:
+        tar.add(tmp_path / "a.txt", "a.txt")
+    dockerfile = f"FROM python\n{line}\n"
+
+    assert modal_sandbox.modal_dockerfile(dockerfile, tmp_path) == dockerfile
 
 
 @pytest.mark.asyncio

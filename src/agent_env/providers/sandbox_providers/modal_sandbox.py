@@ -5,11 +5,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import glob
 import hashlib
+import json
 import logging
 import os
 import re
 import shlex
+import tarfile
 import tempfile
 import weakref
 from pathlib import Path
@@ -276,13 +279,18 @@ class ModalSandboxProvider(SandboxProvider):
                                         context)
                 dockerfile = context / (image.dockerfile_path or "Dockerfile")
                 ignores = ignore_file(context, dockerfile)
+                # Beside the context, not in it, so a COPY of the context still copies the Dockerfile as written.
+                for_modal = Path(work) / "Dockerfile"
+                for_modal.write_text(modal_dockerfile(dockerfile.read_text("utf8"), context), "utf8")
                 built = modal.Image.from_dockerfile(
-                    dockerfile, context_dir=context, ignore=ignores.read_text("utf8").splitlines() if ignores else [],
+                    for_modal, context_dir=context, ignore=ignores.read_text("utf8").splitlines() if ignores else [],
                 )
                 await built.build.aio(app)
             except Exception as e:
+                log = (f"; Modal's build log for {e.image_id} has the cause"
+                       if isinstance(e, modal.exception.ImageBuildError) and getattr(e, "image_id", None) else "")
                 raise RuntimeError(f"Building {image.image_name} on Modal from its build context failed: "
-                                   f"{_fmt_exc(e)}") from e
+                                   f"{_fmt_exc(e)}{log}") from e
         logger.info(f"Built {image.image_name} on Modal as {built.object_id}")
         return built.object_id
 
@@ -472,6 +480,65 @@ class ModalSandboxProvider(SandboxProvider):
                 "REGISTRY_PASSWORD": auth.password,
             }))
         return modal.Image.from_registry(image_name)
+
+
+_COPY_OR_ADD = re.compile(r"\s*(COPY|ADD)\s+(.*)", re.IGNORECASE | re.DOTALL)
+# The flags COPY takes as ADD does; ADD's own (--checksum, --keep-git-dir, --unpack) keep an ADD as it is.
+_COPY_FLAGS = ("--chown=", "--chmod=", "--link")
+
+
+def modal_dockerfile(text: str, context: Path) -> str:
+    """``text``, a Dockerfile, with the two forms Modal's build refuses written as what ``docker build`` makes of them:
+    a JSON-form COPY or ADD whose paths hold no whitespace in shell form, which Modal's context parser reads, and an
+    ADD of files and folders in ``context``, none of them a tar archive, as the COPY it is, since Modal's ADD only
+    fetches a URL. Every other line is left as written."""
+    lines, instruction = [], []
+    for line in text.splitlines(keepends=True):
+        instruction.append(line)
+        if not line.rstrip("\r\n").endswith("\\"):
+            lines.append(_for_modal("".join(instruction), context))
+            instruction = []
+    return "".join(lines + instruction)
+
+
+def _for_modal(instruction: str, context: Path) -> str:
+    match = _COPY_OR_ADD.fullmatch(re.sub(r"\\\r?\n", " ", instruction).strip())
+    if match is None:
+        return instruction
+    keyword, rest = match.group(1).upper(), match.group(2).strip()
+    flags = []
+    while rest.startswith("--"):
+        flag, _, rest = rest.partition(" ")
+        flags.append(flag)
+        rest = rest.strip()
+    if rest.startswith("["):
+        try:
+            args = json.loads(rest)
+        except ValueError:
+            return instruction
+        if not (isinstance(args, list) and len(args) >= 2
+                and all(isinstance(arg, str) and arg and not any(c.isspace() for c in arg) for arg in args)):
+            return instruction
+    elif keyword == "ADD" and not rest.startswith("<<") and not any(c in rest for c in "\"'"):
+        args = rest.split()
+    else:
+        return instruction
+    if keyword == "ADD":
+        if len(args) < 2 or not all(flag.startswith(_COPY_FLAGS) for flag in flags) \
+                or not all(_local_and_not_an_archive(source, context) for source in args[:-1]):
+            return instruction
+        keyword = "COPY"
+    return " ".join([keyword, *flags, *args]) + "\n"
+
+
+def _local_and_not_an_archive(source: str, context: Path) -> bool:
+    """Whether ``source``, an ADD source, names files or folders in ``context``, none a tar archive ADD would unpack."""
+    if "://" in source or source.startswith("git@"):
+        return False
+    matches = glob.glob(source.lstrip("/"), root_dir=context) if glob.has_magic(source) else [source.lstrip("/")]
+    paths = [context / match for match in matches]
+    return bool(paths) and all(path.exists() for path in paths) \
+        and not any(path.is_file() and tarfile.is_tarfile(path) for path in paths)
 
 
 def _fetch_context(object_url: str, archive: Path, out: Path) -> None:
