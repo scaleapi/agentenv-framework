@@ -10,7 +10,10 @@ import logging
 import os
 import re
 import shlex
-from typing import AsyncIterator, ClassVar, Optional
+import tempfile
+import weakref
+from pathlib import Path
+from typing import TYPE_CHECKING, AsyncIterator, ClassVar, Optional
 
 import httpx
 import modal
@@ -23,8 +26,19 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     SandboxProvider,
     apply_default_attribution,
 )
+from agent_env.utils.build_context import extract, ignore_file
+
+if TYPE_CHECKING:
+    from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 
 logger = logging.getLogger(__name__)
+
+# The id of each image built from a build context, by Modal token, app and source digest, for every provider in the
+# process to reuse; one build of each runs at a time, so deploys of one image at once share its build.
+_built_image_ids: dict[tuple[str, str, str], str] = {}
+_build_locks: weakref.WeakValueDictionary[tuple[asyncio.AbstractEventLoop, tuple[str, str, str]], asyncio.Lock] = (
+    weakref.WeakValueDictionary()
+)
 
 DEFAULT_APP_NAME = "agent-env"
 # Lets a dedicated service (e.g. the sandbox proxy service) attribute its Modal apps under its own
@@ -206,12 +220,16 @@ class ModalSandboxProvider(SandboxProvider):
         self._gpu = gpu
         # Looked up on demand and cached by name.
         self._apps: dict[str, modal.App] = {}
+        self._token_id = ""
+        # The context-only images prepare_image was given, by name, so create_container builds them rather than pull.
+        self._context_images: dict[str, DockerImageArtifact] = {}
 
     async def _get_client(self) -> modal.Client:
         if self._client is None:
             from agent_env.config import get_config
             token_id, token_secret = get_config().get_modal_credentials()
             self._client = await modal.Client.from_credentials.aio(token_id, token_secret)
+            self._token_id = token_id
         return self._client
 
     async def _get_app(self, app_name: str, app_tags: Optional[dict[str, str]] = None) -> modal.App:
@@ -228,6 +246,42 @@ class ModalSandboxProvider(SandboxProvider):
                     logger.warning(f"Failed to set tags on Modal app {app_name}: {type(e).__name__}: {e}")
             self._apps[app_name] = app
         return app
+
+    async def prepare_image(self, image: DockerImageArtifact) -> None:
+        """Build ``image`` when it's only a build context, unless this process has already built its sources."""
+        if image.context_only:
+            self._context_images[image.image_name] = image
+            await self._context_image(image)
+
+    async def _context_image(self, image: DockerImageArtifact) -> modal.Image:
+        """The Modal image built from ``image``'s build context: built now unless one built from the same sources is."""
+        client = await self._get_client()
+        app = await self._get_app(self._app_name, _attribution_tags({}))
+        key = (self._token_id, self._app_name, image.source_digest or image.build_context_object_url)
+        async with _build_locks.setdefault((asyncio.get_running_loop(), key), asyncio.Lock()):
+            if (image_id := _built_image_ids.get(key)) is None:
+                image_id = _built_image_ids[key] = await self._build(image, app)
+        return modal.Image.from_id(image_id, client=client)
+
+    async def _build(self, image: DockerImageArtifact, app: modal.App) -> str:
+        """Build ``image`` from its build context, with the context's own ignore file; returns the image's id."""
+        logger.info(f"Building {image.image_name} on Modal from its build context...")
+        with tempfile.TemporaryDirectory(prefix="agent-env-build-") as work:
+            context = Path(work) / "context"
+            try:
+                await asyncio.to_thread(_fetch_context, image.build_context_object_url, Path(work) / "context.tar.gz",
+                                        context)
+                dockerfile = context / (image.dockerfile_path or "Dockerfile")
+                ignores = ignore_file(context, dockerfile)
+                built = modal.Image.from_dockerfile(
+                    dockerfile, context_dir=context, ignore=ignores.read_text("utf8").splitlines() if ignores else [],
+                )
+                await built.build.aio(app)
+            except Exception as e:
+                raise RuntimeError(f"Building {image.image_name} on Modal from its build context failed: "
+                                   f"{_fmt_exc(e)}") from e
+        logger.info(f"Built {image.image_name} on Modal as {built.object_id}")
+        return built.object_id
 
     async def create_container(
         self,
@@ -248,8 +302,6 @@ class ModalSandboxProvider(SandboxProvider):
         expose_externally: bool = True,
         vnc_port: Optional[int] = None,
     ) -> Sandbox:
-        from agent_env.config import get_config
-
         effective = self.effective_network_policy(network_policy)
         attribution = dict(attribution or {})
 
@@ -260,30 +312,10 @@ class ModalSandboxProvider(SandboxProvider):
         app_name = self._app_name
         app = await self._get_app(app_name, app_tags)
 
-        image_store = get_config().get_image_store_at(image_name)
-        from agent_env.store.image_store import (
-            EcrCredentials,
-            OciRegistryImageStore,
-            registry_host_from_ref,
-        )
-
-        uses_ecr_pull_secret = (
-            self._ecr_pull_secret_name is not None
-            and isinstance(image_store, OciRegistryImageStore)
-            and isinstance(image_store.credentials, EcrCredentials)
-            and registry_host_from_ref(image_name) == image_store.registry_host
-        )
-        auth = None if uses_ecr_pull_secret else await asyncio.to_thread(image_store.auth, image_name)
-        if uses_ecr_pull_secret:
-            image = modal.Image.from_aws_ecr(image_name, secret=modal.Secret.from_name(
-                self._ecr_pull_secret_name, required_keys=ECR_READER_SECRET_KEYS))
-        elif auth is not None:
-            image = modal.Image.from_registry(image_name, secret=modal.Secret.from_dict({
-                "REGISTRY_USERNAME": auth.username,
-                "REGISTRY_PASSWORD": auth.password,
-            }))
+        if (context_only := self._context_images.get(image_name)) is not None:
+            image = await self._context_image(context_only)
         else:
-            image = modal.Image.from_registry(image_name)
+            image = await self._registry_image(image_name)
 
         logger.info(
             f"Creating Modal sandbox from image {image_name} "
@@ -400,6 +432,38 @@ class ModalSandboxProvider(SandboxProvider):
         tunnel_urls = {p: _tunnel_url(t) for p, t in tunnels.items()}
         i6pn_address = await _resolve_i6pn_address(sb)
         return self._sandbox_cls(sb, tunnel_urls, i6pn_address=i6pn_address)
+
+    async def _registry_image(self, image_name: str) -> modal.Image:
+        """``image_name`` pulled from its registry, with the image store's credentials for it, if any."""
+        image_store = get_config().get_image_store_at(image_name)
+        from agent_env.store.image_store import (
+            EcrCredentials,
+            OciRegistryImageStore,
+            registry_host_from_ref,
+        )
+
+        uses_ecr_pull_secret = (
+            self._ecr_pull_secret_name is not None
+            and isinstance(image_store, OciRegistryImageStore)
+            and isinstance(image_store.credentials, EcrCredentials)
+            and registry_host_from_ref(image_name) == image_store.registry_host
+        )
+        auth = None if uses_ecr_pull_secret else await asyncio.to_thread(image_store.auth, image_name)
+        if uses_ecr_pull_secret:
+            return modal.Image.from_aws_ecr(image_name, secret=modal.Secret.from_name(
+                self._ecr_pull_secret_name, required_keys=ECR_READER_SECRET_KEYS))
+        if auth is not None:
+            return modal.Image.from_registry(image_name, secret=modal.Secret.from_dict({
+                "REGISTRY_USERNAME": auth.username,
+                "REGISTRY_PASSWORD": auth.password,
+            }))
+        return modal.Image.from_registry(image_name)
+
+
+def _fetch_context(object_url: str, archive: Path, out: Path) -> None:
+    """Download the build context at ``object_url`` to ``archive`` and unpack it into ``out``."""
+    get_config().get_object_store_at(object_url).download_to_file(object_url, str(archive))
+    extract(archive, out)
 
 
 def _attribution_tags(attribution: Attribution) -> dict[str, str]:
