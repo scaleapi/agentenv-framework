@@ -1419,6 +1419,67 @@ async def test_a_chained_gateway_falls_back_under_one_name_from_fresh_state_and_
     assert messages[2].startswith("env_deploy_tools_probe env_id=e1 status=ok ")
 
 
+def _vm(sandbox_id: str) -> _FakeSandbox:
+    vm = _FakeSandbox(sandbox_id, 8080, f"http://{sandbox_id}")
+    vm.mode = "vm"
+    return vm
+
+
+def _creates(gp: EnvironmentGatewayProvider, vm: _FakeSandbox, outcome):
+    """A VM deploy path that creates ``vm``, then raises ``outcome`` or returns it."""
+    async def run(*args, existing_sandbox=None, **kwargs):
+        gp._sandbox = existing_sandbox or vm
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+    return run
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ended_by", [RuntimeError("compose up failed"), asyncio.CancelledError()], ids=["fails", "cancelled"])
+async def test_a_vm_deploy_that_ends_after_creating_its_vm_terminates_it(ended_by):
+    gp, vm = EnvironmentGatewayProvider(), _vm("vm-1")
+    with patch.object(gp, "_deploy_via_vm", side_effect=_creates(gp, vm, ended_by)):
+        with pytest.raises(type(ended_by)):
+            await gp.create_gateway(sandbox_provider=MagicMock(), mcp_servers=[], mcp_server_images=[], env_id="e1")
+    assert vm.terminated and gp.sandbox is None
+
+
+@pytest.mark.asyncio
+async def test_a_failed_deploy_leaves_the_callers_vm_alone():
+    gp, callers = EnvironmentGatewayProvider(), _vm("callers-vm")
+    with patch.object(gp, "_deploy_via_vm", side_effect=_creates(gp, _vm("unused"), RuntimeError("boom"))):
+        with pytest.raises(RuntimeError):
+            await gp.create_gateway(sandbox_provider=MagicMock(), mcp_servers=[], mcp_server_images=[], env_id="e1",
+                                    existing_sandbox=callers)
+    assert not callers.terminated
+
+
+@pytest.mark.asyncio
+async def test_each_failed_chained_member_terminates_its_own_vm_and_the_winner_keeps_its(monkeypatch):
+    monkeypatch.setattr(env_gateway_provider, "_tool_names", AsyncMock(return_value=set()))
+    gp, first, second, deployed = EnvironmentGatewayProvider(), _vm("vm-1"), _vm("vm-2"), _probed()
+    paths = iter([_creates(gp, first, RuntimeError("first")), _creates(gp, second, deployed)])
+
+    async def each_member(*args, **kwargs):
+        return await next(paths)(*args, **kwargs)
+
+    with patch.object(gp, "_deploy_via_vm", side_effect=each_member):
+        chain = ChainedSandboxProvider([MagicMock(), MagicMock()])
+        assert await gp.create_gateway(sandbox_provider=chain, mcp_servers=[], mcp_server_images=[], env_id="e1") is deployed
+    assert first.terminated and not second.terminated and gp.sandbox is second
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_cancelled_while_its_tools_are_probed_terminates_its_vm(monkeypatch):
+    monkeypatch.setattr(env_gateway_provider, "_tool_names", AsyncMock(side_effect=asyncio.CancelledError()))
+    gp, vm = EnvironmentGatewayProvider(), _vm("vm-1")
+    with patch.object(gp, "_deploy_via_vm", side_effect=_creates(gp, vm, _probed())):
+        with pytest.raises(asyncio.CancelledError):
+            await gp.create_gateway(sandbox_provider=MagicMock(), mcp_servers=[], mcp_server_images=[], env_id="e1")
+    assert vm.terminated and gp.sandbox is None
+
+
 @pytest.mark.asyncio
 async def test_a_chained_gateway_that_fails_everywhere_names_every_member():
     gp = EnvironmentGatewayProvider()

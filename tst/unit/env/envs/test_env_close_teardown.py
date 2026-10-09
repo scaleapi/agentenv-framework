@@ -1,10 +1,12 @@
 """Unit tests for env close() routing teardown through the gateway provider."""
 
+import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
 
 from agent_env.env.envs.mcp_server import MCPServerEnv
+from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.website import WebsiteEnv
 
 
@@ -74,3 +76,25 @@ async def test_an_env_that_never_deployed_closes_its_own_provider(make_env):
     env = make_env()
     await env.close()  # the provider built in __init__, not one a test set
     assert env._sandbox is None
+
+
+def _multi_env() -> MultiEnv:
+    return MultiEnv(id="crm-suite", version=1, mcp_server_envs=[_mcp_env()])
+
+
+@pytest.mark.parametrize("make_env", [_mcp_env, _website_env, _multi_env])
+@pytest.mark.asyncio
+async def test_a_close_cancelled_while_it_terminates_keeps_the_sandbox_for_the_next(make_env):
+    env = make_env()
+    env._env_provider = AsyncMock()
+    sandbox = AsyncMock()
+    sandbox.sandbox_id = "sb-1"
+    sandbox.terminate.side_effect = [asyncio.CancelledError(), None]
+    env._sandbox = sandbox
+
+    with pytest.raises(asyncio.CancelledError):
+        await env.close()
+    assert env._sandbox is sandbox
+
+    await env.close()
+    assert sandbox.terminate.await_count == 2 and env._sandbox is None

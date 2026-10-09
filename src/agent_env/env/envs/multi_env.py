@@ -782,7 +782,7 @@ COMPOSE_EOF'''
         if self._sandbox is not None:
             try:
                 await self._sandbox.terminate()
-            except BaseException as e:
+            except Exception as e:  # a cancellation propagates, and keeps the sandbox for the next close()
                 logger.warning(f"Failed to terminate sandbox {self._sandbox.sandbox_id}: {e}")
             self._sandbox = None
 

@@ -609,9 +609,32 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             self._deploy_gateway, **gateway,
             mcp_server_name=mcp_server_name or random_mcp_server_name(),  # drawn once, so every chained attempt presents the same name
         )
+        earlier_sandbox = self._sandbox
         result = await self._run(sandbox_provider, env_id, attempt)
-        await _probe_tools(env_id, result)
+        try:
+            await _probe_tools(env_id, result)
+        except BaseException:  # a cancellation: the probe itself never raises
+            await self._terminate_new_sandbox(
+                earlier_sandbox=earlier_sandbox, existing_sandbox=gateway.get("existing_sandbox"))
+            await self.close()
+            raise
         return result
+
+    async def _terminate_new_sandbox(
+        self, *, earlier_sandbox: Sandbox | None, existing_sandbox: Sandbox | None,
+    ) -> None:
+        """Terminate the sandbox a deploy that failed or was cancelled created: no record names it yet, so nothing else
+        would. Leaves alone an earlier deploy's sandbox, the caller's existing_sandbox, and the container sandboxes
+        close() ends."""
+        new_sandbox, self._sandbox = self._sandbox, earlier_sandbox
+        if (new_sandbox is None or new_sandbox is earlier_sandbox or new_sandbox is existing_sandbox
+                or new_sandbox in self._container_sandboxes):
+            return
+        try:
+            await new_sandbox.terminate()
+        except Exception as e:
+            logger.warning(
+                f"Failed to terminate {type(new_sandbox).__name__} {new_sandbox.sandbox_id} after a failed deploy: {e}")
 
     async def _deploy_via_vm(
         self,
@@ -1203,13 +1226,18 @@ COMPOSE_EOF'''
                 ttl_seconds=ttl_seconds, disk_size_gb=disk_size_gb,
                 cpu=cpu, memory_mb=memory_mb, mcp_server_name=mcp_server_name, **deploy_kwargs,
             )
-        return await self._deploy_via_vm(
-            sandbox_provider, mcp_servers, mcp_server_images,
-            gateway_port=gateway_port, website_configs=website_configs, website_images=website_images,
-            gateway_mode=gateway_mode, ttl_seconds=ttl_seconds, disk_size_gb=disk_size_gb,
-            cpu=cpu, memory_mb=memory_mb, existing_sandbox=existing_sandbox, sidecars=sidecars,
-            mcp_server_name=mcp_server_name, **deploy_kwargs,
-        )
+        earlier_sandbox = self._sandbox
+        try:
+            return await self._deploy_via_vm(
+                sandbox_provider, mcp_servers, mcp_server_images,
+                gateway_port=gateway_port, website_configs=website_configs, website_images=website_images,
+                gateway_mode=gateway_mode, ttl_seconds=ttl_seconds, disk_size_gb=disk_size_gb,
+                cpu=cpu, memory_mb=memory_mb, existing_sandbox=existing_sandbox, sidecars=sidecars,
+                mcp_server_name=mcp_server_name, **deploy_kwargs,
+            )
+        except BaseException:
+            await self._terminate_new_sandbox(earlier_sandbox=earlier_sandbox, existing_sandbox=existing_sandbox)
+            raise
 
     def _sandbox_ids(self, always_name_gateway: bool = False) -> dict[str, str | dict[str, str]]:
         """The containers a container-mode deploy created, in the record's ``sandbox_ids`` shape; ``{}`` on a VM, or only the
