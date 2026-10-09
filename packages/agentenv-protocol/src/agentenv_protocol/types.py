@@ -21,6 +21,8 @@ RPC_PATH = "/agentenv"
 # without one is reached at MCP_PATH by convention.
 MCP_TRANSPORT = "mcp"
 MCP_PATH = "/mcp"
+# A gateway filters MCP tools/list and tools/call by the role this request header names.
+ROLE_HEADER = "AgentEnv-Role"
 
 METHOD_RESET = "data/reset"
 METHOD_ADD = "data/add"
