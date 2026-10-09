@@ -82,6 +82,49 @@ def test_rewrite_child_card_drops_nested_children():
     assert gw._rewrite_child_card("mcp-slack", composite)["children_environments"] is None
 
 
+_CLOCK_SYNC = {"uri": "urn:agentenv:clock/v1",
+               "params": {"endpoint": "/ext/clock/sync-time", "methods": {"sync_time": {"method": "POST"}}}}
+
+
+def test_rewrite_child_card_prefixes_every_child_path_but_the_gateways_routes():
+    """A path outside `/agentenv`, or a method's own, is the child's too; a path stays on the gateway only when
+    the gateway's extension with the same uri names it."""
+    child = {"name": "slack", "url": "/agentenv", "capabilities": {"extensions": [
+        _CLOCK_SYNC,
+        {"uri": "urn:example:export/v1",
+         "params": {"endpoint": "/agentenv/ext/export", "methods": {"start": {"method": "POST", "endpoint": "/export/start"}}}},
+        {"uri": "urn:example:state/v1", "params": {"endpoint": "/state"}},
+        {"uri": "urn:agentenv:enable-tool/v1", "params": {"endpoint": "/tools/enable"}},
+        {"uri": "urn:example:remote/v1", "params": {"endpoint": "https://example.com/hook"}},
+    ]}}
+
+    rewritten = _gateway({"mcp-slack": "http://slack:18765"})._rewrite_child_card("mcp-slack", child)
+
+    clock, export, state, enable, remote = rewritten["capabilities"]["extensions"]
+    assert clock["params"]["endpoint"] == "/svc/mcp-slack/ext/clock/sync-time"
+    assert export["params"]["endpoint"] == "/svc/mcp-slack/agentenv/ext/export"
+    assert export["params"]["methods"]["start"]["endpoint"] == "/svc/mcp-slack/export/start"
+    assert state["params"]["endpoint"] == "/svc/mcp-slack/state"  # the gateway's /state belongs to state/v1
+    assert enable["params"]["endpoint"] == "/tools/enable"
+    assert remote["params"]["endpoint"] == "https://example.com/hook"
+
+
+@pytest.mark.asyncio
+async def test_a_childs_clock_sync_resolves_to_the_child_through_the_protocol_client(monkeypatch):
+    """`find_child` promises child endpoints reachable from the env card's address, as `sync_env_clock` reads them."""
+    gw = _gateway({"mcp-slack": "http://slack:18765"})
+
+    async def fake_fetch(client, key, base_url):
+        return gw._rewrite_child_card(key, {**_SLACK_CARD, "capabilities": {"extensions": [_CLOCK_SYNC]}})
+
+    monkeypatch.setattr(gw, "_fetch_child_card", fake_fetch)
+    card = json.loads((await gw._serve_env_card()).body)
+
+    child = protocol_client.find_child(card, "slack")
+    sync = protocol_client.find_extension_method(child, "urn:agentenv:clock/v1", "sync_time")
+    assert (sync["method"], sync["endpoint"]) == ("POST", "/svc/mcp-slack/ext/clock/sync-time")
+
+
 @pytest.mark.asyncio
 async def test_serve_env_card_composes_children_and_omits_legacy(monkeypatch):
     gw = _gateway({"mcp-slack": "http://slack:18765", "mcp-legacy": "http://legacy:18765"})

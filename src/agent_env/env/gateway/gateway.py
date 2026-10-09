@@ -498,27 +498,47 @@ class Gateway:
         return list(self.rest_proxy_urls)
 
     def _rewrite_child_card(self, key: str, card: dict) -> dict:
-        """Rewrite the child's own `/agentenv` paths (data plane + extension endpoints) to the
-        gateway-rooted `/svc/{key}/...`; gateway-referencing endpoints (e.g. `/tools/disable`) pass
-        through. Backing servers are leaves, so any nested `children_environments` is dropped, and so
-        are the child's interfaces: agents reach its tools through the gateway's aggregate MCP endpoint."""
-        def rewrite(path: str | None) -> str | None:
-            if path and "://" not in path and (path == RPC_PATH or path.startswith(RPC_PATH + "/")):
-                return f"/svc/{key}{path}"
-            return path
+        """Rewrite every path the child names (its `url`, each extension's endpoint and each method's
+        own) to the gateway-rooted `/svc/{key}/...`, so it resolves against the env's address. A path
+        the gateway's own extension with the same `uri` also names (e.g. `/tools/disable`) is the
+        gateway's route and passes through. Backing servers are leaves, so any nested
+        `children_environments` is dropped, and so are the child's interfaces: agents reach its tools
+        through the gateway's aggregate MCP endpoint."""
+        gateway_routes = {
+            (ext["uri"], holder["endpoint"])
+            for ext in self._gateway_extensions()
+            for holder in self._endpoint_holders(ext.get("params") or {})
+            if holder.get("endpoint")
+        }
+
+        def rewrite(path: str, uri: str | None = None) -> str:
+            if not path.startswith("/") or (uri, path) in gateway_routes:
+                return path
+            return f"/svc/{key}{path}"
 
         card = copy.deepcopy(card)
         if card.get("children_environments"):
             logger.warning(f"env card: dropping nested children_environments from leaf {key} (multi-level composition unsupported)")
         card["children_environments"] = None
         card["additionalInterfaces"] = []
-        if card.get("url"):
+        if isinstance(card.get("url"), str):
             card["url"] = rewrite(card["url"])
         for ext in (card.get("capabilities") or {}).get("extensions") or []:
-            params = ext.get("params")
-            if isinstance(params, dict) and params.get("endpoint"):
-                params["endpoint"] = rewrite(params["endpoint"])
+            params = ext.get("params") if isinstance(ext, dict) else None
+            if not isinstance(params, dict):
+                continue
+            uri = ext["uri"] if isinstance(ext.get("uri"), str) else None
+            for holder in self._endpoint_holders(params):
+                if isinstance(holder.get("endpoint"), str):
+                    holder["endpoint"] = rewrite(holder["endpoint"], uri)
         return card
+
+    @staticmethod
+    def _endpoint_holders(params: dict) -> list[dict]:
+        """An extension's params and each of its methods: the objects that can name an `endpoint`."""
+        methods = params.get("methods")
+        method_objects = methods.values() if isinstance(methods, dict) else ()
+        return [params, *(m for m in method_objects if isinstance(m, dict))]
 
     async def _fetch_child_card(self, client: httpx.AsyncClient, key: str, base_url: str) -> dict | None:
         """Fetch + rewrite one backing server's card; None (omit) on 404 / error / timeout / malformed JSON."""
