@@ -8,9 +8,7 @@ Standalone async helpers for the current gateway endpoints: ``POST /api/reset``
 from __future__ import annotations
 
 import asyncio
-import copy
 import logging
-from collections.abc import Iterator
 from typing import TYPE_CHECKING, Optional
 
 import httpx
@@ -41,7 +39,7 @@ async def v1_base_url(deployed: Optional[DeployedEnv], gateway_url: Optional[str
         base_url = environment_base_url(gateway_url, environment_name, mcp=mcp)
         return base_url if await protocol_v1.supports_v1(base_url) else None
     child = deployed.get_child_env_card(environment_name)
-    return deployed.environment_url + _child_path(child) if child else None
+    return deployed.environment_url + child.get("url", RPC_PATH).removesuffix(RPC_PATH) if child else None
 
 
 
@@ -55,65 +53,7 @@ async def child_env_card(deployed: Optional[DeployedEnv], gateway_url: Optional[
             if e.response.status_code == 404:
                 return base_url, None
             raise
-    child = deployed.get_child_env_card(environment_name)
-    if child is None:
-        return deployed.environment_url, None
-    return deployed.environment_url, _prefix_child_endpoints(deployed.environment_card, child)
-
-
-def _child_path(child: dict) -> str:
-    """A child env's path under the env's address, such as ``/svc/mcp-<name>``; empty for a card whose url is ``RPC_PATH`` or none."""
-    return (child.get("url") or RPC_PATH).rstrip("/").removesuffix(RPC_PATH)
-
-
-def _prefix_child_endpoints(env_card: dict, child: dict) -> dict:
-    """A copy of the child card in which each operation resolves against the env's address. One the env card's own extensions offer too (same
-    extension, verb and endpoint, and the same method unless the child's extension lists none) stays as it is; the child serves the rest under its
-    path. An extension endpoint an env operation falls back to keeps its value, and each child method falling back to it gets an endpoint of its own."""
-    path = _child_path(child)
-    env_operations = {(ext.get("uri"), name, verb, endpoint) for ext in _extensions(env_card) for name, _, verb, endpoint in _operations(ext)}
-    env_requests = {(uri, verb, endpoint) for uri, _, verb, endpoint in env_operations}
-    card = copy.deepcopy(child)
-    for ext in _extensions(card):
-        uri, params = ext.get("uri"), ext["params"]
-        env_falls_back, child_falling_back = False, []
-        for name, method, verb, endpoint in _operations(ext):
-            falls_back = method is None or not method.get("endpoint")
-            if (uri, name, verb, endpoint) in env_operations or (method is None and (uri, verb, endpoint) in env_requests):
-                env_falls_back |= falls_back
-            elif not endpoint.startswith(f"{path}/"):
-                if falls_back:
-                    child_falling_back.append(method)
-                else:
-                    method["endpoint"] = path + endpoint
-        if child_falling_back and not env_falls_back:
-            params["endpoint"] = path + params["endpoint"]
-        else:
-            for method in child_falling_back:
-                method["endpoint"] = path + params["endpoint"]
-    return card
-
-
-def _extensions(card: dict) -> Iterator[dict]:
-    """The card's own extensions that can be invoked: those with a text ``uri`` and object ``params``."""
-    for ext in (card.get("capabilities") or {}).get("extensions") or []:
-        if isinstance(ext.get("uri"), str) and isinstance(ext.get("params"), dict):
-            yield ext
-
-
-def _operations(ext: dict) -> list[tuple[str | None, dict | None, str, str]]:
-    """Each operation an extension offers, as ``invoke_extension`` calls it: (method name, method, HTTP verb, endpoint), the endpoint being the method's
-    own, else the extension's; an extension listing no methods offers a POST to its endpoint. Badly shaped ones (a ``methods`` or method that isn't an
-    object, a verb or endpoint that isn't text) are skipped, so they stay as stored and can't break calls to the card's other extensions."""
-    params = ext["params"]
-    methods = params.get("methods") or {}
-    if not isinstance(methods, dict):
-        return []
-    operations = [(name, method, method.get("method") or "POST", method.get("endpoint") or params.get("endpoint"))
-                  for name, method in methods.items() if isinstance(method, dict)] if methods else [(None, None, "POST", params.get("endpoint"))]
-    return [(name, method, verb.upper(), endpoint) for name, method, verb, endpoint in operations
-            if isinstance(verb, str) and isinstance(endpoint, str) and endpoint]
-
+    return deployed.environment_url, deployed.get_child_env_card(environment_name)
 
 async def reset_via_rest(
     base_url: str,
