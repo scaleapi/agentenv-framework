@@ -7,6 +7,7 @@ via subprocess instead of on a remote VM.
 from __future__ import annotations
 
 import asyncio
+import collections
 import contextlib
 import functools
 import glob
@@ -62,6 +63,10 @@ def _runs_in_container(cmd: list[str]) -> bool:
 
 
 _REAP_SECONDS = 5
+# How long a finished command's output is still read, for a job it left in the background that holds it open; and
+# how much of each stream is kept, the end of it: above the largest output core reads whole, run_code's 50 MiB result.
+_OUTPUT_GRACE_SECONDS = 1
+_OUTPUT_TAIL_BYTES = 64 * 1024 * 1024
 
 # Every command a local sandbox runs carries this, set to the sandbox's id, and so does whatever the command starts, so
 # teardown can find a process left running on this machine, such as the agent a host-mode install started.
@@ -282,6 +287,7 @@ class LocalSandbox(VmSandbox):
         logger.debug(f"LocalSandbox exec: {' '.join(cmd)}")
         process = await asyncio.create_subprocess_exec(
             *cmd,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env={**os.environ, _SANDBOX_ENV: self.sandbox_id},
@@ -289,8 +295,10 @@ class LocalSandbox(VmSandbox):
         return process
 
     async def exec_with_output(self, *args: str) -> tuple[int, str, str]:
-        """Like the base, except that cancelling it kills the command and every process it started. This host
-        is the sandbox's VM, so nothing else would."""
+        """Like the base, but as a remote exec session behaves. Cancelling it kills the command and every process it
+        started; this host is the sandbox's VM, so nothing else would. The call ends with the command, even if a job
+        it left in the background still holds its output, which is then closed. Each stream keeps its last
+        ``_OUTPUT_TAIL_BYTES``, and bytes that aren't UTF-8 become replacement characters."""
         spawning = asyncio.ensure_future(self.exec(*args))
         try:
             process = await asyncio.shield(spawning)
@@ -298,13 +306,26 @@ class LocalSandbox(VmSandbox):
             with contextlib.suppress(Exception):
                 await _stop(await spawning)
             raise
+        stdout, stderr = _Tail(), _Tail()
+        reading = [asyncio.ensure_future(tail.drain(stream))
+                   for tail, stream in ((stdout, process.stdout), (stderr, process.stderr))]
         try:
-            stdout, stderr = await asyncio.gather(process.stdout.read(), process.stderr.read())
-            exit_code = await process.wait()
+            exit_code = await _exit_code(process)
+            await asyncio.wait(reading, timeout=_OUTPUT_GRACE_SECONDS)
         except asyncio.CancelledError:
             await _stop(process)
             raise
-        return exit_code, stdout.decode(), stderr.decode()
+        finally:
+            for reader in reading:
+                reader.cancel()
+            # Our ends of its pipes, which a background job may hold. asyncio has no public way to close them.
+            process._transport.close()
+        output = stdout.text(), stderr.text()
+        for name, tail in (("stdout", stdout), ("stderr", stderr)):
+            if tail.dropped:  # not the command itself: it can carry secrets
+                logger.warning("Kept the last %d bytes of a command's %s on sandbox %s; %d before them were dropped",
+                               _OUTPUT_TAIL_BYTES, name, self.sandbox_id, tail.dropped)
+        return exit_code, *output
 
     async def _write_unsigned_object(self, object_store: ObjectStore, object_url: str, vm_path: str) -> None:
         """This host is the VM, so the store writes the object in place, with no exec transport."""
@@ -319,12 +340,50 @@ class LocalSandbox(VmSandbox):
         pass
 
 
+class _Tail:
+    """The end of a stream as it is read: its last ``_OUTPUT_TAIL_BYTES``, and how many bytes before them were
+    dropped. Chunks, because cutting the front off one growing buffer keeps the memory it grew to."""
+
+    def __init__(self) -> None:
+        self.chunks: collections.deque[bytes] = collections.deque()
+        self.size = self.dropped = 0
+
+    async def drain(self, stream: asyncio.StreamReader) -> None:
+        while chunk := await stream.read(1 << 16):
+            self.chunks.append(chunk)
+            self.size += len(chunk)
+            while self.size - len(self.chunks[0]) >= _OUTPUT_TAIL_BYTES:
+                first = self.chunks.popleft()
+                self.size -= len(first)
+                self.dropped += len(first)
+
+    def text(self) -> str:
+        data = b"".join(self.chunks)
+        if (excess := len(data) - _OUTPUT_TAIL_BYTES) > 0:
+            data = data[excess:]
+            self.dropped += excess
+        return data.decode(errors="replace")
+
+
+async def _exit_code(process: asyncio.subprocess.Process) -> int:
+    """``process``'s exit code, as soon as it exits. ``Process.wait()`` also waits for its pipes to close, which a job
+    it left in the background can hold open, so the exit is checked for meanwhile."""
+    waiting = asyncio.ensure_future(process.wait())
+    try:
+        while process.returncode is None:
+            await asyncio.wait([waiting], timeout=0.05)
+        return process.returncode
+    finally:
+        waiting.cancel()
+
+
 async def _stop(process: asyncio.subprocess.Process) -> None:
-    """SIGKILL ``process`` and every process it started, then reap it, waiting a few seconds at most for one
-    that escaped the kill to let go of its output."""
+    """SIGKILL ``process`` and every process it started, wait a few seconds at most for it to exit, then close our
+    ends of its pipes, which a job that escaped the kill may still hold."""
     _kill_tree(process.pid)
     with contextlib.suppress(TimeoutError):
-        await asyncio.wait_for(process.wait(), _REAP_SECONDS)
+        await asyncio.wait_for(_exit_code(process), _REAP_SECONDS)
+    process._transport.close()
 
 
 def _kill_tree(root: int) -> None:

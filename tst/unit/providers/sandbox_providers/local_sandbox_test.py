@@ -1,8 +1,10 @@
 import asyncio
+import contextlib
 import os
 import platform
 import shutil
 import signal
+import subprocess
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +19,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_
 from agent_env.store import LocalFilesystemObjectStore
 from agent_env.store.object_store.local.tls import local_ca
 from agent_env.store.routing import LocalRunObjectStore
+from agent_env.task_step.task_steps.run_code import RunCodeTaskStep
 from agent_env.a2a_agent import a2a_agent as a2a_agent_module
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
@@ -675,8 +678,11 @@ def _fake_docker(monkeypatch, outputs):
 
 
 class _CapturedProcess:
+    returncode = 0
+
     def __init__(self):
         self.stdout = self.stderr = SimpleNamespace(read=self._empty)
+        self._transport = SimpleNamespace(close=lambda: None)
 
     @staticmethod
     async def _empty():
@@ -822,6 +828,75 @@ async def test_a_command_cancelled_while_it_spawns_is_still_stopped(tmp_path: Pa
 
     with pytest.raises(ProcessLookupError):
         os.kill(int(pid_file.read_text()), 0)
+
+
+@pytest.mark.asyncio
+async def test_a_command_reads_nothing_from_this_process(monkeypatch, tmp_path: Path):
+    seen = {}
+
+    async def spawn(*argv, **kwargs):
+        seen.update(kwargs)
+        return _CapturedProcess()
+
+    monkeypatch.setattr(ls.asyncio, "create_subprocess_exec", spawn)
+    await LocalSandbox(work_dir=tmp_path).exec("cat")
+
+    assert seen["stdin"] is asyncio.subprocess.DEVNULL
+
+
+def _state(pid: int) -> str:
+    """``ps``'s state for ``pid``: empty once it is gone, ``Z`` while a parent has yet to reap it."""
+    return subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+
+
+@pytest.mark.asyncio
+async def test_the_call_ends_with_the_command_though_a_job_it_left_holds_its_output(tmp_path: Path):
+    started = asyncio.get_running_loop().time()
+    exit_code, stdout, _ = await LocalSandbox(work_dir=tmp_path).exec_with_output("bash", "-c", "sleep 30 & echo $!")
+    job = int(stdout)
+    try:
+        assert exit_code == 0
+        assert asyncio.get_running_loop().time() - started < 5
+    finally:
+        os.kill(job, signal.SIGKILL)
+
+
+@pytest.mark.asyncio
+async def test_a_job_left_writing_to_the_commands_output_is_cut_off_with_it(tmp_path: Path):
+    await LocalSandbox(work_dir=tmp_path).exec_with_output("bash", "-c", "yes & echo $! > /app/job.pid")
+    job = int((tmp_path / "job.pid").read_text())
+    try:
+        for _ in range(100):
+            if _state(job)[:1] in ("", "Z"):
+                break
+            await asyncio.sleep(0.05)
+        assert _state(job)[:1] in ("", "Z")
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(job, signal.SIGKILL)
+
+
+@pytest.mark.asyncio
+async def test_output_that_isnt_utf8_is_kept_with_replacement_characters(tmp_path: Path):
+    exit_code, stdout, _ = await LocalSandbox(work_dir=tmp_path).exec_with_output("bash", "-c", r"printf 'ok \xff'")
+
+    assert (exit_code, stdout) == (0, "ok \ufffd")
+
+
+def test_a_run_code_result_at_its_limit_is_kept_whole():
+    assert ls._OUTPUT_TAIL_BYTES > RunCodeTaskStep.MAX_OUTPUT_BYTES
+
+
+@pytest.mark.asyncio
+async def test_only_the_end_of_a_long_output_is_kept(monkeypatch, tmp_path: Path, caplog):
+    monkeypatch.setattr(ls, "_OUTPUT_TAIL_BYTES", 1000)
+
+    _, stdout, _ = await LocalSandbox(work_dir=tmp_path).exec_with_output(
+        "bash", "-c", "head -c 200000 /dev/zero | tr '\\0' x; echo END")
+
+    assert len(stdout) == 1000 and stdout.endswith("xEND\n")
+    assert "199004 before them were dropped" in caplog.text
+    assert "head -c" not in caplog.text  # the command is left out: it can carry secrets
 
 
 @pytest.mark.asyncio
