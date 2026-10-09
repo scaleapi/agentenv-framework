@@ -10,7 +10,7 @@ readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"]
 authors = [{ name = "Scale AI" }]
-requires-python = ">=3.11"
+requires-python = ">=3.11.4"
 keywords = ["reinforcement-learning", "rl-environments", "ai-agents", "llm-agents", "agent-evaluation", "mcp", "model-context-protocol", "a2a", "sandbox"]
 classifiers = [
     "Development Status :: 4 - Beta",

@@ -14,7 +14,7 @@ environments; agent-env depends on it.
 
 ## Setup
 
-Python 3.11 or newer. The repo convention is a `.venv` at the root, which the Makefile and CI use.
+Python 3.11.4 or newer. The repo convention is a `.venv` at the root, which the Makefile and CI use.
 
 ```bash
 uv sync --extra dev && . .venv/bin/activate

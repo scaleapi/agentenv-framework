@@ -11,7 +11,7 @@ AgentEnv Framework is a Python SDK and CLI for building, deploying and running a
 
 ## Install
 
-Both packages are on PyPI. You need Python 3.11 or newer and, to run environments locally, a running Docker daemon. With [uv](https://docs.astral.sh/uv/), install the `agent-env` command as a tool:
+Both packages are on PyPI. You need Python 3.11.4 or newer and, to run environments locally, a running Docker daemon. With [uv](https://docs.astral.sh/uv/), install the `agent-env` command as a tool:
 
 ```bash
 uv tool install agentenv-framework
