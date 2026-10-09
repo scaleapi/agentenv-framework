@@ -128,3 +128,30 @@ def test_changelog_row_id_composite_pk(pg_conn):
         f"WHERE schema_name='{schema}' AND table_name='daily' ORDER BY id DESC LIMIT 1",
     )[0][0]
     assert json.loads(row_id) == {"user_id": "u_jin", "day": "2025-11-05"}
+
+
+def test_internal_tables_get_no_changelog_trigger(pg_conn):
+    """A service's internal tables (a leading underscore, like _changelog) hold no
+    domain rows: the installer skips them, so a blob written there is not copied
+    into changed_fields while the domain table beside it is still audited."""
+    schema = "files_svc"
+    _exec(pg_conn, LocalPostgresStateProvider.get_init_script([schema]))
+    _exec(pg_conn, f'CREATE TABLE "{schema}".documents (id text PRIMARY KEY, title text)')
+    _exec(pg_conn, f'CREATE TABLE "{schema}"._files (path text PRIMARY KEY, content bytea)')
+    _exec(pg_conn, f"SELECT public._install_changelog_triggers('{schema}')")
+
+    _exec(pg_conn, f"INSERT INTO \"{schema}\".documents VALUES ('d1', 'brief')")
+    _exec(pg_conn, f"INSERT INTO \"{schema}\"._files VALUES ('a/brief.pdf', '\\x255044462d')")
+
+    rows = _rows(
+        pg_conn,
+        "SELECT table_name, operation FROM public._changelog "
+        f"WHERE schema_name='{schema}' ORDER BY id",
+    )
+    assert rows == [("documents", "INSERT")]
+    triggers = _rows(
+        pg_conn,
+        "SELECT event_object_table FROM information_schema.triggers "
+        f"WHERE trigger_schema='{schema}' AND trigger_name='_changelog_trigger'",
+    )
+    assert {t[0] for t in triggers} == {"documents"}
