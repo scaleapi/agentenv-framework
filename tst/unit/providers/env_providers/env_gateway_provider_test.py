@@ -39,6 +39,7 @@ from agent_env.providers.env_providers.env_gateway_provider import (
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import Sandbox
+from agent_env.providers.sandbox_providers.sandbox_provider import Runs
 from agent_env.providers.env_state import LocalPostgresStateProvider
 from agent_env.config import get_config, set_document_store
 from agent_env.store import EcrImageStore, NotFoundError
@@ -115,6 +116,15 @@ async def test_container_mode_rejects_websites():
             ttl_seconds=60,
             disk_size_gb=10,
         )
+
+
+
+def _vm_provider(**attrs) -> MagicMock:
+    """A sandbox provider that runs a gateway in a VM it creates, as every VM provider does."""
+    provider = MagicMock(ON_THIS_MACHINE=False, **attrs)
+    provider.links = (provider,)
+    provider.runs.return_value = Runs.IN_VM
+    return provider
 
 
 _CONTEXT_ONLY = DockerImageArtifact(id="slack-image", version=2, description="d", image_name="local/slack-0123456789ab:v2",
@@ -1296,7 +1306,7 @@ def test_gateway_service_carries_neither_name_var():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("provider, deploy_method", [(ModalSandboxProvider(), "_deploy_via_containers"), (MagicMock(), "_deploy_via_vm")])
+@pytest.mark.parametrize("provider, deploy_method", [(ModalSandboxProvider(), "_deploy_via_containers"), (_vm_provider(), "_deploy_via_vm")])
 async def test_create_gateway_passes_the_env_name_to_both_deploy_paths(provider, deploy_method):
     """A declared name reaches the gateway on either provider."""
     gp = EnvironmentGatewayProvider()
@@ -1306,7 +1316,7 @@ async def test_create_gateway_passes_the_env_name_to_both_deploy_paths(provider,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("provider, deploy_method", [(ModalSandboxProvider(), "_deploy_via_containers"), (MagicMock(), "_deploy_via_vm")])
+@pytest.mark.parametrize("provider, deploy_method", [(ModalSandboxProvider(), "_deploy_via_containers"), (_vm_provider(), "_deploy_via_vm")])
 async def test_create_gateway_draws_a_random_env_name_when_none_is_declared(provider, deploy_method):
     gp = EnvironmentGatewayProvider()
     with patch.object(gp, deploy_method, new=AsyncMock(return_value=MagicMock())) as deploy:
@@ -1367,7 +1377,7 @@ async def _never_answers(_mcp_url: str) -> set[str]:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("provider, deploy_method", [(ModalSandboxProvider(), "_deploy_via_containers"), (MagicMock(), "_deploy_via_vm")])
+@pytest.mark.parametrize("provider, deploy_method", [(ModalSandboxProvider(), "_deploy_via_containers"), (_vm_provider(), "_deploy_via_vm")])
 @pytest.mark.parametrize("tool_names, error_type", [
     (lambda: AsyncMock(side_effect=RuntimeError("boom")), "RuntimeError"),
     (lambda: _never_answers, "TimeoutError"),
@@ -1405,7 +1415,7 @@ async def test_a_chained_gateway_falls_back_under_one_name_from_fresh_state_and_
     with patch.object(gp, "_deploy_via_containers", side_effect=deploy_path(RuntimeError("boom"))), \
          patch.object(gp, "_deploy_via_vm", side_effect=deploy_path(deployed)), \
          patch.object(gp, "close", wraps=gp.close) as close:
-        chain = ChainedSandboxProvider([ModalSandboxProvider(), MagicMock()])
+        chain = ChainedSandboxProvider([ModalSandboxProvider(), _vm_provider()])
         assert await gp.create_gateway(sandbox_provider=chain, mcp_servers=[], mcp_server_images=[], env_id="e1") is deployed
 
     [(first_name, first_state, first_instance), (second_name, second_state, second_instance)] = seen
@@ -1487,7 +1497,7 @@ async def test_a_chained_gateway_that_fails_everywhere_names_every_member():
     gp = EnvironmentGatewayProvider()
     with patch.object(gp, "_deploy_via_containers", side_effect=RuntimeError("c")), patch.object(gp, "_deploy_via_vm", side_effect=RuntimeError("v")):
         with pytest.raises(RuntimeError) as raised:
-            await gp.create_gateway(sandbox_provider=ChainedSandboxProvider([ModalSandboxProvider(), MagicMock()]),
+            await gp.create_gateway(sandbox_provider=ChainedSandboxProvider([ModalSandboxProvider(), _vm_provider()]),
                                     mcp_servers=[], mcp_server_images=[], env_id="e1")
     assert str(raised.value) == "All 2 chained providers failed to deploy: ModalSandboxProvider: RuntimeError('c'); MagicMock: RuntimeError('v')"
 
@@ -1498,7 +1508,7 @@ async def test_create_gateway_hands_the_deploy_path_every_argument(attribution, 
     """The topology entry point loses nothing on its way to the VM path; attribution arrives as a fresh dict."""
     from agent_env.env.gateway import GatewayMode
 
-    gp, provider = EnvironmentGatewayProvider(), MagicMock()
+    gp, provider = EnvironmentGatewayProvider(), _vm_provider()
     args = dict(mcp_servers=[MagicMock()], mcp_server_images=[MagicMock()], gateway_port=18999, website_configs=[MagicMock()],
                 website_images=[MagicMock()], gateway_mode=GatewayMode.CONSISTENT, ttl_seconds=61, disk_size_gb=11, cpu=1.5,
                 memory_mb=3072, existing_sandbox=MagicMock(), sidecars=[MagicMock()], mcp_server_name="crm")
@@ -1537,7 +1547,7 @@ async def test_deploy_returns_the_gateway_record_for_the_env(caplog):
          patch.object(gp, "_wait_for_tunnel", AsyncMock(return_value=card)), \
          patch.object(env_gateway_provider, "_tool_names", AsyncMock(return_value={"slack_send"})), \
          patch("agent_env.providers.env_providers.env_gateway_provider.asyncio.sleep", AsyncMock()):
-        record = await gp.deploy(env, MagicMock(create_vm=AsyncMock(return_value=vm)), gateway_mode=GatewayMode.CONSISTENT,
+        record = await gp.deploy(env, _vm_provider(create_vm=AsyncMock(return_value=vm)), gateway_mode=GatewayMode.CONSISTENT,
                                    ttl_seconds=60, env_state_type="remote")
 
     acquire.assert_awaited_once_with(env_state_type="remote", ttl_seconds=60, name_hint="crm-env", env_state_instance_id=None)
@@ -1613,7 +1623,7 @@ async def test_a_deploy_on_an_external_state_store_needs_no_servicedb_env(make):
     with _deploying(gp, deploy_gateway) as deploying, \
          patch("agent_env.env.env.Env.get", MagicMock(side_effect=NotFoundError("Env 'default-db' not found"))) as get:
         deploying.acquire.return_value = external
-        record = await gp.deploy(make(), MagicMock(), env_state_type="remote")
+        record = await gp.deploy(make(), _vm_provider(), env_state_type="remote")
     assert get.called is False and record.env_state_instance_ids == ["st-ext"]
 
 
@@ -1649,7 +1659,7 @@ async def test_deploy_fronts_a_multi_envs_servers_and_websites_under_its_name():
                                environment_card={"name": "crm"}, env_state_instance_ids=["st-1"])
 
     with _deploying(gp, deploy_gateway) as deploying:
-        record = await gp.deploy(env, MagicMock(), ttl_seconds=60, env_state_instance_id="st-1")
+        record = await gp.deploy(env, _vm_provider(), ttl_seconds=60, env_state_instance_id="st-1")
 
     assert [(s.image, s.environment_name) for s in seen["mcp_servers"]] == [("mcp-slack", "slack"), ("mcp-gmail", "gmail")]
     assert [i.image_name for i in seen["mcp_server_images"]] == ["mcp-slack", "mcp-gmail"]
@@ -1695,7 +1705,7 @@ async def test_deploy_fronts_a_website_env():
                                env_state_instance_ids=["st-1"])
 
     with _deploying(gp, deploy_gateway):
-        record = await gp.deploy(_site("shop"), MagicMock())
+        record = await gp.deploy(_site("shop"), _vm_provider())
     assert (seen["mcp_servers"], seen["mcp_server_images"]) == ([], [])
     assert seen["website_configs"] == [WebsiteConfig(backend_image="shop-be", frontend_image="shop-fe", environment_name="shop")]
     assert [i.image_name for i in seen["website_images"]] == ["shop-be", "shop-fe"] and re.fullmatch(r"env\d{4}", seen["mcp_server_name"])

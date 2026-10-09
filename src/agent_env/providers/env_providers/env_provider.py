@@ -140,11 +140,7 @@ class _SandboxEnvironmentProvider(EnvironmentProvider):
 
     def _sandbox_providers(self, sandbox_provider: SandboxProvider, env_id: str | None) -> list[SandboxProvider]:
         """The sandbox providers to try, in order: a chained one's members, or itself."""
-        from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
-
-        if isinstance(sandbox_provider, ChainedSandboxProvider):
-            return list(sandbox_provider._providers)
-        return [sandbox_provider]
+        return list(sandbox_provider.links)
 
     async def _run(self, sandbox_provider: SandboxProvider, env_id: str | None, attempt: Callable[[SandboxProvider], Awaitable[Any]]) -> Any:
         """Run ``attempt`` on the sandbox provider, or on each chained member until one succeeds; a deploy that fails or is

@@ -14,8 +14,7 @@ from agent_env.env.env import DeployedSandboxEnv
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT
 from agent_env.env.gateway.constants import WELL_KNOWN_PATH
 from agent_env.providers.env_providers.env_provider import _SandboxEnvironmentProvider, _size_kwargs, _tool_names
-from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
-from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
+from agent_env.providers.sandbox_providers.sandbox_provider import ImageUse, Runs, SandboxProvider, image_problem
 
 if TYPE_CHECKING:
     from agent_env.env.env import Env
@@ -71,11 +70,12 @@ class EnvironmentServerProvider(_SandboxEnvironmentProvider):
 
         name = env.environment_name
         image = env.docker_image_artifact
-        if isinstance(sandbox_provider, ModalSandboxProvider):  # which builds an image that's only a build context
-            await sandbox_provider.prepare_image(image, attribution=attribution)
-        elif problem := image.by_name_problem():
+        runs = sandbox_provider.runs(ImageUse.SERVER)
+        if problem := image_problem(image, runs):
             raise ValueError(f"Can't deploy {name!r} as a server on {type(sandbox_provider).__name__}, which runs its "
                              f"image by name: {problem}")
+        if runs is Runs.BUILDS:
+            await sandbox_provider.prepare_image(image, attribution=attribution)
         server = await sandbox_provider.create_container(
             image_name=env.docker_image_artifact.image_name,
             port=AGENT_ENV_GATEWAY_MCP_PORT,

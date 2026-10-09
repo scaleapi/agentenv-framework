@@ -33,9 +33,13 @@ from agent_env.providers.env_providers.constants import (
     GATEWAY_SERVICE_NAME,
 )
 from agent_env.providers.env_providers.env_provider import _SandboxEnvironmentProvider, _size_kwargs, _tool_names
-from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import Sandbox, VmSandbox, port_bindings
-from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER, SandboxProvider
+from agent_env.providers.sandbox_providers.sandbox_provider import (
+    SANDBOX_MODE_CONTAINER,
+    ImageUse,
+    Runs,
+    SandboxProvider,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -866,7 +870,7 @@ COMPOSE_EOF'''
         await asyncio.gather(*(sandbox_provider.prepare_image(image, attribution=attribution)
                                for image in images if image.context_only))
 
-        i6pn_kwargs = {"i6pn": True, "region": config.modal_default_region} if isinstance(sandbox_provider, ModalSandboxProvider) else {}
+        i6pn_kwargs = sandbox_provider.gateway_container_options()
         deploy = _ContainerDeploy(
             sandbox_provider=sandbox_provider, cpu=cpu, disk_size_gb=disk_size_gb, ttl_seconds=ttl_seconds,
             attribution=attribution, i6pn_kwargs=i6pn_kwargs,
@@ -1205,7 +1209,8 @@ COMPOSE_EOF'''
         mcp_server_name: str | None = None,
         attribution: Optional[Attribution] = None,
     ) -> DeployedGateway:
-        """One gateway deploy on one (unchained) sandbox provider: Modal containers for a ``ModalSandboxProvider``, else a VM."""
+        """One gateway deploy on one (unchained) sandbox provider: a container per server on one that runs a gateway's
+        servers in containers, else a VM."""
         from agent_env.providers.env_state import LocalPostgresStateProvider, build_state_provider
 
         # Every attempt starts from the caller's store: a failed attempt's close() cleared it.
@@ -1216,7 +1221,7 @@ COMPOSE_EOF'''
             else LocalPostgresStateProvider()
         )
         deploy_kwargs = {"attribution": dict(attribution or {})}
-        if isinstance(sandbox_provider, ModalSandboxProvider):
+        if sandbox_provider.runs(ImageUse.GATEWAY) is not Runs.IN_VM:
             if existing_sandbox is not None:
                 raise ValueError("existing_sandbox is only supported for VM-mode providers")
             if sidecars:

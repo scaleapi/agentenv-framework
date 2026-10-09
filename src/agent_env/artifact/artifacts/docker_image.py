@@ -310,7 +310,6 @@ class DockerImageArtifact(Artifact):
         without slashes, or the default branch.
         """
         from agent_env.providers import get_sandbox_provider
-        from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
         from agent_env.providers.sandbox_providers.sandbox import upload_vm_file
         from agent_env.config import get_config
 
@@ -345,7 +344,7 @@ class DockerImageArtifact(Artifact):
         repository = image_repository(id)
         image_ref = image_store.image_ref(repository, f"v{version}")
         provider = get_sandbox_provider()
-        if is_loopback_host(registry_host_from_ref(image_ref)) and not isinstance(provider, LocalSandboxProvider):
+        if is_loopback_host(registry_host_from_ref(image_ref)) and not provider.ON_THIS_MACHINE:
             raise ValueError(
                 f"{image_ref} is in a registry on this machine, which a {type(provider).__name__} build VM can't push to; "
                 "build on the local sandbox provider, or configure an image store a remote VM can reach"

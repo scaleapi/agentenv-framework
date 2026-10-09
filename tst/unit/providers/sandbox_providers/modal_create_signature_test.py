@@ -14,7 +14,7 @@ import pytest
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.attribution import PIPELINE_STEP_KEY
 from agent_env.config import get_config, reset_config
-from agent_env.providers.sandbox_providers import modal_image_build, modal_sandbox
+from agent_env.providers.sandbox_providers import modal_image_build
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy

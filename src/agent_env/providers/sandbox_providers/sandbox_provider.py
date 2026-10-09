@@ -6,6 +6,7 @@ import logging
 import os
 import shlex
 from abc import ABC, abstractmethod
+from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 from urllib.parse import urlparse
 
@@ -34,6 +35,31 @@ SANDBOX_MODE_CONTAINER = "container"
 
 class SandboxProviderTypeError(ConfigError):
     """A config-registered provider produced a Sandbox whose ``.type`` != its ``[sandbox.providers.<name>]`` key."""
+
+
+class ImageUse(Enum):
+    """What a deploy runs an image as."""
+
+    AGENT = "agent"  # an agent, in the sandbox create_sandbox makes
+    SERVER = "server"  # a lone MCP server, in the container create_container makes
+    GATEWAY = "gateway"  # the MCP servers behind a gateway
+
+
+class Runs(Enum):
+    """How a provider runs an image."""
+
+    IN_VM = "in_vm"  # in a VM it creates, which loads the image's tar.gz, pulls its name or builds its context
+    BY_NAME = "by_name"  # in a container started from the image's name, which has to name a registry
+    BUILDS = "builds"  # in a container, building it first when it is only a build context (prepare_image)
+
+
+def image_problem(image: DockerImageArtifact, runs: Runs) -> str | None:
+    """Why a provider that runs images as ``runs`` can't run ``image``, or None when it can."""
+    if runs is Runs.IN_VM:
+        return image.load_problem()
+    if runs is Runs.BY_NAME:
+        return image.by_name_problem()
+    return None
 
 
 class SandboxProvider(ABC):
@@ -142,6 +168,37 @@ class SandboxProvider(ABC):
 
     # Internal→external host rewrites for URLs issued on this platform ({} = none).
     URL_REWRITES: ClassVar[dict[str, str]] = {}
+
+    # Whether its sandboxes run on this machine: an image only this machine holds (in a registry or object store on
+    # it) reaches them, its containers need this machine's Docker, and a gateway's infra envs are built here for it.
+    ON_THIS_MACHINE: ClassVar[bool] = False
+
+    @classmethod
+    def creates_vms(cls) -> bool:
+        """Whether it creates VM sandboxes, as a provider that implements ``create_vm`` does."""
+        return cls.create_vm is not SandboxProvider.create_vm
+
+    @classmethod
+    def runs(cls, use: ImageUse) -> Runs:
+        """How it runs an image for ``use``. One that creates VMs runs an agent and a gateway's servers in a VM, and a
+        lone server in a container from its image's name (``create_container``); one that doesn't runs each from its
+        image's name. A provider that runs images otherwise says so here."""
+        if cls.creates_vms() and use is not ImageUse.SERVER:
+            return Runs.IN_VM
+        return Runs.BY_NAME
+
+    @property
+    def links(self) -> tuple[SandboxProvider, ...]:
+        """The providers a deploy on this one may run on, in the order it tries them: itself, or a chain's."""
+        return (self,)
+
+    def url_from_sandbox(self, url: str) -> str:
+        """``url``, of a service this process reaches, as its sandboxes reach it."""
+        return url
+
+    def gateway_container_options(self) -> dict[str, Any]:
+        """The ``create_container`` options each of a gateway's containers takes, so they reach one another."""
+        return {}
 
     # Extra flags spliced into the agent container's `docker run` in create_container ("" = none).
     # Backends set this for host-specific needs (e.g. local Linux needs --add-host so the

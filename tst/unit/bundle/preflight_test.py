@@ -163,7 +163,8 @@ class _ContainersOnly(SandboxProvider):
         raise AssertionError("preflight creates nothing")
 
 
-def test_an_agent_the_bundle_builds_is_refused_on_a_provider_that_cant_build_it(bundle_dir, monkeypatch):
+def test_an_agent_the_bundle_builds_is_refused_on_a_provider_that_creates_no_vm_and_runs_it_by_name(bundle_dir,
+                                                                                                 monkeypatch):
     registry = Config.sandbox_registry
     monkeypatch.setattr(Config, "sandbox_registry", lambda self: {**registry(self), "containers": {"impl": _ContainersOnly}})
     layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\n"})
@@ -171,9 +172,9 @@ def test_an_agent_the_bundle_builds_is_refused_on_a_provider_that_cant_build_it(
 
     assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox="containers")) == [
         "tasks/t.json: step 'agent': deploys agent '@local/~/triage/solver''s image on the 'containers' sandbox "
-        "provider, which can't build it from its build context, and the bundle builds it from agents/solver/Dockerfile, "
-        "which a sandbox runs only once it's built on this machine or by the provider it runs on; run it with --sandbox "
-        "local, or on a provider that builds it, such as --sandbox modal",
+        "provider, which runs it by name, and the bundle builds it from agents/solver/Dockerfile, which a sandbox runs "
+        "only once it's built on this machine or by the provider it runs on; run it with --sandbox local, or on a "
+        "provider that builds it, such as --sandbox modal",
     ]
 
 

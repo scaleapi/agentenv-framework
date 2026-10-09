@@ -34,6 +34,8 @@ from agent_env.providers.sandbox_providers.sandbox import SANDBOX_LABEL, Network
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_CONTAINER,
     SANDBOX_MODE_VM,
+    ImageUse,
+    Runs,
     SandboxProvider,
     refuse_unenforceable_policy,
 )
@@ -133,6 +135,11 @@ class LocalSandbox(VmSandbox):
     The /app path used by EnvironmentGatewayProvider is redirected to a local temp
     directory since /app is not writable on macOS.
     """
+
+    ON_THIS_MACHINE = True
+
+    def url_from_sandbox(self, url: str) -> str:
+        return LocalSandboxProvider.get_external_url(url)
 
     type = "local"
     extra_hosts = _EXTRA_HOSTS
@@ -491,6 +498,16 @@ class LocalSandboxProvider(SandboxProvider):
     """SandboxProvider that runs VM-style gateway deployments on local Docker."""
 
     EXTRA_CONTAINER_RUN_ARGS = " ".join(f"--add-host {entry}" for entry in _EXTRA_HOSTS)
+    ON_THIS_MACHINE = True
+
+    @classmethod
+    def runs(cls, use: ImageUse) -> Runs:
+        """A gateway in a VM on this machine, which loads its servers' images; an agent or a lone server in a container
+        from its image's name, which this machine's Docker pulls or already holds."""
+        return Runs.IN_VM if use is ImageUse.GATEWAY else Runs.BY_NAME
+
+    def url_from_sandbox(self, url: str) -> str:
+        return self.get_external_url(url)
 
     async def create_vm(
         self,

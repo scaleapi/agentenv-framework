@@ -10,7 +10,7 @@ import logging
 import os
 import re
 import shlex
-from typing import TYPE_CHECKING, AsyncIterator, ClassVar, Optional
+from typing import TYPE_CHECKING, Any, AsyncIterator, ClassVar, Optional
 
 import httpx
 import modal
@@ -20,6 +20,8 @@ from agent_env.config import get_config
 from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy, Sandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_CONTAINER,
+    ImageUse,
+    Runs,
     SandboxProvider,
     apply_default_attribution,
 )
@@ -182,6 +184,15 @@ class ModalSandboxProvider(SandboxProvider):
     # ``type`` equals that name — the registry's type-guard requires the produced
     # sandbox's ``.type`` to match the config key.
     _sandbox_cls: type[ModalSandbox] = ModalSandbox
+
+    @classmethod
+    def runs(cls, use: ImageUse) -> Runs:
+        """Each image in a container of its own, built first when it is only a build context (``prepare_image``)."""
+        return Runs.BUILDS
+
+    def gateway_container_options(self) -> dict[str, Any]:
+        """i6pn, Modal's private network between sandboxes, in the configured region."""
+        return {"i6pn": True, "region": get_config().modal_default_region}
 
     @classmethod
     def supports_network_policy(cls, policy: NetworkPolicy) -> bool:

@@ -20,11 +20,15 @@ _RECORD = SimpleNamespace(env_id="e1")
 
 
 class ProviderA(MagicMock):
-    pass
+    @property
+    def links(self):
+        return (self,)
 
 
 class ProviderB(MagicMock):
-    pass
+    @property
+    def links(self):
+        return (self,)
 
 
 class _Topology(_SandboxEnvironmentProvider):

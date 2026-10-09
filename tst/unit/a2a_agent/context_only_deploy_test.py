@@ -25,6 +25,9 @@ class _VmProvider(SandboxProvider):
     async def create_sandbox(self, **_):
         raise _Created
 
+    async def create_vm(self, **_):
+        raise _Created
+
 
 class _ModalProvider(ModalSandboxProvider):
     """Modal with its build and its container faked, recording the order they're asked for."""
@@ -112,6 +115,9 @@ class _ContainerSandbox:
     sandbox_id = "sb-container"
     mode = "container"
     tunnel_urls = {}
+
+    def url_from_sandbox(self, url):
+        return url
 
 
 @pytest.mark.asyncio
