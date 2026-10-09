@@ -163,11 +163,13 @@ async def test_concurrent_calls_on_one_session_each_get_their_own_reply(serve_it
 @pytest.mark.asyncio
 async def test_a_request_that_outlives_the_timeout_raises_timeout_error_and_the_session_carries_on(serve_items):
     _, lifespan = await serve_items()
-    async with lifespan, ToolSession(_URL, timeout=0.3) as session:
+    async with lifespan, ToolSession(_URL) as session:
+        session.timeout = 0.3
         started = time.monotonic()
         with pytest.raises(TimeoutError, match="tools/call did not finish within 0.3s"):
             await session.call_tool("echo_after", {"value": "late", "seconds": 5})
         waited = time.monotonic() - started
+        session.timeout = 30
         assert (await session.call_tool("echo_after", {"value": "on time", "seconds": 0})).text == "on time"
 
     assert waited < 2
@@ -337,7 +339,8 @@ async def test_closing_waits_for_the_server_no_longer_than_the_sessions_timeout(
         return httpx.Response(200, headers={"mcp-session-id": "s-2"}, json=_reply(message, {"protocolVersion": "2025-11-25"}))
     _route_clients_to(monkeypatch, httpx.MockTransport(stalls_on_delete))
 
-    session = await ToolSession(_URL, timeout=0.3).open()
+    session = await ToolSession(_URL).open()
+    session.timeout = 0.3
     started = time.monotonic()
     await session.close()
     assert time.monotonic() - started < 1
