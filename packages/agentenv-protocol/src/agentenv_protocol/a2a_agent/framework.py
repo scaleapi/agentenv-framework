@@ -28,20 +28,28 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from ._trajectory_log import MAX_TRAJECTORY_READ_BYTES, TaskTrajectories
 from ._triggers import TriggerEngine, TriggerError
 from .extensions import (
     AGENT_CONFIG_V1,
+    MAX_TRAJECTORY_READ_EVENTS,
     MCP_CONFIG_V1,
     SKILL_CONFIG_V1,
     TRAJECTORY_V1,
     TRIGGERS_V1,
+    ContextEventsTrajectoryRequest,
+    ContextObjectTrajectoryRequest,
+    ContextTrajectoryRequest,
     ExtensionActivation,
     ExtensionDefinition,
     ImplementationOwner,
     McpAddRequest,
     OperationReference,
+    TaskEventsTrajectoryRequest,
     TaskObjectTrajectoryRequest,
     TaskTrajectoryRequest,
+    TrajectoryEventsResponse,
+    TrajectoryState,
     TriggerDecideRequest,
     TriggerRegisterRequest,
     enable,
@@ -89,7 +97,6 @@ class _ServingOnItsPort:
 _AGENT_DEFINITION = "_agentenv_a2a_definition"
 _AgentT = TypeVar("_AgentT", bound="AgentEnvAgent")
 _MAX_CACHED_CONTEXTS = 1_024
-_MAX_CACHED_TRAJECTORIES = 1_024
 
 
 def _config_wire_names(config: type[AgentConfig]) -> dict[str, str]:
@@ -153,36 +160,6 @@ class _BoundedContextSessions:
         self._entries[context_id] = session_ref
         while len(self._entries) > self._max_entries:
             self._entries.popitem(last=False)
-
-
-class _BoundedTaskTrajectories:
-    """Least-recently-used cache of completed native task trajectories."""
-
-    def __init__(self, max_entries: int = _MAX_CACHED_TRAJECTORIES) -> None:
-        if max_entries < 1:
-            raise ValueError("max_entries must be positive")
-        self._max_entries = max_entries
-        self._entries: OrderedDict[str, Any] = OrderedDict()
-
-    def __setitem__(self, task_id: str, trajectory: Any) -> None:
-        self._entries.pop(task_id, None)
-        self._entries[task_id] = trajectory
-        while len(self._entries) > self._max_entries:
-            self._entries.popitem(last=False)
-
-    def get(self, task_id: str) -> Any | None:
-        try:
-            trajectory = self._entries.pop(task_id)
-        except KeyError:
-            return None
-        self._entries[task_id] = trajectory
-        return trajectory
-
-    def pop(self, task_id: str, default: Any = None) -> Any:
-        return self._entries.pop(task_id, default)
-
-    def __len__(self) -> int:
-        return len(self._entries)
 
 
 @dataclass(slots=True)
@@ -456,6 +433,10 @@ def _thaw(value: Any) -> Any:
     return value
 
 
+def _encode_trajectory(payload: Any) -> bytes:
+    return json.dumps(_thaw(payload), separators=(",", ":"), default=str).encode()
+
+
 def _validation_error_detail(exc: ValidationError) -> str:
     """Return client-safe Pydantic errors without rejected values or docs URLs."""
     return exc.json(include_input=False, include_url=False)
@@ -557,7 +538,7 @@ class _SdkServices:
             self.config_model
         )
         self.mcp_servers: dict[str, dict[str, Any]] = {}
-        self.task_trajectories = _BoundedTaskTrajectories()
+        self.task_trajectories = TaskTrajectories()
         self._context_sessions = _BoundedContextSessions()
         self.skills: list[Mapping[str, Any]] = []
         self.identity_skills: dict[str, str] = {}
@@ -747,26 +728,73 @@ class _SdkServices:
         return {"skills": skills}
 
     async def trajectory_get(
-        self, request: TaskTrajectoryRequest | TaskObjectTrajectoryRequest
-    ) -> dict[str, Any]:
-        task_id = request.task_id
-        trajectory = self.task_trajectories.get(task_id)
-        if trajectory is None:
-            raise HTTPException(
-                status_code=404,
-                detail=f"No completed trajectory available for task '{task_id}'",
-            )
-        if isinstance(request, TaskTrajectoryRequest):
-            return {"trajectory": _thaw(trajectory.payload)}
-        body = json.dumps(
-            _thaw(trajectory.payload), separators=(",", ":"), default=str
-        ).encode()
+        self,
+        request: TaskTrajectoryRequest
+        | TaskObjectTrajectoryRequest
+        | TaskEventsTrajectoryRequest
+        | ContextTrajectoryRequest
+        | ContextObjectTrajectoryRequest
+        | ContextEventsTrajectoryRequest,
+    ) -> Any:
+        if isinstance(
+            request, (TaskEventsTrajectoryRequest, ContextEventsTrajectoryRequest)
+        ):
+            return self._trajectory_events(request)
+        if isinstance(request, (TaskTrajectoryRequest, TaskObjectTrajectoryRequest)):
+            body = self.task_trajectories.final(request.task_id)
+            if body is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=(
+                        f"No completed trajectory available for task '{request.task_id}'"
+                    ),
+                )
+        else:
+            body = self.task_trajectories.context_events(request.context_id)
+            if body is None:
+                raise HTTPException(
+                    status_code=404, detail=f"Unknown context '{request.context_id}'"
+                )
+        if isinstance(request, (TaskTrajectoryRequest, ContextTrajectoryRequest)):
+            return {"trajectory": json.loads(body)}
         uploaded = await upload(request.objects.trajectory, body)
         return {
             "objects": {
                 "trajectory": uploaded.model_dump(mode="json"),
             }
         }
+
+    def _trajectory_events(
+        self, request: TaskEventsTrajectoryRequest | ContextEventsTrajectoryRequest
+    ) -> TrajectoryEventsResponse:
+        max_events = request.limit or MAX_TRAJECTORY_READ_EVENTS
+        if isinstance(request, TaskEventsTrajectoryRequest):
+            page = self.task_trajectories.task_page(
+                request.task_id, request.after, max_events, MAX_TRAJECTORY_READ_BYTES
+            )
+            unknown = f"Unknown task '{request.task_id}'"
+        else:
+            page = self.task_trajectories.context_page(
+                request.context_id, request.after, max_events, MAX_TRAJECTORY_READ_BYTES
+            )
+            unknown = f"Unknown context '{request.context_id}'"
+        if page is None:
+            raise HTTPException(status_code=404, detail=unknown)
+        if request.after > page.total:
+            raise HTTPException(
+                status_code=400,
+                detail=f"after={request.after} is past the trajectory's {page.total} events",
+            )
+        next_position = request.after + len(page.events)
+        return TrajectoryEventsResponse(
+            context_id=page.context_id,
+            task_id=page.task_id,
+            state=page.state,
+            format=page.format,
+            events=[json.loads(event) for event in page.events],
+            next=next_position,
+            has_more=next_position < page.total,
+        )
 
     async def triggers_register(
         self, request: TriggerRegisterRequest
@@ -1121,6 +1149,9 @@ class _StandardExecutor:
             raise ServerError(error=InvalidParamsError(message=str(exc))) from exc
 
         updater = TaskUpdater(event_queue, task.id, task.context_id)
+        trajectories = self._services.task_trajectories
+        # Before any await: once the client holds this task id, the log knows it.
+        trajectory = trajectories.register(task.id, task.context_id)
         try:
             if context.current_task is None:
                 await event_queue.enqueue_event(task)
@@ -1132,6 +1163,7 @@ class _StandardExecutor:
                 **({"role": task_config.role} if task_config.role is not None else {}),
             }
             async with self._context_locks.acquire(task.context_id):
+                trajectories.start(task.id)
                 request = TaskRequest(
                     task_id=task.id,
                     context_id=task.context_id,
@@ -1144,6 +1176,7 @@ class _StandardExecutor:
                     metadata=metadata,
                     session_ref=self._services.session_ref_for_context(task.context_id),
                     workspace=self._workspace,
+                    trajectory=trajectory,
                 )
                 if self._streaming:
                     result = await self._run_streaming(request, updater, event_queue)
@@ -1155,16 +1188,27 @@ class _StandardExecutor:
                     self._services.set_session_ref_for_context(
                         task.context_id, result.session_ref
                     )
-                if result.native_trajectory is not None:
-                    self._services.task_trajectories[task.id] = result.native_trajectory
 
             parts = _to_a2a_parts(result)
+            # Sealed before the terminal event, so a client that sees the task end can read it.
+            native = result.native_trajectory
+            trajectories.seal(
+                task.id,
+                TrajectoryState.FAILED
+                if result.outcome is TaskOutcome.FAILED
+                else TrajectoryState.COMPLETED,
+                native=None if native is None else _encode_trajectory(native.payload),
+            )
             message = updater.new_agent_message(parts=parts)
             if result.outcome is TaskOutcome.FAILED:
                 await updater.failed(message=message)
             else:
                 await updater.complete(message=message)
+        except asyncio.CancelledError:
+            trajectories.seal(task.id, TrajectoryState.CANCELED)
+            raise
         except Exception:
+            trajectories.seal(task.id, TrajectoryState.FAILED)
             correlation_id = uuid.uuid4().hex
             logger.exception(
                 "unhandled task execution error (correlation_id=%s)",
@@ -1250,6 +1294,7 @@ class _StandardExecutor:
         ``CancelledError`` at its next ``await`` and should stop whatever it started, such as a CLI process."""
         from a2a.server.tasks import TaskUpdater
 
+        self._services.task_trajectories.request_cancel(context.task_id)
         await TaskUpdater(event_queue, context.task_id, context.context_id).cancel()
 
 

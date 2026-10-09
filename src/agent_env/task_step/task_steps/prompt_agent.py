@@ -7,6 +7,7 @@ import json
 import logging
 import time
 import uuid
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from typing import Any, ClassVar, Optional
 import httpx
@@ -21,9 +22,11 @@ from agent_env.a2a_agent.object_transfer import (
     trajectory_mode,
 )
 from agent_env.a2a_agent.staging import draining, staged_changelogs, transfer_store
+from agent_env.a2a_agent.trajectory_follower import live_trajectory_endpoint
 from agent_env.config.model import MODEL_PARAMS_RESERVED
 from agent_env.env.gateway.constants import EXT_CLOCK_URI, EXT_TRIGGERS_URI, TRIGGER_IN_FLIGHT_STATUSES
 from agent_env.store import DuplicateKeyError, get_config
+from agent_env.store.object_store import ObjectStore
 from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.entity_refs import EntityRef
 from agent_env.task_step.task_step import RetryConfig, TaskStep, TaskStepDependency
@@ -34,7 +37,9 @@ from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (
 from agent_env.task_step.snapshot_utils.agent_state_capture import (
     store_trajectory,
     trajectory_object_url,
+    trajectory_prefix_key,
 )
+from agent_env.task_step.snapshot_utils.live_trajectory import LiveTurns
 from agent_env.task_step.snapshot_utils.snapshot_series import SnapshotConfig, SnapshotSeries
 
 logger = logging.getLogger(__name__)
@@ -147,6 +152,7 @@ class PromptAgentTaskStep(TaskStep):
         retry_config: Optional[RetryConfig | dict] = None,
         *,
         snapshot_config: Optional[SnapshotConfig] = None,
+        live_trajectory: bool = False,
     ):
         # `prompt` is the legacy text-only field; `parts` is the multimodal
         # form that's the authoritative A2A wire shape. Exactly one must be set:
@@ -189,6 +195,7 @@ class PromptAgentTaskStep(TaskStep):
         self.user_output_format = user_output_format
         self.user_model = user_model
         self.snapshot_config = snapshot_config
+        self.live_trajectory = live_trajectory
 
     @staticmethod
     def _validate_parts(parts: list[dict]) -> None:
@@ -262,6 +269,8 @@ class PromptAgentTaskStep(TaskStep):
         base["user_model"] = self.user_model
         if self.snapshot_config:
             base["snapshot_config"] = self.snapshot_config.to_dict()
+        if self.live_trajectory:
+            base["live_trajectory"] = True
         return base
 
     @classmethod
@@ -297,6 +306,7 @@ class PromptAgentTaskStep(TaskStep):
                 if data.get("snapshot_config")
                 else None
             ),
+            live_trajectory=data.get("live_trajectory", False),
         )
 
     def _trajectory_prefix(self) -> str:
@@ -477,152 +487,166 @@ class PromptAgentTaskStep(TaskStep):
         per_turn_trajectory_urls: list[str | None] = []
         source_agent_per_turn_prompt_parts: list[list[dict] | None] = []
         traj_ext_cached = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
+        live = self._live_trajectory_target(context, card, target_url, trajectory_output_prefix)
+        live_turns = (
+            LiveTurns(*live, poll_interval_seconds=self.poll_interval_seconds) if live is not None else None
+        )
         final_state: str = TaskState.completed.value
         trajectory_url: Optional[str] = None
         # What the target has been sent: of the files its replies name, the only ones a user-sim is made able
         # to read, so a reply naming any other object a store owns can't read it out through the user-sim.
         sent_to_target: set[str] = set()
 
-        for turn in range(self.max_conversation_turns):
-            # `target_a2a_task_id` is the client A2A message id sent to the target
-            # agent and recorded on the conversation as `a2a_task_id`.
-            # This id is also used as part of the key name for the trajectory S3 object.
-            target_a2a_task_id = uuid.uuid4().hex
+        try:
+            for turn in range(self.max_conversation_turns):
+                # `target_a2a_task_id` is the client A2A message id sent to the target
+                # agent and recorded on the conversation as `a2a_task_id`.
+                # This id is also used as part of the key name for the trajectory S3 object.
+                target_a2a_task_id = uuid.uuid4().hex
 
-            # The turn records the objects' own URLs, and only once the parts are ready to send, so an
-            # object the agent can't be sent leaves no turn waiting.
-            def record_turn() -> None:
-                sent_to_target.update(_file_uris(current_user_parts))
-                conversation_store.add_a2a_task(
-                    conversation_id=conversation_id,
-                    parts=current_user_parts,
-                    a2a_task_id=target_a2a_task_id,
-                    role="user",
-                )
-                # Turn 0 of a prompt-mode step re-sends exactly the text already
-                # persisted as PromptResponse.prompt_text; store a None placeholder
-                # instead of a second copy so the doc doesn't carry the prompt twice.
-                # The list stays index-aligned with the per-turn trajectory URIs.
-                source_agent_per_turn_prompt_parts.append(
-                    None
-                    if turn == 0 and _duplicates_prompt_text(current_user_parts, prompt_text)
-                    else list(current_user_parts)
-                )
-
-            sent_task_id, result = await send_and_wait(
-                target_url, current_user_parts, agent=agent, message_id=target_a2a_task_id,
-                context_id=solver_context_id, timeout_seconds=self.timeout_seconds,
-                poll_interval_seconds=self.poll_interval_seconds, before_send=record_turn,
-            )
-            target_state = result["status"]["state"]
-            status_msg = (result.get("status") or {}).get("message") or {}
-            final_terminal = protocol.TerminalResponse.from_message(status_msg)
-            agent_response_parts = status_msg.get("parts") or [{"kind": "text", "text": final_terminal.response_text}]
-
-            conversation_store.complete_a2a_task(
-                conversation_id=conversation_id,
-                parts=agent_response_parts,
-                role="agent",
-            )
-
-            if traj_ext_cached:
-                turn_traj_uri: str | None = None
-                try:
-                    turn_traj_uri = await self._fetch_trajectory(
-                        target_url, traj_ext_cached, sent_task_id, trajectory_output_prefix,
-                        target_a2a_task_id, card=card, sandbox_type=agent.sandbox_type,
+                # The turn records the objects' own URLs, and only once the parts are ready to send, so an
+                # object the agent can't be sent leaves no turn waiting.
+                def record_turn() -> None:
+                    sent_to_target.update(_file_uris(current_user_parts))
+                    conversation_store.add_a2a_task(
+                        conversation_id=conversation_id,
+                        parts=current_user_parts,
+                        a2a_task_id=target_a2a_task_id,
+                        role="user",
                     )
-                except Exception as e:
-                    logger.warning(f"Turn {turn+1} trajectory fetch failed (continuing): {e}")
-                per_turn_trajectory_urls.append(turn_traj_uri)
+                    # Turn 0 of a prompt-mode step re-sends exactly the text already
+                    # persisted as PromptResponse.prompt_text; store a None placeholder
+                    # instead of a second copy so the doc doesn't carry the prompt twice.
+                    # The list stays index-aligned with the per-turn trajectory URIs.
+                    source_agent_per_turn_prompt_parts.append(
+                        None
+                        if turn == 0 and _duplicates_prompt_text(current_user_parts, prompt_text)
+                        else list(current_user_parts)
+                    )
 
-            final_task_id = sent_task_id
-            final_state = target_state
-            logger.info(f"Turn {turn+1}/{self.max_conversation_turns} agent response ({target_state}): {final_terminal.response_text[:120]}...")
+                following = live_turns.following(target_a2a_task_id) if live_turns is not None else nullcontext(None)
+                async with following as live_turn:
+                    sent_task_id, result = await send_and_wait(
+                        target_url, current_user_parts, agent=agent, message_id=target_a2a_task_id,
+                        context_id=solver_context_id, timeout_seconds=self.timeout_seconds,
+                        poll_interval_seconds=self.poll_interval_seconds, before_send=record_turn,
+                        on_sent=live_turn.follow if live_turn else None,
+                    )
+                    target_state = result["status"]["state"]
+                    if live_turn:
+                        live_turn.ended(target_state)
+                status_msg = (result.get("status") or {}).get("message") or {}
+                final_terminal = protocol.TerminalResponse.from_message(status_msg)
+                agent_response_parts = status_msg.get("parts") or [{"kind": "text", "text": final_terminal.response_text}]
 
-            if target_state == TaskState.failed:
-                conversation_store.mark_closed(conversation_id)
-                break
-            if turn == self.max_conversation_turns - 1:
-                break
+                conversation_store.complete_a2a_task(
+                    conversation_id=conversation_id,
+                    parts=agent_response_parts,
+                    role="agent",
+                )
 
-            conv_doc = conversation_store.get_conversation(conversation_id)
-            if conv_doc and conv_doc.get("status") != "active":
-                logger.info(f"Conversation {conversation_id} no longer active (status={conv_doc.get('status')}); ending multi-turn")
-                break
+                if traj_ext_cached:
+                    turn_traj_uri: str | None = None
+                    try:
+                        turn_traj_uri = await self._fetch_trajectory(
+                            target_url, traj_ext_cached, sent_task_id, trajectory_output_prefix,
+                            target_a2a_task_id, card=card, sandbox_type=agent.sandbox_type,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Turn {turn+1} trajectory fetch failed (continuing): {e}")
+                    per_turn_trajectory_urls.append(turn_traj_uri)
 
-            # After every `break` above: a turn that ends the conversation is covered
-            # by teardown's final capture instead of being captured twice.
-            if series is not None:
-                await series.capture_turn(context, turn + 1)
+                final_task_id = sent_task_id
+                final_state = target_state
+                logger.info(f"Turn {turn+1}/{self.max_conversation_turns} agent response ({target_state}): {final_terminal.response_text[:120]}...")
 
-            if trig_ext and triggers_registered:
-                env_triggers = await self._read_env_triggers(context)
-                (context.metadata.setdefault("env_trigger_snapshots", {})
-                    .setdefault(self.id, []).append({"turn": turn + 1, "envs": env_triggers}))
-                resp = await self._decide(decide_url, turn + 1, final_terminal.response_text, conversation_id, env_triggers)
-                (context.metadata.setdefault("agent_trigger_firings", {})
-                    .setdefault(self.id, []).append({"turn": turn + 1, "fired": resp.get("fired", [])}))
-                logger.info(f"Turn {turn+1} agent-trigger decide: fired={resp.get('fired', [])} done={resp.get('done')}")
-                if bool(resp.get("done")):
-                    current_user_parts = resp.get("parts") or []
-                    conversation_store.add_a2a_task(conversation_id, parts=current_user_parts,
-                                                    a2a_task_id=uuid.uuid4().hex, role="user")
+                if target_state == TaskState.failed:
                     conversation_store.mark_closed(conversation_id)
                     break
-                if resp.get("fired"):
-                    current_user_parts = resp.get("parts") or []
-                    continue
-                # no trigger fired -> fall through to the LLM user-sim for this turn (hybrid)
+                if turn == self.max_conversation_turns - 1:
+                    break
 
-            user_a2a_task_id = uuid.uuid4().hex
-            try:
-                # A user-sim runs in a sandbox agent-env deployed; a human peer, registered or named by
-                # user_a2a_url, has none and reads the store itself.
-                _, user_result = await send_and_wait(
-                    user_url, agent_response_parts,
-                    agent=user_sim if is_user_sim and user_sim.sandbox_id else None, shareable=sent_to_target,
-                    message_id=user_a2a_task_id, context_id=conversation_id,
-                    timeout_seconds=self.user_agent_timeout_seconds,
-                    poll_interval_seconds=self.poll_interval_seconds,
-                )
-            except TimeoutError as e:
-                logger.warning(f"user_a2a_url timeout for conversation {conversation_id} ({e}); marking abandoned")
-                conversation_store.mark_closed(conversation_id)
-                break
+                conv_doc = conversation_store.get_conversation(conversation_id)
+                if conv_doc and conv_doc.get("status") != "active":
+                    logger.info(f"Conversation {conversation_id} no longer active (status={conv_doc.get('status')}); ending multi-turn")
+                    break
 
-            user_state = (user_result.get("status") or {}).get("state")
-            if user_state != TaskState.completed:
-                logger.info(f"user_a2a_url returned state={user_state}; ending multi-turn")
-                conversation_store.mark_closed(conversation_id)
-                break
+                # After every `break` above: a turn that ends the conversation is covered
+                # by teardown's final capture instead of being captured twice.
+                if series is not None:
+                    await series.capture_turn(context, turn + 1)
 
-            user_msg = (user_result.get("status") or {}).get("message") or {}
-            current_user_parts = user_msg.get("parts") or []
-            if not current_user_parts:
-                logger.warning(f"user_a2a_url returned no parts; ending multi-turn")
-                conversation_store.mark_closed(conversation_id)
-                break
-
-            if is_user_sim:
-                raw_text = next((p["text"] for p in current_user_parts if p.get("kind") == "text"), "")
-                try:
-                    parsed = json.loads(raw_text)
-                    message_text = parsed["message"]
-                    done = bool(parsed["done"])
-                except (json.JSONDecodeError, KeyError) as e:
-                    logger.warning(f"user-sim returned malformed output despite output_format ({e}); using raw text as next prompt; raw={raw_text[:200]!r}")
-                    current_user_parts = [{"kind": "text", "text": raw_text}]
-                else:
-                    extras = {k: v for k, v in parsed.items() if k not in ("message", "done")}
-                    if extras:
-                        (context.metadata.setdefault("usersim_turn_outputs", {})
-                            .setdefault(self.id, []).append({"turn": turn + 1, "fields": extras}))
-                    current_user_parts = [{"kind": "text", "text": message_text}]
-                    if done:
-                        logger.info(f"user-sim signaled done=true at turn {turn+1}; ending multi-turn")
+                if trig_ext and triggers_registered:
+                    env_triggers = await self._read_env_triggers(context)
+                    (context.metadata.setdefault("env_trigger_snapshots", {})
+                        .setdefault(self.id, []).append({"turn": turn + 1, "envs": env_triggers}))
+                    resp = await self._decide(decide_url, turn + 1, final_terminal.response_text, conversation_id, env_triggers)
+                    (context.metadata.setdefault("agent_trigger_firings", {})
+                        .setdefault(self.id, []).append({"turn": turn + 1, "fired": resp.get("fired", [])}))
+                    logger.info(f"Turn {turn+1} agent-trigger decide: fired={resp.get('fired', [])} done={resp.get('done')}")
+                    if bool(resp.get("done")):
+                        current_user_parts = resp.get("parts") or []
+                        conversation_store.add_a2a_task(conversation_id, parts=current_user_parts,
+                                                        a2a_task_id=uuid.uuid4().hex, role="user")
                         conversation_store.mark_closed(conversation_id)
                         break
+                    if resp.get("fired"):
+                        current_user_parts = resp.get("parts") or []
+                        continue
+                    # no trigger fired -> fall through to the LLM user-sim for this turn (hybrid)
+
+                user_a2a_task_id = uuid.uuid4().hex
+                try:
+                    # A user-sim runs in a sandbox agent-env deployed; a human peer, registered or named by
+                    # user_a2a_url, has none and reads the store itself.
+                    _, user_result = await send_and_wait(
+                        user_url, agent_response_parts,
+                        agent=user_sim if is_user_sim and user_sim.sandbox_id else None, shareable=sent_to_target,
+                        message_id=user_a2a_task_id, context_id=conversation_id,
+                        timeout_seconds=self.user_agent_timeout_seconds,
+                        poll_interval_seconds=self.poll_interval_seconds,
+                    )
+                except TimeoutError as e:
+                    logger.warning(f"user_a2a_url timeout for conversation {conversation_id} ({e}); marking abandoned")
+                    conversation_store.mark_closed(conversation_id)
+                    break
+
+                user_state = (user_result.get("status") or {}).get("state")
+                if user_state != TaskState.completed:
+                    logger.info(f"user_a2a_url returned state={user_state}; ending multi-turn")
+                    conversation_store.mark_closed(conversation_id)
+                    break
+
+                user_msg = (user_result.get("status") or {}).get("message") or {}
+                current_user_parts = user_msg.get("parts") or []
+                if not current_user_parts:
+                    logger.warning(f"user_a2a_url returned no parts; ending multi-turn")
+                    conversation_store.mark_closed(conversation_id)
+                    break
+
+                if is_user_sim:
+                    raw_text = next((p["text"] for p in current_user_parts if p.get("kind") == "text"), "")
+                    try:
+                        parsed = json.loads(raw_text)
+                        message_text = parsed["message"]
+                        done = bool(parsed["done"])
+                    except (json.JSONDecodeError, KeyError) as e:
+                        logger.warning(f"user-sim returned malformed output despite output_format ({e}); using raw text as next prompt; raw={raw_text[:200]!r}")
+                        current_user_parts = [{"kind": "text", "text": raw_text}]
+                    else:
+                        extras = {k: v for k, v in parsed.items() if k not in ("message", "done")}
+                        if extras:
+                            (context.metadata.setdefault("usersim_turn_outputs", {})
+                                .setdefault(self.id, []).append({"turn": turn + 1, "fields": extras}))
+                        current_user_parts = [{"kind": "text", "text": message_text}]
+                        if done:
+                            logger.info(f"user-sim signaled done=true at turn {turn+1}; ending multi-turn")
+                            conversation_store.mark_closed(conversation_id)
+                            break
+        finally:
+            # On failure too, so a reader of the last turn knows no other follows.
+            if live_turns is not None:
+                await live_turns.end()
 
         await self._persist_env_trigger_state(context)
 
@@ -718,6 +742,27 @@ class PromptAgentTaskStep(TaskStep):
             raise RuntimeError(f"A2A task failed ({detail}): {body}")
 
         return context
+
+    def _live_trajectory_target(
+        self, context: TaskStepContext, card: dict, target_url: str, trajectory_output_prefix: str
+    ) -> Optional[tuple[str, ObjectStore, str]]:
+        """Where this run follows each turn's trajectory live and stores it: the agent's live read,
+        the store and the prefix's key. None when the run did not ask for it, the agent does not
+        offer it, or the prefix is not in the configured store."""
+        enabled = self.step_param_overrides(context).get("live_trajectory", self.live_trajectory)
+        if not bool(enabled):
+            return None
+        endpoint = live_trajectory_endpoint(card, target_url)
+        if endpoint is None:
+            logger.info(f"{self.id}: agent '{self.agent_name}' offers no live trajectory; not following it")
+            return None
+        store = get_config().get_object_store()
+        try:
+            prefix_key = trajectory_prefix_key(store, trajectory_output_prefix)
+        except ValueError as e:
+            logger.warning(f"{self.id}: not following the live trajectory: {e}")
+            return None
+        return endpoint, store, prefix_key
 
     async def _fetch_trajectory(
         self, a2a_url: str, traj_ext: dict, a2a_server_task_id: str, trajectory_output_prefix: str,

@@ -280,8 +280,9 @@ executor maps them to and from the wire-level `a2a.types.Task` lifecycle.
 `TaskRequest` is a frozen record whose nested JSON values are detached copies.
 Its `config`, `mcp_servers`, `skills`, `metadata`, and inbound `DataPart.data`
 retain their declared `dict`/`list` types, so normal Pydantic serialization,
-copying, and `json.dumps(...)` work. Within `tasks.v1`, new request fields are
-additive and have framework defaults. Agent code returns a `TaskResult` through
+copying, and `json.dumps(...)` work. `TaskRequest.trajectory` is the exception:
+it is the task's live trajectory log, described below. Within `tasks.v1`, new
+request fields are additive and have framework defaults. Agent code returns a `TaskResult` through
 its factories or builder so additions to the result contract do not break
 existing handlers.
 
@@ -304,7 +305,77 @@ The SDK does not retry tasks.
 A client that gives up on a task sends `tasks/cancel`. The framework marks the
 task canceled and cancels `run()`, which gets `asyncio.CancelledError` at its
 next `await`. A process `run()` started keeps running unless `run()` stops it,
-so kill it before re-raising.
+so kill it before re-raising. Trajectory events it appended, including any it
+appends while cleaning up, are kept, and its log ends `canceled`.
+
+#### Live trajectories
+
+A runtime that sees its native events as they happen appends each complete
+event to `request.trajectory` and enables `TRAJECTORY_V1` with `live=True`:
+
+```python
+@a2a_agent(identity=..., extensions=(enable(TRAJECTORY_V1, live=True),))
+class MyAgent(AgentEnvAgent):
+    async def run(self, request: TaskRequest[MyAgentConfig]) -> TaskResult:
+        request.trajectory.set_format("my-cli-events/1")
+        execution = await run_my_cli(request, on_event=request.trajectory.append)
+        return TaskResult.text(execution.output)
+```
+
+`append(event)` takes a JSON object and serializes it at once, so an event
+never changes after it is appended and a read never returns part of one. It does
+no I/O; call it from one thread at a time. After the task ends the log refuses
+further events. `set_format` names the events' versioned format, which readers
+use to parse them; call it before the first `append`, which otherwise raises.
+Once an event is appended the format cannot change.
+
+The framework keeps each task's log and serves it while the task runs. When the
+result carries no `native_trajectory`, the log is the task's final trajectory:
+the completed-task reads `{task_id}` and `{task_id, objects}` return it as a JSON
+array. A `native_trajectory` remains the final record of a runtime that can only
+produce one at the end, and takes precedence over appended events.
+
+`live=True` adds two cursor reads to `TRAJECTORY_V1.get`, both framework-owned:
+
+| Request | Reads |
+| --- | --- |
+| `{task_id, after, limit?}` | one task's events |
+| `{context_id, after, limit?}` | the events of every task in a context, in execution order |
+
+Both answer `{context_id, task_id, state, format, events, next, has_more}`
+(`TrajectoryEventsResponse`):
+
+- `events` are the events from position `after`, zero-based. `next` is
+  `after` plus the number returned, the position to read from next; `has_more`
+  says more events are already readable past this page. A page holds at most
+  `limit` events (1 to 1,000, default 1,000) and about 4 MiB, but always at
+  least one event when one exists. A `limit` outside 1 to 1,000, or `after` past
+  the last event, is HTTP 400.
+- `state` is `pending` before the first event, `running` while the task runs,
+  then `completed`, `failed` or `canceled`. A terminal state is reported only
+  once the log can no longer change, so a reader that has reached `has_more:
+  false` in a terminal state has every event. The terminal state is recorded
+  before the task's terminal A2A status, so the completed-task reads succeed as
+  soon as a client sees the task end.
+- A context read reports the context's current task, the running one or else the
+  latest, and the most recent `format` any of its tasks set; its `state` is
+  `running` while any task runs.
+- A task or context the agent has not seen, or no longer keeps, is HTTP 404. A
+  task is known from the moment `message/send` returns its id, so a 404 for an
+  id that was readable means it was evicted, and any cursor held for it, or for
+  its context, is no longer valid.
+
+`live=True` also enables the context reads `{context_id}` and
+`{context_id, objects}`; the framework answers them with the context's events
+unless the agent binds its own handlers, which take precedence. An agent that
+overrides the whole `get` operation must accept the cursor requests too.
+Clients detect live support from the card, with
+`card_request_accepts(get_request, {"task_id", "after"})`.
+
+The logs are kept in memory for up to 1,024 contexts. Past that, whole contexts
+are dropped, least recently used first; a context with a task still pending or
+running is never dropped, nor is the one whose task has just ended. A running
+task's log is logged as a warning once it passes 100 MiB.
 
 `enable(..., description="...")` is reserved for declarations carrying
 configuration or metadata. It preserves the agent-specific extension prose
@@ -319,7 +390,8 @@ entry in `extensions=` is required.
 Configuration keywords are definition-owned rather than hardcoded in
 `enable()`. A configurable `ExtensionDefinition` supplies a named keyword-only
 `configuration_validator` returning `ExtensionConfiguration` with card
-`wire_params`, internal `options`, and optional `features`. `enable()` only
+`wire_params`, internal `options`, and optional `features` and request
+`variants`. `enable()` only
 dispatches to that callable. Definitions without a validator reject
 configuration keywords, and third-party definitions use the same public API as
 the built-ins.
@@ -416,9 +488,9 @@ async def get_live_trajectory(self, request: ContextObjectTrajectoryRequest):
 The last handler opts that agent into the optional live-context variant of
 `TRAJECTORY_V1.get` that uploads through an object grant;
 `TRAJECTORY_V1.get.context` (`ContextTrajectoryRequest`) is its inline
-counterpart. Without them the generated card advertises only the
-framework-owned completed-task variants: `{task_id}`, answered inline, and
-`{task_id, objects}`, answered by upload.
+counterpart. Without them, or `enable(TRAJECTORY_V1, live=True)`, the
+generated card advertises only the framework-owned completed-task variants:
+`{task_id}`, answered inline, and `{task_id, objects}`, answered by upload.
 Snapshot `save` and `load` are an atomic core contract, while its optional
 changelog handlers are enabled as an atomic feature group.
 Each operation has at most one response model. The framework validates a
@@ -556,6 +628,7 @@ optional field, `|` an alternative request):
 | skill `add` | `{name, description, skill_md}` \| `{name, description, skill_bundle: {max_total_bytes, files: [{path, object: ReadObject}]}}` | `{name}` |
 | trajectory `get` | `{task_id}` \| `{context_id}` | `{trajectory}` |
 | | `{task_id \| context_id, objects: {trajectory: WriteObject}}` | `{objects: {trajectory: Uploaded}}` |
+| | `{task_id \| context_id, after, limit?}` | `{context_id, task_id, state, format, events, next, has_more}` |
 | snapshot `save` | `{context_id, objects: {trajectory: WriteObject, workspace?: WriteObject}}` | `{context_id, objects: {trajectory: Uploaded, workspace?: Uploaded}}` |
 | snapshot `load` | `{objects: {trajectory: ReadObject, workspace?: ReadObject}, target_context_id?}` | `{context_id}` |
 | `enable-changelog` | `{write_namespace: WriteNamespaceGrant, roots?}` | `{roots}` |

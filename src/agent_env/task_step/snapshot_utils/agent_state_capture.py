@@ -223,12 +223,7 @@ def upload_trajectory(
     """
 
     store = get_config().get_object_store()
-    # Via the store, not urlparse().path: a prefix naming a different bucket
-    # must fail loudly, not silently write to the configured one.
-    prefix_key = store.get_object_key(trajectory_output_prefix)
-    if prefix_key and not prefix_key.endswith("/"):
-        prefix_key += "/"
-    key = f"{prefix_key}trajectory-{name or uuid.uuid4().hex[:12]}.json"
+    key = f"{trajectory_prefix_key(store, trajectory_output_prefix)}trajectory-{name or uuid.uuid4().hex[:12]}.json"
     body = json.dumps(trajectory, indent=2, default=str).encode()
     return store.put(key, body, content_type="application/json")
 
@@ -248,8 +243,16 @@ def trajectory_object_url(
     trajectory_output_prefix: str, *, store, name: Optional[str] = None
 ) -> str:
     """Return the durable URL used for one agent-written trajectory."""
+    key = f"{trajectory_prefix_key(store, trajectory_output_prefix)}trajectory-{name or uuid.uuid4().hex[:12]}.json"
+    return store.object_url(key)
+
+
+def trajectory_prefix_key(store, trajectory_output_prefix: str) -> str:
+    """The store key of a trajectory prefix, ending in ``/``.
+
+    Via the store, not urlparse().path: a prefix naming a different bucket must fail loudly
+    (``ValueError``), not silently write to the configured one."""
     prefix_key = store.get_object_key(trajectory_output_prefix)
     if prefix_key and not prefix_key.endswith("/"):
         prefix_key += "/"
-    key = f"{prefix_key}trajectory-{name or uuid.uuid4().hex[:12]}.json"
-    return store.object_url(key)
+    return prefix_key

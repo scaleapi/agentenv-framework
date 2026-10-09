@@ -72,6 +72,7 @@ from agentenv_protocol.a2a_agent import (
     TaskResult,
     TaskTrajectoryRequest,
     TextPart,
+    TrajectoryState,
     TriggerDecideRequest,
     TriggerRegisterRequest,
     Usage,
@@ -90,10 +91,10 @@ from agentenv_protocol.a2a_agent._triggers import (
     TriggerError,
     TriggerTimeoutError,
 )
+from agentenv_protocol.a2a_agent._trajectory_log import TaskTrajectories
 from agentenv_protocol.a2a_agent.framework import (
     _BoundedContextLocks,
     _BoundedContextSessions,
-    _BoundedTaskTrajectories,
     _SdkServices,
     _StandardExecutor,
 )
@@ -241,18 +242,21 @@ def test_context_session_cache_evicts_least_recently_used_context() -> None:
     assert sessions.get("third") == "session-3"
 
 
-def test_trajectory_cache_evicts_least_recently_used_task() -> None:
-    trajectories = _BoundedTaskTrajectories(max_entries=2)
-    trajectories["first"] = {"event": 1}
-    trajectories["second"] = {"event": 2}
-    assert trajectories.get("first") == {"event": 1}
+def test_trajectory_cache_evicts_least_recently_used_context() -> None:
+    trajectories = TaskTrajectories(max_contexts=2)
+    for number in (1, 2):
+        trajectories.register(f"task-{number}", f"context-{number}")
+        trajectories.seal(
+            f"task-{number}", TrajectoryState.COMPLETED, native=f"[{number}]".encode()
+        )
+    assert trajectories.final("task-1") == b"[1]"
 
-    trajectories["third"] = {"event": 3}
+    trajectories.register("task-3", "context-3")
+    trajectories.seal("task-3", TrajectoryState.COMPLETED, native=b"[3]")
 
-    assert trajectories.get("first") == {"event": 1}
-    assert trajectories.get("second") is None
-    assert trajectories.get("third") == {"event": 3}
-    assert len(trajectories) == 2
+    assert trajectories.final("task-1") == b"[1]"
+    assert trajectories.final("task-2") is None
+    assert trajectories.final("task-3") == b"[3]"
 
 
 @pytest.mark.asyncio
@@ -2044,15 +2048,16 @@ def test_trajectory_context_variant_is_advertised_only_with_handler() -> None:
         ],
     }
 
-    with pytest.raises(TypeError, match="unsupported configuration"):
+    with pytest.raises(TypeError, match="unexpected keyword argument 'source'"):
         enable(TRAJECTORY_V1, source="task_result")
 
 
 @pytest.mark.asyncio
 async def test_default_handler_delegation_accepts_sdk_request_variant() -> None:
     services = _SdkServices([enable(TRAJECTORY_V1)], None)
-    services.task_trajectories["task-1"] = NativeTrajectory(
-        format="events/v1", payload=[{"type": "result"}]
+    services.task_trajectories.register("task-1", "context-1")
+    services.task_trajectories.seal(
+        "task-1", TrajectoryState.COMPLETED, native=b'[{"type":"result"}]'
     )
 
     result = await DefaultExtensionHandlers(services).call(

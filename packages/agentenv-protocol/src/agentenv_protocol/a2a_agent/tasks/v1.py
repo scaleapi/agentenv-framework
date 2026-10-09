@@ -8,6 +8,8 @@ methods rather than required constructor arguments.
 
 from __future__ import annotations
 
+import json
+import logging
 from collections.abc import AsyncIterator, Awaitable, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
@@ -17,6 +19,9 @@ from typing import Annotated, Any, Generic, Literal, TypeAlias, TypeVar, Union
 from a2a.types import TaskStatusUpdateEvent
 from pydantic import BaseModel, ConfigDict, Field
 
+logger = logging.getLogger(__name__)
+
+_LARGE_LIVE_TRAJECTORY_BYTES = 100 * 1024 * 1024
 
 _WriteOnlyT = TypeVar("_WriteOnlyT")
 WriteOnly: TypeAlias = Annotated[
@@ -125,9 +130,67 @@ class AgentConfig(BaseModel):
 ConfigT = TypeVar("ConfigT", bound=AgentConfig)
 
 
+class TrajectoryLog:
+    """Append-only trajectory of one task, readable while the task runs.
+
+    Each event is serialized as it is appended, so an event once read never changes; append
+    from one thread at a time. Unless the result carries a ``native_trajectory``, the log is
+    the task's final trajectory."""
+
+    __slots__ = ("_events", "_size_bytes", "_format", "_sealed", "_task_id", "_warned")
+
+    def __init__(self) -> None:
+        self._events: list[bytes] = []
+        self._size_bytes = 0
+        self._format: str | None = None
+        self._sealed = False
+        self._task_id: str | None = None
+        self._warned = False
+
+    @property
+    def format(self) -> str | None:
+        return self._format
+
+    def set_format(self, format: str) -> None:
+        """Name the events' versioned format, such as ``my-cli-events/1``; once an event is
+        appended, it stays."""
+        if not isinstance(format, str) or not format.strip():
+            raise ValueError("trajectory format must be a non-empty string")
+        self._ensure_open()
+        if self._events and format != self._format:
+            raise RuntimeError("the trajectory's format cannot change once events are appended")
+        self._format = format
+
+    def append(self, event: Mapping[str, Any]) -> None:
+        """Record one complete event, a JSON object, after ``set_format`` has named its format."""
+        if not isinstance(event, Mapping):
+            raise TypeError("a trajectory event must be a JSON object")
+        self._ensure_open()
+        if self._format is None:
+            raise RuntimeError("call set_format(...) before appending trajectory events")
+        encoded = json.dumps(dict(event), separators=(",", ":"), allow_nan=False).encode()
+        self._events.append(encoded)
+        self._size_bytes += len(encoded)
+        if not self._warned and self._size_bytes > _LARGE_LIVE_TRAJECTORY_BYTES:
+            self._warned = True
+            logger.warning(
+                "trajectory of running task %s exceeds %d bytes",
+                self._task_id,
+                _LARGE_LIVE_TRAJECTORY_BYTES,
+            )
+
+    def __len__(self) -> int:
+        return len(self._events)
+
+    def _ensure_open(self) -> None:
+        if self._sealed:
+            raise RuntimeError("the task has ended; its trajectory can no longer change")
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class TaskRequest(Generic[ConfigT]):
-    """Frozen request record with detached, JSON-native nested values."""
+    """Frozen request record with detached, JSON-native nested values, plus the
+    task's live trajectory log."""
 
     task_id: str
     context_id: str
@@ -138,6 +201,9 @@ class TaskRequest(Generic[ConfigT]):
     metadata: Mapping[str, Any] = field(default_factory=dict)
     session_ref: str | None = None
     workspace: Path | None = None
+    trajectory: TrajectoryLog = field(
+        default_factory=TrajectoryLog, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "parts", tuple(self.parts))

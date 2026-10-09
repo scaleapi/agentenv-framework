@@ -19,7 +19,6 @@ from agentenv_protocol.a2a_agent import (
     AgentEnvAgent,
     AgentIdentity,
     NamespaceChangelogEnableRequest,
-    NativeTrajectory,
     ObjectChangelogApplyRequest,
     ObjectSnapshotLoadRequest,
     ObjectSnapshotSaveRequest,
@@ -32,6 +31,7 @@ from agentenv_protocol.a2a_agent import (
     TaskRequest,
     TaskResult,
     TaskTrajectoryRequest,
+    TrajectoryState,
     TrajectoryWriteObjects,
     a2a_agent,
     card_request_accepts,
@@ -549,8 +549,9 @@ async def test_sdk_trajectory_handler_uploads_portable_object(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     services = _SdkServices((enable(TRAJECTORY_V1),), None)
-    services.task_trajectories["task-1"] = NativeTrajectory(
-        format="events/v1", payload=[{"type": "result"}]
+    services.task_trajectories.register("task-1", "context-1")
+    services.task_trajectories.seal(
+        "task-1", TrajectoryState.COMPLETED, native=b'[{"type":"result"}]'
     )
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -573,7 +574,7 @@ async def test_sdk_trajectory_handler_uploads_portable_object(
             }
         }
     }
-    assert services.task_trajectories.get("task-1") is not None
+    assert services.task_trajectories.final("task-1") is not None
 
 
 @pytest.mark.asyncio

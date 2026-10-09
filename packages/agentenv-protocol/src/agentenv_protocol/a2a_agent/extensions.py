@@ -17,6 +17,7 @@ from pydantic import (
     ConfigDict,
     Field,
     PositiveInt,
+    StrictInt,
     ValidationError,
     model_validator,
 )
@@ -130,6 +131,45 @@ class TrajectoryUploadedObjects(ExtensionResponse):
 
 class TrajectoryObjectsResponse(ExtensionResponse):
     objects: TrajectoryUploadedObjects
+
+
+class TrajectoryState(str, Enum):
+    """Where a trajectory stands: ``pending`` has no events yet, ``running`` is still
+    gaining them, and the terminal states gain no more."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELED = "canceled"
+
+
+MAX_TRAJECTORY_READ_EVENTS = 1_000
+
+
+class TaskEventsTrajectoryRequest(ExtensionRequest):
+    task_id: str
+    after: StrictInt = Field(ge=0)
+    limit: StrictInt | None = Field(default=None, ge=1, le=MAX_TRAJECTORY_READ_EVENTS)
+
+
+class ContextEventsTrajectoryRequest(ExtensionRequest):
+    context_id: str
+    after: StrictInt = Field(ge=0)
+    limit: StrictInt | None = Field(default=None, ge=1, le=MAX_TRAJECTORY_READ_EVENTS)
+
+
+class TrajectoryEventsResponse(ExtensionResponse):
+    """Events from position ``after`` on; ``next`` is the position to read from next, and
+    ``has_more`` says more events are already readable past this page."""
+
+    context_id: str
+    task_id: str
+    state: TrajectoryState
+    format: str | None = None
+    events: list[Any]
+    next: int
+    has_more: bool
 
 
 def _opaque_snapshot_objects(
@@ -573,6 +613,7 @@ class ExtensionConfiguration:
     wire_params: Mapping[str, Any] = field(default_factory=dict)
     options: Mapping[str, Any] = field(default_factory=dict)
     features: frozenset[str] = frozenset()
+    variants: Mapping[str, frozenset[str]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -580,6 +621,13 @@ class ExtensionConfiguration:
         )
         object.__setattr__(self, "options", MappingProxyType(dict(self.options)))
         object.__setattr__(self, "features", frozenset(self.features))
+        object.__setattr__(
+            self,
+            "variants",
+            MappingProxyType(
+                {operation: frozenset(names) for operation, names in self.variants.items()}
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -872,6 +920,18 @@ def _configure_install(**declaration: Any) -> ExtensionConfiguration:
     return ExtensionConfiguration(wire_params=declaration)
 
 
+def _configure_trajectory(*, live: bool = False) -> ExtensionConfiguration:
+    """``live=True`` advertises the cursor reads, which serve the framework's log while a
+    task runs, and the context reads the framework answers when the agent binds none."""
+    if not isinstance(live, bool):
+        raise TypeError("live must be a boolean")
+    if not live:
+        return ExtensionConfiguration()
+    return ExtensionConfiguration(
+        variants={"get": {"task_events", "context_events", "context", "context_objects"}}
+    )
+
+
 SDK = ImplementationOwner.SDK
 RUNTIME = ImplementationOwner.RUNTIME
 
@@ -972,10 +1032,23 @@ TRAJECTORY_V1 = ExtensionDefinition(
                         support_required=False,
                         implementation=RUNTIME,
                     ),
+                    RequestVariant(
+                        "task_events",
+                        TaskEventsTrajectoryRequest,
+                        support_required=False,
+                        implementation=SDK,
+                    ),
+                    RequestVariant(
+                        "context_events",
+                        ContextEventsTrajectoryRequest,
+                        support_required=False,
+                        implementation=SDK,
+                    ),
                 ),
             ),
         )
     },
+    configuration_validator=_configure_trajectory,
 )
 
 SNAPSHOT_V1 = ExtensionDefinition(
@@ -1158,14 +1231,17 @@ def enable(
 
     selected_features = set(features)
     selected_features.update(validated.features)
+    selected_variants = dict(validated.variants)
+    for operation, names in (variants or {}).items():
+        selected_variants[operation] = selected_variants.get(
+            operation, frozenset()
+        ) | frozenset(names)
 
     return ExtensionActivation(
         definition=definition,
         description=description,
         features=frozenset(selected_features),
-        variants={
-            operation: frozenset(names) for operation, names in (variants or {}).items()
-        },
+        variants=selected_variants,
         wire_params=validated.wire_params,
         options=validated.options,
         required=required,
