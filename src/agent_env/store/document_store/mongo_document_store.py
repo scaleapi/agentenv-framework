@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future, wait
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from functools import partial
 from typing import Optional
 
@@ -19,7 +20,7 @@ from pymongo import ASCENDING, DESCENDING, MongoClient, ReturnDocument
 from pymongo.collection import Collection
 from pymongo.database import Database
 from pymongo.errors import DuplicateKeyError as PyMongoDuplicateKeyError
-from pymongo.errors import NetworkTimeout, OperationFailure
+from pymongo.errors import ConnectionFailure, OperationFailure
 
 from agent_env.store.document_store.document_store import (
     AbsentOrNull,
@@ -42,6 +43,7 @@ logger = logging.getLogger(__name__)
 
 # Not pymongo.timeout: that sends maxTimeMS, and MongoDB aborts a build whose createIndexes runs out of it.
 _INDEX_BUILD_WAIT_SECONDS = 5
+_INDEX_RETRY_SECONDS = 5
 
 
 def _field_cond(mongo: dict, field: str) -> dict:
@@ -126,25 +128,35 @@ def _index_spec(fields: list[str], unique: bool) -> tuple[list[tuple[str, int]],
     return [(f, ASCENDING) for f in fields], "_".join(fields) + ("_unique" if unique else "_index")
 
 
-def _settle(build: Future[None], create: Callable[[], None]) -> None:
+def _build_index(build: Future[bool], create: Callable[[], None], listed: Callable[[], bool]) -> None:
+    """Resolve ``build`` to True once MongoDB has built the index, or to False once a request cut off by a connection
+    failure has left a build that MongoDB lists. A request that left none is sent again, so an index the caller
+    stopped waiting for is never left missing."""
     try:
-        create()
+        while True:
+            try:
+                create()
+            except ConnectionFailure:
+                with suppress(ConnectionFailure):
+                    if listed():
+                        build.set_result(False)
+                        return
+                time.sleep(_INDEX_RETRY_SECONDS)
+            else:
+                build.set_result(True)
+                return
     except BaseException as exc:
         build.set_exception(exc)
-    else:
-        build.set_result(None)
 
 
-def _report_late_build(collection: str, name: str, build: Future[None]) -> None:
+def _report_late_build(collection: str, name: str, build: Future[bool]) -> None:
     error = build.exception()
-    if error is None:
-        logger.info("MongoDB finished building index %s on %s", name, collection)
-    elif isinstance(error, NetworkTimeout):
-        logger.info(
-            "Stopped waiting for index %s on %s (%s); MongoDB finishes a build it has started", name, collection, error
-        )
-    else:
+    if error is not None:
         logger.error("MongoDB did not build index %s on %s: %s", name, collection, error)
+    elif build.result():
+        logger.info("MongoDB finished building index %s on %s", name, collection)
+    else:
+        logger.info("Lost the connection while MongoDB builds index %s on %s; it finishes the build", name, collection)
 
 
 def _strip_id(doc: Optional[dict]) -> Optional[dict]:
@@ -279,28 +291,28 @@ class MongoDocumentStore(DocumentStore):
         unique: bool = False,
         ttl_seconds: Optional[int] = None,
     ) -> None:
-        """Wait at most ``_INDEX_BUILD_WAIT_SECONDS`` for MongoDB to build a missing plain index, then leave the
-        build to finish on the server: over a large collection it takes minutes, and holding up the write that asked
-        for it fails that write. A unique index is awaited in full, since writes rely on its constraint."""
+        """Wait at most ``_INDEX_BUILD_WAIT_SECONDS`` for a missing plain index, then go on while a background thread
+        sees the build through: over a large collection it takes minutes, and holding up the write that asked for it
+        fails that write. A unique index is awaited in full, since writes rely on its constraint."""
         if unique:
             self._create_index(collection, fields, unique, ttl_seconds)
             return
         keys, name = _index_spec(fields, unique)
-        existing = self._c(collection).index_information()
-        if name in existing or any(spec["key"] == keys for spec in existing.values()):
+        if self._listed(collection, keys, name):
             return
-        build: Future[None] = Future()
+        build: Future[bool] = Future()
         create = partial(self._create_index, collection, fields, unique, ttl_seconds)
+        listed = partial(self._listed, collection, keys, name)
         thread_name = f"ensure-index-{collection}.{name}"
-        threading.Thread(target=_settle, args=(build, create), name=thread_name, daemon=True).start()
-        if wait([build], timeout=_INDEX_BUILD_WAIT_SECONDS).done:
-            error = build.exception()
-            if error is None:
-                return
-            if not isinstance(error, NetworkTimeout) or name not in self._c(collection).index_information():
-                raise error
-        logger.warning("MongoDB is still building index %s on %s; going on without waiting for it", name, collection)
+        threading.Thread(target=_build_index, args=(build, create, listed), name=thread_name, daemon=True).start()
+        if wait([build], timeout=_INDEX_BUILD_WAIT_SECONDS).done and build.result():
+            return
+        logger.warning("Index %s on %s is not built yet; going on without waiting for it", name, collection)
         build.add_done_callback(partial(_report_late_build, collection, name))
+
+    def _listed(self, collection: str, keys: list[tuple[str, int]], name: str) -> bool:
+        existing = self._c(collection).index_information()
+        return name in existing or any(spec["key"] == keys for spec in existing.values())
 
     def _create_index(
         self,
