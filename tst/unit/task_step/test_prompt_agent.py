@@ -27,6 +27,7 @@ from agent_env.store.object_store import LocalFilesystemObjectStore
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
 from agent_env.task_step.snapshot_utils import agent_state_capture
 from agent_env.task_step.task_steps import prompt_agent as pa
+from agent_env.a2a_agent.protocol import MAX_TURNS_ERROR_CODE
 from agent_env.task_step.task_steps.prompt_agent import (
     PromptAgentTaskStep,
     _duplicates_prompt_text,
@@ -267,5 +268,71 @@ async def test_sdk_agent_on_the_local_store_still_records_its_trajectory(monkeyp
     assert trajectory_requests == [{"task_id": "task-1"}]
     assert store.get_object_key(uri).startswith("prompt_agent_trajectories/trajectory-")
     assert json.loads(store.get(uri)) == [{"type": "echo", "output": "Echo: hi"}]
+
+
+def _serve_failed_terminal(monkeypatch, *, error_code):
+    """Serve an A2A agent whose task terminates in state=failed carrying error_code."""
+    for fn in ("create_conversation", "add_a2a_task", "complete_a2a_task",
+               "mark_closed", "get_conversation"):
+        monkeypatch.setattr(pa.conversation_store, fn, lambda *a, **kw: None)
+    monkeypatch.setattr(pa, "fetch_container_logs", AsyncMock(return_value=None))
+
+    data = {"error_type": "agent_error", "error_message": "Max turns (500) reached without completion."}
+    if error_code is not None:
+        data["error_code"] = error_code
+    status = {"state": "failed", "message": {"parts": [
+        {"kind": "text", "text": "Max turns (500) reached without completion."},
+        {"kind": "data", "data": data},
+    ]}}
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        result = (
+            {"id": "task-1", "contextId": "ctx"}
+            if body["method"] == "message/send"
+            else {"status": status}
+        )
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": result})
+
+    transport = httpx.MockTransport(answer)
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: real_client(*a, transport=transport, **kw))
+
+
+def _solver_context_and_step():
+    context = TaskStepContext(instance_id="ti-1")
+    context.deployed_agents.append(DeployedAgent(
+        agent_name="solver", api_url="http://agent.test", a2a_url="http://agent.test",
+        a2a_card={"capabilities": {"extensions": []}},
+    ))
+    step = PromptAgentTaskStep(
+        id="solve", version=None, prompt="hi", agent_name="solver", poll_interval_seconds=0,
+    )
+    return context, step
+
+
+@pytest.mark.asyncio
+async def test_max_turns_terminal_grades_without_raising(monkeypatch):
+    # A max-steps terminal is an expected budget outcome: execute() must return
+    # the context (so the task flows on to grading) rather than raising, which
+    # would be retried into another full budget.
+    _serve_failed_terminal(monkeypatch, error_code=MAX_TURNS_ERROR_CODE)
+    context, step = _solver_context_and_step()
+
+    result = await step.execute(context)
+
+    assert result is context
+    assert result.prompt_responses[-1].error_code == MAX_TURNS_ERROR_CODE
+
+
+@pytest.mark.asyncio
+async def test_other_failed_terminal_still_raises(monkeypatch):
+    # A failure without the max-steps error_code is a real failure: still raise
+    # so Temporal retries it as before.
+    _serve_failed_terminal(monkeypatch, error_code=None)
+    context, step = _solver_context_and_step()
+
+    with pytest.raises(RuntimeError, match="A2A task failed"):
+        await step.execute(context)
 
 

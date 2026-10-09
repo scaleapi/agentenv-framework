@@ -14,6 +14,7 @@ from a2a.types import TaskState
 
 from agent_env.a2a_agent import A2AAgent, conversation_store
 from agent_env.a2a_agent import protocol
+from agent_env.a2a_agent.protocol import MAX_TURNS_ERROR_CODE
 from agent_env.a2a_agent.object_transfer import (
     TrajectoryUpload,
     fetch_trajectory,
@@ -693,6 +694,20 @@ class PromptAgentTaskStep(TaskStep):
             step_id=self.id,
             structured_output=structured_output,
         ))
+
+        if final_state == TaskState.failed and final_terminal.error_code == MAX_TURNS_ERROR_CODE:
+            # Exhausting the step/turn budget is an expected outcome, not a
+            # retryable crash: re-running the prompt just burns another full
+            # budget and never grades. Return the context (the prompt_response
+            # with its trajectory was already recorded above) so the task flows
+            # on to grading instead of raising.
+            logger.warning(
+                "Agent '%s' hit its step budget (task_id=%s, error_code=%s); grading the "
+                "partial trajectory without retrying. %s",
+                self.agent_name, final_task_id, final_terminal.error_code,
+                agent_error_text(final_terminal.error_message, final_terminal.response_text),
+            )
+            return context
 
         if final_state == TaskState.failed:
             detail_parts = []
