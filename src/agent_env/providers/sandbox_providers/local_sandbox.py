@@ -34,7 +34,7 @@ from agent_env.providers.sandbox_providers.sandbox import SANDBOX_LABEL, Network
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_CONTAINER,
     SANDBOX_MODE_VM,
-    ImageUse,
+    Creation,
     Runs,
     SandboxProvider,
     refuse_unenforceable_policy,
@@ -501,10 +501,10 @@ class LocalSandboxProvider(SandboxProvider):
     ON_THIS_MACHINE = True
 
     @classmethod
-    def runs(cls, use: ImageUse) -> Runs:
-        """A gateway in a VM on this machine, which loads its servers' images; an agent or a lone server in a container
-        from its image's name, which this machine's Docker pulls or already holds."""
-        return Runs.IN_VM if use is ImageUse.GATEWAY else Runs.BY_NAME
+    def runs(cls, creation: Creation) -> Runs:
+        """A container from the image's name either way, which this machine's Docker pulls or already holds; the VMs it
+        creates (``create_vm``) load images of their own."""
+        return Runs.BY_NAME
 
     def url_from_sandbox(self, url: str) -> str:
         return self.get_external_url(url)

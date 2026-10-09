@@ -57,9 +57,9 @@ _STOCK_POSTGRES_IMAGE = "public.ecr.aws/docker/library/postgres:16-alpine"
 
 @dataclass
 class ContainerSpec:
-    """Declarative spec for a store/sidecar container the compute layer provisions (Modal
-    path). The gateway's ``create_container`` loop consumes these and adds its own sandbox
-    knobs (i6pn, attribution)
+    """Declarative spec for a store/sidecar container the compute layer provisions (container
+    mode). The gateway's ``create_container`` loop consumes these and adds its own sandbox
+    knobs (the private network, attribution)
     """
 
     name: str
@@ -85,7 +85,7 @@ class LocalPostgresStateContext(StateContext):
 
     environment_names: the services this shared store must host, one schema each.
     host: the servicedb address, supplied by the compute layer after it stands the
-        container up — e.g. ``"servicedb"`` (compose) or ``"[fdaa::…]"`` (i6pn container).
+        container up — e.g. ``"servicedb"`` (compose) or ``"[fdaa::…]"`` (a container's private host).
     ttl_seconds: the deploy TTL, used to stamp the record's ``expires_at_utc``.
     """
 

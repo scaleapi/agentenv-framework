@@ -14,7 +14,7 @@ from agent_env.env.env import DeployedSandboxEnv
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT
 from agent_env.env.gateway.constants import WELL_KNOWN_PATH
 from agent_env.providers.env_providers.env_provider import _SandboxEnvironmentProvider, _size_kwargs, _tool_names
-from agent_env.providers.sandbox_providers.sandbox_provider import ImageUse, Runs, SandboxProvider, image_problem
+from agent_env.providers.sandbox_providers.sandbox_provider import Creation, Runs, SandboxProvider, image_problem
 
 if TYPE_CHECKING:
     from agent_env.env.env import Env
@@ -70,7 +70,7 @@ class EnvironmentServerProvider(_SandboxEnvironmentProvider):
 
         name = env.environment_name
         image = env.docker_image_artifact
-        runs = sandbox_provider.runs(ImageUse.SERVER)
+        runs = sandbox_provider.runs(Creation.CONTAINER)
         if problem := image_problem(image, runs):
             raise ValueError(f"Can't deploy {name!r} as a server on {type(sandbox_provider).__name__}, which runs its "
                              f"image by name: {problem}")

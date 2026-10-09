@@ -37,12 +37,11 @@ class SandboxProviderTypeError(ConfigError):
     """A config-registered provider produced a Sandbox whose ``.type`` != its ``[sandbox.providers.<name>]`` key."""
 
 
-class ImageUse(Enum):
-    """What a deploy runs an image as."""
+class Creation(Enum):
+    """How a provider is asked to run an image."""
 
-    AGENT = "agent"  # an agent, in the sandbox create_sandbox makes
-    SERVER = "server"  # a lone MCP server, in the container create_container makes
-    GATEWAY = "gateway"  # the MCP servers behind a gateway
+    SANDBOX = "sandbox"  # create_sandbox: a sandbox to run it in
+    CONTAINER = "container"  # create_container: a container started from it
 
 
 class Runs(Enum):
@@ -108,15 +107,20 @@ class SandboxProvider(ABC):
         timeout: int = 3600 * 2,
         attribution: Optional[Attribution] = None,
         network_policy: Optional[NetworkPolicy] = None,
+        private_network: bool = False,
     ) -> Sandbox:
         """Provision a sandbox with the registry image already running as a container.
 
         On return, ``tunnel_urls[port]`` is populated and the container listens on ``port``.
-        Caller still owns readiness polling for the container's own endpoints.
+        Caller still owns readiness polling for the container's own endpoints. ``private_network`` puts it on a
+        network this provider's other such containers share, at its ``private_host``.
 
         Default implementation: create_vm, authenticate Docker to ECR if applicable, docker pull,
         docker run. Backends that bake the image in at sandbox-creation time (Modal) override.
         """
+        if private_network:
+            raise ValueError(f"{type(self).__name__} runs each container in a VM of its own, so it can't put "
+                             "containers on a private network they share")
         sandbox = await self.create_vm(
             cpu=cpu, memory=memory, disk_size_gb=disk_size_gb,
             exposed_ports=[port], timeout=timeout,
@@ -179,11 +183,11 @@ class SandboxProvider(ABC):
         return cls.create_vm is not SandboxProvider.create_vm
 
     @classmethod
-    def runs(cls, use: ImageUse) -> Runs:
-        """How it runs an image for ``use``. One that creates VMs runs an agent and a gateway's servers in a VM, and a
-        lone server in a container from its image's name (``create_container``); one that doesn't runs each from its
-        image's name. A provider that runs images otherwise says so here."""
-        if cls.creates_vms() and use is not ImageUse.SERVER:
+    def runs(cls, creation: Creation) -> Runs:
+        """How it runs an image it's given through ``creation``. One that creates VMs gives ``create_sandbox`` a VM,
+        which loads the image, and pulls the image by name for ``create_container``; one that doesn't runs it from its
+        name either way. A provider that runs images otherwise says so here."""
+        if cls.creates_vms() and creation is Creation.SANDBOX:
             return Runs.IN_VM
         return Runs.BY_NAME
 
@@ -195,10 +199,6 @@ class SandboxProvider(ABC):
     def url_from_sandbox(self, url: str) -> str:
         """``url``, of a service this process reaches, as its sandboxes reach it."""
         return url
-
-    def gateway_container_options(self) -> dict[str, Any]:
-        """The ``create_container`` options each of a gateway's containers takes, so they reach one another."""
-        return {}
 
     # Extra flags spliced into the agent container's `docker run` in create_container ("" = none).
     # Backends set this for host-specific needs (e.g. local Linux needs --add-host so the

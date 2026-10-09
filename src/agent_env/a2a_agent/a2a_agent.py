@@ -28,7 +28,7 @@ from agent_env.a2a_agent.object_transfer import (
 from agent_env.a2a_agent.staging import transfer_store
 from agent_env.providers.sandbox_providers.local_sandbox import LOCAL_TRUST_ENV, local_grant_trust, start_trusting
 from agent_env.providers.sandbox_providers.sandbox_provider import (
-    ImageUse,
+    Creation,
     Runs,
     all_sandbox_container_env,
     all_sandbox_url_rewrites,
@@ -435,7 +435,7 @@ class A2AAgent:
                 raise ValueError(f"Can't deploy agent {self.id!r} on the container sandbox {sandbox.sandbox_id!r}, which "
                                  f"runs its own image, never the agent's: {problem}")
             links = provider.links if provider else ()
-            if by_name := [link for link in links if link.runs(ImageUse.AGENT) is Runs.BY_NAME]:
+            if by_name := [link for link in links if link.runs(Creation.SANDBOX) is Runs.BY_NAME]:
                 raise ValueError(f"Can't deploy agent {self.id!r} with {type(by_name[0]).__name__}, which runs an "
                                  f"agent's image by name: {problem}")
 

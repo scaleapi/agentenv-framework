@@ -152,6 +152,8 @@ class Sandbox(ABC):
 
     # Whether it runs on this machine, as a local sandbox does.
     ON_THIS_MACHINE: ClassVar[bool] = False
+    # The host other containers on its provider's private network reach it at, ready for a URL; None when it's on none.
+    private_host: str | None = None
 
     def url_from_sandbox(self, url: str) -> str:
         """``url``, of a service this process reaches, as this sandbox reaches it."""

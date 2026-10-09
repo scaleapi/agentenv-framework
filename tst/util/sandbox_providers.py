@@ -1,6 +1,6 @@
 """A sandbox provider for unit tests that stand one in with a MagicMock: it declares what a real provider declares, that
-it is its own only link, how it runs an agent's, a server's or a gateway's images, and that its sandboxes reach a URL as
-it is."""
+it is its own only link, how it runs an image it's given, whether it creates VMs, and that its sandboxes reach a URL
+as it is."""
 
 from unittest.mock import MagicMock
 
@@ -14,5 +14,4 @@ def mock_provider(runs: Runs = Runs.IN_VM, *, on_this_machine: bool = False, **a
     provider.runs.return_value = runs
     provider.creates_vms.return_value = runs is Runs.IN_VM
     provider.url_from_sandbox.side_effect = lambda url: url
-    provider.gateway_container_options.return_value = {}
     return provider

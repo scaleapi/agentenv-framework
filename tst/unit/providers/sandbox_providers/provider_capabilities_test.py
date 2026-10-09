@@ -1,20 +1,22 @@
 """What each sandbox provider declares it runs, and that nothing outside the providers asks which provider it has: every
 choice that depends on a provider reads what it declares (``ON_THIS_MACHINE``, ``runs``, ``links``, ``creates_vms``,
-``url_from_sandbox``, ``gateway_container_options``)."""
+``url_from_sandbox``, ``create_container(private_network=)`` and its sandboxes' ``private_host``)."""
 
 import ast
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import modal
 import pytest
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
 from agent_env.providers.sandbox_providers.e2b.provider import E2BSandboxProvider
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
-from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
+from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandbox, ModalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandboxProvider
 from agent_env.providers.sandbox_providers.sail_vm.provider import SailVmSandboxProvider
-from agent_env.providers.sandbox_providers.sandbox_provider import ImageUse, Runs, SandboxProvider, image_problem
+from agent_env.providers.sandbox_providers.sandbox_provider import Creation, Runs, SandboxProvider, image_problem
 
 SRC = Path(__file__).resolve().parents[4] / "src" / "agent_env"
 PROVIDERS = SRC / "providers" / "sandbox_providers"
@@ -22,17 +24,17 @@ PROVIDERS = SRC / "providers" / "sandbox_providers"
 IN_VM, BY_NAME, BUILDS = Runs.IN_VM, Runs.BY_NAME, Runs.BUILDS
 
 
-@pytest.mark.parametrize("cls, on_this_machine, creates_vms, agent, server, gateway", [
-    (LocalSandboxProvider, True, True, BY_NAME, BY_NAME, IN_VM),
-    (ModalSandboxProvider, False, False, BUILDS, BUILDS, BUILDS),
-    (ModalVmSandboxProvider, False, True, IN_VM, BY_NAME, IN_VM),
-    (E2BSandboxProvider, False, True, IN_VM, BY_NAME, IN_VM),
-    (SailVmSandboxProvider, False, True, IN_VM, BY_NAME, IN_VM),
+@pytest.mark.parametrize("cls, on_this_machine, creates_vms, sandbox, container", [
+    (LocalSandboxProvider, True, True, BY_NAME, BY_NAME),
+    (ModalSandboxProvider, False, False, BUILDS, BUILDS),
+    (ModalVmSandboxProvider, False, True, IN_VM, BY_NAME),
+    (E2BSandboxProvider, False, True, IN_VM, BY_NAME),
+    (SailVmSandboxProvider, False, True, IN_VM, BY_NAME),
 ], ids=["local", "modal", "modal_vm", "e2b", "sail_vm"])
-def test_each_provider_declares_where_it_runs_and_how_it_runs_each_image(cls, on_this_machine, creates_vms, agent, server,
-                                                                         gateway):
+def test_each_provider_declares_where_it_runs_and_how_it_runs_an_image(cls, on_this_machine, creates_vms, sandbox,
+                                                                       container):
     assert (cls.ON_THIS_MACHINE, cls.creates_vms()) == (on_this_machine, creates_vms)
-    assert [cls.runs(use) for use in (ImageUse.AGENT, ImageUse.SERVER, ImageUse.GATEWAY)] == [agent, server, gateway]
+    assert [cls.runs(Creation.SANDBOX), cls.runs(Creation.CONTAINER)] == [sandbox, container]
 
 
 class _Vms(SandboxProvider):
@@ -49,11 +51,10 @@ class _Containers(SandboxProvider):
 
 
 def test_a_provider_that_declares_nothing_runs_images_as_the_base_class_does():
-    """In a VM it creates, which loads the image, but a lone server from its image's name; with no VM, by name."""
-    assert [_Vms.runs(use) for use in ImageUse] == [IN_VM, BY_NAME, IN_VM]
-    assert [_Containers.runs(use) for use in ImageUse] == [BY_NAME, BY_NAME, BY_NAME]
-    assert (_Vms.ON_THIS_MACHINE, _Vms().url_from_sandbox("http://localhost:4000"), _Vms().gateway_container_options()) == (
-        False, "http://localhost:4000", {})
+    """A sandbox is a VM it creates, which loads the image, and a container pulls it by name; with no VM, by name."""
+    assert [_Vms.runs(creation) for creation in Creation] == [IN_VM, BY_NAME]
+    assert [_Containers.runs(creation) for creation in Creation] == [BY_NAME, BY_NAME]
+    assert (_Vms.ON_THIS_MACHINE, _Vms().url_from_sandbox("http://localhost:4000")) == (False, "http://localhost:4000")
 
 
 def test_a_chain_is_its_providers_in_order_and_one_provider_is_itself():
@@ -64,9 +65,29 @@ def test_a_chain_is_its_providers_in_order_and_one_provider_is_itself():
     assert ChainedSandboxProvider.creates_vms() is False
 
 
-def test_modals_gateway_containers_reach_one_another_over_its_private_network():
-    options = ModalSandboxProvider().gateway_container_options()
-    assert options["i6pn"] is True and set(options) == {"i6pn", "region"}
+@pytest.mark.asyncio
+async def test_a_container_on_modals_private_network_is_on_i6pn_in_the_configured_region(monkeypatch):
+    provider = ModalSandboxProvider()
+    provider._get_client = AsyncMock(return_value=MagicMock())
+    provider._get_app = AsyncMock(return_value="app")
+    monkeypatch.setattr(provider, "_registry_image", AsyncMock(return_value="image"))
+    create = MagicMock()
+    create.aio = AsyncMock(side_effect=RuntimeError("stop"))
+    with patch.object(modal.Sandbox, "_experimental_create", create), pytest.raises(RuntimeError, match="stop"):
+        await provider.create_container(image_name="registry.example/srv:1", port=8000, env={}, private_network=True)
+
+    assert create.aio.call_args.kwargs["i6pn"] is True and "region" in create.aio.call_args.kwargs
+
+
+def test_a_modal_sandbox_on_i6pn_is_reached_at_its_bracketed_address():
+    sandbox = ModalSandbox(MagicMock(object_id="sb-1"), {}, i6pn_address="fdaa::1")
+    assert (sandbox.private_host, ModalSandbox(MagicMock(object_id="sb-2"), {}).private_host) == ("[fdaa::1]", None)
+
+
+@pytest.mark.asyncio
+async def test_a_provider_whose_containers_are_vms_of_their_own_puts_none_on_a_private_network():
+    with pytest.raises(ValueError, match="can't put containers on a private network"):
+        await _Vms().create_container(image_name="img:1", port=8000, env={}, private_network=True)
 
 
 CONTEXT_ONLY = DockerImageArtifact(id="img", version=2, description="d", image_name="local/img-0123456789ab:v2",

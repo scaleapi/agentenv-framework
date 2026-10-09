@@ -10,7 +10,7 @@ import logging
 import os
 import re
 import shlex
-from typing import TYPE_CHECKING, Any, AsyncIterator, ClassVar, Optional
+from typing import TYPE_CHECKING, AsyncIterator, ClassVar, Optional
 
 import httpx
 import modal
@@ -20,7 +20,7 @@ from agent_env.config import get_config
 from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy, Sandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_CONTAINER,
-    ImageUse,
+    Creation,
     Runs,
     SandboxProvider,
     apply_default_attribution,
@@ -119,6 +119,11 @@ class ModalSandbox(Sandbox):
         self.mode = SANDBOX_MODE_CONTAINER
         self.network_policy = network_policy
 
+    @property
+    def private_host(self) -> str | None:
+        """Its address on i6pn, Modal's private network between sandboxes, bracketed for a URL."""
+        return f"[{self.i6pn_address}]" if self.i6pn_address else None
+
     async def terminate(self) -> None:
         await self._sb.terminate.aio()
 
@@ -186,13 +191,9 @@ class ModalSandboxProvider(SandboxProvider):
     _sandbox_cls: type[ModalSandbox] = ModalSandbox
 
     @classmethod
-    def runs(cls, use: ImageUse) -> Runs:
+    def runs(cls, creation: Creation) -> Runs:
         """Each image in a container of its own, built first when it is only a build context (``prepare_image``)."""
         return Runs.BUILDS
-
-    def gateway_container_options(self) -> dict[str, Any]:
-        """i6pn, Modal's private network between sandboxes, in the configured region."""
-        return {"i6pn": True, "region": get_config().modal_default_region}
 
     @classmethod
     def supports_network_policy(cls, policy: NetworkPolicy) -> bool:
@@ -274,7 +275,10 @@ class ModalSandboxProvider(SandboxProvider):
         region: Optional[str] = None,
         expose_externally: bool = True,
         vnc_port: Optional[int] = None,
+        private_network: bool = False,
     ) -> Sandbox:
+        if private_network:  # i6pn, Modal's private network between sandboxes, in the configured region
+            i6pn, region = True, region or get_config().modal_default_region
         effective = self.effective_network_policy(network_policy)
         attribution = dict(attribution or {})
 

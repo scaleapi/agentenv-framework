@@ -76,15 +76,15 @@ _CARD = {"name": "env1234", "additionalInterfaces": [{"url": "/mcp", "transport"
 class _FakeSandbox(Sandbox):
     type = "modal"
 
-    _i6pn_counter = 0
+    _private_counter = 0
 
     def __init__(self, sandbox_id: str, port: int, endpoint: str):
         self.sandbox_id = sandbox_id
         self.tunnel_urls = {port: endpoint}
         self.vnc_url = None
         self.mode = "container"
-        _FakeSandbox._i6pn_counter += 1
-        self.i6pn_address = f"fdaa::fake:{_FakeSandbox._i6pn_counter:x}"
+        _FakeSandbox._private_counter += 1
+        self.private_host = f"[fdaa::fake:{_FakeSandbox._private_counter:x}]"
         self.terminated = False
         self.exec_calls: list[tuple] = []
         self.write_calls: list[tuple] = []
@@ -120,9 +120,10 @@ async def test_container_mode_rejects_websites():
 
 
 def _vm_provider(**attrs) -> MagicMock:
-    """A sandbox provider that runs a gateway in a VM it creates, as every VM provider does."""
+    """A sandbox provider that creates VMs, where a gateway runs, as every VM provider does."""
     provider = MagicMock(ON_THIS_MACHINE=False, **attrs)
     provider.links = (provider,)
+    provider.creates_vms.return_value = True
     provider.runs.return_value = Runs.IN_VM
     return provider
 
@@ -230,7 +231,7 @@ async def test_container_mode_constructs_internal_mcp_servers_url_format():
     env = gateway_call["env"]
     assert "INTERNAL_MCP_SERVERS" in env
     spec = env["INTERNAL_MCP_SERVERS"]
-    # With i6pn enabled (the default), gateway-to-MCP URLs use i6pn addresses.
+    # Container mode puts every container on the private network, and the gateway reaches each server there.
     import re
     assert re.search(r"slack=http://\[fdaa::fake:[0-9a-f]+\]:\d+/mcp", spec), spec
     assert re.search(r"email=http://\[fdaa::fake:[0-9a-f]+\]:\d+/mcp", spec), spec
@@ -257,7 +258,7 @@ async def test_container_mode_constructs_internal_mcp_servers_url_format():
     db_call = next(c for c in create_calls if c["port"] == SERVICE_DB_PORT)
     assert db_call["env"] == LocalPostgresStateProvider().store_spec(["slack", "email"]).env
     # acquire() runs once, after the db container exists; its context carries the
-    # universe's services and the i6pn host the compute layer stood up.
+    # universe's services and the private host the compute layer stood up.
     assert len(acquire_calls) == 1
     assert acquire_calls[0].environment_names == ["slack", "email"]
     assert re.search(r"^\[fdaa::fake:[0-9a-f]+\]$", acquire_calls[0].host), acquire_calls[0].host
@@ -337,7 +338,7 @@ async def test_container_mode_remote_skips_servicedb_and_points_at_remote():
     mcp_call = next(c for c in create_calls if c["image_name"] == "mcp-slack")
     assert mcp_call["env"]["DATABASE_URL"] == gp._state_provider.url_for_environment("slack", instance=gp._state_instance)
     assert "search_path%3D%22slack%22" in mcp_call["env"]["DATABASE_URL"]
-    # The gateway points at the remote base (not an i6pn servicedb address).
+    # The gateway points at the remote base (not a private-network servicedb address).
     gateway_call = create_calls[-1]
     assert gateway_call["env"]["SERVICE_DB_URL"] == db_url_base
 
@@ -569,7 +570,7 @@ async def test_modal_vm_provider_routes_to_vm_path_not_containers():
     """A ModalVmSandboxProvider must dispatch to _deploy_via_vm (one VM + docker-compose),
     NOT _deploy_via_containers. This is the whole point of the standalone class: it is not a
     ModalSandboxProvider, so create_gateway's isinstance check falls through to the VM path
-    and the i6pn (container-only) gate never fires."""
+    and the container-only private-network gate never fires."""
     from agent_env.env.gateway import GatewayMode
     from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandboxProvider
 
