@@ -33,6 +33,7 @@ from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.gateway import constants
 from agent_env.store import get_config
 from agent_env.store.image_store import LocalRegistryImageStore
+from agent_env.store.object_store.local.grant_server import grant_server
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.teardown_sandboxes import TORN_DOWN_KEY, TeardownSandboxesTaskStep
 
@@ -90,6 +91,9 @@ def local_stack(monkeypatch, tmp_path):
     finally:
         for container_name in owned:
             _docker("rm", "-f", container_name)
+        # A server's grants came from this process's grant server, whose certificate is from this test's state root;
+        # a later test's containers trust another root's CA, so it must start afresh.
+        grant_server(None, None).close()
         reset_artifact_store()
         reset_config()
         _docker("rm", "-f", reg_name)
