@@ -242,8 +242,8 @@ class S3ObjectStore(ObjectStore):
         bucket, key = self._split(object_url)
         try:
             upload_id = self._s3.create_multipart_upload(Bucket=bucket, Key=key, ContentType=media_type)["UploadId"]
-        except ClientError as e:
-            raise GrantUnavailableError(f"S3 refused to start an upload to {object_url} ({_code(e)})") from e
+        except (ClientError, BotoCoreError) as e:
+            raise GrantUnavailableError(f"S3 could not start an upload to {object_url} ({_code(e)})") from e
         try:
             urls = [
                 self._s3.generate_presigned_url(
@@ -450,8 +450,8 @@ class _S3PartsWrite(PendingWrite):
                 )
                 for part in page.get("Parts", [])
             ]
-        except ClientError as e:
-            raise UploadFailedError(f"S3 would not list the parts uploaded to {self.object_url} ({_code(e)})") from e
+        except (ClientError, BotoCoreError) as e:
+            raise UploadFailedError(f"S3 could not list the parts uploaded to {self.object_url} ({_code(e)})") from e
         parts.sort(key=lambda part: part["PartNumber"])
         if [(part["PartNumber"], part["Size"]) for part in parts] != expected:
             raise UploadFailedError(
@@ -465,15 +465,17 @@ class _S3PartsWrite(PendingWrite):
                 UploadId=self._upload_id,
                 MultipartUpload={"Parts": [{"PartNumber": part["PartNumber"], "ETag": part["ETag"]} for part in parts]},
             )
-        except ClientError as e:
-            raise UploadFailedError(f"S3 would not complete the upload to {self.object_url} ({_code(e)})") from e
+        except (ClientError, BotoCoreError) as e:
+            raise UploadFailedError(f"S3 could not complete the upload to {self.object_url} ({_code(e)})") from e
 
     def _abort(self) -> None:
         _abort_quietly(self._s3, self._bucket, self._key, self._upload_id)
 
 
-def _code(e: ClientError) -> str:
-    return e.response.get("Error", {}).get("Code", "unknown")
+def _code(e: ClientError | BotoCoreError) -> str:
+    if isinstance(e, ClientError):
+        return e.response.get("Error", {}).get("Code", "unknown")
+    return type(e).__name__
 
 
 def _abort_quietly(s3, bucket: str, key: str, upload_id: str) -> None:
@@ -481,8 +483,6 @@ def _abort_quietly(s3, bucket: str, key: str, upload_id: str) -> None:
     and the bucket's abandoned-upload lifecycle rule is the backstop."""
     try:
         s3.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
-    except ClientError as e:
+    except (ClientError, BotoCoreError) as e:
         if _code(e) != "NoSuchUpload":
             logger.warning("Could not abort the upload to s3://%s/%s (%s)", bucket, key, _code(e))
-    except BotoCoreError as e:
-        logger.warning("Could not abort the upload to s3://%s/%s (%s)", bucket, key, e)

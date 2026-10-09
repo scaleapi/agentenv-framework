@@ -126,6 +126,35 @@ def test_a_bucket_that_refuses_to_start_the_upload_issues_no_grant(s3):
         store.begin_write(store.object_url("t.zip"), media_type="application/zip", max_bytes=MIB, kinds=KINDS)
 
 
+def _unreachable(**_):
+    raise EndpointConnectionError(endpoint_url="https://s3.us-east-1.amazonaws.com")
+
+
+def test_s3_out_of_reach_at_the_start_issues_no_grant(store, monkeypatch):
+    monkeypatch.setattr(store._s3, "create_multipart_upload", _unreachable)
+    with pytest.raises(GrantUnavailableError, match="EndpointConnectionError"):
+        _begin(store)
+
+
+class _UnreachablePaginator:
+    def paginate(self, **kwargs):
+        _unreachable(**kwargs)
+
+
+@pytest.mark.parametrize(("call", "unreachable"), [
+    ("get_paginator", lambda _: _UnreachablePaginator()),
+    ("complete_multipart_upload", _unreachable),
+], ids=["listing-parts", "completing"])
+def test_s3_out_of_reach_at_the_finish_fails_the_write(s3, store, monkeypatch, call, unreachable):
+    write = _begin(store)
+    _receive(s3, write.grant, b"x" * MIB)
+
+    monkeypatch.setattr(write._s3, call, unreachable)
+    with pytest.raises(UploadFailedError, match="EndpointConnectionError"):
+        write.complete(Uploaded(size_bytes=MIB))
+    assert _upload_is_gone(s3, write)
+
+
 def test_a_store_that_refuses_to_finish_fails_the_write_and_discards_it(s3, store, monkeypatch):
     write = _begin(store)
     _receive(s3, write.grant, b"x" * MIB)
@@ -146,11 +175,8 @@ def test_an_abort_that_cannot_reach_s3_does_not_hide_why_the_write_failed(s3, st
     def denied(**_):
         raise ClientError({"Error": {"Code": "AccessDenied", "Message": "no"}}, "CompleteMultipartUpload")
 
-    def unreachable(**_):
-        raise EndpointConnectionError(endpoint_url="https://s3.us-east-1.amazonaws.com")
-
     monkeypatch.setattr(write._s3, "complete_multipart_upload", denied)
-    monkeypatch.setattr(write._s3, "abort_multipart_upload", unreachable)
+    monkeypatch.setattr(write._s3, "abort_multipart_upload", _unreachable)
     with pytest.raises(UploadFailedError, match="AccessDenied"):
         write.complete(Uploaded(size_bytes=MIB))
 
