@@ -34,6 +34,7 @@ from agent_env.store.ids import image_repository
 from agent_env.store.routing import disable_namespace_routing
 from agent_env.task import Task
 from agent_env.task_step.task_step import TaskStep
+from agent_env.utils.build_context import BuildContext
 from tst.unit.bundle._support import RefusingStore, layout, local_store, plan_of
 
 ROOT = "@local/~/triage"
@@ -402,6 +403,42 @@ def test_a_changed_build_context_rebuilds_the_image_and_rewrites_its_agent(bundl
     assert A2AAgent.get(f"{ROOT}/solver").docker_image_artifact.version == 2
 
 
+def test_an_image_written_as_its_build_context_is_uploaded_with_no_build_and_no_docker(bundle_dir, builds,
+                                                                                       monkeypatch):
+    monkeypatch.setattr(materialize_module.shutil, "which", lambda name: None)
+    layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\nCOPY run.sh /\n", "agents/solver/run.sh": "echo hi\n"})
+    _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
+    image = f"{ROOT}/solver__agent_image"
+    announced = []
+
+    first = materialize(plan_of(bundle_dir), contexts=frozenset({image}), on_build=lambda write: announced.append(write.id))
+
+    written = DockerImageArtifact.get(image, 1)
+    folder = bundle_dir / "agents/solver"
+    assert builds == [] and announced == [] and first.contexts == {image}
+    assert written.context_only and (written.dockerfile_path, written.platform) == ("Dockerfile", "linux/amd64")
+    assert written.source_digest == BuildContext.of(folder, folder / "Dockerfile").source_digest("linux/amd64")
+    assert A2AAgent.get(f"{ROOT}/solver").docker_image_artifact.version == 1
+    assert _summary(materialize(plan_of(bundle_dir), contexts=frozenset({image})))[image] == (1, True, ())
+
+
+def test_an_image_switched_between_built_here_and_a_build_context_is_rewritten_with_its_agent(bundle_dir, builds):
+    layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\nCOPY run.sh /\n", "agents/solver/run.sh": "echo hi\n"})
+    _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
+    image = f"{ROOT}/solver__agent_image"
+    _run(bundle_dir)
+
+    as_context = _summary(materialize(plan_of(bundle_dir), contexts=frozenset({image})))
+    built_again = _summary(_run(bundle_dir))
+
+    assert as_context[image] == (2, False, ("now written as a build context, which its VMs build, not an image built "
+                                            "on this machine",))
+    assert as_context[f"{ROOT}/solver"] == (2, False, (f"artifact {image} is written anew (v1 → v2)",))
+    assert built_again[image] == (3, False, ("now written as an image built on this machine, not a build context, "
+                                             "which its VMs build",))
+    assert len(builds) == 2
+
+
 def test_a_dry_run_predicts_a_rebuild_and_its_agents_rewrite_without_building(bundle_dir, builds):
     layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\nCOPY run.sh /\n", "agents/solver/run.sh": "echo hi\n"})
     _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
@@ -485,7 +522,7 @@ def test_whether_an_image_needs_docker_is_decided_once_another_run_writing_it_is
     monkeypatch.setattr(materialize_module, "materializing", materializing)
     check = materialize_module._refuse_builds_without_docker
     monkeypatch.setattr(materialize_module, "_refuse_builds_without_docker",
-                        lambda plan, ledger: events.append("docker checked") or check(plan, ledger))
+                        lambda plan, ledger, contexts: events.append("docker checked") or check(plan, ledger, contexts))
     layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\n"})
     _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
 

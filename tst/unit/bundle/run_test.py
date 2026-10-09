@@ -534,6 +534,8 @@ def test_the_cli_dry_run_lists_an_image_it_would_build_and_builds_nothing(bundle
         "agents/solver: v1 (new)\n"
         "tasks/agent.json: v1 (new)\n"
         "\n"
+        "Images:\n"
+        "  agents/solver (Dockerfile image) v1: built on this machine\n"
         "Would run:\n"
         "  tasks/agent.json v1\n"
         + DRY_RUN

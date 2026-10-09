@@ -29,6 +29,7 @@ from agent_env.task import Task, record_task_cancelled
 from agent_env.task.interrupts import Interrupts
 from agent_env.task.teardown import TeardownReport, teardown_run
 from agent_env.task_step.context import TaskStepContext
+from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM
 
 from ._fs import relative
 from .materialize import Materialization, Materialized, materialize
@@ -156,6 +157,16 @@ class DryRun:
         """``entry``'s path in the bundle (``tasks/hello.json``)."""
         return relative(self.materialization.plan.bundle.bundle.root, entry.path)
 
+    def images(self) -> tuple[str, ...]:
+        """A line per image the bundle builds: which, the version it would leave, and how it would be written."""
+        plan, contexts = self.materialization.plan, self.materialization.contexts
+        return tuple(
+            f"{_label(plan, done.write)} v{done.version}: "
+            + (f"a build context, which each VM deploying it builds for {DEFAULT_BUILD_PLATFORM}"
+               if done.write.id in contexts else "built on this machine")
+            for done in self.materialization.writes if isinstance(done.write.source, BuiltImage)
+        )
+
 
 class RunInterrupted(KeyboardInterrupt):
     """Ctrl-C or SIGTERM stopped ``run_bundle``. ``result`` holds every run, those it cancelled included, each
@@ -210,6 +221,7 @@ def run_bundle(
             on_wait=lambda: say("waiting for another agent-env run to finish writing this bundle's ids"),
             on_build=lambda write: say(f"{_label(plan, write)}: building with docker, which can take minutes"),
             on_write=lambda done: say(_written(plan, done)),
+            contexts=preflight.contexts,
         )
         entries = _to_run(plan)
         to_run = [(entry, Task.get(entry.id, materialization.version_of("task", entry.id))) for entry in entries]
@@ -251,7 +263,8 @@ def dry_run_bundle(
     say = _progress(on_progress)
     with namespace_routing():
         plan, preflight = _planned(root, tasks, evals, id_root, sandbox)
-        materialization = materialize(plan, dry_run=True, on_write=lambda done: say(_written(plan, done)))
+        materialization = materialize(plan, dry_run=True, on_write=lambda done: say(_written(plan, done)),
+                                      contexts=preflight.contexts)
         runs = _to_run(plan)
         return DryRun(materialization, runs, _skipped(plan, runs, every=not tasks and not evals), preflight.infra)
 

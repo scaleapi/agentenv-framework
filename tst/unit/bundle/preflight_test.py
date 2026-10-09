@@ -132,13 +132,62 @@ def test_a_remote_image_runs_anywhere_and_a_local_one_on_the_local_provider(bund
     assert problem.startswith("tasks/t.json: step 'helper': deploys agent 'helper''s image")
 
 
-def test_an_agent_built_from_the_bundle_is_refused_on_another_provider(bundle_dir):
+# Images the bundle builds, written in the form their deploys run
+
+BUILT = "@local/~/triage/solver__agent_image"
+
+
+@pytest.mark.parametrize("sandbox, form", [
+    ("local", "built on this machine"),
+    ("modal_vm", "a build context, which each VM deploying it builds for linux/amd64"),
+])
+def test_an_agent_the_bundle_builds_is_built_here_for_the_local_provider_and_a_build_context_for_vms(
+        bundle_dir, docker_on_path, sandbox, form):
     layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\n"})
     _task(bundle_dir, [AGENT])
 
-    assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox="modal")) == [
+    dry = dry_run_bundle(bundle_dir, sandbox=sandbox)
+
+    assert dry.materialization.contexts == ({BUILT} if sandbox == "modal_vm" else set())
+    assert dry.images() == (f"agents/solver (Dockerfile image) v1: {form}",)
+
+
+@pytest.mark.parametrize("sandbox", ["modal", "modal_vm,modal"])
+def test_an_agent_the_bundle_builds_is_refused_on_a_provider_that_runs_it_by_name(bundle_dir, sandbox):
+    layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\n"})
+    _task(bundle_dir, [AGENT])
+
+    assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox=sandbox)) == [
         "tasks/t.json: step 'agent': deploys agent '@local/~/triage/solver''s image on the 'modal' sandbox provider, "
-        "which can't reach it: it's built on this machine from agents/solver/Dockerfile; run it with --sandbox local",
+        "which runs it by name, and the bundle builds it from agents/solver/Dockerfile, which a sandbox runs only once "
+        "built on this machine or in its VM; run it with --sandbox local, or on a provider whose VMs build it, such as "
+        "--sandbox modal_vm",
+    ]
+
+
+MIXED = ("the bundle builds it from agents/solver/Dockerfile on this machine for the local provider, and as a build "
+         "context for one whose VMs build it, and a run writes it one way; run its deploys on one kind, such as "
+         "--sandbox local or --sandbox modal_vm")
+
+
+def test_an_image_the_bundle_builds_is_refused_when_a_run_deploys_it_both_here_and_on_vms(bundle_dir):
+    layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\n"})
+    _task(bundle_dir, [{**AGENT, "sandbox_type": "local"},
+                       {**AGENT, "id": "again", "agent_name": "again", "sandbox_type": "modal_vm"}])
+
+    assert _problems(lambda: dry_run_bundle(bundle_dir)) == [
+        "tasks/t.json: step 'agent': deploys agent '@local/~/triage/solver''s image on the 'local' sandbox provider, "
+        f"and tasks/t.json: step 'again' on the 'modal_vm' one: {MIXED}",
+    ]
+
+
+def test_an_image_the_bundle_builds_is_refused_on_a_chain_that_falls_back_from_vms_to_the_local_provider(bundle_dir):
+    layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\n"})
+    _task(bundle_dir, [AGENT])
+
+    assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox="modal_vm,local")) == [
+        "tasks/t.json: step 'agent': deploys agent '@local/~/triage/solver''s image on the 'modal_vm,local' sandbox "
+        f"provider: {MIXED}",
     ]
 
 
@@ -517,13 +566,29 @@ def _env_folder(root, name, toml="", kind="mcp_server"):
                   f"envs/{name}/env.toml": f'type = "{kind}"\n{toml}'})
 
 
-def test_an_image_the_bundle_builds_for_an_env_is_refused_on_another_provider(bundle_dir):
+def test_an_image_the_bundle_builds_for_an_env_is_a_build_context_on_a_gateway_vm(bundle_dir):
     _env_folder(bundle_dir, "crm")
     _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
+    _infra(REMOTE)
 
-    assert (f"tasks/t.json: step 'env': deploys env '{BUNDLE}/crm''s image '{BUNDLE}/crm__env_image' on the 'modal_vm' "
-            "sandbox provider, which can't reach it: it's built on this machine from envs/crm/Dockerfile; run it with "
-            "--sandbox local") in _problems(lambda: dry_run_bundle(bundle_dir, sandbox="modal_vm"))
+    dry = dry_run_bundle(bundle_dir, sandbox="modal_vm")
+
+    assert dry.materialization.contexts == {f"{BUNDLE}/crm__env_image"}
+
+
+@pytest.mark.parametrize("sandbox, toml", [("modal", ""), ("modal_vm", 'env_provider_type = "server"\n')])
+def test_an_image_the_bundle_builds_for_an_env_is_refused_where_its_server_runs_by_name(bundle_dir, sandbox, toml):
+    """Modal's gateway runs each server in a container from its image's name, and a lone server does on any provider."""
+    _env_folder(bundle_dir, "crm", toml)
+    _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
+    _infra(REMOTE)
+
+    assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox=sandbox)) == [
+        f"tasks/t.json: step 'env': deploys env '{BUNDLE}/crm''s image '{BUNDLE}/crm__env_image' on the {sandbox!r} "
+        "sandbox provider, which runs it by name, and the bundle builds it from envs/crm/Dockerfile, which a sandbox "
+        "runs only once built on this machine or in its VM; run it with --sandbox local, or on a provider whose VMs "
+        "build it, such as --sandbox modal_vm",
+    ]
 
 
 def test_a_website_the_bundle_writes_is_refused_on_modal_and_a_multi_holding_one_too(bundle_dir):

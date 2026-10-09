@@ -7,7 +7,11 @@ pass. A run is refused when a deploy would fail on its provider: an image only t
 or saved in its local object store) on a provider that isn't the local one, a VM asked of a provider that can't create
 one, or containers on the local provider without a Docker daemon. A deploy_agent step that names no agent, and a judge
 that names none, deploy the configured default agent, which must be in the store. An env the bundle writes is
-checked from its planned env.toml: an image the bundle builds is one only this machine has.
+checked from its planned env.toml.
+
+An image the bundle builds is written in the form its deploys can run: built on this machine when they deploy on the
+local provider, and as its build context alone when they deploy on providers whose VMs build it. One version is one of
+the two, so a run deploying it both ways is refused, as is one deploying it on a provider that runs an image by name.
 
 A gateway deploy on the local provider runs on infra envs the store may not hold yet: the gateway, the service-db its
 local Postgres state runs from, and the website browser it adds for websites. The run builds those once its writes are
@@ -78,6 +82,7 @@ class Preflight:
 
     infra_kinds: frozenset[str]  # the infra its deploys on the local provider run on
     infra: tuple[InfraBuild, ...]  # those the store doesn't hold yet, or holds built from other inputs
+    contexts: frozenset[str] = frozenset()  # the ids of the images the bundle builds that it writes as build contexts
 
 
 def preflight_run(plan: Plan, tasks: Iterable[ResolvedEntry], sandbox: str | None) -> Preflight:
@@ -97,6 +102,7 @@ class _Image:
     local_only: str | None  # why only this machine has it, or None
     unloadable: str | None = None  # why no sandbox can get it, or None
     by_name: str | None = None  # why a sandbox that runs it by pulling its name can't, or None
+    built: str | None = None  # the id of the image when the bundle builds it, whose form the walk decides at the end
 
 
 @dataclass(frozen=True)
@@ -122,6 +128,8 @@ class _Walk:
         self.agents = {write.id: write.source for write in plan.writes if write.kind is BundleKind.AGENT}
         self.envs = {write.id: write.source for write in plan.writes if write.kind is BundleKind.ENV}
         self.built = {write.id: write.source for write in plan.writes if isinstance(write.source, BuiltImage)}
+        # Each deploy of an image the bundle builds: (where, what, its provider's links, those that run it by name)
+        self.uses: dict[str, list[tuple[str, str, list[SandboxProvider], list[SandboxProvider]]]] = {}
 
     def task(self, task: ResolvedEntry) -> None:
         steps = [build_step(config) for config in task.config]
@@ -148,6 +156,7 @@ class _Walk:
             self.run_problems.extend(e.problems)
         for where, provider, kinds in self.remote_infra:
             self._remote_infra(where, provider, kinds)
+        contexts = self._contexts()
         self._default_agent()
         if self.docker_users and (reason := docker_unreachable()):
             shown = ", ".join(self.docker_users[:_SHOWN_DOCKER_USERS])
@@ -161,7 +170,7 @@ class _Walk:
             problems.append(f"{first}{more}: {problem}")
         if problems:
             raise BundleError(problems)
-        return Preflight(frozenset(self.infra), tuple(infra))
+        return Preflight(frozenset(self.infra), tuple(infra), contexts)
 
     # Deploys, each resolving its provider as its step does when it runs
 
@@ -188,6 +197,7 @@ class _Walk:
         by_name = ([link for link in _links(provider) if isinstance(link, ModalSandboxProvider)] if GATEWAY in kinds
                    else _links(provider))
         self._by_name(where, by_name, images)
+        self._use(where, _links(provider), by_name, images)
         if _local_link(provider):
             self.infra |= kinds
             self.docker_users.append(where)
@@ -259,9 +269,8 @@ class _Walk:
 
     def _planned_image(self, env_id: str, ref: Reference) -> _Image | None:
         what = f"env {env_id!r}'s image {ref.id!r}"
-        if (built := self.built.get(ref.id)) is not None:
-            path = relative(self.plan.bundle.bundle.root, built.entry.path)
-            return _Image(what, f"it's built on this machine from {path}/{built.dockerfile}")
+        if ref.id in self.built:
+            return _Image(what, None, built=ref.id)
         if ref.id in self.written:
             return None  # another of the bundle's writes, which materialize refuses or writes first
         try:
@@ -304,6 +313,7 @@ class _Walk:
         if loaders:
             self._loadable(where, loaders, [image])
         self._by_name(where, by_name, [image])
+        self._use(where, _links(provider), by_name, [image])
         if remote:
             self._reachable(where, remote, [image])
 
@@ -327,9 +337,8 @@ class _Walk:
         what = f"agent {agent_id!r}'s image"
         if (agent := self.agents.get(agent_id)) is not None:
             image_id, image_version = parse_toml_ref(EntityKind.ARTIFACT, agent.config.get("image"))
-            if (built := self.built.get(image_id)) is not None:
-                path = relative(self.plan.bundle.bundle.root, built.entry.path)
-                return _Image(what, f"it's built on this machine from {path}/{built.dockerfile}")
+            if image_id in self.built:
+                return _Image(what, None, built=image_id)
             if image_id in self.written:
                 return None  # another of the bundle's writes, which materialize refuses or writes first
             planned = self._planned_version(EntityKind.ARTIFACT, image_id, image_version)
@@ -380,6 +389,43 @@ class _Walk:
             else:
                 self._by_name(where, [provider], images)
             self._reachable(where, [provider], images)
+
+    def _use(self, where: str, links: list[SandboxProvider], by_name: list[SandboxProvider],
+             images: list[_Image]) -> None:
+        for image in images:
+            if image.built is not None:
+                self.uses.setdefault(image.built, []).append((where, image.what, links, by_name))
+
+    def _contexts(self) -> frozenset[str]:
+        """The images the bundle builds that it writes as build contexts: those every deploy runs on providers whose
+        VMs build them. One its deploys run only on the local provider, or that none runs, is built on this machine."""
+        contexts = set()
+        for image_id, uses in self.uses.items():
+            built = self.built[image_id]
+            source = f"{relative(self.plan.bundle.bundle.root, built.entry.path)}/{built.dockerfile}"
+            local, vms = [], []
+            for where, what, links, by_name in uses:
+                for link in links:
+                    if isinstance(link, LocalSandboxProvider):
+                        local.append((where, what, links, link))
+                    elif link in by_name:
+                        self._problem(where, f"deploys {what} on the {_shown(link)} sandbox provider, which runs it by "
+                                             f"name, and the bundle builds it from {source}, which a sandbox runs only "
+                                             "once built on this machine or in its VM; run it with --sandbox local, or "
+                                             "on a provider whose VMs build it, such as --sandbox modal_vm")
+                    else:
+                        vms.append((where, what, links, link))
+            if local and vms:
+                (where, what, links, link), (elsewhere, _, _, vm) = local[0], vms[0]
+                on = (f"{_named(links)} sandbox provider" if elsewhere == where else
+                      f"{_shown(link)} sandbox provider, and {elsewhere} on the {_shown(vm)} one")
+                self._problem(where, f"deploys {what} on the {on}: the bundle builds it from {source} on this machine "
+                                     "for the local provider, and as a build context for one whose VMs build it, and a "
+                                     "run writes it one way; run its deploys on one kind, such as --sandbox local or "
+                                     "--sandbox modal_vm")
+            elif vms:
+                contexts.add(image_id)
+        return frozenset(contexts)
 
     def _default_agent(self) -> None:
         if not self.default_agent_users:
@@ -443,7 +489,11 @@ def _creates_vms(provider: SandboxProvider) -> bool:
 
 
 def _shown(provider: SandboxProvider) -> str:
-    return repr(",".join(_name(link) for link in _links(provider)))
+    return _named(_links(provider))
+
+
+def _named(links: list[SandboxProvider]) -> str:
+    return repr(",".join(_name(link) for link in links))
 
 
 def _name(provider: SandboxProvider) -> str:
