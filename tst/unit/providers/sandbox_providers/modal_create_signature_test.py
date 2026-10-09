@@ -14,7 +14,7 @@ import pytest
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.attribution import PIPELINE_STEP_KEY
 from agent_env.config import get_config, reset_config
-from agent_env.providers.sandbox_providers import modal_sandbox
+from agent_env.providers.sandbox_providers import modal_image_build, modal_sandbox
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy
@@ -74,7 +74,7 @@ async def test_the_installed_modal_accepts_every_argument_of_a_build_from_a_cont
     (tmp_path / "Dockerfile").write_text("FROM python:3.12\n")
     image = DockerImageArtifact.put_context("solver-image", description="d", context_path=str(tmp_path),
                                             dockerfile_path="Dockerfile")
-    monkeypatch.setattr(modal_sandbox, "_built_image_ids", {})
+    monkeypatch.setattr(modal_image_build, "_built_image_ids", {})
     from_dockerfile, from_id = inspect.signature(modal.Image.from_dockerfile), inspect.signature(modal.Image.from_id)
     built = MagicMock(object_id="im-1")
     built.build.aio = AsyncMock()
