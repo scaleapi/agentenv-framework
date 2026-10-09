@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 # Not pymongo.timeout: that sends maxTimeMS, and MongoDB aborts a build whose createIndexes runs out of it.
 _INDEX_BUILD_WAIT_SECONDS = 5
-_INDEX_RETRY_SECONDS = 5
+_INDEX_RETRY_SECONDS = 1
 
 
 def _field_cond(mongo: dict, field: str) -> dict:
