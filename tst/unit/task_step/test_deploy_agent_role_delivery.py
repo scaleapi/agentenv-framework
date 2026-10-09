@@ -139,8 +139,10 @@ async def test_the_role_header_joins_the_sandbox_headers_without_touching_them(w
         ({"required": ["url"], "optional": None}, False),
         ({"required": ["url"], "optional": ["headers", "name"]}, True),
         ({"supported": ["url", "headers"]}, True),
+        ({"required": ["url", "name"], "optional": ["headers"]}, True),
+        ({"required": ["url", "name"]}, False),
     ],
-    ids=["legacy", "optional-none", "protocol-rendered", "hand-written-supported"],
+    ids=["legacy", "optional-none", "protocol-rendered", "hand-written-supported", "name-required", "name-required-no-headers"],
 )
 async def test_the_card_decides_whether_the_registration_carries_the_role(wiring, add_request, takes_headers):
     await wiring.deploy(_card(_mcp_config(add_request), ROLE_CONFIG), role="executor")

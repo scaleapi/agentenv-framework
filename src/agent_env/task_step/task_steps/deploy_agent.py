@@ -341,11 +341,7 @@ class DeployAgentTaskStep(TaskStep):
         logger.info(f"A2A agent '{a2a_agent_id}' deployed at {a2a_url}")
 
         mcp_ext = A2AAgent.find_extension(card, A2AAgent.EXT_MCP_CONFIG)
-        role_header = (
-            {AGENT_ENV_ROLE_HEADER: self.role}
-            if self.role is not None and mcp_ext and card_request_accepts(_mcp_add_request(mcp_ext), ("url", "headers"))
-            else None
-        )
+        add_request = _mcp_add_request(mcp_ext) if mcp_ext else {}
         role_in_headers = False
         env_mcp_urls: list[tuple[str, str, dict | None, str | None]] = []  # (env_id, url, headers, card_name)
         for env_id in self.env_ids:
@@ -359,9 +355,14 @@ class DeployAgentTaskStep(TaskStep):
                 url = host_url_for(_live_mcp_url(env_id), deployed.sandbox_type)
                 card_name = None
             headers = sandbox_request_headers_for_url(url)
-            if role_header and isinstance(deployed_env, DeployedGatewayEnv):
-                headers = {**headers, **role_header}
-                role_in_headers = True
+            if self.role is not None and mcp_ext and isinstance(deployed_env, DeployedGatewayEnv):
+                # Judge the registration the agent will actually receive: with the card name relayed, a
+                # card that requires `name` still takes the role header.
+                carries_name = bool(card_name) and card_request_accepts(add_request, ("url", "name"))
+                fields = ("url", "headers", "name") if carries_name else ("url", "headers")
+                if card_request_accepts(add_request, fields):
+                    headers = {**headers, AGENT_ENV_ROLE_HEADER: self.role}
+                    role_in_headers = True
             env_mcp_urls.append((env_id, url, headers or None, card_name))
 
         identity_payload: dict[str, str] = {"name": self.agent_name}
