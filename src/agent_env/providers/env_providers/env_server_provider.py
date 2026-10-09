@@ -67,6 +67,8 @@ class EnvironmentServerProvider(_SandboxEnvironmentProvider):
         from agent_env.env.envs.mcp_server import MCPServerEnv
 
         name = env.environment_name
+        if problem := env.docker_image_artifact.by_name_problem():
+            raise ValueError(f"Can't deploy {name!r} as a server, which runs its image by name: {problem}")
         server = await sandbox_provider.create_container(
             image_name=env.docker_image_artifact.image_name,
             port=AGENT_ENV_GATEWAY_MCP_PORT,

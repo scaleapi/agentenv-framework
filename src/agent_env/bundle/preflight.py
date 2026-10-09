@@ -96,6 +96,7 @@ class _Image:
     what: str
     local_only: str | None  # why only this machine has it, or None
     unloadable: str | None = None  # why no sandbox can get it, or None
+    by_name: str | None = None  # why a sandbox that runs it by pulling its name can't, or None
 
 
 @dataclass(frozen=True)
@@ -183,6 +184,10 @@ class _Walk:
         if GATEWAY in kinds and (loaders := [link for link in _links(provider)
                                              if not isinstance(link, ModalSandboxProvider)]):
             self._loadable(where, loaders, images)  # a gateway VM loads its images; Modal's runs each by name
+        # A lone server runs in a container from its image's name on any provider; a gateway does on Modal.
+        by_name = ([link for link in _links(provider) if isinstance(link, ModalSandboxProvider)] if GATEWAY in kinds
+                   else _links(provider))
+        self._by_name(where, by_name, images)
         if _local_link(provider):
             self.infra |= kinds
             self.docker_users.append(where)
@@ -291,12 +296,14 @@ class _Walk:
         if agent_id is None:
             self.default_agent_users.append((where, unnamed))
             agent_id = get_config().get_default_a2a_agent_id()
-        loaders = [link for link in _links(provider) if not isinstance(link, (LocalSandboxProvider, ModalSandboxProvider))]
+        by_name = [link for link in _links(provider) if isinstance(link, (LocalSandboxProvider, ModalSandboxProvider))]
+        loaders = [link for link in _links(provider) if link not in by_name]  # by_name run an agent in a container
         remote = _remote_links(provider)
-        if not (loaders or remote) or (image := self._agent_image(agent_id, version)) is None:
+        if (image := self._agent_image(agent_id, version)) is None:
             return
         if loaders:
-            self._loadable(where, loaders, [image])  # those two run an agent in a container, by image name
+            self._loadable(where, loaders, [image])
+        self._by_name(where, by_name, [image])
         if remote:
             self._reachable(where, remote, [image])
 
@@ -340,6 +347,15 @@ class _Walk:
                 self._problem(where, f"deploys {image.what} on the {_shown(loaders[0])} sandbox provider, which can't "
                                      f"load it: {image.unloadable}")
 
+    def _by_name(self, where: str, links: list[SandboxProvider], images: list[_Image]) -> None:
+        """Refuse each of ``images`` a sandbox on ``links`` can't run: it pulls an image by its name, and a context-only
+        image's name is a tag only a VM sandbox's build gives it."""
+        for image in images:
+            if links and image.by_name:
+                self._problem(where, f"deploys {image.what} on the {_shown(links[0])} sandbox provider, which runs it "
+                                     f"by name: {image.by_name}; run it on a provider whose VMs build it, such as "
+                                     "--sandbox modal_vm")
+
     def _reachable(self, where: str, remote: list[SandboxProvider], images: list[_Image]) -> None:
         for image in images:
             if image.local_only:
@@ -361,6 +377,8 @@ class _Walk:
             images = [_image(f"the {kind} env {env_id!r}'s image {image.id!r}", image) for image in artifacts]
             if not isinstance(provider, ModalSandboxProvider):  # whose containers run by name, or are swapped out
                 self._loadable(where, [provider], images)
+            else:
+                self._by_name(where, [provider], images)
             self._reachable(where, [provider], images)
 
     def _default_agent(self) -> None:
@@ -439,7 +457,7 @@ def _name(provider: SandboxProvider) -> str:
 
 
 def _image(what: str, image: DockerImageArtifact) -> _Image:
-    return _Image(what, _local_only(image), image.load_problem())
+    return _Image(what, _local_only(image), image.load_problem(), image.by_name_problem())
 
 
 def _local_only(image: DockerImageArtifact | str) -> str | None:

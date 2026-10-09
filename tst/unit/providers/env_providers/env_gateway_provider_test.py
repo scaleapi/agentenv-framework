@@ -20,6 +20,7 @@ import yaml
 from mcp.server.fastmcp import FastMCP
 from pytest_socket import enable_socket
 
+from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, _mcp_url
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
@@ -46,6 +47,10 @@ from tst.unit.providers.env_state.fakes import (  # noqa: F401  (fixture)
     EXTERNAL_STATE_TYPE,
     registered_external_provider,
 )
+
+
+def _image(image_name: str) -> DockerImageArtifact:
+    return DockerImageArtifact(id=image_name, description="d", image_name=image_name)
 
 
 @pytest.fixture(autouse=True)
@@ -112,6 +117,30 @@ async def test_container_mode_rejects_websites():
         )
 
 
+_CONTEXT_ONLY = DockerImageArtifact(id="slack-image", version=2, description="d", image_name="local/slack-0123456789ab:v2",
+                                    build_context_object_url="s3://bucket/ctx.tar.gz")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gateway_image, server_image", [(_CONTEXT_ONLY, _image("mcp-slack")),
+                                                         (_image("agent-gateway"), _CONTEXT_ONLY)],
+                         ids=["gateway", "server"])
+async def test_container_mode_refuses_a_context_only_image_before_creating_anything(gateway_image, server_image):
+    provider = ModalSandboxProvider()
+    gp = EnvironmentGatewayProvider()
+    gp._build_local_store = AsyncMock()
+    with patch.object(provider, "create_container", side_effect=AssertionError("created a container")), \
+         patch("agent_env.env.env.Env.get", return_value=MagicMock(docker_image_artifact=gateway_image)):
+        with pytest.raises(ValueError, match="Can't deploy on Modal, whose gateway runs each image by name: 'slack-image' v2 "
+                                             "is only a build context"):
+            await gp._deploy_via_containers(
+                sandbox_provider=provider, mcp_servers=[MCPServerConfig(image=server_image.image_name, environment_name="slack")],
+                mcp_server_images=[server_image], gateway_port=18765, website_configs=None,
+                gateway_mode=MagicMock(value="performance"), ttl_seconds=60, disk_size_gb=10,
+            )
+    gp._build_local_store.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_container_mode_constructs_internal_mcp_servers_url_format():
     """Container mode must pass INTERNAL_MCP_SERVERS as 'name=url,name=url' to the gateway."""
@@ -154,7 +183,7 @@ async def test_container_mode_constructs_internal_mcp_servers_url_format():
              patch("agent_env.config.get_config") as get_cfg, \
              patch.object(LocalPostgresStateProvider, "acquire", _spy_acquire):
             gateway_env = MagicMock()
-            gateway_env.docker_image_artifact.image_name = "agent-gateway"
+            gateway_env.docker_image_artifact = _image("agent-gateway")
             db_env = MagicMock()
             db_env.to_config.return_value.db_image = "postgres:16-alpine"
             db_env.to_config.return_value.db_web_image = None
@@ -169,7 +198,7 @@ async def test_container_mode_constructs_internal_mcp_servers_url_format():
                 MCPServerConfig(image="mcp-slack", environment_name="slack"),
                 MCPServerConfig(image="mcp-email", environment_name="email"),
             ]
-            mcp_images = [MagicMock(image_name="mcp-slack"), MagicMock(image_name="mcp-email")]
+            mcp_images = [_image("mcp-slack"), _image("mcp-email")]
 
             from agent_env.env.gateway import GatewayMode
             result = await gp._deploy_via_containers(
@@ -265,7 +294,7 @@ async def test_container_mode_remote_skips_servicedb_and_points_at_remote():
         with patch("agent_env.env.env.Env.get") as env_get, \
              patch("agent_env.config.get_config") as get_cfg:
             gateway_env = MagicMock()
-            gateway_env.docker_image_artifact.image_name = "agent-gateway"
+            gateway_env.docker_image_artifact = _image("agent-gateway")
             db_env = MagicMock()
             db_env.to_config.return_value.db_image = "postgres:16-alpine"
             db_env.to_config.return_value.db_web_image = None
@@ -279,7 +308,7 @@ async def test_container_mode_remote_skips_servicedb_and_points_at_remote():
             await gp._deploy_via_containers(
                 sandbox_provider=provider,
                 mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")],
-                mcp_server_images=[MagicMock(image_name="mcp-slack")],
+                mcp_server_images=[_image("mcp-slack")],
                 gateway_port=18765,
                 website_configs=None,
                 gateway_mode=GatewayMode.PERFORMANCE,
@@ -322,12 +351,12 @@ async def test_container_mode_mcp_url_follows_the_card():
     with patch.object(provider, "create_container", side_effect=fake_create_container):
         gp._wait_for_tunnel = AsyncMock(return_value=card)
         with patch("agent_env.env.env.Env.get") as env_get, patch("agent_env.config.get_config") as get_cfg:
-            env_get.return_value.docker_image_artifact.image_name = "agent-gateway"
+            env_get.return_value.docker_image_artifact = _image("agent-gateway")
             get_cfg.return_value = MagicMock(default_gateway_env_id="gw-id")
             result = await gp._deploy_via_containers(
                 sandbox_provider=provider,
                 mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")],
-                mcp_server_images=[MagicMock(image_name="mcp-slack")],
+                mcp_server_images=[_image("mcp-slack")],
                 gateway_port=18765, website_configs=None, gateway_mode=GatewayMode.PERFORMANCE,
                 ttl_seconds=60, disk_size_gb=10,
             )
@@ -417,7 +446,7 @@ async def _run_container_deploy(*, cpu=None, memory_mb=None) -> list[dict]:
         with patch("agent_env.env.env.Env.get") as env_get, \
              patch("agent_env.config.get_config") as get_cfg:
             gateway_env = MagicMock()
-            gateway_env.docker_image_artifact.image_name = "agent-gateway"
+            gateway_env.docker_image_artifact = _image("agent-gateway")
             db_env = MagicMock()
             db_cfg = db_env.to_config.return_value
             db_cfg.db_image = "123.dkr.ecr.us-west-2.amazonaws.com/postgres"
@@ -432,7 +461,7 @@ async def _run_container_deploy(*, cpu=None, memory_mb=None) -> list[dict]:
             await gp._deploy_via_containers(
                 sandbox_provider=provider,
                 mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")],
-                mcp_server_images=[MagicMock(image_name="mcp-slack")],
+                mcp_server_images=[_image("mcp-slack")],
                 gateway_port=18765,
                 website_configs=None,
                 gateway_mode=GatewayMode.PERFORMANCE,
@@ -540,7 +569,7 @@ async def test_modal_vm_provider_routes_to_vm_path_not_containers():
     result = await gp.create_gateway(
         sandbox_provider=provider,
         mcp_servers=[MCPServerConfig(image="mcp-a", environment_name="a")],
-        mcp_server_images=[MagicMock(image_name="mcp-a")],
+        mcp_server_images=[_image("mcp-a")],
         gateway_mode=GatewayMode.PERFORMANCE,
         ttl_seconds=60,
         disk_size_gb=10,
@@ -614,7 +643,7 @@ async def test_sail_vm_provider_routes_to_vm_path_not_containers():
     result = await gp.create_gateway(
         sandbox_provider=SailVmSandboxProvider(api_key="sail-test-key"),
         mcp_servers=[MCPServerConfig(image="mcp-a", environment_name="a")],
-        mcp_server_images=[MagicMock(image_name="mcp-a")],
+        mcp_server_images=[_image("mcp-a")],
         gateway_mode=GatewayMode.PERFORMANCE,
         ttl_seconds=60,
         disk_size_gb=10,
@@ -907,7 +936,7 @@ async def test_create_gateway_consumes_external_instance(registered_external_pro
     await gp.create_gateway(
         sandbox_provider=ModalVmSandboxProvider(),
         mcp_servers=[MCPServerConfig(image="mcp-a", environment_name="a")],
-        mcp_server_images=[MagicMock(image_name="mcp-a")],
+        mcp_server_images=[_image("mcp-a")],
         gateway_mode=GatewayMode.PERFORMANCE,
         state_instance=external,
     )
@@ -933,7 +962,7 @@ async def test_create_gateway_local_sets_provider_but_defers_instance():
     await gp.create_gateway(
         sandbox_provider=ModalVmSandboxProvider(),
         mcp_servers=[MCPServerConfig(image="mcp-a", environment_name="a")],
-        mcp_server_images=[MagicMock(image_name="mcp-a")],
+        mcp_server_images=[_image("mcp-a")],
         gateway_mode=GatewayMode.PERFORMANCE,
     )
     assert gp._state_instance is None  # instance self-built later in the deploy path
@@ -1025,7 +1054,7 @@ async def test_deploy_via_vm_prepares_schemas_including_website_browser():
             await gp._deploy_via_vm(
                 sandbox_provider=sandbox_provider,
                 mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")],
-                mcp_server_images=[MagicMock(image_name="mcp-slack")],
+                mcp_server_images=[_image("mcp-slack")],
                 gateway_port=18765,
                 website_configs=[WebsiteConfig(backend_image="b", frontend_image="f", environment_name="shop")],
                 website_images=[MagicMock(), MagicMock()],
@@ -1073,7 +1102,7 @@ async def test_deploy_via_vm_side_loads_sidecar_image():
             await gp._deploy_via_vm(
                 sandbox_provider=sandbox_provider,
                 mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")],
-                mcp_server_images=[MagicMock(image_name="mcp-slack")],
+                mcp_server_images=[_image("mcp-slack")],
                 gateway_port=18765,
                 website_configs=None,
                 website_images=None,

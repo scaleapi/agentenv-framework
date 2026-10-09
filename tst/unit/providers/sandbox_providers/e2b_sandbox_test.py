@@ -5,6 +5,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import asyncio
+
 import pytest
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
@@ -305,6 +307,59 @@ async def test_restricted_image_loading_widens_the_policy_for_tarballs_only_and_
     assert sandbox.network_policy == policy.with_hosts(["downloads.example"])
     base_load.assert_awaited_once_with([tarball], ["https://downloads.example/image.tar.gz"])
     pull.assert_awaited_once_with(["ghcr.io/team/tool:v1"])
+
+
+@pytest.mark.asyncio
+async def test_a_download_under_an_allowlist_adds_its_signed_host_to_the_policy(monkeypatch: pytest.MonkeyPatch):
+    inner = _inner()
+    inner.update_network = AsyncMock()
+    policy = NetworkPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=("workload.example",))
+    sandbox = E2BSandbox(inner, network_policy=policy)
+    store = MagicMock()
+    store.signed_get_url.return_value = "https://downloads.example/build-context.tar.gz?signature=x"
+    set_object_store(store)
+    base_download = AsyncMock()
+    monkeypatch.setattr(VmSandbox, "_download_object_to_vm", base_download)
+
+    await sandbox.load_object_file("s3://bucket/build-context.tar.gz", "/tmp/context.tar.gz")
+
+    assert sandbox.network_policy == policy.with_hosts(["downloads.example"])
+    base_download.assert_awaited_once_with("s3://bucket/build-context.tar.gz", "/tmp/context.tar.gz")
+
+
+@pytest.mark.asyncio
+async def test_concurrent_downloads_keep_each_others_hosts(monkeypatch: pytest.MonkeyPatch):
+    inner = _inner()
+
+    async def slow_update(network):
+        await asyncio.sleep(0.01)  # a policy change is a round trip, so another download can read the policy meanwhile
+
+    inner.update_network = AsyncMock(side_effect=slow_update)
+    policy = NetworkPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=("workload.example",))
+    sandbox = E2BSandbox(inner, network_policy=policy)
+    store = MagicMock()
+    store.signed_get_url.side_effect = lambda url: f"https://{url.split('/')[2]}.downloads.example/object"
+    set_object_store(store)
+    monkeypatch.setattr(VmSandbox, "_download_object_to_vm", AsyncMock())
+
+    await asyncio.gather(sandbox.load_object_file("s3://one/a", "/tmp/a"), sandbox.load_object_file("s3://two/b", "/tmp/b"))
+
+    assert {"one.downloads.example", "two.downloads.example"} <= set(sandbox.network_policy.allow_hosts)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("policy", [None, NetworkPolicy(mode=NetworkMode.ALLOW_ALL)], ids=["reconnected", "allow-all"])
+async def test_a_download_leaves_a_policy_it_needn_t_widen_alone(monkeypatch: pytest.MonkeyPatch, policy):
+    inner = _inner()
+    inner.update_network = AsyncMock()
+    sandbox = E2BSandbox(inner, network_policy=policy)
+    base_download = AsyncMock()
+    monkeypatch.setattr(VmSandbox, "_download_object_to_vm", base_download)
+
+    await sandbox.load_object_file("s3://bucket/build-context.tar.gz", "/tmp/context.tar.gz")
+
+    inner.update_network.assert_not_awaited()
+    base_download.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -197,6 +197,57 @@ def test_an_env_image_with_no_tarball_and_no_registry_is_refused_where_a_gateway
     assert [entry.name for entry in dry_run_bundle(bundle_dir, sandbox="modal").runs] == ["t"]
 
 
+# Images with only a build context, which a VM sandbox builds and nothing else can run
+
+
+def _context_image(id):
+    with namespace_routing():
+        return get_artifact_store().put_document(DockerImageArtifact(
+            id=id, description=id, image_name=f"local/{id}-0123456789ab:v1", build_context_object_url="s3://bucket/ctx.tar.gz",
+            dockerfile_path="Dockerfile", platform="linux/amd64", source_digest="sha256:" + "1" * 64))
+
+
+BY_NAME = ("on the {sandbox!r} sandbox provider, which runs it by name: '{id}' v1 is only a build context, which only a "
+           "VM sandbox builds; run it on a provider whose VMs build it, such as --sandbox modal_vm")
+
+
+@pytest.mark.parametrize("sandbox, refused", [("modal_vm", False), ("local", True), ("modal", True), ("modal_vm,local", True)])
+def test_an_agent_image_that_is_only_a_build_context_runs_where_a_vm_builds_it(bundle_dir, sandbox, refused):
+    with namespace_routing():
+        A2AAgent.put(id="solver", docker_image_artifact=_context_image("solver-image"))
+    _task(bundle_dir, [AGENT])
+
+    if refused:
+        link = "local" if "local" in sandbox else sandbox
+        assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox=sandbox)) == [
+            "tasks/t.json: step 'agent': deploys agent 'solver''s image "
+            + BY_NAME.format(sandbox=sandbox if link == sandbox else link, id="solver-image")]
+    else:
+        assert [entry.name for entry in dry_run_bundle(bundle_dir, sandbox=sandbox).runs] == ["t"]
+
+
+def test_an_env_image_that_is_only_a_build_context_runs_on_a_gateway_vm_and_not_on_modals_containers(bundle_dir):
+    with namespace_routing():
+        MCPServerEnv.put(id="crm", docker_image_artifact=_context_image("crm-image"), environment_name="crm")
+    _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
+
+    assert [entry.name for entry in dry_run_bundle(bundle_dir, sandbox="local").runs] == ["t"]
+    _infra(REMOTE)
+    assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox="modal")) == [
+        "tasks/t.json: step 'env': deploys env 'crm''s image 'crm-image' " + BY_NAME.format(sandbox="modal", id="crm-image")]
+
+
+@pytest.mark.parametrize("sandbox", ["local", "modal_vm"])
+def test_a_lone_server_whose_image_is_only_a_build_context_is_refused_on_any_provider(bundle_dir, sandbox):
+    with namespace_routing():
+        MCPServerEnv.put(id="crm", docker_image_artifact=_context_image("crm-image"), environment_name="crm",
+                         env_provider_type="server")
+    _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
+
+    assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox=sandbox)) == [
+        "tasks/t.json: step 'env': deploys env 'crm''s image 'crm-image' " + BY_NAME.format(sandbox=sandbox, id="crm-image")]
+
+
 # What a provider can create
 
 

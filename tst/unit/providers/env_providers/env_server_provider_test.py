@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.env.env import DeployedEnv, DeployedSandboxEnv
 from agent_env.env.gateway.constants import WELL_KNOWN_PATH
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
@@ -23,7 +24,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvid
 
 _SERVER_CARD = {"name": "slack", "additionalInterfaces": [{"url": "/custom-mcp", "transport": "mcp"}]}
 _SERVER_URL = "https://mcp-slack.fake.host"
-_ENV = SimpleNamespace(id="slack-bare", version=2, environment_name="slack", docker_image_artifact=SimpleNamespace(image_name="mcp-slack"))
+_ENV = SimpleNamespace(id="slack-bare", version=2, environment_name="slack", docker_image_artifact=DockerImageArtifact(id="slack-image", description="d", image_name="mcp-slack"))
 
 
 class _Container:
@@ -58,6 +59,17 @@ async def test_a_deploy_starts_only_the_server_on_sqlite_with_its_sizing():
     assert (call["image_name"], call["port"], call["cpu"], call["memory"], call["timeout"]) == ("mcp-slack", 18765, 2.0, 4096, 60)
     assert call["attribution"] == {"team": "t1"} and "i6pn" not in call
     assert call["env"] == {"ENVIRONMENT_NAME": "slack", "MCP_HOST": "0.0.0.0", "DATABASE_URL": "sqlite:////tmp/slack.sqlite"}
+
+
+@pytest.mark.asyncio
+async def test_a_server_whose_image_is_only_a_build_context_is_refused_before_any_container():
+    image = DockerImageArtifact(id="slack-image", version=3, description="d", image_name="local/slack-0123456789ab:v3",
+                                build_context_object_url="s3://bucket/ctx.tar.gz")
+    run = await _run_server_deploy(env=SimpleNamespace(**{**vars(_ENV), "docker_image_artifact": image}))
+
+    assert "Can't deploy 'slack' as a server, which runs its image by name: 'slack-image' v3 is only a build context" in str(
+        run.result)
+    assert run.calls == []
 
 
 @pytest.mark.asyncio
@@ -156,7 +168,7 @@ async def _hangs_in_cleanup(_url: str) -> list[str]:
     return []
 
 
-async def _run_server_deploy(sandbox_provider=None, *, card=_SERVER_CARD, tools=("slack_list", "slack_send"), tool_names=None,
+async def _run_server_deploy(sandbox_provider=None, *, env=_ENV, card=_SERVER_CARD, tools=("slack_list", "slack_send"), tool_names=None,
                              wait_for_tunnel=None, **deploy_kwargs) -> SimpleNamespace:
     """deploy() with the container faked: the provider, its card URL (or the error it raised), each create_container's
     kwargs, the containers they returned, and the tools/list fake."""
@@ -174,7 +186,7 @@ async def _run_server_deploy(sandbox_provider=None, *, card=_SERVER_CARD, tools=
     with patch.object(_FakeSandboxProvider, "create_container", new=fake_create_container), \
          patch.object(env_server_provider, "_tool_names", new=tool_names):
         try:
-            result = await gp.deploy(_ENV, sandbox_provider or _FakeSandboxProvider(), ttl_seconds=60, **deploy_kwargs)
+            result = await gp.deploy(env, sandbox_provider or _FakeSandboxProvider(), ttl_seconds=60, **deploy_kwargs)
         except Exception as e:  # noqa: BLE001  the failure is the result
             result = e
     return SimpleNamespace(gp=gp, result=result, calls=calls, created=created, tool_names=tool_names)
