@@ -73,6 +73,7 @@ def put(agent_id: str, dockerfile: str | None, context_path: str | None, image_r
             image_name=image_tag,
             build_context_path=str(context),
             dockerfile_path=str(dockerfile_path),
+            platform=build_platform,
         )
         click.echo(f"Created artifact: id={artifact.id} version={artifact.version}")
         metadata = detect_env_metadata(dockerfile_path, context)

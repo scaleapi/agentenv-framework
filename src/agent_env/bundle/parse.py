@@ -24,6 +24,7 @@ from typing import Any, NoReturn
 from agent_env.bundle._fs import Unreadable, fold, home, on_disk, os_reason, read_regular, show
 from agent_env.entity_refs import EntityKind
 from agent_env.store.ids import LOCAL_PREFIX, MAX_AUTHORED_LOCAL_ID_BYTES, validate_local_id
+from agent_env.utils.paths import LEAVINGS
 
 BUNDLE_TOML = "bundle.toml"
 DOCKERFILE = "Dockerfile"
@@ -96,11 +97,6 @@ class BundleError(ValueError):
         """The first problem, and how many more there are."""
         more = len(self.problems) - 1
         return self.problems[0] + (f" (and {more} more)" if more else "")
-
-
-# What the OS or Python writes into a folder on its own. In an artifact or skill folder, everything
-# else is content, dot files included.
-LEAVINGS = frozenset({".DS_Store", "Thumbs.db", "desktop.ini", "__pycache__"})
 
 
 def is_ignored(name: str) -> bool:

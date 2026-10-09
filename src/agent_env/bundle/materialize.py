@@ -158,7 +158,7 @@ def _write_built_image(plan: Plan, write: Write) -> int:
         try:
             return DockerImageArtifact.put(
                 id=write.id, description=f"built from {_path(plan, write)}/{image.dockerfile}", image_name=tag,
-                build_context_path=str(context),
+                build_context_path=str(context), dockerfile_path=str(context / image.dockerfile),
             ).version
         except RuntimeError as e:  # the image store, docker push or docker save
             raise BundleError([f"{_path(plan, write)}: {e}"]) from None

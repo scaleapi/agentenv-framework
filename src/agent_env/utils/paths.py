@@ -1,8 +1,12 @@
-"""Path helpers shared by the artifact loaders."""
+"""Path helpers shared by the artifact loaders, bundle folders and build contexts."""
 
 from __future__ import annotations
 
 import os
+
+# What the OS or Python writes into a folder on its own. In an artifact or skill folder, everything
+# else is content, dot files included.
+LEAVINGS = frozenset({".DS_Store", "Thumbs.db", "desktop.ini", "__pycache__"})
 
 
 def validate_relative_filename(filename: str) -> None:
