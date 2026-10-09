@@ -546,6 +546,15 @@ class TriggerEngine:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
+    async def cancel_scheduled(self) -> None:
+        """Cancel the scheduled trigger actions and wait for them to exit. The gateway's process lifespan calls it at
+        shutdown, before the child sessions close, so no action outlives them."""
+        tasks = list(self._tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self._tasks.clear()
+
     def _resolve_watch_roles(self, body: dict) -> set[str]:
         raw = body.get("watch_roles")
         if raw is None:
@@ -667,13 +676,16 @@ class TriggerEngine:
             if not isinstance(action.get("args", {}), dict):
                 raise TriggerError(f"{w}: args must be an object")
             _validate_placeholders(action.get("args", {}), f"{w}.args", allow_ctx=has_ctx)
-            acting = action.get("as")
-            if acting is not None:
+            if action.get("as") is not None:
+                if not isinstance(action["as"], str):
+                    raise TriggerError(f"{w}: 'as' must be a non-empty AgentEnv-Role other than {DEFAULT_ROLE!r}")
+                acting = action["as"].strip()
                 # the default role means "not forwarded" to the child, so naming it can only be a mistake
-                if not isinstance(acting, str) or not acting.strip() or acting == DEFAULT_ROLE:
+                if not acting or acting == DEFAULT_ROLE:
                     raise TriggerError(f"{w}: 'as' must be a non-empty AgentEnv-Role other than {DEFAULT_ROLE!r}")
                 if _VAR_LOOSE_RE.search(acting):  # never run through _template, so a placeholder would be sent verbatim
                     raise TriggerError(f"{w}: 'as' is not templated; name the role literally")
+                action["as"] = acting  # forwarded as-is by _run_action, so stripped here like the header path strips
         else:
             if action.get("action") not in ("enable", "disable"):
                 raise TriggerError(f"{w}: action must be 'enable' or 'disable'")

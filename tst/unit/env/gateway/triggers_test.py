@@ -119,7 +119,8 @@ def _registration(**overrides):
       "triggers": []}, "must not be in watch_roles"),
     *[({"triggers": [{"id": "x", "when": {"type": "action", "tool": "t"},
                       "actions": [{"type": "tool", "tool": "t2", "as": acting}]}]}, fragment)
-      for acting, fragment in [("", "'as' must be a non-empty"), ("default", "'as' must be a non-empty"),
+      for acting, fragment in [("", "'as' must be a non-empty"), ("   ", "'as' must be a non-empty"),
+                               ("default", "'as' must be a non-empty"), (" default ", "'as' must be a non-empty"),
                                (5, "'as' must be a non-empty"), ("${args.owner}", "not templated")]],
     ({"triggers": [{"id": "x", "when": {"type": "action", "tool": "t"},
                     "actions": [{"type": "permission", "action": "enable", "role": "r", "tools": ["t"], "as": "x"}]}]},
@@ -287,6 +288,31 @@ async def test_a_tool_action_s_as_role_reaches_its_call_and_verify_but_not_the_s
     assert any(e["kind"] == "verify_ok" for e in engine._events)
     internal = [e for e in gw.events if e["event_type"] == "internal_tool_call"]
     assert [(e["as"], e["ok"]) for e in internal] == [("carol@example.com", True), (None, True)]
+
+
+@pytest.mark.asyncio
+async def test_a_tool_action_s_as_role_is_stripped_once_at_registration(engine):
+    reg = _registration()
+    reg["triggers"][1]["actions"][0]["as"] = " carol@example.com "
+    engine.register(reg)
+    assert engine._triggers["rate"]["spec"]["actions"][0]["as"] == "carol@example.com"
+    engine._test_state["doc_text"] = "Budget Fit: fine."
+    engine.on_tool_call("default", "gdocs_batch_update", {"documentId": "doc-1"}, _result())
+    await asyncio.sleep(0.3)
+    assert engine._triggers["rate"]["status"] == "fired"
+    assert [role for tool, role in engine._test_gw.roles if tool.startswith("slack_")] == ["carol@example.com"] * 2
+    assert [e["detail"]["as"] for e in engine._events if e["kind"] == "action_ok"] == ["carol@example.com"]
+
+
+@pytest.mark.asyncio
+async def test_cancel_scheduled_cancels_every_pending_action_and_waits_for_it(engine):
+    async def pending():
+        await asyncio.sleep(60)
+
+    tasks = [engine._schedule(pending()) for _ in range(2)]
+    await asyncio.sleep(0)
+    await engine.cancel_scheduled()
+    assert all(t.cancelled() for t in tasks) and engine._tasks == set()
 
 
 @pytest.mark.asyncio

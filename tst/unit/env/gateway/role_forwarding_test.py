@@ -15,7 +15,7 @@ from mcp.types import CONNECTION_CLOSED, CallToolResult, ErrorData, TextContent,
 
 from agent_env.env.gateway import AGENT_ENV_ROLE_META_KEY, AGENT_ENV_SESSION_META_KEY, InternalMCPServer
 from agent_env.env.gateway import gateway as gateway_module
-from agent_env.env.gateway.gateway import GATEWAY_TRAJECTORY_FILE, Gateway, _is_dead_session
+from agent_env.env.gateway.gateway import GATEWAY_TRAJECTORY_FILE, Gateway, _call_never_reached_child, _is_dead_session
 from agent_env.env.gateway.get_time import GET_TIME_TOOL_NAME
 
 URL = "http://backing/mcp"
@@ -114,14 +114,15 @@ async def test_trigger_internal_calls_are_stamped_only_when_an_as_role_is_given(
     assert "current_time" in native.content[0].text  # gateway-native: no child, no identity, no session touched
 
 
-@pytest.mark.parametrize("exc,dead", [
-    (anyio.ClosedResourceError(), True),
-    (anyio.BrokenResourceError(), True),
-    (McpError(ErrorData(code=32600, message="Session terminated")), True),
-    (McpError(ErrorData(code=CONNECTION_CLOSED, message="Connection closed")), True),
-    (McpError(ErrorData(code=-32602, message="Invalid params")), False),
-    (asyncio.TimeoutError(), False),
-    (ValueError("x"), False),
+@pytest.mark.parametrize("exc,dead,retry", [
+    (anyio.ClosedResourceError(), True, True),
+    (anyio.BrokenResourceError(), True, True),
+    (McpError(ErrorData(code=32600, message="Session terminated")), True, True),
+    (McpError(ErrorData(code=CONNECTION_CLOSED, message="Connection closed")), True, False),  # in flight: may have written
+    (McpError(ErrorData(code=-32602, message="Invalid params")), False, False),
+    (asyncio.TimeoutError(), False, False),
+    (ValueError("x"), False, False),
 ], ids=["closed", "broken", "session_terminated", "connection_closed", "invalid_params", "timeout", "other"])
-def test_the_dead_session_predicate(exc, dead):
+def test_the_dead_session_predicates(exc, dead, retry):
     assert _is_dead_session(exc) is dead
+    assert _call_never_reached_child(exc) is retry

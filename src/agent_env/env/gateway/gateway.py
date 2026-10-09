@@ -79,6 +79,7 @@ class Gateway:
     """Gateway that aggregates MCP tools and REST proxies for website backends."""
 
     TOOL_CALL_TIMEOUT_S = 600.0
+    STARTUP_DISCOVERY_TIMEOUT_S = 60.0  # startup discovery past it fails open, like a failed one; uvicorn must come up
     CHILD_CLOSE_TIMEOUT_S = 3.0  # wait for the owner task to exit a retired child-session generation; past it, cancel it
     TRIGGER_BARRIER_TIMEOUT_S = 30.0  # a barrier may ask for less; past it the call is answered anyway
     # Must be >= the largest timeout any client can ask for, or the proxy severs a load the
@@ -119,6 +120,7 @@ class Gateway:
         self._child_owner: asyncio.Task | None = None
         self._child_close: asyncio.Event | None = None
         self._child_lock = asyncio.Lock()  # open / retire / close of a generation (taken after _discover_lock)
+        self._closing = False  # set at process shutdown; no generation is opened past it
         self._discover_lock = asyncio.Lock()
         self._server_tools: dict[str, list[MCPTool]] = {}
         self._tools_discovered = False
@@ -344,11 +346,11 @@ class Gateway:
 
     def _process_lifespan(self, mcp_lifespan):
         """Once per process (uvicorn's lifespan), outer to the MCP session manager's: at shutdown the MCP sessions end
-        first, then the driver stops, then the child sessions close."""
+        first, then the driver stops and the scheduled trigger actions are cancelled, then the child sessions close."""
         @asynccontextmanager
         async def lifespan(app):
             try:
-                await self._ensure_tools_discovered()
+                await asyncio.wait_for(self._ensure_tools_discovered(), timeout=self.STARTUP_DISCOVERY_TIMEOUT_S)
             except Exception:
                 # a raised startup makes uvicorn exit the process; discovery is retried on first use instead
                 logger.exception("Tool discovery failed at startup; retrying on first use")
@@ -357,7 +359,9 @@ class Gateway:
                 async with mcp_lifespan(app):
                     yield
             finally:
+                self._closing = True
                 await self._trigger_engine.stop_driver()
+                await self._trigger_engine.cancel_scheduled()
                 await self._close_child_sessions()
 
         return lifespan
@@ -701,7 +705,8 @@ class Gateway:
                 try:
                     read_stream, write_stream, _ = await exit_stack.enter_async_context(streamable_http_client(server.mcp_url))
                     session = await exit_stack.enter_async_context(ClientSession(read_stream, write_stream))
-                    await session.initialize()
+                    # a child that accepts the connection but never answers initialize is a failed attempt, not a hang
+                    await asyncio.wait_for(session.initialize(), timeout=CARD_FETCH_TIMEOUT_S)
                     sessions[server.mcp_url] = session
                     logger.info(f"Opened persistent session to {server.name}")
                     break
@@ -722,6 +727,8 @@ class Gateway:
         async with self._child_lock:
             if self._child_owner is not None and not self._child_owner.done():
                 return self._child_sessions
+            if self._closing:
+                raise RuntimeError("gateway is shutting down")
             await self._close_child_sessions()  # a dead or half-open generation
             loop = asyncio.get_running_loop()
             ready: asyncio.Future = loop.create_future()
@@ -782,8 +789,9 @@ class Gateway:
     async def _call_child_tool(self, server_url: str, tool_name: str, arguments: dict, *,
                                meta: dict | None = None) -> CallToolResult:
         """Every child tools/call (MCP proxy, /step, trigger engine): one shared generation, the caller's `_meta`
-        stamp, and one reconnect when the session turns out dead. Discovery is not redone on a reconnect; the
-        registered proxies look their session up by URL."""
+        stamp, and one reconnect when the session turns out dead, retrying the call only if it never reached the
+        child (a call the transport lost in flight may already have written; the next call reopens). Discovery is
+        not redone on a reconnect; the registered proxies look their session up by URL."""
         sessions = await self._ensure_child_sessions()
         try:
             return await asyncio.wait_for(sessions[server_url].call_tool(tool_name, arguments, meta=meta),
@@ -791,8 +799,11 @@ class Gateway:
         except Exception as e:
             if not _is_dead_session(e):
                 raise
-            logger.warning(f"child session to {server_url} is dead ({e!r}), reconnecting...")
             await self._reset_child_sessions(sessions)
+            if not _call_never_reached_child(e):
+                logger.warning(f"child session to {server_url} died with {tool_name} in flight ({e!r}); not retried")
+                raise
+            logger.warning(f"child session to {server_url} is dead ({e!r}), reconnecting...")
             sessions = await self._ensure_child_sessions()
             return await asyncio.wait_for(sessions[server_url].call_tool(tool_name, arguments, meta=meta),
                                           timeout=self.TOOL_CALL_TIMEOUT_S)
@@ -1201,12 +1212,21 @@ _ROLE_HEADER_BYTES = AGENT_ENV_ROLE_HEADER.lower().encode()
 
 
 def _is_dead_session(exc: BaseException) -> bool:
-    """Whether a child call failed because its session is gone: the stream closed under it, the child answered 404
-    for the session id (idle expiry or a restart, which the client reports as code 32600), or the transport died
-    with the call in flight (CONNECTION_CLOSED)."""
+    """Whether a child call failed because its session is gone, so the generation is retired: the stream closed under
+    it, the child answered 404 for the session id (idle expiry or a restart, which the client reports as code 32600),
+    or the transport died with the call in flight (CONNECTION_CLOSED)."""
     if isinstance(exc, (ClosedResourceError, anyio.BrokenResourceError)):
         return True
     return isinstance(exc, McpError) and exc.error.code in (32600, CONNECTION_CLOSED)
+
+
+def _call_never_reached_child(exc: BaseException) -> bool:
+    """Whether a dead-session failure may be retried: the stream was closed before the request was written, or the
+    child rejected the session id at the transport. Not CONNECTION_CLOSED: the call was in flight when the transport
+    died, and the child may already have performed its write."""
+    if isinstance(exc, (ClosedResourceError, anyio.BrokenResourceError)):
+        return True
+    return isinstance(exc, McpError) and exc.error.code == 32600
 
 
 def _is_child_mcp_path(decoded_rest: str) -> bool:
