@@ -45,10 +45,9 @@ def _provider(cls, **kwargs):
 _CREATES = {
     "container": (ModalSandboxProvider, {}, "_experimental_create", lambda p: p.create_container(
         image_name="img:latest", port=8000, env={"A": "1"}, network_policy=_ALLOWLIST, attribution=_ATTRIBUTION,
-        region="us-east-1")),
+        private_network=True)),
     "gpu container": (ModalSandboxProvider, {"gpu": "H100"}, "create", lambda p: p.create_container(
-        image_name="img:latest", port=8000, env={"A": "1"}, network_policy=_ALLOWLIST, attribution=_ATTRIBUTION,
-        region="us-east-1")),
+        image_name="img:latest", port=8000, env={"A": "1"}, network_policy=_ALLOWLIST, attribution=_ATTRIBUTION)),
     "vm": (ModalVmSandboxProvider, {}, "_experimental_create", lambda p: p.create_vm(
         exposed_ports=[8000], network_policy=_ALLOWLIST, attribution=_ATTRIBUTION)),
 }

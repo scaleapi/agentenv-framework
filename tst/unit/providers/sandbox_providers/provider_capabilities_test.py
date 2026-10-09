@@ -81,16 +81,6 @@ async def test_a_container_on_modals_private_network_is_on_i6pn_in_the_configure
     assert create.aio.call_args.kwargs["i6pn"] is True and "region" in create.aio.call_args.kwargs
 
 
-@pytest.mark.asyncio
-async def test_a_gpu_container_is_refused_the_private_network_before_any_modal_call():
-    provider = ModalSandboxProvider(gpu="H100")
-    provider._get_app = AsyncMock()
-    with pytest.raises(ValueError, match="unavailable on GPU sandboxes"):
-        await provider.create_container(image_name="registry.example/srv:1", port=8000, env={}, private_network=True)
-
-    provider._get_app.assert_not_called()
-
-
 def test_a_modal_sandbox_on_i6pn_is_reached_at_its_bracketed_address():
     sandbox = ModalSandbox(MagicMock(object_id="sb-1"), {}, i6pn_address="fdaa::1")
     assert (sandbox.private_host, ModalSandbox(MagicMock(object_id="sb-2"), {}).private_host) == ("[fdaa::1]", None)

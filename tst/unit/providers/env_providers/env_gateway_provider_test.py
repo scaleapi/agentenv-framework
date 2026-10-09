@@ -143,17 +143,11 @@ async def test_a_gateway_deploy_on_a_provider_with_no_vm_and_no_private_network_
 @pytest.mark.asyncio
 async def test_container_mode_rejects_websites():
     provider = ModalSandboxProvider()
-    gp = EnvironmentGatewayProvider()
-    with pytest.raises(NotImplementedError, match="websites"):
-        await gp._deploy_via_containers(
-            sandbox_provider=provider,
-            mcp_servers=[],
-            mcp_server_images=[],
-            gateway_port=18765,
+    with patch.object(provider, "create_container", side_effect=AssertionError("created a container")), \
+         pytest.raises(ValueError, match="can't serve websites"):
+        await EnvironmentGatewayProvider()._deploy_gateway(
+            provider, state_instance=None, mcp_servers=[], mcp_server_images=[],
             website_configs=[WebsiteConfig(backend_image="b", frontend_image="f", environment_name="x")],
-            gateway_mode=MagicMock(value="performance"),
-            ttl_seconds=60,
-            disk_size_gb=10,
         )
 
 
@@ -177,7 +171,11 @@ async def test_container_mode_builds_a_context_only_image_before_creating_anythi
     provider = ModalSandboxProvider()
     gp = EnvironmentGatewayProvider()
     gp._build_local_store = AsyncMock()
-    with patch.object(provider, "prepare_image", side_effect=RuntimeError("the build failed")) as prepare, \
+    async def build(image, *, attribution=None):
+        if image.context_only:
+            raise RuntimeError("the build failed")
+
+    with patch.object(provider, "prepare_image", side_effect=build) as prepare, \
          patch.object(provider, "create_container", side_effect=AssertionError("created a container")), \
          patch("agent_env.env.env.Env.get", return_value=MagicMock(docker_image_artifact=gateway_image)):
         with pytest.raises(RuntimeError, match="the build failed"):
@@ -187,7 +185,8 @@ async def test_container_mode_builds_a_context_only_image_before_creating_anythi
                 gateway_mode=MagicMock(value="performance"), ttl_seconds=60, disk_size_gb=10,
                 attribution={"project_id": "0123456789abcdef01234567"},
             )
-    prepare.assert_awaited_once_with(_CONTEXT_ONLY, attribution={"project_id": "0123456789abcdef01234567"})
+    assert [(call.args, call.kwargs) for call in prepare.await_args_list] == [
+        ((image,), {"attribution": {"project_id": "0123456789abcdef01234567"}}) for image in (gateway_image, server_image)]
     gp._build_local_store.assert_not_awaited()
 
 

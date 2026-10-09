@@ -270,14 +270,13 @@ class ModalSandboxProvider(SandboxProvider):
         attribution: Optional[Attribution] = None,
         network_policy: Optional[NetworkPolicy] = None,
         command: list[str] | None = None,
-        i6pn: bool = False,
-        region: Optional[str] = None,
         expose_externally: bool = True,
         vnc_port: Optional[int] = None,
         private_network: bool = False,
     ) -> Sandbox:
-        if private_network:  # i6pn, Modal's private network between sandboxes, in the configured region
-            i6pn, region = True, region or get_config().modal_default_region
+        # The private network is i6pn, Modal's network between sandboxes, in the configured region.
+        i6pn = private_network
+        region = get_config().modal_default_region if private_network else None
         # GPU sandboxes need the V1 ``Sandbox.create`` factory: the V2
         # ``_experimental_create`` has no ``gpu`` parameter and cannot attach one. V1 in
         # turn has no ``i6pn``, so reject that combination up front — before any Modal

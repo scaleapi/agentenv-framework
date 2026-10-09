@@ -78,8 +78,7 @@ class EnvironmentServerProvider(_SandboxEnvironmentProvider):
         if problem := self.accepts(sandbox_provider).problem(image):
             raise ValueError(f"Can't deploy {name!r} as a server on {type(sandbox_provider).__name__}, which runs its "
                              f"image by name: {problem}")
-        if image.context_only:
-            await sandbox_provider.prepare_image(image, attribution=attribution)
+        await sandbox_provider.prepare_image(image, attribution=attribution)
         server = await sandbox_provider.create_container(
             image_name=env.docker_image_artifact.image_name,
             port=AGENT_ENV_GATEWAY_MCP_PORT,

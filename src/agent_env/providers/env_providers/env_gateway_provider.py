@@ -880,17 +880,12 @@ COMPOSE_EOF'''
         from agent_env.env.env import Env
         from agent_env.config import get_config
 
-        if website_configs:
-            raise NotImplementedError(
-                "Container-mode gateway deploy does not support websites yet; use a VM-mode sandbox provider."
-            )
-
         config = get_config()
         gateway_env = Env.get(config.default_gateway_env_id)
-        # Images that are only a build context are built before anything is created, so a failed build leaves nothing.
+        # Each image is prepared (one that is only a build context, built) before anything is created, so a failed
+        # build leaves nothing.
         images = [gateway_env.docker_image_artifact, *mcp_server_images]
-        await asyncio.gather(*(sandbox_provider.prepare_image(image, attribution=attribution)
-                               for image in images if image.context_only))
+        await asyncio.gather(*(sandbox_provider.prepare_image(image, attribution=attribution) for image in images))
 
         deploy = _ContainerDeploy(
             sandbox_provider=sandbox_provider, cpu=cpu, disk_size_gb=disk_size_gb, ttl_seconds=ttl_seconds,

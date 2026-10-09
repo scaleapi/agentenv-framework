@@ -104,14 +104,15 @@ async def test_a_chain_tells_modal_of_the_image_once_it_tries_modal(monkeypatch,
 
 
 @pytest.mark.asyncio
-async def test_an_image_that_is_not_only_a_build_context_is_not_prepared(monkeypatch, local_stores, litellm):
+async def test_every_image_is_prepared_before_its_sandbox_is_created(monkeypatch, local_stores, litellm):
+    """Preparing an image that isn't only a build context is the provider's to skip, as Modal does."""
     modal = _ModalProvider()
     monkeypatch.setattr(sandbox_provider, "build_sandbox_provider", lambda name: modal)
     pulled = DockerImageArtifact(id="solver-image", version=2, description="d", image_name="registry.example/solver:v2")
 
     with pytest.raises(_Created):
         await A2AAgent(id="solver", version=1, docker_image_artifact=pulled).deploy(sandbox_type="any")
-    assert modal.steps == [("create", "registry.example/solver:v2")]
+    assert modal.steps == [("prepare", "registry.example/solver:v2"), ("create", "registry.example/solver:v2")]
 
 
 class _ContainerSandbox:
