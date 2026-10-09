@@ -1192,6 +1192,9 @@ COMPOSE_EOF'''
                 raise ValueError("existing_sandbox is only supported for VM-mode providers")
             if sidecars:
                 raise NotImplementedError("sidecars are only supported for VM-mode gateway deploys")
+            if problems := [problem for image in [*mcp_server_images, *(website_images or [])]
+                            if (problem := image.by_name_problem())]:
+                raise ValueError(f"Can't deploy on Modal, whose gateway runs each image by name: {'; '.join(problems)}")
             return await self._deploy_via_containers(
                 sandbox_provider, mcp_servers, mcp_server_images,
                 gateway_port=gateway_port, website_configs=website_configs, gateway_mode=gateway_mode,

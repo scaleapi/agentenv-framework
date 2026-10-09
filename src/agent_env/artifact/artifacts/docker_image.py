@@ -264,19 +264,30 @@ class DockerImageArtifact(Artifact):
     def load(self) -> bytes:
         from agent_env.artifact.store import get_artifact_store
         if not self.tar_gz_object_url:
-            raise ValueError(self.load_problem() or f"{self.id!r} v{self.version} has no tar.gz; its image is pulled "
-                             f"from {self.image_name}")
+            how = "built from its build context" if self.context_only else f"pulled from {self.image_name}"
+            raise ValueError(f"{self.id!r} v{self.version} has no tar.gz; its image is {how}")
         return get_artifact_store().get_object(self.tar_gz_object_url)
 
+    @property
+    def context_only(self) -> bool:
+        """Whether only the image's build context is stored: no tar.gz, and an image name that names no registry, the
+        tag a VM sandbox gives the image when it builds it."""
+        return bool(self.build_context_object_url) and not self.tar_gz_object_url and not names_registry(self.image_name)
+
     def load_problem(self) -> str | None:
-        """Why no sandbox can get this image, or None when one can: a tar.gz is loaded, and with none, ``image_name``
-        is pulled, so it must name its registry. One registered by its build context alone isn't built yet."""
-        if self.tar_gz_object_url or names_registry(self.image_name):
+        """Why no VM sandbox can get this image, or None when one can: a tar.gz is loaded, an image with none is pulled
+        when its name names a registry, and built from its build context when it has only that."""
+        if self.tar_gz_object_url or names_registry(self.image_name) or self.context_only:
             return None
-        if self.build_context_object_url:
-            return f"{self.id!r} v{self.version} is only a build context, and sandboxes don't build images from one yet"
         return (f"{self.id!r} v{self.version} has no tar.gz, and its image name {self.image_name!r} doesn't name a "
                 "registry to pull it from")
+
+    def by_name_problem(self) -> str | None:
+        """Why a sandbox that runs an image by pulling its name can't run this one, or None when it can: a context-only
+        image's name is a tag only a VM sandbox's build gives it, and pulled, it would be looked up on Docker Hub."""
+        if self.context_only:
+            return f"{self.id!r} v{self.version} is only a build context, which only a VM sandbox builds"
+        return None
 
     @classmethod
     async def put_from_github(

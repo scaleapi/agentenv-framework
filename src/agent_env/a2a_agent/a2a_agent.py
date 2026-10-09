@@ -33,6 +33,8 @@ from agent_env.providers.sandbox_providers.local_sandbox import (
     local_grant_trust,
     start_trusting,
 )
+from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
+from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox_provider import all_sandbox_container_env, all_sandbox_url_rewrites
 from agent_env.attribution import Attribution
 
@@ -431,6 +433,11 @@ class A2AAgent:
 
         merged_env = await asyncio.to_thread(self._build_merged_env, resolved_env, a2a_port)
         image_name = self.docker_image_artifact.image_name
+        if provider is not None and (problem := self.docker_image_artifact.by_name_problem()):
+            links = provider.providers if isinstance(provider, ChainedSandboxProvider) else [provider]
+            if by_name := [link for link in links if isinstance(link, (LocalSandboxProvider, ModalSandboxProvider))]:
+                raise ValueError(f"Can't deploy agent {self.id!r} with {type(by_name[0]).__name__}, which runs an "
+                                 f"agent's image by name: {problem}")
 
         try:
             if provider is not None:

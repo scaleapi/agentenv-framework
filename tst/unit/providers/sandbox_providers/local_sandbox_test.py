@@ -11,7 +11,6 @@ import pytest
 
 import agent_env.providers.sandbox_providers.local_sandbox as ls
 from agent_env.a2a_agent.a2a_agent import A2AAgent
-from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.config import reset_config, set_object_store
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER, SANDBOX_MODE_VM
@@ -20,6 +19,7 @@ from agent_env.store.object_store.local.tls import local_ca
 from agent_env.store.routing import LocalRunObjectStore
 from agent_env.a2a_agent import a2a_agent as a2a_agent_module
 from agent_env.a2a_agent.a2a_agent import A2AAgent
+from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from tst.unit.store.fakes import FakeObjectStore
 
 
@@ -588,7 +588,7 @@ async def test_create_container_publishes_the_allocated_host_port(monkeypatch, t
 @pytest.mark.asyncio
 async def test_an_agent_placed_on_a_local_vm_publishes_only_on_the_host_ips(monkeypatch, tmp_path):
     monkeypatch.setattr(ls, "_host_ips", lambda: ("127.0.0.1", "172.17.0.1"))
-    agent = A2AAgent(id="a", version=None, docker_image_artifact=SimpleNamespace(image_name="img:1"))
+    agent = A2AAgent(id="a", version=None, docker_image_artifact=DockerImageArtifact(id="img", description="d", image_name="img:1"))
     agent._sandbox = _RecordingLocalSandbox(work_dir=tmp_path)
 
     await agent._run_container("img:1", 8000, {})

@@ -14,6 +14,7 @@ import pytest
 from agent_env.a2a_agent import store as agent_store
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts.cli import CliArtifact
+from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.env.env import DeployedGatewayEnv
 from agent_env.providers.sandbox_providers import sandbox_provider
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
@@ -52,7 +53,7 @@ class _RemoteProvider:
 
 
 def _agent(**fields) -> A2AAgent:
-    return A2AAgent(id="solver", version=1, docker_image_artifact=types.SimpleNamespace(image_name="img"), **fields)
+    return A2AAgent(id="solver", version=1, docker_image_artifact=DockerImageArtifact(id="img", description="d", image_name="img"), **fields)
 
 
 @pytest.mark.asyncio

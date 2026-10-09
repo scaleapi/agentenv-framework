@@ -585,3 +585,89 @@ async def test_a_url_the_local_store_holds_is_read_from_it_not_the_configured_st
     await sandbox.load_docker_images([_image(image, "myimage:latest")])
 
     assert pushed == [(local, data), (local, image)]
+
+
+def _context_image(id: str, digest: str | None, *, platform: str | None = "linux/amd64",
+                   dockerfile: str | None = "Dockerfile") -> DockerImageArtifact:
+    return DockerImageArtifact(id=id, version=1, description="", image_name=f"local/{id}-0123456789ab:v1",
+                               build_context_object_url=f"s3://bucket/{id}/build-context.tar.gz", dockerfile_path=dockerfile,
+                               platform=platform, source_digest=digest)
+
+
+def _work(source: str) -> str:
+    return f"/tmp/agent-env-build-{hashlib.sha256(source.encode()).hexdigest()[:16]}"
+
+
+@pytest.mark.asyncio
+async def test_a_context_only_image_is_built_in_the_vm_from_its_context(signing_store):
+    sandbox, digest = _RecordingVmSandbox(), "sha256:" + "1" * 64
+    work = _work(digest)
+
+    await sandbox.load_docker_images([_context_image("a", digest)])
+
+    assert sandbox.scripts == [
+        f"rm -rf {work} && mkdir -p {work}/context",
+        f"curl -fsSL {sandbox_module.CURL_RETRY_FLAGS} https://signed/build-context.tar.gz -o {work}/context.tar.gz",
+        f"tar -xzf {work}/context.tar.gz -C {work}/context && cd {work}/context && "
+        "docker build --platform linux/amd64 -f Dockerfile -t local/a-0123456789ab:v1 .",
+        f"rm -rf {work}",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_images_with_one_source_share_a_build_and_builds_run_one_at_a_time(signing_store):
+    sandbox, shared, other = _RecordingVmSandbox(), "sha256:" + "1" * 64, "sha256:" + "2" * 64
+
+    await sandbox.load_docker_images([_context_image("a", shared), _context_image("b", other),
+                                      _context_image("c", shared)])
+
+    builds = [script for script in sandbox.scripts if "docker build" in script]
+    assert len(builds) == 2
+    assert builds[0].endswith("-t local/a-0123456789ab:v1 -t local/c-0123456789ab:v1 .")
+    assert builds[1].endswith("-t local/b-0123456789ab:v1 .")
+    assert sandbox.scripts.index(f"rm -rf {_work(shared)}") < sandbox.scripts.index(f"rm -rf {_work(other)} && mkdir -p "
+                                                                                     f"{_work(other)}/context")
+
+
+@pytest.mark.asyncio
+async def test_a_build_takes_the_recorded_dockerfile_and_platform_else_linux_amd64(signing_store):
+    sandbox = _RecordingVmSandbox()
+
+    await sandbox.load_docker_images([_context_image("a", "sha256:" + "1" * 64, platform=None,
+                                                     dockerfile="docker/app.Dockerfile"),
+                                      _context_image("b", "sha256:" + "2" * 64, platform="linux/arm64")])
+
+    builds = [script for script in sandbox.scripts if "docker build" in script]
+    assert "docker build --platform linux/amd64 -f docker/app.Dockerfile -t local/a-0123456789ab:v1 ." in builds[0]
+    assert "docker build --platform linux/arm64 -f Dockerfile -t local/b-0123456789ab:v1 ." in builds[1]
+
+
+class _BuildFailsVm(_RecordingVmSandbox):
+    async def exec_with_output(self, *args):
+        if args[:2] == ("sudo", "bash") and "docker build" in script_run(args):
+            self.scripts.append(script_run(args))
+            return 1, "", "failed to solve: python:3.12: not found"
+        return await super().exec_with_output(*args)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_build_names_its_image_and_still_removes_its_folder(signing_store):
+    sandbox, digest = _BuildFailsVm(), "sha256:" + "1" * 64
+
+    with pytest.raises(RuntimeError, match="(?s)Building local/a-0123456789ab:v1 from its build context failed: .*not found"):
+        await sandbox.load_docker_images([_context_image("a", digest)])
+
+    assert sandbox.scripts[-1] == f"rm -rf {_work(digest)}"
+
+
+@pytest.mark.asyncio
+async def test_tarballs_are_loaded_registry_images_pulled_and_contexts_built(signing_store, registry):
+    sandbox = _RecordingVmSandbox(images_stdout="a\n")
+
+    await sandbox.load_docker_images([_image("s3://bucket/a.tar.gz", "a:1"), _image(None, PUBLIC),
+                                      _context_image("c", "sha256:" + "3" * 64)])
+
+    assert '"https://signed/a.tar.gz"' in sandbox.scripts[0]
+    assert sandbox.scripts[1] == f"docker pull {PUBLIC}"
+    assert not any("local/c-0123456789ab" in script for script in sandbox.scripts if script.startswith("docker pull"))
+    assert sandbox.scripts[-2].endswith("-t local/c-0123456789ab:v1 .")

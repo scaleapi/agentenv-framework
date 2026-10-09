@@ -23,6 +23,7 @@ from typing import IO, TYPE_CHECKING, Any, AsyncIterator, Callable, Iterable, Op
 
 from agent_env.config import get_config
 from agent_env.store.image_store.oci_registry_credentials import registry_host_from_ref
+from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM
 from agent_env.utils.paths import validate_relative_filename
 
 if TYPE_CHECKING:
@@ -279,16 +280,54 @@ class VmSandbox(Sandbox):
         )
 
     async def load_docker_images(self, artifacts: list) -> None:
-        """Put each DockerImageArtifact's image on the VM: those with a tar.gz are loaded from it, in parallel, and the
-        rest are pulled by image name. An image no sandbox can get is refused before anything is loaded."""
+        """Put each DockerImageArtifact's image on the VM: those with a tar.gz are loaded from it, in parallel, those
+        with only a build context are built from it, and the rest are pulled by image name. An image no sandbox can get
+        is refused before anything is loaded."""
         if not artifacts:
             return
         if problems := [problem for artifact in artifacts if (problem := artifact.load_problem())]:
             raise RuntimeError(f"Can't load images: {'; '.join(problems)}")
         if tarballs := [artifact for artifact in artifacts if artifact.tar_gz_object_url]:
             await self._load_tarballs(tarballs)
-        if pulled := [artifact.image_name for artifact in artifacts if not artifact.tar_gz_object_url]:
+        if pulled := [artifact.image_name for artifact in artifacts
+                      if not artifact.tar_gz_object_url and not artifact.context_only]:
             await self.pull_images(pulled)
+        if built := [artifact for artifact in artifacts if artifact.context_only]:
+            await self.build_images(built)
+
+    async def build_images(self, artifacts: list) -> None:
+        """Build each context-only image from its build context, one build at a time, so heavy builds don't contend
+        for one VM; images with the same ``source_digest`` share a build. The build pulls its base images and packages
+        itself, so a network policy restricting egress must allow them; only the context's download is let through."""
+        builds: dict[str, list] = {}
+        for artifact in artifacts:
+            builds.setdefault(artifact.source_digest or artifact.build_context_object_url, []).append(artifact)
+        for source, images in builds.items():
+            await self._build_image(source, images)
+
+    async def _build_image(self, source: str, images: list) -> None:
+        """Download the context ``images`` share, extract it, and ``docker build`` it, tagged with each image's name."""
+        first = images[0]
+        names = list(dict.fromkeys(image.image_name for image in images))
+        work = f"/tmp/agent-env-build-{hashlib.sha256(source.encode()).hexdigest()[:16]}"
+        platform = first.platform or DEFAULT_BUILD_PLATFORM
+        tags = " ".join(f"-t {shlex.quote(name)}" for name in names)
+        logger.info(f"Building {', '.join(names)} from its build context, for {platform}...")
+        await self.exec_script(f"rm -rf {work} && mkdir -p {work}/context")
+        try:
+            await self.load_object_file(first.build_context_object_url, f"{work}/context.tar.gz")
+            await self.exec_script(
+                f"tar -xzf {work}/context.tar.gz -C {work}/context && cd {work}/context && "
+                f"docker build --platform {shlex.quote(platform)} -f {shlex.quote(first.dockerfile_path or 'Dockerfile')} "
+                f"{tags} ."
+            )
+        except RuntimeError as e:
+            raise RuntimeError(f"Building {', '.join(names)} from its build context failed: {e}") from e
+        finally:
+            try:
+                await self.exec_script(f"rm -rf {work}")
+            except Exception as e:  # the VM may be gone; the folder goes with it
+                logger.warning(f"Could not remove {work} on {self.sandbox_id}: {e}")
 
     async def _load_tarballs(self, artifacts: list) -> None:
         """Load the images of ``artifacts``, each with a tar.gz, in parallel."""

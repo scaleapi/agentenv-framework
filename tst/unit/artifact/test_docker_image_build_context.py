@@ -66,11 +66,12 @@ def test_equal_sources_give_equal_digests_and_bytes(local_stores, context):
     assert three.version == 2
 
 
-def test_a_context_only_image_says_why_no_sandbox_can_get_it_yet(local_stores, context):
+def test_a_context_only_image_is_built_by_a_vm_and_refused_where_run_by_name(local_stores, context):
     image = DockerImageArtifact.put_context("a", description="d", context_path=str(context), dockerfile_path="Dockerfile")
 
-    assert image.load_problem() == "'a' v1 is only a build context, and sandboxes don't build images from one yet"
-    with pytest.raises(ValueError, match="is only a build context"):
+    assert image.context_only and image.load_problem() is None
+    assert image.by_name_problem() == "'a' v1 is only a build context, which only a VM sandbox builds"
+    with pytest.raises(ValueError, match="has no tar.gz; its image is built from its build context"):
         image.load()
 
 
