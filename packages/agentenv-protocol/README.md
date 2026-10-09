@@ -192,7 +192,9 @@ async with ToolSession(mcp_url, role="default") as session:
     that can't be read, or a session the server no longer knows. After a restart, the env's state is usually gone too.
   - `httpx.TransportError` means the connection failed, and `TimeoutError` that a request outlived `timeout`
     (600 s by default, the gateway's own limit on a tool call).
-  - Nothing is retried; the caller decides what a lost session means for its episode.
+  - Nothing is retried. A call that raised may still have run on the server, or may yet run: a request stalled
+    on a bad link can arrive after the client has given up. So after any failed call the env's state is unknown;
+    read it back (`data/get`) or end the episode.
 - **Declarations:** `tool_definitions` also takes a card's `capabilities.tools`. It copies each schema, so a caller
   can tighten one (for OpenAI's strict mode, say) without changing the source.
 
