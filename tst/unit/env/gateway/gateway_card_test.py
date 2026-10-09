@@ -127,6 +127,19 @@ def test_a_child_operation_on_a_gateway_path_with_another_verb_is_the_childs():
     assert shared["params"]["methods"]["sync_time"]["endpoint"] == "/svc/mcp-slack/clock/time"
 
 
+def test_a_child_method_named_otherwise_on_a_gateway_path_is_the_childs():
+    """Same uri, verb and path as the gateway's `disable` but another name: a client picks it by name, so the
+    child serves it."""
+    child = {"name": "slack", "url": "/agentenv", "capabilities": {"extensions": [
+        {"uri": "urn:agentenv:disable-tool/v1",
+         "params": {"endpoint": "/tools/disable", "methods": {"mute": {"method": "POST"}}}},
+    ]}}
+
+    (ext,) = _gateway({"mcp-slack": "http://slack:18765"})._rewrite_child_card("mcp-slack", child)["capabilities"]["extensions"]
+
+    assert ext["params"]["endpoint"] == "/svc/mcp-slack/tools/disable"
+
+
 def test_a_slash_ended_child_url_comes_back_without_its_slash():
     """`v1_base_url` strips `/agentenv` off the child's url to reach its data plane, so `/agentenv/` must not
     become `/svc/<key>/agentenv/`."""
