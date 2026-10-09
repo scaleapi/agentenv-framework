@@ -19,6 +19,7 @@ from agentenv_protocol.transfers import (
     HttpPutGrant,
     Uploaded,
     WriteObject,
+    part_ranges,
 )
 from boto3.s3.transfer import TransferConfig
 from botocore.config import Config as BotocoreConfig
@@ -251,7 +252,7 @@ class S3ObjectStore(ObjectStore):
                     Params={"Bucket": bucket, "Key": key, "UploadId": upload_id, "PartNumber": number},
                     ExpiresIn=expires_in,
                 )
-                for number in range(1, math.ceil(max_bytes / part_bytes) + 1)
+                for number in range(1, len(part_ranges(max_bytes, part_bytes)) + 1)
             ]
             grant = WriteObject(
                 media_type=media_type,
@@ -439,9 +440,8 @@ class _S3PartsWrite(PendingWrite):
         self._upload_id = upload_id
 
     def _complete(self, uploaded: Uploaded) -> None:
-        part_bytes = self.grant.write.part_bytes
-        count = max(1, math.ceil(uploaded.size_bytes / part_bytes))
-        expected = [(number, min(part_bytes, uploaded.size_bytes - (number - 1) * part_bytes)) for number in range(1, count + 1)]
+        ranges = part_ranges(uploaded.size_bytes, self.grant.write.part_bytes)
+        expected = [(number, length) for number, (_, length) in enumerate(ranges, start=1)]
         try:
             parts = [
                 part
