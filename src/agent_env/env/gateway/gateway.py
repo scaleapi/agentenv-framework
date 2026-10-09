@@ -498,27 +498,71 @@ class Gateway:
         return list(self.rest_proxy_urls)
 
     def _rewrite_child_card(self, key: str, card: dict) -> dict:
-        """Rewrite the child's own `/agentenv` paths (data plane + extension endpoints) to the
-        gateway-rooted `/svc/{key}/...`; gateway-referencing endpoints (e.g. `/tools/disable`) pass
-        through. Backing servers are leaves, so any nested `children_environments` is dropped, and so
-        are the child's interfaces: agents reach its tools through the gateway's aggregate MCP endpoint."""
-        def rewrite(path: str | None) -> str | None:
-            if path and "://" not in path and (path == RPC_PATH or path.startswith(RPC_PATH + "/")):
-                return f"/svc/{key}{path}"
-            return path
+        """Rewrite every path the child names (its `url`, each extension's endpoint and each method's
+        own) to the gateway-rooted `/svc/{key}/...`, so it resolves against the env's address. An
+        operation the gateway's own extension with the same `uri` also offers (same method name, HTTP
+        verb and endpoint, e.g. `disable`, POST `/tools/disable`) is the gateway's route and keeps its
+        path; a child method falling back to that endpoint gets one of its own under the child's prefix. Backing
+        servers are leaves, so any nested `children_environments` is dropped, and so are the child's
+        interfaces: agents reach its tools through the gateway's aggregate MCP endpoint."""
+        gateway_operations, gateway_requests, gateway_paths = set(), set(), set()
+        for gateway_ext in self._gateway_extensions():
+            for name, _, _, verb, path in self._operations(gateway_ext.get("params") or {}):
+                gateway_operations.add((gateway_ext["uri"], name, verb, path))
+                gateway_requests.add((gateway_ext["uri"], verb, path))
+                gateway_paths.add((gateway_ext["uri"], path))
+
+        def child_path(path: str) -> str:
+            return f"/svc/{key}{path}" if path.startswith("/") else path
 
         card = copy.deepcopy(card)
         if card.get("children_environments"):
             logger.warning(f"env card: dropping nested children_environments from leaf {key} (multi-level composition unsupported)")
         card["children_environments"] = None
         card["additionalInterfaces"] = []
-        if card.get("url"):
-            card["url"] = rewrite(card["url"])
+        url = card.get("url")
+        if isinstance(url, str) and url:
+            card["url"] = child_path(url.rstrip("/") or "/")
         for ext in (card.get("capabilities") or {}).get("extensions") or []:
-            params = ext.get("params")
-            if isinstance(params, dict) and params.get("endpoint"):
-                params["endpoint"] = rewrite(params["endpoint"])
+            params = ext.get("params") if isinstance(ext, dict) else None
+            if not isinstance(params, dict):
+                continue
+            uri = ext["uri"] if isinstance(ext.get("uri"), str) else None
+            endpoint = params.get("endpoint") if isinstance(params.get("endpoint"), str) else None
+            # A method is the gateway's when the gateway offers it under the same name; an extension
+            # listing no methods is a bare request, the gateway's when the gateway serves it.
+            operations = [(method, holder, (uri, name, verb, path) in gateway_operations
+                           if name is not None else (uri, verb, path) in gateway_requests)
+                          for name, method, holder, verb, path in self._operations(params)]
+            # The extension's endpoint stays when a gateway operation falls back to it or, used by no
+            # operation, when the gateway's extension with this uri names it.
+            keep_endpoint = any(on_gateway and holder is params for _, holder, on_gateway in operations) or (
+                all(holder is not params for _, holder, _ in operations) and (uri, endpoint) in gateway_paths)
+            for method, holder, on_gateway in operations:
+                if on_gateway:
+                    continue
+                if holder is not params:
+                    holder["endpoint"] = child_path(holder["endpoint"])
+                elif keep_endpoint and method is not None:
+                    method["endpoint"] = child_path(params["endpoint"])
+            if endpoint is not None and not keep_endpoint:
+                params["endpoint"] = child_path(endpoint)
         return card
+
+    @staticmethod
+    def _operations(params: dict) -> list[tuple[str | None, dict | None, dict, str, str]]:
+        """Each operation an extension offers, read the way `invoke_extension` reads it: (method name, method, the
+        object naming its endpoint, HTTP verb, endpoint). A method without an endpoint of its own uses
+        the extension's, its verb defaults to POST, and an extension listing no methods offers a POST
+        to its endpoint. One without a text endpoint is skipped, so it stays as stored."""
+        methods = params.get("methods")
+        if isinstance(methods, dict) and methods:
+            operations = [(name, method, method if method.get("endpoint") else params, str(method.get("method") or "POST").upper())
+                          for name, method in methods.items() if isinstance(method, dict)]
+        else:
+            operations = [(None, None, params, "POST")]
+        return [(name, method, holder, verb, holder["endpoint"]) for name, method, holder, verb in operations
+                if isinstance(holder.get("endpoint"), str) and holder["endpoint"]]
 
     async def _fetch_child_card(self, client: httpx.AsyncClient, key: str, base_url: str) -> dict | None:
         """Fetch + rewrite one backing server's card; None (omit) on 404 / error / timeout / malformed JSON."""
