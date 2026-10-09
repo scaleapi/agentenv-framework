@@ -368,11 +368,13 @@ class ModalSandboxProvider(SandboxProvider):
                 sandbox.vnc_url = f"{tunnel_urls[vnc_port]}/vnc.html"
                 logger.info(f"Modal sandbox vnc_url: {sandbox.vnc_url}")
             return sandbox
-        except Exception as e:
+        except BaseException as e:  # a cancelled create, at a chain's deadline say, terminates its sandbox too
             try:
                 await sb.terminate.aio()
             except Exception:
                 pass
+            if not isinstance(e, Exception):
+                raise
             raise RuntimeError(
                 f"Modal sandbox post-create failed [{_fmt_exc(e)}]: "
                 f"sb_id={sb.object_id} {call_context}"
