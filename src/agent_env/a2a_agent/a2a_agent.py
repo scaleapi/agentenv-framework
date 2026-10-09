@@ -34,7 +34,6 @@ from agent_env.providers.sandbox_providers.local_sandbox import (
     start_trusting,
 )
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
-from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox_provider import all_sandbox_container_env, all_sandbox_url_rewrites
 from agent_env.attribution import Attribution
 
@@ -438,13 +437,15 @@ class A2AAgent:
                 raise ValueError(f"Can't deploy agent {self.id!r} on the container sandbox {sandbox.sandbox_id!r}, which "
                                  f"runs its own image, never the agent's: {problem}")
             links = provider.providers if isinstance(provider, ChainedSandboxProvider) else [provider] if provider else []
-            if by_name := [link for link in links if isinstance(link, (LocalSandboxProvider, ModalSandboxProvider))]:
+            if by_name := [link for link in links if isinstance(link, LocalSandboxProvider)]:
                 raise ValueError(f"Can't deploy agent {self.id!r} with {type(by_name[0]).__name__}, which runs an "
                                  f"agent's image by name: {problem}")
 
         try:
             if provider is not None:
                 logger.info(f"Provisioning sandbox for A2A agent '{self.id}' via {type(provider).__name__}...")
+                if self.docker_image_artifact.context_only:
+                    await provider.prepare_image(self.docker_image_artifact)
                 self._sandbox = await provider.create_sandbox(
                     image_name=image_name, port=a2a_port, env=merged_env,
                     cpu=cpu, memory=memory, disk_size_gb=disk_size_gb, timeout=ttl_seconds,

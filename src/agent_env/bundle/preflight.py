@@ -10,8 +10,9 @@ that names none, deploy the configured default agent, which must be in the store
 checked from its planned env.toml.
 
 An image the bundle builds is written in the form its deploys can run: built on this machine when they deploy on the
-local provider, and as its build context alone when they deploy on providers whose VMs build it. One version is one of
-the two, so a run deploying it both ways is refused, as is one deploying it on a provider that runs an image by name.
+local provider, and as its build context alone when they deploy on providers that build it, in a VM or, as Modal does,
+themselves. One version is one of the two, so a run deploying it both ways is refused, as is one deploying it on a
+provider that runs an image by name.
 
 A gateway deploy on the local provider runs on infra envs the store may not hold yet: the gateway, the service-db its
 local Postgres state runs from, and the website browser it adds for websites. The run builds those once its writes are
@@ -193,9 +194,10 @@ class _Walk:
         if GATEWAY in kinds and (loaders := [link for link in _links(provider)
                                              if not isinstance(link, ModalSandboxProvider)]):
             self._loadable(where, loaders, images)  # a gateway VM loads its images; Modal's runs each by name
-        # A lone server runs in a container from its image's name on any provider; a gateway does on Modal.
-        by_name = ([link for link in _links(provider) if isinstance(link, ModalSandboxProvider)] if GATEWAY in kinds
-                   else _links(provider))
+        # A lone server runs in a container from its image's name, though Modal's builds one that's only a build context;
+        # a gateway VM loads its images, and Modal's gateway builds each.
+        by_name = [] if GATEWAY in kinds else [link for link in _links(provider)
+                                               if not isinstance(link, ModalSandboxProvider)]
         self._by_name(where, by_name, images)
         self._use(where, _links(provider), by_name, images)
         if _local_link(provider):
@@ -305,13 +307,15 @@ class _Walk:
         if agent_id is None:
             self.default_agent_users.append((where, unnamed))
             agent_id = get_config().get_default_a2a_agent_id()
-        by_name = [link for link in _links(provider) if isinstance(link, (LocalSandboxProvider, ModalSandboxProvider))]
-        loaders = [link for link in _links(provider) if link not in by_name]  # by_name run an agent in a container
+        containers = [link for link in _links(provider)
+                      if isinstance(link, (LocalSandboxProvider, ModalSandboxProvider))]
+        loaders = [link for link in _links(provider) if link not in containers]  # containers run an agent's image
         remote = _remote_links(provider)
         if (image := self._agent_image(agent_id, version)) is None:
             return
         if loaders:
             self._loadable(where, loaders, [image])
+        by_name = [link for link in containers if isinstance(link, LocalSandboxProvider)]  # Modal's builds it
         self._by_name(where, by_name, [image])
         self._use(where, _links(provider), by_name, [image])
         if remote:
@@ -358,12 +362,13 @@ class _Walk:
 
     def _by_name(self, where: str, links: list[SandboxProvider], images: list[_Image]) -> None:
         """Refuse each of ``images`` a sandbox on ``links`` can't run: it pulls an image by its name, and a context-only
-        image's name is a tag only a VM sandbox's build gives it."""
+        image's name is a tag only its build gives it."""
+        on_modal = bool(links) and isinstance(links[0], ModalSandboxProvider)
+        builds = "whose VMs build it, such as --sandbox modal_vm" if on_modal else "that builds it, such as --sandbox modal"
         for image in images:
             if links and image.by_name:
                 self._problem(where, f"deploys {image.what} on the {_shown(links[0])} sandbox provider, which runs it "
-                                     f"by name: {image.by_name}; run it on a provider whose VMs build it, such as "
-                                     "--sandbox modal_vm")
+                                     f"by name: {image.by_name}; run it on a provider {builds}")
 
     def _reachable(self, where: str, remote: list[SandboxProvider], images: list[_Image]) -> None:
         for image in images:
@@ -386,7 +391,7 @@ class _Walk:
             images = [_image(f"the {kind} env {env_id!r}'s image {image.id!r}", image) for image in artifacts]
             if not isinstance(provider, ModalSandboxProvider):  # whose containers run by name, or are swapped out
                 self._loadable(where, [provider], images)
-            else:
+            elif kind != GATEWAY:  # whose image Modal builds when it's only a build context
                 self._by_name(where, [provider], images)
             self._reachable(where, [provider], images)
 
@@ -397,8 +402,8 @@ class _Walk:
                 self.uses.setdefault(image.built, []).append((where, image.what, links, by_name))
 
     def _contexts(self) -> frozenset[str]:
-        """The images the bundle builds that it writes as build contexts: those every deploy runs on providers whose
-        VMs build them. One its deploys run only on the local provider, or that none runs, is built on this machine."""
+        """The images the bundle builds that it writes as build contexts: those every deploy runs on providers that
+        build them. One its deploys run only on the local provider, or that none runs, is built on this machine."""
         contexts = set()
         for image_id, uses in self.uses.items():
             built = self.built[image_id]
@@ -408,12 +413,12 @@ class _Walk:
                 for link in links:
                     if isinstance(link, LocalSandboxProvider):
                         local.append((where, what, links, link))
-                    elif link in by_name or not _creates_vms(link):
-                        how = "runs it by name" if link in by_name else "creates no VM to build it in"
+                    elif link in by_name or not _builds(link):
+                        how = "runs it by name" if link in by_name else "can't build it from its build context"
                         self._problem(where, f"deploys {what} on the {_shown(link)} sandbox provider, which {how}, and "
-                                             f"the bundle builds it from {source}, which a sandbox runs only once built "
-                                             "on this machine or in its VM; run it with --sandbox local, or on a "
-                                             "provider whose VMs build it, such as --sandbox modal_vm")
+                                             f"the bundle builds it from {source}, which a sandbox runs only once it's "
+                                             "built on this machine or by the provider it runs on; run it with "
+                                             "--sandbox local, or on a provider that builds it, such as --sandbox modal")
                     else:
                         vms.append((where, what, links, link))
             if local and vms:
@@ -421,7 +426,7 @@ class _Walk:
                 on = (f"{_named(links)} sandbox provider" if elsewhere == where else
                       f"{_shown(link)} sandbox provider, and {elsewhere} on the {_shown(vm)} one")
                 self._problem(where, f"deploys {what} on the {on}: the bundle builds it from {source} on this machine "
-                                     "for the local provider, and as a build context for one whose VMs build it, and a "
+                                     "for the local provider, and as a build context for one that builds it, and a "
                                      "run writes it one way; run its deploys on one kind, such as --sandbox local or "
                                      "--sandbox modal_vm")
             elif vms:
@@ -487,6 +492,12 @@ def _remote_links(provider: SandboxProvider) -> list[SandboxProvider]:
 def _creates_vms(provider: SandboxProvider) -> bool:
     """Whether ``provider`` implements create_vm; a chain doesn't, whatever its providers do."""
     return type(provider).create_vm is not SandboxProvider.create_vm
+
+
+def _builds(provider: SandboxProvider) -> bool:
+    """Whether ``provider`` builds an image that's only a build context: in a VM it creates, or itself before running
+    it (``prepare_image``), as Modal does."""
+    return _creates_vms(provider) or type(provider).prepare_image is not SandboxProvider.prepare_image
 
 
 def _shown(provider: SandboxProvider) -> str:

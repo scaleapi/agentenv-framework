@@ -20,6 +20,7 @@ from agent_env.providers.env_providers import env_server_provider
 from agent_env.providers.env_providers.env_provider import build_env_provider, record_class_for
 from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider
 from agent_env.providers.env_providers.env_server_provider import EnvironmentServerProvider
+from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 
 _SERVER_CARD = {"name": "slack", "additionalInterfaces": [{"url": "/custom-mcp", "transport": "mcp"}]}
@@ -61,15 +62,40 @@ async def test_a_deploy_starts_only_the_server_on_sqlite_with_its_sizing():
     assert call["env"] == {"ENVIRONMENT_NAME": "slack", "MCP_HOST": "0.0.0.0", "DATABASE_URL": "sqlite:////tmp/slack.sqlite"}
 
 
+_CONTEXT_ONLY = DockerImageArtifact(id="slack-image", version=3, description="d", image_name="local/slack-0123456789ab:v3",
+                                    build_context_object_url="s3://bucket/ctx.tar.gz")
+
+
 @pytest.mark.asyncio
 async def test_a_server_whose_image_is_only_a_build_context_is_refused_before_any_container():
-    image = DockerImageArtifact(id="slack-image", version=3, description="d", image_name="local/slack-0123456789ab:v3",
-                                build_context_object_url="s3://bucket/ctx.tar.gz")
-    run = await _run_server_deploy(env=SimpleNamespace(**{**vars(_ENV), "docker_image_artifact": image}))
+    run = await _run_server_deploy(env=SimpleNamespace(**{**vars(_ENV), "docker_image_artifact": _CONTEXT_ONLY}))
 
-    assert "Can't deploy 'slack' as a server, which runs its image by name: 'slack-image' v3 is only a build context" in str(
-        run.result)
+    assert ("Can't deploy 'slack' as a server on _FakeSandboxProvider, which runs its image by name: 'slack-image' v3 is "
+            "only a build context") in str(run.result)
     assert run.calls == []
+
+
+class _ModalProvider(ModalSandboxProvider):
+    """Modal with its build and its container faked, recording the order they're asked for."""
+
+    def __init__(self):
+        super().__init__()
+        self.steps = []
+
+    async def prepare_image(self, image):
+        self.steps.append(("prepare", image.image_name))
+
+    async def create_container(self, **kwargs):
+        self.steps.append(("create", kwargs["image_name"]))
+        raise RuntimeError("created")
+
+
+@pytest.mark.asyncio
+async def test_modal_builds_a_server_whose_image_is_only_a_build_context_before_its_container():
+    modal = _ModalProvider()
+    await _run_server_deploy(modal, env=SimpleNamespace(**{**vars(_ENV), "docker_image_artifact": _CONTEXT_ONLY}))
+
+    assert modal.steps == [("prepare", "local/slack-0123456789ab:v3"), ("create", "local/slack-0123456789ab:v3")]
 
 
 @pytest.mark.asyncio
