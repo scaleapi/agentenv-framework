@@ -16,12 +16,14 @@ from agent_env.store.object_store.object_store import (
     MIN_GRANT_LIFETIME_SECONDS,
     ObjectMetadata,
     ObjectStore,
+    PendingWrite,
     UploadPolicy,
 )
 
 __all__ = [
     "ObjectStore",
     "ObjectMetadata",
+    "PendingWrite",
     "UploadPolicy",
     "DEFAULT_CONTENT_TYPE",
     "DEFAULT_GRANT_LIFETIME_SECONDS",

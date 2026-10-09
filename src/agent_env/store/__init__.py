@@ -9,6 +9,7 @@ from agent_env.store.base import (
     NotFoundError,
     ObjectAlreadyExistsError,
     ObjectNotFoundError,
+    UploadFailedError,
 )
 from agent_env.config import (
     Config,
@@ -81,6 +82,7 @@ __all__ = [
     "ObjectAlreadyExistsError",
     "ObjectNotFoundError",
     "GrantUnavailableError",
+    "UploadFailedError",
     "ConcurrentModificationError",
     "ConfigError",
     "DuplicateKeyError",
