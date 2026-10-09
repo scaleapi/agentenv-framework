@@ -521,6 +521,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         cpu: float | None = None,
         memory_mb: int | None = None,
         attribution: Optional[Attribution] = None,
+        artifact_id: str | None = None,
+        artifact_version: int | None = None,
     ) -> DeployedGatewayEnv:
         """A gateway in front of the env, with the state store it acquires (local Postgres by default); returns the record.
 

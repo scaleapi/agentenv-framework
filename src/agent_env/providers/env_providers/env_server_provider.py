@@ -36,6 +36,8 @@ class EnvironmentServerProvider(_SandboxEnvironmentProvider):
         cpu: float | None = None,
         memory_mb: int | None = None,
         attribution: Optional[Attribution] = None,
+        artifact_id: str | None = None,
+        artifact_version: int | None = None,
     ) -> DeployedSandboxEnv:
         """The env's MCP server in its own container; returns the record once it serves its card and its tools."""
         from agent_env.env.envs.multi_env import MultiEnv
