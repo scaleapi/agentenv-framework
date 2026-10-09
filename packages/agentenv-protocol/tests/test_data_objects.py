@@ -424,3 +424,12 @@ def test_a_part_that_names_no_object_upload_reads_as_none(part):
 def test_an_uploaded_object_name_must_be_relative(name):
     with pytest.raises(ValueError):
         uploaded_object_part(Uploaded(size_bytes=1), name=name)
+
+
+@pytest.mark.parametrize("declared", [["http-put-parts"], []], ids=["fewer-kinds", "no-kinds"])
+def test_an_explicit_declaration_wins_over_the_data_objects_default(declared):
+    card = EnvironmentCard(name="slack", capabilities=EnvironmentCapabilities(extensions=[
+        EnvironmentExtension(uri=DATA_OBJECTS_EXTENSION_URI, description="declared"),
+        EnvironmentExtension(uri=TRANSFERS_EXTENSION_URI, description="declared", params={"write": declared}),
+    ]))
+    assert protocol_v1.write_kinds(card.model_dump(mode="json", exclude_none=True)) == frozenset(declared)
