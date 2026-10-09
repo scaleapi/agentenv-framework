@@ -72,6 +72,18 @@ def test_a_reported_upload_over_the_limit_is_refused(store):
                           kinds=KINDS).complete(Uploaded(size_bytes=65))
 
 
+class _UnreadableStore(GrantingObjectStore):
+    def get_object_metadata_at(self, object_url):
+        raise PermissionError("the store refused to describe the object")
+
+
+def test_a_store_that_cannot_read_back_the_upload_fails_the_write(tmp_path):
+    store = _UnreadableStore(str(tmp_path))
+    write = store.begin_write(store.object_url("t.zip"), media_type="application/zip", max_bytes=64, kinds=KINDS)
+    with pytest.raises(UploadFailedError, match="PermissionError"):
+        write.complete(Uploaded(size_bytes=1))
+
+
 def test_leaving_an_unfinished_one_url_write_does_nothing(store):
     url = store.object_url("snapshots/github.zip")
     with store.begin_write(url, media_type="application/zip", max_bytes=64, kinds=KINDS):
