@@ -63,7 +63,7 @@ async def test_a_card_with_both_paths_gets_the_role_on_both(wiring, caplog):
 @pytest.mark.parametrize(
     "card", [_card(HEADERS_MCP), _card(HEADERS_MCP, ROLELESS_CONFIG)], ids=["no-agent-config", "roleless-agent-config"]
 )
-async def test_a_header_only_card_gets_the_role_on_the_gateway_registration_and_warns(wiring, caplog, card):
+async def test_a_header_only_card_gets_the_role_on_its_mcp_registration_and_warns(wiring, caplog, card):
     with caplog.at_level(logging.WARNING, logger=_LOGGER):
         context = await wiring.deploy(card, role="executor")
 
@@ -102,19 +102,22 @@ async def test_a_card_with_neither_path_fails_before_any_request(wiring, card):
 
 
 @pytest.mark.asyncio
-async def test_a_header_capable_card_with_no_gateway_env_needs_agent_config(wiring):
-    with pytest.raises(RuntimeError, match="cannot carry role 'grader'"):
-        await wiring.deploy(_card(HEADERS_MCP), role="grader", env_ids=["ext"])
-    assert wiring.requests == []
+async def test_an_env_that_is_not_behind_a_gateway_gets_the_header_too(wiring):
+    """deploy_agent does not judge what the env does with the role: a protocol server reads the header itself."""
+    context = await wiring.deploy(_card(HEADERS_MCP), role="grader", env_ids=["ext"])
+
+    assert wiring.bodies("/ext/mcp-config") == [{"url": _LIVE_MCP_URL, "headers": {AGENT_ENV_ROLE_HEADER: "grader"}}]
+    assert wiring.bodies("/ext/agent-config") == []
+    assert [a.role for a in context.deployed_agents] == ["grader"]
 
 
 @pytest.mark.asyncio
-async def test_the_header_lands_on_the_gateway_entry_only(wiring):
+async def test_the_header_lands_on_every_mcp_registration(wiring):
     context = await wiring.deploy(_card(HEADERS_MCP), role="alice@example.com", env_ids=["crm", "ext"])
 
     assert wiring.bodies("/ext/mcp-config") == [
         {"url": _GATEWAY_MCP_URL, "headers": {AGENT_ENV_ROLE_HEADER: "alice@example.com"}, "name": "crm"},
-        {"url": _LIVE_MCP_URL},
+        {"url": _LIVE_MCP_URL, "headers": {AGENT_ENV_ROLE_HEADER: "alice@example.com"}},
     ]
     assert wiring.bodies("/ext/agent-config") == []
     assert [a.role for a in context.deployed_agents] == ["alice@example.com"]

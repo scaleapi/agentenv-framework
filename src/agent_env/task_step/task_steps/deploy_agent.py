@@ -25,7 +25,7 @@ from agent_env.a2a_agent.object_transfer import (
 )
 from agent_env.a2a_agent.staging import StagedObjectStore, transfer_store
 from agent_env.config import get_config
-from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, DeployedSandboxEnv, Env
+from agent_env.env.env import DeployedEnv, DeployedSandboxEnv, Env
 from agent_env.env.gateway import AGENT_ENV_ROLE_HEADER
 from agent_env.providers.sandbox_providers.local_sandbox import host_url_for
 from agent_env.providers.sandbox_providers.sandbox_provider import reachable_url, sandbox_request_headers_for_url
@@ -355,9 +355,10 @@ class DeployAgentTaskStep(TaskStep):
                 url = host_url_for(_live_mcp_url(env_id), deployed.sandbox_type)
                 card_name = None
             headers = sandbox_request_headers_for_url(url)
-            if self.role is not None and mcp_ext and isinstance(deployed_env, DeployedGatewayEnv):
-                # Judge the registration the agent will actually receive: with the card name relayed, a
-                # card that requires `name` still takes the role header.
+            if self.role is not None and mcp_ext:
+                # Every MCP registration carries the role; the env decides what it means (a gateway forwards it, a
+                # protocol server reads it, anything else ignores an unknown header). Judge the registration the
+                # agent will actually receive: with the card name relayed, a card that requires `name` still takes it.
                 carries_name = bool(card_name) and card_request_accepts(add_request, ("url", "name"))
                 fields = ("url", "headers", "name") if carries_name else ("url", "headers")
                 if card_request_accepts(add_request, fields):
@@ -378,7 +379,7 @@ class DeployAgentTaskStep(TaskStep):
             if not (role_in_headers or role_in_config):
                 raise RuntimeError(
                     f"Agent '{self.agent_name}' cannot carry role '{self.role}': its card takes neither 'headers' on "
-                    f"{A2AAgent.EXT_MCP_CONFIG} add for a gateway env nor 'role' in {A2AAgent.EXT_AGENT_CONFIG}, "
+                    f"{A2AAgent.EXT_MCP_CONFIG} add nor 'role' in {A2AAgent.EXT_AGENT_CONFIG}, "
                     f"so the role would never reach the env"
                 )
             if not role_in_headers:
@@ -388,13 +389,13 @@ class DeployAgentTaskStep(TaskStep):
                 )
             elif not role_in_config:
                 logger.warning(
-                    f"Agent '{self.agent_name}' takes role '{self.role}' as {AGENT_ENV_ROLE_HEADER} on its gateway MCP "
-                    f"registration only; {A2AAgent.EXT_AGENT_CONFIG} does not list 'role'"
+                    f"Agent '{self.agent_name}' takes role '{self.role}' as {AGENT_ENV_ROLE_HEADER} on its MCP "
+                    f"registrations only; {A2AAgent.EXT_AGENT_CONFIG} does not list 'role'"
                 )
             else:
                 logger.info(
-                    f"Role '{self.role}' reaches '{self.agent_name}' as {AGENT_ENV_ROLE_HEADER} on its gateway MCP "
-                    f"registration and through {A2AAgent.EXT_AGENT_CONFIG}"
+                    f"Role '{self.role}' reaches '{self.agent_name}' as {AGENT_ENV_ROLE_HEADER} on its MCP "
+                    f"registrations and through {A2AAgent.EXT_AGENT_CONFIG}"
                 )
 
         if mcp_ext and env_mcp_urls:
