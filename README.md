@@ -44,6 +44,24 @@ uv sync --extra dev
 source .venv/bin/activate
 ```
 
+## Run agents in local microVMs
+
+Install `agentenv-framework[smol]` and select the `smol_vm` sandbox provider in
+`.agentenv/config.toml`:
+
+```toml
+[sandbox]
+default = "smol_vm"
+agent_default = "smol_vm"
+```
+
+Each agent and environment gets its own local SmolVM machine with a Docker daemon,
+so workloads are isolated from the host Docker daemon. This needs a supported
+Apple Silicon macOS or Linux host; on Linux, `/dev/kvm` must be available. AgentEnv can still
+use its default local object and image stores: guest containers can fetch local
+object grants, and the VM forwards pulls from the host's loopback registry.
+Cloud image and object stores continue to work through the same provider.
+
 ## Plugins
 
 A package of your own can add env types, providers, task steps and stores to agent-env, and `agent-env plugin` lists, checks, adds and removes installed plugins. The [plugin docs](https://www.agentenvframework.com/docs/plugins) show how.

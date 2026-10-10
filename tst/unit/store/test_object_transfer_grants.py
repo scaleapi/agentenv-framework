@@ -9,13 +9,26 @@ from agent_env.store.routing import LocalRunObjectStore
 from tst.util.granting_object_store import GrantingObjectStore
 
 
-def test_local_store_grants_reach_only_local_sandboxes(tmp_path) -> None:
+def test_local_store_grants_reach_local_and_smol_vm_sandboxes(tmp_path) -> None:
     store = LocalFilesystemObjectStore(str(tmp_path))
 
     assert store.supports_transfer_grants
     assert store.grants_reach("local")
+    assert store.grants_reach("smol_vm")
     assert not store.grants_reach("modal")
     assert not store.grants_reach(None)
+
+
+def test_custom_bridge_only_grants_are_not_claimed_reachable_from_smol_vm(tmp_path) -> None:
+    store = LocalFilesystemObjectStore(str(tmp_path), grant_bind_host="172.17.0.1")
+    assert store.grants_reach("local")
+    assert not store.grants_reach("smol_vm")
+
+
+def test_custom_private_advertised_host_is_not_claimed_reachable_from_smol_vm(tmp_path) -> None:
+    store = LocalFilesystemObjectStore(str(tmp_path), grant_advertise_host="172.17.0.1")
+    assert store.grants_reach("local")
+    assert not store.grants_reach("smol_vm")
 
 
 def test_local_store_grants_can_be_turned_off(tmp_path) -> None:

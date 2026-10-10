@@ -32,7 +32,7 @@ from agent_env.config.paths import state_root
 from agent_env.store.local_state import ensure_state_dir
 
 # What the CA may vouch for: the names containers reach the host by, and loopback and private addresses.
-LOCAL_NAMES = ("localhost", "host.docker.internal")
+LOCAL_NAMES = ("localhost", "host.docker.internal", "host.smolvm.internal")
 LOCAL_NETWORKS = tuple(
     ipaddress.ip_network(n)
     for n in ("127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "::1/128", "fc00::/7")

@@ -192,16 +192,35 @@ class GrantServer:
             if self._port is not None:
                 return self._port
             address = ipaddress.ip_address(self.bind_host)
-            sock = socket.socket(socket.AF_INET6 if address.version == 6 else socket.AF_INET, socket.SOCK_STREAM)
+            # On Linux the Docker bridge is the primary bind address, but SmolVM's
+            # host.smolvm.internal forwards to host loopback. Serve both on one port
+            # without exposing the grant server on public interfaces.
+            bind_hosts = [self.bind_host]
+            if self.bind_host == default_bind_host() and self.bind_host != "127.0.0.1":
+                bind_hosts.append("127.0.0.1")
+            sockets: list[socket.socket] = []
             try:
-                sock.bind((self.bind_host, 0))
-                hosts = ["localhost", "host.docker.internal", "127.0.0.1", self.advertise_host]
+                for attempt in range(5):
+                    try:
+                        for host in bind_hosts:
+                            sock = socket.socket(socket.AF_INET6 if address.version == 6 and host == self.bind_host else socket.AF_INET, socket.SOCK_STREAM)
+                            sockets.append(sock)
+                            sock.bind((host, sockets[0].getsockname()[1] if len(sockets) > 1 else 0))
+                        break
+                    except OSError:
+                        for sock in sockets:
+                            sock.close()
+                        sockets.clear()
+                        if attempt == 4:
+                            raise
+                hosts = ["localhost", "host.docker.internal", "host.smolvm.internal", "127.0.0.1", self.advertise_host]
                 with contextlib.suppress(ValueError):  # a name the CA cannot vouch for would void the certificate
                     check_local_host(self.bind_host)
                     hosts.append(self.bind_host)
                 context = server_context(local_ca(), hosts)
             except (OSError, ValueError) as e:
-                sock.close()
+                for sock in sockets:
+                    sock.close()
                 raise GrantUnavailableError(f"the local grant server cannot listen on {self.bind_host}: {e}") from e
             config = uvicorn.Config(
                 self._app, lifespan="off", log_config=None, http=_UnloggedH11Protocol,
@@ -212,7 +231,7 @@ class GrantServer:
 
             def serve() -> None:
                 try:
-                    asyncio.run(server.serve(sockets=[sock]))
+                    asyncio.run(server.serve(sockets=sockets))
                 except BaseException as e:  # uvicorn ends a failed startup with SystemExit
                     failure.append(e)
 
@@ -222,15 +241,16 @@ class GrantServer:
             while not server.started:
                 if failure or not thread.is_alive() or time.monotonic() > deadline:
                     server.should_exit = True
-                    sock.close()
+                    for sock in sockets:
+                        sock.close()
                     raise GrantUnavailableError(
                         f"the local grant server did not start on {self.bind_host}"
                         + (f": {failure[0]!r}" if failure else "")
                     )
                 time.sleep(0.01)
             self._uvicorn, self._thread = server, thread
-            self._port = sock.getsockname()[1]
-            logger.info("Local grant server listening on %s:%d", self.bind_host, self._port)
+            self._port = sockets[0].getsockname()[1]
+            logger.info("Local grant server listening on %s:%d", ", ".join(bind_hosts), self._port)
             return self._port
 
     async def _handle(self, request: Request) -> Response:

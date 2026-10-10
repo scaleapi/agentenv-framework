@@ -19,6 +19,7 @@ import weakref
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
 from enum import Enum
+from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, AsyncIterator, Callable, ClassVar, Iterable, Optional
 
 from agent_env.config import get_config
@@ -458,6 +459,17 @@ class VmSandbox(Sandbox):
             raise RuntimeError(
                 f"docker cp {source} {destination} failed (exit {exit_code}):\nstdout: {stdout[-1500:]}\nstderr: {stderr[-1500:]}"
             )
+
+    async def copy_trust_dir_into_container(self, trust_dir: Path, container: str, destination: str) -> None:
+        """Install the local transfer CA in a container on this VM's Docker host."""
+        vm_dir = self._staging_path("trust", container)
+        await self.exec_script(f"mkdir -p {shlex.quote(vm_dir)}")
+        try:
+            for path in trust_dir.iterdir():
+                await self.write_host_file(await asyncio.to_thread(path.read_bytes), f"{vm_dir}/{path.name}")
+            await self.docker_cp(f"{vm_dir}/.", f"{container}:{destination}")
+        finally:
+            await self.exec_script(f"rm -rf {shlex.quote(vm_dir)}")
 
     async def _copy_into_container(self, vm_path: str, destination_path: str) -> None:
         parent = os.path.dirname(destination_path)

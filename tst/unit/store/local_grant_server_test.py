@@ -2,6 +2,7 @@
 grant cases, and the bounds and refusals S3 would apply to the same requests."""
 
 import os
+import ssl
 import subprocess
 import sys
 import threading
@@ -293,6 +294,17 @@ def test_settings_are_checked_when_the_store_is_made(tmp_path):
 
 def test_the_root_defaults_to_the_state_root():
     assert LocalFilesystemObjectStore().root == state_root() / "object_store"
+
+
+def test_default_bridge_listener_also_serves_loopback_on_the_same_port(store, monkeypatch, tmp_path):
+    # A second loopback IP stands in for the Linux Docker bridge address.
+    monkeypatch.setattr(server_module, "default_bind_host", lambda: "127.0.0.2")
+    bridged = LocalFilesystemObjectStore(str(tmp_path / "bridged"), grant_bind_host="127.0.0.2", grant_advertise_host="localhost")
+    grant = bridged.issue_read_grant(bridged.put("k", b"both"))
+    with httpx.Client(verify=ssl.create_default_context(cafile=str(local_ca().bundle_path)), trust_env=False) as client:
+        assert client.get(grant.url).content == b"both"
+        assert client.get(grant.url.replace("localhost", "127.0.0.2")).content == b"both"
+    grant_server("127.0.0.2", "localhost").close()
 
 
 class TestDefaultBindHost:
