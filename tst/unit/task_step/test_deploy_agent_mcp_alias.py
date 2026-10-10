@@ -28,6 +28,11 @@ def test_the_card_name_is_relayed_verbatim_whatever_it_is():
         assert _mcp_add_body(_NAMING_CARD_EXT, "https://gw/mcp", None, name) == {"url": "https://gw/mcp", "name": name}
 
 
+def test_a_hand_written_supported_list_also_takes_the_name():
+    ext = {"params": {"methods": {"add": {"request": {"supported": ["url", "headers", "name"]}}}}}
+    assert _mcp_add_body(ext, "https://gw/mcp", None, "crm") == {"url": "https://gw/mcp", "name": "crm"}
+
+
 def test_no_card_name_means_the_agent_mints_its_own():
     assert _mcp_add_body(_NAMING_CARD_EXT, "https://gw/mcp", None, None) == {"url": "https://gw/mcp"}
     assert "name" not in _mcp_add_body({"params": {"methods": {"add": {"request": {"optional": None}}}}}, "https://gw/mcp", None, "env")
