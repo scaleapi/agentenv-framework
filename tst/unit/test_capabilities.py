@@ -141,9 +141,9 @@ def test_default_agent_other_failures_read_as_present_rather_than_absent(monkeyp
     assert capabilities.default_a2a_agent_is_registered() is True
 
 
-def _fake_e2b_builder(monkeypatch, outcome):
+def _fake_builder(monkeypatch, provider, outcome):
     def build(spec):
-        assert spec == "e2b"
+        assert spec == provider
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
@@ -151,32 +151,23 @@ def _fake_e2b_builder(monkeypatch, outcome):
     monkeypatch.setattr("agent_env.providers.sandbox_providers.sandbox_provider.build_sandbox_provider", build)
 
 
-def test_e2b_absent_when_its_config_is_missing(monkeypatch):
-    _fake_e2b_builder(monkeypatch, ConfigError("[sandbox.providers.e2b.config] requires a non-empty 'base_template'"))
-    assert capabilities.remote_sandbox_is_available("e2b") is False
-    assert capabilities.skip_without_remote_sandbox("e2b").kwargs["reason"] == "agentenv-capability-missing: remote_sandbox"
+_CONFIGURED_PROVIDERS = pytest.mark.parametrize("provider", ["e2b", "sail_vm", "tensorlake"])
 
 
-def test_e2b_present_when_the_provider_builds(monkeypatch):
-    _fake_e2b_builder(monkeypatch, object())
-    assert capabilities.remote_sandbox_is_available("e2b") is True
+@_CONFIGURED_PROVIDERS
+def test_configured_provider_absent_when_its_config_is_missing(monkeypatch, provider):
+    _fake_builder(monkeypatch, provider, ConfigError(f"[sandbox.providers.{provider}.config] requires a non-empty 'api_key'"))
+    assert capabilities.remote_sandbox_is_available(provider) is False
+    assert capabilities.skip_without_remote_sandbox(provider).kwargs["reason"] == "agentenv-capability-missing: remote_sandbox"
 
 
-def test_e2b_other_failures_read_as_present_rather_than_absent(monkeypatch):
-    _fake_e2b_builder(monkeypatch, RuntimeError("api key rejected"))
-    assert capabilities.remote_sandbox_is_available("e2b") is True
+@_CONFIGURED_PROVIDERS
+def test_configured_provider_present_when_the_provider_builds(monkeypatch, provider):
+    _fake_builder(monkeypatch, provider, object())
+    assert capabilities.remote_sandbox_is_available(provider) is True
 
 
-@pytest.mark.parametrize(
-    ("outcome", "available"),
-    [(ConfigError("[sandbox.providers.sail_vm.config] requires a non-empty 'api_key'"), False), (object(), True), (RuntimeError("boom"), True)],
-)
-def test_sail_availability_follows_the_provider_build(monkeypatch, outcome, available):
-    def build(spec):
-        assert spec == "sail_vm"
-        if isinstance(outcome, Exception):
-            raise outcome
-        return outcome
-
-    monkeypatch.setattr("agent_env.providers.sandbox_providers.sandbox_provider.build_sandbox_provider", build)
-    assert capabilities.remote_sandbox_is_available("sail_vm") is available
+@_CONFIGURED_PROVIDERS
+def test_configured_provider_other_failures_read_as_present_rather_than_absent(monkeypatch, provider):
+    _fake_builder(monkeypatch, provider, RuntimeError("api key rejected"))
+    assert capabilities.remote_sandbox_is_available(provider) is True

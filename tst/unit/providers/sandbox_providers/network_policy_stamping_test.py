@@ -21,6 +21,7 @@ from agent_env.providers.sandbox_providers.sail_vm import _sdk as sail_sdk
 from agent_env.providers.sandbox_providers.sail_vm.provider import SailVmSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import Sandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import _BUILTIN_SANDBOX_PROVIDERS
+from agent_env.providers.sandbox_providers.tensorlake.provider import TensorlakeSandboxProvider
 
 
 def _modal_provider(cls):
@@ -86,11 +87,23 @@ async def _sail() -> Sandbox:
         return await provider.create_vm(exposed_ports=[], setup_for_gateway=False)
 
 
+async def _tensorlake() -> Sandbox:
+    sdk = MagicMock()
+    pending = MagicMock(sandbox_id="tl-test")
+    pending.ready = AsyncMock(return_value=MagicMock(sandbox_id="tl-test"))
+    sdk.create = AsyncMock(return_value=pending)
+    provider = TensorlakeSandboxProvider(
+        api_key="test-key", sandbox_cls=sdk, client_cls=MagicMock(),
+    )
+    return await provider.create_vm(exposed_ports=[], setup_for_gateway=False)
+
+
 FACTORIES = {
     "modal": _modal,
     "modal_vm": _modal_vm,
     "e2b": _e2b,
     "sail_vm": _sail,
+    "tensorlake": _tensorlake,
     "local": _local,
 }
 

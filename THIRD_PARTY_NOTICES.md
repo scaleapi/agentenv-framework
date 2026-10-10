@@ -14,7 +14,7 @@ marks, or contributor names to endorse or promote Scale AI, or related products.
 
 ## Python dependencies
 
-The runtime dependencies of `agentenv-framework` and its `aws`, `explorer`, `gcp` and `sail` extras, at the versions resolved in `uv.lock`. Development-only dependencies are not listed.
+The runtime dependencies of `agentenv-framework` and its `aws`, `explorer`, `gcp`, `sail` and `tensorlake` extras, at the versions resolved in `uv.lock`. Development-only dependencies are not listed.
 
 ### a2a-sdk 0.3.26
 
@@ -716,6 +716,14 @@ The runtime dependencies of `agentenv-framework` and its `aws`, `explorer`, `gcp
 - Source: <https://pypi.org/project/synchronicity/0.12.6/>
 - [License text 1](#license-text-1)
 
+### tensorlake 0.5.143
+
+- License: Apache-2.0
+- Copyright: Copyright [2025] [Tensorlake]
+- Author: Tensorlake Inc. <support@tensorlake.ai>
+- Source: <https://github.com/tensorlakeai/tensorlake>
+- [License text 1](#license-text-1)
+
 ### tiktoken 0.12.0
 
 - License: MIT
@@ -805,6 +813,22 @@ The runtime dependencies of `agentenv-framework` and its `aws`, `explorer`, `gcp
 - Copyright: Copyright (c) 2018 - 2026 Isaac Muse
 - Source: <https://github.com/facelessuser/wcmatch>
 - [License text 4](#license-text-4)
+
+### websocket-client 1.9.2
+
+- License: Apache-2.0
+- Copyright: Copyright 2026 engn33r
+- Author: liris
+- Source: <https://github.com/websocket-client/websocket-client>
+- [License text 1](#license-text-1)
+
+### websockets 17.2
+
+- License: BSD-3-Clause
+- Copyright: Copyright (c) Aymeric Augustin and contributors
+- Author: Aymeric Augustin <aymeric.augustin@m4x.org>
+- Source: <https://github.com/python-websockets/websockets>
+- [License text 71](#license-text-71)
 
 ### yarl 1.24.2
 
@@ -7713,4 +7737,31 @@ PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
 LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
 NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+### License text 71
+
+```text
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+    * Redistributions of source code must retain the above copyright notice,
+      this list of conditions and the following disclaimer.
+    * Redistributions in binary form must reproduce the above copyright notice,
+      this list of conditions and the following disclaimer in the documentation
+      and/or other materials provided with the distribution.
+    * Neither the name of the copyright holder nor the names of its contributors
+      may be used to endorse or promote products derived from this software
+      without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```

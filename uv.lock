@@ -88,6 +88,7 @@ dev = [
     { name = "pytest-xdist" },
     { name = "requests" },
     { name = "sail" },
+    { name = "tensorlake" },
     { name = "uvicorn" },
 ]
 explorer = [
@@ -104,11 +105,14 @@ gcp = [
 sail = [
     { name = "sail" },
 ]
+tensorlake = [
+    { name = "tensorlake" },
+]
 
 [package.metadata]
 requires-dist = [
     { name = "a2a-sdk", specifier = "==0.3.26" },
-    { name = "agentenv-framework", extras = ["aws", "explorer", "gcp", "sail"], marker = "extra == 'dev'" },
+    { name = "agentenv-framework", extras = ["aws", "explorer", "gcp", "sail", "tensorlake"], marker = "extra == 'dev'" },
     { name = "agentenv-framework-protocol", editable = "packages/agentenv-protocol" },
     { name = "boto3", marker = "extra == 'aws'", specifier = ">=1.35.0" },
     { name = "botocore", marker = "extra == 'aws'", specifier = ">=1.35.0" },
@@ -143,10 +147,11 @@ requires-dist = [
     { name = "requests", marker = "extra == 'gcp'", specifier = ">=2.31" },
     { name = "sail", marker = "extra == 'sail'", specifier = "~=0.12.8" },
     { name = "starlette", specifier = ">=0.40" },
+    { name = "tensorlake", marker = "extra == 'tensorlake'", specifier = "~=0.5.140" },
     { name = "uvicorn", specifier = ">=0.47" },
     { name = "uvicorn", marker = "extra == 'explorer'", specifier = ">=0.29" },
 ]
-provides-extras = ["aws", "explorer", "gcp", "sail", "dev"]
+provides-extras = ["aws", "explorer", "gcp", "sail", "tensorlake", "dev"]
 
 [[package]]
 name = "agentenv-framework-protocol"
@@ -1526,6 +1531,11 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/b1/df/48c586a5fe32a0f01324ee087459e112ebb7224f646c0b5023f5e79e9956/httpx-0.28.1.tar.gz", hash = "sha256:75e98c5f16b0f35b567856f597f06ff2270a374470a5c2392242528e3e3e42fc", size = 141406, upload-time = "2024-12-06T15:37:23.222Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/2a/39/e50c7c3a983047577ee07d2a9e53faf5a69493943ec3f6a384bdc792deb2/httpx-0.28.1-py3-none-any.whl", hash = "sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad", size = 73517, upload-time = "2024-12-06T15:37:21.509Z" },
+]
+
+[package.optional-dependencies]
+http2 = [
+    { name = "h2" },
 ]
 
 [[package]]
@@ -3420,6 +3430,25 @@ wheels = [
 ]
 
 [[package]]
+name = "tensorlake"
+version = "0.5.149"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "grpcio" },
+    { name = "httpx", extra = ["http2"] },
+    { name = "protobuf" },
+    { name = "pydantic" },
+    { name = "websocket-client" },
+    { name = "websockets" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1e/e5/5f912f624df4f970d1f65f3021de2c4bff996fe694c8d403703f5e509d39/tensorlake-0.5.149-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:0cb8b1c22b1b886b6957fa65ddc1e3add407c7d5483168a1372290841387ef99", size = 8350835, upload-time = "2026-10-11T04:27:45.991Z" },
+    { url = "https://files.pythonhosted.org/packages/40/6d/42786f7c27a66739324e2e9768a7decdc58088b211cb42332022de9d1322/tensorlake-0.5.149-cp310-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:a9fcf052a1641b88756dbbfd8aceea8183d43af1b28b29a4e7a63232ec687a85", size = 8629932, upload-time = "2026-10-11T04:27:48.97Z" },
+    { url = "https://files.pythonhosted.org/packages/9a/07/d1687c3833f3b6866554abc5fc78999a929846d8ea907995dc6e110fce1d/tensorlake-0.5.149-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:b64893799fe684fd18f098f1f5cecc7ef3224926c03db7ba3209520f0c10f02f", size = 8948006, upload-time = "2026-10-11T04:27:51.182Z" },
+    { url = "https://files.pythonhosted.org/packages/1a/80/04264c98c0da4544045724d634c3219de0c1599a8286b6d0eae1ae7f5c27/tensorlake-0.5.149-cp310-abi3-win_amd64.whl", hash = "sha256:b3cc75bc0f7d1d4a4a0b11a31fcc8274ee9fc5e9ee91a09d9f396ac7012ee8c4", size = 9628190, upload-time = "2026-10-11T04:27:54.207Z" },
+]
+
+[[package]]
 name = "tiktoken"
 version = "0.12.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3719,6 +3748,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/57/43/30e407989e313677dbb9d5f045f966549a7254834571e342eaa4b55cc67b/wcmatch-11.0.1.tar.gz", hash = "sha256:1ea2b4fa678b8ca268253798d5963935df39132d47c3e241c0a0732224005e7d", size = 144662, upload-time = "2026-08-14T15:20:40.477Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ce/77/7a02b0f05b3ffcdbef9719ce3ee0b508d6a29b58e95299f1580055671db3/wcmatch-11.0.1-py3-none-any.whl", hash = "sha256:fd149ecddb9f0a88ea780017d6dde17c994e494e7f7303d4e3c9d6251f978f4b", size = 43449, upload-time = "2026-08-14T15:20:39.379Z" },
+]
+
+[[package]]
+name = "websocket-client"
+version = "1.9.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d8/cb/a5abcc2891249f393827c650c6296660ce40374ac22d99ab9aea41f9d2a2/websocket_client-1.9.2.tar.gz", hash = "sha256:0fcb57545848be86992e128218fd96dd87a6769ffdb1a968dff79632b85604d0", size = 84110, upload-time = "2026-08-31T14:08:40.964Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d5/d2/cc4dc1271e464942db7ee278baae2daa99ee77cb2af744025c04da585a3e/websocket_client-1.9.2-py3-none-any.whl", hash = "sha256:e1a673830a9c7bfa47b1cd3d5e4178f4c9651d80a4eab02c9c23a1c3ec6250ce", size = 95786, upload-time = "2026-08-31T14:08:39.899Z" },
 ]
 
 [[package]]
