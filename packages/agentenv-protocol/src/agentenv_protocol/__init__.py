@@ -23,6 +23,7 @@ from .tool_context import (
     SESSION_META_KEY,
     Caller,
     ToolContext,
+    bound,
     normalize_role,
 )
 from .manifest import (
@@ -92,6 +93,7 @@ __all__ = [
     "ToolContext",
     "Caller",
     "normalize_role",
+    "bound",
     "ROLE_META_KEY",
     "SESSION_META_KEY",
     "ROLE_HEADER",

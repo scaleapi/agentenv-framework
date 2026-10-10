@@ -115,8 +115,9 @@ app without one, so a server that mounted is a server whose tool calls are bound
 To answer a call before the tool runs, override `on_tool_call(self, context)`: return `None` to let
 it proceed, or an `mcp.types.CallToolResult` (`isError=True` for a refusal) to send that as the
 tool's reply. An `@extension` method may declare the same parameter; it is filled from the request's
-`AgentEnv-Role` header. In tests, `agentenv_protocol.testing.tool_context(role=...)` binds a caller
-around a direct call to a handler method.
+`AgentEnv-Role` header. Code that acts as a caller outside any dispatch, such as a test calling a
+handler directly or a seeding script, binds a context it builds:
+`with bound(ToolContext.as_caller("alice")): ...`.
 
 ## Serving
 

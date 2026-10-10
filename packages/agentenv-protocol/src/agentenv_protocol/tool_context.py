@@ -61,8 +61,8 @@ ROLE_HEADER = "AgentEnv-Role"
 #: A gateway's unforwarded role. Same meaning as no role at all.
 DEFAULT_ROLE = "default"
 
-#: How the call reached the server. ``"none"`` is :data:`EMPTY`, the context
-#: outside any call; the other two name the dispatch that bound the context.
+#: How the call reached the server. ``"none"`` is a context no dispatch bound, :data:`EMPTY`
+#: outside any call or one built with :meth:`ToolContext.as_caller`; the other two name the dispatch.
 Transport = Literal["mcp", "rest", "none"]
 
 
@@ -99,7 +99,7 @@ class ToolContext:
 
     Hashable, so per-call state can be keyed on the context itself: ``call_id``
     identifies the call; ``arguments`` and ``mcp`` stay out of the hash. The
-    protocol's builders and :meth:`for_test` snapshot ``arguments`` into a
+    protocol's builders and :meth:`as_caller` snapshot ``arguments`` into a
     read-only mapping; a context constructed directly keeps the mapping it is
     given.
     """
@@ -138,9 +138,11 @@ class ToolContext:
         )
 
     @classmethod
-    def for_test(cls, *, role: Optional[str] = None, session: Optional[str] = None, tool: str = "test",
-                 arguments: Optional[Mapping[str, Any]] = None, transport: Transport = "mcp") -> "ToolContext":
-        """A context for a test that calls a handler directly or binds one with :func:`bound`."""
+    def as_caller(cls, role: Optional[str] = None, session: Optional[str] = None, *, tool: str = "",
+                  arguments: Optional[Mapping[str, Any]] = None, transport: Transport = "none") -> "ToolContext":
+        """A context for code that acts as ``role`` outside any dispatch (a test calling a handler
+        directly, a seeding script, an operator helper), to bind with :func:`bound`. The role is
+        normalised as the builders normalise it."""
         return cls(caller=Caller(role=normalize_role(role), session=session, raw_role=role), tool=tool,
                    arguments=_frozen(arguments), call_id=uuid.uuid4().hex, transport=transport)
 

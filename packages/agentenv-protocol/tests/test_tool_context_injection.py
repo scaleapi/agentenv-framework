@@ -150,7 +150,7 @@ async def test_injection_sync_and_async_and_ambient_equals_injected():
     assert ToolContext.current() is EMPTY
 
     twin = app._tool_manager.get_tool("whoami").fn
-    with bound(ToolContext.for_test(role="x")) as ctx:
+    with bound(ToolContext.as_caller("x")) as ctx:
         assert await twin(q="direct") == {"q": "direct", "role": "x", "limit": 3}
     assert env.seen[-1][0] is ctx
 

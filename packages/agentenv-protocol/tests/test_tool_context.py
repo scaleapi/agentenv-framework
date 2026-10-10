@@ -30,7 +30,6 @@ from agentenv_protocol import (
     normalize_role,
     tool,
 )
-from agentenv_protocol import testing
 from agentenv_protocol.agent_env_environment import _is_tool_context_annotation, _schema_from_signature, _tool_context_slot
 from agentenv_protocol.tool_context import EMPTY, bound, caller_from_request, context_from_http, context_from_mcp
 
@@ -85,9 +84,9 @@ def test_normalize_role_absent_blank_default_and_non_string_are_none():
 def test_current_is_empty_outside_a_call_and_bound_restores():
     assert ToolContext.current() is EMPTY
     assert EMPTY.transport == "none" and EMPTY.caller.role is None
-    with bound(ToolContext.for_test(role="a")) as outer:
+    with bound(ToolContext.as_caller("a")) as outer:
         assert ToolContext.current() is outer and outer.role == "a"
-        with bound(ToolContext.for_test(role="b")) as inner:
+        with bound(ToolContext.as_caller("b")) as inner:
             assert ToolContext.current() is inner
         assert ToolContext.current() is outer
     assert ToolContext.current() is EMPTY
@@ -134,16 +133,16 @@ def test_context_from_mcp_tolerates_every_missing_link():
     assert ctx.arguments == {"q": 1}
 
 
-def test_context_from_http_and_testing_helper():
+def test_context_from_http_and_as_caller():
     request = SimpleNamespace(headers={ROLE_HEADER: "carol"})
     ctx = context_from_http(request, "echo", {"m": 1})
     assert ctx.transport == "rest" and ctx.role == "carol" and ctx.tool == "echo" and ctx.arguments == {"m": 1}
 
-    with testing.tool_context(role="alice", session="s") as bound_ctx:
+    with bound(ToolContext.as_caller("alice", session="s")) as bound_ctx:
         assert ToolContext.current() is bound_ctx
-        assert bound_ctx.caller == Caller("alice", "s", "alice")
+        assert bound_ctx.caller == Caller("alice", "s", "alice") and bound_ctx.transport == "none"
     assert ToolContext.current() is EMPTY
-    with testing.tool_context(role="default") as default_ctx:
+    with bound(ToolContext.as_caller("default")) as default_ctx:
         assert default_ctx.role is None and default_ctx.caller.raw_role == "default"
 
 
@@ -235,7 +234,7 @@ async def test_card_schema_omits_the_slot_and_registration_gets_the_twin():
     assert twin.__wrapped__ == handler.whoami and twin.__name__ == "whoami"
     assert inspect.iscoroutinefunction(twin) and not inspect.iscoroutinefunction(mcp.tools["whoami_sync"][1])
 
-    with bound(ToolContext.for_test(role="alice")) as ctx:
+    with bound(ToolContext.as_caller("alice")) as ctx:
         assert await twin(q="x") == {"q": "x", "role": "alice", "limit": 3}
         assert mcp.tools["whoami_sync"][1]() == "alice"
     assert handler.seen == [ctx, ctx]
@@ -266,7 +265,7 @@ async def test_twin_takes_positional_arguments_in_its_advertised_order():
     handler = _Handler()
     first, middle = injecting(handler.first), injecting(handler.middle)
     assert list(inspect.signature(first).parameters) == ["q", "limit"]
-    with bound(ToolContext.for_test(role="alice")):
+    with bound(ToolContext.as_caller("alice")):
         assert await first("x") == {"q": "x", "limit": 3, "role": "alice"}
         assert await first("x", 5) == await first(q="x", limit=5) == {"q": "x", "limit": 5, "role": "alice"}
         assert middle("y", 2) == middle(limit=2, q="y") == {"q": "y", "limit": 2, "role": "alice"}
@@ -353,7 +352,7 @@ def test_caller_from_request_consults_headers_only_when_no_meta_role_entry_exist
 
 
 def test_tool_context_is_hashable_and_its_arguments_are_read_only():
-    ctx = ToolContext.for_test(role="a", arguments={"q": 1})
+    ctx = ToolContext.as_caller("a", arguments={"q": 1})
     assert hash(ctx) == hash(ctx) and {ctx: 1}[ctx] == 1 and ctx in {ctx}
     assert hash(EMPTY) is not None and EMPTY != ctx
     assert ctx.arguments == {"q": 1} and dict(ctx.arguments) == {"q": 1}
@@ -371,7 +370,7 @@ def test_tool_context_embeds_in_a_pydantic_model_but_never_renders_as_a_wire_sch
         context: ToolContext
         note: str = ""
 
-    ctx = ToolContext.for_test(role="a")
+    ctx = ToolContext.as_caller("a")
     assert Audit(context=ctx).context is ctx
     with pytest.raises(ValidationError):
         Audit(context={"caller": {}})
@@ -383,7 +382,7 @@ def test_tool_context_embeds_in_a_pydantic_model_but_never_renders_as_a_wire_sch
 
 @pytest.mark.asyncio
 async def test_binding_follows_the_task_into_to_thread_and_child_tasks():
-    ctx = ToolContext.for_test(role="a")
+    ctx = ToolContext.as_caller("a")
     with bound(ctx):
         assert await asyncio.to_thread(ToolContext.current) is ctx
         assert await asyncio.create_task(_current_later()) is ctx
