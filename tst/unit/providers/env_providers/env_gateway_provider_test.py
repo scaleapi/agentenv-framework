@@ -190,6 +190,34 @@ async def test_container_mode_builds_a_context_only_image_before_creating_anythi
     gp._build_local_store.assert_not_awaited()
 
 
+_IN_THIS_MACHINES_REGISTRY = DockerImageArtifact(id="slack-image", version=2, description="d",
+                                                 image_name="localhost:5000/local/slack:v2")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gateway_image, server_image", [(_IN_THIS_MACHINES_REGISTRY, _image("mcp-slack")),
+                                                         (_image("agent-gateway"), _IN_THIS_MACHINES_REGISTRY)],
+                         ids=["gateway", "server"])
+async def test_container_mode_refuses_an_image_in_this_machines_registry_before_preparing_anything(gateway_image,
+                                                                                                  server_image):
+    provider = ModalSandboxProvider()
+    gp = EnvironmentGatewayProvider()
+    gp._build_local_store = AsyncMock()
+
+    with patch.object(provider, "prepare_image", side_effect=AssertionError("prepared an image")), \
+         patch.object(provider, "create_container", side_effect=AssertionError("created a container")), \
+         patch("agent_env.env.env.Env.get", return_value=MagicMock(docker_image_artifact=gateway_image)):
+        with pytest.raises(ValueError, match="Can't deploy a gateway on ModalSandboxProvider, which runs its images by "
+                                             "name: localhost:5000/local/slack:v2 is in a registry on this machine, "
+                                             "which a sandbox elsewhere can't pull from"):
+            await gp._deploy_via_containers(
+                sandbox_provider=provider, mcp_servers=[MCPServerConfig(image=server_image.image_name, environment_name="slack")],
+                mcp_server_images=[server_image], gateway_port=18765, website_configs=None,
+                gateway_mode=MagicMock(value="performance"), ttl_seconds=60, disk_size_gb=10,
+            )
+    gp._build_local_store.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_container_mode_constructs_internal_mcp_servers_url_format():
     """Container mode must pass INTERNAL_MCP_SERVERS as 'name=url,name=url' to the gateway."""

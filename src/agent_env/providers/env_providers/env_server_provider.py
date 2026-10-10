@@ -75,7 +75,7 @@ class EnvironmentServerProvider(_SandboxEnvironmentProvider):
 
         name = env.environment_name
         image = env.docker_image_artifact
-        if problem := self.accepts(sandbox_provider).problem(image):
+        if problem := self.accepts(sandbox_provider).problem(image, on_this_machine=sandbox_provider.ON_THIS_MACHINE):
             raise ValueError(f"Can't deploy {name!r} as a server on {type(sandbox_provider).__name__}, which runs its "
                              f"image by name: {problem}")
         await sandbox_provider.prepare_image(image, attribution=attribution)

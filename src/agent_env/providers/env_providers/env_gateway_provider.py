@@ -882,9 +882,14 @@ COMPOSE_EOF'''
 
         config = get_config()
         gateway_env = Env.get(config.default_gateway_env_id)
-        # Each image is prepared (one that is only a build context, built) before anything is created, so a failed
-        # build leaves nothing.
+        # Each image is checked, and prepared (one that is only a build context, built), before anything is created, so
+        # an image the provider can't run, or a failed build, leaves nothing.
         images = [gateway_env.docker_image_artifact, *mcp_server_images]
+        accepts = self.accepts(sandbox_provider)
+        if problems := [problem for image in images
+                        if (problem := accepts.problem(image, on_this_machine=sandbox_provider.ON_THIS_MACHINE))]:
+            raise ValueError(f"Can't deploy a gateway on {type(sandbox_provider).__name__}, which runs its images by "
+                             f"name: {'; '.join(problems)}")
         await asyncio.gather(*(sandbox_provider.prepare_image(image, attribution=attribution) for image in images))
 
         deploy = _ContainerDeploy(

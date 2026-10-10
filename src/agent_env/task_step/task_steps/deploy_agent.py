@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Iterable
 from typing import ClassVar, Optional
 
 import httpx
@@ -28,7 +29,12 @@ from agent_env.config import get_config
 from agent_env.env.env import DeployedEnv, DeployedSandboxEnv, Env
 from agent_env.env.gateway import AGENT_ENV_ROLE_HEADER
 from agent_env.providers.sandbox_providers.local_sandbox import host_url_for
-from agent_env.providers.sandbox_providers.sandbox_provider import reachable_url, sandbox_request_headers_for_url
+from agent_env.a2a_agent.a2a_agent import DEFAULT_A2A_PORT
+from agent_env.providers.sandbox_providers.sandbox_provider import (
+    SANDBOX_MODE_VM,
+    reachable_url,
+    sandbox_request_headers_for_url,
+)
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
 from agent_env.entity_refs import EntityRef
@@ -37,6 +43,18 @@ from agent_env.task_step.task_steps.mcp_cli_builder.codegen import ROLE_ENV_VAR
 from agent_env.attribution import deploy_attribution
 
 logger = logging.getLogger(__name__)
+
+
+def linked_sandbox_problem(sandbox_name: str, sandbox_mode: str, ports: Iterable[int | str]) -> str | None:
+    """Why an agent can't be placed on the sandbox ``sandbox_name``, deployed in ``sandbox_mode`` with ``ports``
+    reachable, or None when it can: only a VM can host another container, and the agent is reached on its A2A port."""
+    if sandbox_mode != SANDBOX_MODE_VM:
+        return (f"Cannot link agent to sandbox '{sandbox_name}' (mode={sandbox_mode!r}); only VM-mode sandboxes can "
+                "host an additional agent container")
+    if str(DEFAULT_A2A_PORT) not in {str(port) for port in ports}:
+        return (f"Sandbox '{sandbox_name}' does not expose port {DEFAULT_A2A_PORT}; re-deploy DeploySandboxTaskStep "
+                f"with exposed_ports=[{DEFAULT_A2A_PORT}]")
+    return None
 
 
 def _mcp_add_request(mcp_ext: dict) -> dict:
@@ -252,9 +270,7 @@ class DeployAgentTaskStep(TaskStep):
 
     async def _execute(self, context: TaskStepContext, deployed_agents: list) -> TaskStepContext:
         from agent_env.a2a_agent import A2AAgent
-        from agent_env.a2a_agent.a2a_agent import DEFAULT_A2A_PORT
         from agent_env.providers.sandbox_providers.sandbox_provider import (
-            SANDBOX_MODE_VM,
             build_sandbox_provider,
             get_sandbox_provider,
         )
@@ -274,16 +290,8 @@ class DeployAgentTaskStep(TaskStep):
                     f"Sandbox '{self.sandbox_name}' not found in context.deployed_sandboxes; "
                     f"deploy it with DeploySandboxTaskStep before this step"
                 )
-            if ds.sandbox_mode != SANDBOX_MODE_VM:
-                raise RuntimeError(
-                    f"Cannot link agent to sandbox '{self.sandbox_name}' (mode={ds.sandbox_mode!r}); "
-                    f"only VM-mode sandboxes can host an additional agent container"
-                )
-            if not ds.tunnel_urls or str(DEFAULT_A2A_PORT) not in ds.tunnel_urls:
-                raise RuntimeError(
-                    f"Sandbox '{self.sandbox_name}' does not expose port {DEFAULT_A2A_PORT}; "
-                    f"re-deploy DeploySandboxTaskStep with exposed_ports=[{DEFAULT_A2A_PORT}]"
-                )
+            if problem := linked_sandbox_problem(self.sandbox_name, ds.sandbox_mode, ds.tunnel_urls or ()):
+                raise RuntimeError(problem)
             provider = (
                 build_sandbox_provider(ds.sandbox_type) if ds.sandbox_type else get_sandbox_provider()
             )

@@ -44,13 +44,14 @@ class Accepts(Enum):
     NAME = "name"  # one it starts by its name, which an image that is only a build context gets only from a build
     NAME_OR_CONTEXT = "name_or_context"  # one it starts by its name, or a build context it builds first (prepare_image)
 
-    def problem(self, image: DockerImageArtifact) -> str | None:
-        """Why a provider that accepts these can't run ``image``, or None when it can."""
+    def problem(self, image: DockerImageArtifact, *, on_this_machine: bool = True) -> str | None:
+        """Why a provider that accepts these, and whose sandboxes are ``on_this_machine`` or not, can't run ``image``,
+        or None when it can."""
         if self is Accepts.LOADABLE:
-            return image.load_problem()
-        if self is Accepts.NAME:
-            return image.by_name_problem()
-        return None
+            return image.load_problem(on_this_machine=on_this_machine)
+        if self is Accepts.NAME_OR_CONTEXT and image.context_only:
+            return None
+        return image.by_name_problem(on_this_machine=on_this_machine)
 
 
 class SandboxProvider(ABC):
