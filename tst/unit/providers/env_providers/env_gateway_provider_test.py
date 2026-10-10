@@ -39,6 +39,7 @@ from agent_env.providers.env_providers.env_gateway_provider import (
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import Sandbox
+from agent_env.providers.sandbox_providers.sandbox_provider import Accepts
 from agent_env.providers.env_state import LocalPostgresStateProvider
 from agent_env.config import get_config, set_document_store
 from agent_env.store import EcrImageStore, NotFoundError
@@ -75,15 +76,15 @@ _CARD = {"name": "env1234", "additionalInterfaces": [{"url": "/mcp", "transport"
 class _FakeSandbox(Sandbox):
     type = "modal"
 
-    _i6pn_counter = 0
+    _private_counter = 0
 
     def __init__(self, sandbox_id: str, port: int, endpoint: str):
         self.sandbox_id = sandbox_id
         self.tunnel_urls = {port: endpoint}
         self.vnc_url = None
         self.mode = "container"
-        _FakeSandbox._i6pn_counter += 1
-        self.i6pn_address = f"fdaa::fake:{_FakeSandbox._i6pn_counter:x}"
+        _FakeSandbox._private_counter += 1
+        self.private_host = f"[fdaa::fake:{_FakeSandbox._private_counter:x}]"
         self.terminated = False
         self.exec_calls: list[tuple] = []
         self.write_calls: list[tuple] = []
@@ -100,21 +101,62 @@ class _FakeSandbox(Sandbox):
         self.write_calls.append((destination_path, content))
 
 
+@pytest.mark.parametrize("facts, in_vm, accepts, by_name_otherwise", [
+    ({"CREATES_VMS": True, "CONTAINER_ACCEPTS": Accepts.NAME}, True, Accepts.LOADABLE, Accepts.LOADABLE),
+    ({"CREATES_VMS": False, "CONTAINER_ACCEPTS": Accepts.NAME_OR_CONTEXT}, False, Accepts.NAME_OR_CONTEXT, Accepts.NAME),
+    ({"CREATES_VMS": False, "CONTAINER_ACCEPTS": Accepts.NAME}, False, Accepts.NAME, Accepts.NAME),
+], ids=["vm", "containers-that-build", "containers-by-name"])
+def test_a_gateway_runs_in_a_vm_where_its_provider_creates_them_and_else_in_containers(facts, in_vm, accepts,
+                                                                                         by_name_otherwise):
+    """In containers, the images the deploy prepares (its servers' and the gateway's) run as the provider's containers
+    run them, and the rest (its service-db's) by name."""
+    provider = MagicMock(**facts)
+
+    assert EnvironmentGatewayProvider.in_vm(provider) is in_vm
+    assert EnvironmentGatewayProvider.accepts(provider) is accepts
+    assert EnvironmentGatewayProvider.accepts(provider, prepared=False) is by_name_otherwise
+
+
+@pytest.mark.parametrize("facts, websites, problem", [
+    ({"CREATES_VMS": True, "PRIVATE_NETWORK": False}, True, None),
+    ({"CREATES_VMS": False, "PRIVATE_NETWORK": True}, False, None),
+    ({"CREATES_VMS": False, "PRIVATE_NETWORK": True}, True, "they can't serve websites"),
+    ({"CREATES_VMS": False, "PRIVATE_NETWORK": False}, False, "can't put the gateway's containers on a private network"),
+], ids=["vm-with-websites", "containers", "containers-with-websites", "containers-without-a-private-network"])
+def test_a_gateway_in_containers_needs_their_private_network_and_serves_no_websites(facts, websites, problem):
+    found = EnvironmentGatewayProvider.sandbox_problem(MagicMock(**facts), websites=websites)
+    assert (found is None) if problem is None else (problem in found)
+
+
+@pytest.mark.asyncio
+async def test_a_gateway_deploy_on_a_provider_with_no_vm_and_no_private_network_creates_nothing():
+    provider = MagicMock(CREATES_VMS=False, PRIVATE_NETWORK=False, create_container=AsyncMock())
+
+    with pytest.raises(ValueError, match="private network"):
+        await EnvironmentGatewayProvider()._deploy_gateway(provider, state_instance=None, mcp_servers=[],
+                                                          mcp_server_images=[])
+
+    provider.create_container.assert_not_called()
+    provider.prepare_image.assert_not_called()
+
+
 @pytest.mark.asyncio
 async def test_container_mode_rejects_websites():
     provider = ModalSandboxProvider()
-    gp = EnvironmentGatewayProvider()
-    with pytest.raises(NotImplementedError, match="websites"):
-        await gp._deploy_via_containers(
-            sandbox_provider=provider,
-            mcp_servers=[],
-            mcp_server_images=[],
-            gateway_port=18765,
+    with patch.object(provider, "create_container", side_effect=AssertionError("created a container")), \
+         pytest.raises(ValueError, match="can't serve websites"):
+        await EnvironmentGatewayProvider()._deploy_gateway(
+            provider, state_instance=None, mcp_servers=[], mcp_server_images=[],
             website_configs=[WebsiteConfig(backend_image="b", frontend_image="f", environment_name="x")],
-            gateway_mode=MagicMock(value="performance"),
-            ttl_seconds=60,
-            disk_size_gb=10,
         )
+
+
+
+def _vm_provider(**attrs) -> MagicMock:
+    """A sandbox provider that creates VMs, where a gateway runs, as every VM provider does."""
+    provider = MagicMock(ON_THIS_MACHINE=False, CREATES_VMS=True, SANDBOX_ACCEPTS=Accepts.LOADABLE, **attrs)
+    provider.links = (provider,)
+    return provider
 
 
 _CONTEXT_ONLY = DockerImageArtifact(id="slack-image", version=2, description="d", image_name="local/slack-0123456789ab:v2",
@@ -129,7 +171,11 @@ async def test_container_mode_builds_a_context_only_image_before_creating_anythi
     provider = ModalSandboxProvider()
     gp = EnvironmentGatewayProvider()
     gp._build_local_store = AsyncMock()
-    with patch.object(provider, "prepare_image", side_effect=RuntimeError("the build failed")) as prepare, \
+    async def build(image, *, attribution=None):
+        if image.context_only:
+            raise RuntimeError("the build failed")
+
+    with patch.object(provider, "prepare_image", side_effect=build) as prepare, \
          patch.object(provider, "create_container", side_effect=AssertionError("created a container")), \
          patch("agent_env.env.env.Env.get", return_value=MagicMock(docker_image_artifact=gateway_image)):
         with pytest.raises(RuntimeError, match="the build failed"):
@@ -139,7 +185,8 @@ async def test_container_mode_builds_a_context_only_image_before_creating_anythi
                 gateway_mode=MagicMock(value="performance"), ttl_seconds=60, disk_size_gb=10,
                 attribution={"project_id": "0123456789abcdef01234567"},
             )
-    prepare.assert_awaited_once_with(_CONTEXT_ONLY, attribution={"project_id": "0123456789abcdef01234567"})
+    assert [(call.args, call.kwargs) for call in prepare.await_args_list] == [
+        ((image,), {"attribution": {"project_id": "0123456789abcdef01234567"}}) for image in (gateway_image, server_image)]
     gp._build_local_store.assert_not_awaited()
 
 
@@ -220,7 +267,7 @@ async def test_container_mode_constructs_internal_mcp_servers_url_format():
     env = gateway_call["env"]
     assert "INTERNAL_MCP_SERVERS" in env
     spec = env["INTERNAL_MCP_SERVERS"]
-    # With i6pn enabled (the default), gateway-to-MCP URLs use i6pn addresses.
+    # Container mode puts every container on the private network, and the gateway reaches each server there.
     import re
     assert re.search(r"slack=http://\[fdaa::fake:[0-9a-f]+\]:\d+/mcp", spec), spec
     assert re.search(r"email=http://\[fdaa::fake:[0-9a-f]+\]:\d+/mcp", spec), spec
@@ -247,7 +294,7 @@ async def test_container_mode_constructs_internal_mcp_servers_url_format():
     db_call = next(c for c in create_calls if c["port"] == SERVICE_DB_PORT)
     assert db_call["env"] == LocalPostgresStateProvider().store_spec(["slack", "email"]).env
     # acquire() runs once, after the db container exists; its context carries the
-    # universe's services and the i6pn host the compute layer stood up.
+    # universe's services and the private host the compute layer stood up.
     assert len(acquire_calls) == 1
     assert acquire_calls[0].environment_names == ["slack", "email"]
     assert re.search(r"^\[fdaa::fake:[0-9a-f]+\]$", acquire_calls[0].host), acquire_calls[0].host
@@ -327,7 +374,7 @@ async def test_container_mode_remote_skips_servicedb_and_points_at_remote():
     mcp_call = next(c for c in create_calls if c["image_name"] == "mcp-slack")
     assert mcp_call["env"]["DATABASE_URL"] == gp._state_provider.url_for_environment("slack", instance=gp._state_instance)
     assert "search_path%3D%22slack%22" in mcp_call["env"]["DATABASE_URL"]
-    # The gateway points at the remote base (not an i6pn servicedb address).
+    # The gateway points at the remote base (not a private-network servicedb address).
     gateway_call = create_calls[-1]
     assert gateway_call["env"]["SERVICE_DB_URL"] == db_url_base
 
@@ -559,7 +606,7 @@ async def test_modal_vm_provider_routes_to_vm_path_not_containers():
     """A ModalVmSandboxProvider must dispatch to _deploy_via_vm (one VM + docker-compose),
     NOT _deploy_via_containers. This is the whole point of the standalone class: it is not a
     ModalSandboxProvider, so create_gateway's isinstance check falls through to the VM path
-    and the i6pn (container-only) gate never fires."""
+    and the container-only private-network gate never fires."""
     from agent_env.env.gateway import GatewayMode
     from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandboxProvider
 
@@ -1296,7 +1343,7 @@ def test_gateway_service_carries_neither_name_var():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("provider, deploy_method", [(ModalSandboxProvider(), "_deploy_via_containers"), (MagicMock(), "_deploy_via_vm")])
+@pytest.mark.parametrize("provider, deploy_method", [(ModalSandboxProvider(), "_deploy_via_containers"), (_vm_provider(), "_deploy_via_vm")])
 async def test_create_gateway_passes_the_env_name_to_both_deploy_paths(provider, deploy_method):
     """A declared name reaches the gateway on either provider."""
     gp = EnvironmentGatewayProvider()
@@ -1306,7 +1353,7 @@ async def test_create_gateway_passes_the_env_name_to_both_deploy_paths(provider,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("provider, deploy_method", [(ModalSandboxProvider(), "_deploy_via_containers"), (MagicMock(), "_deploy_via_vm")])
+@pytest.mark.parametrize("provider, deploy_method", [(ModalSandboxProvider(), "_deploy_via_containers"), (_vm_provider(), "_deploy_via_vm")])
 async def test_create_gateway_draws_a_random_env_name_when_none_is_declared(provider, deploy_method):
     gp = EnvironmentGatewayProvider()
     with patch.object(gp, deploy_method, new=AsyncMock(return_value=MagicMock())) as deploy:
@@ -1367,7 +1414,7 @@ async def _never_answers(_mcp_url: str) -> set[str]:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("provider, deploy_method", [(ModalSandboxProvider(), "_deploy_via_containers"), (MagicMock(), "_deploy_via_vm")])
+@pytest.mark.parametrize("provider, deploy_method", [(ModalSandboxProvider(), "_deploy_via_containers"), (_vm_provider(), "_deploy_via_vm")])
 @pytest.mark.parametrize("tool_names, error_type", [
     (lambda: AsyncMock(side_effect=RuntimeError("boom")), "RuntimeError"),
     (lambda: _never_answers, "TimeoutError"),
@@ -1405,7 +1452,7 @@ async def test_a_chained_gateway_falls_back_under_one_name_from_fresh_state_and_
     with patch.object(gp, "_deploy_via_containers", side_effect=deploy_path(RuntimeError("boom"))), \
          patch.object(gp, "_deploy_via_vm", side_effect=deploy_path(deployed)), \
          patch.object(gp, "close", wraps=gp.close) as close:
-        chain = ChainedSandboxProvider([ModalSandboxProvider(), MagicMock()])
+        chain = ChainedSandboxProvider([ModalSandboxProvider(), _vm_provider()])
         assert await gp.create_gateway(sandbox_provider=chain, mcp_servers=[], mcp_server_images=[], env_id="e1") is deployed
 
     [(first_name, first_state, first_instance), (second_name, second_state, second_instance)] = seen
@@ -1443,7 +1490,7 @@ async def test_a_vm_deploy_that_ends_after_creating_its_vm_terminates_it(ended_b
     gp, vm = EnvironmentGatewayProvider(), _vm("vm-1")
     with patch.object(gp, "_deploy_via_vm", side_effect=_creates(gp, vm, ended_by)):
         with pytest.raises(type(ended_by)):
-            await gp.create_gateway(sandbox_provider=MagicMock(), mcp_servers=[], mcp_server_images=[], env_id="e1")
+            await gp.create_gateway(sandbox_provider=_vm_provider(), mcp_servers=[], mcp_server_images=[], env_id="e1")
     assert vm.terminated and gp.sandbox is None
 
 
@@ -1452,7 +1499,7 @@ async def test_a_failed_deploy_leaves_the_callers_vm_alone():
     gp, callers = EnvironmentGatewayProvider(), _vm("callers-vm")
     with patch.object(gp, "_deploy_via_vm", side_effect=_creates(gp, _vm("unused"), RuntimeError("boom"))):
         with pytest.raises(RuntimeError):
-            await gp.create_gateway(sandbox_provider=MagicMock(), mcp_servers=[], mcp_server_images=[], env_id="e1",
+            await gp.create_gateway(sandbox_provider=_vm_provider(), mcp_servers=[], mcp_server_images=[], env_id="e1",
                                     existing_sandbox=callers)
     assert not callers.terminated
 
@@ -1467,7 +1514,7 @@ async def test_each_failed_chained_member_terminates_its_own_vm_and_the_winner_k
         return await next(paths)(*args, **kwargs)
 
     with patch.object(gp, "_deploy_via_vm", side_effect=each_member):
-        chain = ChainedSandboxProvider([MagicMock(), MagicMock()])
+        chain = ChainedSandboxProvider([_vm_provider(), _vm_provider()])
         assert await gp.create_gateway(sandbox_provider=chain, mcp_servers=[], mcp_server_images=[], env_id="e1") is deployed
     assert first.terminated and not second.terminated and gp.sandbox is second
 
@@ -1478,7 +1525,7 @@ async def test_a_deploy_cancelled_while_its_tools_are_probed_terminates_its_vm(m
     gp, vm = EnvironmentGatewayProvider(), _vm("vm-1")
     with patch.object(gp, "_deploy_via_vm", side_effect=_creates(gp, vm, _probed())):
         with pytest.raises(asyncio.CancelledError):
-            await gp.create_gateway(sandbox_provider=MagicMock(), mcp_servers=[], mcp_server_images=[], env_id="e1")
+            await gp.create_gateway(sandbox_provider=_vm_provider(), mcp_servers=[], mcp_server_images=[], env_id="e1")
     assert vm.terminated and gp.sandbox is None
 
 
@@ -1487,7 +1534,7 @@ async def test_a_chained_gateway_that_fails_everywhere_names_every_member():
     gp = EnvironmentGatewayProvider()
     with patch.object(gp, "_deploy_via_containers", side_effect=RuntimeError("c")), patch.object(gp, "_deploy_via_vm", side_effect=RuntimeError("v")):
         with pytest.raises(RuntimeError) as raised:
-            await gp.create_gateway(sandbox_provider=ChainedSandboxProvider([ModalSandboxProvider(), MagicMock()]),
+            await gp.create_gateway(sandbox_provider=ChainedSandboxProvider([ModalSandboxProvider(), _vm_provider()]),
                                     mcp_servers=[], mcp_server_images=[], env_id="e1")
     assert str(raised.value) == "All 2 chained providers failed to deploy: ModalSandboxProvider: RuntimeError('c'); MagicMock: RuntimeError('v')"
 
@@ -1498,7 +1545,7 @@ async def test_create_gateway_hands_the_deploy_path_every_argument(attribution, 
     """The topology entry point loses nothing on its way to the VM path; attribution arrives as a fresh dict."""
     from agent_env.env.gateway import GatewayMode
 
-    gp, provider = EnvironmentGatewayProvider(), MagicMock()
+    gp, provider = EnvironmentGatewayProvider(), _vm_provider()
     args = dict(mcp_servers=[MagicMock()], mcp_server_images=[MagicMock()], gateway_port=18999, website_configs=[MagicMock()],
                 website_images=[MagicMock()], gateway_mode=GatewayMode.CONSISTENT, ttl_seconds=61, disk_size_gb=11, cpu=1.5,
                 memory_mb=3072, existing_sandbox=MagicMock(), sidecars=[MagicMock()], mcp_server_name="crm")
@@ -1537,7 +1584,7 @@ async def test_deploy_returns_the_gateway_record_for_the_env(caplog):
          patch.object(gp, "_wait_for_tunnel", AsyncMock(return_value=card)), \
          patch.object(env_gateway_provider, "_tool_names", AsyncMock(return_value={"slack_send"})), \
          patch("agent_env.providers.env_providers.env_gateway_provider.asyncio.sleep", AsyncMock()):
-        record = await gp.deploy(env, MagicMock(create_vm=AsyncMock(return_value=vm)), gateway_mode=GatewayMode.CONSISTENT,
+        record = await gp.deploy(env, _vm_provider(create_vm=AsyncMock(return_value=vm)), gateway_mode=GatewayMode.CONSISTENT,
                                    ttl_seconds=60, env_state_type="remote")
 
     acquire.assert_awaited_once_with(env_state_type="remote", ttl_seconds=60, name_hint="crm-env", env_state_instance_id=None)
@@ -1613,7 +1660,7 @@ async def test_a_deploy_on_an_external_state_store_needs_no_servicedb_env(make):
     with _deploying(gp, deploy_gateway) as deploying, \
          patch("agent_env.env.env.Env.get", MagicMock(side_effect=NotFoundError("Env 'default-db' not found"))) as get:
         deploying.acquire.return_value = external
-        record = await gp.deploy(make(), MagicMock(), env_state_type="remote")
+        record = await gp.deploy(make(), _vm_provider(), env_state_type="remote")
     assert get.called is False and record.env_state_instance_ids == ["st-ext"]
 
 
@@ -1649,7 +1696,7 @@ async def test_deploy_fronts_a_multi_envs_servers_and_websites_under_its_name():
                                environment_card={"name": "crm"}, env_state_instance_ids=["st-1"])
 
     with _deploying(gp, deploy_gateway) as deploying:
-        record = await gp.deploy(env, MagicMock(), ttl_seconds=60, env_state_instance_id="st-1")
+        record = await gp.deploy(env, _vm_provider(), ttl_seconds=60, env_state_instance_id="st-1")
 
     assert [(s.image, s.environment_name) for s in seen["mcp_servers"]] == [("mcp-slack", "slack"), ("mcp-gmail", "gmail")]
     assert [i.image_name for i in seen["mcp_server_images"]] == ["mcp-slack", "mcp-gmail"]
@@ -1695,7 +1742,7 @@ async def test_deploy_fronts_a_website_env():
                                env_state_instance_ids=["st-1"])
 
     with _deploying(gp, deploy_gateway):
-        record = await gp.deploy(_site("shop"), MagicMock())
+        record = await gp.deploy(_site("shop"), _vm_provider())
     assert (seen["mcp_servers"], seen["mcp_server_images"]) == ([], [])
     assert seen["website_configs"] == [WebsiteConfig(backend_image="shop-be", frontend_image="shop-fe", environment_name="shop")]
     assert [i.image_name for i in seen["website_images"]] == ["shop-be", "shop-fe"] and re.fullmatch(r"env\d{4}", seen["mcp_server_name"])

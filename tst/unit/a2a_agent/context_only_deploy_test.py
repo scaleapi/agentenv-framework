@@ -9,7 +9,7 @@ from agent_env.providers.sandbox_providers import sandbox_provider
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
-from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
+from agent_env.providers.sandbox_providers.sandbox_provider import Accepts, SandboxProvider
 
 
 class _Created(Exception):
@@ -22,7 +22,13 @@ class _LocalProvider(LocalSandboxProvider):
 
 
 class _VmProvider(SandboxProvider):
+    CREATES_VMS = True
+    SANDBOX_ACCEPTS = Accepts.LOADABLE
+
     async def create_sandbox(self, **_):
+        raise _Created
+
+    async def create_vm(self, **_):
         raise _Created
 
 
@@ -98,20 +104,24 @@ async def test_a_chain_tells_modal_of_the_image_once_it_tries_modal(monkeypatch,
 
 
 @pytest.mark.asyncio
-async def test_an_image_that_is_not_only_a_build_context_is_not_prepared(monkeypatch, local_stores, litellm):
+async def test_every_image_is_prepared_before_its_sandbox_is_created(monkeypatch, local_stores, litellm):
+    """Preparing an image that isn't only a build context is the provider's to skip, as Modal does."""
     modal = _ModalProvider()
     monkeypatch.setattr(sandbox_provider, "build_sandbox_provider", lambda name: modal)
     pulled = DockerImageArtifact(id="solver-image", version=2, description="d", image_name="registry.example/solver:v2")
 
     with pytest.raises(_Created):
         await A2AAgent(id="solver", version=1, docker_image_artifact=pulled).deploy(sandbox_type="any")
-    assert modal.steps == [("create", "registry.example/solver:v2")]
+    assert modal.steps == [("prepare", "registry.example/solver:v2"), ("create", "registry.example/solver:v2")]
 
 
 class _ContainerSandbox:
     sandbox_id = "sb-container"
     mode = "container"
     tunnel_urls = {}
+
+    def url_from_sandbox(self, url):
+        return url
 
 
 @pytest.mark.asyncio

@@ -26,15 +26,13 @@ from agent_env.a2a_agent.object_transfer import (
     skill_add_call,
 )
 from agent_env.a2a_agent.staging import transfer_store
-from agent_env.providers.sandbox_providers.local_sandbox import (
-    LOCAL_TRUST_ENV,
-    LocalSandbox,
-    LocalSandboxProvider,
-    local_grant_trust,
-    start_trusting,
+from agent_env.providers.sandbox_providers.local_sandbox import LOCAL_TRUST_ENV, local_grant_trust, start_trusting
+from agent_env.providers.sandbox_providers.sandbox_provider import (
+    Accepts,
+    SandboxProvider,
+    all_sandbox_container_env,
+    all_sandbox_url_rewrites,
 )
-from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
-from agent_env.providers.sandbox_providers.sandbox_provider import all_sandbox_container_env, all_sandbox_url_rewrites
 from agent_env.attribution import Attribution
 
 if TYPE_CHECKING:
@@ -120,6 +118,11 @@ class A2AAgent:
     # extension_method() rather than a separate extension.
     SNAPSHOT_METHOD_ENABLE_CHANGELOG: ClassVar[str] = "enable-changelog"
     SNAPSHOT_METHOD_APPLY_CHANGELOG: ClassVar[str] = "apply-changelog"
+
+    @staticmethod
+    def accepts(sandbox_provider: SandboxProvider) -> Accepts:
+        """The images an agent deploys from on ``sandbox_provider``: those its sandboxes run (``create_sandbox``)."""
+        return sandbox_provider.SANDBOX_ACCEPTS
 
     @staticmethod
     def find_extension(card: dict, uri: str) -> dict | None:
@@ -427,8 +430,8 @@ class A2AAgent:
             resolved_env["LITELLM_API_KEY"] = config.get_litellm_api_key()
         if "LITELLM_BASE_URL" not in resolved_env and "LITELLM_BASE_URL" not in self.default_env_vars:
             resolved_env["LITELLM_BASE_URL"] = config.get_litellm_base_url()
-        if "LITELLM_BASE_URL" in resolved_env and isinstance(provider or sandbox, (LocalSandboxProvider, LocalSandbox)):
-            resolved_env["LITELLM_BASE_URL"] = LocalSandboxProvider.get_external_url(resolved_env["LITELLM_BASE_URL"])
+        if "LITELLM_BASE_URL" in resolved_env:
+            resolved_env["LITELLM_BASE_URL"] = (provider or sandbox).url_from_sandbox(resolved_env["LITELLM_BASE_URL"])
 
         merged_env = await asyncio.to_thread(self._build_merged_env, resolved_env, a2a_port)
         image_name = self.docker_image_artifact.image_name
@@ -436,16 +439,15 @@ class A2AAgent:
             if provider is None and sandbox.mode != SANDBOX_MODE_VM:
                 raise ValueError(f"Can't deploy agent {self.id!r} on the container sandbox {sandbox.sandbox_id!r}, which "
                                  f"runs its own image, never the agent's: {problem}")
-            links = provider.providers if isinstance(provider, ChainedSandboxProvider) else [provider] if provider else []
-            if by_name := [link for link in links if isinstance(link, LocalSandboxProvider)]:
+            links = provider.links if provider else ()
+            if by_name := [link for link in links if self.accepts(link).problem(self.docker_image_artifact)]:
                 raise ValueError(f"Can't deploy agent {self.id!r} with {type(by_name[0]).__name__}, which runs an "
                                  f"agent's image by name: {problem}")
 
         try:
             if provider is not None:
                 logger.info(f"Provisioning sandbox for A2A agent '{self.id}' via {type(provider).__name__}...")
-                if self.docker_image_artifact.context_only:
-                    await provider.prepare_image(self.docker_image_artifact, attribution=attribution)
+                await provider.prepare_image(self.docker_image_artifact, attribution=attribution)
                 self._sandbox = await provider.create_sandbox(
                     image_name=image_name, port=a2a_port, env=merged_env,
                     cpu=cpu, memory=memory, disk_size_gb=disk_size_gb, timeout=ttl_seconds,
@@ -521,7 +523,7 @@ class A2AAgent:
 
     async def _run_container(self, image_name: str, a2a_port: int, merged_env: dict[str, str], enable_docker: bool = False) -> None:
         # On a local VM sandbox the container runs on this host, so it is given the local CA as the provider's are.
-        trust_dir = await asyncio.to_thread(local_grant_trust) if isinstance(self._sandbox, LocalSandbox) else None
+        trust_dir = await asyncio.to_thread(local_grant_trust) if self._sandbox.ON_THIS_MACHINE else None
         agent_env = dict(merged_env) if trust_dir is None else {**LOCAL_TRUST_ENV, **merged_env}
         setup_script = ""
         network_flag = "".join(f"--add-host {entry} \\\n    " for entry in self._sandbox.extra_hosts)

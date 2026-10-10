@@ -6,6 +6,7 @@ import logging
 import os
 import shlex
 from abc import ABC, abstractmethod
+from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 from urllib.parse import urlparse
 
@@ -34,6 +35,22 @@ SANDBOX_MODE_CONTAINER = "container"
 
 class SandboxProviderTypeError(ConfigError):
     """A config-registered provider produced a Sandbox whose ``.type`` != its ``[sandbox.providers.<name>]`` key."""
+
+
+class Accepts(Enum):
+    """The images a sandbox provider can run, by the form the store keeps an image in."""
+
+    LOADABLE = "loadable"  # any a VM can get: a tar.gz it loads, a registry name it pulls, a build context it builds
+    NAME = "name"  # one it starts by its name, which an image that is only a build context gets only from a build
+    NAME_OR_CONTEXT = "name_or_context"  # one it starts by its name, or a build context it builds first (prepare_image)
+
+    def problem(self, image: DockerImageArtifact) -> str | None:
+        """Why a provider that accepts these can't run ``image``, or None when it can."""
+        if self is Accepts.LOADABLE:
+            return image.load_problem()
+        if self is Accepts.NAME:
+            return image.by_name_problem()
+        return None
 
 
 class SandboxProvider(ABC):
@@ -82,15 +99,20 @@ class SandboxProvider(ABC):
         timeout: int = 3600 * 2,
         attribution: Optional[Attribution] = None,
         network_policy: Optional[NetworkPolicy] = None,
+        private_network: bool = False,
     ) -> Sandbox:
         """Provision a sandbox with the registry image already running as a container.
 
         On return, ``tunnel_urls[port]`` is populated and the container listens on ``port``.
-        Caller still owns readiness polling for the container's own endpoints.
+        Caller still owns readiness polling for the container's own endpoints. ``private_network`` puts it on a
+        network this provider's other such containers share, at its ``private_host``.
 
         Default implementation: create_vm, authenticate Docker to ECR if applicable, docker pull,
         docker run. Backends that bake the image in at sandbox-creation time (Modal) override.
         """
+        if private_network:
+            raise ValueError(f"{type(self).__name__} runs each container in a VM of its own, so it can't put "
+                             "containers on a private network they share")
         sandbox = await self.create_vm(
             cpu=cpu, memory=memory, disk_size_gb=disk_size_gb,
             exposed_ports=[port], timeout=timeout,
@@ -142,6 +164,29 @@ class SandboxProvider(ABC):
 
     # Internal→external host rewrites for URLs issued on this platform ({} = none).
     URL_REWRITES: ClassVar[dict[str, str]] = {}
+
+    # What it declares, which nothing outside the providers reads any other way. A provider that declares nothing runs
+    # each image from its name, in a sandbox that isn't on this machine, and creates no VM and no private network.
+    #
+    # Whether its sandboxes run on this machine: an image only this machine holds (in a registry or object store on
+    # it) reaches them, its containers need this machine's Docker, and a gateway's infra envs are built here for it.
+    ON_THIS_MACHINE: ClassVar[bool] = False
+    # Whether create_vm gives a VM sandbox, as a provider that implements it does.
+    CREATES_VMS: ClassVar[bool] = False
+    # The images create_sandbox and create_container run.
+    SANDBOX_ACCEPTS: ClassVar[Accepts] = Accepts.NAME
+    CONTAINER_ACCEPTS: ClassVar[Accepts] = Accepts.NAME
+    # Whether create_container(private_network=True) puts containers on a network they share.
+    PRIVATE_NETWORK: ClassVar[bool] = False
+
+    @property
+    def links(self) -> tuple[SandboxProvider, ...]:
+        """The providers a deploy on this one may run on, in the order it tries them: itself, or a chain's."""
+        return (self,)
+
+    def url_from_sandbox(self, url: str) -> str:
+        """``url``, of a service this process reaches, as its sandboxes reach it."""
+        return url
 
     # Extra flags spliced into the agent container's `docker run` in create_container ("" = none).
     # Backends set this for host-specific needs (e.g. local Linux needs --add-host so the

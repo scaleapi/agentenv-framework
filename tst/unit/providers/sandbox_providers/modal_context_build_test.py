@@ -13,7 +13,7 @@ import modal
 import pytest
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
-from agent_env.providers.sandbox_providers import modal_sandbox
+from agent_env.providers.sandbox_providers import modal_image_build, modal_sandbox
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
 
 SERVER = {"Dockerfile": "FROM python:3.12\nCOPY . /app\n", "src/app.py": "print(1)\n", ".dockerignore": "*.log\n",
@@ -44,7 +44,7 @@ class _Builds:
 
 @pytest.fixture(autouse=True)
 def _no_built_images(monkeypatch):
-    monkeypatch.setattr(modal_sandbox, "_built_image_ids", {})
+    monkeypatch.setattr(modal_image_build, "_built_image_ids", {})
 
 
 @pytest.fixture
@@ -146,7 +146,7 @@ def test_what_modal_cant_take_is_written_as_its_docker_equivalent(tmp_path, line
     (tmp_path / "a.txt").write_text("a")
     (tmp_path / "sub").mkdir()
 
-    assert modal_sandbox.modal_dockerfile(f"FROM python\n{line}\nRUN true\n", tmp_path) == \
+    assert modal_image_build.modal_dockerfile(f"FROM python\n{line}\nRUN true\n", tmp_path) == \
         f"FROM python\n{built}\nRUN true\n"
 
 
@@ -162,7 +162,7 @@ def test_everything_else_is_left_as_written(tmp_path, line):
         tar.add(tmp_path / "a.txt", "a.txt")
     dockerfile = f"FROM python\n{line}\n"
 
-    assert modal_sandbox.modal_dockerfile(dockerfile, tmp_path) == dockerfile
+    assert modal_image_build.modal_dockerfile(dockerfile, tmp_path) == dockerfile
 
 
 @pytest.mark.asyncio
@@ -185,7 +185,7 @@ async def test_a_container_runs_the_built_image_and_builds_it_on_a_miss(local_st
     image = _context_image("solver-image", context)
     provider = _provider()
     await provider.prepare_image(image)
-    modal_sandbox._built_image_ids.clear()
+    modal_image_build._built_image_ids.clear()
 
     with _fake_create() as create, pytest.raises(RuntimeError, match="Modal sandbox create failed"):
         await provider.create_container(image_name=image.image_name, port=8000, env={})

@@ -8,6 +8,7 @@ import copy
 import json
 import logging
 import os
+import posixpath
 import socket
 import subprocess
 from contextlib import asynccontextmanager
@@ -17,6 +18,7 @@ from pathlib import Path
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote
+from uuid import uuid4
 
 import anyio
 import httpx
@@ -28,7 +30,8 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.fastmcp.tools import Tool as FastMCPTool
 from mcp.server.fastmcp.utilities.func_metadata import FuncMetadata, ArgModelBase
-from mcp.types import CallToolResult, TextContent, Tool as MCPTool
+from mcp.shared.exceptions import McpError
+from mcp.types import CONNECTION_CLOSED, CallToolResult, TextContent, Tool as MCPTool
 from pydantic import create_model
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
@@ -41,7 +44,10 @@ if TYPE_CHECKING:
 # Relative import — gateway runs as a standalone container with no agent_env.*
 from .constants import (
     AGENT_ENV_ROLE_HEADER,
+    AGENT_ENV_ROLE_META_KEY,
+    AGENT_ENV_SESSION_META_KEY,
     CARD_FETCH_TIMEOUT_S,
+    CHILD_DISCOVERY_TIMEOUT_S,
     DATA_PLANE_LOAD_TIMEOUT_MAX_S,
     DEFAULT_ROLE,
     GATEWAY_COMPOSE_HOST,
@@ -66,12 +72,16 @@ from .triggers import TriggerEngine, TriggerError
 logger = logging.getLogger(__name__)
 
 _role_var: ContextVar[str] = ContextVar("agent_env_role", default=DEFAULT_ROLE)
+# One key per inbound MCP session (set by the per-session lifespan); empty outside one (/step, triggers, startup).
+_caller_session_var: ContextVar[str] = ContextVar("agent_env_caller_session", default="")
 
 
 class Gateway:
     """Gateway that aggregates MCP tools and REST proxies for website backends."""
 
     TOOL_CALL_TIMEOUT_S = 600.0
+    STARTUP_DISCOVERY_TIMEOUT_S = 60.0  # startup discovery past it fails open, like a failed one; uvicorn must come up
+    CHILD_CLOSE_TIMEOUT_S = 3.0  # wait for the owner task to exit a retired child-session generation; past it, cancel it
     TRIGGER_BARRIER_TIMEOUT_S = 30.0  # a barrier may ask for less; past it the call is answered anyway
     # Must be >= the largest timeout any client can ask for, or the proxy severs a load the
     # client was still legitimately waiting on -- the ordering this module's constants file
@@ -105,17 +115,21 @@ class Gateway:
         if service_db_url:
             self._db_conn = psycopg2.connect(service_db_url)
             self._db_conn.autocommit = True
-        self._mcp_sessions: dict[str, ClientSession] = {}
+        # The process's one generation of child sessions, shared by the MCP proxy, /step and triggers. The client
+        # contexts are anyio task groups, so only the task that entered them may exit them: the owner task.
+        self._child_sessions: dict[str, ClientSession] = {}
+        self._child_owner: asyncio.Task | None = None
+        self._child_close: asyncio.Event | None = None
+        self._child_lock = asyncio.Lock()  # open / retire / close of a generation (taken after _discover_lock)
+        self._closing = False  # set at process shutdown; no generation is opened past it
+        self._discover_lock = asyncio.Lock()
         self._server_tools: dict[str, list[MCPTool]] = {}
         self._tools_discovered = False
         self._tool_server_urls: dict[str, str] = {}
-        self._step_sessions: dict[str, ClientSession] = {}
-        self._step_exit_stack: contextlib.AsyncExitStack | None = None
         self._tool_call_lock: asyncio.Lock | None = asyncio.Lock() if self.gateway_mode == GatewayMode.CONSISTENT else None
         self._role_rules: dict[str, dict[str, bool]] = {}
         self._role_rules_lock = asyncio.Lock()
 
-        self._init_lock = asyncio.Lock()
         self._event_counter = 0
         self._event_lock = asyncio.Lock()
         Path(GATEWAY_TRAJECTORY_FILE).parent.mkdir(parents=True, exist_ok=True)
@@ -124,35 +138,33 @@ class Gateway:
 
         @asynccontextmanager
         async def lifespan(mcp: FastMCP):
-            async with contextlib.AsyncExitStack() as stack:
-                try:
-                    self._mcp_sessions = await self._open_persistent_sessions(stack)
-                    await self._discover_and_register_tools(self._mcp_sessions)
-                except Exception:
-                    logger.exception("Failed to discover tools during MCP lifespan startup")
-                    self._mcp_sessions = {}
-                    self._server_tools = {}
-                    self._tools_discovered = False
-                if self.website_urls:
-                    @self._mcp.tool(name="list_website_urls", description="List available website URLs that can be browsed.")
-                    async def list_website_urls() -> list[str]:
-                        return list(self.website_urls.values())
-                    self._server_tools.setdefault("gateway", []).append(
-                        MCPTool(
-                            name="list_website_urls",
-                            description="List available website URLs that can be browsed.",
-                            inputSchema={"type": "object", "properties": {}},
-                        )
-                    )
-                self._trigger_engine.start_driver()
-                stack.push_async_callback(self._trigger_engine.stop_driver)
-                yield
+            # Entered by mcp's Server.run once per inbound MCP session, in the session's server task before any
+            # handler task is spawned, so the key set here is inherited by every tools/call of that session.
+            # Process-scoped state (child sessions, time-trigger driver) lives in _process_lifespan; discovery
+            # here only lets a connect heal a failed startup discovery (tools/list is synchronous and cannot).
+            _caller_session_var.set(uuid4().hex)
+            try:
+                await self._ensure_tools_discovered()
+            except Exception:
+                logger.exception("Tool discovery failed at MCP session start; proxy tools stay unavailable until it succeeds")
+            yield
 
         self._mcp = FastMCP(server_name, lifespan=lifespan)
         self._mcp.settings.host = host
         self._mcp.settings.port = port
         self._mcp.settings.transport_security.enable_dns_rebinding_protection = False
         self._trigger_engine = TriggerEngine(self)
+        if self.website_urls:
+            @self._mcp.tool(name="list_website_urls", description="List available website URLs that can be browsed.")
+            async def list_website_urls() -> list[str]:
+                return list(self.website_urls.values())
+            self._server_tools.setdefault("gateway", []).append(
+                MCPTool(
+                    name="list_website_urls",
+                    description="List available website URLs that can be browsed.",
+                    inputSchema={"type": "object", "properties": {}},
+                )
+            )
         self._clock = Clock()
         self._env_get_time_url_cache: str | None = None
         self._install_role_filters()
@@ -294,26 +306,8 @@ class Gateway:
 
     def run(self) -> None:
         logger.info(f"Starting Gateway on {self.host}:{self.port} (mode={self.gateway_mode.value})")
-        inner = self._mcp.streamable_http_app()
-        role_header_bytes = AGENT_ENV_ROLE_HEADER.lower().encode()
-
-        async def app(scope, receive, send):
-            if scope["type"] != "http":
-                await inner(scope, receive, send)
-                return
-            role = DEFAULT_ROLE
-            for name, value in scope.get("headers", ()):
-                if name == role_header_bytes:
-                    role = value.decode(errors="ignore").strip() or DEFAULT_ROLE
-                    break
-            token = _role_var.set(role)
-            try:
-                await inner(scope, receive, send)
-            finally:
-                _role_var.reset(token)
-
         config = uvicorn.Config(
-            app,
+            self._asgi_app(),
             host=self._mcp.settings.host,
             port=self._mcp.settings.port,
             log_level=self._mcp.settings.log_level.lower(),
@@ -327,6 +321,51 @@ class Gateway:
                                      self._listen_socket(socket.AF_INET6, "::")])
         else:
             anyio.run(server.serve)
+
+    def _asgi_app(self):
+        """The served app: FastMCP's Starlette app with the AgentEnv-Role header bound per request, and the process
+        lifespan (child sessions, time-trigger driver) wrapped around the MCP session manager's."""
+        inner = self._mcp.streamable_http_app()
+        inner.router.lifespan_context = self._process_lifespan(inner.router.lifespan_context)
+
+        async def app(scope, receive, send):
+            if scope["type"] != "http":
+                await inner(scope, receive, send)
+                return
+            role = DEFAULT_ROLE
+            for name, value in scope.get("headers", ()):
+                if name == _ROLE_HEADER_BYTES:
+                    role = value.decode(errors="ignore").strip() or DEFAULT_ROLE
+                    break
+            token = _role_var.set(role)
+            try:
+                await inner(scope, receive, send)
+            finally:
+                _role_var.reset(token)
+
+        return app
+
+    def _process_lifespan(self, mcp_lifespan):
+        """Once per process (uvicorn's lifespan), outer to the MCP session manager's: at shutdown the MCP sessions end
+        first, then the driver stops and the scheduled trigger actions are cancelled, then the child sessions close."""
+        @asynccontextmanager
+        async def lifespan(app):
+            try:
+                await asyncio.wait_for(self._ensure_tools_discovered(), timeout=self.STARTUP_DISCOVERY_TIMEOUT_S)
+            except Exception:
+                # a raised startup makes uvicorn exit the process; discovery is retried on first use instead
+                logger.exception("Tool discovery failed at startup; retrying on first use")
+            self._trigger_engine.start_driver()
+            try:
+                async with mcp_lifespan(app):
+                    yield
+            finally:
+                self._closing = True
+                await self._trigger_engine.stop_driver()
+                await self._trigger_engine.cancel_scheduled()
+                await self._close_child_sessions()
+
+        return lifespan
 
     def _listen_socket(self, family: int, host: str) -> socket.socket:
         sock = socket.socket(family, socket.SOCK_STREAM)
@@ -450,18 +489,22 @@ class Gateway:
         base_url = url_map.get(service_name)
         if base_url is None:
             return self._json_response({"error": f"Unknown service: {service_name}"}, 404)
+        role = self._request_role(request)
 
         try:
             target_url = self._proxy_target_url(base_url, request)
         except ValueError as e:  # an escaped slash inside the route prefix; refuse rather than forward a wrong path
             return self._json_response({"error": str(e)}, 400)
+        content = await request.body()  # /svc and /website request bodies are small (JSON-RPC, forms)
+        headers = self._proxy_request_headers(request, role)
+        if (url_map is self.rest_proxy_urls and request.method == "POST" and service_name.startswith("mcp-")
+                and _is_child_mcp_path(request.path_params.get("path", ""))):
+            # The gateway is the trust boundary for identity: a child's proxied MCP endpoint stays reachable, but the
+            # role in its JSON-RPC `_meta` is the gateway's to write, like the header above.
+            content = _stamp_jsonrpc_role(content, role)
+            headers["content-length"] = str(len(content))
         client = httpx.AsyncClient(timeout=self.REST_PROXY_TIMEOUT)
-        upstream_request = client.build_request(
-            request.method,
-            target_url,
-            content=await request.body(),  # /svc and /website request bodies are small (JSON-RPC, forms)
-            headers=self._proxy_request_headers(request),
-        )
+        upstream_request = client.build_request(request.method, target_url, content=content, headers=headers)
         try:
             upstream = await client.send(upstream_request, stream=True)  # returns once the headers are in
         except Exception as e:
@@ -485,9 +528,18 @@ class Gateway:
         return url
 
     @staticmethod
-    def _proxy_request_headers(request: Request) -> httpx.Headers:
-        """One entry per raw header, so repeated fields (cookie, x-forwarded-for) keep their multiplicity."""
-        headers = httpx.Headers([(k, v) for k, v in request.headers.raw if k.lower() not in _HOP_BY_HOP])
+    def _request_role(request: Request) -> str:
+        """The role the gateway attributes a REST request to: the first AgentEnv-Role header, else the default role."""
+        return request.headers.get(AGENT_ENV_ROLE_HEADER, "").strip() or DEFAULT_ROLE
+
+    @staticmethod
+    def _proxy_request_headers(request: Request, role: str) -> httpx.Headers:
+        """One entry per raw header, so repeated fields (cookie, x-forwarded-for) keep their multiplicity. The role
+        header is the gateway's to set: the client's copies are dropped and the role the gateway attributed the
+        request to goes in their place, so the upstream never reads a value the gateway did not write."""
+        headers = httpx.Headers([(k, v) for k, v in request.headers.raw
+                                 if k.lower() not in _HOP_BY_HOP and k.lower() != _ROLE_HEADER_BYTES])
+        headers[AGENT_ENV_ROLE_HEADER] = role
         # Bytes are forwarded undecoded, so only ask upstream for encodings the caller can take.
         headers.setdefault("accept-encoding", "identity")
         return headers
@@ -654,7 +706,8 @@ class Gateway:
                 try:
                     read_stream, write_stream, _ = await exit_stack.enter_async_context(streamable_http_client(server.mcp_url))
                     session = await exit_stack.enter_async_context(ClientSession(read_stream, write_stream))
-                    await session.initialize()
+                    # a child that accepts the connection but never answers initialize is a failed attempt, not a hang
+                    await asyncio.wait_for(session.initialize(), timeout=CARD_FETCH_TIMEOUT_S)
                     sessions[server.mcp_url] = session
                     logger.info(f"Opened persistent session to {server.name}")
                     break
@@ -667,27 +720,115 @@ class Gateway:
                         raise
         return sessions
 
+    async def _ensure_child_sessions(self) -> dict[str, ClientSession]:
+        """The process's one generation of child sessions, opened on first need. Liveness is the owner task's, not
+        the dict's emptiness, so a gateway with no backing servers does not reopen on every call."""
+        if self._child_owner is not None and not self._child_owner.done():
+            return self._child_sessions
+        async with self._child_lock:
+            if self._child_owner is not None and not self._child_owner.done():
+                return self._child_sessions
+            if self._closing:
+                raise RuntimeError("gateway is shutting down")
+            await self._close_child_sessions()  # a dead or half-open generation
+            loop = asyncio.get_running_loop()
+            ready: asyncio.Future = loop.create_future()
+            close = asyncio.Event()
+            owner = loop.create_task(self._own_child_sessions(ready, close), name="gateway-child-sessions")
+            owner.add_done_callback(self._log_owner_exit)
+            try:
+                sessions = await ready
+            except BaseException:
+                # Nobody will use this generation: an open still in progress is abandoned (its stack unwinds what
+                # it entered), not finished in the background to hold connections nobody waits on.
+                close.set()
+                owner.cancel()
+                raise
+            self._child_sessions, self._child_owner, self._child_close = sessions, owner, close
+            return sessions
+
+    async def _own_child_sessions(self, ready: asyncio.Future, close: asyncio.Event) -> None:
+        """Holds one generation open: opens the client contexts, reports through `ready`, parks until `close` is set
+        (or it is cancelled) and exits them. Returns rather than raising on a failed open, which `ready` carries."""
+        async with contextlib.AsyncExitStack() as stack:
+            try:
+                sessions = await self._open_persistent_sessions(stack)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                if not ready.done():
+                    ready.set_exception(e)
+                return
+            if ready.cancelled():
+                return  # nobody is waiting any more; the stack closes what was opened
+            ready.set_result(sessions)
+            await close.wait()
+
+    @staticmethod
+    def _log_owner_exit(owner: asyncio.Task) -> None:
+        """Retrieve a generation's exception when it dies on its own (a transport crash), so it is logged now rather
+        than as 'exception never retrieved' at garbage collection."""
+        if not owner.cancelled() and owner.exception() is not None:
+            logger.warning("child session generation ended", exc_info=owner.exception())
+
+    async def _close_child_sessions(self) -> None:
+        """Retire the current generation and wait (bounded) for its owner to exit it. Callers hold _child_lock,
+        except the process lifespan, which runs after the last request."""
+        owner, close = self._child_owner, self._child_close
+        self._child_sessions, self._child_owner, self._child_close = {}, None, None
+        if close is not None:
+            close.set()
+        if owner is not None and not owner.done():
+            try:
+                await asyncio.wait_for(owner, timeout=self.CHILD_CLOSE_TIMEOUT_S)
+            except Exception:
+                logger.warning("child sessions did not close cleanly", exc_info=True)
+
+    async def _reset_child_sessions(self, stale: dict[str, ClientSession]) -> None:
+        """Retire the generation a caller found dead; a concurrent caller that already did is a no-op."""
+        async with self._child_lock:
+            if self._child_sessions is stale:
+                await self._close_child_sessions()
+
+    async def _call_child_tool(self, server_url: str, tool_name: str, arguments: dict, *,
+                               meta: dict | None = None) -> CallToolResult:
+        """Every child tools/call (MCP proxy, /step, trigger engine): one shared generation, the caller's `_meta`
+        stamp, and one reconnect when the session turns out dead, retrying the call only if it never reached the
+        child (a call the transport lost in flight may already have written; the next call reopens). Discovery is
+        not redone on a reconnect; the registered proxies look their session up by URL."""
+        sessions = await self._ensure_child_sessions()
+        try:
+            return await asyncio.wait_for(sessions[server_url].call_tool(tool_name, arguments, meta=meta),
+                                          timeout=self.TOOL_CALL_TIMEOUT_S)
+        except Exception as e:
+            if not _is_dead_session(e):
+                raise
+            await self._reset_child_sessions(sessions)
+            if not _call_never_reached_child(e):
+                logger.warning(f"child session to {server_url} died with {tool_name} in flight ({e!r}); not retried")
+                raise
+            logger.warning(f"child session to {server_url} is dead ({e!r}), reconnecting...")
+            sessions = await self._ensure_child_sessions()
+            return await asyncio.wait_for(sessions[server_url].call_tool(tool_name, arguments, meta=meta),
+                                          timeout=self.TOOL_CALL_TIMEOUT_S)
+
     async def _ensure_tools_discovered(self) -> None:
-        """Lazy-init tool discovery for /step and /state endpoints."""
+        """Idempotent discovery over the process's child sessions (startup, MCP session start, /step, /state, triggers)."""
         if self._tools_discovered:
             return
-        async with self._init_lock:
+        async with self._discover_lock:
             if self._tools_discovered:
                 return
+            sessions = await self._ensure_child_sessions()
             try:
-                if self._step_exit_stack is None:
-                    self._step_exit_stack = contextlib.AsyncExitStack()
-                if not self._step_sessions:
-                    self._step_sessions = await self._open_persistent_sessions(self._step_exit_stack)
-                await self._discover_and_register_tools(self._step_sessions)
-            except Exception:
-                logger.exception("Tool discovery failed during lazy init")
-                self._server_tools = {}
+                await self._discover_and_register_tools(sessions)
+            except Exception as e:
+                logger.exception("Tool discovery failed")
+                for server in self.internal_mcp_servers:
+                    self._server_tools.pop(server.name, None)  # the gateway's own entry stays
                 self._tools_discovered = False
-                self._step_sessions = {}
-                if self._step_exit_stack is not None:
-                    await self._step_exit_stack.aclose()
-                    self._step_exit_stack = None
+                if _is_dead_session(e):
+                    await self._reset_child_sessions(sessions)
                 raise
 
     async def _discover_and_register_tools(self, sessions: dict[str, ClientSession]) -> None:
@@ -697,7 +838,8 @@ class Gateway:
         for server in self.internal_mcp_servers:
             try:
                 session = sessions[server.mcp_url]
-                tools_result = await session.list_tools()
+                # bounded: this runs under _discover_lock, which startup and every MCP connect wait on
+                tools_result = await asyncio.wait_for(session.list_tools(), timeout=CHILD_DISCOVERY_TIMEOUT_S)
                 tools = tools_result.tools
                 logger.info(f"Found {len(tools)} tool(s) from {server.name}")
                 for tool in tools:
@@ -717,7 +859,8 @@ class Gateway:
         self._tools_discovered = True
         if self._mirror_get_time_descriptor():
             logger.info(f"Re-mirrored '{GET_TIME_TOOL_NAME}' descriptor after tool discovery")
-            self._trigger_engine.invalidate_readonly_cache()
+        # list_website_urls sits in _server_tools from construction, so a memo may predate the backing tools
+        self._trigger_engine.invalidate_readonly_cache()
 
     @staticmethod
     def _json_response(data: dict | list, status_code: int) -> Response:
@@ -781,7 +924,7 @@ class Gateway:
         except Exception:
             return self._json_response({"error": "Invalid JSON body"}, 400)
         action = body.get("action")
-        role = request.headers.get(AGENT_ENV_ROLE_HEADER, "").strip() or DEFAULT_ROLE
+        role = self._request_role(request)
         if action == "list_tools":
             return self._step_list_tools(role)
         elif action == "call_tool":
@@ -802,14 +945,6 @@ class Gateway:
             if not self._is_disabled(role, tool.name)
         ]
         return self._json_response({"tools": tools}, 200)
-
-    async def _get_step_session(self, server_url: str) -> ClientSession:
-        """Get or create a persistent MCP session for /step calls."""
-        if not self._step_sessions:
-            if self._step_exit_stack is None:
-                self._step_exit_stack = contextlib.AsyncExitStack()
-            self._step_sessions = await self._open_persistent_sessions(self._step_exit_stack)
-        return self._step_sessions[server_url]
 
     async def _step_call_tool(self, body: dict, role: str) -> Response:
         tool_name = body.get("tool_name")
@@ -835,23 +970,8 @@ class Gateway:
         })
         try:
             async with self._tool_call_guard():
-                session = await self._get_step_session(server_url)
-                try:
-                    result = await asyncio.wait_for(
-                        session.call_tool(tool_name, arguments),
-                        timeout=self.TOOL_CALL_TIMEOUT_S,
-                    )
-                except ClosedResourceError:
-                    logger.warning(f"/step session to {server_url} closed, reconnecting...")
-                    self._step_sessions.clear()
-                    if self._step_exit_stack is not None:
-                        await self._step_exit_stack.aclose()
-                        self._step_exit_stack = None
-                    session = await self._get_step_session(server_url)
-                    result = await asyncio.wait_for(
-                        session.call_tool(tool_name, arguments),
-                        timeout=self.TOOL_CALL_TIMEOUT_S,
-                    )
+                result = await self._call_child_tool(server_url, tool_name, arguments,
+                                                     meta={AGENT_ENV_ROLE_META_KEY: role})
                 changelog_id = self._query_changelog_id()
 
             await self._log_event({
@@ -957,6 +1077,11 @@ class Gateway:
         input_schema = tool.inputSchema or {"type": "object", "properties": {}}
 
         async def proxy(**kwargs) -> CallToolResult:
+            # The session's own role and key, never anything the inbound request wrote: _role_var is what the
+            # disabled check and trigger attribution already keyed this call on.
+            meta = {AGENT_ENV_ROLE_META_KEY: _role_var.get()}
+            if caller_session := _caller_session_var.get():
+                meta[AGENT_ENV_SESSION_META_KEY] = caller_session
             tool_call_event_id = await self._log_event({
                 "event_type": "tool_call",
                 "tool_call": {
@@ -966,11 +1091,7 @@ class Gateway:
             })
 
             async with self._tool_call_guard():
-                session = self._mcp_sessions[server_url]
-                result = await asyncio.wait_for(
-                    session.call_tool(tool_name, kwargs),
-                    timeout=self.TOOL_CALL_TIMEOUT_S,
-                )
+                result = await self._call_child_tool(server_url, tool_name, kwargs, meta=meta)
                 changelog_id = self._query_changelog_id()
 
             await self._log_event({
@@ -1089,6 +1210,63 @@ _HOP_BY_HOP = frozenset({
     b"host", b"connection", b"keep-alive", b"transfer-encoding",
     b"te", b"trailer", b"upgrade", b"proxy-authorization", b"proxy-authenticate",
 })
+
+# The role header as it appears in the raw ASGI header list (lower-cased by the server).
+_ROLE_HEADER_BYTES = AGENT_ENV_ROLE_HEADER.lower().encode()
+
+
+def _is_dead_session(exc: BaseException) -> bool:
+    """Whether a child call failed because its session is gone, so the generation is retired: the stream closed under
+    it, the child answered 404 for the session id (idle expiry or a restart, which the client reports as code 32600),
+    or the transport died with the call in flight (CONNECTION_CLOSED)."""
+    if isinstance(exc, (ClosedResourceError, anyio.BrokenResourceError)):
+        return True
+    return isinstance(exc, McpError) and exc.error.code in (32600, CONNECTION_CLOSED)
+
+
+def _call_never_reached_child(exc: BaseException) -> bool:
+    """Whether a dead-session failure may be retried: the stream was closed before the request was written, or the
+    child rejected the session id at the transport. Not CONNECTION_CLOSED: the call was in flight when the transport
+    died, and the child may already have performed its write."""
+    if isinstance(exc, (ClosedResourceError, anyio.BrokenResourceError)):
+        return True
+    return isinstance(exc, McpError) and exc.error.code == 32600
+
+
+def _is_child_mcp_path(decoded_rest: str) -> bool:
+    """Whether a /svc/{service}/{path} remainder reaches the backing server's MCP endpoint (`mcp` or anything under
+    it), judged after dot-segment normalisation, since httpx collapses `x/../mcp` to `/mcp` on the way upstream.
+
+    >>> [_is_child_mcp_path(p) for p in ("mcp", "mcp/", "mcp/x", "x/../mcp", "./mcp", "/mcp", "mcpx", "agentenv", "")]
+    [True, True, True, True, True, True, False, False, False]
+    """
+    normalized = posixpath.normpath("/" + decoded_rest.lstrip("/"))
+    return normalized == "/mcp" or normalized.startswith("/mcp/")
+
+
+def _stamp_jsonrpc_role(body: bytes, role: str) -> bytes:
+    """A JSON-RPC body (one request or a batch) with every request's `params._meta` carrying the gateway's role
+    stamp in place of whatever the client wrote there; a body that is not JSON-RPC is returned as it came.
+
+    >>> json.loads(_stamp_jsonrpc_role(b'{"method": "tools/call", "params": {"_meta": {"agentenv.io/role": "x", "agentenv.io/session": "s"}}}', "r"))["params"]
+    {'_meta': {'agentenv.io/role': 'r'}}
+    >>> _stamp_jsonrpc_role(b"not json", "r")
+    b'not json'
+    """
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        return body
+    stamped = False
+    for item in parsed if isinstance(parsed, list) else [parsed]:
+        params = item.get("params") if isinstance(item, dict) else None
+        if isinstance(params, dict):
+            meta = dict(params["_meta"]) if isinstance(params.get("_meta"), dict) else {}
+            meta.pop(AGENT_ENV_SESSION_META_KEY, None)
+            meta[AGENT_ENV_ROLE_META_KEY] = role
+            params["_meta"] = meta
+            stamped = True
+    return json.dumps(parsed).encode() if stamped else body
 
 
 class _UpstreamResponse(StreamingResponse):

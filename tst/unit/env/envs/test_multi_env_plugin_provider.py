@@ -32,6 +32,7 @@ from agent_env.providers.env_providers.env_provider import EnvironmentProvider
 from agent_env.providers.env_providers.env_server_provider import EnvironmentServerProvider
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
+from tst.util.sandbox_providers import mock_provider
 
 _URL = "https://pods.example"
 SEEN: dict = {}
@@ -127,7 +128,7 @@ def _multi(t: str = "plugin_pods", servers=("slack",), websites=("shop",)) -> Mu
 
 
 async def _deploy(env, **kwargs):
-    with patch("agent_env.providers.get_env_sandbox_provider", MagicMock(return_value="SANDBOXES")), \
+    with patch("agent_env.providers.get_env_sandbox_provider", MagicMock(return_value=mock_provider())), \
          patch("agent_env.env.envs._deployment.register_env_instance", side_effect=lambda d, ttl: dataclasses.replace(d, instance_id="inst-1")):
         return await env.deploy(**kwargs)
 
@@ -159,7 +160,7 @@ async def test_deploy_env_deploys_a_stock_multi_env_through_the_plugin_and_the_r
     env = _multi()
     context = TaskStepContext()
     with patch("agent_env.env.env.Env.get", return_value=env), \
-         patch("agent_env.providers.get_env_sandbox_provider", MagicMock(return_value="SANDBOXES")), \
+         patch("agent_env.providers.get_env_sandbox_provider", MagicMock(return_value=mock_provider())), \
          patch("agent_env.env.envs._deployment.register_env_instance", side_effect=register):
         await DeployEnvTaskStep(id="deploy", version=None, env_id="crm-suite").execute(context)
 

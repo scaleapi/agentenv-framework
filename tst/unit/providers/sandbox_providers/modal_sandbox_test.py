@@ -51,8 +51,7 @@ async def test_create_container_wraps_modal_create_failure_with_context(_patched
                 env={},
                 cpu=2.0,
                 memory=4096,
-                region="us-east-1",
-                i6pn=True,
+                private_network=True,
             )
 
     msg = str(ei.value)
