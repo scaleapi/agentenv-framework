@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
+from agent_env.artifact.artifacts.docker_image import pull_problem
 from agent_env.attribution import Attribution
 from agent_env.env.env import DeployedGatewayEnv, _mcp_url
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT, GatewayMode
@@ -687,23 +688,6 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         website_images = website_images or []
         sidecars = sidecars or []
 
-        if existing_sandbox is not None:
-            self._sandbox = existing_sandbox
-        else:
-            vm_kwargs: dict = {}
-            if cpu is not None:
-                vm_kwargs["cpu"] = cpu
-            if memory_mb is not None:
-                vm_kwargs["memory"] = memory_mb
-            self._sandbox = await sandbox_provider.create_vm(
-                exposed_ports=[gateway_port, DB_WEB_PORT, DB_MCP_PORT] + [sc.host_port for sc in sidecars],
-                timeout=ttl_seconds,
-                disk_size_gb=disk_size_gb,
-                attribution=attribution,
-                **vm_kwargs,
-            )
-        sandbox = self._sandbox
-
         config = get_config()
         gateway_env = Env.get(config.default_gateway_env_id)
 
@@ -727,6 +711,29 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         ]
         if self._needs_local_postgres:
             all_images += self._state_provider.store_images_to_load()
+        # Every image is checked before the VM is created, so one it can't get leaves nothing to close.
+        on_this_machine = (existing_sandbox or sandbox_provider).ON_THIS_MACHINE
+        if problems := [problem for image in all_images
+                        if (problem := image.load_problem(on_this_machine=on_this_machine))]:
+            raise ValueError(f"Can't deploy a gateway on {type(sandbox_provider).__name__}, whose VM can't get its "
+                             f"images: {'; '.join(problems)}")
+
+        if existing_sandbox is not None:
+            self._sandbox = existing_sandbox
+        else:
+            vm_kwargs: dict = {}
+            if cpu is not None:
+                vm_kwargs["cpu"] = cpu
+            if memory_mb is not None:
+                vm_kwargs["memory"] = memory_mb
+            self._sandbox = await sandbox_provider.create_vm(
+                exposed_ports=[gateway_port, DB_WEB_PORT, DB_MCP_PORT] + [sc.host_port for sc in sidecars],
+                timeout=ttl_seconds,
+                disk_size_gb=disk_size_gb,
+                attribution=attribution,
+                **vm_kwargs,
+            )
+        sandbox = self._sandbox
         await sandbox.load_docker_images(all_images)
 
         # Compose declares the local_state service by name, so "standing up" is just naming the host;
@@ -885,9 +892,12 @@ COMPOSE_EOF'''
         # Each image is checked, and prepared (one that is only a build context, built), before anything is created, so
         # an image the provider can't run, or a failed build, leaves nothing.
         images = [gateway_env.docker_image_artifact, *mcp_server_images]
-        accepts = self.accepts(sandbox_provider)
-        if problems := [problem for image in images
-                        if (problem := accepts.problem(image, on_this_machine=sandbox_provider.ON_THIS_MACHINE))]:
+        on_this_machine, accepts = sandbox_provider.ON_THIS_MACHINE, self.accepts(sandbox_provider)
+        problems = [problem for image in images if (problem := accepts.problem(image, on_this_machine=on_this_machine))]
+        if self._needs_local_postgres:  # the servicedb and its sidecars, by the names the state provider picks
+            problems += [problem for name in self._state_provider.container_images()
+                         if (problem := pull_problem(name, on_this_machine=on_this_machine))]
+        if problems:
             raise ValueError(f"Can't deploy a gateway on {type(sandbox_provider).__name__}, which runs its images by "
                              f"name: {'; '.join(problems)}")
         await asyncio.gather(*(sandbox_provider.prepare_image(image, attribution=attribution) for image in images))
