@@ -167,3 +167,6 @@ cython_debug/
 
 # Generated local-store state (stores default local; see runtime._ensure_agentenv_gitignore)
 /.agentenv/
+
+# The explorer's built web UI, copied in by the release build (.github/workflows/publish-pypi.yml)
+src/agent_env/explorer/static/
