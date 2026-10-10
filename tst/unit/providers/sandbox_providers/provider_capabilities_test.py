@@ -17,13 +17,14 @@ from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandbox, Mo
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandboxProvider
 from agent_env.providers.sandbox_providers.sail_vm.provider import SailVmSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox_provider import Accepts, SandboxProvider
+from agent_env.providers.sandbox_providers.tensorlake.provider import TensorlakeSandboxProvider
 
 SRC = Path(__file__).resolve().parents[4] / "src" / "agent_env"
 PROVIDERS = SRC / "providers" / "sandbox_providers"
 
 LOADABLE, NAME, NAME_OR_CONTEXT = Accepts.LOADABLE, Accepts.NAME, Accepts.NAME_OR_CONTEXT
 PROVIDER_CLASSES = [LocalSandboxProvider, ModalSandboxProvider, ModalVmSandboxProvider, E2BSandboxProvider,
-                    SailVmSandboxProvider, ChainedSandboxProvider]
+                    SailVmSandboxProvider, TensorlakeSandboxProvider, ChainedSandboxProvider]
 
 
 @pytest.mark.parametrize("cls, on_this_machine, creates_vms, sandbox, container, private_network", [
@@ -32,7 +33,8 @@ PROVIDER_CLASSES = [LocalSandboxProvider, ModalSandboxProvider, ModalVmSandboxPr
     (ModalVmSandboxProvider, False, True, LOADABLE, NAME, False),
     (E2BSandboxProvider, False, True, LOADABLE, NAME, False),
     (SailVmSandboxProvider, False, True, LOADABLE, NAME, False),
-], ids=["local", "modal", "modal_vm", "e2b", "sail_vm"])
+    (TensorlakeSandboxProvider, False, True, LOADABLE, NAME, False),
+], ids=["local", "modal", "modal_vm", "e2b", "sail_vm", "tensorlake"])
 def test_each_provider_declares_where_it_runs_and_the_images_it_runs(cls, on_this_machine, creates_vms, sandbox,
                                                                     container, private_network):
     assert (cls.ON_THIS_MACHINE, cls.CREATES_VMS, cls.PRIVATE_NETWORK) == (on_this_machine, creates_vms, private_network)

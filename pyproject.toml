@@ -72,8 +72,12 @@ gcp = [
 sail = [
     "sail~=0.12.8",  # Sailbox exec/fs/listener/egress APIs validated against the 0.12 line
 ]
+# The Tensorlake sandbox provider, selected as the built-in `tensorlake` backend.
+tensorlake = [
+    "tensorlake~=0.5.140",  # AsyncSandbox APIs validated against 0.5.140 to 0.5.148
+]
 dev = [
-    "agentenv-framework[aws,explorer,gcp,sail]",  # so the AWS, explorer, GCP backend and Sail provider tests run in CI
+    "agentenv-framework[aws,explorer,gcp,sail,tensorlake]",  # so the AWS, explorer, GCP backend, Sail and Tensorlake provider tests run in CI
     "griffelib==2.3.0",  # the plugin API check; exact, since what it reports as a break changes between releases
     "moto>=5.0.0",
     "psycopg2-binary>=2.9.0",  # the gateway server module's driver; outside its container only the tests import it

@@ -18,6 +18,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     SandboxProviderTypeError,
     build_sandbox_provider,
 )
+from agent_env.providers.sandbox_providers.tensorlake.provider import TensorlakeSandboxProvider
 
 
 class _RecordingProvider(SandboxProvider):
@@ -245,6 +246,33 @@ def test_sail_missing_api_key_is_a_config_error(monkeypatch, tmp_path):
 
     with pytest.raises(ConfigError, match="requires a non-empty 'api_key'"):
         build_sandbox_provider("sail_vm")
+
+
+def test_tensorlake_builtin_receives_interpolated_key_and_image(monkeypatch, tmp_path):
+    cfg = _write_config(tmp_path, """
+        [sandbox.providers.tensorlake.config]
+        api_key = "env:TL_TEST_API_KEY"
+        image = "team-docker-host"
+    """)
+    monkeypatch.setenv("AGENT_ENV_CONFIG", str(cfg))
+    monkeypatch.setenv("TL_TEST_API_KEY", "resolved-test-key")
+
+    provider = build_sandbox_provider("tensorlake")
+
+    assert isinstance(provider, TensorlakeSandboxProvider)
+    assert provider._api_key == "resolved-test-key"
+    assert provider._image == "team-docker-host"
+
+
+def test_tensorlake_missing_api_key_is_a_config_error(monkeypatch, tmp_path):
+    cfg = _write_config(tmp_path, """
+        [sandbox.providers.tensorlake.config]
+        image = "team-docker-host"
+    """)
+    monkeypatch.setenv("AGENT_ENV_CONFIG", str(cfg))
+
+    with pytest.raises(ConfigError, match="requires a non-empty 'api_key'"):
+        build_sandbox_provider("tensorlake")
 
 
 def test_builtin_config_reaches_chain_members(monkeypatch, tmp_path):

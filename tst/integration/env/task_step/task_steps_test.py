@@ -279,6 +279,11 @@ def echo_agent() -> A2AAgent:
         id="sail_vm",
         marks=skip_without_remote_sandbox("sail_vm"),
     ),
+    pytest.param(
+        "tensorlake",
+        id="tensorlake",
+        marks=skip_without_remote_sandbox("tensorlake"),
+    ),
 ])
 def sandbox_provider(request):
     from agent_env.providers import (
@@ -305,6 +310,10 @@ def sandbox_provider(request):
         set_sandbox_provider(build_sandbox_provider("sail_vm"))
         set_env_sandbox_provider(build_sandbox_provider("sail_vm"))
         set_agent_sandbox_provider(build_sandbox_provider("sail_vm"))
+    elif request.param == "tensorlake":
+        set_sandbox_provider(build_sandbox_provider("tensorlake"))
+        set_env_sandbox_provider(build_sandbox_provider("tensorlake"))
+        set_agent_sandbox_provider(build_sandbox_provider("tensorlake"))
     try:
         yield request.param
     finally:
