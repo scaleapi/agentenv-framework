@@ -225,31 +225,38 @@ class AgentEnvFastMCPApplication(AgentEnvApplication):
         app.tool(name=descriptor.name, description=descriptor.description)(injecting(fn))
 
     def _check_tool_binding(self, app: Any) -> None:
-        """Refuse before any route or tool is added: a dispatch this protocol already wraps (one handler per
-        app, or the second hook would answer the first handler's tools) and an ``on_tool_call`` of the wrong
-        shape. The hook is kept for ``_bind_tool_calls``."""
-        inner = getattr(getattr(app, "_tool_manager", None), "call_tool", None)
-        if callable(inner) and getattr(inner, _TOOL_CONTEXT_BOUND_ATTR, False):
+        """Refuse before any route or tool is added: an app without the dispatch the binding wraps (its tool
+        calls would run unbound, which nothing reading ``ToolContext.current()`` can tell from an empty
+        caller), a dispatch this protocol already wraps (one handler per app, or the second hook would answer
+        the first handler's tools) and an ``on_tool_call`` of the wrong shape. The hook is kept for
+        ``_bind_tool_calls``."""
+        manager = getattr(app, "_tool_manager", None)
+        if not (callable(getattr(manager, "call_tool", None)) and callable(getattr(manager, "get_tool", None))):
+            raise RuntimeError(
+                "this app has no FastMCP tool dispatch to bind a ToolContext around "
+                "(mcp>=1.25,<2 keeps it at FastMCP._tool_manager); "
+                "an app that serves no tools mounts through AgentEnvStarletteApplication"
+            )
+        if getattr(manager.call_tool, _TOOL_CONTEXT_BOUND_ATTR, False):
             raise RuntimeError("this FastMCP app already carries an AgentEnv tool dispatch; mount one handler per app")
         self._hook = _tool_call_hook(self.handler)
 
     def _bind_tool_calls(self, app: Any) -> None:
-        """Wrap ``app._tool_manager.call_tool``, which every tools/call resolves at call time, so each call
+        """Wrap the tool manager's ``call_tool``, which every tools/call resolves at call time, so each call
         of a registered tool runs under its ToolContext and the handler's ``on_tool_call`` may answer
-        it first. An unknown tool name goes straight to the dispatch, whose error answers it.
+        it first. An unknown tool name goes straight to the dispatch, whose error answers it. FastMCP
+        has no public hook for this (its low-level handler is ``FastMCP.call_tool``, bound at
+        construction), so the manager is the one private seam, required by ``_check_tool_binding``.
 
         The installed callable carries ``__agentenv_tool_context__ = True`` and ``__wrapped__`` (the
         dispatch it wraps): the handles a downstream guard uses to assert the ordering contract.
         """
-        manager = getattr(app, "_tool_manager", None)
-        inner = getattr(manager, "call_tool", None)
-        if not callable(inner):
-            return
+        manager = app._tool_manager
+        inner = manager.call_tool
         hook = self._hook
-        get_tool = getattr(manager, "get_tool", None)
 
         async def call_tool(name: str, arguments: dict, *args: Any, **kwargs: Any) -> Any:
-            if get_tool is not None and get_tool(name) is None:
+            if manager.get_tool(name) is None:
                 return await inner(name, arguments, *args, **kwargs)
             context = kwargs.get("context", args[0] if args else None)
             with bound(context_from_mcp(context, name, arguments)) as tool_context:

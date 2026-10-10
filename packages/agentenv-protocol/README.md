@@ -108,7 +108,9 @@ callers apart when the gateway shares one connection to the server. `ctx.tool`, 
 `ctx.call_id` and `ctx.transport` (`"mcp"` or `"rest"`) describe the call. Code that runs on behalf
 of the call without a parameter of its own, such as a database method, reads the same object through
 `ToolContext.current()`, which returns an empty context outside any call. The binding is per call
-and follows the request's task, so concurrent callers never see each other's context.
+and follows the request's task, so concurrent callers never see each other's context. It is made
+at FastMCP's own tool dispatch, for which `mcp` 1.x offers no public hook, and the mount refuses an
+app without one, so a server that mounted is a server whose tool calls are bound.
 
 To answer a call before the tool runs, override `on_tool_call(self, context)`: return `None` to let
 it proceed, or an `mcp.types.CallToolResult` (`isError=True` for a refusal) to send that as the

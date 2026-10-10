@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime
 import decimal
 import enum
+import inspect
 import json
 import sys
 import uuid
@@ -47,6 +48,11 @@ class _FakeMCP:
         self.routes: list[Route] = []
         self.tools: dict[str, tuple] = {}
         self.settings = SimpleNamespace(streamable_http_path="/mcp")
+        self._tool_manager = SimpleNamespace(get_tool=self.tools.get, call_tool=self._call_tool)
+
+    async def _call_tool(self, name: str, arguments: dict, *_: object, **__: object):
+        result = self.tools[name][1](**arguments)
+        return await result if inspect.isawaitable(result) else result
 
     def custom_route(self, path: str, methods: list[str]):
         def deco(fn):

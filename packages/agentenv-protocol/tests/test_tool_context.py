@@ -36,12 +36,17 @@ from agentenv_protocol.tool_context import EMPTY, bound, caller_from_request, co
 
 
 class _FakeMCP:
-    """FastMCP-shaped target without a ``_tool_manager``: records routes and tool registrations."""
+    """FastMCP-shaped target: records routes and tool registrations; its tool manager is the dispatch the mount binds."""
 
     def __init__(self) -> None:
         self.routes: list[Route] = []
         self.tools: dict[str, tuple] = {}
         self.settings = SimpleNamespace(streamable_http_path="/mcp")
+        self._tool_manager = SimpleNamespace(get_tool=self.tools.get, call_tool=self._call_tool)
+
+    async def _call_tool(self, name: str, arguments: dict, *_: object, **__: object):
+        result = self.tools[name][1](**arguments)
+        return await result if inspect.isawaitable(result) else result
 
     def custom_route(self, path: str, methods: list[str]):
         def deco(fn):
@@ -256,9 +261,23 @@ def test_injecting_raises_when_a_slotted_function_has_unresolvable_annotations()
         injecting(broken)
 
 
-def test_fake_target_without_tool_manager_mounts_with_nothing_installed():
-    mcp = _mounted(_SlotHandler())
-    assert not hasattr(mcp, "_tool_manager") and not hasattr(mcp, "call_tool")
+@pytest.mark.parametrize("strip", [lambda mcp: delattr(mcp, "_tool_manager"), lambda mcp: delattr(mcp._tool_manager, "call_tool")])
+def test_target_without_a_tool_dispatch_is_refused_before_any_route_is_added(strip):
+    mcp = _FakeMCP()
+    strip(mcp)
+    with pytest.raises(RuntimeError, match="no FastMCP tool dispatch"):
+        AgentEnvFastMCPApplication(environment_card=EnvironmentCard(name="items"), handler=_SlotHandler()).add_routes_to_app(mcp)
+    assert mcp.routes == [] and mcp.tools == {}
+
+
+@pytest.mark.asyncio
+async def test_mount_binds_the_target_dispatch():
+    handler = _SlotHandler()
+    mcp = _mounted(handler)
+    assert mcp._tool_manager.call_tool.__agentenv_tool_context__ is True
+    assert await mcp._tool_manager.call_tool("whoami", {"q": "x"}, context=None) == {"q": "x", "role": None, "limit": 3}
+    assert handler.seen[-1].transport == "mcp" and handler.seen[-1].tool == "whoami"
+    assert ToolContext.current() is EMPTY
 
 
 class _ExtHandler:
