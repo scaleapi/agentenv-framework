@@ -19,7 +19,7 @@ import weakref
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import IO, TYPE_CHECKING, Any, AsyncIterator, Callable, Iterable, Optional
+from typing import IO, TYPE_CHECKING, Any, AsyncIterator, Callable, ClassVar, Iterable, Optional
 
 from agent_env.config import get_config
 from agent_env.store.image_store.oci_registry_credentials import registry_host_from_ref
@@ -149,6 +149,15 @@ class Sandbox(ABC):
     host_ips: tuple[str, ...] = ()
     # ``name:address`` entries the containers started on this sandbox add to their hosts file.
     extra_hosts: tuple[str, ...] = ()
+
+    # Whether it runs on this machine, as a local sandbox does.
+    ON_THIS_MACHINE: ClassVar[bool] = False
+    # The host other containers on its provider's private network reach it at, ready for a URL; None when it's on none.
+    private_host: str | None = None
+
+    def url_from_sandbox(self, url: str) -> str:
+        """``url``, of a service this process reaches, as this sandbox reaches it."""
+        return url
 
     _VM_READY_TIMEOUT = 1200      # wait_for_vm wall-clock budget (s)
     _VM_READY_POLL_INTERVAL = 30  # sparse polling (s)

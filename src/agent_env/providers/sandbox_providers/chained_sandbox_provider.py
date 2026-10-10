@@ -28,6 +28,10 @@ class ChainedSandboxProvider(SandboxProvider):
         """The providers tried, in order."""
         return tuple(self._providers)
 
+    @property
+    def links(self) -> tuple[SandboxProvider, ...]:
+        return self.providers
+
     @staticmethod
     def filter_sandbox_providers(
         providers: list[SandboxProvider], policy: NetworkPolicy | None

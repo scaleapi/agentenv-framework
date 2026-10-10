@@ -163,7 +163,8 @@ class _ContainersOnly(SandboxProvider):
         raise AssertionError("preflight creates nothing")
 
 
-def test_an_agent_the_bundle_builds_is_refused_on_a_provider_that_cant_build_it(bundle_dir, monkeypatch):
+def test_an_agent_the_bundle_builds_is_refused_on_a_provider_that_creates_no_vm_and_runs_it_by_name(bundle_dir,
+                                                                                                 monkeypatch):
     registry = Config.sandbox_registry
     monkeypatch.setattr(Config, "sandbox_registry", lambda self: {**registry(self), "containers": {"impl": _ContainersOnly}})
     layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\n"})
@@ -171,9 +172,22 @@ def test_an_agent_the_bundle_builds_is_refused_on_a_provider_that_cant_build_it(
 
     assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox="containers")) == [
         "tasks/t.json: step 'agent': deploys agent '@local/~/triage/solver''s image on the 'containers' sandbox "
-        "provider, which can't build it from its build context, and the bundle builds it from agents/solver/Dockerfile, "
-        "which a sandbox runs only once it's built on this machine or by the provider it runs on; run it with --sandbox "
-        "local, or on a provider that builds it, such as --sandbox modal",
+        "provider, which runs it by name, and the bundle builds it from agents/solver/Dockerfile, which a sandbox runs "
+        "only once it's built on this machine or by the provider it runs on; run it with --sandbox local, or on a "
+        "provider that builds it, such as --sandbox modal",
+    ]
+
+
+def test_a_gateway_is_refused_on_a_provider_that_creates_no_vm_and_has_no_private_network(bundle_dir, monkeypatch):
+    registry = Config.sandbox_registry
+    monkeypatch.setattr(Config, "sandbox_registry", lambda self: {**registry(self), "containers": {"impl": _ContainersOnly}})
+    _env("crm", REMOTE)
+    _infra(REMOTE)
+    _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
+
+    assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox="containers")) == [
+        "tasks/t.json: step 'env': deploys env 'crm' on the 'containers' sandbox provider, which creates no VM, and "
+        "can't put the gateway's containers on a private network; run it on a VM provider, such as --sandbox local",
     ]
 
 
@@ -424,8 +438,8 @@ def test_a_website_on_modal_is_refused_since_its_gateway_runs_in_containers(bund
     _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "shop"}])
 
     assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox="modal")) == [
-        "tasks/t.json: step 'env': deploys env 'shop', which has websites, on the 'modal' sandbox provider, whose "
-        "gateway runs in containers and can't serve websites; run it on a VM provider, such as --sandbox local",
+        "tasks/t.json: step 'env': deploys env 'shop' on the 'modal' sandbox provider, which runs the gateway in "
+        "containers, and they can't serve websites; run it on a VM provider, such as --sandbox local",
     ]
 
 
@@ -628,9 +642,9 @@ def test_a_website_the_bundle_writes_is_refused_on_modal_and_a_multi_holding_one
     layout(bundle_dir, {"envs/suite/env.toml": 'type = "multi"\nwebsite_envs = ["shop"]\n'})
     _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "suite"}])
 
-    assert (f"tasks/t.json: step 'env': deploys env '{BUNDLE}/suite', which has websites, on the 'modal' sandbox "
-            "provider, whose gateway runs in containers and can't serve websites; run it on a VM provider, such as "
-            "--sandbox local") in _problems(lambda: dry_run_bundle(bundle_dir, sandbox="modal"))
+    assert (f"tasks/t.json: step 'env': deploys env '{BUNDLE}/suite' on the 'modal' sandbox provider, which runs the "
+            "gateway in containers, and they can't serve websites; run it on a VM provider, such as --sandbox local"
+            ) in _problems(lambda: dry_run_bundle(bundle_dir, sandbox="modal"))
 
 
 @pytest.mark.parametrize("folders, deployed, kinds", [

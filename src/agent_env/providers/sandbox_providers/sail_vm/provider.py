@@ -25,6 +25,7 @@ from agent_env.providers.sandbox_providers.sail_vm.sandbox import (
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, NetworkPolicyUnsupportedError
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_VM,
+    Accepts,
     SandboxProvider,
     apply_default_attribution,
 )
@@ -133,6 +134,8 @@ class SailVmSandboxProvider(SandboxProvider):
     Sail adds it to the agent's requests to the model endpoint (see ``model_key``)."""
 
     EGRESS_HOSTS: ClassVar[tuple[str, ...]] = ("*.sail.box",)
+    CREATES_VMS = True
+    SANDBOX_ACCEPTS = Accepts.LOADABLE  # a sandbox is a VM, which loads the image; a container pulls it by name
 
     def __init__(
         self,
