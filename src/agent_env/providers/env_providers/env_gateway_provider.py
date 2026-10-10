@@ -221,7 +221,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
     ) -> str:
         """Generate docker-compose.yml content for a gateway deployment onto a VM/laptop/arbitrary machine.
         With ``trust_dir``, the local transfer CA's trust files, each MCP server mounts them where
-        ``LOCAL_TRUST_ENV`` points, so its TLS clients trust the local grant server.
+        ``LOCAL_TRUST_ENV`` points and carries ``extra_hosts``, so it reaches and trusts the local grant server.
 
         Supports MCP servers, websites, or both. Website containers (backend + frontend) are added
         to the same docker network. The gateway receives WEBSITE_URLS env var for discovery.
@@ -369,6 +369,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             if trust_dir is not None:
                 lines.extend(f"      - {key}={value}" for key, value in LOCAL_TRUST_ENV.items())
                 lines.extend(["    volumes:", f'      - "{trust_dir}:{LOCAL_TRUST_DIR}:ro"'])
+                if extra_hosts:
+                    lines.extend(["    extra_hosts:", *(f'      - "{entry}"' for entry in extra_hosts)])
             lines.extend([
                 "    healthcheck:",
                 f'      test: ["CMD-SHELL", "python3 -c \\"import socket; s=socket.create_connection((\'localhost\',{gateway_port}),2); s.close()\\""]',

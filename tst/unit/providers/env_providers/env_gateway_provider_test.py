@@ -821,7 +821,8 @@ def test_compose_maps_extra_hosts_into_the_gateway(extra_hosts):
 
 @pytest.mark.parametrize("trust_dir", [None, Path("/state/tls/trust/ab12")], ids=["no-local-grants", "local-grants"])
 def test_compose_hands_each_mcp_server_the_local_transfer_ca_when_there_is_one(trust_dir):
-    """Services on a local compose stack reach the local grant server over TLS, so they mount its CA's trust files."""
+    """Services on a local compose stack reach the local grant server over TLS, so they mount its CA's trust files
+    and carry the sandbox's host mappings, which on Linux are how host.docker.internal resolves."""
     from agent_env.env.envs.service_db import ServiceDBConfig
 
     compose = EnvironmentGatewayProvider().create_docker_compose(
@@ -830,6 +831,7 @@ def test_compose_hands_each_mcp_server_the_local_transfer_ca_when_there_is_one(t
         gateway_image="agent-gateway",
         state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
         state_instance=LocalPostgresStateProvider.default_instance(),
+        extra_hosts=("host.docker.internal:host-gateway",),
         trust_dir=trust_dir,
     )
 
@@ -839,6 +841,7 @@ def test_compose_hands_each_mcp_server_the_local_transfer_ca_when_there_is_one(t
         trusted = {key: env.get(key) for key in LOCAL_TRUST_ENV}
         assert trusted == (LOCAL_TRUST_ENV if trust_dir else dict.fromkeys(LOCAL_TRUST_ENV))
         assert services[name].get("volumes") == ([f"{trust_dir}:{LOCAL_TRUST_DIR}:ro"] if trust_dir else None)
+        assert services[name].get("extra_hosts") == (["host.docker.internal:host-gateway"] if trust_dir else None)
 
 
 # --- sidecar rendering --------------------------------------------------------
