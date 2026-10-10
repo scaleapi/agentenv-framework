@@ -466,7 +466,7 @@ def _callable_name(fn: Callable) -> str:
 
 def _tool_context_slot(fn: Callable) -> str | None:
     """Name of the parameter annotated ``ToolContext`` / ``Optional[ToolContext]`` (any name), or None.
-    The slot is filled by keyword, so a positional-only one is refused here rather than on every call."""
+    The slot is filled by name, so a positional-only one is refused here rather than on every call."""
     hints = _resolved_hints(fn)
     slots = []
     for name, param in inspect.signature(fn).parameters.items():
@@ -515,25 +515,35 @@ def _reduced_signature(fn: Callable, slot: str) -> tuple:
 
 
 def _inject_tool_context(fn: Callable, slot: str) -> Callable:
+    signature, annotations = _reduced_signature(fn, slot)
+    full = inspect.signature(fn)
+
+    def filled(args: tuple, kwargs: dict) -> inspect.BoundArguments:
+        # Positional arguments mean what the twin advertises, then land where ``fn`` declares them.
+        call = full.bind_partial()
+        call.arguments.update(signature.bind(*args, **kwargs).arguments)
+        call.arguments[slot] = ToolContext.current()
+        return call
+
     # Two bodies so the registry's sync/async detection sees the same kind as ``fn``.
     if inspect.iscoroutinefunction(fn):
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
-            kwargs[slot] = ToolContext.current()
-            return await fn(*args, **kwargs)
+            call = filled(args, kwargs)
+            return await fn(*call.args, **call.kwargs)
     else:
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            kwargs[slot] = ToolContext.current()
-            return fn(*args, **kwargs)
+            call = filled(args, kwargs)
+            return fn(*call.args, **call.kwargs)
     functools.update_wrapper(wrapper, fn)
-    wrapper.__signature__, wrapper.__annotations__ = _reduced_signature(fn, slot)
+    wrapper.__signature__, wrapper.__annotations__ = signature, annotations
     return wrapper
 
 
 def injecting(fn: Callable) -> Callable:
     """``fn`` as an MCP tool registry should see it: unchanged when it declares no ``ToolContext``
     parameter, else a twin of the same name, doc and sync/async nature whose signature and annotations
-    omit that parameter and which fills it with ``ToolContext.current()`` on every call. ``@tool``
-    methods get this at mount; use it for a slotted function registered any other way
+    omit that parameter and which fills it with ``ToolContext.current()`` on every call; positional
+    arguments follow the twin's signature, not ``fn``'s. ``@tool`` methods get this at mount; use it for a slotted function registered any other way
     (``app.tool()(fn)``, a separate ``ToolManager``), which otherwise fails at registration."""
     slot = _tool_context_slot(fn)
     return _inject_tool_context(fn, slot) if slot else fn

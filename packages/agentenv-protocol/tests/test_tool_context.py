@@ -254,6 +254,28 @@ def test_slot_less_tool_is_registered_verbatim():
     }
 
 
+@pytest.mark.asyncio
+async def test_twin_takes_positional_arguments_in_its_advertised_order():
+    class _Handler:
+        async def first(self, tc: ToolContext, q: str, limit: int = 3) -> dict:
+            return {"q": q, "limit": limit, "role": tc.role}
+
+        def middle(self, q: str, tc: ToolContext, limit: int = 3) -> dict:
+            return {"q": q, "limit": limit, "role": tc.role}
+
+    handler = _Handler()
+    first, middle = injecting(handler.first), injecting(handler.middle)
+    assert list(inspect.signature(first).parameters) == ["q", "limit"]
+    with bound(ToolContext.for_test(role="alice")):
+        assert await first("x") == {"q": "x", "limit": 3, "role": "alice"}
+        assert await first("x", 5) == await first(q="x", limit=5) == {"q": "x", "limit": 5, "role": "alice"}
+        assert middle("y", 2) == middle(limit=2, q="y") == {"q": "y", "limit": 2, "role": "alice"}
+    with pytest.raises(TypeError, match="missing a required argument: 'q'"):
+        await first()
+    with pytest.raises(TypeError, match="too many positional arguments"):
+        await first("x", 5, 7)
+
+
 def test_injecting_raises_when_a_slotted_function_has_unresolvable_annotations():
     def broken(x: "Undefined", tc: ToolContext) -> str: ...  # noqa: F821
 
