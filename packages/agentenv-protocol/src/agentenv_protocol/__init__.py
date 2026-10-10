@@ -2,6 +2,7 @@
 
 from . import client
 from .preflight import intake_fit_check
+from .tool_client import MCP_PROTOCOL_VERSION, ToolResult, ToolSession, ToolSessionError, tool_definitions
 from .agent_env_environment import (
     AgentEnvApplication,
     AgentEnvEnvironment,
@@ -42,6 +43,7 @@ from .types import (
     METHOD_GET,
     METHOD_RESET,
     PROTOCOL_VERSION,
+    ROLE_HEADER,
     RPC_PATH,
     WELL_KNOWN_PATH,
     AddDataRequest,
@@ -96,6 +98,12 @@ __all__ = [
     "uploaded_object_path",
     "MCP_PATH",
     "MCP_TRANSPORT",
+    "ROLE_HEADER",
+    "MCP_PROTOCOL_VERSION",
+    "ToolSession",
+    "ToolResult",
+    "ToolSessionError",
+    "tool_definitions",
     "MANIFEST_VERSION",
     "INTERFACE_MANIFEST_PATH",
     "GET_INTERFACES_EXTENSION_URI",

@@ -22,7 +22,7 @@ pytestmark = [pytest.mark.int_test_slow]
 
 from agent_env.artifact import Artifact, CliArtifact, DockerImageArtifact, FileArtifact, FileArtifactUniverse, EnvironmentArtifact, EnvironmentUniverseArtifact
 from agent_env.env import Env, GatewayEnv, MCPServerEnv, MultiEnv
-from agentenv_protocol import DataPart, FilePart, client as protocol_v1
+from agentenv_protocol import DataPart, FilePart, ToolSession, client as protocol_v1
 from agent_env.env.envs import WebsiteEnv
 from agent_env.env.gateway import AGENT_ENV_ROLE_HEADER, GatewayMode, TOOL_DISABLE_ACTION, TOOL_ENABLE_ACTION
 from agent_env.env.gateway.get_time import (
@@ -765,6 +765,15 @@ async def test_gateway_with_single_mcp_server(mcp_server_envs, email_service_art
                 await session.initialize()
                 tools_result = await session.list_tools()
                 assert "list_emails" in [t.name for t in tools_result.tools]
+
+        # The protocol package's ToolSession sees what the SDK client sees, and a hidden tool's call is an error result
+        async with ToolSession(result.mcp_url, role="default") as default_session:
+            assert "list_emails" not in [t.name for t in await default_session.list_tools()]
+            hidden = await default_session.call_tool("list_emails", {"folder_name": "INBOX"})
+            assert hidden.isError and "is disabled for role 'default'" in hidden.text, hidden
+        async with ToolSession(result.mcp_url, role="cli") as cli_session:
+            assert "list_emails" in [t.name for t in await cli_session.list_tools()]
+            assert "alex.chen@techcorp.com" in (await cli_session.call_tool("list_emails", {"folder_name": "INBOX"})).text
 
         # Re-enable: list_emails accessible to default role again
         async with httpx.AsyncClient() as client:
