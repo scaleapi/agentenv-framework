@@ -271,7 +271,7 @@ class DockerImageArtifact(Artifact):
     @property
     def context_only(self) -> bool:
         """Whether only the image's build context is stored: no tar.gz, and an image name that names no registry, the
-        tag a VM sandbox gives the image when it builds it."""
+        tag the image's build gives it."""
         return bool(self.build_context_object_url) and not self.tar_gz_object_url and not names_registry(self.image_name)
 
     def load_problem(self) -> str | None:
@@ -284,9 +284,10 @@ class DockerImageArtifact(Artifact):
 
     def by_name_problem(self) -> str | None:
         """Why a sandbox that runs an image by pulling its name can't run this one, or None when it can: a context-only
-        image's name is a tag only a VM sandbox's build gives it, and pulled, it would be looked up on Docker Hub."""
+        image's name is a tag only its build gives it, a VM sandbox's or Modal's, and pulled, it would be looked up on
+        Docker Hub."""
         if self.context_only:
-            return f"{self.id!r} v{self.version} is only a build context, which only a VM sandbox builds"
+            return f"{self.id!r} v{self.version} is only a build context, which has to be built, not pulled"
         return None
 
     @classmethod
@@ -309,7 +310,6 @@ class DockerImageArtifact(Artifact):
         without slashes, or the default branch.
         """
         from agent_env.providers import get_sandbox_provider
-        from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
         from agent_env.providers.sandbox_providers.sandbox import upload_vm_file
         from agent_env.config import get_config
 
@@ -344,7 +344,7 @@ class DockerImageArtifact(Artifact):
         repository = image_repository(id)
         image_ref = image_store.image_ref(repository, f"v{version}")
         provider = get_sandbox_provider()
-        if is_loopback_host(registry_host_from_ref(image_ref)) and not isinstance(provider, LocalSandboxProvider):
+        if is_loopback_host(registry_host_from_ref(image_ref)) and not provider.ON_THIS_MACHINE:
             raise ValueError(
                 f"{image_ref} is in a registry on this machine, which a {type(provider).__name__} build VM can't push to; "
                 "build on the local sandbox provider, or configure an image store a remote VM can reach"

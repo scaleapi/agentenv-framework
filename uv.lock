@@ -1,15 +1,13 @@
 version = 1
 revision = 3
-requires-python = ">=3.11"
+requires-python = ">=3.11.4"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
     "python_full_version >= '3.14' and sys_platform != 'win32'",
     "python_full_version == '3.13.*' and sys_platform == 'win32'",
+    "python_full_version < '3.13' and sys_platform == 'win32'",
     "python_full_version == '3.13.*' and sys_platform != 'win32'",
-    "python_full_version == '3.12.*' and sys_platform == 'win32'",
-    "python_full_version == '3.12.*' and sys_platform != 'win32'",
-    "python_full_version < '3.12' and sys_platform == 'win32'",
-    "python_full_version < '3.12' and sys_platform != 'win32'",
+    "python_full_version < '3.13' and sys_platform != 'win32'",
 ]
 
 [manifest]
@@ -43,7 +41,7 @@ http-server = [
 
 [[package]]
 name = "agentenv-framework"
-version = "0.9.1305"
+version = "0.9.1307"
 source = { editable = "." }
 dependencies = [
     { name = "a2a-sdk" },
@@ -125,7 +123,7 @@ requires-dist = [
     { name = "griffelib", marker = "extra == 'dev'", specifier = "==2.3.0" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "litellm", specifier = ">=1.96.0,<1.97" },
-    { name = "mcp", specifier = ">=1.0.0,<2" },
+    { name = "mcp", specifier = ">=1.25,<2" },
     { name = "modal", specifier = ">=1.5.2.dev22" },
     { name = "moto", marker = "extra == 'dev'", specifier = ">=5.0.0" },
     { name = "packaging", specifier = ">=22" },
@@ -150,7 +148,7 @@ provides-extras = ["aws", "explorer", "gcp", "sail", "dev"]
 
 [[package]]
 name = "agentenv-framework-protocol"
-version = "0.1.320"
+version = "0.1.322"
 source = { editable = "packages/agentenv-protocol" }
 dependencies = [
     { name = "httpx" },

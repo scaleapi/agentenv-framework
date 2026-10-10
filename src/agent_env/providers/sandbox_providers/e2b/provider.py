@@ -20,6 +20,7 @@ from agent_env.providers.sandbox_providers.e2b.sandbox import E2B_ALL_TRAFFIC, E
 from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_VM,
+    Accepts,
     SandboxProvider,
     apply_default_attribution,
 )
@@ -36,6 +37,9 @@ class E2BSandboxProvider(SandboxProvider):
     than read from the process environment.  Configure it with a ``secret:``
     interpolation in ``[sandbox.providers.e2b.config]``.
     """
+
+    CREATES_VMS = True
+    SANDBOX_ACCEPTS = Accepts.LOADABLE  # a sandbox is a VM, which loads the image; a container pulls it by name
 
     # AsyncSandbox.get_host(port) returns ``<port>-<sandbox-id>.e2b.app``.
     # Workloads receive those public URLs, so an allowlisted sandbox must be

@@ -4,11 +4,12 @@ Materializing first refuses every write this release has no writer for, so nothi
 that can't be written whole. It needs the CLI's namespace routing, which sends ``@local`` writes to the
 ``@local`` namespace's store. Holding the bundle's lock, it writes the entities in the plan's order, an image
 built from an entry's Dockerfile just before the entry: with ``docker build`` on this machine, or, for one
-whose deploys build it in their VMs, as its build context alone. Then it builds and preflights every task
-before writing any of them, and writes the evals last, since they name the tasks. Each write goes through the ledger, so one whose inputs haven't changed reuses the version the bundle
-last wrote. A reused task keeps whatever its steps took from config when it was first written, such as a
-rubrics verifier's default judge model. A dry run takes the same path, refusals, checks and preflights
-included, without the lock or a single write.
+whose deploys build it where they run, as its build context alone. Then it builds and preflights every task
+before writing any of them, and writes the evals last, since they name the tasks. Each write goes through the
+ledger, so one whose inputs haven't changed reuses the version the bundle last wrote. A reused task keeps
+whatever its steps took from config when it was first written, such as a rubrics verifier's default judge
+model. A dry run takes the same path, refusals, checks and preflights included, without the lock or a single
+write.
 """
 
 from __future__ import annotations
@@ -83,7 +84,7 @@ def materialize(
     one stays: they're in the ledger, so the next run reuses them. ``on_wait`` is called when another run
     holds a lock this one needs, ``on_build`` before an image is built, and ``on_write`` after each write,
     reused or not. An image the bundle builds whose id is in ``contexts`` is written as its build context
-    alone, for the VM sandboxes that deploy it to build (``preflight_run`` decides which).
+    alone, for the providers that deploy it to build (``preflight_run`` decides which).
 
     ``dry_run`` checks and preflights what a run would, and writes nothing: no entity, ledger row or lock.
     Each write gets the version it would reuse or the store's next, which another run can take first. A step
@@ -159,7 +160,7 @@ def _staged(plan: Plan, image: BuiltImage) -> Iterator[Path]:
 
 def _write_build_context(plan: Plan, write: Write) -> int:
     """Write the image an entry's Dockerfile describes as a docker_image artifact holding its build context alone,
-    which each VM sandbox that deploys it builds."""
+    which each provider that deploys it builds."""
     image = write.source
     with _staged(plan, image) as context:
         try:

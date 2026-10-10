@@ -16,7 +16,7 @@ from typing import NamedTuple, Optional
 
 from agent_env.a2a_agent.staging import drain_all, staged_changelogs
 from agent_env.env.env import DeployedEnv
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, remove_local_work_dir
+from agent_env.providers.sandbox_providers.local_sandbox import remove_local_work_dir
 from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider
 from agent_env.task.interrupts import tearing_down
 from agent_env.task_step.context import TaskStepContext
@@ -105,7 +105,7 @@ async def teardown_run(context: TaskStepContext, *, timeout: float = TERMINATE_T
             failed.append((sandbox, reason))
             return
         context.metadata[TORN_DOWN_KEY] = [*context.metadata.get(TORN_DOWN_KEY, []), sandbox.sandbox_id]
-        if isinstance(handle, LocalSandbox) and (why := await _remove_folder(sandbox)):
+        if handle.ON_THIS_MACHINE and (why := await _remove_folder(sandbox)):
             failed.append((sandbox, why))
         else:
             terminated.append(sandbox)

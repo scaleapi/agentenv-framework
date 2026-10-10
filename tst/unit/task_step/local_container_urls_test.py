@@ -18,6 +18,7 @@ from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.env.env import DeployedGatewayEnv
 from agent_env.providers.sandbox_providers import sandbox_provider
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
+from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 from agent_env.task_step.context import DeployedAgent, DeployedSandbox, TaskStepContext
 from agent_env.task_step.task_steps.install_agent import _build_param_resolvers
 from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
@@ -46,7 +47,7 @@ class _LocalProvider(LocalSandboxProvider):
         raise _Started
 
 
-class _RemoteProvider:
+class _RemoteProvider(SandboxProvider):
     async def create_sandbox(self, *, env, **_):
         self.env = env
         raise _Started

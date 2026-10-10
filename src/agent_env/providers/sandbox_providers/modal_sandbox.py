@@ -10,7 +10,7 @@ import logging
 import os
 import re
 import shlex
-from typing import AsyncIterator, ClassVar, Optional
+from typing import TYPE_CHECKING, AsyncIterator, ClassVar, Optional
 
 import httpx
 import modal
@@ -20,9 +20,14 @@ from agent_env.config import get_config
 from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy, Sandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_CONTAINER,
+    Accepts,
     SandboxProvider,
     apply_default_attribution,
 )
+from agent_env.providers.sandbox_providers.modal_image_build import context_image, fmt_exc
+
+if TYPE_CHECKING:
+    from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 
 logger = logging.getLogger(__name__)
 
@@ -66,12 +71,6 @@ def _modal_network_kwargs(policy: NetworkPolicy) -> dict:
         "outbound_domain_allowlist": list(policy.allow_hosts),
         "outbound_cidr_allowlist": list(policy.allow_cidrs),
     }
-
-
-def _fmt_exc(e: BaseException) -> str:
-    type_name = f"{type(e).__module__}.{type(e).__qualname__}"
-    msg = str(e).strip()
-    return f"{type_name}: {msg}" if msg else type_name
 
 
 async def _resolve_i6pn_address(sb: modal.Sandbox) -> Optional[str]:
@@ -118,6 +117,11 @@ class ModalSandbox(Sandbox):
         self.vnc_url = None
         self.mode = SANDBOX_MODE_CONTAINER
         self.network_policy = network_policy
+
+    @property
+    def private_host(self) -> str | None:
+        """Its address on i6pn, Modal's private network between sandboxes, bracketed for a URL."""
+        return f"[{self.i6pn_address}]" if self.i6pn_address else None
 
     async def terminate(self) -> None:
         await self._sb.terminate.aio()
@@ -185,6 +189,11 @@ class ModalSandboxProvider(SandboxProvider):
     # sandbox's ``.type`` to match the config key.
     _sandbox_cls: type[ModalSandbox] = ModalSandbox
 
+    # Each image in a container of its own, built first when it is only a build context (prepare_image); its
+    # containers share i6pn, Modal's private network.
+    SANDBOX_ACCEPTS = CONTAINER_ACCEPTS = Accepts.NAME_OR_CONTEXT
+    PRIVATE_NETWORK = True
+
     @classmethod
     def supports_network_policy(cls, policy: NetworkPolicy) -> bool:
         return True
@@ -206,12 +215,16 @@ class ModalSandboxProvider(SandboxProvider):
         self._gpu = gpu
         # Looked up on demand and cached by name.
         self._apps: dict[str, modal.App] = {}
+        self._token_id = ""
+        # The context-only images prepare_image was given, by name, so create_container builds them rather than pull.
+        self._context_images: dict[str, DockerImageArtifact] = {}
 
     async def _get_client(self) -> modal.Client:
         if self._client is None:
             from agent_env.config import get_config
             token_id, token_secret = get_config().get_modal_credentials()
             self._client = await modal.Client.from_credentials.aio(token_id, token_secret)
+            self._token_id = token_id
         return self._client
 
     async def _get_app(self, app_name: str, app_tags: Optional[dict[str, str]] = None) -> modal.App:
@@ -229,6 +242,20 @@ class ModalSandboxProvider(SandboxProvider):
             self._apps[app_name] = app
         return app
 
+    async def prepare_image(self, image: DockerImageArtifact, *, attribution: Optional[Attribution] = None) -> None:
+        """Build ``image`` when it's only a build context, unless this process has already built its sources."""
+        if image.context_only:
+            self._context_images[image.image_name] = image
+            await self._context_image(image)
+
+    async def _context_image(self, image: DockerImageArtifact, *,
+                             stale: str | None = None) -> tuple[modal.Image, str]:
+        """The Modal image built from ``image``'s build context, and its id (``modal_image_build.context_image``)."""
+        client = await self._get_client()
+        app = await self._get_app(self._app_name, _attribution_tags({}))
+        return await context_image(image, client=client, app=app, token_id=self._token_id, app_name=self._app_name,
+                                   stale=stale)
+
     async def create_container(
         self,
         *,
@@ -243,13 +270,23 @@ class ModalSandboxProvider(SandboxProvider):
         attribution: Optional[Attribution] = None,
         network_policy: Optional[NetworkPolicy] = None,
         command: list[str] | None = None,
-        i6pn: bool = False,
-        region: Optional[str] = None,
         expose_externally: bool = True,
         vnc_port: Optional[int] = None,
+        private_network: bool = False,
     ) -> Sandbox:
-        from agent_env.config import get_config
-
+        # The private network is i6pn, Modal's network between sandboxes, in the configured region.
+        i6pn = private_network
+        region = get_config().modal_default_region if private_network else None
+        # GPU sandboxes need the V1 ``Sandbox.create`` factory: the V2
+        # ``_experimental_create`` has no ``gpu`` parameter and cannot attach one. V1 in
+        # turn has no ``i6pn``, so reject that combination up front — before any Modal
+        # call — rather than silently returning one whose i6pn_address is None
+        # and failing downstream (e.g. the gateway's "service-db has no i6pn address").
+        if self._gpu and i6pn:
+            raise ValueError(
+                "i6pn is unavailable on GPU sandboxes: the GPU-capable factory "
+                "(modal.Sandbox.create) has no i6pn parameter."
+            )
         effective = self.effective_network_policy(network_policy)
         attribution = dict(attribution or {})
 
@@ -260,30 +297,11 @@ class ModalSandboxProvider(SandboxProvider):
         app_name = self._app_name
         app = await self._get_app(app_name, app_tags)
 
-        image_store = get_config().get_image_store_at(image_name)
-        from agent_env.store.image_store import (
-            EcrCredentials,
-            OciRegistryImageStore,
-            registry_host_from_ref,
-        )
-
-        uses_ecr_pull_secret = (
-            self._ecr_pull_secret_name is not None
-            and isinstance(image_store, OciRegistryImageStore)
-            and isinstance(image_store.credentials, EcrCredentials)
-            and registry_host_from_ref(image_name) == image_store.registry_host
-        )
-        auth = None if uses_ecr_pull_secret else await asyncio.to_thread(image_store.auth, image_name)
-        if uses_ecr_pull_secret:
-            image = modal.Image.from_aws_ecr(image_name, secret=modal.Secret.from_name(
-                self._ecr_pull_secret_name, required_keys=ECR_READER_SECRET_KEYS))
-        elif auth is not None:
-            image = modal.Image.from_registry(image_name, secret=modal.Secret.from_dict({
-                "REGISTRY_USERNAME": auth.username,
-                "REGISTRY_PASSWORD": auth.password,
-            }))
+        built_id = None
+        if (context_only := self._context_images.get(image_name)) is not None:
+            image, built_id = await self._context_image(context_only)
         else:
-            image = modal.Image.from_registry(image_name)
+            image = await self._registry_image(image_name)
 
         logger.info(
             f"Creating Modal sandbox from image {image_name} "
@@ -300,20 +318,9 @@ class ModalSandboxProvider(SandboxProvider):
             f"app={app_name} region={region} i6pn={i6pn}"
         )
 
-        # GPU sandboxes need the V1 ``Sandbox.create`` factory: the V2
-        # ``_experimental_create`` has no ``gpu`` parameter and cannot attach one. V1 in
-        # turn has no ``i6pn``, so reject that combination up front — before a billed
-        # sandbox exists — rather than silently returning one whose i6pn_address is None
-        # and failing downstream (e.g. the gateway's "service-db has no i6pn address").
-        if self._gpu and i6pn:
-            raise ValueError(
-                "i6pn is unavailable on GPU sandboxes: the GPU-capable factory "
-                "(modal.Sandbox.create) has no i6pn parameter."
-            )
-
         # ``i6pn`` is threaded per-factory below (V2 only); everything else is shared.
         create_kwargs = dict(
-            app=app, image=image, cpu=cpu, memory=memory, timeout=timeout,
+            app=app, cpu=cpu, memory=memory, timeout=timeout,
             env=env or {}, client=client, **port_kwargs,
             tags=sandbox_tags or None,
             readiness_probe=modal.Probe.with_exec("true"),
@@ -322,21 +329,31 @@ class ModalSandboxProvider(SandboxProvider):
         if region is not None:
             create_kwargs["region"] = region
 
-        try:
+        async def create(image: modal.Image) -> modal.Sandbox:
             if self._gpu:
-                sb = await modal.Sandbox.create.aio(
+                return await modal.Sandbox.create.aio(
                     *(command or []),
                     gpu=self._gpu,
                     experimental_options={"enable_docker_in_gvisor": True},
+                    image=image,
                     **create_kwargs,
                 )
-            else:
-                sb = await modal.Sandbox._experimental_create.aio(
-                    *(command or []), i6pn=i6pn, **create_kwargs
-                )
+            return await modal.Sandbox._experimental_create.aio(
+                *(command or []), i6pn=i6pn, image=image, **create_kwargs
+            )
+
+        try:
+            try:
+                sb = await create(image)
+            except modal.exception.NotFoundError:
+                if built_id is None:
+                    raise
+                # Modal no longer holds the image this process built from the context, so it's built again, once.
+                image, built_id = await self._context_image(context_only, stale=built_id)
+                sb = await create(image)
         except Exception as e:
             raise RuntimeError(
-                f"Modal sandbox create failed [{_fmt_exc(e)}]: {call_context}"
+                f"Modal sandbox create failed [{fmt_exc(e)}]: {call_context}"
             ) from e
 
         try:
@@ -368,13 +385,15 @@ class ModalSandboxProvider(SandboxProvider):
                 sandbox.vnc_url = f"{tunnel_urls[vnc_port]}/vnc.html"
                 logger.info(f"Modal sandbox vnc_url: {sandbox.vnc_url}")
             return sandbox
-        except Exception as e:
+        except BaseException as e:  # a cancelled create, at a chain's deadline say, terminates its sandbox too
             try:
                 await sb.terminate.aio()
             except Exception:
                 pass
+            if not isinstance(e, Exception):
+                raise
             raise RuntimeError(
-                f"Modal sandbox post-create failed [{_fmt_exc(e)}]: "
+                f"Modal sandbox post-create failed [{fmt_exc(e)}]: "
                 f"sb_id={sb.object_id} {call_context}"
             ) from e
 
@@ -398,6 +417,32 @@ class ModalSandboxProvider(SandboxProvider):
         tunnel_urls = {p: _tunnel_url(t) for p, t in tunnels.items()}
         i6pn_address = await _resolve_i6pn_address(sb)
         return self._sandbox_cls(sb, tunnel_urls, i6pn_address=i6pn_address)
+
+    async def _registry_image(self, image_name: str) -> modal.Image:
+        """``image_name`` pulled from its registry, with the image store's credentials for it, if any."""
+        image_store = get_config().get_image_store_at(image_name)
+        from agent_env.store.image_store import (
+            EcrCredentials,
+            OciRegistryImageStore,
+            registry_host_from_ref,
+        )
+
+        uses_ecr_pull_secret = (
+            self._ecr_pull_secret_name is not None
+            and isinstance(image_store, OciRegistryImageStore)
+            and isinstance(image_store.credentials, EcrCredentials)
+            and registry_host_from_ref(image_name) == image_store.registry_host
+        )
+        auth = None if uses_ecr_pull_secret else await asyncio.to_thread(image_store.auth, image_name)
+        if uses_ecr_pull_secret:
+            return modal.Image.from_aws_ecr(image_name, secret=modal.Secret.from_name(
+                self._ecr_pull_secret_name, required_keys=ECR_READER_SECRET_KEYS))
+        if auth is not None:
+            return modal.Image.from_registry(image_name, secret=modal.Secret.from_dict({
+                "REGISTRY_USERNAME": auth.username,
+                "REGISTRY_PASSWORD": auth.password,
+            }))
+        return modal.Image.from_registry(image_name)
 
 
 def _attribution_tags(attribution: Attribution) -> dict[str, str]:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -50,8 +51,7 @@ async def test_create_container_wraps_modal_create_failure_with_context(_patched
                 env={},
                 cpu=2.0,
                 memory=4096,
-                region="us-east-1",
-                i6pn=True,
+                private_network=True,
             )
 
     msg = str(ei.value)
@@ -87,6 +87,23 @@ async def test_create_container_wraps_post_create_failure_and_terminates(_patche
     assert "Modal sandbox post-create failed" in msg
     assert "sb_id=sb-FAKEFAKEFAKEFAKEFAKE" in msg
     assert "mcp-server-example:v1" in msg
+    fake_sb.terminate.aio.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_create_container_terminates_a_sandbox_whose_create_is_cancelled(_patched_provider):
+    """A chain's deadline cancels a create still waiting on its sandbox, which would otherwise run until its timeout."""
+    fake_sb = MagicMock()
+    fake_sb.object_id = "sb-FAKEFAKEFAKEFAKEFAKE"
+    fake_sb.wait_until_ready.aio = AsyncMock(side_effect=asyncio.CancelledError)
+    fake_sb.terminate.aio = AsyncMock()
+
+    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox._experimental_create") as mock_create:
+        mock_create.aio = AsyncMock(return_value=fake_sb)
+
+        with pytest.raises(asyncio.CancelledError):
+            await _patched_provider.create_container(image_name="registry.example/mcp-server-example:v1", port=18765, env={})
+
     fake_sb.terminate.aio.assert_awaited_once()
 
 

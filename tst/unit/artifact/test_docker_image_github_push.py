@@ -86,7 +86,8 @@ def build(monkeypatch):
     async def create_vm(**kwargs):
         return vm
 
-    monkeypatch.setattr(providers, "get_sandbox_provider", lambda: SimpleNamespace(create_vm=create_vm))
+    monkeypatch.setattr(providers, "get_sandbox_provider", lambda: SimpleNamespace(create_vm=create_vm,
+                                                                                    ON_THIS_MACHINE=False))
     monkeypatch.setattr(artifact_store, "get_artifact_store", lambda: SimpleNamespace(next_version=lambda id: 3))
     monkeypatch.setattr(
         DockerImageArtifact, "put_tar", classmethod(lambda cls, id, **kwargs: SimpleNamespace(id=id, version=3, **kwargs))
