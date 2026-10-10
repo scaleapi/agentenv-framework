@@ -45,13 +45,17 @@ def _mcp_add_request(mcp_ext: dict) -> dict:
     return request if isinstance(request, dict) else {}
 
 
-def _mcp_add_body(mcp_ext: dict, url: str, headers: dict | None, card_name: str | None) -> dict:
-    """Body for the agent's mcp-config `add`; the card name is relayed verbatim when the agent's card takes `name`."""
+def _mcp_add_body(mcp_ext: dict, url: str, headers: dict | None, card_name: str | None, role: str | None = None) -> dict:
+    """Body for the agent's mcp-config `add`. The card name and the role header ride along only when the card's `add`
+    takes them, judged on the exact field set sent; what an env does with the role is the env's business."""
+    request = _mcp_add_request(mcp_ext)
     body: dict = {"url": url}
     if headers:
-        body["headers"] = headers
-    if card_name and card_request_accepts(_mcp_add_request(mcp_ext), ("url", "name")):
+        body["headers"] = dict(headers)
+    if card_name and card_request_accepts(request, ("url", "name")):
         body["name"] = card_name
+    if role and card_request_accepts(request, {*body, "headers"}):
+        body.setdefault("headers", {})[AGENT_ENV_ROLE_HEADER] = role
     return body
 
 
@@ -309,9 +313,7 @@ class DeployAgentTaskStep(TaskStep):
         if resolved_litellm_base_url:
             env_vars["LITELLM_BASE_URL"] = resolved_litellm_base_url
         if self.role is not None:
-            # The generated MCP CLI reads its role from this variable; without it, CLI traffic from a
-            # role-bearing agent reaches the gateway as the CLI's default role.
-            env_vars.setdefault(ROLE_ENV_VAR, self.role)
+            env_vars.setdefault(ROLE_ENV_VAR, self.role)  # the generated MCP CLI sends its role from here
 
         resolved_sandbox_type = user_overrides.get("agent_sandbox") or self.sandbox_type
         deploy_kwargs = {"env_vars": env_vars if env_vars else None}
@@ -341,9 +343,7 @@ class DeployAgentTaskStep(TaskStep):
         logger.info(f"A2A agent '{a2a_agent_id}' deployed at {a2a_url}")
 
         mcp_ext = A2AAgent.find_extension(card, A2AAgent.EXT_MCP_CONFIG)
-        add_request = _mcp_add_request(mcp_ext) if mcp_ext else {}
-        role_in_headers = False
-        env_mcp_urls: list[tuple[str, str, dict | None, str | None]] = []  # (env_id, url, headers, card_name)
+        registrations: list[tuple[str, dict]] = []
         for env_id in self.env_ids:
             deployed_env = env_deployments[env_id]
             if deployed_env is not None:
@@ -354,17 +354,9 @@ class DeployAgentTaskStep(TaskStep):
             else:
                 url = host_url_for(_live_mcp_url(env_id), deployed.sandbox_type)
                 card_name = None
-            headers = sandbox_request_headers_for_url(url)
-            if self.role is not None and mcp_ext:
-                # Every MCP registration carries the role; the env decides what it means (a gateway forwards it, a
-                # protocol server reads it, anything else ignores an unknown header). Judge the registration the
-                # agent will actually receive: with the card name relayed, a card that requires `name` still takes it.
-                carries_name = bool(card_name) and card_request_accepts(add_request, ("url", "name"))
-                fields = ("url", "headers", "name") if carries_name else ("url", "headers")
-                if card_request_accepts(add_request, fields):
-                    headers = {**headers, AGENT_ENV_ROLE_HEADER: self.role}
-                    role_in_headers = True
-            env_mcp_urls.append((env_id, url, headers or None, card_name))
+            if mcp_ext:
+                body = _mcp_add_body(mcp_ext, url, sandbox_request_headers_for_url(url), card_name, self.role)
+                registrations.append((env_id, body))
 
         identity_payload: dict[str, str] = {"name": self.agent_name}
         if self.agent_description is not None:
@@ -372,38 +364,26 @@ class DeployAgentTaskStep(TaskStep):
         if self.role is not None:
             identity_payload["role"] = self.role
         identity = A2AAgent.negotiate_agent_config(card, identity_payload)
-        role_in_config = identity is not None and "role" in identity.fields
         if self.role is not None:
-            # Decided before the first request to the agent, so a role that cannot reach the env is neither
-            # registered nor recorded; execute() closes the deployed agent.
-            if not (role_in_headers or role_in_config):
+            carried_by = [via for via, carried in (
+                (f"{AGENT_ENV_ROLE_HEADER} on the MCP registrations",
+                 any(AGENT_ENV_ROLE_HEADER in body.get("headers", {}) for _, body in registrations)),
+                (A2AAgent.EXT_AGENT_CONFIG, identity is not None and "role" in identity.fields),
+            ) if carried]
+            if not carried_by:
+                # Before the first request to the agent, so a role that cannot reach the env is never registered or recorded.
                 raise RuntimeError(
                     f"Agent '{self.agent_name}' cannot carry role '{self.role}': its card takes neither 'headers' on "
                     f"{A2AAgent.EXT_MCP_CONFIG} add nor 'role' in {A2AAgent.EXT_AGENT_CONFIG}, "
                     f"so the role would never reach the env"
                 )
-            if not role_in_headers:
-                logger.warning(
-                    f"Agent '{self.agent_name}' takes role '{self.role}' through {A2AAgent.EXT_AGENT_CONFIG} only; "
-                    f"its own MCP client must send {AGENT_ENV_ROLE_HEADER}"
-                )
-            elif not role_in_config:
-                logger.warning(
-                    f"Agent '{self.agent_name}' takes role '{self.role}' as {AGENT_ENV_ROLE_HEADER} on its MCP "
-                    f"registrations only; {A2AAgent.EXT_AGENT_CONFIG} does not list 'role'"
-                )
-            else:
-                logger.info(
-                    f"Role '{self.role}' reaches '{self.agent_name}' as {AGENT_ENV_ROLE_HEADER} on its MCP "
-                    f"registrations and through {A2AAgent.EXT_AGENT_CONFIG}"
-                )
+            logger.info(f"Role '{self.role}' reaches '{self.agent_name}' through {' and '.join(carried_by)}")
 
-        if mcp_ext and env_mcp_urls:
+        if registrations:
             endpoint = a2a_url + mcp_ext["params"]["endpoint"]
             async with httpx.AsyncClient() as client:
-                for env_id, mcp_url, headers, card_name in env_mcp_urls:
-                    body = _mcp_add_body(mcp_ext, mcp_url, headers, card_name)
-                    logger.info(f"Registering MCP for env {env_id} via {mcp_url}")
+                for env_id, body in registrations:
+                    logger.info(f"Registering MCP for env {env_id} via {body['url']}")
                     resp = await client.post(endpoint, json=body, timeout=180)
                     if resp.status_code >= 400:
                         logger.error(f"Failed to register MCP {env_id}: {resp.status_code} {resp.text}")

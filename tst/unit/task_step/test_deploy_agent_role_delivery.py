@@ -63,26 +63,22 @@ async def test_a_card_with_both_paths_gets_the_role_on_both(wiring, caplog):
 @pytest.mark.parametrize(
     "card", [_card(HEADERS_MCP), _card(HEADERS_MCP, ROLELESS_CONFIG)], ids=["no-agent-config", "roleless-agent-config"]
 )
-async def test_a_header_only_card_gets_the_role_on_its_mcp_registration_and_warns(wiring, caplog, card):
-    with caplog.at_level(logging.WARNING, logger=_LOGGER):
-        context = await wiring.deploy(card, role="executor")
+async def test_a_header_only_card_gets_the_role_on_its_mcp_registration(wiring, card):
+    context = await wiring.deploy(card, role="executor")
 
     assert wiring.bodies("/ext/mcp-config") == [
         {"url": _GATEWAY_MCP_URL, "headers": {AGENT_ENV_ROLE_HEADER: "executor"}, "name": "crm"}
     ]
     assert all("role" not in body for body in wiring.bodies("/ext/agent-config"))
-    assert any(f"{A2AAgent.EXT_AGENT_CONFIG} does not list 'role'" in m for m in caplog.messages)
     assert [a.role for a in context.deployed_agents] == ["executor"]
 
 
 @pytest.mark.asyncio
-async def test_a_config_only_card_gets_the_role_through_agent_config_and_warns(wiring, caplog):
-    with caplog.at_level(logging.WARNING, logger=_LOGGER):
-        context = await wiring.deploy(_card(LEGACY_MCP, ROLE_CONFIG), role="executor")
+async def test_a_config_only_card_gets_the_role_through_agent_config(wiring):
+    context = await wiring.deploy(_card(LEGACY_MCP, ROLE_CONFIG), role="executor")
 
     assert wiring.bodies("/ext/mcp-config") == [{"url": _GATEWAY_MCP_URL}]
     assert wiring.bodies("/ext/agent-config") == [{"name": "solver", "role": "executor"}]
-    assert any(f"through {A2AAgent.EXT_AGENT_CONFIG} only" in m for m in caplog.messages)
     assert [a.role for a in context.deployed_agents] == ["executor"]
 
 
