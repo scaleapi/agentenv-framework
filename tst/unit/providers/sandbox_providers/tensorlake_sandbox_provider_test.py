@@ -307,7 +307,7 @@ async def test_create_vm_deletes_the_sandbox_when_the_caller_cancels_the_start()
 
 
 @pytest.mark.asyncio
-async def test_create_vm_deletes_the_sandbox_a_create_cancelled_in_flight_yields():
+async def test_a_cancelled_create_vm_deletes_the_sandbox_its_create_yields_before_it_ends():
     provider, sdk = _provider()
     started, release = asyncio.Event(), asyncio.Event()
 
@@ -320,6 +320,32 @@ async def test_create_vm_deletes_the_sandbox_a_create_cancelled_in_flight_yields
     task = asyncio.create_task(provider.create_vm(setup_for_gateway=False))
     await started.wait()
     task.cancel()
+    await asyncio.sleep(0)
+
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    sdk.client.delete.assert_awaited_once_with("tl-test")
+    sdk.pending.ready.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_create_vm_cancelled_twice_leaves_the_delete_to_a_callback():
+    provider, sdk = _provider()
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def slow_create(**kwargs):
+        started.set()
+        await release.wait()
+        return sdk.pending
+
+    sdk.create.side_effect = slow_create
+    task = asyncio.create_task(provider.create_vm(setup_for_gateway=False))
+    await started.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
 
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -328,7 +354,6 @@ async def test_create_vm_deletes_the_sandbox_a_create_cancelled_in_flight_yields
     for _ in range(5):
         await asyncio.sleep(0)
     sdk.client.delete.assert_awaited_once_with("tl-test")
-    sdk.pending.ready.assert_not_awaited()
 
 
 @pytest.mark.asyncio

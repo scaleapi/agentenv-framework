@@ -27,11 +27,19 @@ def _artifact(url: str | None = "s3://bucket/image.tar.gz", *, context_only: boo
     )
 
 
-def _inner() -> MagicMock:
+def _inner(policy: NetworkPolicy | None = None) -> MagicMock:
+    """A fake SDK sandbox whose ``info`` reports the network policy ``update`` last applied."""
+    applied = SimpleNamespace(network_policy=NetworkConfig(**network_config_fields(policy)) if policy else None)
+
+    async def update(*, network=None, **kwargs):
+        if network is not None:
+            applied.network_policy = network
+
     sandbox = MagicMock()
     sandbox.sandbox_id = "tl-test"
     sandbox.terminate = AsyncMock()
-    sandbox.update = AsyncMock()
+    sandbox.update = AsyncMock(side_effect=update)
+    sandbox.info = AsyncMock(return_value=applied)
     sandbox.write_file = AsyncMock()
     sandbox.run = AsyncMock(return_value=SimpleNamespace(exit_code=0, stdout="hello", stderr="warning"))
     return sandbox
@@ -350,8 +358,8 @@ async def test_apply_network_policy_updates_the_sandbox():
 
 @pytest.mark.asyncio
 async def test_restricted_image_loading_adds_the_signed_host_and_waits_for_it(monkeypatch: pytest.MonkeyPatch):
-    inner = _inner()
     policy = NetworkPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=("workload.example",), allow_cidrs=("10.0.0.0/8",))
+    inner = _inner(policy)
     sandbox = TensorlakeSandbox(inner, network_policy=policy)
     sandbox.exec_script = AsyncMock(return_value="")
     artifact = _artifact()
@@ -371,14 +379,15 @@ async def test_restricted_image_loading_adds_the_signed_host_and_waits_for_it(mo
         )
     )
     assert sandbox.network_policy == policy.with_hosts(["downloads.example"])
-    assert "https://downloads.example/" in sandbox.exec_script.await_args.args[0]
+    command, args = inner.run.await_args.args[0], inner.run.await_args.kwargs["args"]
+    assert command == "sh" and "https://downloads.example/" in args[-1]
     base_load.assert_awaited_once_with([artifact], ["https://downloads.example/path?signature=x"])
 
 
 @pytest.mark.asyncio
 async def test_restricted_image_loading_skips_the_update_when_the_host_is_already_allowed(monkeypatch: pytest.MonkeyPatch):
-    inner = _inner()
     policy = NetworkPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=("downloads.example",))
+    inner = _inner(policy)
     sandbox = TensorlakeSandbox(inner, network_policy=policy)
     store = MagicMock()
     store.signed_get_url.return_value = "https://downloads.example/image.tar.gz"
@@ -406,9 +415,10 @@ async def test_restricted_image_loading_pulls_ref_images_and_builds_context_imag
 
 @pytest.mark.asyncio
 async def test_restricted_object_download_adds_the_signed_host(monkeypatch: pytest.MonkeyPatch):
-    inner = _inner()
-    sandbox = TensorlakeSandbox(inner, network_policy=NetworkPolicy(mode=NetworkMode.ALLOWLIST))
+    policy = NetworkPolicy(mode=NetworkMode.ALLOWLIST)
+    sandbox = TensorlakeSandbox(_inner(policy), network_policy=policy)
     sandbox.exec_script = AsyncMock(return_value="")
+    sandbox._exec_with_output_bounded = AsyncMock(return_value=(0, "", ""))
     store = MagicMock()
     store.signed_get_url.return_value = "https://downloads.example/context.tar.gz?signature=x"
     set_object_store(store)
@@ -420,22 +430,19 @@ async def test_restricted_object_download_adds_the_signed_host(monkeypatch: pyte
 
 
 @pytest.mark.asyncio
-async def test_concurrent_downloads_keep_each_others_hosts(monkeypatch: pytest.MonkeyPatch):
-    inner = _inner()
-    sandbox = TensorlakeSandbox(inner, network_policy=NetworkPolicy(mode=NetworkMode.ALLOWLIST))
+async def test_concurrent_downloads_through_two_wrappers_keep_each_others_hosts(monkeypatch: pytest.MonkeyPatch):
+    policy = NetworkPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=("workload.example",))
+    inner = _inner(policy)
+    first, second = TensorlakeSandbox(inner, network_policy=policy), TensorlakeSandbox(inner, network_policy=policy)
     monkeypatch.setattr(TensorlakeSandbox, "_wait_for_egress", AsyncMock())
 
-    async def slow_update(**kwargs):
-        await asyncio.sleep(0)
-
-    inner.update = AsyncMock(side_effect=slow_update)
-
     await asyncio.gather(
-        sandbox._allow_download_hosts(["https://a.example/x"]),
-        sandbox._allow_download_hosts(["https://b.example/y"]),
+        first._allow_download_hosts(["https://a.example/x"]),
+        second._allow_download_hosts(["https://b.example/y"]),
     )
 
-    assert set(sandbox.network_policy.allow_hosts) == {"a.example", "b.example"}
+    applied = network_policy_from_config((await inner.info()).network_policy, sandbox_id="tl-test")
+    assert set(applied.allow_hosts) == {"workload.example", "a.example", "b.example"}
 
 
 @pytest.mark.asyncio
@@ -447,10 +454,26 @@ async def test_unknown_policy_refuses_image_load():
 
 
 @pytest.mark.asyncio
-async def test_unreachable_download_host_is_a_warning_not_a_failure(caplog: pytest.LogCaptureFixture):
+async def test_unreachable_download_host_is_a_warning_not_a_failure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    monkeypatch.setattr(TensorlakeSandbox, "_EGRESS_PROPAGATION_TIMEOUT", 0.05)
+    monkeypatch.setattr(TensorlakeSandbox, "_EGRESS_PROBE_INTERVAL", 0.01)
     sandbox = TensorlakeSandbox(_inner())
-    sandbox.exec_script = AsyncMock(side_effect=RuntimeError("Script failed (exit 1)"))
+    sandbox._exec_with_output_bounded = AsyncMock(return_value=(7, "", ""))
 
     await sandbox._wait_for_egress(["downloads.example"])
 
     assert "still cannot reach" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_egress_wait_bounds_each_probe_by_the_time_left(monkeypatch: pytest.MonkeyPatch):
+    clock = iter([100.0, 100.0, 158.0, 158.0, 161.0, 161.0])
+    monkeypatch.setattr(tl_sandbox, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    sandbox = TensorlakeSandbox(_inner())
+    sandbox._exec_with_output_bounded = AsyncMock(return_value=(7, "", ""))
+
+    await sandbox._wait_for_egress(["downloads.example"])
+
+    assert [call.kwargs["timeout"] for call in sandbox._exec_with_output_bounded.await_args_list] == [60.0, 2.0]

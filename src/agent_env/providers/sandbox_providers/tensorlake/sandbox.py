@@ -124,9 +124,12 @@ class TensorlakeSandbox(VmSandbox):
     # The ingress proxy rejects request bodies above about 4 MB.
     _UPLOAD_CHUNK_BYTES = 512 * 1024
     _UPLOADS_IN_FLIGHT = 8
+    # The join re-runs only when the transport drops; it rewrites the whole file, so a retry is safe.
+    _JOIN_RETRIES = 2
     # A policy change reaches the host firewall in about 5-10 s.
     _EGRESS_PROPAGATION_TIMEOUT = 60
     _EGRESS_PROBE_INTERVAL = 2
+    _EGRESS_PROBE_TIMEOUT = 5
 
     def __init__(
         self,
@@ -261,7 +264,7 @@ class TensorlakeSandbox(VmSandbox):
             quoted = shlex.quote(vm_path)
             written = await self.exec_script(
                 f'for i in $(seq 0 {count - 1}); do cat "{stem}.$i" || exit 1; done > {quoted} && sha256sum {quoted}',
-                max_retries=2,
+                max_retries=self._JOIN_RETRIES,
             )
         finally:
             if count:
@@ -316,7 +319,9 @@ class TensorlakeSandbox(VmSandbox):
         if not hosts:
             return
         async with _policy_locks.setdefault((asyncio.get_running_loop(), self.sandbox_id), asyncio.Lock()):
-            policy = self.network_policy
+            # Another wrapper of this sandbox may have widened the policy since this one last read it.
+            info = await self._sandbox.info()
+            policy = network_policy_from_config(info.network_policy, sandbox_id=self.sandbox_id)
             new_hosts = sorted(hosts - set(policy.allow_hosts))
             if new_hosts:
                 await self.apply_network_policy(policy.with_hosts(new_hosts))
@@ -324,20 +329,24 @@ class TensorlakeSandbox(VmSandbox):
 
     async def _wait_for_egress(self, hosts: list[str]) -> None:
         """Wait until each host accepts a connection, since a policy change is not instant."""
-        attempts = self._EGRESS_PROPAGATION_TIMEOUT // self._EGRESS_PROBE_INTERVAL
+        deadline = time.monotonic() + self._EGRESS_PROPAGATION_TIMEOUT
         probes = " && ".join(
-            f"curl -s -o /dev/null --max-time 5 {shlex.quote(f'https://{host}/')}" for host in hosts
+            f"curl -s -o /dev/null --max-time {self._EGRESS_PROBE_TIMEOUT} {shlex.quote(f'https://{host}/')}"
+            for host in hosts
         )
-        script = (
-            f"for _ in $(seq {attempts}); do ({probes}) && exit 0; sleep {self._EGRESS_PROBE_INTERVAL}; done; exit 1"
+        while (remaining := deadline - time.monotonic()) > 0:
+            try:
+                exit_code, _, _ = await self._exec_with_output_bounded("sh", "-c", probes, timeout=remaining)
+            except Exception as exc:
+                logger.debug("Egress probe failed in Tensorlake sandbox %s: %s", self.sandbox_id, exc)
+                exit_code = -1
+            if exit_code == 0:
+                return
+            await asyncio.sleep(min(self._EGRESS_PROBE_INTERVAL, max(0.0, deadline - time.monotonic())))
+        logger.warning(
+            "Tensorlake sandbox %s still cannot reach %s after %ss; loading images anyway",
+            self.sandbox_id, hosts, self._EGRESS_PROPAGATION_TIMEOUT,
         )
-        try:
-            await self.exec_script(script)
-        except RuntimeError:
-            logger.warning(
-                "Tensorlake sandbox %s still cannot reach %s after %ss; loading images anyway",
-                self.sandbox_id, hosts, self._EGRESS_PROPAGATION_TIMEOUT,
-            )
 
 
 async def _read_parts(source: Any, size: int) -> AsyncIterator[bytes]:
