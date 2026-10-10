@@ -19,7 +19,7 @@ DEFAULT_TTL_SECONDS = 10800  # 3 hours
 @click.option("--gateway-mode", type=click.Choice([m.value for m in GatewayMode], case_sensitive=False),
               default=GatewayMode.PERFORMANCE.value, help="Gateway mode (performance or consistent)")
 @click.option("--sandbox", default=None,
-              help="Sandbox backend(s): a built-in (modal, modal_vm, e2b, local) "
+              help="Sandbox backend(s): a built-in (modal, modal_vm, e2b, tensorlake, local) "
                    "or a name from [sandbox.providers] in .agentenv/config.toml; comma-separated for a "
                    "fallback chain. Defaults to [sandbox].default (else local) when omitted.")
 @click.option("--service-db", "service_db_env_id", default=None,

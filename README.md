@@ -30,7 +30,7 @@ Or install it with pip, into a virtualenv:
 pip install agentenv-framework
 ```
 
-To use the SDK in your own project, add it as a dependency with `uv add agentenv-framework`. The explorer, `agent-env up`, needs the `explorer` extra (`uv tool install 'agentenv-framework[explorer]'`, or the same extra with uvx or pip) and an `.agentenv/config.toml` in the current folder or above it; an empty one keeps every local default.
+To use the SDK in your own project, add it as a dependency with `uv add agentenv-framework`. The explorer, `agent-env up`, needs the `explorer` extra (`uv tool install 'agentenv-framework[explorer]'`, or the same extra with uvx or pip) and an `.agentenv/config.toml` in the current folder or above it; an empty one keeps every local default. The `tensorlake` sandbox backend needs the `tensorlake` extra (`pip install 'agentenv-framework[tensorlake]'`) and an `api_key` in `[sandbox.providers.tensorlake.config]`. Its sandboxes boot from the public image `agentenv-dind-host-v1`; set `image` there to use another registered Docker-capable image.
 
 A plain install runs on local stores and needs no cloud SDK. The cloud store backends are extras: `aws` for S3, Secrets Manager, DynamoDB and ECR (`pip install 'agentenv-framework[aws]'`), and `gcp` for Cloud Storage, Secret Manager, Firestore and Artifact Registry (`pip install 'agentenv-framework[gcp]'`). A config that names a backend without its extra fails, naming the extra to install.
 

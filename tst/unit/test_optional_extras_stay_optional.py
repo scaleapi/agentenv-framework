@@ -121,8 +121,10 @@ def _closure(extras: frozenset[str]) -> set[str]:
 
 
 def _only_in(extra: str) -> list[str]:
-    """Module paths the extra installs and a core install does not."""
-    core = _closure(frozenset())
+    """Module paths the extra installs and neither a core install nor any other extra does: a
+    distribution two extras share (grpcio, for gcp and tensorlake) stays for the other's modules."""
+    others = frozenset(_optional_requirements()) - {extra}
+    core = _closure(frozenset()) | set().union(*(_closure(frozenset({other})) for other in others))
     provided_by_core = set().union(*(_module_paths(d) for d in core))
     extra_only = _closure(frozenset({extra})) - core
     return sorted(set().union(*(_module_paths(d) for d in extra_only)) - provided_by_core)
@@ -166,8 +168,13 @@ def test_core_and_every_store_module_import_without_the_extra(extra):
             "agent_env.store.document_store:DocumentStore",
         ),
         ("aws", "agent_env.store.document_store:DynamoDbDocumentStore", "agent_env.store.document_store:DocumentStore"),
+        (
+            "tensorlake",
+            "agent_env.providers.sandbox_providers.tensorlake.provider:TensorlakeSandboxProvider",
+            "agent_env.providers.sandbox_providers.sandbox_provider:SandboxProvider",
+        ),
     ],
-    ids=["gcs", "secret-manager", "s3", "s3-reexport", "secrets-manager-reexport", "dynamodb", "dynamodb-reexport"],
+    ids=["gcs", "secret-manager", "s3", "s3-reexport", "secrets-manager-reexport", "dynamodb", "dynamodb-reexport", "tensorlake"],
 )
 def test_an_impl_without_its_extra_names_the_extra_to_install(extra, impl, base):
     message = _run(_LOAD_IMPL, _only_in(extra), impl, base)
