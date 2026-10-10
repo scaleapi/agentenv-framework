@@ -83,6 +83,42 @@ environment-prefixed tools without knowing the name at class-definition time; an
 FastMCP; since those apps have no MCP tool registry, constructing one with `@tool` methods
 raises.
 
+### Who is calling
+
+A tool that needs the caller declares a parameter annotated `ToolContext` (any name) and receives
+it on every call. The SDK fills it, never the client: it is absent from the advertised
+`inputSchema` and from `tools/list`. Tools that declare no such parameter are registered unchanged.
+
+```python
+from agentenv_protocol import ToolContext
+
+    @tool(name="{environment_name}_list_inbox")
+    def list_inbox(self, ctx: ToolContext) -> list[dict]:
+        """Messages addressed to the caller."""
+        return [m for m in self.messages if m["to"] == ctx.caller.role]
+```
+
+`ctx.caller.role` is the role the agent was deployed with, as the gateway forwarded it (`None` when
+nothing was forwarded; the gateway's `default` role counts as nothing). It is the caller's side's
+assertion, trusted exactly as far as that side is: behind a gateway it is the gateway's view of the
+agent it deployed; a caller that reaches the server directly chooses it in `AgentEnv-Role`. It says
+whose data a call acts on, not that the caller was authenticated, so a server exposed to untrusted
+direct callers keeps access control on its own boundary. `ctx.caller.session` tells
+callers apart when the gateway shares one connection to the server. `ctx.tool`, `ctx.arguments`,
+`ctx.call_id` and `ctx.transport` (`"mcp"` or `"rest"`) describe the call. Code that runs on behalf
+of the call without a parameter of its own, such as a database method, reads the same object through
+`ToolContext.current()`, which returns an empty context outside any call. The binding is per call
+and follows the request's task, so concurrent callers never see each other's context. It is made
+at FastMCP's own tool dispatch, for which `mcp` 1.x offers no public hook, and the mount refuses an
+app without one, so a server that mounted is a server whose tool calls are bound.
+
+To answer a call before the tool runs, override `on_tool_call(self, context)`: return `None` to let
+it proceed, or an `mcp.types.CallToolResult` (`isError=True` for a refusal) to send that as the
+tool's reply. An `@extension` method may declare the same parameter; it is filled from the request's
+`AgentEnv-Role` header. Code that acts as a caller outside any dispatch, such as a test calling a
+handler directly or a seeding script, binds a context it builds:
+`with bound(ToolContext.as_caller("alice")): ...`.
+
 ## Serving
 
 `serve()` builds the FastMCP app via `create_fastmcp_app()`, which encodes the agent-env deploy
