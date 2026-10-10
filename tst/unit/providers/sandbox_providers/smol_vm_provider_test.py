@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -46,6 +48,31 @@ async def test_vm_creation_selects_local_and_can_publish_an_unstarted_applicatio
     assert ("/storage/agentenv-ports.json", b'{"8080": 44000}') in created
     await sandbox.terminate()
     assert ("deleted", None) in created
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_native_creation_reclaims_vm(monkeypatch):
+    started, release = threading.Event(), threading.Event()
+    deleted = []
+
+    class FakeMachine:
+        def delete(self):
+            deleted.append(True)
+
+    def create(config, conn):
+        started.set()
+        assert release.wait(timeout=10)
+        return FakeMachine()
+
+    monkeypatch.setattr(module, "Machine", SimpleNamespace(create=create))
+    monkeypatch.setattr(module, "_host_port", lambda: 44000)
+    task = asyncio.create_task(module.SmolVmSandboxProvider().create_vm(memory=1024))
+    assert await asyncio.to_thread(started.wait, 5)
+    task.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert deleted == [True]
 
 
 @pytest.mark.asyncio

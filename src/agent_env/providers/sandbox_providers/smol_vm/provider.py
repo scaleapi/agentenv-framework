@@ -71,13 +71,26 @@ class SmolVmSandboxProvider(SandboxProvider):
             raise ValueError("CPU, memory, and storage must be positive")
         name = f"agentenv-{uuid.uuid4().hex[:12]}"
         ports = {port: _host_port() for port in dict.fromkeys(exposed_ports or [])}
+        # Even a portless VM needs a published mapping to select routed virtio-net for nested Docker.
         published = ports or {_DUMMY_PORT: _host_port()}
         config = MachineConfig(
             name=name, persistent=True, wait_for_ports=False,
             resources=ResourceSpec(cpus=math.ceil(cpu), memory_mb=memory, storage_gb=math.ceil(disk_size_gb), network=True),
             ports=[PortSpec(host=host, guest=guest) for guest, host in published.items()],
         )
-        machine = await asyncio.to_thread(Machine.create, config, ConnectOptions(target="local"))
+        creation = asyncio.create_task(asyncio.to_thread(Machine.create, config, ConnectOptions(target="local")))
+        try:
+            machine = await asyncio.shield(creation)
+        except asyncio.CancelledError:
+            # The native create call keeps running after its awaiting task is cancelled.
+            # Wait for it and delete the result so cancellation cannot orphan a VM.
+            try:
+                created = await creation
+            except Exception:
+                pass
+            else:
+                await asyncio.to_thread(created.delete)
+            raise
         sandbox = SmolVmSandbox(machine, ports)
         try:
             await self._setup_docker(sandbox)
