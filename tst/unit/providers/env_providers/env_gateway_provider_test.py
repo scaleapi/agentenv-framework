@@ -37,6 +37,7 @@ from agent_env.providers.env_providers.env_gateway_provider import (
     _redact_compose_secrets,
 )
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
+from agent_env.providers.sandbox_providers.local_sandbox import LOCAL_TRUST_DIR, LOCAL_TRUST_ENV
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import Sandbox
 from agent_env.providers.env_state import LocalPostgresStateProvider
@@ -815,6 +816,31 @@ def test_compose_maps_extra_hosts_into_the_gateway(extra_hosts):
     services = yaml.safe_load(compose)["services"]
     mapped = {name: service["extra_hosts"] for name, service in services.items() if "extra_hosts" in service}
     assert mapped == ({GATEWAY_SERVICE_NAME: list(extra_hosts)} if extra_hosts else {})
+
+
+@pytest.mark.parametrize("trust_files", [None, "./agentenv-trust"], ids=["no-local-grants", "local-grants"])
+def test_compose_hands_each_mcp_server_the_local_transfer_ca_when_there_is_one(trust_files):
+    """Services on a local compose stack reach the local grant server over TLS, so they mount its CA's trust files
+    and carry the sandbox's host mappings, which on Linux are how host.docker.internal resolves."""
+    from agent_env.env.envs.service_db import ServiceDBConfig
+
+    compose = EnvironmentGatewayProvider().create_docker_compose(
+        mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack"),
+                     MCPServerConfig(image="mcp-items", environment_name="items")],
+        gateway_image="agent-gateway",
+        state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
+        state_instance=LocalPostgresStateProvider.default_instance(),
+        extra_hosts=("host.docker.internal:host-gateway",),
+        trust_files=trust_files,
+    )
+
+    services = yaml.safe_load(compose)["services"]
+    for name in ("slack", "items"):
+        env = dict(entry.split("=", 1) for entry in services[name]["environment"])
+        trusted = {key: env.get(key) for key in LOCAL_TRUST_ENV}
+        assert trusted == (LOCAL_TRUST_ENV if trust_files else dict.fromkeys(LOCAL_TRUST_ENV))
+        assert services[name].get("volumes") == ([f"{trust_files}:{LOCAL_TRUST_DIR}:ro"] if trust_files else None)
+        assert services[name].get("extra_hosts") == (["host.docker.internal:host-gateway"] if trust_files else None)
 
 
 # --- sidecar rendering --------------------------------------------------------

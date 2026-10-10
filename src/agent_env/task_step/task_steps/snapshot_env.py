@@ -8,6 +8,7 @@ import logging
 import mimetypes
 import os
 import tempfile
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -16,16 +17,16 @@ from urllib.parse import urlparse
 
 import httpx
 
-from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI, FilePart, uploaded_object_path
-from agentenv_protocol.client import find_extension
-from agentenv_protocol.transfers import WriteNamespaceGrant
+from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI, FilePart, uploaded_object, uploaded_object_path
+from agentenv_protocol.client import find_extension, write_kinds
+from agentenv_protocol.transfers import WriteNamespaceGrant, part_ranges
 
 from agent_env.a2a_agent.object_transfer import ObjectLimits, namespace_grant
 from agent_env.env.gateway.constants import EXT_TRAJECTORY_URI
 from agent_env.store import get_config
 from agent_env.store.base import GrantUnavailableError
 from agent_env.store.ids import derive_id, is_local_id, validate_local_id
-from agent_env.store.object_store import MIN_GRANT_LIFETIME_SECONDS, ObjectStore
+from agent_env.store.object_store import MIN_GRANT_LIFETIME_SECONDS, ObjectStore, PendingWrite
 from agent_env.store.object_store.object_store import issues_grants_to
 from agent_env.store.routing import in_local_run
 from agent_env.task_step.context import TaskStepContext
@@ -46,6 +47,9 @@ _S3_CREDENTIALS_EXTENSION_URI = "urn:agentenv:add-s3-credentials/v1"
 # What a service may upload through its snapshot grant: one bundle, as large as one upload to the
 # store can be up to this.
 ENV_SNAPSHOT_LIMITS = ObjectLimits(max_objects=1, max_object_bytes=50 * 1024**3, max_total_bytes=50 * 1024**3)
+# The most a service may upload as its bundle through an object write: room for the largest bundles seen,
+# about twice over, in a grant of a few hundred part URLs.
+ENV_SNAPSHOT_MAX_BYTES = 16 * 1024**3
 _SNAPSHOT_KEY_PREFIX = "agentenv-snapshots"
 
 
@@ -85,6 +89,48 @@ def _snapshot_upload(card: dict, timeout_seconds: float, sandbox_type: Optional[
         logger.info("snapshot_env: the object store issues no snapshot upload grant (%s)", exc)
         return None
     return _SnapshotUpload(store, grant)
+
+
+def _snapshot_write(
+    card: dict, environment_name: str, timeout_seconds: float, sandbox_type: Optional[str]
+) -> Optional[PendingWrite]:
+    """A write of a service's bundle to an object of its own, for a service whose card takes parts grants;
+    None when it takes none, or the object store issues no grant that reaches the service's sandbox, of
+    ``sandbox_type`` (None: unknown), and lasts the export."""
+    kinds = write_kinds(card)
+    if "http-put-parts" not in kinds:
+        return None
+    config = get_config()
+    store = config.get_object_store()
+    if not issues_grants_to(store, sandbox_type):
+        return None
+    object_url = store.object_url(
+        f"{config.get_artifact_key_prefix()}{_SNAPSHOT_KEY_PREFIX}/{uuid.uuid4().hex}/{environment_name}.zip"
+    )
+    try:
+        return store.begin_write(
+            object_url,
+            media_type="application/zip",
+            max_bytes=ENV_SNAPSHOT_MAX_BYTES,
+            kinds=kinds,
+            expires_in=max(int(timeout_seconds), MIN_GRANT_LIFETIME_SECONDS),
+        )
+    except GrantUnavailableError as exc:
+        logger.info("snapshot_env: the object store issues no snapshot write grant (%s)", exc)
+        return None
+
+
+async def _finish_in_thread(fn, *args):
+    """``await asyncio.to_thread(fn, *args)``, except that a caller cancelled meanwhile first waits for ``fn`` to
+    return, and aborts a write it began, so neither a write nor its completion outlives the caller's cleanup."""
+    task = asyncio.ensure_future(asyncio.to_thread(fn, *args))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await asyncio.wait([task])
+        if task.exception() is None and isinstance(task.result(), PendingWrite):
+            await asyncio.to_thread(task.result().abort)
+        raise
 
 
 async def _push_s3_credentials(base_url: str, card: dict, timeout_seconds: float) -> None:
@@ -412,28 +458,53 @@ class SnapshotEnvTaskStep(TaskStep):
         ``tmp_path``, or the object url a FilePart names when the service uploaded the
         bundle itself (nothing written to ``tmp_path`` then — export_one registers it).
 
-        v1 ``get_data``, handed a namespace grant when the service takes the data-objects
-        form: an upload through it → its object url; ``DataPart`` → json; ``FilePart`` →
-        object url (no download) / base64 ``bytes`` / streamed relative-or-http ``uri`` →
-        ".zip"; else legacy ``GET /export-state`` streamed to disk with a first-byte JSON
-        guard. Errors are caught by the caller (fails just this service)."""
+        v1 ``get_data``, handed an object write when the service takes parts grants, else a
+        namespace grant when it takes the data-objects form: an upload through either → its
+        object url; ``DataPart`` → json; ``FilePart`` → object url (no download) / base64
+        ``bytes`` / streamed relative-or-http ``uri`` → ".zip"; else legacy
+        ``GET /export-state`` streamed to disk with a first-byte JSON guard. Logs which way the
+        export came and how long it took. Errors are caught by the caller (fails just this
+        service)."""
         from agent_env.env import legacy_protocol
         from agentenv_protocol import client as protocol_v1
+
+        started = time.monotonic()
+
+        def exported(tier: str, result: str, detail: str = "") -> str:
+            logger.info(
+                "snapshot_env: %s exported through %s%s in %.1fs",
+                environment_name, tier, detail, time.monotonic() - started,
+            )
+            return result
 
         base_url = await legacy_protocol.v1_base_url(deployed, gateway_url, environment_name, mcp=True)
         if base_url is not None:
             card_base, card = await legacy_protocol.child_env_card(deployed, gateway_url, environment_name)
-            upload = await asyncio.to_thread(
-                _snapshot_upload, card or {}, timeout_seconds, getattr(deployed, "sandbox_type", None)
-            )
-            # Push S3 creds (no-op unless the service advertises the extension), with a grant too: a
-            # bundle the grant cannot hold can still be uploaded with them.
-            await _push_s3_credentials(card_base, card or {}, timeout_seconds)
-            grant = {} if upload is None else {"write_namespace": upload.grant}
-            resp = await protocol_v1.get_data(base_url, timeout=int(timeout_seconds), **grant)
-            part = resp.parts[0] if resp.parts else None
+            sandbox_type = getattr(deployed, "sandbox_type", None)
+            write = None
+            try:
+                write = await _finish_in_thread(_snapshot_write, card or {}, environment_name, timeout_seconds, sandbox_type)
+                upload = None if write is not None else await asyncio.to_thread(
+                    _snapshot_upload, card or {}, timeout_seconds, sandbox_type
+                )
+                # Push S3 creds (no-op unless the service advertises the extension) beside either grant: a
+                # bundle the grant cannot hold, or an upload through it that fails, can still use them.
+                await _push_s3_credentials(card_base, card or {}, timeout_seconds)
+                if write is not None:
+                    grant = {"write_object": write.grant}
+                else:
+                    grant = {} if upload is None else {"write_namespace": upload.grant}
+                resp = await protocol_v1.get_data(base_url, timeout=int(timeout_seconds), **grant)
+                part = resp.parts[0] if resp.parts else None
+                if write is not None and (uploaded := uploaded_object(part)) is not None:
+                    await _finish_in_thread(write.complete, uploaded)
+                    parts = len(part_ranges(uploaded.size_bytes, write.grant.write.part_bytes))
+                    return exported("parts", write.object_url, f" ({uploaded.size_bytes} bytes in {parts} parts)")
+            finally:
+                if write is not None:
+                    await asyncio.to_thread(write.abort)
             if upload is not None and (path := uploaded_object_path(part)) is not None:
-                return upload.object_url(path)
+                return exported("namespace", upload.object_url(path))
             if isinstance(part, FilePart):
                 raw = getattr(part.file, "bytes", None)
                 if raw is not None:
@@ -452,7 +523,7 @@ class SnapshotEnvTaskStep(TaskStep):
                     # last segment carries the shape (e.g. gdrive.zip).
                     scheme = urlparse(uri).scheme
                     if scheme and scheme not in ("http", "https"):
-                        return uri
+                        return exported("service upload", uri)
                     # A relative uri (e.g. "export-snapshot") means "stream it from
                     # my service endpoint" — resolve against the service base_url so
                     # multi-GB bundles never ride inline in the JSON-RPC response.
@@ -470,11 +541,12 @@ class SnapshotEnvTaskStep(TaskStep):
                             with open(tmp_path, "wb") as f:
                                 async for chunk in resp_file.aiter_bytes():
                                     f.write(chunk)
-                return os.path.splitext(getattr(part.file, "name", "") or "")[1] or ".zip"
+                suffix = os.path.splitext(getattr(part.file, "name", "") or "")[1] or ".zip"
+                return exported("inline" if raw is not None else "stream", suffix)
             state = part.data if part is not None else {}
             with open(tmp_path, "w") as f:
                 json.dump(state, f, default=str)
-            return ".json"
+            return exported("data", ".json")
 
         legacy_url = f"{legacy_protocol.environment_base_url(gateway_url, environment_name, mcp=True)}/export-state"
         async with httpx.AsyncClient() as client:
@@ -495,7 +567,7 @@ class SnapshotEnvTaskStep(TaskStep):
                                 )
                             seen_first_bytes = True
                         f.write(chunk)
-        return ".json"
+        return exported("export-state", ".json")
 
     @classmethod
     async def snapshot_env_state(
