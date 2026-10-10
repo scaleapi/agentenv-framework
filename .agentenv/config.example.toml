@@ -14,6 +14,16 @@ secret   = "local"   # process env vars, or an optional flat YAML file
 default       = "local"   # envs run as containers on the host Docker daemon
 agent_default = "local"   # agents too
 
+# Optional Vercel Sandboxes (install the 'vercel' extra):
+# [sandbox.providers.vercel.config]
+# image = "vercel/sandbox/universal"
+# region = "iad1"
+# failover_regions = ["cle1", "sfo1"]
+# network_id = "secure-compute-network-id"
+# token = "secret:vercel_token"       # with team_id and project_id; omit all three for SDK OIDC
+# team_id = "your-team"
+# project_id = "your-project"
+
 [agents]
 default_a2a_agent_id = "a2a-default"   # what a deploy_agent step that names no agent deploys
 
