@@ -195,7 +195,9 @@ class LocalFilesystemObjectStore(ObjectStore):
 
     def grants_reach(self, sandbox_type: str | None) -> bool:
         return sandbox_type == _LOCAL_SANDBOX_TYPE or (
-            sandbox_type == "smol_vm" and self._grant_bind_host in (None, "127.0.0.1")
+            sandbox_type == "smol_vm"
+            and self._grant_bind_host in (None, "127.0.0.1")
+            and self._grant_advertise_host in (None, "localhost", "127.0.0.1", "host.docker.internal", "host.smolvm.internal")
         )
 
     def issue_read_grant(self, object_url: str, *, expires_in: int | None = None) -> HttpGetGrant:

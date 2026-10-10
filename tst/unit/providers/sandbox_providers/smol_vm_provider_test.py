@@ -5,12 +5,15 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from unittest.mock import AsyncMock, MagicMock
 from types import SimpleNamespace
 
 import pytest
 
 from agent_env.providers.sandbox_providers.smol_vm import provider as module
+from agent_env.providers.sandbox_providers.smol_vm import sandbox as sandbox_module
 from agent_env.providers.sandbox_providers.smol_vm.sandbox import SmolVmSandbox, _host_url
+from agent_env.store.object_store.local.store import LocalFilesystemObjectStore
 
 
 @pytest.mark.asyncio
@@ -104,3 +107,39 @@ async def test_reconnect_uses_explicit_agent_only_readiness(monkeypatch):
 def test_local_urls_are_rewritten_for_vm_host():
     assert _host_url("http://127.0.0.1:5000/v2/") == "http://host.smolvm.internal:5000/v2/"
     assert _host_url("https://example.org/path") == "https://example.org/path"
+
+
+@pytest.mark.asyncio
+async def test_local_object_download_uses_a_scoped_https_grant(monkeypatch, tmp_path):
+    store = LocalFilesystemObjectStore(str(tmp_path))
+    object_url = store.put("image.tar.gz", b"archive")
+    issued = MagicMock(return_value=SimpleNamespace(url="https://host.docker.internal:1234/v1/grants/token"))
+    monkeypatch.setattr(store, "issue_read_grant", issued)
+    monkeypatch.setattr(sandbox_module, "get_config", lambda: SimpleNamespace(get_object_store_at=lambda url: store))
+    machine = MagicMock(id="agentenv-test")
+    sandbox = SmolVmSandbox(machine, {})
+    sandbox.write_host_file = AsyncMock()
+    sandbox.exec_script = AsyncMock()
+    sandbox._write_unsigned_object = AsyncMock()
+
+    await sandbox._download_object_to_vm(object_url, "/storage/image.tar.gz")
+
+    issued.assert_called_once_with(object_url, expires_in=3600)
+    sandbox._write_unsigned_object.assert_not_called()
+    sandbox.write_host_file.assert_awaited_once()
+    command = sandbox.exec_script.await_args.args[0]
+    assert "SSL_CERT_FILE=/etc/agentenv-ca-bundle.pem" in command
+    assert "https://host.smolvm.internal:1234/v1/grants/token" in command
+    assert "-o /storage/image.tar.gz" in command
+
+
+@pytest.mark.asyncio
+async def test_unreachable_local_grant_falls_back_to_object_push(monkeypatch, tmp_path):
+    store = LocalFilesystemObjectStore(str(tmp_path), grant_bind_host="172.17.0.1")
+    object_url = store.put("image.tar.gz", b"archive")
+    monkeypatch.setattr(sandbox_module, "get_config", lambda: SimpleNamespace(get_object_store_at=lambda url: store))
+    sandbox = SmolVmSandbox(MagicMock(id="agentenv-test"), {})
+    sandbox._write_unsigned_object = AsyncMock()
+
+    await sandbox._download_object_to_vm(object_url, "/storage/image.tar.gz")
+    sandbox._write_unsigned_object.assert_awaited_once_with(store, object_url, "/storage/image.tar.gz")

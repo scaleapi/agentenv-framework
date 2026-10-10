@@ -25,6 +25,12 @@ def test_custom_bridge_only_grants_are_not_claimed_reachable_from_smol_vm(tmp_pa
     assert not store.grants_reach("smol_vm")
 
 
+def test_custom_private_advertised_host_is_not_claimed_reachable_from_smol_vm(tmp_path) -> None:
+    store = LocalFilesystemObjectStore(str(tmp_path), grant_advertise_host="172.17.0.1")
+    assert store.grants_reach("local")
+    assert not store.grants_reach("smol_vm")
+
+
 def test_local_store_grants_can_be_turned_off(tmp_path) -> None:
     assert not LocalFilesystemObjectStore(str(tmp_path), grants="off").supports_transfer_grants
     with pytest.raises(ValueError, match="grants must be one of"):

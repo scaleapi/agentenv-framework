@@ -11,6 +11,7 @@ from smol import ConnectOptions, Machine
 
 from agent_env.config import get_config
 from agent_env.providers.sandbox_providers.sandbox import CURL_RETRY_FLAGS, VmSandbox
+from agent_env.store.object_store.local.store import LocalFilesystemObjectStore
 from agent_env.store.object_store.local.tls import local_ca
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_VM
 
@@ -58,11 +59,14 @@ class SmolVmSandbox(VmSandbox):
     async def _download_object_to_vm(self, object_url: str, vm_path: str) -> None:
         store = get_config().get_object_store_at(object_url)
         signed = await asyncio.to_thread(store.signed_get_url, object_url)
+        local_grant = isinstance(store, LocalFilesystemObjectStore) and store.supports_transfer_grants and store.grants_reach(self.type)
+        if signed is None and local_grant:
+            signed = (await asyncio.to_thread(store.issue_read_grant, object_url, expires_in=3600)).url
         if signed is None:
             await self._write_unsigned_object(store, object_url, vm_path)
             return
         rewritten = _host_url(signed)
-        local_https = rewritten != signed and urlsplit(signed).scheme == "https"
+        local_https = local_grant or (rewritten != signed and urlsplit(signed).scheme == "https")
         if local_https:
             await self.write_host_file(local_ca().bundle_path.read_bytes(), "/etc/agentenv-ca-bundle.pem")
         ca = "SSL_CERT_FILE=/etc/agentenv-ca-bundle.pem " if local_https else ""
