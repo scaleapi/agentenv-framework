@@ -274,21 +274,24 @@ class DockerImageArtifact(Artifact):
         tag the image's build gives it."""
         return bool(self.build_context_object_url) and not self.tar_gz_object_url and not names_registry(self.image_name)
 
-    def load_problem(self) -> str | None:
-        """Why no VM sandbox can get this image, or None when one can: a tar.gz is loaded, an image with none is pulled
-        when its name names a registry, and built from its build context when it has only that."""
-        if self.tar_gz_object_url or names_registry(self.image_name) or self.context_only:
+    def load_problem(self, *, on_this_machine: bool = True) -> str | None:
+        """Why a VM sandbox can't get this image, or None when it can: a tar.gz is loaded, an image with none is pulled
+        when its name names a registry, one that a VM ``on_this_machine`` or not reaches, and built from its build
+        context when it has only that."""
+        if self.tar_gz_object_url or self.context_only:
             return None
+        if names_registry(self.image_name):
+            return pull_problem(self.image_name, on_this_machine=on_this_machine)
         return (f"{self.id!r} v{self.version} has no tar.gz, and its image name {self.image_name!r} doesn't name a "
                 "registry to pull it from")
 
-    def by_name_problem(self) -> str | None:
+    def by_name_problem(self, *, on_this_machine: bool = True) -> str | None:
         """Why a sandbox that runs an image by pulling its name can't run this one, or None when it can: a context-only
         image's name is a tag only its build gives it, a VM sandbox's or Modal's, and pulled, it would be looked up on
-        Docker Hub."""
+        Docker Hub; and a sandbox not ``on_this_machine`` can't pull from a registry on this machine."""
         if self.context_only:
             return f"{self.id!r} v{self.version} is only a build context, which has to be built, not pulled"
-        return None
+        return pull_problem(self.image_name, on_this_machine=on_this_machine)
 
     @classmethod
     async def put_from_github(
@@ -464,6 +467,14 @@ class DockerImageArtifact(Artifact):
         ref = segments[3]
         path = "/".join(segments[4:]) if len(segments) > 4 else None
         return DockerImageArtifact._GitHubURLParts(owner=owner, repo=repo, ref=ref, path=path)
+
+
+def pull_problem(image_name: str, *, on_this_machine: bool) -> str | None:
+    """Why a sandbox pulling ``image_name`` can't, or None when it can: one that isn't ``on_this_machine`` can't reach a
+    registry on this machine."""
+    if on_this_machine or not is_loopback_host(registry_host_from_ref(image_name)):
+        return None
+    return f"{image_name} is in a registry on this machine, which a sandbox elsewhere can't pull from"
 
 
 def refuse_local_github_build(entity_id: str) -> None:

@@ -54,6 +54,12 @@ def _image(image_name: str) -> DockerImageArtifact:
     return DockerImageArtifact(id=image_name, description="d", image_name=image_name)
 
 
+def _loadable(image_name: str) -> DockerImageArtifact:
+    """An image a VM loads from its tar.gz, as a gateway's VM checks every image it runs before it's created."""
+    return DockerImageArtifact(id=image_name, description="d", image_name=image_name,
+                               tar_gz_object_url="s3://bucket/image.tar.gz")
+
+
 @pytest.fixture(autouse=True)
 def _fake_env_state_store():
     """Keep acquire()'s persist step off a real backend — real store over an in-memory DocumentStore."""
@@ -188,6 +194,76 @@ async def test_container_mode_builds_a_context_only_image_before_creating_anythi
     assert [(call.args, call.kwargs) for call in prepare.await_args_list] == [
         ((image,), {"attribution": {"project_id": "0123456789abcdef01234567"}}) for image in (gateway_image, server_image)]
     gp._build_local_store.assert_not_awaited()
+
+
+_IN_THIS_MACHINES_REGISTRY = DockerImageArtifact(id="slack-image", version=2, description="d",
+                                                 image_name="localhost:5000/local/slack:v2")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gateway_image, server_image", [(_IN_THIS_MACHINES_REGISTRY, _image("mcp-slack")),
+                                                         (_image("agent-gateway"), _IN_THIS_MACHINES_REGISTRY)],
+                         ids=["gateway", "server"])
+async def test_container_mode_refuses_an_image_in_this_machines_registry_before_preparing_anything(gateway_image,
+                                                                                                  server_image):
+    provider = ModalSandboxProvider()
+    gp = EnvironmentGatewayProvider()
+    gp._build_local_store = AsyncMock()
+
+    with patch.object(provider, "prepare_image", side_effect=AssertionError("prepared an image")), \
+         patch.object(provider, "create_container", side_effect=AssertionError("created a container")), \
+         patch("agent_env.env.env.Env.get", return_value=MagicMock(docker_image_artifact=gateway_image)):
+        with pytest.raises(ValueError, match="Can't deploy a gateway on ModalSandboxProvider, which runs its images by "
+                                             "name: localhost:5000/local/slack:v2 is in a registry on this machine, "
+                                             "which a sandbox elsewhere can't pull from"):
+            await gp._deploy_via_containers(
+                sandbox_provider=provider, mcp_servers=[MCPServerConfig(image=server_image.image_name, environment_name="slack")],
+                mcp_server_images=[server_image], gateway_port=18765, website_configs=None,
+                gateway_mode=MagicMock(value="performance"), ttl_seconds=60, disk_size_gb=10,
+            )
+    gp._build_local_store.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_container_mode_refuses_a_servicedb_image_in_this_machines_registry_before_preparing_anything():
+    provider = ModalSandboxProvider()
+    gp = EnvironmentGatewayProvider()
+    gp._state_provider = MagicMock(spec=LocalPostgresStateProvider)
+    gp._state_provider.container_images.return_value = ["localhost:5000/local/servicedb:v1"]
+
+    with patch.object(provider, "prepare_image", side_effect=AssertionError("prepared an image")), \
+         patch("agent_env.env.env.Env.get", return_value=MagicMock(docker_image_artifact=_image("agent-gateway"))):
+        with pytest.raises(ValueError, match="localhost:5000/local/servicedb:v1 is in a registry on this machine"):
+            await gp._deploy_via_containers(
+                sandbox_provider=provider, mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")],
+                mcp_server_images=[_image("mcp-slack")], gateway_port=18765, website_configs=None,
+                gateway_mode=MagicMock(value="performance"), ttl_seconds=60, disk_size_gb=10,
+            )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unloadable", ["gateway", "server", "sidecar"])
+async def test_a_vm_gateway_refuses_an_image_its_vm_cant_get_before_creating_the_vm(unloadable):
+    """A VM elsewhere can't pull from this machine's registry; nothing is created to find that out."""
+    from agent_env.env.gateway import GatewayMode
+
+    here = DockerImageArtifact(id="here", description="d", image_name="localhost:5000/local/here:v1")
+    pick = {name: here if name == unloadable else _loadable(name) for name in ("gateway", "server", "sidecar")}
+    gp = EnvironmentGatewayProvider()
+    gp._state_provider = MagicMock()
+    provider = _vm_provider(create_vm=AsyncMock(side_effect=AssertionError("created a VM")))
+
+    with patch("agent_env.env.env.Env.get", return_value=MagicMock(docker_image_artifact=pick["gateway"])):
+        with pytest.raises(ValueError, match="whose VM can't get its images: localhost:5000/local/here:v1 is in a "
+                                             "registry on this machine"):
+            await gp._deploy_via_vm(
+                sandbox_provider=provider, mcp_servers=[MCPServerConfig(image="server", environment_name="slack")],
+                mcp_server_images=[pick["server"]], gateway_port=18765, website_configs=None, website_images=None,
+                gateway_mode=GatewayMode.PERFORMANCE, ttl_seconds=60, disk_size_gb=10,
+                sidecars=[SidecarConfig(environment_name="relay", image_artifact=pick["sidecar"], container_port=8000,
+                                        host_port=18768)],
+            )
+    provider.create_vm.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1091,7 +1167,7 @@ async def test_deploy_via_vm_prepares_schemas_including_website_browser():
         """Abort right after prepare — the rest of the VM deploy needs a real VM."""
 
     def _fake_env_get(env_id, *a, **k):
-        env = MagicMock()
+        env = MagicMock(docker_image_artifact=_loadable(env_id))
         env.environment_name = "website-browser" if env_id == "wb-id" else env_id
         return env
 
@@ -1103,10 +1179,10 @@ async def test_deploy_via_vm_prepares_schemas_including_website_browser():
             await gp._deploy_via_vm(
                 sandbox_provider=sandbox_provider,
                 mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")],
-                mcp_server_images=[_image("mcp-slack")],
+                mcp_server_images=[_loadable("mcp-slack")],
                 gateway_port=18765,
                 website_configs=[WebsiteConfig(backend_image="b", frontend_image="f", environment_name="shop")],
-                website_images=[MagicMock(), MagicMock()],
+                website_images=[_loadable("b"), _loadable("f")],
                 gateway_mode=GatewayMode.PERFORMANCE,
                 ttl_seconds=60,
                 disk_size_gb=10,
@@ -1136,13 +1212,13 @@ async def test_deploy_via_vm_side_loads_sidecar_image():
     sandbox_provider = MagicMock()
     sandbox_provider.create_vm = AsyncMock(return_value=sandbox)
 
-    sidecar_art = MagicMock(image_name="ecr/relay:1.0.4")
+    sidecar_art = _loadable("ecr/relay:1.0.4")
 
     class _Stop(Exception):
         pass
 
     def _fake_env_get(env_id, *a, **k):
-        env = MagicMock(); env.environment_name = env_id; return env
+        env = MagicMock(docker_image_artifact=_loadable(env_id)); env.environment_name = env_id; return env
 
     with patch("agent_env.env.env.Env.get", side_effect=_fake_env_get), \
          patch("agent_env.config.get_config", return_value=MagicMock(default_gateway_env_id="gw-id")), \
@@ -1151,7 +1227,7 @@ async def test_deploy_via_vm_side_loads_sidecar_image():
             await gp._deploy_via_vm(
                 sandbox_provider=sandbox_provider,
                 mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")],
-                mcp_server_images=[_image("mcp-slack")],
+                mcp_server_images=[_loadable("mcp-slack")],
                 gateway_port=18765,
                 website_configs=None,
                 website_images=None,
@@ -1570,13 +1646,13 @@ async def test_deploy_returns_the_gateway_record_for_the_env(caplog):
     state_provider = MagicMock(spec=DatabaseStateProvider, prepare=AsyncMock(), teardown=AsyncMock())
     vm = MagicMock(sandbox_id="vm-1", type="modal_vm", tunnel_urls={18765: "https://vm.example"}, host_port=lambda port: port, host_ips=(),
                    load_docker_images=AsyncMock(), exec_script=AsyncMock(), exec_with_output=AsyncMock(return_value=(0, "gateway", "")))
-    env = MagicMock(id="crm-env", version=3, environment_name="slack", docker_image_artifact=MagicMock(image_name="mcp-slack"))
+    env = MagicMock(id="crm-env", version=3, environment_name="slack", docker_image_artifact=_loadable("mcp-slack"))
     card = {"name": "env1234", "children_environments": []}
     acquire = AsyncMock(return_value=external)
 
     with patch("agent_env.providers.env_state.acquire_state_for_deploy", acquire), \
          patch("agent_env.providers.env_state.build_state_provider", return_value=state_provider), \
-         patch("agent_env.env.env.Env.get", MagicMock()), \
+         patch("agent_env.env.env.Env.get", MagicMock(return_value=MagicMock(docker_image_artifact=_loadable("gw")))), \
          patch("agent_env.config.get_config", return_value=MagicMock(default_gateway_env_id="gw-id")), \
          patch.object(gp, "create_docker_compose", return_value="services: {}") as compose, \
          patch.object(gp, "_wait_for_gateway", AsyncMock(return_value=True)), \

@@ -28,6 +28,7 @@ from agent_env.a2a_agent.object_transfer import (
 from agent_env.a2a_agent.staging import transfer_store
 from agent_env.providers.sandbox_providers.local_sandbox import LOCAL_TRUST_ENV, local_grant_trust, start_trusting
 from agent_env.providers.sandbox_providers.sandbox_provider import (
+    SANDBOX_MODE_VM,
     Accepts,
     SandboxProvider,
     all_sandbox_container_env,
@@ -120,8 +121,11 @@ class A2AAgent:
     SNAPSHOT_METHOD_APPLY_CHANGELOG: ClassVar[str] = "apply-changelog"
 
     @staticmethod
-    def accepts(sandbox_provider: SandboxProvider) -> Accepts:
-        """The images an agent deploys from on ``sandbox_provider``: those its sandboxes run (``create_sandbox``)."""
+    def accepts(sandbox_provider: SandboxProvider, *, sandbox_mode: str | None = None) -> Accepts:
+        """The images an agent deploys from on ``sandbox_provider``: those its own sandboxes run (``create_sandbox``),
+        or, placed on a VM sandbox a task deployed there (``sandbox_mode`` "vm"), any that VM loads."""
+        if sandbox_mode == SANDBOX_MODE_VM:
+            return Accepts.LOADABLE
         return sandbox_provider.SANDBOX_ACCEPTS
 
     @staticmethod
@@ -412,7 +416,6 @@ class A2AAgent:
         attribution: Optional[Attribution] = None,
     ) -> DeployedA2AAgent:
         from agent_env.providers.sandbox_providers.sandbox_provider import (
-            SANDBOX_MODE_VM,
             build_sandbox_provider,
             get_agent_sandbox_provider,
         )
@@ -434,15 +437,18 @@ class A2AAgent:
             resolved_env["LITELLM_BASE_URL"] = (provider or sandbox).url_from_sandbox(resolved_env["LITELLM_BASE_URL"])
 
         merged_env = await asyncio.to_thread(self._build_merged_env, resolved_env, a2a_port)
-        image_name = self.docker_image_artifact.image_name
-        if problem := self.docker_image_artifact.by_name_problem():
-            if provider is None and sandbox.mode != SANDBOX_MODE_VM:
+        image = self.docker_image_artifact
+        image_name = image.image_name
+        if provider is None:
+            if sandbox.mode != SANDBOX_MODE_VM and (problem := image.by_name_problem()):
                 raise ValueError(f"Can't deploy agent {self.id!r} on the container sandbox {sandbox.sandbox_id!r}, which "
                                  f"runs its own image, never the agent's: {problem}")
-            links = provider.links if provider else ()
-            if by_name := [link for link in links if self.accepts(link).problem(self.docker_image_artifact)]:
-                raise ValueError(f"Can't deploy agent {self.id!r} with {type(by_name[0]).__name__}, which runs an "
-                                 f"agent's image by name: {problem}")
+        elif refused := [(link, problem) for link in provider.links
+                         if (problem := self.accepts(link).problem(image, on_this_machine=link.ON_THIS_MACHINE))]:
+            link, problem = refused[0]
+            how = ("whose VMs can't get it" if self.accepts(link) is Accepts.LOADABLE
+                   else "which runs an agent's image by name")
+            raise ValueError(f"Can't deploy agent {self.id!r} with {type(link).__name__}, {how}: {problem}")
 
         try:
             if provider is not None:

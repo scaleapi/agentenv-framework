@@ -97,13 +97,34 @@ CONTEXT_ONLY = DockerImageArtifact(id="img", version=2, description="d", image_n
 NO_REGISTRY = DockerImageArtifact(id="img", version=2, description="d", image_name="img:v2")
 
 
+IN_THIS_MACHINES_REGISTRY = DockerImageArtifact(id="img", version=2, description="d",
+                                                image_name="localhost:5000/local/img:v2")
+WITH_TAR_GZ = DockerImageArtifact(id="img", version=2, description="d", image_name="localhost:5000/local/img:v2",
+                                  tar_gz_object_url="file:///state/img.tar.gz")
+HERE = "is in a registry on this machine, which a sandbox elsewhere can't pull from"
+
+
 @pytest.mark.parametrize("image, accepts, problem", [
     (CONTEXT_ONLY, LOADABLE, None), (CONTEXT_ONLY, NAME_OR_CONTEXT, None), (CONTEXT_ONLY, NAME, "only a build context"),
     (NO_REGISTRY, LOADABLE, "doesn't name a registry"), (NO_REGISTRY, NAME, None), (NO_REGISTRY, NAME_OR_CONTEXT, None),
 ])
-def test_an_image_is_refused_by_the_form_its_provider_accepts(image, accepts, problem):
-    found = accepts.problem(image)
+@pytest.mark.parametrize("on_this_machine", [True, False])
+def test_an_image_is_refused_by_the_form_its_provider_accepts(image, accepts, problem, on_this_machine):
+    found = accepts.problem(image, on_this_machine=on_this_machine)
     assert (found is None) if problem is None else (problem in found)
+
+
+@pytest.mark.parametrize("image, accepts, problem", [
+    (IN_THIS_MACHINES_REGISTRY, LOADABLE, HERE), (IN_THIS_MACHINES_REGISTRY, NAME, HERE),
+    (IN_THIS_MACHINES_REGISTRY, NAME_OR_CONTEXT, HERE),
+    (WITH_TAR_GZ, LOADABLE, None), (WITH_TAR_GZ, NAME, HERE), (WITH_TAR_GZ, NAME_OR_CONTEXT, HERE),
+])
+def test_a_sandbox_elsewhere_cant_pull_from_this_machines_registry_and_one_on_it_can(image, accepts, problem):
+    """A VM loads an image's tar.gz, which agent-env pushes to it, and pulls one only when it has none."""
+    found = accepts.problem(image, on_this_machine=False)
+    assert (found is None) if problem is None else (problem in found)
+    assert accepts.problem(image, on_this_machine=True) is None
+    assert accepts.problem(image) is None  # a caller that doesn't say gets the check as it was
 
 
 def _concrete_classes() -> set[str]:

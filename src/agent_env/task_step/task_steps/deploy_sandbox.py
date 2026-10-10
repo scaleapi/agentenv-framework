@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import ClassVar, Optional
 
+from agent_env.artifact.artifacts.docker_image import pull_problem
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
 from agent_env.task_step.context import DeployedSandbox, TaskStepContext
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
@@ -140,6 +141,10 @@ class DeploySandboxTaskStep(TaskStep):
         else:
             if self.image is None or self.port is None:
                 raise ValueError("container-mode sandbox requires `image` and `port`")
+            if problems := [(link, problem) for link in provider.links
+                            if (problem := pull_problem(self.image, on_this_machine=link.ON_THIS_MACHINE))]:
+                link, problem = problems[0]
+                raise ValueError(f"Can't deploy sandbox '{self.sandbox_name}' with {type(link).__name__}: {problem}")
             sandbox = await provider.create_sandbox(
                 image_name=self.image,
                 port=self.port,

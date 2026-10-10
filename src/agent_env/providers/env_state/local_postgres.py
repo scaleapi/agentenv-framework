@@ -335,6 +335,13 @@ class LocalPostgresStateProvider(DatabaseStateProvider):
             logger.warning(f"servicedb image {db_image} is not in the image store; running {_STOCK_POSTGRES_IMAGE}")
         return _STOCK_POSTGRES_IMAGE
 
+    def container_images(self) -> list[str]:
+        """The images the container path starts by name: the servicedb's, and each sidecar's it provisions (those the
+        image store owns, as ``sidecar_specs`` decides)."""
+        cfg = self.service_db_config
+        return [self.container_store_image(),
+                *(image for image in (cfg.db_web_image, cfg.db_mcp_image) if self._in_image_store(image))]
+
     def sidecar_specs(self, *, instance: EnvStateInstance | None = None) -> list[ContainerSpec]:
         """pgweb + db-mcp container specs (Modal/container path), pointed at the stood-up
         servicedb. Only sidecar images the image store owns are provisionable in container mode;

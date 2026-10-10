@@ -290,11 +290,13 @@ class VmSandbox(Sandbox):
 
     async def load_docker_images(self, artifacts: list) -> None:
         """Put each DockerImageArtifact's image on the VM: those with a tar.gz are loaded from it, in parallel, those
-        with only a build context are built from it, and the rest are pulled by image name. An image no sandbox can get
-        is refused before anything is loaded."""
+        with only a build context are built from it, and the rest are pulled by image name. An image this VM can't get,
+        such as one to pull from a registry on this machine when the VM isn't on it, is refused before anything is
+        loaded."""
         if not artifacts:
             return
-        if problems := [problem for artifact in artifacts if (problem := artifact.load_problem())]:
+        if problems := [problem for artifact in artifacts
+                        if (problem := artifact.load_problem(on_this_machine=self.ON_THIS_MACHINE))]:
             raise RuntimeError(f"Can't load images: {'; '.join(problems)}")
         if tarballs := [artifact for artifact in artifacts if artifact.tar_gz_object_url]:
             await self._load_tarballs(tarballs)
@@ -311,14 +313,16 @@ class VmSandbox(Sandbox):
         builds: dict[str, list] = {}
         for artifact in artifacts:
             builds.setdefault(artifact.source_digest or artifact.build_context_object_url, []).append(artifact)
-        for source, images in builds.items():
-            await self._build_image(source, images)
+        for images in builds.values():
+            await self._build_image(images)
 
-    async def _build_image(self, source: str, images: list) -> None:
-        """Download the context ``images`` share, extract it, and ``docker build`` it, tagged with each image's name."""
+    async def _build_image(self, images: list) -> None:
+        """Download the context ``images`` share, extract it, and ``docker build`` it, tagged with each image's name.
+        The work folder is this build's own, since a host can run builds of one context at once: two of the local
+        provider's sandboxes, or two deploys onto one VM."""
         first = images[0]
         names = list(dict.fromkeys(image.image_name for image in images))
-        work = f"/tmp/agent-env-build-{hashlib.sha256(source.encode()).hexdigest()[:16]}"
+        work = f"/tmp/agent-env-build-{uuid.uuid4().hex}"
         platform = first.platform or DEFAULT_BUILD_PLATFORM
         tags = " ".join(f"-t {shlex.quote(name)}" for name in names)
         logger.info(f"Building {', '.join(names)} from its build context, for {platform}...")

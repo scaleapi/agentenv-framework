@@ -75,6 +75,20 @@ async def test_a_server_whose_image_is_only_a_build_context_is_refused_before_an
     assert run.calls == []
 
 
+_IN_THIS_MACHINES_REGISTRY = DockerImageArtifact(id="slack-image", version=3, description="d",
+                                                 image_name="localhost:5000/local/slack:v3")
+
+
+@pytest.mark.asyncio
+async def test_a_server_whose_image_is_in_this_machines_registry_is_refused_by_a_provider_elsewhere():
+    run = await _run_server_deploy(env=SimpleNamespace(**{**vars(_ENV), "docker_image_artifact": _IN_THIS_MACHINES_REGISTRY}))
+
+    assert ("Can't deploy 'slack' as a server on _FakeSandboxProvider, which runs its image by name: "
+            "localhost:5000/local/slack:v3 is in a registry on this machine, which a sandbox elsewhere can't pull from"
+            ) in str(run.result)
+    assert run.calls == []
+
+
 class _ModalProvider(ModalSandboxProvider):
     """Modal with its build and its container faked, recording the order they're asked for."""
 
