@@ -47,6 +47,7 @@ from .constants import (
     AGENT_ENV_ROLE_META_KEY,
     AGENT_ENV_SESSION_META_KEY,
     CARD_FETCH_TIMEOUT_S,
+    CHILD_DISCOVERY_TIMEOUT_S,
     DATA_PLANE_LOAD_TIMEOUT_MAX_S,
     DEFAULT_ROLE,
     GATEWAY_COMPOSE_HOST,
@@ -838,7 +839,7 @@ class Gateway:
             try:
                 session = sessions[server.mcp_url]
                 # bounded: this runs under _discover_lock, which startup and every MCP connect wait on
-                tools_result = await asyncio.wait_for(session.list_tools(), timeout=CARD_FETCH_TIMEOUT_S)
+                tools_result = await asyncio.wait_for(session.list_tools(), timeout=CHILD_DISCOVERY_TIMEOUT_S)
                 tools = tools_result.tools
                 logger.info(f"Found {len(tools)} tool(s) from {server.name}")
                 for tool in tools:

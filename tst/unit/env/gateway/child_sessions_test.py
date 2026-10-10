@@ -247,6 +247,32 @@ async def test_a_failed_discovery_keeps_the_gateway_s_own_entry_and_heals_on_the
 
 
 @pytest.mark.asyncio
+async def test_a_child_that_hangs_on_tools_list_fails_discovery_within_its_bound_and_keeps_the_generation(monkeypatch):
+    class _HangsOnList(_FakeSession):
+        hang = True
+
+        async def list_tools(self):
+            if self.hang:
+                await asyncio.Event().wait()
+            return await super().list_tools()
+
+    session = _HangsOnList()
+    opener = _Opener(session)
+    gw = _gateway(opener)
+    monkeypatch.setattr(gateway_module, "CHILD_DISCOVERY_TIMEOUT_S", 0.02)
+    try:
+        with pytest.raises(TimeoutError):
+            await gw._ensure_tools_discovered()
+        assert gw._tools_discovered is False
+        session.hang = False
+        await gw._ensure_tools_discovered()
+        assert gw._tools_discovered is True
+        assert opener.opened == 1  # a slow child is not a dead one: the generation stays
+    finally:
+        await gw._close_child_sessions()
+
+
+@pytest.mark.asyncio
 async def test_discovery_on_a_dead_session_retires_the_generation():
     session = _FakeSession()
     session.list_failures = [McpError(ErrorData(code=32600, message="Session terminated"))]

@@ -84,6 +84,11 @@ GATEWAY_COMPOSE_HOST = "gateway"
 # Per-child card fetch budget (seconds) when composing the env card.
 CARD_FETCH_TIMEOUT_S = 5.0
 
+# Per-child tools/list budget (seconds) during discovery. Wider than a card fetch: the child answers on the
+# connection every caller shares, so a large service busy with another call can take a while, and a timeout
+# here fails the whole discovery, to be retried on the next connect.
+CHILD_DISCOVERY_TIMEOUT_S = 30.0
+
 # Trigger status vocabulary, part of the GET /triggers/state contract; `state` asserts against it.
 TRIGGER_STATUSES = ("armed", "firing", "queued", "fired", "failed")
 
