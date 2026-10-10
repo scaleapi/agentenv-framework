@@ -75,6 +75,8 @@ _SANDBOX_ENV = "AGENTENV_SANDBOX"
 # Where a container finds the local transfer CA's trust files, and the variables that point TLS clients at them:
 # SSL_CERT_FILE replaces a client's roots, so it gets the public roots plus the CA; NODE_EXTRA_CA_CERTS adds.
 LOCAL_TRUST_DIR = "/etc/agentenv"
+# Where in a sandbox's work dir a compose there finds a copy of those trust files to mount.
+_STAGED_TRUST_DIR = "agentenv-trust"
 LOCAL_TRUST_ENV = {
     "SSL_CERT_FILE": f"{LOCAL_TRUST_DIR}/ca-bundle.pem",
     "REQUESTS_CA_BUNDLE": f"{LOCAL_TRUST_DIR}/ca-bundle.pem",
@@ -203,6 +205,15 @@ class LocalSandbox(VmSandbox):
     @property
     def work_dir(self) -> Path:
         return self._work_dir
+
+    def stage_local_trust(self) -> str | None:
+        """Copy the local transfer CA's trust files into the work dir, which Docker shares, for a compose there to
+        mount; their path relative to the work dir, or None where the store hands out no local grants."""
+        trust_dir = local_grant_trust()
+        if trust_dir is None:
+            return None
+        shutil.copytree(trust_dir, self._work_dir / _STAGED_TRUST_DIR, dirs_exist_ok=True)
+        return f"./{_STAGED_TRUST_DIR}"
 
     def _rewrite_app_arg(self, arg: str) -> str:
         if arg == "/app" or arg.startswith(("/app/", "/app:")):

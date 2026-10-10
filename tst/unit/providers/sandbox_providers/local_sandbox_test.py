@@ -1165,3 +1165,14 @@ async def test_a_linked_agent_whose_copy_fails_leaves_no_container(tmp_path, mon
 
 
 _HOST_IPS = ls._host_ips
+
+
+def test_a_compose_on_a_local_sandbox_mounts_a_copy_of_the_trust_files_its_work_dir_holds(tmp_path, monkeypatch):
+    """The CA's own folder may sit outside what Docker shares; the work dir is kept on a shared path."""
+    sandbox = LocalSandbox(work_dir=tmp_path / "work")
+    assert sandbox.stage_local_trust() == "./agentenv-trust"
+    staged = tmp_path / "work" / "agentenv-trust"
+    assert {p.name: p.read_bytes() for p in staged.iterdir()} == {p.name: p.read_bytes() for p in local_ca().trust_dir.iterdir()}
+
+    monkeypatch.setattr(ls, "local_grant_trust", lambda: None)
+    assert LocalSandbox(work_dir=tmp_path / "other").stage_local_trust() is None

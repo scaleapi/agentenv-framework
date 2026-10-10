@@ -10,7 +10,6 @@ import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from agent_env.attribution import Attribution
@@ -34,7 +33,7 @@ from agent_env.providers.env_providers.constants import (
     GATEWAY_SERVICE_NAME,
 )
 from agent_env.providers.env_providers.env_provider import _SandboxEnvironmentProvider, _size_kwargs, _tool_names
-from agent_env.providers.sandbox_providers.local_sandbox import LOCAL_TRUST_DIR, LOCAL_TRUST_ENV, LocalSandbox, local_grant_trust
+from agent_env.providers.sandbox_providers.local_sandbox import LOCAL_TRUST_DIR, LOCAL_TRUST_ENV, LocalSandbox
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import Sandbox, VmSandbox, port_bindings
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER, SandboxProvider
@@ -217,11 +216,12 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         host_ips: tuple[str, ...] = (),
         extra_hosts: tuple[str, ...] = (),
         mcp_server_name: str | None = None,
-        trust_dir: Path | None = None,
+        trust_files: str | None = None,
     ) -> str:
         """Generate docker-compose.yml content for a gateway deployment onto a VM/laptop/arbitrary machine.
-        With ``trust_dir``, the local transfer CA's trust files, each MCP server mounts them where
-        ``LOCAL_TRUST_ENV`` points and carries ``extra_hosts``, so it reaches and trusts the local grant server.
+        With ``trust_files``, where the compose finds the local transfer CA's trust files, each MCP server mounts
+        them where ``LOCAL_TRUST_ENV`` points and carries ``extra_hosts``, so it reaches and trusts the local grant
+        server.
 
         Supports MCP servers, websites, or both. Website containers (backend + frontend) are added
         to the same docker network. The gateway receives WEBSITE_URLS env var for discovery.
@@ -366,9 +366,9 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             if server.extra_env_vars:
                 for key, value in server.extra_env_vars.items():
                     lines.append(f"      - {key}={value}")
-            if trust_dir is not None:
+            if trust_files is not None:
                 lines.extend(f"      - {key}={value}" for key, value in LOCAL_TRUST_ENV.items())
-                lines.extend(["    volumes:", f'      - "{trust_dir}:{LOCAL_TRUST_DIR}:ro"'])
+                lines.extend(["    volumes:", f'      - "{trust_files}:{LOCAL_TRUST_DIR}:ro"'])
                 if extra_hosts:
                     lines.extend(["    extra_hosts:", *(f'      - "{entry}"' for entry in extra_hosts)])
             lines.extend([
@@ -747,7 +747,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             host_ips=sandbox.host_ips,
             extra_hosts=sandbox.extra_hosts,
             mcp_server_name=mcp_server_name,
-            trust_dir=await asyncio.to_thread(local_grant_trust) if isinstance(sandbox, LocalSandbox) else None,
+            trust_files=await asyncio.to_thread(sandbox.stage_local_trust) if isinstance(sandbox, LocalSandbox) else None,
         )
         logger.info(f"Generated docker-compose.yml:\n{_redact_compose_secrets(compose_content)}")
 
