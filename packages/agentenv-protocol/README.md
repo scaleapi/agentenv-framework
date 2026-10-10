@@ -613,14 +613,22 @@ and `httpx`; `agentenv_protocol.a2a_agent` re-exports them.
 | Type | Wire shape |
 | --- | --- |
 | `HttpGetGrant`, `HttpPutGrant` | `{kind: "http-get" \| "http-put", url, expires_at, headers?}`, one exact object |
+| `HttpPartsPutGrant` | `{kind: "http-put-parts", part_bytes, urls, expires_at, headers?}`, one exact object in consecutive parts |
 | `HttpPostPolicyGrant` | `{kind: "http-post-policy", url, fields, path_field, file_field, headers?}`, multipart POST |
 | `WriteNamespaceGrant` | `{root_path, expires_at, max_objects, max_object_bytes, max_total_bytes, write: HttpPostPolicyGrant}` |
 | `ReadObject` | `{media_type, max_bytes, size_bytes?, sha256?, read: HttpGetGrant}` |
-| `WriteObject` | `{media_type, max_bytes, write: HttpPutGrant}` |
+| `WriteObject` | `{media_type, max_bytes, write: HttpPutGrant \| HttpPartsPutGrant}` |
 | `Uploaded` | `{size_bytes, sha256?}` |
 
 URLs are absolute HTTPS and timestamps are UTC. `size_bytes` and `sha256`
-describe the stored bytes. The extensions use them as follows (`?` marks an
+describe the stored bytes. Through a parts grant, part `k` (from 1) is bytes
+`[(k-1)*part_bytes, min(k*part_bytes, size))`, PUT to `urls[k-1]` with exact
+`Content-Length` and the grant's `headers` as given; every part but the last is
+exactly `part_bytes`, and `max_bytes` is at most `part_bytes` times the number of
+URLs. `agentenv_protocol.transfers.part_ranges(size_bytes, part_bytes)` gives each
+part's offset and length, for issuers and receivers alike. `upload()` sends `PARTS_IN_FLIGHT` parts at once and retries each on its own;
+the object exists once the issuer completes it, and only a one-part upload reports
+`sha256`. The extensions use them as follows (`?` marks an
 optional field, `|` an alternative request):
 
 | Operation | Request | Response |

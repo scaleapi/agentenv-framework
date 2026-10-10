@@ -102,6 +102,7 @@ from .tasks.v1 import (
 )
 from ..transfers import (
     HttpGetGrant,
+    HttpPartsPutGrant,
     HttpPostPolicyGrant,
     HttpPutGrant,
     NamespaceUploader,
@@ -150,6 +151,7 @@ __all__ = [
     "FieldSchema",
     "FilePart",
     "HttpGetGrant",
+    "HttpPartsPutGrant",
     "HttpPostPolicyGrant",
     "HttpPutGrant",
     "ImplementationOwner",
