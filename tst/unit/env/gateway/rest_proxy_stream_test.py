@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import doctest
+import json
 from urllib.parse import unquote, urlsplit
 
 import httpx
 import pytest
 
+from agent_env.env.gateway import AGENT_ENV_ROLE_META_KEY, AGENT_ENV_SESSION_META_KEY
 from agent_env.env.gateway import gateway as gateway_module
 from agent_env.env.gateway.gateway import Gateway
 
@@ -385,3 +387,90 @@ async def test_connect_timeout_maps_to_the_502_body_naming_the_error(monkeypatch
     up.install(monkeypatch)
     status, _, chunks = await _call(_gateway(), "/svc/mcp-svc/x")
     assert status == 502 and b"ConnectTimeout" in b"".join(chunks)
+
+
+# --- The role header and the JSON-RPC `_meta` are the gateway's to write, not the client's ---
+
+
+@pytest.mark.asyncio
+async def test_the_client_s_role_headers_are_replaced_by_the_gateway_s_attribution(monkeypatch):
+    up = _Upstream([b"{}"])
+    up.install(monkeypatch)
+    status, _, _ = await _call(_gateway(), "/svc/mcp-svc/x", raw_headers=[
+        (b"agentenv-role", b"alice@example.com"), (b"AgentEnv-Role", b"bob@example.com"), (b"cookie", b"a=1")])
+    assert status == 200
+    assert up.requests[0].headers.get_list("agentenv-role") == ["alice@example.com"]  # first value wins; one entry survives
+    assert up.requests[0].headers["cookie"] == "a=1"
+
+
+@pytest.mark.asyncio
+async def test_an_absent_or_blank_role_header_is_the_default_role_as_step_attributes_it(monkeypatch):
+    up = _Upstream([b"{}"])
+    up.install(monkeypatch)
+    gw = _gateway()
+    await _call(gw, "/svc/mcp-svc/x")
+    await _call(gw, "/svc/mcp-svc/x", headers={"AgentEnv-Role": "   "})
+    assert [r.headers.get_list("agentenv-role") for r in up.requests] == [["default"], ["default"]]
+    seen: list[str] = []
+    monkeypatch.setattr(gw, "_step_list_tools", lambda role: (seen.append(role), gw._json_response({"tools": []}, 200))[1])
+    try:
+        status, _, _ = await _call(gw, "/step", method="POST", body=b'{"action": "list_tools"}', headers={"AgentEnv-Role": "   "})
+    finally:
+        await gw._close_child_sessions()
+    assert status == 200 and seen == ["default"]
+
+
+@pytest.mark.asyncio
+async def test_the_website_proxy_stamps_the_role_too(monkeypatch):
+    up = _Upstream([b"ok"])
+    up.install(monkeypatch)
+    gw = _gateway(website_urls={"web": "http://web"})
+    await _call(gw, "/website/web/assets/app.js", headers={"AgentEnv-Role": "viewer"})
+    await _call(gw, "/website/web")
+    assert [r.headers.get_list("agentenv-role") for r in up.requests] == [["viewer"], ["default"]]
+
+
+def _rpc(**params) -> dict:
+    return {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params}
+
+
+@pytest.mark.asyncio
+async def test_a_proxied_child_mcp_post_carries_the_gateway_s_role_in_every_request_s_meta(monkeypatch):
+    up = _Upstream([b"{}"])
+    up.install(monkeypatch)
+    gw = _gateway()
+    forged = {AGENT_ENV_ROLE_META_KEY: "victim@example.com", AGENT_ENV_SESSION_META_KEY: "forged"}
+    one = json.dumps(_rpc(name="t", arguments={}, _meta=forged)).encode()
+    batch = json.dumps([_rpc(name="t", arguments={}), {"jsonrpc": "2.0", "method": "notifications/initialized"}]).encode()
+    for path, body in [("/svc/mcp-svc/mcp", one), ("/svc/mcp-svc/mcp/", batch), ("/svc/mcp-svc/x/../mcp", one)]:
+        status, _, _ = await _call(gw, path, method="POST", body=body, headers={
+            "AgentEnv-Role": "alice@example.com", "content-type": "application/json", "content-length": str(len(body))})
+        assert status == 200
+    sent = [json.loads(r.content) for r in up.requests]
+    stamp = {AGENT_ENV_ROLE_META_KEY: "alice@example.com"}
+    assert sent[0]["params"]["_meta"] == stamp  # the forged role and session key are gone
+    assert sent[1][0]["params"]["_meta"] == stamp and "params" not in sent[1][1]  # each request of a batch
+    assert sent[2]["params"]["_meta"] == stamp and up.requests[2].url.path == "/mcp"  # dot segments collapse upstream
+    assert all(r.headers["content-length"] == str(len(r.content)) for r in up.requests)  # re-serialised, re-measured
+    assert all(r.headers.get_list("agentenv-role") == ["alice@example.com"] for r in up.requests)
+
+
+@pytest.mark.asyncio
+async def test_bodies_that_are_not_a_child_mcp_request_are_forwarded_untouched(monkeypatch):
+    up = _Upstream([b"{}"])
+    up.install(monkeypatch)
+    gw = Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[],
+                 rest_proxy_urls={"mcp-svc": UPSTREAM, "backend": UPSTREAM})
+    rpc = json.dumps(_rpc(name="t", arguments={}, _meta={AGENT_ENV_ROLE_META_KEY: "x"})).encode()
+    cases = [
+        ("/svc/mcp-svc/mcp", "POST", b"not json"),  # unparsable: as it came
+        ("/svc/mcp-svc/mcp", "GET", b""),  # not a POST
+        ("/svc/mcp-svc/mcpx", "POST", rpc),  # not the MCP endpoint
+        ("/svc/mcp-svc/agentenv", "POST", rpc),  # the data plane keeps its body
+        ("/svc/backend/mcp", "POST", rpc),  # not an mcp-* service
+        ("/svc/mcp-svc/mcp", "POST", b'{"jsonrpc": "2.0", "id": 1, "result": {}}'),  # no params: nothing to stamp
+    ]
+    for path, method, body in cases:
+        status, _, _ = await _call(gw, path, method=method, body=body, headers={"AgentEnv-Role": "alice@example.com"})
+        assert status == 200, path
+    assert [r.content for r in up.requests] == [body for _, _, body in cases]

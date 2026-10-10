@@ -84,6 +84,11 @@ GATEWAY_COMPOSE_HOST = "gateway"
 # Per-child card fetch budget (seconds) when composing the env card.
 CARD_FETCH_TIMEOUT_S = 5.0
 
+# Per-child tools/list budget (seconds) during discovery. Wider than a card fetch: the child answers on the
+# connection every caller shares, so a large service busy with another call can take a while, and a timeout
+# here fails the whole discovery, to be retried on the next connect.
+CHILD_DISCOVERY_TIMEOUT_S = 30.0
+
 # Trigger status vocabulary, part of the GET /triggers/state contract; `state` asserts against it.
 TRIGGER_STATUSES = ("armed", "firing", "queued", "fired", "failed")
 
@@ -96,6 +101,10 @@ GATEWAY_TRAJECTORY_FILE = os.environ.get(
 )
 
 AGENT_ENV_ROLE_HEADER = "AgentEnv-Role"
+# MCP request `_meta` keys the gateway stamps on every child tools/call: the caller's role, and on the MCP path a
+# key naming the inbound session, so a child can keep per-caller state behind the gateway's one shared session.
+AGENT_ENV_ROLE_META_KEY = "agentenv.io/role"
+AGENT_ENV_SESSION_META_KEY = "agentenv.io/session"
 DEFAULT_ROLE = "default"
 WILDCARD = "*"
 TOOL_DISABLE_ACTION = "disable"
