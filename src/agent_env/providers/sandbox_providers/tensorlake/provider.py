@@ -41,6 +41,8 @@ _MAX_MEMORY_MB_PER_CPU = 8 * 1024
 # The disk the host image is published with; a smaller sandbox disk cannot hold it.
 _MIN_DISK_MB = 30 * 1024
 _MAX_DISK_MB = 100 * 1024
+# The disk the image builder needs to build the host image.
+_BUILDER_DISK_MB = 24 * 1024
 # Passed to every SDK call: the SDK otherwise falls back to TENSORLAKE_API_URL in some calls
 # and to the public endpoint in others, so creation and cleanup could hit different services.
 DEFAULT_API_URL = "https://api.tensorlake.ai"
@@ -231,8 +233,9 @@ class TensorlakeSandboxProvider(SandboxProvider):
             raise
 
     async def _create_or_reclaim(self, create: Any) -> Any:
-        """Await a create. If the caller is cancelled first, delete the sandbox the create yields once
-        it settles, since nothing else holds its id."""
+        """Await a create. If the caller is cancelled first, wait for the create to settle and delete the
+        sandbox it yields before the cancellation goes on: nothing else holds its id, and ``asyncio.run``
+        cancels tasks still pending when it ends. Only a second cancellation leaves that to a callback."""
         task = asyncio.ensure_future(create)
 
         def delete_orphan(done: asyncio.Future) -> None:
@@ -245,14 +248,22 @@ class TensorlakeSandboxProvider(SandboxProvider):
         try:
             return await asyncio.shield(task)
         except asyncio.CancelledError:
-            task.add_done_callback(delete_orphan)
+            try:
+                created = await asyncio.shield(task)
+            except asyncio.CancelledError:
+                task.add_done_callback(delete_orphan)
+                raise
+            except Exception as exc:  # noqa: BLE001 - a create that failed left nothing to delete
+                logger.debug("Tensorlake create cancelled by the caller then failed: %s", exc)
+            else:
+                await self._delete_sandbox(created.sandbox_id)
             raise
 
     def _unregistered_image_message(self, image_name: str) -> str:
         return (
             f"Tensorlake image {image_name!r} is not registered at {self._api_url}. Publish it once with:\n"
             f"  tl sbx image create {HOST_IMAGE_DOCKERFILE} -n {image_name} "
-            f"--disk_mb {_MIN_DISK_MB} --builder_disk_mb 24576 --docker_compat\n"
+            f"--disk_mb {_MIN_DISK_MB} --builder_disk_mb {_BUILDER_DISK_MB} --docker_compat\n"
             "or set `image` in [sandbox.providers.tensorlake.config] to a registered Docker-capable image."
         )
 

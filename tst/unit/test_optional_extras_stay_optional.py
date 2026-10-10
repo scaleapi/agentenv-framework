@@ -130,6 +130,14 @@ def _only_in(extra: str) -> list[str]:
     return sorted(set().union(*(_module_paths(d) for d in extra_only)) - provided_by_core)
 
 
+def _not_in_core() -> list[str]:
+    """Module paths some extra installs and a core install does not, including those two extras share."""
+    core = _closure(frozenset())
+    provided_by_core = set().union(*(_module_paths(d) for d in core))
+    optional = set().union(*(_closure(frozenset({extra})) for extra in _optional_requirements())) - core
+    return sorted(set().union(*(_module_paths(d) for d in optional)) - provided_by_core)
+
+
 def _run(script: str, blocked: list[str], *args: str) -> str:
     done = subprocess.run(
         [sys.executable, "-c", script, *args], input=json.dumps(blocked),
@@ -144,6 +152,10 @@ def test_core_and_every_store_module_import_without_the_extra(extra):
     blocked = _only_in(extra)
     assert blocked, f"the {extra!r} extra installs nothing core lacks, so this test proves nothing"
     assert json.loads(_run(_IMPORT_CORE, blocked, json.dumps(_NOT_CORE))) == []
+
+
+def test_core_and_every_store_module_import_without_any_extra():
+    assert json.loads(_run(_IMPORT_CORE, _not_in_core(), json.dumps(_NOT_CORE))) == []
 
 
 @pytest.mark.parametrize(
