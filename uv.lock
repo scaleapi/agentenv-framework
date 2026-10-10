@@ -5,8 +5,8 @@ resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
     "python_full_version >= '3.14' and sys_platform != 'win32'",
     "python_full_version == '3.13.*' and sys_platform == 'win32'",
-    "python_full_version < '3.13' and sys_platform == 'win32'",
     "python_full_version == '3.13.*' and sys_platform != 'win32'",
+    "python_full_version < '3.13' and sys_platform == 'win32'",
     "python_full_version < '3.13' and sys_platform != 'win32'",
 ]
 
@@ -87,6 +87,7 @@ dev = [
     { name = "pytest-xdist" },
     { name = "requests" },
     { name = "sail" },
+    { name = "smolmachines" },
     { name = "uvicorn" },
 ]
 explorer = [
@@ -103,11 +104,14 @@ gcp = [
 sail = [
     { name = "sail" },
 ]
+smol = [
+    { name = "smolmachines" },
+]
 
 [package.metadata]
 requires-dist = [
     { name = "a2a-sdk", specifier = "==0.3.26" },
-    { name = "agentenv-framework", extras = ["aws", "explorer", "gcp", "sail"], marker = "extra == 'dev'" },
+    { name = "agentenv-framework", extras = ["aws", "explorer", "gcp", "sail", "smol"], marker = "extra == 'dev'" },
     { name = "agentenv-framework-protocol", editable = "packages/agentenv-protocol" },
     { name = "boto3", marker = "extra == 'aws'", specifier = ">=1.35.0" },
     { name = "botocore", marker = "extra == 'aws'", specifier = ">=1.35.0" },
@@ -140,11 +144,12 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "requests", marker = "extra == 'gcp'", specifier = ">=2.31" },
     { name = "sail", marker = "extra == 'sail'", specifier = "~=0.12.8" },
+    { name = "smolmachines", marker = "extra == 'smol'", specifier = ">=1.26.1" },
     { name = "starlette", specifier = ">=0.40" },
     { name = "uvicorn", specifier = ">=0.47" },
     { name = "uvicorn", marker = "extra == 'explorer'", specifier = ">=0.29" },
 ]
-provides-extras = ["aws", "explorer", "gcp", "sail", "dev"]
+provides-extras = ["aws", "explorer", "gcp", "sail", "dev", "smol"]
 
 [[package]]
 name = "agentenv-framework-protocol"
@@ -2945,6 +2950,16 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031, upload-time = "2024-12-04T17:35:28.174Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
+]
+
+[[package]]
+name = "smolmachines"
+version = "1.26.1"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/db/24/73597ccc553ad413d670eb8ad808e3d041f791449d8c3f6581269b8e9705/smolmachines-1.26.1-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:143e7ac3e853f9d5fa46f92bb6be9343900e2350fe53feaf3efda657c500e5f5", size = 52118858, upload-time = "2026-10-10T13:18:03.359Z" },
+    { url = "https://files.pythonhosted.org/packages/e7/1a/7faeaf2ff37048899a8176477361b8aef38cdc6f88477d9e617fbb8c7fca/smolmachines-1.26.1-cp39-abi3-manylinux_2_34_aarch64.whl", hash = "sha256:f36e73caa5c32810159e6810a32f008de4f36b6217940809941b938e9610e5ff", size = 63427928, upload-time = "2026-10-10T13:18:08.037Z" },
+    { url = "https://files.pythonhosted.org/packages/00/31/f8f35a27f78e8540bd0560f04271fb42ffdbfb5cd3b15190e701fc7e2f0c/smolmachines-1.26.1-cp39-abi3-manylinux_2_34_x86_64.whl", hash = "sha256:b40e3aa6bd105b14770b6580ca83f7cf4dc4d619cc81809b861dedf6263b7bf6", size = 65220669, upload-time = "2026-10-10T13:18:13.002Z" },
 ]
 
 [[package]]

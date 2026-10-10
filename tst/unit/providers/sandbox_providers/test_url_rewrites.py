@@ -115,9 +115,10 @@ def test_local_provider_leaves_a_url_whose_host_is_not_loopback(url):
 
 
 @pytest.mark.parametrize("sandbox_type, expected", [
-    ("local", "http://host.docker.internal:4000"), ("modal", "http://localhost:4000"), (None, "http://localhost:4000"),
+    ("local", "http://host.docker.internal:4000"),
+    ("smol_vm", "http://host.smolvm.internal:4000"), ("modal", "http://localhost:4000"), (None, "http://localhost:4000"),
 ])
-def test_only_a_local_container_reaches_this_machine_by_another_name(sandbox_type, expected):
+def test_a_local_or_smol_vm_container_reaches_this_machine_by_another_name(sandbox_type, expected):
     assert host_url_for("http://localhost:4000", sandbox_type) == expected
 
 

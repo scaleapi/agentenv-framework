@@ -36,6 +36,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_VM,
     SandboxProvider,
     refuse_unenforceable_policy,
+    _sandbox_provider_class,
 )
 from agent_env.store.object_store.local.tls import local_ca
 from agent_env.store.object_store.local.store import LocalFilesystemObjectStore
@@ -216,6 +217,9 @@ class LocalSandbox(VmSandbox):
 
     def _rewrite_app_script(self, script: str) -> str:
         return _APP_PATH_PATTERN.sub(lambda _: str(self._work_dir), script)
+
+    async def copy_trust_dir_into_container(self, trust_dir: Path, container: str, destination: str) -> None:
+        await asyncio.to_thread(_copy_into_container, trust_dir, container, destination)
 
     async def terminate(self) -> None:
         """Tear down whatever this sandbox is running.
@@ -465,7 +469,7 @@ async def start_trusting(sandbox: VmSandbox, container: str, trust_dir: Path) ->
     """Copy ``trust_dir`` into the created ``container`` where ``LOCAL_TRUST_ENV`` points, then start it. A container
     that cannot be given the files or started is removed, so its name is free for the next attempt."""
     try:
-        await asyncio.to_thread(_copy_into_container, trust_dir, container, _TRUST_DIR)
+        await sandbox.copy_trust_dir_into_container(trust_dir, container, _TRUST_DIR)
         await sandbox.exec_script(f"docker start {shlex.quote(container)} > /dev/null")
     except Exception:
         await sandbox.exec_script(f"docker rm -f {shlex.quote(container)} >/dev/null 2>&1 || true")
@@ -643,6 +647,8 @@ class LocalSandboxProvider(SandboxProvider):
 def host_url_for(url: str, sandbox_type: Optional[str]) -> str:
     """``url``, which this machine reaches, as a container on ``sandbox_type`` reaches it: only a local
     sandbox's containers run on this machine, and they reach its loopback by another name."""
+    if sandbox_type == "smol_vm":
+        return _sandbox_provider_class(sandbox_type).get_external_url(url)
     return LocalSandboxProvider.get_external_url(url) if sandbox_type == LocalSandbox.type else url
 
 

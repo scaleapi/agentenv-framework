@@ -38,10 +38,10 @@ def _handshake(server: ssl.SSLContext, *, cafile: Path, hostname: str) -> None:
     raise AssertionError("the handshake did not finish")
 
 
-@pytest.mark.parametrize("hostname", ["host.docker.internal", "localhost", "127.0.0.1"])
+@pytest.mark.parametrize("hostname", ["host.docker.internal", "host.smolvm.internal", "localhost", "127.0.0.1"])
 def test_a_server_certificate_verifies_for_the_names_it_was_made_for(hostname):
     ca = local_ca()
-    context = server_context(ca, ["localhost", "host.docker.internal", "127.0.0.1"])
+    context = server_context(ca, ["localhost", "host.docker.internal", "host.smolvm.internal", "127.0.0.1"])
     _handshake(context, cafile=ca.cert_path, hostname=hostname)
     _handshake(context, cafile=ca.bundle_path, hostname=hostname)
 
@@ -132,7 +132,7 @@ def test_an_unreadable_ca_is_replaced():
 
 
 @pytest.mark.parametrize("host", [
-    "localhost", "host.docker.internal", "a.localhost", "127.0.0.1", "172.17.0.1", "192.168.5.2", "10.0.0.8",
+    "localhost", "host.docker.internal", "host.smolvm.internal", "a.localhost", "127.0.0.1", "172.17.0.1", "192.168.5.2", "10.0.0.8",
     "::1", "fd00::1",
 ])
 def test_local_hosts_are_accepted(host):

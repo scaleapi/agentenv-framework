@@ -194,7 +194,9 @@ class LocalFilesystemObjectStore(ObjectStore):
         return path.relative_to(root).as_posix()
 
     def grants_reach(self, sandbox_type: str | None) -> bool:
-        return sandbox_type == _LOCAL_SANDBOX_TYPE
+        return sandbox_type == _LOCAL_SANDBOX_TYPE or (
+            sandbox_type == "smol_vm" and self._grant_bind_host in (None, "127.0.0.1")
+        )
 
     def issue_read_grant(self, object_url: str, *, expires_in: int | None = None) -> HttpGetGrant:
         expires_in = self.grant_lifetime_seconds if expires_in is None else expires_in
