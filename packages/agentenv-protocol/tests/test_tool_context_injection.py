@@ -182,17 +182,17 @@ async def test_header_fallback_and_default_blank_roles():
     headers = {ROLE_HEADER: "hdr", "mcp-session-id": "sid"}
 
     await call("whoami_sync", {}, context=_request_context(headers=headers))
-    assert env.seen[-1][0].caller == Caller("hdr", "sid", "hdr")
+    assert env.seen[-1][0].caller == Caller("hdr", "sid")
     await call("whoami_sync", {}, context=_request_context({ROLE_META_KEY: "meta", SESSION_META_KEY: "s-meta"}, headers))
-    assert env.seen[-1][0].caller == Caller("meta", "s-meta", "meta")
+    assert env.seen[-1][0].caller == Caller("meta", "s-meta")
     await call("whoami_sync", {}, context=_request_context({ROLE_META_KEY: "default"}, headers))
-    assert env.seen[-1][0].caller == Caller(None, None, "default")
+    assert env.seen[-1][0].caller == Caller()
     await call("whoami_sync", {}, context=_request_context({ROLE_META_KEY: "   "}, None))
     assert env.seen[-1][0].caller.role is None
 
     async with create_connected_server_and_client_session(app) as session:
         result = await session.call_tool("whoami_sync", {}, meta={ROLE_META_KEY: "default"})
-    assert result.content[0].text == "-" and env.seen[-1][0].caller.raw_role == "default"
+    assert result.content[0].text == "-" and env.seen[-1][0].caller == Caller()
 
 
 def _refusal() -> CallToolResult:
@@ -418,8 +418,8 @@ async def test_direct_caller_over_streamable_http_gets_the_header_role_and_its_o
                     sid = session_id()
     assert sid and result.content[0].text == "grader" and forwarded.content[0].text == "bob"
     direct, proxied = env.seen[-2][0], env.seen[-1][0]
-    assert direct.caller == Caller("grader", sid, "grader")
-    assert proxied.caller == Caller("bob", None, "bob")  # a _meta role entry: the connection's id is not the caller's
+    assert direct.caller == Caller("grader", sid)
+    assert proxied.caller == Caller("bob")  # a _meta role entry: the connection's id is not the caller's
 
 
 def _app_shape(app: FastMCP) -> tuple:

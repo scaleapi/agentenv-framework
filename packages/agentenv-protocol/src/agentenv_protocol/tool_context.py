@@ -75,17 +75,11 @@ class Caller:
 
     ``role`` is the role the agent was deployed with, normalised: None when
     nothing was forwarded or the gateway's default role came through.
-    ``raw_role`` is what was received before normalisation, for logs.
     ``session`` tells callers apart when the gateway shares one connection.
     """
 
     role: Optional[str] = None
     session: Optional[str] = None
-    raw_role: Optional[str] = None
-
-    @property
-    def is_forwarded(self) -> bool:
-        return self.role is not None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -135,7 +129,7 @@ class ToolContext:
         """A context for code that acts as ``role`` outside any dispatch (a test calling a handler
         directly, a seeding script, an operator helper), to bind with :func:`bound`. The role is
         normalised as the builders normalise it."""
-        return cls(caller=Caller(role=normalize_role(role), session=session, raw_role=role), tool=tool,
+        return cls(caller=Caller(role=normalize_role(role), session=session), tool=tool,
                    arguments=_frozen(arguments), call_id=uuid.uuid4().hex)
 
 
@@ -178,8 +172,7 @@ def caller_from_request(meta_extra: Optional[Mapping[str, Any]], headers: Any) -
     session = meta.get(SESSION_META_KEY)
     if not isinstance(session, str) or not session:
         session = None if forwarded or headers is None else headers.get("mcp-session-id")
-    raw_role = raw_role if isinstance(raw_role, str) else None
-    return Caller(role=normalize_role(raw_role), session=session or None, raw_role=raw_role)
+    return Caller(role=normalize_role(raw_role), session=session or None)
 
 
 def context_from_mcp(context: Any, tool: str, arguments: Mapping[str, Any]) -> ToolContext:

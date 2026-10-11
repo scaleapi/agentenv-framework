@@ -99,12 +99,12 @@ def test_current_is_empty_outside_a_call_and_bound_restores():
 def test_caller_from_request_precedence():
     headers = {ROLE_HEADER: "hdr", "mcp-session-id": "sid"}
     assert caller_from_request({ROLE_META_KEY: "meta"}, headers).role == "meta"
-    assert caller_from_request({}, headers) == Caller("hdr", "sid", "hdr")
-    assert caller_from_request(None, headers) == Caller("hdr", "sid", "hdr")
+    assert caller_from_request({}, headers) == Caller("hdr", "sid")
+    assert caller_from_request(None, headers) == Caller("hdr", "sid")
     assert caller_from_request({SESSION_META_KEY: "s-meta"}, headers).session == "s-meta"
     assert caller_from_request({SESSION_META_KEY: ""}, headers).session == "sid"
     assert caller_from_request({SESSION_META_KEY: 7}, headers).session == "sid"
-    assert caller_from_request({ROLE_META_KEY: "default"}, None) == Caller(None, None, "default")
+    assert caller_from_request({ROLE_META_KEY: "default"}, None) == Caller()
     assert caller_from_request(None, None) == Caller()
 
 
@@ -127,7 +127,7 @@ def test_context_from_mcp_tolerates_every_missing_link():
         request=SimpleNamespace(headers={"mcp-session-id": "s1"}),
     ))
     ctx = context_from_mcp(live, "search", arguments)
-    assert ctx.caller == Caller("bob", None, "bob") and ctx.tool == "search"
+    assert ctx.caller == Caller("bob") and ctx.tool == "search"
     assert ctx.call_id and ctx.arguments == {"q": 1}
     arguments["q"] = 2
     assert ctx.arguments == {"q": 1}
@@ -140,10 +140,10 @@ def test_context_from_http_and_as_caller():
 
     with bound(ToolContext.as_caller("alice", session="s")) as bound_ctx:
         assert ToolContext.current() is bound_ctx
-        assert bound_ctx.caller == Caller("alice", "s", "alice") and bound_ctx.call_id
+        assert bound_ctx.caller == Caller("alice", "s") and bound_ctx.call_id
     assert ToolContext.current() is EMPTY
     with bound(ToolContext.as_caller("default")) as default_ctx:
-        assert default_ctx.role is None and default_ctx.caller.raw_role == "default"
+        assert default_ctx.role is None and default_ctx.caller == Caller()
 
 
 def test_tool_context_slot_detection_by_annotation():
@@ -340,15 +340,15 @@ async def test_extension_slot_binds_rest_caller_from_headers():
 
 def test_caller_from_request_consults_headers_only_when_no_meta_role_entry_exists():
     headers = {ROLE_HEADER: "hdr", "mcp-session-id": "conn"}
-    assert caller_from_request(None, headers) == Caller("hdr", "conn", "hdr")
-    assert caller_from_request({}, headers) == Caller("hdr", "conn", "hdr")
-    assert caller_from_request({SESSION_META_KEY: "s-only"}, headers) == Caller("hdr", "s-only", "hdr")
+    assert caller_from_request(None, headers) == Caller("hdr", "conn")
+    assert caller_from_request({}, headers) == Caller("hdr", "conn")
+    assert caller_from_request({SESSION_META_KEY: "s-only"}, headers) == Caller("hdr", "s-only")
     # a _meta role entry marks a proxied call: blank and default stay unforwarded, the connection id is not the caller's
-    assert caller_from_request({ROLE_META_KEY: ""}, headers) == Caller(None, None, "")
-    assert caller_from_request({ROLE_META_KEY: "default"}, headers) == Caller(None, None, "default")
-    assert caller_from_request({ROLE_META_KEY: "bob"}, headers) == Caller("bob", None, "bob")
-    assert caller_from_request({ROLE_META_KEY: "bob", SESSION_META_KEY: "s1"}, headers) == Caller("bob", "s1", "bob")
-    assert caller_from_request({ROLE_META_KEY: 7, SESSION_META_KEY: ""}, headers) == Caller(None, None, None)
+    assert caller_from_request({ROLE_META_KEY: ""}, headers) == Caller()
+    assert caller_from_request({ROLE_META_KEY: "default"}, headers) == Caller()
+    assert caller_from_request({ROLE_META_KEY: "bob"}, headers) == Caller("bob")
+    assert caller_from_request({ROLE_META_KEY: "bob", SESSION_META_KEY: "s1"}, headers) == Caller("bob", "s1")
+    assert caller_from_request({ROLE_META_KEY: 7, SESSION_META_KEY: ""}, headers) == Caller()
 
 
 def test_tool_context_is_hashable_and_its_arguments_are_read_only():
