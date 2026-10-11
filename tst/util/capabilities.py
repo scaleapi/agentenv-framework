@@ -10,6 +10,7 @@ can assert the skips taken equal the skips declared for its profile.
 
 from __future__ import annotations
 
+import os
 import subprocess
 
 import pytest
@@ -19,7 +20,7 @@ MISSING_CAPABILITY_PREFIX = "agentenv-capability-missing: "
 #: Only the agent-driving paths need a model endpoint.
 MODEL_ENDPOINT = "model_endpoint_configured"
 
-#: The remote sandbox providers (``modal``, ``modal_vm``, ``e2b``, ``sail_vm``) need credentials the resolved
+#: The remote sandbox providers (``modal``, ``modal_vm``, ``e2b``, ``sail_vm``, ``vercel``) need credentials the resolved
 #: config may not carry; the local default never does.
 REMOTE_SANDBOX = "remote_sandbox"
 
@@ -75,16 +76,16 @@ def skip_without_model_endpoint() -> pytest.MarkDecorator:
 
 
 def remote_sandbox_is_available(provider: str) -> bool:
-    """Whether the resolved config can build the ``modal`` / ``modal_vm`` / ``e2b`` / ``sail_vm`` sandbox
+    """Whether the resolved config can build the ``modal`` / ``modal_vm`` / ``e2b`` / ``sail_vm`` / ``vercel`` sandbox
     provider, credentials included.
 
-    Modal: any failure to resolve the credentials answers False. E2B and Sail: building the provider
+    Modal: any failure to resolve the credentials answers False. E2B, Sail and Vercel: building the provider
     resolves ``[sandbox.providers.<name>.config]`` and its ``secret:`` references; only a
     ``ConfigError`` (absent or incomplete config) answers False, any other failure answers True and
     lets the test fail on the real problem, as ``model_endpoint_is_configured`` does."""
-    if provider not in ("modal", "modal_vm", "e2b", "sail_vm"):
+    if provider not in ("modal", "modal_vm", "e2b", "sail_vm", "vercel"):
         raise ValueError(f"unknown remote sandbox provider {provider!r}")
-    if provider in ("e2b", "sail_vm"):
+    if provider in ("e2b", "sail_vm", "vercel"):
         from agent_env.config.errors import ConfigError
         from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider
 
@@ -94,7 +95,20 @@ def remote_sandbox_is_available(provider: str) -> bool:
             return False
         except Exception:
             return True
-        return True
+        if provider != "vercel":
+            return True
+        from agent_env.config import get_config
+
+        vercel = get_config().section("sandbox").get("providers", {}).get("vercel", {})
+        config = vercel.get("config", {}) if isinstance(vercel, dict) else {}
+        if isinstance(config, dict) and all(
+            key in config for key in ("token", "team_id", "project_id")
+        ):
+            return True
+        return bool(os.getenv("VERCEL_OIDC_TOKEN")) or all(
+            os.getenv(name)
+            for name in ("VERCEL_TOKEN", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID")
+        )
     from agent_env.config import get_config
 
     try:

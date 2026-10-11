@@ -180,3 +180,44 @@ def test_sail_availability_follows_the_provider_build(monkeypatch, outcome, avai
 
     monkeypatch.setattr("agent_env.providers.sandbox_providers.sandbox_provider.build_sandbox_provider", build)
     assert capabilities.remote_sandbox_is_available("sail_vm") is available
+
+
+def _fake_vercel_config(monkeypatch, config):
+    monkeypatch.setattr(
+        "agent_env.config.get_config",
+        lambda: type("Cfg", (), {"section": lambda self, _name: {"providers": {"vercel": {"config": config}}}})(),
+    )
+
+
+def test_vercel_is_absent_without_configured_or_ambient_credentials(monkeypatch):
+    monkeypatch.setattr(
+        "agent_env.providers.sandbox_providers.sandbox_provider.build_sandbox_provider",
+        lambda spec: object(),
+    )
+    for name in ("VERCEL_TOKEN", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID"):
+        monkeypatch.delenv(name, raising=False)
+    _fake_vercel_config(monkeypatch, {})
+    assert capabilities.remote_sandbox_is_available("vercel") is False
+
+
+def test_vercel_is_present_with_complete_config_credentials(monkeypatch):
+    monkeypatch.setattr(
+        "agent_env.providers.sandbox_providers.sandbox_provider.build_sandbox_provider",
+        lambda spec: object(),
+    )
+    _fake_vercel_config(
+        monkeypatch,
+        {"token": "secret:vercel_token", "team_id": "team", "project_id": "project"},
+    )
+    assert capabilities.remote_sandbox_is_available("vercel") is True
+
+
+def test_vercel_is_present_with_all_ambient_credential_names(monkeypatch):
+    monkeypatch.setattr(
+        "agent_env.providers.sandbox_providers.sandbox_provider.build_sandbox_provider",
+        lambda spec: object(),
+    )
+    for name in ("VERCEL_TOKEN", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID"):
+        monkeypatch.setenv(name, "configured")
+    _fake_vercel_config(monkeypatch, {})
+    assert capabilities.remote_sandbox_is_available("vercel") is True

@@ -13,6 +13,7 @@ from agent_env.providers.sandbox_providers.sandbox import (
     NetworkPolicyUnsupportedError,
     Sandbox,
 )
+from agent_env.providers.sandbox_providers.vercel.provider import VercelSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 
 RESTRICTIVE = NetworkPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=("only-this.example.com",))
@@ -41,7 +42,9 @@ def test_backends_without_enforcement_refuse_restrictive_policies(provider_cls, 
     assert provider_cls.supports_network_policy(ALLOW_ALL) is True
 
 
-@pytest.mark.parametrize("provider_cls", [ModalSandboxProvider, ModalVmSandboxProvider])
+@pytest.mark.parametrize(
+    "provider_cls", [ModalSandboxProvider, ModalVmSandboxProvider, VercelSandboxProvider]
+)
 @pytest.mark.parametrize("policy", [RESTRICTIVE, ALLOWLIST, ALLOW_ALL])
 def test_modal_backends_advertise_full_support(provider_cls, policy):
     assert provider_cls.supports_network_policy(policy) is True
