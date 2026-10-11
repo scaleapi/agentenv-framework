@@ -84,7 +84,7 @@ class _Scripted:
     def __init__(self) -> None:
         self.requests: list[httpx.Request] = []
         self.sessions = {"s-1"}
-        self.answers: dict = {}
+        self.answers: dict = {"tools/list": {"tools": []}}
 
     async def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -333,8 +333,10 @@ async def test_a_failure_at_the_mcp_level_raises_a_tool_session_error(scripted, 
 
 
 @pytest.mark.asyncio
-async def test_a_listed_tool_without_a_name_raises_a_tool_session_error(scripted):
-    scripted.answers["tools/list"] = {"tools": [{"description": "nameless"}]}
+@pytest.mark.parametrize("result", [{"tools": [{"description": "nameless"}]}, {"tools": 7}, {"tools": None}, {}],
+                         ids=["nameless-tool", "tools-not-a-list", "tools-null", "tools-missing"])
+async def test_a_tools_list_that_cannot_be_read_raises_a_tool_session_error(scripted, result):
+    scripted.answers["tools/list"] = result
     async with ToolSession(_URL) as session:
         with pytest.raises(ToolSessionError, match="tools/list: unreadable result"):
             await session.list_tools()

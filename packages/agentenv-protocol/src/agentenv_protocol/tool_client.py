@@ -112,7 +112,9 @@ class ToolSession:
         params: dict[str, Any] = {}
         while True:
             result = await self._request("tools/list", params)
-            tools += [_validated(EnvironmentTool, tool, "tools/list") for tool in result.get("tools") or []]
+            if not isinstance(result.get("tools"), list):
+                raise ToolSessionError("tools/list: unreadable result: tools is not a list")
+            tools += [_validated(EnvironmentTool, tool, "tools/list") for tool in result["tools"]]
             if not result.get("nextCursor"):
                 return tools
             params = {"cursor": result["nextCursor"]}
