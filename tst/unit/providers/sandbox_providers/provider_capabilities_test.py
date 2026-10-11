@@ -4,6 +4,7 @@ choice that depends on a provider reads what it declares (``ON_THIS_MACHINE``, `
 
 import ast
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import modal
@@ -12,10 +13,13 @@ import pytest
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
 from agent_env.providers.sandbox_providers.e2b.provider import E2BSandboxProvider
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
+from agent_env.providers.sandbox_providers.e2b.sandbox import E2BSandbox
+from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandbox, ModalSandboxProvider
-from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandboxProvider
+from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandbox, ModalVmSandboxProvider
 from agent_env.providers.sandbox_providers.sail_vm.provider import SailVmSandboxProvider
+from agent_env.providers.sandbox_providers.sail_vm.sandbox import SailVmSandbox
+from agent_env.providers.sandbox_providers.sandbox import LINUX_AMD64
 from agent_env.providers.sandbox_providers.sandbox_provider import Accepts, SandboxProvider
 
 SRC = Path(__file__).resolve().parents[4] / "src" / "agent_env"
@@ -104,13 +108,18 @@ WITH_TAR_GZ = DockerImageArtifact(id="img", version=2, description="d", image_na
 HERE = "is in a registry on this machine, which a sandbox elsewhere can't pull from"
 
 
+def _on(on_this_machine: bool = False, platforms: frozenset[str] | None = None) -> SimpleNamespace:
+    """A sandbox or provider, as far as what it declares about where it runs and what."""
+    return SimpleNamespace(ON_THIS_MACHINE=on_this_machine, PLATFORMS=platforms)
+
+
 @pytest.mark.parametrize("image, accepts, problem", [
     (CONTEXT_ONLY, LOADABLE, None), (CONTEXT_ONLY, NAME_OR_CONTEXT, None), (CONTEXT_ONLY, NAME, "only a build context"),
     (NO_REGISTRY, LOADABLE, "doesn't name a registry"), (NO_REGISTRY, NAME, None), (NO_REGISTRY, NAME_OR_CONTEXT, None),
 ])
-@pytest.mark.parametrize("on_this_machine", [True, False])
-def test_an_image_is_refused_by_the_form_its_provider_accepts(image, accepts, problem, on_this_machine):
-    found = accepts.problem(image, on_this_machine=on_this_machine)
+@pytest.mark.parametrize("on", [None, _on(True), _on(False), _on(False, LINUX_AMD64)])
+def test_an_image_is_refused_by_the_form_its_provider_accepts(image, accepts, problem, on):
+    found = accepts.problem(image, on=on)
     assert (found is None) if problem is None else (problem in found)
 
 
@@ -121,10 +130,50 @@ def test_an_image_is_refused_by_the_form_its_provider_accepts(image, accepts, pr
 ])
 def test_a_sandbox_elsewhere_cant_pull_from_this_machines_registry_and_one_on_it_can(image, accepts, problem):
     """A VM loads an image's tar.gz, which agent-env pushes to it, and pulls one only when it has none."""
-    found = accepts.problem(image, on_this_machine=False)
+    found = accepts.problem(image, on=_on(False))
     assert (found is None) if problem is None else (problem in found)
-    assert accepts.problem(image, on_this_machine=True) is None
+    assert accepts.problem(image, on=_on(True)) is None
     assert accepts.problem(image) is None  # a caller that doesn't say gets the check as it was
+
+
+ARM64_TAR_GZ = DockerImageArtifact(id="img", version=2, description="d", image_name="img:v2", platform="linux/arm64",
+                                   tar_gz_object_url="file:///state/img.tar.gz")
+ARM64_PULLED = DockerImageArtifact(id="img", version=2, description="d", platform="linux/arm64",
+                                   image_name="123456789012.dkr.ecr.us-west-2.amazonaws.com/img:v2")
+ARM64_CONTEXT = DockerImageArtifact(id="img", version=2, description="d", image_name="local/img-0123456789ab:v2",
+                                    build_context_object_url="s3://bucket/ctx.tar.gz", platform="linux/arm64")
+ARM64 = "'img' v2 is a linux/arm64 image, and the sandbox runs linux/amd64"
+
+
+@pytest.mark.parametrize("image, accepts, problem", [
+    (ARM64_TAR_GZ, LOADABLE, ARM64), (ARM64_PULLED, LOADABLE, ARM64), (ARM64_PULLED, NAME, ARM64),
+    (ARM64_PULLED, NAME_OR_CONTEXT, ARM64),
+    (ARM64_CONTEXT, LOADABLE, ARM64),  # a VM builds it for the platform it records
+    (ARM64_CONTEXT, NAME_OR_CONTEXT, None),  # a provider that builds it does so for a platform of its own
+])
+def test_a_sandbox_declaring_its_platforms_runs_only_images_of_one_of_them(image, accepts, problem):
+    assert accepts.problem(image, on=_on(False, LINUX_AMD64)) == problem
+    assert accepts.problem(image, on=_on(False, frozenset({"linux/amd64", "linux/arm64"}))) is None
+    assert accepts.problem(image, on=_on(False)) is None  # one that declares none isn't checked
+
+
+def test_an_image_that_records_no_platform_isnt_checked():
+    image = DockerImageArtifact(id="img", version=2, description="d", image_name="img:v2",
+                                tar_gz_object_url="s3://bucket/img.tar.gz")
+    assert image.platform is None and LOADABLE.problem(image, on=_on(False, frozenset({"linux/arm64"}))) is None
+
+
+@pytest.mark.parametrize("provider, sandbox", [
+    (ModalSandboxProvider, ModalSandbox), (ModalVmSandboxProvider, ModalVmSandbox), (E2BSandboxProvider, E2BSandbox),
+    (SailVmSandboxProvider, SailVmSandbox),
+])
+def test_the_remote_providers_and_their_sandboxes_declare_they_run_linux_amd64(provider, sandbox):
+    assert provider.PLATFORMS == sandbox.PLATFORMS == LINUX_AMD64
+
+
+def test_the_local_provider_declares_no_platform_since_its_docker_emulates_others():
+    assert LocalSandboxProvider.PLATFORMS is None and LocalSandbox.PLATFORMS is None
+    assert SandboxProvider.PLATFORMS is None  # a plugin's provider that declares nothing isn't checked
 
 
 def _concrete_classes() -> set[str]:

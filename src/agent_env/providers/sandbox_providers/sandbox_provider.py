@@ -44,14 +44,17 @@ class Accepts(Enum):
     NAME = "name"  # one it starts by its name, which an image that is only a build context gets only from a build
     NAME_OR_CONTEXT = "name_or_context"  # one it starts by its name, or a build context it builds first (prepare_image)
 
-    def problem(self, image: DockerImageArtifact, *, on_this_machine: bool = True) -> str | None:
-        """Why a provider that accepts these, and whose sandboxes are ``on_this_machine`` or not, can't run ``image``,
-        or None when it can."""
+    def problem(self, image: DockerImageArtifact, *, on: SandboxProvider | Sandbox | None = None) -> str | None:
+        """Why a provider that accepts these can't run ``image`` on ``on``, the provider or one of its sandboxes, or
+        None when it can: one not on this machine can't pull from a registry on it, and one that declares its
+        platforms runs only images of one of them. With no ``on``, neither is checked."""
+        on_this_machine = on is None or on.ON_THIS_MACHINE
+        platforms = None if on is None else on.PLATFORMS
         if self is Accepts.LOADABLE:
-            return image.load_problem(on_this_machine=on_this_machine)
+            return image.load_problem(on_this_machine=on_this_machine, platforms=platforms)
         if self is Accepts.NAME_OR_CONTEXT and image.context_only:
-            return None
-        return image.by_name_problem(on_this_machine=on_this_machine)
+            return None  # the provider builds it, for a platform of its own
+        return image.by_name_problem(on_this_machine=on_this_machine, platforms=platforms)
 
 
 class SandboxProvider(ABC):
@@ -167,7 +170,8 @@ class SandboxProvider(ABC):
     URL_REWRITES: ClassVar[dict[str, str]] = {}
 
     # What it declares, which nothing outside the providers reads any other way. A provider that declares nothing runs
-    # each image from its name, in a sandbox that isn't on this machine, and creates no VM and no private network.
+    # each image from its name, in a sandbox that isn't on this machine, and creates no VM and no private network; its
+    # images' platforms aren't checked.
     #
     # Whether its sandboxes run on this machine: an image only this machine holds (in a registry or object store on
     # it) reaches them, its containers need this machine's Docker, and a gateway's infra envs are built here for it.
@@ -179,6 +183,10 @@ class SandboxProvider(ABC):
     CONTAINER_ACCEPTS: ClassVar[Accepts] = Accepts.NAME
     # Whether create_container(private_network=True) puts containers on a network they share.
     PRIVATE_NETWORK: ClassVar[bool] = False
+    # The platforms its sandboxes run images of (``linux/amd64``), which its sandbox classes declare too; None,
+    # undeclared, is never checked, as for the local provider, whose Docker runs this machine's and emulates others
+    # where it's set up.
+    PLATFORMS: ClassVar[frozenset[str] | None] = None
 
     @property
     def links(self) -> tuple[SandboxProvider, ...]:

@@ -15,6 +15,7 @@ import uuid
 from dataclasses import dataclass
 from importlib.metadata import version as pkg_version
 from pathlib import Path
+from collections.abc import Collection
 from typing import Any, Callable, ClassVar, Literal
 from urllib.parse import urlparse
 
@@ -274,24 +275,34 @@ class DockerImageArtifact(Artifact):
         tag the image's build gives it."""
         return bool(self.build_context_object_url) and not self.tar_gz_object_url and not names_registry(self.image_name)
 
-    def load_problem(self, *, on_this_machine: bool = True) -> str | None:
+    def load_problem(self, *, on_this_machine: bool = True, platforms: Collection[str] | None = None) -> str | None:
         """Why a VM sandbox can't get this image, or None when it can: a tar.gz is loaded, an image with none is pulled
         when its name names a registry, one that a VM ``on_this_machine`` or not reaches, and built from its build
-        context when it has only that."""
+        context when it has only that; and a VM declaring ``platforms`` runs only an image of one of them."""
         if self.tar_gz_object_url or self.context_only:
-            return None
+            return self.platform_problem(platforms)
         if names_registry(self.image_name):
-            return pull_problem(self.image_name, on_this_machine=on_this_machine)
+            return pull_problem(self.image_name, on_this_machine=on_this_machine) or self.platform_problem(platforms)
         return (f"{self.id!r} v{self.version} has no tar.gz, and its image name {self.image_name!r} doesn't name a "
                 "registry to pull it from")
 
-    def by_name_problem(self, *, on_this_machine: bool = True) -> str | None:
+    def by_name_problem(self, *, on_this_machine: bool = True, platforms: Collection[str] | None = None) -> str | None:
         """Why a sandbox that runs an image by pulling its name can't run this one, or None when it can: a context-only
         image's name is a tag only its build gives it, a VM sandbox's or Modal's, and pulled, it would be looked up on
-        Docker Hub; and a sandbox not ``on_this_machine`` can't pull from a registry on this machine."""
+        Docker Hub; a sandbox not ``on_this_machine`` can't pull from a registry on this machine; and one declaring
+        ``platforms`` runs only an image of one of them."""
         if self.context_only:
             return f"{self.id!r} v{self.version} is only a build context, which has to be built, not pulled"
-        return pull_problem(self.image_name, on_this_machine=on_this_machine)
+        return pull_problem(self.image_name, on_this_machine=on_this_machine) or self.platform_problem(platforms)
+
+    def platform_problem(self, platforms: Collection[str] | None) -> str | None:
+        """Why a sandbox that runs only images of ``platforms`` can't run this one, or None when it can: an image runs
+        on the platform it records, the one it's built for. One that records none, or a sandbox that declares none,
+        isn't checked."""
+        if platforms is None or self.platform is None or self.platform in platforms:
+            return None
+        runs = ", ".join(sorted(platforms))
+        return f"{self.id!r} v{self.version} is a {self.platform} image, and the sandbox runs {runs}"
 
     @classmethod
     async def put_from_github(

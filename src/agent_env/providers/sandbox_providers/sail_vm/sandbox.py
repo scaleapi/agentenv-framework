@@ -21,7 +21,13 @@ from agent_env.providers.sandbox_providers.sail_vm.model_key import (
     carries_model_key,
     docker_shim,
 )
-from agent_env.providers.sandbox_providers.sandbox import CURL_RETRY_FLAGS, NetworkMode, NetworkPolicy, VmSandbox
+from agent_env.providers.sandbox_providers.sandbox import (
+    CURL_RETRY_FLAGS,
+    LINUX_AMD64,
+    NetworkMode,
+    NetworkPolicy,
+    VmSandbox,
+)
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_VM
 
 logger = logging.getLogger(__name__)
@@ -230,6 +236,7 @@ class SailVmSandbox(VmSandbox):
     ``refuse_model_keys``, one that still carries a model key (one Sail doesn't inject here) is refused."""
 
     type = "sail_vm"
+    PLATFORMS = LINUX_AMD64
     _DOCKER_PROBE_TIMEOUT = 10
 
     def __init__(

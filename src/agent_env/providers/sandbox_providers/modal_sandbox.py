@@ -17,7 +17,7 @@ import modal
 
 from agent_env.attribution import PIPELINE_STEP_KEY, RUN_ID_KEY, Attribution
 from agent_env.config import get_config
-from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy, Sandbox
+from agent_env.providers.sandbox_providers.sandbox import LINUX_AMD64, NetworkMode, NetworkPolicy, Sandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_CONTAINER,
     Accepts,
@@ -107,6 +107,7 @@ class _ModalProcessAdapter:
 
 class ModalSandbox(Sandbox):
     type = "modal"
+    PLATFORMS = LINUX_AMD64
 
     def __init__(self, sb: modal.Sandbox, tunnel_urls: dict[int, str], i6pn_address: Optional[str] = None,
                  network_policy: NetworkPolicy | None = None):
@@ -193,6 +194,7 @@ class ModalSandboxProvider(SandboxProvider):
     # containers share i6pn, Modal's private network.
     SANDBOX_ACCEPTS = CONTAINER_ACCEPTS = Accepts.NAME_OR_CONTEXT
     PRIVATE_NETWORK = True
+    PLATFORMS = LINUX_AMD64  # Modal runs x86-64 hosts
 
     @classmethod
     def supports_network_policy(cls, policy: NetworkPolicy) -> bool:

@@ -146,9 +146,9 @@ class _LocalPulls(LocalSandboxProvider):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("provider, image, refusal", [
-    (_VmProvider(), PULLED_HERE, f"with _VmProvider, whose VMs can't get it: {HERE}"),
+    (_VmProvider(), PULLED_HERE, f"with _VmProvider, whose VMs can't run it: {HERE}"),
     (_ModalProvider(), PULLED_HERE, f"with _ModalProvider, which runs an agent's image by name: {HERE}"),
-    (_VmProvider(), NO_REGISTRY, "with _VmProvider, whose VMs can't get it: 'solver-image' v2 has no tar.gz, and its "
+    (_VmProvider(), NO_REGISTRY, "with _VmProvider, whose VMs can't run it: 'solver-image' v2 has no tar.gz, and its "
                                  "image name 'solver:v2' doesn't name a registry to pull it from"),
 ], ids=["vm-elsewhere", "modal", "vm-nothing-to-pull"])
 async def test_an_image_a_provider_cant_get_is_refused_before_anything_is_created(monkeypatch, local_stores, litellm,

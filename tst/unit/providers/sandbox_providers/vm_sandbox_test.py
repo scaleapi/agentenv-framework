@@ -10,7 +10,7 @@ import pytest
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.providers.sandbox_providers import sandbox as sandbox_module
-from agent_env.providers.sandbox_providers.sandbox import VmSandbox
+from agent_env.providers.sandbox_providers.sandbox import LINUX_AMD64, VmSandbox
 from agent_env.store import ImageStore, RegistryAuth, set_object_store
 from agent_env.config import get_config, reset_config
 from tst.unit.store.fakes import ConfiguredObjectStore
@@ -214,6 +214,28 @@ async def test_a_vm_on_this_machine_pulls_from_its_registry_and_one_elsewhere_lo
     elsewhere = _RecordingVmSandbox(images_stdout="localhost:5000/local/img\n")
     await elsewhere.load_docker_images([_image("s3://bucket/a.tar.gz", "localhost:5000/local/img:v1")])
     assert "docker load" in elsewhere.scripts[0] and "docker pull" not in elsewhere.scripts[0]
+
+
+class _AmdVm(_RecordingVmSandbox):
+    """A VM sandbox that declares it runs linux/amd64, as the remote providers' do."""
+
+    PLATFORMS = LINUX_AMD64
+
+
+@pytest.mark.asyncio
+async def test_a_vm_declaring_its_platforms_refuses_a_tar_gz_for_another_before_anything_is_loaded(signing_store):
+    arm64 = DockerImageArtifact(id="img", version=1, description="d", image_name="img:v1", platform="linux/arm64",
+                                tar_gz_object_url="s3://bucket/img.tar.gz")
+
+    amd = _AmdVm()
+    with pytest.raises(RuntimeError, match="Can't load images: 'img' v1 is a linux/arm64 image, and the sandbox runs "
+                                           "linux/amd64"):
+        await amd.load_docker_images([arm64])
+    assert amd.scripts == []
+
+    undeclared = _RecordingVmSandbox(images_stdout="img\n")
+    await undeclared.load_docker_images([arm64])
+    assert "docker load" in undeclared.scripts[0]
 
 
 @pytest.mark.asyncio

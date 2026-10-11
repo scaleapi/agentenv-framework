@@ -52,6 +52,7 @@ from agent_env.providers.env_providers.env_provider import _env_provider_class
 from agent_env.providers.env_providers.env_server_provider import EnvironmentServerProvider
 from agent_env.providers.env_state.env_state_provider import LOCAL_POSTGRES_STATE_TYPE
 from agent_env.providers.env_state.store import get_env_state_instance_store
+from agent_env.providers.sandbox_providers.sandbox import LINUX_AMD64
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     Accepts,
     SandboxProvider,
@@ -338,13 +339,13 @@ class _Walk:
     def _check(self, where: str, provider: SandboxProvider, accepts: Callable[[SandboxProvider], Accepts],
                images: list[_Image], *, vms_load: bool) -> None:
         """Check ``images`` on each provider a deploy may run on, as ``accepts`` says the deploy runs them there, and
-        that one not on this machine reaches each; ``vms_load`` when the deploy loads images on a VM provider, as an
-        agent's and a gateway's do. An image the bundle builds is noted with them, for ``_contexts`` to choose its
-        form."""
+        that one not on this machine reaches each and one declaring its platforms runs each; ``vms_load`` when the
+        deploy loads images on a VM provider, as an agent's and a gateway's do. An image the bundle builds is noted with
+        them, for ``_contexts`` to choose its form."""
         links = list(provider.links)
-        checked: set[tuple[Accepts, bool]] = set()
-        for link in links:  # the first link of each form, on this machine and off it
-            if (key := (accepts(link), link.ON_THIS_MACHINE)) not in checked:
+        checked: set[tuple[Accepts, bool, frozenset[str] | None]] = set()
+        for link in links:  # the first link of each form, where it runs and what it runs
+            if (key := (accepts(link), link.ON_THIS_MACHINE, link.PLATFORMS)) not in checked:
                 checked.add(key)
                 self._accepted(where, link, key[0], images, vms_load=vms_load)
         for image in images:
@@ -352,20 +353,29 @@ class _Walk:
                 self.uses.setdefault(image.built, []).append((where, image.what, links, accepts))
 
     def _accepted(self, where: str, link: SandboxProvider, form: Accepts, images: list[_Image], *,
-                  vms_load: bool) -> None:
+                  vms_load: bool, put: str | None = None) -> None:
         """Refuse each of ``images`` a deploy can't run on ``link``, which takes images in ``form``, with the check the
         deploy makes (``Accepts.problem``): a VM loads an image's tar.gz, or pulls an image with none when its name
         names a registry it reaches, and a provider that runs an image by name can't run one that is only a build
         context, whose name is a tag only its build gives it, nor, from elsewhere, pull one from this machine's
-        registry."""
+        registry; and a provider declaring its platforms runs only an image of one of them. ``put`` is the command that
+        puts the image again, when there is one."""
         for image in images:
             if image.artifact is None:
                 continue
-            if (refusal := form.problem(image.artifact, on_this_machine=link.ON_THIS_MACHINE)) is None:
+            if (refusal := form.problem(image.artifact, on=link)) is None:
+                continue
+            if refusal == image.artifact.platform_problem(link.PLATFORMS):
+                platform = sorted(link.PLATFORMS)[0]
+                again = f"`{put} --platform {platform}`" if put else f"--platform {platform} on its put command"
+                self._problem(where, f"deploys {image.what} on the {_shown(link)} sandbox provider: {refusal}; put it "
+                                     f"again for {' or '.join(sorted(link.PLATFORMS))} ({again}), or run it with "
+                                     "--sandbox local")
                 continue
             if form.problem(image.artifact) is None:  # refused only because the sandbox isn't on this machine
                 loads = (", or on a provider whose VMs load its tar.gz, such as --sandbox modal_vm"
-                         if vms_load and image.artifact.tar_gz_object_url and form is not Accepts.LOADABLE else "")
+                         if vms_load and image.artifact.tar_gz_object_url and form is not Accepts.LOADABLE
+                         and image.artifact.platform_problem(LINUX_AMD64) is None else "")
                 self._problem(where, f"deploys {image.what} on the {_shown(link)} sandbox provider: {refusal}; run it "
                                      f"with --sandbox local{loads}")
                 continue
@@ -393,7 +403,7 @@ class _Walk:
                           env.db_mcp_docker_image_artifact] if isinstance(env, ServiceDBEnv) else [env.docker_image_artifact])
             images = [_Image(f"the {kind} env {env_id!r}'s image {image.id!r}", image) for image in artifacts]
             accepts = EnvironmentGatewayProvider.accepts(provider, prepared=kind == GATEWAY)
-            self._accepted(where, provider, accepts, images, vms_load=True)
+            self._accepted(where, provider, accepts, images, vms_load=True, put=put_command(kind))
 
     def _contexts(self) -> frozenset[str]:
         """The images the bundle builds that it writes as build contexts: those every deploy runs on providers that

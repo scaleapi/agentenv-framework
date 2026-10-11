@@ -38,7 +38,7 @@ from agent_env.providers.env_providers.env_gateway_provider import (
 )
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
-from agent_env.providers.sandbox_providers.sandbox import Sandbox
+from agent_env.providers.sandbox_providers.sandbox import LINUX_AMD64, Sandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import Accepts
 from agent_env.providers.env_state import LocalPostgresStateProvider
 from agent_env.config import get_config, set_document_store
@@ -254,7 +254,7 @@ async def test_a_vm_gateway_refuses_an_image_its_vm_cant_get_before_creating_the
     provider = _vm_provider(create_vm=AsyncMock(side_effect=AssertionError("created a VM")))
 
     with patch("agent_env.env.env.Env.get", return_value=MagicMock(docker_image_artifact=pick["gateway"])):
-        with pytest.raises(ValueError, match="whose VM can't get its images: localhost:5000/local/here:v1 is in a "
+        with pytest.raises(ValueError, match="whose VM can't run its images: localhost:5000/local/here:v1 is in a "
                                              "registry on this machine"):
             await gp._deploy_via_vm(
                 sandbox_provider=provider, mcp_servers=[MCPServerConfig(image="server", environment_name="slack")],
@@ -262,6 +262,27 @@ async def test_a_vm_gateway_refuses_an_image_its_vm_cant_get_before_creating_the
                 gateway_mode=GatewayMode.PERFORMANCE, ttl_seconds=60, disk_size_gb=10,
                 sidecars=[SidecarConfig(environment_name="relay", image_artifact=pick["sidecar"], container_port=8000,
                                         host_port=18768)],
+            )
+    provider.create_vm.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_vm_gateway_refuses_an_image_for_a_platform_its_provider_doesnt_declare_before_creating_the_vm():
+    from agent_env.env.gateway import GatewayMode
+
+    arm64 = DockerImageArtifact(id="arm", description="d", image_name="arm:v1", platform="linux/arm64",
+                                tar_gz_object_url="s3://bucket/arm.tar.gz")
+    gp = EnvironmentGatewayProvider()
+    gp._state_provider = MagicMock()
+    provider = _vm_provider(PLATFORMS=LINUX_AMD64, create_vm=AsyncMock(side_effect=AssertionError("created a VM")))
+
+    with patch("agent_env.env.env.Env.get", return_value=MagicMock(docker_image_artifact=_loadable("gateway"))):
+        with pytest.raises(ValueError, match="whose VM can't run its images: 'arm' v0 is a linux/arm64 image, and the "
+                                             "sandbox runs linux/amd64"):
+            await gp._deploy_via_vm(
+                sandbox_provider=provider, mcp_servers=[MCPServerConfig(image="arm:v1", environment_name="slack")],
+                mcp_server_images=[arm64], gateway_port=18765, website_configs=None, website_images=None,
+                gateway_mode=GatewayMode.PERFORMANCE, ttl_seconds=60, disk_size_gb=10,
             )
     provider.create_vm.assert_not_awaited()
 
