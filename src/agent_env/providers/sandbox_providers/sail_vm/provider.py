@@ -134,7 +134,6 @@ class SailVmSandboxProvider(SandboxProvider):
     Sail adds it to the agent's requests to the model endpoint (see ``model_key``)."""
 
     EGRESS_HOSTS: ClassVar[tuple[str, ...]] = ("*.sail.box",)
-    CREATES_VMS = True
     SANDBOX_ACCEPTS = Accepts.LOADABLE  # a sandbox is a VM, which loads the image; a container pulls it by name
 
     def __init__(

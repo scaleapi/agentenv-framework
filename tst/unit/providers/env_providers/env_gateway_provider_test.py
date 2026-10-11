@@ -38,7 +38,7 @@ from agent_env.providers.env_providers.env_gateway_provider import (
 )
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
-from agent_env.providers.sandbox_providers.sandbox import LINUX_AMD64, Sandbox
+from agent_env.providers.sandbox_providers.sandbox import Sandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import Accepts
 from agent_env.providers.env_state import LocalPostgresStateProvider
 from agent_env.config import get_config, set_document_store
@@ -48,6 +48,7 @@ from tst.unit.providers.env_state.fakes import (  # noqa: F401  (fixture)
     EXTERNAL_STATE_TYPE,
     registered_external_provider,
 )
+from tst.util.sandbox_providers import CONTAINERS, VMS_AND_CONTAINERS
 
 
 def _image(image_name: str) -> DockerImageArtifact:
@@ -108,9 +109,9 @@ class _FakeSandbox(Sandbox):
 
 
 @pytest.mark.parametrize("facts, in_vm, accepts, by_name_otherwise", [
-    ({"CREATES_VMS": True, "CONTAINER_ACCEPTS": Accepts.NAME}, True, Accepts.LOADABLE, Accepts.LOADABLE),
-    ({"CREATES_VMS": False, "CONTAINER_ACCEPTS": Accepts.NAME_OR_CONTEXT}, False, Accepts.NAME_OR_CONTEXT, Accepts.NAME),
-    ({"CREATES_VMS": False, "CONTAINER_ACCEPTS": Accepts.NAME}, False, Accepts.NAME, Accepts.NAME),
+    ({"SUPPORTED_SANDBOX_MODES": VMS_AND_CONTAINERS, "CONTAINER_ACCEPTS": Accepts.NAME}, True, Accepts.LOADABLE, Accepts.LOADABLE),
+    ({"SUPPORTED_SANDBOX_MODES": CONTAINERS, "CONTAINER_ACCEPTS": Accepts.NAME_OR_CONTEXT}, False, Accepts.NAME_OR_CONTEXT, Accepts.NAME),
+    ({"SUPPORTED_SANDBOX_MODES": CONTAINERS, "CONTAINER_ACCEPTS": Accepts.NAME}, False, Accepts.NAME, Accepts.NAME),
 ], ids=["vm", "containers-that-build", "containers-by-name"])
 def test_a_gateway_runs_in_a_vm_where_its_provider_creates_them_and_else_in_containers(facts, in_vm, accepts,
                                                                                          by_name_otherwise):
@@ -124,10 +125,10 @@ def test_a_gateway_runs_in_a_vm_where_its_provider_creates_them_and_else_in_cont
 
 
 @pytest.mark.parametrize("facts, websites, problem", [
-    ({"CREATES_VMS": True, "PRIVATE_NETWORK": False}, True, None),
-    ({"CREATES_VMS": False, "PRIVATE_NETWORK": True}, False, None),
-    ({"CREATES_VMS": False, "PRIVATE_NETWORK": True}, True, "they can't serve websites"),
-    ({"CREATES_VMS": False, "PRIVATE_NETWORK": False}, False, "can't put the gateway's containers on a private network"),
+    ({"SUPPORTED_SANDBOX_MODES": VMS_AND_CONTAINERS, "PRIVATE_NETWORK": False}, True, None),
+    ({"SUPPORTED_SANDBOX_MODES": CONTAINERS, "PRIVATE_NETWORK": True}, False, None),
+    ({"SUPPORTED_SANDBOX_MODES": CONTAINERS, "PRIVATE_NETWORK": True}, True, "they can't serve websites"),
+    ({"SUPPORTED_SANDBOX_MODES": CONTAINERS, "PRIVATE_NETWORK": False}, False, "can't put the gateway's containers on a private network"),
 ], ids=["vm-with-websites", "containers", "containers-with-websites", "containers-without-a-private-network"])
 def test_a_gateway_in_containers_needs_their_private_network_and_serves_no_websites(facts, websites, problem):
     found = EnvironmentGatewayProvider.sandbox_problem(MagicMock(**facts), websites=websites)
@@ -136,7 +137,7 @@ def test_a_gateway_in_containers_needs_their_private_network_and_serves_no_websi
 
 @pytest.mark.asyncio
 async def test_a_gateway_deploy_on_a_provider_with_no_vm_and_no_private_network_creates_nothing():
-    provider = MagicMock(CREATES_VMS=False, PRIVATE_NETWORK=False, create_container=AsyncMock())
+    provider = MagicMock(SUPPORTED_SANDBOX_MODES=CONTAINERS, PRIVATE_NETWORK=False, create_container=AsyncMock())
 
     with pytest.raises(ValueError, match="private network"):
         await EnvironmentGatewayProvider()._deploy_gateway(provider, state_instance=None, mcp_servers=[],
@@ -160,7 +161,7 @@ async def test_container_mode_rejects_websites():
 
 def _vm_provider(**attrs) -> MagicMock:
     """A sandbox provider that creates VMs, where a gateway runs, as every VM provider does."""
-    provider = MagicMock(ON_THIS_MACHINE=False, CREATES_VMS=True, SANDBOX_ACCEPTS=Accepts.LOADABLE, **attrs)
+    provider = MagicMock(ON_THIS_MACHINE=False, SUPPORTED_SANDBOX_MODES=VMS_AND_CONTAINERS, SANDBOX_ACCEPTS=Accepts.LOADABLE, **attrs)
     provider.links = (provider,)
     return provider
 
@@ -262,27 +263,6 @@ async def test_a_vm_gateway_refuses_an_image_its_vm_cant_get_before_creating_the
                 gateway_mode=GatewayMode.PERFORMANCE, ttl_seconds=60, disk_size_gb=10,
                 sidecars=[SidecarConfig(environment_name="relay", image_artifact=pick["sidecar"], container_port=8000,
                                         host_port=18768)],
-            )
-    provider.create_vm.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_a_vm_gateway_refuses_an_image_for_a_platform_its_provider_doesnt_declare_before_creating_the_vm():
-    from agent_env.env.gateway import GatewayMode
-
-    arm64 = DockerImageArtifact(id="arm", description="d", image_name="arm:v1", platform="linux/arm64",
-                                tar_gz_object_url="s3://bucket/arm.tar.gz")
-    gp = EnvironmentGatewayProvider()
-    gp._state_provider = MagicMock()
-    provider = _vm_provider(PLATFORMS=LINUX_AMD64, create_vm=AsyncMock(side_effect=AssertionError("created a VM")))
-
-    with patch("agent_env.env.env.Env.get", return_value=MagicMock(docker_image_artifact=_loadable("gateway"))):
-        with pytest.raises(ValueError, match="whose VM can't run its images: 'arm' v0 is a linux/arm64 image, and the "
-                                             "sandbox runs linux/amd64"):
-            await gp._deploy_via_vm(
-                sandbox_provider=provider, mcp_servers=[MCPServerConfig(image="arm:v1", environment_name="slack")],
-                mcp_server_images=[arm64], gateway_port=18765, website_configs=None, website_images=None,
-                gateway_mode=GatewayMode.PERFORMANCE, ttl_seconds=60, disk_size_gb=10,
             )
     provider.create_vm.assert_not_awaited()
 

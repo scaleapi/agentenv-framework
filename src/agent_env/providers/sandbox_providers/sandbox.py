@@ -51,8 +51,6 @@ CURL_RETRY_FLAGS = "--retry 5 --retry-all-errors --retry-delay 1"
 # Docker label on what a step starts on a sandbox's Docker host (containers, images, networks), valued with the
 # sandbox id, so a sandbox that shares its host (the local one) can remove its own when it terminates.
 SANDBOX_LABEL = "agentenv.sandbox"
-# The platforms of a sandbox on an x86-64 Linux host, as an image records the one it's built for.
-LINUX_AMD64 = frozenset({"linux/amd64"})
 
 # At most this many image signs in flight per event loop: each holds a worker thread, for up to a
 # remote signer's whole retry window, and a connection from its session's pool.
@@ -154,8 +152,10 @@ class Sandbox(ABC):
 
     # Whether it runs on this machine, as a local sandbox does.
     ON_THIS_MACHINE: ClassVar[bool] = False
-    # The platforms it runs images of, as its provider declares them: linux/amd64 unless declared; None runs any.
-    PLATFORMS: ClassVar[frozenset[str] | None] = LINUX_AMD64
+    # The platform of the images it runs, as an image records the one it's built for: linux/amd64, what agent-env
+    # builds for, unless its provider sets another when it creates it. None runs any, unchecked, as a local sandbox
+    # does, whose Docker runs this machine's platform and emulates others where it's set up.
+    platform: str | None = DEFAULT_BUILD_PLATFORM
     # The host other containers on its provider's private network reach it at, ready for a URL; None when it's on none.
     private_host: str | None = None
 
@@ -295,13 +295,13 @@ class VmSandbox(Sandbox):
     async def load_docker_images(self, artifacts: list) -> None:
         """Put each DockerImageArtifact's image on the VM: those with a tar.gz are loaded from it, in parallel, those
         with only a build context are built from it, and the rest are pulled by image name. An image this VM can't get,
-        such as one to pull from a registry on this machine when the VM isn't on it, or can't run, being for a platform
-        it doesn't declare, is refused before anything is loaded."""
+        such as one to pull from a registry on this machine when the VM isn't on it, or can't run, being built for
+        another platform than its own, is refused before anything is loaded."""
         if not artifacts:
             return
         if problems := [problem for artifact in artifacts
                         if (problem := artifact.load_problem(on_this_machine=self.ON_THIS_MACHINE,
-                                                             platforms=self.PLATFORMS))]:
+                                                             platform=self.platform))]:
             raise RuntimeError(f"Can't load images: {'; '.join(problems)}")
         if tarballs := [artifact for artifact in artifacts if artifact.tar_gz_object_url]:
             await self._load_tarballs(tarballs)

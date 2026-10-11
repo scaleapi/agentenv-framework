@@ -35,7 +35,12 @@ from agent_env.providers.env_providers.constants import (
 )
 from agent_env.providers.env_providers.env_provider import _SandboxEnvironmentProvider, _size_kwargs, _tool_names
 from agent_env.providers.sandbox_providers.sandbox import Sandbox, VmSandbox, port_bindings
-from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER, Accepts, SandboxProvider
+from agent_env.providers.sandbox_providers.sandbox_provider import (
+    SANDBOX_MODE_CONTAINER,
+    SANDBOX_MODE_VM,
+    Accepts,
+    SandboxProvider,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -129,7 +134,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
     def in_vm(sandbox_provider: SandboxProvider) -> bool:
         """Whether a deploy on ``sandbox_provider`` runs in a VM, as one on a provider that creates VMs does; on one
         that doesn't, the gateway and each server run in a container of their own, on the provider's private network."""
-        return sandbox_provider.CREATES_VMS
+        return SANDBOX_MODE_VM in sandbox_provider.SUPPORTED_SANDBOX_MODES
 
     @classmethod
     def accepts(cls, sandbox_provider: SandboxProvider, *, prepared: bool = True) -> Accepts:

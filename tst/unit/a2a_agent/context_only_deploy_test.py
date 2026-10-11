@@ -24,7 +24,6 @@ class _LocalProvider(LocalSandboxProvider):
 
 
 class _VmProvider(SandboxProvider):
-    CREATES_VMS = True
     SANDBOX_ACCEPTS = Accepts.LOADABLE
 
     async def create_sandbox(self, **_):

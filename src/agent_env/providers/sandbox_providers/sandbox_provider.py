@@ -16,7 +16,6 @@ from agent_env.config import runtime
 from agent_env.config import ENV_REF_PREFIX
 from agent_env.config.errors import ConfigError
 from agent_env.providers.sandbox_providers.sandbox import (
-    LINUX_AMD64,
     NetworkPolicy,
     NetworkPolicyUnsupportedError,
     Sandbox,
@@ -47,15 +46,14 @@ class Accepts(Enum):
 
     def problem(self, image: DockerImageArtifact, *, on: SandboxProvider | Sandbox | None = None) -> str | None:
         """Why a provider that accepts these can't run ``image`` on ``on``, the provider or one of its sandboxes, or
-        None when it can: one not on this machine can't pull from a registry on it, and one that declares its
-        platforms runs only images of one of them. With no ``on``, neither is checked."""
+        None when it can: one not on this machine can't pull from a registry on it. With no ``on``, that isn't
+        checked."""
         on_this_machine = on is None or on.ON_THIS_MACHINE
-        platforms = None if on is None else on.PLATFORMS
         if self is Accepts.LOADABLE:
-            return image.load_problem(on_this_machine=on_this_machine, platforms=platforms)
+            return image.load_problem(on_this_machine=on_this_machine)
         if self is Accepts.NAME_OR_CONTEXT and image.context_only:
-            return None  # the provider builds it, for a platform of its own
-        return image.by_name_problem(on_this_machine=on_this_machine, platforms=platforms)
+            return None  # the provider builds it
+        return image.by_name_problem(on_this_machine=on_this_machine)
 
 
 class SandboxProvider(ABC):
@@ -177,17 +175,24 @@ class SandboxProvider(ABC):
     # Whether its sandboxes run on this machine: an image only this machine holds (in a registry or object store on
     # it) reaches them, its containers need this machine's Docker, and a gateway's infra envs are built here for it.
     ON_THIS_MACHINE: ClassVar[bool] = False
-    # Whether create_vm gives a VM sandbox, as a provider that implements it does.
+    # The sandbox modes it creates, derived for each provider class (``__init_subclass__``): SANDBOX_MODE_VM when it
+    # implements create_vm, and SANDBOX_MODE_CONTAINER, since every provider implements create_sandbox. One whose
+    # create_sandbox can't make a container declares its own.
+    SUPPORTED_SANDBOX_MODES: ClassVar[frozenset[str]] = frozenset({SANDBOX_MODE_CONTAINER})
+    # Deprecated: SANDBOX_MODE_VM in SUPPORTED_SANDBOX_MODES, derived from it, for plugins that still read it.
     CREATES_VMS: ClassVar[bool] = False
     # The images create_sandbox and create_container run.
     SANDBOX_ACCEPTS: ClassVar[Accepts] = Accepts.NAME
     CONTAINER_ACCEPTS: ClassVar[Accepts] = Accepts.NAME
     # Whether create_container(private_network=True) puts containers on a network they share.
     PRIVATE_NETWORK: ClassVar[bool] = False
-    # The platforms its sandboxes run images of, which its sandbox classes declare too: linux/amd64 unless declared.
-    # None runs any, unchecked, as the local provider does, whose Docker runs this machine's platform and emulates
-    # others where it's set up.
-    PLATFORMS: ClassVar[frozenset[str] | None] = LINUX_AMD64
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        if "SUPPORTED_SANDBOX_MODES" not in cls.__dict__:
+            vm = cls.create_vm is not SandboxProvider.create_vm
+            cls.SUPPORTED_SANDBOX_MODES = frozenset({SANDBOX_MODE_CONTAINER, *([SANDBOX_MODE_VM] if vm else [])})
+        cls.CREATES_VMS = SANDBOX_MODE_VM in cls.SUPPORTED_SANDBOX_MODES
 
     @property
     def links(self) -> tuple[SandboxProvider, ...]:

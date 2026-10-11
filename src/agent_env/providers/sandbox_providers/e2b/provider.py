@@ -38,7 +38,6 @@ class E2BSandboxProvider(SandboxProvider):
     interpolation in ``[sandbox.providers.e2b.config]``.
     """
 
-    CREATES_VMS = True
     SANDBOX_ACCEPTS = Accepts.LOADABLE  # a sandbox is a VM, which loads the image; a container pulls it by name
 
     # AsyncSandbox.get_host(port) returns ``<port>-<sandbox-id>.e2b.app``.

@@ -1,6 +1,7 @@
 """What each sandbox provider declares it runs, and that nothing outside the providers asks which provider it has: every
-choice that depends on a provider reads what it declares (``ON_THIS_MACHINE``, ``CREATES_VMS``, ``SANDBOX_ACCEPTS``,
-``CONTAINER_ACCEPTS``, ``PRIVATE_NETWORK``, ``links`` and ``url_from_sandbox``) and its sandboxes' ``private_host``."""
+choice that depends on a provider reads what it declares (``ON_THIS_MACHINE``, ``SUPPORTED_SANDBOX_MODES``,
+``SANDBOX_ACCEPTS``, ``CONTAINER_ACCEPTS``, ``PRIVATE_NETWORK``, ``links`` and ``url_from_sandbox``) and its sandboxes'
+``private_host`` and ``platform``."""
 
 import ast
 from pathlib import Path
@@ -19,8 +20,13 @@ from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandbox, Mo
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandbox, ModalVmSandboxProvider
 from agent_env.providers.sandbox_providers.sail_vm.provider import SailVmSandboxProvider
 from agent_env.providers.sandbox_providers.sail_vm.sandbox import SailVmSandbox
-from agent_env.providers.sandbox_providers.sandbox import LINUX_AMD64, Sandbox
-from agent_env.providers.sandbox_providers.sandbox_provider import Accepts, SandboxProvider
+from agent_env.providers.sandbox_providers.sandbox import Sandbox
+from agent_env.providers.sandbox_providers.sandbox_provider import (
+    SANDBOX_MODE_CONTAINER,
+    SANDBOX_MODE_VM,
+    Accepts,
+    SandboxProvider,
+)
 
 SRC = Path(__file__).resolve().parents[4] / "src" / "agent_env"
 PROVIDERS = SRC / "providers" / "sandbox_providers"
@@ -39,13 +45,16 @@ PROVIDER_CLASSES = [LocalSandboxProvider, ModalSandboxProvider, ModalVmSandboxPr
 ], ids=["local", "modal", "modal_vm", "e2b", "sail_vm"])
 def test_each_provider_declares_where_it_runs_and_the_images_it_runs(cls, on_this_machine, creates_vms, sandbox,
                                                                     container, private_network):
-    assert (cls.ON_THIS_MACHINE, cls.CREATES_VMS, cls.PRIVATE_NETWORK) == (on_this_machine, creates_vms, private_network)
+    assert ((cls.ON_THIS_MACHINE, SANDBOX_MODE_VM in cls.SUPPORTED_SANDBOX_MODES, cls.PRIVATE_NETWORK)
+            == (on_this_machine, creates_vms, private_network))
     assert (cls.SANDBOX_ACCEPTS, cls.CONTAINER_ACCEPTS) == (sandbox, container)
 
 
 @pytest.mark.parametrize("cls", PROVIDER_CLASSES, ids=lambda cls: cls.__name__)
-def test_a_provider_declares_vms_and_a_private_network_only_where_it_implements_them(cls):
-    assert cls.CREATES_VMS == (cls.create_vm is not SandboxProvider.create_vm)
+def test_a_provider_supports_vms_where_it_implements_create_vm_and_declares_a_private_network_only_with_containers(cls):
+    assert cls.SUPPORTED_SANDBOX_MODES == ({SANDBOX_MODE_CONTAINER, SANDBOX_MODE_VM}
+                                           if cls.create_vm is not SandboxProvider.create_vm else {SANDBOX_MODE_CONTAINER})
+    assert cls.CREATES_VMS == (SANDBOX_MODE_VM in cls.SUPPORTED_SANDBOX_MODES)  # the deprecated spelling, derived
     assert not cls.PRIVATE_NETWORK or cls.create_container is not SandboxProvider.create_container
 
 
@@ -57,11 +66,27 @@ class _Vms(SandboxProvider):
         raise NotImplementedError
 
 
-def test_a_provider_that_declares_nothing_runs_images_by_name_and_creates_no_vm():
-    """Implementing create_vm declares nothing: a provider says it creates VMs, as it says everything else."""
-    assert (_Vms.ON_THIS_MACHINE, _Vms.CREATES_VMS, _Vms.PRIVATE_NETWORK) == (False, False, False)
+def test_a_provider_that_declares_nothing_runs_images_by_name_and_supports_vms_by_implementing_create_vm():
+    assert (_Vms.ON_THIS_MACHINE, _Vms.PRIVATE_NETWORK) == (False, False)
+    assert _Vms.SUPPORTED_SANDBOX_MODES == {SANDBOX_MODE_CONTAINER, SANDBOX_MODE_VM} and _Vms.CREATES_VMS
     assert (_Vms.SANDBOX_ACCEPTS, _Vms.CONTAINER_ACCEPTS) == (NAME, NAME)
     assert _Vms().url_from_sandbox("http://localhost:4000") == "http://localhost:4000"
+
+
+class _VmsOnly(_Vms):
+    """One whose create_sandbox can't make a container, so it declares its modes."""
+
+    SUPPORTED_SANDBOX_MODES = frozenset({SANDBOX_MODE_VM})
+
+
+class _ContainersAgain(_VmsOnly):
+    async def create_sandbox(self, **_):
+        raise NotImplementedError
+
+
+def test_a_provider_that_declares_its_modes_keeps_them_and_a_subclass_that_doesnt_has_them_derived():
+    assert _VmsOnly.SUPPORTED_SANDBOX_MODES == {SANDBOX_MODE_VM} and _VmsOnly.CREATES_VMS
+    assert _ContainersAgain.SUPPORTED_SANDBOX_MODES == {SANDBOX_MODE_CONTAINER, SANDBOX_MODE_VM}
 
 
 def test_a_chain_is_its_providers_in_order_and_one_provider_is_itself():
@@ -108,16 +133,16 @@ WITH_TAR_GZ = DockerImageArtifact(id="img", version=2, description="d", image_na
 HERE = "is in a registry on this machine, which a sandbox elsewhere can't pull from"
 
 
-def _on(on_this_machine: bool = False, platforms: frozenset[str] | None = None) -> SimpleNamespace:
-    """A sandbox or provider, as far as what it declares about where it runs and what."""
-    return SimpleNamespace(ON_THIS_MACHINE=on_this_machine, PLATFORMS=platforms)
+def _on(on_this_machine: bool = False) -> SimpleNamespace:
+    """A sandbox or provider, as far as what it declares about where it runs."""
+    return SimpleNamespace(ON_THIS_MACHINE=on_this_machine)
 
 
 @pytest.mark.parametrize("image, accepts, problem", [
     (CONTEXT_ONLY, LOADABLE, None), (CONTEXT_ONLY, NAME_OR_CONTEXT, None), (CONTEXT_ONLY, NAME, "only a build context"),
     (NO_REGISTRY, LOADABLE, "doesn't name a registry"), (NO_REGISTRY, NAME, None), (NO_REGISTRY, NAME_OR_CONTEXT, None),
 ])
-@pytest.mark.parametrize("on", [None, _on(True), _on(False), _on(False, LINUX_AMD64)])
+@pytest.mark.parametrize("on", [None, _on(True), _on(False)])
 def test_an_image_is_refused_by_the_form_its_provider_accepts(image, accepts, problem, on):
     found = accepts.problem(image, on=on)
     assert (found is None) if problem is None else (problem in found)
@@ -142,47 +167,44 @@ ARM64_PULLED = DockerImageArtifact(id="img", version=2, description="d", platfor
                                    image_name="123456789012.dkr.ecr.us-west-2.amazonaws.com/img:v2")
 ARM64_CONTEXT = DockerImageArtifact(id="img", version=2, description="d", image_name="local/img-0123456789ab:v2",
                                     build_context_object_url="s3://bucket/ctx.tar.gz", platform="linux/arm64")
-ARM64 = "'img' v2 is a linux/arm64 image, and the sandbox runs linux/amd64"
+ARM64 = "'img' v2 is a linux/arm64 image, and the sandbox runs linux/amd64; rebuild it for linux/amd64"
 
 
-@pytest.mark.parametrize("image, accepts, problem", [
-    (ARM64_TAR_GZ, LOADABLE, ARM64), (ARM64_PULLED, LOADABLE, ARM64), (ARM64_PULLED, NAME, ARM64),
-    (ARM64_PULLED, NAME_OR_CONTEXT, ARM64),
-    (ARM64_CONTEXT, LOADABLE, ARM64),  # a VM builds it for the platform it records
-    (ARM64_CONTEXT, NAME_OR_CONTEXT, None),  # a provider that builds it does so for a platform of its own
-])
-def test_a_sandbox_declaring_its_platforms_runs_only_images_of_one_of_them(image, accepts, problem):
-    assert accepts.problem(image, on=_on(False, LINUX_AMD64)) == problem
-    assert accepts.problem(image, on=_on(False, frozenset({"linux/amd64", "linux/arm64"}))) is None
-    assert accepts.problem(image, on=_on(False)) is None  # one that declares none isn't checked
+@pytest.mark.parametrize("image", [ARM64_TAR_GZ, ARM64_PULLED, ARM64_CONTEXT], ids=["tar.gz", "pulled", "context"])
+def test_a_vm_runs_only_images_built_for_its_platform(image):
+    """A VM builds a context for the platform it records, so a context is checked too."""
+    assert image.load_problem(platform="linux/amd64").startswith(ARM64)
+    assert image.load_problem(platform="linux/arm64") is None
+    assert image.load_problem(platform=None) is None  # a sandbox that runs any, as a local one does
 
 
-@pytest.mark.parametrize("recorded, declared", [
+@pytest.mark.parametrize("accepts", [LOADABLE, NAME, NAME_OR_CONTEXT])
+def test_a_provider_checks_no_platform_before_its_sandbox_exists(accepts):
+    assert accepts.problem(ARM64_PULLED, on=_on(False)) is None
+
+
+@pytest.mark.parametrize("recorded, runs", [
     ("linux/amd64/v2", "linux/amd64"), ("linux/arm64/v8", "linux/arm64"), ("linux/amd64", "linux/x86_64"),
 ])
-def test_a_platform_is_the_same_however_the_image_or_the_sandbox_spells_it(recorded, declared):
+def test_a_platform_is_the_same_however_the_image_or_the_sandbox_spells_it(recorded, runs):
     image = DockerImageArtifact(id="img", version=2, description="d", image_name="img:v2", platform=recorded,
                                 tar_gz_object_url="s3://bucket/img.tar.gz")
-    assert LOADABLE.problem(image, on=_on(False, frozenset({declared}))) is None
+    assert image.load_problem(platform=runs) is None
 
 
 def test_an_image_that_records_no_platform_isnt_checked():
     image = DockerImageArtifact(id="img", version=2, description="d", image_name="img:v2",
                                 tar_gz_object_url="s3://bucket/img.tar.gz")
-    assert image.platform is None and LOADABLE.problem(image, on=_on(False, frozenset({"linux/arm64"}))) is None
+    assert image.platform is None and image.load_problem(platform="linux/arm64") is None
 
 
-@pytest.mark.parametrize("provider, sandbox", [
-    (SandboxProvider, Sandbox),  # a plugin's that declares nothing
-    (ModalSandboxProvider, ModalSandbox), (ModalVmSandboxProvider, ModalVmSandbox), (E2BSandboxProvider, E2BSandbox),
-    (SailVmSandboxProvider, SailVmSandbox),
-])
-def test_a_provider_and_its_sandboxes_run_linux_amd64_unless_they_declare_otherwise(provider, sandbox):
-    assert provider.PLATFORMS == sandbox.PLATFORMS == LINUX_AMD64
+@pytest.mark.parametrize("sandbox", [Sandbox, ModalSandbox, ModalVmSandbox, E2BSandbox, SailVmSandbox])
+def test_a_sandbox_runs_linux_amd64_unless_its_provider_sets_another(sandbox):
+    assert sandbox.platform == "linux/amd64"
 
 
-def test_the_local_provider_runs_any_platform_unchecked_since_its_docker_emulates_others():
-    assert LocalSandboxProvider.PLATFORMS is None and LocalSandbox.PLATFORMS is None
+def test_a_local_sandbox_runs_any_platform_unchecked_since_its_docker_emulates_others():
+    assert LocalSandbox.platform is None
 
 
 def _concrete_classes() -> set[str]:

@@ -54,8 +54,8 @@ from agent_env.providers.env_providers.env_provider import _env_provider_class
 from agent_env.providers.env_providers.env_server_provider import EnvironmentServerProvider
 from agent_env.providers.env_state.env_state_provider import LOCAL_POSTGRES_STATE_TYPE
 from agent_env.providers.env_state.store import get_env_state_instance_store
-from agent_env.providers.sandbox_providers.sandbox import LINUX_AMD64
 from agent_env.providers.sandbox_providers.sandbox_provider import (
+    SANDBOX_MODE_VM,
     Accepts,
     SandboxProvider,
     build_sandbox_provider,
@@ -68,7 +68,7 @@ from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep, lin
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.deploy_sandbox import DeploySandboxTaskStep
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
-from agent_env.utils.docker_build import docker_unreachable
+from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM, docker_unreachable
 
 from ._fs import relative
 from .parse import BundleError, BundleKind
@@ -300,10 +300,12 @@ class _Walk:
 
     def _sandbox(self, where: str, step: DeploySandboxTaskStep) -> None:
         provider = _provider(self.sandbox or step.sandbox_type, get_sandbox_provider)
-        if step.sandbox_mode == "vm":
-            if not provider.CREATES_VMS:
-                self._problem(where, f"deploys a VM sandbox, and the {_shown(provider)} sandbox provider can't create a "
-                                     "VM; run it on one that can, such as --sandbox local")
+        if step.sandbox_mode not in provider.SUPPORTED_SANDBOX_MODES:
+            kind = "VM" if step.sandbox_mode == SANDBOX_MODE_VM else step.sandbox_mode
+            self._problem(where, f"deploys a {kind} sandbox, and the {_shown(provider)} sandbox provider can't create a "
+                                 f"{kind}; run it on one that can, such as --sandbox local")
+            return
+        if step.sandbox_mode == SANDBOX_MODE_VM:
             return
         if _local_link(provider):
             self.docker_users.append(where)
@@ -351,28 +353,18 @@ class _Walk:
                 self.uses.setdefault(image.built, []).append((where, image.what, links, accepts))
         return any(link.ON_THIS_MACHINE and not refused for link, refused in zip(links, refusals))
 
-    def _refusal(self, link: SandboxProvider, form: Accepts, image: _Image, *, vms_load: bool,
-                 put: str | None = None) -> str | None:
+    def _refusal(self, link: SandboxProvider, form: Accepts, image: _Image, *, vms_load: bool) -> str | None:
         """Why a deploy can't run ``image`` on ``link``, which takes images in ``form``, by the check the deploy makes
         (``Accepts.problem``), or None when it can: a VM loads an image's tar.gz, or pulls an image with none when its
         name names a registry it reaches, and a provider that runs an image by name can't run one that is only a build
         context, whose name is a tag only its build gives it, nor, from elsewhere, pull one from this machine's
-        registry; and a provider declaring its platforms runs only an image of one of them. ``put`` is the command that
-        puts the image again, when there is one."""
+        registry. A VM it would create checks the image's platform once it exists."""
         if image.artifact is None or (refusal := form.problem(image.artifact, on=link)) is None:
             return None
-        if refusal == image.artifact.platform_problem(link.PLATFORMS):
-            platform = sorted(link.PLATFORMS)[0]
-            again = (f"`{put} --platform {platform}`" if put else
-                     f"--platform {platform} on the put command that builds it, or `docker build --platform {platform}` "
-                     "for one put by name")
-            return (f"deploys {image.what} on the {_shown(link)} sandbox provider: {refusal}; rebuild it for "
-                    f"{' or '.join(sorted(link.PLATFORMS))} ({again}; a Linux host of another platform builds it only "
-                    "with QEMU emulation set up), or run it with --sandbox local")
         if form.problem(image.artifact) is None:  # refused only because the sandbox isn't on this machine
             loads = (", or on a provider whose VMs load its tar.gz, such as --sandbox modal_vm"
                      if vms_load and image.artifact.tar_gz_object_url and form is not Accepts.LOADABLE
-                     and image.artifact.platform_problem(LINUX_AMD64) is None else "")
+                     and image.artifact.platform_problem(DEFAULT_BUILD_PLATFORM) is None else "")
             return (f"deploys {image.what} on the {_shown(link)} sandbox provider: {refusal}; run it with "
                     f"--sandbox local{loads}")
         if form is Accepts.LOADABLE:
@@ -400,7 +392,7 @@ class _Walk:
             accepts = EnvironmentGatewayProvider.accepts(link, prepared=kind == GATEWAY)
             found += [refusal for image in artifacts
                       if (refusal := self._refusal(link, accepts, _Image(f"the {kind} env {env_id!r}'s image {image.id!r}",
-                                                                         image), vms_load=True, put=put_command(kind)))]
+                                                                         image), vms_load=True))]
         return found
 
     def _contexts(self) -> frozenset[str]:

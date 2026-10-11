@@ -10,7 +10,7 @@ import pytest
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.providers.sandbox_providers import sandbox as sandbox_module
-from agent_env.providers.sandbox_providers.sandbox import LINUX_AMD64, VmSandbox
+from agent_env.providers.sandbox_providers.sandbox import VmSandbox
 from agent_env.store import ImageStore, RegistryAuth, set_object_store
 from agent_env.config import get_config, reset_config
 from tst.unit.store.fakes import ConfiguredObjectStore
@@ -219,20 +219,25 @@ async def test_a_vm_on_this_machine_pulls_from_its_registry_and_one_elsewhere_lo
 class _AnyPlatformVm(_RecordingVmSandbox):
     """A VM sandbox that runs any platform, as the local provider's do."""
 
-    PLATFORMS = None
+    platform = None
 
 
 @pytest.mark.asyncio
 async def test_a_vm_refuses_a_tar_gz_for_a_platform_it_doesnt_run_before_anything_is_loaded(signing_store):
-    """A VM runs linux/amd64 unless it declares otherwise."""
+    """A VM runs linux/amd64 unless its provider set another when it created it, as it sets its mode."""
     arm64 = DockerImageArtifact(id="img", version=1, description="d", image_name="img:v1", platform="linux/arm64",
                                 tar_gz_object_url="s3://bucket/img.tar.gz")
 
     amd = _RecordingVmSandbox()
     with pytest.raises(RuntimeError, match="Can't load images: 'img' v1 is a linux/arm64 image, and the sandbox runs "
-                                           "linux/amd64"):
+                                           "linux/amd64; rebuild it for linux/amd64"):
         await amd.load_docker_images([arm64])
-    assert amd.PLATFORMS == LINUX_AMD64 and amd.scripts == []
+    assert amd.platform == "linux/amd64" and amd.scripts == []
+
+    arm = _RecordingVmSandbox(images_stdout="img\n")
+    arm.platform = "linux/arm64"
+    await arm.load_docker_images([arm64])
+    assert "docker load" in arm.scripts[0]
 
     anything = _AnyPlatformVm(images_stdout="img\n")
     await anything.load_docker_images([arm64])
@@ -721,13 +726,9 @@ async def test_two_builds_of_one_context_on_one_host_each_have_a_work_folder_of_
     assert first != second
 
 
-class _AmdAndArmVm(_RecordingVmSandbox):
-    PLATFORMS = frozenset({"linux/amd64", "linux/arm64"})
-
-
 @pytest.mark.asyncio
 async def test_a_build_takes_the_recorded_dockerfile_and_platform_else_linux_amd64(signing_store):
-    sandbox = _AmdAndArmVm()
+    sandbox = _AnyPlatformVm()
 
     await sandbox.load_docker_images([_context_image("a", "sha256:" + "1" * 64, platform=None,
                                                      dockerfile="docker/app.Dockerfile"),

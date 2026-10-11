@@ -274,7 +274,6 @@ class ModalVmSandbox(VmSandbox):
 
 class ModalVmSandboxProvider(SandboxProvider):
     EGRESS_HOSTS: ClassVar[tuple[str, ...]] = ("*.modal.host", "*.w.modal.host")
-    CREATES_VMS = True
     SANDBOX_ACCEPTS = Accepts.LOADABLE  # a sandbox is a VM, which loads the image; a container pulls it by name
 
     @classmethod
