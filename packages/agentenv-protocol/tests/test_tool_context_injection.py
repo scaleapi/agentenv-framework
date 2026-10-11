@@ -38,7 +38,7 @@ from agentenv_protocol import (  # noqa: E402
     tool,
 )
 from agentenv_protocol.agent_env_environment import _is_fastmcp_context_annotation, _schema_from_signature  # noqa: E402
-from agentenv_protocol.tool_context import EMPTY, bound  # noqa: E402
+from agentenv_protocol.tool_context import EMPTY, bound, context_from_mcp  # noqa: E402
 
 
 def _text(result: Any) -> str:
@@ -172,6 +172,14 @@ async def test_concurrent_calls_with_different_meta_roles_never_cross():
     assert results == {"alice": "alice|alice", "bob": "bob|bob"}
     assert set(env.hook_roles) == {"alice", "bob"} and len(env.hook_roles) == 2
     assert ToolContext.current() is EMPTY
+
+
+def test_a_dict_meta_is_read_as_the_custom_entries():
+    """mcp 2 hands ``_meta`` over as a dict rather than a model with ``model_extra``."""
+    as_dict = SimpleNamespace(request_context=SimpleNamespace(meta={ROLE_META_KEY: "zed", SESSION_META_KEY: "s"}, request=None))
+    assert context_from_mcp(as_dict, "t", {}).caller == Caller("zed", "s")
+    assert context_from_mcp(_request_context({ROLE_META_KEY: "zed"}), "t", {}).caller == Caller("zed")
+    assert context_from_mcp(SimpleNamespace(request_context=SimpleNamespace(meta=42, request=None)), "t", {}).caller == Caller()
 
 
 @pytest.mark.asyncio

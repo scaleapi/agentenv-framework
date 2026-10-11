@@ -112,6 +112,14 @@ class _NoSeamApp:
         return register
 
 
+class _ForeignListApp(_NoSeamApp):
+    """Not fastmcp: a ``middleware`` list without ``add_middleware`` is somebody else's list."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.middleware: list = []
+
+
 def _text(result) -> str:
     return result.content[0].text
 
@@ -210,3 +218,7 @@ def test_an_app_with_no_seam_mounts_unbound_unless_a_reader_is_declared(caplog):
     for env, reader in ((_ReaderEnv(), "whoami"), (_HookedEnv(), "on_tool_call")):
         with pytest.raises(RuntimeError, match=reader):
             env.mount(_NoSeamApp())
+    foreign = _ForeignListApp()
+    with pytest.raises(RuntimeError, match="whoami"):
+        _ReaderEnv().mount(foreign)
+    assert foreign.middleware == [] and foreign.tools == {}, "a foreign list is not a seam, and nothing was added"

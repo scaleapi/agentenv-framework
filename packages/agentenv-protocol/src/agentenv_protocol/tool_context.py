@@ -185,12 +185,22 @@ def context_from_mcp(context: Any, tool: str, arguments: Mapping[str, Any]) -> T
             request_context = context.request_context
         except (ValueError, AttributeError):
             request_context = None
-    meta = getattr(request_context, "meta", None)
-    extra = getattr(meta, "model_extra", None) if meta is not None else None
+    extra = _meta_entries(getattr(request_context, "meta", None))
     request = getattr(request_context, "request", None)
     headers = getattr(request, "headers", None) if request is not None else None
     return ToolContext(caller=caller_from_request(extra, headers), tool=tool, arguments=_frozen(arguments),
                        call_id=uuid.uuid4().hex)
+
+
+def _meta_entries(meta: Any) -> Optional[Mapping[str, Any]]:
+    """A request's custom ``_meta`` entries: pydantic's ``model_extra`` where the SDK models them (mcp 1), the
+    mapping itself where it hands them over as a dict (mcp 2)."""
+    if meta is None:
+        return None
+    extra = getattr(meta, "model_extra", None)
+    if extra is not None:
+        return extra
+    return meta if isinstance(meta, Mapping) else None
 
 
 def context_from_http(request: Any, tool: str, arguments: Mapping[str, Any]) -> ToolContext:
