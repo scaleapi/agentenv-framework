@@ -576,6 +576,18 @@ def test_containers_on_the_local_provider_need_docker_and_a_vm_sandbox_doesnt(bu
     ]
 
 
+def test_a_chain_that_skips_the_local_provider_doesnt_need_docker(bundle_dir, monkeypatch):
+    """The local provider runs an image by name, so a deploy of one that is only a build context skips it for a VM."""
+    probes = []
+    monkeypatch.setattr(preflight_module, "docker_unreachable", lambda: probes.append(1) or "docker isn't on PATH")
+    with namespace_routing():
+        A2AAgent.put(id="solver", docker_image_artifact=_context_image("solver-image"))
+    _task(bundle_dir, [AGENT])
+
+    assert [entry.name for entry in dry_run_bundle(bundle_dir, sandbox="modal_vm,local").runs] == ["t"]
+    assert probes == []
+
+
 class _DeploysItself(Env):
     """An env type with a deploy() of its own, as a plugin's env can have."""
 

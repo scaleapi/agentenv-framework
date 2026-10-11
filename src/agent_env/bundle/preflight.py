@@ -188,8 +188,7 @@ class _Walk:
             return
         env_id, images, env_provider = step.env_id, deployment.images, deployment.provider
         elsewhere = functools.partial(self._gateway_elsewhere, env_id, env_provider, kinds) if GATEWAY in kinds else None
-        self._check(where, provider, env_provider.accepts, images, vms_load=GATEWAY in kinds, elsewhere=elsewhere)
-        if _local_link(provider):
+        if self._check(where, provider, env_provider.accepts, images, vms_load=GATEWAY in kinds, elsewhere=elsewhere):
             self.infra |= kinds
             self.docker_users.append(where)
 
@@ -292,13 +291,12 @@ class _Walk:
 
     def _agent_deploy(self, where: str, provider: SandboxProvider, agent_id: str | None, version: int | None,
                       unnamed: str, accepts: Callable[[SandboxProvider], Accepts] = A2AAgent.accepts) -> None:
-        if _local_link(provider):
-            self.docker_users.append(where)
         if agent_id is None:
             self.default_agent_users.append((where, unnamed))
             agent_id = get_config().get_default_a2a_agent_id()
-        if (image := self._agent_image(agent_id, version)) is not None:
-            self._check(where, provider, accepts, [image], vms_load=True)
+        image = self._agent_image(agent_id, version)
+        if self._check(where, provider, accepts, [image] if image else [], vms_load=True):
+            self.docker_users.append(where)
 
     def _sandbox(self, where: str, step: DeploySandboxTaskStep) -> None:
         provider = _provider(self.sandbox or step.sandbox_type, get_sandbox_provider)
@@ -335,12 +333,13 @@ class _Walk:
 
     def _check(self, where: str, provider: SandboxProvider, accepts: Callable[[SandboxProvider], Accepts],
                images: list[_Image], *, vms_load: bool,
-               elsewhere: Callable[[SandboxProvider], list[str]] | None = None) -> None:
+               elsewhere: Callable[[SandboxProvider], list[str]] | None = None) -> bool:
         """Refuse the deploy ``where`` when no provider it may run on takes it, naming why each refuses: one refuses an
         image it can't run as ``accepts`` says the deploy runs images there (``_refusal``), and one not on this machine
         whatever ``elsewhere`` says of it. A deploy skips a provider that refuses it, so one that takes it is enough.
         ``vms_load`` when the deploy loads images on a VM provider, as an agent's and a gateway's do. An image the
-        bundle builds is noted with them, for ``_contexts`` to choose its form."""
+        bundle builds is noted with them, for ``_contexts`` to choose its form. Returns whether a provider on this
+        machine takes the deploy, which then may run on this machine's Docker; one it skips needs none."""
         links = list(provider.links)
         refusals = [[refusal for image in images if (refusal := self._refusal(link, accepts(link), image, vms_load=vms_load))]
                     + (elsewhere(link) if elsewhere and not link.ON_THIS_MACHINE else []) for link in links]
@@ -350,6 +349,7 @@ class _Walk:
         for image in images:
             if image.built is not None:
                 self.uses.setdefault(image.built, []).append((where, image.what, links, accepts))
+        return any(link.ON_THIS_MACHINE and not refused for link, refused in zip(links, refusals))
 
     def _refusal(self, link: SandboxProvider, form: Accepts, image: _Image, *, vms_load: bool,
                  put: str | None = None) -> str | None:
