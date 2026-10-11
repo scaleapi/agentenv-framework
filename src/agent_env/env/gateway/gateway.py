@@ -4,19 +4,15 @@ from __future__ import annotations
 import asyncio
 import atexit
 import contextlib
-import copy
 import json
 import logging
 import os
-import posixpath
 import socket
 import subprocess
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
-from urllib.parse import unquote
 from uuid import uuid4
 
 import anyio
@@ -34,7 +30,6 @@ from mcp.types import CONNECTION_CLOSED, CallToolResult, ErrorData, TextContent,
 from pydantic import create_model
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
-from starlette.types import Receive, Scope, Send
 from anyio import ClosedResourceError
 
 if TYPE_CHECKING:
@@ -43,7 +38,7 @@ if TYPE_CHECKING:
 # Relative import — gateway runs as a standalone container with no agent_env.*
 from .constants import (
     AGENT_ENV_ROLE_HEADER,
-    AGENT_ENV_ROLE_META_KEY,
+    AGENT_ENV_ROLE_META_KEY,  # the server module serves the whole vocabulary, used in this file or not
     AGENT_ENV_SESSION_META_KEY,
     CARD_FETCH_TIMEOUT_S,
     CHILD_DISCOVERY_TIMEOUT_S,
@@ -68,6 +63,7 @@ from .caller import Caller
 from .child_transport import child_http_client
 from .clock import Clock, ClockError, _iso
 from .get_time import GET_TIME_TOOL_NAME, build_get_time_tool
+from .rest_proxy import ROLE_HEADER_BYTES, fetch_child_card, forward, rewrite_child_card
 from .triggers import TriggerEngine, TriggerError
 
 logger = logging.getLogger(__name__)
@@ -327,7 +323,7 @@ class Gateway:
                 return
             role = DEFAULT_ROLE
             for name, value in scope.get("headers", ()):
-                if name == _ROLE_HEADER_BYTES:
+                if name == ROLE_HEADER_BYTES:
                     role = value.decode(errors="ignore").strip() or DEFAULT_ROLE
                     break
             token = Caller(role=role, session=Caller.current().session).bind()
@@ -493,60 +489,13 @@ class Gateway:
         base_url = url_map.get(service_name)
         if base_url is None:
             return self._json_response({"error": f"Unknown service: {service_name}"}, 404)
-        role = self._request_role(request)
-
-        try:
-            target_url = self._proxy_target_url(base_url, request)
-        except ValueError as e:  # an escaped slash inside the route prefix; refuse rather than forward a wrong path
-            return self._json_response({"error": str(e)}, 400)
-        content = await request.body()  # /svc and /website request bodies are small (JSON-RPC, forms)
-        headers = self._proxy_request_headers(request, role)
-        if (url_map is self.rest_proxy_urls and request.method == "POST" and service_name.startswith("mcp-")
-                and _is_child_mcp_path(request.path_params.get("path", ""))):
-            # The gateway is the trust boundary for identity: a child's proxied MCP endpoint stays reachable, but the
-            # role in its JSON-RPC `_meta` is the gateway's to write, like the header above.
-            content = _stamp_jsonrpc_role(content, role)
-            headers["content-length"] = str(len(content))
-        client = httpx.AsyncClient(timeout=self.REST_PROXY_TIMEOUT)
-        upstream_request = client.build_request(request.method, target_url, content=content, headers=headers)
-        try:
-            upstream = await client.send(upstream_request, stream=True)  # returns once the headers are in
-        except Exception as e:
-            await client.aclose()
-            logger.error(f"Proxy to {target_url} failed: {e!r}")
-            return self._json_response({"error": f"Proxy request failed: {e!r}"}, 502)
-        return _UpstreamResponse(upstream, client, target_url)
-
-    @staticmethod
-    def _proxy_target_url(base_url: str, request: Request) -> str:
-        # Forward the path as received: uvicorn decodes scope["path"] for routing, so Starlette's {path} param
-        # would send %2F, %3F and %23 to the upstream as separators. latin-1 keeps one char per wire byte.
-        url = base_url
-        decoded_rest = request.path_params.get("path", "")
-        if decoded_rest:
-            raw_rest = _raw_remainder(request.scope["raw_path"], request.scope["path"], decoded_rest)
-            url += "/" + raw_rest.decode("latin-1")
-        query = request.scope.get("query_string", b"")
-        if query:
-            url += "?" + query.decode("latin-1")
-        return url
+        return await forward(request, base_url, role=self._request_role(request), timeout=self.REST_PROXY_TIMEOUT,
+                             mcp_server=url_map is self.rest_proxy_urls and service_name.startswith("mcp-"))
 
     @staticmethod
     def _request_role(request: Request) -> str:
         """The role the gateway attributes a REST request to: the first AgentEnv-Role header, else the default role."""
         return request.headers.get(AGENT_ENV_ROLE_HEADER, "").strip() or DEFAULT_ROLE
-
-    @staticmethod
-    def _proxy_request_headers(request: Request, role: str) -> httpx.Headers:
-        """One entry per raw header, so repeated fields (cookie, x-forwarded-for) keep their multiplicity. The role
-        header is the gateway's to set: the client's copies are dropped and the role the gateway attributed the
-        request to goes in their place, so the upstream never reads a value the gateway did not write."""
-        headers = httpx.Headers([(k, v) for k, v in request.headers.raw
-                                 if k.lower() not in _HOP_BY_HOP and k.lower() != _ROLE_HEADER_BYTES])
-        headers[AGENT_ENV_ROLE_HEADER] = role
-        # Bytes are forwarded undecoded, so only ask upstream for encodings the caller can take.
-        headers.setdefault("accept-encoding", "identity")
-        return headers
 
     def _backing_keys(self) -> list[str]:
         # rest_proxy_urls entries are the env's backing servers: mcp-<svc> (MCP) + <svc> (website
@@ -554,91 +503,12 @@ class Gateway:
         return list(self.rest_proxy_urls)
 
     def _rewrite_child_card(self, key: str, card: dict) -> dict:
-        """Rewrite every path the child names (its `url`, each extension's endpoint and each method's
-        own) to the gateway-rooted `/svc/{key}/...`, so it resolves against the env's address. An
-        operation the gateway's own extension with the same `uri` also offers (same method name, HTTP
-        verb and endpoint, e.g. `disable`, POST `/tools/disable`) is the gateway's route and keeps its
-        path; a child method falling back to that endpoint gets one of its own under the child's prefix. Backing
-        servers are leaves, so any nested `children_environments` is dropped, and so are the child's
-        interfaces: agents reach its tools through the gateway's aggregate MCP endpoint."""
-        gateway_operations, gateway_requests, gateway_paths = set(), set(), set()
-        for gateway_ext in self._gateway_extensions():
-            for name, _, _, verb, path in self._operations(gateway_ext.get("params") or {}):
-                gateway_operations.add((gateway_ext["uri"], name, verb, path))
-                gateway_requests.add((gateway_ext["uri"], verb, path))
-                gateway_paths.add((gateway_ext["uri"], path))
-
-        def child_path(path: str) -> str:
-            return f"/svc/{key}{path}" if path.startswith("/") else path
-
-        card = copy.deepcopy(card)
-        if card.get("children_environments"):
-            logger.warning(f"env card: dropping nested children_environments from leaf {key} (multi-level composition unsupported)")
-        card["children_environments"] = None
-        card["additionalInterfaces"] = []
-        url = card.get("url")
-        if isinstance(url, str) and url:
-            card["url"] = child_path(url.rstrip("/") or "/")
-        for ext in (card.get("capabilities") or {}).get("extensions") or []:
-            params = ext.get("params") if isinstance(ext, dict) else None
-            if not isinstance(params, dict):
-                continue
-            uri = ext["uri"] if isinstance(ext.get("uri"), str) else None
-            endpoint = params.get("endpoint") if isinstance(params.get("endpoint"), str) else None
-            # A method is the gateway's when the gateway offers it under the same name; an extension
-            # listing no methods is a bare request, the gateway's when the gateway serves it.
-            operations = [(method, holder, (uri, name, verb, path) in gateway_operations
-                           if name is not None else (uri, verb, path) in gateway_requests)
-                          for name, method, holder, verb, path in self._operations(params)]
-            # The extension's endpoint stays when a gateway operation falls back to it or, used by no
-            # operation, when the gateway's extension with this uri names it.
-            keep_endpoint = any(on_gateway and holder is params for _, holder, on_gateway in operations) or (
-                all(holder is not params for _, holder, _ in operations) and (uri, endpoint) in gateway_paths)
-            for method, holder, on_gateway in operations:
-                if on_gateway:
-                    continue
-                if holder is not params:
-                    holder["endpoint"] = child_path(holder["endpoint"])
-                elif keep_endpoint and method is not None:
-                    method["endpoint"] = child_path(params["endpoint"])
-            if endpoint is not None and not keep_endpoint:
-                params["endpoint"] = child_path(endpoint)
-        return card
-
-    @staticmethod
-    def _operations(params: dict) -> list[tuple[str | None, dict | None, dict, str, str]]:
-        """Each operation an extension offers, read the way `invoke_extension` reads it: (method name, method, the
-        object naming its endpoint, HTTP verb, endpoint). A method without an endpoint of its own uses
-        the extension's, its verb defaults to POST, and an extension listing no methods offers a POST
-        to its endpoint. One without a text endpoint is skipped, so it stays as stored."""
-        methods = params.get("methods")
-        if isinstance(methods, dict) and methods:
-            operations = [(name, method, method if method.get("endpoint") else params, str(method.get("method") or "POST").upper())
-                          for name, method in methods.items() if isinstance(method, dict)]
-        else:
-            operations = [(None, None, params, "POST")]
-        return [(name, method, holder, verb, holder["endpoint"]) for name, method, holder, verb in operations
-                if isinstance(holder.get("endpoint"), str) and holder["endpoint"]]
+        return rewrite_child_card(key, card, self._gateway_extensions())
 
     async def _fetch_child_card(self, client: httpx.AsyncClient, key: str, base_url: str) -> dict | None:
         """Fetch + rewrite one backing server's card; None (omit) on 404 / error / timeout / malformed JSON."""
-        url = f"{base_url.rstrip('/')}{WELL_KNOWN_PATH}"
-        try:
-            response = await client.get(url, timeout=CARD_FETCH_TIMEOUT_S)
-        except Exception as e:
-            logger.warning(f"env card: fetching {key} failed ({type(e).__name__}: {e}); omitting")
-            return None
-        if response.status_code == 404:
-            return None
-        if response.status_code >= 400:
-            logger.warning(f"env card: {key} returned HTTP {response.status_code}; omitting")
-            return None
-        try:
-            child = response.json()
-        except Exception:
-            logger.warning(f"env card: {key} returned malformed JSON; omitting")
-            return None
-        return self._rewrite_child_card(key, child)
+        child = await fetch_child_card(client, key, base_url)
+        return None if child is None else self._rewrite_child_card(key, child)
 
     def _gateway_extensions(self) -> list[dict]:
         return GATEWAY_EXTENSIONS
@@ -1281,16 +1151,6 @@ class _ProxyArgModelBase(ArgModelBase):
         return kwargs
 
 
-# HTTP (RFC 7230) hop-by-hop headers, never proxied in either direction.
-_HOP_BY_HOP = frozenset({
-    b"host", b"connection", b"keep-alive", b"transfer-encoding",
-    b"te", b"trailer", b"upgrade", b"proxy-authorization", b"proxy-authenticate",
-})
-
-# The role header as it appears in the raw ASGI header list (lower-cased by the server).
-_ROLE_HEADER_BYTES = AGENT_ENV_ROLE_HEADER.lower().encode()
-
-
 def _is_dead_session(exc: BaseException) -> bool:
     """Whether a child call failed because its session is gone, so the generation is retired: the stream closed under
     it, the child answered 404 for the session id (idle expiry or a restart, which the client reports as code 32600),
@@ -1307,87 +1167,3 @@ def _call_never_reached_child(exc: BaseException) -> bool:
     if isinstance(exc, (ClosedResourceError, anyio.BrokenResourceError)):
         return True
     return isinstance(exc, McpError) and exc.error.code == 32600
-
-
-def _is_child_mcp_path(decoded_rest: str) -> bool:
-    """Whether a /svc/{service}/{path} remainder reaches the backing server's MCP endpoint (`mcp` or anything under
-    it), judged after dot-segment normalisation, since httpx collapses `x/../mcp` to `/mcp` on the way upstream.
-
-    >>> [_is_child_mcp_path(p) for p in ("mcp", "mcp/", "mcp/x", "x/../mcp", "./mcp", "/mcp", "mcpx", "agentenv", "")]
-    [True, True, True, True, True, True, False, False, False]
-    """
-    normalized = posixpath.normpath("/" + decoded_rest.lstrip("/"))
-    return normalized == "/mcp" or normalized.startswith("/mcp/")
-
-
-def _stamp_jsonrpc_role(body: bytes, role: str) -> bytes:
-    """A JSON-RPC body (one request or a batch) with every request's `params._meta` carrying the gateway's role
-    stamp in place of whatever the client wrote there; a body that is not JSON-RPC is returned as it came.
-
-    >>> json.loads(_stamp_jsonrpc_role(b'{"method": "tools/call", "params": {"_meta": {"agentenv.io/role": "x", "agentenv.io/session": "s"}}}', "r"))["params"]
-    {'_meta': {'agentenv.io/role': 'r'}}
-    >>> _stamp_jsonrpc_role(b"not json", "r")
-    b'not json'
-    """
-    try:
-        parsed = json.loads(body)
-    except ValueError:
-        return body
-    stamped = False
-    for item in parsed if isinstance(parsed, list) else [parsed]:
-        params = item.get("params") if isinstance(item, dict) else None
-        if isinstance(params, dict):
-            meta = dict(params["_meta"]) if isinstance(params.get("_meta"), dict) else {}
-            meta.pop(AGENT_ENV_SESSION_META_KEY, None)
-            meta[AGENT_ENV_ROLE_META_KEY] = role
-            params["_meta"] = meta
-            stamped = True
-    return json.dumps(parsed).encode() if stamped else body
-
-
-class _UpstreamResponse(StreamingResponse):
-    """Streams an httpx response through untouched and closes it when the response ends, iterated or not.
-
-    The close lives in `__call__` rather than the body generator because a client that leaves before the first
-    chunk makes Starlette cancel before the generator's first step, and a never-started generator runs no `finally`."""
-
-    _DROP = _HOP_BY_HOP | {b"date", b"server"}  # uvicorn adds the gateway's own; forwarding upstream's duplicates them
-
-    def __init__(self, upstream: httpx.Response, client: httpx.AsyncClient, target_url: str) -> None:
-        super().__init__(self._body(upstream, target_url), status_code=upstream.status_code)
-        # Header block forwarded byte for byte: repeated names (Set-Cookie) stay separate, non-latin-1 values
-        # never hit a str round-trip, and Content-Length/Content-Encoding stay valid for the undecoded body.
-        self.raw_headers = [(k.lower(), v) for k, v in upstream.headers.raw if k.lower() not in self._DROP]
-        self._upstream = upstream
-        self._client = client
-
-    @staticmethod
-    async def _body(upstream: httpx.Response, target_url: str) -> AsyncIterator[bytes]:
-        sent = 0
-        try:
-            async for chunk in upstream.aiter_raw():
-                sent += len(chunk)
-                yield chunk
-        except Exception as e:  # past the headers a failure can only reach the client as a cut body; name it here
-            logger.error(f"Proxy to {target_url} failed after {sent} bytes: {e!r}")
-            raise
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        try:
-            await super().__call__(scope, receive, send)
-        finally:  # normal end, upstream error, or the downstream client going away
-            await self._upstream.aclose()
-            await self._client.aclose()
-
-
-def _raw_remainder(raw_path: bytes, decoded_path: str, decoded_rest: str) -> bytes:
-    """The still-encoded tail of `raw_path` that Starlette's decoded `{path}` param came from.
-
-    >>> _raw_remainder(b"/svc/mcp-svc/x%2Fy%3Fz", "/svc/mcp-svc/x/y?z", "x/y?z")
-    b'x%2Fy%3Fz'
-    """
-    prefix = decoded_path.removesuffix(decoded_rest)  # "/svc/mcp-svc/"
-    rest = raw_path.split(b"/", prefix.count("/"))[-1]  # 3 slashes in both forms, so the tail starts after the 3rd
-    if unquote(rest.decode("latin-1")) != decoded_rest:  # only false when an escaped slash hid inside the prefix
-        raise ValueError(f"cannot route request-target {raw_path.decode('latin-1')!r}: percent-encoded slash in the route prefix")
-    return rest

@@ -16,6 +16,7 @@ import pytest
 
 from agent_env.env.gateway import AGENT_ENV_ROLE_META_KEY, AGENT_ENV_SESSION_META_KEY
 from agent_env.env.gateway import gateway as gateway_module
+from agent_env.env.gateway import rest_proxy as rest_proxy_module
 from agent_env.env.gateway.gateway import Gateway
 
 UPSTREAM = "http://upstream"
@@ -74,7 +75,7 @@ class _Upstream:
             return resp
 
         transport = httpx.MockTransport(handler)
-        monkeypatch.setattr(gateway_module.httpx, "AsyncClient",
+        monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient",
                             lambda **kw: _RecordingClient(transport=transport, **kw))
 
 
@@ -365,9 +366,9 @@ async def test_an_escaped_slash_in_the_route_prefix_is_refused_not_misrouted(mon
 
 
 def test_gateway_module_doctests_pass():
-    """CI does not collect doctests, and `_raw_remainder`'s example is its explanation, so keep it true."""
-    result = doctest.testmod(gateway_module)
-    assert result.attempted >= 1 and result.failed == 0
+    """CI does not collect doctests, and `raw_remainder`'s example is its explanation, so keep it true."""
+    results = [doctest.testmod(module) for module in (gateway_module, rest_proxy_module)]
+    assert sum(r.attempted for r in results) >= 1 and all(r.failed == 0 for r in results)
 
 
 @pytest.mark.asyncio
