@@ -27,7 +27,7 @@ from agent_env.store.image_store.local_registry_image_store import LocalRegistry
 from agent_env.store.image_store.oci_registry_credentials import is_loopback_host, names_registry, registry_host_from_ref
 from agent_env.store.image_store.registry_api import pin_digest
 from agent_env.utils.build_context import BuildContext
-from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM
+from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM, normalize_platform
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +126,7 @@ class DockerImageArtifact(Artifact):
         image_ref = image_store.image_ref(repository, f"v{version}")
         image_store.ensure_repository(repository)
         _push_local_image(image_name, image_ref, image_store)
-        platform = platform or _image_platform(image_ref)
+        platform = normalize_platform(platform) if platform else _image_platform(image_ref)
 
         with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
             tmp_path = Path(tmp.name)
@@ -199,7 +199,7 @@ class DockerImageArtifact(Artifact):
             tar_gz_object_url=tar_gz_object_url,
             build_context_object_url=build_context_object_url,
             dockerfile_path=dockerfile_path,
-            platform=platform,
+            platform=normalize_platform(platform) if platform else None,
             source_digest=source_digest,
         )
         return store.put_document(instance)
@@ -239,6 +239,7 @@ class DockerImageArtifact(Artifact):
         from agent_env.artifact.store import get_artifact_store
         from agent_env.config import get_config
 
+        platform = normalize_platform(platform)
         root = Path(context_path)
         dockerfile = _resolve_dockerfile(root, dockerfile_path)
         if not dockerfile.is_file():
@@ -297,9 +298,11 @@ class DockerImageArtifact(Artifact):
 
     def platform_problem(self, platforms: Collection[str] | None) -> str | None:
         """Why a sandbox that runs only images of ``platforms`` can't run this one, or None when it can: an image runs
-        on the platform it records, the one it's built for. One that records none, or a sandbox that declares none,
-        isn't checked."""
-        if platforms is None or self.platform is None or self.platform in platforms:
+        on the platform it records, the one it's built for, however either is spelled (``normalize_platform``). One
+        that records none, or a sandbox that declares none, isn't checked."""
+        if platforms is None or self.platform is None:
+            return None
+        if normalize_platform(self.platform) in {normalize_platform(platform) for platform in platforms}:
             return None
         runs = ", ".join(sorted(platforms))
         return f"{self.id!r} v{self.version} is a {self.platform} image, and the sandbox runs {runs}"
@@ -560,9 +563,7 @@ def _image_platform(image_ref: str) -> str | None:
                             capture_output=True, text=True)
     if result.returncode != 0 or result.stdout.count("/") != 2:
         return None
-    os_name, architecture, variant = result.stdout.strip().split("/")
-    # arm64 has one variant, so it goes unnamed as in `--platform linux/arm64`; 32-bit arm's v6 and v7 differ.
-    return f"{os_name}/{architecture}/{variant}" if architecture == "arm" and variant else f"{os_name}/{architecture}"
+    return normalize_platform(result.stdout)
 
 
 def _resolve_dockerfile(context_dir: Path, dockerfile_path: str | None) -> Path | None:

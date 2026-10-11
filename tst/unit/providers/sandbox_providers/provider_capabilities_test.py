@@ -157,6 +157,15 @@ def test_a_sandbox_declaring_its_platforms_runs_only_images_of_one_of_them(image
     assert accepts.problem(image, on=_on(False)) is None  # one that declares none isn't checked
 
 
+@pytest.mark.parametrize("recorded, declared", [
+    ("linux/amd64/v2", "linux/amd64"), ("linux/arm64/v8", "linux/arm64"), ("linux/amd64", "linux/x86_64"),
+])
+def test_a_platform_is_the_same_however_the_image_or_the_sandbox_spells_it(recorded, declared):
+    image = DockerImageArtifact(id="img", version=2, description="d", image_name="img:v2", platform=recorded,
+                                tar_gz_object_url="s3://bucket/img.tar.gz")
+    assert LOADABLE.problem(image, on=_on(False, frozenset({declared}))) is None
+
+
 def test_an_image_that_records_no_platform_isnt_checked():
     image = DockerImageArtifact(id="img", version=2, description="d", image_name="img:v2",
                                 tar_gz_object_url="s3://bucket/img.tar.gz")
