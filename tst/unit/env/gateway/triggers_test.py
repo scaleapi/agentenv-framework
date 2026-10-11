@@ -410,7 +410,7 @@ def _step_gateway():
                  internal_mcp_servers=[], rest_proxy_urls={})
     gw._tool_server_urls = {"gdocs_create_document": "http://svc/mcp"}
 
-    async def _fake_call_child_tool(server_url, tool_name, arguments, *, meta=None):
+    async def _fake_call_child_tool(server_url, tool_name, arguments, *, caller=None):
         return _result()
 
     gw._call_child_tool = _fake_call_child_tool  # type: ignore[assignment]

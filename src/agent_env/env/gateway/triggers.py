@@ -20,7 +20,8 @@ import httpx
 from mcp.types import CallToolResult, TextContent
 
 from .clock import ClockError, _advance, _iso, _parse_duration, _parse_rfc3339
-from .constants import AGENT_ENV_ROLE_META_KEY, DEFAULT_ROLE, TRIGGER_IN_FLIGHT_STATUSES, TRIGGER_STATUSES
+from .caller import Caller
+from .constants import DEFAULT_ROLE, TRIGGER_IN_FLIGHT_STATUSES, TRIGGER_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -1068,8 +1069,8 @@ class TriggerEngine:
                 return result
             text = result if isinstance(result, str) else json.dumps(result, default=str)
             return CallToolResult(content=[TextContent(type="text", text=text)], isError=False)
-        meta = {AGENT_ENV_ROLE_META_KEY: role} if role is not None else None
-        return await gw._call_child_tool(server_url, tool_name, arguments, meta=meta)
+        caller = Caller(role=role) if role is not None else None
+        return await gw._call_child_tool(server_url, tool_name, arguments, caller=caller)
 
     async def _fire(self, tid: str, trig: dict, ctx: dict) -> None:
         """Run the actions for one provoking call, then drain any calls queued while firing (repeat

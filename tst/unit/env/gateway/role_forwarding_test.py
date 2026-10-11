@@ -15,6 +15,8 @@ from mcp.types import CONNECTION_CLOSED, CallToolResult, ErrorData, TextContent,
 
 from agent_env.env.gateway import AGENT_ENV_ROLE_META_KEY, AGENT_ENV_SESSION_META_KEY, InternalMCPServer
 from agent_env.env.gateway import gateway as gateway_module
+from agent_env.env.gateway.caller import Caller
+from agent_env.env.gateway.constants import DEFAULT_ROLE
 from agent_env.env.gateway.gateway import GATEWAY_TRAJECTORY_FILE, Gateway, _call_never_reached_child, _is_dead_session
 from agent_env.env.gateway.get_time import GET_TIME_TOOL_NAME
 
@@ -67,10 +69,8 @@ def test_the_mcp_proxy_stamps_the_session_s_role_and_key_never_the_request_s():
 
     def call(role=None, key=None):
         ctx = contextvars.copy_context()  # what the ASGI wrapper and the per-session lifespan would have set
-        if role is not None:
-            ctx.run(gateway_module._role_var.set, role)
-        if key is not None:
-            ctx.run(gateway_module._caller_session_var.set, key)
+        if role is not None or key is not None:
+            ctx.run(Caller(role=role or DEFAULT_ROLE, session=key or "").bind)
         ctx.run(asyncio.run, gw._mcp._tool_manager.call_tool(TOOL.name, {}))
 
     call("alice@example.com", "s1")

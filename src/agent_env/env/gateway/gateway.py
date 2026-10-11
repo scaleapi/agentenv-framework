@@ -12,7 +12,6 @@ import posixpath
 import socket
 import subprocess
 from contextlib import asynccontextmanager
-from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from collections.abc import AsyncIterator
@@ -65,6 +64,7 @@ from .constants import (
     WILDCARD,
     GatewayMode,
 )
+from .caller import Caller
 from .child_transport import child_http_client
 from .clock import Clock, ClockError, _iso
 from .get_time import GET_TIME_TOOL_NAME, build_get_time_tool
@@ -72,9 +72,6 @@ from .triggers import TriggerEngine, TriggerError
 
 logger = logging.getLogger(__name__)
 
-_role_var: ContextVar[str] = ContextVar("agent_env_role", default=DEFAULT_ROLE)
-# One key per inbound MCP session (set by the per-session lifespan); empty outside one (/step, triggers, startup).
-_caller_session_var: ContextVar[str] = ContextVar("agent_env_caller_session", default="")
 
 
 class Gateway:
@@ -139,20 +136,7 @@ class Gateway:
         self._trajectory_file = open(GATEWAY_TRAJECTORY_FILE, "a")
         atexit.register(self._close_trajectory_file)
 
-        @asynccontextmanager
-        async def lifespan(mcp: FastMCP):
-            # Entered by mcp's Server.run once per inbound MCP session, in the session's server task before any
-            # handler task is spawned, so the key set here is inherited by every tools/call of that session.
-            # Process-scoped state (child sessions, time-trigger driver) lives in _process_lifespan; discovery
-            # here only lets a connect heal a failed startup discovery (tools/list is synchronous and cannot).
-            _caller_session_var.set(uuid4().hex)
-            try:
-                await self._ensure_tools_discovered()
-            except Exception:
-                logger.exception("Tool discovery failed at MCP session start; proxy tools stay unavailable until it succeeds")
-            yield
-
-        self._mcp = FastMCP(server_name, lifespan=lifespan)
+        self._mcp = FastMCP(server_name, lifespan=self._session_lifespan)
         self._mcp.settings.host = host
         self._mcp.settings.port = port
         self._mcp.settings.transport_security.enable_dns_rebinding_protection = False
@@ -325,9 +309,15 @@ class Gateway:
         else:
             anyio.run(server.serve)
 
+    # The three scopes a Caller is bound in, innermost first. Request: the served app binds the role the
+    # AgentEnv-Role header named. Session: mcp's Server.run enters the session lifespan once per inbound MCP
+    # session, in the session's server task before any handler task is spawned, so the key bound there is inherited
+    # by every tools/call of that session (and the role is the one its initialize request carried, which that task
+    # inherited). Process: child sessions and the time-trigger driver, outer to the MCP session manager's lifespan.
+
     def _asgi_app(self):
-        """The served app: FastMCP's Starlette app with the AgentEnv-Role header bound per request, and the process
-        lifespan (child sessions, time-trigger driver) wrapped around the MCP session manager's."""
+        """The served app: FastMCP's Starlette app with the request's caller bound around it, and the process
+        lifespan wrapped around the MCP session manager's."""
         inner = self._mcp.streamable_http_app()
         inner.router.lifespan_context = self._process_lifespan(inner.router.lifespan_context)
 
@@ -340,13 +330,24 @@ class Gateway:
                 if name == _ROLE_HEADER_BYTES:
                     role = value.decode(errors="ignore").strip() or DEFAULT_ROLE
                     break
-            token = _role_var.set(role)
+            token = Caller(role=role, session=Caller.current().session).bind()
             try:
                 await inner(scope, receive, send)
             finally:
-                _role_var.reset(token)
+                Caller.reset(token)
 
         return app
+
+    @asynccontextmanager
+    async def _session_lifespan(self, mcp: FastMCP):
+        """Once per inbound MCP session: the session's key joins the caller, and a connect gets to heal a failed
+        startup discovery (tools/list is synchronous and cannot). Nothing process-scoped lives here."""
+        Caller(role=Caller.current().role, session=uuid4().hex).bind()
+        try:
+            await self._ensure_tools_discovered()
+        except Exception:
+            logger.exception("Tool discovery failed at MCP session start; proxy tools stay unavailable until it succeeds")
+        yield
 
     def _process_lifespan(self, mcp_lifespan):
         """Once per process (uvicorn's lifespan), outer to the MCP session manager's: at shutdown the MCP sessions end
@@ -390,17 +391,17 @@ class Gateway:
         return False
 
     def _install_role_filters(self) -> None:
-        """Wrap the FastMCP tool manager so MCP tools/list and tools/call honor _role_var."""
+        """Wrap the FastMCP tool manager so MCP tools/list and tools/call honor the current caller's role."""
         tm = self._mcp._tool_manager
         original_list_tools = tm.list_tools
         original_call_tool = tm.call_tool
 
         def filtered_list_tools():
-            role = _role_var.get()
+            role = Caller.current().role
             return [t for t in original_list_tools() if not self._is_disabled(role, t.name)]
 
         async def filtered_call_tool(name, arguments, context=None, convert_result=False):
-            role = _role_var.get()
+            role = Caller.current().role
             if self._is_disabled(role, name):
                 raise ToolError(f"Tool '{name}' is disabled for role '{role}'")
             native = name not in self._tool_server_urls
@@ -843,11 +844,13 @@ class Gateway:
         task.add_done_callback(lambda _: self._retiring.discard(id(sessions)))
 
     async def _call_child_tool(self, server_url: str, tool_name: str, arguments: dict, *,
-                               meta: dict | None = None) -> CallToolResult:
+                               caller: Caller | None = None) -> CallToolResult:
         """Every child tools/call (MCP proxy, /step, trigger engine): one shared generation, the caller's `_meta`
-        stamp, and one reconnect when the session turns out dead, retrying the call only if it never reached the
-        child (a call the transport lost in flight may already have written; the next call reopens). Discovery is
-        not redone on a reconnect; the registered proxies look their session up by URL."""
+        stamp (none for an unattributed trigger action), and one reconnect when the session turns out dead,
+        retrying the call only if it never reached the child (a call the transport lost in flight may already have
+        written; the next call reopens). Discovery is not redone on a reconnect; the registered proxies look their
+        session up by URL."""
+        meta = caller.meta() if caller is not None else None
         sessions = await self._ensure_child_sessions()
         closed = self._child_close  # this generation's; no await since the lookup, so they agree
         try:
@@ -1046,8 +1049,7 @@ class Gateway:
         })
         try:
             async with self._tool_call_guard():
-                result = await self._call_child_tool(server_url, tool_name, arguments,
-                                                     meta={AGENT_ENV_ROLE_META_KEY: role})
+                result = await self._call_child_tool(server_url, tool_name, arguments, caller=Caller(role=role))
                 changelog_id = self._query_changelog_id()
 
             await self._log_event({
@@ -1153,11 +1155,9 @@ class Gateway:
         input_schema = tool.inputSchema or {"type": "object", "properties": {}}
 
         async def proxy(**kwargs) -> CallToolResult:
-            # The session's own role and key, never anything the inbound request wrote: _role_var is what the
-            # disabled check and trigger attribution already keyed this call on.
-            meta = {AGENT_ENV_ROLE_META_KEY: _role_var.get()}
-            if caller_session := _caller_session_var.get():
-                meta[AGENT_ENV_SESSION_META_KEY] = caller_session
+            # The session's own caller, never anything the inbound request wrote: the same value the disabled check
+            # and trigger attribution already keyed this call on.
+            caller = Caller.current()
             tool_call_event_id = await self._log_event({
                 "event_type": "tool_call",
                 "tool_call": {
@@ -1167,7 +1167,7 @@ class Gateway:
             })
 
             async with self._tool_call_guard():
-                result = await self._call_child_tool(server_url, tool_name, kwargs, meta=meta)
+                result = await self._call_child_tool(server_url, tool_name, kwargs, caller=caller)
                 changelog_id = self._query_changelog_id()
 
             await self._log_event({
