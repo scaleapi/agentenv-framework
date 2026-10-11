@@ -9,6 +9,7 @@ import contextlib
 from types import SimpleNamespace
 
 import anyio
+import httpx
 import pytest
 from mcp.shared.exceptions import McpError
 from mcp.types import CONNECTION_CLOSED, CallToolResult, ErrorData, TextContent, Tool as MCPTool, ToolAnnotations
@@ -304,7 +305,7 @@ async def test_a_child_that_never_answers_initialize_is_a_failed_connect_attempt
             await asyncio.Event().wait()
 
     @contextlib.asynccontextmanager
-    async def streams(url):
+    async def streams(url, **kwargs):
         yield None, None, None
 
     monkeypatch.setattr(gateway_module, "streamable_http_client", streams)
@@ -405,3 +406,28 @@ async def test_shutdown_cancels_scheduled_actions_and_nothing_reopens_the_child_
     with pytest.raises(RuntimeError, match="shutting down"):
         await gw._ensure_child_sessions()
     assert gw._child_owner is None and opener.attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_a_reported_transport_failure_retires_the_generation_once_and_the_next_call_reopens():
+    """The child transport reports a failed POST; the generation is retired at once (so its pending calls fail with
+    CONNECTION_CLOSED) and a second report for the same generation, or one for a generation already gone, is nothing."""
+    session = _FakeSession()
+    opener = _Opener(session)
+    gw = _gateway(opener)
+    first = await gw._ensure_child_sessions()
+    gw._child_transport_failed(first, httpx.ReadError("peer went away"))
+    gw._child_transport_failed(first, httpx.ReadError("again"))
+    assert len(gw._retirements) == 2
+    await asyncio.gather(*gw._retirements)
+    assert gw._retirements == set() and gw._child_owner is None
+    assert opener.exited == opener.entered and len(opener.exited) == 1, "retired exactly once, by the task that opened it"
+
+    second = await gw._ensure_child_sessions()
+    assert second is not first and opener.opened == 2
+    gw._child_transport_failed(first, httpx.ReadError("stale"))  # a report about the retired generation
+    assert gw._retirements == set() and gw._child_sessions is second
+
+    gw._closing = True
+    gw._child_transport_failed(second, httpx.ReadError("at shutdown"))
+    assert gw._retirements == set(), "nothing is retired on the way down; the process lifespan closes it"

@@ -31,7 +31,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.fastmcp.tools import Tool as FastMCPTool
 from mcp.server.fastmcp.utilities.func_metadata import FuncMetadata, ArgModelBase
 from mcp.shared.exceptions import McpError
-from mcp.types import CONNECTION_CLOSED, CallToolResult, TextContent, Tool as MCPTool
+from mcp.types import CONNECTION_CLOSED, CallToolResult, ErrorData, TextContent, Tool as MCPTool
 from pydantic import create_model
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
@@ -65,6 +65,7 @@ from .constants import (
     WILDCARD,
     GatewayMode,
 )
+from .child_transport import child_http_client
 from .clock import Clock, ClockError, _iso
 from .get_time import GET_TIME_TOOL_NAME, build_get_time_tool
 from .triggers import TriggerEngine, TriggerError
@@ -122,6 +123,7 @@ class Gateway:
         self._child_close: asyncio.Event | None = None
         self._child_lock = asyncio.Lock()  # open / retire / close of a generation (taken after _discover_lock)
         self._closing = False  # set at process shutdown; no generation is opened past it
+        self._retirements: set[asyncio.Task] = set()  # generations being retired on a reported transport failure
         self._discover_lock = asyncio.Lock()
         self._server_tools: dict[str, list[MCPTool]] = {}
         self._tools_discovered = False
@@ -699,12 +701,19 @@ class Gateway:
         )
 
     async def _open_persistent_sessions(self, exit_stack: contextlib.AsyncExitStack, max_retries: int = 10, retry_delay: float = 1.0) -> dict[str, ClientSession]:
-        """Open a persistent MCP client session to each internal server."""
+        """Open a persistent MCP client session to each internal server, over a transport that reports a failed
+        request to this generation so it is retired at once (see child_transport)."""
         sessions: dict[str, ClientSession] = {}
+
+        def report(exc: httpx.TransportError) -> None:
+            self._child_transport_failed(sessions, exc)
+
         for server in self.internal_mcp_servers:
             for attempt in range(max_retries):
                 try:
-                    read_stream, write_stream, _ = await exit_stack.enter_async_context(streamable_http_client(server.mcp_url))
+                    client = await exit_stack.enter_async_context(child_http_client(report))
+                    read_stream, write_stream, _ = await exit_stack.enter_async_context(
+                        streamable_http_client(server.mcp_url, http_client=client))
                     session = await exit_stack.enter_async_context(ClientSession(read_stream, write_stream))
                     # a child that accepts the connection but never answers initialize is a failed attempt, not a hang
                     await asyncio.wait_for(session.initialize(), timeout=CARD_FETCH_TIMEOUT_S)
@@ -790,6 +799,18 @@ class Gateway:
             if self._child_sessions is stale:
                 await self._close_child_sessions()
 
+    def _child_transport_failed(self, sessions: dict[str, ClientSession], exc: httpx.TransportError) -> None:
+        """A request to a child of ``sessions`` failed at the transport. mcp's client would keep the request
+        pending, so the generation is retired now: every call it has in flight fails with CONNECTION_CLOSED instead
+        of waiting out its timeout, and the next call reopens. Called from inside the client's own task, so the
+        retirement is scheduled rather than awaited; a report for a generation already retired is nothing."""
+        if self._closing or sessions is not self._child_sessions:
+            return
+        logger.warning(f"child transport failed ({exc!r}); retiring the child session generation")
+        task = asyncio.get_running_loop().create_task(self._reset_child_sessions(sessions), name="gateway-child-retire")
+        self._retirements.add(task)
+        task.add_done_callback(self._retirements.discard)
+
     async def _call_child_tool(self, server_url: str, tool_name: str, arguments: dict, *,
                                meta: dict | None = None) -> CallToolResult:
         """Every child tools/call (MCP proxy, /step, trigger engine): one shared generation, the caller's `_meta`
@@ -797,8 +818,9 @@ class Gateway:
         child (a call the transport lost in flight may already have written; the next call reopens). Discovery is
         not redone on a reconnect; the registered proxies look their session up by URL."""
         sessions = await self._ensure_child_sessions()
+        closed = self._child_close  # this generation's; no await since the lookup, so they agree
         try:
-            return await asyncio.wait_for(sessions[server_url].call_tool(tool_name, arguments, meta=meta),
+            return await asyncio.wait_for(self._call_until_retired(sessions[server_url], closed, tool_name, arguments, meta),
                                           timeout=self.TOOL_CALL_TIMEOUT_S)
         except Exception as e:
             if not _is_dead_session(e):
@@ -809,8 +831,30 @@ class Gateway:
                 raise
             logger.warning(f"child session to {server_url} is dead ({e!r}), reconnecting...")
             sessions = await self._ensure_child_sessions()
-            return await asyncio.wait_for(sessions[server_url].call_tool(tool_name, arguments, meta=meta),
+            closed = self._child_close
+            return await asyncio.wait_for(self._call_until_retired(sessions[server_url], closed, tool_name, arguments, meta),
                                           timeout=self.TOOL_CALL_TIMEOUT_S)
+
+    @staticmethod
+    async def _call_until_retired(session: ClientSession, closed: asyncio.Event | None, tool_name: str,
+                                  arguments: dict, meta: dict | None) -> CallToolResult:
+        """``session.call_tool``, unless its generation is retired first: then the call fails with CONNECTION_CLOSED
+        the way a closed transport would fail it. mcp's client keeps a request whose transport failed pending, and
+        exiting the session under it cancels the receive loop before that loop can fail the request, so the gateway
+        fails it. The retirement event is this generation's; a generation already gone has none."""
+        if closed is None:
+            raise McpError(ErrorData(code=CONNECTION_CLOSED, message="Connection closed"))
+        call = asyncio.ensure_future(session.call_tool(tool_name, arguments, meta=meta))
+        retired = asyncio.ensure_future(closed.wait())
+        try:
+            done, _ = await asyncio.wait({call, retired}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            retired.cancel()
+            if not call.done():
+                call.cancel()
+        if call in done:
+            return call.result()
+        raise McpError(ErrorData(code=CONNECTION_CLOSED, message="Connection closed"))
 
     async def _ensure_tools_discovered(self) -> None:
         """Idempotent discovery over the process's child sessions (startup, MCP session start, /step, /state, triggers)."""

@@ -1,0 +1,93 @@
+"""A child that dies with a call in flight, over real loopback sockets: the call fails within seconds instead of
+waiting out the tool-call timeout, and the next call reopens the generation once the child is back."""
+from __future__ import annotations
+
+import asyncio
+import socket
+import time
+
+import pytest
+import uvicorn
+from mcp.server.fastmcp import FastMCP
+from mcp.shared.exceptions import McpError
+from mcp.types import CONNECTION_CLOSED
+from pytest_socket import enable_socket
+
+from agent_env.env.gateway import InternalMCPServer
+from agent_env.env.gateway.gateway import Gateway
+
+
+@pytest.fixture(autouse=True)
+def _loopback():
+    """Override the suite-wide socket block (tst/unit/conftest.py): loopback is the point here."""
+    enable_socket()
+    yield
+
+
+def _child() -> FastMCP:
+    app = FastMCP("child")
+
+    @app.tool()
+    async def fast() -> str:
+        return "ok"
+
+    @app.tool()
+    async def slow() -> str:
+        await asyncio.Event().wait()  # never set: the call is in flight until the child dies
+        return "never"
+
+    return app
+
+
+def _bind(port: int = 0) -> socket.socket:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", port))
+    return sock
+
+
+async def _serve(app: FastMCP, sock: socket.socket) -> uvicorn.Server:
+    config = uvicorn.Config(app.streamable_http_app(), log_level="critical", access_log=False, timeout_graceful_shutdown=1)
+    config.load()
+    server = uvicorn.Server(config)
+    server.lifespan = config.lifespan_class(config)
+    await server.startup(sockets=[sock])
+    return server
+
+
+def _text(result) -> str:
+    return result.content[0].text
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(60)
+async def test_a_child_dying_mid_call_fails_the_call_fast_and_the_next_call_reopens():
+    sock = _bind()
+    port = sock.getsockname()[1]
+    url = f"http://127.0.0.1:{port}/mcp"
+    server = await _serve(_child(), sock)
+    gw = Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[InternalMCPServer("svc", url)])
+    try:
+        await gw._ensure_tools_discovered()
+        assert _text(await gw._call_child_tool(url, "fast", {})) == "ok"
+        first_generation = gw._child_sessions
+
+        in_flight = asyncio.create_task(gw._call_child_tool(url, "slow", {}))
+        await asyncio.sleep(0.5)  # the request has reached the child and waits there
+        assert not in_flight.done()
+
+        died = time.monotonic()
+        await server.shutdown()  # the child goes away with the call in flight
+        with pytest.raises(McpError) as info:
+            await asyncio.wait_for(in_flight, timeout=30)
+        assert info.value.error.code == CONNECTION_CLOSED
+        assert time.monotonic() - died < 10, "the in-flight call must fail promptly, not after the tool-call timeout"
+        await asyncio.gather(*gw._retirements)
+        assert gw._child_owner is None, "the generation was retired"
+
+        server = await _serve(_child(), _bind(port))  # the child is back on the same address
+        assert _text(await gw._call_child_tool(url, "fast", {})) == "ok", "the next call reopens"
+        assert gw._child_sessions is not first_generation
+    finally:
+        await gw._close_child_sessions()
+        await server.shutdown()
