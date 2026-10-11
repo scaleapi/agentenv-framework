@@ -10,6 +10,7 @@ tst/integration/store/local_parallel_deploy_test.py. The allocator's own tests s
 only its bind probe, which the unit tier can't run.
 """
 
+import errno
 import os
 import threading
 
@@ -150,4 +151,37 @@ def test_a_range_with_every_port_in_use_is_an_error(busy):
     busy.update(local_sandbox_module._HOST_PORTS)
 
     with pytest.raises(RuntimeError, match="Every host port from 20000 to 29999 is in use"):
+        local_sandbox_module._free_host_port()
+
+
+class _Socket:
+    """Stands in for a socket: binding a port in ``failing`` fails with the errno it maps to."""
+
+    failing: dict[int, int] = {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def bind(self, address):
+        if address[1] in self.failing:
+            raise OSError(self.failing[address[1]], os.strerror(self.failing[address[1]]))
+
+
+def test_the_probe_skips_a_port_already_in_use(monkeypatch):
+    monkeypatch.setattr(local_sandbox_module.socket, "socket", _Socket)
+    monkeypatch.setattr(_Socket, "failing", {20101: errno.EADDRINUSE})
+    _last_handed_out(20100)
+
+    assert local_sandbox_module._free_host_port() == 20102
+
+
+def test_a_bind_that_fails_for_another_reason_raises(monkeypatch):
+    monkeypatch.setattr(local_sandbox_module.socket, "socket", _Socket)
+    monkeypatch.setattr(_Socket, "failing", {20101: errno.EACCES})
+    _last_handed_out(20100)
+
+    with pytest.raises(PermissionError):
         local_sandbox_module._free_host_port()

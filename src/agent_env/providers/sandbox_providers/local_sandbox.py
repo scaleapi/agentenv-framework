@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import contextlib
+import errno
 import functools
 import glob
 import json
@@ -146,12 +147,14 @@ def _free_host_port() -> int:
 
 def _bindable(port: int) -> bool:
     """Whether ``port`` is free on every interface, as docker binds it when publishing: a port free on loopback alone
-    can still be taken on another interface."""
+    can still be taken on another interface. A bind that fails for another reason raises."""
     with socket.socket() as s:
         try:
             s.bind(("", port))
-        except OSError:
-            return False
+        except OSError as e:
+            if e.errno == errno.EADDRINUSE:
+                return False
+            raise
         return True
 
 
