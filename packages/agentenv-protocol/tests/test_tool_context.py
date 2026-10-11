@@ -286,7 +286,7 @@ def test_injecting_raises_when_a_slotted_function_has_unresolvable_annotations()
 def test_target_without_a_tool_dispatch_is_refused_before_any_route_is_added(strip):
     mcp = _FakeMCP()
     strip(mcp)
-    with pytest.raises(RuntimeError, match="no FastMCP tool dispatch"):
+    with pytest.raises(RuntimeError, match="no tool dispatch .* whoami, whoami_sync would read an empty caller"):
         AgentEnvFastMCPApplication(environment_card=EnvironmentCard(name="items"), handler=_SlotHandler()).add_routes_to_app(mcp)
     assert mcp.routes == [] and mcp.tools == {}
 

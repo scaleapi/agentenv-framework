@@ -74,6 +74,7 @@ sail = [
 ]
 dev = [
     "agentenv-framework[aws,explorer,gcp,sail]",  # so the AWS, explorer, GCP backend and Sail provider tests run in CI
+    "fastmcp>=3.4,<4",  # the standalone-fastmcp mount path of the protocol; <4 keeps mcp 1.x
     "griffelib==2.3.0",  # the plugin API check; exact, since what it reports as a break changes between releases
     "moto>=5.0.0",
     "psycopg2-binary>=2.9.0",  # the gateway server module's driver; outside its container only the tests import it

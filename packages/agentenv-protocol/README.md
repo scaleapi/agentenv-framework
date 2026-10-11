@@ -169,6 +169,8 @@ extension's, and `client.invoke_extension(base_url, card, uri, params, method=..
 its HTTP verb. Without `method`, `invoke_extension` calls the first method listed; an extension
 with several methods, such as a gateway's `urn:agentenv:clock/v1`, should always be called by name.
 
+Where the binding lives depends on the app. On mcp's own FastMCP it wraps the tool manager's dispatch; on the standalone `fastmcp` package it joins the app's middleware chain as the outermost layer, so a handler's own middleware runs under it too. An app with neither seam mounts unbound, with a warning, unless a tool declares a `ToolContext` parameter or the handler defines `on_tool_call`: then the mount is refused rather than serving an empty caller.
+
 ### Uploading an export through a grant
 
 An export too large to return from `data/get` can go straight to the caller's object store. A
