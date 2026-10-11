@@ -37,6 +37,7 @@ except ImportError:  # Windows, which agent-env does not target.
 
 from agent_env import config
 from agent_env.attribution import Attribution
+from agent_env.config.paths import state_root
 from agent_env.providers.sandbox_providers.sandbox import SANDBOX_LABEL, NetworkPolicy, VmSandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_CONTAINER,
@@ -46,6 +47,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
 )
 from agent_env.store.object_store.local.tls import local_ca
 from agent_env.store.object_store.local.store import LocalFilesystemObjectStore
+from agent_env.store.local_state import ensure_state_dir
 from agent_env.store.routing import LocalRunObjectStore
 
 if TYPE_CHECKING:
@@ -97,8 +99,8 @@ _PORT_MAP_FILE = ".port-map.json"
 # Linux, the VM Docker Desktop or Rancher Desktop runs Docker in included; 49152 up on macOS and Windows) and below
 # Kubernetes' node ports (30000-32767).
 _HOST_PORTS = range(20000, 30000)
-# The last host port handed out, under the sandbox root, so every process using it hands them out in turn.
-_PORT_CURSOR_FILE = ".host-port-cursor"
+# Holds the last host port handed out, in the per-user state root's locks, so every process hands them out in turn.
+_HOST_PORT_CURSOR = "host-ports"
 
 
 def _local_sandbox_root_path() -> Path:
@@ -129,7 +131,9 @@ def _free_host_port() -> int:
     has been handed out, and outgoing connections never use it. The probe alone could not keep it: it releases the
     port, and can't see the sockets of a VM Docker runs in.
     """
-    fd = os.open(_local_sandbox_root() / _PORT_CURSOR_FILE, os.O_RDWR | os.O_CREAT, 0o644)
+    locks = state_root() / "locks"
+    ensure_state_dir(locks)
+    fd = os.open(locks / _HOST_PORT_CURSOR, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         last = os.read(fd, 16).strip()

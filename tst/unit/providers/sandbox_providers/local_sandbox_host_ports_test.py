@@ -16,6 +16,7 @@ import threading
 
 import pytest
 
+from agent_env.config.paths import state_root
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT
 from agent_env.providers.sandbox_providers import local_sandbox as local_sandbox_module
 from agent_env.env.envs.service_db import DB_MCP_PORT, DB_WEB_PORT
@@ -108,9 +109,9 @@ def busy(monkeypatch):
 
 
 def _last_handed_out(port: int) -> None:
-    root = os.environ["AGENT_ENV_LOCAL_SANDBOX_DIR"]
-    with open(os.path.join(root, local_sandbox_module._PORT_CURSOR_FILE), "w") as f:
-        f.write(str(port))
+    cursor = state_root() / "locks" / local_sandbox_module._HOST_PORT_CURSOR
+    cursor.parent.mkdir(parents=True, exist_ok=True)
+    cursor.write_text(str(port))
 
 
 def test_host_ports_are_handed_out_in_turn_skipping_those_in_use(busy):
