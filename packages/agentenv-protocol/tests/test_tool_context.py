@@ -83,7 +83,7 @@ def test_normalize_role_absent_blank_default_and_non_string_are_none():
 
 def test_current_is_empty_outside_a_call_and_bound_restores():
     assert ToolContext.current() is EMPTY
-    assert EMPTY.transport == "none" and EMPTY.caller.role is None
+    assert EMPTY.caller == Caller() and EMPTY.tool == "" and EMPTY.call_id == ""
     with bound(ToolContext.as_caller("a")) as outer:
         assert ToolContext.current() is outer and outer.role == "a"
         with bound(ToolContext.as_caller("b")) as inner:
@@ -110,7 +110,7 @@ def test_caller_from_request_precedence():
 
 def test_context_from_mcp_tolerates_every_missing_link():
     empty = context_from_mcp(None, "t", {})
-    assert empty.transport == "mcp" and empty.caller == Caller() and empty.mcp is None
+    assert empty.caller == Caller() and empty.tool == "t" and empty.call_id
 
     class _OutsideRequest:
         @property
@@ -127,7 +127,7 @@ def test_context_from_mcp_tolerates_every_missing_link():
         request=SimpleNamespace(headers={"mcp-session-id": "s1"}),
     ))
     ctx = context_from_mcp(live, "search", arguments)
-    assert ctx.caller == Caller("bob", None, "bob") and ctx.tool == "search" and ctx.mcp is live
+    assert ctx.caller == Caller("bob", None, "bob") and ctx.tool == "search"
     assert ctx.call_id and ctx.arguments == {"q": 1}
     arguments["q"] = 2
     assert ctx.arguments == {"q": 1}
@@ -136,11 +136,11 @@ def test_context_from_mcp_tolerates_every_missing_link():
 def test_context_from_http_and_as_caller():
     request = SimpleNamespace(headers={ROLE_HEADER: "carol"})
     ctx = context_from_http(request, "echo", {"m": 1})
-    assert ctx.transport == "rest" and ctx.role == "carol" and ctx.tool == "echo" and ctx.arguments == {"m": 1}
+    assert ctx.role == "carol" and ctx.tool == "echo" and ctx.arguments == {"m": 1} and ctx.call_id
 
     with bound(ToolContext.as_caller("alice", session="s")) as bound_ctx:
         assert ToolContext.current() is bound_ctx
-        assert bound_ctx.caller == Caller("alice", "s", "alice") and bound_ctx.transport == "none"
+        assert bound_ctx.caller == Caller("alice", "s", "alice") and bound_ctx.call_id
     assert ToolContext.current() is EMPTY
     with bound(ToolContext.as_caller("default")) as default_ctx:
         assert default_ctx.role is None and default_ctx.caller.raw_role == "default"
@@ -297,7 +297,7 @@ async def test_mount_binds_the_target_dispatch():
     mcp = _mounted(handler)
     assert mcp._tool_manager.call_tool.__agentenv_tool_context__ is True
     assert await mcp._tool_manager.call_tool("whoami", {"q": "x"}, context=None) == {"q": "x", "role": None, "limit": 3}
-    assert handler.seen[-1].transport == "mcp" and handler.seen[-1].tool == "whoami"
+    assert handler.seen[-1].tool == "whoami"
     assert ToolContext.current() is EMPTY
 
 
@@ -305,11 +305,11 @@ class _ExtHandler:
     @extension(uri="urn:agentenv:whoami/v1")
     async def whoami(self, tc: ToolContext, greeting: str = "hi") -> dict:
         assert ToolContext.current() is tc
-        return {"role": tc.role, "transport": tc.transport, "tool": tc.tool, "greeting": greeting}
+        return {"role": tc.role, "tool": tc.tool, "greeting": greeting}
 
     @extension(uri="urn:agentenv:whoami-get/v1", method="GET")
     def whoami_get(self, greeting: str, tc: Optional[ToolContext] = None) -> dict:
-        return {"role": tc.role, "transport": tc.transport, "greeting": greeting}
+        return {"role": tc.role, "greeting": greeting}
 
 
 @pytest.mark.asyncio
@@ -324,7 +324,7 @@ async def test_extension_slot_binds_rest_caller_from_headers():
 
         r = await client.post("/agentenv/ext/whoami", json={}, headers={ROLE_HEADER: "carol"})
         assert r.status_code == 200
-        assert r.json() == {"role": "carol", "transport": "rest", "tool": "whoami", "greeting": "hi"}
+        assert r.json() == {"role": "carol", "tool": "whoami", "greeting": "hi"}
         r = await client.post("/agentenv/ext/whoami", json={"greeting": "yo"})
         assert r.status_code == 200 and r.json()["role"] is None and r.json()["greeting"] == "yo"
         r = await client.post("/agentenv/ext/whoami", json={"greeting": "yo"}, headers={ROLE_HEADER: "default"})
@@ -334,7 +334,7 @@ async def test_extension_slot_binds_rest_caller_from_headers():
         assert r.status_code == 400 and r.json()["error"]["code"] == "invalid_params"
 
         r = await client.get("/agentenv/ext/whoami_get", params={"greeting": "hey"}, headers={ROLE_HEADER: "dave"})
-        assert r.status_code == 200 and r.json() == {"role": "dave", "transport": "rest", "greeting": "hey"}
+        assert r.status_code == 200 and r.json() == {"role": "dave", "greeting": "hey"}
     assert ToolContext.current() is EMPTY
 
 

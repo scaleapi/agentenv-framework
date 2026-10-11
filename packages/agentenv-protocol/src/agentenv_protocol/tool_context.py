@@ -29,7 +29,7 @@ import contextvars
 import dataclasses
 import types
 import uuid
-from typing import Any, Iterator, Literal, Mapping, Optional
+from typing import Any, Iterator, Mapping, Optional
 
 from pydantic_core import core_schema
 
@@ -41,7 +41,6 @@ __all__ = [
     "SESSION_META_KEY",
     "Caller",
     "ToolContext",
-    "Transport",
     "bound",
     "caller_from_request",
     "context_from_http",
@@ -60,10 +59,6 @@ SESSION_META_KEY = "agentenv.io/session"
 ROLE_HEADER = "AgentEnv-Role"
 #: A gateway's unforwarded role. Same meaning as no role at all.
 DEFAULT_ROLE = "default"
-
-#: How the call reached the server. ``"none"`` is a context no dispatch bound, :data:`EMPTY`
-#: outside any call or one built with :meth:`ToolContext.as_caller`; the other two name the dispatch.
-Transport = Literal["mcp", "rest", "none"]
 
 
 def normalize_role(value: Any) -> Optional[str]:
@@ -98,7 +93,7 @@ class ToolContext:
     """What the protocol knows about one tool call.
 
     Hashable, so per-call state can be keyed on the context itself: ``call_id``
-    identifies the call; ``arguments`` and ``mcp`` stay out of the hash. The
+    identifies the call; ``arguments`` stays out of the hash. The
     protocol's builders and :meth:`as_caller` snapshot ``arguments`` into a
     read-only mapping; a context constructed directly keeps the mapping it is
     given.
@@ -108,9 +103,6 @@ class ToolContext:
     tool: str = ""
     arguments: Mapping[str, Any] = dataclasses.field(default_factory=lambda: types.MappingProxyType({}), hash=False)
     call_id: str = ""
-    transport: Transport = "none"
-    #: FastMCP's own request context when the call came over MCP (progress, logging, session); else None.
-    mcp: Any = dataclasses.field(default=None, hash=False, compare=False)
 
     @property
     def role(self) -> Optional[str]:
@@ -139,12 +131,12 @@ class ToolContext:
 
     @classmethod
     def as_caller(cls, role: Optional[str] = None, session: Optional[str] = None, *, tool: str = "",
-                  arguments: Optional[Mapping[str, Any]] = None, transport: Transport = "none") -> "ToolContext":
+                  arguments: Optional[Mapping[str, Any]] = None) -> "ToolContext":
         """A context for code that acts as ``role`` outside any dispatch (a test calling a handler
         directly, a seeding script, an operator helper), to bind with :func:`bound`. The role is
         normalised as the builders normalise it."""
         return cls(caller=Caller(role=normalize_role(role), session=session, raw_role=role), tool=tool,
-                   arguments=_frozen(arguments), call_id=uuid.uuid4().hex, transport=transport)
+                   arguments=_frozen(arguments), call_id=uuid.uuid4().hex)
 
 
 #: The context handed back outside any call.
@@ -205,11 +197,11 @@ def context_from_mcp(context: Any, tool: str, arguments: Mapping[str, Any]) -> T
     request = getattr(request_context, "request", None)
     headers = getattr(request, "headers", None) if request is not None else None
     return ToolContext(caller=caller_from_request(extra, headers), tool=tool, arguments=_frozen(arguments),
-                       call_id=uuid.uuid4().hex, transport="mcp", mcp=context)
+                       call_id=uuid.uuid4().hex)
 
 
 def context_from_http(request: Any, tool: str, arguments: Mapping[str, Any]) -> ToolContext:
     """The context for a REST or extension call: the caller from the request headers only."""
     headers = getattr(request, "headers", None) if request is not None else None
     return ToolContext(caller=caller_from_request(None, headers), tool=tool, arguments=_frozen(arguments),
-                       call_id=uuid.uuid4().hex, transport="rest")
+                       call_id=uuid.uuid4().hex)

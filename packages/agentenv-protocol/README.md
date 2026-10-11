@@ -104,8 +104,8 @@ assertion, trusted exactly as far as that side is: behind a gateway it is the ga
 agent it deployed; a caller that reaches the server directly chooses it in `AgentEnv-Role`. It says
 whose data a call acts on, not that the caller was authenticated, so a server exposed to untrusted
 direct callers keeps access control on its own boundary. `ctx.caller.session` tells
-callers apart when the gateway shares one connection to the server. `ctx.tool`, `ctx.arguments`,
-`ctx.call_id` and `ctx.transport` (`"mcp"` or `"rest"`) describe the call. Code that runs on behalf
+callers apart when the gateway shares one connection to the server. `ctx.tool`, `ctx.arguments`
+and `ctx.call_id` describe the call. Code that runs on behalf
 of the call without a parameter of its own, such as a database method, reads the same object through
 `ToolContext.current()`, which returns an empty context outside any call. The binding is per call
 and follows the request's task, so concurrent callers never see each other's context. It is made

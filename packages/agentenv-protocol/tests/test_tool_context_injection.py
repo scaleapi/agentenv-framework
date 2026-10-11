@@ -145,7 +145,7 @@ async def test_injection_sync_and_async_and_ambient_equals_injected():
     assert len(env.seen) == 2
     for name, (injected, ambient) in zip(("whoami", "whoami_sync"), env.seen, strict=True):
         assert isinstance(injected, ToolContext) and injected is ambient
-        assert injected.tool == name and injected.transport == "mcp" and injected.call_id
+        assert injected.tool == name and injected.call_id
     assert env.seen[0][0].arguments == {"q": "x"}
     assert ToolContext.current() is EMPTY
 
@@ -395,7 +395,7 @@ async def test_create_fastmcp_app_binds_tool_calls_for_a_plain_handler_without_a
     app = create_fastmcp_app(handler, card=EnvironmentCard(name="plain"))
     assert app._tool_manager.call_tool.__agentenv_tool_context__ is True
     assert _text(await app.call_tool("echo", {"q": "hi"})) == "hi"
-    assert handler.seen[0].tool == "echo" and handler.seen[0].transport == "mcp"
+    assert handler.seen[0].tool == "echo"
 
 
 @pytest.mark.asyncio
@@ -418,7 +418,7 @@ async def test_direct_caller_over_streamable_http_gets_the_header_role_and_its_o
                     sid = session_id()
     assert sid and result.content[0].text == "grader" and forwarded.content[0].text == "bob"
     direct, proxied = env.seen[-2][0], env.seen[-1][0]
-    assert direct.caller == Caller("grader", sid, "grader") and direct.mcp is not None
+    assert direct.caller == Caller("grader", sid, "grader")
     assert proxied.caller == Caller("bob", None, "bob")  # a _meta role entry: the connection's id is not the caller's
 
 

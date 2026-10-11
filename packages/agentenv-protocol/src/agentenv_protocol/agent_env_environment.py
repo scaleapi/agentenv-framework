@@ -852,7 +852,7 @@ def _coerce_params(fn: Callable, params: dict) -> dict:
 
 def _extension_handler(fn: Callable, http_method: str) -> Callable:
     """REST handler for an @extension route: bind request params to the handler and return JSON. A
-    ``ToolContext`` parameter is filled from the request headers (transport ``"rest"``) and never bound
+    ``ToolContext`` parameter is filled from the request headers and never bound
     from the params."""
     slot = _tool_context_slot(fn)
     signature = inspect.signature(fn)
