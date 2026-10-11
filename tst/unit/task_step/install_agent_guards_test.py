@@ -52,7 +52,6 @@ def test_preflight_passes_an_agent_with_a_build_context(local_stores):
     assert _step("solver").preflight() == []
 
 
-def test_preflight_reports_an_agent_the_store_doesnt_hold(local_stores):
-    (problem,) = _step("solver").preflight()
-
-    assert problem.startswith("install_agent 's': agent 'agent-x' can't be loaded: ")
+def test_preflight_leaves_an_agent_the_store_doesnt_hold_to_the_run(local_stores):
+    """The run's a2a_agent_id override can name another agent, so a task saved naming a placeholder still saves."""
+    assert _step("solver").preflight() == []

@@ -153,11 +153,12 @@ class InstallAgentTaskStep(TaskStep):
         )
 
     def preflight(self) -> list[str]:
-        """An agent with no build context to install, reported at save instead."""
+        """An agent with no build context to install, reported at save instead. One the store can't give is left to the
+        run, whose ``a2a_agent_id`` override can name another, so a task saved naming a placeholder still saves."""
         try:
             agent = A2AAgent.get(self.a2a_agent_id, self.a2a_agent_version)
-        except (NotFoundError, ValueError, KeyError, TypeError) as e:
-            return [f"install_agent '{self.id}': agent '{self.a2a_agent_id}' can't be loaded: {e}"]
+        except (NotFoundError, ValueError, KeyError, TypeError):
+            return []
         problem = _install_problem(agent)
         return [f"install_agent '{self.id}': {problem}"] if problem else []
 
