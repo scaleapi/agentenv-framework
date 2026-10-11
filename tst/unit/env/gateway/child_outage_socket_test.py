@@ -24,7 +24,7 @@ def _loopback():
     yield
 
 
-def _child() -> FastMCP:
+def _child(slow_started: asyncio.Event) -> FastMCP:
     app = FastMCP("child")
 
     @app.tool()
@@ -33,6 +33,7 @@ def _child() -> FastMCP:
 
     @app.tool()
     async def slow() -> str:
+        slow_started.set()
         await asyncio.Event().wait()  # never set: the call is in flight until the child dies
         return "never"
 
@@ -65,7 +66,8 @@ async def test_a_child_dying_mid_call_fails_the_call_fast_and_the_next_call_reop
     sock = _bind()
     port = sock.getsockname()[1]
     url = f"http://127.0.0.1:{port}/mcp"
-    server = await _serve(_child(), sock)
+    slow_started = asyncio.Event()
+    server = await _serve(_child(slow_started), sock)
     gw = Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[InternalMCPServer("svc", url)])
     try:
         await gw._ensure_tools_discovered()
@@ -73,7 +75,7 @@ async def test_a_child_dying_mid_call_fails_the_call_fast_and_the_next_call_reop
         first_generation = gw._child_sessions
 
         in_flight = asyncio.create_task(gw._call_child_tool(url, "slow", {}))
-        await asyncio.sleep(0.5)  # the request has reached the child and waits there
+        await asyncio.wait_for(slow_started.wait(), 10)  # the child holds the call
         assert not in_flight.done()
 
         died = time.monotonic()
@@ -85,7 +87,7 @@ async def test_a_child_dying_mid_call_fails_the_call_fast_and_the_next_call_reop
         await asyncio.gather(*gw._retirements)
         assert gw._child_owner is None, "the generation was retired"
 
-        server = await _serve(_child(), _bind(port))  # the child is back on the same address
+        server = await _serve(_child(asyncio.Event()), _bind(port))  # the child is back on the same address
         assert _text(await gw._call_child_tool(url, "fast", {})) == "ok", "the next call reopens"
         assert gw._child_sessions is not first_generation
     finally:

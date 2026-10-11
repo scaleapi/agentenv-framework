@@ -852,6 +852,7 @@ class Gateway:
             retired.cancel()
             if not call.done():
                 call.cancel()
+            await asyncio.gather(call, retired, return_exceptions=True)  # the loser's cleanup ends before the caller moves on
         if call in done:
             return call.result()
         raise McpError(ErrorData(code=CONNECTION_CLOSED, message="Connection closed"))
