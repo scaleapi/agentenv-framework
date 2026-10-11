@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import platform
+import random
 import re
 import shlex
 import shutil
@@ -27,6 +28,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
+
+try:
+    import fcntl
+except ImportError:  # Windows, which agent-env does not target.
+    fcntl = None
 
 from agent_env import config
 from agent_env.attribution import Attribution
@@ -86,6 +92,12 @@ LOCAL_TRUST_ENV = {
 _CONTAINER_MODE_MARKER = ".agent-container-mode"
 # The sandbox's container port -> host port map, so a sandbox rebuilt from its id publishes and finds the same ports.
 _PORT_MAP_FILE = ".port-map.json"
+# The host ports sandboxes publish on: below the ranges outgoing connections take their local ports from (32768 up on
+# Linux, the VM Docker Desktop or Rancher Desktop runs Docker in included; 49152 up on macOS and Windows) and below
+# Kubernetes' node ports (30000-32767).
+_HOST_PORTS = range(20000, 30000)
+# The last host port handed out, under the sandbox root, so every process using it hands them out in turn.
+_PORT_CURSOR_FILE = ".host-port-cursor"
 
 
 def _local_sandbox_root_path() -> Path:
@@ -110,17 +122,37 @@ def _local_sandbox_root() -> Path:
 
 
 def _free_host_port() -> int:
-    """A currently-free host port.
+    """The next port in ``_HOST_PORTS`` after the last one handed out, skipping those in use.
 
-    Binds all interfaces, as docker does when publishing a port: a port free on loopback
-    alone can still be taken on another interface.
-
-    Racy: the port is released before docker binds it. The window is small and a loser
-    fails loudly at bind time.
+    Docker binds it later, so nothing may take it meanwhile: another deploy draws it again only after the whole range
+    has been handed out, and outgoing connections never use it. The probe alone could not keep it: it releases the
+    port, and can't see the sockets of a VM Docker runs in.
     """
+    fd = os.open(_local_sandbox_root() / _PORT_CURSOR_FILE, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        last = os.read(fd, 16).strip()
+        start = int(last) + 1 if last.isdigit() else random.choice(_HOST_PORTS)
+        for i in range(len(_HOST_PORTS)):
+            port = _HOST_PORTS[(start + i - _HOST_PORTS.start) % len(_HOST_PORTS)]
+            if _bindable(port):
+                os.ftruncate(fd, 0)
+                os.pwrite(fd, str(port).encode(), 0)
+                return port
+    finally:
+        os.close(fd)
+    raise RuntimeError(f"Every host port from {_HOST_PORTS.start} to {_HOST_PORTS.stop - 1} is in use")
+
+
+def _bindable(port: int) -> bool:
+    """Whether ``port`` is free on every interface, as docker binds it when publishing: a port free on loopback alone
+    can still be taken on another interface."""
     with socket.socket() as s:
-        s.bind(("", 0))
-        return int(s.getsockname()[1])
+        try:
+            s.bind(("", port))
+        except OSError:
+            return False
+        return True
 
 
 class LocalSandbox(VmSandbox):

@@ -6,8 +6,12 @@ unchanged -- they are how services address each other on the compose network.
 
 The allocator is stubbed so these stay hermetic and assert on the mapping rather
 than on whatever the OS hands out; real allocation is covered by
-tst/integration/store/local_parallel_deploy_test.py.
+tst/integration/store/local_parallel_deploy_test.py. The allocator's own tests stub
+only its bind probe, which the unit tier can't run.
 """
+
+import os
+import threading
 
 import pytest
 
@@ -92,3 +96,58 @@ async def test_tunnel_urls_stay_keyed_by_container_port(fake_ports):
     assert set(sandbox.tunnel_urls) == set(RESERVED)
     for port in RESERVED:
         assert sandbox.tunnel_urls[port] == f"http://127.0.0.1:{sandbox.host_port(port)}"
+
+
+@pytest.fixture
+def busy(monkeypatch):
+    """Ports the stand-in bind probe finds in use; every other port is free."""
+    ports: set[int] = set()
+    monkeypatch.setattr(local_sandbox_module, "_bindable", lambda port: port not in ports)
+    return ports
+
+
+def _last_handed_out(port: int) -> None:
+    root = os.environ["AGENT_ENV_LOCAL_SANDBOX_DIR"]
+    with open(os.path.join(root, local_sandbox_module._PORT_CURSOR_FILE), "w") as f:
+        f.write(str(port))
+
+
+def test_host_ports_are_handed_out_in_turn_skipping_those_in_use(busy):
+    _last_handed_out(20100)
+    busy.add(20102)
+
+    assert [local_sandbox_module._free_host_port() for _ in range(3)] == [20101, 20103, 20104]
+
+
+def test_host_ports_wrap_round_their_range(busy):
+    _last_handed_out(29998)
+
+    assert [local_sandbox_module._free_host_port() for _ in range(2)] == [29999, 20000]
+
+
+def test_the_first_host_port_lies_in_the_range(busy):
+    assert local_sandbox_module._free_host_port() in local_sandbox_module._HOST_PORTS
+
+
+def test_concurrent_draws_never_share_a_host_port(busy):
+    """Each draw opens the cursor afresh, so the lock serialises threads as it does processes."""
+    drawn: list[int] = []
+
+    def draw():
+        for _ in range(50):
+            drawn.append(local_sandbox_module._free_host_port())
+
+    threads = [threading.Thread(target=draw) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(set(drawn)) == len(drawn) == 400
+
+
+def test_a_range_with_every_port_in_use_is_an_error(busy):
+    busy.update(local_sandbox_module._HOST_PORTS)
+
+    with pytest.raises(RuntimeError, match="Every host port from 20000 to 29999 is in use"):
+        local_sandbox_module._free_host_port()
