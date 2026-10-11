@@ -16,6 +16,7 @@ from agentenv_protocol import (
     ROLE_HEADER,
     EnvironmentCard,
     EnvironmentTool,
+    ToolContext,
     ToolResult,
     ToolSession,
     ToolSessionError,
@@ -52,6 +53,11 @@ class _Items:
     def explode(self) -> str:
         """Always fails."""
         raise RuntimeError("the tool blew up")
+
+    @tool()
+    def whoami(self, ctx: ToolContext) -> str:
+        """Who is calling."""
+        return json.dumps({"role": ctx.caller.role, "session": ctx.caller.session})
 
 
 def _route_clients_to(monkeypatch, transport: httpx.AsyncBaseTransport) -> None:
@@ -148,6 +154,21 @@ async def test_a_failing_or_unknown_tool_is_an_error_result_not_an_exception(ser
     assert failed.isError and "the tool blew up" in failed.text
     assert unknown.isError and "no_such_tool" in unknown.text
     assert not after.isError
+
+
+@pytest.mark.asyncio
+async def test_a_tool_reads_the_role_and_session_a_tool_session_sends_as_its_caller(serve_items):
+    _, lifespan = await serve_items()
+    async with (lifespan, ToolSession(_URL, role="alice@example.com") as alice, ToolSession(_URL) as anonymous,
+                ToolSession(_URL, role="default") as default):
+        whoami = {t.name: t for t in await alice.list_tools()}["whoami"]
+        seen = [json.loads((await session.call_tool("whoami")).text) for session in (alice, anonymous, default)]
+
+    assert not whoami.inputSchema.get("properties")
+    assert seen == [{"role": "alice@example.com", "session": alice.session_id},
+                    {"role": None, "session": anonymous.session_id},
+                    {"role": None, "session": default.session_id}]
+    assert len({alice.session_id, anonymous.session_id, default.session_id}) == 3
 
 
 @pytest.mark.asyncio

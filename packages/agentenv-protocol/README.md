@@ -211,7 +211,7 @@ installs, whichever `mcp` version the loop's own environment pins.
 ```python
 from agentenv_protocol import ToolSession, tool_definitions
 
-async with ToolSession(mcp_url, role="default") as session:
+async with ToolSession(mcp_url, role="alice@example.com") as session:
     tools = await session.list_tools()                 # EnvironmentTool: name, description, inputSchema
     declared = tool_definitions(tools, "openai_chat")  # or "openai_responses", "anthropic"
     result = await session.call_tool("slack_send_message", {"channel": "general", "text": "hi"})
@@ -221,11 +221,17 @@ async with ToolSession(mcp_url, role="default") as session:
 - **The URL:** `mcp_url` is `DeployedEnv.mcp_url` in agent-env, or the address a card was fetched from joined with
   `client.mcp_path(card)`.
 - **Sessions:** a `ToolSession` is one MCP session, and calls on it may run concurrently. `async with` opens and ends
-  it; `open()` and `close()` do the same for a session held across calls.
-- **Roles:** `role` is sent as `AgentEnv-Role` (`ROLE_HEADER`). A gateway lists only the tools that role may use, and
-  answers a call to a hidden one with an error result. `headers` adds any others.
+  it; `open()` and `close()` do the same for a session held across calls. A tool tells sessions apart by
+  `ctx.caller.session`: the session's id when the server is reached directly, or, behind a gateway, a key the gateway
+  gives each session. A session belongs to the event loop that opened it, so a caller with a synchronous API runs all
+  of a session's calls on one loop of its own.
+- **Roles:** `role` is sent as `AgentEnv-Role` (`ROLE_HEADER`) and says who the caller is. A gateway lists only the
+  tools that role may use, answers a call to a hidden one with an error result, and forwards the role to the servers
+  behind it; a server reached directly reads the header itself. Either way a tool reads it as `ctx.caller.role`
+  ([Who is calling](#who-is-calling)), where `default`, like no role, is `None`. `headers` adds any others.
 - **Errors:**
-  - A tool that fails returns a result with `isError` set and the server's text.
+  - A tool that fails, or a call the server refuses (a tool hidden from the role, or an `on_tool_call` refusal),
+    returns a result with `isError` set and the server's text.
   - `ToolSessionError` means the request failed at the MCP level: a JSON-RPC error, an HTTP error status, a reply
     that can't be read, or a session the server no longer knows. After a restart, the env's state is usually gone too.
   - `httpx.TransportError` means the connection failed, and `TimeoutError` that a request outlived `timeout`

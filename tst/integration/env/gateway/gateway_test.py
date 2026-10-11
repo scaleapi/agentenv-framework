@@ -1931,7 +1931,7 @@ async def test_renamed_registration_serves_its_registered_name(agentenv_items_en
         assert [c["name"] for c in result.environment_card["children_environments"]] == ["renameditems"]
         card = await protocol_v1.get_card(base)
         assert card["name"] == "renameditems"
-        assert [t["name"] for t in card["capabilities"]["tools"]] == ["renameditems_add_item"]
+        assert [t["name"] for t in card["capabilities"]["tools"]] == ["renameditems_add_item", "renameditems_whoami"]
 
         sent: list[tuple[str, str]] = []
         real_send = httpx.AsyncClient.send
@@ -1985,7 +1985,8 @@ async def test_gateway_with_agentenv_environment(agentenv_items_env):
             "urn:agentenv:export-as-file/v1",
         }
         # Decorator tools ride capabilities.tools ({environment_name} resolved); imperative tools stay handshake-only.
-        assert [t["name"] for t in card["capabilities"]["tools"]] == ["items_add_item"]
+        assert [t["name"] for t in card["capabilities"]["tools"]] == ["items_add_item", "items_whoami"]
+        assert not protocol_v1.find_tool(card, "items_whoami")["inputSchema"].get("properties")
         add_item_tool = protocol_v1.find_tool(card, "items_add_item")
         assert add_item_tool["description"] == "Add an item to the store."
         assert add_item_tool["inputSchema"]["required"] == ["item"]
@@ -2038,6 +2039,12 @@ async def test_gateway_with_agentenv_environment(agentenv_items_env):
             assert "w" in content, f"Expected @tool-added item 'w' via list_items, got {content}"
 
         await _verify_list_tools(mcp_url=result.mcp_url, tool_verifier_callback=assert_tool_sees_items)
+
+        # The role a ToolSession sends reaches the child's tool as its caller, with the gateway's key for each session
+        async with ToolSession(result.mcp_url, role="alice@example.com") as alice, ToolSession(result.mcp_url) as anonymous:
+            seen = [json.loads((await session.call_tool("items_whoami")).text) for session in (alice, alice, anonymous)]
+        assert [caller["role"] for caller in seen] == ["alice@example.com", "alice@example.com", None]
+        assert seen[0]["session"] == seen[1]["session"] != seen[2]["session"] and None not in {c["session"] for c in seen}
 
         # Exercise load_environment_artifact's v1 branch end-to-end (supports_v1 -> reset + add inline).
         items_artifact = EnvironmentArtifact.put(

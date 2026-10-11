@@ -142,7 +142,8 @@ async def test_a_load_is_timed_by_its_payload_and_the_servers_state_reads_as_jso
 @pytest.mark.asyncio
 async def test_a_deployed_envs_tools_are_listed_declared_and_called_from_a_loop_of_ones_own(local_stack):
     """A trainer's view: the env's tools declared for a model API and called, the env's data plane agreeing on the state
-    they left, a failing tool as an error result, concurrent sessions each answered, and a restart as a lost session."""
+    they left, a failing tool as an error result, concurrent sessions each answered as their own caller, and a restart
+    as a lost session."""
     uid = uuid.uuid4().hex[:8]
     env = MCPServerEnv.put(id=f"server-items-{uid}", docker_image_artifact=_put_items_image(f"server-items-{uid}"),
                            environment_name="items", env_provider_type="server")
@@ -165,10 +166,14 @@ async def test_a_deployed_envs_tools_are_listed_declared_and_called_from_a_loop_
     assert failed.isError and "injected error for list_items" in failed.text
     assert (await protocol_v1.get_data(base_url)).parts[0].data == {"items": ["crate", "crate"]}
 
-    async def add(item: str) -> int:
-        async with ToolSession(deployed.mcp_url) as own:
-            return json.loads((await own.call_tool("items_add_item", {"item": item})).text)["count"]
-    assert sorted(await asyncio.gather(*(add(f"w{i}") for i in range(8)))) == list(range(3, 11))
+    async def add(i: int) -> tuple[int, dict, str]:
+        async with ToolSession(deployed.mcp_url, role=f"worker{i}@example.com") as own:
+            count = json.loads((await own.call_tool("items_add_item", {"item": f"w{i}"})).text)["count"]
+            return count, json.loads((await own.call_tool("items_whoami")).text), own.session_id
+    added_by = await asyncio.gather(*(add(i) for i in range(8)))
+    assert sorted(count for count, _, _ in added_by) == list(range(3, 11))
+    assert [caller for _, caller, _ in added_by] == [{"role": f"worker{i}@example.com", "session": session_id}
+                                                     for i, (_, _, session_id) in enumerate(added_by)]
     assert sorted((await protocol_v1.get_data(base_url)).parts[0].data["items"]) == ["crate"] * 2 + [f"w{i}" for i in range(8)]
 
     async with ToolSession(deployed.mcp_url) as before_restart:

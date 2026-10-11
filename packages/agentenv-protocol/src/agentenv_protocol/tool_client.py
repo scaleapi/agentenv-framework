@@ -14,7 +14,8 @@ from typing import Any, Literal
 import httpx
 from pydantic import BaseModel, Field, field_validator
 
-from .types import PROTOCOL_VERSION, ROLE_HEADER, EnvironmentTool
+from .tool_context import ROLE_HEADER
+from .types import PROTOCOL_VERSION, EnvironmentTool
 
 MCP_PROTOCOL_VERSION = "2025-11-25"
 
@@ -50,10 +51,11 @@ class ToolResult(BaseModel):
 
 class ToolSession:
     """One MCP session on an env's streamable-HTTP endpoint (``DeployedEnv.mcp_url``, or a card's address joined with
-    ``client.mcp_path(card)``); ``role`` is sent as ``AgentEnv-Role``, which a gateway filters tools by. A request that
-    outlives ``timeout`` (by default the gateway's own tool-call limit) raises TimeoutError, a failed connection
-    httpx.TransportError. Nothing is retried, and a call that raised may still have run, or may yet run once its stalled
-    request gets through, so after any failure the env's state is unknown."""
+    ``client.mcp_path(card)``), used on the event loop that opened it; ``role`` is sent as ``AgentEnv-Role``, the
+    caller's identity, which a gateway filters tools by and forwards and a tool reads as ``ToolContext.caller.role``.
+    A request that outlives ``timeout`` (by default the gateway's own tool-call limit) raises TimeoutError, a failed
+    connection httpx.TransportError. Nothing is retried, and a call that raised may still have run, or may yet run once
+    its stalled request gets through, so after any failure the env's state is unknown."""
 
     def __init__(self, url: str, *, role: str | None = None, headers: dict[str, str] | None = None,
                  timeout: float = 600.0, verify: bool = True) -> None:
