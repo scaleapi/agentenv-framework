@@ -42,6 +42,7 @@ from agent_env.providers.sandbox_providers.sandbox import SANDBOX_LABEL, Network
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_CONTAINER,
     SANDBOX_MODE_VM,
+    Accepts,
     SandboxProvider,
     refuse_unenforceable_policy,
 )
@@ -538,6 +539,8 @@ class LocalSandboxProvider(SandboxProvider):
 
     EXTRA_CONTAINER_RUN_ARGS = " ".join(f"--add-host {entry}" for entry in _EXTRA_HOSTS)
     ON_THIS_MACHINE = True
+    # An agent's sandbox is a container from its image's name, though a VM it creates (create_vm) loads images.
+    SANDBOX_ACCEPTS = Accepts.NAME
 
     def url_from_sandbox(self, url: str) -> str:
         return self.get_external_url(url)

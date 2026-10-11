@@ -190,3 +190,53 @@ async def test_the_local_provider_is_asked_for_a_sandbox_for_an_image_in_its_own
 
     with pytest.raises(_Created):
         await A2AAgent(id="solver", version=1, docker_image_artifact=PULLED_HERE).deploy(sandbox_type="any")
+
+
+class _Container:
+    """A container sandbox, recording whether it was terminated."""
+
+    sandbox_id, mode, type, tunnel_urls, vnc_url, network_policy = "sb-agent", "container", "fake", {}, None, None
+    ON_THIS_MACHINE = False
+
+    def __init__(self):
+        self.terminated = False
+
+    async def terminate(self):
+        self.terminated = True
+
+
+class _ContainerAgentsUndeclared(SandboxProvider):
+    """One that creates VMs, so is taken to load an agent's image on one, but gives the agent a container."""
+
+    def __init__(self):
+        self.sandbox = _Container()
+
+    async def create_vm(self, **_):
+        raise AssertionError("an agent's sandbox comes from create_sandbox")
+
+    async def create_sandbox(self, **_):
+        return self.sandbox
+
+
+@pytest.mark.asyncio
+async def test_a_provider_taken_to_load_the_agents_image_that_gives_a_container_names_the_declaration_it_lacks(
+        monkeypatch, local_stores, litellm):
+    provider = _ContainerAgentsUndeclared()
+    monkeypatch.setattr(sandbox_provider, "build_sandbox_provider", lambda name: provider)
+
+    with pytest.raises(ValueError, match=r"_ContainerAgentsUndeclared gave agent 'solver' a container, which runs its "
+                                         r"image by name, though it takes images as a VM loads them \(SANDBOX_ACCEPTS is "
+                                         r"LOADABLE, the default for a provider that implements create_vm\); declare "
+                                         r"SANDBOX_ACCEPTS = Accepts.NAME on it: 'solver-image' v2 is only a build context"):
+        await A2AAgent(id="solver", version=1, docker_image_artifact=IMAGE).deploy(sandbox_type="any")
+    assert provider.sandbox.terminated
+
+
+@pytest.mark.asyncio
+async def test_a_container_that_can_run_the_agents_image_by_name_goes_on_to_serve_it(monkeypatch, local_stores, litellm):
+    """Its provider should say so, but the deploy it gave works, so it isn't refused."""
+    monkeypatch.setattr(sandbox_provider, "build_sandbox_provider", lambda name: _ContainerAgentsUndeclared())
+    pulled = DockerImageArtifact(id="solver-image", version=2, description="d", image_name="registry.example/solver:v2")
+
+    with pytest.raises(RuntimeError, match="No tunnel URL for port"):
+        await A2AAgent(id="solver", version=1, docker_image_artifact=pulled).deploy(sandbox_type="any")

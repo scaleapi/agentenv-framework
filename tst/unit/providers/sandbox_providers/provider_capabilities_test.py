@@ -64,10 +64,10 @@ class _Vms(SandboxProvider):
         raise NotImplementedError
 
 
-def test_a_provider_that_declares_nothing_runs_images_by_name_and_supports_vms_by_implementing_create_vm():
+def test_a_provider_that_declares_nothing_has_what_it_implements_and_loads_an_agents_image_on_a_vm():
     assert (_Vms.ON_THIS_MACHINE, _Vms.PRIVATE_NETWORK) == (False, False)
     assert _Vms.SUPPORTED_SANDBOX_MODES == {SANDBOX_MODE_CONTAINER, SANDBOX_MODE_VM}
-    assert (_Vms.SANDBOX_ACCEPTS, _Vms.CONTAINER_ACCEPTS) == (NAME, NAME)
+    assert (_Vms.SANDBOX_ACCEPTS, _Vms.CONTAINER_ACCEPTS) == (LOADABLE, NAME)
     assert _Vms().url_from_sandbox("http://localhost:4000") == "http://localhost:4000"
 
 
@@ -92,6 +92,35 @@ def test_a_provider_supports_only_the_modes_it_implements():
         {SANDBOX_MODE_VM}, {SANDBOX_MODE_CONTAINER})
     assert SandboxProvider.SUPPORTED_SANDBOX_MODES == set()
     assert _Declared.SUPPORTED_SANDBOX_MODES == {SANDBOX_MODE_VM}
+
+
+class _BuildingContainers(_ContainersOnly):
+    CONTAINER_ACCEPTS = NAME_OR_CONTEXT
+
+
+class _ContainerAgents(_Vms):
+    """One whose agents run as containers by name although it creates VMs, as the local provider's do."""
+
+    SANDBOX_ACCEPTS = NAME
+
+
+class _ContainerAgentsAgain(_ContainerAgents):
+    pass
+
+
+class _VmsAgain(_Vms):
+    CONTAINER_ACCEPTS = NAME_OR_CONTEXT
+
+
+@pytest.mark.parametrize("cls, accepts", [
+    (_Vms, LOADABLE), (_VmsOnly, LOADABLE),  # create_sandbox gives a bare VM the deploy loads the image into
+    (_ContainersOnly, NAME), (_BuildingContainers, NAME_OR_CONTEXT),  # create_sandbox is one of its containers
+    (_ContainerAgents, NAME), (_ContainerAgentsAgain, NAME),  # declared, and kept by a subclass
+    (_VmsAgain, LOADABLE),  # derived again for a subclass that declares nothing
+    (LocalSandboxProvider, NAME),
+], ids=lambda value: getattr(value, "__name__", getattr(value, "name", value)))
+def test_an_agents_sandbox_takes_what_create_sandbox_gives_unless_the_provider_declares_otherwise(cls, accepts):
+    assert cls.SANDBOX_ACCEPTS is accepts
 
 
 def test_a_chain_is_its_providers_in_order_and_one_provider_is_itself():

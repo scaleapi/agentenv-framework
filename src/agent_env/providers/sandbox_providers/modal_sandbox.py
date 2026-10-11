@@ -191,7 +191,7 @@ class ModalSandboxProvider(SandboxProvider):
 
     # Each image in a container of its own, built first when it is only a build context (prepare_image); its
     # containers share i6pn, Modal's private network.
-    SANDBOX_ACCEPTS = CONTAINER_ACCEPTS = Accepts.NAME_OR_CONTEXT
+    CONTAINER_ACCEPTS = Accepts.NAME_OR_CONTEXT
     PRIVATE_NETWORK = True
 
     @classmethod

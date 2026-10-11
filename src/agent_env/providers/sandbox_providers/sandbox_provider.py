@@ -166,9 +166,9 @@ class SandboxProvider(ABC):
     # Internal→external host rewrites for URLs issued on this platform ({} = none).
     URL_REWRITES: ClassVar[dict[str, str]] = {}
 
-    # What it declares, which nothing outside the providers reads any other way. A provider that declares nothing runs
-    # each image from its name, in a sandbox that isn't on this machine, on linux/amd64, and creates no VM and no
-    # private network.
+    # What it declares, which nothing outside the providers reads any other way. A provider that declares nothing has
+    # its sandboxes off this machine, runs its containers' images by name on no private network, and gives an agent's
+    # sandbox the images that follow from what it implements (SANDBOX_ACCEPTS).
     #
     # Whether its sandboxes run on this machine: an image only this machine holds (in a registry or object store on
     # it) reaches them, its containers need this machine's Docker, and a gateway's infra envs are built here for it.
@@ -176,9 +176,14 @@ class SandboxProvider(ABC):
     # The sandbox modes it creates, derived for each provider class from what it implements (``__init_subclass__``):
     # SANDBOX_MODE_CONTAINER when it implements create_sandbox, SANDBOX_MODE_VM when it implements create_vm.
     SUPPORTED_SANDBOX_MODES: ClassVar[frozenset[str]] = frozenset()
-    # The images create_sandbox and create_container run.
-    SANDBOX_ACCEPTS: ClassVar[Accepts] = Accepts.NAME
+    # The images create_container runs.
     CONTAINER_ACCEPTS: ClassVar[Accepts] = Accepts.NAME
+    # The images create_sandbox, an agent's sandbox, runs; derived for a provider class that doesn't declare them
+    # (``__init_subclass__``): those a VM loads when it implements create_vm, since its create_sandbox gives a bare VM
+    # the deploy loads the image into, and else CONTAINER_ACCEPTS, since its create_sandbox is one of its containers.
+    # One whose create_sandbox differs declares them, as the local provider does, and its subclasses keep them.
+    SANDBOX_ACCEPTS: ClassVar[Accepts] = Accepts.NAME
+    _DECLARES_SANDBOX_ACCEPTS: ClassVar[bool] = False
     # Whether create_container(private_network=True) puts containers on a network they share.
     PRIVATE_NETWORK: ClassVar[bool] = False
 
@@ -187,6 +192,11 @@ class SandboxProvider(ABC):
         cls.SUPPORTED_SANDBOX_MODES = frozenset(
             mode for mode, method in ((SANDBOX_MODE_CONTAINER, "create_sandbox"), (SANDBOX_MODE_VM, "create_vm"))
             if getattr(cls, method) is not getattr(SandboxProvider, method))
+        if "SANDBOX_ACCEPTS" in cls.__dict__:
+            cls._DECLARES_SANDBOX_ACCEPTS = True
+        elif not cls._DECLARES_SANDBOX_ACCEPTS:
+            cls.SANDBOX_ACCEPTS = (Accepts.LOADABLE if SANDBOX_MODE_VM in cls.SUPPORTED_SANDBOX_MODES
+                                   else cls.CONTAINER_ACCEPTS)
 
     @property
     def links(self) -> tuple[SandboxProvider, ...]:
