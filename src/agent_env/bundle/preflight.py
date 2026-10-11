@@ -24,7 +24,6 @@ done (``agent_env.env.bootstrap``), so they're named here, and refused here when
 from __future__ import annotations
 
 import functools
-import itertools
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
@@ -188,7 +187,8 @@ class _Walk:
             return
         env_id, images, env_provider = step.env_id, deployment.images, deployment.provider
         elsewhere = functools.partial(self._gateway_elsewhere, env_id, env_provider, kinds) if GATEWAY in kinds else None
-        if self._check(where, provider, env_provider.accepts, images, vms_load=GATEWAY in kinds, elsewhere=elsewhere):
+        taking = self._check(where, provider, env_provider.accepts, images, vms_load=GATEWAY in kinds, elsewhere=elsewhere)
+        if any(link.ON_THIS_MACHINE for link in taking):
             self.infra |= kinds
             self.docker_users.append(where)
 
@@ -295,7 +295,8 @@ class _Walk:
             self.default_agent_users.append((where, unnamed))
             agent_id = get_config().get_default_a2a_agent_id()
         image = self._agent_image(agent_id, version)
-        if self._check(where, provider, accepts, [image] if image else [], vms_load=True):
+        taking = self._check(where, provider, accepts, [image] if image else [], vms_load=True)
+        if any(link.ON_THIS_MACHINE for link in taking):
             self.docker_users.append(where)
 
     def _sandbox(self, where: str, step: DeploySandboxTaskStep) -> None:
@@ -335,23 +336,32 @@ class _Walk:
 
     def _check(self, where: str, provider: SandboxProvider, accepts: Callable[[SandboxProvider], Accepts],
                images: list[_Image], *, vms_load: bool,
-               elsewhere: Callable[[SandboxProvider], list[str]] | None = None) -> bool:
-        """Refuse the deploy ``where`` when no provider it may run on takes it, naming why each refuses: one refuses an
-        image it can't run as ``accepts`` says the deploy runs images there (``_refusal``), and one not on this machine
-        whatever ``elsewhere`` says of it. A deploy skips a provider that refuses it, so one that takes it is enough.
-        ``vms_load`` when the deploy loads images on a VM provider, as an agent's and a gateway's do. An image the
-        bundle builds is noted with them, for ``_contexts`` to choose its form. Returns whether a provider on this
-        machine takes the deploy, which then may run on this machine's Docker; one it skips needs none."""
+               elsewhere: Callable[[SandboxProvider], list[str]] | None = None) -> list[SandboxProvider]:
+        """The providers the deploy ``where`` may run on that take it, refusing the deploy, naming why each refuses
+        (``_link_refusals``), when none does: a deploy skips a provider that refuses it, so one that takes it is enough.
+        One on this machine that takes it runs it on this machine's Docker; one it skips needs none. An image the
+        bundle builds is noted with them, for ``_contexts`` to choose its form."""
         links = list(provider.links)
-        refusals = [[refusal for image in images if (refusal := self._refusal(link, accepts(link), image, vms_load=vms_load))]
-                    + (elsewhere(link) if elsewhere and not link.ON_THIS_MACHINE else []) for link in links]
-        if all(refusals):
-            for problem in itertools.chain.from_iterable(refusals):
-                self._problem(where, problem)
+        refusals = [(link, self._link_refusals(link, accepts, images, vms_load=vms_load, elsewhere=elsewhere))
+                    for link in links]
+        if all(found for _, found in refusals):
+            for _, found in refusals:
+                for problem in found:
+                    self._problem(where, problem)
         for image in images:
             if image.built is not None:
                 self.uses.setdefault(image.built, []).append((where, image.what, links, accepts))
-        return any(link.ON_THIS_MACHINE and not refused for link, refused in zip(links, refusals))
+        return [link for link, found in refusals if not found]
+
+    def _link_refusals(self, link: SandboxProvider, accepts: Callable[[SandboxProvider], Accepts], images: list[_Image],
+                       *, vms_load: bool, elsewhere: Callable[[SandboxProvider], list[str]] | None) -> list[str]:
+        """Why ``link`` can't take a deploy of ``images``: each it can't run as ``accepts`` says the deploy runs images
+        there (``_refusal``), and, when it isn't on this machine, whatever ``elsewhere`` says of it. ``vms_load`` when
+        the deploy loads images on a VM provider, as an agent's and a gateway's do."""
+        found = [refusal for image in images if (refusal := self._refusal(link, accepts(link), image, vms_load=vms_load))]
+        if elsewhere is not None and not link.ON_THIS_MACHINE:
+            found += elsewhere(link)
+        return found
 
     def _refusal(self, link: SandboxProvider, form: Accepts, image: _Image, *, vms_load: bool) -> str | None:
         """Why a deploy can't run ``image`` on ``link``, which takes images in ``form``, by the check the deploy makes

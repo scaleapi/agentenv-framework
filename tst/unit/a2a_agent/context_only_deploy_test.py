@@ -136,6 +136,7 @@ class _ContainerSandbox:
     sandbox_id = "sb-container"
     mode = "container"
     tunnel_urls = {}
+    ON_THIS_MACHINE = False
 
     def url_from_sandbox(self, url):
         return url

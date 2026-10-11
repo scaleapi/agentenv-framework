@@ -442,7 +442,7 @@ class A2AAgent:
         image = self.docker_image_artifact
         image_name = image.image_name
         if provider is None:
-            if sandbox.mode != SANDBOX_MODE_VM and (problem := image.by_name_problem()):
+            if sandbox.mode != SANDBOX_MODE_VM and (problem := image.by_name_problem(on_this_machine=sandbox.ON_THIS_MACHINE)):
                 raise ValueError(f"Can't deploy agent {self.id!r} on the container sandbox {sandbox.sandbox_id!r}, which "
                                  f"runs its own image, never the agent's: {problem}")
         else:

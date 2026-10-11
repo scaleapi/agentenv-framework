@@ -69,8 +69,8 @@ def test_equal_sources_give_equal_digests_and_bytes(local_stores, context):
 def test_a_context_only_image_is_built_and_refused_where_run_by_name(local_stores, context):
     image = DockerImageArtifact.put_context("a", description="d", context_path=str(context), dockerfile_path="Dockerfile")
 
-    assert image.context_only and image.load_problem() is None
-    assert image.by_name_problem() == "'a' v1 is only a build context, which has to be built, not pulled"
+    assert image.context_only and image.load_problem(on_this_machine=False) is None
+    assert image.by_name_problem(on_this_machine=False) == "'a' v1 is only a build context, which has to be built, not pulled"
     with pytest.raises(ValueError, match="has no tar.gz; its image is built from its build context"):
         image.load()
 

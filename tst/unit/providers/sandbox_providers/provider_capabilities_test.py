@@ -172,9 +172,9 @@ ARM64 = "'img' v2 is a linux/arm64 image, and the sandbox runs linux/amd64; rebu
 @pytest.mark.parametrize("image", [ARM64_TAR_GZ, ARM64_PULLED, ARM64_CONTEXT], ids=["tar.gz", "pulled", "context"])
 def test_a_vm_runs_only_images_built_for_its_platform(image):
     """A VM builds a context for the platform it records, so a context is checked too."""
-    assert image.load_problem(platform="linux/amd64").startswith(ARM64)
-    assert image.load_problem(platform="linux/arm64") is None
-    assert image.load_problem(platform=None) is None  # a sandbox that runs any, as a local one does
+    assert image.load_problem(on_this_machine=False, platform="linux/amd64").startswith(ARM64)
+    assert image.load_problem(on_this_machine=False, platform="linux/arm64") is None
+    assert image.load_problem(on_this_machine=False, platform=None) is None  # a sandbox that runs any, as a local one does
 
 
 @pytest.mark.parametrize("accepts", [LOADABLE, NAME, NAME_OR_CONTEXT])
@@ -188,13 +188,13 @@ def test_a_provider_checks_no_platform_before_its_sandbox_exists(accepts):
 def test_a_platform_is_the_same_however_the_image_or_the_sandbox_spells_it(recorded, runs):
     image = DockerImageArtifact(id="img", version=2, description="d", image_name="img:v2", platform=recorded,
                                 tar_gz_object_url="s3://bucket/img.tar.gz")
-    assert image.load_problem(platform=runs) is None
+    assert image.load_problem(on_this_machine=False, platform=runs) is None
 
 
 def test_an_image_that_records_no_platform_isnt_checked():
     image = DockerImageArtifact(id="img", version=2, description="d", image_name="img:v2",
                                 tar_gz_object_url="s3://bucket/img.tar.gz")
-    assert image.platform is None and image.load_problem(platform="linux/arm64") is None
+    assert image.platform is None and image.load_problem(on_this_machine=False, platform="linux/arm64") is None
 
 
 @pytest.mark.parametrize("sandbox", [Sandbox, ModalSandbox, ModalVmSandbox, E2BSandbox, SailVmSandbox])
