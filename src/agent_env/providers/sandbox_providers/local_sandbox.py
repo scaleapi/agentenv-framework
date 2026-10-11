@@ -95,11 +95,12 @@ LOCAL_TRUST_ENV = {
 _CONTAINER_MODE_MARKER = ".agent-container-mode"
 # The sandbox's container port -> host port map, so a sandbox rebuilt from its id publishes and finds the same ports.
 _PORT_MAP_FILE = ".port-map.json"
-# The host ports sandboxes publish on: below the ranges outgoing connections take their local ports from (32768 up on
-# Linux, the VM Docker Desktop or Rancher Desktop runs Docker in included; 49152 up on macOS and Windows) and below
-# Kubernetes' node ports (30000-32767).
+# The host ports sandboxes publish on: below the default ranges outgoing connections take their local ports from (32768
+# up on Linux, the VM Docker Desktop or Rancher Desktop runs Docker in included; 49152 up on macOS and Windows) and
+# below Kubernetes' node ports (30000-32767).
 _HOST_PORTS = range(20000, 30000)
-# Holds the last host port handed out, in the per-user state root's locks, so every process hands them out in turn.
+# Holds the last host port handed out, in the per-user state root's locks, so processes sharing that root hand them
+# out in turn.
 _HOST_PORT_CURSOR = "host-ports"
 
 
@@ -127,9 +128,9 @@ def _local_sandbox_root() -> Path:
 def _free_host_port() -> int:
     """The next port in ``_HOST_PORTS`` after the last one handed out, skipping those in use.
 
-    Docker binds it later, so nothing may take it meanwhile: another deploy draws it again only after the whole range
-    has been handed out, and outgoing connections never use it. The probe alone could not keep it: it releases the
-    port, and can't see the sockets of a VM Docker runs in.
+    Docker binds it later, so nothing may take it meanwhile: a deploy sharing this state root draws it again only after
+    the whole range has gone round, and outgoing connections don't use the range by default. The probe alone could not
+    keep it: it releases the port, and can't see the sockets of a VM Docker runs in.
     """
     locks = state_root() / "locks"
     ensure_state_dir(locks)
@@ -559,10 +560,10 @@ class LocalSandboxProvider(SandboxProvider):
     ) -> LocalSandbox:
         refuse_unenforceable_policy(self, network_policy)
         # Allocated here rather than in the sandbox constructor: probing for a free port
-        # is I/O, and callers that only need a handle must not pay for it.
-        sandbox = LocalSandbox(
-            port_map={port: _free_host_port() for port in (exposed_ports or [])},
-        )
+        # is I/O, and callers that only need a handle must not pay for it. Off the event
+        # loop, since a draw waits for any other process's draw to finish.
+        port_map = await asyncio.to_thread(lambda: {port: _free_host_port() for port in exposed_ports or []})
+        sandbox = LocalSandbox(port_map=port_map)
         (sandbox.work_dir / _PORT_MAP_FILE).write_text(json.dumps(sandbox._port_map))
         sandbox.network_policy = self.effective_network_policy(network_policy)
         return sandbox

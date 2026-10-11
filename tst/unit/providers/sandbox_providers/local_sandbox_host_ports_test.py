@@ -5,16 +5,19 @@ published once; each sandbox gets its own host ports instead. Container ports ar
 unchanged -- they are how services address each other on the compose network.
 
 The allocator is stubbed so these stay hermetic and assert on the mapping rather
-than on whatever the OS hands out; real allocation is covered by
+than on the ports it draws; real allocation is covered by
 tst/integration/store/local_parallel_deploy_test.py. The allocator's own tests stub
-only its bind probe, which the unit tier can't run.
+its bind probe, but for one that binds real sockets.
 """
 
 import errno
 import os
+import platform
+import socket
 import threading
 
 import pytest
+from pytest_socket import enable_socket
 
 from agent_env.config.paths import state_root
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT
@@ -32,7 +35,7 @@ RESERVED = [AGENT_ENV_GATEWAY_MCP_PORT, DB_WEB_PORT, DB_MCP_PORT]
 @pytest.fixture
 def fake_ports(monkeypatch):
     """Deterministic, ever-increasing stand-in for the free-port probe."""
-    counter = iter(range(50000, 50100))
+    counter = iter(range(20000, 20100))
     monkeypatch.setattr(local_sandbox_module, "_free_host_port", lambda: next(counter))
 
 
@@ -108,7 +111,7 @@ def busy(monkeypatch):
     return ports
 
 
-def _last_handed_out(port: int) -> None:
+def _last_handed_out(port: int | str) -> None:
     cursor = state_root() / "locks" / local_sandbox_module._HOST_PORT_CURSOR
     cursor.parent.mkdir(parents=True, exist_ok=True)
     cursor.write_text(str(port))
@@ -127,8 +130,13 @@ def test_host_ports_wrap_round_their_range(busy):
     assert [local_sandbox_module._free_host_port() for _ in range(2)] == [29999, 20000]
 
 
-def test_the_first_host_port_lies_in_the_range(busy):
-    assert local_sandbox_module._free_host_port() in local_sandbox_module._HOST_PORTS
+@pytest.mark.parametrize("cursor", [None, "", "not a port"])
+def test_a_missing_or_unreadable_cursor_starts_at_a_random_port(busy, monkeypatch, cursor):
+    monkeypatch.setattr(local_sandbox_module.random, "choice", lambda ports: 25000)
+    if cursor is not None:
+        _last_handed_out(cursor)
+
+    assert local_sandbox_module._free_host_port() == 25000
 
 
 def test_concurrent_draws_never_share_a_host_port(busy):
@@ -186,3 +194,23 @@ def test_a_bind_that_fails_for_another_reason_raises(monkeypatch):
 
     with pytest.raises(PermissionError):
         local_sandbox_module._free_host_port()
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="only Linux answers on all of 127.0.0.0/8 unconfigured")
+def test_the_probe_skips_a_port_taken_on_another_address():
+    """Docker also publishes on the bridge gateway, so a port held on any other address is no free port either."""
+    enable_socket()
+    with socket.socket() as held:
+        port = next(port for port in local_sandbox_module._HOST_PORTS if _binds(held, ("127.0.0.2", port)))
+        held.listen()
+        _last_handed_out(port - 1)
+
+        assert local_sandbox_module._free_host_port() != port
+
+
+def _binds(s: socket.socket, address: tuple[str, int]) -> bool:
+    try:
+        s.bind(address)
+    except OSError:
+        return False
+    return True
