@@ -19,7 +19,7 @@ from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandbox, Mo
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandbox, ModalVmSandboxProvider
 from agent_env.providers.sandbox_providers.sail_vm.provider import SailVmSandboxProvider
 from agent_env.providers.sandbox_providers.sail_vm.sandbox import SailVmSandbox
-from agent_env.providers.sandbox_providers.sandbox import LINUX_AMD64
+from agent_env.providers.sandbox_providers.sandbox import LINUX_AMD64, Sandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import Accepts, SandboxProvider
 
 SRC = Path(__file__).resolve().parents[4] / "src" / "agent_env"
@@ -164,16 +164,16 @@ def test_an_image_that_records_no_platform_isnt_checked():
 
 
 @pytest.mark.parametrize("provider, sandbox", [
+    (SandboxProvider, Sandbox),  # a plugin's that declares nothing
     (ModalSandboxProvider, ModalSandbox), (ModalVmSandboxProvider, ModalVmSandbox), (E2BSandboxProvider, E2BSandbox),
     (SailVmSandboxProvider, SailVmSandbox),
 ])
-def test_the_remote_providers_and_their_sandboxes_declare_they_run_linux_amd64(provider, sandbox):
+def test_a_provider_and_its_sandboxes_run_linux_amd64_unless_they_declare_otherwise(provider, sandbox):
     assert provider.PLATFORMS == sandbox.PLATFORMS == LINUX_AMD64
 
 
-def test_the_local_provider_declares_no_platform_since_its_docker_emulates_others():
+def test_the_local_provider_runs_any_platform_unchecked_since_its_docker_emulates_others():
     assert LocalSandboxProvider.PLATFORMS is None and LocalSandbox.PLATFORMS is None
-    assert SandboxProvider.PLATFORMS is None  # a plugin's provider that declares nothing isn't checked
 
 
 def _concrete_classes() -> set[str]:

@@ -22,7 +22,7 @@ from agent_env.providers.sandbox_providers.sail_vm.sandbox import (
     policy_name,
     release_injection,
 )
-from agent_env.providers.sandbox_providers.sandbox import LINUX_AMD64, NetworkPolicy, NetworkPolicyUnsupportedError
+from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, NetworkPolicyUnsupportedError
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_VM,
     Accepts,
@@ -136,7 +136,6 @@ class SailVmSandboxProvider(SandboxProvider):
     EGRESS_HOSTS: ClassVar[tuple[str, ...]] = ("*.sail.box",)
     CREATES_VMS = True
     SANDBOX_ACCEPTS = Accepts.LOADABLE  # a sandbox is a VM, which loads the image; a container pulls it by name
-    PLATFORMS = LINUX_AMD64  # every Sailbox is the amd64 devbox image
 
     def __init__(
         self,

@@ -154,8 +154,8 @@ class Sandbox(ABC):
 
     # Whether it runs on this machine, as a local sandbox does.
     ON_THIS_MACHINE: ClassVar[bool] = False
-    # The platforms it runs images of, as its provider declares them; None, undeclared, is never checked.
-    PLATFORMS: ClassVar[frozenset[str] | None] = None
+    # The platforms it runs images of, as its provider declares them: linux/amd64 unless declared; None runs any.
+    PLATFORMS: ClassVar[frozenset[str] | None] = LINUX_AMD64
     # The host other containers on its provider's private network reach it at, ready for a URL; None when it's on none.
     private_host: str | None = None
 

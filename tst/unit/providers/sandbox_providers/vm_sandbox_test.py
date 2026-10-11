@@ -216,26 +216,27 @@ async def test_a_vm_on_this_machine_pulls_from_its_registry_and_one_elsewhere_lo
     assert "docker load" in elsewhere.scripts[0] and "docker pull" not in elsewhere.scripts[0]
 
 
-class _AmdVm(_RecordingVmSandbox):
-    """A VM sandbox that declares it runs linux/amd64, as the remote providers' do."""
+class _AnyPlatformVm(_RecordingVmSandbox):
+    """A VM sandbox that runs any platform, as the local provider's do."""
 
-    PLATFORMS = LINUX_AMD64
+    PLATFORMS = None
 
 
 @pytest.mark.asyncio
-async def test_a_vm_declaring_its_platforms_refuses_a_tar_gz_for_another_before_anything_is_loaded(signing_store):
+async def test_a_vm_refuses_a_tar_gz_for_a_platform_it_doesnt_run_before_anything_is_loaded(signing_store):
+    """A VM runs linux/amd64 unless it declares otherwise."""
     arm64 = DockerImageArtifact(id="img", version=1, description="d", image_name="img:v1", platform="linux/arm64",
                                 tar_gz_object_url="s3://bucket/img.tar.gz")
 
-    amd = _AmdVm()
+    amd = _RecordingVmSandbox()
     with pytest.raises(RuntimeError, match="Can't load images: 'img' v1 is a linux/arm64 image, and the sandbox runs "
                                            "linux/amd64"):
         await amd.load_docker_images([arm64])
-    assert amd.scripts == []
+    assert amd.PLATFORMS == LINUX_AMD64 and amd.scripts == []
 
-    undeclared = _RecordingVmSandbox(images_stdout="img\n")
-    await undeclared.load_docker_images([arm64])
-    assert "docker load" in undeclared.scripts[0]
+    anything = _AnyPlatformVm(images_stdout="img\n")
+    await anything.load_docker_images([arm64])
+    assert "docker load" in anything.scripts[0]
 
 
 @pytest.mark.asyncio
@@ -720,9 +721,13 @@ async def test_two_builds_of_one_context_on_one_host_each_have_a_work_folder_of_
     assert first != second
 
 
+class _AmdAndArmVm(_RecordingVmSandbox):
+    PLATFORMS = frozenset({"linux/amd64", "linux/arm64"})
+
+
 @pytest.mark.asyncio
 async def test_a_build_takes_the_recorded_dockerfile_and_platform_else_linux_amd64(signing_store):
-    sandbox = _RecordingVmSandbox()
+    sandbox = _AmdAndArmVm()
 
     await sandbox.load_docker_images([_context_image("a", "sha256:" + "1" * 64, platform=None,
                                                      dockerfile="docker/app.Dockerfile"),

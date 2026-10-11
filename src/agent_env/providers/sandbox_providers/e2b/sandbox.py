@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from agent_env.config import get_config
-from agent_env.providers.sandbox_providers.sandbox import LINUX_AMD64, NetworkMode, NetworkPolicy, VmSandbox
+from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy, VmSandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_VM
 
 if TYPE_CHECKING:
@@ -91,7 +91,6 @@ class E2BSandbox(VmSandbox):
     """
 
     type = "e2b"
-    PLATFORMS = LINUX_AMD64
     # ``docker info`` should normally return in well under one second.  Keep
     # each readiness probe short so a wedged daemon cannot consume the entire
     # VM-ready budget in one await.

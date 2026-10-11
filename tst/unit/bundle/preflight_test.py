@@ -386,8 +386,8 @@ def test_modal_builds_a_gateway_image_that_is_only_a_build_context_but_not_a_ser
 NOT_AMD64 = "v1 is a linux/arm64 image, and the sandbox runs linux/amd64"
 
 
-class _VmsOfNoDeclaredPlatform(SandboxProvider):
-    """A plugin's VM provider that declares no platform, which isn't checked."""
+class _Vms(SandboxProvider):
+    """A plugin's VM provider that declares no platform, so its VMs run linux/amd64."""
 
     CREATES_VMS = True
     SANDBOX_ACCEPTS = Accepts.LOADABLE
@@ -396,19 +396,27 @@ class _VmsOfNoDeclaredPlatform(SandboxProvider):
         raise AssertionError("preflight creates nothing")
 
 
-@pytest.mark.parametrize("sandbox, refused", [("modal_vm", True), ("local", False), ("vms", False)])
-def test_an_image_for_a_platform_a_provider_doesnt_declare_is_refused_there(bundle_dir, monkeypatch, sandbox, refused):
-    """The local provider declares none, since its Docker emulates other platforms; nor does a plugin's here."""
+class _ArmVms(_Vms):
+    """A plugin's VM provider whose VMs run linux/arm64."""
+
+    PLATFORMS = frozenset({"linux/arm64"})
+
+
+@pytest.mark.parametrize("sandbox, refused", [("modal_vm", True), ("vms", True), ("local", False), ("arm-vms", False)])
+def test_an_image_for_a_platform_a_provider_doesnt_run_is_refused_there(bundle_dir, monkeypatch, sandbox, refused):
+    """A provider runs linux/amd64 unless it declares otherwise; the local provider runs any, since its Docker emulates
+    other platforms."""
     registry = Config.sandbox_registry
-    monkeypatch.setattr(Config, "sandbox_registry", lambda self: {**registry(self), "vms": {"impl": _VmsOfNoDeclaredPlatform}})
+    monkeypatch.setattr(Config, "sandbox_registry",
+                        lambda self: {**registry(self), "vms": {"impl": _Vms}, "arm-vms": {"impl": _ArmVms}})
     _agent("solver", ARM64_HERE)
     _task(bundle_dir, [AGENT])
 
     if refused:
         assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox=sandbox)) == [
-            f"tasks/t.json: step 'agent': deploys agent 'solver''s image on the 'modal_vm' sandbox provider: 'solver-image' "
-            f"{NOT_AMD64}; put it again for linux/amd64 (--platform linux/amd64 on its put command), or run it with "
-            "--sandbox local"]
+            f"tasks/t.json: step 'agent': deploys agent 'solver''s image on the {sandbox!r} sandbox provider: "
+            f"'solver-image' {NOT_AMD64}; put it again for linux/amd64 (--platform linux/amd64 on its put command), or "
+            "run it with --sandbox local"]
     else:
         assert [entry.name for entry in dry_run_bundle(bundle_dir, sandbox=sandbox).runs] == ["t"]
 

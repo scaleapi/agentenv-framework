@@ -16,6 +16,7 @@ from agent_env.config import runtime
 from agent_env.config import ENV_REF_PREFIX
 from agent_env.config.errors import ConfigError
 from agent_env.providers.sandbox_providers.sandbox import (
+    LINUX_AMD64,
     NetworkPolicy,
     NetworkPolicyUnsupportedError,
     Sandbox,
@@ -170,8 +171,8 @@ class SandboxProvider(ABC):
     URL_REWRITES: ClassVar[dict[str, str]] = {}
 
     # What it declares, which nothing outside the providers reads any other way. A provider that declares nothing runs
-    # each image from its name, in a sandbox that isn't on this machine, and creates no VM and no private network; its
-    # images' platforms aren't checked.
+    # each image from its name, in a sandbox that isn't on this machine, on linux/amd64, and creates no VM and no
+    # private network.
     #
     # Whether its sandboxes run on this machine: an image only this machine holds (in a registry or object store on
     # it) reaches them, its containers need this machine's Docker, and a gateway's infra envs are built here for it.
@@ -183,10 +184,10 @@ class SandboxProvider(ABC):
     CONTAINER_ACCEPTS: ClassVar[Accepts] = Accepts.NAME
     # Whether create_container(private_network=True) puts containers on a network they share.
     PRIVATE_NETWORK: ClassVar[bool] = False
-    # The platforms its sandboxes run images of (``linux/amd64``), which its sandbox classes declare too; None,
-    # undeclared, is never checked, as for the local provider, whose Docker runs this machine's and emulates others
-    # where it's set up.
-    PLATFORMS: ClassVar[frozenset[str] | None] = None
+    # The platforms its sandboxes run images of, which its sandbox classes declare too: linux/amd64 unless declared.
+    # None runs any, unchecked, as the local provider does, whose Docker runs this machine's platform and emulates
+    # others where it's set up.
+    PLATFORMS: ClassVar[frozenset[str] | None] = LINUX_AMD64
 
     @property
     def links(self) -> tuple[SandboxProvider, ...]:
