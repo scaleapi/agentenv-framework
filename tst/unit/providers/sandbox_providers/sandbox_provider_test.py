@@ -309,6 +309,43 @@ def test_skip_refusing_gives_no_provider_when_it_refuses_every_link(provider):
     assert running is None and refused == [(link, "too far") for link in provider.links]
 
 
+class _Vm(_FakeSandbox):
+    """A VM sandbox of ``platform``, recording whether it was terminated."""
+
+    def __init__(self, sandbox_id: str, platform: str):
+        super().__init__(sandbox_id)
+        self.mode, self.platform, self.terminated = "vm", platform, False
+
+    async def terminate(self) -> None:
+        self.terminated = True
+
+
+@pytest.mark.asyncio
+async def test_a_chain_closes_a_vm_that_cant_run_the_image_and_tries_the_next_provider(caplog):
+    arm64 = DockerImageArtifact(id="img", version=1, description="d", image_name="img:v1", platform="linux/arm64",
+                                tar_gz_object_url="s3://bucket/img.tar.gz")
+    amd, arm = _Vm("amd", "linux/amd64"), _Vm("arm", "linux/arm64")
+    chain = ChainedSandboxProvider([_StubProvider(sandbox=amd), _StubProvider(sandbox=arm)])
+    await chain.prepare_image(arm64)
+
+    assert await chain.create_sandbox(image_name="img:v1", port=8000, env={}) is arm
+    assert amd.terminated and not arm.terminated
+    assert "gave a VM that can't run the image: 'img' v1 is a linux/arm64 image" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_chain_none_of_whose_vms_runs_the_image_names_each_refusal():
+    arm64 = DockerImageArtifact(id="img", version=1, description="d", image_name="img:v1", platform="linux/arm64",
+                                tar_gz_object_url="s3://bucket/img.tar.gz")
+    chain = ChainedSandboxProvider([_StubProvider(sandbox=_Vm("one", "linux/amd64")),
+                                    _StubProvider(sandbox=_Vm("two", "linux/amd64"))])
+    await chain.prepare_image(arm64)
+
+    with pytest.raises(RuntimeError, match="All 2 providers failed: _StubProvider: ValueError.*linux/arm64 image.*; "
+                                           "_StubProvider: ValueError"):
+        await chain.create_sandbox(image_name="img:v1", port=8000, env={})
+
+
 _CONTEXT_ONLY = DockerImageArtifact(id="solver-image", version=2, description="d", image_name="local/solver-0123456789ab:v2",
                                     build_context_object_url="s3://bucket/ctx.tar.gz")
 

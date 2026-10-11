@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from agent_env.attribution import Attribution
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, NetworkPolicyUnsupportedError, Sandbox
-from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
+from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_VM, SandboxProvider
 
 if TYPE_CHECKING:
     from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
@@ -81,6 +81,15 @@ class ChainedSandboxProvider(SandboxProvider):
             except Exception as e:
                 logger.warning(f"{name}.create_sandbox failed: {e}; trying next provider")
                 errors.append((name, e))
+                continue
+            # A VM loads the image, so one of another platform can't run it, and the next provider's may.
+            if image is not None and sandbox.mode == SANDBOX_MODE_VM and (problem := image.platform_problem(sandbox.platform)):
+                logger.warning(f"{name}.create_sandbox gave a VM that can't run the image: {problem}; trying next provider")
+                errors.append((name, ValueError(problem)))
+                try:
+                    await sandbox.terminate()
+                except Exception as e:
+                    logger.warning(f"{name}: terminating sandbox {sandbox.sandbox_id} failed: {e}")
                 continue
             logger.info(
                 f"chain_provider_attempt provider={name} status=success sandbox_type={sandbox.type} "

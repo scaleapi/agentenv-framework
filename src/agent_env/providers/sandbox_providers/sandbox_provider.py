@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import shlex
-from abc import ABC, abstractmethod
+from abc import ABC
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 from urllib.parse import urlparse
@@ -59,7 +59,6 @@ class Accepts(Enum):
 class SandboxProvider(ABC):
     """Compute backend that provisions sandboxes. Selected via [sandbox] default / build_sandbox_provider(); swap via set_sandbox_provider()."""
 
-    @abstractmethod
     async def create_sandbox(
         self,
         *,
@@ -72,7 +71,8 @@ class SandboxProvider(ABC):
         timeout: int = 3600 * 2,
         attribution: Optional[Attribution] = None,
         network_policy: Optional[NetworkPolicy] = None,
-    ) -> Sandbox: ...
+    ) -> Sandbox:
+        raise NotImplementedError(f"{type(self).__name__} does not support create_sandbox")
 
     async def create_vm(
         self,
@@ -175,12 +175,10 @@ class SandboxProvider(ABC):
     # Whether its sandboxes run on this machine: an image only this machine holds (in a registry or object store on
     # it) reaches them, its containers need this machine's Docker, and a gateway's infra envs are built here for it.
     ON_THIS_MACHINE: ClassVar[bool] = False
-    # The sandbox modes it creates, derived for each provider class (``__init_subclass__``): SANDBOX_MODE_VM when it
-    # implements create_vm, and SANDBOX_MODE_CONTAINER, since every provider implements create_sandbox. One whose
-    # create_sandbox can't make a container declares its own.
-    SUPPORTED_SANDBOX_MODES: ClassVar[frozenset[str]] = frozenset({SANDBOX_MODE_CONTAINER})
-    # Deprecated: SANDBOX_MODE_VM in SUPPORTED_SANDBOX_MODES, derived from it, for plugins that still read it.
-    CREATES_VMS: ClassVar[bool] = False
+    # The sandbox modes it creates, derived for each provider class from what it implements (``__init_subclass__``):
+    # SANDBOX_MODE_CONTAINER when it implements create_sandbox, SANDBOX_MODE_VM when it implements create_vm. One that
+    # implements a method it can't serve declares its own.
+    SUPPORTED_SANDBOX_MODES: ClassVar[frozenset[str]] = frozenset()
     # The images create_sandbox and create_container run.
     SANDBOX_ACCEPTS: ClassVar[Accepts] = Accepts.NAME
     CONTAINER_ACCEPTS: ClassVar[Accepts] = Accepts.NAME
@@ -190,9 +188,9 @@ class SandboxProvider(ABC):
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
         if "SUPPORTED_SANDBOX_MODES" not in cls.__dict__:
-            vm = cls.create_vm is not SandboxProvider.create_vm
-            cls.SUPPORTED_SANDBOX_MODES = frozenset({SANDBOX_MODE_CONTAINER, *([SANDBOX_MODE_VM] if vm else [])})
-        cls.CREATES_VMS = SANDBOX_MODE_VM in cls.SUPPORTED_SANDBOX_MODES
+            cls.SUPPORTED_SANDBOX_MODES = frozenset(
+                mode for mode, method in ((SANDBOX_MODE_CONTAINER, "create_sandbox"), (SANDBOX_MODE_VM, "create_vm"))
+                if getattr(cls, method) is not getattr(SandboxProvider, method))
 
     @property
     def links(self) -> tuple[SandboxProvider, ...]:
@@ -315,9 +313,16 @@ def _build_registry(source: Config | None = None) -> dict[str, dict]:
 
 def _validate_plugin(name: str, loaded: Any) -> type[SandboxProvider]:
     cls = _registration.require_subclass(loaded, SandboxProvider)
-    if problem := _registration.unimplemented(cls, SandboxProvider):
+    if problem := _unimplemented(cls):
         raise TypeError(problem)
     return cls
+
+
+def _unimplemented(cls: type[SandboxProvider]) -> str | None:
+    """What ``cls`` still has to implement to work as a sandbox provider, if anything: a sandbox mode at least,
+    create_sandbox or create_vm."""
+    return _registration.unimplemented(cls, SandboxProvider) or (
+        None if cls.SUPPORTED_SANDBOX_MODES else f"{cls.__qualname__} must implement create_sandbox or create_vm")
 
 
 def _get_sandbox_registry() -> dict[str, dict]:
@@ -371,7 +376,7 @@ def _merge_config_toml_sandbox_providers(
         if not impl:
             raise ConfigError(f"config.toml sandbox provider {name!r} is missing an 'impl' dotted path")
         cls = load_impl(impl, SandboxProvider)
-        if problem := _registration.unimplemented(cls, SandboxProvider):
+        if problem := _unimplemented(cls):
             raise ConfigError(f"{where} impl {impl!r}: {problem}")
         if from_plugins.refuse(name, where):
             continue

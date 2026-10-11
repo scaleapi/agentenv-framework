@@ -51,10 +51,9 @@ def test_each_provider_declares_where_it_runs_and_the_images_it_runs(cls, on_thi
 
 
 @pytest.mark.parametrize("cls", PROVIDER_CLASSES, ids=lambda cls: cls.__name__)
-def test_a_provider_supports_vms_where_it_implements_create_vm_and_declares_a_private_network_only_with_containers(cls):
-    assert cls.SUPPORTED_SANDBOX_MODES == ({SANDBOX_MODE_CONTAINER, SANDBOX_MODE_VM}
-                                           if cls.create_vm is not SandboxProvider.create_vm else {SANDBOX_MODE_CONTAINER})
-    assert cls.CREATES_VMS == (SANDBOX_MODE_VM in cls.SUPPORTED_SANDBOX_MODES)  # the deprecated spelling, derived
+def test_a_provider_supports_the_modes_it_implements_and_declares_a_private_network_only_with_containers(cls):
+    assert cls.SUPPORTED_SANDBOX_MODES == (
+        {SANDBOX_MODE_CONTAINER} | ({SANDBOX_MODE_VM} if cls.create_vm is not SandboxProvider.create_vm else set()))
     assert not cls.PRIVATE_NETWORK or cls.create_container is not SandboxProvider.create_container
 
 
@@ -68,25 +67,38 @@ class _Vms(SandboxProvider):
 
 def test_a_provider_that_declares_nothing_runs_images_by_name_and_supports_vms_by_implementing_create_vm():
     assert (_Vms.ON_THIS_MACHINE, _Vms.PRIVATE_NETWORK) == (False, False)
-    assert _Vms.SUPPORTED_SANDBOX_MODES == {SANDBOX_MODE_CONTAINER, SANDBOX_MODE_VM} and _Vms.CREATES_VMS
+    assert _Vms.SUPPORTED_SANDBOX_MODES == {SANDBOX_MODE_CONTAINER, SANDBOX_MODE_VM}
     assert (_Vms.SANDBOX_ACCEPTS, _Vms.CONTAINER_ACCEPTS) == (NAME, NAME)
     assert _Vms().url_from_sandbox("http://localhost:4000") == "http://localhost:4000"
 
 
-class _VmsOnly(_Vms):
-    """One whose create_sandbox can't make a container, so it declares its modes."""
+class _VmsOnly(SandboxProvider):
+    async def create_vm(self, **_):
+        raise NotImplementedError
 
-    SUPPORTED_SANDBOX_MODES = frozenset({SANDBOX_MODE_VM})
 
-
-class _ContainersAgain(_VmsOnly):
+class _ContainersOnly(SandboxProvider):
     async def create_sandbox(self, **_):
         raise NotImplementedError
 
 
-def test_a_provider_that_declares_its_modes_keeps_them_and_a_subclass_that_doesnt_has_them_derived():
-    assert _VmsOnly.SUPPORTED_SANDBOX_MODES == {SANDBOX_MODE_VM} and _VmsOnly.CREATES_VMS
-    assert _ContainersAgain.SUPPORTED_SANDBOX_MODES == {SANDBOX_MODE_CONTAINER, SANDBOX_MODE_VM}
+class _Declared(_Vms):
+    """One that implements create_sandbox but can't always serve it, so it declares its modes."""
+
+    SUPPORTED_SANDBOX_MODES = frozenset({SANDBOX_MODE_VM})
+
+
+class _DerivedAgain(_Declared):
+    async def create_sandbox(self, **_):
+        raise NotImplementedError
+
+
+def test_a_provider_supports_only_the_modes_it_implements_unless_it_declares_them():
+    assert (_VmsOnly.SUPPORTED_SANDBOX_MODES, _ContainersOnly.SUPPORTED_SANDBOX_MODES) == (
+        {SANDBOX_MODE_VM}, {SANDBOX_MODE_CONTAINER})
+    assert SandboxProvider.SUPPORTED_SANDBOX_MODES == set()
+    assert _Declared.SUPPORTED_SANDBOX_MODES == {SANDBOX_MODE_VM}
+    assert _DerivedAgain.SUPPORTED_SANDBOX_MODES == {SANDBOX_MODE_CONTAINER, SANDBOX_MODE_VM}  # a subclass that doesn't
 
 
 def test_a_chain_is_its_providers_in_order_and_one_provider_is_itself():
