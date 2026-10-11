@@ -61,16 +61,31 @@ def litellm(monkeypatch):
     monkeypatch.setenv("LITELLM_BASE_URL", "http://litellm.example/v1")
 
 
+BY_NAME = ("with _LocalProvider, which runs an agent's image by name: 'solver-image' v2 is only a build context, which has "
+           "to be built, not pulled")
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("provider", [_LocalProvider(), ChainedSandboxProvider([_VmProvider(), _LocalProvider()])],
-                         ids=["local", "chain-with-local"])
-async def test_a_provider_that_runs_the_agent_by_name_refuses_it(monkeypatch, local_stores, litellm, provider):
+@pytest.mark.parametrize("provider, refusal", [
+    (_LocalProvider(), BY_NAME),
+    (ChainedSandboxProvider([_LocalProvider(), _LocalProvider()]), f"{BY_NAME}; nor {BY_NAME}"),
+], ids=["local", "chain-of-locals"])
+async def test_a_provider_that_runs_the_agent_by_name_refuses_it(monkeypatch, local_stores, litellm, provider, refusal):
     monkeypatch.setattr(sandbox_provider, "build_sandbox_provider", lambda name: provider)
 
-    with pytest.raises(ValueError, match="Can't deploy agent 'solver' with _LocalProvider, which runs an agent's image by "
-                                         "name: 'solver-image' v2 is only a build context, which has to be built, not "
-                                         "pulled"):
+    with pytest.raises(ValueError, match=f"Can't deploy agent 'solver' {refusal}"):
         await A2AAgent(id="solver", version=1, docker_image_artifact=IMAGE).deploy(sandbox_type="any")
+
+
+@pytest.mark.asyncio
+async def test_a_chain_skips_a_provider_that_runs_the_agent_by_name_for_one_that_builds_it(monkeypatch, local_stores,
+                                                                                           litellm, caplog):
+    monkeypatch.setattr(sandbox_provider, "build_sandbox_provider",
+                        lambda name: ChainedSandboxProvider([_LocalProvider(), _VmProvider()]))
+
+    with pytest.raises(RuntimeError, match=r"All 1 providers failed: _VmProvider: _Created\(\)"):
+        await A2AAgent(id="solver", version=1, docker_image_artifact=IMAGE).deploy(sandbox_type="any")
+    assert "sandbox_provider_skipped provider=_LocalProvider: 'solver-image' v2 is only a build context" in caplog.text
 
 
 @pytest.mark.asyncio

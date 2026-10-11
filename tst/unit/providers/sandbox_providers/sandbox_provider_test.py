@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 
@@ -11,7 +12,7 @@ import agent_env.providers.sandbox_providers.chained_sandbox_provider as chained
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.config import get_config
 from agent_env.config.loader import load_impl
-from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
+from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider, skip_refusing
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandbox, ModalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandbox, ModalVmSandboxProvider
@@ -281,6 +282,31 @@ async def test_chain_create_sandbox_all_fail_raises_with_all_names():
     assert "_StubProvider" in msg
     assert "first boom" in msg
     assert "second boom" in msg
+
+
+def test_skip_refusing_leaves_a_provider_none_of_whose_links_it_refuses():
+    chain = ChainedSandboxProvider([_StubProvider(), _StubProvider()])
+
+    assert skip_refusing(chain, lambda link: None) == (chain, [])
+
+
+def test_skip_refusing_chains_the_links_it_doesnt_refuse_warning_of_each_it_skips(caplog):
+    first, second, third = _StubProvider(), _StubProvider(), _StubProvider()
+
+    with caplog.at_level(logging.WARNING, logger=chained_module.__name__):
+        running, refused = skip_refusing(ChainedSandboxProvider([first, second, third]),
+                                         lambda link: "too far" if link is second else None)
+
+    assert running.links == (first, third) and refused == [(second, "too far")]
+    assert "sandbox_provider_skipped provider=_StubProvider: too far" in caplog.text
+
+
+@pytest.mark.parametrize("provider", [_StubProvider(), ChainedSandboxProvider([_StubProvider(), _StubProvider()])],
+                         ids=["one", "chain"])
+def test_skip_refusing_gives_no_provider_when_it_refuses_every_link(provider):
+    running, refused = skip_refusing(provider, lambda link: "too far")
+
+    assert running is None and refused == [(link, "too far") for link in provider.links]
 
 
 _CONTEXT_ONLY = DockerImageArtifact(id="solver-image", version=2, description="d", image_name="local/solver-0123456789ab:v2",

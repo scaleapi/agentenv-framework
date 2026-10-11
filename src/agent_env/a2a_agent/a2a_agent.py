@@ -26,6 +26,7 @@ from agent_env.a2a_agent.object_transfer import (
     skill_add_call,
 )
 from agent_env.a2a_agent.staging import transfer_store
+from agent_env.providers.sandbox_providers.chained_sandbox_provider import skip_refusing
 from agent_env.providers.sandbox_providers.local_sandbox import LOCAL_TRUST_ENV, local_grant_trust, start_trusting
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_VM,
@@ -443,12 +444,14 @@ class A2AAgent:
             if sandbox.mode != SANDBOX_MODE_VM and (problem := image.by_name_problem()):
                 raise ValueError(f"Can't deploy agent {self.id!r} on the container sandbox {sandbox.sandbox_id!r}, which "
                                  f"runs its own image, never the agent's: {problem}")
-        elif refused := [(link, problem) for link in provider.links
-                         if (problem := self.accepts(link).problem(image, on=link))]:
-            link, problem = refused[0]
-            how = ("whose VMs can't run it" if self.accepts(link) is Accepts.LOADABLE
-                   else "which runs an agent's image by name")
-            raise ValueError(f"Can't deploy agent {self.id!r} with {type(link).__name__}, {how}: {problem}")
+        else:
+            provider, refused = skip_refusing(provider, lambda link: self.accepts(link).problem(image, on=link))
+            if provider is None:
+                refusals = [f"with {type(link).__name__}, "
+                            + ("whose VMs can't run it" if self.accepts(link) is Accepts.LOADABLE
+                               else "which runs an agent's image by name")
+                            + f": {problem}" for link, problem in refused]
+                raise ValueError(f"Can't deploy agent {self.id!r} {'; nor '.join(refusals)}")
 
         try:
             if provider is not None:

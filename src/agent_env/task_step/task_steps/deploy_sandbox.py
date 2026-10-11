@@ -6,6 +6,7 @@ import logging
 from typing import ClassVar, Optional
 
 from agent_env.artifact.artifacts.docker_image import pull_problem
+from agent_env.providers.sandbox_providers.chained_sandbox_provider import skip_refusing
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
 from agent_env.task_step.context import DeployedSandbox, TaskStepContext
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
@@ -141,10 +142,11 @@ class DeploySandboxTaskStep(TaskStep):
         else:
             if self.image is None or self.port is None:
                 raise ValueError("container-mode sandbox requires `image` and `port`")
-            if problems := [(link, problem) for link in provider.links
-                            if (problem := pull_problem(self.image, on_this_machine=link.ON_THIS_MACHINE))]:
-                link, problem = problems[0]
-                raise ValueError(f"Can't deploy sandbox '{self.sandbox_name}' with {type(link).__name__}: {problem}")
+            provider, refused = skip_refusing(
+                provider, lambda link: pull_problem(self.image, on_this_machine=link.ON_THIS_MACHINE))
+            if provider is None:
+                refusals = "; nor ".join(f"with {type(link).__name__}: {problem}" for link, problem in refused)
+                raise ValueError(f"Can't deploy sandbox '{self.sandbox_name}' {refusals}")
             sandbox = await provider.create_sandbox(
                 image_name=self.image,
                 port=self.port,

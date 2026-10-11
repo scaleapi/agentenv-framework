@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from agent_env.attribution import Attribution
@@ -113,3 +114,18 @@ class ChainedSandboxProvider(SandboxProvider):
                 await p.close()
             except Exception as e:
                 logger.warning(f"close() failed on {type(p).__name__}: {e}")
+
+
+def skip_refusing(provider: SandboxProvider, problem: Callable[[SandboxProvider], str | None]
+                  ) -> tuple[SandboxProvider | None, list[tuple[SandboxProvider, str]]]:
+    """``provider`` less each of its links ``problem`` refuses, each skipped with a warning, and the refusals: a deploy
+    runs on any link that takes it. None in place of the provider when ``problem`` refuses every link."""
+    refused = [(link, reason) for link in provider.links if (reason := problem(link))]
+    if not refused:
+        return provider, []
+    running = [link for link in provider.links if all(link is not refusing for refusing, _ in refused)]
+    if not running:
+        return None, refused
+    for link, reason in refused:
+        logger.warning(f"sandbox_provider_skipped provider={type(link).__name__}: {reason}")
+    return ChainedSandboxProvider(running), refused

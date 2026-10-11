@@ -107,17 +107,23 @@ AGENT = {"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "
 # Images only this machine has
 
 
-@pytest.mark.parametrize("sandbox", ["modal", "local,modal"])
 def test_an_image_in_this_machines_registry_is_refused_where_a_sandbox_elsewhere_pulls_it_before_anything_is_written(
-        bundle_dir, sandbox):
+        bundle_dir):
     _agent("solver")
     _task(bundle_dir, [AGENT])
 
-    assert _problems(lambda: run_bundle(bundle_dir, sandbox=sandbox)) == [
+    assert _problems(lambda: run_bundle(bundle_dir, sandbox="modal")) == [
         f"tasks/t.json: step 'agent': deploys agent 'solver''s image on the 'modal' sandbox provider: {HERE}; run it "
         "with --sandbox local, or on a provider whose VMs load its tar.gz, such as --sandbox modal_vm",
     ]
     assert not local_store().path.exists()
+
+
+def test_a_chain_runs_an_image_in_this_machines_registry_on_its_local_provider_skipping_one_elsewhere(bundle_dir):
+    _agent("solver")
+    _task(bundle_dir, [AGENT])
+
+    assert [entry.name for entry in dry_run_bundle(bundle_dir, sandbox="modal,local").runs] == ["t"]
 
 
 @pytest.mark.parametrize("where", [LOCAL, (REMOTE[0], LOCAL[1])])
@@ -325,17 +331,16 @@ BY_NAME = ("on the {sandbox!r} sandbox provider, which runs it by name: '{id}' v
 
 
 @pytest.mark.parametrize("sandbox, refused", [("modal_vm", False), ("modal", False), ("modal_vm,modal", False),
-                                              ("local", True), ("modal_vm,local", True)])
+                                              ("local", True), ("modal_vm,local", False)])
 def test_an_agent_image_that_is_only_a_build_context_runs_where_a_vm_or_modal_builds_it(bundle_dir, sandbox, refused):
+    """A chain skips the local provider, which runs an image by name, so one that builds it is enough."""
     with namespace_routing():
         A2AAgent.put(id="solver", docker_image_artifact=_context_image("solver-image"))
     _task(bundle_dir, [AGENT])
 
     if refused:
-        link = "local" if "local" in sandbox else sandbox
         assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox=sandbox)) == [
-            "tasks/t.json: step 'agent': deploys agent 'solver''s image "
-            + BY_NAME.format(sandbox=sandbox if link == sandbox else link, id="solver-image")]
+            "tasks/t.json: step 'agent': deploys agent 'solver''s image " + BY_NAME.format(sandbox=sandbox, id="solver-image")]
     else:
         assert [entry.name for entry in dry_run_bundle(bundle_dir, sandbox=sandbox).runs] == ["t"]
 
@@ -384,6 +389,9 @@ def test_modal_builds_a_gateway_image_that_is_only_a_build_context_but_not_a_ser
 # Images built for a platform a provider's sandboxes don't run
 
 NOT_AMD64 = "v1 is a linux/arm64 image, and the sandbox runs linux/amd64"
+EMULATION = "a Linux host of another platform builds it only with QEMU emulation set up"
+REBUILD = (f"rebuild it for linux/amd64 (--platform linux/amd64 on the put command that builds it, or `docker build "
+           f"--platform linux/amd64` for one put by name; {EMULATION}), or run it with --sandbox local")
 
 
 class _Vms(SandboxProvider):
@@ -402,23 +410,36 @@ class _ArmVms(_Vms):
     PLATFORMS = frozenset({"linux/arm64"})
 
 
-@pytest.mark.parametrize("sandbox, refused", [("modal_vm", True), ("vms", True), ("local", False), ("arm-vms", False)])
-def test_an_image_for_a_platform_a_provider_doesnt_run_is_refused_there(bundle_dir, monkeypatch, sandbox, refused):
-    """A provider runs linux/amd64 unless it declares otherwise; the local provider runs any, since its Docker emulates
-    other platforms."""
+@pytest.fixture
+def plugin_vms(monkeypatch):
     registry = Config.sandbox_registry
     monkeypatch.setattr(Config, "sandbox_registry",
                         lambda self: {**registry(self), "vms": {"impl": _Vms}, "arm-vms": {"impl": _ArmVms}})
+
+
+@pytest.mark.parametrize("sandbox, refused", [("modal_vm", True), ("vms", True), ("local", False), ("arm-vms", False),
+                                              ("modal_vm,local", False), ("modal_vm,arm-vms", False)])
+def test_an_image_for_a_platform_a_provider_doesnt_run_is_refused_there(bundle_dir, plugin_vms, sandbox, refused):
+    """A provider runs linux/amd64 unless it declares otherwise; the local provider runs any, since its Docker emulates
+    other platforms. A chain skips a provider that doesn't run it."""
     _agent("solver", ARM64_HERE)
     _task(bundle_dir, [AGENT])
 
     if refused:
         assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox=sandbox)) == [
             f"tasks/t.json: step 'agent': deploys agent 'solver''s image on the {sandbox!r} sandbox provider: "
-            f"'solver-image' {NOT_AMD64}; put it again for linux/amd64 (--platform linux/amd64 on its put command), or "
-            "run it with --sandbox local"]
+            f"'solver-image' {NOT_AMD64}; {REBUILD}"]
     else:
         assert [entry.name for entry in dry_run_bundle(bundle_dir, sandbox=sandbox).runs] == ["t"]
+
+
+def test_a_chain_none_of_whose_providers_runs_an_image_is_refused_naming_each(bundle_dir, plugin_vms):
+    _agent("solver", ARM64_HERE)
+    _task(bundle_dir, [AGENT])
+
+    assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox="modal_vm,vms")) == [
+        f"tasks/t.json: step 'agent': deploys agent 'solver''s image on the {link!r} sandbox provider: 'solver-image' "
+        f"{NOT_AMD64}; {REBUILD}" for link in ("modal_vm", "vms")]
 
 
 def test_infra_built_here_for_another_platform_is_refused_on_a_vm_provider_naming_the_command_to_put_it_again(bundle_dir):
@@ -430,9 +451,18 @@ def test_infra_built_here_for_another_platform_is_refused_on_a_vm_provider_namin
     problems = _problems(lambda: dry_run_bundle(bundle_dir, sandbox="modal_vm"))
 
     assert problems[0] == ("tasks/t.json: step 'env': deploys the gateway env 'default''s image 'gateway-default' on the "
-                           f"'modal_vm' sandbox provider: 'gateway-default' {NOT_AMD64}; put it again for linux/amd64 "
-                           "(`agent-env env gateway put --id default --platform linux/amd64`), or run it with --sandbox local")
+                           f"'modal_vm' sandbox provider: 'gateway-default' {NOT_AMD64}; rebuild it for linux/amd64 "
+                           f"(`agent-env env gateway put --id default --platform linux/amd64`; {EMULATION}), or run it with "
+                           "--sandbox local")
     assert len(problems) == 4  # the gateway's image, and the service-db's three
+
+
+def test_infra_built_here_for_another_platform_runs_on_a_chain_that_falls_back_to_the_local_provider(bundle_dir):
+    _env("crm", REMOTE)
+    _infra(ARM64_HERE)
+    _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
+
+    assert [entry.name for entry in dry_run_bundle(bundle_dir, sandbox="modal_vm,local").runs] == ["t"]
 
 
 def test_a_vm_provider_isnt_offered_for_an_image_its_vms_wouldnt_run(bundle_dir):

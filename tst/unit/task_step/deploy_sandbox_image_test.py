@@ -1,10 +1,11 @@
 """A container-mode deploy_sandbox runs its image by name, so a provider whose sandboxes are elsewhere can't pull one from
-this machine's registry; one on this machine can."""
+this machine's registry; one on this machine can, and a chain skips the rest for it."""
 
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.deploy_sandbox import DeploySandboxTaskStep
@@ -36,3 +37,18 @@ async def test_a_container_sandbox_pulls_an_image_from_this_machines_registry_on
                                                  "registry on this machine, which a sandbox elsewhere can't pull from"):
                 await step.execute(TaskStepContext())
             provider.create_sandbox.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_chain_pulls_an_image_from_this_machines_registry_on_its_provider_here_skipping_one_elsewhere():
+    step = DeploySandboxTaskStep(id="s", version=1, sandbox_name="box", sandbox_mode="container",
+                                 image="localhost:5000/box:v1", port=80)
+    elsewhere, here = _provider(on_this_machine=False), _provider(on_this_machine=True)
+
+    with patch("agent_env.providers.sandbox_providers.sandbox_provider.get_sandbox_provider",
+               return_value=ChainedSandboxProvider([elsewhere, here])):
+        await step.execute(TaskStepContext())
+
+    elsewhere.create_sandbox.assert_not_awaited()
+    here.create_sandbox.assert_awaited_once()
+
