@@ -717,8 +717,9 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         if self._needs_local_postgres:
             all_images += self._state_provider.store_images_to_load()
         # Every image is checked before the VM is created, so one it can't get leaves nothing to close.
-        on = existing_sandbox or sandbox_provider
-        if problems := [problem for image in all_images if (problem := Accepts.LOADABLE.problem(image, on=on))]:
+        here = (existing_sandbox or sandbox_provider).ON_THIS_MACHINE
+        if problems := [problem for image in all_images
+                        if (problem := Accepts.LOADABLE.problem(image, on_this_machine=here))]:
             raise ValueError(f"Can't deploy a gateway on {type(sandbox_provider).__name__}, whose VM can't run its "
                              f"images: {'; '.join(problems)}")
 
@@ -897,7 +898,8 @@ COMPOSE_EOF'''
         # an image the provider can't run, or a failed build, leaves nothing.
         images = [gateway_env.docker_image_artifact, *mcp_server_images]
         accepts = self.accepts(sandbox_provider)
-        problems = [problem for image in images if (problem := accepts.problem(image, on=sandbox_provider))]
+        problems = [problem for image in images
+                    if (problem := accepts.problem(image, on_this_machine=sandbox_provider.ON_THIS_MACHINE))]
         if self._needs_local_postgres:  # the servicedb and its sidecars, by the names the state provider picks
             problems += [problem for name in self._state_provider.container_images()
                          if (problem := pull_problem(name, on_this_machine=sandbox_provider.ON_THIS_MACHINE))]

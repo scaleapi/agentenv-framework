@@ -299,9 +299,7 @@ class VmSandbox(Sandbox):
         another platform than its own, is refused before anything is loaded."""
         if not artifacts:
             return
-        if problems := [problem for artifact in artifacts
-                        if (problem := artifact.load_problem(on_this_machine=self.ON_THIS_MACHINE,
-                                                             platform=self.platform))]:
+        if problems := self.load_problems(artifacts):
             raise RuntimeError(f"Can't load images: {'; '.join(problems)}")
         if tarballs := [artifact for artifact in artifacts if artifact.tar_gz_object_url]:
             await self._load_tarballs(tarballs)
@@ -310,6 +308,13 @@ class VmSandbox(Sandbox):
             await self.pull_images(pulled)
         if built := [artifact for artifact in artifacts if artifact.context_only]:
             await self.build_images(built)
+
+    def load_problems(self, artifacts: list) -> list[str]:
+        """Why this VM can't get or run each DockerImageArtifact it can't, as ``load_docker_images`` refuses them: one
+        to pull from a registry on this machine when the VM isn't on it, one with no tar.gz whose name names no
+        registry, or one built for another platform than its own."""
+        return [problem for artifact in artifacts
+                if (problem := artifact.load_problem(on_this_machine=self.ON_THIS_MACHINE, platform=self.platform))]
 
     async def build_images(self, artifacts: list) -> None:
         """Build each context-only image from its build context, one build at a time, so heavy builds don't contend

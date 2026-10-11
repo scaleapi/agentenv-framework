@@ -84,7 +84,8 @@ async def test_a_chain_skips_a_provider_that_runs_the_agent_by_name_for_one_that
 
     with pytest.raises(RuntimeError, match=r"All 1 providers failed: _VmProvider: _Created\(\)"):
         await A2AAgent(id="solver", version=1, docker_image_artifact=IMAGE).deploy(sandbox_type="any")
-    assert "sandbox_provider_skipped provider=_LocalProvider: 'solver-image' v2 is only a build context" in caplog.text
+    assert ("sandbox_provider_skipped provider=_LocalProvider: which runs an agent's image by name: 'solver-image' v2 is "
+            "only a build context") in caplog.text
 
 
 @pytest.mark.asyncio

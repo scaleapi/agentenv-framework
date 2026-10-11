@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import posixpath
@@ -445,13 +446,7 @@ class A2AAgent:
                 raise ValueError(f"Can't deploy agent {self.id!r} on the container sandbox {sandbox.sandbox_id!r}, which "
                                  f"runs its own image, never the agent's: {problem}")
         else:
-            provider, refused = skip_refusing(provider, lambda link: self.accepts(link).problem(image, on=link))
-            if provider is None:
-                refusals = [f"with {type(link).__name__}, "
-                            + ("whose VMs can't run it" if self.accepts(link) is Accepts.LOADABLE
-                               else "which runs an agent's image by name")
-                            + f": {problem}" for link, problem in refused]
-                raise ValueError(f"Can't deploy agent {self.id!r} {'; nor '.join(refusals)}")
+            provider = skip_refusing(provider, functools.partial(self._refusal, image), what=f"agent {self.id!r}")
 
         try:
             if provider is not None:
@@ -507,6 +502,14 @@ class A2AAgent:
         except BaseException:  # a cancelled deploy closes its sandbox too
             await self.close()
             raise
+
+    def _refusal(self, image: DockerImageArtifact, link: SandboxProvider) -> str | None:
+        """Why ``link`` can't run ``image`` as this agent's own sandbox, as a clause on its name, or None when it can."""
+        accepts = self.accepts(link)
+        if problem := accepts.problem(image, on_this_machine=link.ON_THIS_MACHINE):
+            how = "whose VMs can't run it" if accepts is Accepts.LOADABLE else "which runs an agent's image by name"
+            return f"{how}: {problem}"
+        return None
 
     def _build_merged_env(self, resolved_env: dict[str, str], a2a_port: int) -> dict[str, str]:
         merged_env = dict(self.default_env_vars)

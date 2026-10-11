@@ -287,33 +287,39 @@ async def test_chain_create_sandbox_all_fail_raises_with_all_names():
 def test_skip_refusing_leaves_a_provider_none_of_whose_links_it_refuses():
     chain = ChainedSandboxProvider([_StubProvider(), _StubProvider()])
 
-    assert skip_refusing(chain, lambda link: None) == (chain, [])
+    assert skip_refusing(chain, lambda link: None, what="it") is chain
 
 
-def test_skip_refusing_chains_the_links_it_doesnt_refuse_warning_of_each_it_skips(caplog):
+def test_skip_refusing_chains_the_links_it_doesnt_refuse_noting_each_it_skips(caplog):
     first, second, third = _StubProvider(), _StubProvider(), _StubProvider()
 
-    with caplog.at_level(logging.WARNING, logger=chained_module.__name__):
-        running, refused = skip_refusing(ChainedSandboxProvider([first, second, third]),
-                                         lambda link: "too far" if link is second else None)
+    with caplog.at_level(logging.INFO, logger=chained_module.__name__):
+        running = skip_refusing(ChainedSandboxProvider([first, second, third]),
+                                lambda link: "which is too far" if link is not third else None, what="it")
 
-    assert running.links == (first, third) and refused == [(second, "too far")]
-    assert "sandbox_provider_skipped provider=_StubProvider: too far" in caplog.text
-
-
-@pytest.mark.parametrize("provider", [_StubProvider(), ChainedSandboxProvider([_StubProvider(), _StubProvider()])],
-                         ids=["one", "chain"])
-def test_skip_refusing_gives_no_provider_when_it_refuses_every_link(provider):
-    running, refused = skip_refusing(provider, lambda link: "too far")
-
-    assert running is None and refused == [(link, "too far") for link in provider.links]
+    assert running.links == (third,)
+    warned, noted = [r for r in caplog.records if "sandbox_provider_skipped" in r.getMessage()]
+    assert (warned.levelno, noted.levelno) == (logging.WARNING, logging.INFO)  # the first, preferred, is warned of
+    assert warned.getMessage() == "sandbox_provider_skipped provider=_StubProvider: which is too far"
 
 
-class _Vm(_FakeSandbox):
+@pytest.mark.parametrize("provider, refusal", [
+    (_StubProvider(), "with _StubProvider, which is too far"),
+    (ChainedSandboxProvider([_StubProvider(), _StubProvider()]),
+     "with _StubProvider, which is too far; nor with _StubProvider, which is too far"),
+], ids=["one", "chain"])
+def test_skip_refusing_names_each_refusal_when_it_refuses_every_link(provider, refusal):
+    with pytest.raises(ValueError, match=f"^Can't deploy it {refusal}$"):
+        skip_refusing(provider, lambda link: "which is too far", what="it")
+
+
+class _Vm(VmSandbox):
     """A VM sandbox of ``platform``, recording whether it was terminated."""
 
+    type = "fake"
+
     def __init__(self, sandbox_id: str, platform: str):
-        super().__init__(sandbox_id)
+        self.sandbox_id, self.tunnel_urls, self.vnc_url = sandbox_id, {}, None
         self.mode, self.platform, self.terminated = "vm", platform, False
 
     async def terminate(self) -> None:
@@ -330,7 +336,7 @@ async def test_a_chain_closes_a_vm_that_cant_run_the_image_and_tries_the_next_pr
 
     assert await chain.create_sandbox(image_name="img:v1", port=8000, env={}) is arm
     assert amd.terminated and not arm.terminated
-    assert "gave a VM that can't run the image: 'img' v1 is a linux/arm64 image" in caplog.text
+    assert "gave a VM that can't load the image: 'img' v1 is a linux/arm64 image" in caplog.text
 
 
 @pytest.mark.asyncio

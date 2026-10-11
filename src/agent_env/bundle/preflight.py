@@ -359,9 +359,9 @@ class _Walk:
         name names a registry it reaches, and a provider that runs an image by name can't run one that is only a build
         context, whose name is a tag only its build gives it, nor, from elsewhere, pull one from this machine's
         registry. A VM it would create checks the image's platform once it exists."""
-        if image.artifact is None or (refusal := form.problem(image.artifact, on=link)) is None:
+        if image.artifact is None or (refusal := form.problem(image.artifact, on_this_machine=link.ON_THIS_MACHINE)) is None:
             return None
-        if form.problem(image.artifact) is None:  # refused only because the sandbox isn't on this machine
+        if form.problem(image.artifact, on_this_machine=True) is None:  # refused only because the sandbox isn't here
             loads = (", or on a provider whose VMs load its tar.gz, such as --sandbox modal_vm"
                      if vms_load and image.artifact.tar_gz_object_url and form is not Accepts.LOADABLE
                      and image.artifact.platform_problem(DEFAULT_BUILD_PLATFORM) is None else "")

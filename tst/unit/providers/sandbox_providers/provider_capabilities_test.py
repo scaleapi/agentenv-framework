@@ -5,7 +5,6 @@ choice that depends on a provider reads what it declares (``ON_THIS_MACHINE``, `
 
 import ast
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import modal
@@ -82,23 +81,17 @@ class _ContainersOnly(SandboxProvider):
         raise NotImplementedError
 
 
-class _Declared(_Vms):
-    """One that implements create_sandbox but can't always serve it, so it declares its modes."""
+class _Declared(_VmsOnly):
+    """One that declares its modes, which are derived regardless: what it implements says what it supports."""
 
-    SUPPORTED_SANDBOX_MODES = frozenset({SANDBOX_MODE_VM})
-
-
-class _DerivedAgain(_Declared):
-    async def create_sandbox(self, **_):
-        raise NotImplementedError
+    SUPPORTED_SANDBOX_MODES = frozenset({SANDBOX_MODE_CONTAINER})
 
 
-def test_a_provider_supports_only_the_modes_it_implements_unless_it_declares_them():
+def test_a_provider_supports_only_the_modes_it_implements():
     assert (_VmsOnly.SUPPORTED_SANDBOX_MODES, _ContainersOnly.SUPPORTED_SANDBOX_MODES) == (
         {SANDBOX_MODE_VM}, {SANDBOX_MODE_CONTAINER})
     assert SandboxProvider.SUPPORTED_SANDBOX_MODES == set()
     assert _Declared.SUPPORTED_SANDBOX_MODES == {SANDBOX_MODE_VM}
-    assert _DerivedAgain.SUPPORTED_SANDBOX_MODES == {SANDBOX_MODE_CONTAINER, SANDBOX_MODE_VM}  # a subclass that doesn't
 
 
 def test_a_chain_is_its_providers_in_order_and_one_provider_is_itself():
@@ -145,18 +138,13 @@ WITH_TAR_GZ = DockerImageArtifact(id="img", version=2, description="d", image_na
 HERE = "is in a registry on this machine, which a sandbox elsewhere can't pull from"
 
 
-def _on(on_this_machine: bool = False) -> SimpleNamespace:
-    """A sandbox or provider, as far as what it declares about where it runs."""
-    return SimpleNamespace(ON_THIS_MACHINE=on_this_machine)
-
-
 @pytest.mark.parametrize("image, accepts, problem", [
     (CONTEXT_ONLY, LOADABLE, None), (CONTEXT_ONLY, NAME_OR_CONTEXT, None), (CONTEXT_ONLY, NAME, "only a build context"),
     (NO_REGISTRY, LOADABLE, "doesn't name a registry"), (NO_REGISTRY, NAME, None), (NO_REGISTRY, NAME_OR_CONTEXT, None),
 ])
-@pytest.mark.parametrize("on", [None, _on(True), _on(False)])
-def test_an_image_is_refused_by_the_form_its_provider_accepts(image, accepts, problem, on):
-    found = accepts.problem(image, on=on)
+@pytest.mark.parametrize("on_this_machine", [True, False])
+def test_an_image_is_refused_by_the_form_its_provider_accepts(image, accepts, problem, on_this_machine):
+    found = accepts.problem(image, on_this_machine=on_this_machine)
     assert (found is None) if problem is None else (problem in found)
 
 
@@ -167,10 +155,9 @@ def test_an_image_is_refused_by_the_form_its_provider_accepts(image, accepts, pr
 ])
 def test_a_sandbox_elsewhere_cant_pull_from_this_machines_registry_and_one_on_it_can(image, accepts, problem):
     """A VM loads an image's tar.gz, which agent-env pushes to it, and pulls one only when it has none."""
-    found = accepts.problem(image, on=_on(False))
+    found = accepts.problem(image, on_this_machine=False)
     assert (found is None) if problem is None else (problem in found)
-    assert accepts.problem(image, on=_on(True)) is None
-    assert accepts.problem(image) is None  # a caller that doesn't say gets the check as it was
+    assert accepts.problem(image, on_this_machine=True) is None
 
 
 ARM64_TAR_GZ = DockerImageArtifact(id="img", version=2, description="d", image_name="img:v2", platform="linux/arm64",
@@ -192,7 +179,7 @@ def test_a_vm_runs_only_images_built_for_its_platform(image):
 
 @pytest.mark.parametrize("accepts", [LOADABLE, NAME, NAME_OR_CONTEXT])
 def test_a_provider_checks_no_platform_before_its_sandbox_exists(accepts):
-    assert accepts.problem(ARM64_PULLED, on=_on(False)) is None
+    assert accepts.problem(ARM64_PULLED, on_this_machine=False) is None
 
 
 @pytest.mark.parametrize("recorded, runs", [

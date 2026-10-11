@@ -44,11 +44,9 @@ class Accepts(Enum):
     NAME = "name"  # one it starts by its name, which an image that is only a build context gets only from a build
     NAME_OR_CONTEXT = "name_or_context"  # one it starts by its name, or a build context it builds first (prepare_image)
 
-    def problem(self, image: DockerImageArtifact, *, on: SandboxProvider | Sandbox | None = None) -> str | None:
-        """Why a provider that accepts these can't run ``image`` on ``on``, the provider or one of its sandboxes, or
-        None when it can: one not on this machine can't pull from a registry on it. With no ``on``, that isn't
-        checked."""
-        on_this_machine = on is None or on.ON_THIS_MACHINE
+    def problem(self, image: DockerImageArtifact, *, on_this_machine: bool) -> str | None:
+        """Why a provider that accepts these, whose sandboxes run ``on_this_machine`` or elsewhere, can't run ``image``,
+        or None when it can: one elsewhere can't pull from a registry on this machine."""
         if self is Accepts.LOADABLE:
             return image.load_problem(on_this_machine=on_this_machine)
         if self is Accepts.NAME_OR_CONTEXT and image.context_only:
@@ -176,8 +174,7 @@ class SandboxProvider(ABC):
     # it) reaches them, its containers need this machine's Docker, and a gateway's infra envs are built here for it.
     ON_THIS_MACHINE: ClassVar[bool] = False
     # The sandbox modes it creates, derived for each provider class from what it implements (``__init_subclass__``):
-    # SANDBOX_MODE_CONTAINER when it implements create_sandbox, SANDBOX_MODE_VM when it implements create_vm. One that
-    # implements a method it can't serve declares its own.
+    # SANDBOX_MODE_CONTAINER when it implements create_sandbox, SANDBOX_MODE_VM when it implements create_vm.
     SUPPORTED_SANDBOX_MODES: ClassVar[frozenset[str]] = frozenset()
     # The images create_sandbox and create_container run.
     SANDBOX_ACCEPTS: ClassVar[Accepts] = Accepts.NAME
@@ -187,10 +184,9 @@ class SandboxProvider(ABC):
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
-        if "SUPPORTED_SANDBOX_MODES" not in cls.__dict__:
-            cls.SUPPORTED_SANDBOX_MODES = frozenset(
-                mode for mode, method in ((SANDBOX_MODE_CONTAINER, "create_sandbox"), (SANDBOX_MODE_VM, "create_vm"))
-                if getattr(cls, method) is not getattr(SandboxProvider, method))
+        cls.SUPPORTED_SANDBOX_MODES = frozenset(
+            mode for mode, method in ((SANDBOX_MODE_CONTAINER, "create_sandbox"), (SANDBOX_MODE_VM, "create_vm"))
+            if getattr(cls, method) is not getattr(SandboxProvider, method))
 
     @property
     def links(self) -> tuple[SandboxProvider, ...]:

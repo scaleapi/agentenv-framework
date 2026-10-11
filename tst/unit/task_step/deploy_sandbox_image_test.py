@@ -33,8 +33,9 @@ async def test_a_container_sandbox_pulls_an_image_from_this_machines_registry_on
             await step.execute(TaskStepContext())
             provider.create_sandbox.assert_awaited_once()
         else:
-            with pytest.raises(ValueError, match="Can't deploy sandbox 'box' with AsyncMock: localhost:5000/box:v1 is in a "
-                                                 "registry on this machine, which a sandbox elsewhere can't pull from"):
+            with pytest.raises(ValueError, match="Can't deploy sandbox 'box' with AsyncMock, whose sandboxes pull it by "
+                                                 "name: localhost:5000/box:v1 is in a registry on this machine, which a "
+                                                 "sandbox elsewhere can't pull from"):
                 await step.execute(TaskStepContext())
             provider.create_sandbox.assert_not_awaited()
 
