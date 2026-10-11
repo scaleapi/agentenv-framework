@@ -136,7 +136,6 @@ class _ContainerSandbox:
     sandbox_id = "sb-container"
     mode = "container"
     tunnel_urls = {}
-    ON_THIS_MACHINE = False
 
     def url_from_sandbox(self, url):
         return url
@@ -153,6 +152,14 @@ PULLED_HERE = DockerImageArtifact(id="solver-image", version=2, description="d",
                                   image_name="localhost:5000/local/solver:v2")
 HERE = "localhost:5000/local/solver:v2 is in a registry on this machine, which a sandbox elsewhere can't pull from"
 NO_REGISTRY = DockerImageArtifact(id="solver-image", version=2, description="d", image_name="solver:v2")
+
+
+@pytest.mark.asyncio
+async def test_an_existing_container_sandbox_elsewhere_takes_an_agent_whose_image_is_in_this_machines_registry(
+        local_stores, litellm):
+    """It pulls nothing, so where the agent's image is doesn't matter: the deploy goes on to the container's card."""
+    with pytest.raises(RuntimeError, match="No tunnel URL for port"):
+        await A2AAgent(id="solver", version=1, docker_image_artifact=PULLED_HERE).deploy(sandbox=_ContainerSandbox())
 
 
 class _LocalPulls(LocalSandboxProvider):
