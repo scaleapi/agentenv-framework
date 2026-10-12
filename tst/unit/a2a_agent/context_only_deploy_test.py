@@ -218,25 +218,90 @@ class _ContainerAgentsUndeclared(SandboxProvider):
         return self.sandbox
 
 
+class _BuildingContainerAgentsUndeclared(_ContainerAgentsUndeclared):
+    """The same, but its containers run a build context it builds first (prepare_image), as Modal's do."""
+
+    CONTAINER_ACCEPTS = Accepts.NAME_OR_CONTEXT
+
+
+class _ModalContainer(_ModalProvider):
+    """Modal with its build faked, giving a container."""
+
+    async def create_container(self, **kwargs):
+        self.steps.append(("create", kwargs["image_name"]))
+        return _Container()
+
+
+PULLED = DockerImageArtifact(id="solver-image", version=2, description="d", image_name="registry.example/solver:v2")
+
+
+MISDECLARED = (r"_ContainerAgentsUndeclared gave a container, which can't run the image: 'solver-image' v2 is only a "
+               r"build context, which has to be built, not pulled; its SANDBOX_ACCEPTS is LOADABLE, the default for a "
+               r"provider that implements create_vm, so declare the images its containers run instead: "
+               r"SANDBOX_ACCEPTS = Accepts.NAME")
+
+
 @pytest.mark.asyncio
 async def test_a_provider_taken_to_load_the_agents_image_that_gives_a_container_names_the_declaration_it_lacks(
         monkeypatch, local_stores, litellm):
     provider = _ContainerAgentsUndeclared()
     monkeypatch.setattr(sandbox_provider, "build_sandbox_provider", lambda name: provider)
 
-    with pytest.raises(ValueError, match=r"_ContainerAgentsUndeclared gave agent 'solver' a container, which runs its "
-                                         r"image by name, though it takes images as a VM loads them \(SANDBOX_ACCEPTS is "
-                                         r"LOADABLE, the default for a provider that implements create_vm\); declare "
-                                         r"SANDBOX_ACCEPTS = Accepts.NAME on it: 'solver-image' v2 is only a build context"):
+    with pytest.raises(ValueError, match=f"^{MISDECLARED}$"):
         await A2AAgent(id="solver", version=1, docker_image_artifact=IMAGE).deploy(sandbox_type="any")
     assert provider.sandbox.terminated
 
 
 @pytest.mark.asyncio
-async def test_a_container_that_can_run_the_agents_image_by_name_goes_on_to_serve_it(monkeypatch, local_stores, litellm):
-    """Its provider should say so, but the deploy it gave works, so it isn't refused."""
-    monkeypatch.setattr(sandbox_provider, "build_sandbox_provider", lambda name: _ContainerAgentsUndeclared())
-    pulled = DockerImageArtifact(id="solver-image", version=2, description="d", image_name="registry.example/solver:v2")
+async def test_a_chain_closes_a_container_that_cant_run_the_agents_image_and_tries_the_next_provider(
+        monkeypatch, local_stores, litellm, caplog):
+    misdeclared, modal = _ContainerAgentsUndeclared(), _ModalContainer()
+    monkeypatch.setattr(sandbox_provider, "build_sandbox_provider",
+                        lambda name: ChainedSandboxProvider([misdeclared, modal]))
 
     with pytest.raises(RuntimeError, match="No tunnel URL for port"):
-        await A2AAgent(id="solver", version=1, docker_image_artifact=pulled).deploy(sandbox_type="any")
+        await A2AAgent(id="solver", version=1, docker_image_artifact=IMAGE).deploy(sandbox_type="any")
+    assert misdeclared.sandbox.terminated
+    assert modal.steps == [("prepare", IMAGE.image_name), ("create", IMAGE.image_name)]
+    assert f"{MISDECLARED.replace(chr(92), '')}; trying next provider" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_chain_none_of_whose_sandboxes_runs_the_agents_image_names_each_refusal(monkeypatch, local_stores,
+                                                                                       litellm):
+    """The provider after one that gives a container it can't run is tried, a VM provider here."""
+    misdeclared = _ContainerAgentsUndeclared()
+    monkeypatch.setattr(sandbox_provider, "build_sandbox_provider",
+                        lambda name: ChainedSandboxProvider([misdeclared, _VmProvider()]))
+
+    with pytest.raises(RuntimeError, match=r"All 2 providers failed: _ContainerAgentsUndeclared: ValueError\(.*declare "
+                                           r"the images its containers run instead: "
+                                           r"SANDBOX_ACCEPTS = Accepts.NAME.*\); _VmProvider: _Created\(\)$"):
+        await A2AAgent(id="solver", version=1, docker_image_artifact=IMAGE).deploy(sandbox_type="any")
+    assert misdeclared.sandbox.terminated
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_class, image", [
+    (_ContainerAgentsUndeclared, PULLED),
+    (_BuildingContainerAgentsUndeclared, IMAGE),
+], ids=["pulled-by-name", "built-first"])
+async def test_a_container_that_can_run_the_agents_image_goes_on_to_serve_it(monkeypatch, local_stores, litellm,
+                                                                            provider_class, image):
+    """Its provider should say so, but the deploy it gave works, so it isn't refused."""
+    monkeypatch.setattr(sandbox_provider, "build_sandbox_provider", lambda name: provider_class())
+
+    with pytest.raises(RuntimeError, match="No tunnel URL for port"):
+        await A2AAgent(id="solver", version=1, docker_image_artifact=image).deploy(sandbox_type="any")
+
+
+@pytest.mark.asyncio
+async def test_a_chain_that_falls_back_from_a_vm_provider_to_modal_serves_the_agent_from_modals_container(
+        monkeypatch, local_stores, litellm):
+    modal = _ModalContainer()
+    monkeypatch.setattr(sandbox_provider, "build_sandbox_provider",
+                        lambda name: ChainedSandboxProvider([_VmProvider(), modal]))
+
+    with pytest.raises(RuntimeError, match="No tunnel URL for port"):
+        await A2AAgent(id="solver", version=1, docker_image_artifact=IMAGE).deploy(sandbox_type="any")
+    assert modal.steps == [("prepare", IMAGE.image_name), ("create", IMAGE.image_name)]

@@ -17,7 +17,12 @@ from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, Lo
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandbox, ModalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandbox, ModalVmSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import Sandbox, VmSandbox, _pull
-from agent_env.providers.sandbox_providers.sandbox_provider import _BUILTIN_SANDBOX_PROVIDERS, SandboxProvider, build_sandbox_provider
+from agent_env.providers.sandbox_providers.sandbox_provider import (
+    _BUILTIN_SANDBOX_PROVIDERS,
+    Accepts,
+    SandboxProvider,
+    build_sandbox_provider,
+)
 from agent_env.store import ImageStore, RegistryAuth
 from tst.util.exec_scripts import script_run
 
@@ -357,7 +362,10 @@ _CONTEXT_ONLY = DockerImageArtifact(id="solver-image", version=2, description="d
 
 
 class _PreparingProvider(_StubProvider):
-    """A stub whose prepare_image takes ``prepare_seconds``, or raises ``prepare_raises``, recording each image."""
+    """A stub whose prepare_image takes ``prepare_seconds``, or raises ``prepare_raises``, recording each image, and
+    whose containers run the build contexts it prepares, as Modal's do."""
+
+    CONTAINER_ACCEPTS = Accepts.NAME_OR_CONTEXT
 
     def __init__(self, *, prepare_seconds: float = 0, prepare_raises: Exception | None = None, **kwargs):
         super().__init__(**kwargs)

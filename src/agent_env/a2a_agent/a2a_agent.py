@@ -462,7 +462,7 @@ class A2AAgent:
                 )
                 self._owns_sandbox = True
                 logger.info(f"Sandbox created: {self._sandbox.sandbox_id} (mode={self._sandbox.mode})")
-                if problem := self._misdeclared(provider, image):
+                if problem := provider.sandbox_problem(self._sandbox, image):
                     raise ValueError(problem)
             else:
                 if network_policy is not None and network_policy.restricts_egress:
@@ -506,20 +506,6 @@ class A2AAgent:
         except BaseException:  # a cancelled deploy closes its sandbox too
             await self.close()
             raise
-
-    def _misdeclared(self, provider: SandboxProvider, image: DockerImageArtifact) -> str | None:
-        """Why the sandbox ``provider`` gave can't run ``image`` though it was taken to load it, or None: every provider
-        it may come from takes images as a VM loads them (``SANDBOX_ACCEPTS``), yet it gave a container, which runs the
-        image by name, and the image can't be run that way."""
-        links = provider.links
-        if self._sandbox.mode == SANDBOX_MODE_VM or any(self.accepts(link) is not Accepts.LOADABLE for link in links):
-            return None
-        if (problem := image.by_name_problem(on_this_machine=self._sandbox.ON_THIS_MACHINE)) is None:
-            return None
-        names = " or ".join(dict.fromkeys(type(link).__name__ for link in links))
-        return (f"{names} gave agent {self.id!r} a container, which runs its image by name, though it takes images as a VM "
-                "loads them (SANDBOX_ACCEPTS is LOADABLE, the default for a provider that implements create_vm); declare "
-                f"SANDBOX_ACCEPTS = Accepts.NAME on it: {problem}")
 
     def _refusal(self, image: DockerImageArtifact, link: SandboxProvider) -> str | None:
         """Why ``link`` can't run ``image`` as this agent's own sandbox, as a clause on its name, or None when it can."""

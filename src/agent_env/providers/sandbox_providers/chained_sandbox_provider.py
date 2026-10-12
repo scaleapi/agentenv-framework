@@ -6,8 +6,8 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from agent_env.attribution import Attribution
-from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, NetworkPolicyUnsupportedError, Sandbox, VmSandbox
-from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_VM, SandboxProvider
+from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, NetworkPolicyUnsupportedError, Sandbox
+from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 
 if TYPE_CHECKING:
     from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
@@ -48,6 +48,11 @@ class ChainedSandboxProvider(SandboxProvider):
                 f"(providers: {[type(p).__name__ for p in providers]})"),
         )
 
+    def sandbox_problem(self, sandbox: Sandbox, image: DockerImageArtifact) -> str | None:
+        """None: create_sandbox checks each provider's sandbox as it tries it, and gives only one that runs
+        the image."""
+        return None
+
     def supports_network_policy(self, policy: NetworkPolicy) -> bool:
         return any(p.supports_network_policy(policy) for p in self._providers)
 
@@ -76,11 +81,10 @@ class ChainedSandboxProvider(SandboxProvider):
                 logger.warning(f"{name}.create_sandbox failed: {e}; trying next provider")
                 errors.append((name, e))
                 continue
-            # The deploy loads the image into a VM, which refuses one it can't get or run; the next provider's may not.
-            if (image is not None and sandbox.mode == SANDBOX_MODE_VM and isinstance(sandbox, VmSandbox)
-                    and (problems := sandbox.load_problems([image]))):
-                problem = "; ".join(problems)
-                logger.warning(f"{name}.create_sandbox gave a VM that can't load the image: {problem}; trying next provider")
+            # A VM refuses an image it can't get or run, and a container runs only what its provider's containers do;
+            # the next provider's sandbox may run it.
+            if image is not None and (problem := p.sandbox_problem(sandbox, image)):
+                logger.warning(f"{problem}; trying next provider")
                 errors.append((name, ValueError(problem)))
                 try:
                     await sandbox.terminate()

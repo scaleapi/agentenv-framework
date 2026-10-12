@@ -13,7 +13,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_
 
 
 class _Sandbox:
-    sandbox_id, type, mode, network_policy = "sb-agent", "fake", SANDBOX_MODE_CONTAINER, None
+    sandbox_id, type, mode, network_policy, ON_THIS_MACHINE = "sb-agent", "fake", SANDBOX_MODE_CONTAINER, None, False
     tunnel_urls = {DEFAULT_A2A_PORT: "http://agent"}
     terminated = False
 
