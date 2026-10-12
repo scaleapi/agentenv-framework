@@ -2,6 +2,7 @@
 stores only, for this host's platform, once each however many runs ask."""
 
 import importlib
+import re
 from pathlib import Path
 
 import pytest
@@ -205,3 +206,42 @@ def test_the_build_inputs_are_every_file_in_the_build_context_less_python_caches
     assert bootstrap.build_inputs_digest(GATEWAY) == before
     (tmp_path / "gateway.py").write_text("served, changed")
     assert bootstrap.build_inputs_digest(GATEWAY) != before
+
+
+# What Docker's legacy builder refuses, by what it is.
+_BUILDKIT_ONLY = {
+    "a syntax directive": r"^\s*#\s*syntax\s*=",
+    "RUN --mount, --network or --security": r"^\s*RUN\s+(--\S+\s+)*--(mount|network|security)\b",
+    "COPY or ADD --chmod, --link, --parents, --exclude, --checksum or --keep-git-dir":
+        r"^\s*(COPY|ADD)\s+(--\S+\s+)*--(chmod|link|parents|exclude|checksum|keep-git-dir)\b",
+    "a heredoc": r"<<-?\s*[\"']?\w+",
+    "a build arg with no default": r"^\s*ARG\s+\w+\s*$",
+}
+
+
+def _legacy_build_problems(dockerfile: str) -> list[str]:
+    return [what for what, pattern in _BUILDKIT_ONLY.items()
+            if re.search(pattern, dockerfile, re.IGNORECASE | re.MULTILINE)]
+
+
+@pytest.mark.parametrize("dockerfile", [dockerfile for dockerfiles in bootstrap._DOCKERFILES.values()
+                                        for dockerfile in dockerfiles],
+                         ids=lambda dockerfile: dockerfile.relative_to(bootstrap._ENV_PACKAGE).as_posix())
+def test_each_infra_image_builds_from_its_context_alone_on_dockers_legacy_builder(dockerfile):
+    """A sandbox rebuilds an infra image from its build context, which carries no build args, and a VM with no buildx,
+    as modal_vm's has none, builds with Docker's legacy builder."""
+    assert _legacy_build_problems(dockerfile.read_text()) == []
+
+
+@pytest.mark.parametrize("line, problem", [
+    ("# syntax=docker/dockerfile:1", "a syntax directive"),
+    ("RUN --mount=type=cache,target=/root/.npm npm ci", "RUN --mount, --network or --security"),
+    ("copy --chown=1:1 --chmod=755 entrypoint.sh /app/",
+     "COPY or ADD --chmod, --link, --parents, --exclude, --checksum or --keep-git-dir"),
+    ("RUN <<EOF\necho hi\nEOF", "a heredoc"),
+    ("ARG PLAYWRIGHT_MCP_VERSION", "a build arg with no default"),
+], ids=["syntax", "run-mount", "copy-chmod", "heredoc", "arg"])
+def test_the_legacy_builder_check_names_what_only_buildkit_or_a_build_arg_builds(line, problem):
+    dockerfile = f"FROM python:3.12\n{line}\nCOPY --from=builder --chown=app:app /app /app\n"
+
+    assert _legacy_build_problems(dockerfile) == [problem]
