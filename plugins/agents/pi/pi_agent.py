@@ -399,7 +399,7 @@ class PiAgent(AgentEnvAgent):
         self.changelog: ChangelogCapture | None = None
         # A changelog is one sequence of tool calls, so while one is captured, runs take turns.
         self._changelog_turn = asyncio.Lock()
-        # Restoring the workspace waits for no task to be running in it, and tasks wait for a restore to finish.
+        # Restoring the workspace waits for no task to be running in it; tasks and saves wait for a restore to finish.
         self._workspace_lock = asyncio.Lock()
         self._running = 0
 
@@ -608,7 +608,8 @@ class PiAgent(AgentEnvAgent):
             with tempfile.TemporaryDirectory() as scratch:
                 archive = Path(scratch) / "workspace.tar.gz"
                 self.workspace.mkdir(parents=True, exist_ok=True)
-                await asyncio.to_thread(_pack, self.workspace, archive)
+                async with self._workspace_lock:
+                    await asyncio.to_thread(_pack, self.workspace, archive)
                 objects["workspace"] = (await upload(request.objects.workspace, archive)).model_dump(mode="json")
         return {"context_id": request.context_id, "objects": objects}
 

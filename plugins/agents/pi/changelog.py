@@ -4,8 +4,8 @@ After each tool call the capture builds one increment, ``NNNNNN.tar`` named by t
 position: the files under the roots that changed since the previous increment (``files/<absolute path>``),
 the paths that disappeared, and the conversation's pi session as it stood (``session.jsonl``). Increments
 upload in order; a failed one is kept as built, with any built after it, for the next tool call or for
-``flush`` when the task ends. If what is held outgrows ``MAX_PENDING_BYTES``, it is dropped and capture stops:
-every later ``flush`` reports the changelog incomplete.
+``flush`` when the task ends. If what failed uploads leave held outgrows ``MAX_PENDING_BYTES``, it is dropped and
+capture stops: every later ``flush`` reports the changelog incomplete.
 """
 
 from __future__ import annotations
@@ -128,15 +128,14 @@ class ChangelogCapture:
             deleted = [path for path in self._state if path not in current]
             meta = {"position": self._position, "context_id": context_id, "session_id": session_id}
             body = await asyncio.to_thread(increment, changed, deleted, self.roots, session, meta)
-            if sum(len(held) for _, held in self._pending) + len(body) > MAX_PENDING_BYTES:
-                logger.error("changelog uploads are failing with %d increments held; capture stops", len(self._pending))
-                self._pending.clear()
-                self._abandoned = True
-                return
             self._pending.append((f"{self._position:06d}.tar", body))
             self._position += 1
             self._state = current
             await self._drain()
+            if sum(len(held) for _, held in self._pending) > MAX_PENDING_BYTES:
+                logger.error("changelog uploads are failing with %d increments held; capture stops", len(self._pending))
+                self._pending.clear()
+                self._abandoned = True
 
     async def flush(self) -> bool:
         """Retry the pending increments; whether every increment so far is uploaded."""

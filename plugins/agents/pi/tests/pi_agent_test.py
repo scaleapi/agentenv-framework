@@ -569,6 +569,30 @@ async def test_capture_stops_when_held_increments_outgrow_the_cap(
     assert await capture.flush() is False
 
 
+@pytest.mark.asyncio
+async def test_a_large_increment_uploads_when_the_store_is_up(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    uploads: dict[str, bytes] = {}
+
+    class Namespace:
+        def __init__(self, grant) -> None:
+            pass
+
+        async def upload(self, relative_path: str, source: bytes) -> None:
+            uploads[relative_path] = source
+
+    monkeypatch.setattr(changelog, "NamespaceUploader", Namespace)
+    monkeypatch.setattr(changelog, "MAX_PENDING_BYTES", 1024)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    capture = changelog.ChangelogCapture(None, [str(workspace)])
+    await capture.start()
+    (workspace / "big.bin").write_bytes(b"x" * 8192)
+    await capture.capture(None, context_id="c", session_id="s")
+
+    assert list(uploads) == ["000000.tar"]
+    assert await capture.flush() is True
+
+
 def test_an_unuploadable_changelog_fails_the_task(
     client: TestClient, record: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
