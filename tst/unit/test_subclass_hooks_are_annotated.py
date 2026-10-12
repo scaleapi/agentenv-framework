@@ -10,7 +10,8 @@ SRC = Path(__file__).resolve().parents[2] / "src" / "agent_env"
 
 def _unannotated(hook: ast.FunctionDef) -> list[str]:
     args = hook.args
-    params = [*args.posonlyargs, *args.args[1:], *args.kwonlyargs, *filter(None, (args.vararg, args.kwarg))]
+    after_cls = [*args.posonlyargs, *args.args][1:]
+    params = [*after_cls, *args.kwonlyargs, *filter(None, (args.vararg, args.kwarg))]
     return [param.arg for param in params if param.annotation is None] + (["return"] if hook.returns is None else [])
 
 
