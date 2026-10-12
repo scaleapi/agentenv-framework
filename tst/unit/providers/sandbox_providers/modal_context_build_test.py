@@ -190,6 +190,19 @@ async def test_an_image_with_a_build_context_beside_its_tar_gz_is_built_when_mod
     assert len(builds.calls) == int(built)
 
 
+@pytest.mark.asyncio
+async def test_an_image_modal_pulls_drops_one_prepared_earlier_under_its_name(local_stores, context, builds):
+    provider = _provider()
+    built = _context_image("gateway-image", context).model_copy(update={
+        "image_name": "registry.example/gateway:v1", "tar_gz_object_url": "file:///state/gateway.tar.gz",
+        "platform": "linux/arm64"})
+    await provider.prepare_image(built)
+
+    await provider.prepare_image(built.model_copy(update={"platform": "linux/amd64"}))
+
+    assert provider._context_images == {}
+
+
 def _fake_create():
     """A patched ``modal.Sandbox._experimental_create`` that stops right after recording its call."""
     create = MagicMock()

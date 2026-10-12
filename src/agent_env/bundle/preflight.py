@@ -394,17 +394,18 @@ class _Walk:
                 f"on a provider {builds}")
 
     def _remote_infra(self, link: SandboxProvider, kinds: set[str]) -> list[str]:
-        """Why ``link``, a provider not on this machine, can't run the infra envs of ``kinds``."""
+        """Why ``link``, a provider not on this machine, can't run the infra envs of ``kinds``. One the run builds, in
+        local stores missing or built from other inputs, isn't checked: it's built anew, with its build context."""
+        built = {build.kind for build in infra_to_build(kinds)} if stores_are_local() else set()
         found = []
-        for kind in sorted(kinds):
+        for kind in sorted(kinds - built):
             env_id = default_env_id(kind)
             try:
                 env = Env.get(env_id)
             except NotFoundError:
-                if not stores_are_local():  # in local stores the run builds it
-                    found.append(f"deploys on the {_shown(link)} sandbox provider, which needs the {kind} env "
-                                 f"{env_id!r}, and the store doesn't hold it; agent-env builds infra envs only into local "
-                                 f"stores, so put it with `{put_command(kind)}`")
+                found.append(f"deploys on the {_shown(link)} sandbox provider, which needs the {kind} env {env_id!r}, "
+                             f"and the store doesn't hold it; agent-env builds infra envs only into local stores, so put "
+                             f"it with `{put_command(kind)}`")
                 continue
             artifacts = ([env.db_docker_image_artifact, env.db_web_docker_image_artifact,
                           env.db_mcp_docker_image_artifact] if isinstance(env, ServiceDBEnv) else [env.docker_image_artifact])

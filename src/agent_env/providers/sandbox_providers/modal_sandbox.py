@@ -246,12 +246,14 @@ class ModalSandboxProvider(SandboxProvider):
     async def prepare_image(self, image: DockerImageArtifact, *, attribution: Optional[Attribution] = None) -> None:
         """Build ``image`` from its build context when Modal can't run it by name: it's only a build context, its name
         is in a registry Modal can't reach, or it's built for another platform than Modal's; unless this process has
-        already built its sources."""
+        already built its sources. One it pulls drops an image prepared earlier under its name."""
         if image.build_context_object_url and (
                 image.context_only or image.by_name_problem(on_this_machine=self.ON_THIS_MACHINE)
                 or image.platform_problem(self._sandbox_cls.platform)):
             self._context_images[image.image_name] = image
             await self._context_image(image)
+        else:
+            self._context_images.pop(image.image_name, None)
 
     async def _context_image(self, image: DockerImageArtifact, *,
                              stale: str | None = None) -> tuple[modal.Image, str]:

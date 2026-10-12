@@ -702,6 +702,17 @@ def test_a_gateway_deploy_on_another_provider_has_its_missing_infra_built_in_loc
                        "stores, so put it with `agent-env env gateway put --id default`")
 
 
+def test_stock_infra_built_from_other_inputs_is_rebuilt_for_modal_rather_than_refused(bundle_dir):
+    """Infra built before its images kept their build contexts is in this machine's registry, which Modal can't pull
+    from; built anew, it carries the contexts Modal builds it from."""
+    _env("crm", REMOTE)
+    _infra(PULLED_HERE, built_from="an earlier release's")
+    _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
+
+    assert [str(build) for build in dry_run_bundle(bundle_dir, sandbox="modal").infra] == [
+        "service-db env 'default-db' (its build inputs changed)", "gateway env 'default' (its build inputs changed)"]
+
+
 def test_infra_built_for_deploys_elsewhere_needs_docker_here(bundle_dir, monkeypatch):
     _env("crm", REMOTE)
     _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
