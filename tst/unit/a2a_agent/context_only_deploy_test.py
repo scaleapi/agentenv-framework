@@ -224,6 +224,12 @@ class _BuildingContainerAgentsUndeclared(_ContainerAgentsUndeclared):
     CONTAINER_ACCEPTS = Accepts.NAME_OR_CONTEXT
 
 
+class _ContainerAgentsDeclared(_ContainerAgentsUndeclared):
+    """The same, but declaring that its agents' containers run a build context it builds, unlike create_container's."""
+
+    SANDBOX_ACCEPTS = Accepts.NAME_OR_CONTEXT
+
+
 class _ModalContainer(_ModalProvider):
     """Modal with its build faked, giving a container."""
 
@@ -285,10 +291,11 @@ async def test_a_chain_none_of_whose_sandboxes_runs_the_agents_image_names_each_
 @pytest.mark.parametrize("provider_class, image", [
     (_ContainerAgentsUndeclared, PULLED),
     (_BuildingContainerAgentsUndeclared, IMAGE),
-], ids=["pulled-by-name", "built-first"])
+    (_ContainerAgentsDeclared, IMAGE),
+], ids=["pulled-by-name", "built-first", "declared"])
 async def test_a_container_that_can_run_the_agents_image_goes_on_to_serve_it(monkeypatch, local_stores, litellm,
                                                                             provider_class, image):
-    """Its provider should say so, but the deploy it gave works, so it isn't refused."""
+    """Its provider should say so, unless it declared it, but the deploy it gave works, so it isn't refused."""
     monkeypatch.setattr(sandbox_provider, "build_sandbox_provider", lambda name: provider_class())
 
     with pytest.raises(RuntimeError, match="No tunnel URL for port"):

@@ -205,21 +205,19 @@ class SandboxProvider(ABC):
 
     def sandbox_problem(self, sandbox: Sandbox, image: DockerImageArtifact) -> str | None:
         """Why ``sandbox``, which create_sandbox gave to run ``image``, can't run it, or None when it can: a VM that
-        can't load it, or a container that doesn't run it (CONTAINER_ACCEPTS), which create_sandbox gives only when
-        SANDBOX_ACCEPTS is wrong."""
+        can't load it, or a container from a provider whose SANDBOX_ACCEPTS takes images as a VM loads them, which runs
+        only the images its containers do (CONTAINER_ACCEPTS). One that declares other images is taken at its word."""
         name = type(self).__name__
         if sandbox.mode == SANDBOX_MODE_VM:
             problems = sandbox.load_problems([image]) if isinstance(sandbox, VmSandbox) else []
             return f"{name} gave a VM that can't load the image: {'; '.join(problems)}" if problems else None
+        if self.SANDBOX_ACCEPTS is not Accepts.LOADABLE:
+            return None
         if (problem := self.CONTAINER_ACCEPTS.problem(image, on_this_machine=sandbox.ON_THIS_MACHINE)) is None:
             return None
-        refusal = f"{name} gave a container, which can't run the image: {problem}"
-        if self.SANDBOX_ACCEPTS is self.CONTAINER_ACCEPTS:
-            return refusal
-        loadable = self.SANDBOX_ACCEPTS is Accepts.LOADABLE
-        default = ", the default for a provider that implements create_vm" if loadable else ""
-        return (f"{refusal}; its SANDBOX_ACCEPTS is {self.SANDBOX_ACCEPTS.name}{default}, so declare the images its "
-                f"containers run instead: SANDBOX_ACCEPTS = Accepts.{self.CONTAINER_ACCEPTS.name}")
+        return (f"{name} gave a container, which can't run the image: {problem}; its SANDBOX_ACCEPTS is LOADABLE, the "
+                "default for a provider that implements create_vm, so declare the images its containers run instead: "
+                f"SANDBOX_ACCEPTS = Accepts.{self.CONTAINER_ACCEPTS.name}")
 
     def url_from_sandbox(self, url: str) -> str:
         """``url``, of a service this process reaches, as its sandboxes reach it."""
