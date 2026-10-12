@@ -187,7 +187,7 @@ class SandboxProvider(ABC):
     # Whether create_container(private_network=True) puts containers on a network they share.
     PRIVATE_NETWORK: ClassVar[bool] = False
 
-    def __init_subclass__(cls, **kwargs):
+    def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         cls.SUPPORTED_SANDBOX_MODES = frozenset(
             mode for mode, method in ((SANDBOX_MODE_CONTAINER, "create_sandbox"), (SANDBOX_MODE_VM, "create_vm"))
