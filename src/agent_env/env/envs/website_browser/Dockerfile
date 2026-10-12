@@ -28,6 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# The pinned @playwright/mcp version; update it here when upgrading the Playwright MCP server.
 ARG PLAYWRIGHT_MCP_VERSION=0.0.41
 ENV PLAYWRIGHT_MCP_VERSION=${PLAYWRIGHT_MCP_VERSION}
 

@@ -40,6 +40,7 @@ from agent_env.env.bootstrap import (
     InfraError,
     default_env_id,
     infra_to_build,
+    needs_docker,
     put_command,
     stores_are_local,
 )
@@ -163,8 +164,7 @@ class _Walk:
             self.run_problems.append(f"the local sandbox provider runs containers for {shown}"
                                      f"{f' and {more} more' if more > 0 else ''}, and {reason}")
         elif reason:  # infra the run builds for deploys elsewhere
-            self.run_problems.append(f"building the {', '.join(build.kind for build in infra)} env needs docker, and "
-                                     f"{reason}")
+            self.run_problems.append(needs_docker(infra, reason))
         problems = list(self.run_problems)
         for problem, wheres in self.problems.items():
             first, *others = wheres
