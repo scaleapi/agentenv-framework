@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import functools
 import hashlib
 import logging
 import os
@@ -70,9 +71,15 @@ async def _terminate_created(sb: modal.Sandbox) -> None:
                        f"its timeout: {fmt_exc(e)}")
 
 
-def _terminate_when_created(creating: asyncio.Future) -> None:
-    """Terminate the sandbox a create that outlasted its cancel's wait made, if it made one."""
-    if creating.cancelled() or creating.exception() is not None:
+def _terminate_when_created(creating: asyncio.Future, *, call_context: str) -> None:
+    """Terminate the sandbox a create that outlasted its cancel's wait made, if it made one. A create cancelled before
+    it ended, as a process that exits cancels it, may have made one all the same, which runs until its timeout, so a
+    warning names the call."""
+    if creating.cancelled():
+        logger.warning(f"A cancelled Modal sandbox create was stopped before Modal answered; a sandbox Modal made for "
+                       f"it runs until its timeout: {call_context}")
+        return
+    if creating.exception() is not None:
         return
     task = creating.get_loop().create_task(_terminate_created(creating.result()))
     _LATE_TERMINATIONS.add(task)
@@ -393,8 +400,9 @@ class ModalSandboxProvider(SandboxProvider):
             try:
                 created = await asyncio.wait_for(asyncio.shield(creating), _CANCELLED_CREATE_WAIT_SECONDS)
             except (Exception, asyncio.CancelledError):  # it failed, outlasted the wait, or a second cancel came
+                # A create that ended just as the wait gave up runs the callback at once
+                creating.add_done_callback(functools.partial(_terminate_when_created, call_context=call_context))
                 if not creating.done():
-                    creating.add_done_callback(_terminate_when_created)
                     logger.warning(f"A cancelled Modal sandbox create is still waiting on Modal; the sandbox it "
                                    f"creates, if any, is terminated when it ends: {call_context}")
             if created is not None:

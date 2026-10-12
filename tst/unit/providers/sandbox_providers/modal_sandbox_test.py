@@ -208,6 +208,51 @@ async def test_a_cancelled_create_stops_waiting_on_a_request_that_hangs_and_term
 
 
 @pytest.mark.asyncio
+async def test_a_sandbox_created_just_as_a_cancelled_creates_wait_gives_up_is_terminated(_patched_provider, monkeypatch):
+    """The wait can give up in the same step Modal answers, which leaves the create done but its sandbox running."""
+    fake_sb = MagicMock(object_id="sb-JUSTINTIME")
+    fake_sb.terminate.aio = AsyncMock()
+    asked, release = asyncio.Event(), asyncio.Event()
+
+    async def experimental_create(*args, **kwargs):
+        asked.set()
+        await release.wait()
+        return fake_sb
+
+    async def gives_up_as_the_create_ends(awaitable, timeout):
+        await awaitable
+        raise TimeoutError
+
+    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox._experimental_create") as mock_create:
+        mock_create.aio = AsyncMock(side_effect=experimental_create)
+        create = asyncio.create_task(
+            _patched_provider.create_container(image_name="registry.example/mcp-server-example:v1", port=18765, env={}))
+        await asked.wait()
+        monkeypatch.setattr(modal_sandbox.asyncio, "wait_for", gives_up_as_the_create_ends)
+        create.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await create
+    for _ in range(50):
+        if fake_sb.terminate.aio.await_count:
+            break
+        await asyncio.sleep(0.01)
+
+    fake_sb.terminate.aio.assert_awaited_once()
+
+
+def test_a_process_that_exits_while_a_cancelled_create_hangs_names_the_create_in_a_warning(
+        _patched_provider, monkeypatch, caplog):
+    """Exiting cancels the create, so what Modal makes for it runs until its timeout; the warning lets it be found."""
+    monkeypatch.setattr(modal_sandbox, "_CANCELLED_CREATE_WAIT_SECONDS", 0.05)
+
+    asyncio.run(_cancel_a_create_that_hangs(_patched_provider, cancels=1))
+
+    assert any("stopped before Modal answered" in r.getMessage() and "mcp-server-example:v1" in r.getMessage()
+               for r in caplog.records if r.levelname == "WARNING")
+
+
+@pytest.mark.asyncio
 async def test_create_container_includes_cause_message_in_wrapped_text(_patched_provider):
     class _RemoteErrorWithMessage(Exception):
         pass
