@@ -164,8 +164,18 @@ IN_THIS_MACHINES_REGISTRY = DockerImageArtifact(id="img", version=2, description
                                                 image_name="localhost:5000/local/img:v2")
 WITH_TAR_GZ = DockerImageArtifact(id="img", version=2, description="d", image_name="localhost:5000/local/img:v2",
                                   tar_gz_object_url="file:///state/img.tar.gz")
-WITH_TAR_GZ_AND_CONTEXT = WITH_TAR_GZ.model_copy(update={"build_context_object_url": "file:///state/ctx.tar.gz"})
+WITH_TAR_GZ_AND_CONTEXT = WITH_TAR_GZ.model_copy(update={"build_context_object_url": "file:///state/ctx.tar.gz",
+                                                         "dockerfile_path": "Dockerfile"})
+# A context written before contexts became whole folders records no Dockerfile, so it can't be built.
+WITH_TAR_GZ_AND_AN_OLD_CONTEXT = WITH_TAR_GZ.model_copy(update={"build_context_object_url": "file:///state/ctx.tar.gz"})
 HERE = "is in a registry on this machine, which a sandbox elsewhere can't pull from"
+BARE_TAG_TAR_GZ = DockerImageArtifact(id="img", version=2, description="d", image_name="mcp-server-email",
+                                      tar_gz_object_url="s3://bucket/img.tar.gz")
+BARE_TAG_TAR_GZ_AND_CONTEXT = BARE_TAG_TAR_GZ.model_copy(update={"build_context_object_url": "s3://bucket/ctx.tar.gz",
+                                                                 "dockerfile_path": "Dockerfile"})
+BARE_TAG_TAR_GZ_AND_AN_OLD_CONTEXT = BARE_TAG_TAR_GZ.model_copy(
+    update={"build_context_object_url": "s3://bucket/ctx.tar.gz"})
+BUILT_ELSEWHERE = "it's the tag the machine that built it gave it"
 
 
 @pytest.mark.parametrize("image, accepts, problem", [
@@ -184,6 +194,10 @@ def test_an_image_is_refused_by_the_form_its_provider_accepts(image, accepts, pr
     (WITH_TAR_GZ, LOADABLE, None), (WITH_TAR_GZ, NAME, HERE), (WITH_TAR_GZ, NAME_OR_CONTEXT, HERE),
     (WITH_TAR_GZ_AND_CONTEXT, LOADABLE, None), (WITH_TAR_GZ_AND_CONTEXT, NAME, HERE),
     (WITH_TAR_GZ_AND_CONTEXT, NAME_OR_CONTEXT, None),
+    (BARE_TAG_TAR_GZ, LOADABLE, None), (BARE_TAG_TAR_GZ, NAME, BUILT_ELSEWHERE),
+    (BARE_TAG_TAR_GZ, NAME_OR_CONTEXT, BUILT_ELSEWHERE), (BARE_TAG_TAR_GZ_AND_CONTEXT, NAME_OR_CONTEXT, None),
+    (WITH_TAR_GZ_AND_AN_OLD_CONTEXT, NAME_OR_CONTEXT, HERE),
+    (BARE_TAG_TAR_GZ_AND_AN_OLD_CONTEXT, NAME_OR_CONTEXT, BUILT_ELSEWHERE),
 ])
 def test_a_sandbox_elsewhere_cant_pull_from_this_machines_registry_and_one_on_it_can(image, accepts, problem):
     """A VM loads an image's tar.gz, which agent-env pushes to it, and pulls one only when it has none; a provider that

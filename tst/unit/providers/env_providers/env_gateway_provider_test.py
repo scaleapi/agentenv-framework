@@ -243,7 +243,8 @@ async def test_container_mode_refuses_a_servicedb_image_in_this_machines_registr
 _SERVICEDB_BUILT_HERE = DockerImageArtifact(id="default-db__db_image", version=1, description="d",
                                             image_name="localhost:5000/local/servicedb:v1",
                                             tar_gz_object_url="file:///state/servicedb.tar.gz",
-                                            build_context_object_url="file:///state/ctx.tar.gz", platform="linux/arm64")
+                                            build_context_object_url="file:///state/ctx.tar.gz",
+                                            dockerfile_path="Dockerfile", platform="linux/arm64")
 
 
 @pytest.mark.asyncio

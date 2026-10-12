@@ -49,7 +49,7 @@ class Accepts(Enum):
         or None when it can: one elsewhere can't pull from a registry on this machine."""
         if self is Accepts.LOADABLE:
             return image.load_problem(on_this_machine=on_this_machine)
-        if self is Accepts.NAME_OR_CONTEXT and image.build_context_object_url:
+        if self is Accepts.NAME_OR_CONTEXT and image.buildable:
             return None  # the provider builds what it can't pull
         return image.by_name_problem(on_this_machine=on_this_machine)
 

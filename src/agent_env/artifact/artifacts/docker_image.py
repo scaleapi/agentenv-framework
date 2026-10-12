@@ -275,10 +275,17 @@ class DockerImageArtifact(Artifact):
         tag the image's build gives it."""
         return bool(self.build_context_object_url) and not self.tar_gz_object_url and not names_registry(self.image_name)
 
+    @property
+    def buildable(self) -> bool:
+        """Whether a sandbox can build the image from its stored build context: one that is only a context, or one whose
+        context records its Dockerfile's path, as every put since contexts became whole folders does. An older context,
+        or a GitHub build's, records none and is kept only beside its tar.gz."""
+        return self.context_only or bool(self.build_context_object_url and self.dockerfile_path)
+
     def rebuilt_for(self, platform: str | None) -> bool:
         """Whether a VM sandbox of ``platform`` builds this image from its build context rather than load its tar.gz,
         which is built for another platform: the image runs, though not byte for byte the one stored."""
-        return bool(self.tar_gz_object_url and self.build_context_object_url) and self.platform_problem(platform) is not None
+        return bool(self.tar_gz_object_url) and self.buildable and self.platform_problem(platform) is not None
 
     def load_problem(self, *, on_this_machine: bool, platform: str | None = None) -> str | None:
         """Why a VM sandbox can't get this image, or None when it can: a tar.gz is loaded, an image with none is pulled
@@ -295,9 +302,13 @@ class DockerImageArtifact(Artifact):
     def by_name_problem(self, *, on_this_machine: bool) -> str | None:
         """Why a sandbox that runs an image by pulling its name can't run this one, or None when it can: a context-only
         image's name is a tag only its build gives it, a VM sandbox's or Modal's, and pulled, it would be looked up on
-        Docker Hub; and a sandbox not ``on_this_machine`` can't pull from a registry on this machine."""
+        Docker Hub. A sandbox not ``on_this_machine`` can't pull from a registry on this machine, nor an image stored as
+        a tar.gz under a name that names no registry: that's the tag the machine that built it gave it."""
         if self.context_only:
             return f"{self.id!r} v{self.version} is only a build context, which has to be built, not pulled"
+        if self.tar_gz_object_url and not names_registry(self.image_name) and not on_this_machine:
+            return (f"{self.id!r} v{self.version} is stored as a tar.gz under {self.image_name!r}, which names no "
+                    "registry: it's the tag the machine that built it gave it, which a sandbox elsewhere can't pull")
         return pull_problem(self.image_name, on_this_machine=on_this_machine)
 
     def platform_problem(self, platform: str | None) -> str | None:

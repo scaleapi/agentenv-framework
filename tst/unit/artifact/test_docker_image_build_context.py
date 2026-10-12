@@ -177,17 +177,23 @@ def test_a_put_records_the_platform_as_docker_build_names_it(local_stores, conte
     assert image.platform == "linux/arm64" and image.source_digest == named.source_digest
 
 
-@pytest.mark.parametrize("context_url, platform, rebuilt, problem", [
-    ("s3://bucket/ctx.tar.gz", "linux/amd64", True, None),
-    ("s3://bucket/ctx.tar.gz", "linux/arm64", False, None),
-    ("s3://bucket/ctx.tar.gz", None, False, None),
-    (None, "linux/amd64", False, "'img' v1 is a linux/arm64 image, and the sandbox runs linux/amd64"),
-], ids=["context-another-platform", "context-same-platform", "vm-runs-any", "no-context"])
-def test_a_vm_of_another_platform_builds_an_image_from_the_context_beside_its_tar_gz(context_url, platform, rebuilt,
-                                                                                    problem):
+OTHER_PLATFORM = "'img' v1 is a linux/arm64 image, and the sandbox runs linux/amd64"
+
+
+@pytest.mark.parametrize("context_url, dockerfile, platform, rebuilt, problem", [
+    ("s3://bucket/ctx.tar.gz", "Dockerfile", "linux/amd64", True, None),
+    ("s3://bucket/ctx.tar.gz", "Dockerfile", "linux/arm64", False, None),
+    ("s3://bucket/ctx.tar.gz", "Dockerfile", None, False, None),
+    (None, None, "linux/amd64", False, OTHER_PLATFORM),
+    ("s3://bucket/ctx.tar.gz", None, "linux/amd64", False, OTHER_PLATFORM),
+], ids=["context-another-platform", "context-same-platform", "vm-runs-any", "no-context",
+        "context-naming-no-dockerfile"])
+def test_a_vm_of_another_platform_builds_an_image_from_the_context_beside_its_tar_gz(context_url, dockerfile, platform,
+                                                                                    rebuilt, problem):
+    """Only from a context that records its Dockerfile, as every put since contexts became whole folders does."""
     image = DockerImageArtifact(id="img", version=1, description="d", image_name="localhost:5000/img:v1",
                                 tar_gz_object_url="file:///state/img.tar.gz", build_context_object_url=context_url,
-                                platform="linux/arm64")
+                                dockerfile_path=dockerfile, platform="linux/arm64")
 
     assert image.rebuilt_for(platform) is rebuilt
     assert (image.load_problem(on_this_machine=False, platform=platform) or "").startswith(problem or "")

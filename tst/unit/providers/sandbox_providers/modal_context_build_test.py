@@ -178,7 +178,8 @@ async def test_an_image_with_no_build_context_is_not_built(local_stores, builds)
     ("localhost:5000/local/gateway:v1", "linux/amd64", True),
     ("registry.example/gateway:v1", "linux/arm64", True),
     ("registry.example/gateway:v1", "linux/amd64", False),
-], ids=["in-this-machines-registry", "for-another-platform", "pulled"])
+    ("mcp-server-gateway", "linux/amd64", True),
+], ids=["in-this-machines-registry", "for-another-platform", "pulled", "under-a-tag-of-the-machine-that-built-it"])
 async def test_an_image_with_a_build_context_beside_its_tar_gz_is_built_when_modal_cant_run_it_by_name(
         local_stores, context, builds, image_name, platform, built):
     """As the infra bootstrap writes its images: a tar.gz, which Modal can't load, and the context it was built from."""
@@ -188,6 +189,17 @@ async def test_an_image_with_a_build_context_beside_its_tar_gz_is_built_when_mod
     await _provider().prepare_image(image)
 
     assert len(builds.calls) == int(built)
+
+
+@pytest.mark.asyncio
+async def test_an_image_whose_context_records_no_dockerfile_is_not_built(local_stores, context, builds):
+    """A context written before contexts became whole folders, or a GitHub build's, names no Dockerfile to build."""
+    image = _context_image("server-image", context).model_copy(update={
+        "image_name": "mcp-server-email", "tar_gz_object_url": "file:///state/server.tar.gz", "dockerfile_path": None})
+
+    await _provider().prepare_image(image)
+
+    assert builds.calls == []
 
 
 @pytest.mark.asyncio

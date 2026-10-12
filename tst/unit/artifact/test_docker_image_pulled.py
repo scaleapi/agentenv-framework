@@ -51,6 +51,25 @@ def test_a_sandbox_elsewhere_cant_pull_from_this_machines_registry(image_name):
     assert image.load_problem(on_this_machine=False) == image.by_name_problem(on_this_machine=False) == here
 
 
+@pytest.mark.parametrize("image_name, tar_gz, elsewhere", [
+    ("mcp-server-email", "s3://bucket/img.tar.gz",
+     "'img' v1 is stored as a tar.gz under 'mcp-server-email', which names no registry: it's the tag the machine that "
+     "built it gave it, which a sandbox elsewhere can't pull"),
+    ("team/img:v1", "s3://bucket/img.tar.gz", "names no registry"),
+    (REF, "s3://bucket/img.tar.gz", None),
+    ("python:3.12", None, None),
+], ids=["bare-tag", "bare-path", "registry", "docker-hub-name"])
+def test_a_sandbox_elsewhere_cant_pull_the_tag_an_image_stored_as_a_tar_gz_was_built_under(image_name, tar_gz,
+                                                                                          elsewhere):
+    """The tag exists only where the image was built, so a sandbox on this machine may still have it; a name without
+    a tar.gz is an image to pull from Docker Hub."""
+    image = DockerImageArtifact(id="img", version=1, description="d", image_name=image_name, tar_gz_object_url=tar_gz)
+
+    found = image.by_name_problem(on_this_machine=False)
+    assert (found is None) if elsewhere is None else (elsewhere in found)
+    assert image.by_name_problem(on_this_machine=True) is None
+
+
 def test_a_vm_elsewhere_loads_the_tar_gz_of_an_image_named_for_this_machines_registry():
     image = DockerImageArtifact(id="img", version=1, description="d", image_name="localhost:5000/img:v1",
                                 tar_gz_object_url="file:///state/img.tar.gz")
