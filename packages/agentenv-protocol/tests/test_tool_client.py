@@ -15,14 +15,12 @@ from pydantic import Field
 from agentenv_protocol import (
     ROLE_HEADER,
     EnvironmentCard,
-    EnvironmentTool,
     ToolContext,
     ToolResult,
     ToolSession,
     ToolSessionError,
     create_fastmcp_app,
     tool,
-    tool_definitions,
 )
 
 _URL = "http://env/mcp"
@@ -200,22 +198,6 @@ def test_text_joins_the_text_blocks_and_skips_the_rest():
     result = ToolResult(content=[{"type": "text", "text": "first"}, {"type": "image", "data": "...", "mimeType": "image/png"},
                                  {"type": "text", "text": "second"}])
     assert result.text == "first\nsecond" and ToolResult().text == ""
-
-
-def test_tool_definitions_declare_each_tool_for_each_model_api():
-    schema = {"type": "object", "properties": {"item": {"type": "string"}}, "required": ["item"]}
-    tools = [EnvironmentTool(name="add", description="Add one.", inputSchema=schema), EnvironmentTool(name="bare")]
-
-    chat, responses, anthropic = (tool_definitions(tools, api) for api in ("openai_chat", "openai_responses", "anthropic"))
-
-    assert chat[0] == {"type": "function", "function": {"name": "add", "description": "Add one.", "parameters": schema}}
-    assert responses[0] == {"type": "function", "name": "add", "description": "Add one.", "parameters": schema}
-    assert anthropic[0] == {"name": "add", "description": "Add one.", "input_schema": schema}
-    assert anthropic[1] == {"name": "bare", "description": "", "input_schema": {"type": "object", "properties": {}}}
-    chat[0]["function"]["parameters"]["additionalProperties"] = False
-    assert "additionalProperties" not in tools[0].inputSchema
-    with pytest.raises(ValueError, match="api must be one of anthropic, openai_chat, openai_responses"):
-        tool_definitions(tools, "gemini")
 
 
 @pytest.mark.asyncio

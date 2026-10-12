@@ -209,11 +209,10 @@ is an MCP client for the env's streamable-HTTP endpoint, written on `httpx`, so 
 installs, whichever `mcp` version the loop's own environment pins.
 
 ```python
-from agentenv_protocol import ToolSession, tool_definitions
+from agentenv_protocol import ToolSession
 
 async with ToolSession(mcp_url=mcp_url, role="alice@example.com") as session:
     tools = await session.list_tools()                 # EnvironmentTool: name, description, inputSchema
-    declared = tool_definitions(tools, "openai_chat")  # or "openai_responses", "anthropic"
     result = await session.call_tool("slack_send_message", {"channel": "general", "text": "hi"})
     print(result.text, result.isError)
 ```
@@ -241,8 +240,8 @@ async with ToolSession(mcp_url=mcp_url, role="alice@example.com") as session:
   - `ToolSession` retries nothing. A call that raised may still have run on the server, or may yet run: a request
     stalled on a bad link can arrive after the client has given up. So after any failed call the env's state is
     unknown; read it back (`data/get`) or end the episode.
-- **Declarations:** `tool_definitions` also takes a card's `capabilities.tools`. It copies each schema, so a caller
-  can tighten one (for OpenAI's strict mode, say) without changing the source.
+- **Tools:** `list_tools()` returns the tools the role may use as `EnvironmentTool`, the type a card's
+  `capabilities.tools` holds. Each `inputSchema` is the JSON Schema a model API takes as the tool's parameters.
 
 ## A2A agent framework
 

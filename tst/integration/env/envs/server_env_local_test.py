@@ -19,7 +19,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from agentenv_protocol import ToolSession, ToolSessionError, tool_definitions
+from agentenv_protocol import ToolSession, ToolSessionError
 from agentenv_protocol import client as protocol_v1
 
 from agent_env.artifact import DockerImageArtifact, EnvironmentArtifact, FileArtifact
@@ -140,8 +140,8 @@ async def test_a_load_is_timed_by_its_payload_and_the_servers_state_reads_as_jso
 
 
 @pytest.mark.asyncio
-async def test_a_deployed_envs_tools_are_listed_declared_and_called_from_a_loop_of_ones_own(local_stack):
-    """A trainer's view: the env's tools declared for a model API and called, the env's data plane agreeing on the state
+async def test_a_deployed_envs_tools_are_listed_and_called_from_a_loop_of_ones_own(local_stack):
+    """A trainer's view: the env's tools listed with their schemas and called, the env's data plane agreeing on the state
     they left, a failing tool as an error result, concurrent sessions each answered as their own caller, and a restart
     as a lost session."""
     uid = uuid.uuid4().hex[:8]
@@ -153,15 +153,15 @@ async def test_a_deployed_envs_tools_are_listed_declared_and_called_from_a_loop_
     base_url = await legacy_protocol.v1_base_url(deployed, None, "items")
 
     async with ToolSession(mcp_url=deployed.mcp_url) as session:
-        declared = {d["function"]["name"]: d["function"] for d in tool_definitions(await session.list_tools(), "openai_chat")}
+        tools = {tool.name: tool for tool in await session.list_tools()}
         added = await session.call_tool("items_add_item", {"item": "crate", "times": 2})
         listed = await session.call_tool("list_items")
         await protocol_v1.invoke_extension(base_url, await protocol_v1.get_card(base_url), "urn:agentenv:set-errors/v1",
                                            {"tool_name": "list_items", "error_rate": 1.0})
         failed = await session.call_tool("list_items")
 
-    assert {"items_add_item", "list_items"} <= set(declared)
-    assert declared["items_add_item"]["parameters"]["properties"]["item"]["description"] == "The item to add."
+    assert {"items_add_item", "list_items"} <= set(tools)
+    assert tools["items_add_item"].inputSchema["properties"]["item"]["description"] == "The item to add."
     assert json.loads(added.text) == {"count": 2} and json.loads(listed.text) == {"items": ["crate", "crate"]}
     assert failed.isError and "injected error for list_items" in failed.text
     assert (await protocol_v1.get_data(base_url)).parts[0].data == {"items": ["crate", "crate"]}

@@ -5,11 +5,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import copy
 import itertools
 import json
-from collections.abc import AsyncIterator, Iterable
-from typing import Any, Literal
+from collections.abc import AsyncIterator
+from typing import Any
 
 import httpx
 from pydantic import BaseModel, Field, field_validator
@@ -22,15 +21,11 @@ _SESSION_HEADER = "Mcp-Session-Id"
 _VERSION_HEADER = "MCP-Protocol-Version"
 _ACCEPT = "application/json, text/event-stream"
 _CLOSE_TIMEOUT_S = 5.0
-_EMPTY_SCHEMA = {"type": "object", "properties": {}}
-
-ToolApi = Literal["openai_chat", "openai_responses", "anthropic"]
 
 
 class ToolSessionError(RuntimeError):
-    """The server failed a request at the MCP level: a JSON-RPC error, an HTTP error status, a session it no longer
-    knows, or a response that can't be read. A tool that fails is not one; its result carries ``isError``. Only the
-    server the session talks to reports a lost session: a gateway reconnects to a child that restarted and retries."""
+    """An MCP-level failure: a JSON-RPC error, an HTTP error status, a reply that can't be read, or a session the server
+    no longer knows. A tool that fails is not one; its result carries ``isError``."""
 
 
 class ToolResult(BaseModel):
@@ -50,12 +45,8 @@ class ToolResult(BaseModel):
 
 
 class ToolSession:
-    """One MCP session on an env's streamable-HTTP endpoint (``DeployedEnv.mcp_url``, or a card's address joined with
-    ``client.mcp_path(card)``), used on the event loop that opened it; ``role`` is sent as ``AgentEnv-Role``, the
-    caller's identity, which a gateway filters tools by and forwards and a tool reads as ``ToolContext.caller.role``.
-    A request that outlives ``timeout`` (by default the gateway's own tool-call limit) raises TimeoutError, a failed
-    connection httpx.TransportError. Nothing is retried, and a call that raised may still have run, or may yet run once
-    its stalled request gets through, so after any failure the env's state is unknown."""
+    """One MCP session on an env's ``mcp_url``. Use it on the event loop that opened it, and after any failed call treat
+    the env's state as unknown: nothing is retried, and a call that raised may still run on the server."""
 
     def __init__(self, *, mcp_url: str, role: str | None = None, headers: dict[str, str] | None = None,
                  timeout: float = 600.0) -> None:
@@ -79,7 +70,7 @@ class ToolSession:
         await self.close()
         self.session_id = self.protocol_version = None
         self._loop = asyncio.get_running_loop()
-        self._client = httpx.AsyncClient(headers=self._headers, timeout=self.timeout, follow_redirects=True)
+        self._client = httpx.AsyncClient(headers=self._headers, timeout=None, follow_redirects=True)
         try:
             result = await self._request("initialize", {
                 "protocolVersion": _MCP_PROTOCOL_VERSION,
@@ -87,7 +78,8 @@ class ToolSession:
                 "clientInfo": {"name": "agentenv-protocol", "version": PROTOCOL_VERSION},
             })
             self.protocol_version = result.get("protocolVersion") or _MCP_PROTOCOL_VERSION
-            await self._deadline("notifications/initialized", self._notify("notifications/initialized"))
+            await self._deadline("notifications/initialized",
+                                 self._exchange({"jsonrpc": "2.0", "method": "notifications/initialized"}))
         except BaseException:
             await self.close()
             raise
@@ -101,7 +93,7 @@ class ToolSession:
         client, self._client = self._open_client(), None
         try:
             if self.session_id:
-                with contextlib.suppress(httpx.HTTPError, asyncio.TimeoutError, TimeoutError):
+                with contextlib.suppress(httpx.HTTPError, asyncio.TimeoutError):
                     await asyncio.wait_for(client.delete(self.mcp_url, headers=self._session_headers()),
                                            min(self.timeout, _CLOSE_TIMEOUT_S))
         finally:
@@ -136,13 +128,15 @@ class ToolSession:
     async def _deadline(self, method: str, exchange: Any) -> Any:
         try:
             return await asyncio.wait_for(exchange, self.timeout)
-        except (asyncio.TimeoutError, httpx.TimeoutException) as e:
+        except asyncio.TimeoutError as e:
             raise TimeoutError(f"{method} did not finish within {self.timeout}s") from e
 
     async def _exchange(self, message: dict) -> dict:
         async with self._open_client().stream("POST", self.mcp_url, json=message,
                                               headers=self._session_headers()) as response:
             await self._raise_for_status(response, message["method"])
+            if "id" not in message:
+                return {}
             if message["method"] == "initialize":
                 self.session_id = response.headers.get(_SESSION_HEADER)
             content_type = response.headers.get("content-type", "")
@@ -162,11 +156,6 @@ class ToolSession:
             except ValueError as e:
                 raise ToolSessionError(f"{message['method']}: unreadable reply: {e}") from e
             raise ToolSessionError(f"{message['method']}: unexpected content type {content_type!r}")
-
-    async def _notify(self, method: str) -> None:
-        response = await self._open_client().post(self.mcp_url, json={"jsonrpc": "2.0", "method": method},
-                                                  headers=self._session_headers())
-        await self._raise_for_status(response, method)
 
     async def _raise_for_status(self, response: httpx.Response, method: str) -> None:
         if response.status_code == 404 and self.session_id:
@@ -188,25 +177,6 @@ class ToolSession:
         if asyncio.get_running_loop() is not self._loop:
             raise RuntimeError("the ToolSession was opened on another event loop; use and close it on that one")
         return self._client
-
-
-_SHAPES = {
-    "openai_chat": lambda name, description, schema: {
-        "type": "function", "function": {"name": name, "description": description, "parameters": schema}},
-    "openai_responses": lambda name, description, schema: {
-        "type": "function", "name": name, "description": description, "parameters": schema},
-    "anthropic": lambda name, description, schema: {"name": name, "description": description, "input_schema": schema},
-}
-
-
-def tool_definitions(tools: Iterable[EnvironmentTool], api: ToolApi) -> list[dict]:
-    """The tools as a model API declares them: OpenAI Chat Completions, OpenAI Responses or Anthropic Messages.
-
-    ``tools`` comes from ``ToolSession.list_tools()`` or a card's ``capabilities.tools``; each schema is a copy."""
-    if api not in _SHAPES:
-        raise ValueError(f"api must be one of {', '.join(sorted(_SHAPES))}, not {api!r}")
-    shape = _SHAPES[api]
-    return [shape(t.name, t.description or "", copy.deepcopy(t.inputSchema or _EMPTY_SCHEMA)) for t in tools]
 
 
 def _validated(model: type[BaseModel], data: Any, method: str) -> Any:
