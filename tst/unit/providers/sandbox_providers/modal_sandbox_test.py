@@ -22,6 +22,16 @@ def test_provider_default_pull_secret_is_none():
     assert ModalSandboxProvider()._ecr_pull_secret_name is None
 
 
+@pytest.mark.asyncio
+async def test_apps_are_looked_up_in_the_configured_environment():
+    provider = ModalSandboxProvider(environment_name="rl-prod")
+    provider._get_client = AsyncMock(return_value=MagicMock())  # type: ignore[method-assign]
+    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.App.lookup") as lookup:
+        lookup.aio = AsyncMock(return_value=MagicMock())
+        await provider._get_app("agent-env-p")
+    assert lookup.aio.call_args.kwargs["environment_name"] == "rl-prod"
+
+
 @pytest.fixture
 def _patched_provider():
     provider = ModalSandboxProvider(app_name="agent-env-test")
@@ -308,6 +318,7 @@ async def test_image_auth_paths(_patched_provider):
     ecr_host = "123456789012.dkr.ecr.us-west-2.amazonaws.com"
     ecr = "123456789012.dkr.ecr.us-west-2.amazonaws.com/example/x:v1"
     _patched_provider._ecr_pull_secret_name = "agent-env-ecr-reader"
+    _patched_provider._environment_name = "rl-prod"
     p = lambda n: patch(f"agent_env.providers.sandbox_providers.modal_sandbox.modal.{n}")  # noqa: E731
 
     with p("Image.from_aws_ecr") as aws_ecr, p("Image.from_registry") as registry, \
@@ -340,6 +351,7 @@ async def test_image_auth_paths(_patched_provider):
     from_name.assert_called_once_with(
         "agent-env-ecr-reader",
         required_keys=["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION"],
+        environment_name="rl-prod",
     )
     assert registry.call_args_list[0].kwargs["secret"] is not None
     assert registry.call_args_list[1].args == ("pub.example/x:v1",)

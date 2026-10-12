@@ -234,9 +234,13 @@ class ModalSandboxProvider(SandboxProvider):
         app_name: Optional[str] = None,
         gpu: Optional[str] = None,
         ecr_pull_secret_name: Optional[str] = None,
+        environment_name: Optional[str] = None,
     ):
         self._app_name = _resolve_app_base_name(app_name)
         self._ecr_pull_secret_name = ecr_pull_secret_name
+        # Modal environment for the Apps and the ECR pull secret; None is Modal's own default
+        # (MODAL_ENVIRONMENT, else the workspace default).
+        self._environment_name = environment_name
         self._client: Optional[modal.Client] = None
         # Optional Modal GPU spec (e.g. "H100", "A100", "H100:2"). When set, create_container
         # provisions the sandbox with the V1 ``modal.Sandbox.create`` factory (which accepts
@@ -263,7 +267,9 @@ class ModalSandboxProvider(SandboxProvider):
         app = self._apps.get(app_name)
         if app is None:
             client = await self._get_client()
-            app = await modal.App.lookup.aio(app_name, create_if_missing=True, client=client)
+            app = await modal.App.lookup.aio(
+                app_name, create_if_missing=True, client=client, environment_name=self._environment_name,
+            )
             if app_tags:
                 # App tags are the dimension Modal's billing report breaks down by; set them
                 # once per app (cached below) rather than on every sandbox.
@@ -291,6 +297,7 @@ class ModalSandboxProvider(SandboxProvider):
         client = await self._get_client()
         app = await self._get_app(self._app_name, _attribution_tags({}))
         return await context_image(image, client=client, app=app, token_id=self._token_id, app_name=self._app_name,
+                                   environment_name=self._environment_name,
                                    stale=stale)
 
     async def create_container(
@@ -493,7 +500,8 @@ class ModalSandboxProvider(SandboxProvider):
         auth = None if uses_ecr_pull_secret else await asyncio.to_thread(image_store.auth, image_name)
         if uses_ecr_pull_secret:
             return modal.Image.from_aws_ecr(image_name, secret=modal.Secret.from_name(
-                self._ecr_pull_secret_name, required_keys=ECR_READER_SECRET_KEYS))
+                self._ecr_pull_secret_name, required_keys=ECR_READER_SECRET_KEYS,
+                environment_name=self._environment_name))
         if auth is not None:
             return modal.Image.from_registry(image_name, secret=modal.Secret.from_dict({
                 "REGISTRY_USERNAME": auth.username,
