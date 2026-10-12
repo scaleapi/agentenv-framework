@@ -130,7 +130,7 @@ def scripted(monkeypatch) -> _Scripted:
                          ids=["event-stream", "json", "stateless"])
 async def test_an_agentenv_servers_tools_are_listed_and_called_in_each_streamable_http_mode(serve_items, mode):
     handler, lifespan = await serve_items(**mode)
-    async with lifespan, ToolSession(_URL) as session:
+    async with lifespan, ToolSession(mcp_url=_URL) as session:
         tools = {t.name: t for t in await session.list_tools()}
         added = await session.call_tool("items_add_item", {"item": "crate", "times": 2})
         listed = await session.call_tool("list_items")
@@ -146,7 +146,7 @@ async def test_an_agentenv_servers_tools_are_listed_and_called_in_each_streamabl
 @pytest.mark.asyncio
 async def test_a_failing_or_unknown_tool_is_an_error_result_not_an_exception(serve_items):
     _, lifespan = await serve_items()
-    async with lifespan, ToolSession(_URL) as session:
+    async with lifespan, ToolSession(mcp_url=_URL) as session:
         failed = await session.call_tool("explode")
         unknown = await session.call_tool("no_such_tool")
         after = await session.call_tool("list_items")
@@ -159,8 +159,8 @@ async def test_a_failing_or_unknown_tool_is_an_error_result_not_an_exception(ser
 @pytest.mark.asyncio
 async def test_a_tool_reads_the_role_and_session_a_tool_session_sends_as_its_caller(serve_items):
     _, lifespan = await serve_items()
-    async with (lifespan, ToolSession(_URL, role="alice@example.com") as alice, ToolSession(_URL) as anonymous,
-                ToolSession(_URL, role="default") as default):
+    async with (lifespan, ToolSession(mcp_url=_URL, role="alice@example.com") as alice,
+                ToolSession(mcp_url=_URL) as anonymous, ToolSession(mcp_url=_URL, role="default") as default):
         whoami = {t.name: t for t in await alice.list_tools()}["whoami"]
         seen = [json.loads((await session.call_tool("whoami")).text) for session in (alice, anonymous, default)]
 
@@ -174,7 +174,7 @@ async def test_a_tool_reads_the_role_and_session_a_tool_session_sends_as_its_cal
 @pytest.mark.asyncio
 async def test_concurrent_calls_on_one_session_each_get_their_own_reply(serve_items):
     _, lifespan = await serve_items()
-    async with lifespan, ToolSession(_URL) as session:
+    async with lifespan, ToolSession(mcp_url=_URL) as session:
         results = await asyncio.gather(*(session.call_tool("echo_after", {"value": f"v{i}", "seconds": (i % 5) / 50})
                                          for i in range(25)))
 
@@ -184,7 +184,7 @@ async def test_concurrent_calls_on_one_session_each_get_their_own_reply(serve_it
 @pytest.mark.asyncio
 async def test_a_request_that_outlives_the_timeout_raises_timeout_error_and_the_session_carries_on(serve_items):
     _, lifespan = await serve_items()
-    async with lifespan, ToolSession(_URL) as session:
+    async with lifespan, ToolSession(mcp_url=_URL) as session:
         session.timeout = 0.3
         started = time.monotonic()
         with pytest.raises(TimeoutError, match="tools/call did not finish within 0.3s"):
@@ -220,7 +220,7 @@ def test_tool_definitions_declare_each_tool_for_each_model_api():
 
 @pytest.mark.asyncio
 async def test_the_session_sends_its_role_and_headers_echoes_the_session_and_ends_it_on_close(scripted):
-    async with ToolSession(_URL, role="cli", headers={"X-Trace": "t-1"}) as session:
+    async with ToolSession(mcp_url=_URL, role="cli", headers={"X-Trace": "t-1"}) as session:
         await session.list_tools()
 
     initialize, initialized, listing, delete = scripted.requests
@@ -237,7 +237,7 @@ async def test_the_session_sends_its_role_and_headers_echoes_the_session_and_end
 
 @pytest.mark.asyncio
 async def test_a_closed_session_opens_again_as_a_new_session(scripted):
-    session = ToolSession(_URL)
+    session = ToolSession(mcp_url=_URL)
     async with session:
         pass
     scripted.sessions.add("s-1")
@@ -250,7 +250,7 @@ async def test_a_closed_session_opens_again_as_a_new_session(scripted):
 
 @pytest.mark.asyncio
 async def test_opening_an_open_session_ends_the_one_it_held_first(scripted):
-    session = await ToolSession(_URL).open()
+    session = await ToolSession(mcp_url=_URL).open()
     scripted.answers["initialize"] = lambda m: httpx.Response(200, headers={"mcp-session-id": "s-2"}, json=_reply(m, {
         "protocolVersion": "2025-06-18"}))
     scripted.sessions.add("s-2")
@@ -259,6 +259,23 @@ async def test_opening_an_open_session_ends_the_one_it_held_first(scripted):
 
     deletes = [r.headers["mcp-session-id"] for r in scripted.requests if r.method == "DELETE"]
     assert deletes == ["s-1", "s-2"] and scripted.sessions == set()
+
+
+def test_a_session_is_used_and_closed_only_on_the_event_loop_that_opened_it(scripted):
+    session, opener, other = ToolSession(mcp_url=_URL), asyncio.new_event_loop(), asyncio.new_event_loop()
+    try:
+        opener.run_until_complete(session.open())
+        with pytest.raises(RuntimeError, match="opened on another event loop"):
+            other.run_until_complete(session.call_tool("t"))
+        with pytest.raises(RuntimeError, match="opened on another event loop"):
+            other.run_until_complete(session.close())
+        assert not opener.run_until_complete(session.call_tool("t")).isError
+        opener.run_until_complete(session.close())
+    finally:
+        opener.close()
+        other.close()
+
+    assert [r.method for r in scripted.requests].count("DELETE") == 1 and scripted.sessions == set()
 
 
 @pytest.mark.asyncio
@@ -271,7 +288,7 @@ async def test_tools_list_follows_cursors_until_the_last_page(scripted):
                                                          **({"nextCursor": cursor} if cursor else {})}))
     scripted.answers["tools/list"] = page
 
-    async with ToolSession(_URL) as session:
+    async with ToolSession(mcp_url=_URL) as session:
         assert [t.name for t in await session.list_tools()] == ["a", "b", "c", "d"]
     assert [b["params"] for b in scripted.bodies("tools/list")] == [{}, {"cursor": "p2"}, {"cursor": "p3"}]
 
@@ -290,13 +307,13 @@ async def test_an_event_stream_reply_is_found_among_comments_priming_events_noti
         )
     scripted.answers["tools/call"] = stream
 
-    async with ToolSession(_URL) as session:
+    async with ToolSession(mcp_url=_URL) as session:
         assert (await session.call_tool("t")).text == "found"
 
 
 @pytest.mark.asyncio
 async def test_a_session_the_server_dropped_raises_and_says_the_state_may_be_gone(scripted):
-    async with ToolSession(_URL) as session:
+    async with ToolSession(mcp_url=_URL) as session:
         scripted.sessions.clear()
         with pytest.raises(ToolSessionError, match="no longer knows session s-1.*state may be gone"):
             await session.call_tool("t")
@@ -327,7 +344,7 @@ async def test_a_session_the_server_dropped_raises_and_says_the_state_may_be_gon
         "text-block-with-a-number"])
 async def test_a_failure_at_the_mcp_level_raises_a_tool_session_error(scripted, answer, match):
     scripted.answers["tools/call"] = answer
-    async with ToolSession(_URL) as session:
+    async with ToolSession(mcp_url=_URL) as session:
         with pytest.raises(ToolSessionError, match=match):
             await session.call_tool("t")
 
@@ -337,7 +354,7 @@ async def test_a_failure_at_the_mcp_level_raises_a_tool_session_error(scripted, 
                          ids=["nameless-tool", "tools-not-a-list", "tools-null", "tools-missing"])
 async def test_a_tools_list_that_cannot_be_read_raises_a_tool_session_error(scripted, result):
     scripted.answers["tools/list"] = result
-    async with ToolSession(_URL) as session:
+    async with ToolSession(mcp_url=_URL) as session:
         with pytest.raises(ToolSessionError, match="tools/list: unreadable result"):
             await session.list_tools()
 
@@ -345,7 +362,7 @@ async def test_a_tools_list_that_cannot_be_read_raises_a_tool_session_error(scri
 @pytest.mark.asyncio
 async def test_a_failed_initialize_raises_and_leaves_the_session_closed(scripted):
     scripted.answers["initialize"] = lambda m: httpx.Response(503, text="starting up")
-    session = ToolSession(_URL)
+    session = ToolSession(mcp_url=_URL)
     with pytest.raises(ToolSessionError, match="initialize: HTTP 503"):
         await session.open()
     with pytest.raises(RuntimeError, match="the ToolSession is not open"):
@@ -363,7 +380,7 @@ async def test_closing_after_the_server_is_gone_does_not_raise(monkeypatch):
         return httpx.Response(200, headers={"mcp-session-id": "s-9"}, json=_reply(message, {"protocolVersion": "2025-11-25"}))
     _route_clients_to(monkeypatch, httpx.MockTransport(gone_on_delete))
 
-    async with ToolSession(_URL) as session:
+    async with ToolSession(mcp_url=_URL) as session:
         assert session.session_id == "s-9"
     await session.close()
 
@@ -379,7 +396,7 @@ async def test_closing_waits_for_the_server_no_longer_than_the_sessions_timeout(
         return httpx.Response(200, headers={"mcp-session-id": "s-2"}, json=_reply(message, {"protocolVersion": "2025-11-25"}))
     _route_clients_to(monkeypatch, httpx.MockTransport(stalls_on_delete))
 
-    session = await ToolSession(_URL).open()
+    session = await ToolSession(mcp_url=_URL).open()
     session.timeout = 0.3
     started = time.monotonic()
     await session.close()

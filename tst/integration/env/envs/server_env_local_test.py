@@ -152,7 +152,7 @@ async def test_a_deployed_envs_tools_are_listed_declared_and_called_from_a_loop_
     local_stack.append(container)
     base_url = await legacy_protocol.v1_base_url(deployed, None, "items")
 
-    async with ToolSession(deployed.mcp_url) as session:
+    async with ToolSession(mcp_url=deployed.mcp_url) as session:
         declared = {d["function"]["name"]: d["function"] for d in tool_definitions(await session.list_tools(), "openai_chat")}
         added = await session.call_tool("items_add_item", {"item": "crate", "times": 2})
         listed = await session.call_tool("list_items")
@@ -167,7 +167,7 @@ async def test_a_deployed_envs_tools_are_listed_declared_and_called_from_a_loop_
     assert (await protocol_v1.get_data(base_url)).parts[0].data == {"items": ["crate", "crate"]}
 
     async def add(i: int) -> tuple[int, dict, str]:
-        async with ToolSession(deployed.mcp_url, role=f"worker{i}@example.com") as own:
+        async with ToolSession(mcp_url=deployed.mcp_url, role=f"worker{i}@example.com") as own:
             count = json.loads((await own.call_tool("items_add_item", {"item": f"w{i}"})).text)["count"]
             return count, json.loads((await own.call_tool("items_whoami")).text), own.session_id
     added_by = await asyncio.gather(*(add(i) for i in range(8)))
@@ -176,12 +176,12 @@ async def test_a_deployed_envs_tools_are_listed_declared_and_called_from_a_loop_
                                                      for i, (_, _, session_id) in enumerate(added_by)]
     assert sorted((await protocol_v1.get_data(base_url)).parts[0].data["items"]) == ["crate"] * 2 + [f"w{i}" for i in range(8)]
 
-    async with ToolSession(deployed.mcp_url) as before_restart:
+    async with ToolSession(mcp_url=deployed.mcp_url) as before_restart:
         assert _docker("restart", container).returncode == 0
         assert _wait_ready(f"{base_url}/.well-known/agent-env.json", (200,))
         with pytest.raises(ToolSessionError, match="no longer knows session"):
             await before_restart.call_tool("list_items")
-    async with ToolSession(deployed.mcp_url) as after_restart:
+    async with ToolSession(mcp_url=deployed.mcp_url) as after_restart:
         assert json.loads((await after_restart.call_tool("list_items")).text) == {"items": []}
 
 

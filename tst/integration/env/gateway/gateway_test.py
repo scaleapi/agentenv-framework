@@ -765,11 +765,11 @@ async def test_gateway_with_single_mcp_server(mcp_server_envs, email_service_art
                 assert "list_emails" in [t.name for t in tools_result.tools]
 
         # The protocol package's ToolSession sees what the SDK client sees, and a hidden tool's call is an error result
-        async with ToolSession(result.mcp_url, role="default") as default_session:
+        async with ToolSession(mcp_url=result.mcp_url, role="default") as default_session:
             assert "list_emails" not in [t.name for t in await default_session.list_tools()]
             hidden = await default_session.call_tool("list_emails", {"folder_name": "INBOX"})
             assert hidden.isError and "is disabled for role 'default'" in hidden.text, hidden
-        async with ToolSession(result.mcp_url, role="cli") as cli_session:
+        async with ToolSession(mcp_url=result.mcp_url, role="cli") as cli_session:
             assert "list_emails" in [t.name for t in await cli_session.list_tools()]
             assert "alex.chen@techcorp.com" in (await cli_session.call_tool("list_emails", {"folder_name": "INBOX"})).text
 
@@ -2041,7 +2041,8 @@ async def test_gateway_with_agentenv_environment(agentenv_items_env):
         await _verify_list_tools(mcp_url=result.mcp_url, tool_verifier_callback=assert_tool_sees_items)
 
         # The role a ToolSession sends reaches the child's tool as its caller, with the gateway's key for each session
-        async with ToolSession(result.mcp_url, role="alice@example.com") as alice, ToolSession(result.mcp_url) as anonymous:
+        async with (ToolSession(mcp_url=result.mcp_url, role="alice@example.com") as alice,
+                    ToolSession(mcp_url=result.mcp_url) as anonymous):
             seen = [json.loads((await session.call_tool("items_whoami")).text) for session in (alice, alice, anonymous)]
         assert [caller["role"] for caller in seen] == ["alice@example.com", "alice@example.com", None]
         assert seen[0]["session"] == seen[1]["session"] != seen[2]["session"] and None not in {c["session"] for c in seen}

@@ -17,8 +17,7 @@ from pydantic import BaseModel, Field, field_validator
 from .tool_context import ROLE_HEADER
 from .types import PROTOCOL_VERSION, EnvironmentTool
 
-MCP_PROTOCOL_VERSION = "2025-11-25"
-
+_MCP_PROTOCOL_VERSION = "2025-11-25"
 _SESSION_HEADER = "Mcp-Session-Id"
 _VERSION_HEADER = "MCP-Protocol-Version"
 _ACCEPT = "application/json, text/event-stream"
@@ -30,7 +29,8 @@ ToolApi = Literal["openai_chat", "openai_responses", "anthropic"]
 
 class ToolSessionError(RuntimeError):
     """The server failed a request at the MCP level: a JSON-RPC error, an HTTP error status, a session it no longer
-    knows, or a response that can't be read. A tool that fails is not one; its result carries ``isError``."""
+    knows, or a response that can't be read. A tool that fails is not one; its result carries ``isError``. Only the
+    server the session talks to reports a lost session: a gateway reconnects to a child that restarted and retries."""
 
 
 class ToolResult(BaseModel):
@@ -57,15 +57,15 @@ class ToolSession:
     connection httpx.TransportError. Nothing is retried, and a call that raised may still have run, or may yet run once
     its stalled request gets through, so after any failure the env's state is unknown."""
 
-    def __init__(self, url: str, *, role: str | None = None, headers: dict[str, str] | None = None,
-                 timeout: float = 600.0, verify: bool = True) -> None:
-        self.url = url
+    def __init__(self, *, mcp_url: str, role: str | None = None, headers: dict[str, str] | None = None,
+                 timeout: float = 600.0) -> None:
+        self.mcp_url = mcp_url
         self.timeout = timeout
         self.session_id: str | None = None
         self.protocol_version: str | None = None
         self._headers = {**(headers or {}), **({ROLE_HEADER: role} if role else {}), "Accept": _ACCEPT}
-        self._verify = verify
         self._client: httpx.AsyncClient | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._ids = itertools.count(1)
 
     async def __aenter__(self) -> ToolSession:
@@ -78,15 +78,15 @@ class ToolSession:
         """Start a new MCP session, ending the one this object holds, if any."""
         await self.close()
         self.session_id = self.protocol_version = None
-        self._client = httpx.AsyncClient(headers=self._headers, timeout=self.timeout, verify=self._verify,
-                                         follow_redirects=True)
+        self._loop = asyncio.get_running_loop()
+        self._client = httpx.AsyncClient(headers=self._headers, timeout=self.timeout, follow_redirects=True)
         try:
             result = await self._request("initialize", {
-                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "protocolVersion": _MCP_PROTOCOL_VERSION,
                 "capabilities": {},
                 "clientInfo": {"name": "agentenv-protocol", "version": PROTOCOL_VERSION},
             })
-            self.protocol_version = result.get("protocolVersion") or MCP_PROTOCOL_VERSION
+            self.protocol_version = result.get("protocolVersion") or _MCP_PROTOCOL_VERSION
             await self._deadline("notifications/initialized", self._notify("notifications/initialized"))
         except BaseException:
             await self.close()
@@ -96,13 +96,13 @@ class ToolSession:
     async def close(self) -> None:
         """End the session on the server, waiting at most 5 s (or ``timeout``, if shorter), then close the connection; a
         server that is already gone is not an error."""
-        client, self._client = self._client, None
-        if client is None:
+        if self._client is None:
             return
+        client, self._client = self._open_client(), None
         try:
             if self.session_id:
                 with contextlib.suppress(httpx.HTTPError, asyncio.TimeoutError, TimeoutError):
-                    await asyncio.wait_for(client.delete(self.url, headers=self._session_headers()),
+                    await asyncio.wait_for(client.delete(self.mcp_url, headers=self._session_headers()),
                                            min(self.timeout, _CLOSE_TIMEOUT_S))
         finally:
             await client.aclose()
@@ -140,7 +140,7 @@ class ToolSession:
             raise TimeoutError(f"{method} did not finish within {self.timeout}s") from e
 
     async def _exchange(self, message: dict) -> dict:
-        async with self._open_client().stream("POST", self.url, json=message,
+        async with self._open_client().stream("POST", self.mcp_url, json=message,
                                               headers=self._session_headers()) as response:
             await self._raise_for_status(response, message["method"])
             if message["method"] == "initialize":
@@ -164,7 +164,7 @@ class ToolSession:
             raise ToolSessionError(f"{message['method']}: unexpected content type {content_type!r}")
 
     async def _notify(self, method: str) -> None:
-        response = await self._open_client().post(self.url, json={"jsonrpc": "2.0", "method": method},
+        response = await self._open_client().post(self.mcp_url, json={"jsonrpc": "2.0", "method": method},
                                                   headers=self._session_headers())
         await self._raise_for_status(response, method)
 
@@ -174,7 +174,7 @@ class ToolSession:
                                    "or ended the session, and the env's state may be gone with it")
         if response.status_code >= 400:
             body = (await response.aread()).decode(errors="replace")[:1000]
-            raise ToolSessionError(f"{method}: HTTP {response.status_code} from {self.url}: {body}")
+            raise ToolSessionError(f"{method}: HTTP {response.status_code} from {self.mcp_url}: {body}")
 
     def _session_headers(self) -> dict[str, str]:
         headers = {_SESSION_HEADER: self.session_id} if self.session_id else {}
@@ -185,6 +185,8 @@ class ToolSession:
     def _open_client(self) -> httpx.AsyncClient:
         if self._client is None:
             raise RuntimeError("the ToolSession is not open: use `async with ToolSession(...)` or `await open()`")
+        if asyncio.get_running_loop() is not self._loop:
+            raise RuntimeError("the ToolSession was opened on another event loop; use and close it on that one")
         return self._client
 
 

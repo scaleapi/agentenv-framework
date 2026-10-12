@@ -2,7 +2,7 @@
 
 from . import client
 from .preflight import intake_fit_check
-from .tool_client import MCP_PROTOCOL_VERSION, ToolResult, ToolSession, ToolSessionError, tool_definitions
+from .tool_client import ToolResult, ToolSession, ToolSessionError, tool_definitions
 from .agent_env_environment import (
     AgentEnvApplication,
     AgentEnvEnvironment,
@@ -117,7 +117,6 @@ __all__ = [
     "uploaded_object_path",
     "MCP_PATH",
     "MCP_TRANSPORT",
-    "MCP_PROTOCOL_VERSION",
     "ToolSession",
     "ToolResult",
     "ToolSessionError",

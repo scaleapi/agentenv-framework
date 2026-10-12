@@ -211,7 +211,7 @@ installs, whichever `mcp` version the loop's own environment pins.
 ```python
 from agentenv_protocol import ToolSession, tool_definitions
 
-async with ToolSession(mcp_url, role="alice@example.com") as session:
+async with ToolSession(mcp_url=mcp_url, role="alice@example.com") as session:
     tools = await session.list_tools()                 # EnvironmentTool: name, description, inputSchema
     declared = tool_definitions(tools, "openai_chat")  # or "openai_responses", "anthropic"
     result = await session.call_tool("slack_send_message", {"channel": "general", "text": "hi"})
@@ -223,8 +223,8 @@ async with ToolSession(mcp_url, role="alice@example.com") as session:
 - **Sessions:** a `ToolSession` is one MCP session, and calls on it may run concurrently. `async with` opens and ends
   it; `open()` and `close()` do the same for a session held across calls. A tool tells sessions apart by
   `ctx.caller.session`: the session's id when the server is reached directly, or, behind a gateway, a key the gateway
-  gives each session. A session belongs to the event loop that opened it, so a caller with a synchronous API runs all
-  of a session's calls on one loop of its own.
+  gives each session. A session belongs to the event loop that opened it, and using or closing it on another raises
+  `RuntimeError`, so a caller with a synchronous API runs all of a session's calls on one loop of its own.
 - **Roles:** `role` is sent as `AgentEnv-Role` (`ROLE_HEADER`) and says who the caller is. A gateway lists only the
   tools that role may use, answers a call to a hidden one with an error result, and forwards the role to the servers
   behind it; a server reached directly reads the header itself. Either way a tool reads it as `ctx.caller.role`
@@ -234,11 +234,13 @@ async with ToolSession(mcp_url, role="alice@example.com") as session:
     returns a result with `isError` set and the server's text.
   - `ToolSessionError` means the request failed at the MCP level: a JSON-RPC error, an HTTP error status, a reply
     that can't be read, or a session the server no longer knows. After a restart, the env's state is usually gone too.
+    Only the server the session talks to reports this: a gateway reconnects to a child that restarted and retries the
+    call, and a stateless server has no session to lose, so neither restart raises anything.
   - `httpx.TransportError` means the connection failed, and `TimeoutError` that a request outlived `timeout`
     (600 s by default, the gateway's own limit on a tool call).
-  - Nothing is retried. A call that raised may still have run on the server, or may yet run: a request stalled
-    on a bad link can arrive after the client has given up. So after any failed call the env's state is unknown;
-    read it back (`data/get`) or end the episode.
+  - `ToolSession` retries nothing. A call that raised may still have run on the server, or may yet run: a request
+    stalled on a bad link can arrive after the client has given up. So after any failed call the env's state is
+    unknown; read it back (`data/get`) or end the episode.
 - **Declarations:** `tool_definitions` also takes a card's `capabilities.tools`. It copies each schema, so a caller
   can tighten one (for OpenAI's strict mode, say) without changing the source.
 
