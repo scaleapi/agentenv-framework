@@ -25,6 +25,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class DeployRefused(RuntimeError):
+    """A deploy that would fail the same way on any sandbox provider, so a chain raises it rather than trying the next."""
+
+
 class EnvironmentProvider(ABC):
     """Deploys an env and hands back its record; tears down what it created."""
 
@@ -149,6 +153,8 @@ class _SandboxEnvironmentProvider(EnvironmentProvider):
             for p in sandbox_providers:
                 try:
                     return await self._attempt(p, env_id, attempt)
+                except DeployRefused:
+                    raise
                 except Exception as e:
                     errors.append((type(p).__name__, e))
                     await self.close()

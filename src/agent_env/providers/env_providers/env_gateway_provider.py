@@ -12,11 +12,19 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
+import httpx
+
 from agent_env.artifact.artifacts.docker_image import pull_problem
 from agent_env.attribution import Attribution
 from agent_env.env.env import DeployedGatewayEnv, _mcp_url
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT, GatewayMode
-from agent_env.env.gateway.constants import DEFAULT_MCP_SERVER_NAME, WELL_KNOWN_PATH, random_mcp_server_name
+from agent_env.env.gateway.constants import (
+    DEFAULT_MCP_SERVER_NAME,
+    STATE_TOOL_NAME_CLASHES_KEY,
+    WELL_KNOWN_PATH,
+    random_mcp_server_name,
+    tool_name_clashes_text,
+)
 from agent_env.env.envs.service_db import (
     DATABASE_SERVICE_NAME,
     DB_MCP_CONTAINER_PORT,
@@ -33,7 +41,13 @@ from agent_env.providers.env_providers.constants import (
     GATEWAY_APP_DIR,
     GATEWAY_SERVICE_NAME,
 )
-from agent_env.providers.env_providers.env_provider import _SandboxEnvironmentProvider, _size_kwargs, _tool_names
+from agent_env.providers.env_providers.env_provider import (
+    DeployRefused,
+    _SandboxEnvironmentProvider,
+    _size_kwargs,
+    _tool_names,
+)
+from agent_env.providers.sandbox_providers.local_sandbox import remove_local_work_dir
 from agent_env.providers.sandbox_providers.sandbox import Sandbox, VmSandbox, port_bindings
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_CONTAINER,
@@ -654,9 +668,9 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
     async def _terminate_new_sandbox(
         self, *, earlier_sandbox: Sandbox | None, existing_sandbox: Sandbox | None,
     ) -> None:
-        """Terminate the sandbox a deploy that failed or was cancelled created: no record names it yet, so nothing else
-        would. Leaves alone an earlier deploy's sandbox, the caller's existing_sandbox, and the container sandboxes
-        close() ends."""
+        """Terminate the sandbox a deploy that failed or was cancelled created, and remove a local one's work folder once
+        it's down: no record names it yet, so no teardown would. Leaves alone an earlier deploy's sandbox, the caller's
+        existing_sandbox, and the container sandboxes close() ends."""
         new_sandbox, self._sandbox = self._sandbox, earlier_sandbox
         if (new_sandbox is None or new_sandbox is earlier_sandbox or new_sandbox is existing_sandbox
                 or new_sandbox in self._container_sandboxes):
@@ -666,6 +680,12 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         except Exception as e:
             logger.warning(
                 f"Failed to terminate {type(new_sandbox).__name__} {new_sandbox.sandbox_id} after a failed deploy: {e}")
+            return
+        if new_sandbox.ON_THIS_MACHINE:
+            try:
+                await asyncio.to_thread(remove_local_work_dir, new_sandbox.sandbox_id)
+            except OSError as e:
+                logger.warning(f"{new_sandbox.sandbox_id}'s work folder was not removed after a failed deploy: {e}")
 
     async def _deploy_via_vm(
         self,
@@ -852,6 +872,7 @@ COMPOSE_EOF'''
         if card is None:
             raise RuntimeError("Tunnel did not become ready in time")
         card_read_at_utc = datetime.now(timezone.utc).isoformat()
+        await self._refuse_tool_name_clashes(gateway_url)
         mcp_url = _mcp_url(gateway_url, card)
         logger.info(f"MCP endpoint: {mcp_url}")
 
@@ -1003,6 +1024,7 @@ COMPOSE_EOF'''
             if card is None:
                 raise RuntimeError("Gateway tunnel did not become ready in time")
             card_read_at_utc = datetime.now(timezone.utc).isoformat()
+            await self._refuse_tool_name_clashes(gateway_url)
 
             db_web_url = pgweb_sb.tunnel_urls[DB_WEB_PORT] + "/" if pgweb_sb else None
             db_mcp_url = db_mcp_sb.tunnel_urls[DB_MCP_CONTAINER_PORT] + "/mcp" if db_mcp_sb else None
@@ -1020,6 +1042,24 @@ COMPOSE_EOF'''
         except Exception:
             await self.close()
             raise
+
+    async def _refuse_tool_name_clashes(self, gateway_url: str) -> None:
+        """Refuse the deploy when the gateway reports tool names more than one of its sources serves, which leaves it
+        serving none of its servers' tools. A gateway whose /state can't be read, or that doesn't report clashes (an
+        image older than the report), is let through as before."""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{gateway_url}/state", timeout=_STATE_READ_TIMEOUT_S)
+            response.raise_for_status()
+            clashes = response.json().get(STATE_TOOL_NAME_CLASHES_KEY)
+        except Exception as e:
+            logger.warning(f"Couldn't read the gateway's /state, so its tool names aren't checked for clashes: {e!r}")
+            return
+        if clashes and isinstance(clashes, dict):
+            raise DeployRefused(
+                f"The env's MCP servers serve duplicate tool names, which an agent couldn't tell apart, so its gateway "
+                f"serves none of their tools: {tool_name_clashes_text(clashes)}. Rename the tools, or deploy those "
+                f"servers in separate envs")
 
     async def _wait_for_gateway(self, sandbox: VmSandbox, port: int, timeout: int = 300) -> bool:
         """Wait for the gateway to answer on ``port``.
@@ -1408,6 +1448,10 @@ def _redact_compose_secrets(compose_content: str) -> str:
         _SECRET_ENV_KEY_RE.sub(r"\1\2=***", line) for line in compose_content.splitlines()
     )
 
+
+# Budget for reading the gateway's /state once its card is served: answering it runs tool discovery, one server at a
+# time, if startup's didn't complete.
+_STATE_READ_TIMEOUT_S = 60.0
 
 # Cap on the post-readiness tools/list probe; it only logs, so a slow gateway costs deploy time, never the deploy.
 _TOOLS_PROBE_TIMEOUT_S = 10.0

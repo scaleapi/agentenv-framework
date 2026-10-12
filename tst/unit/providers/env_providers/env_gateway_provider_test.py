@@ -36,6 +36,7 @@ from agent_env.providers.env_providers.env_gateway_provider import (
     WebsiteConfig,
     _redact_compose_secrets,
 )
+from agent_env.providers.env_providers.env_provider import DeployRefused
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import Sandbox
@@ -334,6 +335,7 @@ async def test_container_mode_constructs_internal_mcp_servers_url_format():
         gp._init_service_db_via_exec = AsyncMock()
         # Patch _wait_for_tunnel to skip the real HTTP poll; it returns the card it read
         gp._wait_for_tunnel = AsyncMock(return_value=_CARD)
+        gp._refuse_tool_name_clashes = AsyncMock()
         # Patch Env.get and config to return mock envs
         with patch("agent_env.env.env.Env.get") as env_get, \
              patch("agent_env.config.get_config") as get_cfg, \
@@ -447,6 +449,7 @@ async def test_container_mode_remote_skips_servicedb_and_points_at_remote():
 
     with patch.object(provider, "create_container", side_effect=fake_create_container):
         gp._wait_for_tunnel = AsyncMock(return_value=_CARD)
+        gp._refuse_tool_name_clashes = AsyncMock()
         with patch("agent_env.env.env.Env.get") as env_get, \
              patch("agent_env.config.get_config") as get_cfg:
             gateway_env = MagicMock()
@@ -506,6 +509,7 @@ async def test_container_mode_mcp_url_follows_the_card():
 
     with patch.object(provider, "create_container", side_effect=fake_create_container):
         gp._wait_for_tunnel = AsyncMock(return_value=card)
+        gp._refuse_tool_name_clashes = AsyncMock()
         with patch("agent_env.env.env.Env.get") as env_get, patch("agent_env.config.get_config") as get_cfg:
             env_get.return_value.docker_image_artifact = _image("agent-gateway")
             get_cfg.return_value = MagicMock(default_gateway_env_id="gw-id")
@@ -586,6 +590,7 @@ def _slack_in_containers(gp: EnvironmentGatewayProvider, provider: ModalSandboxP
     with patch.object(provider, "create_container", side_effect=create_container):
         gp._init_service_db_via_exec = AsyncMock()
         gp._wait_for_tunnel = AsyncMock(return_value=_CARD)
+        gp._refuse_tool_name_clashes = AsyncMock()
         with patch("agent_env.env.env.Env.get") as env_get, \
              patch("agent_env.config.get_config") as get_cfg:
             gateway_env = MagicMock()
@@ -655,6 +660,76 @@ async def test_a_deploy_cancelled_while_its_containers_are_created_closes_those_
 
     assert [sandbox.sandbox_id for sandbox in created] == ["postgres", "mcp-slack", "pgweb"]
     assert [sandbox.terminated for sandbox in created] == [True, True, True]
+
+
+def _serve_state(monkeypatch, reply) -> list[str]:
+    """Answer every HTTP request with ``reply`` (a Response factory, or an exception to raise); returns the URLs asked."""
+    real_client, seen = httpx.AsyncClient, []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        if isinstance(reply, Exception):
+            raise reply
+        return reply()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real_client(transport=httpx.MockTransport(handler)))
+    return seen
+
+
+_CLASH_STATE = {"mcp_servers": [], "tool_name_clashes": {"list_items": ["items", "stock"]}}
+
+
+@pytest.mark.asyncio
+async def test_a_gateway_reporting_a_tool_name_clash_is_refused_naming_the_tool_and_its_servers(monkeypatch):
+    seen = _serve_state(monkeypatch, lambda: httpx.Response(200, json=_CLASH_STATE))
+
+    with pytest.raises(DeployRefused) as raised:
+        await EnvironmentGatewayProvider()._refuse_tool_name_clashes("https://gw.example")
+
+    assert seen == ["https://gw.example/state"]
+    assert str(raised.value) == (
+        "The env's MCP servers serve duplicate tool names, which an agent couldn't tell apart, so its gateway serves "
+        "none of their tools: 'list_items' from 'items' and 'stock'. Rename the tools, or deploy those servers in "
+        "separate envs")
+
+
+@pytest.mark.parametrize("reply", [
+    lambda: httpx.Response(200, json={"mcp_servers": [], "tool_name_clashes": {}}),
+    lambda: httpx.Response(200, json={"mcp_servers": []}),
+    lambda: httpx.Response(200, json=[]),
+    lambda: httpx.Response(200, text="<html></html>"),
+    lambda: httpx.Response(500, text="boom"),
+    httpx.ConnectError("refused"),
+], ids=["no-clash", "older-gateway", "not-an-object", "not-json", "server-error", "unreachable"])
+@pytest.mark.asyncio
+async def test_a_gateway_reporting_no_clash_or_whose_state_cant_be_read_is_let_through(monkeypatch, reply):
+    _serve_state(monkeypatch, reply)
+
+    await EnvironmentGatewayProvider()._refuse_tool_name_clashes("https://gw.example")
+
+
+@pytest.mark.asyncio
+async def test_a_container_deploy_whose_gateway_reports_a_tool_name_clash_is_refused_and_leaves_nothing_running(
+        monkeypatch):
+    provider = ModalSandboxProvider()
+    gp = EnvironmentGatewayProvider()
+    created: list[_FakeSandbox] = []
+
+    async def create_container(**kwargs):
+        name = kwargs["image_name"].rsplit("/", 1)[-1]
+        sandbox = _FakeSandbox(name, kwargs["port"], f"https://{name}.modal.host")
+        created.append(sandbox)
+        return sandbox
+
+    _serve_state(monkeypatch, lambda: httpx.Response(200, json=_CLASH_STATE))
+    with _slack_in_containers(gp, provider, create_container) as args:
+        del gp._refuse_tool_name_clashes  # the real check, reading the gateway's /state
+        with pytest.raises(DeployRefused, match="'list_items' from 'items' and 'stock'"):
+            await gp._run(ChainedSandboxProvider([provider, ModalSandboxProvider()]), "slack",
+                          lambda p: gp._deploy_via_containers(sandbox_provider=p, **args))
+
+    assert "agent-gateway" in [sandbox.sandbox_id for sandbox in created]
+    assert all(sandbox.terminated for sandbox in created)
 
 
 @pytest.mark.asyncio
@@ -1630,6 +1705,20 @@ async def test_a_vm_deploy_that_ends_after_creating_its_vm_terminates_it(ended_b
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("on_this_machine", [True, False], ids=["local", "remote"])
+async def test_a_failed_deploy_removes_a_local_vms_work_folder_once_it_is_down(monkeypatch, on_this_machine):
+    """No record names the VM, so the run's teardown, which removes a local sandbox's folder, never reaches it."""
+    removed: list[str] = []
+    monkeypatch.setattr(env_gateway_provider, "remove_local_work_dir", removed.append)
+    gp, vm = EnvironmentGatewayProvider(), _vm("vm-1")
+    vm.ON_THIS_MACHINE = on_this_machine
+    with patch.object(gp, "_deploy_via_vm", side_effect=_creates(gp, vm, RuntimeError("gateway not ready"))):
+        with pytest.raises(RuntimeError):
+            await gp.create_gateway(sandbox_provider=_vm_provider(), mcp_servers=[], mcp_server_images=[], env_id="e1")
+    assert vm.terminated and removed == (["vm-1"] if on_this_machine else [])
+
+
+@pytest.mark.asyncio
 async def test_a_failed_deploy_leaves_the_callers_vm_alone():
     gp, callers = EnvironmentGatewayProvider(), _vm("callers-vm")
     with patch.object(gp, "_deploy_via_vm", side_effect=_creates(gp, _vm("unused"), RuntimeError("boom"))):
@@ -1717,10 +1806,13 @@ async def test_deploy_returns_the_gateway_record_for_the_env(caplog):
          patch.object(gp, "_wait_for_gateway", AsyncMock(return_value=True)), \
          patch.object(gp, "_get_container_id", AsyncMock(return_value=None)), \
          patch.object(gp, "_wait_for_tunnel", AsyncMock(return_value=card)), \
+         patch.object(gp, "_refuse_tool_name_clashes", AsyncMock()) as clashes_checked, \
          patch.object(env_gateway_provider, "_tool_names", AsyncMock(return_value={"slack_send"})), \
          patch("agent_env.providers.env_providers.env_gateway_provider.asyncio.sleep", AsyncMock()):
         record = await gp.deploy(env, _vm_provider(create_vm=AsyncMock(return_value=vm)), gateway_mode=GatewayMode.CONSISTENT,
                                    ttl_seconds=60, env_state_type="remote")
+
+    clashes_checked.assert_awaited_once_with("https://vm.example")
 
     acquire.assert_awaited_once_with(env_state_type="remote", ttl_seconds=60, name_hint="crm-env", env_state_instance_id=None)
     [server] = compose.call_args.kwargs["mcp_servers"]

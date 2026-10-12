@@ -89,6 +89,19 @@ CARD_FETCH_TIMEOUT_S = 5.0
 # here fails the whole discovery, to be retried on the next connect.
 CHILD_DISCOVERY_TIMEOUT_S = 30.0
 
+# The GET /state field naming each tool name more than one source serves, with its sources: backing servers by name,
+# `gateway` for the gateway's own tools. Empty unless discovery found such a clash, which leaves the env serving none
+# of its servers' tools; a deploy reads it to fail with the clash instead.
+STATE_TOOL_NAME_CLASHES_KEY = "tool_name_clashes"
+
+
+def tool_name_clashes_text(clashes: dict[str, list[str]]) -> str:
+    """Each clashing name and its sources, e.g. ``'list_items' from 'items' and 'stock'``."""
+    def sources(names: list[str]) -> str:
+        quoted = [f"'{n}'" for n in names]
+        return f"{', '.join(quoted[:-1])} and {quoted[-1]}" if len(quoted) > 1 else quoted[0]
+    return "; ".join(f"'{name}' from {sources(names)}" for name, names in clashes.items())
+
 # Trigger status vocabulary, part of the GET /triggers/state contract; `state` asserts against it.
 TRIGGER_STATUSES = ("armed", "firing", "queued", "fired", "failed")
 
@@ -190,7 +203,7 @@ GATEWAY_EXTENSIONS = [
     },
     {
         "uri": EXT_STATE_URI,
-        "description": "State (urn:agentenv:state/v1): the env's MCP servers and their tools, its changelog id and its role rules.",
+        "description": "State (urn:agentenv:state/v1): the env's MCP servers and their tools, any tool name more than one of them serves, its changelog id and its role rules.",
         "params": {"endpoint": "/state", "methods": {
             "get": {"method": "GET", "endpoint": "/state"}}},
         "required": False,

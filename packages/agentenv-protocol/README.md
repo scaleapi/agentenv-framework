@@ -77,7 +77,9 @@ under the card's `capabilities.tools` (name, description, signature-derived `inp
 `Annotated[..., Field(description=...)]` param descriptions included). `{environment_name}` in a
 tool name is resolved to the card's name at mount, so a shared mixin or base class can declare
 environment-prefixed tools without knowing the name at class-definition time; any other unresolved
-`{...}` token raises. Duplicate tool names raise at construction.
+`{...}` token raises. Duplicate tool names raise at construction. Names must also differ across the
+servers an env deploys behind one gateway: if two serve a name, the gateway serves none of their
+tools and the deploy fails naming it, so prefix with `{environment_name}` when servers may share one.
 
 `AgentEnvStarletteApplication` mounts the same handler onto a Starlette/FastAPI app instead of
 FastMCP; since those apps have no MCP tool registry, constructing one with `@tool` methods

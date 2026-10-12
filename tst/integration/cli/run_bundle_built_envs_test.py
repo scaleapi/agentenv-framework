@@ -153,19 +153,23 @@ def test_an_env_folder_is_built_named_by_its_card_deployed_and_rebuilt_only_when
     assert edited.output.count("building with docker") == 1, edited.output
 
 
-def _server(build):
-    """The items server's source, its list_items answering with ``build``."""
+def _server(build, *, own_list_items=False):
+    """The items server's source, its list_items answering with ``build``. Every copy registers list_items under that
+    one name, so a multi of two can't deploy; with ``own_list_items`` it's prefixed by the server's environment_name."""
     source = (ITEMS / "server.py").read_text()
     server = source.replace('json.dumps({"items": self.store})',
                             f'json.dumps({{"items": self.store, "build": "{build}"}})')
-    assert server != source
+    if own_list_items:
+        server = "import os\n" + server.replace(
+            'self.mcp.tool(name="list_items")', 'self.mcp.tool(name=f"{os.environ[\'ENVIRONMENT_NAME\']}_list_items")')
+    assert server != source and (not own_list_items or "_list_items\")" in server)
     return server
 
 
-def _items(folder, build, dockerfile="Dockerfile"):
+def _items(folder, build, dockerfile="Dockerfile", *, own_list_items=False):
     """The items server of ``build``, built from ``dockerfile`` in its folder."""
     shutil.copytree(PROTOCOL, folder / "agentenv_protocol", ignore=shutil.ignore_patterns("__pycache__"))
-    (folder / "server.py").write_text(_server(build))
+    (folder / "server.py").write_text(_server(build, own_list_items=own_list_items))
     shutil.copy(ITEMS / "seed.json", folder / "seed.json")
     (folder / dockerfile).parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(ITEMS / "Dockerfile", folder / dockerfile)
@@ -377,8 +381,7 @@ def test_environments_and_a_universe_written_from_a_bundle_load_into_an_env_thro
 
 
 # Checks each items server CONFIG names holds exactly the items loaded into it, read from its export-state route behind
-# the multi's gateway. Not over MCP: every items server registers list_items under that one name, which the gateway
-# serves from only one server. CONFIG goes above it.
+# the multi's gateway. CONFIG goes above it.
 VERIFY_SEEDED = '''
 import httpx
 
@@ -400,7 +403,7 @@ def _put_store_data(state):
     """What a user puts in the store before a bundle names it: the items server as the env ledger, built by the CLI;
     ledger's environment; stock's file; and a universe shared across servers, with environments for items and gmail."""
     source = state / "ledger-src"
-    _items(source, "v1")
+    _items(source, "v1", own_list_items=True)
     for argv in (
         ["env", "mcp-server", "put", "--id", "ledger", "--environment-name", "ledger", "--dockerfile",
          str(source / "Dockerfile"), "--context", str(source), "--platform", ""],
@@ -431,8 +434,8 @@ def _composed_bundle(root):
     items' environment from its folder, stock's a bundle environment over a pinned store file, and ledger's a store
     environment. Task universe loads it into the multi; task shared loads the store's shared universe into items."""
     envs = root / "envs"
-    _items(envs / "items", "v1")
-    _items(envs / "stock", "v1")
+    _items(envs / "items", "v1", own_list_items=True)
+    _items(envs / "stock", "v1", own_list_items=True)
     (envs / "stock/env.toml").write_text('environment_name = "stock"\n')
     (envs / "suite").mkdir()
     (envs / "suite/env.toml").write_text('type = "multi"\nmcp_server_envs = ["items", "stock", "ledger"]\n')
@@ -511,3 +514,24 @@ def test_a_multi_whose_children_name_one_container_is_refused_before_anything_is
             in result.output), result.output
     assert "building with docker" not in result.output and "Traceback" not in result.output, result.output
     assert _files(state) == before
+
+
+def test_a_multi_whose_servers_share_a_tool_name_is_refused_at_deploy_naming_the_tool_and_both_servers(state):
+    """The gateway would serve neither server's tools, so the deploy fails, once, and tears down what it started."""
+    root = state / "shared-name-bundle"
+    envs = root / "envs"
+    _items(envs / "items", "v1")
+    _items(envs / "stock", "v1")
+    (envs / "stock/env.toml").write_text('environment_name = "stock"\n')
+    (envs / "suite").mkdir()
+    (envs / "suite/env.toml").write_text('type = "multi"\nmcp_server_envs = ["items", "stock"]\n')
+    (root / "tasks").mkdir()
+    (root / "tasks/suite.json").write_text(json.dumps(
+        [{"id": "env", "type": "deploy_env", "env_id": "suite", "sandbox_type": "local"}]))
+
+    result = _run(root)
+
+    assert result.exit_code == 1, result.output
+    assert "tasks/suite.json v1: failed at step 'env'" in result.output, result.output
+    assert "serve duplicate tool names" in result.output, result.output
+    assert "'list_items' from 'items' and 'stock'" in result.output, result.output
