@@ -600,16 +600,20 @@ class PiAgent(AgentEnvAgent):
     @extension(SNAPSHOT_V1.save)
     async def save_snapshot(self, request: ObjectSnapshotSaveRequest) -> dict[str, Any]:
         session_id = self.session_ref_for_context(request.context_id) or _session_id(request.context_id)
-        session = self._session_file(session_id)
-        if session is None:
-            raise HTTPException(status_code=404, detail=f"No conversation for context '{request.context_id}'")
-        objects = {"trajectory": (await upload(request.objects.trajectory, session)).model_dump(mode="json")}
-        if request.objects.workspace is not None:
-            with tempfile.TemporaryDirectory() as scratch:
-                archive = Path(scratch) / "workspace.tar.gz"
-                self.workspace.mkdir(parents=True, exist_ok=True)
-                async with self._workspace_lock:
+        with tempfile.TemporaryDirectory() as scratch:
+            # The conversation and the workspace are copied together, so a restore cannot fall between them.
+            copy = Path(scratch) / "session.jsonl"
+            archive = Path(scratch) / "workspace.tar.gz"
+            async with self._workspace_lock:
+                session = self._session_file(session_id)
+                if session is None:
+                    raise HTTPException(status_code=404, detail=f"No conversation for context '{request.context_id}'")
+                shutil.copyfile(session, copy)
+                if request.objects.workspace is not None:
+                    self.workspace.mkdir(parents=True, exist_ok=True)
                     await asyncio.to_thread(_pack, self.workspace, archive)
+            objects = {"trajectory": (await upload(request.objects.trajectory, copy)).model_dump(mode="json")}
+            if request.objects.workspace is not None:
                 objects["workspace"] = (await upload(request.objects.workspace, archive)).model_dump(mode="json")
         return {"context_id": request.context_id, "objects": objects}
 
