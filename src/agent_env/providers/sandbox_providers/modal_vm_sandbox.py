@@ -283,7 +283,6 @@ class ModalVmSandboxProvider(SandboxProvider):
 
     def __init__(self, app_name: Optional[str] = None, environment_name: Optional[str] = None):
         self._app_name = _resolve_app_base_name(app_name)
-        # Modal environment for the Apps; None is Modal's own default.
         self._environment_name = environment_name
         self._client: Optional[modal.Client] = None
         # Per-attribution-scope Modal App, looked up on demand (billing aggregates per App).

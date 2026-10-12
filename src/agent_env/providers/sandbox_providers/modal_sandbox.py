@@ -238,8 +238,6 @@ class ModalSandboxProvider(SandboxProvider):
     ):
         self._app_name = _resolve_app_base_name(app_name)
         self._ecr_pull_secret_name = ecr_pull_secret_name
-        # Modal environment for the Apps and the ECR pull secret; None is Modal's own default
-        # (MODAL_ENVIRONMENT, else the workspace default).
         self._environment_name = environment_name
         self._client: Optional[modal.Client] = None
         # Optional Modal GPU spec (e.g. "H100", "A100", "H100:2"). When set, create_container
