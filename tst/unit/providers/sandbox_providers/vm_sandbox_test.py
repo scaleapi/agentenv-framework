@@ -245,6 +245,27 @@ async def test_a_vm_refuses_a_tar_gz_for_a_platform_it_doesnt_run_before_anythin
 
 
 @pytest.mark.asyncio
+async def test_a_vm_builds_an_image_from_the_build_context_beside_a_tar_gz_for_another_platform(signing_store):
+    """As the infra bootstrap writes its images on Apple silicon: built for the VM's platform, the image runs, though
+    not byte for byte the one stored; a VM of the tar.gz's platform loads the tar.gz."""
+    arm64 = DockerImageArtifact(id="gw", version=1, description="d", image_name="localhost:5000/gw:v1",
+                                platform="linux/arm64", tar_gz_object_url="s3://bucket/gw.tar.gz",
+                                build_context_object_url="s3://bucket/gw/build-context.tar.gz",
+                                dockerfile_path="Dockerfile", source_digest="sha256:" + "3" * 64)
+
+    amd = _RecordingVmSandbox()
+    await amd.load_docker_images([arm64])
+    assert not any("docker load" in script for script in amd.scripts)
+    assert any("docker build --platform linux/amd64 -f Dockerfile -t localhost:5000/gw:v1 ." in script
+               for script in amd.scripts)
+
+    arm = _RecordingVmSandbox(images_stdout="localhost:5000/gw:v1\n")
+    arm.platform = "linux/arm64"
+    await arm.load_docker_images([arm64])
+    assert "docker load" in arm.scripts[0] and not any("docker build" in script for script in arm.scripts)
+
+
+@pytest.mark.asyncio
 async def test_a_login_is_minted_once_per_registry():
     minted = []
 

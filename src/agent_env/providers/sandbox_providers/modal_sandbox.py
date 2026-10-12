@@ -216,7 +216,8 @@ class ModalSandboxProvider(SandboxProvider):
         # Looked up on demand and cached by name.
         self._apps: dict[str, modal.App] = {}
         self._token_id = ""
-        # The context-only images prepare_image was given, by name, so create_container builds them rather than pull.
+        # The images prepare_image builds from their build contexts, by name, so create_container builds them rather
+        # than pull.
         self._context_images: dict[str, DockerImageArtifact] = {}
 
     async def _get_client(self) -> modal.Client:
@@ -243,8 +244,12 @@ class ModalSandboxProvider(SandboxProvider):
         return app
 
     async def prepare_image(self, image: DockerImageArtifact, *, attribution: Optional[Attribution] = None) -> None:
-        """Build ``image`` when it's only a build context, unless this process has already built its sources."""
-        if image.context_only:
+        """Build ``image`` from its build context when Modal can't run it by name: it's only a build context, its name
+        is in a registry Modal can't reach, or it's built for another platform than Modal's; unless this process has
+        already built its sources."""
+        if image.build_context_object_url and (
+                image.context_only or image.by_name_problem(on_this_machine=self.ON_THIS_MACHINE)
+                or image.platform_problem(self._sandbox_cls.platform)):
             self._context_images[image.image_name] = image
             await self._context_image(image)
 
@@ -298,8 +303,8 @@ class ModalSandboxProvider(SandboxProvider):
         app = await self._get_app(app_name, app_tags)
 
         built_id = None
-        if (context_only := self._context_images.get(image_name)) is not None:
-            image, built_id = await self._context_image(context_only)
+        if (prepared := self._context_images.get(image_name)) is not None:
+            image, built_id = await self._context_image(prepared)
         else:
             image = await self._registry_image(image_name)
 
@@ -349,7 +354,7 @@ class ModalSandboxProvider(SandboxProvider):
                 if built_id is None:
                     raise
                 # Modal no longer holds the image this process built from the context, so it's built again, once.
-                image, built_id = await self._context_image(context_only, stale=built_id)
+                image, built_id = await self._context_image(prepared, stale=built_id)
                 sb = await create(image)
         except Exception as e:
             raise RuntimeError(

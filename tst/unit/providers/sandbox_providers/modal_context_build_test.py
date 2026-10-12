@@ -166,11 +166,28 @@ def test_everything_else_is_left_as_written(tmp_path, line):
 
 
 @pytest.mark.asyncio
-async def test_an_image_that_is_not_only_a_build_context_is_not_built(local_stores, builds):
+async def test_an_image_with_no_build_context_is_not_built(local_stores, builds):
     await _provider().prepare_image(DockerImageArtifact(id="solver-image", description="d",
                                                         image_name="registry.example/solver:v2"))
 
     assert builds.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("image_name, platform, built", [
+    ("localhost:5000/local/gateway:v1", "linux/amd64", True),
+    ("registry.example/gateway:v1", "linux/arm64", True),
+    ("registry.example/gateway:v1", "linux/amd64", False),
+], ids=["in-this-machines-registry", "for-another-platform", "pulled"])
+async def test_an_image_with_a_build_context_beside_its_tar_gz_is_built_when_modal_cant_run_it_by_name(
+        local_stores, context, builds, image_name, platform, built):
+    """As the infra bootstrap writes its images: a tar.gz, which Modal can't load, and the context it was built from."""
+    image = _context_image("gateway-image", context).model_copy(update={
+        "image_name": image_name, "tar_gz_object_url": "file:///state/gateway.tar.gz", "platform": platform})
+
+    await _provider().prepare_image(image)
+
+    assert len(builds.calls) == int(built)
 
 
 def _fake_create():

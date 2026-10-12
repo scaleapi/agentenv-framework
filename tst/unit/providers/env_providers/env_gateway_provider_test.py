@@ -108,20 +108,18 @@ class _FakeSandbox(Sandbox):
         self.write_calls.append((destination_path, content))
 
 
-@pytest.mark.parametrize("facts, in_vm, accepts, by_name_otherwise", [
-    ({"SUPPORTED_SANDBOX_MODES": VMS_AND_CONTAINERS, "CONTAINER_ACCEPTS": Accepts.NAME}, True, Accepts.LOADABLE, Accepts.LOADABLE),
-    ({"SUPPORTED_SANDBOX_MODES": CONTAINERS, "CONTAINER_ACCEPTS": Accepts.NAME_OR_CONTEXT}, False, Accepts.NAME_OR_CONTEXT, Accepts.NAME),
-    ({"SUPPORTED_SANDBOX_MODES": CONTAINERS, "CONTAINER_ACCEPTS": Accepts.NAME}, False, Accepts.NAME, Accepts.NAME),
+@pytest.mark.parametrize("facts, in_vm, accepts", [
+    ({"SUPPORTED_SANDBOX_MODES": VMS_AND_CONTAINERS, "CONTAINER_ACCEPTS": Accepts.NAME}, True, Accepts.LOADABLE),
+    ({"SUPPORTED_SANDBOX_MODES": CONTAINERS, "CONTAINER_ACCEPTS": Accepts.NAME_OR_CONTEXT}, False, Accepts.NAME_OR_CONTEXT),
+    ({"SUPPORTED_SANDBOX_MODES": CONTAINERS, "CONTAINER_ACCEPTS": Accepts.NAME}, False, Accepts.NAME),
 ], ids=["vm", "containers-that-build", "containers-by-name"])
-def test_a_gateway_runs_in_a_vm_where_its_provider_creates_them_and_else_in_containers(facts, in_vm, accepts,
-                                                                                         by_name_otherwise):
-    """In containers, the images the deploy prepares (its servers' and the gateway's) run as the provider's containers
-    run them, and the rest (its service-db's) by name."""
+def test_a_gateway_runs_in_a_vm_where_its_provider_creates_them_and_else_in_containers(facts, in_vm, accepts):
+    """In containers, every image the deploy prepares (its servers', the gateway's and its service-db's) runs as the
+    provider's containers run them."""
     provider = MagicMock(**facts)
 
     assert EnvironmentGatewayProvider.in_vm(provider) is in_vm
     assert EnvironmentGatewayProvider.accepts(provider) is accepts
-    assert EnvironmentGatewayProvider.accepts(provider, prepared=False) is by_name_otherwise
 
 
 @pytest.mark.parametrize("facts, websites, problem", [
@@ -240,6 +238,38 @@ async def test_container_mode_refuses_a_servicedb_image_in_this_machines_registr
                 mcp_server_images=[_image("mcp-slack")], gateway_port=18765, website_configs=None,
                 gateway_mode=MagicMock(value="performance"), ttl_seconds=60, disk_size_gb=10,
             )
+
+
+_SERVICEDB_BUILT_HERE = DockerImageArtifact(id="default-db__db_image", version=1, description="d",
+                                            image_name="localhost:5000/local/servicedb:v1",
+                                            tar_gz_object_url="file:///state/servicedb.tar.gz",
+                                            build_context_object_url="file:///state/ctx.tar.gz", platform="linux/arm64")
+
+
+@pytest.mark.asyncio
+async def test_container_mode_prepares_the_servicedb_images_it_starts_as_it_does_the_gateways():
+    """As the infra bootstrap writes them: in this machine's registry, which Modal can't pull from, with the build
+    contexts Modal builds them from."""
+    provider = ModalSandboxProvider()
+    gp = EnvironmentGatewayProvider()
+    gp._state_provider = MagicMock(spec=LocalPostgresStateProvider)
+    gp._state_provider.container_images.return_value = [_SERVICEDB_BUILT_HERE.image_name]
+    gp._state_provider.store_images_to_load.return_value = [_SERVICEDB_BUILT_HERE]
+    prepared = []
+
+    async def prepare(image, *, attribution=None):
+        prepared.append(image)
+
+    with patch.object(provider, "prepare_image", side_effect=prepare), \
+         patch.object(provider, "create_container", side_effect=RuntimeError("stop")), \
+         patch("agent_env.env.env.Env.get", return_value=MagicMock(docker_image_artifact=_image("agent-gateway"))):
+        with pytest.raises(RuntimeError, match="stop"):
+            await gp._deploy_via_containers(
+                sandbox_provider=provider, mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")],
+                mcp_server_images=[_image("mcp-slack")], gateway_port=18765, website_configs=None,
+                gateway_mode=MagicMock(value="performance"), ttl_seconds=60, disk_size_gb=10,
+            )
+    assert [image.id for image in prepared] == ["agent-gateway", "mcp-slack", "default-db__db_image"]
 
 
 @pytest.mark.asyncio

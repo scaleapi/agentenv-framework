@@ -31,7 +31,6 @@ from agent_env.env.gateway.get_time import (
 )
 from agent_env.env.envs.service_db import ServiceDBEnv
 from agent_env.env.envs.website_browser import (
-    PLAYWRIGHT_MCP_VERSION,
     WEBSITE_BROWSER_IMAGE_TAG,
     WEBSITE_BROWSER_ENVIRONMENT_NAME,
 )
@@ -64,7 +63,7 @@ GATEWAY_IMAGE = DockerImageConfig(
     name="gateway",
     dockerfile=ENV_DIR / "gateway" / "Dockerfile",
     tag="env-gateway",
-    context=ENV_DIR,
+    context=ENV_DIR / "gateway",
     service_name="gateway",
 )
 
@@ -229,7 +228,6 @@ def website_browser_env() -> MCPServerEnv:
     logger.info(f"Building {img.name} Docker image...")
     result = subprocess.run(
         ["docker", "build", "--platform", "linux/amd64",
-         "--build-arg", f"PLAYWRIGHT_MCP_VERSION={PLAYWRIGHT_MCP_VERSION}",
          "-f", str(img.dockerfile), "-t", img.tag, str(img.context)],
         capture_output=True,
         text=True,

@@ -294,32 +294,35 @@ class VmSandbox(Sandbox):
 
     async def load_docker_images(self, artifacts: list) -> None:
         """Put each DockerImageArtifact's image on the VM: those with a tar.gz are loaded from it, in parallel, those
-        with only a build context are built from it, and the rest are pulled by image name. An image this VM can't get,
-        such as one to pull from a registry on this machine when the VM isn't on it, or can't run, being built for
-        another platform than its own, is refused before anything is loaded."""
+        with only a build context are built from it, and the rest are pulled by image name; one whose tar.gz is built
+        for another platform than the VM's is built from the build context beside it, for the VM's. An image this VM
+        can't get, such as one to pull from a registry on this machine when the VM isn't on it, or can't run, being
+        built for another platform with no build context, is refused before anything is loaded."""
         if not artifacts:
             return
         if problems := self.load_problems(artifacts):
             raise RuntimeError(f"Can't load images: {'; '.join(problems)}")
-        if tarballs := [artifact for artifact in artifacts if artifact.tar_gz_object_url]:
+        built = [artifact for artifact in artifacts if artifact.context_only or artifact.rebuilt_for(self.platform)]
+        if tarballs := [artifact for artifact in artifacts
+                        if artifact.tar_gz_object_url and not artifact.rebuilt_for(self.platform)]:
             await self._load_tarballs(tarballs)
         if pulled := [artifact.image_name for artifact in artifacts
                       if not artifact.tar_gz_object_url and not artifact.context_only]:
             await self.pull_images(pulled)
-        if built := [artifact for artifact in artifacts if artifact.context_only]:
+        if built:
             await self.build_images(built)
 
     def load_problems(self, artifacts: list) -> list[str]:
         """Why this VM can't get or run each DockerImageArtifact it can't, as ``load_docker_images`` refuses them: one
         to pull from a registry on this machine when the VM isn't on it, one with no tar.gz whose name names no
-        registry, or one built for another platform than its own."""
+        registry, or one built for another platform than its own with no build context beside it."""
         return [problem for artifact in artifacts
                 if (problem := artifact.load_problem(on_this_machine=self.ON_THIS_MACHINE, platform=self.platform))]
 
     async def build_images(self, artifacts: list) -> None:
-        """Build each context-only image from its build context, one build at a time, so heavy builds don't contend
-        for one VM; images with the same ``source_digest`` share a build. The build pulls its base images and packages
-        itself, so a network policy restricting egress must allow them; only the context's download is let through."""
+        """Build each image from its build context, one build at a time, so heavy builds don't contend for one VM;
+        images with the same ``source_digest`` share a build. The build pulls its base images and packages itself, so
+        a network policy restricting egress must allow them; only the context's download is let through."""
         builds: dict[str, list] = {}
         for artifact in artifacts:
             builds.setdefault(artifact.source_digest or artifact.build_context_object_url, []).append(artifact)
@@ -327,13 +330,14 @@ class VmSandbox(Sandbox):
             await self._build_image(images)
 
     async def _build_image(self, images: list) -> None:
-        """Download the context ``images`` share, extract it, and ``docker build`` it, tagged with each image's name.
-        The work folder is this build's own, since a host can run builds of one context at once: two of the local
-        provider's sandboxes, or two deploys onto one VM."""
+        """Download the context ``images`` share, extract it, and ``docker build`` it, tagged with each image's name,
+        for the platform it records, or this VM's when its tar.gz is for another. The work folder is this build's own,
+        since a host can run builds of one context at once: two of the local provider's sandboxes, or two deploys onto
+        one VM."""
         first = images[0]
         names = list(dict.fromkeys(image.image_name for image in images))
         work = f"/tmp/agent-env-build-{uuid.uuid4().hex}"
-        platform = first.platform or DEFAULT_BUILD_PLATFORM
+        platform = self.platform if first.rebuilt_for(self.platform) else first.platform or DEFAULT_BUILD_PLATFORM
         tags = " ".join(f"-t {shlex.quote(name)}" for name in names)
         logger.info(f"Building {', '.join(names)} from its build context, for {platform}...")
         await self.exec_script(f"rm -rf {work} && mkdir -p {work}/context")

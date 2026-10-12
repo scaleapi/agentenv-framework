@@ -3,6 +3,8 @@ local Postgres state runs from, and the website browser it adds for websites. Ea
 (``default_gateway_env_id``, ``default_service_db_env_id``, ``default_website_browser_env_id``).
 
 The put commands build them one at a time; ``ensure_default_envs`` builds the ones a run needs, into local stores only.
+Each image keeps its build context beside its tar.gz, so a VM or Modal running another platform than the one it was
+built on builds it again from that.
 """
 
 from __future__ import annotations
@@ -17,11 +19,7 @@ from agent_env.config import get_config
 from agent_env.env.env import Env
 from agent_env.env.envs import GatewayEnv, MCPServerEnv
 from agent_env.env.envs.service_db import ServiceDBEnv
-from agent_env.env.envs.website_browser import (
-    PLAYWRIGHT_MCP_VERSION,
-    WEBSITE_BROWSER_ENVIRONMENT_NAME,
-    WEBSITE_BROWSER_IMAGE_TAG,
-)
+from agent_env.env.envs.website_browser import WEBSITE_BROWSER_ENVIRONMENT_NAME, WEBSITE_BROWSER_IMAGE_TAG
 from agent_env.store.base import NotFoundError
 from agent_env.store.document_store import LocalSqliteDocumentStore
 from agent_env.store.ids import derive_id
@@ -34,7 +32,7 @@ from agent_env.utils.docker_build import build_image, docker_unreachable
 
 _ENV_PACKAGE = Path(__file__).parent
 GATEWAY_DOCKERFILE = _ENV_PACKAGE / "gateway" / "Dockerfile"
-GATEWAY_CONTEXT = _ENV_PACKAGE
+GATEWAY_CONTEXT = GATEWAY_DOCKERFILE.parent
 GATEWAY_IMAGE_TAG = "env-gateway"
 SERVICE_DB_DOCKERFILE = _ENV_PACKAGE / "envs" / "service_db" / "Dockerfile"
 SERVICE_DB_IMAGE_NAME = "agent-env-service-db"
@@ -59,7 +57,8 @@ def put_gateway_env(env_id: str, *, platform: str | None, metadata: Mapping[str,
     build_image(GATEWAY_DOCKERFILE, GATEWAY_CONTEXT, GATEWAY_IMAGE_TAG, platform=platform)
     say("Creating DockerImageArtifact...")
     artifact = DockerImageArtifact.put(id=derive_id(env_id, "env_image"), description="Created from agent-env CLI",
-                                       image_name=GATEWAY_IMAGE_TAG)
+                                       image_name=GATEWAY_IMAGE_TAG, build_context_path=str(GATEWAY_CONTEXT),
+                                       dockerfile_path=GATEWAY_DOCKERFILE.name)
     say(f"Created artifact: id={artifact.id} version={artifact.version}")
     say("Creating GatewayEnv...")
     env = GatewayEnv.put(id=env_id, docker_image_artifact=artifact,
@@ -84,7 +83,9 @@ def put_service_db_env(env_id: str, *, platform: str | None, metadata: Mapping[s
         say(f"Building {label} image from {dockerfile}...")
         build_image(dockerfile, dockerfile.parent, image, platform=platform)
         say(f"Creating {label} DockerImageArtifact...")
-        artifacts.append(DockerImageArtifact.put(id=artifact_id, description=description, image_name=image))
+        artifacts.append(DockerImageArtifact.put(id=artifact_id, description=description, image_name=image,
+                                                 build_context_path=str(dockerfile.parent),
+                                                 dockerfile_path=dockerfile.name))
         say(f"Created {label} DockerImageArtifact: id={artifacts[-1].id} version={artifacts[-1].version}")
     say("Creating ServiceDBEnv...")
     env = ServiceDBEnv.put(
@@ -103,11 +104,12 @@ def put_website_browser_env(env_id: str, *, platform: str | None, metadata: Mapp
     """Build the website browser image for ``platform`` (this host's when None) and write it as the MCP server env
     ``env_id``."""
     say("Building website browser Docker image...")
-    build_image(WEBSITE_BROWSER_DOCKERFILE, WEBSITE_BROWSER_CONTEXT, WEBSITE_BROWSER_IMAGE_TAG, platform=platform,
-                build_args={"PLAYWRIGHT_MCP_VERSION": PLAYWRIGHT_MCP_VERSION})
+    build_image(WEBSITE_BROWSER_DOCKERFILE, WEBSITE_BROWSER_CONTEXT, WEBSITE_BROWSER_IMAGE_TAG, platform=platform)
     say("Creating DockerImageArtifact...")
     artifact = DockerImageArtifact.put(id=derive_id(env_id, "env_image"), description="Website browser MCP server",
-                                       image_name=WEBSITE_BROWSER_IMAGE_TAG)
+                                       image_name=WEBSITE_BROWSER_IMAGE_TAG,
+                                       build_context_path=str(WEBSITE_BROWSER_CONTEXT),
+                                       dockerfile_path=WEBSITE_BROWSER_DOCKERFILE.name)
     say(f"Created artifact: id={artifact.id} version={artifact.version}")
     say("Creating MCPServerEnv...")
     env = MCPServerEnv.put(id=env_id, docker_image_artifact=artifact, environment_name=WEBSITE_BROWSER_ENVIRONMENT_NAME,
@@ -123,21 +125,19 @@ def _metadata(kind: str, dockerfile: Path, context: Path, extra: Mapping[str, st
 
 BUILD_INPUTS_KEY = "build_inputs_sha256"  # the metadata key a put records build_inputs_digest under
 _BUILD_INPUTS = {
-    GATEWAY: lambda: _files_under(GATEWAY_DOCKERFILE.parent),  # the gateway's Dockerfile copies only its own folder
+    GATEWAY: lambda: _files_under(GATEWAY_CONTEXT),
     SERVICE_DB: lambda: [SERVICE_DB_DOCKERFILE, DB_WEB_DOCKERFILE, DB_MCP_DOCKERFILE],  # they copy nothing
     WEBSITE_BROWSER: lambda: [WEBSITE_BROWSER_DOCKERFILE, WEBSITE_BROWSER_CONTEXT / "entrypoint.sh"],
 }
-_BUILD_ARGS = {WEBSITE_BROWSER: {"PLAYWRIGHT_MCP_VERSION": PLAYWRIGHT_MCP_VERSION}}
 
 
 def build_inputs_digest(kind: str) -> str:
-    """A digest of what agent-env builds ``kind``'s images from: the Dockerfiles it ships, the files they copy and the
-    build args. What a build fetches (base images, packages) isn't an input."""
+    """A digest of what agent-env builds ``kind``'s images from: the Dockerfiles it ships and the files they copy,
+    which hold every build arg's value too, so a build from the build context alone builds the same thing. What a
+    build fetches (base images, packages) isn't an input."""
     digest = hashlib.sha256()
     for path in sorted(_BUILD_INPUTS[kind]()):
         digest.update(path.relative_to(_ENV_PACKAGE).as_posix().encode() + b"\0" + path.read_bytes() + b"\0")
-    for name, value in sorted(_BUILD_ARGS.get(kind, {}).items()):
-        digest.update(f"{name}={value}\0".encode())
     return digest.hexdigest()
 
 

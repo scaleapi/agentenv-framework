@@ -28,7 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-ARG PLAYWRIGHT_MCP_VERSION
+ARG PLAYWRIGHT_MCP_VERSION=0.0.41
 ENV PLAYWRIGHT_MCP_VERSION=${PLAYWRIGHT_MCP_VERSION}
 
 # Pre-install the pinned version and Playwright's Chromium, which is built for linux/amd64 and linux/arm64 alike

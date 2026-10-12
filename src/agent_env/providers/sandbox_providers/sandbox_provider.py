@@ -42,15 +42,15 @@ class Accepts(Enum):
 
     LOADABLE = "loadable"  # any a VM can get: a tar.gz it loads, a registry name it pulls, a build context it builds
     NAME = "name"  # one it starts by its name, which an image that is only a build context gets only from a build
-    NAME_OR_CONTEXT = "name_or_context"  # one it starts by its name, or a build context it builds first (prepare_image)
+    NAME_OR_CONTEXT = "name_or_context"  # one it starts by its name, or builds first from its build context (prepare_image)
 
     def problem(self, image: DockerImageArtifact, *, on_this_machine: bool) -> str | None:
         """Why a provider that accepts these, whose sandboxes run ``on_this_machine`` or elsewhere, can't run ``image``,
         or None when it can: one elsewhere can't pull from a registry on this machine."""
         if self is Accepts.LOADABLE:
             return image.load_problem(on_this_machine=on_this_machine)
-        if self is Accepts.NAME_OR_CONTEXT and image.context_only:
-            return None  # the provider builds it
+        if self is Accepts.NAME_OR_CONTEXT and image.build_context_object_url:
+            return None  # the provider builds what it can't pull
         return image.by_name_problem(on_this_machine=on_this_machine)
 
 

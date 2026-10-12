@@ -8,7 +8,7 @@ import pytest
 from click.testing import CliRunner
 
 from agent_env.cli import cli
-from agent_env.env.envs.website_browser import PLAYWRIGHT_MCP_VERSION, WEBSITE_BROWSER_IMAGE_TAG
+from agent_env.env.envs.website_browser import WEBSITE_BROWSER_IMAGE_TAG
 from agent_env.utils.docker_build import DockerBuildError
 
 gateway = importlib.import_module("agent_env.cli.env.gateway")  # the packages export the click commands
@@ -50,7 +50,7 @@ def _put_commands(tmp_path):
                         service_db.SERVICE_DB_IMAGE_NAME), None),
         "website-browser": ("agent_env.env.bootstrap", ["env", "website-browser", "put", "--id", "x"],
                             (website_browser.WEBSITE_BROWSER_DOCKERFILE, website_browser.WEBSITE_BROWSER_CONTEXT,
-                             WEBSITE_BROWSER_IMAGE_TAG), {"PLAYWRIGHT_MCP_VERSION": PLAYWRIGHT_MCP_VERSION}),
+                             WEBSITE_BROWSER_IMAGE_TAG), None),
     }
 
 

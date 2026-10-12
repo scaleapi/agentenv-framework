@@ -2,6 +2,7 @@
 stores only, for this host's platform, once each however many runs ask."""
 
 import importlib
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -12,6 +13,7 @@ from agent_env.cli.up import _bootstrap_envs, up
 from agent_env.env import GatewayEnv
 from agent_env.env import bootstrap
 from agent_env.env.bootstrap import GATEWAY, SERVICE_DB, WEBSITE_BROWSER, InfraError, ensure_default_envs
+from agent_env.env.envs.website_browser import PLAYWRIGHT_MCP_VERSION
 
 
 @pytest.fixture
@@ -33,6 +35,29 @@ def puts(local_stores, monkeypatch):
     for kind in (GATEWAY, SERVICE_DB, WEBSITE_BROWSER):
         monkeypatch.setitem(bootstrap._PUTS, kind, put(kind))
     return calls
+
+
+@pytest.mark.parametrize("put, contexts", [
+    (bootstrap.put_gateway_env, [(bootstrap.GATEWAY_CONTEXT, "Dockerfile")]),
+    (bootstrap.put_service_db_env, [(bootstrap.SERVICE_DB_DOCKERFILE.parent, name)
+                                    for name in ("Dockerfile", "Dockerfile.db-web", "Dockerfile.db-mcp")]),
+    (bootstrap.put_website_browser_env, [(bootstrap.WEBSITE_BROWSER_CONTEXT, "Dockerfile")]),
+], ids=[GATEWAY, SERVICE_DB, WEBSITE_BROWSER])
+def test_each_infra_image_keeps_the_build_context_it_is_built_from(local_stores, monkeypatch, put, contexts):
+    """So a VM or Modal running another platform than this machine builds it again from that."""
+    kept = []
+
+    def keep(id, *, description, image_name, build_context_path=None, dockerfile_path=None, platform=None):
+        kept.append((Path(build_context_path), dockerfile_path))
+        return get_artifact_store().put_document(DockerImageArtifact(
+            id=id, description=description, image_name=image_name, tar_gz_s3_url="file:///x.tar.gz"))
+
+    monkeypatch.setattr(bootstrap, "build_image", lambda *args, **kwargs: None)
+    monkeypatch.setattr(bootstrap.DockerImageArtifact, "put", keep)
+
+    put("x", platform=None)
+
+    assert kept == contexts
 
 
 def test_missing_infra_is_built_for_this_host_in_order_and_once(puts):
@@ -168,12 +193,14 @@ def test_a_put_records_what_the_env_was_built_from_whatever_metadata_it_was_give
     assert env.metadata["owner"] == "me"
 
 
-def test_the_build_inputs_are_the_shipped_files_and_build_args_less_python_caches(tmp_path, monkeypatch):
+def test_the_build_inputs_are_the_shipped_files_less_python_caches(tmp_path):
     (tmp_path / "__pycache__").mkdir()
     (tmp_path / "__pycache__/gateway.cpython-312.pyc").write_text("compiled")
     (tmp_path / "gateway.py").write_text("served")
-    before = bootstrap.build_inputs_digest(WEBSITE_BROWSER)
-    monkeypatch.setitem(bootstrap._BUILD_ARGS, WEBSITE_BROWSER, {"PLAYWRIGHT_MCP_VERSION": "9.9.9"})
 
     assert bootstrap._files_under(tmp_path) == [tmp_path / "gateway.py"]
-    assert bootstrap.build_inputs_digest(WEBSITE_BROWSER) != before
+
+
+def test_the_website_browser_dockerfile_installs_the_playwright_mcp_version_agent_env_names():
+    """A build from its build context alone, which carries no build args, installs that version too."""
+    assert f"ARG PLAYWRIGHT_MCP_VERSION={PLAYWRIGHT_MCP_VERSION}\n" in bootstrap.WEBSITE_BROWSER_DOCKERFILE.read_text()

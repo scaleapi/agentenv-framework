@@ -367,23 +367,27 @@ def test_a_lone_server_whose_image_is_only_a_build_context_is_refused_on_any_pro
     assert [entry.name for entry in dry_run_bundle(bundle_dir, sandbox="modal").runs] == ["t"]
 
 
-def test_modal_builds_a_gateway_image_that_is_only_a_build_context_but_not_a_service_db_one(bundle_dir):
+def _built_here(id):
+    """An image as the infra bootstrap builds it: in this machine's registry, for its platform, with its tar.gz and
+    its build context."""
+    with namespace_routing():
+        return get_artifact_store().put_document(DockerImageArtifact(
+            id=id, description=id, image_name=f"localhost:5000/{id}:v1", tar_gz_s3_url="file:///tmp/img-v1.tar.gz",
+            build_context_object_url="file:///tmp/ctx.tar.gz", dockerfile_path="Dockerfile", platform="linux/arm64",
+            source_digest="sha256:" + "2" * 64))
+
+
+@pytest.mark.parametrize("image", [_context_image, _built_here], ids=["only-a-build-context", "built-here"])
+def test_modal_builds_the_gateway_and_service_db_images_it_cant_pull_from_their_build_contexts(bundle_dir, image):
     with namespace_routing():
         MCPServerEnv.put(id="crm", docker_image_artifact=_image("crm-image", REMOTE), environment_name="crm")
+        GatewayEnv.put(id="default", docker_image_artifact=image("gateway-default"))
+        ServiceDBEnv.put(id="default-db", db_docker_image_artifact=image("service-db-default-db"),
+                         db_web_docker_image_artifact=image("db-web-default-db"),
+                         db_mcp_docker_image_artifact=image("db-mcp-default-db"))
     _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
-    _infra(REMOTE)
-    with namespace_routing():
-        GatewayEnv.put(id="default", docker_image_artifact=_context_image("gateway-default"))
-    assert [entry.name for entry in dry_run_bundle(bundle_dir, sandbox="modal").runs] == ["t"]
 
-    with namespace_routing():
-        ServiceDBEnv.put(id="default-db", db_docker_image_artifact=_context_image("service-db-default-db"),
-                         db_web_docker_image_artifact=_image("db-web-default-db", REMOTE),
-                         db_mcp_docker_image_artifact=_image("db-mcp-default-db", REMOTE))
-    assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox="modal")) == [
-        "tasks/t.json: step 'env': deploys the service-db env 'default-db''s image 'service-db-default-db' on the 'modal' "
-        "sandbox provider, which runs it by name: 'service-db-default-db' v2 is only a build context, which has to be "
-        "built, not pulled; run it on a provider whose VMs build it, such as --sandbox modal_vm"]
+    assert [entry.name for entry in dry_run_bundle(bundle_dir, sandbox="modal").runs] == ["t"]
 
 
 # Images built for another platform than the sandboxes run, which a VM refuses as it loads them
@@ -684,13 +688,32 @@ def test_missing_infra_in_stores_that_arent_local_is_refused_naming_its_put_comm
     ]
 
 
-def test_a_gateway_deploy_on_another_provider_needs_infra_it_can_reach(bundle_dir):
+def test_a_gateway_deploy_on_another_provider_has_its_missing_infra_built_in_local_stores(bundle_dir, monkeypatch):
+    """Built for this machine, with the build context a VM of another platform builds it from."""
     _env("crm", REMOTE)
     _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
 
+    assert [str(build) for build in dry_run_bundle(bundle_dir, sandbox="modal_vm").infra] == [
+        "service-db env 'default-db' (missing)", "gateway env 'default' (missing)"]
+    monkeypatch.setattr("agent_env.bundle.preflight.stores_are_local", lambda: False)
     (problem, *_) = _problems(lambda: dry_run_bundle(bundle_dir, sandbox="modal_vm"))
-    assert problem.startswith("tasks/t.json: step 'env': deploys on the 'modal_vm' sandbox provider, which needs the "
-                              "gateway env 'default', and the store doesn't hold it")
+    assert problem == ("tasks/t.json: step 'env': deploys on the 'modal_vm' sandbox provider, which needs the gateway "
+                       "env 'default', and the store doesn't hold it; agent-env builds infra envs only into local "
+                       "stores, so put it with `agent-env env gateway put --id default`")
+
+
+def test_infra_built_for_deploys_elsewhere_needs_docker_here(bundle_dir, monkeypatch):
+    _env("crm", REMOTE)
+    _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
+    monkeypatch.setattr(preflight_module, "docker_unreachable", lambda: "docker isn't on PATH")
+
+    assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox="modal_vm")) == [
+        "building the service-db, gateway env needs docker, and docker isn't on PATH"]
+
+
+def test_a_gateway_deploy_on_another_provider_needs_infra_it_can_reach(bundle_dir):
+    _env("crm", REMOTE)
+    _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
     _infra(PULLED_HERE)
     problems = _problems(lambda: dry_run_bundle(bundle_dir, sandbox="modal_vm"))
     assert problems[0] == ("tasks/t.json: step 'env': deploys the gateway env 'default''s image 'gateway-default' on the "

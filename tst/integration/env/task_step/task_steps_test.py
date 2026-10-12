@@ -64,7 +64,7 @@ GATEWAY_IMAGE = DockerImageConfig(
     name="gateway",
     dockerfile=ENV_DIR / "gateway" / "Dockerfile",
     tag="env-gateway",
-    context=ENV_DIR,
+    context=ENV_DIR / "gateway",
     service_name="gateway",
 )
 

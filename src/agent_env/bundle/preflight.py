@@ -16,9 +16,10 @@ local provider, and as its build context alone when they deploy on providers tha
 themselves. One version is one of the two, so a run deploying it both ways is refused, as is one deploying it on a
 provider that runs an image by name.
 
-A gateway deploy on the local provider runs on infra envs the store may not hold yet: the gateway, the service-db its
-local Postgres state runs from, and the website browser it adds for websites. The run builds those once its writes are
-done (``agent_env.env.bootstrap``), so they're named here, and refused here when they can't be built.
+A gateway deploy runs on infra envs the store may not hold yet: the gateway, the service-db its local Postgres state
+runs from, and the website browser it adds for websites. In local stores the run builds those once its writes are done
+(``agent_env.env.bootstrap``), for this machine's platform and with their build contexts, which a VM or Modal running
+another platform builds them from; so they're named here, and refused here when they can't be built.
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ from agent_env.env.bootstrap import (
     default_env_id,
     infra_to_build,
     put_command,
+    stores_are_local,
 )
 from agent_env.env.env import Env
 from agent_env.env.envs._deployment import provider_or_class
@@ -154,11 +156,15 @@ class _Walk:
             self.run_problems.extend(e.problems)
         contexts = self._contexts()
         self._default_agent()
-        if self.docker_users and (reason := docker_unreachable()):
+        reason = docker_unreachable() if self.docker_users or infra else None
+        if reason and self.docker_users:
             shown = ", ".join(self.docker_users[:_SHOWN_DOCKER_USERS])
             more = len(self.docker_users) - _SHOWN_DOCKER_USERS
             self.run_problems.append(f"the local sandbox provider runs containers for {shown}"
                                      f"{f' and {more} more' if more > 0 else ''}, and {reason}")
+        elif reason:  # infra the run builds for deploys elsewhere
+            self.run_problems.append(f"building the {', '.join(build.kind for build in infra)} env needs docker, and "
+                                     f"{reason}")
         problems = list(self.run_problems)
         for problem, wheres in self.problems.items():
             first, *others = wheres
@@ -191,10 +197,12 @@ class _Walk:
         if any(link.ON_THIS_MACHINE for link in taking):
             self.infra |= kinds
             self.docker_users.append(where)
+        elif taking and stores_are_local():
+            self.infra |= kinds
 
     def _gateway_elsewhere(self, env_id: str, env_provider: type, kinds: set[str], link: SandboxProvider) -> list[str]:
         """Why ``link``, a provider not on this machine, can't run env ``env_id``'s gateway deploy: its sandboxes, or
-        the infra envs of ``kinds`` it runs, which agent-env builds only for the local provider."""
+        the infra envs of ``kinds`` it runs."""
         found = []
         if problem := env_provider.sandbox_problem(link, websites=WEBSITE_BROWSER in kinds):
             found.append(f"deploys env {env_id!r} on the {_shown(link)} sandbox provider, which {problem}; run it on a VM "
@@ -393,13 +401,14 @@ class _Walk:
             try:
                 env = Env.get(env_id)
             except NotFoundError:
-                found.append(f"deploys on the {_shown(link)} sandbox provider, which needs the {kind} env {env_id!r}, and "
-                             "the store doesn't hold it; agent-env builds it only for the local sandbox provider, so put "
-                             f"it in a store that provider can reach (`{put_command(kind)}`)")
+                if not stores_are_local():  # in local stores the run builds it
+                    found.append(f"deploys on the {_shown(link)} sandbox provider, which needs the {kind} env "
+                                 f"{env_id!r}, and the store doesn't hold it; agent-env builds infra envs only into local "
+                                 f"stores, so put it with `{put_command(kind)}`")
                 continue
             artifacts = ([env.db_docker_image_artifact, env.db_web_docker_image_artifact,
                           env.db_mcp_docker_image_artifact] if isinstance(env, ServiceDBEnv) else [env.docker_image_artifact])
-            accepts = EnvironmentGatewayProvider.accepts(link, prepared=kind == GATEWAY)
+            accepts = EnvironmentGatewayProvider.accepts(link)
             found += [refusal for image in artifacts
                       if (refusal := self._refusal(link, accepts, _Image(f"the {kind} env {env_id!r}'s image {image.id!r}",
                                                                          image), vms_load=True))]

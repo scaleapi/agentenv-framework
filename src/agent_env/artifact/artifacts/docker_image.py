@@ -275,12 +275,18 @@ class DockerImageArtifact(Artifact):
         tag the image's build gives it."""
         return bool(self.build_context_object_url) and not self.tar_gz_object_url and not names_registry(self.image_name)
 
+    def rebuilt_for(self, platform: str | None) -> bool:
+        """Whether a VM sandbox of ``platform`` builds this image from its build context rather than load its tar.gz,
+        which is built for another platform: the image runs, though not byte for byte the one stored."""
+        return bool(self.tar_gz_object_url and self.build_context_object_url) and self.platform_problem(platform) is not None
+
     def load_problem(self, *, on_this_machine: bool, platform: str | None = None) -> str | None:
         """Why a VM sandbox can't get this image, or None when it can: a tar.gz is loaded, an image with none is pulled
         when its name names a registry, one that a VM ``on_this_machine`` or not reaches, and built from its build
-        context when it has only that; and a VM of ``platform`` runs only an image built for it."""
+        context when it has only that; and a VM of ``platform`` runs only an image built for it, or one it rebuilds
+        from the build context beside a tar.gz of another platform."""
         if self.tar_gz_object_url or self.context_only:
-            return self.platform_problem(platform)
+            return None if self.rebuilt_for(platform) else self.platform_problem(platform)
         if names_registry(self.image_name):
             return pull_problem(self.image_name, on_this_machine=on_this_machine) or self.platform_problem(platform)
         return (f"{self.id!r} v{self.version} has no tar.gz, and its image name {self.image_name!r} doesn't name a "

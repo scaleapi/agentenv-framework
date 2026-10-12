@@ -137,13 +137,12 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         return SANDBOX_MODE_VM in sandbox_provider.SUPPORTED_SANDBOX_MODES
 
     @classmethod
-    def accepts(cls, sandbox_provider: SandboxProvider, *, prepared: bool = True) -> Accepts:
+    def accepts(cls, sandbox_provider: SandboxProvider) -> Accepts:
         """The images a deploy on ``sandbox_provider`` runs: in a VM, any it loads; in containers, those the provider's
-        containers run, of the images the deploy prepares (its servers' and the gateway's), and the rest (its
-        service-db's) by name."""
+        containers run, as it prepares each (its servers', the gateway's and its service-db's)."""
         if cls.in_vm(sandbox_provider):
             return Accepts.LOADABLE
-        return sandbox_provider.CONTAINER_ACCEPTS if prepared else Accepts.NAME
+        return sandbox_provider.CONTAINER_ACCEPTS
 
     @classmethod
     def sandbox_problem(cls, sandbox_provider: SandboxProvider, *, websites: bool) -> str | None:
@@ -894,15 +893,20 @@ COMPOSE_EOF'''
 
         config = get_config()
         gateway_env = Env.get(config.default_gateway_env_id)
-        # Each image is checked, and prepared (one that is only a build context, built), before anything is created, so
-        # an image the provider can't run, or a failed build, leaves nothing.
+        # Each image is checked, and prepared (one the provider can't pull, built from its build context), before
+        # anything is created, so an image the provider can't run, or a failed build, leaves nothing.
         images = [gateway_env.docker_image_artifact, *mcp_server_images]
-        accepts = self.accepts(sandbox_provider)
-        problems = [problem for image in images
-                    if (problem := accepts.problem(image, on_this_machine=sandbox_provider.ON_THIS_MACHINE))]
+        problems = []
         if self._needs_local_postgres:  # the servicedb and its sidecars, by the names the state provider picks
-            problems += [problem for name in self._state_provider.container_images()
-                         if (problem := pull_problem(name, on_this_machine=sandbox_provider.ON_THIS_MACHINE))]
+            stored = {image.image_name: image for image in self._state_provider.store_images_to_load()}
+            for name in self._state_provider.container_images():
+                if name in stored:
+                    images.append(stored[name])
+                elif problem := pull_problem(name, on_this_machine=sandbox_provider.ON_THIS_MACHINE):
+                    problems.append(problem)
+        accepts = self.accepts(sandbox_provider)
+        problems += [problem for image in images
+                     if (problem := accepts.problem(image, on_this_machine=sandbox_provider.ON_THIS_MACHINE))]
         if problems:
             raise ValueError(f"Can't deploy a gateway on {type(sandbox_provider).__name__}, which runs its images by "
                              f"name: {'; '.join(problems)}")
