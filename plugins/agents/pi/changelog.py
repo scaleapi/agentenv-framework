@@ -1,10 +1,11 @@
 """Tool-call changelog capture and replay for the snapshot extension's changelog feature.
 
-After each tool call the capture uploads one increment, ``NNNNNN.tar`` named by the tool call's zero-based
+After each tool call the capture builds one increment, ``NNNNNN.tar`` named by the tool call's zero-based
 position: the files under the roots that changed since the previous increment (``files/<absolute path>``),
-the paths that disappeared, and the conversation's pi session as it stood (``session.jsonl``). A failed
-upload leaves its changes for the next increment, so positions may be sparse, as the protocol allows; the
-last failed one is retried by ``flush`` when the task ends, since no later increment may follow it.
+the paths that disappeared, and the conversation's pi session as it stood (``session.jsonl``). Increments
+upload in order; a failed one is kept as built, with any built after it, for the next tool call or for
+``flush`` when the task ends. If what is held outgrows ``MAX_PENDING_BYTES``, it is dropped and capture stops:
+every later ``flush`` reports the changelog incomplete.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ META = "meta.json"
 SESSION = "session.jsonl"
 FILES = "files/"
 logger = logging.getLogger(__name__)
+MAX_PENDING_BYTES = 256 * 1024 * 1024
 _SKIPPED_DIRS = frozenset({"__pycache__", ".git"})
 
 Signature = tuple[int, int, int]
@@ -110,6 +112,7 @@ class ChangelogCapture:
         self._position = 0
         self._state: dict[str, Signature] = {}
         self._pending: deque[tuple[str, bytes]] = deque()
+        self._abandoned = False
 
     async def start(self) -> None:
         self._state = await asyncio.to_thread(scan, self.roots)
@@ -118,11 +121,18 @@ class ChangelogCapture:
         """Build the increment for the next tool call and upload it with any still pending, in order. A failed
         upload is logged and kept, not raised, for the next capture or ``flush``."""
         async with self._lock:
+            if self._abandoned:
+                return
             current = await asyncio.to_thread(scan, self.roots)
             changed = [path for path, signature in current.items() if self._state.get(path) != signature]
             deleted = [path for path in self._state if path not in current]
             meta = {"position": self._position, "context_id": context_id, "session_id": session_id}
             body = await asyncio.to_thread(increment, changed, deleted, self.roots, session, meta)
+            if sum(len(held) for _, held in self._pending) + len(body) > MAX_PENDING_BYTES:
+                logger.error("changelog uploads are failing with %d increments held; capture stops", len(self._pending))
+                self._pending.clear()
+                self._abandoned = True
+                return
             self._pending.append((f"{self._position:06d}.tar", body))
             self._position += 1
             self._state = current
@@ -132,7 +142,7 @@ class ChangelogCapture:
         """Retry the pending increments; whether every increment so far is uploaded."""
         async with self._lock:
             await self._drain()
-            return not self._pending
+            return not self._pending and not self._abandoned
 
     async def _drain(self) -> None:
         while self._pending:

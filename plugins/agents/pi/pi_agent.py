@@ -331,14 +331,23 @@ def _pack(directory: Path, archive: Path) -> None:
 
 
 def _unpack(archive: Path, directory: Path) -> None:
-    """Replace ``directory``'s contents with the archive's."""
-    with tarfile.open(archive) as tar:
+    """Replace ``directory``'s contents with the archive's. The archive is extracted into a staging directory
+    inside it first, so one that fails to extract leaves the contents as they were."""
+    staging = directory / f".pi-a2a-restore-{uuid.uuid4().hex}"
+    try:
+        with tarfile.open(archive) as tar:
+            tar.extractall(staging, filter="data")
         for child in directory.iterdir():
+            if child == staging:
+                continue
             if child.is_dir() and not child.is_symlink():
                 shutil.rmtree(child)
             else:
                 child.unlink()
-        tar.extractall(directory, filter="data")
+        for child in staging.iterdir():
+            child.rename(directory / child.name)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 @a2a_agent(
@@ -390,6 +399,9 @@ class PiAgent(AgentEnvAgent):
         self.changelog: ChangelogCapture | None = None
         # A changelog is one sequence of tool calls, so while one is captured, runs take turns.
         self._changelog_turn = asyncio.Lock()
+        # Restoring the workspace waits for no task to be running in it, and tasks wait for a restore to finish.
+        self._workspace_lock = asyncio.Lock()
+        self._running = 0
 
     def create_app(self) -> Starlette:
         app = super().create_app()
@@ -414,6 +426,8 @@ class PiAgent(AgentEnvAgent):
             directory.mkdir(parents=True, exist_ok=True)
         cwd = request.workspace or self.workspace
         cwd.mkdir(parents=True, exist_ok=True)
+        async with self._workspace_lock:
+            self._running += 1
         try:
             with self.peers.run(request.context_id) as peer_run:
                 if self.changelog is None:
@@ -421,6 +435,7 @@ class PiAgent(AgentEnvAgent):
                 async with self._changelog_turn:
                     return await self._run_pi(request, config, base_url, agent_dir, files_dir, cwd, peer_run)
         finally:
+            self._running -= 1
             shutil.rmtree(run_dir, ignore_errors=True)
 
     async def _run_pi(
@@ -555,6 +570,10 @@ class PiAgent(AgentEnvAgent):
         roots = configured.split(":") if configured else [str(self.workspace), "/app"]
         return [os.path.realpath(root) for root in roots]
 
+    def _require_idle(self) -> None:
+        if self._running:
+            raise HTTPException(status_code=409, detail="a task is running; restore the workspace once it finishes")
+
     def _session_file(self, session_id: str) -> Path | None:
         if not self.sessions_dir.is_dir():
             return None
@@ -602,9 +621,12 @@ class PiAgent(AgentEnvAgent):
             if request.objects.workspace is not None:
                 archive = Path(scratch) / "workspace.tar.gz"
                 await download(request.objects.workspace, archive)
-                self.workspace.mkdir(parents=True, exist_ok=True)
-                await asyncio.to_thread(_unpack, archive, self.workspace)
-            self._install_session(session.read_bytes(), context_id)
+            async with self._workspace_lock:
+                self._require_idle()
+                if request.objects.workspace is not None:
+                    self.workspace.mkdir(parents=True, exist_ok=True)
+                    await asyncio.to_thread(_unpack, archive, self.workspace)
+                self._install_session(session.read_bytes(), context_id)
         return {"context_id": context_id}
 
     @extension(SNAPSHOT_V1.changelog.enable)
@@ -628,11 +650,15 @@ class PiAgent(AgentEnvAgent):
     async def apply_changelog(self, request: ObjectChangelogApplyRequest) -> dict[str, Any]:
         session = None
         with tempfile.TemporaryDirectory() as scratch:
+            paths = []
             for item in request.increments:
-                path = Path(scratch) / f"{item.sequence:06d}.tar"
-                await download(item.object, path)
-                applied = await asyncio.to_thread(apply_increment, path, self._changelog_roots())
-                session = applied.session or session
+                paths.append(Path(scratch) / f"{item.sequence:06d}.tar")
+                await download(item.object, paths[-1])
+            async with self._workspace_lock:
+                self._require_idle()
+                for path in paths:
+                    applied = await asyncio.to_thread(apply_increment, path, self._changelog_roots())
+                    session = applied.session or session
         if not request.resume_conversation:
             return {"count": len(request.increments)}
         context_id = request.target_context_id or uuid.uuid4().hex

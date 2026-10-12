@@ -26,7 +26,7 @@ lint: ## Lint with ruff, the check the unit job runs
 	$(VENV_BIN)/ruff check
 
 unit-test: ## Run the unit test suite in parallel (no external services)
-	$(PYTHON) -m pytest tst/unit/ packages/agentenv-protocol/tests/ -n auto
+	$(PYTHON) -m pytest tst/unit/ packages/agentenv-protocol/tests/ plugins/ -n auto
 
 # Integration tests. Requires Docker and a local OCI registry on :5000
 # (docker run -d -p 5000:5000 public.ecr.aws/docker/library/registry:2);

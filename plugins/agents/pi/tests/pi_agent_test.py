@@ -316,6 +316,38 @@ def test_snapshot_round_trip_restores_conversation_and_workspace(
     assert any("remember TOKEN-1" in line for line in invocation["history"])
 
 
+def test_a_workspace_archive_that_fails_to_extract_changes_nothing(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "keep.txt").write_text("keep")
+    archive = tmp_path / "bad.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        for name in ("new.txt", "../escape.txt"):
+            info = tarfile.TarInfo(name)
+            info.size = 1
+            tar.addfile(info, io.BytesIO(b"x"))
+
+    with pytest.raises(tarfile.FilterError):
+        pi_agent._unpack(archive, workspace)
+
+    assert [path.name for path in workspace.iterdir()] == ["keep.txt"]
+
+
+def test_restoring_the_workspace_waits_for_no_running_task(
+    tmp_path: Path, record: Path, objects: dict[str, bytes]
+) -> None:
+    agent = PiAgent(home=tmp_path / "home", workspace=tmp_path / "ws", pi_command=(sys.executable, str(FAKE_PI)))
+    with TestClient(agent.create_app(), client=("127.0.0.1", 50000)) as client:
+        objects["trajectory"] = b'{"type": "session", "id": "x", "cwd": "/"}\n'
+        agent._running = 1
+        loaded = client.put("/ext/snapshot", json={"objects": {"trajectory": _read("trajectory")}})
+        applied = client.put("/ext/snapshot/changelog", json={"increments": [], "resume_conversation": False})
+        agent._running = 0
+        idle = client.put("/ext/snapshot", json={"objects": {"trajectory": _read("trajectory")}})
+
+    assert (loaded.status_code, applied.status_code, idle.status_code) == (409, 409, 200)
+
+
 def test_snapshot_of_an_unknown_context_is_404(client: TestClient, objects: dict[str, bytes]) -> None:
     response = client.post("/ext/snapshot", json={"context_id": "nope", "objects": {"trajectory": _write("t")}})
 
@@ -508,6 +540,33 @@ async def test_flush_retries_a_failed_last_increment(tmp_path: Path, monkeypatch
     assert await capture.flush() is False
     assert await capture.flush() is True
     assert list(uploads) == ["000000.tar"]
+
+
+@pytest.mark.asyncio
+async def test_capture_stops_when_held_increments_outgrow_the_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class DownNamespace:
+        def __init__(self, grant) -> None:
+            pass
+
+        async def upload(self, relative_path: str, source: bytes) -> None:
+            raise RuntimeError("store down")
+
+    monkeypatch.setattr(changelog, "NamespaceUploader", DownNamespace)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    capture = changelog.ChangelogCapture(None, [str(workspace)])
+    await capture.start()
+    (workspace / "a.txt").write_text("a" * 4096)
+    await capture.capture(None, context_id="c", session_id="s")
+    monkeypatch.setattr(changelog, "MAX_PENDING_BYTES", 2 * len(capture._pending[0][1]) - 1)
+    (workspace / "b.txt").write_text("b" * 4096)
+    await capture.capture(None, context_id="c", session_id="s")
+    await capture.capture(None, context_id="c", session_id="s")
+
+    assert not capture._pending
+    assert await capture.flush() is False
 
 
 def test_an_unuploadable_changelog_fails_the_task(

@@ -23,8 +23,8 @@ Sessions live in `~/.pi-a2a/sessions` and skills in `~/.pi-a2a/skills/<name>`.
 | `mcp-config/v1` | SDK default; written to `mcp.json` per task |
 | `skill-config/v1` | inline and bundle skills installed as `SKILL.md` directories, passed with `--skill` |
 | `trajectory/v1` | the task's pi JSON events, with `message_update` / `tool_execution_update` deltas dropped (format `pi-json-events/v1`) |
-| `snapshot/v1` | `save` uploads the context's pi session (JSONL) and, when asked, the workspace as a gzipped tar; `load` replaces the workspace's contents with the saved ones, restores the session and binds it to the target context |
-| `snapshot/v1` changelog | after enable, every tool result builds `NNNNNN.tar`: the files that changed under the roots, the deleted paths and the session so far. Increments upload in order; a failed one is kept, with those after it, and retried at the next tool result and when the task ends, which fails as `pi.changelog_incomplete` if any is still not uploaded. `apply` replays them in order, writing only under the replaying agent's own roots (symlinks resolved), and with `resume_conversation` binds the last session to the target context |
+| `snapshot/v1` | `save` uploads the context's pi session (JSONL) and, when asked, the workspace as a gzipped tar; `load` replaces the workspace's contents with the saved ones (extracted aside first, so an archive that fails to extract changes nothing), restores the session and binds it to the target context |
+| `snapshot/v1` changelog | after enable, every tool result builds `NNNNNN.tar`: the files that changed under the roots, the deleted paths and the session so far. Increments upload in order; a failed one is kept, with those after it, and retried at the next tool result and when the task ends, which fails as `pi.changelog_incomplete` if any is still not uploaded. Past 256 MiB held, they are dropped and capture stops, so every later task fails that way until the changelog is enabled again. `apply` replays them in order, writing only under the replaying agent's own roots (symlinks resolved), and with `resume_conversation` binds the last session to the target context |
 | `peer-agents/v1` | setting peers registers a loopback MCP server (`peers` at `http://127.0.0.1:$A2A_PORT/mcp`) whose `peer_list` and `peer_send_message` tools send A2A messages, one conversation per A2A context and peer. It answers only loopback clients that send a running task's token, which each task gets in its environment and pi sends as a header, so a task speaks only in its own context's conversations. A peer on the host's loopback is retried at `host.docker.internal` |
 | `install/v1` | copies this directory into the task container as `/opt/pi-a2a`, runs `install.sh` (Debian or Ubuntu, as root, with network access), writes the LiteLLM credentials to a 0600 `agent.env` through a heredoc and starts `start.sh`, which sources it. The credentials stay off each command's first line, the only one the installer logs, but core's install contract substitutes them into the script text, so a sandbox that logs whole scripts records them |
 | `triggers/v1` | SDK default |
@@ -45,6 +45,8 @@ agent-env a2a-agent put --id pi --dockerfile plugins/agents/pi/Dockerfile --cont
 ```
 
 An installed agent is started without registration env vars, so it does not get `PI_A2A_MODEL_PARAMS`.
+
+Snapshot `load` and changelog `apply` answer 409 while a task is running, and tasks wait while either restores the workspace.
 
 Usage is summed over the assistant messages. `cost_usd` is only reported when the model has `cost`
 metadata, and the generated `models.json` sets none. A `stopReason` of `error` is an `infra_error`
