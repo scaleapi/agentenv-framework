@@ -364,8 +364,15 @@ class ModalSandboxProvider(SandboxProvider):
         try:
             sb = await asyncio.shield(creating)
         except asyncio.CancelledError:
-            with contextlib.suppress(Exception, asyncio.CancelledError):
-                await (await creating).terminate.aio()
+            created = None
+            with contextlib.suppress(Exception, asyncio.CancelledError):  # the create failed, or a second cancel came
+                created = await creating
+            if created is not None:
+                try:
+                    await created.terminate.aio()
+                except Exception as e:
+                    logger.warning(f"Could not terminate Modal sandbox {created.object_id}, whose create was cancelled; "
+                                   f"it runs until its timeout: {fmt_exc(e)}")
             raise
         except Exception as e:
             raise RuntimeError(

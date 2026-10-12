@@ -136,6 +136,33 @@ async def test_create_container_terminates_a_sandbox_modal_creates_after_its_cre
 
 
 @pytest.mark.asyncio
+async def test_a_sandbox_a_cancelled_create_cant_terminate_is_named_in_a_warning(_patched_provider, caplog):
+    """It runs until its timeout, so whoever reads the log can find it."""
+    fake_sb = MagicMock(object_id="sb-STILLRUNNING")
+    fake_sb.terminate.aio = AsyncMock(side_effect=RuntimeError("Modal is unavailable"))
+    asked, release = asyncio.Event(), asyncio.Event()
+
+    async def experimental_create(*args, **kwargs):
+        asked.set()
+        await release.wait()
+        return fake_sb
+
+    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox._experimental_create") as mock_create:
+        mock_create.aio = AsyncMock(side_effect=experimental_create)
+        create = asyncio.create_task(
+            _patched_provider.create_container(image_name="registry.example/mcp-server-example:v1", port=18765, env={}))
+        await asyncio.wait_for(asked.wait(), timeout=5)
+        create.cancel()
+        release.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await create
+
+    assert any("sb-STILLRUNNING" in r.getMessage() and "Modal is unavailable" in r.getMessage()
+               for r in caplog.records if r.levelname == "WARNING")
+
+
+@pytest.mark.asyncio
 async def test_create_container_includes_cause_message_in_wrapped_text(_patched_provider):
     class _RemoteErrorWithMessage(Exception):
         pass
