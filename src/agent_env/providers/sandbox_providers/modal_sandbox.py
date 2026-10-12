@@ -348,15 +348,25 @@ class ModalSandboxProvider(SandboxProvider):
                 *(command or []), i6pn=i6pn, image=image, **create_kwargs
             )
 
-        try:
+        async def create_rebuilding_once() -> modal.Sandbox:
             try:
-                sb = await create(image)
+                return await create(image)
             except modal.exception.NotFoundError:
                 if built_id is None:
                     raise
                 # Modal no longer holds the image this process built from the context, so it's built again, once.
-                image, built_id = await self._context_image(prepared, stale=built_id)
-                sb = await create(image)
+                rebuilt, _ = await self._context_image(prepared, stale=built_id)
+                return await create(rebuilt)
+
+        # Modal may create the sandbox even when this create is cancelled, so the request runs to its end, and what it
+        # created is then terminated: a cancelled create leaves nothing running.
+        creating = asyncio.ensure_future(create_rebuilding_once())
+        try:
+            sb = await asyncio.shield(creating)
+        except asyncio.CancelledError:
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await (await creating).terminate.aio()
+            raise
         except Exception as e:
             raise RuntimeError(
                 f"Modal sandbox create failed [{fmt_exc(e)}]: {call_context}"

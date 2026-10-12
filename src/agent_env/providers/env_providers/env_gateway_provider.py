@@ -935,7 +935,8 @@ COMPOSE_EOF'''
                 self._state_provider.sidecar_specs(instance=state_instance)
                 if self._needs_local_postgres else []
             )
-            # Step 2: MCP server sandboxes (HTTPS), provisioned in parallel.
+            # Step 2: MCP server sandboxes (HTTPS), provisioned in parallel. Each is recorded as it's created, so a
+            # deploy that fails or is cancelled mid-batch closes the ones already made.
             mcp_coros = [
                 self._provision_mcp(deploy, cfg, art, state_instance)
                 for cfg, art in zip(mcp_servers, mcp_server_images)
@@ -954,12 +955,10 @@ COMPOSE_EOF'''
                     continue
                 if i < len(mcp_coros):
                     environment_name, mcp_sb = r
-                    self._container_sandboxes.append(mcp_sb)
                     self._environment_sandboxes[environment_name] = mcp_sb
                     mcp_results.append((environment_name, mcp_sb))
                 else:
                     spec = sidecar_specs[i - len(mcp_coros)]
-                    self._container_sandboxes.append(r)
                     if spec.name == PGWEB_SERVICE_NAME:
                         pgweb_sb = r
                         self._pgweb_sandbox = r
@@ -1106,7 +1105,7 @@ COMPOSE_EOF'''
 
     async def _provision_sidecar(self, deploy: _ContainerDeploy, spec) -> Sandbox:
         logger.info(f"Provisioning {spec.name} from {spec.image}...")
-        return await deploy.sandbox_provider.create_container(
+        sb = await deploy.sandbox_provider.create_container(
             image_name=spec.image,
             port=spec.port,
             env=spec.env,
@@ -1116,6 +1115,8 @@ COMPOSE_EOF'''
             attribution=deploy.attribution,
             private_network=True,
         )
+        self._container_sandboxes.append(sb)
+        return sb
 
     @property
     def _needs_local_postgres(self) -> bool:
@@ -1217,6 +1218,7 @@ COMPOSE_EOF'''
             attribution=deploy.attribution,
             private_network=True,
         )
+        self._container_sandboxes.append(sb)
         return cfg.environment_name, sb
 
     async def _deploy_gateway(

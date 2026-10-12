@@ -574,29 +574,16 @@ async def test_wait_for_tunnel_polls_through_connection_errors(monkeypatch):
     card, seen = await _probe(monkeypatch, httpx.ConnectError("refused"), lambda: httpx.Response(200, json=_CARD))
     assert card == _CARD and len(seen) == 2
 
-async def _run_container_deploy(*, cpu=None, memory_mb=None) -> list[dict]:
-    """Run _deploy_via_containers with all I/O mocked, returning the list of
-    create_container kwargs (one per provisioned component: db, mcp, pgweb,
-    db-mcp, gateway). ECR-style db images are used so the pgweb/db-mcp aux
-    services are provisioned too."""
+@contextlib.contextmanager
+def _slack_in_containers(gp: EnvironmentGatewayProvider, provider: ModalSandboxProvider, create_container):
+    """``gp`` ready to deploy the slack server on ``provider`` in containers, every I/O but ``create_container``
+    mocked. ECR-style db images, so the pgweb and db-mcp sidecars are provisioned too. Yields the deploy's arguments."""
     from agent_env.env.gateway import GatewayMode
 
-    provider = ModalSandboxProvider()
-    gp = EnvironmentGatewayProvider()
     gp._state_provider = LocalPostgresStateProvider()  # normally set by create_gateway
-    create_calls: list[dict] = []
-
-    async def fake_create_container(**kwargs):
-        create_calls.append(kwargs)
-        port = kwargs["port"]
-        image = kwargs["image_name"]
-        if kwargs.get("is_tcp"):
-            return _FakeSandbox(f"db-{port}", port, f"tcp://db.modal.host:{port}")
-        return _FakeSandbox(f"sb-{image}-{port}", port, f"https://{image}.modal.host")
-
     # The servicedb images are in the image store, so the containers run them.
     get_config().set_image_store(EcrImageStore(registry_host="123.dkr.ecr.us-west-2.amazonaws.com"))
-    with patch.object(provider, "create_container", side_effect=fake_create_container):
+    with patch.object(provider, "create_container", side_effect=create_container):
         gp._init_service_db_via_exec = AsyncMock()
         gp._wait_for_tunnel = AsyncMock(return_value=_CARD)
         with patch("agent_env.env.env.Env.get") as env_get, \
@@ -613,20 +600,61 @@ async def _run_container_deploy(*, cpu=None, memory_mb=None) -> list[dict]:
             cfg.default_service_db_env_id = "db-id"
             get_cfg.return_value = cfg
             env_get.side_effect = lambda env_id, *a, **k: gateway_env if env_id == "gw-id" else db_env
+            yield dict(mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")],
+                       mcp_server_images=[_image("mcp-slack")], gateway_port=18765, website_configs=None,
+                       gateway_mode=GatewayMode.PERFORMANCE, ttl_seconds=60, disk_size_gb=10)
 
-            await gp._deploy_via_containers(
-                sandbox_provider=provider,
-                mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")],
-                mcp_server_images=[_image("mcp-slack")],
-                gateway_port=18765,
-                website_configs=None,
-                gateway_mode=GatewayMode.PERFORMANCE,
-                ttl_seconds=60,
-                disk_size_gb=10,
-                cpu=cpu,
-                memory_mb=memory_mb,
-            )
+
+async def _run_container_deploy(*, cpu=None, memory_mb=None) -> list[dict]:
+    """Run _deploy_via_containers with all I/O mocked, returning the list of
+    create_container kwargs (one per provisioned component: db, mcp, pgweb,
+    db-mcp, gateway)."""
+    provider = ModalSandboxProvider()
+    gp = EnvironmentGatewayProvider()
+    create_calls: list[dict] = []
+
+    async def fake_create_container(**kwargs):
+        create_calls.append(kwargs)
+        port = kwargs["port"]
+        image = kwargs["image_name"]
+        if kwargs.get("is_tcp"):
+            return _FakeSandbox(f"db-{port}", port, f"tcp://db.modal.host:{port}")
+        return _FakeSandbox(f"sb-{image}-{port}", port, f"https://{image}.modal.host")
+
+    with _slack_in_containers(gp, provider, fake_create_container) as args:
+        await gp._deploy_via_containers(sandbox_provider=provider, cpu=cpu, memory_mb=memory_mb, **args)
     return create_calls
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_cancelled_while_its_containers_are_created_closes_those_already_made():
+    """Each container is recorded as it's created, so the close a cancelled deploy gets terminates the ones made
+    before the cancel, not only those a finished batch would have recorded."""
+    provider = ModalSandboxProvider()
+    gp = EnvironmentGatewayProvider()
+    created: list[_FakeSandbox] = []
+    made, never = asyncio.Event(), asyncio.Event()
+
+    async def create_container(**kwargs):
+        if kwargs["image_name"].endswith("db-mcp"):
+            await never.wait()  # still being created when the deploy is cancelled
+        name = kwargs["image_name"].rsplit("/", 1)[-1]
+        sandbox = _FakeSandbox(name, kwargs["port"], f"https://{name}.modal.host")
+        created.append(sandbox)
+        if len(created) == 3:  # the servicedb, the slack server and pgweb
+            made.set()
+        return sandbox
+
+    with _slack_in_containers(gp, provider, create_container) as args:
+        deploy = asyncio.create_task(
+            gp._run(provider, "slack", lambda p: gp._deploy_via_containers(sandbox_provider=p, **args)))
+        await asyncio.wait_for(made.wait(), timeout=10)
+        deploy.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await deploy
+
+    assert [sandbox.sandbox_id for sandbox in created] == ["postgres", "mcp-slack", "pgweb"]
+    assert [sandbox.terminated for sandbox in created] == [True, True, True]
 
 
 @pytest.mark.asyncio

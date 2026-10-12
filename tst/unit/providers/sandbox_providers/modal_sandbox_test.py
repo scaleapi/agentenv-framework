@@ -108,6 +108,34 @@ async def test_create_container_terminates_a_sandbox_whose_create_is_cancelled(_
 
 
 @pytest.mark.asyncio
+async def test_create_container_terminates_a_sandbox_modal_creates_after_its_create_is_cancelled(_patched_provider):
+    """Cancelled while Modal is still creating the sandbox, as a deploy cancelled mid-batch is: Modal creates it all the
+    same, and it would run until its timeout, so the create waits for it and terminates it."""
+    fake_sb = MagicMock()
+    fake_sb.terminate.aio = AsyncMock()
+    asked, release = asyncio.Event(), asyncio.Event()
+
+    async def experimental_create(*args, **kwargs):
+        asked.set()
+        await release.wait()
+        return fake_sb
+
+    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox._experimental_create") as mock_create:
+        mock_create.aio = AsyncMock(side_effect=experimental_create)
+        create = asyncio.create_task(
+            _patched_provider.create_container(image_name="registry.example/mcp-server-example:v1", port=18765, env={}))
+        await asyncio.wait_for(asked.wait(), timeout=5)
+        create.cancel()
+        release.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await create
+
+    fake_sb.terminate.aio.assert_awaited_once()
+    fake_sb.wait_until_ready.aio.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_create_container_includes_cause_message_in_wrapped_text(_patched_provider):
     class _RemoteErrorWithMessage(Exception):
         pass
