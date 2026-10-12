@@ -417,8 +417,8 @@ async def test_a_reported_transport_failure_retires_the_generation_once_and_the_
     gw = _gateway(opener)
     first = await gw._ensure_child_sessions()
     gw._child_transport_failed(first, httpx.ReadError("peer went away"))
-    gw._child_transport_failed(first, httpx.ReadError("again"))
-    assert len(gw._retirements) == 2
+    gw._child_transport_failed(first, httpx.ReadError("again"))  # every request in flight reports; one retirement
+    assert len(gw._retirements) == 1
     await asyncio.gather(*gw._retirements)
     assert gw._retirements == set() and gw._child_owner is None
     assert opener.exited == opener.entered and len(opener.exited) == 1, "retired exactly once, by the task that opened it"

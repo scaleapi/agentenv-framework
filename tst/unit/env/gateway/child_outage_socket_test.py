@@ -3,6 +3,7 @@ waiting out the tool-call timeout, and the next call reopens the generation once
 from __future__ import annotations
 
 import asyncio
+import functools
 import socket
 import time
 
@@ -90,6 +91,49 @@ async def test_a_child_dying_mid_call_fails_the_call_fast_and_the_next_call_reop
         server = await _serve(_child(asyncio.Event()), _bind(port))  # the child is back on the same address
         assert _text(await gw._call_child_tool(url, "fast", {})) == "ok", "the next call reopens"
         assert gw._child_sessions is not first_generation
+    finally:
+        await gw._close_child_sessions()
+        await server.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(60)
+async def test_a_call_arriving_while_the_child_is_still_down_waits_for_the_reconnect_not_for_its_own_timeout():
+    """mcp's client runs its requests in a task group whose cancel scope belongs to the task that opened the
+    session: a reconnect attempt the child refuses cancels the generation's owner rather than raising to it. The
+    attempt must read as a failure to retry, so a call that arrives during the outage completes as soon as the child
+    is back, and fails within the reconnect schedule if it never comes back; before, that call waited out its own
+    timeout with every other call queued behind the reconnect lock."""
+    sock = _bind()
+    port = sock.getsockname()[1]
+    url = f"http://127.0.0.1:{port}/mcp"
+    server = await _serve(_child(asyncio.Event()), sock)
+    gw = Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[InternalMCPServer("svc", url)])
+    gw._open_persistent_sessions = functools.partial(Gateway._open_persistent_sessions, gw, max_retries=4, retry_delay=0.5)
+    try:
+        await gw._ensure_tools_discovered()
+        await server.shutdown()
+        with pytest.raises(McpError) as info:  # the call that finds the child gone retires the generation
+            await asyncio.wait_for(gw._call_child_tool(url, "fast", {}), timeout=10)
+        assert info.value.error.code == CONNECTION_CLOSED
+
+        started = time.monotonic()
+        during = asyncio.create_task(gw._call_child_tool(url, "fast", {}))  # reconnects; refused until the child is back
+        await asyncio.sleep(1.2)
+        assert not during.done()
+        server = await _serve(_child(asyncio.Event()), _bind(port))
+        assert _text(await asyncio.wait_for(during, timeout=10)) == "ok"
+        assert time.monotonic() - started < 10
+
+        await server.shutdown()
+        with pytest.raises(McpError):
+            await asyncio.wait_for(gw._call_child_tool(url, "fast", {}), timeout=10)
+        started = time.monotonic()
+        with pytest.raises(RuntimeError, match="could not open a session"):  # the child stays down: 4 refused attempts
+            await asyncio.wait_for(gw._call_child_tool(url, "fast", {}), timeout=20)
+        assert time.monotonic() - started < 10
+        server = await _serve(_child(asyncio.Event()), _bind(port))
+        assert _text(await gw._call_child_tool(url, "fast", {})) == "ok"
     finally:
         await gw._close_child_sessions()
         await server.shutdown()

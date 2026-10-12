@@ -124,6 +124,7 @@ class Gateway:
         self._child_lock = asyncio.Lock()  # open / retire / close of a generation (taken after _discover_lock)
         self._closing = False  # set at process shutdown; no generation is opened past it
         self._retirements: set[asyncio.Task] = set()  # generations being retired on a reported transport failure
+        self._retiring: set[int] = set()  # ids of generations a report has already retired, so the rest are no-ops
         self._discover_lock = asyncio.Lock()
         self._server_tools: dict[str, list[MCPTool]] = {}
         self._tools_discovered = False
@@ -702,7 +703,14 @@ class Gateway:
 
     async def _open_persistent_sessions(self, exit_stack: contextlib.AsyncExitStack, max_retries: int = 10, retry_delay: float = 1.0) -> dict[str, ClientSession]:
         """Open a persistent MCP client session to each internal server, over a transport that reports a failed
-        request to this generation so it is retired at once (see child_transport)."""
+        request to this generation so it is retired at once (see child_transport).
+
+        Each attempt opens its contexts on a stack of its own. mcp's client runs its requests in an anyio task group
+        whose cancel scope belongs to the task that entered it, this one: a request that fails outright (the child
+        refusing the connection) cancels whatever this task awaits, and keeps cancelling it until that group is
+        exited. So a failed attempt is exited before anything else is awaited, and reads as a failure to retry
+        rather than as this task being cancelled; only a cancellation that is still pending once the attempt's
+        group is gone came from outside."""
         sessions: dict[str, ClientSession] = {}
 
         def report(exc: httpx.TransportError) -> None:
@@ -710,23 +718,36 @@ class Gateway:
 
         for server in self.internal_mcp_servers:
             for attempt in range(max_retries):
+                attempt_stack = contextlib.AsyncExitStack()
                 try:
-                    client = await exit_stack.enter_async_context(child_http_client(report))
-                    read_stream, write_stream, _ = await exit_stack.enter_async_context(
+                    client = await attempt_stack.enter_async_context(child_http_client(report))
+                    read_stream, write_stream, _ = await attempt_stack.enter_async_context(
                         streamable_http_client(server.mcp_url, http_client=client))
-                    session = await exit_stack.enter_async_context(ClientSession(read_stream, write_stream))
+                    session = await attempt_stack.enter_async_context(ClientSession(read_stream, write_stream))
                     # a child that accepts the connection but never answers initialize is a failed attempt, not a hang
                     await asyncio.wait_for(session.initialize(), timeout=CARD_FETCH_TIMEOUT_S)
+                except BaseException as e:
+                    failure: BaseException = e
+                    try:
+                        await attempt_stack.aclose()
+                    except BaseException as unwound:  # the client's task group names what failed
+                        if isinstance(e, asyncio.CancelledError):
+                            failure = unwound
+                    if isinstance(e, asyncio.CancelledError) and asyncio.current_task().cancelling():
+                        raise
+                    if attempt < max_retries - 1:
+                        logger.warning(f"Failed to connect to {server.name} (attempt {attempt + 1}/{max_retries}): {failure!r}")
+                        await asyncio.sleep(retry_delay)
+                    else:
+                        logger.error(f"Failed to connect to {server.name} after {max_retries} attempts: {failure!r}")
+                        if failure is e:
+                            raise
+                        raise RuntimeError(f"could not open a session to {server.name}: {failure!r}") from failure
+                else:
+                    exit_stack.push_async_callback(attempt_stack.aclose)
                     sessions[server.mcp_url] = session
                     logger.info(f"Opened persistent session to {server.name}")
                     break
-                except Exception as e:
-                    if attempt < max_retries - 1:
-                        logger.warning(f"Failed to connect to {server.name} (attempt {attempt + 1}/{max_retries}): {e}")
-                        await asyncio.sleep(retry_delay)
-                    else:
-                        logger.error(f"Failed to connect to {server.name} after {max_retries} attempts: {e}")
-                        raise
         return sessions
 
     async def _ensure_child_sessions(self) -> dict[str, ClientSession]:
@@ -758,20 +779,28 @@ class Gateway:
 
     async def _own_child_sessions(self, ready: asyncio.Future, close: asyncio.Event) -> None:
         """Holds one generation open: opens the client contexts, reports through `ready`, parks until `close` is set
-        (or it is cancelled) and exits them. Returns rather than raising on a failed open, which `ready` carries."""
-        async with contextlib.AsyncExitStack() as stack:
-            try:
-                sessions = await self._open_persistent_sessions(stack)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                if not ready.done():
-                    ready.set_exception(e)
-                return
-            if ready.cancelled():
-                return  # nobody is waiting any more; the stack closes what was opened
-            ready.set_result(sessions)
-            await close.wait()
+        (or it is cancelled) and exits them. Returns rather than raising on a failed open, which `ready` carries.
+        `close` is set on the way out whatever the reason, so a call racing on it fails now, not at its timeout."""
+        try:
+            async with contextlib.AsyncExitStack() as stack:
+                try:
+                    sessions = await self._open_persistent_sessions(stack)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    if not ready.done():
+                        ready.set_exception(e)
+                    return
+                if ready.cancelled():
+                    return  # nobody is waiting any more; the stack closes what was opened
+                ready.set_result(sessions)
+                await close.wait()
+        except BaseExceptionGroup as e:
+            # a request failing outright under a live generation cancels this task through mcp's client task group
+            # (see _open_persistent_sessions); the stack has unwound, and the transport failure retires the generation
+            logger.warning(f"child session generation ended: {e!r}")
+        finally:
+            close.set()
 
     @staticmethod
     def _log_owner_exit(owner: asyncio.Task) -> None:
@@ -804,12 +833,14 @@ class Gateway:
         pending, so the generation is retired now: every call it has in flight fails with CONNECTION_CLOSED instead
         of waiting out its timeout, and the next call reopens. Called from inside the client's own task, so the
         retirement is scheduled rather than awaited; a report for a generation already retired is nothing."""
-        if self._closing or sessions is not self._child_sessions:
-            return
+        if self._closing or sessions is not self._child_sessions or id(sessions) in self._retiring:
+            return  # every request in flight on a dying generation reports; the first one retires it
+        self._retiring.add(id(sessions))
         logger.warning(f"child transport failed ({exc!r}); retiring the child session generation")
         task = asyncio.get_running_loop().create_task(self._reset_child_sessions(sessions), name="gateway-child-retire")
         self._retirements.add(task)
         task.add_done_callback(self._retirements.discard)
+        task.add_done_callback(lambda _: self._retiring.discard(id(sessions)))
 
     async def _call_child_tool(self, server_url: str, tool_name: str, arguments: dict, *,
                                meta: dict | None = None) -> CallToolResult:
