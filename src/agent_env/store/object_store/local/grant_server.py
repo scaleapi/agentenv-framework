@@ -52,6 +52,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_ADVERTISE_HOST = "host.docker.internal"
 _START_TIMEOUT_SECONDS = 10
 _BIND_ATTEMPTS = 5  # a second socket on one port can lose the port to another process in between
+# Where the platform default is served as well: the address a VM on this machine reaches it at (``HOST_ADDRESS``).
+DEFAULT_ALSO_SERVED = "127.0.0.1"
 _OPS_BY_METHOD = {"GET": "get", "HEAD": "get", "PUT": "put", "POST": "post"}
 _UPLOAD_KEY_FIELD = "key"  # the form fields a policy upload names its key and file by (HttpPostPolicyGrant's path/file fields)
 _UPLOAD_FILE_FIELD = "file"
@@ -86,7 +88,7 @@ def grant_server(bind_host: str | None, advertise_host: str | None) -> GrantServ
     resolved = bind_host or default_bind_host()
     # The platform default is served on loopback too, where a VM on this machine reaches it; an explicit bind
     # host is served as given.
-    key = (resolved, advertise_host or DEFAULT_ADVERTISE_HOST, bind_host is None and resolved != "127.0.0.1")
+    key = (resolved, advertise_host or DEFAULT_ADVERTISE_HOST, bind_host is None and resolved != DEFAULT_ALSO_SERVED)
     with _servers_lock:
         server = _servers.get(key)
         if server is None:
@@ -202,10 +204,11 @@ class GrantServer:
         with self._lock:
             if self._port is not None:
                 return self._port
-            bind_hosts = [self.bind_host] + (["127.0.0.1"] if self.also_loopback else [])
+            bind_hosts = [self.bind_host] + ([DEFAULT_ALSO_SERVED] if self.also_loopback else [])
             sockets: list[socket.socket] = []
+            attempts = _BIND_ATTEMPTS if len(bind_hosts) > 1 else 1
             try:
-                for attempt in range(_BIND_ATTEMPTS if len(bind_hosts) > 1 else 1):
+                for attempt in range(attempts):
                     try:
                         for host in bind_hosts:  # the first picks the port, the rest bind it
                             family = socket.AF_INET6 if ipaddress.ip_address(host).version == 6 else socket.AF_INET
@@ -215,7 +218,7 @@ class GrantServer:
                         break
                     except OSError:
                         _close_all(sockets)
-                        if attempt == _BIND_ATTEMPTS - 1:
+                        if attempt == attempts - 1:
                             raise
                 hosts = ["localhost", "host.docker.internal", "127.0.0.1", self.advertise_host]
                 with contextlib.suppress(ValueError):  # a name the CA cannot vouch for would void the certificate

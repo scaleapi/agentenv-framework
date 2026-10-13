@@ -26,7 +26,7 @@ from agent_env.store.base import ObjectAlreadyExistsError, ObjectNotFoundError
 if os.name != "nt":
     import fcntl
 from agent_env.store.local_state import ensure_state_dir
-from agent_env.store.object_store.local.grant_server import DEFAULT_ADVERTISE_HOST, grant_server
+from agent_env.store.object_store.local.grant_server import DEFAULT_ADVERTISE_HOST, DEFAULT_ALSO_SERVED, grant_server
 from agent_env.store.object_store.local.tls import check_local_host
 from agent_env.store.object_store.local.tokens import Op
 from agent_env.store.object_store.object_store import (
@@ -196,9 +196,9 @@ class LocalFilesystemObjectStore(ObjectStore):
         (its provider's ``ON_THIS_MACHINE``): when the server listens where the sandbox's requests arrive and the grant
         URL names this machine by a name the sandbox resolves: not its loopback by number or as ``localhost``, which
         inside any sandbox is the sandbox's own. A container on this machine's Docker reaches the address
-        ``host.docker.internal`` maps to, so any bind host. A VM here reaches the loopback address its provider
-        declares (``HOST_ADDRESS``), served by default or when bound there, and no address by number, which there is
-        the VM's own."""
+        ``host.docker.internal`` maps to, so any bind host. A VM here reaches the address its provider declares
+        (``HOST_ADDRESS``), which the server serves when bound there, or by default when it is the address the default
+        serves as well, and no address by number, which there is the VM's own."""
         from agent_env.providers.sandbox_providers.sandbox_provider import on_this_machine_provider  # providers import this module
 
         provider = on_this_machine_provider(sandbox_type)
@@ -209,7 +209,8 @@ class LocalFilesystemObjectStore(ObjectStore):
             return False
         if provider.HOST_ADDRESS is None:
             return True
-        return self._grant_bind_host in (None, provider.HOST_ADDRESS) and not _is_address(advertised)
+        served = DEFAULT_ALSO_SERVED if self._grant_bind_host is None else self._grant_bind_host
+        return served == provider.HOST_ADDRESS and not _is_address(advertised)
 
     def issue_read_grant(self, object_url: str, *, expires_in: int | None = None) -> HttpGetGrant:
         expires_in = self.grant_lifetime_seconds if expires_in is None else expires_in

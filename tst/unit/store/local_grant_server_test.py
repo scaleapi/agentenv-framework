@@ -15,6 +15,7 @@ from agent_env.a2a_agent import object_transfer
 from agent_env.a2a_agent.object_transfer import TransferCall, invoke_transfer
 from agent_env.config.paths import state_root
 from agent_env.store import LocalFilesystemObjectStore
+from agent_env.store.base import GrantUnavailableError
 from agent_env.store.object_store.local import grant_server as server_module
 from agent_env.store.object_store.local.grant_server import default_bind_host, grant_server, unreachable_hint
 from agent_env.store.object_store.local.tls import local_ca
@@ -305,6 +306,17 @@ def test_an_explicit_bind_host_is_served_as_given(tmp_path, monkeypatch):
     try:
         store.issue_read_grant(store.put("k", b"v"))
         assert [server.also_loopback for server in server_module._servers.values()] == [False]
+    finally:
+        for server in server_module._servers.values():
+            server.close()
+
+
+def test_an_explicit_bind_host_this_machine_doesnt_have_reports_the_bind_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(server_module, "_servers", {})
+    store = LocalFilesystemObjectStore(str(tmp_path), grant_bind_host="203.0.113.1")  # TEST-NET-3: nobody's
+    try:
+        with pytest.raises(GrantUnavailableError, match="cannot listen on 203.0.113.1"):
+            store.issue_read_grant(store.put("k", b"v"))
     finally:
         for server in server_module._servers.values():
             server.close()

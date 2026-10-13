@@ -22,10 +22,17 @@ class _VmHere(SandboxProvider):
         raise NotImplementedError
 
 
+class _VmElsewhereOnLoopback(_VmHere):
+    """One that forwards this machine's names to a loopback address the default server doesn't serve."""
+
+    HOST_ADDRESS = "127.0.0.2"
+
+
 @pytest.fixture
 def vm_here(tmp_path, monkeypatch):
     (tmp_path / "config.toml").write_text(
         '[sandbox.providers.vm_here]\nimpl = "tst.unit.store.test_object_transfer_grants:_VmHere"\n'
+        '[sandbox.providers.vm_other]\nimpl = "tst.unit.store.test_object_transfer_grants:_VmElsewhereOnLoopback"\n'
     )
     monkeypatch.setenv("AGENT_ENV_CONFIG", str(tmp_path / "config.toml"))
     reset_config()
@@ -62,6 +69,12 @@ def test_a_vm_on_this_machine_reaches_the_server_at_its_declared_loopback_addres
     assert not LocalFilesystemObjectStore(str(tmp_path), grant_bind_host="172.17.0.1").grants_reach("vm_here")
     assert not LocalFilesystemObjectStore(str(tmp_path), grant_advertise_host="172.17.0.1").grants_reach("vm_here")
     assert not LocalFilesystemObjectStore(str(tmp_path), grant_advertise_host="localhost").grants_reach("vm_here")
+
+
+def test_a_vm_reaching_an_address_the_default_server_doesnt_serve_needs_the_server_bound_there(tmp_path, vm_here) -> None:
+    assert not LocalFilesystemObjectStore(str(tmp_path)).grants_reach("vm_other")
+    assert not LocalFilesystemObjectStore(str(tmp_path), grant_bind_host="127.0.0.1").grants_reach("vm_other")
+    assert LocalFilesystemObjectStore(str(tmp_path), grant_bind_host="127.0.0.2").grants_reach("vm_other")
 
 
 def test_local_store_grants_can_be_turned_off(tmp_path) -> None:

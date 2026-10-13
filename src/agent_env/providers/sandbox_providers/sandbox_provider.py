@@ -177,8 +177,9 @@ class SandboxProvider(ABC):
     ON_THIS_MACHINE: ClassVar[bool] = False
     # For a provider on this machine, where a request from its sandboxes to this machine's names arrives: None for
     # containers on this machine's Docker, at the address ``host.docker.internal`` maps to, where the local grant
-    # server listens by default; a loopback address for a VM here whose networking forwards this machine's names to
-    # it, which the server listens on too by default, and from which this machine's addresses by number aren't reached.
+    # server listens by default; for a VM here whose networking forwards this machine's names to an address of its
+    # own, that address: ``127.0.0.1``, which the server serves as well by default, or another the server is bound to.
+    # From such a VM this machine's addresses by number aren't reached.
     HOST_ADDRESS: ClassVar[str | None] = None
     # The sandbox modes it creates, derived for each provider class from what it implements (``__init_subclass__``):
     # SANDBOX_MODE_CONTAINER when it implements create_sandbox, SANDBOX_MODE_VM when it implements create_vm.
