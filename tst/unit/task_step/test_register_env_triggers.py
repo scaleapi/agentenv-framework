@@ -3,13 +3,14 @@ propagation. Only the gateway HTTP boundary is mocked; the step logic runs real.
 
 from __future__ import annotations
 
+import copy
 import json
 
 import httpx
 import pytest
 
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, EnvCapabilityUnsupported
-from agent_env.env.gateway.constants import GATEWAY_EXTENSIONS, WELL_KNOWN_PATH
+from agent_env.env.gateway.constants import EXT_TRIGGERS_URI, GATEWAY_EXTENSIONS, WELL_KNOWN_PATH
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
 from agent_env.task_step.task_steps.register_env_triggers import RegisterEnvTriggersStep
 
@@ -64,6 +65,7 @@ async def test_registers_and_audits(monkeypatch):
     assert len(audit) == 1
     assert audit[0]["env_id"] == "env-x"
     assert audit[0]["added"] == ["t1"]
+    assert audit[0]["executor_agent_names"] == []
 
 
 @pytest.mark.asyncio
@@ -142,6 +144,83 @@ async def test_a_card_without_triggers_raises_before_any_request(monkeypatch):
     with pytest.raises(EnvCapabilityUnsupported, match="does not offer 'register' on urn:agentenv:triggers/v1"):
         await _step().execute(ctx)
     assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_resolves_each_named_executor_alongside_the_default(monkeypatch):
+    sent = _mock_gateway(monkeypatch, {"ok": True, "added": ["a", "b", "d"], "all": ["a", "b", "d"]})
+    context = TaskStepContext(deployed_envs=[_record()], deployed_agents=[
+        DeployedAgent(agent_name="exec-1", api_url="http://exec:9000", role="executor"),
+        DeployedAgent(agent_name="alice", api_url="http://alice:9000", a2a_url="http://alice:9000/a2a-base",
+                      role="alice@example.com"),
+        DeployedAgent(agent_name="bob", api_url="http://bob:9000", role="bob@example.com"),
+    ], metadata={})
+
+    out = await _step(triggers=_NAMED_TRIGGERS, watch_roles=["default"], executor_agent_name="exec-1",
+                      executor_timeout_seconds=30).execute(context)
+
+    body = json.loads(sent[0].content)
+    assert body["executor"] == {"a2a_url": "http://exec:9000", "timeout_seconds": 30, "role": "executor"}
+    assert body["executors"] == {
+        "alice": {"a2a_url": "http://alice:9000/a2a-base", "timeout_seconds": 30, "role": "alice@example.com"},
+        "bob": {"a2a_url": "http://bob:9000", "timeout_seconds": 30, "role": "bob@example.com"}}
+    assert out.metadata["env_trigger_registrations"][0]["executor_agent_names"] == ["alice", "bob"]
+
+
+@pytest.mark.asyncio
+async def test_a_missing_named_executor_raises_before_any_request(monkeypatch):
+    sent = _mock_gateway(monkeypatch, {})
+    with pytest.raises(RuntimeError, match="Executor agent 'alice' not found"):
+        await _step(triggers=_NAMED_TRIGGERS).execute(_context())
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_named_executor_in_watch_roles_raises(monkeypatch):
+    _mock_gateway(monkeypatch, {})
+    context = TaskStepContext(deployed_envs=[_record()], deployed_agents=[
+        DeployedAgent(agent_name="alice", api_url="http://alice", role="alice@example.com"),
+        DeployedAgent(agent_name="bob", api_url="http://bob", role="default"),
+    ], metadata={})
+    with pytest.raises(RuntimeError, match="'default' is in watch_roles"):
+        await _step(triggers=_NAMED_TRIGGERS, watch_roles=["default"]).execute(context)
+
+
+@pytest.mark.asyncio
+async def test_a_gateway_without_named_executors_refuses_them_before_any_request(monkeypatch):
+    sent = _mock_gateway(monkeypatch, {})
+    context = TaskStepContext(deployed_envs=[_record(_without_named_executors())], deployed_agents=[
+        DeployedAgent(agent_name="alice", api_url="http://alice", role="alice@example.com"),
+        DeployedAgent(agent_name="bob", api_url="http://bob", role="bob@example.com"),
+    ], metadata={})
+    with pytest.raises(RuntimeError, match=r"takes no 'executors'.*\['alice', 'bob'\]"):
+        await _step(triggers=_NAMED_TRIGGERS).execute(context)
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_gateway_without_named_executors_still_takes_the_default(monkeypatch):
+    sent = _mock_gateway(monkeypatch, {"ok": True, "added": ["t1"], "all": ["t1"]})
+    context = _context(with_executor=True)
+    context.deployed_envs = [_record(_without_named_executors())]
+    await _step(executor_agent_name="exec-1", watch_roles=["default"]).execute(context)
+    assert "executors" not in json.loads(sent[0].content)
+
+
+_NAMED_TRIGGERS = [
+    {"id": tid, "when": {"type": "action", "tool": "slack_send_message"},
+     "actions": [{"type": "nl", "instruction": f"reply as {tid}", **named}]}
+    for tid, named in (("a", {"executor": "alice"}), ("b", {"executor": "bob"}), ("a2", {"executor": "alice"}),
+                       ("d", {}))
+]
+
+
+def _without_named_executors() -> list:
+    """The gateway's own extensions, as a gateway that predates named executors advertises them."""
+    extensions = copy.deepcopy(GATEWAY_EXTENSIONS)
+    triggers = next(e for e in extensions if e["uri"] == EXT_TRIGGERS_URI)
+    del triggers["params"]["methods"]["register"]["request"]["properties"]["executors"]
+    return extensions
 
 
 def _record(extensions: list = GATEWAY_EXTENSIONS) -> DeployedEnv:

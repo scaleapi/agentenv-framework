@@ -171,7 +171,7 @@ GATEWAY_EXTENSIONS = [
         "uri": EXT_TRIGGERS_URI,
         "description": "Register (additive add-by-id), remove, clear, or read (state) typed Action/State triggers + the firing log (harness control path).",
         "params": {"endpoint": "/triggers/register", "methods": {
-            "register": {"method": "POST", "endpoint": "/triggers/register", "request": {"type": "object", "properties": {"watch_roles": {"type": "array", "items": {"type": "string"}}, "executor": {"type": "object"}, "triggers": {"type": "array"}}, "required": ["triggers"]}},
+            "register": {"method": "POST", "endpoint": "/triggers/register", "request": {"type": "object", "properties": {"watch_roles": {"type": "array", "items": {"type": "string"}}, "executor": {"type": "object"}, "executors": {"type": "object"}, "triggers": {"type": "array"}}, "required": ["triggers"]}},
             "remove": {"method": "POST", "endpoint": "/triggers/remove", "request": {"type": "object", "properties": {"ids": {"type": "array", "items": {"type": "string"}}}, "required": ["ids"]}},
             "clear": {"method": "POST", "endpoint": "/triggers/clear", "request": {"type": "object", "properties": {}}},
             "state": {"method": "GET", "endpoint": "/triggers/state", "request": {"type": "object", "properties": {}}}}},
