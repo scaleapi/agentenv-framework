@@ -785,17 +785,17 @@ async def test_a_failed_build_names_its_image_and_still_removes_its_folder(signi
 
 
 class _FlakyBuildVm(_RecordingVmSandbox):
-    """Its first ``docker build`` fails with ``stderr``; any later one succeeds."""
+    """Its first ``docker build`` fails with ``stderr`` (or ``stdout``); any later one succeeds."""
 
-    def __init__(self, stderr: str):
+    def __init__(self, stderr: str, stdout: str = ""):
         super().__init__()
-        self._stderr = stderr
+        self._stderr, self._stdout = stderr, stdout
 
     async def exec_with_output(self, *args):
         if args[:2] == ("sudo", "bash") and "docker build" in script_run(args):
             self.scripts.append(script_run(args))
             first = sum("docker build" in script for script in self.scripts) == 1
-            return (1, "", self._stderr) if first else (0, "", "")
+            return (1, self._stdout, self._stderr) if first else (0, "", "")
         return await super().exec_with_output(*args)
 
 
@@ -825,6 +825,17 @@ async def test_a_build_that_fails_fetching_an_image_runs_once_more(signing_store
     builds = [script for script in sandbox.scripts if "docker build" in script]
     assert len(builds) == 2 and builds[0] == builds[1]
     assert sum(script.startswith("tar -xzf") for script in sandbox.scripts) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_retried_builds_warning_names_the_error_where_docker_wrote_it_to_stdout(signing_store, no_pause,
+                                                                                      caplog):
+    sandbox = _FlakyBuildVm("", stdout=_BASE_IMAGE_404["legacy"])
+
+    with caplog.at_level("WARNING", logger=sandbox_module.__name__):
+        await sandbox.load_docker_images([_context_image("a", "sha256:" + "1" * 64)])
+
+    assert caplog.messages[-1].endswith("from remote: not found")
 
 
 @pytest.mark.asyncio

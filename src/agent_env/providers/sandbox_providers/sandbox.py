@@ -577,9 +577,15 @@ async def _once_more(sandbox: VmSandbox, script: str, what: str, *, unless: tupl
         if any(marker in str(e) for marker in unless):
             raise
         logger.warning("%s on %s failed; trying once more in %ss: %s", what, sandbox.sandbox_id,
-                       _REGISTRY_RETRY_SECONDS, str(e).strip().rsplit("\n", 1)[-1])
+                       _REGISTRY_RETRY_SECONDS, _last_output_line(str(e)))
         await asyncio.sleep(_REGISTRY_RETRY_SECONDS)
         await sandbox.exec_script(script)
+
+
+def _last_output_line(error: str) -> str:
+    """The last line of an ``exec_script`` error that says something, past its empty ``stdout:``/``stderr:`` labels."""
+    lines = (line.removeprefix("stdout: ").removeprefix("stderr: ").strip() for line in reversed(error.splitlines()))
+    return next((line for line in lines if line), "")
 
 
 async def _pull(sandbox: VmSandbox, image_name: str) -> None:
