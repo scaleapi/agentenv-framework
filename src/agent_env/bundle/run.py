@@ -445,6 +445,10 @@ def _written(plan: Plan, done: Materialized) -> str:
     return f"{what} ({'; '.join(done.reasons)})" + _pinned(done)
 
 
+# How much of a pinned digest a write line shows, as `docker images` shortens an image id.
+_SHOWN_DIGEST_HEX = 12
+
+
 def _pinned(done: Materialized) -> str:
     """For an image a tag names in its registry, the digest it was pinned to, which re-runs keep while the ref does."""
     if not isinstance(done.write.source, ReferencedImage) or "@" in done.write.source.ref:
@@ -454,7 +458,7 @@ def _pinned(done: Materialized) -> str:
     except NotFoundError:  # a dry run's image, not yet written
         return ""
     algorithm, _, digest = name.rpartition("@")[2].partition(":")
-    return f", pinned to {algorithm}:{digest[:12]}"
+    return f", pinned to {algorithm}:{digest[:_SHOWN_DIGEST_HEX]}"
 
 
 def _label(plan: Plan, write: Write) -> str:
