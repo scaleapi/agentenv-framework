@@ -73,6 +73,22 @@ def engine(monkeypatch):
     return eng
 
 
+@pytest.fixture
+def executor_calls(monkeypatch):
+    """Every executor call as (executor, instruction, context_id); the stub answers with `.reply`, raising it if an
+    exception."""
+    calls = _ExecutorCalls()
+
+    async def fake_executor(self, executor, instruction, context_id):
+        calls.append((executor, instruction, context_id))
+        if isinstance(calls.reply, BaseException):
+            raise calls.reply
+        return calls.reply
+
+    monkeypatch.setattr(TriggerEngine, "_call_executor", fake_executor)
+    return calls
+
+
 def _registration(**overrides):
     base = {
         "watch_roles": ["default"],
@@ -276,14 +292,7 @@ def test_a_named_executor_registered_earlier_serves_a_later_batch(engine):
 
 
 @pytest.mark.asyncio
-async def test_each_nl_action_goes_to_the_executor_it_names(engine, monkeypatch):
-    sent: list[tuple[str, str, str]] = []
-
-    async def fake_executor(self, executor, instruction, context_id):
-        sent.append((executor["a2a_url"], instruction, context_id))
-        return "done"
-
-    monkeypatch.setattr(TriggerEngine, "_call_executor", fake_executor)
+async def test_each_nl_action_goes_to_the_executor_it_names(engine, executor_calls):
     engine.register({
         "executor": {"a2a_url": "http://default", "role": "executor"},
         "executors": {"alice": {"a2a_url": "http://alice", "role": "alice@example.com"},
@@ -295,19 +304,16 @@ async def test_each_nl_action_goes_to_the_executor_it_names(engine, monkeypatch)
     engine.on_tool_call("default", "linear_create_issue", {}, _result())
     await asyncio.sleep(0.2)
 
-    assert sorted(sent) == [("http://alice", "as a", "trigger-a"), ("http://bob", "as b", "trigger-b"),
-                            ("http://default", "as d", "trigger-d")]
+    assert sorted((e["a2a_url"], i, c) for e, i, c in executor_calls) == [
+        ("http://alice", "as a", "trigger-a"), ("http://bob", "as b", "trigger-b"), ("http://default", "as d", "trigger-d")]
     details = {e["trigger_id"]: e["detail"] for e in engine._events if e["kind"] == "action_ok"}
     assert details == {"d": {"nl": "as d"}, "a": {"nl": "as a", "executor": "alice"},
                        "b": {"nl": "as b", "executor": "bob"}}
 
 
 @pytest.mark.asyncio
-async def test_a_named_executor_that_does_not_complete_is_named_in_the_failure(engine, monkeypatch):
-    async def fake_executor(self, executor, instruction, context_id):
-        return None
-
-    monkeypatch.setattr(TriggerEngine, "_call_executor", fake_executor)
+async def test_a_named_executor_that_does_not_complete_is_named_in_the_failure(engine, executor_calls):
+    executor_calls.reply = None
     engine.register({"executors": {"bob": {"a2a_url": "http://bob", "role": "bob"}},
                      "triggers": [{"id": "x", "when": {"type": "action", "tool": "t"},
                                    "actions": [{"type": "nl", "instruction": "hi", "executor": "bob"}]}]})
@@ -319,11 +325,8 @@ async def test_a_named_executor_that_does_not_complete_is_named_in_the_failure(e
 
 
 @pytest.mark.asyncio
-async def test_a_named_executor_that_cannot_be_reached_is_named_in_the_failure(engine, monkeypatch):
-    async def fake_executor(self, executor, instruction, context_id):
-        raise httpx.ConnectTimeout("")
-
-    monkeypatch.setattr(TriggerEngine, "_call_executor", fake_executor)
+async def test_a_named_executor_that_cannot_be_reached_is_named_in_the_failure(engine, executor_calls):
+    executor_calls.reply = httpx.ConnectTimeout("")
     engine.register({"executors": {"bob": {"a2a_url": "http://bob", "role": "bob"}},
                      "triggers": [{"id": "x", "when": {"type": "action", "tool": "t"},
                                    "actions": [{"type": "nl", "instruction": "hi", "executor": "bob"}]}]})
@@ -348,14 +351,7 @@ async def test_no_executor_role_is_ever_watched(engine, role):
 
 
 @pytest.mark.asyncio
-async def test_a_trigger_listing_an_executor_role_is_provoked_by_that_executor_alone(engine, monkeypatch):
-    sent: list[tuple[str, str]] = []
-
-    async def fake_executor(self, executor, instruction, context_id):
-        sent.append((executor["role"], instruction))
-        return "done"
-
-    monkeypatch.setattr(TriggerEngine, "_call_executor", fake_executor)
+async def test_a_trigger_listing_an_executor_role_is_provoked_by_that_executor_alone(engine, executor_calls):
     engine.register({
         "executors": {"denise": {"a2a_url": "http://d", "role": "denise@example.com"},
                       "bob": {"a2a_url": "http://b", "role": "bob@example.com"}},
@@ -371,7 +367,8 @@ async def test_a_trigger_listing_an_executor_role_is_provoked_by_that_executor_a
         engine.on_tool_call(role, "slack_send_message", {}, _result())
         await asyncio.sleep(0.2)
 
-    assert sent == [("bob@example.com", "reply to denise"), ("denise@example.com", "reply to the solver")]
+    assert [(e["role"], i) for e, i, _ in executor_calls] == [
+        ("bob@example.com", "reply to denise"), ("denise@example.com", "reply to the solver")]
     detected = [(e["trigger_id"], e["provoking"]["role"]) for e in engine._events if e["kind"] == "detected"]
     assert detected == [("bob-hears-denise", "denise@example.com"), ("denise-hears-solver", "default")]
     assert {t["id"]: t["when"].get("roles") for t in engine.state()["triggers"]} == {
@@ -615,3 +612,7 @@ async def test_step_path_respects_watch_roles(monkeypatch):
     assert resp.status_code == 200
     await asyncio.sleep(0.1)
     assert gw._trigger_engine._triggers["s"]["status"] == "armed"
+
+
+class _ExecutorCalls(list):
+    reply: object = "done"
