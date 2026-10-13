@@ -187,6 +187,16 @@ def test_builtin_accepts_a_config_only_table(monkeypatch, tmp_path):
     assert provider._ecr_pull_secret_name == "my-ecr-reader"
 
 
+@pytest.mark.parametrize("name", ["modal", "modal_vm"])
+def test_modal_builtins_accept_an_environment_name(monkeypatch, tmp_path, name):
+    cfg = _write_config(tmp_path, f"""
+        [sandbox.providers.{name}.config]
+        environment_name = "rl-prod"
+    """)
+    monkeypatch.setenv("AGENT_ENV_CONFIG", str(cfg))
+    assert build_sandbox_provider(name)._environment_name == "rl-prod"
+
+
 def test_e2b_builtin_receives_interpolated_key_and_versioned_base(monkeypatch, tmp_path):
     cfg = _write_config(tmp_path, """
         [sandbox.providers.e2b.config]

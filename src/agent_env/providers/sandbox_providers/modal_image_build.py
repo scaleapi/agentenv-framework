@@ -24,19 +24,20 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# The id of each image built from a build context, by Modal token, app and source digest, for every provider in the
-# process to reuse; one build of each runs at a time, so deploys of one image at once share its build.
-_built_image_ids: dict[tuple[str, str, str], str] = {}
-_build_locks: weakref.WeakValueDictionary[tuple[asyncio.AbstractEventLoop, tuple[str, str, str]], asyncio.Lock] = (
+# The id of each image built from a build context, by Modal token, environment, app and source digest, for every
+# provider in the process to reuse; one build of each runs at a time, so deploys of one image at once share its build.
+_built_image_ids: dict[tuple[str, str, str, str], str] = {}
+_build_locks: weakref.WeakValueDictionary[tuple[asyncio.AbstractEventLoop, tuple[str, str, str, str]], asyncio.Lock] = (
     weakref.WeakValueDictionary()
 )
 
 
 async def context_image(image: DockerImageArtifact, *, client: modal.Client, app: modal.App, token_id: str,
-                        app_name: str, stale: str | None = None) -> tuple[modal.Image, str]:
+                        app_name: str, environment_name: str | None,
+                        stale: str | None = None) -> tuple[modal.Image, str]:
     """The Modal image built from ``image``'s build context in ``app``, and its id: built now unless one built from the
     same sources is, other than ``stale``, an id Modal no longer holds."""
-    key = (token_id, app_name, image.source_digest or image.build_context_object_url)
+    key = (token_id, environment_name or "", app_name, image.source_digest or image.build_context_object_url)
     async with _build_locks.setdefault((asyncio.get_running_loop(), key), asyncio.Lock()):
         image_id = _built_image_ids.get(key)
         if image_id is None or image_id == stale:
