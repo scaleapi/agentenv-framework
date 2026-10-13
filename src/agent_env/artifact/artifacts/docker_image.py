@@ -32,6 +32,9 @@ logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[str, str, int], None]
 
+# How an image stored under its build tag gets a name a sandbox elsewhere pulls: put() pushes it to the image store.
+PUT_AGAIN = "put the image again so its name records its registry"
+
 _SAFE_GIT_NAME = re.compile(r"^[a-zA-Z0-9._-]+$")
 
 
@@ -282,6 +285,17 @@ class DockerImageArtifact(Artifact):
         or a GitHub build's, records none and is kept only beside its tar.gz."""
         return self.context_only or bool(self.build_context_object_url and self.dockerfile_path)
 
+    @property
+    def stored_under_build_tag(self) -> bool:
+        """Whether the image is stored as a tar.gz under a name that names no registry, the tag the machine that built
+        it gave it: only that machine, or a VM that loads the tar.gz, has an image of that name."""
+        return bool(self.tar_gz_object_url) and not names_registry(self.image_name)
+
+    def build_tag_reason(self) -> str:
+        """Why a sandbox elsewhere can't pull an image ``stored_under_build_tag``."""
+        return (f"{self.id!r} v{self.version} is stored as a tar.gz under {self.image_name!r}, which names no registry: "
+                "it's the tag the machine that built it gave it, which a sandbox elsewhere can't pull")
+
     def rebuilt_for(self, platform: str | None) -> bool:
         """Whether a VM sandbox of ``platform`` builds this image from its build context rather than load its tar.gz,
         which is built for another platform: the image runs, though not byte for byte the one stored."""
@@ -306,9 +320,8 @@ class DockerImageArtifact(Artifact):
         a tar.gz under a name that names no registry: that's the tag the machine that built it gave it."""
         if self.context_only:
             return f"{self.id!r} v{self.version} is only a build context, which has to be built, not pulled"
-        if self.tar_gz_object_url and not names_registry(self.image_name) and not on_this_machine:
-            return (f"{self.id!r} v{self.version} is stored as a tar.gz under {self.image_name!r}, which names no "
-                    "registry: it's the tag the machine that built it gave it, which a sandbox elsewhere can't pull")
+        if self.stored_under_build_tag and not on_this_machine:
+            return f"{self.build_tag_reason()}; run it on a provider whose VMs load its tar.gz, or {PUT_AGAIN}"
         return pull_problem(self.image_name, on_this_machine=on_this_machine)
 
     def platform_problem(self, platform: str | None) -> str | None:

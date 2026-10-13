@@ -119,6 +119,23 @@ def test_an_image_in_this_machines_registry_is_refused_where_a_sandbox_elsewhere
     assert not local_store().path.exists()
 
 
+def test_an_image_stored_under_its_build_tag_is_refused_where_a_sandbox_elsewhere_pulls_it_naming_the_flags(bundle_dir):
+    """The tag exists only on the machine that built the image, so a sandbox elsewhere would look it up on Docker Hub;
+    the refusal gives its remedy once, with the flags that apply it."""
+    _agent("solver", ("mcp-server-email:v1", "s3://bucket/img-v1.tar.gz"))
+    _task(bundle_dir, [AGENT])
+
+    [problem] = _problems(lambda: run_bundle(bundle_dir, sandbox="modal"))
+
+    assert problem.startswith("tasks/t.json: step 'agent': deploys agent 'solver''s image on the 'modal' sandbox "
+                              "provider: ")
+    assert "is stored as a tar.gz under 'mcp-server-email:v1', which names no registry" in problem
+    assert problem.endswith("; run it with --sandbox local, or on a provider whose VMs load its tar.gz, such as "
+                            "--sandbox modal_vm, or put the image again so its name records its registry")
+    assert problem.count("whose VMs load its tar.gz") == 1
+    assert not local_store().path.exists()
+
+
 def test_a_chain_runs_an_image_in_this_machines_registry_on_its_local_provider_skipping_one_elsewhere(bundle_dir):
     _agent("solver")
     _task(bundle_dir, [AGENT])

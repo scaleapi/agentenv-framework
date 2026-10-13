@@ -29,7 +29,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 from agent_env.a2a_agent import A2AAgent
-from agent_env.artifact.artifacts.docker_image import DockerImageArtifact, pull_problem
+from agent_env.artifact.artifacts.docker_image import PUT_AGAIN, DockerImageArtifact, pull_problem
 from agent_env.config import get_config
 from agent_env.entity_refs import EntityKind, parse_toml_ref
 from agent_env.env.bootstrap import (
@@ -383,6 +383,9 @@ class _Walk:
             loads = (", or on a provider whose VMs load its tar.gz, such as --sandbox modal_vm"
                      if vms_load and image.artifact.tar_gz_object_url and form is not Accepts.LOADABLE
                      and image.artifact.platform_problem(DEFAULT_BUILD_PLATFORM) is None else "")
+            if image.artifact.stored_under_build_tag:  # the refusal's own remedy, with the flags that apply it
+                return (f"deploys {image.what} on the {_shown(link)} sandbox provider: "
+                        f"{image.artifact.build_tag_reason()}; run it with --sandbox local{loads}, or {PUT_AGAIN}")
             return (f"deploys {image.what} on the {_shown(link)} sandbox provider: {refusal}; run it with "
                     f"--sandbox local{loads}")
         if form is Accepts.LOADABLE:

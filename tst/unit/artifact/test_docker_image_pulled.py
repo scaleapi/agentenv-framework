@@ -54,7 +54,8 @@ def test_a_sandbox_elsewhere_cant_pull_from_this_machines_registry(image_name):
 @pytest.mark.parametrize("image_name, tar_gz, elsewhere", [
     ("mcp-server-email", "s3://bucket/img.tar.gz",
      "'img' v1 is stored as a tar.gz under 'mcp-server-email', which names no registry: it's the tag the machine that "
-     "built it gave it, which a sandbox elsewhere can't pull"),
+     "built it gave it, which a sandbox elsewhere can't pull; run it on a provider whose VMs load its tar.gz, or put "
+     "the image again so its name records its registry"),
     ("team/img:v1", "s3://bucket/img.tar.gz", "names no registry"),
     (REF, "s3://bucket/img.tar.gz", None),
     ("python:3.12", None, None),
