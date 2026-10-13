@@ -7,7 +7,7 @@ from agent_env.task import AgentSpec, EpisodeError, EpisodeSpec, Task, TurnSpec
 from agent_env.task.episode import _EpisodeAgentStep, _EpisodeTurnStep
 from agent_env.task.episode_rules import CHECKS, UNAFFECTED
 from agent_env.task.task import substitute_seed_in_steps
-from agent_env.task_step.registry import get_task_step_registry
+from agent_env.task_step.registry import _builtin_registry
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 
@@ -270,8 +270,8 @@ ALLOWED = {
 def test_steps_that_need_only_what_an_outside_player_leaves_are_allowed(replace):
     EpisodeSpec.from_task(_portsim(**replace))
 
-def test_every_registered_step_type_is_checked_or_unaffected():
-    registered, checked = set(get_task_step_registry()), set(CHECKS)
+def test_every_built_in_step_type_is_checked_or_unaffected():
+    registered, checked = set(_builtin_registry()), set(CHECKS)
 
     assert sorted(registered - checked - UNAFFECTED) == []
     assert sorted((checked | UNAFFECTED) - registered) == []
