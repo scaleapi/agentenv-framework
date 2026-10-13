@@ -3,9 +3,11 @@
 The env deploys, a later process restores its record and loads data into the server, and the teardown step, which
 rebuilds each sandbox from disk, removes the container. A load is timed by the size of the payload it staged, through
 the deploy's own handle and a restored one; and the server's state reads as JSON whether ``data/get`` answers with
-data or with a file bundle. Requires a docker daemon; spins up a throwaway ``registry:2`` and skips if it can't start.
+data or with a file bundle. A loop of one's own lists, declares and calls the server's tools through ``ToolSession``.
+Requires a docker daemon; spins up a throwaway ``registry:2`` and skips if it can't start.
 """
 
+import asyncio
 import json
 import shutil
 import socket
@@ -17,6 +19,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from agentenv_protocol import ToolSession, ToolSessionError
 from agentenv_protocol import client as protocol_v1
 
 from agent_env.artifact import DockerImageArtifact, EnvironmentArtifact, FileArtifact
@@ -134,6 +137,52 @@ async def test_a_load_is_timed_by_its_payload_and_the_servers_state_reads_as_jso
     await protocol_v1.invoke_extension(base_url, card, "urn:agentenv:export-as-file/v1", {"enabled": True})
     assert [part.kind for part in (await protocol_v1.get_data(base_url)).parts] == ["file"]
     assert await legacy_protocol.service_state(deployed, None, "items") == items
+
+
+@pytest.mark.asyncio
+async def test_a_deployed_envs_tools_are_listed_and_called_from_a_loop_of_ones_own(local_stack):
+    """A trainer's view: the env's tools listed with their schemas and called, the env's data plane agreeing on the state
+    they left, a failing tool as an error result, concurrent sessions each answered as their own caller, and a restart
+    as a lost session."""
+    uid = uuid.uuid4().hex[:8]
+    env = MCPServerEnv.put(id=f"server-items-{uid}", docker_image_artifact=_put_items_image(f"server-items-{uid}"),
+                           environment_name="items", env_provider_type="server")
+    deployed = await env.deploy(sandbox_type="local", ttl_seconds=900)
+    container = f"agent-{deployed.sandbox_id}"
+    local_stack.append(container)
+    base_url = await legacy_protocol.v1_base_url(deployed, None, "items")
+
+    async with ToolSession(mcp_url=deployed.mcp_url) as session:
+        tools = {tool.name: tool for tool in await session.list_tools()}
+        added = await session.call_tool("items_add_item", {"item": "crate", "times": 2})
+        listed = await session.call_tool("list_items")
+        await protocol_v1.invoke_extension(base_url, await protocol_v1.get_card(base_url), "urn:agentenv:set-errors/v1",
+                                           {"tool_name": "list_items", "error_rate": 1.0})
+        failed = await session.call_tool("list_items")
+
+    assert {"items_add_item", "list_items"} <= set(tools)
+    assert tools["items_add_item"].inputSchema["properties"]["item"]["description"] == "The item to add."
+    assert json.loads(added.text) == {"count": 2} and json.loads(listed.text) == {"items": ["crate", "crate"]}
+    assert failed.isError and "injected error for list_items" in failed.text
+    assert (await protocol_v1.get_data(base_url)).parts[0].data == {"items": ["crate", "crate"]}
+
+    async def add(i: int) -> tuple[int, dict, str]:
+        async with ToolSession(mcp_url=deployed.mcp_url, role=f"worker{i}@example.com") as own:
+            count = json.loads((await own.call_tool("items_add_item", {"item": f"w{i}"})).text)["count"]
+            return count, json.loads((await own.call_tool("items_whoami")).text), own.session_id
+    added_by = await asyncio.gather(*(add(i) for i in range(8)))
+    assert sorted(count for count, _, _ in added_by) == list(range(3, 11))
+    assert [caller for _, caller, _ in added_by] == [{"role": f"worker{i}@example.com", "session": session_id}
+                                                     for i, (_, _, session_id) in enumerate(added_by)]
+    assert sorted((await protocol_v1.get_data(base_url)).parts[0].data["items"]) == ["crate"] * 2 + [f"w{i}" for i in range(8)]
+
+    async with ToolSession(mcp_url=deployed.mcp_url) as before_restart:
+        assert _docker("restart", container).returncode == 0
+        assert _wait_ready(f"{base_url}/.well-known/agent-env.json", (200,))
+        with pytest.raises(ToolSessionError, match="no longer knows session"):
+            await before_restart.call_tool("list_items")
+    async with ToolSession(mcp_url=deployed.mcp_url) as after_restart:
+        assert json.loads((await after_restart.call_tool("list_items")).text) == {"items": []}
 
 
 def _put_items_image(artifact_id: str) -> DockerImageArtifact:

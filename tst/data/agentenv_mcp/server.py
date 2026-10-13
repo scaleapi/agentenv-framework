@@ -12,7 +12,7 @@ import httpx
 from pydantic import Field
 from starlette.responses import JSONResponse
 
-from agentenv_protocol import AgentEnvEnvironment, DataPart, EnvironmentCapabilities, EnvironmentExtension, FilePart, add_data, environment_card, extension, get_data, reset_data, tool
+from agentenv_protocol import AgentEnvEnvironment, DataPart, EnvironmentCapabilities, EnvironmentExtension, FilePart, ToolContext, add_data, environment_card, extension, get_data, reset_data, tool
 
 
 @environment_card(
@@ -110,6 +110,11 @@ class ItemsEnv(AgentEnvEnvironment):
         """Add an item to the store."""
         self.store.extend([item] * times)
         return json.dumps({"count": len(self.store)})
+
+    @tool(name="{environment_name}_whoami")
+    def whoami(self, ctx: ToolContext) -> str:
+        """The role and session this call arrived with."""
+        return json.dumps({"role": ctx.caller.role, "session": ctx.caller.session})
 
     def list_items(self) -> str:
         """List all items currently stored."""

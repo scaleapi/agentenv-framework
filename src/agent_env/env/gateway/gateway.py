@@ -53,11 +53,13 @@ from .constants import (
     METHOD_RESET,
     PROTOCOL_VERSION,
     RPC_PATH,
+    STATE_TOOL_NAME_CLASHES_KEY,
     TOOL_DISABLE_ACTION,
     TOOL_ENABLE_ACTION,
     WELL_KNOWN_PATH,
     WILDCARD,
     GatewayMode,
+    tool_name_clashes_text,
 )
 from .caller import Caller
 from .child_transport import child_http_client
@@ -68,6 +70,14 @@ from .triggers import TriggerEngine, TriggerError
 
 logger = logging.getLogger(__name__)
 
+
+class ToolNameClash(ValueError):
+    """More than one source serves a tool under one name, so an agent couldn't tell which it calls: the gateway serves
+    none of its servers' tools rather than a set missing some."""
+
+    def __init__(self, clashes: dict[str, list[str]]):
+        self.clashes = clashes
+        super().__init__(f"Duplicate tool name{'s' if len(clashes) > 1 else ''} {tool_name_clashes_text(clashes)}")
 
 
 class Gateway:
@@ -121,6 +131,7 @@ class Gateway:
         self._discover_lock = asyncio.Lock()
         self._server_tools: dict[str, list[MCPTool]] = {}
         self._tools_discovered = False
+        self._tool_name_clashes: dict[str, list[str]] = {}  # found once, by a discovery that then registered nothing
         self._tool_server_urls: dict[str, str] = {}
         self._tool_call_lock: asyncio.Lock | None = asyncio.Lock() if self.gateway_mode == GatewayMode.CONSISTENT else None
         self._role_rules: dict[str, dict[str, bool]] = {}
@@ -205,7 +216,8 @@ class Gateway:
             ]
             changelog_id = self._query_changelog_id()
             roles = {role: self._format_role_rules(rules) for role, rules in self._role_rules.items()}
-            return self._json_response({"mcp_servers": mcp_servers, "changelog_id": changelog_id, "roles": roles}, 200)
+            return self._json_response({"mcp_servers": mcp_servers, "changelog_id": changelog_id, "roles": roles,
+                                        STATE_TOOL_NAME_CLASHES_KEY: self._tool_name_clashes}, 200)
 
         @self._mcp.custom_route("/step", methods=["POST"])
         async def step_endpoint(request: Request) -> Response:
@@ -341,6 +353,8 @@ class Gateway:
         Caller(role=Caller.current().role, session=uuid4().hex).bind()
         try:
             await self._ensure_tools_discovered()
+        except ToolNameClash as e:
+            logger.error(f"MCP session started on an env serving none of its servers' tools: {e}")
         except Exception:
             logger.exception("Tool discovery failed at MCP session start; proxy tools stay unavailable until it succeeds")
         yield
@@ -352,6 +366,8 @@ class Gateway:
         async def lifespan(app):
             try:
                 await asyncio.wait_for(self._ensure_tools_discovered(), timeout=self.STARTUP_DISCOVERY_TIMEOUT_S)
+            except ToolNameClash:
+                pass  # logged by discovery; the gateway stays up to report the clash on /state
             except Exception:
                 # a raised startup makes uvicorn exit the process; discovery is retried on first use instead
                 logger.exception("Tool discovery failed at startup; retrying on first use")
@@ -768,9 +784,15 @@ class Gateway:
         async with self._discover_lock:
             if self._tools_discovered:
                 return
+            if self._tool_name_clashes:  # the servers' names don't change, so neither does a clash
+                raise ToolNameClash(self._tool_name_clashes)
             sessions = await self._ensure_child_sessions()
             try:
                 await self._discover_and_register_tools(sessions)
+            except ToolNameClash as e:
+                self._tool_name_clashes = e.clashes
+                logger.error(f"Tool discovery refused: {e}. The env serves none of its servers' tools")
+                raise
             except Exception as e:
                 logger.exception("Tool discovery failed")
                 for server in self.internal_mcp_servers:
@@ -781,30 +803,36 @@ class Gateway:
                 raise
 
     async def _discover_and_register_tools(self, sessions: dict[str, ClientSession]) -> None:
-        """Discover tools from all internal servers via persistent sessions and register proxies."""
+        """Discover tools from all internal servers via persistent sessions and register proxies: for every tool once
+        every server has listed and no two sources share a name (ToolNameClash), else for none."""
         logger.info(f"Discovering tools from {len(self.internal_mcp_servers)} internal server(s)...")
-        registered_tools: dict[str, str] = {}
+        listed: list[tuple[InternalMCPServer, list[MCPTool]]] = []
         for server in self.internal_mcp_servers:
             try:
                 session = sessions[server.mcp_url]
                 # bounded: this runs under _discover_lock, which startup and every MCP connect wait on
                 tools_result = await asyncio.wait_for(session.list_tools(), timeout=CHILD_DISCOVERY_TIMEOUT_S)
-                tools = tools_result.tools
-                logger.info(f"Found {len(tools)} tool(s) from {server.name}")
-                for tool in tools:
-                    if tool.name in registered_tools:
-                        raise ValueError(
-                            f"Duplicate tool name '{tool.name}': already registered from "
-                            f"'{registered_tools[tool.name]}', cannot register from '{server.name}'"
-                        )
-                    self._create_and_register_proxy_tool(server.mcp_url, tool)
-                    self._tool_server_urls[tool.name] = server.mcp_url
-                    registered_tools[tool.name] = server.name
-                    logger.debug(f"Registered proxy tool: {tool.name}")
-                self._server_tools[server.name] = tools
             except Exception as e:
                 logger.error(f"Failed to discover tools from {server.name}: {e}")
                 raise
+            logger.info(f"Found {len(tools_result.tools)} tool(s) from {server.name}")
+            listed.append((server, tools_result.tools))
+        # get_time is left out: a backing server's tool of that name wins, and the clock refuses to arm over it
+        sources: dict[str, list[str]] = {
+            tool.name: ["gateway"] for tool in self._server_tools.get("gateway", []) if tool.name != GET_TIME_TOOL_NAME}
+        for server, tools in listed:
+            for tool in tools:
+                sources.setdefault(tool.name, []).append(server.name)
+        clashes = {name: names for name, names in sources.items() if len(names) > 1}
+        if clashes:
+            raise ToolNameClash(clashes)
+        proxies = [(server, tool, self._proxy_tool(server.mcp_url, tool)) for server, tools in listed for tool in tools]
+        for server, tool, proxy in proxies:
+            self._mcp._tool_manager._tools[tool.name] = proxy
+            self._tool_server_urls[tool.name] = server.mcp_url
+            logger.debug(f"Registered proxy tool: {tool.name}")
+        for server, tools in listed:
+            self._server_tools[server.name] = tools
         self._tools_discovered = True
         if self._mirror_get_time_descriptor():
             logger.info(f"Re-mirrored '{GET_TIME_TOOL_NAME}' descriptor after tool discovery")
@@ -863,6 +891,8 @@ class Gateway:
     async def _handle_step(self, request: Request) -> Response:
         try:
             await self._ensure_tools_discovered()
+        except ToolNameClash as e:
+            return self._json_response({"error": f"{e}, so the env serves none of its servers' tools."}, 503)
         except Exception:
             return self._json_response(
                 {"error": "Tool discovery has not completed. Internal MCP servers may be unavailable."},
@@ -1019,7 +1049,10 @@ class Gateway:
         self._trigger_engine.invalidate_readonly_cache()
 
     def _create_and_register_proxy_tool(self, server_url: str, tool: MCPTool) -> None:
-        """Create a proxy tool that forwards calls to an internal server via its persistent session."""
+        self._mcp._tool_manager._tools[tool.name] = self._proxy_tool(server_url, tool)
+
+    def _proxy_tool(self, server_url: str, tool: MCPTool) -> FastMCPTool:
+        """A proxy tool that forwards calls to an internal server via its persistent session."""
         tool_name = tool.name
         tool_description = tool.description or ""
         input_schema = tool.inputSchema or {"type": "object", "properties": {}}
@@ -1049,7 +1082,7 @@ class Gateway:
             return result
 
         arg_model = self._create_arg_model_from_schema(tool_name, input_schema)
-        fastmcp_tool = FastMCPTool(
+        return FastMCPTool(
             fn=proxy,
             name=tool_name,
             description=tool_description,
@@ -1057,7 +1090,6 @@ class Gateway:
             fn_metadata=FuncMetadata(arg_model=arg_model),
             is_async=True,
         )
-        self._mcp._tool_manager._tools[tool_name] = fastmcp_tool
 
     @staticmethod
     def _create_arg_model_from_schema(tool_name: str, schema: dict[str, Any]):

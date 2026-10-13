@@ -22,7 +22,7 @@ pytestmark = [pytest.mark.int_test_slow]
 
 from agent_env.artifact import Artifact, CliArtifact, DockerImageArtifact, FileArtifact, FileArtifactUniverse, EnvironmentArtifact, EnvironmentUniverseArtifact
 from agent_env.env import Env, GatewayEnv, MCPServerEnv, MultiEnv
-from agentenv_protocol import DataPart, FilePart, client as protocol_v1
+from agentenv_protocol import DataPart, FilePart, ToolSession, client as protocol_v1
 from agent_env.env.envs import WebsiteEnv
 from agent_env.env.gateway import AGENT_ENV_ROLE_HEADER, GatewayMode, TOOL_DISABLE_ACTION, TOOL_ENABLE_ACTION
 from agent_env.env.gateway.get_time import (
@@ -763,6 +763,15 @@ async def test_gateway_with_single_mcp_server(mcp_server_envs, email_service_art
                 await session.initialize()
                 tools_result = await session.list_tools()
                 assert "list_emails" in [t.name for t in tools_result.tools]
+
+        # The protocol package's ToolSession sees what the SDK client sees, and a hidden tool's call is an error result
+        async with ToolSession(mcp_url=result.mcp_url, role="default") as default_session:
+            assert "list_emails" not in [t.name for t in await default_session.list_tools()]
+            hidden = await default_session.call_tool("list_emails", {"folder_name": "INBOX"})
+            assert hidden.isError and "is disabled for role 'default'" in hidden.text, hidden
+        async with ToolSession(mcp_url=result.mcp_url, role="cli") as cli_session:
+            assert "list_emails" in [t.name for t in await cli_session.list_tools()]
+            assert "alex.chen@techcorp.com" in (await cli_session.call_tool("list_emails", {"folder_name": "INBOX"})).text
 
         # Re-enable: list_emails accessible to default role again
         async with httpx.AsyncClient() as client:
@@ -1922,7 +1931,7 @@ async def test_renamed_registration_serves_its_registered_name(agentenv_items_en
         assert [c["name"] for c in result.environment_card["children_environments"]] == ["renameditems"]
         card = await protocol_v1.get_card(base)
         assert card["name"] == "renameditems"
-        assert [t["name"] for t in card["capabilities"]["tools"]] == ["renameditems_add_item"]
+        assert [t["name"] for t in card["capabilities"]["tools"]] == ["renameditems_add_item", "renameditems_whoami"]
 
         sent: list[tuple[str, str]] = []
         real_send = httpx.AsyncClient.send
@@ -1976,7 +1985,8 @@ async def test_gateway_with_agentenv_environment(agentenv_items_env):
             "urn:agentenv:export-as-file/v1",
         }
         # Decorator tools ride capabilities.tools ({environment_name} resolved); imperative tools stay handshake-only.
-        assert [t["name"] for t in card["capabilities"]["tools"]] == ["items_add_item"]
+        assert [t["name"] for t in card["capabilities"]["tools"]] == ["items_add_item", "items_whoami"]
+        assert not protocol_v1.find_tool(card, "items_whoami")["inputSchema"].get("properties")
         add_item_tool = protocol_v1.find_tool(card, "items_add_item")
         assert add_item_tool["description"] == "Add an item to the store."
         assert add_item_tool["inputSchema"]["required"] == ["item"]
@@ -2029,6 +2039,13 @@ async def test_gateway_with_agentenv_environment(agentenv_items_env):
             assert "w" in content, f"Expected @tool-added item 'w' via list_items, got {content}"
 
         await _verify_list_tools(mcp_url=result.mcp_url, tool_verifier_callback=assert_tool_sees_items)
+
+        # The role a ToolSession sends reaches the child's tool as its caller, with the gateway's key for each session
+        async with (ToolSession(mcp_url=result.mcp_url, role="alice@example.com") as alice,
+                    ToolSession(mcp_url=result.mcp_url) as anonymous):
+            seen = [json.loads((await session.call_tool("items_whoami")).text) for session in (alice, alice, anonymous)]
+        assert [caller["role"] for caller in seen] == ["alice@example.com", "alice@example.com", None]
+        assert seen[0]["session"] == seen[1]["session"] != seen[2]["session"] and None not in {c["session"] for c in seen}
 
         # Exercise load_environment_artifact's v1 branch end-to-end (supports_v1 -> reset + add inline).
         items_artifact = EnvironmentArtifact.put(

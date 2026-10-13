@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
-from agent_env.providers.env_providers.env_provider import EnvironmentProvider, _SandboxEnvironmentProvider
+from agent_env.providers.env_providers.env_provider import DeployRefused, EnvironmentProvider, _SandboxEnvironmentProvider
 
 _ATTEMPT = r"env_deploy_provider_attempt env_id=e1 provider={} status={} duration_s=\d+\.\d"
 _ENV = SimpleNamespace(id="e1")
@@ -106,6 +106,18 @@ async def test_a_chain_that_fails_everywhere_names_every_member():
         await topology.deploy(_ENV, ChainedSandboxProvider([ProviderA(), ProviderB()]))
 
     assert str(raised.value) == "All 2 chained providers failed to deploy: ProviderA: RuntimeError('a'); ProviderB: ValueError('b')"
+
+
+@pytest.mark.asyncio
+async def test_a_chain_stops_at_a_refused_deploy_which_the_next_member_would_refuse_too():
+    topology = _Topology(DeployRefused("duplicate tool names"), _RECORD)
+
+    with patch.object(topology, "close", wraps=topology.close) as close, \
+            pytest.raises(DeployRefused, match="duplicate tool names"):
+        await topology.deploy(_ENV, ChainedSandboxProvider([ProviderA(), ProviderB()]))
+
+    assert [type(s.sandbox_provider).__name__ for s in topology.seen] == ["ProviderA"]
+    close.assert_awaited_once()
 
 
 @pytest.mark.asyncio

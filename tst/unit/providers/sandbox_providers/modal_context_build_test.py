@@ -64,8 +64,8 @@ def builds(monkeypatch):
     return builds
 
 
-def _provider() -> ModalSandboxProvider:
-    provider = ModalSandboxProvider(app_name="agent-env-test")
+def _provider(environment_name: str | None = None) -> ModalSandboxProvider:
+    provider = ModalSandboxProvider(app_name="agent-env-test", environment_name=environment_name)
     provider._get_client = AsyncMock(return_value=MagicMock())
     provider._get_app = AsyncMock(return_value="app")
     return provider
@@ -108,6 +108,17 @@ async def test_deploys_of_the_same_sources_at_once_share_one_build_and_later_one
     await _provider().prepare_image(first)
 
     assert len(builds.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_each_modal_environment_builds_its_own_image_of_the_same_sources(local_stores, context, builds):
+    image = _context_image("solver-image", context)
+
+    await _provider().prepare_image(image)
+    await _provider("rl-prod").prepare_image(image)
+    await _provider("rl-prod").prepare_image(image)
+
+    assert len(builds.calls) == 2
 
 
 @pytest.mark.asyncio
