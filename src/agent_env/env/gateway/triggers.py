@@ -811,7 +811,8 @@ class TriggerEngine:
         """
         pending: list[asyncio.Task] = []
         timeout_s: float | None = None
-        if not any(self._provoked_by(trig, role) for trig in self._triggers.values()):
+        provokable = [(tid, trig) for tid, trig in self._triggers.items() if self._provoked_by(trig, role)]
+        if not provokable:
             return pending, timeout_s
         # Before the isError guard: an errored call is still a clock tick.
         if self._has_time_triggers:
@@ -822,9 +823,9 @@ class TriggerEngine:
         data = _result_data(result)
         ctx = {"args": arguments, "result": data}
         provoking = {"tool": name, "role": role}
-        for tid, trig in self._triggers.items():
+        for tid, trig in provokable:
             when = trig["spec"]["when"]
-            if when["type"] != "action" or when["tool"] != name or not self._provoked_by(trig, role):
+            if when["type"] != "action" or when["tool"] != name:
                 continue
             if trig["status"] != "armed" and not (when.get("repeat") and trig["status"] in TRIGGER_IN_FLIGHT_STATUSES):
                 continue
@@ -838,9 +839,8 @@ class TriggerEngine:
                 asked = barrier.get("timeout_seconds") or self._gw.TRIGGER_BARRIER_TIMEOUT_S
                 timeout_s = asked if timeout_s is None else max(timeout_s, asked)
         if not self._is_readonly(name):
-            for tid, trig in self._triggers.items():
-                if (trig["status"] == "armed" and trig["spec"]["when"]["type"] == "state" and not trig["evaluating"]
-                        and self._provoked_by(trig, role)):
+            for tid, trig in provokable:
+                if trig["status"] == "armed" and trig["spec"]["when"]["type"] == "state" and not trig["evaluating"]:
                     trig["evaluating"] = True
                     self._schedule(self._eval_state(tid, trig, provoking))
         return pending, timeout_s
