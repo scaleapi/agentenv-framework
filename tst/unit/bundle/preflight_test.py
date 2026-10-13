@@ -131,7 +131,7 @@ def test_an_image_stored_under_its_build_tag_is_refused_where_a_sandbox_elsewher
                               "provider: ")
     assert "is stored as a tar.gz under 'mcp-server-email:v1', which names no registry" in problem
     assert problem.endswith("; run it with --sandbox local, or on a provider whose VMs load its tar.gz, such as "
-                            "--sandbox modal_vm, or put the image again so its name records its registry")
+                            "--sandbox modal_vm, or put the image again in an image store whose registry the sandbox can reach")
     assert problem.count("whose VMs load its tar.gz") == 1
     assert not local_store().path.exists()
 

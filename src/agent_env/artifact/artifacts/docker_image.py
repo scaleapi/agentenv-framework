@@ -32,8 +32,9 @@ logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[str, str, int], None]
 
-# How an image stored under its build tag gets a name a sandbox elsewhere pulls: put() pushes it to the image store.
-PUT_AGAIN = "put the image again so its name records its registry"
+# How an image stored under its build tag gets a name a sandbox elsewhere pulls: put() pushes it to the image store,
+# which has to be one whose registry that sandbox reaches; this machine's own registry isn't.
+PUT_AGAIN = "put the image again in an image store whose registry the sandbox can reach"
 
 _SAFE_GIT_NAME = re.compile(r"^[a-zA-Z0-9._-]+$")
 
