@@ -190,7 +190,7 @@ OTHER_PLATFORM = "'img' v1 is a linux/arm64 image, and the sandbox runs linux/am
         "context-naming-no-dockerfile"])
 def test_a_vm_of_another_platform_builds_an_image_from_the_context_beside_its_tar_gz(context_url, dockerfile, platform,
                                                                                     rebuilt, problem):
-    """Only from a context that records its Dockerfile, as every put since contexts became whole folders does."""
+    """Only from a context that records its Dockerfile."""
     image = DockerImageArtifact(id="img", version=1, description="d", image_name="localhost:5000/img:v1",
                                 tar_gz_object_url="file:///state/img.tar.gz", build_context_object_url=context_url,
                                 dockerfile_path=dockerfile, platform="linux/arm64")

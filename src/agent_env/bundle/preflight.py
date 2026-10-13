@@ -383,7 +383,7 @@ class _Walk:
             loads = (", or on a provider whose VMs load its tar.gz, such as --sandbox modal_vm"
                      if vms_load and image.artifact.tar_gz_object_url and form is not Accepts.LOADABLE
                      and image.artifact.platform_problem(DEFAULT_BUILD_PLATFORM) is None else "")
-            if image.artifact.stored_under_build_tag:  # the refusal's own remedy, with the flags that apply it
+            if image.artifact.stored_under_build_tag:  # its remedy, with the CLI's flags
                 return (f"deploys {image.what} on the {_shown(link)} sandbox provider: "
                         f"{image.artifact.build_tag_reason()}; run it with --sandbox local{loads}, or {PUT_AGAIN}")
             return (f"deploys {image.what} on the {_shown(link)} sandbox provider: {refusal}; run it with "

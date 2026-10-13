@@ -158,7 +158,7 @@ async def test_a_provider_whose_containers_are_vms_of_their_own_puts_none_on_a_p
 CONTEXT_ONLY = DockerImageArtifact(id="img", version=2, description="d", image_name="local/img-0123456789ab:v2",
                                    build_context_object_url="s3://bucket/ctx.tar.gz", dockerfile_path="Dockerfile")
 NO_REGISTRY = DockerImageArtifact(id="img", version=2, description="d", image_name="img:v2")
-# Only a context, which put_context always writes with its Dockerfile's path: one without is built by no sandbox.
+# put_context always records the Dockerfile; without it, nothing builds the context.
 CONTEXT_ONLY_NO_DOCKERFILE = CONTEXT_ONLY.model_copy(update={"dockerfile_path": None})
 
 
@@ -168,7 +168,7 @@ WITH_TAR_GZ = DockerImageArtifact(id="img", version=2, description="d", image_na
                                   tar_gz_object_url="file:///state/img.tar.gz")
 WITH_TAR_GZ_AND_CONTEXT = WITH_TAR_GZ.model_copy(update={"build_context_object_url": "file:///state/ctx.tar.gz",
                                                          "dockerfile_path": "Dockerfile"})
-# A context written before contexts became whole folders records no Dockerfile, so it can't be built.
+# An old context records no Dockerfile, so nothing builds it.
 WITH_TAR_GZ_AND_AN_OLD_CONTEXT = WITH_TAR_GZ.model_copy(update={"build_context_object_url": "file:///state/ctx.tar.gz"})
 HERE = "is in a registry on this machine, which a sandbox elsewhere can't pull from"
 BARE_TAG_TAR_GZ = DockerImageArtifact(id="img", version=2, description="d", image_name="mcp-server-email",

@@ -62,8 +62,7 @@ def test_a_sandbox_elsewhere_cant_pull_from_this_machines_registry(image_name):
 ], ids=["bare-tag", "bare-path", "registry", "docker-hub-name"])
 def test_a_sandbox_elsewhere_cant_pull_the_tag_an_image_stored_as_a_tar_gz_was_built_under(image_name, tar_gz,
                                                                                           elsewhere):
-    """The tag exists only where the image was built, so a sandbox on this machine may still have it; a name without
-    a tar.gz is an image to pull from Docker Hub."""
+    """The tag exists only where the image was built; a bare name with no tar.gz is a Docker Hub image."""
     image = DockerImageArtifact(id="img", version=1, description="d", image_name=image_name, tar_gz_object_url=tar_gz)
 
     found = image.by_name_problem(on_this_machine=False)

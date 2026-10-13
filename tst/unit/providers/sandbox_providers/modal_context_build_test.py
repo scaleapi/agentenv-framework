@@ -204,7 +204,7 @@ async def test_an_image_with_a_build_context_beside_its_tar_gz_is_built_when_mod
 
 @pytest.mark.asyncio
 async def test_an_image_whose_context_records_no_dockerfile_is_not_built(local_stores, context, builds):
-    """A context written before contexts became whole folders, or a GitHub build's, names no Dockerfile to build."""
+    """Old and GitHub contexts record no Dockerfile."""
     image = _context_image("server-image", context).model_copy(update={
         "image_name": "mcp-server-email", "tar_gz_object_url": "file:///state/server.tar.gz", "dockerfile_path": None})
 

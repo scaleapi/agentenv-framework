@@ -120,8 +120,7 @@ def test_an_image_in_this_machines_registry_is_refused_where_a_sandbox_elsewhere
 
 
 def test_an_image_stored_under_its_build_tag_is_refused_where_a_sandbox_elsewhere_pulls_it_naming_the_flags(bundle_dir):
-    """The tag exists only on the machine that built the image, so a sandbox elsewhere would look it up on Docker Hub;
-    the refusal gives its remedy once, with the flags that apply it."""
+    """The remedy is given once, with the CLI's flags."""
     _agent("solver", ("mcp-server-email:v1", "s3://bucket/img-v1.tar.gz"))
     _task(bundle_dir, [AGENT])
 

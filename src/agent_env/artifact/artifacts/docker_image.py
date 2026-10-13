@@ -32,8 +32,6 @@ logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[str, str, int], None]
 
-# How an image stored under its build tag gets a name a sandbox elsewhere pulls: put() pushes it to the image store,
-# which has to be one whose registry that sandbox reaches; this machine's own registry isn't.
 PUT_AGAIN = "put the image again in an image store whose registry the sandbox can reach"
 
 _SAFE_GIT_NAME = re.compile(r"^[a-zA-Z0-9._-]+$")
@@ -281,15 +279,12 @@ class DockerImageArtifact(Artifact):
 
     @property
     def buildable(self) -> bool:
-        """Whether a sandbox can build the image from its stored build context: one that records its Dockerfile's path,
-        as every put since contexts became whole folders does. An older context, or a GitHub build's, records none and
-        is kept only beside its tar.gz."""
+        """Whether the context records its Dockerfile, so a sandbox can build it; old and GitHub contexts don't."""
         return bool(self.build_context_object_url and self.dockerfile_path)
 
     @property
     def stored_under_build_tag(self) -> bool:
-        """Whether the image is stored as a tar.gz under a name that names no registry, the tag the machine that built
-        it gave it: only that machine, or a VM that loads the tar.gz, has an image of that name."""
+        """Whether the image is a tar.gz under a bare tag, which only the machine that built it has."""
         return bool(self.tar_gz_object_url) and not names_registry(self.image_name)
 
     def build_tag_reason(self) -> str:
@@ -317,10 +312,8 @@ class DockerImageArtifact(Artifact):
                 "registry to pull it from")
 
     def by_name_problem(self, *, on_this_machine: bool) -> str | None:
-        """Why a sandbox that runs an image by pulling its name can't run this one, or None when it can: a context-only
-        image's name is a tag only its build gives it, a VM sandbox's or Modal's, and pulled, it would be looked up on
-        Docker Hub. A sandbox not ``on_this_machine`` can't pull from a registry on this machine, nor an image stored as
-        a tar.gz under a name that names no registry: that's the tag the machine that built it gave it."""
+        """Why a sandbox that pulls images by name can't run this one, or None: a context-only image must be built,
+        and a sandbox elsewhere can't pull from this machine's registry or an image ``stored_under_build_tag``."""
         if self.context_only:
             return f"{self.id!r} v{self.version} is only a build context, which has to be built, not pulled"
         if self.stored_under_build_tag and not on_this_machine:
