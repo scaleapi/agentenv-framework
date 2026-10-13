@@ -16,6 +16,7 @@ from agent_env.providers.sandbox_providers.chained_sandbox_provider import Chain
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandbox, ModalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandbox, ModalVmSandboxProvider
+from agent_env.providers.sandbox_providers import sandbox as sandbox_module
 from agent_env.providers.sandbox_providers.sandbox import Sandbox, VmSandbox, _pull
 from agent_env.providers.sandbox_providers.sandbox_provider import _BUILTIN_SANDBOX_PROVIDERS, SandboxProvider, build_sandbox_provider
 from agent_env.store import ImageStore, RegistryAuth
@@ -601,18 +602,27 @@ def test_cpu_floor_differs_between_container_and_vm_backends():
 
 
 class _PullingVm(VmSandbox):
-    def __init__(self, first_pull_error: str | None):
+    """Its first ``failures`` pulls fail with ``pull_error``."""
+
+    def __init__(self, pull_error: str | None, failures: int = 1):
+        self.sandbox_id = "vm-test"
         self.scripts: list[str] = []
-        self._first_pull_error = first_pull_error
+        self._pull_error = pull_error
+        self._failures = failures
 
     async def terminate(self) -> None:
         pass
 
     async def exec_script(self, script: str, *, max_retries: int = 0) -> str:
         self.scripts.append(script)
-        if self._first_pull_error and len(self.scripts) == 1:
-            raise RuntimeError(f"Script failed (exit 1):\nstdout: \nstderr: {self._first_pull_error}")
+        if self._pull_error and len(self.scripts) <= self._failures:
+            raise RuntimeError(f"Script failed (exit 1):\nstdout: \nstderr: {self._pull_error}")
         return ""
+
+
+@pytest.fixture
+def no_pause(monkeypatch):
+    monkeypatch.setattr(sandbox_module, "_REGISTRY_RETRY_SECONDS", 0)
 
 
 @pytest.mark.asyncio
@@ -626,9 +636,19 @@ async def test_an_image_with_nothing_for_this_platform_is_pulled_for_amd64():
 
 
 @pytest.mark.asyncio
-async def test_any_other_pull_failure_is_raised_as_it_was():
-    sandbox = _PullingVm("Error response from daemon: pull access denied for registry/agent")
+async def test_any_other_pull_failure_runs_once_more(no_pause):
+    """As a registry's 404 for a blob it holds, which passes."""
+    sandbox = _PullingVm("Error response from daemon: failed to copy: httpReadSeeker: failed open: not found")
+
+    await _pull(sandbox, "registry/agent:v1")
+
+    assert sandbox.scripts == ["docker pull registry/agent:v1"] * 2
+
+
+@pytest.mark.asyncio
+async def test_a_pull_that_fails_again_is_raised_as_it_was(no_pause):
+    sandbox = _PullingVm("Error response from daemon: pull access denied for registry/agent", failures=2)
 
     with pytest.raises(RuntimeError, match="pull access denied"):
         await _pull(sandbox, "registry/agent:v1")
-    assert sandbox.scripts == ["docker pull registry/agent:v1"]
+    assert sandbox.scripts == ["docker pull registry/agent:v1"] * 2

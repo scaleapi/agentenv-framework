@@ -38,6 +38,11 @@ def signing_store():
     reset_config()
 
 
+@pytest.fixture
+def no_pause(monkeypatch):
+    monkeypatch.setattr(sandbox_module, "_REGISTRY_RETRY_SECONDS", 0)
+
+
 class _RecordingVmSandbox(VmSandbox):
     """Concrete VmSandbox that records executed scripts instead of touching a VM."""
 
@@ -309,7 +314,7 @@ class _OnePullFailsVm(_RecordingVmSandbox):
 
 
 @pytest.mark.asyncio
-async def test_the_first_pull_to_fail_cancels_the_rest_so_a_stalled_one_cant_hold_it_back(registry):
+async def test_the_first_pull_to_fail_cancels_the_rest_so_a_stalled_one_cant_hold_it_back(registry, no_pause):
     sandbox = _OnePullFailsVm()
 
     with pytest.raises(RuntimeError, match="manifest unknown"):
@@ -713,8 +718,8 @@ async def test_a_context_only_image_is_built_in_the_vm_from_its_context(signing_
     assert sandbox.scripts == [
         f"rm -rf {work} && mkdir -p {work}/context",
         f"curl -fsSL {sandbox_module.CURL_RETRY_FLAGS} https://signed/build-context.tar.gz -o {work}/context.tar.gz",
-        f"tar -xzf {work}/context.tar.gz -C {work}/context && cd {work}/context && "
-        "docker build --platform linux/amd64 -f Dockerfile -t local/a-0123456789ab:v1 .",
+        f"tar -xzf {work}/context.tar.gz -C {work}/context",
+        f"cd {work}/context && docker build --platform linux/amd64 -f Dockerfile -t local/a-0123456789ab:v1 .",
         f"rm -rf {work}",
     ]
 
@@ -769,7 +774,7 @@ class _BuildFailsVm(_RecordingVmSandbox):
 
 
 @pytest.mark.asyncio
-async def test_a_failed_build_names_its_image_and_still_removes_its_folder(signing_store):
+async def test_a_failed_build_names_its_image_and_still_removes_its_folder(signing_store, no_pause):
     sandbox, digest = _BuildFailsVm(), "sha256:" + "1" * 64
 
     with pytest.raises(RuntimeError, match="(?s)Building local/a-0123456789ab:v1 from its build context failed: .*not found"):
@@ -777,6 +782,60 @@ async def test_a_failed_build_names_its_image_and_still_removes_its_folder(signi
 
     (work,) = _works(sandbox)
     assert sandbox.scripts[-1] == f"rm -rf {work}"
+
+
+class _FlakyBuildVm(_RecordingVmSandbox):
+    """Its first ``docker build`` fails with ``stderr``; any later one succeeds."""
+
+    def __init__(self, stderr: str):
+        super().__init__()
+        self._stderr = stderr
+
+    async def exec_with_output(self, *args):
+        if args[:2] == ("sudo", "bash") and "docker build" in script_run(args):
+            self.scripts.append(script_run(args))
+            first = sum("docker build" in script for script in self.scripts) == 1
+            return (1, "", self._stderr) if first else (0, "", "")
+        return await super().exec_with_output(*args)
+
+
+# A base image's blob the registry answered 404 for, as mirror.gcr.io once did, in each builder's words.
+_BASE_IMAGE_404 = {
+    "legacy": "Step 1/10 : FROM mirror.gcr.io/library/python:3.12-slim\nfailed to copy: httpReadSeeker: failed "
+              "open: could not fetch content descriptor sha256:9cbf (application/vnd.oci.image.config.v1+json) "
+              "from remote: not found",
+    "buildkit": "#4 [1/5] FROM mirror.gcr.io/library/python:3.12-slim\n#4 ERROR: failed to copy: httpReadSeeker: "
+                "failed open: not found\nERROR: failed to build: failed to solve: failed to copy: httpReadSeeker: "
+                "not found",
+}
+_RUN_FAILED = {
+    "legacy": "Step 4/10 : RUN pytest\nThe command '/bin/sh -c pytest' returned a non-zero code: 1",
+    "buildkit": "#7 [4/5] RUN pytest\nERROR: failed to build: failed to solve: process \"/bin/sh -c pytest\" did not "
+                "complete successfully: exit code: 1",
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stderr", _BASE_IMAGE_404.values(), ids=_BASE_IMAGE_404)
+async def test_a_build_that_fails_fetching_an_image_runs_once_more(signing_store, no_pause, stderr):
+    sandbox = _FlakyBuildVm(stderr)
+
+    await sandbox.load_docker_images([_context_image("a", "sha256:" + "1" * 64)])
+
+    builds = [script for script in sandbox.scripts if "docker build" in script]
+    assert len(builds) == 2 and builds[0] == builds[1]
+    assert sum(script.startswith("tar -xzf") for script in sandbox.scripts) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stderr", _RUN_FAILED.values(), ids=_RUN_FAILED)
+async def test_a_build_whose_run_command_fails_fails_once_with_its_output(signing_store, no_pause, stderr):
+    sandbox = _FlakyBuildVm(stderr)
+
+    with pytest.raises(RuntimeError, match=re.escape(stderr.rsplit("\n", 1)[-1])):
+        await sandbox.load_docker_images([_context_image("a", "sha256:" + "1" * 64)])
+
+    assert sum("docker build" in script for script in sandbox.scripts) == 1
 
 
 @pytest.mark.asyncio
