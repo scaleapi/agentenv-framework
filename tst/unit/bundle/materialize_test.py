@@ -346,6 +346,35 @@ def test_a_registry_image_a_folder_names_is_pinned_once_and_read_again_only_when
     assert registry == ["ghcr.io/acme/solver:1", "ghcr.io/acme/solver:2"]
 
 
+@pytest.mark.parametrize("ref, pinned", [
+    ("ghcr.io/acme/solver:1", ", pinned to sha256:aaaaaaaaaaaa"),
+    (f"ghcr.io/acme/solver@{DIGEST}", ""),
+], ids=["tag", "digest"])
+def test_a_tag_refs_write_line_names_the_digest_it_runs(bundle_dir, registry, ref, pinned):
+    layout(bundle_dir, {"agents/solver/agent.toml": f'image = {{ ref = "{ref}" }}\n'})
+    _steps(bundle_dir, [DEPLOY_SOLVER])
+    plan = plan_of(bundle_dir)
+    lines = []
+
+    materialize(plan, on_write=lambda done: lines.append(_written(plan, done)))
+    materialize(plan, on_write=lambda done: lines.append(_written(plan, done)))
+
+    image = f"agents/solver ({ref} image): v1"
+    assert [line for line in lines if line.startswith(image)] == [
+        f"{image} (new){pinned}", f"{image}, unchanged{pinned}"]
+
+
+def test_an_env_folder_naming_a_registry_image_is_written_over_it(bundle_dir, registry):
+    layout(bundle_dir, {"envs/crm/env.toml": 'environment_name = "crm"\nimage = { ref = "ghcr.io/acme/crm:1" }\n'})
+    _steps(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
+
+    done = _run(bundle_dir)
+
+    env = Env.get(f"{ROOT}/crm", done.version_of("env", f"{ROOT}/crm"))
+    assert (env.docker_image_artifact.id, env.docker_image_artifact.image_name) == (
+        f"{ROOT}/crm__env_image", f"ghcr.io/acme/crm:1@{DIGEST}")
+
+
 def test_a_registry_image_its_registry_refuses_is_a_problem_naming_its_folder(bundle_dir, monkeypatch):
     def refuse(ref, auth):
         raise ValueError(f"{ref}: the registry answered 404 (manifest unknown)")

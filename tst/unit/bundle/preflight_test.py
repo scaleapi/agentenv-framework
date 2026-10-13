@@ -387,6 +387,25 @@ def test_an_agent_image_that_is_only_a_build_context_runs_where_a_vm_or_modal_bu
         assert [entry.name for entry in dry_run_bundle(bundle_dir, sandbox=sandbox).runs] == ["t"]
 
 
+@pytest.mark.parametrize("ref, problem", [
+    ("ghcr.io/acme/crm:1", None),
+    ("localhost:5000/team/crm:v1", "localhost:5000/team/crm:v1 is in a registry on this machine"),
+], ids=["public", "this-machine"])
+def test_an_env_folder_naming_a_registry_image_is_checked_as_modals_containers_pull_it(bundle_dir, monkeypatch, ref,
+                                                                                      problem):
+    monkeypatch.setattr(docker_image_module, "pin_digest",
+                        lambda ref, auth: pytest.fail("a dry run asked the registry"))
+    layout(bundle_dir, {"envs/crm/env.toml": f'environment_name = "crm"\nimage = {{ ref = "{ref}" }}\n'})
+    _infra(REMOTE)
+    _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
+
+    if problem is None:
+        assert [entry.name for entry in dry_run_bundle(bundle_dir, sandbox="modal").runs] == ["t"]
+    else:
+        [found] = _problems(lambda: dry_run_bundle(bundle_dir, sandbox="modal"))
+        assert found.startswith("tasks/t.json: step 'env': deploys env ") and problem in found, found
+
+
 def test_an_env_image_that_is_only_a_build_context_runs_on_a_gateway_vm_and_on_modals_containers(bundle_dir):
     with namespace_routing():
         MCPServerEnv.put(id="crm", docker_image_artifact=_context_image("crm-image"), environment_name="crm")

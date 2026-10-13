@@ -22,8 +22,10 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 
+from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.env.bootstrap import InfraBuild, ensure_default_envs
 from agent_env.providers import build_sandbox_provider
+from agent_env.store.base import NotFoundError
 from agent_env.store.routing import namespace_routing, run_scope
 from agent_env.task import Task, record_task_cancelled
 from agent_env.task.interrupts import Interrupts
@@ -439,8 +441,20 @@ def _task_run_command(ref: Reference) -> str:
 def _written(plan: Plan, done: Materialized) -> str:
     what = f"{_label(plan, done.write)}: v{done.version}"
     if done.reused:
-        return f"{what}, unchanged" + (f" ({'; '.join(done.reasons)})" if done.reasons else "")
-    return f"{what} ({'; '.join(done.reasons)})"
+        return f"{what}, unchanged" + (f" ({'; '.join(done.reasons)})" if done.reasons else "") + _pinned(done)
+    return f"{what} ({'; '.join(done.reasons)})" + _pinned(done)
+
+
+def _pinned(done: Materialized) -> str:
+    """For an image a tag names in its registry, the digest it was pinned to, which re-runs keep while the ref does."""
+    if not isinstance(done.write.source, ReferencedImage) or "@" in done.write.source.ref:
+        return ""
+    try:
+        name = DockerImageArtifact.get(done.write.id, done.version).image_name
+    except NotFoundError:  # a dry run's image, not yet written
+        return ""
+    algorithm, _, digest = name.rpartition("@")[2].partition(":")
+    return f", pinned to {algorithm}:{digest[:12]}"
 
 
 def _label(plan: Plan, write: Write) -> str:
