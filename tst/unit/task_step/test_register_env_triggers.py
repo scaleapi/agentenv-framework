@@ -193,7 +193,7 @@ async def test_a_gateway_without_named_executors_refuses_them_before_any_request
         DeployedAgent(agent_name="alice", api_url="http://alice", role="alice@example.com"),
         DeployedAgent(agent_name="bob", api_url="http://bob", role="bob@example.com"),
     ], metadata={})
-    with pytest.raises(RuntimeError, match=r"takes no 'executors'.*\['alice', 'bob'\]"):
+    with pytest.raises(RuntimeError, match=r"does not declare 'named_executors'.*\['alice', 'bob'\]"):
         await _step(triggers=_NAMED_TRIGGERS).execute(context)
     assert sent == []
 
@@ -219,6 +219,7 @@ def _without_named_executors() -> list:
     """The gateway's own extensions, as a gateway that predates named executors advertises them."""
     extensions = copy.deepcopy(GATEWAY_EXTENSIONS)
     triggers = next(e for e in extensions if e["uri"] == EXT_TRIGGERS_URI)
+    del triggers["params"]["features"]
     del triggers["params"]["methods"]["register"]["request"]["properties"]["executors"]
     return extensions
 

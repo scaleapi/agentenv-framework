@@ -108,6 +108,10 @@ TRIGGER_STATUSES = ("armed", "firing", "queued", "fired", "failed")
 # A fire is in flight; `queued` also has further provoking calls already waiting to be drained.
 TRIGGER_IN_FLIGHT_STATUSES = ("firing", "queued")
 
+# What triggers/v1 takes beyond its first release, declared on the card so a client can refuse an older gateway.
+TRIGGER_NAMED_EXECUTORS = "named_executors"
+TRIGGER_FEATURES = (TRIGGER_NAMED_EXECUTORS,)
+
 GATEWAY_TRAJECTORY_FILE = os.environ.get(
     "GATEWAY_TRAJECTORY_FILE",
     f"/tmp/agentenv/{uuid4().hex[:8]}-trajectory.jsonl",
@@ -170,7 +174,7 @@ GATEWAY_EXTENSIONS = [
     {
         "uri": EXT_TRIGGERS_URI,
         "description": "Register (additive add-by-id), remove, clear, or read (state) typed Action/State triggers + the firing log (harness control path).",
-        "params": {"endpoint": "/triggers/register", "methods": {
+        "params": {"endpoint": "/triggers/register", "features": list(TRIGGER_FEATURES), "methods": {
             "register": {"method": "POST", "endpoint": "/triggers/register", "request": {"type": "object", "properties": {"watch_roles": {"type": "array", "items": {"type": "string"}}, "executor": {"type": "object"}, "executors": {"type": "object"}, "triggers": {"type": "array"}}, "required": ["triggers"]}},
             "remove": {"method": "POST", "endpoint": "/triggers/remove", "request": {"type": "object", "properties": {"ids": {"type": "array", "items": {"type": "string"}}}, "required": ["ids"]}},
             "clear": {"method": "POST", "endpoint": "/triggers/clear", "request": {"type": "object", "properties": {}}},

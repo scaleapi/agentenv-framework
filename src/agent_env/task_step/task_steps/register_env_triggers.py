@@ -9,7 +9,7 @@ import httpx
 from agentenv_protocol import client as protocol_v1
 
 from agent_env.env.env import DeployedEnv, DeployedSandboxEnv
-from agent_env.env.gateway.constants import EXT_TRIGGERS_URI
+from agent_env.env.gateway.constants import EXT_TRIGGERS_URI, TRIGGER_NAMED_EXECUTORS
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity_refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
@@ -74,10 +74,10 @@ class RegisterEnvTriggersStep(TaskStep):
         named = _named_executors(self.triggers)
         if named:
             # A gateway that predates `executors` ignores it and would send these actions to the default executor.
-            if not _takes_named_executors(deployed):
+            if TRIGGER_NAMED_EXECUTORS not in _trigger_features(deployed):
                 raise RuntimeError(
-                    f"Env '{self.env_id}' runs a gateway whose triggers/v1 register takes no 'executors', so nl actions "
-                    f"naming {named} cannot reach their executors; redeploy it on a gateway image that takes them.")
+                    f"Env '{self.env_id}' runs a gateway whose triggers/v1 does not declare '{TRIGGER_NAMED_EXECUTORS}', "
+                    f"so nl actions naming {named} cannot reach their executors; redeploy it on a gateway image that does.")
             body["executors"] = {name: self._executor(context, deployed, name) for name in named}
         try:
             result = await deployed.invoke(EXT_TRIGGERS_URI, "register", body)
@@ -119,6 +119,6 @@ def _named_executors(triggers: list[dict]) -> list[str]:
     return list(dict.fromkeys(name for name in names if isinstance(name, str) and name))
 
 
-def _takes_named_executors(deployed: DeployedEnv) -> bool:
-    register = protocol_v1.find_extension_method(deployed.environment_card or {}, EXT_TRIGGERS_URI, "register") or {}
-    return "executors" in ((register.get("request") or {}).get("properties") or {})
+def _trigger_features(deployed: DeployedEnv) -> list:
+    """The triggers/v1 features the env's gateway declares on its card; one that predates them declares none."""
+    return protocol_v1.extension_params(deployed.environment_card or {}, EXT_TRIGGERS_URI).get("features") or []
