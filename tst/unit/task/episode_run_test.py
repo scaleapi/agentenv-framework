@@ -418,6 +418,15 @@ async def test_the_scores_are_every_verifiers_by_step_with_an_aggregate_beside_i
 
 
 @pytest.mark.asyncio
+async def test_a_score_is_keyed_by_its_step_when_the_seed_names_its_verifier(teardowns):
+    episode = await _spec(ITEMS, ALICE, TURN, {**REPLIES, "verifier_id": "replies-<week>"}, seed={"week": "3"}).start()
+
+    await (await episode.next_turn()).end("done")
+
+    assert await episode.result() == {"replies": 1.0}
+
+
+@pytest.mark.asyncio
 async def test_a_tolerated_verifier_that_recorded_no_score_is_missing_from_the_scores(teardowns):
     unscored = {"id": "graded", "type": "agent_prompt_response_verifier", "prompt_id": "missing",
                 "verifier_id": "graded", "criteria": [{"type": "response_contains", "needles": ["crate"]}],

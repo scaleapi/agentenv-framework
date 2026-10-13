@@ -150,7 +150,8 @@ class Episode:
                 )
             await self._wait(changed)
         self._raise_unless_completed()
-        return recorded_scores(self._task.steps, self._context)
+        seeded = substitute_seed_in_steps(self._task.steps, self._context.metadata.get("seed") or {})
+        return recorded_scores(seeded, self._context)
 
     async def abandon(self, reason: str) -> None:
         """Stop the run and wait for its teardown; it is recorded cancelled with ``reason``. A run a step has
