@@ -287,6 +287,7 @@ def test_the_platform_default_is_served_on_loopback_too_where_a_vm_on_this_machi
     """A second loopback address stands in for the Linux Docker bridge address the default binds."""
     monkeypatch.setattr(server_module, "_servers", {})
     monkeypatch.setattr(server_module, "default_bind_host", lambda: "127.0.0.2")
+    monkeypatch.setenv("SSL_CERT_FILE", str(local_ca().bundle_path))
     store = LocalFilesystemObjectStore(str(tmp_path), grant_advertise_host="localhost")
     try:
         grant = store.issue_read_grant(store.put("k", b"both"))
