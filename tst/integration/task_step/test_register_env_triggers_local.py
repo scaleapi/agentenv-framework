@@ -52,7 +52,7 @@ async def test_each_nl_action_reaches_the_executor_it_names(local_stack):
         async with httpx.AsyncClient(base_url=deployed.gateway_url, timeout=60) as client:
             provoke = await client.post("/step", json={"action": "call_tool", "tool_name": "list_items", "arguments": {}})
             assert provoke.status_code == 200, provoke.text
-            state = await _settled(client, ("to-alice", "to-bob"))
+            state = await _quiet(client, {"to-alice": 1, "to-bob": 1, "on-add": 0})
             stored = await client.post("/step", json={"action": "call_tool", "tool_name": "list_items", "arguments": {}},
                                        headers={AGENT_ENV_ROLE_HEADER: "harness"})
     finally:
@@ -175,19 +175,6 @@ class _ExecutorHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
-
-
-async def _settled(client: httpx.AsyncClient, trigger_ids: tuple[str, ...], timeout_s: float = 90) -> dict:
-    """The gateway's trigger state once every one of ``trigger_ids`` has left armed/firing."""
-    deadline = time.monotonic() + timeout_s
-    while True:
-        state = (await client.get("/triggers/state")).raise_for_status().json()
-        statuses = {t["id"]: t["status"] for t in state["triggers"]}
-        if all(statuses.get(tid) not in ("armed", *TRIGGER_IN_FLIGHT_STATUSES) for tid in trigger_ids):
-            return state
-        if time.monotonic() > deadline:
-            raise AssertionError(f"triggers {trigger_ids} did not settle: {statuses}")
-        await asyncio.sleep(1)
 
 
 async def _quiet(client: httpx.AsyncClient, fires: dict[str, int], timeout_s: float = 120) -> dict:
