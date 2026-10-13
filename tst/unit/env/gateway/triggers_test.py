@@ -309,7 +309,7 @@ async def test_a_named_executor_that_does_not_complete_is_named_in_the_failure(e
 @pytest.mark.asyncio
 async def test_a_named_executor_that_cannot_be_reached_is_named_in_the_failure(engine, monkeypatch):
     async def fake_executor(self, executor, instruction, context_id):
-        raise httpx.ConnectError("connection refused")
+        raise httpx.ConnectTimeout("")
 
     monkeypatch.setattr(TriggerEngine, "_call_executor", fake_executor)
     engine.register({"executors": {"bob": {"a2a_url": "http://bob", "role": "bob"}},
@@ -319,7 +319,7 @@ async def test_a_named_executor_that_cannot_be_reached_is_named_in_the_failure(e
     await asyncio.sleep(0.2)
 
     [failure] = [e for e in engine._events if e["kind"] == "action_failed"]
-    assert (failure["executor"], failure["detail"]) == ("bob", "connection refused")
+    assert (failure["executor"], failure["detail"]) == ("bob", "ConnectTimeout")
 
 
 @pytest.mark.asyncio
