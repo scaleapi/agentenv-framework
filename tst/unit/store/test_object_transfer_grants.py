@@ -16,7 +16,7 @@ class _VmHere(SandboxProvider):
     loopback, as SmolVM's does."""
 
     ON_THIS_MACHINE = True
-    HOST_ADDRESS = "127.0.0.1"
+    REACHES_HOST_AT = "127.0.0.1"
 
     async def create_vm(self, **kwargs):  # pragma: no cover - never provisioned here
         raise NotImplementedError
@@ -25,7 +25,7 @@ class _VmHere(SandboxProvider):
 class _VmElsewhereOnLoopback(_VmHere):
     """One that forwards this machine's names to a loopback address the default server doesn't serve."""
 
-    HOST_ADDRESS = "127.0.0.2"
+    REACHES_HOST_AT = "127.0.0.2"
 
 
 @pytest.fixture

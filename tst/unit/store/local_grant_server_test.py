@@ -305,7 +305,7 @@ def test_an_explicit_bind_host_is_served_as_given(tmp_path, monkeypatch):
     store = LocalFilesystemObjectStore(str(tmp_path), grant_bind_host="127.0.0.1")
     try:
         store.issue_read_grant(store.put("k", b"v"))
-        assert [server.also_loopback for server in server_module._servers.values()] == [False]
+        assert [server.bind_hosts for server in server_module._servers.values()] == [("127.0.0.1",)]
     finally:
         for server in server_module._servers.values():
             server.close()

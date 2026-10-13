@@ -192,25 +192,23 @@ class LocalFilesystemObjectStore(ObjectStore):
         return path.relative_to(root).as_posix()
 
     def grants_reach(self, sandbox_type: str | None) -> bool:
-        """Whether a sandbox of ``sandbox_type`` reaches this store's grant server, as only one on this machine does
-        (its provider's ``ON_THIS_MACHINE``): when the server listens where the sandbox's requests arrive and the grant
-        URL names this machine by a name the sandbox resolves: not its loopback by number or as ``localhost``, which
-        inside any sandbox is the sandbox's own. A container on this machine's Docker reaches the address
-        ``host.docker.internal`` maps to, so any bind host. A VM here reaches the address its provider declares
-        (``HOST_ADDRESS``), which the server serves when bound there, or by default when it is the address the default
-        serves as well, and no address by number, which there is the VM's own."""
+        """Whether a sandbox of ``sandbox_type`` reaches this store's grant server: one on this machine (its provider's
+        ``ON_THIS_MACHINE``), at an address the server serves, by a grant URL naming this machine as it resolves it."""
         from agent_env.providers.sandbox_providers.sandbox_provider import on_this_machine_provider  # providers import this module
 
         provider = on_this_machine_provider(sandbox_type)
         if provider is None:
             return False
         advertised = self._grant_advertise_host or DEFAULT_ADVERTISE_HOST
-        if _is_loopback_literal(advertised):
-            return False
-        if provider.HOST_ADDRESS is None:
-            return True
-        served = DEFAULT_ALSO_SERVED if self._grant_bind_host is None else self._grant_bind_host
-        return served == provider.HOST_ADDRESS and not _is_address(advertised)
+        if provider.REACHES_HOST_AT is None:  # a container on this machine's Docker: at host.docker.internal's address
+            return not _is_own_loopback(advertised)
+        # a VM here: only at the address it declares, and only by a name, as an address there is the VM's own
+        return self._serves(provider.REACHES_HOST_AT) and not _is_address(advertised) and advertised != "localhost"
+
+    def _serves(self, address: str) -> bool:
+        """Whether the grant server listens at ``address``: where it's bound, or by default also at the one a VM on
+        this machine arrives at (``DEFAULT_ALSO_SERVED``)."""
+        return address == (DEFAULT_ALSO_SERVED if self._grant_bind_host is None else self._grant_bind_host)
 
     def issue_read_grant(self, object_url: str, *, expires_in: int | None = None) -> HttpGetGrant:
         expires_in = self.grant_lifetime_seconds if expires_in is None else expires_in
@@ -455,8 +453,6 @@ def _is_address(host: str) -> bool:
     return True
 
 
-def _is_loopback_literal(host: str) -> bool:
-    """Whether ``host`` names this machine from itself: ``localhost``, a loopback address or the unspecified one."""
-    if host == "localhost":
-        return True
-    return _is_address(host) and (ipaddress.ip_address(host).is_loopback or ipaddress.ip_address(host).is_unspecified)
+def _is_own_loopback(host: str) -> bool:
+    """Whether ``host`` is ``localhost`` or a loopback address, which inside a sandbox is the sandbox's own."""
+    return host == "localhost" or (_is_address(host) and ipaddress.ip_address(host).is_loopback)

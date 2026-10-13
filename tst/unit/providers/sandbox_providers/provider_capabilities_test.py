@@ -69,7 +69,7 @@ class _Vms(SandboxProvider):
 
 
 def test_a_provider_that_declares_nothing_has_what_it_implements_and_loads_an_agents_image_on_a_vm():
-    assert (_Vms.ON_THIS_MACHINE, _Vms.HOST_ADDRESS, _Vms.PRIVATE_NETWORK) == (False, None, False)
+    assert (_Vms.ON_THIS_MACHINE, _Vms.REACHES_HOST_AT, _Vms.PRIVATE_NETWORK) == (False, None, False)
     assert _Vms.SUPPORTED_SANDBOX_MODES == {SANDBOX_MODE_CONTAINER, SANDBOX_MODE_VM}
     assert (_Vms.SANDBOX_ACCEPTS, _Vms.CONTAINER_ACCEPTS) == (LOADABLE, NAME)
     assert _Vms().url_from_sandbox("http://localhost:4000") == "http://localhost:4000"
@@ -135,8 +135,8 @@ def test_the_provider_of_a_type_on_this_machine_is_read_from_the_registry_and_on
     assert on_this_machine_provider(sandbox_type) is expected
 
 
-def test_every_built_in_providers_sandboxes_are_containers_on_this_machines_docker_or_elsewhere():
-    assert all(cls.HOST_ADDRESS is None for cls in PROVIDER_CLASSES)
+def test_every_built_in_providers_sandboxes_are_containers_on_this_machines_docker_or_elsewhere():  # none is a VM here
+    assert all(cls.REACHES_HOST_AT is None for cls in PROVIDER_CLASSES)
 
 
 def test_a_chain_is_its_providers_in_order_and_one_provider_is_itself():
