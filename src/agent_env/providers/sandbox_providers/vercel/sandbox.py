@@ -27,6 +27,8 @@ from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_
 logger = logging.getLogger(__name__)
 
 _STREAM_CHUNK_BYTES = 2 * 1024 * 1024
+_UPLOAD_ATTEMPTS = 3
+_UPLOAD_RETRY_DELAY_SECONDS = 0.25
 _DOCKER_SETUP_TIMEOUT = 300
 _policy_locks: weakref.WeakValueDictionary[
     tuple[asyncio.AbstractEventLoop, str], asyncio.Lock
@@ -287,15 +289,15 @@ exit 1
             await self.exec_script(f": > {shlex.quote(staged)}")
             while chunk := await asyncio.to_thread(source.read, _STREAM_CHUNK_BYTES):
                 digest.update(chunk)
-                for attempt in range(3):
+                for attempt in range(_UPLOAD_ATTEMPTS):
                     try:
                         await self._sandbox.fs.write_bytes(chunk_path, chunk)
                         break
                     except Exception:
                         # SDK transport failures have several types; only the replaceable part is retried.
-                        if attempt == 2:
+                        if attempt + 1 == _UPLOAD_ATTEMPTS:
                             raise
-                        await asyncio.sleep(0.25 * 2**attempt)
+                        await asyncio.sleep(_UPLOAD_RETRY_DELAY_SECONDS * 2**attempt)
                 await self.exec_script(f"cat {shlex.quote(chunk_path)} >> {shlex.quote(staged)}")
             await self.exec_script(
                 f"printf '%s  %s\n' {digest.hexdigest()} {shlex.quote(staged)} | sha256sum -c - >/dev/null "

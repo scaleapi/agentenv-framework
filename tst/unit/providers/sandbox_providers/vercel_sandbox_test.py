@@ -586,3 +586,22 @@ async def test_unobtainable_image_is_refused_before_loading_any_image():
 
     sandbox._signed_image_urls.assert_not_awaited()
     sandbox.exec_script.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cached", [None, NetworkPolicy()])
+@pytest.mark.parametrize("current_mode", ["deny-all", "unknown"])
+async def test_signed_download_refreshes_even_an_unrestricted_or_unknown_cached_policy(cached, current_mode):
+    sandbox = _sandbox(policy=cached)
+    sandbox._client.get_sandbox.return_value = SimpleNamespace(
+        network_policy=SimpleNamespace(mode=current_mode, allow={}, subnets=None),
+    )
+    if current_mode == "unknown":
+        with pytest.raises(RuntimeError, match="applied network policy is unknown"):
+            await sandbox._allow_download_hosts(["https://bucket.example/artifact"])
+        sandbox._sandbox.update_network_policy.assert_not_awaited()
+    else:
+        await sandbox._allow_download_hosts(["https://bucket.example/artifact"])
+        assert sandbox.network_policy == NetworkPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=("bucket.example",))
+        sandbox._sandbox.update_network_policy.assert_awaited_once()
+    sandbox._client.get_sandbox.assert_awaited_once_with(name=sandbox.sandbox_id)

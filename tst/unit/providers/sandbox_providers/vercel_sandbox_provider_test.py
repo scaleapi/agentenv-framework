@@ -8,10 +8,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from agent_env.config.errors import ConfigError
+from agent_env.task import teardown
+from agent_env.task_step.context import DeployedSandbox, TaskStepContext
+from agent_env.task_step.task_steps import teardown_sandboxes
 from agent_env.providers.sandbox_providers import vercel as vercel_module
 from agent_env.providers.sandbox_providers.vercel import sandbox as vercel_sandbox_module
 from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy
-from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider
+from agent_env.providers.sandbox_providers.sandbox_provider import SandboxNotFoundError, build_sandbox_provider
 from agent_env.providers.sandbox_providers.vercel.provider import (
     VercelSandboxProvider,
     resource_shape,
@@ -257,7 +260,6 @@ async def test_close_closes_the_long_lived_sdk_client():
         ({"timeout": 0}, "timeout"),
         ({"exposed_ports": list(range(1, 17))}, "at most 15"),
         ({"exposed_ports": [0]}, "ports must be integers"),
-        ({"attribution": {f"k{i}": "v" for i in range(6)}}, "at most 5"),
     ],
 )
 @pytest.mark.asyncio
@@ -305,3 +307,91 @@ async def test_close_waits_for_cancelled_creation_and_reclaims_even_a_lost_respo
     release.set()
     await asyncio.wait_for(closing, timeout=1)
     assert order == ["destroy", "close"]
+
+
+def test_excess_tags_keep_run_and_step_then_sorted_keys_and_warn_without_values(caplog):
+    original = {"z": "private-value", "run_id": "run", "d": "4", "pipeline_step": "step", "c": "3", "b": "2", "a": "1"}
+    with caplog.at_level(logging.WARNING):
+        tags = VercelSandboxProvider._tags(original)
+        reordered = VercelSandboxProvider._tags(dict(reversed(list(original.items()))))
+    assert tags == reordered == {"pipeline_step": "step", "run_id": "run", "a": "1", "b": "2", "c": "3"}
+    assert len(original) == 7
+    assert "d, z" in caplog.text
+    assert "private-value" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["run", "step"])
+async def test_cleanup_records_an_already_deleted_sandbox_as_torn_down(monkeypatch, entry):
+    provider = _provider()
+    provider._client.get_sandbox.side_effect = type("Missing", (Exception,), {"status_code": 404})("gone")
+    monkeypatch.setattr(teardown, "build_sandbox_provider", lambda _: provider)
+    monkeypatch.setattr(teardown_sandboxes, "build_sandbox_provider", lambda _: provider)
+    context = TaskStepContext(deployed_sandboxes=[DeployedSandbox(
+        sandbox_name="box", sandbox_id="gone", sandbox_mode="vm", sandbox_type="vercel",
+    )])
+    if entry == "run":
+        report = await teardown.teardown_run(context)
+        assert not report.failed and not report.still_up
+        assert [box.sandbox_id for box in report.terminated] == ["gone"]
+    else:
+        await teardown_sandboxes.TeardownSandboxesTaskStep(
+            id="cleanup", version=1, sandbox_names=["box"],
+        ).execute(context)
+    assert context.metadata[teardown_sandboxes.TORN_DOWN_KEY] == ["gone"]
+    provider._client.get_sandbox.assert_awaited_once_with(name="gone")
+
+
+@pytest.mark.asyncio
+async def test_missing_lookup_still_raises_and_preserves_the_sdk_error():
+    provider = _provider()
+    missing = type("Missing", (Exception,), {"status_code": 404})("gone")
+    provider._client.get_sandbox.side_effect = missing
+    with pytest.raises(SandboxNotFoundError) as caught:
+        await provider.get_sandbox("gone")
+    assert caught.value.__cause__ is missing
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [
+    type("Unauthorized", (Exception,), {"status_code": 401})("unauthorized"),
+    type("Forbidden", (Exception,), {"status_code": 403})("forbidden"),
+    ConnectionError("offline"),
+    asyncio.CancelledError(),
+])
+async def test_lookup_preserves_auth_transport_and_cancellation_errors(error):
+    provider = _provider()
+    provider._client.get_sandbox.side_effect = error
+    with pytest.raises(type(error)) as caught:
+        await provider.get_sandbox("box")
+    assert caught.value is error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["run", "step"])
+async def test_cleanup_does_not_mark_permission_failure_as_torn_down(monkeypatch, entry):
+    provider = _provider()
+    provider._client.get_sandbox.side_effect = type("Forbidden", (Exception,), {"status_code": 403})("forbidden")
+    monkeypatch.setattr(teardown, "build_sandbox_provider", lambda _: provider)
+    monkeypatch.setattr(teardown_sandboxes, "build_sandbox_provider", lambda _: provider)
+    context = TaskStepContext(deployed_sandboxes=[DeployedSandbox(
+        sandbox_name="box", sandbox_id="box", sandbox_mode="vm", sandbox_type="vercel",
+    )])
+    if entry == "run":
+        report = await teardown.teardown_run(context)
+        assert len(report.failed) == 1 and report.still_up
+    else:
+        await teardown_sandboxes.TeardownSandboxesTaskStep(id="cleanup", version=1, sandbox_names=["box"]).execute(context)
+    assert not context.metadata.get(teardown_sandboxes.TORN_DOWN_KEY)
+
+
+@pytest.mark.parametrize("tags", [{}, {"a": "1"}, {str(i): str(i) for i in range(5)}])
+def test_supported_tags_are_preserved_without_warning(tags, caplog):
+    with caplog.at_level(logging.WARNING):
+        assert VercelSandboxProvider._tags(tags) == tags
+    assert not caplog.records
+
+
+def test_invalid_tag_is_not_hidden_by_overflow():
+    with pytest.raises(ValueError, match="non-empty"):
+        VercelSandboxProvider._tags({**{str(i): "v" for i in range(6)}, "z": ""})

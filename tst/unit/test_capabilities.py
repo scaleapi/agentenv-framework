@@ -194,7 +194,7 @@ def test_vercel_is_absent_without_configured_or_ambient_credentials(monkeypatch)
         "agent_env.providers.sandbox_providers.sandbox_provider.build_sandbox_provider",
         lambda spec: object(),
     )
-    for name in ("VERCEL_TOKEN", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID"):
+    for name in ("VERCEL_TOKEN", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID", "VERCEL_OIDC_TOKEN"):
         monkeypatch.delenv(name, raising=False)
     _fake_vercel_config(monkeypatch, {})
     assert capabilities.remote_sandbox_is_available("vercel") is False

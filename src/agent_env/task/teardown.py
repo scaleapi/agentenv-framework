@@ -17,7 +17,7 @@ from typing import NamedTuple, Optional
 from agent_env.a2a_agent.staging import drain_all, staged_changelogs
 from agent_env.env.env import DeployedEnv
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, remove_local_work_dir
-from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider
+from agent_env.providers.sandbox_providers.sandbox_provider import SandboxNotFoundError, build_sandbox_provider
 from agent_env.task.interrupts import tearing_down
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.teardown_sandboxes import _DEFAULT_PROVIDERS, TORN_DOWN_KEY, _env_sandbox_ids
@@ -136,7 +136,10 @@ async def _remove_folder(sandbox: RecordedSandbox) -> str | None:
 async def _terminate(sandbox: RecordedSandbox):
     provider = (build_sandbox_provider(sandbox.sandbox_type) if sandbox.sandbox_type
                 else _DEFAULT_PROVIDERS[sandbox.slot]())
-    handle = await provider.get_sandbox(sandbox.sandbox_id)
+    try:
+        handle = await provider.get_sandbox(sandbox.sandbox_id)
+    except SandboxNotFoundError:
+        return None
     await handle.terminate()
     return handle
 

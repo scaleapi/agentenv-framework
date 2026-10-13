@@ -18,6 +18,7 @@ from agent_env.a2a_agent.staging import LAST_DRAIN_SECONDS, drain_all, staged_ch
 from agent_env.entity_refs import EntityRef
 from agent_env.env.env import DeployedSandboxEnv
 from agent_env.providers.sandbox_providers.sandbox_provider import (
+    SandboxNotFoundError,
     SandboxProvider,
     build_sandbox_provider,
     get_agent_sandbox_provider,
@@ -169,5 +170,8 @@ async def _terminate(sandbox_id: str, sandbox_type: Optional[str], default_slot:
     provider: SandboxProvider = (
         build_sandbox_provider(sandbox_type) if sandbox_type else _DEFAULT_PROVIDERS[default_slot]()
     )
-    sandbox = await provider.get_sandbox(sandbox_id)
+    try:
+        sandbox = await provider.get_sandbox(sandbox_id)
+    except SandboxNotFoundError:
+        return
     await sandbox.terminate()

@@ -36,6 +36,10 @@ class SandboxProviderTypeError(ConfigError):
     """A config-registered provider produced a Sandbox whose ``.type`` != its ``[sandbox.providers.<name>]`` key."""
 
 
+class SandboxNotFoundError(LookupError):
+    """The requested sandbox no longer exists; cleanup may treat it as already done."""
+
+
 class SandboxProvider(ABC):
     """Compute backend that provisions sandboxes. Selected via [sandbox] default / build_sandbox_provider(); swap via set_sandbox_provider()."""
 

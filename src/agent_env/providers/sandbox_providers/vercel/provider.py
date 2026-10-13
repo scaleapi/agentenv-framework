@@ -8,13 +8,14 @@ import math
 import uuid
 from typing import Any, Callable, ClassVar, Self
 
-from agent_env.attribution import Attribution
+from agent_env.attribution import Attribution, PIPELINE_STEP_KEY, RUN_ID_KEY
 from agent_env.config.errors import ConfigError
 from agent_env.providers.sandbox_providers.sandbox import (
     NetworkPolicy,
     NetworkPolicyUnsupportedError,
 )
 from agent_env.providers.sandbox_providers.sandbox_provider import (
+    SandboxNotFoundError,
     SandboxProvider,
     apply_default_attribution,
 )
@@ -250,10 +251,17 @@ class VercelSandboxProvider(SandboxProvider):
             for key, value in apply_default_attribution(dict(attribution or {})).items()
             if value is not None
         }
-        if len(tags) > _MAX_TAGS:
-            raise ValueError(f"Vercel accepts at most {_MAX_TAGS} attribution tags")
         if any(not key or not value for key, value in tags.items()):
             raise ValueError("attribution keys and values must be non-empty")
+        if len(tags) > _MAX_TAGS:
+            preferred = [key for key in (PIPELINE_STEP_KEY, RUN_ID_KEY) if key in tags]
+            keys = preferred + sorted(key for key in tags if key not in preferred)
+            logger.warning(
+                "Vercel accepts at most %s attribution tags; omitting keys: %s",
+                _MAX_TAGS,
+                ", ".join(keys[_MAX_TAGS:]),
+            )
+            tags = {key: tags[key] for key in keys[:_MAX_TAGS]}
         return tags
 
     async def create_vm(
@@ -392,7 +400,12 @@ class VercelSandboxProvider(SandboxProvider):
         )
 
     async def get_sandbox(self, sandbox_id: str) -> VercelSandbox:
-        raw = await self._get_client().get_sandbox(name=sandbox_id)
+        try:
+            raw = await self._get_client().get_sandbox(name=sandbox_id)
+        except Exception as error:
+            if _is_missing_resource(error):
+                raise SandboxNotFoundError(f"Vercel sandbox {sandbox_id!r} was not found") from error
+            raise
         applied = network_policy_from_vercel(raw.network_policy)
         if applied is None:
             logger.warning(
