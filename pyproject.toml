@@ -74,7 +74,7 @@ sail = [
 ]
 # The Tensorlake sandbox provider, selected as the built-in `tensorlake` backend.
 tensorlake = [
-    "tensorlake~=0.5.140",  # AsyncSandbox APIs validated against 0.5.140 to 0.5.148
+    "tensorlake~=0.5.140",  # AsyncSandbox APIs validated against 0.5.140 to 0.5.149
 ]
 dev = [
     "agentenv-framework[aws,explorer,gcp,sail,tensorlake]",  # so the AWS, explorer, GCP backend, Sail and Tensorlake provider tests run in CI

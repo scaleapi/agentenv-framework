@@ -407,6 +407,25 @@ async def test_get_sandbox_recovers_ports_and_policy():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("make", ["create_vm", "get_sandbox"])
+async def test_the_sandbox_reads_its_info_from_the_api_not_the_handle_cache(make: str):
+    raw = _raw_sandbox()
+    provider, sdk = _provider(raw)
+    live = _info(ports=[8080])
+    sdk.client.get = AsyncMock(return_value=SimpleNamespace(value=live))
+
+    if make == "create_vm":
+        sandbox = await provider.create_vm(setup_for_gateway=False)
+    else:
+        sandbox = await provider.get_sandbox("tl-test")
+    raw.info.reset_mock()
+
+    assert await sandbox._read_info() is live
+    sdk.client.get.assert_awaited_once_with("tl-test")
+    raw.info.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_get_sandbox_without_an_ingress_endpoint_still_reconnects_for_teardown():
     raw = _raw_sandbox()
     info = _info(ports=[8080])

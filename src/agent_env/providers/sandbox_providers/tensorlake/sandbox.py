@@ -16,7 +16,7 @@ import shlex
 import time
 import uuid
 import weakref
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from ipaddress import ip_network
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -115,7 +115,7 @@ class TensorlakeSandbox(VmSandbox):
     """A Tensorlake MicroVM with a systemd-managed Docker daemon.
 
     ``sandbox`` is an already-created ``tensorlake.sandbox.AsyncSandbox``; the provider owns
-    creation, ports and reconnect.
+    creation, ports and reconnect. ``read_info`` reads the sandbox's info from the API, not the handle's cache.
     """
 
     type = "tensorlake"
@@ -135,10 +135,12 @@ class TensorlakeSandbox(VmSandbox):
         self,
         sandbox: Any,
         *,
+        read_info: Callable[[], Awaitable[Any]],
         tunnel_urls: Mapping[int, str] | None = None,
         network_policy: NetworkPolicy | None = None,
     ):
         self._sandbox = sandbox
+        self._read_info = read_info
         self.sandbox_id = sandbox.sandbox_id
         self.mode = SANDBOX_MODE_VM
         self.vnc_url = None
@@ -320,7 +322,7 @@ class TensorlakeSandbox(VmSandbox):
             return
         async with _policy_locks.setdefault((asyncio.get_running_loop(), self.sandbox_id), asyncio.Lock()):
             # Another wrapper of this sandbox may have widened the policy since this one last read it.
-            info = await self._sandbox.info()
+            info = await self._read_info()
             policy = network_policy_from_config(info.network_policy, sandbox_id=self.sandbox_id)
             new_hosts = sorted(hosts - set(policy.allow_hosts))
             if new_hosts:

@@ -8,8 +8,10 @@ The gateway and agent containers run inside it through the inherited ``VmSandbox
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import math
+from collections.abc import Awaitable, Callable
 from ipaddress import ip_network
 from pathlib import Path
 from typing import Any, ClassVar, Self
@@ -20,7 +22,6 @@ from agent_env.attribution import PIPELINE_STEP_KEY, RUN_ID_KEY, Attribution
 from agent_env.config.errors import ConfigError
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
 from agent_env.providers.sandbox_providers.sandbox_provider import (
-    Accepts,
     SandboxProvider,
     apply_default_attribution,
     refuse_unenforceable_policy,
@@ -62,9 +63,6 @@ class TensorlakeSandboxProvider(SandboxProvider):
     ``image`` names a registered Docker-capable image and defaults to the public host image.
     ``api_url`` defaults to the public Tensorlake API.
     """
-
-    CREATES_VMS = True
-    SANDBOX_ACCEPTS = Accepts.LOADABLE  # a sandbox is a VM, which loads the image; a container pulls it by name
 
     # Exposed ports are served at ``https://<port>-<sandbox-id>.sandbox.tensorlake.ai``.
     EGRESS_HOSTS: ClassVar[tuple[str, ...]] = ("*.sandbox.tensorlake.ai",)
@@ -204,7 +202,10 @@ class TensorlakeSandboxProvider(SandboxProvider):
                 # the Tensorlake API key to every workload that calls the URL.
                 info = await raw_sandbox.update(exposed_ports=ports, allow_unauthenticated_access=True)
                 tunnel_urls = self._tunnel_urls(info, ports)
-            sandbox = TensorlakeSandbox(raw_sandbox, tunnel_urls=tunnel_urls, network_policy=effective_policy)
+            sandbox = TensorlakeSandbox(
+                raw_sandbox, read_info=self._info_reader(raw_sandbox.sandbox_id), tunnel_urls=tunnel_urls,
+                network_policy=effective_policy,
+            )
             logger.info(
                 "Tensorlake sandbox started: sandbox_id=%s image=%s attribution=%s",
                 raw_sandbox.sandbox_id, image_name, resolved_attribution,
@@ -276,6 +277,15 @@ class TensorlakeSandboxProvider(SandboxProvider):
         except Exception as cleanup_error:  # noqa: BLE001 - cleanup must not mask the create failure
             logger.warning("Failed to delete Tensorlake sandbox %s after start failure: %s", sandbox_id, cleanup_error)
 
+    def _info_reader(self, sandbox_id: str) -> Callable[[], Awaitable[Any]]:
+        return functools.partial(self._live_info, sandbox_id)
+
+    async def _live_info(self, sandbox_id: str) -> Any:
+        """The sandbox as the API reports it now: ``AsyncSandbox.info`` returns the handle's cached copy, so two
+        handles of one sandbox would each see only their own updates."""
+        async with self._client_cls.for_cloud(**self._client_kwargs()) as client:
+            return (await client.get(sandbox_id)).value
+
     @staticmethod
     def _tunnel_urls(info: Any, ports: list[int]) -> dict[int, str]:
         urls: dict[int, str] = {}
@@ -318,7 +328,7 @@ class TensorlakeSandboxProvider(SandboxProvider):
         tunnel_urls = {
             port: url for port in info.exposed_ports or [] if (url := info.url_for_port(port)) is not None
         }
-        sandbox = TensorlakeSandbox(raw_sandbox, tunnel_urls=tunnel_urls)
+        sandbox = TensorlakeSandbox(raw_sandbox, read_info=self._info_reader(sandbox_id), tunnel_urls=tunnel_urls)
         try:
             sandbox.network_policy = network_policy_from_config(info.network_policy, sandbox_id=sandbox_id)
         except RuntimeError as exc:

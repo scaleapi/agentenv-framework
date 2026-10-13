@@ -23,12 +23,14 @@ from agent_env.store import set_object_store
 
 def _artifact(url: str | None = "s3://bucket/image.tar.gz", *, context_only: bool = False) -> SimpleNamespace:
     return SimpleNamespace(
-        tar_gz_object_url=url, context_only=context_only, image_name="img:latest", load_problem=lambda: None
+        tar_gz_object_url=url, context_only=context_only, image_name="img:latest", load_problem=lambda **_: None,
+        rebuilt_for=lambda *_, **__: False,
     )
 
 
 def _inner(policy: NetworkPolicy | None = None) -> MagicMock:
-    """A fake SDK sandbox whose ``info`` reports the network policy ``update`` last applied."""
+    """A fake SDK sandbox. ``live_info`` reports the network policy ``update`` last applied; ``info`` reports the one
+    it was created with, as the SDK's cached copy does."""
     applied = SimpleNamespace(network_policy=NetworkConfig(**network_config_fields(policy)) if policy else None)
 
     async def update(*, network=None, **kwargs):
@@ -39,14 +41,19 @@ def _inner(policy: NetworkPolicy | None = None) -> MagicMock:
     sandbox.sandbox_id = "tl-test"
     sandbox.terminate = AsyncMock()
     sandbox.update = AsyncMock(side_effect=update)
-    sandbox.info = AsyncMock(return_value=applied)
+    sandbox.info = AsyncMock(return_value=SimpleNamespace(network_policy=applied.network_policy))
+    sandbox.live_info = AsyncMock(side_effect=lambda: applied)
     sandbox.write_file = AsyncMock()
     sandbox.run = AsyncMock(return_value=SimpleNamespace(exit_code=0, stdout="hello", stderr="warning"))
     return sandbox
 
 
+def _wrap(inner: MagicMock, **kwargs) -> TensorlakeSandbox:
+    return TensorlakeSandbox(inner, read_info=inner.live_info, **kwargs)
+
+
 def test_vm_identity_and_tunnel_urls():
-    sandbox = TensorlakeSandbox(_inner(), tunnel_urls={8080: "https://8080-tl-test.sandbox.tensorlake.ai"})
+    sandbox = _wrap(_inner(), tunnel_urls={8080: "https://8080-tl-test.sandbox.tensorlake.ai"})
 
     assert isinstance(sandbox, VmSandbox)
     assert sandbox.type == "tensorlake"
@@ -59,7 +66,7 @@ def test_vm_identity_and_tunnel_urls():
 @pytest.mark.asyncio
 async def test_exec_passes_argv_unchanged_and_keeps_sudo():
     inner = _inner()
-    sandbox = TensorlakeSandbox(inner)
+    sandbox = _wrap(inner)
 
     result = await sandbox.exec_with_output("sudo", "bash", "-c", "docker images && echo 'hello world'")
 
@@ -74,12 +81,12 @@ async def test_nonzero_exit_is_a_process_result():
     inner = _inner()
     inner.run.return_value = SimpleNamespace(exit_code=7, stdout="out", stderr="bad")
 
-    assert await TensorlakeSandbox(inner).exec_with_output("sudo", "docker", "images") == (7, "out", "bad")
+    assert await _wrap(inner).exec_with_output("sudo", "docker", "images") == (7, "out", "bad")
 
 
 @pytest.mark.asyncio
 async def test_setup_starts_docker_service_polls_until_ready_and_checks_compose(monkeypatch: pytest.MonkeyPatch):
-    sandbox = TensorlakeSandbox(_inner())
+    sandbox = _wrap(_inner())
     sandbox._exec_with_output_bounded = AsyncMock(
         side_effect=[(0, "", ""), (1, "", "not ready"), (0, "", ""), (0, "Docker Compose version v2.40.0", "")]
     )
@@ -101,7 +108,7 @@ async def test_setup_starts_docker_service_polls_until_ready_and_checks_compose(
 
 @pytest.mark.asyncio
 async def test_setup_rejects_an_image_without_compose_v2():
-    sandbox = TensorlakeSandbox(_inner())
+    sandbox = _wrap(_inner())
     sandbox._exec_with_output_bounded = AsyncMock(
         side_effect=[(0, "", ""), (0, "", ""), (1, "", "docker: 'compose' is not a docker command")]
     )
@@ -113,7 +120,7 @@ async def test_setup_rejects_an_image_without_compose_v2():
 @pytest.mark.asyncio
 async def test_docker_readiness_timeout_reports_the_service_journal():
     inner = _inner()
-    sandbox = TensorlakeSandbox(inner)
+    sandbox = _wrap(inner)
     sandbox._VM_READY_TIMEOUT = 0
     inner.run.return_value = SimpleNamespace(exit_code=0, stdout="dockerd failed to start", stderr="")
 
@@ -127,7 +134,7 @@ async def test_docker_readiness_timeout_reports_the_service_journal():
 @pytest.mark.asyncio
 async def test_a_failing_probe_counts_as_not_ready(monkeypatch: pytest.MonkeyPatch):
     inner = _inner()
-    sandbox = TensorlakeSandbox(inner)
+    sandbox = _wrap(inner)
     sandbox._VM_READY_TIMEOUT = 1
     sandbox._DOCKER_READINESS_COMMAND_TIMEOUT = 0.25
     inner.run.side_effect = [
@@ -146,7 +153,7 @@ async def test_a_failing_probe_counts_as_not_ready(monkeypatch: pytest.MonkeyPat
 async def test_terminate_terminates_the_sdk_sandbox():
     inner = _inner()
 
-    await TensorlakeSandbox(inner).terminate()
+    await _wrap(inner).terminate()
 
     inner.terminate.assert_awaited_once_with()
 
@@ -156,7 +163,7 @@ async def test_terminate_of_a_sandbox_that_is_gone_is_not_an_error():
     inner = _inner()
     inner.terminate.side_effect = SandboxNotFoundError("tl-test")
 
-    await TensorlakeSandbox(inner).terminate()
+    await _wrap(inner).terminate()
 
 
 @pytest.mark.asyncio
@@ -167,7 +174,7 @@ async def test_a_lost_transport_is_exit_minus_one_so_idempotent_scripts_retry(mo
         SimpleNamespace(exit_code=0, stdout="done", stderr=""),
     ]
     monkeypatch.setattr(tl_sandbox.asyncio, "sleep", AsyncMock())
-    sandbox = TensorlakeSandbox(inner)
+    sandbox = _wrap(inner)
 
     assert await sandbox.exec_with_output("true") == (-1, "", "Connection error: stream ended without an exit event")
     inner.run.side_effect = [
@@ -184,7 +191,7 @@ def _sha256_reply(data: bytes) -> AsyncMock:
 @pytest.mark.asyncio
 async def test_large_writes_upload_in_proxy_sized_parts_and_join_as_root():
     inner = _inner()
-    sandbox = TensorlakeSandbox(inner)
+    sandbox = _wrap(inner)
     sandbox._UPLOAD_CHUNK_BYTES = 4
     sandbox.exec_script = _sha256_reply(b"0123456789")
 
@@ -207,7 +214,7 @@ async def test_large_writes_upload_in_proxy_sized_parts_and_join_as_root():
 @pytest.mark.asyncio
 async def test_join_command_length_does_not_grow_with_the_part_count():
     inner = _inner()
-    sandbox = TensorlakeSandbox(inner)
+    sandbox = _wrap(inner)
     sandbox._UPLOAD_CHUNK_BYTES = 1
     sandbox.exec_script = _sha256_reply(b"x" * 10_000)
 
@@ -220,7 +227,7 @@ async def test_join_command_length_does_not_grow_with_the_part_count():
 @pytest.mark.asyncio
 async def test_empty_write_still_creates_the_file():
     inner = _inner()
-    sandbox = TensorlakeSandbox(inner)
+    sandbox = _wrap(inner)
     sandbox.exec_script = _sha256_reply(b"")
 
     await sandbox._write_bytes_to_vm_path(b"", "/tmp/empty")
@@ -239,7 +246,7 @@ async def test_unsigned_object_streams_through_the_file_api(tmp_path):
     store = MagicMock()
     store.open = MagicMock(side_effect=lambda url: open(source, "rb"))
     inner = _inner()
-    sandbox = TensorlakeSandbox(inner)
+    sandbox = _wrap(inner)
     sandbox._UPLOAD_CHUNK_BYTES = 1000
     sandbox.exec_script = _sha256_reply(payload)
 
@@ -265,7 +272,7 @@ async def test_parts_upload_concurrently_up_to_the_limit():
         in_flight -= 1
 
     inner.write_file = AsyncMock(side_effect=write_file)
-    sandbox = TensorlakeSandbox(inner)
+    sandbox = _wrap(inner)
     sandbox._UPLOAD_CHUNK_BYTES = 1
     sandbox._UPLOADS_IN_FLIGHT = 3
     sandbox.exec_script = _sha256_reply(b"x" * 9)
@@ -279,7 +286,7 @@ async def test_parts_upload_concurrently_up_to_the_limit():
 async def test_a_failed_part_raises_its_error_and_cleans_up():
     inner = _inner()
     inner.write_file = AsyncMock(side_effect=[None, SandboxConnectionError("proxy closed"), None, None])
-    sandbox = TensorlakeSandbox(inner)
+    sandbox = _wrap(inner)
     sandbox._UPLOAD_CHUNK_BYTES = 1
     sandbox._UPLOADS_IN_FLIGHT = 1
     sandbox.exec_script = AsyncMock(return_value="")
@@ -294,7 +301,7 @@ async def test_a_failed_part_raises_its_error_and_cleans_up():
 @pytest.mark.asyncio
 async def test_a_joined_file_with_the_wrong_digest_is_refused():
     inner = _inner()
-    sandbox = TensorlakeSandbox(inner)
+    sandbox = _wrap(inner)
     sandbox.exec_script = _sha256_reply(b"other")
 
     with pytest.raises(RuntimeError, match="does not match the upload"):
@@ -345,7 +352,7 @@ def test_a_policy_agent_env_never_applies_is_refused(applied):
 @pytest.mark.asyncio
 async def test_apply_network_policy_updates_the_sandbox():
     inner = _inner()
-    sandbox = TensorlakeSandbox(inner)
+    sandbox = _wrap(inner)
     policy = NetworkPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=("api.example",))
 
     await sandbox.apply_network_policy(policy)
@@ -360,7 +367,7 @@ async def test_apply_network_policy_updates_the_sandbox():
 async def test_restricted_image_loading_adds_the_signed_host_and_waits_for_it(monkeypatch: pytest.MonkeyPatch):
     policy = NetworkPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=("workload.example",), allow_cidrs=("10.0.0.0/8",))
     inner = _inner(policy)
-    sandbox = TensorlakeSandbox(inner, network_policy=policy)
+    sandbox = _wrap(inner, network_policy=policy)
     sandbox.exec_script = AsyncMock(return_value="")
     artifact = _artifact()
     store = MagicMock()
@@ -388,7 +395,7 @@ async def test_restricted_image_loading_adds_the_signed_host_and_waits_for_it(mo
 async def test_restricted_image_loading_skips_the_update_when_the_host_is_already_allowed(monkeypatch: pytest.MonkeyPatch):
     policy = NetworkPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=("downloads.example",))
     inner = _inner(policy)
-    sandbox = TensorlakeSandbox(inner, network_policy=policy)
+    sandbox = _wrap(inner, network_policy=policy)
     store = MagicMock()
     store.signed_get_url.return_value = "https://downloads.example/image.tar.gz"
     set_object_store(store)
@@ -401,7 +408,7 @@ async def test_restricted_image_loading_skips_the_update_when_the_host_is_alread
 
 @pytest.mark.asyncio
 async def test_restricted_image_loading_pulls_ref_images_and_builds_context_images(monkeypatch: pytest.MonkeyPatch):
-    sandbox = TensorlakeSandbox(_inner(), network_policy=NetworkPolicy(mode=NetworkMode.ALLOWLIST))
+    sandbox = _wrap(_inner(), network_policy=NetworkPolicy(mode=NetworkMode.ALLOWLIST))
     pull, build = AsyncMock(), AsyncMock()
     monkeypatch.setattr(VmSandbox, "pull_images", pull)
     monkeypatch.setattr(VmSandbox, "build_images", build)
@@ -416,7 +423,7 @@ async def test_restricted_image_loading_pulls_ref_images_and_builds_context_imag
 @pytest.mark.asyncio
 async def test_restricted_object_download_adds_the_signed_host(monkeypatch: pytest.MonkeyPatch):
     policy = NetworkPolicy(mode=NetworkMode.ALLOWLIST)
-    sandbox = TensorlakeSandbox(_inner(policy), network_policy=policy)
+    sandbox = _wrap(_inner(policy), network_policy=policy)
     sandbox.exec_script = AsyncMock(return_value="")
     sandbox._exec_with_output_bounded = AsyncMock(return_value=(0, "", ""))
     store = MagicMock()
@@ -433,7 +440,7 @@ async def test_restricted_object_download_adds_the_signed_host(monkeypatch: pyte
 async def test_concurrent_downloads_through_two_wrappers_keep_each_others_hosts(monkeypatch: pytest.MonkeyPatch):
     policy = NetworkPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=("workload.example",))
     inner = _inner(policy)
-    first, second = TensorlakeSandbox(inner, network_policy=policy), TensorlakeSandbox(inner, network_policy=policy)
+    first, second = _wrap(inner, network_policy=policy), _wrap(inner, network_policy=policy)
     monkeypatch.setattr(TensorlakeSandbox, "_wait_for_egress", AsyncMock())
 
     await asyncio.gather(
@@ -441,13 +448,13 @@ async def test_concurrent_downloads_through_two_wrappers_keep_each_others_hosts(
         second._allow_download_hosts(["https://b.example/y"]),
     )
 
-    applied = network_policy_from_config((await inner.info()).network_policy, sandbox_id="tl-test")
+    applied = network_policy_from_config((await inner.live_info()).network_policy, sandbox_id="tl-test")
     assert set(applied.allow_hosts) == {"workload.example", "a.example", "b.example"}
 
 
 @pytest.mark.asyncio
 async def test_unknown_policy_refuses_image_load():
-    sandbox = TensorlakeSandbox(_inner(), network_policy=None)
+    sandbox = _wrap(_inner(), network_policy=None)
 
     with pytest.raises(RuntimeError, match="applied network policy is unknown"):
         await sandbox.load_docker_images([_artifact()])
@@ -459,7 +466,7 @@ async def test_unreachable_download_host_is_a_warning_not_a_failure(
 ):
     monkeypatch.setattr(TensorlakeSandbox, "_EGRESS_PROPAGATION_TIMEOUT", 0.05)
     monkeypatch.setattr(TensorlakeSandbox, "_EGRESS_PROBE_INTERVAL", 0.01)
-    sandbox = TensorlakeSandbox(_inner())
+    sandbox = _wrap(_inner())
     sandbox._exec_with_output_bounded = AsyncMock(return_value=(7, "", ""))
 
     await sandbox._wait_for_egress(["downloads.example"])
@@ -471,7 +478,7 @@ async def test_unreachable_download_host_is_a_warning_not_a_failure(
 async def test_egress_wait_bounds_each_probe_by_the_time_left(monkeypatch: pytest.MonkeyPatch):
     clock = iter([100.0, 100.0, 158.0, 158.0, 161.0, 161.0])
     monkeypatch.setattr(tl_sandbox, "time", SimpleNamespace(monotonic=lambda: next(clock)))
-    sandbox = TensorlakeSandbox(_inner())
+    sandbox = _wrap(_inner())
     sandbox._exec_with_output_bounded = AsyncMock(return_value=(7, "", ""))
 
     await sandbox._wait_for_egress(["downloads.example"])
