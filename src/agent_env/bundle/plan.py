@@ -15,6 +15,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+import yaml
+
 from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact import (
     Artifact,
@@ -22,7 +24,9 @@ from agent_env.artifact import (
     EnvironmentUniverseArtifact,
     FileArtifact,
     FileArtifactUniverse,
+    SkillArtifact,
 )
+from agent_env.artifact.artifacts.skill import parse_skill_md, skill_name_of
 from agent_env.artifact.registry import canonical_type, get_artifact_registry
 from agent_env.config import get_config
 from agent_env.entity_refs import EntityKind
@@ -57,7 +61,7 @@ from .authoring import (
     universe_files,
     universe_layout,
 )
-from .parse import BundleEntry, BundleError, BundleKind
+from .parse import SKILL_MD, BundleEntry, BundleError, BundleKind
 from .resolve import BuiltImage, Reference, ResolvedBundle, ResolvedEntry, build_step
 
 _Key = tuple[str, str]  # (store, id)
@@ -345,6 +349,9 @@ class _Planner:
                 except BundleError as e:
                     self.problems.extend(e.problems)
                 continue
+            if source.entry.kind is BundleKind.SKILL:
+                self._check_skill(source.entry)
+                continue
             if source.entry.kind is not BundleKind.ARTIFACT:
                 continue
             cls = registry.get(canonical_type(source.entry.type))
@@ -593,6 +600,28 @@ class _Planner:
                 if waiting[dependent] == 0:
                     heapq.heappush(ready, (self.rank[dependent], dependent))
         return tuple(writes)
+
+    def _check_skill(self, entry: BundleEntry) -> None:
+        """List the skill's folder and read its SKILL.md the way its write will, so a link that leaves the bundle,
+        frontmatter the spec refuses or a name other than the folder's fails before anything is written."""
+        try:
+            files = entry_files(self.resolved.bundle, entry)
+        except BundleError as e:
+            self.problems.extend(e.problems)
+            return
+        where, expected = self._path(entry), skill_name_of(entry.id)
+        try:
+            skill_md = files[SKILL_MD].read_bytes()
+            name = parse_skill_md(skill_md)[0].get("name")
+            if isinstance(name, str) and name != expected:
+                self.problems.append(f"{where}: {SKILL_MD} names the skill {name!r}, but its folder is {expected!r}; "
+                                     "make them match")
+                return
+            SkillArtifact.validate(skill_md=skill_md, expected_name=expected)
+        except yaml.YAMLError as e:
+            self.problems.append(f"{where}: {SKILL_MD}'s frontmatter isn't valid YAML: {' '.join(str(e).split())}")
+        except ValueError as e:
+            self.problems.append(f"{where}: {e}")
 
     def _path(self, entry: BundleEntry) -> str:
         return relative(self.resolved.bundle.root, entry.path)

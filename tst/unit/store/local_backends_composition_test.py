@@ -167,7 +167,8 @@ def test_skill_artifact_put_and_download(local_stores, tmp_path):
 
     art = SkillArtifact.put(id="local-skill", skill_dir=skill_dir)
     assert art.skill_object_url.startswith("file://")
-    assert local_stores.get_object_store().get_object_key(art.skill_object_url) == "artifacts/skill/local-skill/1"
+    assert re.fullmatch(r"artifacts/skill/local-skill/1-[0-9a-f]+",
+                        local_stores.get_object_store().get_object_key(art.skill_object_url))
     assert art.skill_files_id == "local-skill__files"
     with download_skill(art.skill_object_url) as out:
         names = sorted(p.name for p in out.rglob("*") if p.is_file())

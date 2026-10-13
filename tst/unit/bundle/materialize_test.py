@@ -16,6 +16,7 @@ from agent_env.artifact import Artifact, EnvironmentArtifact, EnvironmentUnivers
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
+from agent_env.artifact.artifacts.skill import SkillArtifact
 from agent_env.artifact.store import get_artifact_store
 from agent_env.bundle import BundleError
 from agent_env.bundle import materialize as materialize_module
@@ -220,7 +221,6 @@ def test_what_has_no_writer_yet_is_refused_before_anything_is_written(bundle_dir
         "envs/tickets/env.toml": 'environment_name = "tickets"\n',
         "envs/own/env.toml": 'type = "own_env_materialize_test"\n',
         "agents/solver/Dockerfile": "FROM scratch\n",
-        "skills/pdf/SKILL.md": "---\nname: pdf\n---\n",
         "artifacts/base-mcp/Dockerfile": "FROM scratch\n",
         "artifacts/doc/artifact.toml": 'type = "document_only_materialize_test"\n',
         "evals/regression.toml": 'tasks = ["t"]\n',
@@ -229,7 +229,6 @@ def test_what_has_no_writer_yet_is_refused_before_anything_is_written(bundle_dir
         {"id": "tickets", "type": "deploy_env", "env_id": "tickets"},
         {"id": "own", "type": "deploy_env", "env_id": "own"},
         {"id": "agent", "type": "deploy_agent", "env_ids": ["tickets"], "a2a_agent_id": "solver"},
-        {"id": "pdf", "type": "load_artifact", "env_id": "tickets", "artifact_id": "pdf"},
         {"id": "image", "type": "load_artifact", "env_id": "tickets", "artifact_id": "base-mcp"},
         {"id": "doc", "type": "load_artifact", "env_id": "tickets", "artifact_id": "doc"},
     ])
@@ -238,8 +237,75 @@ def test_what_has_no_writer_yet_is_refused_before_anything_is_written(bundle_dir
         "artifacts/base-mcp: writing a docker_image artifact isn't supported yet",
         "artifacts/doc: writing a document_only_materialize_test artifact isn't supported yet",
         "envs/own: writing an own_env_materialize_test env isn't supported yet",
-        "skills/pdf: writing a skill isn't supported yet",
     ]
+    assert not local_store().path.exists()
+
+
+SKILL = {
+    "skills/pdf-extract/SKILL.md": "---\nname: pdf-extract\ndescription: Pull text out of PDFs.\n---\nBody\n",
+    "skills/pdf-extract/scripts/extract.py": "print('text')\n",
+    "skills/pdf-extract/.env.example": "TOKEN=\n",
+    "skills/pdf-extract/__pycache__/extract.cpython-312.pyc": "compiled\n",
+    "skills/pdf-extract/.DS_Store": "finder\n",
+}
+ADD_SKILL = {"id": "skill", "type": "add_skills", "skills": [{"skill_artifact_id": "pdf-extract"}]}
+
+
+def test_a_skill_folder_is_written_as_a_skill_named_after_it_from_the_files_the_ledger_hashes(bundle_dir):
+    layout(bundle_dir, SKILL)
+    _steps(bundle_dir, [ADD_SKILL])
+
+    done = _run(bundle_dir)
+
+    skill = SkillArtifact.get(f"{ROOT}/pdf-extract")
+    assert _summary(done)[skill.id] == (1, False, ("new",))
+    assert (skill.skill_name, skill.description) == ("pdf-extract", "Pull text out of PDFs.")
+    assert sorted(skill.get_skill_files().get_file_artifacts()) == [".env.example", "SKILL.md", "scripts/extract.py"]
+    task = Task.get(f"{ROOT}/t", done.version_of("task", f"{ROOT}/t"))
+    assert task.steps[0].skills[0].skill_artifact_id == skill.id
+
+
+def test_an_unchanged_skill_is_reused_and_one_whose_files_change_rewritten(bundle_dir):
+    layout(bundle_dir, SKILL)
+    _steps(bundle_dir, [ADD_SKILL])
+    _run(bundle_dir)
+    (bundle_dir / "skills/pdf-extract/__pycache__/extract.cpython-312.pyc").write_text("recompiled\n")
+
+    assert _summary(_run(bundle_dir))[f"{ROOT}/pdf-extract"] == (1, True, ())
+    (bundle_dir / "skills/pdf-extract/scripts/extract.py").write_text("print('more text')\n")
+    assert _summary(_run(bundle_dir))[f"{ROOT}/pdf-extract"] == (2, False, ("files changed: scripts/extract.py",))
+
+
+@_RUN_OR_DRY_RUN
+@pytest.mark.parametrize("skill_md, problem", [
+    ("---\nname: pdf\ndescription: d\n---\n",
+     "skills/pdf-extract: SKILL.md names the skill 'pdf', but its folder is 'pdf-extract'; make them match"),
+    ("---\nname: pdf-extract\n---\n",
+     "skills/pdf-extract: SKILL.md frontmatter 'description' is required and must be a non-empty string"),
+    ("# no frontmatter\n",
+     "skills/pdf-extract: SKILL.md must begin with a YAML frontmatter block delimited by '---'"),
+    ("---\nname: [pdf\n---\n", "skills/pdf-extract: SKILL.md's frontmatter isn't valid YAML: "),
+], ids=["other-name", "no-description", "no-frontmatter", "bad-yaml"])
+def test_a_skill_md_its_write_would_refuse_is_refused_before_anything_is_written(bundle_dir, dry_run, skill_md,
+                                                                                problem):
+    layout(bundle_dir, {"skills/pdf-extract/SKILL.md": skill_md})
+    _steps(bundle_dir, [ADD_SKILL])
+
+    problems = _problems(lambda: _run(bundle_dir, dry_run))
+
+    assert len(problems) == 1 and problems[0].startswith(problem), problems
+    assert not local_store().path.exists()
+
+
+def test_a_skill_file_linking_out_of_the_bundle_is_refused_before_anything_is_written(bundle_dir, tmp_path):
+    layout(bundle_dir, SKILL)
+    (tmp_path / "outside.py").write_text("print('outside')\n")
+    (bundle_dir / "skills/pdf-extract/scripts/outside.py").symlink_to(tmp_path / "outside.py")
+    _steps(bundle_dir, [ADD_SKILL])
+
+    problems = _problems(lambda: _run(bundle_dir))
+
+    assert len(problems) == 1 and problems[0].startswith("skills/pdf-extract/scripts/outside.py"), problems
     assert not local_store().path.exists()
 
 

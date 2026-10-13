@@ -31,7 +31,7 @@ LAYOUT = {
     "artifacts/greeting/hello.txt": "hello\n",
     "artifacts/greeting/check.py": "print('ok')\n",
     "artifacts/base-mcp/Dockerfile": "FROM scratch\n",
-    "skills/pdf/SKILL.md": "---\nname: pdf\n---\n",
+    "skills/pdf/SKILL.md": "---\nname: pdf\ndescription: Read PDFs.\n---\n",
 }
 
 
