@@ -611,11 +611,13 @@ def _slack_in_containers(gp: EnvironmentGatewayProvider, provider: ModalSandboxP
                        gateway_mode=GatewayMode.PERFORMANCE, ttl_seconds=60, disk_size_gb=10)
 
 
-async def _run_container_deploy(*, cpu=None, memory_mb=None) -> list[dict]:
+async def _run_container_deploy(*, cpu=None, memory_mb=None, listen_host=None) -> list[dict]:
     """Run _deploy_via_containers with all I/O mocked, returning the list of
     create_container kwargs (one per provisioned component: db, mcp, pgweb,
     db-mcp, gateway)."""
     provider = ModalSandboxProvider()
+    if listen_host:
+        provider.PRIVATE_LISTEN_HOST = listen_host
     gp = EnvironmentGatewayProvider()
     create_calls: list[dict] = []
 
@@ -763,11 +765,14 @@ async def test_the_deploys_cpu_reaches_every_container():
 
 
 @pytest.mark.asyncio
-async def test_container_mode_injects_the_registered_environment_name():
-    """As in compose mode, the MCP server gets its registered name, which the SDK serves as its card name."""
-    calls = await _run_container_deploy()
+@pytest.mark.parametrize("listen_host, expected", [(None, "::"), ("0.0.0.0", "0.0.0.0")])
+async def test_container_mode_injects_the_registered_environment_name_and_the_providers_listen_host(
+        listen_host, expected):
+    """As in compose mode, the MCP server gets its registered name, which the SDK serves as its card name; it listens
+    on the host its provider's private network reaches."""
+    calls = await _run_container_deploy(listen_host=listen_host)
     mcp = next(c for c in calls if c["image_name"] == "mcp-slack")
-    assert mcp["env"]["ENVIRONMENT_NAME"] == "slack"
+    assert (mcp["env"]["ENVIRONMENT_NAME"], mcp["env"]["MCP_HOST"]) == ("slack", expected)
 
 
 @pytest.mark.asyncio

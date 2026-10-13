@@ -51,6 +51,7 @@ from .constants import (
     METHOD_ADD,
     METHOD_GET,
     METHOD_RESET,
+    PRIVATE_HOST_ENV,
     PROTOCOL_VERSION,
     RPC_PATH,
     STATE_TOOL_NAME_CLASHES_KEY,
@@ -456,9 +457,11 @@ class Gateway:
             logger.exception("Awaiting trigger barriers failed (fail-open)")
 
     async def _env_get_time_url(self) -> str:
-        """The gateway's own server-reachable /clock/time URL (cached, resolved off the event loop): modal i6pn if resolvable, else the compose service name."""
+        """The gateway's own server-reachable /clock/time URL (cached, resolved off the event loop): the private host its
+        sandbox provider set, else modal i6pn if resolvable, else the compose service name."""
         if self._env_get_time_url_cache is None:
-            host = await asyncio.to_thread(self._resolve_i6pn_host) or GATEWAY_COMPOSE_HOST
+            host = (os.environ.get(PRIVATE_HOST_ENV) or await asyncio.to_thread(self._resolve_i6pn_host)
+                    or GATEWAY_COMPOSE_HOST)
             self._env_get_time_url_cache = f"http://{host}:{self.port}/clock/time"
         return self._env_get_time_url_cache
 

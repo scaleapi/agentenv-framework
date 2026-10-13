@@ -1248,7 +1248,7 @@ COMPOSE_EOF'''
         env = dict(cfg.extra_env_vars or {})
         env["DATABASE_URL"] = self._state_provider.url_for_environment(cfg.environment_name, instance=state_instance)
         env["ENVIRONMENT_NAME"] = cfg.environment_name
-        env.setdefault("MCP_HOST", "::")  # every address, IPv6 included, as a private network may use
+        env.setdefault("MCP_HOST", deploy.sandbox_provider.PRIVATE_LISTEN_HOST)
         sb = await deploy.sandbox_provider.create_container(
             image_name=image_artifact.image_name,
             port=AGENT_ENV_GATEWAY_MCP_PORT,

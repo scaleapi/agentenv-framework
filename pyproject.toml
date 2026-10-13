@@ -46,6 +46,7 @@ dependencies = [
     "uvicorn>=0.47",  # 0.47 adds ssl_context_factory, how the local grant server gets its TLS context
     "modal>=1.5.2.dev22",  # dev22 adds _experimental_create(tags=); dev2 added VM-mode V2 (vm_runtime)
     "e2b~=2.46.4",  # AsyncSandbox/AsyncTemplate APIs validated against the 2.46 line
+    "huggingface_hub>=1.32,<2",  # the hf_jobs provider: network groups arrive in 1.32, its sandbox bootstrap is validated on 1.32 and 1.33, and the provider checks the private helpers it calls as it's built; litellm keeps it below 2
 ]
 
 [project.optional-dependencies]

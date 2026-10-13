@@ -97,5 +97,5 @@ def test_the_builtin_floor_is_pinned(builtin_registry):
     Pinned rather than counted: a new entry should be argued for in review. Platforms
     registered from config add theirs on top."""
     assert set(all_sandbox_egress_hosts()) == {
-        "*.modal.host", "*.w.modal.host", "*.e2b.app", "*.sail.box", "*.sandbox.tensorlake.ai",
+        "*.modal.host", "*.w.modal.host", "*.e2b.app", "*.sail.box", "*.sandbox.tensorlake.ai", "*.hf.jobs",
     }

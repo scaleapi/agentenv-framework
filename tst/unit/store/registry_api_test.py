@@ -1,4 +1,5 @@
-"""Pinning an image ref to the digest its registry serves, over a fake registry's OCI distribution API."""
+"""Pinning an image ref to the digest its registry serves, and reading its run config, over a fake registry's OCI
+distribution API."""
 
 import base64
 import hashlib
@@ -8,7 +9,7 @@ import pytest
 
 from agent_env.store import RegistryAuth
 from agent_env.store.image_store import registry_api
-from agent_env.store.image_store.registry_api import pin_digest
+from agent_env.store.image_store.registry_api import image_config, pin_digest
 
 DIGEST = "sha256:" + "a" * 64
 OTHER = "sha256:" + "b" * 64
@@ -184,3 +185,53 @@ def test_a_digest_docker_couldnt_pull_by_is_refused_before_any_request(fake_regi
     with pytest.raises(ValueError, match=f"'{digest}' isn't a sha256, sha384 or sha512 digest"):
         pin_digest(f"ghcr.io/org/tool@{digest}", None)
     assert seen == []
+
+
+CONFIG = "sha256:" + "c" * 64
+AMD64 = "sha256:" + "d" * 64
+
+
+def _registry_with_index(request):
+    path = request.url.path
+    if path == "/token":
+        return httpx.Response(200, json={"token": "anon"})
+    if request.headers.get("authorization") != "Bearer anon":
+        return httpx.Response(401, headers={"WWW-Authenticate": 'Bearer realm="https://ghcr.io/token",service="ghcr.io"'})
+    if path == "/v2/org/server/manifests/v1":
+        return httpx.Response(200, json={"manifests": [
+            {"digest": OTHER, "platform": {"os": "linux", "architecture": "arm64"}},
+            {"digest": AMD64, "platform": {"os": "linux", "architecture": "amd64"}}]})
+    if path == f"/v2/org/server/manifests/{AMD64}":
+        return httpx.Response(200, json={"config": {"digest": CONFIG}})
+    if path == f"/v2/org/server/blobs/{CONFIG}":
+        return httpx.Response(200, json={"config": {"Cmd": ["python", "-m", "server"], "WorkingDir": "/app"}})
+    return httpx.Response(404)
+
+
+def test_an_images_run_config_is_its_amd64_entrys_through_the_anonymous_token(fake_registry):
+    seen = fake_registry(_registry_with_index)
+
+    assert image_config("ghcr.io/org/server:v1", None) == {"Cmd": ["python", "-m", "server"], "WorkingDir": "/app"}
+    assert [r.url.path for r in seen] == ["/v2/org/server/manifests/v1", "/token", "/v2/org/server/manifests/v1",
+                                          f"/v2/org/server/manifests/{AMD64}", f"/v2/org/server/blobs/{CONFIG}"]
+
+
+def test_a_name_with_no_registry_is_docker_hubs_library_image(fake_registry):
+    def hub(request):
+        if request.url.path.endswith("/manifests/16-alpine"):
+            return httpx.Response(200, json={"config": {"digest": CONFIG}})
+        return httpx.Response(200, json={"config": {"Entrypoint": ["docker-entrypoint.sh"], "Cmd": ["postgres"]}})
+
+    seen = fake_registry(hub)
+
+    assert image_config("postgres:16-alpine", None)["Entrypoint"] == ["docker-entrypoint.sh"]
+    assert seen[0].url == "https://registry-1.docker.io/v2/library/postgres/manifests/16-alpine"
+
+
+def test_an_index_with_no_entry_for_the_platform_is_refused(fake_registry):
+    fake_registry(lambda request: httpx.Response(200, json={"manifests": [
+        {"digest": OTHER, "platform": {"os": "linux", "architecture": "arm64"}}]}))
+
+    with pytest.raises(ValueError, match="serves no linux/amd64 image"):
+        image_config("ghcr.io/org/server:v1", None)
+

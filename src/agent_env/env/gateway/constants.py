@@ -81,6 +81,10 @@ EXT_STATE_URI = "urn:agentenv:state/v1"
 # Gateway's compose service name — how backing servers reach it to build env_get_time_url (compose path).
 GATEWAY_COMPOSE_HOST = "gateway"
 
+# The host a container is reached at on its sandbox provider's private network, which a provider whose network names
+# its containers sets; the gateway builds env_get_time_url from it before Modal's i6pn and the compose name.
+PRIVATE_HOST_ENV = "AGENT_ENV_PRIVATE_HOST"
+
 # Per-child card fetch budget (seconds) when composing the env card.
 CARD_FETCH_TIMEOUT_S = 5.0
 

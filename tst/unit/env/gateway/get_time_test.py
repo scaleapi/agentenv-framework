@@ -10,6 +10,7 @@ from mcp.types import Tool as MCPTool
 
 from agent_env.env.gateway import InternalMCPServer
 from agent_env.env.gateway.clock import ClockError
+from agent_env.env.gateway.constants import PRIVATE_HOST_ENV
 from agent_env.env.gateway.get_time import GET_TIME_TOOL_DESCRIPTION, GET_TIME_TOOL_NAME
 from agent_env.env.gateway.gateway import Gateway
 
@@ -298,3 +299,17 @@ def test_backing_tools_are_not_logged_by_the_wrapper(gw):
               if e.get("tool_call", {}).get("function_name") == "svc_thing"]
     # exactly one — the proxy closure's own. Two would mean the wrapper logged it as well.
     assert len(logged) == 1, f"expected the proxy closure's single record, got {logged}"
+
+
+@pytest.mark.parametrize("private_host, i6pn, expected", [
+    ("nwa-123-c0ffee", "[fd00::1]", "nwa-123-c0ffee"),
+    (None, "[fd00::1]", "[fd00::1]"),
+    (None, None, "gateway"),
+], ids=["provider-set private host", "modal i6pn", "compose name"])
+def test_the_clock_url_names_the_host_the_servers_reach_the_gateway_at(gw, monkeypatch, private_host, i6pn, expected):
+    if private_host:
+        monkeypatch.setenv(PRIVATE_HOST_ENV, private_host)
+    else:
+        monkeypatch.delenv(PRIVATE_HOST_ENV, raising=False)
+    monkeypatch.setattr(Gateway, "_resolve_i6pn_host", staticmethod(lambda: i6pn))
+    assert asyncio.run(gw._env_get_time_url()) == f"http://{expected}:{gw.port}/clock/time"

@@ -1,4 +1,5 @@
-"""Read an image's digest from its registry over the OCI distribution API, to pin a tag to the image it names now."""
+"""Read an image's digest from its registry over the OCI distribution API, to pin a tag to the image it names now, and
+its config, to run it where only its name is known."""
 
 from __future__ import annotations
 
@@ -48,6 +49,76 @@ def pin_digest(ref: str, auth: RegistryAuth | None) -> str:
         raise ValueError(f"{ref}: the tag {image.tag!r} names {served} now, not {image.digest}; give the tag or the "
                          "digest alone")
     return ref
+
+
+def image_config(ref: str, auth: RegistryAuth | None, platform: str = "linux/amd64") -> dict:
+    """The run config of the image ``ref`` names, as its config blob's ``config`` holds it (``Entrypoint``, ``Cmd``,
+    ``Env``, ``WorkingDir``, ``User``), ``platform``'s from a multi-platform index. ``auth`` as for ``pin_digest``.
+    Raises ValueError naming what the registry answered."""
+    image = _parse(_qualified(ref))
+    reference = image.digest or image.tag or "latest"
+    what = f"{image.name}{'@' if image.digest else ':'}{reference}"
+    scheme = "http" if is_loopback_host(image.host) else "https"
+    base = f"{scheme}://{image.host}/v2/{image.repository}"
+    try:
+        with httpx.Client(timeout=_TIMEOUT_SECONDS, follow_redirects=True) as client:
+            fetch = _Fetch(client, auth, what)
+            manifest = fetch.json(f"{base}/manifests/{reference}", _MANIFEST_TYPES)
+            if (entries := manifest.get("manifests")) is not None:
+                os_name, _, arch = platform.partition("/")
+                digest = next((m.get("digest") for m in entries
+                               if (m.get("platform") or {}).get("os") == os_name
+                               and (m.get("platform") or {}).get("architecture") == arch), None)
+                if digest is None:
+                    raise ValueError(f"{what}: {image.host} serves no {platform} image for it")
+                manifest = fetch.json(f"{base}/manifests/{digest}", _MANIFEST_TYPES)
+            config_digest = (manifest.get("config") or {}).get("digest")
+            if not config_digest:
+                raise ValueError(f"{what}: {image.host} served a manifest with no config")
+            blob = fetch.json(f"{base}/blobs/{config_digest}", "*/*")
+    except httpx.HTTPError as e:
+        raise ValueError(f"{what}: couldn't read its config from {image.host}: {type(e).__name__}: {e}") from e
+    return blob.get("config") or {}
+
+
+def _qualified(ref: str) -> str:
+    """``ref`` with Docker Hub's host when it names none, as Docker reads it: a first part with no ``.`` or ``:`` that
+    isn't ``localhost`` is a Docker Hub path."""
+    first, slash, _ = ref.partition("/")
+    if slash and ("." in first or ":" in first or first == "localhost"):
+        return ref
+    return f"docker.io/{ref}"
+
+
+class _Fetch:
+    """GETs from one registry, with ``auth`` until its Bearer challenge gives a token, which then replaces it."""
+
+    def __init__(self, client: httpx.Client, auth: RegistryAuth | None, what: str):
+        self._client = client
+        self._basic = (auth.username, auth.password) if auth is not None else None
+        self._token: str | None = None
+        self._what = what
+
+    def json(self, url: str, accept: str) -> dict:
+        response = self._get(url, accept)
+        if response.status_code == 401 and self._token is None:
+            self._token = _bearer_token(self._client, response, self._basic, self._what)
+            if self._token is not None:
+                response = self._get(url, accept)
+        if response.status_code != 200:
+            raise ValueError(f"{self._what}: {url} answered HTTP {response.status_code}")
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            raise ValueError(f"{self._what}: {url} answered with something other than a JSON object")
+        return body
+
+    def _get(self, url: str, accept: str) -> httpx.Response:
+        if self._token is not None:
+            return self._client.get(url, headers={"Accept": accept, "Authorization": f"Bearer {self._token}"})
+        return self._client.get(url, headers={"Accept": accept}, auth=self._basic)
 
 
 def _parse(ref: str) -> _ImageRef:

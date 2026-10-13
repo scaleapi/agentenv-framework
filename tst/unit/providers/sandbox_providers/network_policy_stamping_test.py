@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from agent_env.providers.sandbox_providers import hf_jobs
 from agent_env.providers.sandbox_providers.e2b.provider import E2BSandboxProvider
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
@@ -98,12 +99,26 @@ async def _tensorlake() -> Sandbox:
     return await provider.create_vm(exposed_ports=[], setup_for_gateway=False)
 
 
+async def _hf_jobs() -> Sandbox:
+    api = MagicMock(endpoint="https://huggingface.co")
+    api.inspect_job.return_value = SimpleNamespace(
+        status=SimpleNamespace(stage="RUNNING", message=None, expose_urls=["https://job--8000.hf.jobs"]), labels={})
+    box = MagicMock()
+    provider = hf_jobs.HfJobsSandboxProvider(token="hf_test", namespace="someone")
+    provider._api = api
+    with patch.object(hf_jobs.httpx, "post", return_value=MagicMock(status_code=200, json=lambda: {"id": "job"})), \
+            patch.object(hf_jobs.HubSandbox, "connect", return_value=box), \
+            patch.object(hf_jobs, "_image_command", return_value=["server"]):
+        return await provider.create_sandbox(image_name="ghcr.io/x/y:1", port=8000, env={})
+
+
 FACTORIES = {
     "modal": _modal,
     "modal_vm": _modal_vm,
     "e2b": _e2b,
     "sail_vm": _sail,
     "tensorlake": _tensorlake,
+    "hf_jobs": _hf_jobs,
     "local": _local,
 }
 
