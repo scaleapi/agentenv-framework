@@ -628,8 +628,6 @@ class TriggerEngine:
         when = spec.get("when")
         if not isinstance(when, dict) or when.get("type") not in ("action", "state", "time"):
             raise TriggerError(f"trigger '{tid}': when.type must be 'action', 'state', or 'time'")
-        if when["type"] == "time" and "roles" in when:
-            raise TriggerError(f"trigger '{tid}': when.roles is only valid on action and state triggers")
         self._normalize_roles(when, tid)
         if when["type"] == "action":
             self._normalize_action_when(when, tid)
@@ -661,6 +659,8 @@ class TriggerEngine:
         if when.get("roles") is None:
             when.pop("roles", None)
             return
+        if when["type"] == "time":
+            raise TriggerError(f"trigger '{tid}': when.roles is only valid on action and state triggers")
         roles = when["roles"]
         if not isinstance(roles, list) or not roles or not all(isinstance(r, str) and r for r in roles):
             raise TriggerError(f"trigger '{tid}': when.roles must be a non-empty list of non-empty AgentEnv-Roles")

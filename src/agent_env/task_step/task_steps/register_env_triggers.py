@@ -74,7 +74,7 @@ class RegisterEnvTriggersStep(TaskStep):
         if self.watch_roles is not None:
             body["watch_roles"] = self.watch_roles
         if self.executor_agent_name is not None:
-            body["executor"] = self._executor(context, deployed, self.executor_agent_name)
+            body["executor"] = self._executor_config(context, deployed, self.executor_agent_name)
         named = _named_executors(self.triggers)
         # An older gateway ignores what it does not declare: named actions would go to the default executor, and a
         # trigger's when.roles would leave it to the watched roles, so a persona never provokes it.
@@ -85,7 +85,7 @@ class RegisterEnvTriggersStep(TaskStep):
                 f"Env '{self.env_id}' runs a gateway whose triggers/v1 does not declare {missing}, which these triggers "
                 f"use; redeploy it on a gateway image that does.")
         if named:
-            body["executors"] = {name: self._executor(context, deployed, name) for name in named}
+            body["executors"] = {name: self._executor_config(context, deployed, name) for name in named}
         try:
             result = await deployed.invoke(EXT_TRIGGERS_URI, "register", body)
         except httpx.HTTPStatusError as e:
@@ -100,7 +100,7 @@ class RegisterEnvTriggersStep(TaskStep):
         })
         return context
 
-    def _executor(self, context: TaskStepContext, deployed: DeployedEnv, agent_name: str) -> dict:
+    def _executor_config(self, context: TaskStepContext, deployed: DeployedEnv, agent_name: str) -> dict:
         agent = next((a for a in context.deployed_agents if a.agent_name == agent_name), None)
         if agent is None:
             raise RuntimeError(f"Executor agent '{agent_name}' not found in context.deployed_agents")
