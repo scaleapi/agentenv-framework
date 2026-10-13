@@ -34,8 +34,7 @@ async def test_each_nl_action_reaches_the_executor_it_names(local_stack):
     deployed = await env.deploy(sandbox_type="local", ttl_seconds=900)
     # host.docker.internal: loopback on Docker Desktop, the bridge gateway on Linux.
     host = env._sandbox.host_ips[-1]
-    alice = _Executor("alice", "alice@example.com", deployed.gateway_url, host)
-    bob = _Executor("bob", "bob@example.com", deployed.gateway_url, host)
+    started: list[_Executor] = []
     triggers = [
         {"id": "to-alice", "when": {"type": "action", "tool": "list_items"},
          "actions": [{"type": "nl", "executor": "alice", "instruction": "ALICE-ACTS"}]},
@@ -44,6 +43,8 @@ async def test_each_nl_action_reaches_the_executor_it_names(local_stack):
         {"id": "on-add", "when": {"type": "action", "tool": "items_add_item", "repeat": True}, "actions": []},
     ]
     try:
+        alice = _Executor("alice", "alice@example.com", deployed.gateway_url, host, started)
+        bob = _Executor("bob", "bob@example.com", deployed.gateway_url, host, started)
         context = TaskStepContext(deployed_envs=[deployed], deployed_agents=[alice.agent, bob.agent], metadata={})
         await RegisterEnvTriggersStep(id="reg", version=None, env_id=env.id, triggers=triggers,
                                       watch_roles=["default"], executor_timeout_seconds=60).execute(context)
@@ -54,8 +55,8 @@ async def test_each_nl_action_reaches_the_executor_it_names(local_stack):
             stored = await client.post("/step", json={"action": "call_tool", "tool_name": "list_items", "arguments": {}},
                                        headers={AGENT_ENV_ROLE_HEADER: "harness"})
     finally:
-        alice.stop()
-        bob.stop()
+        for executor in started:
+            executor.stop()
         await env.close()
 
     statuses = {t["id"]: t["status"] for t in state["triggers"]}
@@ -73,12 +74,13 @@ async def test_each_nl_action_reaches_the_executor_it_names(local_stack):
 class _Executor:
     """An A2A executor on this machine that acts on each instruction through the gateway, under its own role."""
 
-    def __init__(self, name: str, role: str, gateway_url: str, host: str) -> None:
+    def __init__(self, name: str, role: str, gateway_url: str, host: str, started: list) -> None:
         self.role, self.gateway_url = role, gateway_url
         self.instructions: list[str] = []
         self.acted_as: list[str] = []
         self._server = ThreadingHTTPServer((host, 0), functools.partial(_ExecutorHandler, self))
         threading.Thread(target=self._server.serve_forever, daemon=True).start()
+        started.append(self)
         url = f"http://{host}:{self._server.server_port}"
         self.agent = DeployedAgent(agent_name=name, api_url=url, a2a_url=url, role=role)
 
@@ -90,6 +92,7 @@ class _Executor:
 
     def stop(self) -> None:
         self._server.shutdown()
+        self._server.server_close()
 
     def _call(self, tool: str, arguments: dict) -> dict:
         response = httpx.post(f"{self.gateway_url}/step", json={"action": "call_tool", "tool_name": tool,
