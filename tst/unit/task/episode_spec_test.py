@@ -1,9 +1,9 @@
-"""What ``EpisodeSpec.from_task`` reads off a task (the outside agents, their turns, the reward), what it refuses, and
-the copy of the task it runs."""
+"""What ``EpisodeSpec.from_task`` reads off a task (the agents a loop plays), what it refuses, and the copy of the task
+it runs."""
 
 import pytest
 
-from agent_env.task import AgentSpec, EpisodeError, EpisodeSpec, Task, TurnSpec
+from agent_env.task import EpisodeError, EpisodeSpec, Task
 from agent_env.task.episode import _EpisodeAgentStep, _EpisodeTurnStep
 from agent_env.task.episode_rules import CHECKS, UNAFFECTED
 from agent_env.task.task import substitute_seed_in_steps
@@ -35,19 +35,14 @@ def _portsim(*extra, **replace):
     return _task(*(step for step in steps.values() if step is not None), *extra)
 
 
-def _refusal(task, agents=None):
+def _refusal(task, trainer_agents=None):
     with pytest.raises(EpisodeError) as raised:
-        EpisodeSpec.from_task(task, agents=agents)
+        EpisodeSpec.from_task(task, trainer_agents=trainer_agents)
     return str(raised.value)
 
 
-def test_a_task_with_one_prompted_agent_is_played_as_that_agent_with_its_turns_seeded():
-    spec = EpisodeSpec.from_task(_portsim(), seed=SEED)
-
-    assert spec.agents == {"default-agent": AgentSpec(role="planner@Valencia", turns=(
-        TurnSpec(step_id="play", prompt="Plan week 3.", system_prompt="You plan Valencia."),
-    ))}
-    assert spec._reward_verifier_id == "berth"
+def test_a_task_with_one_prompted_agent_is_played_as_that_agent():
+    assert EpisodeSpec.from_task(_portsim(), seed=SEED).trainer_agents == ("default-agent",)
 
 
 def test_an_agent_named_by_the_seed_is_the_one_played_from_outside():
@@ -56,39 +51,40 @@ def test_an_agent_named_by_the_seed_is_the_one_played_from_outside():
         seed={**SEED, "who": "planner"},
     )
 
-    assert list(spec.agents) == ["planner"]
+    assert spec.trainer_agents == ("planner",)
     assert [step.type for step in spec._copy.steps] == [
         "deploy_env", "load_artifact", "episode_agent", "episode_turn", "env_outcome_verifier"]
-    assert spec.agents["planner"].turns[0].system_prompt == "You plan Valencia."
 
 
 def test_a_prompts_own_system_prompt_wins_over_the_agents():
     spec = EpisodeSpec.from_task(_portsim(play={**PLAY, "system_prompt": "Plan only the berths."}))
 
-    assert spec.agents["default-agent"].turns[0].system_prompt == "Plan only the berths."
+    assert spec._copy.steps[3].system_prompt == "Plan only the berths."
 
 
-def test_each_prompt_of_an_outside_agent_is_a_turn_in_task_order():
+def test_each_prompt_of_a_trainer_agent_becomes_a_turn():
     again = {**PLAY, "id": "replan", "prompt_id": "replan", "prompt": "Replan.", "depends_on": ["play"]}
     spec = EpisodeSpec.from_task(_portsim(again))
 
-    assert [turn.step_id for turn in spec.agents["default-agent"].turns] == ["play", "replan"]
+    assert [step.id for step in spec._copy.steps if step.type == "episode_turn"] == ["play", "replan"]
 
 
 def test_a_task_prompting_several_agents_needs_the_ones_to_play_named():
     task = _portsim(BOB, ASK_BOB)
 
-    assert _refusal(task) == "task 'dock' prompts ['default-agent', 'bob']; name the ones to play with agents="
-    assert list(EpisodeSpec.from_task(task, agents=["bob"]).agents) == ["bob"]
-    assert list(EpisodeSpec.from_task(task, agents=["bob", "default-agent"]).agents) == ["bob", "default-agent"]
+    assert _refusal(task) == (
+        "task 'dock' prompts ['default-agent', 'bob']; name the ones to play with trainer_agents=")
+    assert EpisodeSpec.from_task(task, trainer_agents=["bob"]).trainer_agents == ("bob",)
+    assert EpisodeSpec.from_task(task, trainer_agents=["bob", "default-agent", "bob"]).trainer_agents == (
+        "bob", "default-agent")
 
 
-@pytest.mark.parametrize(("agents", "message"), [
+@pytest.mark.parametrize(("trainer_agents", "message"), [
     (["carol"], "task 'dock' doesn't prompt ['carol']; it prompts ['default-agent']"),
-    ([], "agents= names no agent; task 'dock' prompts ['default-agent']"),
+    ([], "trainer_agents= names no agent; task 'dock' prompts ['default-agent']"),
 ])
-def test_only_a_prompted_agent_can_be_played(agents, message):
-    assert _refusal(_portsim(), agents=agents) == message
+def test_only_a_prompted_agent_can_be_played(trainer_agents, message):
+    assert _refusal(_portsim(), trainer_agents=trainer_agents) == message
 
 
 def test_a_task_prompting_no_agent_has_nothing_to_play():
@@ -97,7 +93,7 @@ def test_a_task_prompting_no_agent_has_nothing_to_play():
 
 def test_the_copy_stands_in_for_the_outside_agents_steps_and_keeps_everything_else():
     task = _portsim(BOB, ASK_BOB)
-    copy = EpisodeSpec.from_task(task, agents=["default-agent"])._copy
+    copy = EpisodeSpec.from_task(task, trainer_agents=["default-agent"])._copy
 
     assert (copy.id, copy.version) == ("dock", 4)
     assert [step.type for step in copy.steps] == [
@@ -139,29 +135,10 @@ def test_a_turn_timeout_replaces_every_outside_prompts_own():
 
 
 def test_an_inside_agent_keeps_its_own_steps():
-    copy = EpisodeSpec.from_task(_portsim(BOB, ASK_BOB), agents=["bob"])._copy
+    copy = EpisodeSpec.from_task(_portsim(BOB, ASK_BOB), trainer_agents=["bob"])._copy
 
     assert type(copy.steps[2]) is DeployAgentTaskStep and type(copy.steps[3]) is PromptAgentTaskStep
     assert [step.type for step in copy.steps[5:]] == ["episode_agent", "episode_turn"]
-
-
-def test_the_reward_is_the_verifier_no_aggregate_lists():
-    graded = {"id": "graded", "type": "agent_prompt_response_verifier", "prompt_id": "play", "verifier_id": "reply",
-              "criteria": [{"type": "response_contains", "needles": ["berths"]}]}
-    overall = {"id": "overall", "type": "aggregate_verifiers", "verifier_ids": ["berth", "reply"],
-               "verifier_id": "overall"}
-
-    assert EpisodeSpec.from_task(_portsim(graded, overall))._reward_verifier_id == "overall"
-
-
-@pytest.mark.parametrize(("extra", "replace", "count"), [
-    ((), {"verify": None}, "0"),
-    (({**VERIFY, "id": "verify-2", "verifier_id": "crane"},), {}, "2: ['verify', 'verify-2']"),
-])
-def test_a_task_without_exactly_one_top_level_verifier_has_no_reward(extra, replace, count):
-    assert _refusal(_portsim(*extra, **replace)) == (
-        "task 'dock' can't run as an episode: the reward is the score of the one verifier no aggregate_verifiers "
-        f"step lists, and the task has {count}")
 
 
 AT_THE_AGENT = {"agent_name": "default-agent"}
@@ -241,7 +218,7 @@ def test_a_user_simulator_played_from_outside_is_refused():
     ask = {**ASK_BOB, "max_conversation_turns": 3, "user_agent_name": "default-agent"}
 
     assert "step 'ask-bob': its user simulator 'default-agent' is played from outside" in _refusal(
-        _portsim(BOB, ask), agents=["default-agent"])
+        _portsim(BOB, ask), trainer_agents=["default-agent"])
 
 
 def test_every_refusal_is_reported_at_once():

@@ -1,6 +1,6 @@
 """Run a task with some of its agents played from outside AgentEnv, by a training loop's model or any other caller.
 
-AgentEnv runs everything else exactly as ``Task.run`` does, so the reward is the score ``agent-env run`` would give.
+AgentEnv runs everything else exactly as ``Task.run`` does, so its scores are the ones ``agent-env run`` would report.
 """
 
 from __future__ import annotations
@@ -10,14 +10,13 @@ import logging
 import uuid
 from collections import deque
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from typing import Any, ClassVar, Optional
 
 from agent_env.entity_refs import EntityRef
 from agent_env.providers.sandbox_providers.sandbox_provider import sandbox_request_headers_for_url
 from agent_env.task.episode_rules import problems
 from agent_env.task.store import record_task_cancelled
-from agent_env.task.task import Task, substitute_seed_in_steps
+from agent_env.task.task import Task, recorded_scores, substitute_seed_in_steps
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.task_step.task_step import TaskStep
@@ -33,71 +32,43 @@ class EpisodeError(RuntimeError):
     """A task that can't run as an episode, or an episode asked for what it can't give."""
 
 
-@dataclass(frozen=True)
-class TurnSpec:
-    step_id: str
-    prompt: str
-    system_prompt: str | None
-
-
-@dataclass(frozen=True)
-class AgentSpec:
-    role: str | None
-    turns: tuple[TurnSpec, ...]
-
-
 class EpisodeSpec:
-    """A task read as an episode: the agents played from outside, their turns, and the copy of the task that runs."""
+    """A task read as an episode: the agents a loop plays, and the copy of the task that runs. Built by
+    ``from_task``."""
 
-    def __init__(
-        self, *, copy: Task, agents: dict[str, AgentSpec], reward_verifier_id: str, seed: dict[str, str] | None,
-    ):
+    def __init__(self, *, copy: Task, trainer_agents: tuple[str, ...], seed: dict[str, str] | None):
         self._copy = copy
-        self.agents = agents
-        self._reward_verifier_id = reward_verifier_id
+        self.trainer_agents = trainer_agents
         self._seed = seed
 
     @classmethod
     def from_task(
-        cls, task: Task, *, agents: Sequence[str] | None = None, seed: Mapping[str, str] | None = None,
+        cls, task: Task, *, trainer_agents: Sequence[str] | None = None, seed: Mapping[str, str] | None = None,
         turn_timeout: float | None = None,
     ) -> EpisodeSpec:
-        """``turn_timeout`` is every outside turn's deadline in seconds, in place of its prompt's own
-        ``timeout_seconds``, which budgets an agent's run rather than the loop playing it."""
+        """``trainer_agents`` are the agents the loop plays, by default the task's only prompted agent.
+        ``turn_timeout`` is every turn's deadline in seconds, in place of its prompt's own ``timeout_seconds``,
+        which budgets an agent's run rather than the loop playing it."""
         seed = dict(seed) if seed else None
         seeded = substitute_seed_in_steps(task.steps, seed or {})
-        outside = _outside_agents(task, seeded, agents)
-        found = problems(seeded, outside)
-        verifiers = _top_level_verifiers(seeded)
-        if len(verifiers) != 1:
-            found.append(
-                f"the reward is the score of the one verifier no aggregate_verifiers step lists, and the task has "
-                f"{len(verifiers)}" + (f": {[step.id for step in verifiers]}" if verifiers else "")
-            )
-        if found:
+        outside = _trainer_agents(task, seeded, trainer_agents)
+        if found := problems(seeded, outside):
             raise EpisodeError(f"task {task.id!r} can't run as an episode: " + "; ".join(found))
         deploys = {
             as_run.agent_name: step for step, as_run in zip(task.steps, seeded)
             if step.type == "deploy_agent" and as_run.agent_name in outside
         }
         steps = [_stand_in(step, as_run, deploys, turn_timeout) for step, as_run in zip(task.steps, seeded)]
-        return cls(
-            copy=Task(id=task.id, version=task.version, steps=steps),
-            agents={name: _agent_spec(seeded, name) for name in outside},
-            reward_verifier_id=verifiers[0].verifier_id,
-            seed=seed,
-        )
+        return cls(copy=Task(id=task.id, version=task.version, steps=steps), trainer_agents=tuple(outside), seed=seed)
 
-    async def start(self, *, run_group_id: str | None = None) -> Episode:
+    async def start(self) -> Episode:
         """Start one run of the task, a new episode each call. It returns once the run's record exists, before
         anything is deployed; ``next_turn()`` is where the deploys and setup are waited for."""
         episode_id = uuid.uuid4().hex
-        metadata: dict[str, Any] = {"episode": {"id": episode_id, "agents": list(self.agents)}}
+        metadata: dict[str, Any] = {"episode": {"id": episode_id, "trainer_agents": list(self.trainer_agents)}}
         if self._seed:
             metadata["seed"] = dict(self._seed)
-        if run_group_id is not None:
-            metadata["run_group_id"] = run_group_id
-        episode = Episode(episode_id, self._copy, self._reward_verifier_id, TaskStepContext(metadata=metadata))
+        episode = Episode(episode_id, self._copy, TaskStepContext(metadata=metadata))
         await episode._launch()
         return episode
 
@@ -142,10 +113,9 @@ class Episode:
     Cancelling a caller of ``next_turn()``, ``result()`` or ``abandon()`` cancels that call, never the run. Use an
     episode on the event loop that started it."""
 
-    def __init__(self, id: str, task: Task, reward_verifier_id: str, context: TaskStepContext):
+    def __init__(self, id: str, task: Task, context: TaskStepContext):
         self.id = id
         self._task = task
-        self._reward_verifier_id = reward_verifier_id
         self._context = context
         self._run: asyncio.Task[None]
         self._bindings: dict[str, tuple[str | None, dict[str, str]]] = {}
@@ -169,8 +139,9 @@ class Episode:
                 return None
             await self._wait(changed)
 
-    async def result(self) -> float:
-        """The reward, once the run and its teardown are over: the score of the task's one top-level verifier."""
+    async def result(self) -> dict[str, float]:
+        """Every score the run recorded, by the id of the step that recorded it, once the run and its teardown are
+        over: what ``agent-env run`` reports. Making a reward of them is the caller's."""
         while not self._run.done():
             changed = self._changed
             if open_turn := next((turn for turn in self._turns if turn._open), None):
@@ -179,11 +150,7 @@ class Episode:
                 )
             await self._wait(changed)
         self._raise_unless_completed()
-        verifications = self._context.metadata.get("verifications") or {}
-        score = (verifications.get(self._reward_verifier_id) or {}).get("score")
-        if not isinstance(score, (int, float)):
-            raise EpisodeError(f"verifier {self._reward_verifier_id!r} left no score")
-        return float(score)
+        return recorded_scores(self._task.steps, self._context)
 
     async def abandon(self, reason: str) -> None:
         """Stop the run and wait for its teardown; it is recorded cancelled with ``reason``. A run a step has
@@ -265,34 +232,21 @@ def _episode_of(context: TaskStepContext) -> Episode:
     return _live[context.metadata["episode"]["id"]]
 
 
-def _outside_agents(task: Task, steps: list[TaskStep], agents: Sequence[str] | None) -> list[str]:
+def _trainer_agents(task: Task, steps: list[TaskStep], named: Sequence[str] | None) -> list[str]:
     prompted = list(dict.fromkeys(step.agent_name for step in steps if step.type == "prompt_agent"))
-    if agents is None:
+    if named is None:
         if len(prompted) != 1:
             raise EpisodeError(
-                f"task {task.id!r} prompts {prompted}; name the ones to play with agents=" if prompted
+                f"task {task.id!r} prompts {prompted}; name the ones to play with trainer_agents=" if prompted
                 else f"task {task.id!r} prompts no agent"
             )
         return prompted
-    outside = list(dict.fromkeys(agents))
+    outside = list(dict.fromkeys(named))
     if not outside:
-        raise EpisodeError(f"agents= names no agent; task {task.id!r} prompts {prompted}")
+        raise EpisodeError(f"trainer_agents= names no agent; task {task.id!r} prompts {prompted}")
     if unprompted := [name for name in outside if name not in prompted]:
         raise EpisodeError(f"task {task.id!r} doesn't prompt {unprompted}; it prompts {prompted}")
     return outside
-
-
-def _top_level_verifiers(steps: list[TaskStep]) -> list[TaskStep]:
-    aggregated = {vid for step in steps if step.type == "aggregate_verifiers" for vid in step.verifier_ids}
-    return [step for step in steps if getattr(step, "verifier_id", None) and step.verifier_id not in aggregated]
-
-
-def _agent_spec(steps: list[TaskStep], name: str) -> AgentSpec:
-    deploy = next(step for step in steps if step.type == "deploy_agent" and step.agent_name == name)
-    return AgentSpec(role=deploy.role, turns=tuple(
-        TurnSpec(step_id=step.id, prompt=step.prompt, system_prompt=step.system_prompt or deploy.system_prompt)
-        for step in steps if step.type == "prompt_agent" and step.agent_name == name
-    ))
 
 
 def _stand_in(step: TaskStep, as_run: TaskStep, deploys: dict[str, TaskStep], turn_timeout: float | None) -> TaskStep:

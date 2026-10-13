@@ -27,6 +27,7 @@ from agent_env.providers import build_sandbox_provider
 from agent_env.store.routing import namespace_routing, run_scope
 from agent_env.task import Task, record_task_cancelled
 from agent_env.task.interrupts import Interrupts
+from agent_env.task.task import recorded_scores
 from agent_env.task.teardown import TeardownReport, teardown_run
 from agent_env.task_step.context import TaskStepContext
 from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM
@@ -78,13 +79,7 @@ class TaskRun:
     def scores(self) -> dict[str, float]:
         """Every score the run recorded, by the id of the step that recorded it, or by its verification's key
         when that isn't a step's verifier id."""
-        steps = {step.verifier_id: step.id for step in self.task.steps if getattr(step, "verifier_id", None)}
-        scores = {}
-        for key, verification in (self.context.metadata.get("verifications") or {}).items():
-            score = verification.get("score")
-            if isinstance(score, (int, float)):
-                scores[steps.get(key, key)] = float(score)
-        return scores
+        return recorded_scores(self.task.steps, self.context)
 
     @property
     def outcome(self) -> Outcome:

@@ -156,10 +156,10 @@ orchestrators call it the same way. What callers rely on:
 - A run is resumable: pass a previously persisted `context`, a `start_step` and the existing
   `instance_id`; completed steps are seeded as SUCCESS.
 - An episode (`EpisodeSpec`, `task/episode.py`) is one `Task.run()` of a copy of the task in which
-  each outside agent's `deploy_agent` and `prompt_agent` steps are the plain-data `episode_agent` and
-  `episode_turn`, which wait for the caller instead of deploying or prompting. Its record is tagged
-  `context.metadata["episode"]` and names the original task, so it isn't resumable with
-  `start_step`. The episode tears down what its run deployed, and an abandoned one is recorded
+  the `deploy_agent` and `prompt_agent` steps of each of its `trainer_agents` are the plain-data
+  `episode_agent` and `episode_turn`, which wait for the caller instead of deploying or prompting. Its
+  record is tagged `context.metadata["episode"]` and names the original task, so it isn't resumable
+  with `start_step`. The episode tears down what its run deployed, and an abandoned one is recorded
   `cancelled`.
 
 ## Tests

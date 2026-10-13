@@ -117,6 +117,18 @@ def substitute_seed_in_steps(steps: list["TaskStep"], seed: dict) -> list["TaskS
     return out
 
 
+def recorded_scores(steps: list["TaskStep"], context: TaskStepContext) -> dict[str, float]:
+    """Every score a run of ``steps`` recorded, by the id of the step that recorded it, or by its verification's key
+    when that isn't a step's verifier id."""
+    step_ids = {step.verifier_id: step.id for step in steps if getattr(step, "verifier_id", None)}
+    scores = {}
+    for key, verification in (context.metadata.get("verifications") or {}).items():
+        score = verification.get("score")
+        if isinstance(score, (int, float)):
+            scores[step_ids.get(key, key)] = float(score)
+    return scores
+
+
 def _dependency_ids(steps: list["TaskStep"]) -> dict[str, set[str]]:
     """Direct dependency ids per step; depends_on None = all prior (scheduler semantics)."""
     deps: dict[str, set[str]] = {}

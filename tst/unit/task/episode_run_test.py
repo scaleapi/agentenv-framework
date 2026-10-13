@@ -1,4 +1,4 @@
-"""The run of an episode, on fake steps: its turns, its reward, abandoning it, teardown and its record."""
+"""The run of an episode, on fake steps: its turns, its scores, abandoning it, teardown and its record."""
 
 import asyncio
 
@@ -154,12 +154,12 @@ async def test_the_run_waits_at_an_outside_turn_and_carries_on_once_it_ends(tear
     assert (turn.mcp_urls, turn.headers) == ({"items": "http://127.0.0.1:20031/items/mcp"}, {"items": {}})
 
     await turn.end("Added a crate.")
-    assert await episode.result() == 1.0
+    assert await episode.result() == {"replies": 1.0}
     assert await episode.next_turn() is None
     assert teardowns.finished == [episode.id]
     record = Task.get_instance(episode.id)
     assert record.status == "completed"
-    assert record.context["metadata"]["episode"] == {"id": episode.id, "agents": ["alice"]}
+    assert record.context["metadata"]["episode"] == {"id": episode.id, "trainer_agents": ["alice"]}
     assert [(r["step_id"], r["prompt_text"], r["response"]) for r in record.context["prompt_responses"]] == [
         ("turn", "Add a crate.", "Added a crate.")]
     assert record.context["deployed_agents"] == []
@@ -181,7 +181,7 @@ async def test_two_outside_agents_turns_are_each_handed_out_once(teardowns):
     bob_turn = {**TURN, "id": "bob-turn", "agent_name": "bob", "prompt_id": "bob-turn", "depends_on": ["bob"]}
     episode = await _spec(
         ITEMS, {**ALICE, "depends_on": ["items"]}, bob, {**TURN, "depends_on": ["alice"]}, bob_turn,
-        {**REPLIES, "depends_on": ["turn", "bob-turn"]}, agents=["alice", "bob"],
+        {**REPLIES, "depends_on": ["turn", "bob-turn"]}, trainer_agents=["alice", "bob"],
     ).start()
 
     first = await episode.next_turn()
@@ -190,7 +190,7 @@ async def test_two_outside_agents_turns_are_each_handed_out_once(teardowns):
     await first.end("one")
     await second.end("two")
 
-    assert await episode.result() == 1.0
+    assert await episode.result() == {"replies": 1.0}
 
 
 @pytest.mark.asyncio
@@ -204,21 +204,24 @@ async def test_episodes_of_one_spec_run_side_by_side_each_with_its_own_record(te
 
     played = dict(await asyncio.gather(*(play(n) for n in range(8))))
 
-    assert list(played.values()) == [1.0] * 8
+    assert list(played.values()) == [{"replies": 1.0}] * 8
     assert sorted(teardowns.finished) == sorted(played)
     assert sorted(Task.get_instance(id).context["prompt_responses"][0]["response"] for id in played) == [
         f"crate {n}" for n in range(8)]
 
 
 @pytest.mark.asyncio
-async def test_a_seed_reaches_the_agents_env_binding_and_role(teardowns):
+async def test_a_seed_reaches_the_turns_prompt_env_binding_and_role(teardowns):
     episode = await _spec(
-        {**ITEMS, "env_id": "<env>"}, {**ALICE, "env_ids": ["<env>"], "role": "<who>"}, TURN, REPLIES,
+        {**ITEMS, "env_id": "<env>"},
+        {**ALICE, "env_ids": ["<env>"], "role": "<who>", "system_prompt": "You keep the <env>."},
+        {**TURN, "prompt": "Add a crate to the <env>."}, REPLIES,
         seed={"env": "pantry", "who": "bob@example.com"},
     ).start()
 
     turn = await episode.next_turn()
 
+    assert (turn.prompt, turn.system_prompt) == ("Add a crate to the pantry.", "You keep the pantry.")
     assert (turn.mcp_urls, turn.role) == ({"pantry": "http://127.0.0.1:20031/pantry/mcp"}, "bob@example.com")
 
 
@@ -265,7 +268,7 @@ async def test_a_tolerant_turn_past_its_deadline_is_scored_without_a_reply(teard
     episode = await _spec(ITEMS, ALICE, tolerant, REPLIES).start()
     await _ended(episode)
 
-    assert await episode.result() == 0.0
+    assert await episode.result() == {"replies": 0.0}
     assert await episode.next_turn() is None
     assert [f["step_id"] for f in Task.get_instance(episode.id).context["metadata"]["failed_steps"]] == ["turn"]
 
@@ -280,19 +283,19 @@ async def test_the_result_is_refused_while_a_turn_waits_or_is_open(teardowns):
     with pytest.raises(EpisodeError, match="isn't ended"):
         await episode.result()
     await turn.end("done")
-    assert await episode.result() == 1.0
+    assert await episode.result() == {"replies": 1.0}
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("reply", "reward"), [("Added a crate.", 1.0), (None, 0.0)])
-async def test_the_reply_is_graded_as_a_prompt_agents_would_be(teardowns, reply, reward):
+@pytest.mark.parametrize(("reply", "score"), [("Added a crate.", 1.0), (None, 0.0)])
+async def test_the_reply_is_graded_as_a_prompt_agents_would_be(teardowns, reply, score):
     graded = {"id": "graded", "type": "agent_prompt_response_verifier", "prompt_id": "turn", "verifier_id": "graded",
               "criteria": [{"type": "response_contains", "needles": ["crate"]}]}
     episode = await _spec(ITEMS, ALICE, TURN, graded).start()
 
     await (await episode.next_turn()).end(reply)
 
-    assert await episode.result() == reward
+    assert await episode.result() == {"graded": score}
 
 
 @pytest.mark.asyncio
@@ -349,7 +352,7 @@ async def test_abandoning_during_teardown_waits_for_it_and_leaves_the_runs_outco
     await abandoning
 
     assert teardowns.finished == [episode.id]
-    assert await episode.result() == 1.0
+    assert await episode.result() == {"replies": 1.0}
     assert Task.get_instance(episode.id).status == "completed"
 
 
@@ -372,17 +375,7 @@ async def test_cancelling_a_caller_cancels_only_its_wait(teardowns):
     with pytest.raises(asyncio.CancelledError):
         await scoring
     _gate("after").set()
-    assert await episode.result() == 1.0
-
-
-@pytest.mark.asyncio
-async def test_a_run_group_id_groups_the_record(teardowns):
-    episode = await _spec(ITEMS, ALICE, TURN, REPLIES).start(run_group_id="grpo-step-7")
-
-    await (await episode.next_turn()).end("done")
-    await episode.result()
-
-    assert Task.get_instance(episode.id).context["metadata"]["run_group_id"] == "grpo-step-7"
+    assert await episode.result() == {"replies": 1.0}
 
 
 @pytest.mark.asyncio
@@ -395,7 +388,7 @@ async def test_an_agent_named_by_the_seed_is_played_from_outside_in_the_run(tear
 
     assert turn.agent == "bob"
     await turn.end("done")
-    assert await episode.result() == 1.0
+    assert await episode.result() == {"replies": 1.0}
 
 
 @pytest.mark.asyncio
@@ -411,15 +404,28 @@ async def test_a_turn_ended_twice_keeps_its_first_reply(teardowns):
 
 
 @pytest.mark.asyncio
-async def test_a_reward_verifier_that_left_no_score_is_no_reward(teardowns):
+async def test_the_scores_are_every_verifiers_by_step_with_an_aggregate_beside_its_parts(teardowns):
+    def graded(step_id, needle):
+        return {"id": step_id, "type": "agent_prompt_response_verifier", "prompt_id": "turn",
+                "verifier_id": f"has-{needle}", "criteria": [{"type": "response_contains", "needles": [needle]}]}
+    overall = {"id": "overall", "type": "aggregate_verifiers", "verifier_ids": ["has-crate", "has-pallet"],
+               "verifier_id": "overall"}
+    episode = await _spec(ITEMS, ALICE, TURN, graded("crates", "crate"), graded("pallets", "pallet"), overall).start()
+
+    await (await episode.next_turn()).end("Added a crate.")
+
+    assert await episode.result() == {"crates": 1.0, "pallets": 0.0, "overall": 0.5}
+
+
+@pytest.mark.asyncio
+async def test_a_tolerated_verifier_that_recorded_no_score_is_missing_from_the_scores(teardowns):
     unscored = {"id": "graded", "type": "agent_prompt_response_verifier", "prompt_id": "missing",
                 "verifier_id": "graded", "criteria": [{"type": "response_contains", "needles": ["crate"]}],
                 "fail_task_on_error": False}
-    episode = await _spec(ITEMS, ALICE, TURN, unscored).start()
+    episode = await _spec(ITEMS, ALICE, TURN, unscored, REPLIES).start()
     await (await episode.next_turn()).end("done")
 
-    with pytest.raises(EpisodeError, match="verifier 'graded' left no score"):
-        await episode.result()
+    assert await episode.result() == {"replies": 1.0}
 
 
 BREAKS_WHILE_THE_TURN_IS_OPEN = (

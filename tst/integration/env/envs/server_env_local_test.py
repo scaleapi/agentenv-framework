@@ -211,8 +211,8 @@ async def verify(mcp_url):
 @pytest.mark.asyncio
 async def test_a_tasks_agent_is_played_from_a_loop_of_ones_own_as_an_episode(local_stack, tmp_path):
     """A trainer's view of a task: the env deployed and loaded and the echo agent prompted around the outside agent,
-    which plays its turn through the env's tools as its role and is never deployed; its reply recorded, the reward
-    the verifier's score; and every episode, played, not played or abandoned, leaving nothing behind."""
+    which plays its turn through the env's tools as its role and is never deployed; its reply recorded and scored
+    by the verifier; and every episode, played, not played or abandoned, leaving nothing behind."""
     uid = uuid.uuid4().hex[:8]
     env = MCPServerEnv.put(id=f"server-items-{uid}", docker_image_artifact=_put_items_image(f"server-items-{uid}"),
                            environment_name="items", env_provider_type="server")
@@ -229,7 +229,7 @@ async def test_a_tasks_agent_is_played_from_a_loop_of_ones_own_as_an_episode(loc
         {"id": "play", "type": "prompt_agent", "agent_name": "policy", "prompt_id": "play", "prompt": "Add a crate."},
         {"id": "check", "type": "env_outcome_verifier", "env_id": env.id, "file_artifact_id": verify.id,
          "verifier_id": "crate"},
-    ]}), agents=["policy"])
+    ]}), trainer_agents=["policy"])
 
     async def play(episode, add):
         turn = await episode.next_turn()
@@ -243,10 +243,10 @@ async def test_a_tasks_agent_is_played_from_a_loop_of_ones_own_as_an_episode(loc
 
     sandboxes = tmp_path / "sandboxes"
     played, unplayed = await spec.start(), await spec.start()
-    assert await asyncio.gather(play(played, True), play(unplayed, False)) == [1.0, 0.0]
+    assert await asyncio.gather(play(played, True), play(unplayed, False)) == [{"check": 1.0}, {"check": 0.0}]
     assert list(sandboxes.glob("agent-env-*")) == []
     record = Task.get_instance(played.id)
-    assert record.status == "completed" and record.context["metadata"]["episode"]["agents"] == ["policy"]
+    assert record.status == "completed" and record.context["metadata"]["episode"]["trainer_agents"] == ["policy"]
     assert [agent["agent_name"] for agent in record.context["deployed_agents"]] == ["echo"]
     replies = {response["step_id"]: response["response"] for response in record.context["prompt_responses"]}
     assert replies["play"] == "Added a crate." and replies["ask-echo"].startswith("Echo:")

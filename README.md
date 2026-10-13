@@ -58,10 +58,10 @@ while (turn := await episode.next_turn()) is not None:
     async with ToolSession(mcp_url=turn.mcp_urls["my-env"], role=turn.role, headers=turn.headers["my-env"]) as tools:
         ...  # your model reads turn.prompt and calls tools.call_tool(name, arguments)
     await turn.end(response="Done.")
-reward = await episode.result()
+scores = await episode.result()  # every score the run recorded, by step id
 ```
 
-The reward is the score of the task's one top-level verifier, `turn_timeout` is each turn's deadline in seconds (the prompt's own `timeout_seconds` otherwise), `episode.abandon(reason)` stops a run early, and `from_task` names any step an outside player can't stand behind. [Running tasks](https://www.agentenvframework.com/docs/tasks/running) covers the rest.
+The scores are the ones `agent-env run` reports, so making a reward of them is yours. `trainer_agents=` names the agents you play when the task prompts several, `turn_timeout` is each turn's deadline in seconds (the prompt's own `timeout_seconds` otherwise), `episode.abandon(reason)` stops a run early, and `from_task` names any step an outside player can't stand behind. [Running tasks](https://www.agentenvframework.com/docs/tasks/running) covers the rest.
 
 ## Plugins
 
