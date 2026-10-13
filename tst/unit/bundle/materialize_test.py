@@ -279,12 +279,12 @@ def test_an_unchanged_skill_is_reused_and_one_whose_files_change_rewritten(bundl
 @_RUN_OR_DRY_RUN
 @pytest.mark.parametrize("skill_md, problem", [
     ("---\nname: pdf\ndescription: d\n---\n",
-     "skills/pdf-extract: SKILL.md names the skill 'pdf', but its folder is 'pdf-extract'; make them match"),
+     "skills/pdf-extract: SKILL.md frontmatter 'name' 'pdf' must be 'pdf-extract'"),
     ("---\nname: pdf-extract\n---\n",
      "skills/pdf-extract: SKILL.md frontmatter 'description' is required and must be a non-empty string"),
     ("# no frontmatter\n",
      "skills/pdf-extract: SKILL.md must begin with a YAML frontmatter block delimited by '---'"),
-    ("---\nname: [pdf\n---\n", "skills/pdf-extract: SKILL.md's frontmatter isn't valid YAML: "),
+    ("---\nname: [pdf\n---\n", "skills/pdf-extract: SKILL.md frontmatter isn't valid YAML: "),
 ], ids=["other-name", "no-description", "no-frontmatter", "bad-yaml"])
 def test_a_skill_md_its_write_would_refuse_is_refused_before_anything_is_written(bundle_dir, dry_run, skill_md,
                                                                                 problem):

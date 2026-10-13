@@ -61,3 +61,10 @@ def test_a_put_that_fails_after_uploading_its_files_can_be_retried(local_stores,
         SkillArtifact.put("pdf-extract", files=skill_files)
 
     assert SkillArtifact.put("pdf-extract", files=skill_files).version == 1
+
+
+def test_frontmatter_that_isnt_yaml_is_a_value_error(local_stores, skill_files):
+    skill_files["SKILL.md"].write_text("---\nname: [pdf-extract\n---\n")
+
+    with pytest.raises(ValueError, match="SKILL.md frontmatter isn't valid YAML"):
+        SkillArtifact.put("pdf-extract", files=skill_files)

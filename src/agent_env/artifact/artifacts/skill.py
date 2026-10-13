@@ -24,6 +24,7 @@ from agent_env.store.ids import derive_id
 
 if TYPE_CHECKING:
     from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
+    from agent_env.bundle.authoring import AuthoringContext
 
 
 AGENT_SKILLS_SPEC_VERSION = "0.1"
@@ -118,6 +119,19 @@ class SkillArtifact(Artifact):
         )
         return store.put_document(instance)
 
+    @classmethod
+    def accept_toml(cls, data: Any, ctx: AuthoringContext) -> None:
+        """Check the folder's SKILL.md the way ``from_toml`` will, before anything is written."""
+        try:
+            cls.validate(skill_md=(ctx.dir / _SKILL_MD_FILENAME).read_bytes(), expected_name=skill_name_of(ctx.id))
+        except ValueError as e:
+            ctx.refuse([str(e)])
+
+    @classmethod
+    def from_toml(cls, data: Any, ctx: AuthoringContext) -> "SkillArtifact":
+        """Write the skill in the bundle folder: every file its folder walk lists."""
+        return cls.put(ctx.id, files=ctx.files())
+
     def get_skill_files(self) -> "FileArtifactUniverse":
         from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
         return FileArtifactUniverse.get(self.skill_files_id)
@@ -140,7 +154,10 @@ def parse_skill_md(data: bytes) -> tuple[dict, str]:
         raise ValueError("SKILL.md frontmatter is not closed with '---'")
     frontmatter_text = after_open[: end_match.start()]
     body = after_open[end_match.end():].lstrip("\n")
-    parsed = yaml.safe_load(frontmatter_text) or {}
+    try:
+        parsed = yaml.safe_load(frontmatter_text) or {}
+    except yaml.YAMLError as e:
+        raise ValueError(f"SKILL.md frontmatter isn't valid YAML: {' '.join(str(e).split())}") from e
     if not isinstance(parsed, dict):
         raise ValueError("SKILL.md frontmatter must be a YAML mapping")
     return parsed, body

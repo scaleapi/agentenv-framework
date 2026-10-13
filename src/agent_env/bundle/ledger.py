@@ -31,7 +31,7 @@ from agent_env.store.local_state import holding_locks
 from agent_env.task.store import TASKS_COLLECTION
 from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM
 
-from .authoring import build_context_files, entry_files
+from .authoring import build_context_files
 from .parse import Bundle, BundleKind
 from .plan import Plan, Write, env_writer, folder_walk, unpinned_store_refs
 from .resolve import BuiltImage
@@ -127,8 +127,7 @@ class Ledger:
                   "files": {}, "needs": {}, "store_refs": {}}
         if write.kind in (BundleKind.ARTIFACT, BundleKind.SKILL):
             built = isinstance(write.source, BuiltImage)
-            listing = (build_context_files if built else entry_files if write.kind is BundleKind.SKILL
-                       else folder_walk(get_artifact_registry().get(_type(write))))
+            listing = build_context_files if built else folder_walk(get_artifact_registry().get(_type(write)))
             for key, path in listing(self._plan.bundle.bundle, write.source.entry).items():
                 inputs["files"][key] = _file_sha256(path) + (_mode(path) if built else "")
             if built and write.id in self._contexts:
@@ -209,13 +208,13 @@ def materializing(bundle: Bundle, on_wait: Callable[[], None] | None = None) -> 
 
 def _tracked(write: Write) -> bool:
     """Whether the ledger can list everything ``write`` is made from. Not yet for a type with a ``from_toml`` of
-    its own, which may read its folder in ways it can't see. An artifact is made from its toml, the files its type
-    reads from its folder (``folder_walk``) and what it references; a skill from its folder's files
-    (``entry_files``); an agent or env from its toml and what it references. A built image is made from its build
-    context, ``build_context_files``; what the build fetches (its base image, packages) isn't an input."""
+    its own, which may read its folder in ways it can't see. An artifact, a skill included, is made from its toml,
+    the files its type reads from its folder (``folder_walk``) and what it references; an agent or env from its
+    toml and what it references. A built image is made from its build context, ``build_context_files``; what the
+    build fetches (its base image, packages) isn't an input."""
     if isinstance(write.source, BuiltImage):
         return True
-    if write.kind is BundleKind.ARTIFACT:
+    if write.kind in (BundleKind.ARTIFACT, BundleKind.SKILL):
         return folder_walk(get_artifact_registry().get(_type(write))) is not None
     if write.kind is BundleKind.ENV:
         return env_writer(get_env_registry().get(_type(write)))
