@@ -281,10 +281,10 @@ class DockerImageArtifact(Artifact):
 
     @property
     def buildable(self) -> bool:
-        """Whether a sandbox can build the image from its stored build context: one that is only a context, or one whose
-        context records its Dockerfile's path, as every put since contexts became whole folders does. An older context,
-        or a GitHub build's, records none and is kept only beside its tar.gz."""
-        return self.context_only or bool(self.build_context_object_url and self.dockerfile_path)
+        """Whether a sandbox can build the image from its stored build context: one that records its Dockerfile's path,
+        as every put since contexts became whole folders does. An older context, or a GitHub build's, records none and
+        is kept only beside its tar.gz."""
+        return bool(self.build_context_object_url and self.dockerfile_path)
 
     @property
     def stored_under_build_tag(self) -> bool:
@@ -307,6 +307,8 @@ class DockerImageArtifact(Artifact):
         when its name names a registry, one that a VM ``on_this_machine`` or not reaches, and built from its build
         context when it has only that; and a VM of ``platform`` runs only an image built for it, or one it rebuilds
         from the build context beside a tar.gz of another platform."""
+        if self.context_only and not self.buildable:
+            return f"{self.id!r} v{self.version} is only a build context, which records no Dockerfile to build it with"
         if self.tar_gz_object_url or self.context_only:
             return None if self.rebuilt_for(platform) else self.platform_problem(platform)
         if names_registry(self.image_name):

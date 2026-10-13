@@ -353,7 +353,7 @@ async def test_a_chain_none_of_whose_vms_runs_the_image_names_each_refusal():
 
 
 _CONTEXT_ONLY = DockerImageArtifact(id="solver-image", version=2, description="d", image_name="local/solver-0123456789ab:v2",
-                                    build_context_object_url="s3://bucket/ctx.tar.gz")
+                                    build_context_object_url="s3://bucket/ctx.tar.gz", dockerfile_path="Dockerfile")
 
 
 class _PreparingProvider(_StubProvider):

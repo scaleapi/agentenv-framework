@@ -53,7 +53,7 @@ async def build(image: DockerImageArtifact, app: modal.App) -> str:
         try:
             await asyncio.to_thread(_fetch_context, image.build_context_object_url, Path(work) / "context.tar.gz",
                                     context)
-            dockerfile = context / (image.dockerfile_path or "Dockerfile")
+            dockerfile = context / image.dockerfile_path
             ignores = ignore_file(context, dockerfile)
             # Beside the context, not in it, so a COPY of the context still copies the Dockerfile as written.
             for_modal = Path(work) / "Dockerfile"

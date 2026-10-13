@@ -166,7 +166,7 @@ def _vm_provider(**attrs) -> MagicMock:
 
 
 _CONTEXT_ONLY = DockerImageArtifact(id="slack-image", version=2, description="d", image_name="local/slack-0123456789ab:v2",
-                                    build_context_object_url="s3://bucket/ctx.tar.gz")
+                                    build_context_object_url="s3://bucket/ctx.tar.gz", dockerfile_path="Dockerfile")
 
 
 @pytest.mark.asyncio

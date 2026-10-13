@@ -51,7 +51,7 @@ class _ModalProvider(ModalSandboxProvider):
 
 
 IMAGE = DockerImageArtifact(id="solver-image", version=2, description="d", image_name="local/solver-0123456789ab:v2",
-                            build_context_object_url="s3://bucket/ctx.tar.gz")
+                            build_context_object_url="s3://bucket/ctx.tar.gz", dockerfile_path="Dockerfile")
 
 
 @pytest.fixture

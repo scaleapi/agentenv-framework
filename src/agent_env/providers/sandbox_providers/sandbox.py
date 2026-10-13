@@ -345,7 +345,7 @@ class VmSandbox(Sandbox):
             await self.load_object_file(first.build_context_object_url, f"{work}/context.tar.gz")
             await self.exec_script(
                 f"tar -xzf {work}/context.tar.gz -C {work}/context && cd {work}/context && "
-                f"docker build --platform {shlex.quote(platform)} -f {shlex.quote(first.dockerfile_path or 'Dockerfile')} "
+                f"docker build --platform {shlex.quote(platform)} -f {shlex.quote(first.dockerfile_path)} "
                 f"{tags} ."
             )
         except RuntimeError as e:

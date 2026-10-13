@@ -63,7 +63,7 @@ async def test_a_deploy_starts_only_the_server_on_sqlite_with_its_sizing():
 
 
 _CONTEXT_ONLY = DockerImageArtifact(id="slack-image", version=3, description="d", image_name="local/slack-0123456789ab:v3",
-                                    build_context_object_url="s3://bucket/ctx.tar.gz")
+                                    build_context_object_url="s3://bucket/ctx.tar.gz", dockerfile_path="Dockerfile")
 
 
 @pytest.mark.asyncio
