@@ -189,11 +189,11 @@ async def test_a_named_executor_in_watch_roles_raises(monkeypatch):
 @pytest.mark.asyncio
 async def test_a_gateway_without_named_executors_refuses_them_before_any_request(monkeypatch):
     sent = _mock_gateway(monkeypatch, {})
-    context = TaskStepContext(deployed_envs=[_record(_without_named_executors())], deployed_agents=[
+    context = TaskStepContext(deployed_envs=[_record(_with_features())], deployed_agents=[
         DeployedAgent(agent_name="alice", api_url="http://alice", role="alice@example.com"),
         DeployedAgent(agent_name="bob", api_url="http://bob", role="bob@example.com"),
     ], metadata={})
-    with pytest.raises(RuntimeError, match=r"does not declare 'named_executors'.*\['alice', 'bob'\]"):
+    with pytest.raises(RuntimeError, match=r"does not declare \['named_executors'\]"):
         await _step(triggers=_NAMED_TRIGGERS).execute(context)
     assert sent == []
 
@@ -202,9 +202,21 @@ async def test_a_gateway_without_named_executors_refuses_them_before_any_request
 async def test_a_gateway_without_named_executors_still_takes_the_default(monkeypatch):
     sent = _mock_gateway(monkeypatch, {"ok": True, "added": ["t1"], "all": ["t1"]})
     context = _context(with_executor=True)
-    context.deployed_envs = [_record(_without_named_executors())]
+    context.deployed_envs = [_record(_with_features())]
     await _step(executor_agent_name="exec-1", watch_roles=["default"]).execute(context)
     assert "executors" not in json.loads(sent[0].content)
+
+
+@pytest.mark.asyncio
+async def test_a_gateway_without_provoking_roles_refuses_a_trigger_that_lists_roles(monkeypatch):
+    sent = _mock_gateway(monkeypatch, {})
+    triggers = [{"id": "hears-denise", "when": {"type": "action", "tool": "slack_send_message",
+                                                "roles": ["denise@example.com"]}, "actions": []}]
+    context = TaskStepContext(deployed_envs=[_record(_with_features("named_executors"))], deployed_agents=[],
+                              metadata={})
+    with pytest.raises(RuntimeError, match=r"does not declare \['provoking_roles'\]"):
+        await _step(triggers=triggers).execute(context)
+    assert sent == []
 
 
 _NAMED_TRIGGERS = [
@@ -215,12 +227,15 @@ _NAMED_TRIGGERS = [
 ]
 
 
-def _without_named_executors() -> list:
-    """The gateway's own extensions, as a gateway that predates named executors advertises them."""
+def _with_features(*features: str) -> list:
+    """The gateway's own extensions as a gateway declaring only ``features`` advertises them (none: one that predates
+    the list)."""
     extensions = copy.deepcopy(GATEWAY_EXTENSIONS)
-    triggers = next(e for e in extensions if e["uri"] == EXT_TRIGGERS_URI)
-    del triggers["params"]["features"]
-    del triggers["params"]["methods"]["register"]["request"]["properties"]["executors"]
+    params = next(e for e in extensions if e["uri"] == EXT_TRIGGERS_URI)["params"]
+    if features:
+        params["features"] = list(features)
+    else:
+        del params["features"]
     return extensions
 
 

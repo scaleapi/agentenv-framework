@@ -1,5 +1,6 @@
-"""Named nl-trigger executors on a local gateway: each nl action reaches only the executor it names, and that executor
-acts in the env as its own role. Requires a docker daemon; spins up a throwaway ``registry:2``."""
+"""Named nl-trigger executors on a local gateway: each nl action reaches only the executor it names, that executor acts
+in the env as its own role, and personas react to each other through `when.roles`. Requires a docker daemon; spins up a
+throwaway ``registry:2``."""
 
 import asyncio
 import functools
@@ -71,11 +72,60 @@ async def test_each_nl_action_reaches_the_executor_it_names(local_stack):
     assert context.metadata["env_trigger_registrations"][0]["executor_agent_names"] == ["alice", "bob"]
 
 
-class _Executor:
-    """An A2A executor on this machine that acts on each instruction through the gateway, under its own role."""
+@pytest.mark.asyncio
+async def test_personas_react_to_each_other_until_one_stays_quiet(local_stack):
+    _seed_bootstrap_envs()
+    uid = uuid.uuid4().hex[:8]
+    items = MCPServerEnv.put(id=f"chain-items-{uid}", environment_name="items",
+                             docker_image_artifact=_put_items_image(f"chain-items-{uid}"))
+    env = MultiEnv.put(id=f"chain-{uid}", mcp_server_envs=[items], name="suite")
+    deployed = await env.deploy(sandbox_type="local", ttl_seconds=900)
+    host = env._sandbox.host_ips[-1]
+    started: list[_Executor] = []
+    triggers = [
+        {"id": "denise-hears-solver", "when": {"type": "action", "tool": "list_items"},
+         "actions": [{"type": "nl", "executor": "denise", "instruction": "DENISE-TO-SOLVER"}]},
+        {"id": "bob-hears-denise", "when": {"type": "action", "tool": "items_add_item", "repeat": True,
+                                            "roles": ["denise@example.com"]},
+         "actions": [{"type": "nl", "executor": "bob", "instruction": "BOB-TO-DENISE"}]},
+        {"id": "denise-hears-bob", "when": {"type": "action", "tool": "items_add_item", "repeat": True,
+                                            "roles": ["bob@example.com"]},
+         "actions": [{"type": "nl", "executor": "denise", "instruction": "DENISE-TO-BOB"}]},
+    ]
+    try:
+        denise = _Executor("denise", "denise@example.com", deployed.gateway_url, host, started)
+        bob = _Executor("bob", "bob@example.com", deployed.gateway_url, host, started, replies=1)
+        context = TaskStepContext(deployed_envs=[deployed], deployed_agents=[denise.agent, bob.agent], metadata={})
+        await RegisterEnvTriggersStep(id="reg", version=None, env_id=env.id, triggers=triggers,
+                                      watch_roles=["default"], executor_timeout_seconds=60).execute(context)
+        async with httpx.AsyncClient(base_url=deployed.gateway_url, timeout=60) as client:
+            provoke = await client.post("/step", json={"action": "call_tool", "tool_name": "list_items", "arguments": {}})
+            assert provoke.status_code == 200, provoke.text
+            state = await _quiet(client, {"denise-hears-solver": 1, "bob-hears-denise": 2, "denise-hears-bob": 1})
+            stored = await client.post("/step", json={"action": "call_tool", "tool_name": "list_items", "arguments": {}},
+                                       headers={AGENT_ENV_ROLE_HEADER: "harness"})
+    finally:
+        for executor in started:
+            executor.stop()
+        await env.close()
 
-    def __init__(self, name: str, role: str, gateway_url: str, host: str, started: list) -> None:
-        self.role, self.gateway_url = role, gateway_url
+    assert (denise.instructions, bob.instructions) == (["DENISE-TO-SOLVER", "DENISE-TO-BOB"],
+                                                       ["BOB-TO-DENISE", "BOB-TO-DENISE"])
+    assert json.loads(stored.json()["content"][0]["text"])["items"] == [
+        "DENISE-TO-SOLVER by denise@example.com", "BOB-TO-DENISE by bob@example.com",
+        "DENISE-TO-BOB by denise@example.com"]
+    provokers = [(e["trigger_id"], e["provoking"]["role"]) for e in state["events"] if e["kind"] == "detected"]
+    assert provokers == [("denise-hears-solver", "default"), ("bob-hears-denise", "denise@example.com"),
+                         ("denise-hears-bob", "bob@example.com"), ("bob-hears-denise", "denise@example.com")]
+
+
+class _Executor:
+    """An A2A executor on this machine that acts on each instruction through the gateway, under its own role; with
+    ``replies``, it stops acting after that many."""
+
+    def __init__(self, name: str, role: str, gateway_url: str, host: str, started: list,
+                 replies: int | None = None) -> None:
+        self.role, self.gateway_url, self.replies = role, gateway_url, replies
         self.instructions: list[str] = []
         self.acted_as: list[str] = []
         self._server = ThreadingHTTPServer((host, 0), functools.partial(_ExecutorHandler, self))
@@ -86,6 +136,8 @@ class _Executor:
 
     def act(self, instruction: str) -> None:
         self.instructions.append(instruction)
+        if self.replies is not None and len(self.instructions) > self.replies:
+            return
         whoami = self._call("items_whoami", {})
         self.acted_as.append(json.loads(whoami["content"][0]["text"])["role"])
         self._call("items_add_item", {"item": f"{instruction} by {self.role}"})
@@ -135,4 +187,22 @@ async def _settled(client: httpx.AsyncClient, trigger_ids: tuple[str, ...], time
             return state
         if time.monotonic() > deadline:
             raise AssertionError(f"triggers {trigger_ids} did not settle: {statuses}")
+        await asyncio.sleep(1)
+
+
+async def _quiet(client: httpx.AsyncClient, fires: dict[str, int], timeout_s: float = 120) -> dict:
+    """The gateway's trigger state once each trigger in ``fires`` has fired that many times, none is in flight, and
+    nothing else fires for a few seconds after."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        state = (await client.get("/triggers/state")).raise_for_status().json()
+        triggers = {t["id"]: t for t in state["triggers"]}
+        if all(triggers[tid]["fire_count"] >= n and triggers[tid]["status"] not in TRIGGER_IN_FLIGHT_STATUSES
+               for tid, n in fires.items()):
+            await asyncio.sleep(3)
+            later = (await client.get("/triggers/state")).raise_for_status().json()
+            assert {t["id"]: t["fire_count"] for t in later["triggers"]} == fires, later["events"][-6:]
+            return later
+        if time.monotonic() > deadline:
+            raise AssertionError(f"chain did not settle: { {tid: t['fire_count'] for tid, t in triggers.items()} }")
         await asyncio.sleep(1)

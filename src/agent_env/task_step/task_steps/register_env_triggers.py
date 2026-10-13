@@ -9,7 +9,7 @@ import httpx
 from agentenv_protocol import client as protocol_v1
 
 from agent_env.env.env import DeployedEnv, DeployedSandboxEnv
-from agent_env.env.gateway.constants import EXT_TRIGGERS_URI, TRIGGER_NAMED_EXECUTORS
+from agent_env.env.gateway.constants import EXT_TRIGGERS_URI, TRIGGER_NAMED_EXECUTORS, TRIGGER_PROVOKING_ROLES
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity_refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 
 
 class RegisterEnvTriggersStep(TaskStep):
+    """An nl action may name its `executor`, and a trigger's `when.roles` may list executor roles so personas react to
+    each other. Such a chain ends when a persona's turn makes no matching write, so give conversational nl actions no
+    `verify` (its retry forces a write), give persona prompts a stop condition, and prefer a `where` off-ramp."""
+
     type: ClassVar[str] = "register_env_triggers"
     entity_refs = (EntityRef.env("env_id"),)
 
@@ -72,12 +76,15 @@ class RegisterEnvTriggersStep(TaskStep):
         if self.executor_agent_name is not None:
             body["executor"] = self._executor(context, deployed, self.executor_agent_name)
         named = _named_executors(self.triggers)
+        # An older gateway ignores what it does not declare: named actions would go to the default executor, and a
+        # trigger's when.roles would leave it to the watched roles, so a persona never provokes it.
+        used = {TRIGGER_NAMED_EXECUTORS: bool(named), TRIGGER_PROVOKING_ROLES: _lists_roles(self.triggers)}
+        missing = [feature for feature, needed in used.items() if needed and feature not in _trigger_features(deployed)]
+        if missing:
+            raise RuntimeError(
+                f"Env '{self.env_id}' runs a gateway whose triggers/v1 does not declare {missing}, which these triggers "
+                f"use; redeploy it on a gateway image that does.")
         if named:
-            # A gateway that predates `executors` ignores it and would send these actions to the default executor.
-            if TRIGGER_NAMED_EXECUTORS not in _trigger_features(deployed):
-                raise RuntimeError(
-                    f"Env '{self.env_id}' runs a gateway whose triggers/v1 does not declare '{TRIGGER_NAMED_EXECUTORS}', "
-                    f"so nl actions naming {named} cannot reach their executors; redeploy it on a gateway image that does.")
             body["executors"] = {name: self._executor(context, deployed, name) for name in named}
         try:
             result = await deployed.invoke(EXT_TRIGGERS_URI, "register", body)
@@ -117,6 +124,10 @@ def _named_executors(triggers: list[dict]) -> list[str]:
     names = (action.get("executor") for trigger in triggers for action in trigger.get("actions") or []
              if isinstance(action, dict) and action.get("type") == "nl")
     return list(dict.fromkeys(name for name in names if isinstance(name, str) and name))
+
+
+def _lists_roles(triggers: list[dict]) -> bool:
+    return any(isinstance(trigger.get("when"), dict) and trigger["when"].get("roles") for trigger in triggers)
 
 
 def _trigger_features(deployed: DeployedEnv) -> list:

@@ -110,7 +110,8 @@ TRIGGER_IN_FLIGHT_STATUSES = ("firing", "queued")
 
 # What triggers/v1 takes beyond its first release, declared on the card so a client can refuse an older gateway.
 TRIGGER_NAMED_EXECUTORS = "named_executors"
-TRIGGER_FEATURES = (TRIGGER_NAMED_EXECUTORS,)
+TRIGGER_PROVOKING_ROLES = "provoking_roles"
+TRIGGER_FEATURES = (TRIGGER_NAMED_EXECUTORS, TRIGGER_PROVOKING_ROLES)
 
 GATEWAY_TRAJECTORY_FILE = os.environ.get(
     "GATEWAY_TRAJECTORY_FILE",

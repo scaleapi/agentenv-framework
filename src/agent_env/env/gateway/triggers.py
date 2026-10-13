@@ -34,7 +34,7 @@ _MAX_CATCHUP = 1000
 _EVENTS_HEAD = 1000
 _EVENTS_TAIL = 9000
 # Schedule keys state() echoes; excludes the unbounded `check`/`where`.
-_WHEN_SUMMARY_KEYS = ("type", "tool", "repeat", "at", "after", "offset", "every", "count", "until", "seed")
+_WHEN_SUMMARY_KEYS = ("type", "tool", "roles", "repeat", "at", "after", "offset", "every", "count", "until", "seed")
 # Placeholder roots reading the provoking call; a bare name is a check-pipeline binding.
 _CTX_PREFIXES = ("args", "result")
 # Where a barrier waits; a further wait point is a new value here, not a new top-level field.
@@ -641,6 +641,9 @@ class TriggerEngine:
         when = spec.get("when")
         if not isinstance(when, dict) or when.get("type") not in ("action", "state", "time"):
             raise TriggerError(f"trigger '{tid}': when.type must be 'action', 'state', or 'time'")
+        if when["type"] == "time" and "roles" in when:
+            raise TriggerError(f"trigger '{tid}': when.roles is only valid on action and state triggers")
+        self._normalize_roles(when, tid)
         if when["type"] == "action":
             self._normalize_action_when(when, tid)
         elif when["type"] == "state":
@@ -660,7 +663,20 @@ class TriggerEngine:
             raise TriggerError(f"trigger '{tid}': actions must be a list")
         for i, action in enumerate(actions):
             self._normalize_action(action, f"trigger '{tid}': actions[{i}]", has_ctx, executor, executors)
+            target = executors[action["executor"]] if action.get("executor") is not None else executor
+            if action["type"] == "nl" and target is not None and target["role"] in when.get("roles", ()):
+                raise TriggerError(f"trigger '{tid}': when.roles includes {target['role']!r}, the role of the executor "
+                                   f"actions[{i}] goes to, so each of its replies would provoke it again")
         return spec
+
+    @staticmethod
+    def _normalize_roles(when: dict, tid: str) -> None:
+        if when.get("roles") is None:
+            when.pop("roles", None)
+            return
+        roles = when["roles"]
+        if not isinstance(roles, list) or not roles or not all(isinstance(r, str) and r for r in roles):
+            raise TriggerError(f"trigger '{tid}': when.roles must be a non-empty list of non-empty AgentEnv-Roles")
 
     @staticmethod
     def _normalize_action_when(when: dict, tid: str) -> None:
@@ -809,9 +825,7 @@ class TriggerEngine:
         """
         pending: list[asyncio.Task] = []
         timeout_s: float | None = None
-        if role in self._executor_roles:  # executors' own traffic is never watched (prevents cascades)
-            return pending, timeout_s
-        if role not in self._watch_roles or not self._triggers:
+        if not any(self._provoked_by(trig, role) for trig in self._triggers.values()):
             return pending, timeout_s
         # Before the isError guard: an errored call is still a clock tick.
         if self._has_time_triggers:
@@ -824,7 +838,7 @@ class TriggerEngine:
         provoking = {"tool": name, "role": role}
         for tid, trig in self._triggers.items():
             when = trig["spec"]["when"]
-            if when["type"] != "action" or when["tool"] != name:
+            if when["type"] != "action" or when["tool"] != name or not self._provoked_by(trig, role):
                 continue
             if trig["status"] != "armed" and not (when.get("repeat") and trig["status"] in TRIGGER_IN_FLIGHT_STATUSES):
                 continue
@@ -839,10 +853,19 @@ class TriggerEngine:
                 timeout_s = asked if timeout_s is None else max(timeout_s, asked)
         if not self._is_readonly(name):
             for tid, trig in self._triggers.items():
-                if trig["status"] == "armed" and trig["spec"]["when"]["type"] == "state" and not trig["evaluating"]:
+                if (trig["status"] == "armed" and trig["spec"]["when"]["type"] == "state" and not trig["evaluating"]
+                        and self._provoked_by(trig, role)):
                     trig["evaluating"] = True
                     self._schedule(self._eval_state(tid, trig, provoking))
         return pending, timeout_s
+
+    def _provoked_by(self, trig: dict, role: str) -> bool:
+        """Whether a call by ``role`` can provoke ``trig``: the roles its `when` lists, else the watched ones. Unlisted,
+        an executor's own calls never provoke anything, so an executor cannot set off a cascade unasked."""
+        roles = trig["spec"]["when"].get("roles")
+        if roles is not None:
+            return role in roles
+        return role in self._watch_roles and role not in self._executor_roles
 
     def _mark_detected(self, tid: str, trig: dict, provoking: dict, ctx: dict | None = None) -> asyncio.Task | None:
         ctx = ctx if ctx is not None else {}

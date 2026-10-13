@@ -146,6 +146,18 @@ def _registration(**overrides):
     ({"executors": {"bob": {"a2a_url": "http://b", "role": "bob"}},
       "triggers": [{"id": "x", "when": {"type": "action", "tool": "t"},
                     "actions": [{"type": "tool", "tool": "t2", "executor": "bob"}]}]}, "only valid on nl actions"),
+    *[({"triggers": [{"id": "x", "when": {"type": "action", "tool": "t", "roles": roles}, "actions": []}]},
+       "when.roles must be a non-empty list") for roles in ("denise", [], [""], [5])],
+    ({"triggers": [{"id": "x", "when": {"type": "time", "after": "y", "offset": "PT1S", "roles": ["denise"]},
+                    "actions": []}]}, "only valid on action and state triggers"),
+    ({"executors": {"denise": {"a2a_url": "http://d", "role": "denise@example.com"}},
+      "triggers": [{"id": "x", "when": {"type": "action", "tool": "t", "roles": ["denise@example.com"]},
+                    "actions": [{"type": "nl", "instruction": "hi", "executor": "denise"}]}]},
+     "would provoke it again"),
+    ({"executor": {"a2a_url": "http://e", "role": "executor"},
+      "triggers": [{"id": "x", "when": {"type": "state", "roles": ["executor"], "check": {
+          "tool": "t", "predicate": {"exists": True}}}, "actions": [{"type": "nl", "instruction": "hi"}]}]},
+     "would provoke it again"),
 ])
 def test_registration_fails_loud(engine, bad, fragment):
     with pytest.raises(TriggerError, match=".*"):
@@ -333,6 +345,51 @@ async def test_no_executor_role_is_ever_watched(engine, role):
     engine.on_tool_call(role, "search_emails", {}, _result())
     await asyncio.sleep(0.1)
     assert engine._triggers["x"]["status"] == "armed"
+
+
+@pytest.mark.asyncio
+async def test_a_trigger_listing_an_executor_role_is_provoked_by_that_executor_alone(engine, monkeypatch):
+    sent: list[tuple[str, str]] = []
+
+    async def fake_executor(self, executor, instruction, context_id):
+        sent.append((executor["role"], instruction))
+        return "done"
+
+    monkeypatch.setattr(TriggerEngine, "_call_executor", fake_executor)
+    engine.register({
+        "executors": {"denise": {"a2a_url": "http://d", "role": "denise@example.com"},
+                      "bob": {"a2a_url": "http://b", "role": "bob@example.com"}},
+        "triggers": [
+            {"id": "denise-hears-solver", "when": {"type": "action", "tool": "slack_send_message", "repeat": True},
+             "actions": [{"type": "nl", "executor": "denise", "instruction": "reply to the solver"}]},
+            {"id": "bob-hears-denise", "when": {"type": "action", "tool": "slack_send_message", "repeat": True,
+                                                "roles": ["denise@example.com"]},
+             "actions": [{"type": "nl", "executor": "bob", "instruction": "reply to denise"}]},
+        ],
+    })
+    for role in ("denise@example.com", "bob@example.com", "default"):
+        engine.on_tool_call(role, "slack_send_message", {}, _result())
+        await asyncio.sleep(0.2)
+
+    assert sent == [("bob@example.com", "reply to denise"), ("denise@example.com", "reply to the solver")]
+    detected = [(e["trigger_id"], e["provoking"]["role"]) for e in engine._events if e["kind"] == "detected"]
+    assert detected == [("bob-hears-denise", "denise@example.com"), ("denise-hears-solver", "default")]
+    assert {t["id"]: t["when"].get("roles") for t in engine.state()["triggers"]} == {
+        "denise-hears-solver": None, "bob-hears-denise": ["denise@example.com"]}
+
+
+@pytest.mark.asyncio
+async def test_an_executor_write_prompts_only_the_state_triggers_that_list_it(engine):
+    engine._test_state["doc_text"] = "Budget Fit"
+    check = {"tool": "gdocs_get_document_text", "args": {"documentId": "doc-1"},
+             "extract": "text", "predicate": {"regex": "Budget Fit"}}
+    engine.register({"executors": {"denise": {"a2a_url": "http://d", "role": "denise@example.com"}},
+                     "triggers": [{"id": "listed", "when": {"type": "state", "roles": ["denise@example.com"],
+                                                            "check": check}, "actions": []},
+                                  {"id": "unlisted", "when": {"type": "state", "check": check}, "actions": []}]})
+    engine.on_tool_call("denise@example.com", "gdocs_batch_update", {"documentId": "doc-1"}, _result())
+    await asyncio.sleep(0.2)
+    assert {tid: t["status"] for tid, t in engine._triggers.items()} == {"listed": "fired", "unlisted": "armed"}
 
 
 def test_generated_id_on_omit(engine):
