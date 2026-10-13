@@ -17,6 +17,7 @@ from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.gateway.constants import random_mcp_server_name
 from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider
 from tst.unit.env.envs.test_multi_env_vm_sizing import _deployed_kwargs
+from tst.util.sandbox_providers import mock_provider
 
 
 def test_name_is_stored_only_when_set_and_round_trips():
@@ -75,7 +76,7 @@ async def test_a_deploy_records_the_mcp_url_and_name_its_gateway_card_gives():
     with patch.object(EnvironmentGatewayProvider, "_deploy_gateway", deploy_gateway), \
          patch("agent_env.providers.env_providers.env_gateway_provider._probe_tools", AsyncMock()), \
          patch("agent_env.env.env.Env.get"), \
-         patch("agent_env.providers.get_env_sandbox_provider", MagicMock()), \
+         patch("agent_env.providers.get_env_sandbox_provider", MagicMock(return_value=mock_provider())), \
          patch("agent_env.providers.env_state.acquire_state_for_deploy", AsyncMock(return_value=None)), \
          patch("agent_env.env.envs._deployment.register_env_instance", side_effect=lambda deployed, ttl: deployed):
         record = await MultiEnv(id="e", version=1, mcp_server_envs=[], name="crm").deploy()

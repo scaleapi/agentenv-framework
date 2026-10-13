@@ -62,6 +62,8 @@ class _Deploys(TaskStep):
 
 
 class _FakeSandbox:
+    ON_THIS_MACHINE = False
+
     def __init__(self, log, sandbox_id):
         self.log, self.sandbox_id = log, sandbox_id
 

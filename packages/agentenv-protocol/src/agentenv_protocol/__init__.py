@@ -2,6 +2,7 @@
 
 from . import client
 from .preflight import intake_fit_check
+from .tool_client import ToolResult, ToolSession, ToolSessionError
 from .agent_env_environment import (
     AgentEnvApplication,
     AgentEnvEnvironment,
@@ -12,8 +13,19 @@ from .agent_env_environment import (
     environment_card,
     extension,
     get_data,
+    injecting,
     reset_data,
     tool,
+)
+from .tool_context import (
+    DEFAULT_ROLE,
+    ROLE_HEADER,
+    ROLE_META_KEY,
+    SESSION_META_KEY,
+    Caller,
+    ToolContext,
+    bound,
+    normalize_role,
 )
 from .manifest import (
     CLI_COMMANDS,
@@ -78,6 +90,15 @@ __all__ = [
     "get_data",
     "extension",
     "tool",
+    "injecting",
+    "ToolContext",
+    "Caller",
+    "normalize_role",
+    "bound",
+    "ROLE_META_KEY",
+    "SESSION_META_KEY",
+    "ROLE_HEADER",
+    "DEFAULT_ROLE",
     "EnvironmentCapabilities",
     "EnvironmentCard",
     "EnvironmentExtension",
@@ -96,6 +117,9 @@ __all__ = [
     "uploaded_object_path",
     "MCP_PATH",
     "MCP_TRANSPORT",
+    "ToolSession",
+    "ToolResult",
+    "ToolSessionError",
     "MANIFEST_VERSION",
     "INTERFACE_MANIFEST_PATH",
     "GET_INTERFACES_EXTENSION_URI",

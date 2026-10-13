@@ -3,6 +3,8 @@ local Postgres state runs from, and the website browser it adds for websites. Ea
 (``default_gateway_env_id``, ``default_service_db_env_id``, ``default_website_browser_env_id``).
 
 The put commands build them one at a time; ``ensure_default_envs`` builds the ones a run needs, into local stores only.
+Each image keeps its build context beside its tar.gz, so a VM or Modal running another platform than the one it was
+built on builds it again from that.
 """
 
 from __future__ import annotations
@@ -17,11 +19,7 @@ from agent_env.config import get_config
 from agent_env.env.env import Env
 from agent_env.env.envs import GatewayEnv, MCPServerEnv
 from agent_env.env.envs.service_db import ServiceDBEnv
-from agent_env.env.envs.website_browser import (
-    PLAYWRIGHT_MCP_VERSION,
-    WEBSITE_BROWSER_ENVIRONMENT_NAME,
-    WEBSITE_BROWSER_IMAGE_TAG,
-)
+from agent_env.env.envs.website_browser import WEBSITE_BROWSER_ENVIRONMENT_NAME, WEBSITE_BROWSER_IMAGE_TAG
 from agent_env.store.base import NotFoundError
 from agent_env.store.document_store import LocalSqliteDocumentStore
 from agent_env.store.ids import derive_id
@@ -29,12 +27,13 @@ from agent_env.store.image_store import LocalRegistryImageStore
 from agent_env.store.local_state import holding_locks
 from agent_env.store.object_store import LocalFilesystemObjectStore
 from agent_env.store.routing import configured_store
+from agent_env.utils.build_context import BuildContext
 from agent_env.utils.build_metadata import detect_env_metadata
 from agent_env.utils.docker_build import build_image, docker_unreachable
 
 _ENV_PACKAGE = Path(__file__).parent
 GATEWAY_DOCKERFILE = _ENV_PACKAGE / "gateway" / "Dockerfile"
-GATEWAY_CONTEXT = _ENV_PACKAGE
+GATEWAY_CONTEXT = GATEWAY_DOCKERFILE.parent
 GATEWAY_IMAGE_TAG = "env-gateway"
 SERVICE_DB_DOCKERFILE = _ENV_PACKAGE / "envs" / "service_db" / "Dockerfile"
 SERVICE_DB_IMAGE_NAME = "agent-env-service-db"
@@ -55,15 +54,10 @@ def _quiet(line: str) -> None:
 def put_gateway_env(env_id: str, *, platform: str | None, metadata: Mapping[str, str] | None = None,
                     say: Callable[[str], None] = _quiet) -> GatewayEnv:
     """Build the gateway image for ``platform`` (this host's when None) and write it as the gateway env ``env_id``."""
-    say("Building gateway Docker image...")
-    build_image(GATEWAY_DOCKERFILE, GATEWAY_CONTEXT, GATEWAY_IMAGE_TAG, platform=platform)
-    say("Creating DockerImageArtifact...")
-    artifact = DockerImageArtifact.put(id=derive_id(env_id, "env_image"), description="Created from agent-env CLI",
-                                       image_name=GATEWAY_IMAGE_TAG)
-    say(f"Created artifact: id={artifact.id} version={artifact.version}")
+    artifact = _build_and_put("gateway", derive_id(env_id, "env_image"), "Created from agent-env CLI",
+                              GATEWAY_DOCKERFILE, GATEWAY_IMAGE_TAG, platform=platform, say=say)
     say("Creating GatewayEnv...")
-    env = GatewayEnv.put(id=env_id, docker_image_artifact=artifact,
-                         metadata=_metadata(GATEWAY, GATEWAY_DOCKERFILE, GATEWAY_CONTEXT, metadata))
+    env = GatewayEnv.put(id=env_id, docker_image_artifact=artifact, metadata=_metadata(GATEWAY, metadata))
     say(f"Created GatewayEnv: id={env.id} version={env.version}")
     return env
 
@@ -72,28 +66,17 @@ def put_service_db_env(env_id: str, *, platform: str | None, metadata: Mapping[s
                        say: Callable[[str], None] = _quiet) -> ServiceDBEnv:
     """Build the service-db, db-web and db-mcp images for ``platform`` (this host's when None) and write them as the
     service-db env ``env_id``."""
-    artifacts = []
-    for label, dockerfile, image, artifact_id, description in (
-        ("ServiceDB", SERVICE_DB_DOCKERFILE, SERVICE_DB_IMAGE_NAME, derive_id(env_id, "db_image"),
-         f"ServiceDB PostgreSQL image for {env_id}"),
-        ("db-web", DB_WEB_DOCKERFILE, DB_WEB_IMAGE_NAME, derive_id(env_id, "db_web_image"),
-         "db-web lightweight web UI for database inspection"),
-        ("db-mcp", DB_MCP_DOCKERFILE, DB_MCP_IMAGE_NAME, derive_id(env_id, "db_mcp_image"),
-         "db-mcp PostgreSQL MCP server for direct DB access"),
-    ):
-        say(f"Building {label} image from {dockerfile}...")
-        build_image(dockerfile, dockerfile.parent, image, platform=platform)
-        say(f"Creating {label} DockerImageArtifact...")
-        artifacts.append(DockerImageArtifact.put(id=artifact_id, description=description, image_name=image))
-        say(f"Created {label} DockerImageArtifact: id={artifacts[-1].id} version={artifacts[-1].version}")
+    db = _build_and_put("ServiceDB", derive_id(env_id, "db_image"), f"ServiceDB PostgreSQL image for {env_id}",
+                        SERVICE_DB_DOCKERFILE, SERVICE_DB_IMAGE_NAME, platform=platform, say=say)
+    db_web = _build_and_put("db-web", derive_id(env_id, "db_web_image"),
+                            "db-web lightweight web UI for database inspection", DB_WEB_DOCKERFILE, DB_WEB_IMAGE_NAME,
+                            platform=platform, say=say)
+    db_mcp = _build_and_put("db-mcp", derive_id(env_id, "db_mcp_image"),
+                            "db-mcp PostgreSQL MCP server for direct DB access", DB_MCP_DOCKERFILE, DB_MCP_IMAGE_NAME,
+                            platform=platform, say=say)
     say("Creating ServiceDBEnv...")
-    env = ServiceDBEnv.put(
-        id=env_id,
-        db_docker_image_artifact=artifacts[0],
-        db_web_docker_image_artifact=artifacts[1],
-        db_mcp_docker_image_artifact=artifacts[2],
-        metadata=_metadata(SERVICE_DB, SERVICE_DB_DOCKERFILE, SERVICE_DB_DOCKERFILE.parent, metadata),
-    )
+    env = ServiceDBEnv.put(id=env_id, db_docker_image_artifact=db, db_web_docker_image_artifact=db_web,
+                           db_mcp_docker_image_artifact=db_mcp, metadata=_metadata(SERVICE_DB, metadata))
     say(f"Created ServiceDBEnv: id={env.id} version={env.version}")
     return env
 
@@ -102,48 +85,51 @@ def put_website_browser_env(env_id: str, *, platform: str | None, metadata: Mapp
                             say: Callable[[str], None] = _quiet) -> MCPServerEnv:
     """Build the website browser image for ``platform`` (this host's when None) and write it as the MCP server env
     ``env_id``."""
-    say("Building website browser Docker image...")
-    build_image(WEBSITE_BROWSER_DOCKERFILE, WEBSITE_BROWSER_CONTEXT, WEBSITE_BROWSER_IMAGE_TAG, platform=platform,
-                build_args={"PLAYWRIGHT_MCP_VERSION": PLAYWRIGHT_MCP_VERSION})
-    say("Creating DockerImageArtifact...")
-    artifact = DockerImageArtifact.put(id=derive_id(env_id, "env_image"), description="Website browser MCP server",
-                                       image_name=WEBSITE_BROWSER_IMAGE_TAG)
-    say(f"Created artifact: id={artifact.id} version={artifact.version}")
+    artifact = _build_and_put("website browser", derive_id(env_id, "env_image"), "Website browser MCP server",
+                              WEBSITE_BROWSER_DOCKERFILE, WEBSITE_BROWSER_IMAGE_TAG, platform=platform, say=say)
     say("Creating MCPServerEnv...")
     env = MCPServerEnv.put(id=env_id, docker_image_artifact=artifact, environment_name=WEBSITE_BROWSER_ENVIRONMENT_NAME,
-                           metadata=_metadata(WEBSITE_BROWSER, WEBSITE_BROWSER_DOCKERFILE, WEBSITE_BROWSER_CONTEXT,
-                                              metadata))
+                           metadata=_metadata(WEBSITE_BROWSER, metadata))
     say(f"Created MCPServerEnv: id={env.id} version={env.version} environment_name={env.environment_name}")
     return env
 
 
-def _metadata(kind: str, dockerfile: Path, context: Path, extra: Mapping[str, str] | None) -> dict[str, str]:
-    return {**detect_env_metadata(dockerfile, context), **(extra or {}), BUILD_INPUTS_KEY: build_inputs_digest(kind)}
+def _build_and_put(label: str, artifact_id: str, description: str, dockerfile: Path, image_name: str, *,
+                   platform: str | None, say: Callable[[str], None]) -> DockerImageArtifact:
+    """Build ``dockerfile``'s image for ``platform`` from the folder it's in, and write it with that folder as its build
+    context, which a sandbox that can't run its tar.gz builds it from."""
+    say(f"Building {label} image from {dockerfile}...")
+    build_image(dockerfile, dockerfile.parent, image_name, platform=platform)
+    say(f"Creating {label} DockerImageArtifact...")
+    artifact = DockerImageArtifact.put(id=artifact_id, description=description, image_name=image_name,
+                                       build_context_path=str(dockerfile.parent), dockerfile_path=dockerfile.name)
+    say(f"Created {label} DockerImageArtifact: id={artifact.id} version={artifact.version}")
+    return artifact
+
+
+def _metadata(kind: str, extra: Mapping[str, str] | None) -> dict[str, str]:
+    dockerfile = _DOCKERFILES[kind][0]
+    return {**detect_env_metadata(dockerfile, dockerfile.parent), **(extra or {}),
+            BUILD_INPUTS_KEY: build_inputs_digest(kind)}
 
 
 BUILD_INPUTS_KEY = "build_inputs_sha256"  # the metadata key a put records build_inputs_digest under
-_BUILD_INPUTS = {
-    GATEWAY: lambda: _files_under(GATEWAY_DOCKERFILE.parent),  # the gateway's Dockerfile copies only its own folder
-    SERVICE_DB: lambda: [SERVICE_DB_DOCKERFILE, DB_WEB_DOCKERFILE, DB_MCP_DOCKERFILE],  # they copy nothing
-    WEBSITE_BROWSER: lambda: [WEBSITE_BROWSER_DOCKERFILE, WEBSITE_BROWSER_CONTEXT / "entrypoint.sh"],
+# Each kind's Dockerfiles, each built from the folder it's in; the first is the one its env records.
+_DOCKERFILES = {
+    GATEWAY: [GATEWAY_DOCKERFILE],
+    SERVICE_DB: [SERVICE_DB_DOCKERFILE, DB_WEB_DOCKERFILE, DB_MCP_DOCKERFILE],
+    WEBSITE_BROWSER: [WEBSITE_BROWSER_DOCKERFILE],
 }
-_BUILD_ARGS = {WEBSITE_BROWSER: {"PLAYWRIGHT_MCP_VERSION": PLAYWRIGHT_MCP_VERSION}}
 
 
 def build_inputs_digest(kind: str) -> str:
-    """A digest of what agent-env builds ``kind``'s images from: the Dockerfiles it ships, the files they copy and the
-    build args. What a build fetches (base images, packages) isn't an input."""
+    """A digest of the build contexts agent-env builds ``kind``'s images from, as each put stores them: the Dockerfiles
+    it ships and the files beside them. They hold every build arg's value too, so a build from a build context alone
+    builds the same thing. What a build fetches (base images, packages) isn't an input."""
     digest = hashlib.sha256()
-    for path in sorted(_BUILD_INPUTS[kind]()):
-        digest.update(path.relative_to(_ENV_PACKAGE).as_posix().encode() + b"\0" + path.read_bytes() + b"\0")
-    for name, value in sorted(_BUILD_ARGS.get(kind, {}).items()):
-        digest.update(f"{name}={value}\0".encode())
+    for dockerfile in _DOCKERFILES[kind]:
+        digest.update(BuildContext.of(dockerfile.parent, dockerfile).source_digest(None).encode() + b"\0")
     return digest.hexdigest()
-
-
-def _files_under(folder: Path) -> list[Path]:
-    return [path for path in folder.rglob("*")
-            if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc"]
 
 
 _PUTS = {GATEWAY: put_gateway_env, SERVICE_DB: put_service_db_env, WEBSITE_BROWSER: put_website_browser_env}
@@ -208,6 +194,11 @@ def infra_to_build(kinds: Iterable[str]) -> list[InfraBuild]:
     return builds
 
 
+def needs_docker(builds: Iterable[InfraBuild], reason: str) -> str:
+    """Why ``builds`` can't be built here, given why docker can't be used (``docker_unreachable``)."""
+    return f"building the {', '.join(build.kind for build in builds)} env needs docker, and {reason}"
+
+
 def ensure_default_envs(kinds: Iterable[str], *, say: Callable[[str], None] = _quiet) -> list[InfraBuild]:
     """Build the infra envs of ``kinds`` that ``infra_to_build`` names, for this host's platform, and return them. Each
     id is locked while it's checked and built, so concurrent runs build it once. Raises InfraError before building
@@ -219,7 +210,7 @@ def ensure_default_envs(kinds: Iterable[str], *, say: Callable[[str], None] = _q
     with holding_locks(ids, on_wait=lambda: say("waiting for another agent-env run to finish building the infra envs")):
         builds = infra_to_build(kinds)
         if builds and (reason := docker_unreachable()):
-            raise InfraError([f"building the {', '.join(build.kind for build in builds)} env needs docker, and {reason}"])
+            raise InfraError([needs_docker(builds, reason)])
         for build in builds:
             say(f"{build}: building, which can take minutes")
             _PUTS[build.kind](build.id, platform=None)
@@ -234,14 +225,11 @@ def stores_are_local() -> bool:
             and isinstance(configured_store(config.get_image_store()), LocalRegistryImageStore))
 
 
-_STOCK_DOCKERFILES = {GATEWAY: GATEWAY_DOCKERFILE, SERVICE_DB: SERVICE_DB_DOCKERFILE, WEBSITE_BROWSER: WEBSITE_BROWSER_DOCKERFILE}
-
-
 def _built_from_stock(env: Env, kind: str) -> bool:
     """Whether ``env`` was built from the Dockerfile agent-env ships for ``kind``, in this install or another one, as
     the put commands record it; an env someone built from their own Dockerfile is theirs to rebuild."""
     recorded = (env.metadata or {}).get("dockerfile_path")
-    shipped = _STOCK_DOCKERFILES[kind].relative_to(_ENV_PACKAGE.parent.parent).parts  # ("agent_env", "env", ...)
+    shipped = _DOCKERFILES[kind][0].relative_to(_ENV_PACKAGE.parent.parent).parts  # ("agent_env", "env", ...)
     return recorded is not None and Path(recorded).parts[-len(shipped):] == shipped
 
 

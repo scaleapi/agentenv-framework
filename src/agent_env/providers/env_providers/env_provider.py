@@ -25,6 +25,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class DeployRefused(RuntimeError):
+    """A deploy that would fail the same way on any sandbox provider, so a chain raises it rather than trying the next."""
+
+
 class EnvironmentProvider(ABC):
     """Deploys an env and hands back its record; tears down what it created."""
 
@@ -138,25 +142,19 @@ class _SandboxEnvironmentProvider(EnvironmentProvider):
         logger.info(f"  Tunnel not ready after {timeout}s (last: {last})")
         return None
 
-    def _sandbox_providers(self, sandbox_provider: SandboxProvider, env_id: str | None) -> list[SandboxProvider]:
-        """The sandbox providers to try, in order: a chained one's members, or itself."""
-        from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
-
-        if isinstance(sandbox_provider, ChainedSandboxProvider):
-            return list(sandbox_provider._providers)
-        return [sandbox_provider]
-
     async def _run(self, sandbox_provider: SandboxProvider, env_id: str | None, attempt: Callable[[SandboxProvider], Awaitable[Any]]) -> Any:
         """Run ``attempt`` on the sandbox provider, or on each chained member until one succeeds; a deploy that fails or is
         cancelled is closed."""
         try:
-            sandbox_providers = self._sandbox_providers(sandbox_provider, env_id)
+            sandbox_providers = list(sandbox_provider.links)  # a chain's members in order, or the provider itself
             if len(sandbox_providers) == 1:
                 return await self._attempt(sandbox_providers[0], env_id, attempt)
             errors: list[tuple[str, Exception]] = []
             for p in sandbox_providers:
                 try:
                     return await self._attempt(p, env_id, attempt)
+                except DeployRefused:
+                    raise
                 except Exception as e:
                     errors.append((type(p).__name__, e))
                     await self.close()

@@ -57,9 +57,9 @@ _STOCK_POSTGRES_IMAGE = "public.ecr.aws/docker/library/postgres:16-alpine"
 
 @dataclass
 class ContainerSpec:
-    """Declarative spec for a store/sidecar container the compute layer provisions (Modal
-    path). The gateway's ``create_container`` loop consumes these and adds its own sandbox
-    knobs (i6pn, attribution)
+    """Declarative spec for a store/sidecar container the compute layer provisions (container
+    mode). The gateway's ``create_container`` loop consumes these and adds its own sandbox
+    knobs (the private network, attribution)
     """
 
     name: str
@@ -85,7 +85,7 @@ class LocalPostgresStateContext(StateContext):
 
     environment_names: the services this shared store must host, one schema each.
     host: the servicedb address, supplied by the compute layer after it stands the
-        container up — e.g. ``"servicedb"`` (compose) or ``"[fdaa::…]"`` (i6pn container).
+        container up — e.g. ``"servicedb"`` (compose) or ``"[fdaa::…]"`` (a container's private host).
     ttl_seconds: the deploy TTL, used to stamp the record's ``expires_at_utc``.
     """
 
@@ -334,6 +334,13 @@ class LocalPostgresStateProvider(DatabaseStateProvider):
         if db_image != _STOCK_POSTGRES_IMAGE:
             logger.warning(f"servicedb image {db_image} is not in the image store; running {_STOCK_POSTGRES_IMAGE}")
         return _STOCK_POSTGRES_IMAGE
+
+    def container_images(self) -> list[str]:
+        """The images the container path starts by name: the servicedb's, and each sidecar's it provisions (those the
+        image store owns, as ``sidecar_specs`` decides)."""
+        cfg = self.service_db_config
+        return [self.container_store_image(),
+                *(image for image in (cfg.db_web_image, cfg.db_mcp_image) if self._in_image_store(image))]
 
     def sidecar_specs(self, *, instance: EnvStateInstance | None = None) -> list[ContainerSpec]:
         """pgweb + db-mcp container specs (Modal/container path), pointed at the stood-up

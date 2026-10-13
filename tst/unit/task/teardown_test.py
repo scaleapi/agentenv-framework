@@ -20,6 +20,8 @@ from agent_env.task_step.task_steps.teardown_sandboxes import TORN_DOWN_KEY
 
 
 class _FakeSandbox:
+    ON_THIS_MACHINE = False
+
     def __init__(self, provider, sandbox_id):
         self.provider, self.sandbox_id = provider, sandbox_id
 

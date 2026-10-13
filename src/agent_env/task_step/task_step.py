@@ -90,7 +90,7 @@ class TaskStep(ABC):
     # Fields holding env, A2A agent or artifact ids; None means undeclared.
     entity_refs: ClassVar[tuple[EntityRef, ...] | None] = None
 
-    def __init_subclass__(cls, **kwargs) -> None:
+    def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         # Never inherited: a subclass may add id fields its parent's declaration misses.
         if "entity_refs" not in vars(cls):

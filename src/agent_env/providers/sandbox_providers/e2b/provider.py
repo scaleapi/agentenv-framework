@@ -37,6 +37,7 @@ class E2BSandboxProvider(SandboxProvider):
     interpolation in ``[sandbox.providers.e2b.config]``.
     """
 
+
     # AsyncSandbox.get_host(port) returns ``<port>-<sandbox-id>.e2b.app``.
     # Workloads receive those public URLs, so an allowlisted sandbox must be
     # able to reach the E2B ingress domain just as it can reach Modal's.

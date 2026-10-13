@@ -10,17 +10,19 @@ WORKDIR /app
 RUN apt-get update \
   && apt-get install -y libpq-dev gcc git \
   && rm -rf /var/lib/apt/lists/*
-RUN git clone https://github.com/crystaldba/postgres-mcp.git /app
+# Pinned, so every build, here or in a VM, builds the same source; move the pin on purpose.
+RUN git clone https://github.com/crystaldba/postgres-mcp.git /app \
+  && git -C /app checkout --quiet 15c8e33353546148acc2d8bd784551cf3905d1e2
 
 # Patch: disable DNS rebinding protection in FastMCP constructor.
 # FastMCP auto-enables it when host="127.0.0.1" (the default), which rejects
 # requests arriving through reverse proxies with non-localhost Host headers.
 # postgres-mcp creates FastMCP("postgres-mcp") with defaults, then sets
 # mcp.settings.host later — but transport_security is already locked in.
-RUN sed -i 's/mcp = FastMCP("postgres-mcp")/from mcp.server.transport_security import TransportSecuritySettings\nmcp = FastMCP("postgres-mcp", transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False))/' /app/src/postgres_mcp/server.py
+RUN sed -i 's/mcp = FastMCP("postgres-mcp")/from mcp.server.transport_security import TransportSecuritySettings\nmcp = FastMCP("postgres-mcp", transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False))/' /app/src/postgres_mcp/server.py \
+  && grep -q "enable_dns_rebinding_protection=False" /app/src/postgres_mcp/server.py
 
-RUN --mount=type=cache,target=/root/.cache/uv \
-  uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev
 
 FROM public.ecr.aws/docker/library/python:3.12-slim-bookworm
 RUN groupadd -r app && useradd -r -g app app

@@ -11,6 +11,22 @@ DEFAULT_BUILD_PLATFORM = "linux/amd64"  # the remote sandbox VMs
 DOCKER_INFO_TIMEOUT_SECONDS = 10
 
 
+# Docker's names for architectures that hosts and tools also call otherwise.
+_ARCHITECTURES = {"x86_64": "amd64", "x86-64": "amd64", "aarch64": "arm64", "i386": "386"}
+
+
+def normalize_platform(platform: str) -> str:
+    """``platform`` as ``docker build --platform`` names it, so the same platform compares equal however it's spelled:
+    lower case, the architecture by Docker's name for it, and no variant but 32-bit arm's, whose v6 and v7 differ, so an
+    amd64 or arm64 image is known by its architecture alone."""
+    os_name, _, rest = platform.strip().lower().partition("/")
+    architecture, _, variant = rest.partition("/")
+    architecture = _ARCHITECTURES.get(architecture, architecture)
+    if architecture == "arm" and variant:
+        return f"{os_name}/{architecture}/{variant}"
+    return f"{os_name}/{architecture}" if architecture else os_name
+
+
 class DockerBuildError(RuntimeError):
     """A local ``docker build`` that failed or couldn't start; the message carries docker's output."""
 

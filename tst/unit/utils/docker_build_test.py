@@ -1,5 +1,5 @@
 """``build_image``: the argv it runs, what a failed or impossible build raises, and that importing it pulls in
-neither the CLI nor the providers, so library code can build too."""
+neither the CLI nor the providers, so library code can build too; and ``normalize_platform``."""
 
 import os
 import subprocess
@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_env.utils import docker_build
-from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM, DockerBuildError, build_image
+from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM, DockerBuildError, build_image, normalize_platform
 
 
 @pytest.fixture
@@ -104,3 +104,13 @@ def test_docker_unreachable_says_why_docker_info_didnt_answer(monkeypatch, outco
     monkeypatch.setattr(docker_build.subprocess, "run", run)
 
     assert docker_build.docker_unreachable() == reason
+
+
+@pytest.mark.parametrize("platform, normalized", [
+    ("linux/amd64", "linux/amd64"), (" Linux/AMD64\n", "linux/amd64"), ("linux/x86_64", "linux/amd64"),
+    ("linux/amd64/v2", "linux/amd64"), ("linux/aarch64", "linux/arm64"), ("linux/arm64/v8", "linux/arm64"),
+    ("linux/arm/v7", "linux/arm/v7"), ("linux/arm/v6", "linux/arm/v6"), ("linux/i386", "linux/386"),
+])
+def test_a_platform_is_named_by_os_and_architecture_keeping_only_32_bit_arms_variant(platform, normalized):
+    assert normalize_platform(platform) == normalized
+

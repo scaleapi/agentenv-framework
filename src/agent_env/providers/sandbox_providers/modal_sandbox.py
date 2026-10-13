@@ -5,17 +5,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
-import glob
+import functools
 import hashlib
-import json
 import logging
 import os
 import re
 import shlex
-import tarfile
-import tempfile
-import weakref
-from pathlib import Path
 from typing import TYPE_CHECKING, AsyncIterator, ClassVar, Optional
 
 import httpx
@@ -26,22 +21,16 @@ from agent_env.config import get_config
 from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy, Sandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_CONTAINER,
+    Accepts,
     SandboxProvider,
     apply_default_attribution,
 )
-from agent_env.utils.build_context import extract, ignore_file
+from agent_env.providers.sandbox_providers.modal_image_build import context_image, fmt_exc
 
 if TYPE_CHECKING:
     from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 
 logger = logging.getLogger(__name__)
-
-# The id of each image built from a build context, by Modal token, app and source digest, for every provider in the
-# process to reuse; one build of each runs at a time, so deploys of one image at once share its build.
-_built_image_ids: dict[tuple[str, str, str], str] = {}
-_build_locks: weakref.WeakValueDictionary[tuple[asyncio.AbstractEventLoop, tuple[str, str, str]], asyncio.Lock] = (
-    weakref.WeakValueDictionary()
-)
 
 DEFAULT_APP_NAME = "agent-env"
 # Lets a dedicated service (e.g. the sandbox proxy service) attribute its Modal apps under its own
@@ -65,6 +54,36 @@ _I6PN_RESOLVE_CMD = "getent ahostsv6 i6pn.modal.local 2>/dev/null | awk 'NR==1 {
 # chunks divisible by 3 so concatenated base64 has padding only at EOF (mid-stream
 # '=' would make `base64 -d` truncate the file).
 _STDIN_CHUNK_BYTES = 8 * 1024 * 1024 - ((8 * 1024 * 1024) % 3)
+# How long a cancelled create waits for its request to Modal to end, a few seconds as a rule; past it the cancel goes
+# on, and the sandbox the request creates is terminated when it ends.
+_CANCELLED_CREATE_WAIT_SECONDS = 30
+# Terminations started after their create's cancel had gone on, kept so they run to their end.
+_LATE_TERMINATIONS: set[asyncio.Task] = set()
+
+
+async def _terminate_created(sb: modal.Sandbox) -> None:
+    """Terminate ``sb``, which a cancelled create made. A failure is logged, naming it, since it runs until its
+    timeout."""
+    try:
+        await sb.terminate.aio()
+    except Exception as e:
+        logger.warning(f"Could not terminate Modal sandbox {sb.object_id}, whose create was cancelled; it runs until "
+                       f"its timeout: {fmt_exc(e)}")
+
+
+def _terminate_when_created(creating: asyncio.Future, *, call_context: str) -> None:
+    """Terminate the sandbox a create that outlasted its cancel's wait made, if it made one. A create cancelled before
+    it ended, as a process that exits cancels it, may have made one all the same, which runs until its timeout, so a
+    warning names the call."""
+    if creating.cancelled():
+        logger.warning(f"A cancelled Modal sandbox create was stopped before Modal answered; a sandbox Modal made for "
+                       f"it runs until its timeout: {call_context}")
+        return
+    if creating.exception() is not None:
+        return
+    task = creating.get_loop().create_task(_terminate_created(creating.result()))
+    _LATE_TERMINATIONS.add(task)
+    task.add_done_callback(_LATE_TERMINATIONS.discard)
 
 
 def _tunnel_url(t) -> str:
@@ -83,12 +102,6 @@ def _modal_network_kwargs(policy: NetworkPolicy) -> dict:
         "outbound_domain_allowlist": list(policy.allow_hosts),
         "outbound_cidr_allowlist": list(policy.allow_cidrs),
     }
-
-
-def _fmt_exc(e: BaseException) -> str:
-    type_name = f"{type(e).__module__}.{type(e).__qualname__}"
-    msg = str(e).strip()
-    return f"{type_name}: {msg}" if msg else type_name
 
 
 async def _resolve_i6pn_address(sb: modal.Sandbox) -> Optional[str]:
@@ -135,6 +148,11 @@ class ModalSandbox(Sandbox):
         self.vnc_url = None
         self.mode = SANDBOX_MODE_CONTAINER
         self.network_policy = network_policy
+
+    @property
+    def private_host(self) -> str | None:
+        """Its address on i6pn, Modal's private network between sandboxes, bracketed for a URL."""
+        return f"[{self.i6pn_address}]" if self.i6pn_address else None
 
     async def terminate(self) -> None:
         await self._sb.terminate.aio()
@@ -202,6 +220,11 @@ class ModalSandboxProvider(SandboxProvider):
     # sandbox's ``.type`` to match the config key.
     _sandbox_cls: type[ModalSandbox] = ModalSandbox
 
+    # Each image in a container of its own, built first when it is only a build context (prepare_image); its
+    # containers share i6pn, Modal's private network.
+    CONTAINER_ACCEPTS = Accepts.NAME_OR_CONTEXT
+    PRIVATE_NETWORK = True
+
     @classmethod
     def supports_network_policy(cls, policy: NetworkPolicy) -> bool:
         return True
@@ -211,9 +234,11 @@ class ModalSandboxProvider(SandboxProvider):
         app_name: Optional[str] = None,
         gpu: Optional[str] = None,
         ecr_pull_secret_name: Optional[str] = None,
+        environment_name: Optional[str] = None,
     ):
         self._app_name = _resolve_app_base_name(app_name)
         self._ecr_pull_secret_name = ecr_pull_secret_name
+        self._environment_name = environment_name
         self._client: Optional[modal.Client] = None
         # Optional Modal GPU spec (e.g. "H100", "A100", "H100:2"). When set, create_container
         # provisions the sandbox with the V1 ``modal.Sandbox.create`` factory (which accepts
@@ -224,7 +249,8 @@ class ModalSandboxProvider(SandboxProvider):
         # Looked up on demand and cached by name.
         self._apps: dict[str, modal.App] = {}
         self._token_id = ""
-        # The context-only images prepare_image was given, by name, so create_container builds them rather than pull.
+        # The images prepare_image builds from their build contexts, by name, so create_container builds them rather
+        # than pull.
         self._context_images: dict[str, DockerImageArtifact] = {}
 
     async def _get_client(self) -> modal.Client:
@@ -239,7 +265,9 @@ class ModalSandboxProvider(SandboxProvider):
         app = self._apps.get(app_name)
         if app is None:
             client = await self._get_client()
-            app = await modal.App.lookup.aio(app_name, create_if_missing=True, client=client)
+            app = await modal.App.lookup.aio(
+                app_name, create_if_missing=True, client=client, environment_name=self._environment_name,
+            )
             if app_tags:
                 # App tags are the dimension Modal's billing report breaks down by; set them
                 # once per app (cached below) rather than on every sandbox.
@@ -251,46 +279,24 @@ class ModalSandboxProvider(SandboxProvider):
         return app
 
     async def prepare_image(self, image: DockerImageArtifact, *, attribution: Optional[Attribution] = None) -> None:
-        """Build ``image`` when it's only a build context, unless this process has already built its sources."""
-        if image.context_only:
+        """Build ``image`` from its build context when Modal can't run it by name: it's only a build context, its name
+        is in a registry Modal can't reach, or it's built for another platform than Modal's; unless this process has
+        already built its sources. One it pulls drops an image prepared earlier under its name."""
+        if image.buildable and (image.by_name_problem(on_this_machine=self.ON_THIS_MACHINE)
+                                or image.platform_problem(self._sandbox_cls.platform)):
             self._context_images[image.image_name] = image
             await self._context_image(image)
+        else:
+            self._context_images.pop(image.image_name, None)
 
     async def _context_image(self, image: DockerImageArtifact, *,
                              stale: str | None = None) -> tuple[modal.Image, str]:
-        """The Modal image built from ``image``'s build context, and its id: built now unless one built from the same
-        sources is, other than ``stale``, an id Modal no longer holds."""
+        """The Modal image built from ``image``'s build context, and its id (``modal_image_build.context_image``)."""
         client = await self._get_client()
         app = await self._get_app(self._app_name, _attribution_tags({}))
-        key = (self._token_id, self._app_name, image.source_digest or image.build_context_object_url)
-        async with _build_locks.setdefault((asyncio.get_running_loop(), key), asyncio.Lock()):
-            image_id = _built_image_ids.get(key)
-            if image_id is None or image_id == stale:
-                image_id = _built_image_ids[key] = await self._build(image, app)
-        return modal.Image.from_id(image_id, client=client), image_id
-
-    async def _build(self, image: DockerImageArtifact, app: modal.App) -> str:
-        """Build ``image`` from its build context, with the context's own ignore file; returns the image's id."""
-        logger.info(f"Building {image.image_name} on Modal from its build context...")
-        with tempfile.TemporaryDirectory(prefix="agent-env-build-") as work:
-            context = Path(work) / "context"
-            try:
-                await asyncio.to_thread(_fetch_context, image.build_context_object_url, Path(work) / "context.tar.gz",
-                                        context)
-                dockerfile = context / (image.dockerfile_path or "Dockerfile")
-                ignores = ignore_file(context, dockerfile)
-                # Beside the context, not in it, so a COPY of the context still copies the Dockerfile as written.
-                for_modal = Path(work) / "Dockerfile"
-                for_modal.write_text(modal_dockerfile(dockerfile.read_text("utf8"), context), "utf8")
-                built = modal.Image.from_dockerfile(
-                    for_modal, context_dir=context, ignore=ignores.read_text("utf8").splitlines() if ignores else [],
-                )
-                await built.build.aio(app)
-            except Exception as e:
-                raise RuntimeError(f"Building {image.image_name} on Modal from its build context failed: "
-                                   f"{_fmt_exc(e)}") from e
-        logger.info(f"Built {image.image_name} on Modal as {built.object_id}")
-        return built.object_id
+        return await context_image(image, client=client, app=app, token_id=self._token_id, app_name=self._app_name,
+                                   environment_name=self._environment_name,
+                                   stale=stale)
 
     async def create_container(
         self,
@@ -306,11 +312,23 @@ class ModalSandboxProvider(SandboxProvider):
         attribution: Optional[Attribution] = None,
         network_policy: Optional[NetworkPolicy] = None,
         command: list[str] | None = None,
-        i6pn: bool = False,
-        region: Optional[str] = None,
         expose_externally: bool = True,
         vnc_port: Optional[int] = None,
+        private_network: bool = False,
     ) -> Sandbox:
+        # The private network is i6pn, Modal's network between sandboxes, in the configured region.
+        i6pn = private_network
+        region = get_config().modal_default_region if private_network else None
+        # GPU sandboxes need the V1 ``Sandbox.create`` factory: the V2
+        # ``_experimental_create`` has no ``gpu`` parameter and cannot attach one. V1 in
+        # turn has no ``i6pn``, so reject that combination up front — before any Modal
+        # call — rather than silently returning one whose i6pn_address is None
+        # and failing downstream (e.g. the gateway's "service-db has no i6pn address").
+        if self._gpu and i6pn:
+            raise ValueError(
+                "i6pn is unavailable on GPU sandboxes: the GPU-capable factory "
+                "(modal.Sandbox.create) has no i6pn parameter."
+            )
         effective = self.effective_network_policy(network_policy)
         attribution = dict(attribution or {})
 
@@ -322,8 +340,8 @@ class ModalSandboxProvider(SandboxProvider):
         app = await self._get_app(app_name, app_tags)
 
         built_id = None
-        if (context_only := self._context_images.get(image_name)) is not None:
-            image, built_id = await self._context_image(context_only)
+        if (prepared := self._context_images.get(image_name)) is not None:
+            image, built_id = await self._context_image(prepared)
         else:
             image = await self._registry_image(image_name)
 
@@ -341,17 +359,6 @@ class ModalSandboxProvider(SandboxProvider):
             f"image={image_name} port={port} cpu={cpu} memory={memory}MB "
             f"app={app_name} region={region} i6pn={i6pn}"
         )
-
-        # GPU sandboxes need the V1 ``Sandbox.create`` factory: the V2
-        # ``_experimental_create`` has no ``gpu`` parameter and cannot attach one. V1 in
-        # turn has no ``i6pn``, so reject that combination up front — before a billed
-        # sandbox exists — rather than silently returning one whose i6pn_address is None
-        # and failing downstream (e.g. the gateway's "service-db has no i6pn address").
-        if self._gpu and i6pn:
-            raise ValueError(
-                "i6pn is unavailable on GPU sandboxes: the GPU-capable factory "
-                "(modal.Sandbox.create) has no i6pn parameter."
-            )
 
         # ``i6pn`` is threaded per-factory below (V2 only); everything else is shared.
         create_kwargs = dict(
@@ -377,18 +384,38 @@ class ModalSandboxProvider(SandboxProvider):
                 *(command or []), i6pn=i6pn, image=image, **create_kwargs
             )
 
-        try:
+        async def create_rebuilding_once() -> modal.Sandbox:
             try:
-                sb = await create(image)
+                return await create(image)
             except modal.exception.NotFoundError:
                 if built_id is None:
                     raise
                 # Modal no longer holds the image this process built from the context, so it's built again, once.
-                image, built_id = await self._context_image(context_only, stale=built_id)
-                sb = await create(image)
+                rebuilt, _ = await self._context_image(prepared, stale=built_id)
+                return await create(rebuilt)
+
+        # Modal may create the sandbox even when this create is cancelled, so the request runs on, and what it creates
+        # is terminated: a cancelled create leaves nothing running. The cancel waits for it a while only, so a request
+        # that hangs can't hold up a chain's deadline or a Ctrl-C.
+        creating = asyncio.ensure_future(create_rebuilding_once())
+        try:
+            sb = await asyncio.shield(creating)
+        except asyncio.CancelledError:
+            created = None
+            try:
+                created = await asyncio.wait_for(asyncio.shield(creating), _CANCELLED_CREATE_WAIT_SECONDS)
+            except (Exception, asyncio.CancelledError):  # it failed, outlasted the wait, or a second cancel came
+                # A create that ended just as the wait gave up runs the callback at once
+                creating.add_done_callback(functools.partial(_terminate_when_created, call_context=call_context))
+                if not creating.done():
+                    logger.warning(f"A cancelled Modal sandbox create is still waiting on Modal; the sandbox it "
+                                   f"creates, if any, is terminated when it ends: {call_context}")
+            if created is not None:
+                await _terminate_created(created)
+            raise
         except Exception as e:
             raise RuntimeError(
-                f"Modal sandbox create failed [{_fmt_exc(e)}]: {call_context}"
+                f"Modal sandbox create failed [{fmt_exc(e)}]: {call_context}"
             ) from e
 
         try:
@@ -428,7 +455,7 @@ class ModalSandboxProvider(SandboxProvider):
             if not isinstance(e, Exception):
                 raise
             raise RuntimeError(
-                f"Modal sandbox post-create failed [{_fmt_exc(e)}]: "
+                f"Modal sandbox post-create failed [{fmt_exc(e)}]: "
                 f"sb_id={sb.object_id} {call_context}"
             ) from e
 
@@ -471,78 +498,14 @@ class ModalSandboxProvider(SandboxProvider):
         auth = None if uses_ecr_pull_secret else await asyncio.to_thread(image_store.auth, image_name)
         if uses_ecr_pull_secret:
             return modal.Image.from_aws_ecr(image_name, secret=modal.Secret.from_name(
-                self._ecr_pull_secret_name, required_keys=ECR_READER_SECRET_KEYS))
+                self._ecr_pull_secret_name, required_keys=ECR_READER_SECRET_KEYS,
+                environment_name=self._environment_name))
         if auth is not None:
             return modal.Image.from_registry(image_name, secret=modal.Secret.from_dict({
                 "REGISTRY_USERNAME": auth.username,
                 "REGISTRY_PASSWORD": auth.password,
             }))
         return modal.Image.from_registry(image_name)
-
-
-_COPY_OR_ADD = re.compile(r"\s*(COPY|ADD)\s+(.*)", re.IGNORECASE | re.DOTALL)
-# The flags COPY takes as ADD does; ADD's own (--checksum, --keep-git-dir, --unpack) keep an ADD as it is.
-_COPY_FLAGS = ("--chown=", "--chmod=", "--link")
-
-
-def modal_dockerfile(text: str, context: Path) -> str:
-    """``text``, a Dockerfile, with the two forms Modal's build refuses written as what ``docker build`` makes of them:
-    a JSON-form COPY or ADD whose paths hold no whitespace in shell form, which Modal's context parser reads, and an
-    ADD of files and folders in ``context``, none of them a tar archive, as the COPY it is, since Modal's ADD only
-    fetches a URL. Every other line is left as written."""
-    lines, instruction = [], []
-    for line in text.splitlines(keepends=True):
-        instruction.append(line)
-        if not line.rstrip("\r\n").endswith("\\"):
-            lines.append(_for_modal("".join(instruction), context))
-            instruction = []
-    return "".join(lines + instruction)
-
-
-def _for_modal(instruction: str, context: Path) -> str:
-    match = _COPY_OR_ADD.fullmatch(re.sub(r"\\\r?\n", " ", instruction).strip())
-    if match is None:
-        return instruction
-    keyword, rest = match.group(1).upper(), match.group(2).strip()
-    flags = []
-    while rest.startswith("--"):
-        flag, _, rest = rest.partition(" ")
-        flags.append(flag)
-        rest = rest.strip()
-    if rest.startswith("["):
-        try:
-            args = json.loads(rest)
-        except ValueError:
-            return instruction
-        if not (isinstance(args, list) and len(args) >= 2
-                and all(isinstance(arg, str) and arg and not any(c.isspace() for c in arg) for arg in args)):
-            return instruction
-    elif keyword == "ADD" and not rest.startswith("<<") and not any(c in rest for c in "\"'"):
-        args = rest.split()
-    else:
-        return instruction
-    if keyword == "ADD":
-        if len(args) < 2 or not all(flag.startswith(_COPY_FLAGS) for flag in flags) \
-                or not all(_local_and_not_an_archive(source, context) for source in args[:-1]):
-            return instruction
-        keyword = "COPY"
-    return " ".join([keyword, *flags, *args]) + "\n"
-
-
-def _local_and_not_an_archive(source: str, context: Path) -> bool:
-    """Whether ``source``, an ADD source, names files or folders in ``context``, none a tar archive ADD would unpack."""
-    if "://" in source or source.startswith("git@"):
-        return False
-    matches = glob.glob(source.lstrip("/"), root_dir=context) if glob.has_magic(source) else [source.lstrip("/")]
-    paths = [context / match for match in matches]
-    return bool(paths) and all(path.exists() for path in paths) \
-        and not any(path.is_file() and tarfile.is_tarfile(path) for path in paths)
-
-
-def _fetch_context(object_url: str, archive: Path, out: Path) -> None:
-    """Download the build context at ``object_url`` to ``archive`` and unpack it into ``out``."""
-    get_config().get_object_store_at(object_url).download_to_file(object_url, str(archive))
-    extract(archive, out)
 
 
 def _attribution_tags(attribution: Attribution) -> dict[str, str]:

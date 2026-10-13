@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 
@@ -11,7 +12,7 @@ import agent_env.providers.sandbox_providers.chained_sandbox_provider as chained
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.config import get_config
 from agent_env.config.loader import load_impl
-from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
+from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider, skip_refusing
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandbox, ModalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandbox, ModalVmSandboxProvider
@@ -283,8 +284,76 @@ async def test_chain_create_sandbox_all_fail_raises_with_all_names():
     assert "second boom" in msg
 
 
+def test_skip_refusing_leaves_a_provider_none_of_whose_links_it_refuses():
+    chain = ChainedSandboxProvider([_StubProvider(), _StubProvider()])
+
+    assert skip_refusing(chain, lambda link: None, what="it") is chain
+
+
+def test_skip_refusing_chains_the_links_it_doesnt_refuse_noting_each_it_skips(caplog):
+    first, second, third = _StubProvider(), _StubProvider(), _StubProvider()
+
+    with caplog.at_level(logging.INFO, logger=chained_module.__name__):
+        running = skip_refusing(ChainedSandboxProvider([first, second, third]),
+                                lambda link: "which is too far" if link is not third else None, what="it")
+
+    assert running.links == (third,)
+    warned, noted = [r for r in caplog.records if "sandbox_provider_skipped" in r.getMessage()]
+    assert (warned.levelno, noted.levelno) == (logging.WARNING, logging.INFO)  # the first, preferred, is warned of
+    assert warned.getMessage() == "sandbox_provider_skipped provider=_StubProvider: which is too far"
+
+
+@pytest.mark.parametrize("provider, refusal", [
+    (_StubProvider(), "with _StubProvider, which is too far"),
+    (ChainedSandboxProvider([_StubProvider(), _StubProvider()]),
+     "with _StubProvider, which is too far; nor with _StubProvider, which is too far"),
+], ids=["one", "chain"])
+def test_skip_refusing_names_each_refusal_when_it_refuses_every_link(provider, refusal):
+    with pytest.raises(ValueError, match=f"^Can't deploy it {refusal}$"):
+        skip_refusing(provider, lambda link: "which is too far", what="it")
+
+
+class _Vm(VmSandbox):
+    """A VM sandbox of ``platform``, recording whether it was terminated."""
+
+    type = "fake"
+
+    def __init__(self, sandbox_id: str, platform: str):
+        self.sandbox_id, self.tunnel_urls, self.vnc_url = sandbox_id, {}, None
+        self.mode, self.platform, self.terminated = "vm", platform, False
+
+    async def terminate(self) -> None:
+        self.terminated = True
+
+
+@pytest.mark.asyncio
+async def test_a_chain_closes_a_vm_that_cant_run_the_image_and_tries_the_next_provider(caplog):
+    arm64 = DockerImageArtifact(id="img", version=1, description="d", image_name="img:v1", platform="linux/arm64",
+                                tar_gz_object_url="s3://bucket/img.tar.gz")
+    amd, arm = _Vm("amd", "linux/amd64"), _Vm("arm", "linux/arm64")
+    chain = ChainedSandboxProvider([_StubProvider(sandbox=amd), _StubProvider(sandbox=arm)])
+    await chain.prepare_image(arm64)
+
+    assert await chain.create_sandbox(image_name="img:v1", port=8000, env={}) is arm
+    assert amd.terminated and not arm.terminated
+    assert "gave a VM that can't load the image: 'img' v1 is a linux/arm64 image" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_chain_none_of_whose_vms_runs_the_image_names_each_refusal():
+    arm64 = DockerImageArtifact(id="img", version=1, description="d", image_name="img:v1", platform="linux/arm64",
+                                tar_gz_object_url="s3://bucket/img.tar.gz")
+    chain = ChainedSandboxProvider([_StubProvider(sandbox=_Vm("one", "linux/amd64")),
+                                    _StubProvider(sandbox=_Vm("two", "linux/amd64"))])
+    await chain.prepare_image(arm64)
+
+    with pytest.raises(RuntimeError, match="All 2 providers failed: _StubProvider: ValueError.*linux/arm64 image.*; "
+                                           "_StubProvider: ValueError"):
+        await chain.create_sandbox(image_name="img:v1", port=8000, env={})
+
+
 _CONTEXT_ONLY = DockerImageArtifact(id="solver-image", version=2, description="d", image_name="local/solver-0123456789ab:v2",
-                                    build_context_object_url="s3://bucket/ctx.tar.gz")
+                                    build_context_object_url="s3://bucket/ctx.tar.gz", dockerfile_path="Dockerfile")
 
 
 class _PreparingProvider(_StubProvider):

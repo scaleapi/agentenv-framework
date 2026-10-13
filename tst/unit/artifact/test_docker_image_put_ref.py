@@ -31,7 +31,7 @@ def test_a_ref_is_registered_with_its_tag_pinned_and_no_tarball(local_stores, re
 
     stored = DockerImageArtifact.get("tool-image", image.version)
     assert (stored.version, stored.image_name, stored.tar_gz_object_url) == (1, f"ghcr.io/org/tool:v1@{DIGEST}", None)
-    assert stored.load_problem() is None
+    assert stored.load_problem(on_this_machine=False) is None
     assert DockerImageArtifact.put_ref("tool-image", description="d", image_name="ghcr.io/org/tool:v1").version == 2
 
 

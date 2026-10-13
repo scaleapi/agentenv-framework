@@ -77,11 +77,49 @@ under the card's `capabilities.tools` (name, description, signature-derived `inp
 `Annotated[..., Field(description=...)]` param descriptions included). `{environment_name}` in a
 tool name is resolved to the card's name at mount, so a shared mixin or base class can declare
 environment-prefixed tools without knowing the name at class-definition time; any other unresolved
-`{...}` token raises. Duplicate tool names raise at construction.
+`{...}` token raises. Duplicate tool names raise at construction. Names must also differ across the
+servers an env deploys behind one gateway: if two serve a name, the gateway serves none of their
+tools and the deploy fails naming it, so prefix with `{environment_name}` when servers may share one.
 
 `AgentEnvStarletteApplication` mounts the same handler onto a Starlette/FastAPI app instead of
 FastMCP; since those apps have no MCP tool registry, constructing one with `@tool` methods
 raises.
+
+### Who is calling
+
+A tool that needs the caller declares a parameter annotated `ToolContext` (any name) and receives
+it on every call. The SDK fills it, never the client: it is absent from the advertised
+`inputSchema` and from `tools/list`. Tools that declare no such parameter are registered unchanged.
+
+```python
+from agentenv_protocol import ToolContext
+
+    @tool(name="{environment_name}_list_inbox")
+    def list_inbox(self, ctx: ToolContext) -> list[dict]:
+        """Messages addressed to the caller."""
+        return [m for m in self.messages if m["to"] == ctx.caller.role]
+```
+
+`ctx.caller.role` is the role the agent was deployed with, as the gateway forwarded it (`None` when
+nothing was forwarded; the gateway's `default` role counts as nothing). It is the caller's side's
+assertion, trusted exactly as far as that side is: behind a gateway it is the gateway's view of the
+agent it deployed; a caller that reaches the server directly chooses it in `AgentEnv-Role`. It says
+whose data a call acts on, not that the caller was authenticated, so a server exposed to untrusted
+direct callers keeps access control on its own boundary. `ctx.caller.session` tells
+callers apart when the gateway shares one connection to the server. `ctx.tool`, `ctx.arguments`
+and `ctx.call_id` describe the call. Code that runs on behalf
+of the call without a parameter of its own, such as a database method, reads the same object through
+`ToolContext.current()`, which returns an empty context outside any call. The binding is per call
+and follows the request's task, so concurrent callers never see each other's context. It is made
+at FastMCP's own tool dispatch, for which `mcp` 1.x offers no public hook, and the mount refuses an
+app without one, so a server that mounted is a server whose tool calls are bound.
+
+To answer a call before the tool runs, override `on_tool_call(self, context)`: return `None` to let
+it proceed, or an `mcp.types.CallToolResult` (`isError=True` for a refusal) to send that as the
+tool's reply. An `@extension` method may declare the same parameter; it is filled from the request's
+`AgentEnv-Role` header. Code that acts as a caller outside any dispatch, such as a test calling a
+handler directly or a seeding script, binds a context it builds:
+`with bound(ToolContext.as_caller("alice")): ...`.
 
 ## Serving
 
@@ -133,6 +171,8 @@ extension's, and `client.invoke_extension(base_url, card, uri, params, method=..
 its HTTP verb. Without `method`, `invoke_extension` calls the first method listed; an extension
 with several methods, such as a gateway's `urn:agentenv:clock/v1`, should always be called by name.
 
+Where the binding lives depends on the app. On mcp's own FastMCP it wraps the tool manager's dispatch; on the standalone `fastmcp` package it joins the app's middleware chain as the outermost layer, so a handler's own middleware runs under it too. An app with neither seam mounts unbound, with a warning, unless a tool declares a `ToolContext` parameter or the handler defines `on_tool_call`: then the mount is refused rather than serving an empty caller.
+
 ### Uploading an export through a grant
 
 An export too large to return from `data/get` can go straight to the caller's object store. A
@@ -162,7 +202,48 @@ class SlackEnv(AgentEnvEnvironment):
         return [DataPart(data=self.state())]
 ```
 
-Dependencies are intentionally light (`pydantic`, `starlette`) so the package can be added to environment server images without pulling a heavier framework — `mcp` is imported lazily inside `create_fastmcp_app()` and is deliberately not a dependency.
+Dependencies are intentionally light (`pydantic`, `starlette`, `httpx`) so the package can be added to environment server images without pulling a heavier framework — `mcp` is imported lazily inside `create_fastmcp_app()` and is deliberately not a dependency.
+
+## Calling an env's tools
+
+A loop of your own, such as a trainer's rollout or an eval harness, reaches an env's tools through `ToolSession`. It
+is an MCP client for the env's streamable-HTTP endpoint, written on `httpx`, so it works wherever this package
+installs, whichever `mcp` version the loop's own environment pins.
+
+```python
+from agentenv_protocol import ToolSession
+
+async with ToolSession(mcp_url=mcp_url, role="alice@example.com") as session:
+    tools = await session.list_tools()                 # EnvironmentTool: name, description, inputSchema
+    result = await session.call_tool("slack_send_message", {"channel": "general", "text": "hi"})
+    print(result.text, result.isError)
+```
+
+- **The URL:** `mcp_url` is `DeployedEnv.mcp_url` in agent-env, or the address a card was fetched from joined with
+  `client.mcp_path(card)`.
+- **Sessions:** a `ToolSession` is one MCP session, and calls on it may run concurrently. `async with` opens and ends
+  it; `open()` and `close()` do the same for a session held across calls. A tool tells sessions apart by
+  `ctx.caller.session`: the session's id when the server is reached directly, or, behind a gateway, a key the gateway
+  gives each session. A session belongs to the event loop that opened it, and using or closing it on another raises
+  `RuntimeError`, so a caller with a synchronous API runs all of a session's calls on one loop of its own.
+- **Roles:** `role` is sent as `AgentEnv-Role` (`ROLE_HEADER`) and says who the caller is. A gateway lists only the
+  tools that role may use, answers a call to a hidden one with an error result, and forwards the role to the servers
+  behind it; a server reached directly reads the header itself. Either way a tool reads it as `ctx.caller.role`
+  ([Who is calling](#who-is-calling)), where `default`, like no role, is `None`. `headers` adds any others.
+- **Errors:**
+  - A tool that fails, or a call the server refuses (a tool hidden from the role, or an `on_tool_call` refusal),
+    returns a result with `isError` set and the server's text.
+  - `ToolSessionError` means the request failed at the MCP level: a JSON-RPC error, an HTTP error status, a reply
+    that can't be read, or a session the server no longer knows. After a restart, the env's state is usually gone too.
+    Only the server the session talks to reports this: a gateway reconnects to a child that restarted and retries the
+    call, and a stateless server has no session to lose, so neither restart raises anything.
+  - `httpx.TransportError` means the connection failed, and `TimeoutError` that a request outlived `timeout`
+    (600 s by default, the gateway's own limit on a tool call).
+  - `ToolSession` retries nothing. A call that raised may still have run on the server, or may yet run: a request
+    stalled on a bad link can arrive after the client has given up. So after any failed call the env's state is
+    unknown; read it back (`data/get`) or end the episode.
+- **Tools:** `list_tools()` returns the tools the role may use as `EnvironmentTool`, the type a card's
+  `capabilities.tools` holds. Each `inputSchema` is the JSON Schema a model API takes as the tool's parameters.
 
 ## A2A agent framework
 

@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import io
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -183,6 +184,85 @@ async def test_an_image_no_sandbox_can_get_is_refused_before_anything_is_loaded(
         await sandbox.load_docker_images([_image("s3://bucket/a.tar.gz", "a:1"), _image(None, "img:v1")])
 
     assert sandbox.scripts == []
+
+
+class _VmOnThisMachine(_RecordingVmSandbox):
+    """A VM sandbox on this machine, as the local provider's are."""
+
+    ON_THIS_MACHINE = True
+
+
+@pytest.mark.asyncio
+async def test_a_vm_elsewhere_refuses_an_image_to_pull_from_this_machines_registry_before_anything_is_loaded(
+        signing_store):
+    sandbox = _RecordingVmSandbox(images_stdout="a\n")
+
+    with pytest.raises(RuntimeError, match="Can't load images: localhost:5000/local/img:v1 is in a registry on this "
+                                           "machine, which a sandbox elsewhere can't pull from"):
+        await sandbox.load_docker_images([_image("s3://bucket/a.tar.gz", "a:1"),
+                                          _image(None, "localhost:5000/local/img:v1")])
+
+    assert sandbox.scripts == []
+
+
+@pytest.mark.asyncio
+async def test_a_vm_on_this_machine_pulls_from_its_registry_and_one_elsewhere_loads_a_tar_gz_named_for_it(signing_store):
+    here = _VmOnThisMachine(images_stdout="localhost:5000/local/img\n")
+    await here.load_docker_images([_image(None, "localhost:5000/local/img:v1")])
+    assert here.scripts == ["docker pull localhost:5000/local/img:v1"]
+
+    elsewhere = _RecordingVmSandbox(images_stdout="localhost:5000/local/img\n")
+    await elsewhere.load_docker_images([_image("s3://bucket/a.tar.gz", "localhost:5000/local/img:v1")])
+    assert "docker load" in elsewhere.scripts[0] and "docker pull" not in elsewhere.scripts[0]
+
+
+class _AnyPlatformVm(_RecordingVmSandbox):
+    """A VM sandbox that runs any platform, as the local provider's do."""
+
+    platform = None
+
+
+@pytest.mark.asyncio
+async def test_a_vm_refuses_a_tar_gz_for_a_platform_it_doesnt_run_before_anything_is_loaded(signing_store):
+    """A VM runs linux/amd64 unless its provider set another when it created it, as it sets its mode."""
+    arm64 = DockerImageArtifact(id="img", version=1, description="d", image_name="img:v1", platform="linux/arm64",
+                                tar_gz_object_url="s3://bucket/img.tar.gz")
+
+    amd = _RecordingVmSandbox()
+    with pytest.raises(RuntimeError, match="Can't load images: 'img' v1 is a linux/arm64 image, and the sandbox runs "
+                                           "linux/amd64; rebuild it for linux/amd64"):
+        await amd.load_docker_images([arm64])
+    assert amd.platform == "linux/amd64" and amd.scripts == []
+
+    arm = _RecordingVmSandbox(images_stdout="img\n")
+    arm.platform = "linux/arm64"
+    await arm.load_docker_images([arm64])
+    assert "docker load" in arm.scripts[0]
+
+    anything = _AnyPlatformVm(images_stdout="img\n")
+    await anything.load_docker_images([arm64])
+    assert "docker load" in anything.scripts[0]
+
+
+@pytest.mark.asyncio
+async def test_a_vm_builds_an_image_from_the_build_context_beside_a_tar_gz_for_another_platform(signing_store):
+    """As the infra bootstrap writes its images on Apple silicon: built for the VM's platform, the image runs, though
+    not byte for byte the one stored; a VM of the tar.gz's platform loads the tar.gz."""
+    arm64 = DockerImageArtifact(id="gw", version=1, description="d", image_name="localhost:5000/gw:v1",
+                                platform="linux/arm64", tar_gz_object_url="s3://bucket/gw.tar.gz",
+                                build_context_object_url="s3://bucket/gw/build-context.tar.gz",
+                                dockerfile_path="Dockerfile", source_digest="sha256:" + "3" * 64)
+
+    amd = _RecordingVmSandbox()
+    await amd.load_docker_images([arm64])
+    assert not any("docker load" in script for script in amd.scripts)
+    assert any("docker build --platform linux/amd64 -f Dockerfile -t localhost:5000/gw:v1 ." in script
+               for script in amd.scripts)
+
+    arm = _RecordingVmSandbox(images_stdout="localhost:5000/gw:v1\n")
+    arm.platform = "linux/arm64"
+    await arm.load_docker_images([arm64])
+    assert "docker load" in arm.scripts[0] and not any("docker build" in script for script in arm.scripts)
 
 
 @pytest.mark.asyncio
@@ -604,7 +684,7 @@ async def test_a_build_context_the_local_store_holds_is_pushed_over_exec_and_bui
 
     await sandbox.load_docker_images([image])
 
-    work = _work(image.source_digest)
+    (work,) = _works(sandbox)
     assert image.build_context_object_url.startswith("file://")
     assert pushed == [(image.build_context_object_url, f"{work}/context.tar.gz")]
     assert f"docker build --platform linux/amd64 -f Dockerfile -t {image.image_name} ." in sandbox.scripts[-2]
@@ -617,17 +697,19 @@ def _context_image(id: str, digest: str | None, *, platform: str | None = "linux
                                platform=platform, source_digest=digest)
 
 
-def _work(source: str) -> str:
-    return f"/tmp/agent-env-build-{hashlib.sha256(source.encode()).hexdigest()[:16]}"
+def _works(sandbox: _RecordingVmSandbox) -> list[str]:
+    """The work folder of each build ``sandbox`` ran, in order."""
+    return [match[1] for script in sandbox.scripts
+            if (match := re.fullmatch(r"rm -rf (/tmp/agent-env-build-[0-9a-f]{32}) && mkdir -p \1/context", script))]
 
 
 @pytest.mark.asyncio
 async def test_a_context_only_image_is_built_in_the_vm_from_its_context(signing_store):
     sandbox, digest = _RecordingVmSandbox(), "sha256:" + "1" * 64
-    work = _work(digest)
 
     await sandbox.load_docker_images([_context_image("a", digest)])
 
+    (work,) = _works(sandbox)
     assert sandbox.scripts == [
         f"rm -rf {work} && mkdir -p {work}/context",
         f"curl -fsSL {sandbox_module.CURL_RETRY_FLAGS} https://signed/build-context.tar.gz -o {work}/context.tar.gz",
@@ -648,13 +730,26 @@ async def test_images_with_one_source_share_a_build_and_builds_run_one_at_a_time
     assert len(builds) == 2
     assert builds[0].endswith("-t local/a-0123456789ab:v1 -t local/c-0123456789ab:v1 .")
     assert builds[1].endswith("-t local/b-0123456789ab:v1 .")
-    assert sandbox.scripts.index(f"rm -rf {_work(shared)}") < sandbox.scripts.index(f"rm -rf {_work(other)} && mkdir -p "
-                                                                                     f"{_work(other)}/context")
+    first, second = _works(sandbox)
+    assert sandbox.scripts.index(f"rm -rf {first}") < sandbox.scripts.index(f"rm -rf {second} && mkdir -p {second}/context")
+
+
+@pytest.mark.asyncio
+async def test_two_builds_of_one_context_on_one_host_each_have_a_work_folder_of_their_own(signing_store):
+    """Two of the local provider's sandboxes share this machine's /tmp, and two deploys can build on one VM: a folder
+    named after the context alone let one build's cleanup delete the other's context mid-build."""
+    sandbox, digest = _RecordingVmSandbox(), "sha256:" + "1" * 64
+
+    await sandbox.load_docker_images([_context_image("a", digest)])
+    await sandbox.load_docker_images([_context_image("a", digest)])
+
+    first, second = _works(sandbox)
+    assert first != second
 
 
 @pytest.mark.asyncio
 async def test_a_build_takes_the_recorded_dockerfile_and_platform_else_linux_amd64(signing_store):
-    sandbox = _RecordingVmSandbox()
+    sandbox = _AnyPlatformVm()
 
     await sandbox.load_docker_images([_context_image("a", "sha256:" + "1" * 64, platform=None,
                                                      dockerfile="docker/app.Dockerfile"),
@@ -680,7 +775,8 @@ async def test_a_failed_build_names_its_image_and_still_removes_its_folder(signi
     with pytest.raises(RuntimeError, match="(?s)Building local/a-0123456789ab:v1 from its build context failed: .*not found"):
         await sandbox.load_docker_images([_context_image("a", digest)])
 
-    assert sandbox.scripts[-1] == f"rm -rf {_work(digest)}"
+    (work,) = _works(sandbox)
+    assert sandbox.scripts[-1] == f"rm -rf {work}"
 
 
 @pytest.mark.asyncio
@@ -694,3 +790,34 @@ async def test_tarballs_are_loaded_registry_images_pulled_and_contexts_built(sig
     assert sandbox.scripts[1] == f"docker pull {PUBLIC}"
     assert not any("local/c-0123456789ab" in script for script in sandbox.scripts if script.startswith("docker pull"))
     assert sandbox.scripts[-2].endswith("-t local/c-0123456789ab:v1 .")
+
+
+@pytest.mark.asyncio
+async def test_a_vm_installs_the_trust_dir_in_its_container_through_itself_and_cleans_up(tmp_path):
+    """The container is on the VM's Docker, not this machine's: the files go into the VM, then ``docker cp`` there."""
+    (tmp_path / "ca.pem").write_bytes(b"ca")
+    (tmp_path / "ca-bundle.pem").write_bytes(b"bundle")
+    vm = _RecordingVmSandbox()
+
+    await vm.copy_trust_dir_into_container(tmp_path, "agent-x", "/etc/agentenv")
+
+    scripts = vm.scripts
+    staged = next(s for s in scripts if s.startswith("mkdir -p ")).removeprefix("mkdir -p ")
+    assert staged.startswith("/tmp/_trust_") and "agent-x" in staged
+    assert sum("base64" in s for s in scripts) == 2  # one write per file
+    assert any(s.startswith(f"docker cp {staged}/. agent-x:/etc/agentenv") for s in scripts)
+    assert scripts[-1] == f"rm -rf {staged}"
+
+
+@pytest.mark.asyncio
+async def test_start_trusting_a_container_on_a_vm_never_runs_docker_on_this_machine(tmp_path, monkeypatch):
+    import agent_env.providers.sandbox_providers.local_sandbox as ls
+
+    monkeypatch.setattr(ls, "_copy_into_container", lambda *args: pytest.fail("docker cp ran on this machine"))
+    (tmp_path / "ca.pem").write_bytes(b"ca")
+    vm = _RecordingVmSandbox()
+
+    await ls.start_trusting(vm, "agent-x", tmp_path)
+
+    assert any(s.startswith("docker cp ") and s.endswith("agent-x:/etc/agentenv") for s in vm.scripts)
+    assert vm.scripts[-1] == "docker start agent-x > /dev/null"

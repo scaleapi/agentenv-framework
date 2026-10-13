@@ -70,6 +70,8 @@ def test_ctrl_c_cancels_the_running_runs_lets_a_finished_ones_teardown_finish_an
     terminated = []
 
     class _Sandbox:
+        ON_THIS_MACHINE = False
+
         def __init__(self, sandbox_id):
             self.sandbox_id = sandbox_id
 

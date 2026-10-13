@@ -63,7 +63,7 @@ async def test_a_deploy_starts_only_the_server_on_sqlite_with_its_sizing():
 
 
 _CONTEXT_ONLY = DockerImageArtifact(id="slack-image", version=3, description="d", image_name="local/slack-0123456789ab:v3",
-                                    build_context_object_url="s3://bucket/ctx.tar.gz")
+                                    build_context_object_url="s3://bucket/ctx.tar.gz", dockerfile_path="Dockerfile")
 
 
 @pytest.mark.asyncio
@@ -72,6 +72,20 @@ async def test_a_server_whose_image_is_only_a_build_context_is_refused_before_an
 
     assert ("Can't deploy 'slack' as a server on _FakeSandboxProvider, which runs its image by name: 'slack-image' v3 is "
             "only a build context") in str(run.result)
+    assert run.calls == []
+
+
+_IN_THIS_MACHINES_REGISTRY = DockerImageArtifact(id="slack-image", version=3, description="d",
+                                                 image_name="localhost:5000/local/slack:v3")
+
+
+@pytest.mark.asyncio
+async def test_a_server_whose_image_is_in_this_machines_registry_is_refused_by_a_provider_elsewhere():
+    run = await _run_server_deploy(env=SimpleNamespace(**{**vars(_ENV), "docker_image_artifact": _IN_THIS_MACHINES_REGISTRY}))
+
+    assert ("Can't deploy 'slack' as a server on _FakeSandboxProvider, which runs its image by name: "
+            "localhost:5000/local/slack:v3 is in a registry on this machine, which a sandbox elsewhere can't pull from"
+            ) in str(run.result)
     assert run.calls == []
 
 

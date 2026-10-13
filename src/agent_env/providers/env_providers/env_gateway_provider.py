@@ -12,10 +12,19 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
+import httpx
+
+from agent_env.artifact.artifacts.docker_image import pull_problem
 from agent_env.attribution import Attribution
 from agent_env.env.env import DeployedGatewayEnv, _mcp_url
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT, GatewayMode
-from agent_env.env.gateway.constants import DEFAULT_MCP_SERVER_NAME, WELL_KNOWN_PATH, random_mcp_server_name
+from agent_env.env.gateway.constants import (
+    DEFAULT_MCP_SERVER_NAME,
+    STATE_TOOL_NAME_CLASHES_KEY,
+    WELL_KNOWN_PATH,
+    random_mcp_server_name,
+    tool_name_clashes_text,
+)
 from agent_env.env.envs.service_db import (
     DATABASE_SERVICE_NAME,
     DB_MCP_CONTAINER_PORT,
@@ -32,10 +41,20 @@ from agent_env.providers.env_providers.constants import (
     GATEWAY_APP_DIR,
     GATEWAY_SERVICE_NAME,
 )
-from agent_env.providers.env_providers.env_provider import _SandboxEnvironmentProvider, _size_kwargs, _tool_names
-from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
+from agent_env.providers.env_providers.env_provider import (
+    DeployRefused,
+    _SandboxEnvironmentProvider,
+    _size_kwargs,
+    _tool_names,
+)
+from agent_env.providers.sandbox_providers.local_sandbox import remove_local_work_dir
 from agent_env.providers.sandbox_providers.sandbox import Sandbox, VmSandbox, port_bindings
-from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER, SandboxProvider
+from agent_env.providers.sandbox_providers.sandbox_provider import (
+    SANDBOX_MODE_CONTAINER,
+    SANDBOX_MODE_VM,
+    Accepts,
+    SandboxProvider,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -124,6 +143,32 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
 
     type = "gateway"
     record_class = DeployedGatewayEnv
+
+    @staticmethod
+    def in_vm(sandbox_provider: SandboxProvider) -> bool:
+        """Whether a deploy on ``sandbox_provider`` runs in a VM, as one on a provider that creates VMs does; on one
+        that doesn't, the gateway and each server run in a container of their own, on the provider's private network."""
+        return SANDBOX_MODE_VM in sandbox_provider.SUPPORTED_SANDBOX_MODES
+
+    @classmethod
+    def accepts(cls, sandbox_provider: SandboxProvider) -> Accepts:
+        """The images a deploy on ``sandbox_provider`` runs: in a VM, any it loads; in containers, those the provider's
+        containers run, as it prepares each (its servers', the gateway's and its service-db's)."""
+        if cls.in_vm(sandbox_provider):
+            return Accepts.LOADABLE
+        return sandbox_provider.CONTAINER_ACCEPTS
+
+    @classmethod
+    def sandbox_problem(cls, sandbox_provider: SandboxProvider, *, websites: bool) -> str | None:
+        """Why a deploy, with ``websites`` or without, can't run on ``sandbox_provider``, or None when it can: in
+        containers, it needs their private network, and serves no websites."""
+        if cls.in_vm(sandbox_provider):
+            return None
+        if not sandbox_provider.PRIVATE_NETWORK:
+            return "creates no VM, and can't put the gateway's containers on a private network"
+        if websites:
+            return "runs the gateway in containers, and they can't serve websites"
+        return None
 
     def __init__(self):
         super().__init__()
@@ -623,9 +668,9 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
     async def _terminate_new_sandbox(
         self, *, earlier_sandbox: Sandbox | None, existing_sandbox: Sandbox | None,
     ) -> None:
-        """Terminate the sandbox a deploy that failed or was cancelled created: no record names it yet, so nothing else
-        would. Leaves alone an earlier deploy's sandbox, the caller's existing_sandbox, and the container sandboxes
-        close() ends."""
+        """Terminate the sandbox a deploy that failed or was cancelled created, and remove a local one's work folder once
+        it's down: no record names it yet, so no teardown would. Leaves alone an earlier deploy's sandbox, the caller's
+        existing_sandbox, and the container sandboxes close() ends."""
         new_sandbox, self._sandbox = self._sandbox, earlier_sandbox
         if (new_sandbox is None or new_sandbox is earlier_sandbox or new_sandbox is existing_sandbox
                 or new_sandbox in self._container_sandboxes):
@@ -635,6 +680,12 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         except Exception as e:
             logger.warning(
                 f"Failed to terminate {type(new_sandbox).__name__} {new_sandbox.sandbox_id} after a failed deploy: {e}")
+            return
+        if new_sandbox.ON_THIS_MACHINE:
+            try:
+                await asyncio.to_thread(remove_local_work_dir, new_sandbox.sandbox_id)
+            except OSError as e:
+                logger.warning(f"{new_sandbox.sandbox_id}'s work folder was not removed after a failed deploy: {e}")
 
     async def _deploy_via_vm(
         self,
@@ -661,23 +712,6 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         website_images = website_images or []
         sidecars = sidecars or []
 
-        if existing_sandbox is not None:
-            self._sandbox = existing_sandbox
-        else:
-            vm_kwargs: dict = {}
-            if cpu is not None:
-                vm_kwargs["cpu"] = cpu
-            if memory_mb is not None:
-                vm_kwargs["memory"] = memory_mb
-            self._sandbox = await sandbox_provider.create_vm(
-                exposed_ports=[gateway_port, DB_WEB_PORT, DB_MCP_PORT] + [sc.host_port for sc in sidecars],
-                timeout=ttl_seconds,
-                disk_size_gb=disk_size_gb,
-                attribution=attribution,
-                **vm_kwargs,
-            )
-        sandbox = self._sandbox
-
         config = get_config()
         gateway_env = Env.get(config.default_gateway_env_id)
 
@@ -701,6 +735,29 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         ]
         if self._needs_local_postgres:
             all_images += self._state_provider.store_images_to_load()
+        # Every image is checked before the VM is created, so one it can't get leaves nothing to close.
+        here = (existing_sandbox or sandbox_provider).ON_THIS_MACHINE
+        if problems := [problem for image in all_images
+                        if (problem := Accepts.LOADABLE.problem(image, on_this_machine=here))]:
+            raise ValueError(f"Can't deploy a gateway on {type(sandbox_provider).__name__}, whose VM can't run its "
+                             f"images: {'; '.join(problems)}")
+
+        if existing_sandbox is not None:
+            self._sandbox = existing_sandbox
+        else:
+            vm_kwargs: dict = {}
+            if cpu is not None:
+                vm_kwargs["cpu"] = cpu
+            if memory_mb is not None:
+                vm_kwargs["memory"] = memory_mb
+            self._sandbox = await sandbox_provider.create_vm(
+                exposed_ports=[gateway_port, DB_WEB_PORT, DB_MCP_PORT] + [sc.host_port for sc in sidecars],
+                timeout=ttl_seconds,
+                disk_size_gb=disk_size_gb,
+                attribution=attribution,
+                **vm_kwargs,
+            )
+        sandbox = self._sandbox
         await sandbox.load_docker_images(all_images)
 
         # Compose declares the local_state service by name, so "standing up" is just naming the host;
@@ -815,6 +872,7 @@ COMPOSE_EOF'''
         if card is None:
             raise RuntimeError("Tunnel did not become ready in time")
         card_read_at_utc = datetime.now(timezone.utc).isoformat()
+        await self._refuse_tool_name_clashes(gateway_url)
         mcp_url = _mcp_url(gateway_url, card)
         logger.info(f"MCP endpoint: {mcp_url}")
 
@@ -854,22 +912,30 @@ COMPOSE_EOF'''
         from agent_env.env.env import Env
         from agent_env.config import get_config
 
-        if website_configs:
-            raise NotImplementedError(
-                "Container-mode gateway deploy does not support websites yet; use a VM-mode sandbox provider."
-            )
-
         config = get_config()
         gateway_env = Env.get(config.default_gateway_env_id)
-        # Images that are only a build context are built before anything is created, so a failed build leaves nothing.
+        # Each image is checked, and prepared (one the provider can't pull, built from its build context), before
+        # anything is created, so an image the provider can't run, or a failed build, leaves nothing.
         images = [gateway_env.docker_image_artifact, *mcp_server_images]
-        await asyncio.gather(*(sandbox_provider.prepare_image(image, attribution=attribution)
-                               for image in images if image.context_only))
+        problems = []
+        if self._needs_local_postgres:  # the servicedb and its sidecars, by the names the state provider picks
+            stored = {image.image_name: image for image in self._state_provider.store_images_to_load()}
+            for name in self._state_provider.container_images():
+                if name in stored:
+                    images.append(stored[name])
+                elif problem := pull_problem(name, on_this_machine=sandbox_provider.ON_THIS_MACHINE):
+                    problems.append(problem)
+        accepts = self.accepts(sandbox_provider)
+        problems += [problem for image in images
+                     if (problem := accepts.problem(image, on_this_machine=sandbox_provider.ON_THIS_MACHINE))]
+        if problems:
+            raise ValueError(f"Can't deploy a gateway on {type(sandbox_provider).__name__}, which runs its images by "
+                             f"name: {'; '.join(problems)}")
+        await asyncio.gather(*(sandbox_provider.prepare_image(image, attribution=attribution) for image in images))
 
-        i6pn_kwargs = {"i6pn": True, "region": config.modal_default_region} if isinstance(sandbox_provider, ModalSandboxProvider) else {}
         deploy = _ContainerDeploy(
             sandbox_provider=sandbox_provider, cpu=cpu, disk_size_gb=disk_size_gb, ttl_seconds=ttl_seconds,
-            attribution=attribution, i6pn_kwargs=i6pn_kwargs,
+            attribution=attribution,
         )
 
         try:
@@ -890,7 +956,8 @@ COMPOSE_EOF'''
                 self._state_provider.sidecar_specs(instance=state_instance)
                 if self._needs_local_postgres else []
             )
-            # Step 2: MCP server sandboxes (HTTPS), provisioned in parallel.
+            # Step 2: MCP server sandboxes (HTTPS), provisioned in parallel. Each is recorded as it's created, so a
+            # deploy that fails or is cancelled mid-batch closes the ones already made.
             mcp_coros = [
                 self._provision_mcp(deploy, cfg, art, state_instance)
                 for cfg, art in zip(mcp_servers, mcp_server_images)
@@ -909,12 +976,10 @@ COMPOSE_EOF'''
                     continue
                 if i < len(mcp_coros):
                     environment_name, mcp_sb = r
-                    self._container_sandboxes.append(mcp_sb)
                     self._environment_sandboxes[environment_name] = mcp_sb
                     mcp_results.append((environment_name, mcp_sb))
                 else:
                     spec = sidecar_specs[i - len(mcp_coros)]
-                    self._container_sandboxes.append(r)
                     if spec.name == PGWEB_SERVICE_NAME:
                         pgweb_sb = r
                         self._pgweb_sandbox = r
@@ -925,21 +990,12 @@ COMPOSE_EOF'''
             if errors:
                 raise RuntimeError(f"{len(errors)} of {len(all_results)} sandbox provisioning tasks failed") from errors[0]
 
-            mcp_url_public_by_name: dict[str, str] = {}
-            mcp_url_i6pn_by_name: dict[str, str] = {}
-            for environment_name, mcp_sb in mcp_results:
-                mcp_url_public_by_name[environment_name] = f"{mcp_sb.tunnel_urls[AGENT_ENV_GATEWAY_MCP_PORT]}/mcp"
-                mcp_i6pn = getattr(mcp_sb, "i6pn_address", None)
-                if mcp_i6pn:
-                    mcp_url_i6pn_by_name[environment_name] = f"http://[{mcp_i6pn}]:{AGENT_ENV_GATEWAY_MCP_PORT}/mcp"
-
-            if i6pn_kwargs:
-                missing_i6pn = [n for n in mcp_url_public_by_name if n not in mcp_url_i6pn_by_name]
-                if missing_i6pn:
-                    raise RuntimeError(f"i6pn requested but resolution failed for MCPs: {missing_i6pn}")
-                internal_servers_by_name = mcp_url_i6pn_by_name
-            else:
-                internal_servers_by_name = mcp_url_public_by_name
+            # The gateway reaches each server over the provider's private network.
+            if missing := [name for name, mcp_sb in mcp_results if not mcp_sb.private_host]:
+                raise RuntimeError(f"{type(sandbox_provider).__name__} gave the MCP servers {missing} no address on its "
+                                   "private network")
+            internal_servers_by_name = {name: f"http://{mcp_sb.private_host}:{AGENT_ENV_GATEWAY_MCP_PORT}/mcp"
+                                        for name, mcp_sb in mcp_results}
 
             # Step 3: gateway sandbox (HTTPS) with full MCP URLs in env
             logger.info(f"Provisioning gateway from {gateway_env.docker_image_artifact.image_name}...")
@@ -957,7 +1013,7 @@ COMPOSE_EOF'''
                 **_size_kwargs(cpu, memory_mb),
                 disk_size_gb=disk_size_gb, timeout=ttl_seconds,
                 attribution=attribution,
-                **i6pn_kwargs,
+                private_network=True,
             )
             self._container_sandboxes.append(gateway_sb)
             self._sandbox = gateway_sb
@@ -968,6 +1024,7 @@ COMPOSE_EOF'''
             if card is None:
                 raise RuntimeError("Gateway tunnel did not become ready in time")
             card_read_at_utc = datetime.now(timezone.utc).isoformat()
+            await self._refuse_tool_name_clashes(gateway_url)
 
             db_web_url = pgweb_sb.tunnel_urls[DB_WEB_PORT] + "/" if pgweb_sb else None
             db_mcp_url = db_mcp_sb.tunnel_urls[DB_MCP_CONTAINER_PORT] + "/mcp" if db_mcp_sb else None
@@ -985,6 +1042,24 @@ COMPOSE_EOF'''
         except Exception:
             await self.close()
             raise
+
+    async def _refuse_tool_name_clashes(self, gateway_url: str) -> None:
+        """Refuse the deploy when the gateway reports tool names more than one of its sources serves, which leaves it
+        serving none of its servers' tools. A gateway whose /state can't be read, or that doesn't report clashes (an
+        image older than the report), is let through as before."""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{gateway_url}/state", timeout=_STATE_READ_TIMEOUT_S)
+            response.raise_for_status()
+            clashes = response.json().get(STATE_TOOL_NAME_CLASHES_KEY)
+        except Exception as e:
+            logger.warning(f"Couldn't read the gateway's /state, so its tool names aren't checked for clashes: {e!r}")
+            return
+        if clashes and isinstance(clashes, dict):
+            raise DeployRefused(
+                f"The env's MCP servers serve duplicate tool names, which an agent couldn't tell apart, so its gateway "
+                f"serves none of their tools: {tool_name_clashes_text(clashes)}. Rename the tools, or deploy those "
+                f"servers in separate envs")
 
     async def _wait_for_gateway(self, sandbox: VmSandbox, port: int, timeout: int = 300) -> bool:
         """Wait for the gateway to answer on ``port``.
@@ -1070,7 +1145,7 @@ COMPOSE_EOF'''
 
     async def _provision_sidecar(self, deploy: _ContainerDeploy, spec) -> Sandbox:
         logger.info(f"Provisioning {spec.name} from {spec.image}...")
-        return await deploy.sandbox_provider.create_container(
+        sb = await deploy.sandbox_provider.create_container(
             image_name=spec.image,
             port=spec.port,
             env=spec.env,
@@ -1078,8 +1153,10 @@ COMPOSE_EOF'''
             **_size_kwargs(deploy.cpu, None),
             disk_size_gb=deploy.disk_size_gb, timeout=deploy.ttl_seconds,
             attribution=deploy.attribution,
-            **deploy.i6pn_kwargs,
+            private_network=True,
         )
+        self._container_sandboxes.append(sb)
+        return sb
 
     @property
     def _needs_local_postgres(self) -> bool:
@@ -1138,8 +1215,8 @@ COMPOSE_EOF'''
         logger.info("Service-db schemas initialized.")
 
     async def _stand_up_servicedb(self, deploy: _ContainerDeploy, spec: "LocalPostgresStoreSpec") -> str:
-        """Container mode stands the servicedb up as its own i6pn-only sandbox; returns its host."""
-        logger.info("Provisioning service-db sandbox (Modal, i6pn-only)...")
+        """Container mode stands the servicedb up as its own sandbox, on the private network only; returns its host."""
+        logger.info("Provisioning service-db sandbox (private network only)...")
         # Local backend only (external skips standup); the provider is set by _deploy_gateway.
         db_sb = await deploy.sandbox_provider.create_container(
             image_name=self._state_provider.container_store_image(),
@@ -1149,16 +1226,15 @@ COMPOSE_EOF'''
             disk_size_gb=deploy.disk_size_gb, timeout=deploy.ttl_seconds,
             expose_externally=False,
             attribution=deploy.attribution,
-            **deploy.i6pn_kwargs,
+            private_network=True,
         )
         self._container_sandboxes.append(db_sb)
         self._db_sandbox = db_sb
-        db_i6pn_address = getattr(db_sb, "i6pn_address", None)
-        if not db_i6pn_address:
-            raise RuntimeError("service-db has no i6pn address; cannot route postgres traffic")
-        host = f"[{db_i6pn_address}]"
+        host = db_sb.private_host
+        if not host:
+            raise RuntimeError("service-db has no address on the private network; cannot route postgres traffic")
         await self._init_service_db_via_exec(db_sb, spec.init_sql)
-        logger.info(f"Service-db ready at {host}:{spec.port} (i6pn-only)")
+        logger.info(f"Service-db ready at {host}:{spec.port} (private network only)")
         return host
 
     async def _provision_mcp(
@@ -1172,8 +1248,7 @@ COMPOSE_EOF'''
         env = dict(cfg.extra_env_vars or {})
         env["DATABASE_URL"] = self._state_provider.url_for_environment(cfg.environment_name, instance=state_instance)
         env["ENVIRONMENT_NAME"] = cfg.environment_name
-        if deploy.i6pn_kwargs:
-            env.setdefault("MCP_HOST", "::")
+        env.setdefault("MCP_HOST", "::")  # every address, IPv6 included, as a private network may use
         sb = await deploy.sandbox_provider.create_container(
             image_name=image_artifact.image_name,
             port=AGENT_ENV_GATEWAY_MCP_PORT,
@@ -1181,8 +1256,9 @@ COMPOSE_EOF'''
             **_size_kwargs(deploy.cpu, None),
             disk_size_gb=deploy.disk_size_gb, timeout=deploy.ttl_seconds,
             attribution=deploy.attribution,
-            **deploy.i6pn_kwargs,
+            private_network=True,
         )
+        self._container_sandboxes.append(sb)
         return cfg.environment_name, sb
 
     async def _deploy_gateway(
@@ -1205,7 +1281,8 @@ COMPOSE_EOF'''
         mcp_server_name: str | None = None,
         attribution: Optional[Attribution] = None,
     ) -> DeployedGateway:
-        """One gateway deploy on one (unchained) sandbox provider: Modal containers for a ``ModalSandboxProvider``, else a VM."""
+        """One gateway deploy on one (unchained) sandbox provider: a VM on one that creates VMs, else a container per
+        server on its private network."""
         from agent_env.providers.env_state import LocalPostgresStateProvider, build_state_provider
 
         # Every attempt starts from the caller's store: a failed attempt's close() cleared it.
@@ -1216,7 +1293,9 @@ COMPOSE_EOF'''
             else LocalPostgresStateProvider()
         )
         deploy_kwargs = {"attribution": dict(attribution or {})}
-        if isinstance(sandbox_provider, ModalSandboxProvider):
+        if not self.in_vm(sandbox_provider):
+            if problem := self.sandbox_problem(sandbox_provider, websites=bool(website_configs)):
+                raise ValueError(f"Can't deploy a gateway on {type(sandbox_provider).__name__}, which {problem}")
             if existing_sandbox is not None:
                 raise ValueError("existing_sandbox is only supported for VM-mode providers")
             if sidecars:
@@ -1370,6 +1449,10 @@ def _redact_compose_secrets(compose_content: str) -> str:
     )
 
 
+# Budget for reading the gateway's /state once its card is served: answering it runs tool discovery, one server at a
+# time, if startup's didn't complete.
+_STATE_READ_TIMEOUT_S = 60.0
+
 # Cap on the post-readiness tools/list probe; it only logs, so a slow gateway costs deploy time, never the deploy.
 _TOOLS_PROBE_TIMEOUT_S = 10.0
 
@@ -1406,4 +1489,3 @@ class _ContainerDeploy:
     disk_size_gb: float
     ttl_seconds: int
     attribution: Optional[Attribution]
-    i6pn_kwargs: dict

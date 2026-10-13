@@ -84,6 +84,24 @@ GATEWAY_COMPOSE_HOST = "gateway"
 # Per-child card fetch budget (seconds) when composing the env card.
 CARD_FETCH_TIMEOUT_S = 5.0
 
+# Per-child tools/list budget (seconds) during discovery. Wider than a card fetch: the child answers on the
+# connection every caller shares, so a large service busy with another call can take a while, and a timeout
+# here fails the whole discovery, to be retried on the next connect.
+CHILD_DISCOVERY_TIMEOUT_S = 30.0
+
+# The GET /state field naming each tool name more than one source serves, with its sources: backing servers by name,
+# `gateway` for the gateway's own tools. Empty unless discovery found such a clash, which leaves the env serving none
+# of its servers' tools; a deploy reads it to fail with the clash instead.
+STATE_TOOL_NAME_CLASHES_KEY = "tool_name_clashes"
+
+
+def tool_name_clashes_text(clashes: dict[str, list[str]]) -> str:
+    """Each clashing name and its sources, e.g. ``'list_items' from 'items' and 'stock'``."""
+    def sources(names: list[str]) -> str:
+        quoted = [f"'{n}'" for n in names]
+        return f"{', '.join(quoted[:-1])} and {quoted[-1]}" if len(quoted) > 1 else quoted[0]
+    return "; ".join(f"'{name}' from {sources(names)}" for name, names in clashes.items())
+
 # Trigger status vocabulary, part of the GET /triggers/state contract; `state` asserts against it.
 TRIGGER_STATUSES = ("armed", "firing", "queued", "fired", "failed")
 
@@ -96,6 +114,10 @@ GATEWAY_TRAJECTORY_FILE = os.environ.get(
 )
 
 AGENT_ENV_ROLE_HEADER = "AgentEnv-Role"
+# MCP request `_meta` keys the gateway stamps on every child tools/call: the caller's role, and on the MCP path a
+# key naming the inbound session, so a child can keep per-caller state behind the gateway's one shared session.
+AGENT_ENV_ROLE_META_KEY = "agentenv.io/role"
+AGENT_ENV_SESSION_META_KEY = "agentenv.io/session"
 DEFAULT_ROLE = "default"
 WILDCARD = "*"
 TOOL_DISABLE_ACTION = "disable"
@@ -181,7 +203,7 @@ GATEWAY_EXTENSIONS = [
     },
     {
         "uri": EXT_STATE_URI,
-        "description": "State (urn:agentenv:state/v1): the env's MCP servers and their tools, its changelog id and its role rules.",
+        "description": "State (urn:agentenv:state/v1): the env's MCP servers and their tools, any tool name more than one of them serves, its changelog id and its role rules.",
         "params": {"endpoint": "/state", "methods": {
             "get": {"method": "GET", "endpoint": "/state"}}},
         "required": False,

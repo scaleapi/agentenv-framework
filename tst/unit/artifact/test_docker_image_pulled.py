@@ -16,7 +16,7 @@ def test_a_document_with_no_tar_gz_is_read(document):
     image = DockerImageArtifact.model_validate(document)
 
     assert image.tar_gz_object_url is None
-    assert image.load_problem() is None
+    assert image.load_problem(on_this_machine=False) is None
 
 
 def test_one_is_written_with_both_spellings_of_its_tar_gz_empty_and_reads_back_the_same():
@@ -39,7 +39,42 @@ def test_one_is_written_with_both_spellings_of_its_tar_gz_empty_and_reads_back_t
 def test_an_image_loads_from_its_tar_gz_or_by_pulling_a_name_that_names_its_registry(image_name, tar_gz, problem):
     image = DockerImageArtifact(id="img", version=1, description="d", image_name=image_name, tar_gz_object_url=tar_gz)
 
-    assert image.load_problem() == problem
+    assert image.load_problem(on_this_machine=True) == problem
+
+
+@pytest.mark.parametrize("image_name", ["localhost:5000/img:v1", "127.0.0.1:5000/img:v1"])
+def test_a_sandbox_elsewhere_cant_pull_from_this_machines_registry(image_name):
+    image = DockerImageArtifact(id="img", version=1, description="d", image_name=image_name)
+    here = f"{image_name} is in a registry on this machine, which a sandbox elsewhere can't pull from"
+
+    assert (image.load_problem(on_this_machine=True), image.by_name_problem(on_this_machine=True)) == (None, None)
+    assert image.load_problem(on_this_machine=False) == image.by_name_problem(on_this_machine=False) == here
+
+
+@pytest.mark.parametrize("image_name, tar_gz, elsewhere", [
+    ("mcp-server-email", "s3://bucket/img.tar.gz",
+     "'img' v1 is stored as a tar.gz under 'mcp-server-email', which names no registry: it's the tag the machine that "
+     "built it gave it, which a sandbox elsewhere can't pull; run it on a provider whose VMs load its tar.gz, or put "
+     "the image again in an image store whose registry the sandbox can reach"),
+    ("team/img:v1", "s3://bucket/img.tar.gz", "names no registry"),
+    (REF, "s3://bucket/img.tar.gz", None),
+    ("python:3.12", None, None),
+], ids=["bare-tag", "bare-path", "registry", "docker-hub-name"])
+def test_a_sandbox_elsewhere_cant_pull_the_tag_an_image_stored_as_a_tar_gz_was_built_under(image_name, tar_gz,
+                                                                                          elsewhere):
+    """The tag exists only where the image was built; a bare name with no tar.gz is a Docker Hub image."""
+    image = DockerImageArtifact(id="img", version=1, description="d", image_name=image_name, tar_gz_object_url=tar_gz)
+
+    found = image.by_name_problem(on_this_machine=False)
+    assert (found is None) if elsewhere is None else (elsewhere in found)
+    assert image.by_name_problem(on_this_machine=True) is None
+
+
+def test_a_vm_elsewhere_loads_the_tar_gz_of_an_image_named_for_this_machines_registry():
+    image = DockerImageArtifact(id="img", version=1, description="d", image_name="localhost:5000/img:v1",
+                                tar_gz_object_url="file:///state/img.tar.gz")
+
+    assert image.load_problem(on_this_machine=False) is None
 
 
 def test_one_with_no_tar_gz_has_no_bytes_to_load():

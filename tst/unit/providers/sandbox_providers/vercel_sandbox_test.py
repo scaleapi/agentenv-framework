@@ -559,7 +559,7 @@ async def test_registry_and_context_images_use_the_vm_loading_contract(monkeypat
     monkeypatch.setattr("agent_env.providers.sandbox_providers.sandbox.get_config", lambda: config)
     reference = DockerImageArtifact(id="ref", description="", image_name="registry.example/tool:v1")
     context = DockerImageArtifact(id="context", description="", image_name="context:v1",
-                                  build_context_object_url="file:///store/context.tar.gz")
+                                  build_context_object_url="file:///store/context.tar.gz", dockerfile_path="Dockerfile")
 
     await sandbox.load_docker_images([reference, context])
 

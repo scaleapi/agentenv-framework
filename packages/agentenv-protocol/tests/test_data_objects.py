@@ -3,6 +3,7 @@ call, and the answer that names where the export was uploaded."""
 
 from __future__ import annotations
 
+import inspect
 import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -51,11 +52,23 @@ def _grant(*, max_object_bytes: int = 1024) -> WriteNamespaceGrant:
 class _FakeMCP:
     def __init__(self) -> None:
         self.routes: list[Route] = []
+        self.tools: dict[str, tuple] = {}
         self.settings = SimpleNamespace(streamable_http_path="/mcp")
+        self._tool_manager = SimpleNamespace(get_tool=self.tools.get, call_tool=self._call_tool)
+
+    async def _call_tool(self, name: str, arguments: dict, *_: object, **__: object):
+        result = self.tools[name][1](**arguments)
+        return await result if inspect.isawaitable(result) else result
 
     def custom_route(self, path: str, methods: list[str]):
         def deco(fn):
             self.routes.append(Route(path, fn, methods=methods))
+            return fn
+        return deco
+
+    def tool(self, name: str | None = None, description: str | None = None):
+        def deco(fn):
+            self.tools[name or fn.__name__] = (description, fn)
             return fn
         return deco
 

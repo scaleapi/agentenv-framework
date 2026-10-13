@@ -1,4 +1,6 @@
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import click
 
@@ -43,14 +45,32 @@ class _UserErrorsAreNotCrashes(click.Group):
             raise click.ClickException("\n".join([str(e), *getattr(e, "__notes__", ())])) from e
 
 
+@contextmanager
+def _verbose_logging() -> Iterator[None]:
+    """Log agent-env's own DEBUG messages, and only warnings from other libraries, while a command runs: their debug
+    logs can carry credentials, as hpack's do, which log every HTTP/2 header Modal's client sends, its token among
+    them. The loggers' levels are put back after it, so a CLI invoked in-process leaves the caller's logging as it was."""
+    logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(name)s %(message)s")
+    loggers = [logging.getLogger(name) for name in ("agent_env", "agentenv_protocol")]
+    levels = [logger.level for logger in loggers]
+    for logger in loggers:
+        logger.setLevel(logging.DEBUG)
+    try:
+        yield
+    finally:
+        for logger, level in zip(loggers, levels):
+            logger.setLevel(level)
+
+
 @click.group(cls=_UserErrorsAreNotCrashes)
 @click.version_option(package_name="agentenv-framework", prog_name="agent-env", message="%(prog)s %(version)s")
-@click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging (DEBUG level)")
+@click.option("--verbose", "-v", is_flag=True,
+              help="Enable agent-env's DEBUG logging (other libraries log warnings only)")
 @click.pass_context
 def cli(ctx: click.Context, verbose: bool):
     """Agent environment CLI."""
     if verbose:
-        logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(name)s %(message)s")
+        ctx.with_resource(_verbose_logging())
     # For this command only, so a CLI invoked in-process leaves the caller's stores as they were.
     ctx.with_resource(namespace_routing())
 

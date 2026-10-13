@@ -2,31 +2,34 @@
 
 Each deploy, an env's, an agent's, a sandbox's or a rubrics judge's, runs on its effective sandbox provider: the run's
 ``--sandbox``, else the step's own field, else the config default, resolved as the step resolves it when it runs. A
-comma-separated provider is a chain whose deploys fall back from one provider to the next, so every provider in it must
-pass. A run is refused when a deploy would fail on its provider: an image only this machine has (in its local registry,
-or saved in its local object store) on a provider that isn't the local one, a VM asked of a provider that can't create
-one, or containers on the local provider without a Docker daemon. A deploy_agent step that names no agent, and a judge
-that names none, deploy the configured default agent, which must be in the store. An env the bundle writes is
-checked from its planned env.toml.
+comma-separated provider is a chain whose deploys skip a provider that refuses them and fall back from one provider to
+the next, so a deploy is refused only when every provider in it refuses it. A run is refused when a deploy would fail on
+its provider: an image the provider can't run, by the check the deploy itself makes, such as one a sandbox elsewhere
+would pull from this machine's registry; a VM asked of a provider that can't create one; or containers on the local
+provider without a Docker daemon. An image's tar.gz or build context
+that only this machine's object store holds isn't refused: agent-env pushes it to the sandbox. A deploy_agent step that
+names no agent, and a judge that names none, deploy the configured default agent, which must be in the store. An env the
+bundle writes is checked from its planned env.toml.
 
 An image the bundle builds is written in the form its deploys can run: built on this machine when they deploy on the
 local provider, and as its build context alone when they deploy on providers that build it, in a VM or, as Modal does,
 themselves. One version is one of the two, so a run deploying it both ways is refused, as is one deploying it on a
 provider that runs an image by name.
 
-A gateway deploy on the local provider runs on infra envs the store may not hold yet: the gateway, the service-db its
-local Postgres state runs from, and the website browser it adds for websites. The run builds those once its writes are
-done (``agent_env.env.bootstrap``), so they're named here, and refused here when they can't be built.
+A gateway deploy runs on infra envs the store may not hold yet: the gateway, the service-db its local Postgres state
+runs from, and the website browser it adds for websites. In local stores the run builds those once its writes are done
+(``agent_env.env.bootstrap``), for this machine's platform and with their build contexts, which a VM or Modal running
+another platform builds them from; so they're named here, and refused here when they can't be built.
 """
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from urllib.parse import urlparse
 
 from agent_env.a2a_agent import A2AAgent
-from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
+from agent_env.artifact.artifacts.docker_image import PUT_AGAIN, DockerImageArtifact, pull_problem
 from agent_env.config import get_config
 from agent_env.entity_refs import EntityKind, parse_toml_ref
 from agent_env.env.bootstrap import (
@@ -37,7 +40,9 @@ from agent_env.env.bootstrap import (
     InfraError,
     default_env_id,
     infra_to_build,
+    needs_docker,
     put_command,
+    stores_are_local,
 )
 from agent_env.env.env import Env
 from agent_env.env.envs._deployment import provider_or_class
@@ -51,10 +56,9 @@ from agent_env.providers.env_providers.env_provider import _env_provider_class
 from agent_env.providers.env_providers.env_server_provider import EnvironmentServerProvider
 from agent_env.providers.env_state.env_state_provider import LOCAL_POSTGRES_STATE_TYPE
 from agent_env.providers.env_state.store import get_env_state_instance_store
-from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
-from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox_provider import (
+    SANDBOX_MODE_VM,
+    Accepts,
     SandboxProvider,
     build_sandbox_provider,
     get_agent_sandbox_provider,
@@ -62,12 +66,11 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     get_sandbox_provider,
 )
 from agent_env.store.base import NotFoundError
-from agent_env.store.image_store.oci_registry_credentials import is_loopback_host, registry_host_from_ref
-from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
+from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep, linked_sandbox_problem
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.deploy_sandbox import DeploySandboxTaskStep
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
-from agent_env.utils.docker_build import docker_unreachable
+from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM, docker_unreachable
 
 from ._fs import relative
 from .parse import BundleError, BundleKind
@@ -100,9 +103,7 @@ class _Image:
     """An image a deploy runs, as its message names it."""
 
     what: str
-    local_only: str | None  # why only this machine has it, or None
-    unloadable: str | None = None  # why no sandbox can get it, or None
-    by_name: str | None = None  # why a sandbox that runs it by pulling its name can't, or None
+    artifact: DockerImageArtifact | None = None  # the store's image, checked as each provider runs it
     built: str | None = None  # the id of the image when the bundle builds it, whose form the walk decides at the end
 
 
@@ -122,15 +123,14 @@ class _Walk:
         self.problems: dict[str, dict[str, None]] = {}  # each deploy's problem, and the deploys it's found at
         self.run_problems: list[str] = []  # the run's as a whole
         self.infra: set[str] = set()  # the infra kinds a deploy on the local provider needs
-        self.remote_infra: list[tuple[str, SandboxProvider, set[str]]] = []  # (where, provider, kinds) of a deploy elsewhere
         self.docker_users: list[str] = []
         self.default_agent_users: list[tuple[str, str]] = []  # (where, what names no agent)
         self.written = {write.id for write in plan.writes}
         self.agents = {write.id: write.source for write in plan.writes if write.kind is BundleKind.AGENT}
         self.envs = {write.id: write.source for write in plan.writes if write.kind is BundleKind.ENV}
         self.built = {write.id: write.source for write in plan.writes if isinstance(write.source, BuiltImage)}
-        # Each deploy of an image the bundle builds: (where, what, its provider's links, those that run it by name)
-        self.uses: dict[str, list[tuple[str, str, list[SandboxProvider], list[SandboxProvider]]]] = {}
+        # Each deploy of an image the bundle builds: (where, what, its provider's links, the images it accepts on each)
+        self.uses: dict[str, list[tuple[str, str, list[SandboxProvider], Callable[[SandboxProvider], Accepts]]]] = {}
 
     def task(self, task: ResolvedEntry) -> None:
         steps = [build_step(config) for config in task.config]
@@ -155,15 +155,16 @@ class _Walk:
             infra = infra_to_build(self.infra)
         except InfraError as e:
             self.run_problems.extend(e.problems)
-        for where, provider, kinds in self.remote_infra:
-            self._remote_infra(where, provider, kinds)
         contexts = self._contexts()
         self._default_agent()
-        if self.docker_users and (reason := docker_unreachable()):
+        reason = docker_unreachable() if self.docker_users or infra else None
+        if reason and self.docker_users:
             shown = ", ".join(self.docker_users[:_SHOWN_DOCKER_USERS])
             more = len(self.docker_users) - _SHOWN_DOCKER_USERS
             self.run_problems.append(f"the local sandbox provider runs containers for {shown}"
                                      f"{f' and {more} more' if more > 0 else ''}, and {reason}")
+        elif reason:  # infra the run builds for deploys elsewhere
+            self.run_problems.append(needs_docker(infra, reason))
         problems = list(self.run_problems)
         for problem, wheres in self.problems.items():
             first, *others = wheres
@@ -190,32 +191,23 @@ class _Walk:
             kinds = set()
         else:  # a plugin's provider, or one deploy_env's own preflight refuses for this env
             return
-        env_id, images = step.env_id, deployment.images
-        if GATEWAY in kinds and (loaders := [link for link in _links(provider)
-                                             if not isinstance(link, ModalSandboxProvider)]):
-            self._loadable(where, loaders, images)  # a gateway VM loads its images; Modal's runs each by name
-        # A lone server runs in a container from its image's name, though Modal's builds one that's only a build context;
-        # a gateway VM loads its images, and Modal's gateway builds each.
-        by_name = [] if GATEWAY in kinds else [link for link in _links(provider)
-                                               if not isinstance(link, ModalSandboxProvider)]
-        self._by_name(where, by_name, images)
-        self._use(where, _links(provider), by_name, images)
-        if _local_link(provider):
+        env_id, images, env_provider = step.env_id, deployment.images, deployment.provider
+        elsewhere = functools.partial(self._gateway_elsewhere, env_id, env_provider, kinds) if GATEWAY in kinds else None
+        taking = self._check(where, provider, env_provider.accepts, images, vms_load=GATEWAY in kinds, elsewhere=elsewhere)
+        if any(link.ON_THIS_MACHINE for link in taking):
             self.infra |= kinds
             self.docker_users.append(where)
-        if remote := _remote_links(provider):
-            self._reachable(where, remote, images)
-            # Modal's gateway runs each server in a container of its own, and can't serve websites.
-            containers = [link for link in remote if isinstance(link, ModalSandboxProvider)]
-            vms = [link for link in remote if link not in containers]
-            if WEBSITE_BROWSER in kinds and containers:
-                self._problem(where, f"deploys env {env_id!r}, which has websites, on the {_shown(containers[0])} "
-                                     "sandbox provider, whose gateway runs in containers and can't serve websites; run it "
-                                     "on a VM provider, such as --sandbox local")
-            if containers:
-                self.remote_infra.append((where, containers[0], kinds - {WEBSITE_BROWSER}))
-            if vms:
-                self.remote_infra.append((where, vms[0], kinds))
+        elif taking and stores_are_local():
+            self.infra |= kinds
+
+    def _gateway_elsewhere(self, env_id: str, env_provider: type, kinds: set[str], link: SandboxProvider) -> list[str]:
+        """Why ``link``, a provider not on this machine, can't run env ``env_id``'s gateway deploy: its sandboxes, or
+        the infra envs of ``kinds`` it runs."""
+        found = []
+        if problem := env_provider.sandbox_problem(link, websites=WEBSITE_BROWSER in kinds):
+            found.append(f"deploys env {env_id!r} on the {_shown(link)} sandbox provider, which {problem}; run it on a VM "
+                         "provider, such as --sandbox local")
+        return found + self._remote_infra(link, kinds if env_provider.in_vm(link) else kinds - {WEBSITE_BROWSER})
 
     def _stored(self, step: DeployEnvTaskStep) -> _Deployment | None:
         """How a store env deploys, or None when the walk leaves it to deploy_env's own preflight."""
@@ -272,11 +264,11 @@ class _Walk:
     def _planned_image(self, env_id: str, ref: Reference) -> _Image | None:
         what = f"env {env_id!r}'s image {ref.id!r}"
         if ref.id in self.built:
-            return _Image(what, None, built=ref.id)
+            return _Image(what, built=ref.id)
         if ref.id in self.written:
             return None  # another of the bundle's writes, which materialize refuses or writes first
         try:
-            return _image(what, DockerImageArtifact.get(ref.id, self._planned_version(ref.kind, ref.id, ref.version)))
+            return _Image(what, DockerImageArtifact.get(ref.id, self._planned_version(ref.kind, ref.id, ref.version)))
         except NotFoundError:
             return None  # the plan reports a store image that isn't there
 
@@ -285,14 +277,19 @@ class _Walk:
         return version if version is not None else self.plan.store_latest.get((kind, entity_id))
 
     def _agent(self, where: str, step: DeployAgentTaskStep, sandboxes: dict[str, DeploySandboxTaskStep]) -> None:
+        accepts: Callable[[SandboxProvider], Accepts] = A2AAgent.accepts
         if step.sandbox_name:
             linked = sandboxes.get(step.sandbox_name)
             if linked is None:
                 return  # the step itself refuses an agent linked to a sandbox the task doesn't deploy
+            if problem := linked_sandbox_problem(step.sandbox_name, linked.sandbox_mode, linked.exposed_ports or ()):
+                self._problem(where, problem)
+                return
             provider = _provider(self.sandbox or linked.sandbox_type, get_sandbox_provider)
+            accepts = functools.partial(A2AAgent.accepts, sandbox_mode=linked.sandbox_mode)  # the VM loads its image
         else:
             provider = _provider(self.sandbox or step.sandbox_type, get_agent_sandbox_provider)
-        self._agent_deploy(where, provider, step.a2a_agent_id, step.a2a_agent_version, "names no agent")
+        self._agent_deploy(where, provider, step.a2a_agent_id, step.a2a_agent_version, "names no agent", accepts)
 
     def _judge(self, where: str, step: RubricsVerifierTaskStep) -> None:
         if not step.use_agent_judge or step.agent_name is not None:
@@ -301,37 +298,30 @@ class _Walk:
         self._agent_deploy(where, provider, step.judge_a2a_agent_id, None, "names no judge agent")
 
     def _agent_deploy(self, where: str, provider: SandboxProvider, agent_id: str | None, version: int | None,
-                      unnamed: str) -> None:
-        if _local_link(provider):
-            self.docker_users.append(where)
+                      unnamed: str, accepts: Callable[[SandboxProvider], Accepts] = A2AAgent.accepts) -> None:
         if agent_id is None:
             self.default_agent_users.append((where, unnamed))
             agent_id = get_config().get_default_a2a_agent_id()
-        containers = [link for link in _links(provider)
-                      if isinstance(link, (LocalSandboxProvider, ModalSandboxProvider))]
-        loaders = [link for link in _links(provider) if link not in containers]  # containers run an agent's image
-        remote = _remote_links(provider)
-        if (image := self._agent_image(agent_id, version)) is None:
-            return
-        if loaders:
-            self._loadable(where, loaders, [image])
-        by_name = [link for link in containers if isinstance(link, LocalSandboxProvider)]  # Modal's builds it
-        self._by_name(where, by_name, [image])
-        self._use(where, _links(provider), by_name, [image])
-        if remote:
-            self._reachable(where, remote, [image])
+        image = self._agent_image(agent_id, version)
+        taking = self._check(where, provider, accepts, [image] if image else [], vms_load=True)
+        if any(link.ON_THIS_MACHINE for link in taking):
+            self.docker_users.append(where)
 
     def _sandbox(self, where: str, step: DeploySandboxTaskStep) -> None:
         provider = _provider(self.sandbox or step.sandbox_type, get_sandbox_provider)
-        if step.sandbox_mode == "vm":
-            if not _creates_vms(provider):
-                self._problem(where, f"deploys a VM sandbox, and the {_shown(provider)} sandbox provider can't create a "
-                                     "VM; run it on one that can, such as --sandbox local")
+        if step.sandbox_mode not in provider.SUPPORTED_SANDBOX_MODES:
+            kind = "VM" if step.sandbox_mode == SANDBOX_MODE_VM else step.sandbox_mode
+            self._problem(where, f"deploys a {kind} sandbox, and the {_shown(provider)} sandbox provider can't create a "
+                                 f"{kind}; run it on one that can, such as --sandbox local")
+            return
+        if step.sandbox_mode == SANDBOX_MODE_VM:
             return
         if _local_link(provider):
             self.docker_users.append(where)
-        if step.image and (remote := _remote_links(provider)):
-            self._reachable(where, remote, [_Image(f"the image {step.image}", _local_only(step.image))])
+        if step.image and not _local_link(provider):  # one on this machine pulls from its registry, and a deploy skips the rest
+            if problem := pull_problem(step.image, on_this_machine=False):
+                self._problem(where, f"deploys the image {step.image} on the {_shown(provider)} sandbox provider: "
+                                     f"{problem}; run it with --sandbox local")
 
     # What a deploy runs
 
@@ -342,64 +332,91 @@ class _Walk:
         if (agent := self.agents.get(agent_id)) is not None:
             image_id, image_version = parse_toml_ref(EntityKind.ARTIFACT, agent.config.get("image"))
             if image_id in self.built:
-                return _Image(what, None, built=image_id)
+                return _Image(what, built=image_id)
             if image_id in self.written:
                 return None  # another of the bundle's writes, which materialize refuses or writes first
             planned = self._planned_version(EntityKind.ARTIFACT, image_id, image_version)
-            return _image(what, DockerImageArtifact.get(image_id, planned))
+            return _Image(what, DockerImageArtifact.get(image_id, planned))
         try:
-            return _image(what, A2AAgent.get(agent_id, version).docker_image_artifact)
+            return _Image(what, A2AAgent.get(agent_id, version).docker_image_artifact)
         except (NotFoundError, ValueError, KeyError, TypeError):
             return None
 
-    def _loadable(self, where: str, loaders: list[SandboxProvider], images: list[_Image]) -> None:
-        """Refuse each of ``images`` a VM on ``loaders`` can't get: it loads an image's tar.gz, or pulls an image with
-        none by name."""
+    def _check(self, where: str, provider: SandboxProvider, accepts: Callable[[SandboxProvider], Accepts],
+               images: list[_Image], *, vms_load: bool,
+               elsewhere: Callable[[SandboxProvider], list[str]] | None = None) -> list[SandboxProvider]:
+        """The providers the deploy ``where`` may run on that take it, refusing the deploy, naming why each refuses
+        (``_link_refusals``), when none does: a deploy skips a provider that refuses it, so one that takes it is enough.
+        One on this machine that takes it runs it on this machine's Docker; one it skips needs none. An image the
+        bundle builds is noted with them, for ``_contexts`` to choose its form."""
+        links = list(provider.links)
+        refusals = [(link, self._link_refusals(link, accepts, images, vms_load=vms_load, elsewhere=elsewhere))
+                    for link in links]
+        if all(found for _, found in refusals):
+            for _, found in refusals:
+                for problem in found:
+                    self._problem(where, problem)
         for image in images:
-            if image.unloadable:
-                self._problem(where, f"deploys {image.what} on the {_shown(loaders[0])} sandbox provider, which can't "
-                                     f"load it: {image.unloadable}")
+            if image.built is not None:
+                self.uses.setdefault(image.built, []).append((where, image.what, links, accepts))
+        return [link for link, found in refusals if not found]
 
-    def _by_name(self, where: str, links: list[SandboxProvider], images: list[_Image]) -> None:
-        """Refuse each of ``images`` a sandbox on ``links`` can't run: it pulls an image by its name, and a context-only
-        image's name is a tag only its build gives it."""
-        on_modal = bool(links) and isinstance(links[0], ModalSandboxProvider)
-        builds = "whose VMs build it, such as --sandbox modal_vm" if on_modal else "that builds it, such as --sandbox modal"
-        for image in images:
-            if links and image.by_name:
-                self._problem(where, f"deploys {image.what} on the {_shown(links[0])} sandbox provider, which runs it "
-                                     f"by name: {image.by_name}; run it on a provider {builds}")
+    def _link_refusals(self, link: SandboxProvider, accepts: Callable[[SandboxProvider], Accepts], images: list[_Image],
+                       *, vms_load: bool, elsewhere: Callable[[SandboxProvider], list[str]] | None) -> list[str]:
+        """Why ``link`` can't take a deploy of ``images``: each it can't run as ``accepts`` says the deploy runs images
+        there (``_refusal``), and, when it isn't on this machine, whatever ``elsewhere`` says of it. ``vms_load`` when
+        the deploy loads images on a VM provider, as an agent's and a gateway's do."""
+        found = [refusal for image in images if (refusal := self._refusal(link, accepts(link), image, vms_load=vms_load))]
+        if elsewhere is not None and not link.ON_THIS_MACHINE:
+            found += elsewhere(link)
+        return found
 
-    def _reachable(self, where: str, remote: list[SandboxProvider], images: list[_Image]) -> None:
-        for image in images:
-            if image.local_only:
-                self._problem(where, f"deploys {image.what} on the {_shown(remote[0])} sandbox provider, which can't "
-                                     f"reach it: {image.local_only}; run it with --sandbox local")
+    def _refusal(self, link: SandboxProvider, form: Accepts, image: _Image, *, vms_load: bool) -> str | None:
+        """Why a deploy can't run ``image`` on ``link``, which takes images in ``form``, by the check the deploy makes
+        (``Accepts.problem``), or None when it can: a VM loads an image's tar.gz, or pulls an image with none when its
+        name names a registry it reaches, and a provider that runs an image by name can't run one that is only a build
+        context, whose name is a tag only its build gives it, nor, from elsewhere, pull one from this machine's
+        registry. A VM it would create checks the image's platform once it exists."""
+        if image.artifact is None or (refusal := form.problem(image.artifact, on_this_machine=link.ON_THIS_MACHINE)) is None:
+            return None
+        if form.problem(image.artifact, on_this_machine=True) is None:  # refused only because the sandbox isn't here
+            loads = (", or on a provider whose VMs load its tar.gz, such as --sandbox modal_vm"
+                     if vms_load and image.artifact.tar_gz_object_url and form is not Accepts.LOADABLE
+                     and image.artifact.platform_problem(DEFAULT_BUILD_PLATFORM) is None else "")
+            if image.artifact.stored_under_build_tag:  # its remedy, with the CLI's flags
+                return (f"deploys {image.what} on the {_shown(link)} sandbox provider: "
+                        f"{image.artifact.build_tag_reason()}; run it with --sandbox local{loads}, or {PUT_AGAIN}")
+            return (f"deploys {image.what} on the {_shown(link)} sandbox provider: {refusal}; run it with "
+                    f"--sandbox local{loads}")
+        if form is Accepts.LOADABLE:
+            return f"deploys {image.what} on the {_shown(link)} sandbox provider, which can't load it: {refusal}"
+        builds_itself = link.CONTAINER_ACCEPTS is Accepts.NAME_OR_CONTEXT
+        builds = ("whose VMs build it, such as --sandbox modal_vm" if builds_itself
+                  else "that builds it, such as --sandbox modal")
+        return (f"deploys {image.what} on the {_shown(link)} sandbox provider, which runs it by name: {refusal}; run it "
+                f"on a provider {builds}")
 
-    def _remote_infra(self, where: str, provider: SandboxProvider, kinds: set[str]) -> None:
-        for kind in sorted(kinds):
+    def _remote_infra(self, link: SandboxProvider, kinds: set[str]) -> list[str]:
+        """Why ``link``, a provider not on this machine, can't run the infra envs of ``kinds``. One the run builds, in
+        local stores missing or built from other inputs, isn't checked: it's built anew, with its build context."""
+        built = {build.kind for build in infra_to_build(kinds)} if stores_are_local() else set()
+        found = []
+        for kind in sorted(kinds - built):
             env_id = default_env_id(kind)
             try:
                 env = Env.get(env_id)
             except NotFoundError:
-                self._problem(where, f"deploys on the {_shown(provider)} sandbox provider, which needs the {kind} env "
-                                     f"{env_id!r}, and the store doesn't hold it; agent-env builds it only for the local "
-                                     f"sandbox provider, so put it in a store that provider can reach (`{put_command(kind)}`)")
+                found.append(f"deploys on the {_shown(link)} sandbox provider, which needs the {kind} env {env_id!r}, "
+                             f"and the store doesn't hold it; agent-env builds infra envs only into local stores, so put "
+                             f"it with `{put_command(kind)}`")
                 continue
             artifacts = ([env.db_docker_image_artifact, env.db_web_docker_image_artifact,
                           env.db_mcp_docker_image_artifact] if isinstance(env, ServiceDBEnv) else [env.docker_image_artifact])
-            images = [_image(f"the {kind} env {env_id!r}'s image {image.id!r}", image) for image in artifacts]
-            if not isinstance(provider, ModalSandboxProvider):  # whose containers run by name, or are swapped out
-                self._loadable(where, [provider], images)
-            elif kind != GATEWAY:  # whose image Modal builds when it's only a build context
-                self._by_name(where, [provider], images)
-            self._reachable(where, [provider], images)
-
-    def _use(self, where: str, links: list[SandboxProvider], by_name: list[SandboxProvider],
-             images: list[_Image]) -> None:
-        for image in images:
-            if image.built is not None:
-                self.uses.setdefault(image.built, []).append((where, image.what, links, by_name))
+            accepts = EnvironmentGatewayProvider.accepts(link)
+            found += [refusal for image in artifacts
+                      if (refusal := self._refusal(link, accepts, _Image(f"the {kind} env {env_id!r}'s image {image.id!r}",
+                                                                         image), vms_load=True))]
+        return found
 
     def _contexts(self) -> frozenset[str]:
         """The images the bundle builds that it writes as build contexts: those every deploy runs on providers that
@@ -409,16 +426,16 @@ class _Walk:
             built = self.built[image_id]
             source = f"{relative(self.plan.bundle.bundle.root, built.entry.path)}/{built.dockerfile}"
             local, vms = [], []
-            for where, what, links, by_name in uses:
+            for where, what, links, accepts in uses:
                 for link in links:
-                    if isinstance(link, LocalSandboxProvider):
+                    if link.ON_THIS_MACHINE:
                         local.append((where, what, links, link))
-                    elif link in by_name or not _builds(link):
-                        how = "runs it by name" if link in by_name else "can't build it from its build context"
-                        self._problem(where, f"deploys {what} on the {_shown(link)} sandbox provider, which {how}, and "
-                                             f"the bundle builds it from {source}, which a sandbox runs only once it's "
-                                             "built on this machine or by the provider it runs on; run it with "
-                                             "--sandbox local, or on a provider that builds it, such as --sandbox modal")
+                    elif accepts(link) is Accepts.NAME:
+                        self._problem(where, f"deploys {what} on the {_shown(link)} sandbox provider, which runs it by "
+                                             f"name, and the bundle builds it from {source}, which a sandbox runs only "
+                                             "once it's built on this machine or by the provider it runs on; run it "
+                                             "with --sandbox local, or on a provider that builds it, such as --sandbox "
+                                             "modal")
                     else:
                         vms.append((where, what, links, link))
             if local and vms:
@@ -460,7 +477,7 @@ def _stored_images(env: Env) -> tuple[list[_Image], bool]:
     """The images a store env runs through a gateway, and whether it has websites."""
     topology = _gateway_topology(env)
     images = [*topology.mcp_server_images, *(topology.website_images or [])]
-    return [_image(f"env {env.id!r}'s image {image.id!r}", image) for image in images], bool(topology.website_configs)
+    return [_Image(f"env {env.id!r}'s image {image.id!r}", image) for image in images], bool(topology.website_configs)
 
 
 def _state_type(step: DeployEnvTaskStep) -> str | None:
@@ -477,31 +494,12 @@ def _provider(spec: str | None, default: Callable[[], SandboxProvider]) -> Sandb
     return build_sandbox_provider(spec) if spec else default()
 
 
-def _links(provider: SandboxProvider) -> list[SandboxProvider]:
-    return list(provider.providers) if isinstance(provider, ChainedSandboxProvider) else [provider]
-
-
 def _local_link(provider: SandboxProvider) -> bool:
-    return any(isinstance(link, LocalSandboxProvider) for link in _links(provider))
-
-
-def _remote_links(provider: SandboxProvider) -> list[SandboxProvider]:
-    return [link for link in _links(provider) if not isinstance(link, LocalSandboxProvider)]
-
-
-def _creates_vms(provider: SandboxProvider) -> bool:
-    """Whether ``provider`` implements create_vm; a chain doesn't, whatever its providers do."""
-    return type(provider).create_vm is not SandboxProvider.create_vm
-
-
-def _builds(provider: SandboxProvider) -> bool:
-    """Whether ``provider`` builds an image that's only a build context: in a VM it creates, or itself before running
-    it (``prepare_image``), as Modal does."""
-    return _creates_vms(provider) or type(provider).prepare_image is not SandboxProvider.prepare_image
+    return any(link.ON_THIS_MACHINE for link in provider.links)
 
 
 def _shown(provider: SandboxProvider) -> str:
-    return _named(_links(provider))
+    return _named(list(provider.links))
 
 
 def _named(links: list[SandboxProvider]) -> str:
@@ -517,17 +515,3 @@ def _name(provider: SandboxProvider) -> str:
             return name
     return cls.__name__
 
-
-def _image(what: str, image: DockerImageArtifact) -> _Image:
-    return _Image(what, _local_only(image), image.load_problem(), image.by_name_problem())
-
-
-def _local_only(image: DockerImageArtifact | str) -> str | None:
-    """Why only this machine has ``image``: its reference names a registry on this machine, or it's saved in this
-    machine's object store. None when neither."""
-    ref = image if isinstance(image, str) else image.image_name
-    if is_loopback_host(registry_host_from_ref(ref)):
-        return f"{ref} is in a registry on this machine"
-    if not isinstance(image, str) and image.tar_gz_object_url and urlparse(image.tar_gz_object_url).scheme == "file":
-        return f"{image.id!r} is saved in this machine's object store"
-    return None

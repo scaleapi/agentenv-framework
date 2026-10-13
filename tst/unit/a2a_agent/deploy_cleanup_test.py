@@ -9,7 +9,7 @@ import pytest
 from agent_env.a2a_agent.a2a_agent import DEFAULT_A2A_PORT, A2AAgent
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.providers.sandbox_providers import sandbox_provider
-from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER
+from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER, SandboxProvider
 
 
 class _Sandbox:
@@ -26,7 +26,7 @@ class _Sandbox:
 async def test_a_deploy_that_stops_waiting_for_its_card_closes_its_sandbox(monkeypatch, local_stores, ending):
     sandbox, waiting = _Sandbox(), asyncio.Event()
 
-    class _Provider:
+    class _Provider(SandboxProvider):
         async def create_sandbox(self, **_):
             return sandbox
 

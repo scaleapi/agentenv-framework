@@ -29,6 +29,7 @@ from agent_env.providers.env_providers.env_provider import _builtin_env_provider
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER, SANDBOX_MODE_VM
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.teardown_sandboxes import _env_sandbox_ids
+from tst.util.sandbox_providers import mock_provider
 
 _GW = "https://gw.example"
 _CARD = {"name": "env1234", "url": "/agentenv", "children_environments": [{"name": "email", "url": "/svc/mcp-email/agentenv"}]}
@@ -282,7 +283,7 @@ async def test_a_restored_env_without_a_gateway_loads_into_the_server_and_closes
 
 @pytest.mark.asyncio
 async def test_validation_deploys_a_server_env_as_declared_on_the_default_sandbox_provider():
-    env, seen, default = _env("server"), {}, MagicMock()
+    env, seen, default = _env("server"), {}, mock_provider()
     ran = MagicMock(run=AsyncMock(return_value=MagicMock(deployed_envs=[], deployed_agents=[], instance_id="i")))
     with patch("agent_env.task.Task.put", side_effect=lambda **kwargs: seen.update(kwargs) or ran):
         await env.validate()
@@ -350,7 +351,7 @@ async def _deploy(env: MCPServerEnv, sandboxes: dict[str, MagicMock], seen: dict
          patch("agent_env.providers.env_providers.env_gateway_provider._tool_names", AsyncMock(return_value={"email_send"})), \
          patch("agent_env.providers.env_state.build_state_provider", MagicMock(return_value=MagicMock(teardown=AsyncMock()))), \
          patch("agent_env.config.get_config", MagicMock()), patch("agent_env.env.env.Env.get", MagicMock()), \
-         patch("agent_env.providers.get_env_sandbox_provider", MagicMock(return_value=MagicMock())), \
+         patch("agent_env.providers.get_env_sandbox_provider", MagicMock(return_value=mock_provider())), \
          patch("agent_env.providers.env_state.acquire_state_for_deploy", side_effect=acquire), \
          patch("agent_env.env.envs._deployment.register_env_instance",
                side_effect=lambda deployed, ttl: dataclasses.replace(deployed, instance_id="inst-1")):
@@ -364,7 +365,7 @@ async def _restore(record: DeployedEnv, sandboxes: dict[str, MagicMock], dead: t
             raise RuntimeError("Sandbox has already finished with status terminated")
         return sandboxes[sandbox_id]
 
-    provider = MagicMock(get_sandbox=AsyncMock(side_effect=get_sandbox))
+    provider = mock_provider(get_sandbox=AsyncMock(side_effect=get_sandbox))
     with patch("agent_env.env.env.Env.get", return_value=_env(env_provider_type)), \
          patch("agent_env.providers.build_sandbox_provider", return_value=provider):
         return await MCPServerEnv.from_deployed_env(record)

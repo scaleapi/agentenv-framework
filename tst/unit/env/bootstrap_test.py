@@ -2,6 +2,8 @@
 stores only, for this host's platform, once each however many runs ask."""
 
 import importlib
+import re
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -24,7 +26,7 @@ def puts(local_stores, monkeypatch):
             calls.append((kind, env_id, platform))
             artifact = get_artifact_store().put_document(DockerImageArtifact(
                 id=f"{kind}-{env_id}", description=kind, image_name=f"{kind}:v1", tar_gz_s3_url="file:///x.tar.gz"))
-            shipped = bootstrap._STOCK_DOCKERFILES[kind].relative_to(bootstrap._ENV_PACKAGE.parent.parent)
+            shipped = bootstrap._DOCKERFILES[kind][0].relative_to(bootstrap._ENV_PACKAGE.parent.parent)
             GatewayEnv.put(id=env_id, docker_image_artifact=artifact, metadata={
                 "dockerfile_path": f"/another/install/site-packages/{shipped}",
                 bootstrap.BUILD_INPUTS_KEY: bootstrap.build_inputs_digest(kind)})
@@ -33,6 +35,31 @@ def puts(local_stores, monkeypatch):
     for kind in (GATEWAY, SERVICE_DB, WEBSITE_BROWSER):
         monkeypatch.setitem(bootstrap._PUTS, kind, put(kind))
     return calls
+
+
+@pytest.mark.parametrize("kind, put, contexts", [
+    (GATEWAY, bootstrap.put_gateway_env, [(bootstrap.GATEWAY_CONTEXT, "Dockerfile")]),
+    (SERVICE_DB, bootstrap.put_service_db_env, [(bootstrap.SERVICE_DB_DOCKERFILE.parent, name)
+                                                for name in ("Dockerfile", "Dockerfile.db-web", "Dockerfile.db-mcp")]),
+    (WEBSITE_BROWSER, bootstrap.put_website_browser_env, [(bootstrap.WEBSITE_BROWSER_CONTEXT, "Dockerfile")]),
+], ids=[GATEWAY, SERVICE_DB, WEBSITE_BROWSER])
+def test_each_infra_image_keeps_the_build_context_it_is_built_from(local_stores, monkeypatch, kind, put, contexts):
+    """So a VM or Modal running another platform than this machine builds it again from that; and those contexts are
+    what its recorded build inputs cover."""
+    kept = []
+
+    def keep(id, *, description, image_name, build_context_path=None, dockerfile_path=None, platform=None):
+        kept.append((Path(build_context_path), dockerfile_path))
+        return get_artifact_store().put_document(DockerImageArtifact(
+            id=id, description=description, image_name=image_name, tar_gz_s3_url="file:///x.tar.gz"))
+
+    monkeypatch.setattr(bootstrap, "build_image", lambda *args, **kwargs: None)
+    monkeypatch.setattr(bootstrap.DockerImageArtifact, "put", keep)
+
+    put("x", platform=None)
+
+    assert kept == contexts
+    assert [folder / name for folder, name in kept] == bootstrap._DOCKERFILES[kind]
 
 
 def test_missing_infra_is_built_for_this_host_in_order_and_once(puts):
@@ -168,12 +195,53 @@ def test_a_put_records_what_the_env_was_built_from_whatever_metadata_it_was_give
     assert env.metadata["owner"] == "me"
 
 
-def test_the_build_inputs_are_the_shipped_files_and_build_args_less_python_caches(tmp_path, monkeypatch):
+def test_the_build_inputs_are_every_file_in_the_build_context_less_python_caches(tmp_path, monkeypatch):
+    (tmp_path / "Dockerfile").write_text("FROM python:3.12\nCOPY . /app\n")
+    (tmp_path / "gateway.py").write_text("served")
+    monkeypatch.setitem(bootstrap._DOCKERFILES, GATEWAY, [tmp_path / "Dockerfile"])
+    before = bootstrap.build_inputs_digest(GATEWAY)
+
     (tmp_path / "__pycache__").mkdir()
     (tmp_path / "__pycache__/gateway.cpython-312.pyc").write_text("compiled")
-    (tmp_path / "gateway.py").write_text("served")
-    before = bootstrap.build_inputs_digest(WEBSITE_BROWSER)
-    monkeypatch.setitem(bootstrap._BUILD_ARGS, WEBSITE_BROWSER, {"PLAYWRIGHT_MCP_VERSION": "9.9.9"})
+    assert bootstrap.build_inputs_digest(GATEWAY) == before
+    (tmp_path / "gateway.py").write_text("served, changed")
+    assert bootstrap.build_inputs_digest(GATEWAY) != before
 
-    assert bootstrap._files_under(tmp_path) == [tmp_path / "gateway.py"]
-    assert bootstrap.build_inputs_digest(WEBSITE_BROWSER) != before
+
+# What Docker's legacy builder refuses, by what it is.
+_BUILDKIT_ONLY = {
+    "a syntax directive": r"^\s*#\s*syntax\s*=",
+    "RUN --mount, --network or --security": r"^\s*RUN\s+(--\S+\s+)*--(mount|network|security)\b",
+    "COPY or ADD --chmod, --link, --parents, --exclude, --checksum or --keep-git-dir":
+        r"^\s*(COPY|ADD)\s+(--\S+\s+)*--(chmod|link|parents|exclude|checksum|keep-git-dir)\b",
+    "a heredoc": r"<<-?\s*[\"']?\w+",
+    "a build arg with no default": r"^\s*ARG\s+\w+\s*$",
+}
+
+
+def _legacy_build_problems(dockerfile: str) -> list[str]:
+    return [what for what, pattern in _BUILDKIT_ONLY.items()
+            if re.search(pattern, dockerfile, re.IGNORECASE | re.MULTILINE)]
+
+
+@pytest.mark.parametrize("dockerfile", [dockerfile for dockerfiles in bootstrap._DOCKERFILES.values()
+                                        for dockerfile in dockerfiles],
+                         ids=lambda dockerfile: dockerfile.relative_to(bootstrap._ENV_PACKAGE).as_posix())
+def test_each_infra_image_builds_from_its_context_alone_on_dockers_legacy_builder(dockerfile):
+    """A sandbox rebuilds an infra image from its build context, which carries no build args, and a VM with no buildx,
+    as modal_vm's has none, builds with Docker's legacy builder."""
+    assert _legacy_build_problems(dockerfile.read_text()) == []
+
+
+@pytest.mark.parametrize("line, problem", [
+    ("# syntax=docker/dockerfile:1", "a syntax directive"),
+    ("RUN --mount=type=cache,target=/root/.npm npm ci", "RUN --mount, --network or --security"),
+    ("copy --chown=1:1 --chmod=755 entrypoint.sh /app/",
+     "COPY or ADD --chmod, --link, --parents, --exclude, --checksum or --keep-git-dir"),
+    ("RUN <<EOF\necho hi\nEOF", "a heredoc"),
+    ("ARG PLAYWRIGHT_MCP_VERSION", "a build arg with no default"),
+], ids=["syntax", "run-mount", "copy-chmod", "heredoc", "arg"])
+def test_the_legacy_builder_check_names_what_only_buildkit_or_a_build_arg_builds(line, problem):
+    dockerfile = f"FROM python:3.12\n{line}\nCOPY --from=builder --chown=app:app /app /app\n"
+
+    assert _legacy_build_problems(dockerfile) == [problem]
