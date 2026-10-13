@@ -85,7 +85,7 @@ def _choose_mcp_url(agent, env) -> str:
     return reachable_url(env.mcp_url, from_sandbox_type=env.sandbox_type, to_sandbox_type=agent.sandbox_type)
 
 
-def _live_mcp_url(env_id: str) -> str:
+def live_mcp_url(env_id: str) -> str:
     """The MCP URL of an env that is referenced by id but never deployed here.
 
     Such an env is a pointer at a live endpoint: it exposes ``mcp_url`` and has no
@@ -104,10 +104,11 @@ def _deploy_step_of(deployed_env: DeployedEnv) -> Optional[str]:
     return (deployed_env.metadata or {}).get("deploy_step_id")
 
 
-def bound_deployment(context: TaskStepContext, env_id: str, step: TaskStep) -> Optional[DeployedEnv]:
-    """The deployment of `env_id` the agent `step` deploys is bound to, by its `env_step_id`, or None if it isn't
-    deployed here."""
-    env_step_id = step.env_step_id
+def bound_deployment(
+    context: TaskStepContext, env_id: str, *, env_step_id: Optional[str], step_id: str,
+) -> Optional[DeployedEnv]:
+    """The deployment of `env_id` that the agent deployed by step `step_id` is bound to, by `env_step_id`, or None if
+    it isn't deployed here."""
     matches = [d for d in context.deployed_envs if d.env_id == env_id]
     if env_step_id is not None:
         # A filter, not a hint: an unmatched id is an error, never a substitute.
@@ -115,13 +116,13 @@ def bound_deployment(context: TaskStepContext, env_id: str, step: TaskStep) -> O
         named = [d for d in matches if _deploy_step_of(d) == env_step_id]
         if matches and not named:
             raise RuntimeError(
-                f"deploy_agent '{step.id}': env_step_id '{env_step_id}' names no deployment of "
+                f"deploy_agent '{step_id}': env_step_id '{env_step_id}' names no deployment of "
                 f"env '{env_id}' (deployed by: {[_deploy_step_of(d) for d in matches]})"
             )
         matches = named
     if len(matches) > 1:
         raise RuntimeError(
-            f"deploy_agent '{step.id}': {len(matches)} deployments of env '{env_id}' "
+            f"deploy_agent '{step_id}': {len(matches)} deployments of env '{env_id}' "
             f"(deployed by: {[_deploy_step_of(d) for d in matches]}). Set env_step_id "
             "to the deploy_env step this agent should bind to."
         )
@@ -304,7 +305,10 @@ class DeployAgentTaskStep(TaskStep):
         )
 
         # Resolved before anything is provisioned so an unbound env fails before a sandbox exists.
-        env_deployments = {env_id: bound_deployment(context, env_id, self) for env_id in self.env_ids}
+        env_deployments = {
+            env_id: bound_deployment(context, env_id, env_step_id=self.env_step_id, step_id=self.id)
+            for env_id in self.env_ids
+        }
 
         existing = next((a for a in context.deployed_agents if a.agent_name == self.agent_name), None)
         if existing is not None:
@@ -388,7 +392,7 @@ class DeployAgentTaskStep(TaskStep):
                 if not card_name:
                     logger.warning(f"Env {env_id} has no env card name; the agent will pick its own MCP alias")
             else:
-                url = host_url_for(_live_mcp_url(env_id), deployed.sandbox_type)
+                url = host_url_for(live_mcp_url(env_id), deployed.sandbox_type)
                 card_name = None
             if mcp_ext:
                 body = _mcp_add_body(mcp_ext, url, sandbox_request_headers_for_url(url), card_name, self.role)

@@ -15,20 +15,16 @@ from typing import Any, ClassVar, Optional
 
 from agent_env.entity_refs import EntityRef
 from agent_env.providers.sandbox_providers.sandbox_provider import sandbox_request_headers_for_url
+from agent_env.task.episode_rules import problems
 from agent_env.task.store import record_task_cancelled
 from agent_env.task.task import Task, substitute_seed_in_steps
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.task_step.task_step import TaskStep
-from agent_env.task_step.task_steps.deploy_agent import _live_mcp_url, bound_deployment
+from agent_env.task_step.task_steps.deploy_agent import bound_deployment, live_mcp_url
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 
 logger = logging.getLogger(__name__)
-
-_AGENT_DEPLOYERS = ("install_agent", "deploy_human_agent")
-_AGENT_TARGETING = (
-    "add_skills", "register_agent_triggers", "snapshot_agent_state", "load_artifact", "verify_sandbox", "run_code",
-)
 
 _live: dict[str, Episode] = {}
 
@@ -71,15 +67,15 @@ class EpisodeSpec:
         seed = dict(seed) if seed else None
         seeded = substitute_seed_in_steps(task.steps, seed or {})
         outside = _outside_agents(task, seeded, agents)
-        problems = _problems(seeded, outside)
+        found = problems(seeded, outside)
         verifiers = _top_level_verifiers(seeded)
         if len(verifiers) != 1:
-            problems.append(
+            found.append(
                 f"the reward is the score of the one verifier no aggregate_verifiers step lists, and the task has "
                 f"{len(verifiers)}" + (f": {[step.id for step in verifiers]}" if verifiers else "")
             )
-        if problems:
-            raise EpisodeError(f"task {task.id!r} can't run as an episode: " + "; ".join(problems))
+        if found:
+            raise EpisodeError(f"task {task.id!r} can't run as an episode: " + "; ".join(found))
         deploys = {
             as_run.agent_name: step for step, as_run in zip(task.steps, seeded)
             if step.type == "deploy_agent" and as_run.agent_name in outside
@@ -101,17 +97,8 @@ class EpisodeSpec:
             metadata["seed"] = dict(self._seed)
         if run_group_id is not None:
             metadata["run_group_id"] = run_group_id
-        episode = Episode(self, episode_id, TaskStepContext(metadata=metadata))
-        _live[episode_id] = episode
-        running = asyncio.Event()
-        episode._run = asyncio.create_task(episode._drive(running))
-        try:
-            await running.wait()
-        except asyncio.CancelledError:
-            episode._abandoned = "start() was cancelled"
-            episode._run.cancel()
-            await asyncio.wait((episode._run,))
-            raise
+        episode = Episode(episode_id, self._copy, self._reward_verifier_id, TaskStepContext(metadata=metadata))
+        await episode._launch()
         return episode
 
 
@@ -134,8 +121,19 @@ class Turn:
     async def end(self, response: str | None = None) -> None:
         """Hand the turn back, and the run carries on. No reply records an empty one, as an agent that answers with
         nothing leaves. Once the turn is over, ended or not, this does nothing."""
-        if not self._reply.done():
+        if self._open:
             self._reply.set_result(response or "")
+
+    @property
+    def _open(self) -> bool:
+        return not self._reply.done()
+
+    async def _replied_within(self, seconds: float) -> str:
+        return await asyncio.wait_for(self._reply, seconds)
+
+    def _fail(self, error: Exception) -> None:
+        if self._open:
+            self._reply.set_exception(error)
 
 
 class Episode:
@@ -144,9 +142,10 @@ class Episode:
     Cancelling a caller of ``next_turn()``, ``result()`` or ``abandon()`` cancels that call, never the run. Use an
     episode on the event loop that started it."""
 
-    def __init__(self, spec: EpisodeSpec, id: str, context: TaskStepContext):
+    def __init__(self, id: str, task: Task, reward_verifier_id: str, context: TaskStepContext):
         self.id = id
-        self._spec = spec
+        self._task = task
+        self._reward_verifier_id = reward_verifier_id
         self._context = context
         self._run: asyncio.Task[None]
         self._bindings: dict[str, tuple[str | None, dict[str, str]]] = {}
@@ -163,7 +162,7 @@ class Episode:
             changed = self._changed
             while self._waiting and self._abandoned is None:
                 turn = self._waiting.popleft()
-                if not turn._reply.done():
+                if turn._open:
                     return turn
             if self._run.done():
                 self._raise_unless_completed()
@@ -174,16 +173,16 @@ class Episode:
         """The reward, once the run and its teardown are over: the score of the task's one top-level verifier."""
         while not self._run.done():
             changed = self._changed
-            if open_turn := next((turn for turn in self._turns if not turn._reply.done()), None):
+            if open_turn := next((turn for turn in self._turns if turn._open), None):
                 raise EpisodeError(
                     f"turn {open_turn.step_id!r} of agent {open_turn.agent!r} isn't ended, so the run can't finish"
                 )
             await self._wait(changed)
         self._raise_unless_completed()
-        verifier_id = self._spec._reward_verifier_id
-        score = ((self._context.metadata.get("verifications") or {}).get(verifier_id) or {}).get("score")
+        verifications = self._context.metadata.get("verifications") or {}
+        score = (verifications.get(self._reward_verifier_id) or {}).get("score")
         if not isinstance(score, (int, float)):
-            raise EpisodeError(f"verifier {verifier_id!r} left no score")
+            raise EpisodeError(f"verifier {self._reward_verifier_id!r} left no score")
         return float(score)
 
     async def abandon(self, reason: str) -> None:
@@ -193,17 +192,29 @@ class Episode:
         if not (self._run.done() or self._tearing_down or self._abandoned is not None):
             if any(failure.get("is_fatal") for failure in self._context.metadata.get("failed_steps") or []):
                 for turn in self._turns:
-                    if not turn._reply.done():
-                        turn._reply.set_exception(EpisodeError(f"episode abandoned: {reason}"))
+                    turn._fail(EpisodeError(f"episode abandoned: {reason}"))
             else:
                 self._abandoned = reason
                 self._run.cancel(msg=reason)
         await asyncio.wait((self._run,))
 
+    async def _launch(self) -> None:
+        """Start the run and return once its record exists. Cancelled, it takes the run down and waits for teardown."""
+        _live[self.id] = self
+        running = asyncio.Event()
+        self._run = asyncio.create_task(self._drive(running))
+        try:
+            await running.wait()
+        except asyncio.CancelledError:
+            self._abandoned = "start() was cancelled"
+            self._run.cancel()
+            await asyncio.wait((self._run,))
+            raise
+
     async def _drive(self, running: asyncio.Event) -> None:
         running.set()
         try:
-            await self._spec._copy.run(context=self._context, instance_id=self.id)
+            await self._task.run(context=self._context, instance_id=self.id)
         finally:
             self._tearing_down = True
             try:
@@ -225,6 +236,9 @@ class Episode:
         if (error := self._run.exception()) is not None:
             raise error
 
+    def _bind(self, agent: str, role: str | None, mcp_urls: dict[str, str]) -> None:
+        self._bindings[agent] = (role, mcp_urls)
+
     async def _play(self, step: _EpisodeTurnStep) -> str:
         if step.agent_name not in self._bindings:
             raise RuntimeError(
@@ -238,7 +252,7 @@ class Episode:
         self._changed.set_result(None)
         self._changed = asyncio.get_running_loop().create_future()
         try:
-            return await asyncio.wait_for(turn._reply, step.timeout_seconds)
+            return await turn._replied_within(step.timeout_seconds)
         except TimeoutError:
             raise TimeoutError(
                 f"turn {step.id!r} of agent {step.agent_name!r} wasn't ended within {step.timeout_seconds}s"
@@ -266,75 +280,6 @@ def _outside_agents(task: Task, steps: list[TaskStep], agents: Sequence[str] | N
     if unprompted := [name for name in outside if name not in prompted]:
         raise EpisodeError(f"task {task.id!r} doesn't prompt {unprompted}; it prompts {prompted}")
     return outside
-
-
-def _problems(steps: list[TaskStep], outside: list[str]) -> list[str]:
-    """Why each step, and each outside agent, can't be run with the agent played from outside."""
-    problems = []
-    for name in outside:
-        deploys = [step for step in steps if step.type == "deploy_agent" and step.agent_name == name]
-        if len(deploys) != 1:
-            problems.append(f"agent {name!r} is played from outside, so it needs exactly one deploy_agent step, "
-                            f"not {len(deploys)}")
-    outside_prompts = {
-        step.id: step.prompt_id for step in steps if step.type == "prompt_agent" and step.agent_name in outside
-    }
-    for step in steps:
-        problems.extend(f"step {step.id!r}: {why}" for why in _step_problems(step, outside, outside_prompts))
-    return problems
-
-
-def _step_problems(step: TaskStep, outside: list[str], outside_prompts: dict[str, str]) -> list[str]:
-    why = []
-    if step.retry_config is not None:
-        why.append("retry_config can replay an outside turn")
-    agent = getattr(step, "agent_name", None)
-    if step.type == "prompt_agent" and agent in outside:
-        why.extend(
-            f"an outside agent's prompt can't have {what}" for what, present in (
-                ("parts, only a text prompt", step.parts is not None),
-                ("a user simulator (max_conversation_turns > 1)", step.max_conversation_turns > 1),
-                ("output_format", step.output_format),
-                ("agentenv_tools", step.agentenv_tools),
-                ("snapshot_config", step.snapshot_config),
-            ) if present
-        )
-    elif step.type == "prompt_agent" and step.max_conversation_turns > 1 and step.user_agent_name in outside:
-        why.append(f"its user simulator {step.user_agent_name!r} is played from outside")
-    elif step.type == "deploy_agent" and agent in outside:
-        why.extend(
-            f"an outside agent can't have {what}" for what, present in (
-                ("skills, instructions its player wouldn't get", step.skills),
-                ("agent_snapshot_files_artifact_id", step.agent_snapshot_files_artifact_id),
-                ("agent_changelog_object_url", step.agent_changelog_object_url),
-                ("enable_agent_changelog", step.enable_agent_changelog),
-            ) if present
-        )
-    elif step.type in _AGENT_DEPLOYERS and agent in outside:
-        why.append(f"{step.type} deploys {agent!r}, which is played from outside")
-    elif step.type.startswith("verify_a2a_"):
-        why.append("validates the task's deployed A2A agent, and an episode plays one from outside")
-    elif step.type in _AGENT_TARGETING and agent in outside:
-        why.append(f"{step.type} needs {agent!r} as a real agent, and it is played from outside")
-    elif step.type == "collect_artifacts":
-        if agent in outside and not (step.env_id or step.container_name or step.sandbox_name):
-            why.append(f"collects from {agent!r}'s sandbox, and it is played from outside")
-        if step.manifest_step_id in outside_prompts:
-            why.append(f"its manifest is outside prompt {step.manifest_step_id!r}")
-    elif step.type == "register_env_triggers" and step.executor_agent_name in outside:
-        why.append(f"its executor {step.executor_agent_name!r} is played from outside")
-    elif step.type == "peer_agents":
-        why.extend(
-            f"peers {name!r}, which is played from outside" for name in dict.fromkeys(
-                name for peering in step.peerings for name in (peering.source_agent_name, *peering.peer_agent_names)
-            ) if name in outside
-        )
-    elif step.type == "rubrics_verifier":
-        if step.use_trajectory and step.prompt_id in outside_prompts.values():
-            why.append("grades an outside prompt's trajectory, which an outside player doesn't hand back")
-        if step.use_agent_judge and agent in outside:
-            why.append(f"judges in {agent!r}'s sandbox, and it is played from outside")
-    return why
 
 
 def _top_level_verifiers(steps: list[TaskStep]) -> list[TaskStep]:
@@ -398,9 +343,9 @@ class _EpisodeAgentStep(TaskStep):
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         mcp_urls = {}
         for env_id in self.env_ids:
-            deployed = bound_deployment(context, env_id, self)
-            mcp_urls[env_id] = deployed.mcp_url if deployed is not None else _live_mcp_url(env_id)
-        _episode_of(context)._bindings[self.agent_name] = (self.role, mcp_urls)
+            deployed = bound_deployment(context, env_id, env_step_id=self.env_step_id, step_id=self.id)
+            mcp_urls[env_id] = deployed.mcp_url if deployed is not None else live_mcp_url(env_id)
+        _episode_of(context)._bind(self.agent_name, self.role, mcp_urls)
         return context
 
 
