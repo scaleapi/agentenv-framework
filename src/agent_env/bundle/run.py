@@ -36,7 +36,7 @@ from .materialize import Materialization, Materialized, materialize
 from .parse import BundleEntry, BundleError, BundleKind, parse_bundle
 from .plan import Plan, Write, plan_bundle
 from .preflight import Preflight, preflight_run
-from .resolve import BuiltImage, Reference, resolve_bundle
+from .resolve import BuiltImage, ImpliedImage, Reference, ReferencedImage, resolve_bundle
 
 logger = logging.getLogger(__name__)
 
@@ -158,13 +158,16 @@ class DryRun:
         return relative(self.materialization.plan.bundle.bundle.root, entry.path)
 
     def images(self) -> tuple[str, ...]:
-        """A line per image the bundle builds: which, the version it would leave, and how it would be written."""
+        """A line per image a folder's image key has the bundle write: which, the version it would leave, and how it
+        would be written."""
         plan, contexts = self.materialization.plan, self.materialization.contexts
         return tuple(
             f"{_label(plan, done.write)} v{done.version}: "
-            + (f"a build context, which each deploy builds where it runs, for {DEFAULT_BUILD_PLATFORM}"
+            + ("pulled from its registry, its tag pinned to a digest when it's written"
+               if isinstance(done.write.source, ReferencedImage)
+               else f"a build context, which each deploy builds where it runs, for {DEFAULT_BUILD_PLATFORM}"
                if done.write.id in contexts else "built on this machine")
-            for done in self.materialization.writes if isinstance(done.write.source, BuiltImage)
+            for done in self.materialization.writes if isinstance(done.write.source, ImpliedImage)
         )
 
 
@@ -443,7 +446,9 @@ def _written(plan: Plan, done: Materialized) -> str:
 def _label(plan: Plan, write: Write) -> str:
     """How a write is named: its entry's folder, and for an image built from it, which image."""
     path = _path(plan, write.source.entry)
-    return f"{path} ({write.source.dockerfile} image)" if isinstance(write.source, BuiltImage) else path
+    if isinstance(write.source, BuiltImage):
+        return f"{path} ({write.source.dockerfile} image)"
+    return f"{path} ({write.source.ref} image)" if isinstance(write.source, ReferencedImage) else path
 
 
 def _path(plan: Plan, entry: BundleEntry) -> str:

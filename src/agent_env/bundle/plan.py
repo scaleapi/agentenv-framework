@@ -59,7 +59,7 @@ from .authoring import (
     universe_layout,
 )
 from .parse import BundleEntry, BundleError, BundleKind
-from .resolve import BuiltImage, Reference, ResolvedBundle, ResolvedEntry, build_step
+from .resolve import BuiltImage, ImpliedImage, Reference, ResolvedBundle, ResolvedEntry, build_step
 
 _Key = tuple[str, str]  # (store, id)
 
@@ -82,7 +82,7 @@ class Write:
 
     kind: BundleKind  # a built image is an ARTIFACT; kind.store keys uniqueness
     id: str
-    source: ResolvedEntry | BuiltImage
+    source: ResolvedEntry | ImpliedImage
     needs: tuple[_Key, ...]  # (kind.store, id) of the earlier writes it references
 
 
@@ -113,11 +113,11 @@ class _Planner:
     def __init__(self, resolved: ResolvedBundle):
         self.resolved = resolved
         self.problems: list[str] = []
-        self.nodes: dict[_Key, ResolvedEntry | BuiltImage] = {}
+        self.nodes: dict[_Key, ResolvedEntry | ImpliedImage] = {}
         self.rank: dict[_Key, int] = {}
         self.edges: dict[_Key, list[_Key]] = {}
-        images: dict[BundleEntry, list[BuiltImage]] = {}
-        for image in resolved.built_images:
+        images: dict[BundleEntry, list[ImpliedImage]] = {}
+        for image in resolved.images:
             images.setdefault(image.entry, []).append(image)
         for entry in resolved.entries:
             for image in images.get(entry.entry, ()):
@@ -130,7 +130,7 @@ class _Planner:
                         for entry in resolved.entries for output in entry.outputs}
         self.accepted: dict[_Key, dict] = {}  # each toml a type checks, as it accepted it
 
-    def _add(self, key: _Key, source: ResolvedEntry | BuiltImage, needs: list[_Key]) -> None:
+    def _add(self, key: _Key, source: ResolvedEntry | ImpliedImage, needs: list[_Key]) -> None:
         """Record a write in bundle order, a built image just before the entry that builds it."""
         self.nodes[key], self.rank[key], self.edges[key] = source, len(self.rank), needs
 
@@ -172,8 +172,9 @@ class _Planner:
         writers: dict[_Key, str] = {}
         claims: list[tuple[_Key, str, str]] = []
         for key, source in self.nodes.items():
-            if isinstance(source, BuiltImage):
-                claims.append((key, self._path(source.entry), f"the image built for {self._path(source.entry)}"))
+            if isinstance(source, ImpliedImage):
+                how = "built" if isinstance(source, BuiltImage) else "referenced"
+                claims.append((key, self._path(source.entry), f"the image {how} for {self._path(source.entry)}"))
             else:
                 claims.append((key, self._path(source.entry), self._path(source.entry)))
                 for id, folder in self._written_beside(source):
@@ -268,7 +269,7 @@ class _Planner:
         latest: dict[tuple[EntityKind, str], int] = {}
         for key in sorted(closure, key=self.rank.__getitem__):
             source = self.nodes[key]
-            if isinstance(source, BuiltImage):
+            if isinstance(source, ImpliedImage):
                 continue
             for ref in source.references:
                 if ref.local is not None:
@@ -335,7 +336,7 @@ class _Planner:
         registry = get_artifact_registry()
         for key in sorted(closure, key=self.rank.__getitem__):
             source = self.nodes[key]
-            if isinstance(source, BuiltImage):
+            if isinstance(source, ImpliedImage):
                 continue
             if source.entry.kind in (BundleKind.AGENT, BundleKind.ENV):
                 agent = source.entry.kind is BundleKind.AGENT
@@ -377,7 +378,7 @@ class _Planner:
         store = get_config().get_document_store()
         for key in sorted(closure, key=self.rank.__getitem__):
             source = self.nodes[key]
-            if isinstance(source, BuiltImage) or source.entry.kind is not BundleKind.ENV:
+            if isinstance(source, ImpliedImage) or source.entry.kind is not BundleKind.ENV:
                 continue
             latest = Sort.by("version", descending=True)
             stored = store.find_one(ENVS_COLLECTION, Filter.of(id=source.entry.id), sort=latest)
@@ -393,7 +394,7 @@ class _Planner:
         apart."""
         for key in sorted(closure, key=self.rank.__getitem__):
             source = self.nodes[key]
-            if isinstance(source, BuiltImage) or source.entry.kind is not BundleKind.ENV:
+            if isinstance(source, ImpliedImage) or source.entry.kind is not BundleKind.ENV:
                 continue
             if not issubclass(get_env_registry().get(source.entry.type, Env), MultiEnv):
                 continue
@@ -433,7 +434,7 @@ class _Planner:
         registry = get_artifact_registry()
         for key in sorted(closure, key=self.rank.__getitem__):
             source = self.nodes[key]
-            if isinstance(source, BuiltImage) or source.entry.kind is not BundleKind.ARTIFACT:
+            if isinstance(source, ImpliedImage) or source.entry.kind is not BundleKind.ARTIFACT:
                 continue
             cls = registry.get(canonical_type(source.entry.type))
             if cls is None or not issubclass(cls, EnvironmentUniverseArtifact) or folder_walk(cls) is None:
@@ -587,7 +588,7 @@ class _Planner:
         while ready:
             _, key = heapq.heappop(ready)
             source = self.nodes[key]
-            kind = BundleKind.ARTIFACT if isinstance(source, BuiltImage) else source.entry.kind
+            kind = BundleKind.ARTIFACT if isinstance(source, ImpliedImage) else source.entry.kind
             writes.append(Write(kind, key[1], source, tuple(self.edges[key])))
             for dependent in dependents.get(key, ()):
                 waiting[dependent] -= 1
@@ -603,7 +604,7 @@ def unpinned_store_refs(plan: Plan, write: Write) -> dict[tuple[EntityKind, str]
     """The version the plan read for each store entity ``write`` names without a version, by (kind, id). Its writer
     pins each to that version and the ledger hashes them, so a version the store gains in between isn't written,
     and one it gains later rewrites ``write``."""
-    if isinstance(write.source, BuiltImage):
+    if isinstance(write.source, ImpliedImage):
         return {}
     return {(ref.kind, ref.id): plan.store_latest[ref.kind, ref.id]
             for ref in write.source.references if ref.local is None and ref.version is None}
@@ -629,8 +630,8 @@ def keeps_base_from_toml(cls: type, base: type) -> bool:
     return next(c for c in cls.__mro__ if "from_toml" in vars(c)) is base
 
 
-def _key(entity: BundleEntry | BuiltImage) -> _Key:
-    kind = BundleKind.ARTIFACT if isinstance(entity, BuiltImage) else entity.kind
+def _key(entity: BundleEntry | ImpliedImage) -> _Key:
+    kind = BundleKind.ARTIFACT if isinstance(entity, ImpliedImage) else entity.kind
     return (kind.store, entity.id)
 
 

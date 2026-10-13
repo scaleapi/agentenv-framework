@@ -6,7 +6,7 @@ import pytest
 
 from agent_env.bundle import BundleError, BundleKind, parse_bundle
 from agent_env.bundle import resolve as resolve_module
-from agent_env.bundle.resolve import BuiltImage, Output, Reference, resolve_bundle
+from agent_env.bundle.resolve import BuiltImage, Output, Reference, ReferencedImage, resolve_bundle
 from agent_env.entity_refs import EntityKind, EntityRef
 from agent_env.env.env import Env
 from agent_env.task import Task
@@ -78,7 +78,8 @@ def problems(bundle) -> tuple[str, ...]:
 
 
 def refs(entry) -> list[tuple]:
-    return [(r.kind, r.id, r.version, getattr(r.local, "name", None) or getattr(r.local, "dockerfile", None))
+    return [(r.kind, r.id, r.version,
+             getattr(r.local, "name", None) or getattr(r.local, "dockerfile", None) or getattr(r.local, "ref", None))
             for r in entry.references]
 
 
@@ -354,7 +355,7 @@ def test_an_image_key_left_out_or_given_a_dockerfile_builds_the_folder(make):
     web = next(e for e in result.entries if e.entry.name == "web")
     assert web.config == {"type": "composite_test", "image": f"{ROOT}/web__env_image",
                           "backend_image": f"{ROOT}/web__backend_image"}
-    assert [image for image in result.built_images if image.entry == web.entry] == [
+    assert [image for image in result.images if image.entry == web.entry] == [
         BuiltImage(f"{ROOT}/web__env_image", web.entry, "Dockerfile"),
         BuiltImage(f"{ROOT}/web__backend_image", web.entry, "Dockerfile.backend"),
     ]
@@ -362,12 +363,31 @@ def test_an_image_key_left_out_or_given_a_dockerfile_builds_the_folder(make):
                          (EntityKind.ARTIFACT, f"{ROOT}/web__backend_image", None, "Dockerfile.backend")]
 
 
+def test_an_image_key_naming_a_registry_image_has_the_bundle_reference_it(make):
+    bundle = make(files={
+        "envs/web/env.toml": 'type = "composite_test"\nimage = { ref = "ghcr.io/acme/web:1" }\n'
+                             'backend_image = { ref = "ghcr.io/acme/api@sha256:' + "a" * 64 + '" }\n',
+        "agents/judge/agent.toml": 'image = { ref = "ghcr.io/acme/judge:2" }\n',
+    })
+    result = resolve_bundle(bundle)
+    web, judge = (next(e for e in result.entries if e.entry.name == name) for name in ("web", "judge"))
+    assert (web.config, judge.config) == (
+        {"type": "composite_test", "image": f"{ROOT}/web__env_image", "backend_image": f"{ROOT}/web__backend_image"},
+        {"image": f"{ROOT}/judge__agent_image"})
+    assert [image for image in result.images if image.entry in (web.entry, judge.entry)] == [
+        ReferencedImage(f"{ROOT}/web__env_image", web.entry, "ghcr.io/acme/web:1"),
+        ReferencedImage(f"{ROOT}/web__backend_image", web.entry, "ghcr.io/acme/api@sha256:" + "a" * 64),
+        ReferencedImage(f"{ROOT}/judge__agent_image", judge.entry, "ghcr.io/acme/judge:2"),
+    ]
+    assert refs(judge) == [(EntityKind.ARTIFACT, f"{ROOT}/judge__agent_image", None, "ghcr.io/acme/judge:2")]
+
+
 def test_an_agent_names_a_store_image_or_builds_its_folder(make):
     result = resolve_bundle(make(files={"agents/judge/agent.toml": 'image = { artifact = "claude-image", version = 3 }\n'}))
     solver, judge = (next(e for e in result.entries if e.entry.name == name) for name in ("solver", "judge"))
     assert (solver.config, judge.config) == (
         {"image": f"{ROOT}/solver__agent_image"}, {"image": {"artifact": "claude-image", "version": 3}})
-    assert [image for image in result.built_images if image.entry.kind is BundleKind.AGENT] == [
+    assert [image for image in result.images if image.entry.kind is BundleKind.AGENT] == [
         BuiltImage(f"{ROOT}/solver__agent_image", solver.entry, "Dockerfile")]
     assert (refs(solver), refs(judge)) == (
         [(EntityKind.ARTIFACT, f"{ROOT}/solver__agent_image", None, "Dockerfile")],
@@ -378,7 +398,10 @@ def test_an_agent_names_a_store_image_or_builds_its_folder(make):
 @pytest.mark.parametrize(("toml", "problem"), [
     ('image = "base-mcp"\nbackend_image = { dockerfile = "Dockerfile.missing" }', "backend_image: there is no 'Dockerfile.missing' in "
      "this folder to build"),
-    ('image = { ref = "ghcr.io/acme/web:1" }', "image: an external image ({ ref = ... }) isn't supported yet"),
+    ('image = { ref = "ghcr.io/acme/web:1", platform = "linux/amd64" }',
+     "image: a registry image takes only ref, not platform"),
+    ('image = { ref = "web:1" }',
+     "image: 'web:1' doesn't name its registry; spell it out, as in docker.io/library/web:1"),
     ('image = "greeting"', "image: 'greeting' is this bundle's file_artifact_universe, but this field takes "
      "docker_image"),
     ('image = "base-mcp"\nbackend_image = { dockerfile = "../tickets/Dockerfile" }', "backend_image: there is no "
@@ -441,7 +464,7 @@ def test_entities_without_references_resolve_to_a_copy_of_their_config(make):
     assert {(e.entry.kind, e.entry.name): e.references for e in result.entries if e.entry.kind not in built} == {
         (BundleKind.ARTIFACT, "greeting"): (), (BundleKind.ARTIFACT, "base-mcp"): (), (BundleKind.SKILL, "pdf"): (),
     }
-    assert {image.entry.kind for image in result.built_images} == set(built)
+    assert {image.entry.kind for image in result.images} == set(built)
 
 
 @pytest.mark.parametrize(("depends_on", "problem"), [

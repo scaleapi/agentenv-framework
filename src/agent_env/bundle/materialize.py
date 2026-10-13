@@ -41,7 +41,7 @@ from .authoring import AuthoringContext, build_context_files
 from .ledger import Ledger, materializing
 from .parse import BundleError, BundleKind
 from .plan import Plan, Write, env_writer, folder_walk, unpinned_store_refs
-from .resolve import BuiltImage, build_step
+from .resolve import BuiltImage, ImpliedImage, ReferencedImage, build_step
 
 @dataclass(frozen=True)
 class Materialized:
@@ -137,6 +137,8 @@ def materialize(
 
 def _write_entity(plan: Plan, write: Write, on_build: Callable[[Write], None] | None,
                   contexts: frozenset[str]) -> int:
+    if isinstance(write.source, ReferencedImage):
+        return _write_referenced_image(plan, write)
     if not isinstance(write.source, BuiltImage):
         return _WRITERS[write.kind](plan, write)
     if write.id in contexts:
@@ -170,6 +172,15 @@ def _write_build_context(plan: Plan, write: Write) -> int:
             ).version
         except (ValueError, RuntimeError) as e:  # a context it can't write, or the object store
             raise BundleError([f"{_path(plan, write)}: {e}"]) from None
+
+
+def _write_referenced_image(plan: Plan, write: Write) -> int:
+    """Register the registry image an entry's image key names, its tag pinned to the digest the registry serves now."""
+    try:
+        return DockerImageArtifact.put_ref(write.id, description=f"referenced by {_path(plan, write)}",
+                                           image_name=write.source.ref).version
+    except ValueError as e:  # the registry's answer, or a registry on this machine the image's store can't name
+        raise BundleError([f"{_path(plan, write)}: {e}"]) from None
 
 
 def _write_built_image(plan: Plan, write: Write) -> int:
@@ -271,7 +282,7 @@ def _refuse_builds_without_docker(plan: Plan, ledger: Ledger, contexts: frozense
 
 def _unwritable(write: Write) -> str | None:
     """What ``write`` would write, when this release has no writer for it."""
-    if isinstance(write.source, BuiltImage) or write.kind is BundleKind.TASK:
+    if isinstance(write.source, ImpliedImage) or write.kind is BundleKind.TASK:
         return None
     if write.kind not in _WRITERS:
         return with_article(write.kind.value.removesuffix("s"))

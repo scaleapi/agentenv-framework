@@ -13,6 +13,7 @@ import pytest
 
 from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact import Artifact, EnvironmentArtifact, EnvironmentUniverseArtifact
+from agent_env.artifact.artifacts import docker_image as docker_image_module
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
@@ -307,6 +308,54 @@ def test_a_skill_file_linking_out_of_the_bundle_is_refused_before_anything_is_wr
 
     assert len(problems) == 1 and problems[0].startswith("skills/pdf-extract/scripts/outside.py"), problems
     assert not local_store().path.exists()
+
+
+REF_AGENT = {"agents/solver/agent.toml": 'image = { ref = "ghcr.io/acme/solver:1" }\n'}
+DEPLOY_SOLVER = {"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}
+DIGEST = "sha256:" + "a" * 64
+
+
+@pytest.fixture
+def registry(monkeypatch):
+    """Each ref the registry is asked to pin; every tag pins to DIGEST."""
+    asked = []
+
+    def pin(ref, auth):
+        asked.append(ref)
+        return ref if "@" in ref else f"{ref}@{DIGEST}"
+
+    monkeypatch.setattr(docker_image_module, "pin_digest", pin)
+    return asked
+
+
+def test_a_registry_image_a_folder_names_is_pinned_once_and_read_again_only_when_its_ref_changes(bundle_dir, registry):
+    layout(bundle_dir, REF_AGENT)
+    _steps(bundle_dir, [DEPLOY_SOLVER])
+    image_id, agent_id = f"{ROOT}/solver__agent_image", f"{ROOT}/solver"
+
+    first = _run(bundle_dir)
+
+    image = DockerImageArtifact.get(image_id)
+    assert (image.image_name, image.tar_gz_object_url) == (f"ghcr.io/acme/solver:1@{DIGEST}", None)
+    assert A2AAgent.get(agent_id, first.version_of("agent", agent_id)).docker_image_artifact.id == image_id
+    assert _summary(_run(bundle_dir))[image_id] == (1, True, ())
+    assert registry == ["ghcr.io/acme/solver:1"]
+    (bundle_dir / "agents/solver/agent.toml").write_text('image = { ref = "ghcr.io/acme/solver:2" }\n')
+
+    assert _summary(_run(bundle_dir))[image_id][:2] == (2, False)
+    assert registry == ["ghcr.io/acme/solver:1", "ghcr.io/acme/solver:2"]
+
+
+def test_a_registry_image_its_registry_refuses_is_a_problem_naming_its_folder(bundle_dir, monkeypatch):
+    def refuse(ref, auth):
+        raise ValueError(f"{ref}: the registry answered 404 (manifest unknown)")
+
+    monkeypatch.setattr(docker_image_module, "pin_digest", refuse)
+    layout(bundle_dir, REF_AGENT)
+    _steps(bundle_dir, [DEPLOY_SOLVER])
+
+    assert _problems(lambda: _run(bundle_dir)) == (
+        "agents/solver: ghcr.io/acme/solver:1: the registry answered 404 (manifest unknown)",)
 
 
 AGENT_TOML = """\

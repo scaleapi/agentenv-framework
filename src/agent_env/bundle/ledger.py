@@ -34,7 +34,7 @@ from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM
 from .authoring import build_context_files
 from .parse import Bundle, BundleKind
 from .plan import Plan, Write, env_writer, folder_walk, unpinned_store_refs
-from .resolve import BuiltImage
+from .resolve import BuiltImage, ImpliedImage, ReferencedImage
 
 LEDGER_COLLECTION = "bundle_ledger"
 # Bumped by hand when what a digest covers changes, or a writer's output changes enough that every
@@ -122,10 +122,10 @@ class Ledger:
         tell it all, so it is written every run."""
         if not _tracked(write):
             return None
-        config = {"dockerfile": write.source.dockerfile} if isinstance(write.source, BuiltImage) else write.source.config
+        config = _config(write)
         inputs = {"type": _type(write), "config": _sha256(_canonical(config)),
                   "files": {}, "needs": {}, "store_refs": {}}
-        if write.kind in (BundleKind.ARTIFACT, BundleKind.SKILL):
+        if write.kind in (BundleKind.ARTIFACT, BundleKind.SKILL) and not isinstance(write.source, ReferencedImage):
             built = isinstance(write.source, BuiltImage)
             listing = build_context_files if built else folder_walk(get_artifact_registry().get(_type(write)))
             for key, path in listing(self._plan.bundle.bundle, write.source.entry).items():
@@ -211,8 +211,9 @@ def _tracked(write: Write) -> bool:
     its own, which may read its folder in ways it can't see. An artifact, a skill included, is made from its toml,
     the files its type reads from its folder (``folder_walk``) and what it references; an agent or env from its
     toml and what it references. A built image is made from its build context, ``build_context_files``; what the
-    build fetches (its base image, packages) isn't an input."""
-    if isinstance(write.source, BuiltImage):
+    build fetches (its base image, packages) isn't an input. A referenced image is made from its ref's text, so a tag
+    that moves in its registry isn't a change."""
+    if isinstance(write.source, ImpliedImage):
         return True
     if write.kind in (BundleKind.ARTIFACT, BundleKind.SKILL):
         return folder_walk(get_artifact_registry().get(_type(write))) is not None
@@ -221,8 +222,16 @@ def _tracked(write: Write) -> bool:
     return True
 
 
-def _type(write: Write) -> str:
+def _config(write: Write) -> Any:
     if isinstance(write.source, BuiltImage):
+        return {"dockerfile": write.source.dockerfile}
+    if isinstance(write.source, ReferencedImage):
+        return {"ref": write.source.ref}
+    return write.source.config
+
+
+def _type(write: Write) -> str:
+    if isinstance(write.source, ImpliedImage):
         return "docker_image"
     type_ = write.source.entry.type
     return canonical_type(type_) if write.kind is BundleKind.ARTIFACT else type_
