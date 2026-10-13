@@ -25,6 +25,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_VM,
     Accepts,
     SandboxProvider,
+    on_this_machine_provider,
 )
 from agent_env.providers.sandbox_providers.tensorlake.provider import TensorlakeSandboxProvider
 from agent_env.providers.sandbox_providers.tensorlake.sandbox import TensorlakeSandbox
@@ -68,7 +69,7 @@ class _Vms(SandboxProvider):
 
 
 def test_a_provider_that_declares_nothing_has_what_it_implements_and_loads_an_agents_image_on_a_vm():
-    assert (_Vms.ON_THIS_MACHINE, _Vms.PRIVATE_NETWORK) == (False, False)
+    assert (_Vms.ON_THIS_MACHINE, _Vms.HOST_ADDRESS, _Vms.PRIVATE_NETWORK) == (False, None, False)
     assert _Vms.SUPPORTED_SANDBOX_MODES == {SANDBOX_MODE_CONTAINER, SANDBOX_MODE_VM}
     assert (_Vms.SANDBOX_ACCEPTS, _Vms.CONTAINER_ACCEPTS) == (LOADABLE, NAME)
     assert _Vms().url_from_sandbox("http://localhost:4000") == "http://localhost:4000"
@@ -124,6 +125,18 @@ class _VmsAgain(_Vms):
 ], ids=lambda value: getattr(value, "__name__", getattr(value, "name", value)))
 def test_an_agents_sandbox_takes_what_create_sandbox_gives_unless_the_provider_declares_otherwise(cls, accepts):
     assert cls.SANDBOX_ACCEPTS is accepts
+
+
+@pytest.mark.parametrize("sandbox_type, expected", [
+    ("local", LocalSandboxProvider), ("modal", None), ("e2b", None), (None, None), ("no-such-provider", None),
+])
+def test_the_provider_of_a_type_on_this_machine_is_read_from_the_registry_and_one_elsewhere_or_unknown_is_none(
+        sandbox_type, expected):
+    assert on_this_machine_provider(sandbox_type) is expected
+
+
+def test_every_built_in_providers_sandboxes_are_containers_on_this_machines_docker_or_elsewhere():
+    assert all(cls.HOST_ADDRESS is None for cls in PROVIDER_CLASSES)
 
 
 def test_a_chain_is_its_providers_in_order_and_one_provider_is_itself():

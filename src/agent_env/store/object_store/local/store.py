@@ -26,7 +26,7 @@ from agent_env.store.base import ObjectAlreadyExistsError, ObjectNotFoundError
 if os.name != "nt":
     import fcntl
 from agent_env.store.local_state import ensure_state_dir
-from agent_env.store.object_store.local.grant_server import grant_server
+from agent_env.store.object_store.local.grant_server import DEFAULT_ADVERTISE_HOST, grant_server
 from agent_env.store.object_store.local.tls import check_local_host
 from agent_env.store.object_store.local.tokens import Op
 from agent_env.store.object_store.object_store import (
@@ -50,8 +50,6 @@ _STAGED_PREFIX = "staged-"
 _STAGED_GRACE_SECONDS = 60  # a staged file younger than this may not be locked by its writer yet
 _GRANT_MODES = ("auto", "off")
 _MAX_GRANT_LIFETIME_SECONDS = 7 * 24 * 60 * 60  # a hosted store's longest signature; a grant cannot outlive its process anyway
-_LOCAL_SANDBOX_TYPE = "local"  # LocalSandbox.type: containers on this host's Docker, which trust the local CA
-
 logger = logging.getLogger(__name__)
 
 _META_DIR = ".agentenv-meta"  # each object's content type, at the object's own key
@@ -194,7 +192,24 @@ class LocalFilesystemObjectStore(ObjectStore):
         return path.relative_to(root).as_posix()
 
     def grants_reach(self, sandbox_type: str | None) -> bool:
-        return sandbox_type == _LOCAL_SANDBOX_TYPE
+        """Whether a sandbox of ``sandbox_type`` reaches this store's grant server, as only one on this machine does
+        (its provider's ``ON_THIS_MACHINE``): when the server listens where the sandbox's requests arrive and the grant
+        URL names this machine by a name the sandbox resolves: not its loopback by number or as ``localhost``, which
+        inside any sandbox is the sandbox's own. A container on this machine's Docker reaches the address
+        ``host.docker.internal`` maps to, so any bind host. A VM here reaches the loopback address its provider
+        declares (``HOST_ADDRESS``), served by default or when bound there, and no address by number, which there is
+        the VM's own."""
+        from agent_env.providers.sandbox_providers.sandbox_provider import on_this_machine_provider  # providers import this module
+
+        provider = on_this_machine_provider(sandbox_type)
+        if provider is None:
+            return False
+        advertised = self._grant_advertise_host or DEFAULT_ADVERTISE_HOST
+        if _is_loopback_literal(advertised):
+            return False
+        if provider.HOST_ADDRESS is None:
+            return True
+        return self._grant_bind_host in (None, provider.HOST_ADDRESS) and not _is_address(advertised)
 
     def issue_read_grant(self, object_url: str, *, expires_in: int | None = None) -> HttpGetGrant:
         expires_in = self.grant_lifetime_seconds if expires_in is None else expires_in
@@ -428,3 +443,19 @@ def _missing_as_not_found(object_url: str) -> Iterator[None]:
         yield
     except (FileNotFoundError, IsADirectoryError, NotADirectoryError) as e:
         raise ObjectNotFoundError(f"No object at {object_url}.") from e
+
+
+def _is_address(host: str) -> bool:
+    """Whether ``host`` is an IP address rather than a name."""
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
+def _is_loopback_literal(host: str) -> bool:
+    """Whether ``host`` names this machine from itself: ``localhost``, a loopback address or the unspecified one."""
+    if host == "localhost":
+        return True
+    return _is_address(host) and (ipaddress.ip_address(host).is_loopback or ipaddress.ip_address(host).is_unspecified)

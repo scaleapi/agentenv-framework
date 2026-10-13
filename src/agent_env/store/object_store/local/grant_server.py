@@ -51,6 +51,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_ADVERTISE_HOST = "host.docker.internal"
 _START_TIMEOUT_SECONDS = 10
+_BIND_ATTEMPTS = 5  # a second socket on one port can lose the port to another process in between
 _OPS_BY_METHOD = {"GET": "get", "HEAD": "get", "PUT": "put", "POST": "post"}
 _UPLOAD_KEY_FIELD = "key"  # the form fields a policy upload names its key and file by (HttpPostPolicyGrant's path/file fields)
 _UPLOAD_FILE_FIELD = "file"
@@ -59,7 +60,7 @@ _MAX_FORM_FIELD_BYTES = 64 * 1024
 _MAX_PART_HEADER_BYTES = 16 * 1024
 _DOWNLOAD_CHUNK_BYTES = 1024 * 1024
 
-_servers: dict[tuple[str, str], GrantServer] = {}
+_servers: dict[tuple[str, str, bool], GrantServer] = {}
 _servers_lock = threading.Lock()
 
 
@@ -82,7 +83,10 @@ class _Rejected(Exception):
 def grant_server(bind_host: str | None, advertise_host: str | None) -> GrantServer:
     """This process's grant server for a bind and advertised host, created on first use; neither
     given means this platform's default bind address and ``host.docker.internal``."""
-    key = (bind_host or default_bind_host(), advertise_host or DEFAULT_ADVERTISE_HOST)
+    resolved = bind_host or default_bind_host()
+    # The platform default is served on loopback too, where a VM on this machine reaches it; an explicit bind
+    # host is served as given.
+    key = (resolved, advertise_host or DEFAULT_ADVERTISE_HOST, bind_host is None and resolved != "127.0.0.1")
     with _servers_lock:
         server = _servers.get(key)
         if server is None:
@@ -130,13 +134,20 @@ def default_bind_host() -> str:
         return "127.0.0.1"
 
 
+def _close_all(sockets: list[socket.socket]) -> None:
+    for sock in sockets:
+        sock.close()
+    sockets.clear()
+
+
 class GrantServer:
     """Serves the grants of the local stores registered with it, over HTTPS on one port. Started by
     the first grant it issues; it runs in a daemon thread for the rest of the process."""
 
-    def __init__(self, bind_host: str, advertise_host: str) -> None:
+    def __init__(self, bind_host: str, advertise_host: str, also_loopback: bool = False) -> None:
         self.bind_host = bind_host
         self.advertise_host = advertise_host
+        self.also_loopback = also_loopback
         self._signer = GrantSigner()
         self._stores: dict[str, LocalFilesystemObjectStore] = {}
         self._lock = threading.Lock()
@@ -191,17 +202,28 @@ class GrantServer:
         with self._lock:
             if self._port is not None:
                 return self._port
-            address = ipaddress.ip_address(self.bind_host)
-            sock = socket.socket(socket.AF_INET6 if address.version == 6 else socket.AF_INET, socket.SOCK_STREAM)
+            bind_hosts = [self.bind_host] + (["127.0.0.1"] if self.also_loopback else [])
+            sockets: list[socket.socket] = []
             try:
-                sock.bind((self.bind_host, 0))
+                for attempt in range(_BIND_ATTEMPTS if len(bind_hosts) > 1 else 1):
+                    try:
+                        for host in bind_hosts:  # the first picks the port, the rest bind it
+                            family = socket.AF_INET6 if ipaddress.ip_address(host).version == 6 else socket.AF_INET
+                            sock = socket.socket(family, socket.SOCK_STREAM)
+                            sockets.append(sock)
+                            sock.bind((host, sockets[0].getsockname()[1] if len(sockets) > 1 else 0))
+                        break
+                    except OSError:
+                        _close_all(sockets)
+                        if attempt == _BIND_ATTEMPTS - 1:
+                            raise
                 hosts = ["localhost", "host.docker.internal", "127.0.0.1", self.advertise_host]
                 with contextlib.suppress(ValueError):  # a name the CA cannot vouch for would void the certificate
                     check_local_host(self.bind_host)
                     hosts.append(self.bind_host)
                 context = server_context(local_ca(), hosts)
             except (OSError, ValueError) as e:
-                sock.close()
+                _close_all(sockets)
                 raise GrantUnavailableError(f"the local grant server cannot listen on {self.bind_host}: {e}") from e
             config = uvicorn.Config(
                 self._app, lifespan="off", log_config=None, http=_UnloggedH11Protocol,
@@ -212,7 +234,7 @@ class GrantServer:
 
             def serve() -> None:
                 try:
-                    asyncio.run(server.serve(sockets=[sock]))
+                    asyncio.run(server.serve(sockets=sockets))
                 except BaseException as e:  # uvicorn ends a failed startup with SystemExit
                     failure.append(e)
 
@@ -222,15 +244,15 @@ class GrantServer:
             while not server.started:
                 if failure or not thread.is_alive() or time.monotonic() > deadline:
                     server.should_exit = True
-                    sock.close()
+                    _close_all(sockets)
                     raise GrantUnavailableError(
                         f"the local grant server did not start on {self.bind_host}"
                         + (f": {failure[0]!r}" if failure else "")
                     )
                 time.sleep(0.01)
             self._uvicorn, self._thread = server, thread
-            self._port = sock.getsockname()[1]
-            logger.info("Local grant server listening on %s:%d", self.bind_host, self._port)
+            self._port = sockets[0].getsockname()[1]
+            logger.info("Local grant server listening on %s:%d", " and ".join(bind_hosts), self._port)
             return self._port
 
     async def _handle(self, request: Request) -> Response:

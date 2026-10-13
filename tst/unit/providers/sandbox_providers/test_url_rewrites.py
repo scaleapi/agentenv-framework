@@ -116,9 +116,32 @@ def test_local_provider_leaves_a_url_whose_host_is_not_loopback(url):
 
 @pytest.mark.parametrize("sandbox_type, expected", [
     ("local", "http://host.docker.internal:4000"), ("modal", "http://localhost:4000"), (None, "http://localhost:4000"),
+    ("no-such-provider", "http://localhost:4000"),
 ])
-def test_only_a_local_container_reaches_this_machine_by_another_name(sandbox_type, expected):
+def test_a_container_on_this_machine_reaches_it_by_another_name_and_one_elsewhere_as_it_is(sandbox_type, expected):
     assert host_url_for("http://localhost:4000", sandbox_type) == expected
+
+
+class _Here(SandboxProvider):
+    """A config-registered provider whose sandboxes run on this machine, as a local VM provider's do."""
+
+    ON_THIS_MACHINE = True
+
+    async def create_vm(self, **kwargs):  # pragma: no cover - never provisioned here
+        raise NotImplementedError
+
+
+def test_a_provider_that_declares_its_sandboxes_on_this_machine_gets_the_rewrite_without_naming_itself(tmp_path, monkeypatch):
+    (tmp_path / "config.toml").write_text(
+        '[sandbox.providers.here]\nimpl = "tst.unit.providers.sandbox_providers.test_url_rewrites:_Here"\n'
+    )
+    monkeypatch.setenv("AGENT_ENV_CONFIG", str(tmp_path / "config.toml"))
+    reset_config()
+    try:
+        assert host_url_for("http://127.0.0.1:4000/mcp", "here") == "http://host.docker.internal:4000/mcp"
+        assert host_url_for("https://api.example.com/v1", "here") == "https://api.example.com/v1"
+    finally:
+        reset_config()
 
 
 def test_nested_rewrite_keys_apply_longest_first():

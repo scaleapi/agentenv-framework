@@ -790,3 +790,34 @@ async def test_tarballs_are_loaded_registry_images_pulled_and_contexts_built(sig
     assert sandbox.scripts[1] == f"docker pull {PUBLIC}"
     assert not any("local/c-0123456789ab" in script for script in sandbox.scripts if script.startswith("docker pull"))
     assert sandbox.scripts[-2].endswith("-t local/c-0123456789ab:v1 .")
+
+
+@pytest.mark.asyncio
+async def test_a_vm_installs_the_trust_dir_in_its_container_through_itself_and_cleans_up(tmp_path):
+    """The container is on the VM's Docker, not this machine's: the files go into the VM, then ``docker cp`` there."""
+    (tmp_path / "ca.pem").write_bytes(b"ca")
+    (tmp_path / "ca-bundle.pem").write_bytes(b"bundle")
+    vm = _RecordingVmSandbox()
+
+    await vm.copy_trust_dir_into_container(tmp_path, "agent-x", "/etc/agentenv")
+
+    scripts = vm.scripts
+    staged = next(s for s in scripts if s.startswith("mkdir -p ")).removeprefix("mkdir -p ")
+    assert staged.startswith("/tmp/_trust_") and "agent-x" in staged
+    assert sum("base64" in s for s in scripts) == 2  # one write per file
+    assert any(s.startswith(f"docker cp {staged}/. agent-x:/etc/agentenv") for s in scripts)
+    assert scripts[-1] == f"rm -rf {staged}"
+
+
+@pytest.mark.asyncio
+async def test_start_trusting_a_container_on_a_vm_never_runs_docker_on_this_machine(tmp_path, monkeypatch):
+    import agent_env.providers.sandbox_providers.local_sandbox as ls
+
+    monkeypatch.setattr(ls, "_copy_into_container", lambda *args: pytest.fail("docker cp ran on this machine"))
+    (tmp_path / "ca.pem").write_bytes(b"ca")
+    vm = _RecordingVmSandbox()
+
+    await ls.start_trusting(vm, "agent-x", tmp_path)
+
+    assert any(s.startswith("docker cp ") and s.endswith("agent-x:/etc/agentenv") for s in vm.scripts)
+    assert vm.scripts[-1] == "docker start agent-x > /dev/null"

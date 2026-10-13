@@ -44,6 +44,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_VM,
     Accepts,
     SandboxProvider,
+    on_this_machine_provider,
     refuse_unenforceable_policy,
 )
 from agent_env.store.object_store.local.tls import local_ca
@@ -258,6 +259,10 @@ class LocalSandbox(VmSandbox):
 
     def _rewrite_app_script(self, script: str) -> str:
         return _APP_PATH_PATTERN.sub(lambda _: str(self._work_dir), script)
+
+    async def copy_trust_dir_into_container(self, trust_dir: Path, container: str, destination: str) -> None:
+        """Directly: the container is on this machine's Docker, and this sandbox's shell would rewrite the path."""
+        await asyncio.to_thread(_copy_into_container, trust_dir, container, destination)
 
     async def terminate(self) -> None:
         """Tear down whatever this sandbox is running.
@@ -504,10 +509,11 @@ def local_grant_trust() -> Path | None:
 
 
 async def start_trusting(sandbox: VmSandbox, container: str, trust_dir: Path) -> None:
-    """Copy ``trust_dir`` into the created ``container`` where ``LOCAL_TRUST_ENV`` points, then start it. A container
-    that cannot be given the files or started is removed, so its name is free for the next attempt."""
+    """Copy ``trust_dir`` into the created ``container`` where ``LOCAL_TRUST_ENV`` points, as the sandbox's host can
+    reach it, then start it. A container that cannot be given the files or started is removed, so its name is free
+    for the next attempt."""
     try:
-        await asyncio.to_thread(_copy_into_container, trust_dir, container, _TRUST_DIR)
+        await sandbox.copy_trust_dir_into_container(trust_dir, container, _TRUST_DIR)
         await sandbox.exec_script(f"docker start {shlex.quote(container)} > /dev/null")
     except Exception:
         await sandbox.exec_script(f"docker rm -f {shlex.quote(container)} >/dev/null 2>&1 || true")
@@ -682,9 +688,10 @@ class LocalSandboxProvider(SandboxProvider):
 
 
 def host_url_for(url: str, sandbox_type: Optional[str]) -> str:
-    """``url``, which this machine reaches, as a container on ``sandbox_type`` reaches it: only a local
-    sandbox's containers run on this machine, and they reach its loopback by another name."""
-    return LocalSandboxProvider.get_external_url(url) if sandbox_type == LocalSandbox.type else url
+    """``url``, which this machine reaches, as a container on ``sandbox_type`` reaches it: one on this machine (its
+    provider's ``ON_THIS_MACHINE``) reaches this machine's loopback as ``host.docker.internal``; one elsewhere reaches
+    the URL as it is, or not at all."""
+    return LocalSandboxProvider.get_external_url(url) if on_this_machine_provider(sandbox_type) else url
 
 
 def _is_loopback(host: Optional[str]) -> bool:

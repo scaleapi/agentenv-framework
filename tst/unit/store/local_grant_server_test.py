@@ -282,6 +282,33 @@ def test_grant_urls_name_the_advertised_host(tmp_path, monkeypatch):
             server.close()
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="only Linux has the whole 127.0.0.0/8 on its loopback interface")
+def test_the_platform_default_is_served_on_loopback_too_where_a_vm_on_this_machine_reaches_it(tmp_path, monkeypatch):
+    """A second loopback address stands in for the Linux Docker bridge address the default binds."""
+    monkeypatch.setattr(server_module, "_servers", {})
+    monkeypatch.setattr(server_module, "default_bind_host", lambda: "127.0.0.2")
+    store = LocalFilesystemObjectStore(str(tmp_path), grant_advertise_host="localhost")
+    try:
+        grant = store.issue_read_grant(store.put("k", b"both"))
+        assert httpx.get(grant.url).content == b"both"
+        assert httpx.get(grant.url.replace("localhost", "127.0.0.2")).content == b"both"
+    finally:
+        for server in server_module._servers.values():
+            server.close()
+
+
+def test_an_explicit_bind_host_is_served_as_given(tmp_path, monkeypatch):
+    monkeypatch.setattr(server_module, "_servers", {})
+    monkeypatch.setattr(server_module, "default_bind_host", lambda: "127.0.0.2")
+    store = LocalFilesystemObjectStore(str(tmp_path), grant_bind_host="127.0.0.1")
+    try:
+        store.issue_read_grant(store.put("k", b"v"))
+        assert [server.also_loopback for server in server_module._servers.values()] == [False]
+    finally:
+        for server in server_module._servers.values():
+            server.close()
+
+
 def test_settings_are_checked_when_the_store_is_made(tmp_path):
     with pytest.raises(ValueError, match="IP address"):
         LocalFilesystemObjectStore(str(tmp_path), grant_bind_host="localhost")
