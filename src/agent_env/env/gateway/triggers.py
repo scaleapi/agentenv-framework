@@ -1193,7 +1193,7 @@ class TriggerEngine:
                        changelog_id_before=changelog_before, changelog_id_after=self._gw._query_changelog_id())
             return True
         except Exception as e:
-            self._emit("action_failed", tid, action_index=index, detail=str(e)[:300])
+            self._emit("action_failed", tid, action_index=index, detail=str(e)[:300], **_named_executor(action))
             return False
 
     async def _run_verify(self, tid: str, index: int, verify: dict, ctx: dict | None = None,

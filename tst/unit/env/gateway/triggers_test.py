@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 
+import httpx
 import pytest
 from mcp.types import CallToolResult, TextContent
 
@@ -303,6 +304,22 @@ async def test_a_named_executor_that_does_not_complete_is_named_in_the_failure(e
 
     [failure] = [e for e in engine._events if e["kind"] == "action_failed"]
     assert failure["executor"] == "bob" and engine._triggers["x"]["status"] == "armed"
+
+
+@pytest.mark.asyncio
+async def test_a_named_executor_that_cannot_be_reached_is_named_in_the_failure(engine, monkeypatch):
+    async def fake_executor(self, executor, instruction, context_id):
+        raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(TriggerEngine, "_call_executor", fake_executor)
+    engine.register({"executors": {"bob": {"a2a_url": "http://bob", "role": "bob"}},
+                     "triggers": [{"id": "x", "when": {"type": "action", "tool": "t"},
+                                   "actions": [{"type": "nl", "instruction": "hi", "executor": "bob"}]}]})
+    engine.on_tool_call("default", "t", {}, _result())
+    await asyncio.sleep(0.2)
+
+    [failure] = [e for e in engine._events if e["kind"] == "action_failed"]
+    assert (failure["executor"], failure["detail"]) == ("bob", "connection refused")
 
 
 @pytest.mark.asyncio
