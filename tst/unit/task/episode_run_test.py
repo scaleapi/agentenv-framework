@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 import pytest_asyncio
+from agentenv_protocol import EnvironmentTool, ToolResult
 
 import agent_env.task.episode as episode_module
 from agent_env.config.runtime import Config
@@ -102,6 +103,37 @@ class _Teardowns:
         return TeardownReport()
 
 
+class _ToolSessions:
+    """Stands in for ``ToolSession``: the session on each URL serves the tools ``offered`` names for it, and every
+    session opened, call made and session closed is recorded."""
+
+    def __init__(self, offered):
+        self.offered = offered
+        self.opened = []
+        self.calls = []
+        self.closed = []
+
+    def __call__(self, *, mcp_url, role, headers, timeout):
+        sessions = self
+
+        class _Session:
+            async def open(self):
+                sessions.opened.append((mcp_url, role, headers, timeout))
+                return self
+
+            async def list_tools(self):
+                return [EnvironmentTool(name=name) for name in sessions.offered[mcp_url]]
+
+            async def call_tool(self, name, arguments=None):
+                sessions.calls.append((mcp_url, name, arguments))
+                return ToolResult(content=[{"type": "text", "text": f"{name} on {mcp_url}"}])
+
+            async def close(self):
+                sessions.closed.append(mcp_url)
+
+        return _Session()
+
+
 @pytest_asyncio.fixture
 async def teardowns(monkeypatch, local_stores):
     """Fake steps registered and ``teardown_run`` stood in for; an episode the test leaves running is abandoned
@@ -173,6 +205,57 @@ async def test_a_turn_carries_the_headers_each_url_needs(teardowns, monkeypatch)
     turn = await episode.next_turn()
 
     assert turn.headers == {"items": {"X-Sandbox": "http://127.0.0.1:20031/items/mcp"}}
+
+
+ITEMS_MCP, PANTRY_MCP = "http://127.0.0.1:20031/items/mcp", "http://127.0.0.1:20031/pantry/mcp"
+PANTRY = {"id": "pantry", "type": "episode_test_env", "env_id": "pantry"}
+STOCKED = {**ALICE, "env_ids": ["items", "pantry"]}
+
+
+def _tool_sessions(monkeypatch, offered):
+    sessions = _ToolSessions(offered)
+    monkeypatch.setattr(episode_module, "ToolSession", sessions)
+    monkeypatch.setattr(episode_module, "sandbox_request_headers_for_url", lambda url: {"X-Sandbox": url})
+    return sessions
+
+
+@pytest.mark.asyncio
+async def test_a_turns_tools_call_each_env_as_its_role_with_its_headers(teardowns, monkeypatch):
+    sessions = _tool_sessions(monkeypatch, {ITEMS_MCP: ["items_add_item"], PANTRY_MCP: ["pantry_count"]})
+    episode = await _spec(ITEMS, PANTRY, STOCKED, TURN, REPLIES).start()
+    turn = await episode.next_turn()
+
+    async with turn.tools(timeout=30) as tools:
+        assert [tool.name for tool in tools.list()] == ["items_add_item", "pantry_count"]
+        assert (await tools.call("pantry_count")).text == f"pantry_count on {PANTRY_MCP}"
+
+    assert sessions.opened == [(url, "alice@example.com", {"X-Sandbox": url}, 30) for url in (ITEMS_MCP, PANTRY_MCP)]
+    assert sessions.calls == [(PANTRY_MCP, "pantry_count", None)]
+    assert sorted(sessions.closed) == [ITEMS_MCP, PANTRY_MCP]
+
+
+@pytest.mark.asyncio
+async def test_a_tool_two_envs_offer_is_refused_as_the_tools_open_and_nothing_is_left_open(teardowns, monkeypatch):
+    sessions = _tool_sessions(monkeypatch, {ITEMS_MCP: ["count"], PANTRY_MCP: ["count"]})
+    episode = await _spec(ITEMS, PANTRY, STOCKED, TURN, REPLIES).start()
+    turn = await episode.next_turn()
+
+    with pytest.raises(EpisodeError, match="tool 'count' is offered by both env 'items' and env 'pantry'"):
+        async with turn.tools():
+            pass
+    assert sorted(sessions.closed) == [ITEMS_MCP, PANTRY_MCP]
+
+
+@pytest.mark.asyncio
+async def test_a_tool_no_env_offers_is_refused(teardowns, monkeypatch):
+    _tool_sessions(monkeypatch, {ITEMS_MCP: ["items_add_item"]})
+    episode = await _spec(ITEMS, ALICE, TURN, REPLIES).start()
+    turn = await episode.next_turn()
+
+    async with turn.tools() as tools:
+        with pytest.raises(EpisodeError) as raised:
+            await tools.call("nope")
+    assert str(raised.value) == "no env of turn 'turn' offers tool 'nope'; they offer ['items_add_item']"
 
 
 @pytest.mark.asyncio

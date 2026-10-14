@@ -49,14 +49,13 @@ source .venv/bin/activate
 An episode is one run of a task in which some of its agents are played from outside AgentEnv, by a training loop's model or any code of your own. AgentEnv runs the rest exactly as `agent-env run` does, deploying the envs, running the other agents and scoring, and waits at each of your agent's turns:
 
 ```python
-from agentenv_protocol import ToolSession
 from agent_env.task import EpisodeSpec, Task
 
 spec = EpisodeSpec.from_task(Task.get("my-task"), turn_timeout=900)
 episode = await spec.start()
 while (turn := await episode.next_turn()) is not None:
-    async with ToolSession(mcp_url=turn.mcp_urls["my-env"], role=turn.role, headers=turn.headers["my-env"]) as tools:
-        ...  # your model reads turn.prompt and calls tools.call_tool(name, arguments)
+    async with turn.tools() as tools:  # the agent's env tools, called as its role
+        ...  # your model reads turn.system_prompt and turn.prompt, and acts with tools.list() and tools.call()
     await turn.end(response="Done.")
 scores = await episode.result()  # every score the run recorded, by step id
 ```

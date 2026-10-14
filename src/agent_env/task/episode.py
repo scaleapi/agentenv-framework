@@ -12,6 +12,8 @@ from collections import deque
 from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar, Optional
 
+from agentenv_protocol import EnvironmentTool, ToolResult, ToolSession
+
 from agent_env.entity_refs import EntityRef
 from agent_env.providers.sandbox_providers.sandbox_provider import sandbox_request_headers_for_url
 from agent_env.task.episode_rules import problems
@@ -74,7 +76,8 @@ class EpisodeSpec:
 
 
 class Turn:
-    """An outside agent's turn: what it is asked, the envs it acts in and the headers each needs, until ``end()``."""
+    """An outside agent's turn. Its model reads ``system_prompt`` and ``prompt``, acts through ``tools()`` (or an MCP
+    client of its own on ``mcp_urls``, sending ``headers`` and ``role``), and hands its reply back with ``end()``."""
 
     def __init__(
         self, *, agent: str, step_id: str, prompt: str, system_prompt: str | None, role: str | None,
@@ -88,6 +91,11 @@ class Turn:
         self.mcp_urls = mcp_urls
         self.headers = {env_id: sandbox_request_headers_for_url(url) for env_id, url in mcp_urls.items()}
         self._reply: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+
+    def tools(self, *, timeout: float = 600.0) -> TurnTools:
+        """A client for the tools of the envs this agent acts in, calling them as its role with the headers each URL
+        needs; use it with ``async with``. ``timeout`` bounds each call, in seconds."""
+        return TurnTools(self, timeout)
 
     async def end(self, response: str | None = None) -> None:
         """Hand the turn back, and the run carries on. No reply records an empty one, as an agent that answers with
@@ -105,6 +113,49 @@ class Turn:
     def _fail(self, error: Exception) -> None:
         if self._open:
             self._reply.set_exception(error)
+
+
+class TurnTools:
+    """The tools of a turn's envs, listed once when it opens: ``list()`` names every one, and ``call()`` routes a
+    call to the env that offers it."""
+
+    def __init__(self, turn: Turn, timeout: float):
+        self._step_id = turn.step_id
+        self._sessions = {
+            env_id: ToolSession(mcp_url=url, role=turn.role, headers=turn.headers[env_id], timeout=timeout)
+            for env_id, url in turn.mcp_urls.items()
+        }
+        self._tools: list[EnvironmentTool] = []
+        self._offered_by: dict[str, str] = {}
+
+    async def __aenter__(self) -> TurnTools:
+        try:
+            for env_id, session in self._sessions.items():
+                await session.open()
+                for tool in await session.list_tools():
+                    if (other := self._offered_by.get(tool.name)) is not None:
+                        raise EpisodeError(f"tool {tool.name!r} is offered by both env {other!r} and env {env_id!r}")
+                    self._offered_by[tool.name] = env_id
+                    self._tools.append(tool)
+        except BaseException:
+            await self._close()
+            raise
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        await self._close()
+
+    def list(self) -> list[EnvironmentTool]:
+        return list(self._tools)
+
+    async def call(self, name: str, arguments: dict[str, Any] | None = None) -> ToolResult:
+        if name not in self._offered_by:
+            raise EpisodeError(
+                f"no env of turn {self._step_id!r} offers tool {name!r}; they offer {sorted(self._offered_by)}")
+        return await self._sessions[self._offered_by[name]].call_tool(name, arguments)
+
+    async def _close(self) -> None:
+        await asyncio.gather(*(session.close() for session in self._sessions.values()))
 
 
 class Episode:

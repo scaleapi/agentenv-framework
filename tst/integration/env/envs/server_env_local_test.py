@@ -235,9 +235,10 @@ async def test_a_tasks_agent_is_played_from_a_loop_of_ones_own_as_an_episode(loc
         turn = await episode.next_turn()
         assert [agent["agent_name"] for agent in Task.get_instance(episode.id).context["deployed_agents"]] == ["echo"]
         if add:
-            async with ToolSession(mcp_url=turn.mcp_urls[env.id], role=turn.role, headers=turn.headers[env.id]) as own:
-                await own.call_tool("items_add_item", {"item": "crate"})
-                assert json.loads((await own.call_tool("items_whoami")).text)["role"] == "alice@example.com"
+            async with turn.tools() as tools:
+                assert {"items_add_item", "items_whoami"} <= {tool.name for tool in tools.list()}
+                await tools.call("items_add_item", {"item": "crate"})
+                assert json.loads((await tools.call("items_whoami")).text)["role"] == "alice@example.com"
         await turn.end("Added a crate." if add else None)
         return await episode.result()
 
