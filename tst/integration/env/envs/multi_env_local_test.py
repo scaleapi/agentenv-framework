@@ -26,7 +26,7 @@ _TST_DATA = Path(__file__).resolve().parents[3] / "data"
 
 
 @pytest.mark.asyncio
-async def test_a_multi_env_deploys_restores_loads_and_tears_down_on_local_compose(local_stack):
+async def test_a_multi_env_deploys_restores_loads_and_tears_down_on_local_compose(local_stack):  # noqa: F811  (fixture)
     _seed_bootstrap_envs()
     uid = uuid.uuid4().hex[:8]
     slack_tag = f"multi-slack-{uid}"

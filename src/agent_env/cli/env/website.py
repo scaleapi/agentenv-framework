@@ -17,9 +17,7 @@ from agent_env.cli.utils import (
 )
 from agent_env.utils.card_naming import card_name_from_github, card_name_from_source
 from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM, build_image
-from agent_env.env import Env
 from agent_env.env.envs.website import WebsiteEnv
-from agent_env.providers import get_env_sandbox_provider
 from agent_env.store.ids import derive_id, image_repository
 
 
@@ -152,10 +150,10 @@ def put(
             sys.exit(1)
         click.echo(f"Derived environment_name={environment_name!r} from the environment card.")
 
-    click.echo(f"Building website backend Docker image...")
+    click.echo("Building website backend Docker image...")
     build_image(backend_dockerfile_path, backend_ctx, backend_tag, platform=build_platform)
 
-    click.echo(f"Creating backend DockerImageArtifact...")
+    click.echo("Creating backend DockerImageArtifact...")
     backend_artifact = DockerImageArtifact.put(
         id=backend_id,
         description="Website backend image created from agent-env CLI",
@@ -167,10 +165,10 @@ def put(
     frontend_ctx = Path(frontend_docker_context) if frontend_docker_context else frontend_dockerfile_path.parent
     frontend_tag = image_repository(frontend_id)
 
-    click.echo(f"Building website frontend Docker image...")
+    click.echo("Building website frontend Docker image...")
     build_image(frontend_dockerfile_path, frontend_ctx, frontend_tag, platform=build_platform)
 
-    click.echo(f"Creating frontend DockerImageArtifact...")
+    click.echo("Creating frontend DockerImageArtifact...")
     frontend_artifact = DockerImageArtifact.put(
         id=frontend_id,
         description="Website frontend image created from agent-env CLI",
@@ -181,7 +179,7 @@ def put(
     metadata = detect_env_metadata(backend_dockerfile_path, backend_ctx)
     metadata.update(user_metadata)
 
-    click.echo(f"Creating WebsiteEnv...")
+    click.echo("Creating WebsiteEnv...")
     env = WebsiteEnv.put(
         id=env_id,
         backend_docker_image_artifact=backend_artifact,

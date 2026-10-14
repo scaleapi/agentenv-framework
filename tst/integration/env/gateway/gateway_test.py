@@ -1169,7 +1169,7 @@ async def test_gateway_with_multi_mcp_server(sandbox_provider, multi_env, enviro
 
             # Verify schema in /step list_tools response
             list_emails_tool = next(t for t in tools if t["name"] == "list_emails")
-            assert "folder_name" in str(list_emails_tool["parameters"]), f"Expected folder_name in schema via /step"
+            assert "folder_name" in str(list_emails_tool["parameters"]), "Expected folder_name in schema via /step"
 
             resp = await _step_call_tool(client, gateway_url, "list_emails", {"folder_name": "INBOX"})
             content_text = _step_content_text(resp)
@@ -1192,7 +1192,7 @@ async def test_gateway_with_multi_mcp_server(sandbox_provider, multi_env, enviro
             assert "gateway" not in server_names  # no websites configured
             slack_server = next(s for s in state["mcp_servers"] if s["name"] == "slack")
             assert any(t["name"] == "channels_list" for t in slack_server["tools"])
-            assert "changelog_id" in state, f"Expected changelog_id in /state response"
+            assert "changelog_id" in state, "Expected changelog_id in /state response"
 
         load_result = await multi_env.load_environment_universe_artifact(environment_universe_artifact)
 
@@ -1583,7 +1583,7 @@ async def _verify_list_tools(mcp_url: str, tool_verifier_callback: callable):
             if assertion_errors:
                 raise
             if verified:
-                logger.info(f"  Verified (ignoring cleanup error)")
+                logger.info("  Verified (ignoring cleanup error)")
                 break
             logger.info(f"  Attempt {attempt + 1} failed: {type(eg).__name__}")
             if attempt < max_retries - 1:
@@ -1663,7 +1663,7 @@ async def test_load_from_snapshot(multi_env, environment_universe_artifact):
         result = await multi_env.deploy()
 
         # Load universe — should use the snapshot created by test_snapshot_cli
-        load_result = await multi_env.load_environment_universe_artifact(environment_universe_artifact)
+        await multi_env.load_environment_universe_artifact(environment_universe_artifact)
 
         # Verify data was loaded correctly via MCP tools
         async def assert_loaded_data(session, tools_result, tool_names):
@@ -1747,7 +1747,7 @@ async def test_gateway_consistent_mode(multi_env, environment_universe_artifact)
             response = await client.get(f"{result.gateway_url}/state", timeout=30)
             response.raise_for_status()
             state = response.json()
-            assert "changelog_id" in state, f"Expected changelog_id in /state response"
+            assert "changelog_id" in state, "Expected changelog_id in /state response"
             assert isinstance(state["changelog_id"], int) and state["changelog_id"] > 0, (
                 f"Expected positive changelog_id in /state after writes, got {state['changelog_id']}"
             )

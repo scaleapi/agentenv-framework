@@ -35,8 +35,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional
 
-import yaml
-
 from agent_env.config import loader as config_loader
 from agent_env.config import model as model_config
 from agent_env.config.errors import ConfigError, EmptySecretBundleError

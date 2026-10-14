@@ -49,6 +49,8 @@ jobs:
           uv run --no-project --with tomlkit python scripts/bump_version.py
           uv lock --check
           git checkout -- pyproject.toml packages/agentenv-protocol/pyproject.toml uv.lock
+      - name: Lint
+        run: .venv/bin/ruff check
       - name: Unit tier
         run: .venv/bin/python -m pytest tst/unit packages/agentenv-protocol/tests -n auto -q --timeout=300 --junitxml=junit-unit.xml
 

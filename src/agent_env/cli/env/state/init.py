@@ -56,6 +56,7 @@ def _resolve_environment_names(env: Env) -> list[str]:
 def init_env_state(env_id: str, env_state_type: str | None, ttl_seconds: int):
     """Pre-initialize a durable remote state store for an env and print its instance id."""
     from agent_env.providers.env_state import (
+        EnvStateInstance,
         acquire_state_for_deploy,
         build_state_provider,
     )

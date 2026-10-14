@@ -41,7 +41,7 @@ def vm_platform(monkeypatch, caplog):
 
 
 @pytest.mark.asyncio
-async def test_an_image_that_is_only_a_build_context_is_built_on_the_vm(local_stack, vm_platform, tmp_path, caplog):
+async def test_an_image_that_is_only_a_build_context_is_built_on_the_vm(local_stack, vm_platform, tmp_path, caplog):  # noqa: F811  (fixture)
     _seed_bootstrap_envs()
     uid = uuid.uuid4().hex[:8]
     image = DockerImageArtifact.put_context(f"ctx-items-{uid}", description="build context e2e",
@@ -55,7 +55,7 @@ async def test_an_image_that_is_only_a_build_context_is_built_on_the_vm(local_st
 
 @pytest.mark.asyncio
 async def test_an_image_whose_tar_gz_is_for_another_platform_is_built_from_the_context_beside_it(
-        local_stack, vm_platform, tmp_path, caplog):
+        local_stack, vm_platform, tmp_path, caplog):  # noqa: F811  (fixture)
     _seed_bootstrap_envs()
     uid = uuid.uuid4().hex[:8]
     context = _items_context(tmp_path / "items")

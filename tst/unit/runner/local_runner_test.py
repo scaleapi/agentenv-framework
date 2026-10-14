@@ -213,7 +213,7 @@ async def test_cancel_a_queued_run_before_it_starts(docs, monkeypatch):
     _install_task(monkeypatch, task)
     runner = LocalRunner(workers=1)
     await runner.start()
-    blocker = await runner.submit("t1", 1)
+    await runner.submit("t1", 1)
     await asyncio.wait_for(started.wait(), 2)        # blocker holds the one slot
     waiting = await runner.submit("t1", 1)           # no free slot → QUEUED
 

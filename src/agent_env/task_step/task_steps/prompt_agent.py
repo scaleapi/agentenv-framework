@@ -620,7 +620,7 @@ class PromptAgentTaskStep(TaskStep):
                 user_msg = (user_result.get("status") or {}).get("message") or {}
                 current_user_parts = user_msg.get("parts") or []
                 if not current_user_parts:
-                    logger.warning(f"user_a2a_url returned no parts; ending multi-turn")
+                    logger.warning("user_a2a_url returned no parts; ending multi-turn")
                     conversation_store.mark_closed(conversation_id)
                     break
 

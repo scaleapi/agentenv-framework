@@ -39,6 +39,7 @@ or one of them only where it is used.
 
 | Command | What it does |
 |---|---|
+| `make lint` | `ruff check` over the repository, with the rules in `pyproject.toml` (pyflakes) |
 | `make unit-test` | `tst/unit` and `packages/agentenv-protocol/tests`, in parallel, no network |
 | `make int-test-fast` | `tst/integration` minus `int_test_slow`, in parallel; needs Docker and a local OCI registry (`docker run -d -p 5000:5000 public.ecr.aws/docker/library/registry:2`) |
 | `make int-test-slow` | the `int_test_slow` tests, serially (they build the same Docker tags from module fixtures and race under xdist) |
@@ -186,7 +187,8 @@ The required checks on pull requests and `main` are `unit`, `integration-local`,
 `integration-local-slow`, `installer`, `plugin-api` and `clean-install`. `.github/workflows/local-backends.yml` runs
 the first four, all installed from public PyPI with no secrets and no external services (a `registry:2` service container for the integration jobs). The
 `unit` job also fails if `uv.lock` resolves anything from a registry other than PyPI or if
-`agentenv-framework-protocol` is not the editable workspace member. The integration jobs run
+`agentenv-framework-protocol` is not the editable workspace member, or if `ruff check` reports a
+problem. The integration jobs run
 `.github/scripts/check_skip_policy.py` over the JUnit report: only `agentenv-capability-missing`
 skips for the allowed capabilities pass, and the fast job allows no skips under
 `tst/integration/store/`. The `installer` job runs `tst/installer` when a pull request or push

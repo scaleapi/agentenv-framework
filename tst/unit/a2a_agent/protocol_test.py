@@ -284,7 +284,7 @@ async def test_a_blip_shorter_than_the_window_is_ridden_out(monkeypatch):
             _disconnected(request, agent)
         return _task("completed" if agent.now > 50 else "working")
 
-    agent = _Agent(monkeypatch, answer)
+    _Agent(monkeypatch, answer)
 
     result = await poll_a2a_task("http://agent", "t-1", 1200, 2, sandbox_id="sb-1")
 

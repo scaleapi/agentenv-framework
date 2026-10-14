@@ -21,7 +21,7 @@ from agent_env.store.document_store import (
 from agent_env.store.query import QueryBuilder, to_document_query
 
 if TYPE_CHECKING:
-    from agent_env.a2a_agent.a2a_agent import A2AAgent
+    from agent_env.a2a_agent.a2a_agent import A2AAgent, DeployedA2AAgent
 
 logger = logging.getLogger(__name__)
 

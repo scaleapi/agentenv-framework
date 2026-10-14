@@ -98,7 +98,7 @@ def run(eval_id: str, eval_version: int | None, output_dir: str | None, k: int, 
     tasks = []
     for et in eval_obj.tasks:
         task = Task.get(et.task_id, version=et.task_version)
-        version_note = f" (resolved from latest)" if et.task_version is None else ""
+        version_note = " (resolved from latest)" if et.task_version is None else ""
         click.echo(f"  Loaded task: {task.id} v{task.version} ({len(task.steps)} steps){version_note}")
         tasks.append(task)
 

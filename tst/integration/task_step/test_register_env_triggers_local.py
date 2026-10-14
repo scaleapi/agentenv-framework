@@ -26,7 +26,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
 
 @pytest.mark.asyncio
-async def test_each_nl_action_reaches_the_executor_it_names(local_stack):
+async def test_each_nl_action_reaches_the_executor_it_names(local_stack):  # noqa: F811  (fixture)
     _seed_bootstrap_envs()
     uid = uuid.uuid4().hex[:8]
     items = MCPServerEnv.put(id=f"trig-items-{uid}", environment_name="items",
@@ -73,7 +73,7 @@ async def test_each_nl_action_reaches_the_executor_it_names(local_stack):
 
 
 @pytest.mark.asyncio
-async def test_personas_react_to_each_other_until_one_stays_quiet(local_stack):
+async def test_personas_react_to_each_other_until_one_stays_quiet(local_stack):  # noqa: F811  (fixture)
     _seed_bootstrap_envs()
     uid = uuid.uuid4().hex[:8]
     items = MCPServerEnv.put(id=f"chain-items-{uid}", environment_name="items",

@@ -21,7 +21,6 @@ from agent_env.store.object_store.local.tls import local_ca
 from agent_env.store.routing import LocalRunObjectStore
 from agent_env.task_step.task_steps.run_code import RunCodeTaskStep
 from agent_env.a2a_agent import a2a_agent as a2a_agent_module
-from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from tst.unit.store.fakes import FakeObjectStore
 

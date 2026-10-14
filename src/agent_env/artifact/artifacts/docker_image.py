@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import gzip
 import logging
-import os
 import posixpath
 import re
 import shlex
@@ -13,7 +12,6 @@ import subprocess
 import tempfile
 import uuid
 from dataclasses import dataclass
-from importlib.metadata import version as pkg_version
 from pathlib import Path
 from typing import Any, Callable, ClassVar, Literal
 from urllib.parse import urlparse

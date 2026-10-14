@@ -37,6 +37,7 @@ This is the same install CI performs. `make install` is equivalent.
 
 | Command | What it runs | Needs |
 |---|---|---|
+| `make lint` | `ruff check`, with the rules in `pyproject.toml`; the `unit` job runs it too | nothing external |
 | `make unit-test` | unit suite for `agentenv-framework` and `agentenv-framework-protocol` | nothing external |
 | `make int-test-fast` | integration tests against the local backends | Docker |
 | `make int-test-slow` | tests that build images or deploy sandboxes, minutes each | Docker, and a sandbox backend for some |
