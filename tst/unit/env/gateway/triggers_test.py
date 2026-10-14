@@ -3,13 +3,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
+from datetime import datetime, timezone
 
 import httpx
 import pytest
 from mcp.types import CallToolResult, TextContent
 
 from agent_env.env.gateway.clock import Clock
-from agent_env.env.gateway.triggers import TriggerEngine, TriggerError
+from agent_env.env.gateway import triggers as triggers_module
+from agent_env.env.gateway.triggers import TriggerEngine, TriggerError, _next_opening
 
 
 class _FakeGateway:
@@ -89,6 +92,37 @@ def executor_calls(monkeypatch):
     return calls
 
 
+@pytest.fixture
+def waits(monkeypatch):
+    """Every virtual-time wait the engine makes, in virtual seconds; none of them actually sleeps."""
+    waited: list[float] = []
+
+    async def fake_sleep(self, seconds):
+        waited.append(seconds)
+
+    monkeypatch.setattr(TriggerEngine, "_sleep_virtual", fake_sleep)
+    return waited
+
+
+@pytest.fixture
+def virtual_time(engine, monkeypatch):
+    """The engine's clock armed at 2026-10-14T08:00Z (a Wednesday) on a fake source; each wait advances it at once
+    and is recorded in virtual seconds, and `.advance(s)` moves it by `s` virtual seconds."""
+    source = {"t": 0.0}
+    clock = Clock(now_fn=lambda: source["t"])
+    clock.set_time("2026-10-14T08:00:00Z")
+    engine._test_gw._clock = clock
+    waited = _Waits()
+    waited.advance = lambda seconds: source.__setitem__("t", source["t"] + seconds / clock.rate)
+
+    async def fake_sleep(self, seconds):
+        waited.append(seconds)
+        waited.advance(seconds)
+
+    monkeypatch.setattr(TriggerEngine, "_sleep_virtual", fake_sleep)
+    return waited
+
+
 def _registration(**overrides):
     base = {
         "watch_roles": ["default"],
@@ -162,6 +196,27 @@ def _registration(**overrides):
     ({"executors": {"bob": {"a2a_url": "http://b", "role": "bob"}},
       "triggers": [{"id": "x", "when": {"type": "action", "tool": "t"},
                     "actions": [{"type": "tool", "tool": "t2", "executor": "bob"}]}]}, "only valid on nl actions"),
+    *[({"triggers": [{"id": "x", "when": {"type": "action", "tool": "t"},
+                      "actions": [{"type": "tool", "tool": "t2", "delay": delay}]}]}, fragment)
+      for delay, fragment in [("soon", "delay"), ("PT0S", "delay must be a positive duration"),
+                              ({"dist": "uniform"}, "delay must be an ISO-8601 duration or"),
+                              ({"dist": "exp", "mean": "PT1M"}, "requires an integer 'seed'"),
+                              ({"dist": "exp", "mean": "PT0S", "seed": 1}, "delay.mean must be a positive")]],
+    ({"triggers": [{"id": "x", "when": {"type": "action", "tool": "t"}, "barrier": {"at": "provoking_call"},
+                    "actions": [{"type": "tool", "tool": "t2", "delay": "PT1M"}]}]}, "can't run under a barrier"),
+    *[({"executors": {"bob": {"a2a_url": "http://b", "role": "bob", "hours": hours}}, "triggers": []}, fragment)
+      for hours, fragment in [({"start": "9:00", "end": "17:00"}, "hours.start must be a 24-hour"),
+                              ({"start": "09:00", "end": "09:00"}, "would never be available"),
+                              ({"start": "09:00", "end": "17:00", "utc_offset": "PST"}, "utc_offset must look like"),
+                              ({"start": "09:00", "end": "17:00", "days": ["monday"]}, "hours.days must be")]],
+    ({"triggers": [{"id": "x", "when": {"type": "action", "tool": "t", "unless": {"tool": "t2"}}, "actions": []}]},
+     "when.unless is only valid on time triggers"),
+    ({"triggers": [{"id": "x", "when": {"type": "time", "every": "PT1H", "unless": {"tool": "t2"}}, "actions": []}]},
+     "only valid on a one-shot time trigger"),
+    ({"triggers": [{"id": "x", "when": {"type": "time", "at": "PT1H", "unless": {"where": {}}}, "actions": []}]},
+     "must be an object with a non-empty 'tool'"),
+    ({"triggers": [{"id": "x", "when": {"type": "time", "at": "PT1H", "unless": {"tool": "t2", "roles": []}},
+                    "actions": []}]}, "when.unless.roles must be a non-empty list"),
     *[({"triggers": [{"id": "x", "when": {"type": "action", "tool": "t", "roles": roles}, "actions": []}]},
        "when.roles must be a non-empty list") for roles in ("denise", [], [""], [5])],
     ({"triggers": [{"id": "x", "when": {"type": "time", "after": "y", "offset": "PT1S", "roles": ["denise"]},
@@ -387,6 +442,142 @@ async def test_an_executor_write_prompts_only_the_state_triggers_that_list_it(en
     engine.on_tool_call("denise@example.com", "gdocs_batch_update", {"documentId": "doc-1"}, _result())
     await asyncio.sleep(0.2)
     assert {tid: t["status"] for tid, t in engine._triggers.items()} == {"listed": "fired", "unlisted": "armed"}
+
+
+@pytest.mark.asyncio
+async def test_a_delay_waits_its_virtual_time_before_the_action(engine, executor_calls, waits):
+    engine.register({"executors": {"bob": {"a2a_url": "http://bob", "role": "bob"}},
+                     "triggers": [{"id": "x", "when": {"type": "action", "tool": "t"},
+                                   "actions": [{"type": "nl", "executor": "bob", "instruction": "reply",
+                                                "delay": "PT20M"}]}]})
+    engine.on_tool_call("default", "t", {}, _result())
+    await asyncio.sleep(0.2)
+
+    assert waits == [1200.0] and len(executor_calls) == 1
+    kinds = [e["kind"] for e in engine._events if e.get("trigger_id") == "x"]
+    assert kinds.index("delayed") < kinds.index("action_ok")
+    [delayed] = [e for e in engine._events if e["kind"] == "delayed"]
+    assert (delayed["virtual_seconds"], delayed["executor"]) == (1200.0, "bob")
+
+
+@pytest.mark.asyncio
+async def test_a_stochastic_delay_draws_the_same_sequence_from_its_seed(engine, waits):
+    engine.register({"triggers": [{"id": "x", "when": {"type": "action", "tool": "t", "repeat": True},
+                                   "actions": [{"type": "tool", "tool": "slack_send_message",
+                                                "args": {"channel": "#c", "text": "hi"},
+                                                "delay": {"dist": "exp", "mean": "PT10M", "seed": 7}}]}]})
+    for _ in range(3):
+        engine.on_tool_call("default", "t", {}, _result())
+        await asyncio.sleep(0.1)
+
+    rng = random.Random(7)
+    assert waits == [rng.expovariate(1.0 / 600) for _ in range(3)]
+    assert len(engine._test_state["slack"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_working_hours_defer_an_nl_action_until_they_open(engine, executor_calls, virtual_time):
+    engine.register({"executors": {"bob": {"a2a_url": "http://bob", "role": "bob",
+                                           "hours": {"start": "09:00", "end": "17:00"}}},
+                     "triggers": [{"id": "x", "when": {"type": "action", "tool": "t"},
+                                   "actions": [{"type": "nl", "executor": "bob", "instruction": "reply"}]}]})
+    engine.on_tool_call("default", "t", {}, _result())
+    await asyncio.sleep(0.2)
+
+    [deferred] = [e for e in engine._events if e["kind"] == "deferred"]
+    assert (deferred["until"], deferred["executor"]) == ("2026-10-14T09:00:00Z", "bob")
+    assert virtual_time == [3600.0] and len(executor_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_working_hours_do_not_apply_while_the_clock_is_unarmed(engine, executor_calls, waits):
+    engine.register({"executors": {"bob": {"a2a_url": "http://bob", "role": "bob",
+                                           "hours": {"start": "09:00", "end": "09:01"}}},
+                     "triggers": [{"id": "x", "when": {"type": "action", "tool": "t"},
+                                   "actions": [{"type": "nl", "executor": "bob", "instruction": "reply"}]}]})
+    engine.on_tool_call("default", "t", {}, _result())
+    await asyncio.sleep(0.2)
+
+    assert waits == [] and len(executor_calls) == 1
+    assert not [e for e in engine._events if e["kind"] == "deferred"]
+
+
+@pytest.mark.parametrize("now, hours, opens", [
+    ("2026-10-14T08:00:00Z", {"start": "09:00", "end": "17:00"}, "2026-10-14T09:00:00Z"),
+    ("2026-10-14T12:00:00Z", {"start": "09:00", "end": "17:00"}, None),
+    ("2026-10-14T17:00:00Z", {"start": "09:00", "end": "17:00"}, "2026-10-15T09:00:00Z"),
+    ("2026-10-14T15:00:00Z", {"start": "09:00", "end": "17:00", "utc_offset": "-07:00"}, "2026-10-14T16:00:00Z"),
+    ("2026-10-14T16:30:00Z", {"start": "09:00", "end": "17:00", "utc_offset": "-07:00"}, None),
+    ("2026-10-14T23:00:00Z", {"start": "22:00", "end": "06:00"}, None),
+    ("2026-10-15T03:00:00Z", {"start": "22:00", "end": "06:00"}, None),
+    ("2026-10-14T12:00:00Z", {"start": "22:00", "end": "06:00"}, "2026-10-14T22:00:00Z"),
+    ("2026-10-17T12:00:00Z", {"start": "09:00", "end": "17:00", "days": ["mon", "tue", "wed", "thu", "fri"]},
+     "2026-10-19T09:00:00Z"),
+    ("2026-10-17T03:00:00Z", {"start": "22:00", "end": "06:00", "days": ["fri"]}, None),
+], ids=["before", "inside", "at-end", "offset-before", "offset-inside", "wrap-evening", "wrap-morning",
+        "wrap-midday", "weekend", "wrap-from-a-listed-day"])
+def test_next_opening(now, hours, opens):
+    hours = {"utc_offset": "+00:00", "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"], **hours}
+    got = _next_opening(datetime.fromisoformat(now.replace("Z", "+00:00")), hours)
+    assert (got.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if got else None) == opens
+
+
+def _deadline(**unless) -> dict:
+    """An anchor `dm` (fired by a call to `t`) and a deadline 30 virtual minutes after it, cancelled by `unless`."""
+    return {"executors": {"bob": {"a2a_url": "http://bob", "role": "bob"}},
+            "triggers": [{"id": "dm", "when": {"type": "action", "tool": "t"}, "actions": []},
+                         {"id": "deadline", "when": {"type": "time", "after": "dm", "offset": "PT30M",
+                                                     "unless": {"tool": "slack_send_message", **unless}},
+                          "actions": []}]}
+
+
+@pytest.mark.asyncio
+async def test_a_matching_call_after_the_anchor_cancels_the_deadline(engine, virtual_time):
+    engine.register(_deadline(where={"channel_id": {"equals": "D1"}}))
+    engine.on_tool_call("default", "slack_send_message", {"channel_id": "D1"}, _result())  # before the anchor
+    assert engine._triggers["deadline"]["status"] == "armed"
+    engine.on_tool_call("default", "t", {}, _result())
+    await asyncio.sleep(0.1)
+    for call, error in ((("default", "slack_send_message", {"channel_id": "D2"}), False),
+                        (("default", "slack_send_message", {"channel_id": "D1"}), True),
+                        (("bob", "slack_send_message", {"channel_id": "D1"}), False)):
+        engine.on_tool_call(*call, _result(is_error=error))
+    assert engine._triggers["deadline"]["status"] == "armed"
+
+    engine.on_tool_call("default", "slack_send_message", {"channel_id": "D1"}, _result())
+    assert engine.state()["triggers"][1]["status"] == "cancelled"
+    [cancelled] = [e for e in engine._events if e["kind"] == "cancelled"]
+    assert cancelled["provoking"] == {"tool": "slack_send_message", "role": "default"}
+
+    virtual_time.advance(3600)
+    engine._eval_time_triggers()
+    await asyncio.sleep(0.1)
+    assert engine._triggers["deadline"]["status"] == "cancelled" and engine._triggers["deadline"]["fire_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_deadline_lists_the_executor_roles_that_cancel_it(engine, virtual_time):
+    engine.register(_deadline(roles=["bob"]))
+    engine.on_tool_call("default", "t", {}, _result())
+    await asyncio.sleep(0.1)
+    engine.on_tool_call("default", "slack_send_message", {}, _result())
+    assert engine._triggers["deadline"]["status"] == "armed"
+    engine.on_tool_call("bob", "slack_send_message", {}, _result())
+    assert engine._triggers["deadline"]["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_a_deadline_nobody_cancels_fires_when_due(engine, virtual_time):
+    engine.register(_deadline())
+    engine.on_tool_call("default", "t", {}, _result())
+    await asyncio.sleep(0.1)
+    virtual_time.advance(29 * 60)
+    engine._eval_time_triggers()
+    assert engine._triggers["deadline"]["status"] == "armed"
+    virtual_time.advance(2 * 60)
+    engine._eval_time_triggers()
+    await asyncio.sleep(0.1)
+    assert engine._triggers["deadline"]["status"] == "fired"
 
 
 def test_generated_id_on_omit(engine):
@@ -616,3 +807,55 @@ async def test_step_path_respects_watch_roles(monkeypatch):
 
 class _ExecutorCalls(list):
     reply: object = "done"
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rate, virtual_seconds, steps", [(60, 1200, [5.0, 5.0, 5.0, 5.0]), (None, 12, [5.0, 5.0, 2.0])],
+                         ids=["armed-at-60x", "unarmed"])
+async def test_waiting_virtual_time_follows_the_clock_rate(engine, monkeypatch, rate, virtual_seconds, steps):
+    slept: list[float] = []
+
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(triggers_module.asyncio, "sleep", fake_sleep)
+    if rate is not None:
+        engine._test_gw._clock.set_time("2026-10-14T08:00:00Z", rate=rate)
+    await engine._sleep_virtual(virtual_seconds)
+    assert slept == steps
+
+
+@pytest.mark.asyncio
+async def test_tool_call_events_carry_the_callers_role_and_the_fire_an_executor_made_them_for(monkeypatch):
+    gw = _step_gateway()
+    events: list[dict] = []
+
+    async def capture(event):
+        events.append(dict(event))
+        return f"event_{len(events)}"
+
+    async def executor(self, executor, instruction, context_id):
+        await gw._step_call_tool({"tool_name": "gdocs_create_document", "arguments": {"title": "by bob"}}, "bob")
+        return "done"
+
+    monkeypatch.setattr(gw, "_log_event", capture)
+    monkeypatch.setattr(TriggerEngine, "_call_executor", executor)
+    gw._trigger_engine.register({
+        "watch_roles": ["default"], "executors": {"bob": {"a2a_url": "http://bob", "role": "bob"}},
+        "triggers": [{"id": "t", "when": {"type": "action", "tool": "gdocs_create_document",
+                                          "where": {"title": {"regex": "solver"}}},
+                      "actions": [{"type": "nl", "executor": "bob", "instruction": "write"}]}]})
+    await gw._step_call_tool({"tool_name": "gdocs_create_document", "arguments": {"title": "by solver"}}, "default")
+    await asyncio.sleep(0.2)
+    await gw._step_call_tool({"tool_name": "gdocs_create_document", "arguments": {"title": "later"}}, "bob")
+
+    calls = [(e["tool_call"]["arguments"]["title"], e["role"], e.get("caused_by"))
+             for e in events if e["event_type"] == "tool_call"]
+    assert calls == [("by solver", "default", None),
+                     ("by bob", "bob", [{"trigger_id": "t", "action_index": 0, "fire": 1}]),
+                     ("later", "bob", None)]
+
+
+class _Waits(list):
+    advance = None

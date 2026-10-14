@@ -128,6 +128,11 @@ class Clock:
         return self._armed
 
     @property
+    def rate(self) -> float:
+        """Virtual seconds per real second; 1.0 while unarmed."""
+        return self._rate
+
+    @property
     def generation(self) -> int:
         """Bumped on every arm/clear — lets consumers detect a re-anchor and drop stale derived state."""
         return self._generation

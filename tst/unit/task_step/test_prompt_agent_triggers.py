@@ -588,7 +588,7 @@ async def test_capture_put_failure_keeps_inline_summary():
 
 # The other half of the partition. It lives here rather than in the engine or the step because it is
 # a ledger for the test below, not something either of them needs at runtime.
-_KNOWN_SETTLED_STATUSES = ("armed", "fired", "failed")
+_KNOWN_SETTLED_STATUSES = ("armed", "fired", "failed", "cancelled")
 
 
 def test_the_capture_path_classifies_every_status_the_engine_can_emit():

@@ -41,6 +41,8 @@ _CTX_PREFIXES = ("args", "result")
 _BARRIER_AT = ("provoking_call",)
 _BARRIER_KEYS = ("at", "timeout_seconds")
 _DROP = object()  # an unresolved `${x?}` used as a whole value: drop the key / element
+# Real seconds between re-reads of the clock while waiting out virtual time, so a rate change or re-arm is followed.
+_VIRTUAL_RECHECK_S = 5.0
 # An allowlist, not a size bound: identifier/metadata keys only, since bodies and addresses are PII.
 _ECHO_KEYS = frozenset({
     "action", "createdTime", "fileName", "kind", "mimeType", "modifiedTime", "name", "role",
@@ -59,6 +61,8 @@ _EVENT_KINDS = frozenset({
     "action_ok", "action_failed",     # one fire-action within a trigger
     "verify_ok", "verify_failed",     # typed acceptance of an action
     "fired", "failed", "eval_error",  # per trigger; `failed` re-arms an action/state trigger, retires a time one
+    "delayed", "deferred",            # an action waited out its delay / its executor's working hours
+    "cancelled",                      # a deadline's `unless` call came before it was due
 })
 # Trigger-level failures; the per-action kinds are details of one of these, so this counts once per failure.
 _FAILURE_KINDS = ("failed", "eval_error")
@@ -385,6 +389,7 @@ class TriggerEngine:
     def __init__(self, gateway):
         self._gw = gateway
         self._executors: dict[str | None, dict] = {}  # `executor` under None, `executors` by name
+        self._in_flight: dict[str, list[dict]] = {}  # executor role -> the fires it is realizing, for attribution
         self._watch_roles: set[str] = set()
         self._config_set = False
         self._triggers: dict[str, dict] = {}
@@ -443,7 +448,7 @@ class TriggerEngine:
                                    "next_mark": None, "resolved": False, "fire_count": 0,
                                    "failure_count": 0, "last_failure_at": None,
                                    "rng": _make_rng(spec), "mark_gen": None,
-                                   "pending": deque(), "task": None}
+                                   "pending": deque(), "task": None, "delay_rngs": _delay_rngs(spec)}
             self._emit("added", tid)
         self._recompute_time_flag()
         return {"ok": True, "added": batch_order, "all": list(self._triggers)}
@@ -468,6 +473,8 @@ class TriggerEngine:
             named.append((when["tool"], "when.tool"))
         elif when["type"] == "state":
             named.extend((t, "when.check") for t in _check_tools(when["check"]))
+        elif "unless" in when:
+            named.append((when["unless"]["tool"], "when.unless.tool"))
         for i, action in enumerate(spec["actions"]):
             if action["type"] == "tool":
                 named.append((action["tool"], f"actions[{i}].tool"))
@@ -503,6 +510,7 @@ class TriggerEngine:
         self._seq = 0
         self._watch_roles = set()
         self._executors = {}
+        self._in_flight = {}
         self._config_set = False
         self._readonly_tools = None
         self._recompute_time_flag()
@@ -593,9 +601,12 @@ class TriggerEngine:
             raise TriggerError(f"{where}.role must be a non-empty string (the deployed executor's AgentEnv-Role, kept out of watch_roles so its own tool calls never fire triggers)")
         if role in watch_roles:
             raise TriggerError(f"{where}.role {role!r} must not be in watch_roles {sorted(watch_roles)} — the executor's own tool calls would fire triggers (cascade)")
-        return {"a2a_url": raw["a2a_url"].rstrip("/"),
-                "timeout_seconds": float(raw.get("timeout_seconds", 120)),
-                "role": role}
+        executor = {"a2a_url": raw["a2a_url"].rstrip("/"),
+                    "timeout_seconds": float(raw.get("timeout_seconds", 120)),
+                    "role": role}
+        if raw.get("hours") is not None:
+            executor["hours"] = _normalize_hours(raw["hours"], where)
+        return executor
 
     @staticmethod
     def _normalize_barrier(spec: dict, tid: str, has_ctx: bool) -> None:
@@ -629,6 +640,8 @@ class TriggerEngine:
         if not isinstance(when, dict) or when.get("type") not in ("action", "state", "time"):
             raise TriggerError(f"trigger '{tid}': when.type must be 'action', 'state', or 'time'")
         self._normalize_roles(when, tid)
+        if "unless" in when and when["type"] != "time":
+            raise TriggerError(f"trigger '{tid}': when.unless is only valid on time triggers")
         if when["type"] == "action":
             self._normalize_action_when(when, tid)
         elif when["type"] == "state":
@@ -652,6 +665,9 @@ class TriggerEngine:
             if action["type"] == "nl" and target is not None and target["role"] in when.get("roles", ()):
                 raise TriggerError(f"trigger '{tid}': when.roles includes {target['role']!r}, the role of the executor "
                                    f"actions[{i}] goes to, so each of its replies would provoke it again")
+        if spec.get("barrier") and any("delay" in action for action in actions):
+            raise TriggerError(f"trigger '{tid}': a delayed action can't run under a barrier, which holds the provoking "
+                               f"call until the actions finish")
         return spec
 
     @staticmethod
@@ -691,6 +707,10 @@ class TriggerEngine:
             raise TriggerError(f"{w}: 'as' is only valid on tool actions")
         if "executor" in action and atype != "nl":
             raise TriggerError(f"{w}: 'executor' is only valid on nl actions")
+        if action.get("delay") is None:
+            action.pop("delay", None)
+        else:
+            _normalize_delay(action["delay"], w)
         if atype == "nl":
             if not isinstance(action.get("instruction"), str) or not action["instruction"]:
                 raise TriggerError(f"{w}: instruction must be a non-empty string")
@@ -743,6 +763,10 @@ class TriggerEngine:
             raise TriggerError(f"{w}: when.type=='time' needs at least one of 'at', 'after', or 'every'")
         if has_at and has_after:
             raise TriggerError(f"{w}: when may have at most one of 'at' / 'after'")
+        if "unless" in when:
+            if has_every:
+                raise TriggerError(f"{w}: when.unless is only valid on a one-shot time trigger ('at' or 'after')")
+            _normalize_unless(when["unless"], w)
         if has_after:
             if not isinstance(when["after"], str) or not when["after"]:
                 raise TriggerError(f"{w}: when.after must be a non-empty trigger id")
@@ -838,6 +862,18 @@ class TriggerEngine:
                 pending.append(task)
                 asked = barrier.get("timeout_seconds") or self._gw.TRIGGER_BARRIER_TIMEOUT_S
                 timeout_s = asked if timeout_s is None else max(timeout_s, asked)
+        for tid, trig in provokable:
+            when = trig["spec"]["when"]
+            unless = when.get("unless")
+            # An `after` deadline's window opens when its anchor fires; before that nothing is awaited yet.
+            if (unless is None or unless["tool"] != name or trig["status"] != "armed"
+                    or ("after" in when and not trig["resolved"])):
+                continue
+            if all(_eval_predicate(pred, _where_value(ctx, field)) for field, pred in unless.get("where", {}).items()):
+                trig["status"] = "cancelled"
+                trig["next_mark"] = None
+                self._emit("cancelled", tid, provoking=provoking)
+                self._recompute_time_flag()
         if not self._is_readonly(name):
             for tid, trig in provokable:
                 if trig["status"] == "armed" and trig["spec"]["when"]["type"] == "state" and not trig["evaluating"]:
@@ -846,9 +882,10 @@ class TriggerEngine:
         return pending, timeout_s
 
     def _provoked_by(self, trig: dict, role: str) -> bool:
-        """Whether a call by ``role`` can provoke ``trig``: the roles its `when` lists, else the watched ones. Unlisted,
-        an executor's own calls never provoke anything, so an executor cannot set off a cascade unasked."""
-        roles = trig["spec"]["when"].get("roles")
+        """Whether a call by ``role`` can provoke ``trig``: the roles its `when` (or a deadline's `unless`) lists, else the
+        watched ones. Unlisted, an executor's own calls never provoke anything, so it cannot set off a cascade unasked."""
+        when = trig["spec"]["when"]
+        roles = when.get("roles", (when.get("unless") or {}).get("roles"))
         if roles is not None:
             return role in roles
         return role in self._watch_roles and role not in self._executor_roles
@@ -1162,6 +1199,8 @@ class TriggerEngine:
             trig["task"] = None
 
     async def _run_action(self, tid: str, index: int, action: dict, ctx: dict) -> bool:
+        if "delay" in action:
+            await self._delay(tid, index, action)
         changelog_before = self._gw._query_changelog_id()
         try:
             if action["type"] == "permission":
@@ -1223,21 +1262,61 @@ class TriggerEngine:
         instruction = action["instruction"]
         named = _named_executor(action)
         executor = self._executors.get(action.get("executor"))
-        for attempt in (1, 2):
-            reply = await self._call_executor(executor, instruction, context_id=f"trigger-{tid}")
-            if reply is None:
-                self._emit("action_failed", tid, action_index=index,
-                           detail=f"executor attempt {attempt} did not complete", **named)
-                return False
-            if "verify" not in action:
-                return True
-            if await self._run_verify(tid, index, action["verify"], ctx):
-                return True
-            if attempt == 1:
-                instruction = (f"{action['instruction']}\n\nYour previous attempt did not pass verification — "
-                               f"the expected change is not observable in the environment. Do it again exactly as described.")
+        if executor is not None and "hours" in executor:
+            await self._await_hours(tid, index, executor["hours"], named)
+        cause = {"trigger_id": tid, "action_index": index, "fire": self._triggers.get(tid, {}).get("fire_count", 0) + 1}
+        causes = self._in_flight.setdefault(executor["role"], []) if executor is not None else []
+        causes.append(cause)
+        try:
+            for attempt in (1, 2):
+                reply = await self._call_executor(executor, instruction, context_id=f"trigger-{tid}")
+                if reply is None:
+                    self._emit("action_failed", tid, action_index=index,
+                               detail=f"executor attempt {attempt} did not complete", **named)
+                    return False
+                if "verify" not in action:
+                    return True
+                if await self._run_verify(tid, index, action["verify"], ctx):
+                    return True
+                if attempt == 1:
+                    instruction = (f"{action['instruction']}\n\nYour previous attempt did not pass verification — "
+                                   f"the expected change is not observable in the environment. Do it again exactly as described.")
+        finally:
+            causes.remove(cause)
         self._emit("action_failed", tid, action_index=index, detail="verification failed after retry", **named)
         return False
+
+    def caused_by(self, role: str) -> list[dict]:
+        """The fires the executor with ``role`` is realizing right now, which its tool calls are attributed to."""
+        return list(self._in_flight.get(role, ()))
+
+    async def _delay(self, tid: str, index: int, action: dict) -> None:
+        delay = action["delay"]
+        if isinstance(delay, str):
+            seconds = _parse_duration(delay).total_seconds()
+        else:
+            mean = _parse_duration(delay["mean"]).total_seconds()
+            seconds = self._triggers[tid]["delay_rngs"][index].expovariate(1.0 / mean)
+        self._emit("delayed", tid, action_index=index, virtual_seconds=round(seconds, 3), **_named_executor(action))
+        await self._sleep_virtual(seconds)
+
+    async def _await_hours(self, tid: str, index: int, hours: dict, named: dict) -> None:
+        """Wait until the executor's working hours are open; they don't apply while the clock is unarmed."""
+        deferred = False
+        while (now := self._gw._clock.now()) is not None and (opens := _next_opening(now, hours)) is not None:
+            if not deferred:
+                self._emit("deferred", tid, action_index=index, until=_iso(opens), **named)
+                deferred = True
+            await self._sleep_virtual((opens - now).total_seconds())
+
+    async def _sleep_virtual(self, seconds: float) -> None:
+        """Wait ``seconds`` of virtual time: real seconds at the clock's rate, which is 1 while it is unarmed."""
+        remaining = seconds
+        while remaining > 0:
+            rate = self._gw._clock.rate
+            step = min(remaining / rate, _VIRTUAL_RECHECK_S)
+            await asyncio.sleep(step)
+            remaining -= step * rate
 
     async def _call_executor(self, executor: dict | None, instruction: str, context_id: str) -> str | None:
         if executor is None:
@@ -1276,3 +1355,85 @@ def _result_text(result: CallToolResult) -> str:
 def _named_executor(action: dict) -> dict:
     """``{"executor": name}`` for an nl action that names its executor, for its firing-log events; else empty."""
     return {"executor": action["executor"]} if action.get("executor") is not None else {}
+
+
+_DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+_HHMM_RE = re.compile(r"([01]\d|2[0-3]):([0-5]\d)")
+_UTC_OFFSET_RE = re.compile(r"([+-])([01]\d|2[0-3]):([0-5]\d)")
+
+
+def _normalize_delay(delay: Any, w: str) -> None:
+    """Validate an action's `delay`: a positive ISO-8601 duration, or a seeded exponential like `every`'s."""
+    if isinstance(delay, str):
+        if _dur_or_400(delay, f"{w}: delay") <= timedelta(0):
+            raise TriggerError(f"{w}: delay must be a positive duration")
+        return
+    if not isinstance(delay, dict) or delay.get("dist") != "exp":
+        raise TriggerError(f"{w}: delay must be an ISO-8601 duration or {{dist: 'exp', mean, seed}}")
+    if not isinstance(delay.get("mean"), str) or _dur_or_400(delay["mean"], f"{w}: delay.mean") <= timedelta(0):
+        raise TriggerError(f"{w}: delay.mean must be a positive ISO-8601 duration")
+    if not isinstance(delay.get("seed"), int) or isinstance(delay.get("seed"), bool):
+        raise TriggerError(f"{w}: a stochastic delay requires an integer 'seed'")
+
+
+def _delay_rngs(spec: dict) -> dict[int, random.Random]:
+    """A seeded RNG per stochastic delay, so its draws repeat run to run like a stochastic `every`'s."""
+    return {i: random.Random(action["delay"]["seed"]) for i, action in enumerate(spec["actions"])
+            if isinstance(action.get("delay"), dict)}
+
+
+def _normalize_unless(unless: Any, w: str) -> None:
+    """Validate a deadline's `unless`: the call that cancels it, matched like an action trigger's."""
+    if not isinstance(unless, dict) or not isinstance(unless.get("tool"), str) or not unless["tool"]:
+        raise TriggerError(f"{w}: when.unless must be an object with a non-empty 'tool'")
+    where = unless.get("where", {})
+    if not isinstance(where, dict):
+        raise TriggerError(f"{w}: when.unless.where must be an object")
+    for field, pred in where.items():
+        _validate_predicate(pred, f"{w}: unless.where.{field}")
+        _, path = _ctx_path(field)
+        if path:
+            _validate_path(path, f"{w}: unless.where.{field}")
+    roles = unless.get("roles")
+    if roles is not None and (not isinstance(roles, list) or not roles
+                              or not all(isinstance(r, str) and r for r in roles)):
+        raise TriggerError(f"{w}: when.unless.roles must be a non-empty list of non-empty AgentEnv-Roles")
+
+
+def _normalize_hours(raw: Any, where: str) -> dict:
+    """Validate an executor's working hours, returning them with `utc_offset` and `days` filled in."""
+    if not isinstance(raw, dict):
+        raise TriggerError(f"{where}.hours must be an object {{start, end, utc_offset?, days?}}")
+    for key in ("start", "end"):
+        if not isinstance(raw.get(key), str) or not _HHMM_RE.fullmatch(raw[key]):
+            raise TriggerError(f"{where}.hours.{key} must be a 24-hour 'HH:MM'")
+    if raw["start"] == raw["end"]:
+        raise TriggerError(f"{where}.hours: start equals end, so the executor would never be available")
+    offset = raw.get("utc_offset", "+00:00")
+    if not isinstance(offset, str) or not _UTC_OFFSET_RE.fullmatch(offset):
+        raise TriggerError(f"{where}.hours.utc_offset must look like '-07:00' or '+05:30'")
+    days = raw.get("days", list(_DAYS))
+    if not isinstance(days, list) or not days or not set(days) <= set(_DAYS):
+        raise TriggerError(f"{where}.hours.days must be a non-empty list of {list(_DAYS)}")
+    return {"start": raw["start"], "end": raw["end"], "utc_offset": offset, "days": [d for d in _DAYS if d in days]}
+
+
+def _next_opening(now: datetime, hours: dict) -> datetime | None:
+    """None if ``now`` is within the working hours, else when they next open. A window starts on each listed day and
+    runs to `end`, past midnight when `end` is earlier than `start`."""
+    sign, hh, mm = _UTC_OFFSET_RE.fullmatch(hours["utc_offset"]).groups()
+    local = now.astimezone(timezone((1 if sign == "+" else -1) * timedelta(hours=int(hh), minutes=int(mm))))
+    start_h, start_m = map(int, hours["start"].split(":"))
+    end_h, end_m = map(int, hours["end"].split(":"))
+    length = timedelta(minutes=((end_h - start_h) * 60 + end_m - start_m) % (24 * 60))
+    midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    for days_ahead in range(-1, 8):
+        day = midnight + timedelta(days=days_ahead)
+        if _DAYS[day.weekday()] not in hours["days"]:
+            continue
+        opens = day.replace(hour=start_h, minute=start_m)
+        if opens <= local < opens + length:
+            return None
+        if opens > local:
+            return opens
+    return None

@@ -417,7 +417,7 @@ class Gateway:
             if self._is_disabled(role, name):
                 raise ToolError(f"Tool '{name}' is disabled for role '{role}'")
             native = name not in self._tool_server_urls
-            event_id = await self._log_native_tool_call(name, arguments) if native else None
+            event_id = await self._log_native_tool_call(name, arguments, role) if native else None
             result = await original_call_tool(name, arguments, context=context, convert_result=convert_result)
             if native:
                 await self._log_native_tool_result(event_id, result)
@@ -946,6 +946,7 @@ class Gateway:
             "event_type": "tool_call",
             "source": "step_api",
             "tool_call": {"function_name": tool_name, "arguments": arguments},
+            **self._attribution(role),
         })
         try:
             async with self._tool_call_guard():
@@ -980,6 +981,7 @@ class Gateway:
             "event_type": "tool_call",
             "source": "step_api",
             "tool_call": {"function_name": tool_name, "arguments": arguments},
+            **self._attribution(role),
         })
         try:
             async with self._tool_call_guard():
@@ -1067,6 +1069,7 @@ class Gateway:
                     "function_name": tool_name,
                     "arguments": kwargs,
                 },
+                **self._attribution(caller.role),
             })
 
             async with self._tool_call_guard():
@@ -1109,12 +1112,13 @@ class Gateway:
         if self._trajectory_file and not self._trajectory_file.closed:
             self._trajectory_file.close()
 
-    async def _log_native_tool_call(self, name: str, arguments: dict | None) -> str | None:
+    async def _log_native_tool_call(self, name: str, arguments: dict | None, role: str) -> str | None:
         """Trajectory record for a gateway-owned tool on the MCP path (fail-open)."""
         try:
             return await self._log_event({
                 "event_type": "tool_call",
                 "tool_call": {"function_name": name, "arguments": arguments or {}},
+                **self._attribution(role),
             })
         except Exception:
             logger.exception(f"Failed to log tool_call for gateway tool '{name}'")
@@ -1131,6 +1135,12 @@ class Gateway:
             })
         except Exception:
             logger.exception("Failed to log tool_call_result for a gateway tool")
+
+    def _attribution(self, role: str) -> dict:
+        """Who made a tool call, for its trajectory event: the caller's role, and the trigger fires it was made for
+        when that role is an executor realizing them."""
+        causes = self._trigger_engine.caused_by(role)
+        return {"role": role, **({"caused_by": causes} if causes else {})}
 
     async def _log_event(self, event: dict) -> str:
         async with self._event_lock:
