@@ -99,6 +99,7 @@ agent-env = "agent_env.cli:cli"
 
 [project.entry-points."agent_env.bundles"]
 hello = "agent_env.examples"
+echo-mcp = "agent_env.examples"
 
 [project.urls]
 Homepage = "https://www.agentenvframework.com"
