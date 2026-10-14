@@ -20,13 +20,13 @@ from agent_env.env.gateway.constants import TRIGGER_IN_FLIGHT_STATUSES
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
 from agent_env.task_step.task_steps.register_env_triggers import RegisterEnvTriggersStep
 from tst.integration.env.envs.server_env_local_test import _put_items_image
-from tst.integration.store.local_parallel_deploy_test import _seed_bootstrap_envs, local_stack  # noqa: F401  (fixture)
+from tst.integration.store.local_parallel_deploy_test import _seed_bootstrap_envs, local_stack as local_stack
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
 
 @pytest.mark.asyncio
-async def test_each_nl_action_reaches_the_executor_it_names(local_stack):  # noqa: F811  (fixture)
+async def test_each_nl_action_reaches_the_executor_it_names(local_stack):
     _seed_bootstrap_envs()
     uid = uuid.uuid4().hex[:8]
     items = MCPServerEnv.put(id=f"trig-items-{uid}", environment_name="items",
@@ -73,7 +73,7 @@ async def test_each_nl_action_reaches_the_executor_it_names(local_stack):  # noq
 
 
 @pytest.mark.asyncio
-async def test_personas_react_to_each_other_until_one_stays_quiet(local_stack):  # noqa: F811  (fixture)
+async def test_personas_react_to_each_other_until_one_stays_quiet(local_stack):
     _seed_bootstrap_envs()
     uid = uuid.uuid4().hex[:8]
     items = MCPServerEnv.put(id=f"chain-items-{uid}", environment_name="items",

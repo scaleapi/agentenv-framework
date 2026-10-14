@@ -44,10 +44,10 @@ from agent_env.providers.sandbox_providers.sandbox_provider import Accepts
 from agent_env.providers.env_state import LocalPostgresStateProvider
 from agent_env.config import get_config, set_document_store
 from agent_env.store import EcrImageStore, NotFoundError
-from tst.unit.providers.env_state.fakes import (  # noqa: F401  (fixture)
+from tst.unit.providers.env_state.fakes import (
     EXTERNAL_READINESS_SERVICE,
     EXTERNAL_STATE_TYPE,
-    registered_external_provider,
+    registered_external_provider as registered_external_provider,
 )
 from tst.util.sandbox_providers import CONTAINERS, VMS_AND_CONTAINERS
 
@@ -1176,7 +1176,7 @@ async def test_acquire_state_for_deploy_local_returns_none():
 
 
 @pytest.mark.asyncio
-async def test_create_gateway_consumes_external_instance(registered_external_provider):  # noqa: F811  (fixture)
+async def test_create_gateway_consumes_external_instance(registered_external_provider):
     """create_gateway records a pre-acquired external instance up front — deriving the consume-only
     provider from its state_type — so the deploy paths + close() read it off self. It does NOT
     re-acquire, and it no longer threads the instance as a deploy-path kwarg."""

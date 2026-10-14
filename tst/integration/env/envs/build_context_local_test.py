@@ -19,7 +19,7 @@ from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.providers.sandbox_providers import sandbox
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox
 from agent_env.utils.docker_build import normalize_platform
-from tst.integration.env.envs.server_env_local_test import local_stack  # noqa: F401  (fixture)
+from tst.integration.env.envs.server_env_local_test import local_stack as local_stack
 from tst.integration.store.local_parallel_deploy_test import _docker, _seed_bootstrap_envs
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
@@ -41,7 +41,7 @@ def vm_platform(monkeypatch, caplog):
 
 
 @pytest.mark.asyncio
-async def test_an_image_that_is_only_a_build_context_is_built_on_the_vm(local_stack, vm_platform, tmp_path, caplog):  # noqa: F811  (fixture)
+async def test_an_image_that_is_only_a_build_context_is_built_on_the_vm(local_stack, vm_platform, tmp_path, caplog):
     _seed_bootstrap_envs()
     uid = uuid.uuid4().hex[:8]
     image = DockerImageArtifact.put_context(f"ctx-items-{uid}", description="build context e2e",
@@ -55,7 +55,7 @@ async def test_an_image_that_is_only_a_build_context_is_built_on_the_vm(local_st
 
 @pytest.mark.asyncio
 async def test_an_image_whose_tar_gz_is_for_another_platform_is_built_from_the_context_beside_it(
-        local_stack, vm_platform, tmp_path, caplog):  # noqa: F811  (fixture)
+        local_stack, vm_platform, tmp_path, caplog):
     _seed_bootstrap_envs()
     uid = uuid.uuid4().hex[:8]
     context = _items_context(tmp_path / "items")
