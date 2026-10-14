@@ -22,6 +22,8 @@ from urllib.parse import urlparse
 from agent_env.config.model import MODEL_HEADERS_ENV
 
 SECRET_PREFIX = "AGENTENV_LITELLM_"
+#: Hex characters of a value's SHA-256 a secret name keeps.
+SECRET_HASH_CHARS = 32
 HEADER_SECRET_PREFIX = f"{SECRET_PREFIX}H_"
 POLICY_PREFIX = "agentenv-"
 PLACEHOLDER = "sail-injected-model-key"
@@ -69,11 +71,12 @@ _LITERAL_HEADERS = re.compile(rf"\b{MODEL_HEADERS_ENV}['\"]?(?:=|\s*:\s*)(.*)")
 
 
 def secret_name(key: str) -> str:
-    return SECRET_PREFIX + hashlib.sha256(key.encode()).hexdigest()[:32].upper()
+    return SECRET_PREFIX + hashlib.sha256(key.encode()).hexdigest()[:SECRET_HASH_CHARS].upper()
 
 
 def header_secret_name(name: str, value: str) -> str:
-    return HEADER_SECRET_PREFIX + hashlib.sha256(f"{name.lower()}\0{value}".encode()).hexdigest()[:32].upper()
+    digest = hashlib.sha256(f"{name.lower()}\0{value}".encode()).hexdigest()
+    return HEADER_SECRET_PREFIX + digest[:SECRET_HASH_CHARS].upper()
 
 
 def _is_header_placeholder(value: str) -> bool:
@@ -305,11 +308,13 @@ class ModelKeyInjection:
     def _encodings(self) -> list[tuple[str, str]]:
         """Each value agent-env writes into commands, and the placeholder it becomes, in every encoding:
         shell-quoted, inside single quotes, and raw. The headers go whole, as their JSON in each spelling, so
-        a short value can't rewrite unrelated text."""
-        pairs = [(self.key, PLACEHOLDER)] if self.key else []
+        a short value can't rewrite unrelated text, and first, so a header holding the key is still whole."""
+        pairs = []
         if self.header_values:
             placeholders = json.dumps(dict.fromkeys(self.header_values, HEADER_PLACEHOLDER))
             pairs += [(text, placeholders) for text in [json.dumps(self.header_values), *sorted(self.header_texts)]]
+        if self.key:
+            pairs.append((self.key, PLACEHOLDER))
         return [(encode(value), encode(placeholder)) for value, placeholder in pairs
                 for encode in (shlex.quote, lambda text: text.replace("'", "'\\''"), lambda text: text)]
 

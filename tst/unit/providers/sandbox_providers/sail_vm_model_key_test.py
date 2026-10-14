@@ -1099,3 +1099,19 @@ def test_sailboxes_writing_the_same_headers_differently_each_keep_their_spelling
     for text in spellings:
         assert reconnected.scrub(f"LITELLM_EXTRA_HEADERS={shlex.quote(text)}") == (
             f"LITELLM_EXTRA_HEADERS={shlex.quote(json.dumps(_PLACEHELD))}")
+
+
+@pytest.mark.asyncio
+async def test_a_header_holding_the_model_key_is_scrubbed_whole_and_not_refused():
+    headers = {"X-Gateway-Token": _KEY, "X-HF-Bill-To": "acme-org"}
+    sailbox = _sailbox()
+    sailbox.exec.aio = AsyncMock(return_value=_process())
+    sdk, _, _ = _fake_sdk(sailbox)
+    sandbox = await SailVmSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(
+        image_name="agent:1", port=8000, env={**_ENV, "LITELLM_EXTRA_HEADERS": json.dumps(headers)})
+
+    await sandbox.exec_script(f"docker run -d -e LITELLM_API_KEY={_KEY} "
+                              f"-e LITELLM_EXTRA_HEADERS={shlex.quote(json.dumps(headers))} agent:1")
+
+    (run,) = [arg for call in sailbox.exec.aio.await_args_list for arg in call.args[0] if "docker run" in arg]
+    assert _KEY not in run and json.dumps(dict.fromkeys(headers, HEADER_PLACEHOLDER)) in run
