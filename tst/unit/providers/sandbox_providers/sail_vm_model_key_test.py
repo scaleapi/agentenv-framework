@@ -19,7 +19,6 @@ from agent_env.providers.sandbox_providers.sail_vm.model_key import (
     ModelKeyInjection,
     carries_model_key,
     docker_shim,
-    header_lines,
     header_secret_name,
     secret_name,
 )
@@ -95,8 +94,7 @@ def fresh_key_state(monkeypatch):
     monkeypatch.setattr(_sdk, "_installed_key", None)
     monkeypatch.setattr(_sdk, "_apps", {})
     monkeypatch.setattr(model_key, "_injected_keys", {})
-    monkeypatch.setattr(model_key, "_injected_headers", {})
-    monkeypatch.setattr(model_key, "_header_holders", {})
+    monkeypatch.setattr(model_key, "_held_headers", {})
     monkeypatch.setattr(model_key, "_holders", {})
 
 
@@ -974,7 +972,7 @@ async def test_a_failed_create_forgets_the_headers_too():
     with pytest.raises(RuntimeError, match="no capacity"):
         await SailVmSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(image_name="agent:1", port=8000, env=_ENV_H)
 
-    assert model_key._injected_headers == {}
+    assert model_key._held_headers == {}
 
 
 @pytest.mark.asyncio
@@ -986,17 +984,15 @@ async def test_commands_and_files_carry_header_placeholders_never_the_values():
     written = json.dumps(_HEADERS)
 
     await sandbox.exec_script(f"docker run -d -e LITELLM_EXTRA_HEADERS='{written.replace(chr(39), chr(39) + chr(92) + chr(39) + chr(39))}' agent:1")
-    await sandbox.exec_with_output("sudo", "bash", "-c", f"docker exec -e LITELLM_EXTRA_HEADERS={shlex.quote(written)} "
-                                   f"-e ANTHROPIC_CUSTOM_HEADERS={shlex.quote(header_lines(_HEADERS))} c pytest")
+    await sandbox.exec_with_output("sudo", "bash", "-c", f"docker exec -e LITELLM_EXTRA_HEADERS={shlex.quote(written)} c pytest")
     await sandbox.write_host_file(f"LITELLM_EXTRA_HEADERS={written}\n".encode(), "/opt/agent/.env")
 
     sent = [arg for call in sailbox.exec.aio.await_args_list for arg in call.args[0]]
     sent.append(sailbox.fs.write.aio.await_args.args[1].decode())
     assert not any(value in text for value in _HEADERS.values() for text in sent)
-    (run,) = [arg for arg in sent if "docker run" in arg]
-    assert json.dumps(_PLACEHELD) in run
-    (exec_,) = [arg for arg in sent if "docker exec" in arg]
-    assert shlex.quote(header_lines(_PLACEHELD)) in exec_
+    for command in ("docker run", "docker exec"):
+        (script,) = [arg for arg in sent if command in arg]
+        assert json.dumps(_PLACEHELD) in script
 
 
 @pytest.mark.asyncio
@@ -1051,10 +1047,10 @@ async def test_a_sailbox_without_injection_refuses_header_values_but_takes_place
     (f"-e LITELLM_EXTRA_HEADERS={shlex.quote(json.dumps(_HEADERS))}", True, True),
     (f"-e LITELLM_EXTRA_HEADERS={shlex.quote(json.dumps(_PLACEHELD))}", True, False),
     ('-e LITELLM_EXTRA_HEADERS="$LITELLM_EXTRA_HEADERS"', True, False),
-    (f"-e ANTHROPIC_CUSTOM_HEADERS={shlex.quote(header_lines(_HEADERS))}", True, True),
-    (f"-e ANTHROPIC_CUSTOM_HEADERS={shlex.quote(header_lines(_PLACEHELD))}", True, False),
     (f"LITELLM_EXTRA_HEADERS={json.dumps(_HEADERS)}", False, True),
     (f"LITELLM_EXTRA_HEADERS={json.dumps(_PLACEHELD)}\nOTHER=1", False, False),
+    (f"LITELLM_EXTRA_HEADERS={json.dumps(_PLACEHELD)}\nLITELLM_EXTRA_HEADERS={json.dumps(_HEADERS)}", False, True),
+    (f"LITELLM_EXTRA_HEADERS: '{json.dumps(_HEADERS)}'", False, True),
     ("LITELLM_EXTRA_HEADERS={}", False, False),
 ])
 def test_a_header_assignment_is_detected_as_the_shell_reads_it(text, shell, carries):

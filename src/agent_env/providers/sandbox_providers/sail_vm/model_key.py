@@ -28,7 +28,6 @@ PLACEHOLDER = "sail-injected-model-key"
 HEADER_PLACEHOLDER = "sail-injected-header"
 KEY_ENV = "LITELLM_API_KEY"
 BASE_URL_ENV = "LITELLM_BASE_URL"
-HEADERS_ENV = MODEL_HEADERS_ENV
 #: The headers the key is set as; a [model.headers] entry may not set them too.
 KEY_HEADERS = ("authorization", "x-api-key")
 
@@ -61,11 +60,12 @@ MIN_KEY_LENGTH = 16
 # By secret name: the key, so a handle reconnected here can still scrub its agent's key, and the launches
 # and Sailboxes in this process that need it, so the key is forgotten once none does. Process memory only.
 _injected_keys: dict[str, str] = {}
-_injected_headers: dict[frozenset[str], tuple[dict[str, str], frozenset[str]]] = {}
 _holders: dict[str, set[str]] = {}
-_header_holders: dict[frozenset[str], set[str]] = {}
-# The env vars agent-env hands a model endpoint's headers in, and how each writes them.
-_HEADER_NAMES = (HEADERS_ENV, "ANTHROPIC_CUSTOM_HEADERS")
+# By holder: the headers it was launched or reconnected with, under their secrets, so a handle reconnected here
+# can scrub them; each holder drops its own, so Sailboxes sharing headers never drop one another's.
+_held_headers: dict[str, tuple[frozenset[str], dict[str, str], frozenset[str]]] = {}
+# In text that isn't a shell script: the headers' JSON, to the end of its line.
+_LITERAL_HEADERS = re.compile(rf"\b{MODEL_HEADERS_ENV}['\"]?(?:=|\s*:\s*)(.*)")
 
 
 def secret_name(key: str) -> str:
@@ -76,20 +76,13 @@ def header_secret_name(name: str, value: str) -> str:
     return HEADER_SECRET_PREFIX + hashlib.sha256(f"{name.lower()}\0{value}".encode()).hexdigest()[:32].upper()
 
 
-def header_lines(headers: Mapping[str, str]) -> str:
-    """Headers as ``ANTHROPIC_CUSTOM_HEADERS`` takes them: one ``Name: Value`` per line."""
-    return "\n".join(f"{name}: {value}" for name, value in headers.items())
-
-
-def _is_header_placeholder(name: str, value: str) -> bool:
-    """Whether ``value``, as the ``name`` env var holds it, carries no header value but the placeholder."""
-    if name == HEADERS_ENV:
-        try:
-            headers = json.loads(value)
-        except ValueError:
-            return False
-        return isinstance(headers, dict) and all(v == HEADER_PLACEHOLDER for v in headers.values())
-    return all(line.partition(": ")[2] == HEADER_PLACEHOLDER for line in value.splitlines() if line)
+def _is_header_placeholder(value: str) -> bool:
+    """Whether the headers' JSON ``value`` carries no header value but the placeholder."""
+    try:
+        headers = json.loads(value)
+    except ValueError:
+        return False
+    return isinstance(headers, dict) and all(v == HEADER_PLACEHOLDER for v in headers.values())
 
 
 def carries_model_key(text: str, *, shell: bool) -> bool:
@@ -109,19 +102,16 @@ def carries_model_key(text: str, *, shell: bool) -> bool:
             continue
         if name in _KEY_NAMES and value != PLACEHOLDER:
             return True
-        if name in _HEADER_NAMES and not _is_header_placeholder(name, value):
+        if name == MODEL_HEADERS_ENV and not _is_header_placeholder(value):
             return True
     return False
 
 
 def _carries_headers_literally(text: str) -> bool:
-    """Whether text that isn't a shell script (a file, one argv word) assigns a header env var a value: the rest
-    of the text after ``NAME=``, which for one argv word is all of it."""
-    for name in _HEADER_NAMES:
-        _, assigned, value = text.partition(f"{name}=")
-        if name == HEADERS_ENV:
-            value = value.split("\n", 1)[0].strip().strip("'\"")
-        if assigned and value and not _REFERENCE.match(value) and not _is_header_placeholder(name, value):
+    """Whether text that isn't a shell script (a file, one argv word) assigns the headers' env var a value."""
+    for value in _LITERAL_HEADERS.findall(text):
+        value = value.strip().strip("'\"")
+        if value and not _REFERENCE.match(value) and not _is_header_placeholder(value):
             return True
     return False
 
@@ -205,13 +195,13 @@ class ModelKeyInjection:
                 f"Sail model-key injection needs a {KEY_ENV} of at least {MIN_KEY_LENGTH} characters, to scrub it "
                 "safely; set inject_model_key = false in [sandbox.providers.sail_vm.config] to pass it in"
             )
-        text = env.get(HEADERS_ENV) or ""
+        text = env.get(MODEL_HEADERS_ENV) or ""
         try:
             values = json.loads(text or "{}")
         except ValueError:
             values = None
         if not isinstance(values, dict) or not all(isinstance(value, str) for value in values.values()):
-            raise ValueError(f"{HEADERS_ENV} must be a JSON object of header names and values")
+            raise ValueError(f"{MODEL_HEADERS_ENV} must be a JSON object of header names and values")
         if clash := sorted(name for name in values if name.lower() in KEY_HEADERS):
             raise ValueError(
                 f"[model.headers] sets {clash}, which Sail sets from the model key; drop them, or set "
@@ -278,26 +268,18 @@ class ModelKeyInjection:
         if self.key is not None:
             _injected_keys[self.secret] = self.key
         _holders.setdefault(self.secret, set()).add(holder)
-        if self.headers:
-            if self.header_values:
-                _, texts = _injected_headers.get(self._headers_id(), (None, frozenset()))
-                _injected_headers[self._headers_id()] = (self.header_values, texts | self.header_texts)
-            _header_holders.setdefault(self._headers_id(), set()).add(holder)
+        if self.header_values:
+            _held_headers[holder] = (self._headers_id(), self.header_values, self.header_texts)
 
     def release(self, holder: str) -> None:
-        """Drop ``holder``, forgetting the key, and the headers, once no launch or Sailbox in this process needs
-        them; the two are counted apart, since Sailboxes with different keys can share headers."""
+        """Drop ``holder``, forgetting the key once no launch or Sailbox in this process needs it, and the
+        headers ``holder`` held."""
         holders = _holders.get(self.secret, set())
         holders.discard(holder)
         if not holders:
             _holders.pop(self.secret, None)
             _injected_keys.pop(self.secret, None)
-        if self.headers:
-            held = _header_holders.get(self._headers_id(), set())
-            held.discard(holder)
-            if not held:
-                _header_holders.pop(self._headers_id(), None)
-                _injected_headers.pop(self._headers_id(), None)
+        _held_headers.pop(holder, None)
 
     def recover_key(self, candidate: str | None) -> None:
         """Recover the key this injection's secret was named from: one this process injected, else
@@ -311,8 +293,10 @@ class ModelKeyInjection:
         ``candidate`` (the configured headers) when they are those."""
         if not self.headers:
             return
-        if remembered := _injected_headers.get(self._headers_id()):
-            self.header_values, self.header_texts = remembered
+        held = [(values, texts) for headers, values, texts in _held_headers.values() if headers == self._headers_id()]
+        if held:
+            self.header_values = held[0][0]
+            self.header_texts = frozenset().union(*(texts for _, texts in held))
         elif candidate and {
             name.lower(): header_secret_name(name, value) for name, value in candidate.items()
         } == self.headers:
@@ -320,14 +304,12 @@ class ModelKeyInjection:
 
     def _encodings(self) -> list[tuple[str, str]]:
         """Each value agent-env writes into commands, and the placeholder it becomes, in every encoding:
-        shell-quoted, inside single quotes, and raw. The headers go whole, as each env var holds them, so a
-        short value can't rewrite unrelated text."""
+        shell-quoted, inside single quotes, and raw. The headers go whole, as their JSON in each spelling, so
+        a short value can't rewrite unrelated text."""
         pairs = [(self.key, PLACEHOLDER)] if self.key else []
         if self.header_values:
-            placeholders = dict.fromkeys(self.header_values, HEADER_PLACEHOLDER)
-            pairs += [(json.dumps(self.header_values), json.dumps(placeholders)),
-                      (header_lines(self.header_values), header_lines(placeholders))]
-            pairs += [(text, json.dumps(placeholders)) for text in sorted(self.header_texts)]
+            placeholders = json.dumps(dict.fromkeys(self.header_values, HEADER_PLACEHOLDER))
+            pairs += [(text, placeholders) for text in [json.dumps(self.header_values), *sorted(self.header_texts)]]
         return [(encode(value), encode(placeholder)) for value, placeholder in pairs
                 for encode in (shlex.quote, lambda text: text.replace("'", "'\\''"), lambda text: text)]
 

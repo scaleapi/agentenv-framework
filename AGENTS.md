@@ -69,12 +69,9 @@ or one of them only where it is used.
   this machine that local containers call, a model proxy say, has to listen there: bind it to the
   bridge address and use that address in its URL. Binding `0.0.0.0` also works, but exposes the
   service to the network.
-- `[model.headers]` go with every call to the configured endpoint and nowhere else: as
-  `extra_headers` on agent-env's own calls, and as `LITELLM_EXTRA_HEADERS` (a JSON object) to every
-  agent and unit-test verifier pointed at that endpoint, and to an installed agent that declares the
-  `litellm_extra_headers` param. The verifier also gets them as `ANTHROPIC_CUSTOM_HEADERS`. Core only
-  writes that variable, never reads it. On `sail_vm` with `inject_model_key`, Sail sets them at egress
-  like the key, and the Sailbox holds only placeholders.
+- `[model.headers]` go with every call to the configured endpoint and nowhere else: `extra_headers` on
+  agent-env's own calls, `LITELLM_EXTRA_HEADERS` (JSON, written by core, never read) for agents and the
+  unit-test verifier. On `sail_vm` with `inject_model_key`, Sail sets them at egress like the key.
 - A host-mode `install_agent` (no `container_name`) on a `local` sandbox runs the agent's
   `install_commands_host` on this machine, with your privileges. Every command a local sandbox runs
   carries `AGENTENV_SANDBOX=<sandbox id>`, and teardown stops the processes that carry it, then removes

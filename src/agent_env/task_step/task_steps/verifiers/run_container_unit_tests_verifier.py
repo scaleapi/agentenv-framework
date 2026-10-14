@@ -66,7 +66,7 @@ _SAFE_ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
 _RESERVED_ENV_KEYS = frozenset({
     "LITELLM_API_KEY", "ANTHROPIC_API_KEY",
     "LITELLM_BASE_URL", "ANTHROPIC_BASE_URL",
-    MODEL_HEADERS_ENV, "ANTHROPIC_CUSTOM_HEADERS",
+    MODEL_HEADERS_ENV,
     "PATH", "HOME",
 })
 _MODEL_URL_KEYS = frozenset({"LITELLM_BASE_URL", "ANTHROPIC_BASE_URL"})
@@ -262,9 +262,6 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
         if MODEL_HEADERS_ENV not in merged_env:
             if headers := config.get_model_headers(merged_env.get("LITELLM_BASE_URL")):
                 merged_env[MODEL_HEADERS_ENV] = json.dumps(headers)
-        if "ANTHROPIC_CUSTOM_HEADERS" not in merged_env:
-            if headers := config.get_model_headers(merged_env.get("ANTHROPIC_BASE_URL")):
-                merged_env["ANTHROPIC_CUSTOM_HEADERS"] = "\n".join(f"{k}: {v}" for k, v in headers.items())
         for key in _MODEL_URL_KEYS & merged_env.keys():
             merged_env[key] = host_url_for(merged_env[key], sandbox.type)
         env_flags = " ".join(f"-e {k}={shlex.quote(v)}" for k, v in merged_env.items())

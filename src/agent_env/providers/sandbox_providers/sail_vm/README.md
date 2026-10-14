@@ -201,9 +201,8 @@ values of the endpoint's `[model.headers]`:
    (`/v1/` for `https://host/v1`), it also sets each header from its own, so another service on the same host
    never gets them. Sail adds them as each request leaves the box.
 3. Inside the box, every command and file agent-env sends carries the placeholder
-   `sail-injected-model-key` in place of the key. `LITELLM_EXTRA_HEADERS` (and the unit-test verifier's
-   `ANTHROPIC_CUSTOM_HEADERS`) keep the header names with `sail-injected-header` as every value, which the
-   policy overwrites.
+   `sail-injected-model-key` in place of the key. `LITELLM_EXTRA_HEADERS` keeps the header names with
+   `sail-injected-header` as every value, which the policy overwrites.
 4. A `docker` shim on the box gives every container the VM's CA bundle (`SSL_CERT_FILE`,
    `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`, `CURL_CA_BUNDLE`). Sail terminates TLS for the model host
    with its own CA, so containers need it to trust those requests.

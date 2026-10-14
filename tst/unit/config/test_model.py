@@ -199,18 +199,33 @@ def test_client_kwargs_omits_none_api_base_and_splats_params():
 
 # --- headers ------------------------------------------------------------------
 
-_WITH_HEADERS = ModelConfig(base_url="https://gw/v1", headers={"X-Bill-To": "secret:org", "X-Plain": "v"})
+_HEADERS = {"X-Bill-To": "secret:org", "X-Plain": "v"}
+_RESOLVED = {"X-Bill-To": "acme", "X-Plain": "v"}
+_WITH_HEADERS = ModelConfig(base_url="https://gw/v1", headers=_HEADERS)
 
 
-def test_headers_for_the_configured_endpoint_resolve_their_refs():
-    assert _WITH_HEADERS.headers_for("https://gw/v1", secret_resolver=_secrets({"org": "acme"})) == {
-        "X-Bill-To": "acme", "X-Plain": "v"}
+@pytest.mark.parametrize("configured, env_base, asked, expected", [
+    ("https://gw/v1", None, "https://gw/v1", _RESOLVED),
+    ("https://gw/v1", None, "https://gw/v1/", _RESOLVED),
+    ("https://gw/v1/", None, "https://gw/v1", _RESOLVED),
+    ("https://gw/v1", "https://env-gw/v1", "https://env-gw/v1", _RESOLVED),
+    ("https://gw/v1", "https://env-gw/v1", "https://gw/v1", {}),
+    ("https://gw/v1", None, "https://elsewhere.example/v1", {}),
+    ("https://gw/v1", None, None, {}),
+    (None, None, "https://gw/v1", {}),
+], ids=["configured", "trailing-slash-asked", "trailing-slash-configured", "env-configured", "file-shadowed-by-env",
+        "elsewhere", "no-url", "no-endpoint"])
+def test_headers_go_only_to_the_configured_endpoint_and_resolve_only_for_it(monkeypatch, configured, env_base, asked,
+                                                                           expected):
+    if env_base:
+        monkeypatch.setenv("LITELLM_BASE_URL", env_base)
+    resolved = []
 
+    headers = ModelConfig(base_url=configured, headers=_HEADERS).headers_for(
+        asked, secret_resolver=lambda key: resolved.append(key) or {"org": "acme"}.get(key))
 
-def test_headers_ignore_a_trailing_slash_on_either_url():
-    assert _WITH_HEADERS.headers_for("https://gw/v1/", secret_resolver=_secrets({"org": "acme"}))["X-Bill-To"] == "acme"
-    assert ModelConfig(base_url="https://gw/v1/", headers={"X-Plain": "v"}).headers_for(
-        "https://gw/v1", secret_resolver=_secrets({})) == {"X-Plain": "v"}
+    assert headers == expected
+    assert bool(resolved) is bool(expected)
 
 
 def test_headers_held_back_from_another_endpoint_are_logged(caplog):
@@ -220,45 +235,22 @@ def test_headers_held_back_from_another_endpoint_are_logged(caplog):
     assert "Not sending [model.headers] to elsewhere.example" in caplog.text
 
 
-def test_a_header_ref_that_resolves_to_a_value_http_cant_carry_fails_loud():
-    with pytest.raises(ConfigError, match="value HTTP can't carry"):
-        _WITH_HEADERS.headers_for("https://gw/v1", secret_resolver=_secrets({"org": "acme\nX-Injected: 1"}))
+@pytest.mark.parametrize("secrets, problem", [
+    ({}, "Unresolved secret:org"),
+    ({"org": "acme\nX-Injected: 1"}, "value HTTP can't carry"),
+], ids=["unresolvable", "resolves-to-a-value-http-cant-carry"])
+def test_a_header_ref_that_cant_be_sent_fails_loud(secrets, problem):
+    with pytest.raises(ConfigError, match=problem):
+        _WITH_HEADERS.headers_for("https://gw/v1", secret_resolver=_secrets(secrets))
 
 
-def test_headers_follow_the_endpoint_the_env_var_configures(monkeypatch):
-    monkeypatch.setenv("LITELLM_BASE_URL", "https://env-gw/v1")
-    assert _WITH_HEADERS.headers_for("https://env-gw/v1", secret_resolver=_secrets({"org": "acme"}))["X-Bill-To"] == "acme"
-    assert _WITH_HEADERS.headers_for("https://gw/v1", secret_resolver=_secrets({})) == {}
-
-
-@pytest.mark.parametrize("base_url", ["https://elsewhere.example/v1", None])
-def test_headers_go_nowhere_but_the_configured_endpoint_and_resolve_nothing(base_url):
-    assert _WITH_HEADERS.headers_for(base_url, secret_resolver=_secrets({})) == {}
-
-
-def test_headers_without_a_configured_endpoint_go_nowhere():
-    assert ModelConfig(headers={"X-Plain": "v"}).headers_for("https://gw/v1", secret_resolver=_secrets({})) == {}
-
-
-def test_an_unresolvable_header_ref_fails_loud():
-    with pytest.raises(ConfigError, match="Unresolved secret:org"):
-        _WITH_HEADERS.headers_for("https://gw/v1", secret_resolver=_secrets({}))
-
-
-def test_resolve_call_sends_the_headers_to_the_configured_endpoint():
-    call = _WITH_HEADERS.resolve_call("m", secret_resolver=_secrets({"org": "acme"}))
-    assert call.params == {"extra_headers": {"X-Bill-To": "acme", "X-Plain": "v"}}
-
-
-def test_resolve_call_sends_no_headers_to_a_foreign_override():
-    call = _WITH_HEADERS.resolve_call("m", base_override="https://elsewhere.example", secret_resolver=_secrets({}))
-    assert call.params == {}
-
-
-def test_resolve_call_sends_no_headers_to_a_model_override():
-    call = _WITH_HEADERS.resolve_call(
-        "m", model_overrides={"m": {"secret_key": "k", "base_url": "https://gw/v1"}}, secret_resolver=_secrets({"k": "sk"}))
-    assert call.params == {}
+@pytest.mark.parametrize("call, expected", [
+    ({}, {"extra_headers": _RESOLVED}),
+    ({"base_override": "https://elsewhere.example"}, {}),
+    ({"model_overrides": {"m": {"secret_key": "k", "base_url": "https://gw/v1"}}}, {}),
+], ids=["configured", "foreign-override", "model-override"])
+def test_resolve_call_sends_the_headers_only_to_the_configured_endpoint(call, expected):
+    assert _WITH_HEADERS.resolve_call("m", secret_resolver=_secrets({"org": "acme", "k": "sk"}), **call).params == expected
 
 
 def test_params_extra_headers_win_per_header_whatever_its_case():
