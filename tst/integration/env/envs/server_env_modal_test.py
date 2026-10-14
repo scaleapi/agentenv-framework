@@ -89,30 +89,38 @@ async def test_an_episodes_env_on_modal_is_played_from_this_machine_and_no_endin
          "verifier_id": "crate"},
     ]})
     spec = EpisodeSpec.from_task(task)
+    started = []
 
-    played = await spec.start()
-    turn = await played.next_turn()
-    assert turn.mcp_urls[env.id].startswith("https://")
-    async with turn.tools() as tools:
-        await tools.call("items_add_item", {"item": "crate"})
-        assert json.loads((await tools.call("items_whoami")).text)["role"] == "alice@example.com"
-    await turn.end("Added a crate.")
-    assert await played.result() == {"check": 1.0}
+    async def start(spec):
+        started.append(episode := await spec.start())
+        return episode
 
-    abandoned = await spec.start()
-    await abandoned.next_turn()
-    await abandoned.abandon("test")
-    assert Task.get_instance(abandoned.id).status == "cancelled"
+    try:
+        played = await start(spec)
+        turn = await played.next_turn()
+        assert turn.mcp_urls[env.id].startswith("https://")
+        async with turn.tools() as tools:
+            await tools.call("items_add_item", {"item": "crate"})
+            assert json.loads((await tools.call("items_whoami")).text)["role"] == "alice@example.com"
+        await turn.end("Added a crate.")
+        assert await played.result() == {"check": 1.0}
 
-    forgotten = await EpisodeSpec.from_task(task, turn_timeout=3).start()
-    await forgotten.next_turn()
-    with pytest.raises(TimeoutError, match="wasn't ended within 3s"):
+        abandoned = await start(spec)
+        await abandoned.next_turn()
+        await abandoned.abandon("test")
+        assert Task.get_instance(abandoned.id).status == "cancelled"
+
+        forgotten = await start(EpisodeSpec.from_task(task, turn_timeout=3))
         await forgotten.next_turn()
+        with pytest.raises(TimeoutError, match="wasn't ended within 3s"):
+            await forgotten.next_turn()
 
-    for episode in (played, abandoned, forgotten):
-        [sandbox_id] = [entry["sandbox_id"] for entry in Task.get_instance(episode.id).context["deployed_envs"]]
-        await _stopped(sandbox_id)
-
+        for episode in (played, abandoned, forgotten):
+            [sandbox_id] = [entry["sandbox_id"] for entry in Task.get_instance(episode.id).context["deployed_envs"]]
+            await _stopped(sandbox_id)
+    finally:
+        for episode in started:
+            await episode.abandon("the test ended")
 
 async def _stopped(sandbox_id: str) -> None:
     sandbox = await modal.Sandbox.from_id.aio(sandbox_id)
