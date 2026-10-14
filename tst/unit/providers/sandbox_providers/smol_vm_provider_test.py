@@ -57,7 +57,7 @@ async def test_vm_creation_selects_local_and_can_publish_an_unstarted_applicatio
         id = "agentenv-test"
 
         def endpoint(self, port):
-            return SimpleNamespace(http_url=f"http://127.0.0.1:44000")
+            return SimpleNamespace(http_url="http://127.0.0.1:44000")
 
         def write_file(self, path, data):
             created.append((path, data))
