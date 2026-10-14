@@ -96,7 +96,6 @@ def substitute_seed_in_steps(steps: list["TaskStep"], seed: dict) -> list["TaskS
     objects, so it executes exactly what the original run executed."""
     if not seed:
         return list(steps)
-    from agent_env.task_step.registry import get_task_step_registry
 
     def _sub(value):
         if isinstance(value, str):
@@ -111,12 +110,23 @@ def substitute_seed_in_steps(steps: list["TaskStep"], seed: dict) -> list["TaskS
 
     from agent_env.task_step.task_step import attach_retry_config
 
-    registry = get_task_step_registry()
     out: list["TaskStep"] = []
     for step in steps:
         data = _sub(step.to_dict())
-        out.append(attach_retry_config(registry[step.type].from_dict(data), data))
+        out.append(attach_retry_config(type(step).from_dict(data), data))
     return out
+
+
+def recorded_scores(steps: list["TaskStep"], context: TaskStepContext) -> dict[str, float]:
+    """Every score a run of ``steps`` recorded, by the id of the step that recorded it, or by its verification's key
+    when that isn't a step's verifier id."""
+    step_ids = {step.verifier_id: step.id for step in steps if getattr(step, "verifier_id", None)}
+    scores = {}
+    for key, verification in (context.metadata.get("verifications") or {}).items():
+        score = verification.get("score")
+        if isinstance(score, (int, float)):
+            scores[step_ids.get(key, key)] = float(score)
+    return scores
 
 
 def _dependency_ids(steps: list["TaskStep"]) -> dict[str, set[str]]:

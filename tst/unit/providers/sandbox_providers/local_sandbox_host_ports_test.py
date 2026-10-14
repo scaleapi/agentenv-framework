@@ -13,6 +13,7 @@ its bind probe, but for one that binds real sockets.
 import errno
 import os
 import platform
+import random
 import socket
 import threading
 
@@ -134,11 +135,22 @@ def test_host_ports_wrap_round_their_range(busy):
 
 @pytest.mark.parametrize("cursor", [None, "", "not a port"])
 def test_a_missing_or_unreadable_cursor_starts_at_a_random_port(busy, monkeypatch, cursor):
-    monkeypatch.setattr(local_sandbox_module.random, "choice", lambda ports: 25000)
+    monkeypatch.setattr(local_sandbox_module.secrets, "choice", lambda ports: 25000)
     if cursor is not None:
         _last_handed_out(cursor)
 
     assert local_sandbox_module._free_host_port() == 25000
+
+
+def test_the_first_port_of_a_state_root_does_not_follow_a_reseeded_random(busy, tmp_path, monkeypatch):
+    """A trainer reseeds ``random``; fresh state roots must still start apart in the range."""
+    starts = []
+    for root in ("a", "b", "c"):
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / root))
+        random.seed(0)
+        starts.append(local_sandbox_module._free_host_port())
+
+    assert len(set(starts)) > 1
 
 
 def test_concurrent_draws_never_share_a_host_port(busy):
