@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_env.a2a_agent import A2AAgent
+from agent_env.artifact import Artifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.registry import canonical_type, get_artifact_registry
 from agent_env.entity_refs import EntityRef, RefRole, ref_sites
@@ -187,10 +188,12 @@ def _write_referenced_image(plan: Plan, write: Write) -> int:
 
 
 def _latest_image_name(image_id: str) -> str | None:
+    """The image name ``image_id``'s latest version records, when that version is an image: a folder can change type."""
     try:
-        return DockerImageArtifact.get(image_id).image_name
+        latest = Artifact.get(image_id)
     except NotFoundError:
         return None
+    return latest.image_name if isinstance(latest, DockerImageArtifact) else None
 
 
 def _write_built_image(plan: Plan, write: Write) -> int:

@@ -8,9 +8,12 @@ import pytest
 from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts import docker_image as docker_image_module
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
+from agent_env.artifact.artifacts.file import FileArtifact
+from agent_env.artifact.store import get_artifact_store
 from agent_env.bundle.materialize import materialize
 from agent_env.env import Env
 from agent_env.store.ids import image_repository
+from agent_env.store.routing import namespace_routing
 from tst.unit.bundle._support import DIGEST, layout, plan_of
 
 ROOT = "@local/~/triage"
@@ -128,6 +131,20 @@ def test_a_registry_image_folder_rewritten_for_its_description_keeps_its_digest_
     _run(bundle_dir)
 
     assert DockerImageArtifact.get(IMAGE).image_name == f"ghcr.io/acme/crm:2@{MOVED}"
+
+
+def test_a_registry_image_folder_replaces_another_type_of_artifact_its_id_held(bundle_dir, registry):
+    with namespace_routing():
+        get_artifact_store().put_document(FileArtifact(
+            id=IMAGE, description="a file first", object_url="file:///notes.txt", filename="notes.txt",
+            content_type="text/plain"))
+    layout(bundle_dir, REFERENCED)
+
+    done = _run(bundle_dir)
+
+    assert DockerImageArtifact.get(IMAGE).image_name == f"ghcr.io/acme/crm:1@{DIGEST}"
+    assert _images_named(done) == [(IMAGE, 2)] * 3
+    assert registry == ["ghcr.io/acme/crm:1"]
 
 
 def test_an_image_folder_may_ship_a_skill_in_its_image(bundle_dir, builds):
