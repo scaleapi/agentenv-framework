@@ -2816,6 +2816,11 @@ async def test_gateway_queued_trigger_is_not_reported_settled(sandbox_provider, 
 @pytest.mark.asyncio
 @pytest.mark.integration
 @pytest.mark.int_test_slow
+@pytest.mark.parametrize(
+    "sandbox_provider",
+    [pytest.param("modal_vm", id="modal_vm", marks=skip_without_remote_sandbox("modal_vm"))],
+    indirect=True,
+)
 async def test_gateway_triggers_nl_executor(sandbox_provider, mcp_server_envs, email_service_artifact):
     """Deployed e2e for the nl fire-action: a real claude-code A2A executor agent realizes an NL event
     over A2A, gated by the engine's typed verify. The one trigger type the hermetic test can't cover
@@ -2827,9 +2832,6 @@ async def test_gateway_triggers_nl_executor(sandbox_provider, mcp_server_envs, e
     from agent_env.task_step.context import TaskStepContext
     from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
     from agent_env.task_step.task_steps.register_env_triggers import RegisterEnvTriggersStep
-
-    if sandbox_provider != "modal_vm":
-        pytest.skip("nl-executor e2e runs on modal_vm only (VM-mode agent deploy)")
 
     email_ref = mcp_server_envs["email"]
     email_env = Env.get(email_ref.id, version=email_ref.version)
