@@ -497,12 +497,12 @@ async def test_a_re_arm_during_one_mark_s_delay_does_not_shorten_the_next(engine
                                                 "args": {"channel": "#c", "text": "hi"}, "delay": "PT90M"}]}]})
     record = TriggerEngine._sleep_virtual
 
-    async def re_arm_a_day_on_after_the_first_wait(self, seconds, generation=None):
+    async def re_arm_a_day_back_after_the_first_wait(self, seconds, generation=None):
         await record(self, seconds, generation)
         if len(virtual_time) == 1:
-            self._gw._clock.set_time("2026-10-15T10:30:00Z")
+            self._gw._clock.set_time("2026-10-13T10:30:00Z")
 
-    monkeypatch.setattr(TriggerEngine, "_sleep_virtual", re_arm_a_day_on_after_the_first_wait)
+    monkeypatch.setattr(TriggerEngine, "_sleep_virtual", re_arm_a_day_back_after_the_first_wait)
     engine._eval_time_triggers()
     virtual_time.advance(2 * 3600)  # 10:00: the 09:00 and 10:00 marks come due together
     engine._eval_time_triggers()
@@ -968,12 +968,23 @@ async def test_waiting_virtual_time_follows_the_clock_rate(engine, monkeypatch, 
 
 
 @pytest.mark.asyncio
-async def test_waiting_virtual_time_holds_while_frozen_follows_a_new_rate_and_skips_a_re_arm_s_jump(engine, monkeypatch):
+async def test_waiting_virtual_time_holds_while_frozen_and_follows_a_new_rate(engine, monkeypatch):
     stepped = _SteppedClock(engine, monkeypatch)
     stepped.at[1] = lambda: stepped.clock.set_time("2026-10-14T08:00:00Z", rate=0)  # after 5 unarmed seconds
-    stepped.at[3] = lambda: stepped.clock.set_time("2026-10-20T08:00:00Z", rate=4)  # six days on, then 4x
+    stepped.at[3] = lambda: stepped.clock.set_time("2026-10-14T08:00:00Z", rate=4)  # where it froze, now at 4x
     await engine._sleep_virtual(13)
     assert stepped.slept == [5.0, 5.0, 5.0, 2.0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("re_arm_to, steps", [("2026-10-14T08:00:08Z", [5.0, 2.0]), ("2026-10-13T08:00:00Z", [5.0, 5.0])],
+                         ids=["forward-counts-its-jump", "back-counts-nothing"])
+async def test_waiting_virtual_time_counts_a_re_arm_forward_but_not_back(engine, monkeypatch, re_arm_to, steps):
+    stepped = _SteppedClock(engine, monkeypatch)
+    stepped.clock.set_time("2026-10-14T08:00:00Z")
+    stepped.at[1] = lambda: stepped.clock.set_time(re_arm_to)  # at 08:00:05: 3 s ahead, or a day back
+    await engine._sleep_virtual(10)
+    assert stepped.slept == steps
 
 
 @pytest.mark.asyncio

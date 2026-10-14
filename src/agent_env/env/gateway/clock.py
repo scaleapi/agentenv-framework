@@ -150,7 +150,7 @@ class Clock:
         if t0 > _MAX_T0 - timedelta(seconds=_OVERFLOW_HORIZON_S * r):
             raise ClockError(f"virtual_time {virtual_time!r} at rate {r:g} would overflow datetime near the max")
         with self._lock:
-            self._bank()
+            self._bank(t0)
             self._t0 = t0
             self._rate = r
             self._armed = True
@@ -168,7 +168,8 @@ class Clock:
         return {"ok": True, "armed": False}
 
     def elapsed(self) -> float:
-        """Virtual seconds run so far: real time at each arm's rate (1 while unarmed), not counting a re-arm's jump."""
+        """Virtual seconds run so far: real time at each arm's rate (1 while unarmed), plus the jump of each re-arm
+        forward; one back counts nothing."""
         with self._lock:
             return self._lived + (self._now() - self._anchor) * self._rate
 
@@ -194,8 +195,11 @@ class Clock:
             return {"armed": True, "t0": _iso(self._t0), "virtual_seconds_per_real_second": self._rate,
                     "virtual_time": _iso(_advance(self._t0, elapsed * self._rate))}
 
-    def _bank(self) -> None:
+    def _bank(self, t0: datetime | None = None) -> None:
         """Fold the stretch since the last arm/clear into `_lived` at its rate, and start the next one now."""
         now = self._now()
-        self._lived += (now - self._anchor) * self._rate
+        ran = (now - self._anchor) * self._rate
+        self._lived += ran
+        if t0 is not None and self._armed:  # a re-arm forward is time the world lived through; one back adds nothing
+            self._lived += max(0.0, (t0 - _advance(self._t0, ran)).total_seconds())
         self._anchor = now

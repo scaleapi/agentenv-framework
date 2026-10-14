@@ -1345,8 +1345,8 @@ class TriggerEngine:
             trig["waiting"] = False
 
     async def _sleep_virtual(self, seconds: float, generation: int | None = None) -> None:
-        """Wait out ``seconds`` of virtual time as the clock runs: real time at its rate (1 while unarmed), none while
-        frozen. Given the clock's ``generation``, stop early once a re-arm or clear moves it on."""
+        """Wait out ``seconds`` of virtual time as the clock runs (real time at its rate, 1 while unarmed, none while
+        frozen) or jumps ahead. Given the clock's ``generation``, stop early once a re-arm or clear moves it on."""
         clock = self._gw._clock
         until = clock.elapsed() + seconds
         while (left := until - clock.elapsed()) > 0 and (generation is None or clock.generation == generation):
