@@ -16,8 +16,8 @@ import json
 import logging
 import os
 import platform
-import random
 import re
+import secrets
 import shlex
 import shutil
 import signal
@@ -140,7 +140,7 @@ def _free_host_port() -> int:
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         last = os.read(fd, 16).strip()
-        start = int(last) + 1 if last.isdigit() else random.choice(_HOST_PORTS)
+        start = int(last) + 1 if last.isdigit() else secrets.choice(_HOST_PORTS)
         for i in range(len(_HOST_PORTS)):
             port = _HOST_PORTS[(start + i - _HOST_PORTS.start) % len(_HOST_PORTS)]
             if _bindable(port):

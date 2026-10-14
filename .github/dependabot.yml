@@ -8,6 +8,19 @@ updates:
     groups:
       python-minor-and-patch:
         update-types: ["minor", "patch"]
+    ignore:
+      # mcp 2 removed mcp.server.fastmcp, which env/gateway imports at module scope, and the dev
+      # extra's fastmcp needs mcp<2, so a major update can't resolve.
+      - dependency-name: "mcp"
+        update-types: ["version-update:semver-major"]
+  - package-ecosystem: "npm"
+    directory: "/src/agent_env/explorer/ui"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-and-patch:
+        update-types: ["minor", "patch"]
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

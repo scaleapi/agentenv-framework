@@ -37,7 +37,7 @@ from agent_env.store.routing import disable_namespace_routing
 from agent_env.task import Task
 from agent_env.task_step.task_step import TaskStep
 from agent_env.utils.build_context import BuildContext
-from tst.unit.bundle._support import RefusingStore, layout, local_store, plan_of
+from tst.unit.bundle._support import DIGEST, RefusingStore, layout, local_store, plan_of
 
 ROOT = "@local/~/triage"
 LAYOUT = {
@@ -222,7 +222,6 @@ def test_what_has_no_writer_yet_is_refused_before_anything_is_written(bundle_dir
         "envs/tickets/env.toml": 'environment_name = "tickets"\n',
         "envs/own/env.toml": 'type = "own_env_materialize_test"\n',
         "agents/solver/Dockerfile": "FROM scratch\n",
-        "artifacts/base-mcp/Dockerfile": "FROM scratch\n",
         "artifacts/doc/artifact.toml": 'type = "document_only_materialize_test"\n',
         "evals/regression.toml": 'tasks = ["t"]\n',
     })
@@ -230,12 +229,10 @@ def test_what_has_no_writer_yet_is_refused_before_anything_is_written(bundle_dir
         {"id": "tickets", "type": "deploy_env", "env_id": "tickets"},
         {"id": "own", "type": "deploy_env", "env_id": "own"},
         {"id": "agent", "type": "deploy_agent", "env_ids": ["tickets"], "a2a_agent_id": "solver"},
-        {"id": "image", "type": "load_artifact", "env_id": "tickets", "artifact_id": "base-mcp"},
         {"id": "doc", "type": "load_artifact", "env_id": "tickets", "artifact_id": "doc"},
     ])
 
     assert sorted(_problems(lambda: _run(bundle_dir, dry_run))) == [
-        "artifacts/base-mcp: writing a docker_image artifact isn't supported yet",
         "artifacts/doc: writing a document_only_materialize_test artifact isn't supported yet",
         "envs/own: writing an own_env_materialize_test env isn't supported yet",
     ]
@@ -312,20 +309,6 @@ def test_a_skill_file_linking_out_of_the_bundle_is_refused_before_anything_is_wr
 
 REF_AGENT = {"agents/solver/agent.toml": 'image = { ref = "ghcr.io/acme/solver:1" }\n'}
 DEPLOY_SOLVER = {"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}
-DIGEST = "sha256:" + "a" * 64
-
-
-@pytest.fixture
-def registry(monkeypatch):
-    """Each ref the registry is asked to pin; every tag pins to DIGEST."""
-    asked = []
-
-    def pin(ref, auth):
-        asked.append(ref)
-        return ref if "@" in ref else f"{ref}@{DIGEST}"
-
-    monkeypatch.setattr(docker_image_module, "pin_digest", pin)
-    return asked
 
 
 def test_a_registry_image_a_folder_names_is_pinned_once_and_read_again_only_when_its_ref_changes(bundle_dir, registry):

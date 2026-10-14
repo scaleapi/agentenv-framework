@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional
 from agentenv_protocol.a2a_agent import STANDARD_EXTENSIONS
 
 from agent_env.config import get_config
+from agent_env.config.model import MODEL_HEADERS_ENV
 from agent_env.entity_refs import EntityRef
 from agent_env.providers.sandbox_providers.sandbox import (
     SANDBOX_LABEL,
@@ -20,6 +21,7 @@ from agent_env.providers.sandbox_providers.sandbox import (
     NetworkPolicyUnsupportedError,
     port_bindings,
 )
+from agent_env.artifact.artifacts.cli import GATEWAY_ENV_FILE
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.a2a_agent.object_transfer import (
     TRANSFER_TIMEOUT_SECONDS,
@@ -257,7 +259,7 @@ class A2AAgent:
         env_dir = posixpath.dirname(entrypoint_path)
 
         # write .env first — write_file_from_text creates the parent dir; write_file_from_object does not.
-        await sandbox.write_file_from_text(f"AGENT_ENV_GATEWAY_URL={gateway_url}\n", f"{env_dir}/.env")
+        await sandbox.write_file_from_text(f"AGENT_ENV_GATEWAY_URL={gateway_url}\n", f"{env_dir}/{GATEWAY_ENV_FILE}")
 
         for rel_path, file_artifact in cli_artifact.get_cli_files().get_file_artifacts().items():
             await sandbox.write_file_from_object(file_artifact.object_url, f"{target_root}/{rel_path}")
@@ -435,6 +437,11 @@ class A2AAgent:
             resolved_env["LITELLM_API_KEY"] = config.get_litellm_api_key()
         if "LITELLM_BASE_URL" not in resolved_env and "LITELLM_BASE_URL" not in self.default_env_vars:
             resolved_env["LITELLM_BASE_URL"] = config.get_litellm_base_url()
+        if MODEL_HEADERS_ENV not in resolved_env and MODEL_HEADERS_ENV not in self.default_env_vars:
+            headers = config.get_model_headers(
+                resolved_env.get("LITELLM_BASE_URL", self.default_env_vars.get("LITELLM_BASE_URL")))
+            if headers:
+                resolved_env[MODEL_HEADERS_ENV] = json.dumps(headers)
         if "LITELLM_BASE_URL" in resolved_env:
             resolved_env["LITELLM_BASE_URL"] = (provider or sandbox).url_from_sandbox(resolved_env["LITELLM_BASE_URL"])
 

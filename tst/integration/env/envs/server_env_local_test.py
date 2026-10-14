@@ -3,12 +3,14 @@
 The env deploys, a later process restores its record and loads data into the server, and the teardown step, which
 rebuilds each sandbox from disk, removes the container. A load is timed by the size of the payload it staged, through
 the deploy's own handle and a restored one; and the server's state reads as JSON whether ``data/get`` answers with
-data or with a file bundle. A loop of one's own lists, declares and calls the server's tools through ``ToolSession``.
-Requires a docker daemon; spins up a throwaway ``registry:2`` and skips if it can't start.
+data or with a file bundle. A loop of one's own lists, declares and calls the server's tools through ``ToolSession``,
+and plays a task's agent as an episode, around the echo agent. Requires a docker daemon; spins up a throwaway
+``registry:2`` and skips if it can't start.
 """
 
 import asyncio
 import json
+import re
 import shutil
 import socket
 import subprocess
@@ -30,8 +32,11 @@ from agent_env.env.env import DeployedSandboxEnv, Env
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.gateway import constants
 from agent_env.store.image_store import LocalRegistryImageStore
+from agent_env.store.object_store.local.grant_server import grant_server
+from agent_env.task import EpisodeSpec, Task
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.teardown_sandboxes import TORN_DOWN_KEY, TeardownSandboxesTaskStep
+from tst.util.a2a_test_agent import put_test_agent
 
 pytestmark = pytest.mark.integration
 
@@ -75,8 +80,10 @@ def local_stack(monkeypatch, tmp_path):
         pytest.skip("local registry did not become ready")
 
     owned: list[str] = []
+    sandboxes = tmp_path / "sandboxes"
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("AGENT_ENV_LOCAL_SANDBOX_DIR", str(tmp_path / "sandboxes"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("AGENT_ENV_LOCAL_SANDBOX_DIR", str(sandboxes))
     for var in ("DOCUMENT", "OBJECT", "IMAGE"):
         monkeypatch.setenv(f"AGENT_ENV_{var}_STORE", "local")
     configure()
@@ -85,8 +92,14 @@ def local_stack(monkeypatch, tmp_path):
     try:
         yield owned
     finally:
+        # A run's sandboxes aren't known up front: each has a work dir in this test's sandbox root, named after it.
+        for work_dir in sandboxes.glob("agent-env-*"):
+            if m := re.match(r"agent-env-(local-[0-9a-f]+)-", work_dir.name):
+                owned.append(f"agent-{m.group(1)}")
         for container_name in owned:
             _docker("rm", "-f", container_name)
+        # Agents upload through this process's grant server, whose certificate is from this test's state root.
+        grant_server(None, None).close()
         reset_artifact_store()
         reset_config()
         _docker("rm", "-f", reg_name)
@@ -183,6 +196,86 @@ async def test_a_deployed_envs_tools_are_listed_and_called_from_a_loop_of_ones_o
             await before_restart.call_tool("list_items")
     async with ToolSession(mcp_url=deployed.mcp_url) as after_restart:
         assert json.loads((await after_restart.call_tool("list_items")).text) == {"items": []}
+
+
+VERIFY_CRATE = """
+from agentenv_protocol import client
+
+
+async def verify(mcp_url):
+    items = (await client.get_data(mcp_url.removesuffix("/mcp"))).parts[0].data["items"]
+    return [{"id": "crate", "result": "crate" in items}]
+"""
+
+
+@pytest.mark.asyncio
+async def test_a_tasks_agent_is_played_from_a_loop_of_ones_own_as_an_episode(local_stack, tmp_path):
+    """A trainer's view of a seeded task: the env deployed and loaded and the echo agent prompted around the outside
+    agent, which plays its turn through the env's tools as its role and is never deployed; its reply recorded and
+    scored under the verifier's step; and every episode, played, not played, abandoned or forgotten past its turn's
+    deadline, leaving nothing behind."""
+    uid = uuid.uuid4().hex[:8]
+    env = MCPServerEnv.put(id=f"server-items-{uid}", docker_image_artifact=_put_items_image(f"server-items-{uid}"),
+                           environment_name="items", env_provider_type="server")
+    verify = FileArtifact.put_bytes(id=f"verify-crate-{uid}", description="episode e2e", filename="verify.py",
+                                    content=VERIFY_CRATE.encode(), content_type="text/x-python")
+    task = Task.from_dict({"id": f"crate-{uid}", "steps": [
+        {"id": "env", "type": "deploy_env", "env_id": "<env>"},
+        {"id": "load", "type": "load_artifact", "env_id": "<env>", "artifact_id": _items_artifact(uid).id},
+        {"id": "policy", "type": "deploy_agent", "agent_name": "policy", "env_ids": ["<env>"],
+         "role": "<who>@example.com"},
+        {"id": "echo", "type": "deploy_agent", "agent_name": "echo", "a2a_agent_id": put_test_agent(f"echo-{uid}").id},
+        {"id": "ask-echo", "type": "prompt_agent", "agent_name": "echo", "prompt_id": "ask-echo",
+         "prompt": "Count the crates."},
+        {"id": "play", "type": "prompt_agent", "agent_name": "policy", "prompt_id": "play", "prompt": "Add a <item>."},
+        {"id": "check", "type": "env_outcome_verifier", "env_id": "<env>", "file_artifact_id": verify.id,
+         "verifier_id": "crate-<week>"},
+    ]})
+    seed = {"env": env.id, "who": "alice", "item": "crate", "week": "3"}
+    spec = EpisodeSpec.from_task(task, trainer_agents=["policy"], seed=seed)
+
+    async def play(episode, add):
+        turn = await episode.next_turn()
+        assert turn.prompt == "Add a crate." and turn.role == "alice@example.com"
+        assert [agent["agent_name"] for agent in Task.get_instance(episode.id).context["deployed_agents"]] == ["echo"]
+        if add:
+            async with turn.tools() as tools:
+                assert {"items_add_item", "items_whoami"} <= {tool.name for tool in tools.list()}
+                await tools.call("items_add_item", {"item": "crate"})
+                assert json.loads((await tools.call("items_whoami")).text)["role"] == "alice@example.com"
+        await turn.end("Added a crate." if add else None)
+        return await episode.result()
+
+    sandboxes = tmp_path / "sandboxes"
+    played, unplayed = await spec.start(), await spec.start()
+    assert await asyncio.gather(play(played, True), play(unplayed, False)) == [{"check": 1.0}, {"check": 0.0}]
+    assert list(sandboxes.glob("agent-env-*")) == []
+    record = Task.get_instance(played.id)
+    assert record.status == "completed" and record.context["metadata"]["episode"]["trainer_agents"] == ["policy"]
+    assert [agent["agent_name"] for agent in record.context["deployed_agents"]] == ["echo"]
+    replies = {response["step_id"]: response["response"] for response in record.context["prompt_responses"]}
+    assert replies["play"] == "Added a crate." and replies["ask-echo"].startswith("Echo:")
+
+    abandoned = await spec.start()
+    await abandoned.next_turn()
+    assert len(list(sandboxes.glob("agent-env-*"))) == 2
+    await abandoned.abandon("test")
+    assert (Task.get_instance(abandoned.id).status, Task.get_instance(abandoned.id).error) == ("cancelled", "test")
+    assert list(sandboxes.glob("agent-env-*")) == []
+
+    forgotten = await EpisodeSpec.from_task(task, trainer_agents=["policy"], seed=seed, turn_timeout=3).start()
+    await forgotten.next_turn()
+    with pytest.raises(TimeoutError, match="turn 'play' of agent 'policy' wasn't ended within 3s"):
+        await forgotten.next_turn()
+    assert Task.get_instance(forgotten.id).status == "failed"
+    assert list(sandboxes.glob("agent-env-*")) == []
+    for episode in (played, unplayed, abandoned, forgotten):
+        context = Task.get_instance(episode.id).context
+        sandbox_ids = [entry["sandbox_id"] for key in ("deployed_envs", "deployed_agents")
+                       for entry in context[key] if entry.get("sandbox_id")]
+        assert len(sandbox_ids) == 2
+        for sandbox_id in sandbox_ids:
+            assert _docker("ps", "-aq", "--filter", f"name=^/agent-{sandbox_id}$").stdout.strip() == ""
 
 
 def _put_items_image(artifact_id: str) -> DockerImageArtifact:

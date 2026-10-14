@@ -8,7 +8,7 @@ import pytest
 
 from agent_env.store import RegistryAuth
 from agent_env.store.image_store import registry_api
-from agent_env.store.image_store.registry_api import pin_digest
+from agent_env.store.image_store.registry_api import pin_digest, pinned_from
 
 DIGEST = "sha256:" + "a" * 64
 OTHER = "sha256:" + "b" * 64
@@ -184,3 +184,17 @@ def test_a_digest_docker_couldnt_pull_by_is_refused_before_any_request(fake_regi
     with pytest.raises(ValueError, match=f"'{digest}' isn't a sha256, sha384 or sha512 digest"):
         pin_digest(f"ghcr.io/org/tool@{digest}", None)
     assert seen == []
+
+
+@pytest.mark.parametrize("pinned, ref, pins", [
+    (f"ghcr.io/acme/app:1@{DIGEST}", "ghcr.io/acme/app:1", True),
+    (f"ghcr.io/acme/app:latest@{DIGEST}", "ghcr.io/acme/app", True),
+    (f"localhost:5000/team/app:1@{DIGEST}", "localhost:5000/team/app:1", True),
+    (f"ghcr.io/acme/app@{DIGEST}", f"ghcr.io/acme/app@{DIGEST}", True),
+    (f"ghcr.io/acme/app:1@{DIGEST}", "ghcr.io/acme/app:2", False),
+    (f"ghcr.io/acme/app:1@{DIGEST}", "ghcr.io/acme/other:1", False),
+    (f"ghcr.io/acme/app@{DIGEST}", f"ghcr.io/acme/app@{OTHER}", False),
+    ("ghcr.io/acme/app:1", "ghcr.io/acme/app:1", False),
+], ids=["tag", "latest", "loopback port", "digest", "another tag", "another name", "another digest", "unpinned"])
+def test_a_pin_pins_the_ref_it_was_pinned_from(pinned, ref, pins):
+    assert pinned_from(pinned, ref) is pins

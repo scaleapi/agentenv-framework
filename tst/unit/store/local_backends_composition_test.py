@@ -208,7 +208,8 @@ def test_a_local_id_cli_bundle_round_trips(local_stores, cli_routing, tmp_path):
     cli_dir = _cli_dir(tmp_path, "cli", {"bin/tool": b"#!/bin/sh\n", "lib/data.txt": b"d"})
     art = CliArtifact.put(id=HOSTILE, command_name="tool", entrypoint="bin/tool", cli_dir=cli_dir)
 
-    assert local_stores.get_object_store().get_object_key(art.cli_object_url) == f"artifacts/cli/{HOSTILE_SEGMENT}/1"
+    assert re.fullmatch(rf"artifacts/cli/{re.escape(HOSTILE_SEGMENT)}/1-[0-9a-f]+",
+                        local_stores.get_object_store().get_object_key(art.cli_object_url))
     assert art.cli_files_id == f"{HOSTILE}__files"
     loaded = {rel: fa.load() for rel, fa in CliArtifact.get(HOSTILE).get_cli_files().get_file_artifacts().items()}
     assert loaded == {"bin/tool": b"#!/bin/sh\n", "lib/data.txt": b"d"}

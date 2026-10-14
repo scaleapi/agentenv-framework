@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-import random
+import secrets
 import string
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Optional, Self
@@ -160,7 +160,7 @@ class A2AAgentInstanceStore:
 
     def create_instance(self, deployed: "DeployedA2AAgent", ttl_seconds: int) -> "DeployedA2AAgent":
         from agent_env.a2a_agent.a2a_agent import DeployedA2AAgent
-        suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
+        suffix = "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(8))
         instance_id = f"{deployed.agent_id}-{suffix}"
         now = datetime.now(timezone.utc)
         created_at_utc = now.strftime("%Y-%m-%d %H:%M UTC")

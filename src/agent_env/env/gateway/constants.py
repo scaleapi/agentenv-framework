@@ -103,7 +103,7 @@ def tool_name_clashes_text(clashes: dict[str, list[str]]) -> str:
     return "; ".join(f"'{name}' from {sources(names)}" for name, names in clashes.items())
 
 # Trigger status vocabulary, part of the GET /triggers/state contract; `state` asserts against it.
-TRIGGER_STATUSES = ("armed", "firing", "queued", "fired", "failed")
+TRIGGER_STATUSES = ("armed", "firing", "queued", "fired", "failed", "cancelled")
 
 # A fire is in flight; `queued` also has further provoking calls already waiting to be drained.
 TRIGGER_IN_FLIGHT_STATUSES = ("firing", "queued")
@@ -111,7 +111,11 @@ TRIGGER_IN_FLIGHT_STATUSES = ("firing", "queued")
 # What triggers/v1 takes beyond its first release, declared on the card so a client can refuse an older gateway.
 TRIGGER_NAMED_EXECUTORS = "named_executors"
 TRIGGER_PROVOKING_ROLES = "provoking_roles"
-TRIGGER_FEATURES = (TRIGGER_NAMED_EXECUTORS, TRIGGER_PROVOKING_ROLES)
+TRIGGER_ACTION_DELAY = "action_delay"
+TRIGGER_EXECUTOR_HOURS = "executor_hours"
+TRIGGER_UNLESS = "unless"
+TRIGGER_FEATURES = (TRIGGER_NAMED_EXECUTORS, TRIGGER_PROVOKING_ROLES, TRIGGER_ACTION_DELAY, TRIGGER_EXECUTOR_HOURS,
+                    TRIGGER_UNLESS)
 
 GATEWAY_TRAJECTORY_FILE = os.environ.get(
     "GATEWAY_TRAJECTORY_FILE",

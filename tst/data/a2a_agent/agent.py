@@ -12,12 +12,16 @@ and it answers each ``send-file <uri>`` line of its prompt with a file part nami
 
 It installs skills under ``~/skills/<name>/``, a bundle's files downloaded through their read grants, and a
 ``list-skills`` line in its prompt adds a ``skill <name>: <path>=<sha256 prefix>, ...`` line for each one.
+A ``run <command>`` line has it run that command in its container and add a ``ran <command>: <output>`` line.
 """
 
 import asyncio
 import base64
+import contextlib
 import hashlib
+import os
 import re
+import signal
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -47,6 +51,8 @@ from agentenv_protocol.a2a_agent import (
 
 SEND_FILE = "send-file "
 LIST_SKILLS = "list-skills"
+RUN = "run "
+RUN_TIMEOUT_SECONDS = 60
 SKILLS_DIR = Path.home() / "skills"
 LIVE_STEPS = re.compile(r"live-steps (\d+)")
 LIVE_STEP_SECONDS = 1
@@ -79,6 +85,26 @@ async def _read(part: FilePart) -> str:
     return f"read {part.name} over {scheme}: {data.decode(errors='replace').strip()}"
 
 
+async def _ran(command: str) -> str:
+    """``command``'s output, stdout and stderr together, run by the shell in a process group of its own, which is
+    stopped with whatever it started if the command times out or the request is cancelled."""
+    process = await asyncio.create_subprocess_shell(command, stdout=asyncio.subprocess.PIPE,
+                                                    stderr=asyncio.subprocess.STDOUT, start_new_session=True)
+    output = None
+    try:
+        output, _ = await asyncio.wait_for(process.communicate(), RUN_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        pass
+    finally:
+        if process.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            await process.wait()
+    if output is None:
+        return f"ran {command}: timed out after {RUN_TIMEOUT_SECONDS}s"
+    return f"ran {command}: {output.decode(errors='replace').strip()}"
+
+
 def _skills() -> list[str]:
     """One line per installed skill: each file's path and the first 12 hex digits of its sha256."""
     if not SKILLS_DIR.is_dir():
@@ -109,6 +135,8 @@ class EchoAgent(AgentEnvAgent):
         reply = "\n".join([reply, *[await _read(part) for part in request.parts if isinstance(part, FilePart)]])
         if LIST_SKILLS in prompt.splitlines():
             reply = "\n".join([reply, *_skills()])
+        runs = [line.removeprefix(RUN).strip() for line in prompt.splitlines() if line.startswith(RUN)]
+        reply = "\n".join([reply, *[await _ran(command) for command in runs]])
         sends = [line.removeprefix(SEND_FILE).strip() for line in prompt.splitlines() if line.startswith(SEND_FILE)]
         files = [FilePart(uri=uri, name=uri.rsplit("/", 1)[-1], mime_type="text/plain") for uri in sends]
         request.trajectory.append({"type": "echo", "input": prompt, "output": reply})

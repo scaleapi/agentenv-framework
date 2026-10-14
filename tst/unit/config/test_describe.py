@@ -613,6 +613,28 @@ config = { authorization = "Bearer abc", oauth_id = "z", passphrase = "p", datab
     assert resolved["database"] == "keep"
 
 
+def test_model_header_values_are_masked_whatever_the_header_is_called(tmp_path, monkeypatch):
+    """A header's name doesn't say it carries a credential (`X-Api-Key`), so every literal header value is
+    masked, in [model.headers] and [model.params.extra_headers] alike; a reference still names its secret."""
+    path = _write_config(tmp_path, """
+[model]
+base_url = "https://example.invalid"
+
+[model.headers]
+"X-Api-Key" = "literal-header-key"
+"X-Bill-To" = "secret:bill_to"
+
+[model.params.extra_headers]
+"X-Portkey-Virtual-Key" = "literal-virtual-key"
+""")
+    monkeypatch.setenv("AGENT_ENV_CONFIG", str(path))
+
+    rendered = render(describe_config())
+
+    assert "literal-header-key" not in rendered and "literal-virtual-key" not in rendered
+    assert "secret:bill_to" in rendered
+
+
 def test_a_section_name_used_as_a_key_inside_another_table_is_warned_about(tmp_path, monkeypatch):
     """TOML binds a bare key to the table above it, so `envs = "..."` typed at the foot of a
     file becomes `[task_steps].envs` — a well-formed document that configures nothing. No

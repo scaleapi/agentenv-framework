@@ -81,6 +81,29 @@ def test_the_mcp_proxy_stamps_the_session_s_role_and_key_never_the_request_s():
     ]
 
 
+def test_mcp_tool_calls_record_who_made_them_and_the_fires_in_flight_for_that_executor():
+    session = _RecordingSession()
+    gw = _gateway(session)
+    gw._create_and_register_proxy_tool(URL, TOOL)
+    gw._tool_server_urls[TOOL.name] = URL
+    gw._clock.set_time("2019-06-15T12:00:00Z", 1)
+    gw._register_get_time_tool()
+    cause = {"trigger_id": "x", "action_index": 0, "fire": 1}
+    gw._trigger_engine._in_flight["bob@example.com"] = [cause]
+    before = len(_trajectory(gw))
+
+    for role in ("bob@example.com", "alice@example.com"):
+        for tool in (TOOL.name, GET_TIME_TOOL_NAME):  # a proxied tool, and one the gateway serves itself
+            ctx = contextvars.copy_context()
+            ctx.run(Caller(role=role).bind)
+            ctx.run(asyncio.run, gw._mcp._tool_manager.call_tool(tool, {}))
+
+    calls = [e for e in _trajectory(gw)[before:] if e["event_type"] == "tool_call"]
+    assert [(e["tool_call"]["function_name"], e["role"], e.get("caused_by")) for e in calls] == [
+        (TOOL.name, "bob@example.com", [cause]), (GET_TIME_TOOL_NAME, "bob@example.com", [cause]),
+        (TOOL.name, "alice@example.com", None), (GET_TIME_TOOL_NAME, "alice@example.com", None)]
+
+
 @pytest.mark.asyncio
 async def test_step_stamps_the_header_role_in_meta_including_on_the_reconnect():
     session = _RecordingSession(failures=[anyio.ClosedResourceError()])

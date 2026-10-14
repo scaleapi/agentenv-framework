@@ -679,8 +679,9 @@ multi-operation custom extensions, and advanced ASGI-lifespan plus
 common SDK-operation override hooks.
 
 The agent examples make real OpenAI-compatible model calls. Set
-`LITELLM_API_KEY` and, when needed, `LITELLM_BASE_URL`; their typed agent config
-selects the model and system prompt for each deployment. Tests inject a fake
+`LITELLM_API_KEY` and, when needed, `LITELLM_BASE_URL`; they also send the headers in
+`LITELLM_EXTRA_HEADERS`, a JSON object AgentEnv sets when the endpoint needs any. Their typed
+agent config selects the model and system prompt for each deployment. Tests inject a fake
 model client, so the example suite remains offline and deterministic.
 
 ### Object transfer

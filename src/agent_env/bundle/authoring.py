@@ -62,6 +62,13 @@ class AuthoringContext:
     def files(self) -> dict[str, Path]:
         return entry_files(self.bundle, self.entry)
 
+    def try_files(self) -> dict[str, Path] | None:
+        """``files``, or None when the folder can't be listed, which the plan's walk reports."""
+        try:
+            return self.files()
+        except BundleError:
+            return None
+
     def file(self) -> tuple[str, Path]:
         return entry_file(self.bundle, self.entry)
 
