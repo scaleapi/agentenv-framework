@@ -57,6 +57,22 @@ def test_from_section_rejects_unknown_key():
         ModelConfig.from_section({"base_ur": "typo"}, secret_resolver=lambda ref: None)
 
 
+def test_from_section_keeps_header_refs_raw():
+    calls = []
+    cfg = ModelConfig.from_section(
+        {"base_url": "https://gw/v1", "headers": {"X-Bill-To": "secret:org", "X-Plain": "v"}},
+        secret_resolver=lambda ref: calls.append(ref) or "resolved",
+    )
+    assert cfg.headers == {"X-Bill-To": "secret:org", "X-Plain": "v"}
+    assert calls == []
+
+
+@pytest.mark.parametrize("headers", [{"X-Retries": 3}, ["X-Bill-To"]])
+def test_from_section_rejects_headers_that_are_not_strings(headers):
+    with pytest.raises(ConfigError, match=r"\[model.headers\]"):
+        ModelConfig.from_section({"headers": headers}, secret_resolver=lambda ref: None)
+
+
 # --- model_for_role -----------------------------------------------------------
 
 def test_model_for_role_hit_and_fallback():
@@ -168,3 +184,57 @@ def test_client_kwargs_omits_none_api_base_and_splats_params():
     cc = ModelCallConfig(api_key="k", api_base=None, params={"aws_region_name": "us-west-2"})
     assert cc.client_kwargs() == {"api_key": "k", "aws_region_name": "us-west-2"}
     assert ModelCallConfig("k", "https://b", {}).client_kwargs() == {"api_key": "k", "api_base": "https://b"}
+
+
+# --- headers ------------------------------------------------------------------
+
+_WITH_HEADERS = ModelConfig(base_url="https://gw/v1", headers={"X-Bill-To": "secret:org", "X-Plain": "v"})
+
+
+def test_headers_for_the_configured_endpoint_resolve_their_refs():
+    assert _WITH_HEADERS.headers_for("https://gw/v1", secret_resolver=_secrets({"org": "acme"})) == {
+        "X-Bill-To": "acme", "X-Plain": "v"}
+
+
+def test_headers_follow_the_endpoint_the_env_var_configures(monkeypatch):
+    monkeypatch.setenv("LITELLM_BASE_URL", "https://env-gw/v1")
+    assert _WITH_HEADERS.headers_for("https://env-gw/v1", secret_resolver=_secrets({"org": "acme"}))["X-Bill-To"] == "acme"
+    assert _WITH_HEADERS.headers_for("https://gw/v1", secret_resolver=_secrets({})) == {}
+
+
+@pytest.mark.parametrize("base_url", ["https://elsewhere.example/v1", None])
+def test_headers_go_nowhere_but_the_configured_endpoint_and_resolve_nothing(base_url):
+    assert _WITH_HEADERS.headers_for(base_url, secret_resolver=_secrets({})) == {}
+
+
+def test_headers_without_a_configured_endpoint_go_nowhere():
+    assert ModelConfig(headers={"X-Plain": "v"}).headers_for("https://gw/v1", secret_resolver=_secrets({})) == {}
+
+
+def test_an_unresolvable_header_ref_fails_loud():
+    with pytest.raises(ConfigError, match="Unresolved secret:org"):
+        _WITH_HEADERS.headers_for("https://gw/v1", secret_resolver=_secrets({}))
+
+
+def test_resolve_call_sends_the_headers_to_the_configured_endpoint():
+    call = _WITH_HEADERS.resolve_call("m", secret_resolver=_secrets({"org": "acme"}))
+    assert call.params == {"extra_headers": {"X-Bill-To": "acme", "X-Plain": "v"}}
+
+
+def test_resolve_call_sends_no_headers_to_a_foreign_override():
+    call = _WITH_HEADERS.resolve_call("m", base_override="https://elsewhere.example", secret_resolver=_secrets({}))
+    assert call.params == {}
+
+
+def test_resolve_call_sends_no_headers_to_a_model_override():
+    call = _WITH_HEADERS.resolve_call(
+        "m", model_overrides={"m": {"secret_key": "k", "base_url": "https://gw/v1"}}, secret_resolver=_secrets({"k": "sk"}))
+    assert call.params == {}
+
+
+def test_params_extra_headers_win_per_header():
+    cfg = ModelConfig(base_url="https://gw/v1", headers={"X-Bill-To": "acme", "X-Plain": "v"},
+                      params={"temperature": 0, "extra_headers": {"X-Bill-To": "other"}})
+    call = cfg.resolve_call("m", secret_resolver=_secrets({}))
+    assert call.params == {"temperature": 0, "extra_headers": {"X-Bill-To": "other", "X-Plain": "v"}}
+    assert cfg.params == {"temperature": 0, "extra_headers": {"X-Bill-To": "other"}}

@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional
 from agentenv_protocol.a2a_agent import STANDARD_EXTENSIONS
 
 from agent_env.config import get_config
+from agent_env.config.model import MODEL_HEADERS_ENV
 from agent_env.entity_refs import EntityRef
 from agent_env.providers.sandbox_providers.sandbox import (
     SANDBOX_LABEL,
@@ -436,6 +437,10 @@ class A2AAgent:
             resolved_env["LITELLM_API_KEY"] = config.get_litellm_api_key()
         if "LITELLM_BASE_URL" not in resolved_env and "LITELLM_BASE_URL" not in self.default_env_vars:
             resolved_env["LITELLM_BASE_URL"] = config.get_litellm_base_url()
+        if MODEL_HEADERS_ENV not in resolved_env and MODEL_HEADERS_ENV not in self.default_env_vars:
+            headers = config.get_model_headers(resolved_env.get("LITELLM_BASE_URL"))
+            if headers:
+                resolved_env[MODEL_HEADERS_ENV] = json.dumps(headers)
         if "LITELLM_BASE_URL" in resolved_env:
             resolved_env["LITELLM_BASE_URL"] = (provider or sandbox).url_from_sandbox(resolved_env["LITELLM_BASE_URL"])
 

@@ -1,11 +1,13 @@
 """A URL on this machine that agent-env hands into a container on it reaches the host: an agent's, a unit-test
 verifier's and an installed agent's model endpoint, a peer's and a trigger executor's A2A URL, and a CLI's gateway
-URL. Containers elsewhere get them as they are."""
+URL. Containers elsewhere get them as they are. The model endpoint's ``[model.headers]`` go with it, and only with
+it."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import shlex
 import types
 
 import httpx
@@ -15,6 +17,7 @@ from agent_env.a2a_agent import store as agent_store
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts.cli import CliArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
+from agent_env.config.model import ModelConfig
 from agent_env.env.env import DeployedGatewayEnv
 from agent_env.providers.sandbox_providers import sandbox_provider
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
@@ -29,12 +32,19 @@ from agent_env.task_step.task_steps.verifiers.run_container_unit_tests_verifier 
 
 MODEL = "http://localhost:4000/v1"
 MODEL_IN_CONTAINER = "http://host.docker.internal:4000/v1"
+HEADERS = {"X-Bill-To": "acme"}
+ELSEWHERE = "http://127.0.0.1:5001"
 
 
 @pytest.fixture
 def model_endpoint(monkeypatch):
     monkeypatch.setenv("LITELLM_BASE_URL", MODEL)
     monkeypatch.setenv("LITELLM_API_KEY", "k")
+
+
+@pytest.fixture
+def model_headers(monkeypatch, local_stores, model_endpoint):
+    monkeypatch.setattr(local_stores, "_model_cfg", ModelConfig(headers=HEADERS))
 
 
 class _Started(Exception):
@@ -71,6 +81,46 @@ async def test_an_agent_gets_the_model_endpoint_its_container_reaches(
         await _agent().deploy(sandbox_type="any", env_vars={"LITELLM_BASE_URL": MODEL} if passed else None)
 
     assert provider.env["LITELLM_BASE_URL"] == expected
+    assert "LITELLM_EXTRA_HEADERS" not in provider.env
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_cls", [_LocalProvider, _RemoteProvider])
+@pytest.mark.parametrize("passed", [False, True], ids=["configured", "passed"])
+async def test_an_agent_gets_the_model_endpoints_headers(monkeypatch, model_headers, provider_cls, passed):
+    provider = provider_cls()
+    monkeypatch.setattr(sandbox_provider, "build_sandbox_provider", lambda name: provider)
+
+    with pytest.raises(_Started):
+        await _agent().deploy(sandbox_type="any", env_vars={"LITELLM_BASE_URL": MODEL} if passed else None)
+
+    assert json.loads(provider.env["LITELLM_EXTRA_HEADERS"]) == HEADERS
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("deploy_env, agent_fields", [
+    ({"LITELLM_BASE_URL": ELSEWHERE}, {}),
+    (None, {"default_env_vars": {"LITELLM_BASE_URL": ELSEWHERE}}),
+], ids=["passed-elsewhere", "its-own-endpoint"])
+async def test_an_agent_pointed_elsewhere_gets_no_headers(monkeypatch, model_headers, deploy_env, agent_fields):
+    provider = _RemoteProvider()
+    monkeypatch.setattr(sandbox_provider, "build_sandbox_provider", lambda name: provider)
+
+    with pytest.raises(_Started):
+        await _agent(**agent_fields).deploy(sandbox_type="any", env_vars=deploy_env)
+
+    assert "LITELLM_EXTRA_HEADERS" not in provider.env
+
+
+@pytest.mark.asyncio
+async def test_headers_an_agent_is_given_win(monkeypatch, model_headers):
+    provider = _RemoteProvider()
+    monkeypatch.setattr(sandbox_provider, "build_sandbox_provider", lambda name: provider)
+
+    with pytest.raises(_Started):
+        await _agent().deploy(sandbox_type="any", env_vars={"LITELLM_EXTRA_HEADERS": '{"X-Bill-To": "mine"}'})
+
+    assert provider.env["LITELLM_EXTRA_HEADERS"] == '{"X-Bill-To": "mine"}'
 
 
 @pytest.mark.asyncio
@@ -122,7 +172,7 @@ class _VerifierSandbox:
         return 0, "ok", ""
 
 
-def _run_verifier(monkeypatch, sandbox_type: str, **step_fields) -> str:
+def _run_verifier(monkeypatch, sandbox_type: str, seed: dict | None = None, **step_fields) -> str:
     """The verifier's test command, as it ran on a sandbox of ``sandbox_type``."""
     sandbox = _VerifierSandbox(sandbox_type)
     provider = types.SimpleNamespace(get_sandbox=lambda sandbox_id: asyncio.sleep(0, result=sandbox))
@@ -132,6 +182,8 @@ def _run_verifier(monkeypatch, sandbox_type: str, **step_fields) -> str:
             id=artifact_id, version=1, object_url=object_url)))
     context = TaskStepContext()
     context.metadata["deployed_docker_containers"] = [{"container_name": "c", "sandbox_name": "h"}]
+    if seed:
+        context.metadata["seed"] = seed
     context.deployed_sandboxes.append(
         DeployedSandbox(sandbox_name="h", sandbox_id="sb-1", sandbox_mode="vm", sandbox_type=sandbox_type))
 
@@ -157,6 +209,26 @@ def test_a_model_endpoint_the_verifier_sets_itself_is_reached_through_the_host(m
     assert "-e LITELLM_BASE_URL=http://host.docker.internal:5001 " in run
 
 
+def test_a_unit_test_verifier_gets_the_model_endpoints_headers(monkeypatch, model_headers):
+    run = _run_verifier(monkeypatch, "local")
+
+    assert f"-e LITELLM_EXTRA_HEADERS={shlex.quote(json.dumps(HEADERS))} " in run
+    assert f"-e ANTHROPIC_CUSTOM_HEADERS={shlex.quote('X-Bill-To: acme')} " in run
+
+
+def test_a_unit_test_verifier_pointed_elsewhere_gets_no_headers(monkeypatch, model_headers):
+    run = _run_verifier(monkeypatch, "local", env_vars={"LITELLM_BASE_URL": ELSEWHERE, "ANTHROPIC_BASE_URL": ELSEWHERE})
+
+    assert "LITELLM_EXTRA_HEADERS" not in run and "ANTHROPIC_CUSTOM_HEADERS" not in run
+
+
+def test_a_seed_column_cant_replace_the_verifiers_headers(monkeypatch, model_headers):
+    run = _run_verifier(monkeypatch, "local", seed={"litellm_extra_headers": "{}", "anthropic_custom_headers": "x"})
+
+    assert f"-e LITELLM_EXTRA_HEADERS={shlex.quote(json.dumps(HEADERS))} " in run
+    assert f"-e ANTHROPIC_CUSTOM_HEADERS={shlex.quote('X-Bill-To: acme')} " in run
+
+
 @pytest.mark.parametrize("sandbox_type, expected", [
     ("local", MODEL_IN_CONTAINER), ("modal_vm", MODEL), (None, MODEL),
 ], ids=["local-container", "remote-container", "host-install"])
@@ -167,6 +239,18 @@ def test_an_installed_agent_gets_the_model_endpoint_it_reaches(sandbox_type, exp
     )
 
     assert resolvers["litellm_base_url"]() == expected
+
+
+@pytest.mark.parametrize("configured, expected", [(True, HEADERS), (False, {})], ids=["headers", "none"])
+def test_an_installed_agent_gets_the_model_endpoints_headers(monkeypatch, local_stores, model_endpoint, configured, expected):
+    if configured:
+        monkeypatch.setattr(local_stores, "_model_cfg", ModelConfig(headers=HEADERS))
+    resolvers = _build_param_resolvers(
+        container_name="c", work_dir="/w", agent_ctx_tar="/w/a.tgz", a2a_port=8000, agent_name="solver",
+        config=local_stores, sandbox_type="local",
+    )
+
+    assert json.loads(resolvers["litellm_extra_headers"]()) == expected
 
 
 _PEERS_CARD = {"capabilities": {"extensions": [

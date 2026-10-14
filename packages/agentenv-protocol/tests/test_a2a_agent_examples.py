@@ -64,9 +64,20 @@ StreamingAgent = _streaming.StreamingAgent
 
 
 @pytest.mark.asyncio
-async def test_reference_model_forwards_generic_metadata(
+@pytest.mark.parametrize("endpoint_headers, sent_headers", [
+    (None, {"Authorization": "Bearer request-scoped-key"}),
+    ('{"X-Bill-To": "acme", "Authorization": "Bearer theirs"}',
+     {"X-Bill-To": "acme", "Authorization": "Bearer request-scoped-key"}),
+], ids=["no-endpoint-headers", "endpoint-headers"])
+async def test_reference_model_forwards_generic_metadata_and_the_endpoints_headers(
     monkeypatch: pytest.MonkeyPatch,
+    endpoint_headers: str | None,
+    sent_headers: dict[str, str],
 ) -> None:
+    if endpoint_headers is None:
+        monkeypatch.delenv("LITELLM_EXTRA_HEADERS", raising=False)
+    else:
+        monkeypatch.setenv("LITELLM_EXTRA_HEADERS", endpoint_headers)
     captured: dict[str, Any] = {}
     class Response:
         def raise_for_status(self) -> None:
@@ -107,7 +118,7 @@ async def test_reference_model_forwards_generic_metadata(
         "client": {"timeout": 120},
         "request": {
             "url": "https://models.example/v1/chat/completions",
-            "headers": {"Authorization": "Bearer request-scoped-key"},
+            "headers": sent_headers,
             "json": {
                 "model": "test-model",
                 "messages": [{"role": "user", "content": "hello"}],

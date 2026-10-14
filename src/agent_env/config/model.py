@@ -1,6 +1,6 @@
-"""Resolution of the ``[model]`` config.toml block: endpoint, default/per-role models, and
-provider params. A ``ModelConfig`` value object parsed from the ``[model]`` table; a
-``secret_resolver`` is injected per call so secret references resolve lazily."""
+"""Resolution of the ``[model]`` config.toml block: endpoint, default/per-role models,
+provider params, and the endpoint's headers. A ``ModelConfig`` value object parsed from the
+``[model]`` table; a ``secret_resolver`` is injected per call so secret references resolve lazily."""
 
 from __future__ import annotations
 
@@ -14,6 +14,8 @@ from agent_env.config.loader import SecretResolver, interpolate
 
 _ENV_BASE_URL = "LITELLM_BASE_URL"
 _ENV_API_KEY = "LITELLM_API_KEY"
+# Agents get ``[model.headers]`` here as a JSON object; unlike its two siblings, agent-env never reads it.
+MODEL_HEADERS_ENV = "LITELLM_EXTRA_HEADERS"
 
 
 class ModelParam(StrEnum):
@@ -57,13 +59,14 @@ class ModelConfig:
     default: Optional[str] = None
     roles: dict = field(default_factory=dict)
     params: dict = field(default_factory=dict)
+    headers: dict = field(default_factory=dict)  # values may hold unresolved env:/secret: references
 
     @classmethod
     def from_section(cls, section: dict, *, secret_resolver: SecretResolver) -> ModelConfig:
         """Build from the raw ``[model]`` section: reject unknown keys and reserved
         ``[model.params]`` keys, then resolve ``env:``/``secret:`` refs — except
-        ``api_key``, which keeps its raw reference and resolves lazily per call
-        (an eager secret fetch would make every ``[model]`` read need credentials)."""
+        ``api_key`` and ``[model.headers]``, which keep their raw references and resolve
+        lazily per call (an eager secret fetch would make every ``[model]`` read need credentials)."""
         allowed = {f.name for f in fields(cls)}
         unknown = set(section) - allowed
         if unknown:
@@ -74,8 +77,11 @@ class ModelConfig:
                 f"[model.params] may not set reserved keys {sorted(reserved)} "
                 "(agent-env sets these on the model call)"
             )
+        headers = section.get("headers", {})
+        if not isinstance(headers, dict) or not all(isinstance(v, str) for v in headers.values()):
+            raise ConfigError("[model.headers] maps header names to strings (an env:/secret: reference is fine)")
         cfg = interpolate(
-            {k: v for k, v in section.items() if k != "api_key"},
+            {k: v for k, v in section.items() if k not in ("api_key", "headers")},
             secret_resolver=secret_resolver,
         )
         return cls(
@@ -84,6 +90,7 @@ class ModelConfig:
             default=cfg.get("default"),
             roles=cfg.get("roles", {}),
             params=cfg.get("params", {}),
+            headers=dict(headers),
         )
 
     def model_for_role(self, role: str) -> Optional[str]:
@@ -105,6 +112,14 @@ class ModelConfig:
         if self.api_key is None:
             return None
         return interpolate(self.api_key, secret_resolver=secret_resolver)
+
+    def headers_for(self, base_url: Optional[str], *, secret_resolver: SecretResolver) -> dict[str, str]:
+        """``[model.headers]``, resolved, for a call or an agent pointed at ``base_url``: none unless
+        that is the configured endpoint, since a header may carry a credential."""
+        configured_base = os.getenv(_ENV_BASE_URL) or self.base_url
+        if not self.headers or not base_url or base_url != configured_base:
+            return {}
+        return interpolate(dict(self.headers), secret_resolver=secret_resolver)
 
     def resolve_call(
         self,
@@ -151,4 +166,8 @@ class ModelConfig:
         # URL would receive the configured proxy's credential.
         if key is None and (api_base is None or api_base == configured_base):
             key = self._resolved_api_key(secret_resolver)
-        return ModelCallConfig(api_key=key, api_base=api_base, params=dict(self.params))
+        params = dict(self.params)
+        headers = self.headers_for(api_base, secret_resolver=secret_resolver)
+        if headers:
+            params["extra_headers"] = {**headers, **params.get("extra_headers", {})}
+        return ModelCallConfig(api_key=key, api_base=api_base, params=params)

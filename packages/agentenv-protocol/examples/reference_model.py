@@ -48,7 +48,8 @@ class OpenAICompatibleModel:
             if base_url.endswith("/v1")
             else f"{base_url}/v1/chat/completions"
         )
-        return endpoint, {"Authorization": f"Bearer {api_key}"}
+        headers = json.loads(os.getenv("LITELLM_EXTRA_HEADERS") or "{}")
+        return endpoint, {**headers, "Authorization": f"Bearer {api_key}"}
 
     async def complete(
         self,

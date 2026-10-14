@@ -33,6 +33,7 @@ import time
 import uuid
 from typing import Any, ClassVar, Optional
 
+from agent_env.config.model import MODEL_HEADERS_ENV
 from agent_env.providers.sandbox_providers.local_sandbox import host_url_for
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     all_sandbox_container_env,
@@ -65,6 +66,7 @@ _SAFE_ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
 _RESERVED_ENV_KEYS = frozenset({
     "LITELLM_API_KEY", "ANTHROPIC_API_KEY",
     "LITELLM_BASE_URL", "ANTHROPIC_BASE_URL",
+    MODEL_HEADERS_ENV, "ANTHROPIC_CUSTOM_HEADERS",
     "PATH", "HOME",
 })
 _MODEL_URL_KEYS = frozenset({"LITELLM_BASE_URL", "ANTHROPIC_BASE_URL"})
@@ -255,6 +257,15 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
         command, extra_env = self._resolve_command(context)
         merged_env.update(self.env_vars)
         merged_env.update(extra_env)
+        try:
+            headers = config.get_model_headers(merged_env.get("LITELLM_BASE_URL"))
+            if headers:
+                merged_env.setdefault(MODEL_HEADERS_ENV, json.dumps(headers))
+            headers = config.get_model_headers(merged_env.get("ANTHROPIC_BASE_URL"))
+            if headers:
+                merged_env.setdefault("ANTHROPIC_CUSTOM_HEADERS", "\n".join(f"{k}: {v}" for k, v in headers.items()))
+        except (KeyError, ConfigError):
+            logger.warning("[model.headers] unavailable; the verifier's model calls won't carry them")
         for key in _MODEL_URL_KEYS & merged_env.keys():
             merged_env[key] = host_url_for(merged_env[key], sandbox.type)
         env_flags = " ".join(f"-e {k}={shlex.quote(v)}" for k, v in merged_env.items())
