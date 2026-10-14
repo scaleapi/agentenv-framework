@@ -35,6 +35,18 @@ def test_a_ref_is_registered_with_its_tag_pinned_and_no_tarball(local_stores, re
     assert DockerImageArtifact.put_ref("tool-image", description="d", image_name="ghcr.io/org/tool:v1").version == 2
 
 
+@pytest.mark.parametrize("pinned, kept", [
+    ("ghcr.io/org/tool:v1@sha256:" + "a" * 64, True),
+    ("ghcr.io/org/tool:v2@sha256:" + "a" * 64, False),
+    ("ghcr.io/org/tool:v1", False),
+], ids=["same ref", "another tag", "no digest"])
+def test_a_pin_an_earlier_version_recorded_is_kept_only_when_it_pins_the_same_ref(local_stores, resolved, pinned, kept):
+    image = DockerImageArtifact.put_ref("tool-image", description="d", image_name="ghcr.io/org/tool:v1", pinned=pinned)
+
+    assert image.image_name == (pinned if kept else f"ghcr.io/org/tool:v1@{DIGEST}")
+    assert resolved == ([] if kept else [("ghcr.io/org/tool:v1", None)])
+
+
 def test_the_configured_store_lends_its_credentials_only_for_its_own_registry(local_stores, resolved):
     class _Registry(ImageStore):
         def image_ref(self, repository, tag):

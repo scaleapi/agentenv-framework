@@ -29,6 +29,7 @@ from agent_env.artifact.registry import canonical_type, get_artifact_registry
 from agent_env.entity_refs import EntityRef, RefRole, ref_sites
 from agent_env.env.registry import get_env_registry
 from agent_env.eval import Eval, EvalTask
+from agent_env.store.base import NotFoundError
 from agent_env.store.ids import image_repository
 from agent_env.store.routing import namespace_routing_enabled
 from agent_env.task import Task
@@ -175,13 +176,21 @@ def _write_build_context(plan: Plan, write: Write) -> int:
 
 
 def _write_referenced_image(plan: Plan, write: Write) -> int:
-    """Register the registry image an entry's image key names, its tag pinned to the digest the registry serves now."""
+    """Register the registry image an entry's image key or image folder names, its tag pinned to the digest the
+    registry serves now. Written again with the same ref, as for a new description, it keeps the digest it has."""
     try:
         return DockerImageArtifact.put_ref(
             write.id, description=write.source.description or f"referenced by {_path(plan, write)}",
-            image_name=write.source.ref).version
+            image_name=write.source.ref, pinned=_latest_image_name(write.id)).version
     except ValueError as e:  # the registry's answer, or a registry on this machine the image's store can't name
         raise BundleError([f"{_path(plan, write)}: {e}"]) from None
+
+
+def _latest_image_name(image_id: str) -> str | None:
+    try:
+        return DockerImageArtifact.get(image_id).image_name
+    except NotFoundError:
+        return None
 
 
 def _write_built_image(plan: Plan, write: Write) -> int:
