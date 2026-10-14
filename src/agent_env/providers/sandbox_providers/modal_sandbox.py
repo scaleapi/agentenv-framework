@@ -90,6 +90,17 @@ def _tunnel_url(t) -> str:
     return f"https://{t.host}" + (f":{t.port}" if t.port != 443 else "")
 
 
+async def _tunnel_urls(sb: modal.Sandbox) -> Optional[dict[int, str]]:
+    """None once the sandbox has finished. Modal raises ``ConflictError`` for other refusals too, hence ``poll()``."""
+    try:
+        tunnels = await sb.tunnels.aio()
+    except modal.exception.ConflictError:
+        if await sb.poll.aio() is None:
+            raise
+        return None
+    return {p: _tunnel_url(t) for p, t in tunnels.items()}
+
+
 def _modal_network_kwargs(policy: NetworkPolicy) -> dict:
     """``policy`` as Modal ``_experimental_create`` kwargs.
 
@@ -475,8 +486,9 @@ class ModalSandboxProvider(SandboxProvider):
     async def get_sandbox(self, sandbox_id: str) -> Sandbox:
         client = await self._get_client()
         sb = await modal.Sandbox.from_id.aio(sandbox_id, client=client)
-        tunnels = await sb.tunnels.aio()
-        tunnel_urls = {p: _tunnel_url(t) for p, t in tunnels.items()}
+        tunnel_urls = await _tunnel_urls(sb)
+        if tunnel_urls is None:
+            return self._sandbox_cls(sb, {})
         i6pn_address = await _resolve_i6pn_address(sb)
         return self._sandbox_cls(sb, tunnel_urls, i6pn_address=i6pn_address)
 

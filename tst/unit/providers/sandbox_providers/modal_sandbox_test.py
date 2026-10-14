@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import modal
 import pytest
 
 from agent_env.config import get_config
@@ -437,3 +438,35 @@ async def test_write_file_from_object_reads_a_url_from_the_store_that_holds_it(c
     sandbox._write_stream_via_exec = collect
     await sandbox.write_file_from_object(url, "/data/a.json")
     assert written == [(b"LOCAL", "/data/a.json")]
+
+
+def _refusing_tunnels(*, exit_code: int | None) -> MagicMock:
+    sb = MagicMock()
+    sb.tunnels.aio = AsyncMock(side_effect=modal.exception.ConflictError("Sandbox has already finished with status terminated"))
+    sb.poll.aio = AsyncMock(return_value=exit_code)
+    sb.terminate.aio = AsyncMock()
+    sb.exec.aio = AsyncMock()
+    return sb
+
+
+@pytest.mark.asyncio
+async def test_a_sandbox_that_already_finished_gets_a_handle_without_tunnels_whose_terminate_takes_it_down(
+    _patched_provider,
+):
+    sb = _refusing_tunnels(exit_code=137)
+    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox.from_id") as from_id:
+        from_id.aio = AsyncMock(return_value=sb)
+        sandbox = await _patched_provider.get_sandbox("sb-finished")
+        await sandbox.terminate()
+
+    assert sandbox.tunnel_urls == {}
+    sb.exec.aio.assert_not_called()
+    sb.terminate.aio.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_conflict_on_a_sandbox_still_running_is_raised(_patched_provider):
+    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox.from_id") as from_id:
+        from_id.aio = AsyncMock(return_value=_refusing_tunnels(exit_code=None))
+        with pytest.raises(modal.exception.ConflictError):
+            await _patched_provider.get_sandbox("sb-running")

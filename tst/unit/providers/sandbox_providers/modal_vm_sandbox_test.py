@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import modal
 import pytest
 
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandbox, ModalVmSandboxProvider
@@ -395,3 +396,24 @@ async def test_apps_are_looked_up_in_the_configured_environment():
         lookup.aio = AsyncMock(return_value=MagicMock())
         await provider._get_app("agent-env-p")
     assert lookup.aio.call_args.kwargs["environment_name"] == "rl-prod"
+
+
+@pytest.mark.parametrize("exit_code", [137, None], ids=["finished", "running"])
+@pytest.mark.asyncio
+async def test_a_vm_that_already_finished_gets_a_handle_without_tunnels_and_a_conflict_while_running_is_raised(
+    exit_code,
+):
+    provider = ModalVmSandboxProvider()
+    provider._get_client = AsyncMock(return_value=MagicMock())  # type: ignore[method-assign]
+    sb = MagicMock()
+    sb.tunnels.aio = AsyncMock(side_effect=modal.exception.ConflictError("Sandbox has already finished with status terminated"))
+    sb.poll.aio = AsyncMock(return_value=exit_code)
+    with patch("agent_env.providers.sandbox_providers.modal_vm_sandbox.modal.Sandbox.from_id") as from_id:
+        from_id.aio = AsyncMock(return_value=sb)
+        if exit_code is None:
+            with pytest.raises(modal.exception.ConflictError):
+                await provider.get_sandbox("sb-running")
+            return
+        sandbox = await provider.get_sandbox("sb-finished")
+
+    assert sandbox.tunnel_urls == {}

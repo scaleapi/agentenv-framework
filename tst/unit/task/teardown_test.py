@@ -8,9 +8,13 @@ import os
 import tempfile
 import time
 
+from unittest.mock import AsyncMock, MagicMock
+
+import modal
 import pytest
 
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv
+from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, remove_local_work_dir
 from agent_env.task import teardown
 from agent_env.task.teardown import RecordedSandbox, TeardownReport, recorded_sandboxes, teardown_run
@@ -142,6 +146,23 @@ def test_a_terminate_that_fails_is_reported_not_raised_and_the_others_still_go(t
     assert report.still_up == (RecordedSandbox("sb-gw", "modal", "env"),)
     assert len(report.terminated) == 4
     assert "sb-gw" not in context.metadata[TORN_DOWN_KEY]
+
+
+def test_a_modal_sandbox_that_already_finished_is_counted_down_not_reported_up(monkeypatch):
+    sb = MagicMock()
+    sb.tunnels.aio = AsyncMock(side_effect=modal.exception.ConflictError("Sandbox has already finished with status terminated"))
+    sb.poll.aio = AsyncMock(return_value=137)
+    sb.terminate.aio = AsyncMock()
+    monkeypatch.setattr(modal.Sandbox, "from_id", MagicMock(aio=AsyncMock(return_value=sb)))
+    monkeypatch.setattr(ModalSandboxProvider, "_get_client", AsyncMock(return_value=MagicMock()))
+    context = TaskStepContext(deployed_sandboxes=[
+        DeployedSandbox(sandbox_name="box", sandbox_id="sb-finished", sandbox_mode="container", sandbox_type="modal")])
+
+    report = _run(context)
+
+    assert report.terminated == (RecordedSandbox("sb-finished", "modal", "sandbox"),)
+    assert report.still_up == ()
+    assert context.metadata[TORN_DOWN_KEY] == ["sb-finished"]
 
 
 def test_cancelling_it_returns_what_it_reached_and_leaves_the_rest(terminated):
