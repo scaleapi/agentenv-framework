@@ -13,7 +13,7 @@ from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.deploy_sandbox import DeploySandboxTaskStep
-from tst.integration.store.local_parallel_deploy_test import local_stack  # noqa: F401
+from tst.integration.store.local_parallel_deploy_test import local_stack as local_stack
 from tst.util.a2a_test_agent import build_test_agent_image, put_test_agent
 
 
