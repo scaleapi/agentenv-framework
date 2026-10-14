@@ -24,8 +24,8 @@ if TYPE_CHECKING:
 
 # A command a bundle's CLI is installed as, at /opt/cli/<command_name>/.
 _COMMAND_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*")
-# Where installing a CLI writes the gateway URL, beside its entrypoint.
-_GATEWAY_ENV_FILE = ".env"
+# The file installing a CLI writes the gateway URL to, beside its entrypoint.
+GATEWAY_ENV_FILE = ".env"
 
 
 class CliArtifact(Artifact):
@@ -75,7 +75,7 @@ class CliArtifact(Artifact):
             if not (cli_dir / entrypoint).is_file():
                 raise ValueError(f"entrypoint {entrypoint!r} not found at {cli_dir / entrypoint}")
             files = {p.relative_to(cli_dir).as_posix(): p for p in sorted(cli_dir.rglob("*")) if p.is_file()}
-        if entrypoint not in files:
+        elif entrypoint not in files:
             raise ValueError(f"entrypoint {entrypoint!r} isn't among the CLI's files")
 
         store = get_artifact_store()
@@ -112,7 +112,7 @@ class CliArtifact(Artifact):
                 f"'-', since the CLI is installed at /opt/cli/<command_name>; not {command_name!r}"))
         files = ctx.try_files()
         if entrypoint is not None and files is not None:
-            gateway_env = posixpath.join(posixpath.dirname(entrypoint), _GATEWAY_ENV_FILE)
+            gateway_env = posixpath.join(posixpath.dirname(entrypoint), GATEWAY_ENV_FILE)
             if entrypoint not in files:
                 problems.append(ctx.config_problem(f"entrypoint {entrypoint!r} isn't one of this folder's files"))
             elif any(name == gateway_env or name.startswith(f"{gateway_env}/") for name in files):

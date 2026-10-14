@@ -20,6 +20,7 @@ from agent_env.providers.sandbox_providers.sandbox import (
     NetworkPolicyUnsupportedError,
     port_bindings,
 )
+from agent_env.artifact.artifacts.cli import GATEWAY_ENV_FILE
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.a2a_agent.object_transfer import (
     TRANSFER_TIMEOUT_SECONDS,
@@ -257,7 +258,7 @@ class A2AAgent:
         env_dir = posixpath.dirname(entrypoint_path)
 
         # write .env first — write_file_from_text creates the parent dir; write_file_from_object does not.
-        await sandbox.write_file_from_text(f"AGENT_ENV_GATEWAY_URL={gateway_url}\n", f"{env_dir}/.env")
+        await sandbox.write_file_from_text(f"AGENT_ENV_GATEWAY_URL={gateway_url}\n", f"{env_dir}/{GATEWAY_ENV_FILE}")
 
         for rel_path, file_artifact in cli_artifact.get_cli_files().get_file_artifacts().items():
             await sandbox.write_file_from_object(file_artifact.object_url, f"{target_root}/{rel_path}")

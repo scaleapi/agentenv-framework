@@ -96,6 +96,17 @@ def test_a_load_of_a_cli_folder_missing_what_installing_it_needs_is_refused(bund
             f"gateway, so the step needs {missing}") in _problems(bundle_dir)
 
 
+def test_a_step_loading_two_cli_folders_without_an_agent_is_refused_once(bundle_dir):
+    layout(bundle_dir, {**FILES, "artifacts/hi/artifact.toml": TOML.replace('"hello"\n', '"hi"\n', 1),
+                        "artifacts/hi/bin/hello": "#!/bin/sh\n", "tasks/t.json": json.dumps([
+                            {"id": "load", "type": "load_artifact", "env_id": "items",
+                             "artifacts": [{"id": "hello"}, {"id": "hi"}]}])})
+
+    assert [problem for problem in _problems(bundle_dir) if "CLI" in problem] == [
+        "tasks/t.json: step 'load': loading the CLIs 'hello' and 'hi' installs them into an agent and points them at "
+        "an env's gateway, so the step needs agent_name"]
+
+
 def test_two_cli_folders_installed_as_one_command_in_one_agent_are_refused(bundle_dir):
     layout(bundle_dir, {**FILES, "artifacts/hi/artifact.toml": TOML, "artifacts/hi/bin/hello": "#!/bin/sh\n",
                         **_loads({"id": "load", "artifact_id": "hello"}, {"id": "load-hi", "artifact_id": "hi"})})

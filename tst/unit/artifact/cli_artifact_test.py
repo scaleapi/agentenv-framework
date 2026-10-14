@@ -30,6 +30,12 @@ def test_a_put_takes_a_folder_or_a_listing(local_stores, sources):
         CliArtifact.put("hello-cli", command_name="hello", entrypoint="bin/hello", **sources)
 
 
+def test_a_folders_entrypoint_is_recorded_as_given(local_stores, cli_files, tmp_path):
+    cli = CliArtifact.put("hello-cli", command_name="hello", entrypoint="./bin/hello", cli_dir=tmp_path)
+
+    assert cli.entrypoint == "./bin/hello"
+
+
 def test_a_listing_without_its_entrypoint_is_refused(local_stores, cli_files):
     with pytest.raises(ValueError, match="entrypoint 'bin/hi' isn't among the CLI's files"):
         CliArtifact.put("hello-cli", command_name="hello", entrypoint="bin/hi", files=cli_files)

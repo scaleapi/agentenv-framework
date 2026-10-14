@@ -47,6 +47,7 @@ from agent_env.store.ids import LOCAL_PREFIX
 from agent_env.store.routing import namespace_routing_enabled
 from agent_env.task import Task
 from agent_env.task_step.registry import get_task_step_registry
+from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
 
 from ._fs import fold, relative, with_article
@@ -133,6 +134,7 @@ class _Planner:
         self.outputs = {(output.kind.value, output.id): (entry.entry, output)
                         for entry in resolved.entries for output in entry.outputs}
         self.accepted: dict[_Key, dict] = {}  # each toml a type checks, as it accepted it
+        self.steps: dict[_Key, list[TaskStep]] = {}  # each task's steps that build, as a write will build them
 
     def _add(self, key: _Key, source: ResolvedEntry | BundleImage, needs: list[_Key]) -> None:
         """Record a write in bundle order, a built image just before the entry that builds it."""
@@ -382,25 +384,21 @@ class _Planner:
                 if isinstance(source, ResolvedEntry) and source.entry.kind is BundleKind.ARTIFACT
                 and issubclass(registry.get(canonical_type(source.entry.type)) or object, CliArtifact)}
         for key in sorted(closure, key=self.rank.__getitem__):
-            source = self.nodes[key]
-            if not (isinstance(source, ResolvedEntry) and source.entry.kind is BundleKind.TASK):
-                continue
             installed: dict[tuple[str, str], tuple[Any, str]] = {}
-            for config in source.config:
-                try:
-                    step = build_step(config)
-                except Exception:
-                    continue  # reported by the task check
+            for step in self.steps.get(key, ()):
                 if not isinstance(step, LoadArtifactTaskStep):
                     continue
-                where = f"{self._path(source.entry)}: step {step.id!r}"
-                for cli in (clis[ref["id"]] for ref in step.artifacts if ref.get("id") in clis):
-                    missing = [name for name in ("agent_name", "env_id") if not getattr(step, name)]
-                    if missing:
-                        needs = " and ".join(missing)
-                        self.problems.append(f"{where}: loading the CLI {cli.name!r} installs it into an agent and "
-                                             f"points it at an env's gateway, so the step needs {needs}")
-                        continue
+                loaded = [clis[ref["id"]] for ref in step.artifacts if ref.get("id") in clis]
+                if not loaded:
+                    continue
+                where = f"{self._path(self.nodes[key].entry)}: step {step.id!r}"
+                if missing := [name for name in ("agent_name", "env_id") if not getattr(step, name)]:
+                    names, it = " and ".join(repr(cli.name) for cli in loaded), "them" if len(loaded) > 1 else "it"
+                    self.problems.append(f"{where}: loading the CLI{'s' * (it == 'them')} {names} installs {it} into "
+                                         f"an agent and points {it} at an env's gateway, so the step needs "
+                                         f"{' and '.join(missing)}")
+                    continue
+                for cli in loaded:
                     command = self.accepted.get(_key(cli), {}).get("command_name")
                     if command is None:
                         continue  # its artifact.toml's problem is reported by the file check
@@ -613,6 +611,7 @@ class _Planner:
                     failed = True
                     self.problems.append(f"{self._path(source.entry)}: step {step.get('id')!r}: "
                                          f"{registry[step['type']].type} can't read it ({type(e).__name__}: {e})")
+            self.steps[key] = steps
             if not failed:
                 try:
                     Task(id=source.entry.id, version=None, steps=steps)
