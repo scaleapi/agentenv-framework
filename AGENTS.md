@@ -73,7 +73,8 @@ or one of them only where it is used.
   `extra_headers` on agent-env's own calls, and as `LITELLM_EXTRA_HEADERS` (a JSON object) to every
   agent and unit-test verifier pointed at that endpoint, and to an installed agent that declares the
   `litellm_extra_headers` param. The verifier also gets them as `ANTHROPIC_CUSTOM_HEADERS`. Core only
-  writes that variable, never reads it.
+  writes that variable, never reads it. On `sail_vm` with `inject_model_key`, Sail sets them at egress
+  like the key, and the Sailbox holds only placeholders.
 - A host-mode `install_agent` (no `container_name`) on a `local` sandbox runs the agent's
   `install_commands_host` on this machine, with your privileges. Every command a local sandbox runs
   carries `AGENTENV_SANDBOX=<sandbox id>`, and teardown stops the processes that carry it, then removes

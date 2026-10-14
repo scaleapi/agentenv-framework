@@ -1,6 +1,7 @@
 """Model-key injection on Sailboxes: the key stays at Sail, the Sailbox only ever holds a placeholder."""
 
 import asyncio
+import json
 import logging
 import shlex
 import subprocess
@@ -13,10 +14,13 @@ from agent_env.providers.sandbox_providers.sail_vm import _sdk
 from agent_env.providers.sandbox_providers.sail_vm import model_key
 from agent_env.providers.sandbox_providers.sail_vm.model_key import (
     DOCKER_SHIM_PATH,
+    HEADER_PLACEHOLDER,
     PLACEHOLDER,
     ModelKeyInjection,
     carries_model_key,
     docker_shim,
+    header_lines,
+    header_secret_name,
     secret_name,
 )
 from agent_env.providers.sandbox_providers.sail_vm.provider import SailVmSandboxProvider
@@ -91,6 +95,7 @@ def fresh_key_state(monkeypatch):
     monkeypatch.setattr(_sdk, "_installed_key", None)
     monkeypatch.setattr(_sdk, "_apps", {})
     monkeypatch.setattr(model_key, "_injected_keys", {})
+    monkeypatch.setattr(model_key, "_injected_headers", {})
     monkeypatch.setattr(model_key, "_holders", {})
 
 
@@ -887,3 +892,150 @@ async def test_an_unconfirmed_lost_create_keeps_its_policy_rather_than_fail_dele
     saved[0].delete.aio.assert_not_awaited()
     assert "stays with the unconfirmed Sailbox" in caplog.text
     assert secret_name(_KEY) not in model_key._injected_keys
+
+
+# --- [model.headers]: each value is a Sail secret the policy sets, and the Sailbox holds placeholders ----------
+
+_HEADERS = {"X-HF-Bill-To": "acme-org", "X-Gateway-Key": "it's-a-gateway-secret"}
+_ENV_H = {**_ENV, "LITELLM_EXTRA_HEADERS": json.dumps(_HEADERS)}
+_PLACEHELD = dict.fromkeys(_HEADERS, HEADER_PLACEHOLDER)
+
+
+def test_header_secrets_are_named_from_the_header_and_its_value():
+    assert header_secret_name("X-A", "v") == header_secret_name("x-a", "v")
+    assert len({header_secret_name("X-A", "v"), header_secret_name("X-A", "w"), header_secret_name("X-B", "v")}) == 3
+    assert header_secret_name("X-A", "v").startswith("AGENTENV_LITELLM_H_")
+
+
+def test_the_policy_sets_each_header_from_its_secret_and_never_holds_a_value():
+    injection = ModelKeyInjection.for_env(_ENV_H)
+    (rule,) = injection.rules()["llm.example.com"]
+    headers = rule["request"]["set"]["headers"]
+
+    assert set(headers) == {"authorization", "x-api-key", "x-hf-bill-to", "x-gateway-key"}
+    assert headers["x-hf-bill-to"] == f"${{secrets.{header_secret_name('X-HF-Bill-To', 'acme-org')}}}"
+    assert not any(value in str(injection.rules()) or value in repr(injection) for value in _HEADERS.values())
+
+
+@pytest.mark.parametrize("name", ["Authorization", "X-Api-Key"])
+def test_a_header_the_key_is_set_as_is_refused(name):
+    with pytest.raises(ValueError, match="Sail sets from the model key"):
+        ModelKeyInjection.for_env({**_ENV, "LITELLM_EXTRA_HEADERS": json.dumps({name: "Bearer other"})})
+
+
+def test_an_injection_with_headers_is_recovered_from_its_saved_policy_only():
+    injection = ModelKeyInjection.for_env(_ENV_H)
+    recovered = ModelKeyInjection.from_document({"rules": injection.rules()}, "ep_1")
+    assert injection.matches(recovered) and recovered.header_values is None
+    assert not injection.matches(ModelKeyInjection.for_env(_ENV))
+    (rule,) = injection.rules()["llm.example.com"]
+    widened = {**rule["request"]["set"]["headers"], "x-other": "${secrets.GITHUB_TOKEN}"}
+    assert ModelKeyInjection.from_document({"rules": {"llm.example.com": [{"request": {"set": {"headers": widened}}}]}},
+                                           "ep_2") is None
+
+
+@pytest.mark.asyncio
+async def test_an_agent_sailbox_gets_its_headers_through_secrets_and_its_saved_policy():
+    sdk, saved, _ = _fake_sdk(_sailbox())
+
+    await SailVmSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(image_name="agent:1", port=8000, env=_ENV_H)
+
+    stored = {call.args[0]: call.args[1] for call in sdk.Secret.set.aio.await_args_list}
+    assert stored == {secret_name(_KEY): _KEY, **{header_secret_name(n, v): v for n, v in _HEADERS.items()}}
+    (policy,) = saved
+    assert policy.document == {"rules": ModelKeyInjection.for_env(_ENV_H).rules()}
+
+
+@pytest.mark.asyncio
+async def test_a_failed_create_forgets_the_headers_too():
+    sdk, _, _ = _fake_sdk(_sailbox())
+    sdk.Sailbox.create.aio = AsyncMock(side_effect=RuntimeError("no capacity"))
+
+    with pytest.raises(RuntimeError, match="no capacity"):
+        await SailVmSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(image_name="agent:1", port=8000, env=_ENV_H)
+
+    assert model_key._injected_headers == {}
+
+
+@pytest.mark.asyncio
+async def test_commands_and_files_carry_header_placeholders_never_the_values():
+    sailbox = _sailbox()
+    sailbox.exec.aio = AsyncMock(return_value=_process())
+    sdk, _, _ = _fake_sdk(sailbox)
+    sandbox = await SailVmSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(image_name="agent:1", port=8000, env=_ENV_H)
+    written = json.dumps(_HEADERS)
+
+    await sandbox.exec_script(f"docker run -d -e LITELLM_EXTRA_HEADERS='{written.replace(chr(39), chr(39) + chr(92) + chr(39) + chr(39))}' agent:1")
+    await sandbox.exec_with_output("sudo", "bash", "-c", f"docker exec -e LITELLM_EXTRA_HEADERS={shlex.quote(written)} "
+                                   f"-e ANTHROPIC_CUSTOM_HEADERS={shlex.quote(header_lines(_HEADERS))} c pytest")
+    await sandbox.write_host_file(f"LITELLM_EXTRA_HEADERS={written}\n".encode(), "/opt/agent/.env")
+
+    sent = [arg for call in sailbox.exec.aio.await_args_list for arg in call.args[0]]
+    sent.append(sailbox.fs.write.aio.await_args.args[1].decode())
+    assert not any(value in text for value in _HEADERS.values() for text in sent)
+    (run,) = [arg for arg in sent if "docker run" in arg]
+    assert json.dumps(_PLACEHELD) in run
+    (exec_,) = [arg for arg in sent if "docker exec" in arg]
+    assert shlex.quote(header_lines(_PLACEHELD)) in exec_
+
+
+@pytest.mark.asyncio
+async def test_reconnect_in_another_process_scrubs_the_configured_headers(monkeypatch):
+    injection = ModelKeyInjection.for_env(_ENV_H)
+    sailbox = _sailbox()
+    sailbox.egress_policy = SimpleNamespace(policy_id="ep_9", document={"rules": injection.rules()})
+    sailbox.exec.aio = AsyncMock(return_value=_process())
+    sdk, _, _ = _fake_sdk(sailbox)
+    monkeypatch.setattr("agent_env.providers.sandbox_providers.sail_vm.provider.get_config", lambda: MagicMock(
+        get_litellm_api_key=lambda: _KEY, get_litellm_base_url=lambda: "https://llm.example.com/v1",
+        get_model_headers=lambda base_url: dict(_HEADERS)))
+
+    sandbox = await SailVmSandboxProvider(api_key="sail-key", sdk=sdk).get_sandbox("sb_1")
+    await sandbox.exec_with_output("docker", "exec", "-e", f"LITELLM_EXTRA_HEADERS={json.dumps(_HEADERS)}", "c", "pytest")
+
+    assert sailbox.exec.aio.await_args.args[0][3] == f"LITELLM_EXTRA_HEADERS={json.dumps(_PLACEHELD)}"
+
+
+@pytest.mark.asyncio
+async def test_reconnect_with_other_configured_headers_refuses_rather_than_send_them(monkeypatch):
+    injection = ModelKeyInjection.for_env(_ENV_H)
+    sailbox = _sailbox()
+    sailbox.egress_policy = SimpleNamespace(policy_id="ep_9", document={"rules": injection.rules()})
+    sailbox.exec.aio = AsyncMock(return_value=_process())
+    sdk, _, _ = _fake_sdk(sailbox)
+    other = {"X-HF-Bill-To": "another-org", "X-Gateway-Key": "another-secret"}
+    monkeypatch.setattr("agent_env.providers.sandbox_providers.sail_vm.provider.get_config", lambda: MagicMock(
+        get_litellm_api_key=lambda: _KEY, get_litellm_base_url=lambda: "https://llm.example.com/v1",
+        get_model_headers=lambda base_url: other))
+
+    sandbox = await SailVmSandboxProvider(api_key="sail-key", sdk=sdk).get_sandbox("sb_1")
+
+    assert sandbox._injection.header_values is None
+    with pytest.raises(ModelKeyRefusedError):
+        await sandbox.exec_with_output("docker", "exec", "-e", f"LITELLM_EXTRA_HEADERS={json.dumps(other)}", "c", "pytest")
+
+
+@pytest.mark.asyncio
+async def test_a_sailbox_without_injection_refuses_header_values_but_takes_placeholders():
+    sailbox = _sailbox(ports=())
+    sailbox.exec.aio = AsyncMock(return_value=_process())
+    sdk, _, _ = _fake_sdk(sailbox)
+    sandbox = await SailVmSandboxProvider(api_key="sail-key", sdk=sdk).create_vm(exposed_ports=[])
+
+    with pytest.raises(ModelKeyRefusedError, match="model.headers"):
+        await sandbox.exec_with_output("docker", "exec", "-e", f"LITELLM_EXTRA_HEADERS={json.dumps(_HEADERS)}", "c", "true")
+    await sandbox.exec_with_output("docker", "exec", "-e", f"LITELLM_EXTRA_HEADERS={json.dumps(_PLACEHELD)}", "c", "true")
+
+
+@pytest.mark.parametrize(("text", "shell", "carries"), [
+    (f"-e LITELLM_EXTRA_HEADERS={shlex.quote(json.dumps(_HEADERS))}", True, True),
+    (f"-e LITELLM_EXTRA_HEADERS={shlex.quote(json.dumps(_PLACEHELD))}", True, False),
+    ('-e LITELLM_EXTRA_HEADERS="$LITELLM_EXTRA_HEADERS"', True, False),
+    (f"-e ANTHROPIC_CUSTOM_HEADERS={shlex.quote(header_lines(_HEADERS))}", True, True),
+    (f"-e ANTHROPIC_CUSTOM_HEADERS={shlex.quote(header_lines(_PLACEHELD))}", True, False),
+    (f"LITELLM_EXTRA_HEADERS={json.dumps(_HEADERS)}", False, True),
+    (f"LITELLM_EXTRA_HEADERS={json.dumps(_PLACEHELD)}\nOTHER=1", False, False),
+    ("LITELLM_EXTRA_HEADERS={}", False, False),
+])
+def test_a_header_assignment_is_detected_as_the_shell_reads_it(text, shell, carries):
+    assert carries_model_key(text, shell=shell) is carries
