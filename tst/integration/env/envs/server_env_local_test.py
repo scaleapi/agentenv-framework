@@ -210,29 +210,33 @@ async def verify(mcp_url):
 
 @pytest.mark.asyncio
 async def test_a_tasks_agent_is_played_from_a_loop_of_ones_own_as_an_episode(local_stack, tmp_path):
-    """A trainer's view of a task: the env deployed and loaded and the echo agent prompted around the outside agent,
-    which plays its turn through the env's tools as its role and is never deployed; its reply recorded and scored
-    by the verifier; and every episode, played, not played or abandoned, leaving nothing behind."""
+    """A trainer's view of a seeded task: the env deployed and loaded and the echo agent prompted around the outside
+    agent, which plays its turn through the env's tools as its role and is never deployed; its reply recorded and
+    scored under the verifier's step; and every episode, played, not played, abandoned or forgotten past its turn's
+    deadline, leaving nothing behind."""
     uid = uuid.uuid4().hex[:8]
     env = MCPServerEnv.put(id=f"server-items-{uid}", docker_image_artifact=_put_items_image(f"server-items-{uid}"),
                            environment_name="items", env_provider_type="server")
     verify = FileArtifact.put_bytes(id=f"verify-crate-{uid}", description="episode e2e", filename="verify.py",
                                     content=VERIFY_CRATE.encode(), content_type="text/x-python")
-    spec = EpisodeSpec.from_task(Task.from_dict({"id": f"crate-{uid}", "steps": [
-        {"id": "env", "type": "deploy_env", "env_id": env.id},
-        {"id": "load", "type": "load_artifact", "env_id": env.id, "artifact_id": _items_artifact(uid).id},
-        {"id": "policy", "type": "deploy_agent", "agent_name": "policy", "env_ids": [env.id],
-         "role": "alice@example.com"},
+    task = Task.from_dict({"id": f"crate-{uid}", "steps": [
+        {"id": "env", "type": "deploy_env", "env_id": "<env>"},
+        {"id": "load", "type": "load_artifact", "env_id": "<env>", "artifact_id": _items_artifact(uid).id},
+        {"id": "policy", "type": "deploy_agent", "agent_name": "policy", "env_ids": ["<env>"],
+         "role": "<who>@example.com"},
         {"id": "echo", "type": "deploy_agent", "agent_name": "echo", "a2a_agent_id": put_test_agent(f"echo-{uid}").id},
         {"id": "ask-echo", "type": "prompt_agent", "agent_name": "echo", "prompt_id": "ask-echo",
          "prompt": "Count the crates."},
-        {"id": "play", "type": "prompt_agent", "agent_name": "policy", "prompt_id": "play", "prompt": "Add a crate."},
-        {"id": "check", "type": "env_outcome_verifier", "env_id": env.id, "file_artifact_id": verify.id,
-         "verifier_id": "crate"},
-    ]}), trainer_agents=["policy"])
+        {"id": "play", "type": "prompt_agent", "agent_name": "policy", "prompt_id": "play", "prompt": "Add a <item>."},
+        {"id": "check", "type": "env_outcome_verifier", "env_id": "<env>", "file_artifact_id": verify.id,
+         "verifier_id": "crate-<week>"},
+    ]})
+    seed = {"env": env.id, "who": "alice", "item": "crate", "week": "3"}
+    spec = EpisodeSpec.from_task(task, trainer_agents=["policy"], seed=seed)
 
     async def play(episode, add):
         turn = await episode.next_turn()
+        assert turn.prompt == "Add a crate." and turn.role == "alice@example.com"
         assert [agent["agent_name"] for agent in Task.get_instance(episode.id).context["deployed_agents"]] == ["echo"]
         if add:
             async with turn.tools() as tools:
@@ -258,7 +262,14 @@ async def test_a_tasks_agent_is_played_from_a_loop_of_ones_own_as_an_episode(loc
     await abandoned.abandon("test")
     assert (Task.get_instance(abandoned.id).status, Task.get_instance(abandoned.id).error) == ("cancelled", "test")
     assert list(sandboxes.glob("agent-env-*")) == []
-    for episode in (played, unplayed, abandoned):
+
+    forgotten = await EpisodeSpec.from_task(task, trainer_agents=["policy"], seed=seed, turn_timeout=3).start()
+    await forgotten.next_turn()
+    with pytest.raises(TimeoutError, match="turn 'play' of agent 'policy' wasn't ended within 3s"):
+        await forgotten.next_turn()
+    assert Task.get_instance(forgotten.id).status == "failed"
+    assert list(sandboxes.glob("agent-env-*")) == []
+    for episode in (played, unplayed, abandoned, forgotten):
         context = Task.get_instance(episode.id).context
         sandbox_ids = [entry["sandbox_id"] for key in ("deployed_envs", "deployed_agents")
                        for entry in context[key] if entry.get("sandbox_id")]
