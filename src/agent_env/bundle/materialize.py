@@ -24,11 +24,13 @@ from pathlib import Path
 from typing import Any
 
 from agent_env.a2a_agent import A2AAgent
+from agent_env.artifact import Artifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.registry import canonical_type, get_artifact_registry
 from agent_env.entity_refs import EntityRef, RefRole, ref_sites
 from agent_env.env.registry import get_env_registry
 from agent_env.eval import Eval, EvalTask
+from agent_env.store.base import NotFoundError
 from agent_env.store.ids import image_repository
 from agent_env.store.routing import namespace_routing_enabled
 from agent_env.task import Task
@@ -41,7 +43,7 @@ from .authoring import AuthoringContext, build_context_files
 from .ledger import Ledger, materializing
 from .parse import BundleError, BundleKind
 from .plan import Plan, Write, env_writer, folder_walk, unpinned_store_refs
-from .resolve import BuiltImage, ImpliedImage, ReferencedImage, build_step
+from .resolve import BuiltImage, BundleImage, ReferencedImage, build_step
 
 @dataclass(frozen=True)
 class Materialized:
@@ -167,7 +169,7 @@ def _write_build_context(plan: Plan, write: Write) -> int:
     with _staged(plan, image) as context:
         try:
             return DockerImageArtifact.put_context(
-                write.id, description=f"built from {_path(plan, write)}/{image.dockerfile}", context_path=str(context),
+                write.id, description=_image_description(plan, write), context_path=str(context),
                 dockerfile_path=str(context / image.dockerfile),
             ).version
         except (ValueError, RuntimeError) as e:  # a context it can't write, or the object store
@@ -175,12 +177,23 @@ def _write_build_context(plan: Plan, write: Write) -> int:
 
 
 def _write_referenced_image(plan: Plan, write: Write) -> int:
-    """Register the registry image an entry's image key names, its tag pinned to the digest the registry serves now."""
+    """Register the registry image an entry's image key or image folder names, its tag pinned to the digest the
+    registry serves now. Written again with the same ref, as for a new description, it keeps the digest it has."""
     try:
-        return DockerImageArtifact.put_ref(write.id, description=f"referenced by {_path(plan, write)}",
-                                           image_name=write.source.ref).version
+        return DockerImageArtifact.put_ref(
+            write.id, description=_image_description(plan, write), image_name=write.source.ref,
+            earlier_pin=_latest_image_name(write.id)).version
     except ValueError as e:  # the registry's answer, or a registry on this machine the image's store can't name
         raise BundleError([f"{_path(plan, write)}: {e}"]) from None
+
+
+def _latest_image_name(image_id: str) -> str | None:
+    """The image name ``image_id``'s latest version records, when that version is an image: a folder can change type."""
+    try:
+        latest = Artifact.get(image_id)
+    except NotFoundError:
+        return None
+    return latest.image_name if isinstance(latest, DockerImageArtifact) else None
 
 
 def _write_built_image(plan: Plan, write: Write) -> int:
@@ -195,11 +208,21 @@ def _write_built_image(plan: Plan, write: Write) -> int:
             raise BundleError([f"{_path(plan, write)}: {_tail(str(e))}"]) from None
         try:
             return DockerImageArtifact.put(
-                id=write.id, description=f"built from {_path(plan, write)}/{image.dockerfile}", image_name=tag,
+                id=write.id, description=_image_description(plan, write), image_name=tag,
                 build_context_path=str(context), dockerfile_path=str(context / image.dockerfile),
             ).version
         except RuntimeError as e:  # the image store, docker push or docker save
             raise BundleError([f"{_path(plan, write)}: {e}"]) from None
+
+
+def _image_description(plan: Plan, write: Write) -> str:
+    """An image folder's description, else where the image comes from."""
+    image = write.source
+    if image.description:
+        return image.description
+    if isinstance(image, BuiltImage):
+        return f"built from {_path(plan, write)}/{image.dockerfile}"
+    return f"referenced by {_path(plan, write)}"
 
 
 _BUILD_OUTPUT_TAIL_LINES = 40
@@ -282,7 +305,7 @@ def _refuse_builds_without_docker(plan: Plan, ledger: Ledger, contexts: frozense
 
 def _unwritable(write: Write) -> str | None:
     """What ``write`` would write, when this release has no writer for it."""
-    if isinstance(write.source, ImpliedImage) or write.kind is BundleKind.TASK:
+    if isinstance(write.source, BundleImage) or write.kind is BundleKind.TASK:
         return None
     if write.kind not in _WRITERS:
         return with_article(write.kind.value.removesuffix("s"))

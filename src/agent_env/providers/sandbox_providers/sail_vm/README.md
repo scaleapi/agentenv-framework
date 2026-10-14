@@ -189,16 +189,20 @@ asyncio.run(main())
 - **Reconnect:** `get_sandbox` restores the ports and the applied egress policy. A policy it can't
   represent leaves `network_policy` unknown, and image loading then fails closed.
 
-## The agent's model key
+## The agent's model key and headers
 
-With `inject_model_key` on, an agent's `LITELLM_API_KEY` never enters its Sailbox:
+With `inject_model_key` on, an agent's `LITELLM_API_KEY` never enters its Sailbox, and neither do the
+values of the endpoint's `[model.headers]`:
 
 1. The key is stored as a Sail secret named `AGENTENV_LITELLM_<sha256(key)[:32]>`, one per distinct key.
+   Each header value is a secret of its own, `AGENTENV_LITELLM_H_<sha256(name, value)[:32]>`.
 2. The Sailbox is created with a saved egress policy. On requests to `LITELLM_BASE_URL`'s host, the policy
-   sets the `authorization: Bearer …` and `x-api-key` headers from that secret. Sail adds the key as each
-   request leaves the box.
+   sets the `authorization: Bearer …` and `x-api-key` headers from the key's secret. On those under its path
+   (`/v1/` for `https://host/v1`), it also sets each header from its own, so another service on the same host
+   never gets them. Sail adds them as each request leaves the box.
 3. Inside the box, every command and file agent-env sends carries the placeholder
-   `sail-injected-model-key` in place of the key.
+   `sail-injected-model-key` in place of the key. `LITELLM_EXTRA_HEADERS` keeps the header names with
+   `sail-injected-header` as every value, which the policy overwrites.
 4. A `docker` shim on the box gives every container the VM's CA bundle (`SSL_CERT_FILE`,
    `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`, `CURL_CA_BUNDLE`). Sail terminates TLS for the model host
    with its own CA, so containers need it to trust those requests.
@@ -207,12 +211,13 @@ Requirements and behaviour:
 
 - **Endpoint:** the model endpoint must be HTTPS and reachable from Sail.
 - **Key length:** keys shorter than 16 characters are refused, because scrubbing replaces the key
-  wherever it appears.
-- **Other keys are refused:** a Sailbox refuses any command or file that would carry a model key Sail
-  doesn't inject for it. One example is an agent deployed into a sandbox it didn't create.
+  wherever it appears. Headers are replaced as a whole, so their values have no minimum.
+- **Headers the key sets:** a `[model.headers]` entry named `authorization` or `x-api-key` is refused.
+- **Other keys are refused:** a Sailbox refuses any command or file that would carry a model key, or
+  header values, Sail doesn't inject for it. One example is an agent deployed into a sandbox it didn't create.
 - **Turning it off:** set `inject_model_key = false` to pass keys in as other providers do.
-- **Cleanup:** terminate deletes the Sailbox's policy. The secret is kept, so a concurrent launch with the
-  same key never loses it. To remove secrets for retired keys, sweep `AGENTENV_LITELLM_*` with
+- **Cleanup:** terminate deletes the Sailbox's policy. The secrets are kept, so a concurrent launch with the
+  same key or headers never loses them. To remove secrets for retired keys, sweep `AGENTENV_LITELLM_*` with
   `sail secret list`.
 
 ## Attribution and cost

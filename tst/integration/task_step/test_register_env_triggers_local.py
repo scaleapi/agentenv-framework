@@ -1,6 +1,7 @@
 """Named nl-trigger executors on a local gateway: each nl action reaches only the executor it names, that executor acts
-in the env as its own role, and personas react to each other through `when.roles`. Requires a docker daemon; spins up a
-throwaway ``registry:2``."""
+in the env as its own role, personas react to each other through `when.roles`, replies wait out their delay and working
+hours in virtual time, deadlines fire on silence, and the trajectory names who made each call. Requires a docker daemon;
+spins up a throwaway ``registry:2``."""
 
 import asyncio
 import functools
@@ -8,6 +9,7 @@ import json
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
@@ -119,6 +121,80 @@ async def test_personas_react_to_each_other_until_one_stays_quiet(local_stack):
                          ("denise-hears-bob", "bob@example.com"), ("bob-hears-denise", "denise@example.com")]
 
 
+@pytest.mark.asyncio
+async def test_a_reply_waits_its_delay_and_hours_and_its_writes_name_the_fire(local_stack):
+    _seed_bootstrap_envs()
+    env, deployed, host = await _deploy_items("pace")
+    started: list[_Executor] = []
+    triggers = [{"id": "bob-hears-solver", "when": {"type": "action", "tool": "list_items"},
+                 "actions": [{"type": "nl", "executor": "bob", "instruction": "BOB-ACTS", "delay": "PT2M"}]}]
+    try:
+        bob = _Executor("bob", "bob@example.com", deployed.gateway_url, host, started)
+        context = TaskStepContext(deployed_envs=[deployed], deployed_agents=[bob.agent], metadata={})
+        async with httpx.AsyncClient(base_url=deployed.gateway_url, timeout=60) as client:
+            await RegisterEnvTriggersStep(id="reg", version=None, env_id=env.id, triggers=triggers, watch_roles=["default"],
+                                          executor_timeout_seconds=60,
+                                          executor_hours={"bob": {"start": "09:00", "end": "17:00"}}).execute(context)
+            # At 60x the delay ends about 08:52, and bob's hours hold him to 09:00: some 10 real seconds in all.
+            await _arm_clock(client, "2026-10-14T08:50:00Z", 60)
+            (await client.post("/step", json={"action": "call_tool", "tool_name": "list_items", "arguments": {}})).raise_for_status()
+            state = await _quiet(client, {"bob-hears-solver": 1})
+            trajectory = [json.loads(line) for line in (await client.get("/trajectory")).raise_for_status().text.splitlines()]
+    finally:
+        for executor in started:
+            executor.stop()
+        await env.close()
+
+    paced = [e for e in state["events"] if e["kind"] in ("delayed", "deferred", "action_ok")]
+    assert [e["kind"] for e in paced] == ["delayed", "deferred", "action_ok"]
+    delayed, deferred, _ = paced
+    assert deferred["until"] == "2026-10-14T09:00:00Z"
+    assert (_virtual(deferred) - _virtual(delayed)).total_seconds() >= 120
+    calls = [e for e in trajectory if e.get("event_type") == "tool_call"]
+    cause = [{"trigger_id": "bob-hears-solver", "action_index": 0, "fire": 1}]
+    assert ("list_items", "default", None) in [(e["tool_call"]["function_name"], e["role"], e.get("caused_by"))
+                                               for e in calls]
+    bobs = [e for e in calls if e["role"] == "bob@example.com"]
+    assert [(e["tool_call"]["function_name"], e.get("caused_by")) for e in bobs] == [("items_whoami", cause),
+                                                                                     ("items_add_item", cause)]
+    assert all(_virtual(e) >= datetime(2026, 10, 14, 9, tzinfo=timezone.utc) for e in bobs)
+
+
+@pytest.mark.asyncio
+async def test_a_deadline_fires_on_silence_and_a_reply_cancels_it(local_stack):
+    _seed_bootstrap_envs()
+    env, deployed, host = await _deploy_items("deadline")
+    started: list[_Executor] = []
+    triggers = []
+    for n in (1, 2):
+        triggers += [{"id": f"dm-{n}", "when": {"type": "action", "tool": "list_items"}, "actions": []},
+                     {"id": f"deadline-{n}", "when": {"type": "time", "after": f"dm-{n}", "offset": "PT2M",
+                                                      "unless": {"tool": "items_add_item", "roles": ["default"],
+                                                                 "where": {"item": {"regex": f"^REPLY-{n}"}}}},
+                      "actions": [{"type": "nl", "executor": "bob", "instruction": f"ESCALATE-{n}"}]}]
+    try:
+        bob = _Executor("bob", "bob@example.com", deployed.gateway_url, host, started)
+        context = TaskStepContext(deployed_envs=[deployed], deployed_agents=[bob.agent], metadata={})
+        async with httpx.AsyncClient(base_url=deployed.gateway_url, timeout=60) as client:
+            await _arm_clock(client, "2026-10-14T10:00:00Z", 60)
+            await RegisterEnvTriggersStep(id="reg", version=None, env_id=env.id, triggers=triggers, watch_roles=["default"],
+                                          executor_timeout_seconds=60).execute(context)
+            (await client.post("/step", json={"action": "call_tool", "tool_name": "list_items", "arguments": {}})).raise_for_status()
+            (await client.post("/step", json={"action": "call_tool", "tool_name": "items_add_item",
+                                              "arguments": {"item": "REPLY-2"}})).raise_for_status()
+            state = await _quiet(client, {"dm-1": 1, "dm-2": 1, "deadline-1": 1, "deadline-2": 0})
+    finally:
+        for executor in started:
+            executor.stop()
+        await env.close()
+
+    statuses = {t["id"]: t["status"] for t in state["triggers"]}
+    assert (statuses["deadline-1"], statuses["deadline-2"]) == ("fired", "cancelled"), state["events"][-8:]
+    assert bob.instructions == ["ESCALATE-1"]
+    [cancelled] = [e for e in state["events"] if e["kind"] == "cancelled"]
+    assert (cancelled["trigger_id"], cancelled["provoking"]["role"]) == ("deadline-2", "default")
+
+
 class _Executor:
     """An A2A executor on this machine that acts on each instruction through the gateway, under its own role; with
     ``replies``, it stops acting after that many."""
@@ -193,3 +269,22 @@ async def _quiet(client: httpx.AsyncClient, fires: dict[str, int], timeout_s: fl
         if time.monotonic() > deadline:
             raise AssertionError(f"chain did not settle: { {tid: t['fire_count'] for tid, t in triggers.items()} }")
         await asyncio.sleep(1)
+
+
+async def _deploy_items(label: str):
+    """A MultiEnv of the in-repo items server on local compose, and the host address its gateway reaches this machine at."""
+    uid = uuid.uuid4().hex[:8]
+    items = MCPServerEnv.put(id=f"{label}-items-{uid}", environment_name="items",
+                             docker_image_artifact=_put_items_image(f"{label}-items-{uid}"))
+    env = MultiEnv.put(id=f"{label}-{uid}", mcp_server_envs=[items], name="suite")
+    deployed = await env.deploy(sandbox_type="local", ttl_seconds=900)
+    return env, deployed, env._sandbox.host_ips[-1]
+
+
+def _virtual(event: dict) -> datetime:
+    return datetime.fromisoformat(event["virtual_time"].replace("Z", "+00:00"))
+
+
+async def _arm_clock(client: httpx.AsyncClient, virtual_time: str, rate: float) -> None:
+    (await client.put("/clock/set-time", json={"virtual_time": virtual_time,
+                                                "virtual_seconds_per_real_second": rate})).raise_for_status()

@@ -226,8 +226,9 @@ class _SailProcess:
 
 class SailVmSandbox(VmSandbox):
     """A Sailbox from the Docker-capable devbox image; commands run as root. With a model-key ``injection``,
-    the key's value never enters the Sailbox: every command and file is scrubbed of it. With
-    ``refuse_model_keys``, one that still carries a model key (one Sail doesn't inject here) is refused."""
+    the key's value and the endpoint's header values never enter the Sailbox: every command and file is
+    scrubbed of them. With ``refuse_model_keys``, one that still carries a model key or header values (ones
+    Sail doesn't inject here) is refused."""
 
     type = "sail_vm"
     _DOCKER_PROBE_TIMEOUT = 10
@@ -364,9 +365,9 @@ class SailVmSandbox(VmSandbox):
 
     def _refusal(self) -> ModelKeyRefusedError:
         return ModelKeyRefusedError(
-            f"Refusing to send a model key into Sailbox {self.sandbox_id}: Sail injects model keys only for an agent "
-            "deployed on its own Sail sandbox, so this one would land on the Sailbox's disk. Deploy the agent on its "
-            "own sandbox, or set inject_model_key = false in [sandbox.providers.sail_vm.config] to pass keys in."
+            f"Refusing to send a model key or [model.headers] into Sailbox {self.sandbox_id}: Sail injects them only "
+            "for an agent deployed on its own Sail sandbox, so these would land on the Sailbox's disk. Deploy the agent "
+            "on its own sandbox, or set inject_model_key = false in [sandbox.providers.sail_vm.config] to pass them in."
         )
 
     async def apply_network_policy(self, policy: NetworkPolicy) -> None:

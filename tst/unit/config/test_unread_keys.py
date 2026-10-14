@@ -212,7 +212,7 @@ def test_a_config_key_in_a_free_form_table_shadows_nothing(tmp_path, monkeypatch
 
 
 def test_a_key_beside_config_in_a_table_that_takes_no_config_is_named(tmp_path, monkeypatch):
-    takes = "[model] takes 'base_url', 'api_key', 'default', 'roles' and 'params'."
+    takes = "[model] takes 'base_url', 'api_key', 'default', 'roles', 'params' and 'headers'."
     assert _warnings(tmp_path, monkeypatch, '[model]\nmode = "x"\nconfig = { mode = "y" }\n') == [
         f"[model] has a key named 'mode', which agent-env does not read: {takes}",
         f"[model] has a key named 'config', which agent-env does not read: {takes}",

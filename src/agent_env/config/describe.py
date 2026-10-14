@@ -59,8 +59,9 @@ SOURCE_INSTALLED: ConfigSource = "installed"
 # debugging round-trip, under-masking prints a credential into a terminal and a paste. On
 # that trade `auth` is in even though it also catches `author` — a store `config` table is
 # where `authorization = "Bearer ..."` lives, and a masked author is the cheaper mistake.
+# `headers` masks a whole table of HTTP headers: a name like `X-Api-Key` doesn't say it holds a key.
 _SECRET_KEY_PARTS = ("password", "passwd", "passphrase", "secret", "token", "credential",
-                     "api_key", "private_key", "auth", "bearer")
+                     "api_key", "private_key", "auth", "bearer", "headers")
 _URI_USERINFO = re.compile(r"(?P<scheme>[a-zA-Z][\w+.-]*://)(?P<userinfo>[^/@\s]+)@")
 
 

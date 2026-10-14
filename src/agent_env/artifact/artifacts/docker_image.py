@@ -22,7 +22,7 @@ from agent_env.artifact.artifact import Artifact, _write_twin
 from agent_env.store.ids import fs_safe, image_repository, is_local_id, local_image_repository
 from agent_env.store.image_store.local_registry_image_store import LocalRegistryImageStore
 from agent_env.store.image_store.oci_registry_credentials import is_loopback_host, names_registry, registry_host_from_ref
-from agent_env.store.image_store.registry_api import pin_digest
+from agent_env.store.image_store.registry_api import pin_digest, pinned_from
 from agent_env.utils.build_context import BuildContext
 from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM, normalize_platform
 
@@ -204,10 +204,12 @@ class DockerImageArtifact(Artifact):
         return store.put_document(instance)
 
     @classmethod
-    def put_ref(cls, id: str, *, description: str, image_name: str) -> "DockerImageArtifact":
+    def put_ref(cls, id: str, *, description: str, image_name: str,
+                earlier_pin: str | None = None) -> "DockerImageArtifact":
         """Register ``image_name``, an image already in a registry, writing this document only: nothing is pushed,
         saved or uploaded, and a sandbox pulls the image. A tag is pinned to the digest the registry serves for it
         now, recorded as ``name:tag@sha256:...``, so every run gets the same image; a digest is checked to exist.
+        ``earlier_pin``, the pin an earlier version recorded, is kept instead when it pins ``image_name``.
 
         ``image_name`` must name its registry. The registry is read with the configured image store's credentials
         where it holds that registry, anonymously otherwise. One on this machine is refused unless ``id``'s image
@@ -223,7 +225,10 @@ class DockerImageArtifact(Artifact):
                 and not isinstance(config.get_image_store_for(id), LocalRegistryImageStore)):
             raise ValueError(f"{image_name} is in a registry on this machine, which only an image in the local "
                              "registry's store, such as an @local one, can name")
-        pinned = pin_digest(image_name, config.get_image_store().auth(image_name))
+        if earlier_pin is not None and pinned_from(earlier_pin, image_name):
+            pinned = earlier_pin
+        else:
+            pinned = pin_digest(image_name, config.get_image_store().auth(image_name))
         store = get_artifact_store()
         version = store.next_version(id)
         return store.put_document(cls(id=id, version=version, description=description, image_name=pinned))

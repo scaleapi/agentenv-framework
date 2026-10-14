@@ -6,7 +6,7 @@ import asyncio
 import copy
 import dataclasses
 import logging
-import random
+import secrets
 import string
 import time
 from dataclasses import dataclass, field
@@ -299,7 +299,7 @@ class TaskInstanceStore:
         completed_step_docs = [
             dataclasses.asdict(e) for e in completed_steps or []
         ]
-        suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
+        suffix = "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(8))
         instance_id = f"{task_id}-{suffix}"
         created_at_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         doc = _new_instance_doc(

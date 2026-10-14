@@ -260,3 +260,19 @@ def test_saturated_clock_stays_monotonic():
         seen.append(c.read()["virtual_time"])
     assert seen == sorted(seen)
     assert seen[-1] == "9999-12-31T23:59:59.999999Z"
+
+
+def test_elapsed_runs_at_each_arm_s_rate_and_counts_a_re_arm_forward_but_not_back():
+    now = FakeNow()
+    c = Clock(now_fn=now)
+    now.tick(10)  # unarmed: real time
+    c.set_time(T0, rate=60)
+    now.tick(2)  # 120 virtual s, to 00:02:00
+    c.set_time("2026-01-01T01:00:00Z", rate=60)  # 58 virtual min ahead
+    now.tick(1)
+    c.set_time("2025-12-31T00:00:00Z", rate=0)  # a day back, frozen
+    now.tick(100)
+    c.clear()
+    now.tick(5)  # unarmed again
+    assert c.elapsed() == 10 + 120 + 58 * 60 + 60 + 0 + 5
+

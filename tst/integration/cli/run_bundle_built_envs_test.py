@@ -203,13 +203,16 @@ def _check(root, env, *, items=(), slack=False, websites=(), build="v1"):
 
 def _gateway_bundle(root):
     """An env of each kind a bundle writes, all deployed through the gateway: items and stock are the items server,
-    built from its folder and named by its card, and built from docker/Dockerfile under a name of its own; relay is an
-    MCP server over the store image the CLI put for mail; shop is a website; suite is a multi of items, mail and
-    shop."""
+    built from its folder and named by its card, and built from docker/Dockerfile under a name of its own; depot is
+    the items server built from an image folder, artifacts/depot-image; relay is an MCP server over the store image
+    the CLI put for mail; shop is a website; suite is a multi of items, mail and shop."""
     envs = root / "envs"
     _items(envs / "items", "v1")
     _items(envs / "stock", "v1", dockerfile="docker/Dockerfile")
     (envs / "stock/env.toml").write_text('image = { dockerfile = "docker/Dockerfile" }\nenvironment_name = "stock"\n')
+    _items(root / "artifacts/depot-image", "v1")
+    (envs / "depot").mkdir()
+    (envs / "depot/env.toml").write_text('image = "depot-image"\nenvironment_name = "depot"\n')
     (envs / "relay").mkdir()
     (envs / "relay/env.toml").write_text('image = "mail__env_image"\nenvironment_name = "relay"\n')
     _shop(envs / "shop")
@@ -218,6 +221,7 @@ def _gateway_bundle(root):
         'type = "multi"\nmcp_server_envs = ["items", "mail"]\nwebsite_envs = ["shop"]\nname = "suite"\n')
     _check(root, "items", items=["items"])
     _check(root, "stock", items=["stock"])
+    _check(root, "depot", items=["depot"])
     _check(root, "relay", slack=True)
     _check(root, "shop", websites=["shop"])
     _check(root, "suite", items=["items"], slack=True, websites=["shop"])
@@ -233,8 +237,9 @@ def _put_mail():
 
 
 GATEWAY_IMAGES = ("envs/items (Dockerfile image)", "envs/stock (docker/Dockerfile image)",
-                  "envs/shop (Dockerfile.backend image)", "envs/shop (Dockerfile.frontend image)")
-GATEWAY_ENVS = ("items", "stock", "relay", "shop", "suite")
+                  "artifacts/depot-image (Dockerfile image)", "envs/shop (Dockerfile.backend image)",
+                  "envs/shop (Dockerfile.frontend image)")
+GATEWAY_ENVS = ("items", "stock", "depot", "relay", "shop", "suite")
 
 
 def test_each_kind_of_bundle_env_deploys_through_the_gateway_and_a_child_edit_rewrites_its_multi(state):
@@ -254,7 +259,8 @@ def test_each_kind_of_bundle_env_deploys_through_the_gateway_and_a_child_edit_re
         written = {name: Env.get(ids[name]) for name in GATEWAY_ENVS}
         mail = Env.get("mail")
     assert {name: env.environment_name for name, env in written.items() if name != "suite"} == {
-        "items": "items", "stock": "stock", "relay": "relay", "shop": "shop"}
+        "items": "items", "stock": "stock", "depot": "depot", "relay": "relay", "shop": "shop"}
+    assert written["depot"].docker_image_artifact.id == ids["depot-image"]
     assert written["relay"].docker_image_artifact.id == mail.docker_image_artifact.id == "mail__env_image"
     assert [child.id for child in written["suite"].mcp_server_envs] == [ids["items"], "mail"]
     assert [child.id for child in written["suite"].website_envs] == [ids["shop"]]
