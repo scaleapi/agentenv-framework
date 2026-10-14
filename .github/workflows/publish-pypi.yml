@@ -5,7 +5,7 @@ name: Publish to PyPI
 # distribution the way the release does (agentenv-framework pinned to the exact agentenv-framework-protocol it was
 # released with) and runs in its own environment, because PyPI binds a pending publisher to one workflow and
 # environment per project. Once both are on PyPI, it creates the tag's GitHub release, whose notes list the pull
-# requests merged since the previous tag. Files already on PyPI and a release that already exists are skipped, so a
+# requests merged since the previous release. Files already on PyPI and a release that already exists are skipped, so a
 # rerun is safe.
 
 on:
@@ -110,7 +110,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Create the GitHub release, with notes from the pull requests since the previous tag
+      - name: Create the GitHub release, with notes from the pull requests since the previous release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -124,8 +124,11 @@ jobs:
           protocol=$(sed -n 's/^version = "\(.*\)"/\1/p' packages/agentenv-protocol/pyproject.toml)
           header="On PyPI: [agentenv-framework ${framework}](https://pypi.org/project/agentenv-framework/${framework}/) · [agentenv-framework-protocol ${protocol}](https://pypi.org/project/agentenv-framework-protocol/${protocol}/)"
           args=(--verify-tag --title "$tag" --generate-notes --notes "$header")
-          # Without a start tag, GitHub counts from the previous release rather than the previous tag.
-          previous=$(git tag --list 'v*' --sort=-v:refname | grep -A1 -x "$tag" | sed -n 2p)
+          # From the newest earlier tag with a release, not the previous tag: a tag main's CI kept off PyPI has no
+          # release, and its pull requests belong in these notes.
+          released=$(gh release list --limit 100 --json tagName --jq '.[].tagName')
+          previous=$(git tag --list 'v*' --sort=-v:refname | awk -v tag="$tag" 'after; $0 == tag {after = 1}' |
+            grep -m1 -Fx -f <(printf '%s\n' "$released") || true)
           if [ -n "$previous" ]; then
             args+=(--notes-start-tag "$previous")
           fi
