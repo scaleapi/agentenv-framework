@@ -1,24 +1,31 @@
 """CliArtifact — packages a CLI tool (entrypoint + supporting files) as a versioned artifact.
 
 A CliArtifact references one FileArtifactUniverse bundling every file in the CLI
-directory tree, colocated under a single object-store prefix (`artifacts/cli/<key_segment(id)>/<version>/`).
+directory tree, colocated under one object-store prefix per write (`ArtifactStore.attempt_prefix`).
 The `entrypoint` field is a relative path within that prefix that consumers
 (e.g. an agent gateway) chmod +x and symlink onto PATH.
 """
 
 from __future__ import annotations
 
+import posixpath
+import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Optional
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Mapping, Optional
 
 from pydantic import ConfigDict, Field, model_serializer
 
 from agent_env.artifact.artifact import Artifact, _write_twin
-from agent_env.config import get_config
-from agent_env.store.ids import derive_id, key_segment
+from agent_env.store.ids import derive_id
 
 if TYPE_CHECKING:
     from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
+    from agent_env.bundle.authoring import AuthoringContext
+
+# A command a bundle's CLI is installed as, at /opt/cli/<command_name>/.
+_COMMAND_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*")
+# Where installing a CLI writes the gateway URL, beside its entrypoint.
+_GATEWAY_ENV_FILE = ".env"
 
 
 class CliArtifact(Artifact):
@@ -33,6 +40,8 @@ class CliArtifact(Artifact):
 
     env_id: Optional[str] = Field(default=None, description="Source env id this CLI was generated from, if any")
     env_version: Optional[int] = Field(default=None, description="Source env version this CLI was generated from, if any")
+
+    toml_keys: ClassVar[dict[str, type]] = {"command_name": str, "entrypoint": str}  # what an artifact.toml sets
 
     # No return annotation: pydantic builds the serialization schema from one, and a dict drops the fields.
     @model_serializer(mode="wrap")
@@ -49,32 +58,32 @@ class CliArtifact(Artifact):
         *,
         command_name: str,
         entrypoint: str,
-        cli_dir: Path,
+        cli_dir: Optional[Path] = None,
+        files: Optional[Mapping[str, Path]] = None,
         env_id: Optional[str] = None,
         env_version: Optional[int] = None,
     ) -> "CliArtifact":
+        """Write the CLI in ``cli_dir``, or the ``files`` given by their paths in the CLI, ``entrypoint`` among them."""
         from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
         from agent_env.artifact.store import get_artifact_store
 
-        if not cli_dir.is_dir():
-            raise ValueError(f"cli_dir {cli_dir} is not a directory")
-        entrypoint_path = cli_dir / entrypoint
-        if not entrypoint_path.is_file():
-            raise ValueError(f"entrypoint {entrypoint!r} not found at {entrypoint_path}")
-
-        files: dict[str, Path] = {}
-        for p in sorted(cli_dir.rglob("*")):
-            if p.is_file():
-                files[p.relative_to(cli_dir).as_posix()] = p
-        if not files:
-            raise ValueError(f"cli_dir {cli_dir} contains no files")
+        if (cli_dir is None) == (files is None):
+            raise ValueError("specify exactly one of cli_dir or files")
+        if cli_dir is not None:
+            if not cli_dir.is_dir():
+                raise ValueError(f"cli_dir {cli_dir} is not a directory")
+            if not (cli_dir / entrypoint).is_file():
+                raise ValueError(f"entrypoint {entrypoint!r} not found at {cli_dir / entrypoint}")
+            files = {p.relative_to(cli_dir).as_posix(): p for p in sorted(cli_dir.rglob("*")) if p.is_file()}
+        if entrypoint not in files:
+            raise ValueError(f"entrypoint {entrypoint!r} isn't among the CLI's files")
 
         store = get_artifact_store()
         version = store.next_version(id)
-        key = f"{get_config().get_artifact_key_prefix()}artifacts/cli/{key_segment(id)}/{version}/"
-        cli_object_url = get_config().get_object_store_for(id).object_url(key)
+        cli_object_url = store.attempt_prefix(cls.model_fields["type"].default, id)
 
-        universe = FileArtifactUniverse.put_bundled(id=derive_id(id, "files"), files=files, prefix_url=cli_object_url)
+        universe = FileArtifactUniverse.put_bundled(id=derive_id(id, "files"), files=dict(files),
+                                                    prefix_url=cli_object_url)
 
         instance = cls(
             id=id,
@@ -87,6 +96,38 @@ class CliArtifact(Artifact):
             env_version=env_version,
         )
         return store.put_document(instance)
+
+    @classmethod
+    def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:
+        """The keys of ``data``, an artifact.toml, a CLI takes, checked against the folder's files the way installing
+        it reads them. Raises BundleError listing every problem."""
+        fields, problems = ctx.accepted(data, **cls.toml_keys)
+        for key in cls.toml_keys:
+            if key not in data:
+                problems.append(ctx.config_problem(f"{key} is required"))
+        command_name, entrypoint = fields.get("command_name"), fields.get("entrypoint")
+        if command_name is not None and not _COMMAND_NAME.fullmatch(command_name):
+            problems.append(ctx.config_problem(
+                f"command_name must be a plain name, of letters, digits, '.', '_' and '-' and not starting with '.' or "
+                f"'-', since the CLI is installed at /opt/cli/<command_name>; not {command_name!r}"))
+        files = ctx.try_files()
+        if entrypoint is not None and files is not None:
+            gateway_env = posixpath.join(posixpath.dirname(entrypoint), _GATEWAY_ENV_FILE)
+            if entrypoint not in files:
+                problems.append(ctx.config_problem(f"entrypoint {entrypoint!r} isn't one of this folder's files"))
+            elif gateway_env in files:
+                problems.append(f"{gateway_env}: installing the CLI writes the gateway URL to this file, beside its "
+                                "entrypoint; rename or remove the folder's own")
+        if problems:
+            ctx.refuse(problems)
+        return fields
+
+    @classmethod
+    def from_toml(cls, data: dict, ctx: AuthoringContext) -> "CliArtifact":
+        """Write the CLI in the bundle folder: every file its folder walk lists."""
+        fields = cls.accept_toml(data, ctx)
+        return cls.put(ctx.id, command_name=fields["command_name"], entrypoint=fields["entrypoint"],
+                       files=ctx.files())
 
     def get_cli_files(self) -> "FileArtifactUniverse":
         from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse

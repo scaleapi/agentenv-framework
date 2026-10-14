@@ -18,6 +18,7 @@ from typing import Any
 from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact import (
     Artifact,
+    CliArtifact,
     EnvironmentArtifact,
     EnvironmentUniverseArtifact,
     FileArtifact,
@@ -68,7 +69,7 @@ _GETTERS = {EntityKind.ENV: Env.get, EntityKind.AGENT: A2AAgent.get, EntityKind.
 
 # The artifact types written from their folders, and what each one's write reads there, which the ledger hashes.
 _FOLDER_WALKS = {FileArtifact: one_file, FileArtifactUniverse: entry_files, EnvironmentArtifact: environment_files,
-                 EnvironmentUniverseArtifact: universe_files, SkillArtifact: entry_files}
+                 EnvironmentUniverseArtifact: universe_files, SkillArtifact: entry_files, CliArtifact: entry_files}
 # The env types whose from_toml reads only the toml and what it names, so a type built by one of them is written from
 # its env.toml and the ledger can list what it's made from.
 _ENV_FROM_TOMLS = (Env, MCPServerEnv, WebsiteEnv, MultiEnv)
