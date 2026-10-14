@@ -440,33 +440,32 @@ async def test_write_file_from_object_reads_a_url_from_the_store_that_holds_it(c
     assert written == [(b"LOCAL", "/data/a.json")]
 
 
-def _refusing_tunnels(*, exit_code: int | None) -> MagicMock:
+@pytest.mark.asyncio
+async def test_terminate_sandbox_terminates_by_id_without_reading_its_tunnels(_patched_provider):
     sb = MagicMock()
     sb.tunnels.aio = AsyncMock(side_effect=modal.exception.ConflictError("Sandbox has already finished with status terminated"))
-    sb.poll.aio = AsyncMock(return_value=exit_code)
     sb.terminate.aio = AsyncMock()
-    sb.exec.aio = AsyncMock()
-    return sb
-
-
-@pytest.mark.asyncio
-async def test_a_sandbox_that_already_finished_gets_a_handle_without_tunnels_whose_terminate_takes_it_down(
-    _patched_provider,
-):
-    sb = _refusing_tunnels(exit_code=137)
     with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox.from_id") as from_id:
         from_id.aio = AsyncMock(return_value=sb)
-        sandbox = await _patched_provider.get_sandbox("sb-finished")
-        await sandbox.terminate()
+        await _patched_provider.terminate_sandbox("sb-finished")
 
-    assert sandbox.tunnel_urls == {}
-    sb.exec.aio.assert_not_called()
     sb.terminate.aio.assert_awaited_once()
+    sb.tunnels.aio.assert_not_called()
+    sb.exec.aio.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_a_conflict_on_a_sandbox_still_running_is_raised(_patched_provider):
+async def test_terminate_sandbox_counts_a_sandbox_modal_no_longer_knows_as_gone(_patched_provider):
     with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox.from_id") as from_id:
-        from_id.aio = AsyncMock(return_value=_refusing_tunnels(exit_code=None))
+        from_id.aio = AsyncMock(side_effect=modal.exception.NotFoundError("Sandbox not found"))
+        await _patched_provider.terminate_sandbox("sb-gone")
+
+
+@pytest.mark.asyncio
+async def test_get_sandbox_still_raises_for_a_finished_sandbox_so_a_reattach_sees_it_dead(_patched_provider):
+    sb = MagicMock()
+    sb.tunnels.aio = AsyncMock(side_effect=modal.exception.ConflictError("Sandbox has already finished with status terminated"))
+    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox.from_id") as from_id:
+        from_id.aio = AsyncMock(return_value=sb)
         with pytest.raises(modal.exception.ConflictError):
-            await _patched_provider.get_sandbox("sb-running")
+            await _patched_provider.get_sandbox("sb-finished")

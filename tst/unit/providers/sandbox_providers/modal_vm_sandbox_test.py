@@ -398,22 +398,17 @@ async def test_apps_are_looked_up_in_the_configured_environment():
     assert lookup.aio.call_args.kwargs["environment_name"] == "rl-prod"
 
 
-@pytest.mark.parametrize("exit_code", [137, None], ids=["finished", "running"])
+@pytest.mark.parametrize("found", [True, False], ids=["live or finished", "gone"])
 @pytest.mark.asyncio
-async def test_a_vm_that_already_finished_gets_a_handle_without_tunnels_and_a_conflict_while_running_is_raised(
-    exit_code,
-):
+async def test_terminate_sandbox_terminates_a_vm_by_id_and_counts_one_modal_no_longer_knows_as_gone(found):
     provider = ModalVmSandboxProvider()
     provider._get_client = AsyncMock(return_value=MagicMock())  # type: ignore[method-assign]
     sb = MagicMock()
-    sb.tunnels.aio = AsyncMock(side_effect=modal.exception.ConflictError("Sandbox has already finished with status terminated"))
-    sb.poll.aio = AsyncMock(return_value=exit_code)
-    with patch("agent_env.providers.sandbox_providers.modal_vm_sandbox.modal.Sandbox.from_id") as from_id:
-        from_id.aio = AsyncMock(return_value=sb)
-        if exit_code is None:
-            with pytest.raises(modal.exception.ConflictError):
-                await provider.get_sandbox("sb-running")
-            return
-        sandbox = await provider.get_sandbox("sb-finished")
+    sb.terminate.aio = AsyncMock()
+    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox.from_id") as from_id:
+        from_id.aio = (AsyncMock(return_value=sb) if found
+                       else AsyncMock(side_effect=modal.exception.NotFoundError("Sandbox not found")))
+        await provider.terminate_sandbox("sb-vm")
 
-    assert sandbox.tunnel_urls == {}
+    assert sb.terminate.aio.await_count == (1 if found else 0)
+    sb.tunnels.aio.assert_not_called()

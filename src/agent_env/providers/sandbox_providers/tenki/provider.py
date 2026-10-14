@@ -18,13 +18,13 @@ from datetime import UTC, datetime
 from typing import Any, ClassVar, Self
 from urllib.parse import urlparse
 
-from tenki import AsyncClient
+from tenki import AsyncClient, SessionNotFoundError
 
 from agent_env.attribution import Attribution
 from agent_env.config.errors import ConfigError
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, NetworkPolicyUnsupportedError
 from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider, apply_default_attribution
-from agent_env.providers.sandbox_providers.tenki.sandbox import ENDED_STATES, TenkiSandbox, policy_from_info
+from agent_env.providers.sandbox_providers.tenki.sandbox import ENDED_STATES, TenkiSandbox, close_session, policy_from_info
 
 logger = logging.getLogger(__name__)
 
@@ -413,3 +413,11 @@ class TenkiSandboxProvider(SandboxProvider):
             network_policy=policy_from_info(info),
             command_timeout=_remaining_lifetime(info.timeout_at),
         )
+
+    async def terminate_sandbox(self, sandbox_id: str) -> None:
+        try:
+            session = await self._client().get(sandbox_id)
+        except SessionNotFoundError:
+            logger.info("Tenki session %s was already gone at terminate", sandbox_id)
+            return
+        await close_session(session)

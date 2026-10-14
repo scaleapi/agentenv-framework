@@ -183,6 +183,16 @@ kill -0 "$(cat {pid_file})"
         sandbox.network_policy = self.effective_network_policy(None)
         return sandbox
 
+    async def terminate_sandbox(self, sandbox_id: str) -> None:
+        """Connecting starts a stopped machine, and the SDK deletes only a connected one, so a listed machine is
+        connected first; one not listed is gone."""
+        conn = ConnectOptions(target="local", wait_for_ports=False)
+        if sandbox_id not in {machine.name for machine in await asyncio.to_thread(Machine.list, conn)}:
+            logger.info("SmolVM machine %s was already gone at terminate", sandbox_id)
+            return
+        machine = await asyncio.to_thread(Machine.connect, sandbox_id, conn)
+        await asyncio.to_thread(machine.delete)
+
     async def _configure_host_access(self, sandbox: SmolVmSandbox) -> None:
         code, stdout, stderr = await sandbox.exec_with_output("getent", "ahostsv4", "host.smolvm.internal")
         if code or not stdout.strip():

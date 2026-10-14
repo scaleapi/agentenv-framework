@@ -162,6 +162,11 @@ class SandboxProvider(ABC):
     async def get_sandbox(self, sandbox_id: str) -> Sandbox:
         raise NotImplementedError(f"{type(self).__name__} does not support get_sandbox")
 
+    async def terminate_sandbox(self, sandbox_id: str) -> None:
+        """Terminate a sandbox this provider made, by id; one that has already finished or is gone is terminated.
+        A backend that can terminate without a live handle overrides this, so teardown doesn't need one."""
+        await (await self.get_sandbox(sandbox_id)).terminate()
+
     async def close(self) -> None:
         pass
 

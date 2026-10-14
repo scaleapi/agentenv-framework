@@ -39,6 +39,8 @@ class _FakeSandbox:
 
 
 class _FakeProvider:
+    ON_THIS_MACHINE = False
+
     def __init__(self, name, log):
         self.name, self.log = name, log
 
@@ -46,6 +48,9 @@ class _FakeProvider:
         if self.log.behaviors.get(sandbox_id) == "gone":
             raise RuntimeError(f"no sandbox {sandbox_id}")
         return _FakeSandbox(self, sandbox_id)
+
+    async def terminate_sandbox(self, sandbox_id):
+        await (await self.get_sandbox(sandbox_id)).terminate()
 
 
 class _Log(list):
@@ -148,10 +153,30 @@ def test_a_terminate_that_fails_is_reported_not_raised_and_the_others_still_go(t
     assert "sb-gw" not in context.metadata[TORN_DOWN_KEY]
 
 
+def test_a_record_that_names_its_backend_is_terminated_by_id_and_one_that_doesnt_through_a_handle(
+    terminated, monkeypatch,
+):
+    by_id = []
+
+    async def terminate_sandbox(self, sandbox_id):
+        by_id.append((self.name, sandbox_id))
+
+    monkeypatch.setattr(_FakeProvider, "terminate_sandbox", terminate_sandbox)
+    context = TaskStepContext(deployed_sandboxes=[
+        DeployedSandbox(sandbox_name="named", sandbox_id="sb-named", sandbox_mode="vm", sandbox_type="modal"),
+        DeployedSandbox(sandbox_name="unnamed", sandbox_id="sb-unnamed", sandbox_mode="vm"),
+    ])
+
+    report = _run(context)
+
+    assert by_id == [("modal", "sb-named")]
+    assert terminated == [("default-sandbox", "sb-unnamed")]
+    assert {sandbox.sandbox_id for sandbox in report.terminated} == {"sb-named", "sb-unnamed"}
+
+
 def test_a_modal_sandbox_that_already_finished_is_counted_down_not_reported_up(monkeypatch):
     sb = MagicMock()
     sb.tunnels.aio = AsyncMock(side_effect=modal.exception.ConflictError("Sandbox has already finished with status terminated"))
-    sb.poll.aio = AsyncMock(return_value=137)
     sb.terminate.aio = AsyncMock()
     monkeypatch.setattr(modal.Sandbox, "from_id", MagicMock(aio=AsyncMock(return_value=sb)))
     monkeypatch.setattr(ModalSandboxProvider, "_get_client", AsyncMock(return_value=MagicMock()))
@@ -163,6 +188,7 @@ def test_a_modal_sandbox_that_already_finished_is_counted_down_not_reported_up(m
     assert report.terminated == (RecordedSandbox("sb-finished", "modal", "sandbox"),)
     assert report.still_up == ()
     assert context.metadata[TORN_DOWN_KEY] == ["sb-finished"]
+    sb.tunnels.aio.assert_not_called()
 
 
 def test_cancelling_it_returns_what_it_reached_and_leaves_the_rest(terminated):

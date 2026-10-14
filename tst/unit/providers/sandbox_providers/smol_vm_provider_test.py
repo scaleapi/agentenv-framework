@@ -298,3 +298,20 @@ async def test_loopback_advertised_grant_uses_object_push(monkeypatch, tmp_path)
     await sandbox._download_object_to_vm(object_url, "/storage/image.tar.gz")
 
     sandbox._write_unsigned_object.assert_awaited_once_with(store, object_url, "/storage/image.tar.gz")
+
+
+@pytest.mark.parametrize("listed", [True, False], ids=["listed", "gone"])
+@pytest.mark.asyncio
+async def test_terminate_sandbox_deletes_a_listed_machine_without_setting_it_up(monkeypatch, listed):
+    deleted = []
+    connect = MagicMock(return_value=SimpleNamespace(delete=lambda: deleted.append(True)))
+    machines = [SimpleNamespace(name="agentenv-vm-1")] if listed else []
+    monkeypatch.setattr(module, "Machine", SimpleNamespace(list=lambda conn: machines, connect=connect))
+    setup = AsyncMock()
+    monkeypatch.setattr(module.SmolVmSandboxProvider, "_setup_docker", setup)
+
+    await module.SmolVmSandboxProvider().terminate_sandbox("agentenv-vm-1")
+
+    assert deleted == ([True] if listed else [])
+    assert connect.called is listed
+    setup.assert_not_called()

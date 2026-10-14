@@ -336,3 +336,10 @@ class TensorlakeSandboxProvider(SandboxProvider):
                 "Reconnected to Tensorlake sandbox %s, but image loading will fail closed: %s", sandbox_id, exc,
             )
         return sandbox
+
+    async def terminate_sandbox(self, sandbox_id: str) -> None:
+        try:
+            raw_sandbox = await self._sandbox_cls.connect(sandbox_id, **self._client_kwargs())
+            await raw_sandbox.terminate()
+        except SandboxNotFoundError:
+            logger.info("Tensorlake sandbox %s was already absent during terminate", sandbox_id)

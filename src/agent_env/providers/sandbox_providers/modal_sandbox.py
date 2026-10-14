@@ -90,15 +90,12 @@ def _tunnel_url(t) -> str:
     return f"https://{t.host}" + (f":{t.port}" if t.port != 443 else "")
 
 
-async def _tunnel_urls(sb: modal.Sandbox) -> Optional[dict[int, str]]:
-    """None once the sandbox has finished. Modal raises ``ConflictError`` for other refusals too, hence ``poll()``."""
+async def _terminate_by_id(client, sandbox_id: str) -> None:
     try:
-        tunnels = await sb.tunnels.aio()
-    except modal.exception.ConflictError:
-        if await sb.poll.aio() is None:
-            raise
-        return None
-    return {p: _tunnel_url(t) for p, t in tunnels.items()}
+        sb = await modal.Sandbox.from_id.aio(sandbox_id, client=client)
+        await sb.terminate.aio()
+    except modal.exception.NotFoundError:
+        logger.info("Modal sandbox %s was already gone at terminate", sandbox_id)
 
 
 def _modal_network_kwargs(policy: NetworkPolicy) -> dict:
@@ -486,11 +483,13 @@ class ModalSandboxProvider(SandboxProvider):
     async def get_sandbox(self, sandbox_id: str) -> Sandbox:
         client = await self._get_client()
         sb = await modal.Sandbox.from_id.aio(sandbox_id, client=client)
-        tunnel_urls = await _tunnel_urls(sb)
-        if tunnel_urls is None:
-            return self._sandbox_cls(sb, {})
+        tunnels = await sb.tunnels.aio()
+        tunnel_urls = {p: _tunnel_url(t) for p, t in tunnels.items()}
         i6pn_address = await _resolve_i6pn_address(sb)
         return self._sandbox_cls(sb, tunnel_urls, i6pn_address=i6pn_address)
+
+    async def terminate_sandbox(self, sandbox_id: str) -> None:
+        await _terminate_by_id(await self._get_client(), sandbox_id)
 
     async def _registry_image(self, image_name: str) -> modal.Image:
         """``image_name`` pulled from its registry, with the image store's credentials for it, if any."""

@@ -32,8 +32,8 @@ from agent_env.providers.sandbox_providers.modal_sandbox import (
     _attribution_tags,
     _log_sandbox_started,
     _resolve_app_base_name,
+    _terminate_by_id,
     _tunnel_url,
-    _tunnel_urls,
     _modal_network_kwargs,
 )
 from agent_env.attribution import Attribution
@@ -408,8 +408,13 @@ class ModalVmSandboxProvider(SandboxProvider):
     async def get_sandbox(self, sandbox_id: str) -> ModalVmSandbox:
         client = await self._get_client()
         sb = await modal.Sandbox.from_id.aio(sandbox_id, client=client)
+        tunnels = await sb.tunnels.aio()
+        tunnel_urls = {p: _tunnel_url(t) for p, t in tunnels.items()}
         # dockerd is already running on a live sandbox; do not re-run setup here.
-        return ModalVmSandbox(sb, await _tunnel_urls(sb) or {})
+        return ModalVmSandbox(sb, tunnel_urls)
+
+    async def terminate_sandbox(self, sandbox_id: str) -> None:
+        await _terminate_by_id(await self._get_client(), sandbox_id)
 
 
 # ── Object downloads (internal) ────────────────────────────────────────────────────
