@@ -22,7 +22,7 @@ from agent_env.env.gateway.constants import TRIGGER_IN_FLIGHT_STATUSES
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
 from agent_env.task_step.task_steps.register_env_triggers import RegisterEnvTriggersStep
 from tst.integration.env.envs.server_env_local_test import _put_items_image
-from tst.integration.store.local_parallel_deploy_test import _seed_bootstrap_envs, local_stack  # noqa: F401  (fixture)
+from tst.integration.store.local_parallel_deploy_test import _seed_bootstrap_envs, local_stack as local_stack
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 

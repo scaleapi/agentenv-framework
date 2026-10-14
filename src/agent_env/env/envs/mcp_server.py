@@ -7,11 +7,11 @@ import logging
 import os
 import uuid
 from importlib.metadata import version as pkg_version
-from typing import TYPE_CHECKING, Callable, ClassVar, Optional
+from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional
 
 from agentenv_protocol import FilePart, client as protocol_v1
 from agent_env.artifact import Artifact, DockerImageArtifact
-from agent_env.artifact.artifacts.docker_image import GitHubBuildResult, ProgressCallback, refuse_local_github_build
+from agent_env.artifact.artifacts.docker_image import ProgressCallback, refuse_local_github_build
 from agent_env.config import get_config
 from agent_env.entity_refs import EntityRef
 from agent_env.env.env import Env, gateway_url_of
@@ -28,7 +28,7 @@ from agent_env.attribution import Attribution
 if TYPE_CHECKING:
     from agent_env.artifact import CliArtifact, EnvironmentArtifact, EnvironmentUniverseArtifact
     from agent_env.bundle.authoring import AuthoringContext
-    from agent_env.env.env import DeployedEnv
+    from agent_env.env.env import DeployedEnv, LoadFileArtifactUniverseResult
     from agent_env.providers.env_providers.env_provider import EnvironmentProvider
 
 logger = logging.getLogger(__name__)

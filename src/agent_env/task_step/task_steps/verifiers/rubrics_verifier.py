@@ -18,7 +18,7 @@ from agent_env.a2a_agent.object_transfer import (
 from agent_env.a2a_agent.staging import transfer_store
 from agent_env.config import get_config
 from agent_env.config.model import ModelParam
-from agent_env.task_step.context import TaskStepContext, dual_keyed
+from agent_env.task_step.context import PromptResponse, TaskStepContext, dual_keyed
 from agent_env.task_step.task_steps.verifiers.judge_utils.judge_output_format import (
     SCREENSHOT_GROUNDING,
     JudgeOutputFormat,

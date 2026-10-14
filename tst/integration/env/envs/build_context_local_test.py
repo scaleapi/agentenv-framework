@@ -19,7 +19,7 @@ from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.providers.sandbox_providers import sandbox
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox
 from agent_env.utils.docker_build import normalize_platform
-from tst.integration.env.envs.server_env_local_test import local_stack  # noqa: F401  (fixture)
+from tst.integration.env.envs.server_env_local_test import local_stack as local_stack
 from tst.integration.store.local_parallel_deploy_test import _docker, _seed_bootstrap_envs
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]

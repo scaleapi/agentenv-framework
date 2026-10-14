@@ -17,7 +17,7 @@ import json
 import logging
 import shlex
 from datetime import datetime, timezone
-from typing import Any, Callable, ClassVar, Optional
+from typing import Callable, ClassVar, Optional
 
 import httpx
 

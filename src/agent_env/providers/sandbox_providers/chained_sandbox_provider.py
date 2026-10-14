@@ -66,6 +66,17 @@ class ChainedSandboxProvider(SandboxProvider):
         attribution: Attribution | None = None,
         **kwargs,
     ) -> Sandbox:
+        return await self._create("create_sandbox", attribution=attribution, **kwargs)
+
+    async def create_container(
+        self,
+        *,
+        attribution: Attribution | None = None,
+        **kwargs,
+    ) -> Sandbox:
+        return await self._create("create_container", attribution=attribution, **kwargs)
+
+    async def _create(self, method: str, *, attribution: Attribution | None = None, **kwargs) -> Sandbox:
         sandbox_providers = self.filter_sandbox_providers(self._providers, kwargs.get("network_policy"))
         image = self._images.get(kwargs.get("image_name"))
         errors: list[tuple[str, Exception]] = []
@@ -76,9 +87,9 @@ class ChainedSandboxProvider(SandboxProvider):
                     # outside the deadline, which bounds creating the sandbox, not a build
                     await p.prepare_image(image, attribution=attribution)
                 async with asyncio.timeout(_PROVISION_DEADLINE_SECONDS):
-                    sandbox = await p.create_sandbox(attribution=attribution, **kwargs)
+                    sandbox = await getattr(p, method)(attribution=attribution, **kwargs)
             except Exception as e:
-                logger.warning(f"{name}.create_sandbox failed: {e}; trying next provider")
+                logger.warning(f"{name}.{method} failed: {e}; trying next provider")
                 errors.append((name, e))
                 continue
             # A VM refuses an image it can't get or run, and a container runs only what its provider's containers do;

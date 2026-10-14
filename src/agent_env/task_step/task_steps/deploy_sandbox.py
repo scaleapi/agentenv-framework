@@ -152,7 +152,7 @@ class DeploySandboxTaskStep(TaskStep):
             if self.image is None or self.port is None:
                 raise ValueError("container-mode sandbox requires `image` and `port`")
             provider = skip_refusing(provider, self._pull_refusal, what=f"sandbox '{self.sandbox_name}'")
-            sandbox = await provider.create_sandbox(
+            sandbox = await provider.create_container(
                 image_name=self.image,
                 port=self.port,
                 env=self.env_vars or {},

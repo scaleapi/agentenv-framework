@@ -1,11 +1,12 @@
 name: Publish to PyPI
 
 # On a release tag, uploads agentenv-framework-protocol and then agentenv-framework to PyPI through trusted
-# publishing, so no token is stored anywhere. Each job builds its distribution the way the release does
-# (agentenv-framework pinned to the exact agentenv-framework-protocol it was released with) and runs in its own
-# environment, because PyPI binds a pending publisher to one workflow and environment per project. Once both are on
-# PyPI, it creates the tag's GitHub release, whose notes list the pull requests merged since the previous tag. Files
-# already on PyPI and a release that already exists are skipped, so a rerun is safe.
+# publishing, so no token is stored anywhere, once main's CI has passed on the tagged commit. Each job builds its
+# distribution the way the release does (agentenv-framework pinned to the exact agentenv-framework-protocol it was
+# released with) and runs in its own environment, because PyPI binds a pending publisher to one workflow and
+# environment per project. Once both are on PyPI, it creates the tag's GitHub release, whose notes list the pull
+# requests merged since the previous tag. Files already on PyPI and a release that already exists are skipped, so a
+# rerun is safe.
 
 on:
   push:
@@ -15,7 +16,33 @@ permissions:
   contents: read
 
 jobs:
+  # The release automation tags a version bump seconds after it pushes the bump, so this waits for those runs
+  # rather than failing on one still in progress. After a failed run passes on a re-run, re-run this workflow.
+  main-ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      actions: read
+    steps:
+      - name: Wait for main's CI to pass on the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          for workflow in local-backends.yml clean-install.yml plugin-api.yml; do
+            echo "Waiting for ${workflow} on main at ${GITHUB_SHA}"
+            until run=$(gh run list --workflow "$workflow" --commit "$GITHUB_SHA" --branch main --event push --limit 1 \
+                --json status,conclusion,url --jq '.[] | select(.status == "completed") | "\(.conclusion) \(.url)"') &&
+                [ -n "$run" ]; do
+              sleep 30
+            done
+            read -r conclusion url <<< "$run"
+            [ "$conclusion" = success ] || { echo "::error::${workflow} ended ${conclusion} on ${GITHUB_SHA}: ${url}"; exit 1; }
+            echo "${workflow} passed: ${url}"
+          done
+
   protocol:
+    needs: main-ci
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: pypi-protocol

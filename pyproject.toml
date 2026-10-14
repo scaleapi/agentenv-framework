@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentenv-framework"
-version = "0.9.1327"
+version = "0.9.1329"
 description = "SDK and CLI for building, deploying and running agent environments and the tasks that grade agents in them."
 readme = "README.md"
 license = "Apache-2.0"
@@ -81,7 +81,7 @@ tenki = [
     "tenki[async]~=1.4.1",  # AsyncClient/AsyncSandbox exec, stdin, ports and egress APIs validated against the 1.4 line
 ]
 dev = [
-    "agentenv-framework[aws,explorer,gcp,sail,tensorlake,tenki]",  # so the AWS, explorer, GCP backend, Sail, Tensorlake and Tenki provider tests run in CI
+    "agentenv-framework[aws,explorer,gcp,sail,tensorlake,tenki]",  # exercise portable optional providers and stores in CI
     "fastmcp>=3.4,<4",  # the standalone-fastmcp mount path of the protocol; <4 keeps mcp 1.x
     "griffelib==2.3.0",  # the plugin API check; exact, since what it reports as a break changes between releases
     "moto>=5.0.0",
@@ -92,6 +92,10 @@ dev = [
     "pytest-socket>=0.7.0",
     "pytest-timeout>=2.3.0",
     "pytest-xdist>=3.0.0",
+    "ruff==0.16.10",  # the lint gate; exact, since what it reports changes between releases
+]
+smol = [
+    "smolmachines>=1.27.0",
 ]
 
 [project.scripts]
@@ -139,3 +143,6 @@ markers = [
 log_cli = true
 log_cli_level = "INFO"
 log_cli_format = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
+[tool.ruff.lint]
+select = ["F"]

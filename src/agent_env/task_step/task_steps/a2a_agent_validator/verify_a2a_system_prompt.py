@@ -84,7 +84,6 @@ class VerifyA2ASystemPromptStep(TaskStep):
         deployed = next((a for a in context.deployed_agents), None)
         if deployed is None:
             raise RuntimeError("No deployed agent found in context")
-        agent = A2AAgent.get(self.a2a_agent_id, self.a2a_agent_version)
 
         config_ext = A2AAgent.find_extension(deployed.a2a_card or {}, A2AAgent.EXT_AGENT_CONFIG)
         if config_ext is None:

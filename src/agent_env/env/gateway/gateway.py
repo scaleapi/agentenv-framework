@@ -38,8 +38,8 @@ if TYPE_CHECKING:
 # Relative import — gateway runs as a standalone container with no agent_env.*
 from .constants import (
     AGENT_ENV_ROLE_HEADER,
-    AGENT_ENV_ROLE_META_KEY,  # the server module serves the whole vocabulary, used in this file or not
-    AGENT_ENV_SESSION_META_KEY,
+    AGENT_ENV_ROLE_META_KEY,  # noqa: F401  (the server module serves the whole vocabulary, used in this file or not)
+    AGENT_ENV_SESSION_META_KEY,  # noqa: F401
     CARD_FETCH_TIMEOUT_S,
     CHILD_DISCOVERY_TIMEOUT_S,
     DATA_PLANE_LOAD_TIMEOUT_MAX_S,

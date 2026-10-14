@@ -17,7 +17,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict
 
-from agent_env.config import get_config, get_runner
+from agent_env.config import get_runner
 from agent_env.explorer.entity_ids import EntityId
 from agent_env.explorer.routers.common import PaginatedResponse, docs
 from agent_env.runner.runner import RunStatus

@@ -26,10 +26,11 @@ class Refuse(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, Refuse())
 """
 
-# Not core: the explorer and the sail_vm provider are their extras' own packages, the gateway runs
+# Not core: the explorer, Sail and Smol providers need their optional extras, and the gateway runs
 # only in its container image, and the code runner is a script that reads its arguments on import.
 _NOT_CORE = (
-    "agent_env.explorer", "agent_env.providers.sandbox_providers.sail_vm", "agent_env.env.gateway",
+    "agent_env.explorer", "agent_env.providers.sandbox_providers.sail_vm",
+    "agent_env.providers.sandbox_providers.smol_vm", "agent_env.env.gateway",
     "agent_env.task_step.task_steps.run_code_runner",
 )
 
@@ -190,9 +191,13 @@ def test_core_and_every_store_module_import_without_any_extra():
             "agent_env.providers.sandbox_providers.tenki.provider:TenkiSandboxProvider",
             "agent_env.providers.sandbox_providers.sandbox_provider:SandboxProvider",
         ),
+        (
+            "smol", "agent_env.providers.sandbox_providers.smol_vm.provider:SmolVmSandboxProvider",
+            "agent_env.providers.sandbox_providers.sandbox_provider:SandboxProvider",
+        ),
     ],
     ids=["gcs", "secret-manager", "s3", "s3-reexport", "secrets-manager-reexport", "dynamodb", "dynamodb-reexport", "tensorlake",
-         "tenki"],
+         "tenki", "smol"],
 )
 def test_an_impl_without_its_extra_names_the_extra_to_install(extra, impl, base):
     message = _run(_LOAD_IMPL, _only_in(extra), impl, base)

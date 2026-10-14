@@ -294,7 +294,6 @@ async def test_mid_body_upstream_failure_is_logged_with_bytes_and_propagates(mon
         pass
 
     up = _Upstream([b"a" * 1024, b"b" * 1024], headers={"content-length": "2048"})
-    real = up.handler
 
     def handler(request):
         async def body():

@@ -50,6 +50,11 @@ def test_local_store_grants_reach_only_sandboxes_on_this_machine(tmp_path) -> No
     assert not store.grants_reach("no-such-provider")
 
 
+def test_smol_vm_reaches_local_store_when_its_sdk_is_installed(tmp_path) -> None:
+    pytest.importorskip("smol")
+    assert LocalFilesystemObjectStore(str(tmp_path)).grants_reach("smol_vm")
+
+
 @pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "::1"])
 def test_a_grant_url_naming_this_machines_loopback_reaches_no_container_which_it_names_itself_to(tmp_path, host) -> None:
     assert not LocalFilesystemObjectStore(str(tmp_path), grant_advertise_host=host).grants_reach("local")
@@ -75,6 +80,20 @@ def test_a_vm_reaching_an_address_the_default_server_doesnt_serve_needs_the_serv
     assert not LocalFilesystemObjectStore(str(tmp_path)).grants_reach("vm_other")
     assert not LocalFilesystemObjectStore(str(tmp_path), grant_bind_host="127.0.0.1").grants_reach("vm_other")
     assert LocalFilesystemObjectStore(str(tmp_path), grant_bind_host="127.0.0.2").grants_reach("vm_other")
+
+
+def test_custom_private_advertised_host_is_not_claimed_reachable_from_smol_vm(tmp_path) -> None:
+    store = LocalFilesystemObjectStore(str(tmp_path), grant_advertise_host="172.17.0.1")
+    assert store.grants_reach("local")
+    assert not store.grants_reach("smol_vm")
+
+
+@pytest.mark.parametrize("host", ["localhost", "127.0.0.1"])
+def test_loopback_grant_url_is_not_claimed_reachable_from_agent_container(tmp_path, host) -> None:
+    store = LocalFilesystemObjectStore(str(tmp_path), grant_advertise_host=host)
+
+    assert not store.grants_reach("local")
+    assert not store.grants_reach("smol_vm")
 
 
 def test_local_store_grants_can_be_turned_off(tmp_path) -> None:

@@ -23,7 +23,7 @@ import pytest
 
 import agent_env.task.task as task_module
 import agent_env.task.store as store_mod
-from agent_env.env.env import DeployedEnv, DeployedGatewayEnv
+from agent_env.env.env import DeployedGatewayEnv
 from agent_env.store import LocalSqliteDocumentStore
 from agent_env.store.document_store import Filter
 from agent_env.task.step_journal import _SCHEDULER_STEP_ID, _SEED_STEP_ID, commit_ordered, replay_context

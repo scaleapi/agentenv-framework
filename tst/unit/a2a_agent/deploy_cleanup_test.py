@@ -2,7 +2,6 @@
 made it into a run's context doesn't outlive it."""
 
 import asyncio
-import types
 
 import pytest
 

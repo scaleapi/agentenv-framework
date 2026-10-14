@@ -5,11 +5,15 @@ long-running store can be stood up ahead of time and referenced later by its ``i
 """
 
 import asyncio
+from typing import TYPE_CHECKING
 
 import click
 
 from agent_env.env import Env, MultiEnv
 from agent_env.store.routing import run_scope
+
+if TYPE_CHECKING:
+    from agent_env.providers.env_state import EnvStateInstance
 
 # A durable store can't be shorter-lived than a normal run, so the floor is the default run TTL
 # (agent-env's current default, mirrored from cli/env/deploy.py).

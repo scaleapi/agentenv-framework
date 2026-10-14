@@ -91,7 +91,7 @@ def deploy(env_id: str, env_version: int | None, ttl_seconds: int, gateway_mode:
         click.echo(f"Error: {e}", err=True)
         raise SystemExit(1)
 
-    click.echo(f"Deployed!")
+    click.echo("Deployed!")
     if deployed_env.instance_id:
         click.echo("Instance ID: " + click.style(deployed_env.instance_id, fg="green"))
     click.echo("Env MCP Url: " + click.style(deployed_env.mcp_url, fg="blue"))

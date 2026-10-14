@@ -11,6 +11,7 @@ plugin's name patches it instead of colliding.
 
 import asyncio
 import importlib
+import importlib.util
 from abc import abstractmethod
 import logging
 import sys
@@ -527,7 +528,9 @@ def test_every_built_in_type_implements_what_a_plugin_of_its_group_must(monkeypa
         *((cls, Env, _ENV_MUST_IMPLEMENT) for cls in config.env_registry().values()),
         *((cls, TaskStep, _STEP_MUST_IMPLEMENT) for cls in config.task_step_registry().values()),
         *((cls, Artifact, ()) for cls in config.artifact_registry().values()),
-        *((load_impl(entry["impl"], SandboxProvider), SandboxProvider, ()) for entry in config.sandbox_registry().values()),
+        *((load_impl(entry["impl"], SandboxProvider), SandboxProvider, ())
+          for name, entry in config.sandbox_registry().items()
+          if name != "smol_vm" or importlib.util.find_spec("smol") is not None),
         *((load_impl(entry["impl"], EnvStateProvider), EnvStateProvider, ()) for entry in config.state_registry().values()),
         *((cls, EnvironmentProvider, ()) for cls in config.env_provider_registry().values()),
     ]

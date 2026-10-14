@@ -554,7 +554,6 @@ class TaskInstanceStore:
             undone_seqs.clear()
             undone_seqs.update({e["step_id"]: e["seq"] for e in entries if e["step_id"] in step_ids})
             before = doc.get("completed_steps", [])
-            completed_ids = {c.get("step_id") for c in before}
             if not any(e["step_id"] == _SEED_STEP_ID for e in entries):
                 raise ValueError(f"instance {instance_id!r} has no journal seed (pre-journal or unseeded); cannot undo")
             journaled = {e["step_id"] for e in entries}

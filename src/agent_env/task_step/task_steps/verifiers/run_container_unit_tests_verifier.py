@@ -203,7 +203,6 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
         return command, extra_env
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
-        from agent_env.artifact.artifacts.file import FileArtifact
         from agent_env.providers.sandbox_providers.sandbox_provider import (
             build_sandbox_provider,
             get_sandbox_provider,

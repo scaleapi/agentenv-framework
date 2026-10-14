@@ -76,6 +76,8 @@ class _StubProvider(SandboxProvider):
 @pytest.mark.parametrize("name", sorted(_BUILTIN_SANDBOX_PROVIDERS))
 def test_each_builtin_impl_string_loads(name):
     # A stale string only fails when that backend is built: the registry skips it at DEBUG.
+    if name == "smol_vm":
+        pytest.importorskip("smol")
     assert issubclass(load_impl(_BUILTIN_SANDBOX_PROVIDERS[name], SandboxProvider), SandboxProvider)
 
 

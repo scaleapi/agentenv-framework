@@ -98,7 +98,9 @@ def test_resolving_and_describing_a_bare_install_create_nothing(tmp_path):
 def test_a_config_file_is_reported_as_the_source_with_its_path(tmp_path):
     path = _write_config(tmp_path, MONGO_TOML)
 
-    sections = _sections(describe_config())
+    report = describe_config()
+    assert report.config_path == path
+    sections = _sections(report)
     assert sections["document"].impl_name == "MongoDocumentStore"
     assert sections["document"].winner.where == "[stores.document]"
     assert sections["document"].winner.kind == "file"

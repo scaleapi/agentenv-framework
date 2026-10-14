@@ -1,4 +1,4 @@
-.PHONY: help install unit-test int-test int-test-fast int-test-slow installer-test clean-install-test test clean
+.PHONY: help install lint unit-test int-test int-test-fast int-test-slow installer-test clean-install-test test clean
 
 VENV := .venv
 VENV_BIN := $(abspath $(VENV))/bin
@@ -21,6 +21,9 @@ install: ## Create .venv and install the package with dev dependencies
 	$(PIP) install --upgrade pip
 	$(PIP) install -e ./packages/agentenv-protocol
 	$(PIP) install -e ".[dev]"
+
+lint: ## Lint with ruff, the check the unit job runs
+	$(VENV_BIN)/ruff check
 
 unit-test: ## Run the unit test suite in parallel (no external services)
 	$(PYTHON) -m pytest tst/unit/ packages/agentenv-protocol/tests/ -n auto

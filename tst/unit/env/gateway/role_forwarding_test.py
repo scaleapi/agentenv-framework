@@ -14,7 +14,6 @@ from mcp.shared.exceptions import McpError
 from mcp.types import CONNECTION_CLOSED, CallToolResult, ErrorData, TextContent, Tool as MCPTool
 
 from agent_env.env.gateway import AGENT_ENV_ROLE_META_KEY, AGENT_ENV_SESSION_META_KEY, InternalMCPServer
-from agent_env.env.gateway import gateway as gateway_module
 from agent_env.env.gateway.caller import Caller
 from agent_env.env.gateway.constants import DEFAULT_ROLE
 from agent_env.env.gateway.gateway import GATEWAY_TRAJECTORY_FILE, Gateway, _call_never_reached_child, _is_dead_session

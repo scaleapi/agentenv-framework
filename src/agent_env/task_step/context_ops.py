@@ -10,9 +10,12 @@ from __future__ import annotations
 import dataclasses
 import types
 from dataclasses import dataclass, field
-from typing import Any, Union, get_args, get_origin, get_type_hints
+from typing import TYPE_CHECKING, Any, Union, get_args, get_origin, get_type_hints
 
 from agent_env.task_step.context import PromptResponse, TaskStepContext, _REDACTED_KEYS, _strip_redacted_keys
+
+if TYPE_CHECKING:
+    from agent_env.store.document_store import UpdateSpec
 
 
 @dataclass
