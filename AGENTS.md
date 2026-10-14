@@ -39,7 +39,7 @@ or one of them only where it is used.
 
 | Command | What it does |
 |---|---|
-| `make unit-test` | `tst/unit` and `packages/agentenv-protocol/tests`, in parallel, no network |
+| `make unit-test` | `tst/unit`, `packages/agentenv-protocol/tests` and `plugins`, in parallel, no network |
 | `make int-test-fast` | `tst/integration` minus `int_test_slow`, in parallel; needs Docker and a local OCI registry (`docker run -d -p 5000:5000 public.ecr.aws/docker/library/registry:2`) |
 | `make int-test-slow` | the `int_test_slow` tests, serially (they build the same Docker tags from module fixtures and race under xdist) |
 | `make installer-test` | `tst/installer`: `plugin add` / `remove` through the real pip, uv and pipx, offline against wheels built from the checkout, and the container user journey (`python:3.12-slim`, `--network none`) with the PEP 668 refusal; needs uv, pipx and Docker |

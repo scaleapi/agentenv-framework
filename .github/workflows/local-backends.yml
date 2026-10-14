@@ -50,7 +50,7 @@ jobs:
           uv lock --check
           git checkout -- pyproject.toml packages/agentenv-protocol/pyproject.toml uv.lock
       - name: Unit tier
-        run: .venv/bin/python -m pytest tst/unit packages/agentenv-protocol/tests -n auto -q --timeout=300 --junitxml=junit-unit.xml
+        run: .venv/bin/python -m pytest tst/unit packages/agentenv-protocol/tests plugins -n auto -q --timeout=300 --junitxml=junit-unit.xml
 
   ui:
     runs-on: ubuntu-latest
