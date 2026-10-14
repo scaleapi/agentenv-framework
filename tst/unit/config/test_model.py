@@ -232,9 +232,9 @@ def test_resolve_call_sends_no_headers_to_a_model_override():
     assert call.params == {}
 
 
-def test_params_extra_headers_win_per_header():
+def test_params_extra_headers_win_per_header_whatever_its_case():
     cfg = ModelConfig(base_url="https://gw/v1", headers={"X-Bill-To": "acme", "X-Plain": "v"},
-                      params={"temperature": 0, "extra_headers": {"X-Bill-To": "other"}})
+                      params={"temperature": 0, "extra_headers": {"x-bill-to": "other"}})
     call = cfg.resolve_call("m", secret_resolver=_secrets({}))
-    assert call.params == {"temperature": 0, "extra_headers": {"X-Bill-To": "other", "X-Plain": "v"}}
-    assert cfg.params == {"temperature": 0, "extra_headers": {"X-Bill-To": "other"}}
+    assert call.params == {"temperature": 0, "extra_headers": {"X-Plain": "v", "x-bill-to": "other"}}
+    assert cfg.params == {"temperature": 0, "extra_headers": {"x-bill-to": "other"}}

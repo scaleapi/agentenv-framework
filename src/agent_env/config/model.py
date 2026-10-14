@@ -169,5 +169,7 @@ class ModelConfig:
         params = dict(self.params)
         headers = self.headers_for(api_base, secret_resolver=secret_resolver)
         if headers:
-            params["extra_headers"] = {**headers, **params.get("extra_headers", {})}
+            explicit = params.get("extra_headers", {})
+            overridden = {name.lower() for name in explicit}
+            params["extra_headers"] = {**{k: v for k, v in headers.items() if k.lower() not in overridden}, **explicit}
         return ModelCallConfig(api_key=key, api_base=api_base, params=params)

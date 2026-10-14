@@ -113,6 +113,17 @@ async def test_an_agent_pointed_elsewhere_gets_no_headers(monkeypatch, model_hea
 
 
 @pytest.mark.asyncio
+async def test_an_agent_whose_own_endpoint_is_the_configured_one_gets_its_headers(monkeypatch, model_headers):
+    provider = _RemoteProvider()
+    monkeypatch.setattr(sandbox_provider, "build_sandbox_provider", lambda name: provider)
+
+    with pytest.raises(_Started):
+        await _agent(default_env_vars={"LITELLM_BASE_URL": MODEL}).deploy(sandbox_type="any")
+
+    assert json.loads(provider.env["LITELLM_EXTRA_HEADERS"]) == HEADERS
+
+
+@pytest.mark.asyncio
 async def test_headers_an_agent_is_given_win(monkeypatch, model_headers):
     provider = _RemoteProvider()
     monkeypatch.setattr(sandbox_provider, "build_sandbox_provider", lambda name: provider)

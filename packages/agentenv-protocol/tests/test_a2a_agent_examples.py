@@ -64,16 +64,19 @@ StreamingAgent = _streaming.StreamingAgent
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("endpoint_headers, sent_headers", [
-    (None, {"Authorization": "Bearer request-scoped-key"}),
-    ('{"X-Bill-To": "acme", "Authorization": "Bearer theirs"}',
+@pytest.mark.parametrize("endpoint_headers, configured_url, sent_headers", [
+    (None, "https://models.example/v1", {"Authorization": "Bearer request-scoped-key"}),
+    ('{"X-Bill-To": "acme", "authorization": "Bearer theirs"}', "https://models.example/v1",
      {"X-Bill-To": "acme", "Authorization": "Bearer request-scoped-key"}),
-], ids=["no-endpoint-headers", "endpoint-headers"])
+    ('{"X-Bill-To": "acme"}', "https://configured.example/v1", {"Authorization": "Bearer request-scoped-key"}),
+], ids=["no-endpoint-headers", "endpoint-headers", "another-endpoint"])
 async def test_reference_model_forwards_generic_metadata_and_the_endpoints_headers(
     monkeypatch: pytest.MonkeyPatch,
     endpoint_headers: str | None,
+    configured_url: str,
     sent_headers: dict[str, str],
 ) -> None:
+    monkeypatch.setenv("LITELLM_BASE_URL", configured_url)
     if endpoint_headers is None:
         monkeypatch.delenv("LITELLM_EXTRA_HEADERS", raising=False)
     else:

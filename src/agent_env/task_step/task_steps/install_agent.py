@@ -292,7 +292,8 @@ class InstallAgentTaskStep(TaskStep):
                     f"{commands_key}[{i-1}] references undeclared placeholder {{{e.args[0]}}}; "
                     f"add it to the extension's required_params"
                 )
-            logger.info(f"  [{i}/{len(install_commands)}] {formatted.splitlines()[0][:140]}")
+            # The template, not the command: resolved params carry the model key and headers.
+            logger.info(f"  [{i}/{len(install_commands)}] {cmd.splitlines()[0][:140]}")
             await sandbox.exec_script(formatted)
         if not host_mode:  # copied into the container; a host install may run from it
             await sandbox.exec_script(f"rm -rf {shlex.quote(work_dir)}")

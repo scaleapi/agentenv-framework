@@ -438,7 +438,8 @@ class A2AAgent:
         if "LITELLM_BASE_URL" not in resolved_env and "LITELLM_BASE_URL" not in self.default_env_vars:
             resolved_env["LITELLM_BASE_URL"] = config.get_litellm_base_url()
         if MODEL_HEADERS_ENV not in resolved_env and MODEL_HEADERS_ENV not in self.default_env_vars:
-            headers = config.get_model_headers(resolved_env.get("LITELLM_BASE_URL"))
+            headers = config.get_model_headers(
+                resolved_env.get("LITELLM_BASE_URL", self.default_env_vars.get("LITELLM_BASE_URL")))
             if headers:
                 resolved_env[MODEL_HEADERS_ENV] = json.dumps(headers)
         if "LITELLM_BASE_URL" in resolved_env:

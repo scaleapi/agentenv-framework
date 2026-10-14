@@ -1,9 +1,17 @@
-"""Unit tests for InstallAgentTaskStep's workspace_dir plumbing (no I/O)."""
+"""Unit tests for InstallAgentTaskStep's workspace_dir plumbing, and what its install logs show (no I/O)."""
 
 from __future__ import annotations
 
+import asyncio
+import logging
+from types import SimpleNamespace
+
 import pytest
 
+from agent_env.a2a_agent import A2AAgent
+from agent_env.config.model import ModelConfig
+from agent_env.providers.sandbox_providers import sandbox_provider
+from agent_env.task_step.context import DeployedSandbox, TaskStepContext
 from agent_env.task_step.task_steps.install_agent import (
     InstallAgentTaskStep,
     _build_param_resolvers,
@@ -111,3 +119,58 @@ def test_a2a_port_roundtrip():
     assert InstallAgentTaskStep.from_dict(step.to_dict()).a2a_port == 8010
     step2 = InstallAgentTaskStep(id="s", version=None, sandbox_name="vm", a2a_agent_id="agent")
     assert InstallAgentTaskStep.from_dict(step2.to_dict()).a2a_port is None
+
+
+class _InstallSandbox:
+    def __init__(self):
+        self.scripts: list[str] = []
+
+    def scoped_name(self, name):
+        return name
+
+    def host_port(self, port):
+        return port
+
+    async def load_docker_images(self, images):
+        return None
+
+    async def load_object_file(self, url, destination):
+        return None
+
+    async def exec_script(self, script):
+        self.scripts.append(script)
+        return ""
+
+
+def _resolved(value):
+    return lambda *args, **kwargs: asyncio.sleep(0, result=value)
+
+
+@pytest.mark.asyncio
+async def test_install_logs_show_the_command_template_not_the_model_key_or_headers(monkeypatch, caplog, local_stores):
+    monkeypatch.setenv("LITELLM_BASE_URL", "http://localhost:4000/v1")
+    monkeypatch.setenv("LITELLM_API_KEY", "sk-never-logged")
+    monkeypatch.setattr(local_stores, "_model_cfg", ModelConfig(headers={"X-Bill-To": "org-never-logged"}))
+    sandbox = _InstallSandbox()
+    monkeypatch.setattr(sandbox_provider, "build_sandbox_provider",
+                        lambda name: SimpleNamespace(get_sandbox=_resolved(sandbox)))
+    image = SimpleNamespace(image_name="img", build_context_object_url="s3://bucket/ctx.tar.gz")
+    monkeypatch.setattr(A2AAgent, "get", staticmethod(lambda *args: SimpleNamespace(
+        id="agent-x", version=1, metadata={}, docker_image_artifact=image)))
+    step = InstallAgentTaskStep(id="i", version=None, sandbox_name="vm", a2a_agent_id="agent-x", agent_name="solver")
+    monkeypatch.setattr(step, "_extract_install_extension", _resolved({"params": {
+        "install_commands_host": ["start --key {litellm_api_key} --headers {litellm_extra_headers}"],
+        "required_params_host": ["litellm_api_key", "litellm_extra_headers"], "a2a_port": 8000}}))
+    monkeypatch.setattr(step, "_wait_for_agent_card", _resolved({}))
+    monkeypatch.setattr(step, "_register_instance", lambda *args: SimpleNamespace(instance_id="solver-1"))
+    context = TaskStepContext(deployed_sandboxes=[DeployedSandbox(
+        sandbox_name="vm", sandbox_id="sb-1", sandbox_mode="vm", sandbox_type="local",
+        tunnel_urls={"8000": "http://127.0.0.1:8000"})])
+
+    with caplog.at_level(logging.INFO, logger="agent_env.task_step.task_steps.install_agent"):
+        await step.execute(context)
+
+    [command] = [s for s in sandbox.scripts if s.startswith("start ")]
+    assert "sk-never-logged" in command and "org-never-logged" in command
+    assert "start --key {litellm_api_key} --headers {litellm_extra_headers}" in caplog.text
+    assert "never-logged" not in caplog.text
