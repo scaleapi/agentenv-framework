@@ -17,8 +17,11 @@ A ``run <command>`` line has it run that command in its container and add a ``ra
 
 import asyncio
 import base64
+import contextlib
 import hashlib
+import os
 import re
+import signal
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -83,13 +86,21 @@ async def _read(part: FilePart) -> str:
 
 
 async def _ran(command: str) -> str:
-    """``command``'s output, stdout and stderr together, run by the shell."""
+    """``command``'s output, stdout and stderr together, run by the shell in a process group of its own, which is
+    stopped with whatever it started if the command times out or the request is cancelled."""
     process = await asyncio.create_subprocess_shell(command, stdout=asyncio.subprocess.PIPE,
-                                                    stderr=asyncio.subprocess.STDOUT)
+                                                    stderr=asyncio.subprocess.STDOUT, start_new_session=True)
+    output = None
     try:
         output, _ = await asyncio.wait_for(process.communicate(), RUN_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
-        process.kill()
+        pass
+    finally:
+        if process.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            await process.wait()
+    if output is None:
         return f"ran {command}: timed out after {RUN_TIMEOUT_SECONDS}s"
     return f"ran {command}: {output.decode(errors='replace').strip()}"
 

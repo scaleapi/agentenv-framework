@@ -115,7 +115,7 @@ class CliArtifact(Artifact):
             gateway_env = posixpath.join(posixpath.dirname(entrypoint), _GATEWAY_ENV_FILE)
             if entrypoint not in files:
                 problems.append(ctx.config_problem(f"entrypoint {entrypoint!r} isn't one of this folder's files"))
-            elif gateway_env in files:
+            elif any(name == gateway_env or name.startswith(f"{gateway_env}/") for name in files):
                 problems.append(f"{gateway_env}: installing the CLI writes the gateway URL to this file, beside its "
                                 "entrypoint; rename or remove the folder's own")
         if problems:

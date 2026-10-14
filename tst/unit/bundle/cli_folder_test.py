@@ -95,11 +95,14 @@ def test_a_cli_folder_its_walk_refuses_is_reported_once(bundle_dir, tmp_path):
     (TOML, {"artifacts/hello/bin/.env": "AGENT_ENV_GATEWAY_URL=mine\n"},
      "artifacts/hello: bin/.env: installing the CLI writes the gateway URL to this file, beside its entrypoint; "
      "rename or remove the folder's own"),
+    (TOML, {"artifacts/hello/bin/.env/settings": "x\n"},
+     "artifacts/hello: bin/.env: installing the CLI writes the gateway URL to this file, beside its entrypoint; "
+     "rename or remove the folder's own"),
     (TOML + 'env_id = "crm"\n', {},
      "artifacts/hello: artifact.toml: unknown key 'env_id'; a cli artifact takes command_name, entrypoint, type "
      "and id"),
 ], ids=["no command_name", "no entrypoint", "command_name a path", "no such entrypoint", "its own .env",
-        "unknown key"])
+        "a .env folder", "unknown key"])
 def test_a_cli_folder_that_couldnt_be_installed_as_written_is_refused_before_any_write(bundle_dir, toml, extra,
                                                                                        problem):
     layout(bundle_dir, {**FILES, "artifacts/hello/artifact.toml": toml, **extra})
