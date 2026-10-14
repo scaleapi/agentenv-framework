@@ -43,25 +43,31 @@ class LiveTrajectoryChunks:
         self._directory = f"{prefix_key}{turn_id}/live/"
         self._format_written = False
         self._stored = 0
+        self._storing: asyncio.Future | None = None
         self._ended = False
 
     async def __call__(self, batch: TrajectoryBatch) -> None:
         if batch.events:
-            body = b"".join(
-                json.dumps(event, separators=(",", ":")).encode() + b"\n" for event in batch.events
-            )
-            await self._put(f"{batch.after:08d}-{batch.next:08d}.jsonl", body, "application/x-ndjson")
-            self._stored = batch.next
+            # Shielded, so a cancelled follower's write still counts its events: ``end`` waits for it.
+            self._storing = asyncio.ensure_future(self._store_events(batch))
+            await asyncio.shield(self._storing)
         if batch.format and not self._format_written:
             await self._put("meta.json", json.dumps({"format": batch.format}).encode(), "application/json")
             self._format_written = True
         if batch.last:
             await self.end(batch.state)
 
+    async def _store_events(self, batch: TrajectoryBatch) -> None:
+        body = b"".join(json.dumps(event, separators=(",", ":")).encode() + b"\n" for event in batch.events)
+        await self._put(f"{batch.after:08d}-{batch.next:08d}.jsonl", body, "application/x-ndjson")
+        self._stored = batch.next
+
     async def end(self, state: TrajectoryState) -> None:
         """Mark the turn ended in ``state`` after the events stored so far; the first mark stays."""
         if self._ended:
             return
+        if self._storing is not None:
+            await asyncio.wait({self._storing})
         end = {"state": state.value, "next": self._stored}
         await self._put("end.json", json.dumps(end).encode(), "application/json")
         self._ended = True

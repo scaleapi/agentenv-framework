@@ -229,8 +229,17 @@ async def test_a_failed_turn_stops_its_follower_without_draining_and_marks_it_en
 
 @pytest.mark.asyncio
 async def test_a_cancelled_turn_is_marked_ended_after_the_events_it_stored(monkeypatch, tmp_path):
+    """The step is cancelled once the page is stored but before its write has returned."""
     _agent_answering(monkeypatch, _page(0, [{"i": 0}, {"i": 1}], "running"), _page(2, [], "running"))
     store = LocalFilesystemObjectStore(str(tmp_path))
+    put = store.put
+
+    def put_then_linger(key, body, *, content_type):
+        put(key, body, content_type=content_type)
+        if key.endswith(".jsonl"):
+            time.sleep(0.2)
+
+    monkeypatch.setattr(store, "put", put_then_linger)
 
     with pytest.raises(asyncio.CancelledError):
         async with following_live_trajectory(
