@@ -146,6 +146,7 @@ class _Planner:
         store_refs, store_latest = self._check_store_refs(closure)
         self._build_tasks(closure)
         self._check_files(closure)
+        self._check_cli_loads(closure)
         self._check_env_types(closure)
         self._check_multi_names(closure, store_latest)
         self._check_universes(closure, store_latest)
@@ -164,6 +165,7 @@ class _Planner:
         self._check_store_refs(everything, stores=False)
         self._build_tasks(everything)
         self._check_files(everything)
+        self._check_cli_loads(everything)
         self._check_universes(everything, None)
         self._check_loaded_environments(everything, None)
         if self.problems:
@@ -370,6 +372,45 @@ class _Planner:
                     self.accepted[key] = accept(source.config, ctx)
             except BundleError as e:
                 self.problems.extend(e.problems)
+
+    def _check_cli_loads(self, closure: set[_Key]) -> None:
+        """Each load of one of the bundle's CLIs names what installing it needs, an agent and an env whose gateway it
+        reads, and no two of a task's loads install one command into one agent, where the second would replace the
+        first."""
+        registry = get_artifact_registry()
+        clis = {source.entry.id: source.entry for source in self.nodes.values()
+                if isinstance(source, ResolvedEntry) and source.entry.kind is BundleKind.ARTIFACT
+                and issubclass(registry.get(canonical_type(source.entry.type)) or object, CliArtifact)}
+        for key in sorted(closure, key=self.rank.__getitem__):
+            source = self.nodes[key]
+            if not (isinstance(source, ResolvedEntry) and source.entry.kind is BundleKind.TASK):
+                continue
+            installed: dict[tuple[str, str], tuple[Any, str]] = {}
+            for config in source.config:
+                try:
+                    step = build_step(config)
+                except Exception:
+                    continue  # reported by the task check
+                if not isinstance(step, LoadArtifactTaskStep):
+                    continue
+                where = f"{self._path(source.entry)}: step {step.id!r}"
+                for cli in (clis[ref["id"]] for ref in step.artifacts if ref.get("id") in clis):
+                    missing = [name for name in ("agent_name", "env_id") if not getattr(step, name)]
+                    if missing:
+                        needs = " and ".join(missing)
+                        self.problems.append(f"{where}: loading the CLI {cli.name!r} installs it into an agent and "
+                                             f"points it at an env's gateway, so the step needs {needs}")
+                        continue
+                    command = self.accepted.get(_key(cli), {}).get("command_name")
+                    if command is None:
+                        continue  # its artifact.toml's problem is reported by the file check
+                    if (step.agent_name, command) in installed:
+                        first, name = installed[step.agent_name, command]
+                        self.problems.append(f"{where}: installs the CLI {cli.name!r} as {command!r} in agent "
+                                             f"{step.agent_name!r}, where step {first!r} already installed {name!r} "
+                                             "under that command; give one another command_name")
+                    else:
+                        installed[step.agent_name, command] = (step.id, cli.name)
 
     def _env_accept(self, entry: BundleEntry) -> Any:
         """How ``entry``'s env type checks its env.toml, when it's an env written from one and checks it at all."""

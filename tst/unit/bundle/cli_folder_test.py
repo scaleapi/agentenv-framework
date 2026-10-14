@@ -82,6 +82,37 @@ def test_a_cli_folder_its_walk_refuses_is_reported_once(bundle_dir, tmp_path):
         "points to into the bundle, or put it in a store and refer to it by id"]
 
 
+def _loads(*steps):
+    return {"tasks/t.json": json.dumps([{"type": "load_artifact", "env_id": "items", "agent_name": "default-agent",
+                                         **step} for step in steps])}
+
+
+@pytest.mark.parametrize("target, missing", [({"env_id": "items"}, "agent_name"), ({"agent_name": "a"}, "env_id")])
+def test_a_load_of_a_cli_folder_missing_what_installing_it_needs_is_refused(bundle_dir, target, missing):
+    layout(bundle_dir, {**FILES, "tasks/t.json": json.dumps([
+        {"id": "load", "type": "load_artifact", "artifact_id": "hello", **target}])})
+
+    assert ("tasks/t.json: step 'load': loading the CLI 'hello' installs it into an agent and points it at an env's "
+            f"gateway, so the step needs {missing}") in _problems(bundle_dir)
+
+
+def test_two_cli_folders_installed_as_one_command_in_one_agent_are_refused(bundle_dir):
+    layout(bundle_dir, {**FILES, "artifacts/hi/artifact.toml": TOML, "artifacts/hi/bin/hello": "#!/bin/sh\n",
+                        **_loads({"id": "load", "artifact_id": "hello"}, {"id": "load-hi", "artifact_id": "hi"})})
+
+    assert ("tasks/t.json: step 'load-hi': installs the CLI 'hi' as 'hello' in agent 'default-agent', where step "
+            "'load' already installed 'hello' under that command; give one another command_name") in _problems(
+        bundle_dir)
+
+
+def test_two_cli_folders_of_one_command_may_go_to_different_agents(bundle_dir):
+    layout(bundle_dir, {**FILES, "artifacts/hi/artifact.toml": TOML, "artifacts/hi/bin/hello": "#!/bin/sh\n",
+                        **_loads({"id": "load", "artifact_id": "hello"},
+                                 {"id": "load-hi", "artifact_id": "hi", "agent_name": "reviewer"})})
+
+    assert not [problem for problem in _problems(bundle_dir) if "CLI" in problem]
+
+
 @pytest.mark.parametrize("toml, extra, problem", [
     ('type = "cli"\nentrypoint = "bin/hello"\n', {},
      "artifacts/hello: artifact.toml: command_name is required"),
