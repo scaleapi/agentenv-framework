@@ -465,10 +465,10 @@ def test_adding_a_plugin_by_its_bare_name_keeps_the_version_the_tool_pins(tmp_pa
     before = tool.state()
 
     again = tool.cli("plugin", "add", GRADER, "--yes")
-    tool.rebuild()
 
     assert again.returncode == 0 and "Nothing changed" in again.stdout, again.stdout + again.stderr
     assert tool.state()[1] == before[1]
+    tool.rebuild()
     assert tool.plugins()[GRADER]["version"] == "0.3.0"
 
 
