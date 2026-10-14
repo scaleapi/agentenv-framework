@@ -74,14 +74,14 @@ def _build_steps(steps: list[dict]) -> list[tuple[dict, object]]:
             raise SystemExit(1)
         kwargs = {k: v for k, v in step_dict.items() if k != "type"}
         kwargs.setdefault("version", None)
-        # retry_config lives on the TaskStep base but most step __init__s don't
-        # accept it; construct without it and hydrate (as Task.from_dict does),
-        # so retry_config on any step type doesn't crash create. put() below
-        # handles the kwargs form the same way.
-        from agent_env.task_step.task_step import attach_retry_config
+        # retry_config and when live on the TaskStep base but most step __init__s
+        # don't accept them; construct without them and hydrate (as Task.from_dict
+        # does), so they don't crash create on any step type. put() below handles
+        # the kwargs form the same way.
+        from agent_env.task_step.task_step import UNFORWARDED_BASE_FIELDS, attach_base_fields
 
-        ctor_kwargs = {k: v for k, v in kwargs.items() if k != "retry_config"}
-        step = attach_retry_config(step_cls(**ctor_kwargs), step_dict)
+        ctor_kwargs = {k: v for k, v in kwargs.items() if k not in UNFORWARDED_BASE_FIELDS}
+        step = attach_base_fields(step_cls(**ctor_kwargs), step_dict)
         built.append((kwargs, step))
     return built
 

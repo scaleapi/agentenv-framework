@@ -19,7 +19,7 @@ from agent_env.plugins import _registration
 from agent_env.store.routing import run_scope
 from agent_env.task_step.context import TaskStepContext, regraft_redacted_keys
 from agent_env.task_step.context_ops import ContextUpdateOps, build_context_update_ops
-from agent_env.task_step.task_step import RetryConfig, TaskStep
+from agent_env.task_step.task_step import RetryConfig, TaskStep, record_skip, skip_reason
 
 if TYPE_CHECKING:
     from agent_env.task.store import TaskInstance, TaskQuery
@@ -109,13 +109,13 @@ def substitute_seed_in_steps(steps: list["TaskStep"], seed: dict) -> list["TaskS
             return {k: _sub(v) for k, v in value.items()}
         return value
 
-    from agent_env.task_step.task_step import attach_retry_config
+    from agent_env.task_step.task_step import attach_base_fields
 
     registry = get_task_step_registry()
     out: list["TaskStep"] = []
     for step in steps:
         data = _sub(step.to_dict())
-        out.append(attach_retry_config(registry[step.type].from_dict(data), data))
+        out.append(attach_base_fields(registry[step.type].from_dict(data), data))
     return out
 
 
@@ -378,9 +378,9 @@ class Task:
                 raise ValueError(
                     f"Unknown task step type: {step_type}{_registration.failure_note(_registration.TASK_STEPS, step_type)}"
                 )
-            from agent_env.task_step.task_step import attach_retry_config
+            from agent_env.task_step.task_step import attach_base_fields
 
-            steps.append(attach_retry_config(step_cls.from_dict(step_dict), step_dict))
+            steps.append(attach_base_fields(step_cls.from_dict(step_dict), step_dict))
         return cls(
             id=data["id"],
             version=data.get("version"),
@@ -583,8 +583,14 @@ class Task:
             pre_context = copy.deepcopy(context)
             started_mono = time.monotonic()
             started_utc = datetime.now(timezone.utc).isoformat()
+            status = _store.TaskStepStatus.SUCCESS
             try:
-                await step.execute(context)
+                reason = skip_reason(step, context)
+                if reason is None:
+                    await step.execute(context)
+                else:
+                    record_skip(step, context, reason)
+                    status = _store.TaskStepStatus.SKIPPED
             except asyncio.CancelledError:
                 raise
             except BaseException as exc:
@@ -600,11 +606,14 @@ class Task:
                     await _heartbeat_step(step, pre_context, _store.TaskStepStatus.FAILURE, dispatch_epoch)
                 raise
             duration = time.monotonic() - started_mono
-            await _heartbeat_step(step, pre_context, _store.TaskStepStatus.SUCCESS, dispatch_epoch)
-            logger.info(
-                "%sStep %s (%s) completed in %.1fs",
-                log_prefix, step.id, step.type, duration,
-            )
+            await _heartbeat_step(step, pre_context, status, dispatch_epoch)
+            if status is _store.TaskStepStatus.SKIPPED:
+                logger.info("%sStep %s (%s) skipped: %s", log_prefix, step.id, step.type, reason)
+            else:
+                logger.info(
+                    "%sStep %s (%s) completed in %.1fs",
+                    log_prefix, step.id, step.type, duration,
+                )
             if on_step_complete:
                 result = on_step_complete(idx, total, step, context, duration)
                 if inspect.isawaitable(result):

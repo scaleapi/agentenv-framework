@@ -153,6 +153,7 @@ def reset_task_store() -> None:
 class TaskStepStatus(StrEnum):
     SUCCESS = "success"
     FAILURE = "failure"
+    SKIPPED = "skipped"
 
 
 @dataclass

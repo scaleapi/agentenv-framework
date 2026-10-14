@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
@@ -46,6 +47,79 @@ def attach_retry_config(step: "TaskStep", data: dict[str, Any]) -> "TaskStep":
     if raw is not None and getattr(step, "retry_config", None) is None:
         step.retry_config = RetryConfig.from_dict(raw)
     return step
+
+
+UNFORWARDED_BASE_FIELDS = ("retry_config", "when", "if_dependency_skipped")
+SKIPPED_STEPS_KEY = "skipped_steps"
+_IF_DEPENDENCY_SKIPPED = ("skip", "run")
+
+
+def attach_base_fields(step: "TaskStep", data: dict[str, Any]) -> "TaskStep":
+    """Hydrate the base fields step ``__init__``s don't forward (``retry_config``, ``when``,
+    ``if_dependency_skipped``) after ``step_cls.from_dict``, so they survive every round-trip."""
+    attach_retry_config(step, data)
+    if data.get("when") is not None and getattr(step, "when", None) is None:
+        step.when = check_when(data["when"])
+    if data.get("if_dependency_skipped") is not None:
+        step.if_dependency_skipped = check_if_dependency_skipped(data["if_dependency_skipped"])
+    return step
+
+
+def check_if_dependency_skipped(value: Any) -> str:
+    if value in _IF_DEPENDENCY_SKIPPED:
+        return value
+    raise ValueError(f"if_dependency_skipped is 'skip' or 'run', not {value!r}")
+
+
+def skip_reason(step: "TaskStep", context: TaskStepContext) -> str | None:
+    """Why ``step`` is skipped in this run, or None to run it: its seed-substituted ``when`` is false, or a
+    step it names in ``depends_on`` was skipped (unless it sets ``if_dependency_skipped: run``). Implicit
+    ordering (``depends_on`` None) does not carry a skip. Skips are read from ``context.metadata``, so a
+    resumed run, or a runner that dispatches steps one at a time, sees the earlier ones."""
+    when = getattr(step, "when", None)
+    if not evaluate_when(when):
+        return f"when={when!r}"
+    if getattr(step, "if_dependency_skipped", "skip") == "run":
+        return None
+    skipped = {s["step_id"] for s in context.metadata.get(SKIPPED_STEPS_KEY) or []}
+    for dep in getattr(step, "depends_on", None) or []:
+        if dep.task_step_id in skipped:
+            return f"dependency {dep.task_step_id!r} was skipped"
+    return None
+
+
+def record_skip(step: "TaskStep", context: TaskStepContext, reason: str) -> None:
+    """Add ``step`` to the run's skips once; a retried dispatch rehydrates a context that may already hold it."""
+    skipped = context.metadata.setdefault(SKIPPED_STEPS_KEY, [])
+    if all(s["step_id"] != step.id for s in skipped):
+        skipped.append({"step_id": step.id, "reason": reason})
+
+
+_WHEN_TRUE = frozenset({"true", "yes", "on", "1"})
+_WHEN_FALSE = frozenset({"false", "no", "off", "0", ""})
+_UNRESOLVED_PLACEHOLDER = re.compile(r"<[A-Za-z0-9_.-]+>")
+
+
+def check_when(when: Any) -> str | bool:
+    """``when`` as stored: a bool, or a string the run's seed may substitute into one."""
+    if isinstance(when, (bool, str)):
+        return when
+    raise ValueError(f"when is a bool or a string, not {when!r}")
+
+
+def evaluate_when(when: str | bool | None) -> bool:
+    """Whether a step with this ``when`` runs. None always runs; a string must, after seed
+    substitution, be true/yes/on/1 or false/no/off/0/empty."""
+    if when is None or isinstance(when, bool):
+        return when is not False
+    value = when.strip().lower()
+    if value in _WHEN_TRUE:
+        return True
+    if value in _WHEN_FALSE:
+        return False
+    if _UNRESOLVED_PLACEHOLDER.search(when):
+        raise ValueError(f"when={when!r} still holds a placeholder: the run's seed has no value for it")
+    raise ValueError(f"when={when!r} is not a boolean; use true/yes/on/1 or false/no/off/0")
 
 
 @dataclass
@@ -103,6 +177,8 @@ class TaskStep(ABC):
         depends_on: Optional[list] = None,
         fail_task_on_error: bool = True,
         retry_config: Optional["RetryConfig | dict"] = None,
+        when: Optional[str | bool] = None,
+        if_dependency_skipped: str = "skip",
     ):
         self.id = id
         self.version = version
@@ -111,6 +187,8 @@ class TaskStep(ABC):
         if retry_config is not None and not isinstance(retry_config, RetryConfig):
             retry_config = RetryConfig.from_dict(retry_config)
         self.retry_config = retry_config
+        self.when = None if when is None else check_when(when)
+        self.if_dependency_skipped = check_if_dependency_skipped(if_dependency_skipped)
 
     @abstractmethod
     async def execute(self, context: TaskStepContext) -> TaskStepContext | None:
@@ -138,6 +216,10 @@ class TaskStep(ABC):
             base["depends_on"] = [dataclasses.asdict(d) for d in self.depends_on]
         if self.retry_config is not None:
             base["retry_config"] = dataclasses.asdict(self.retry_config)
+        if getattr(self, "when", None) is not None:
+            base["when"] = self.when
+        if getattr(self, "if_dependency_skipped", "skip") != "skip":
+            base["if_dependency_skipped"] = self.if_dependency_skipped
         return base
 
     @classmethod
@@ -163,13 +245,10 @@ class TaskStep(ABC):
         from .store import get_task_step_store
 
         kwargs.setdefault("version", None)
-        # Most step __init__s don't accept retry_config (it lives on the base but
-        # subclasses don't forward it); construct without it, then hydrate so a
-        # retry_config on any step type round-trips through the step store.
-        retry_config_raw = kwargs.pop("retry_config", None)
-        instance = cls(**kwargs)
-        if retry_config_raw is not None:
-            attach_retry_config(instance, {"retry_config": retry_config_raw})
+        # Most step __init__s don't accept the unforwarded base fields; construct
+        # without them, then hydrate so they round-trip through the step store on any step type.
+        base_fields = {k: kwargs.pop(k) for k in UNFORWARDED_BASE_FIELDS if k in kwargs}
+        instance = attach_base_fields(cls(**kwargs), base_fields)
         return get_task_step_store().put_document(instance)
 
     @classmethod
