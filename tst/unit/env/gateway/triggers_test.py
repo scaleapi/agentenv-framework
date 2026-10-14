@@ -93,34 +93,17 @@ def executor_calls(monkeypatch):
 
 
 @pytest.fixture
-def waits(monkeypatch):
-    """Every virtual-time wait the engine makes, in virtual seconds; none of them actually sleeps."""
-    waited: list[float] = []
-
-    async def fake_sleep(self, seconds):
-        waited.append(seconds)
-
-    monkeypatch.setattr(TriggerEngine, "_sleep_virtual", fake_sleep)
-    return waited
+def waits(engine, monkeypatch):
+    """Every virtual-time wait the engine makes, in virtual seconds, on an unarmed clock whose source only the waits
+    advance, so none of them actually sleeps."""
+    return _fake_waits(engine, monkeypatch)
 
 
 @pytest.fixture
 def virtual_time(engine, monkeypatch):
     """The engine's clock armed at 2026-10-14T08:00Z (a Wednesday) on a fake source; each wait advances it at once
     and is recorded in virtual seconds, and `.advance(s)` moves it by `s` virtual seconds."""
-    source = {"t": 0.0}
-    clock = Clock(now_fn=lambda: source["t"])
-    clock.set_time("2026-10-14T08:00:00Z")
-    engine._test_gw._clock = clock
-    waited = _Waits()
-    waited.advance = lambda seconds: source.__setitem__("t", source["t"] + seconds / clock.rate)
-
-    async def fake_sleep(self, seconds):
-        waited.append(seconds)
-        waited.advance(seconds)
-
-    monkeypatch.setattr(TriggerEngine, "_sleep_virtual", fake_sleep)
-    return waited
+    return _fake_waits(engine, monkeypatch, armed_at="2026-10-14T08:00:00Z")
 
 
 def _registration(**overrides):
@@ -204,11 +187,15 @@ def _registration(**overrides):
                               ({"dist": "exp", "mean": "PT0S", "seed": 1}, "delay.mean must be a positive")]],
     ({"triggers": [{"id": "x", "when": {"type": "action", "tool": "t"}, "barrier": {"at": "provoking_call"},
                     "actions": [{"type": "tool", "tool": "t2", "delay": "PT1M"}]}]}, "can't run under a barrier"),
+    ({"executors": {"bob": {"a2a_url": "http://b", "role": "bob", "hours": {"start": "09:00", "end": "17:00"}}},
+      "triggers": [{"id": "x", "when": {"type": "action", "tool": "t"}, "barrier": {"at": "provoking_call"},
+                    "actions": [{"type": "nl", "executor": "bob", "instruction": "hi"}]}]}, "can't run under a barrier"),
     *[({"executors": {"bob": {"a2a_url": "http://b", "role": "bob", "hours": hours}}, "triggers": []}, fragment)
       for hours, fragment in [({"start": "9:00", "end": "17:00"}, "hours.start must be a 24-hour"),
                               ({"start": "09:00", "end": "09:00"}, "would never be available"),
                               ({"start": "09:00", "end": "17:00", "utc_offset": "PST"}, "utc_offset must look like"),
-                              ({"start": "09:00", "end": "17:00", "days": ["monday"]}, "hours.days must be")]],
+                              ({"start": "09:00", "end": "17:00", "days": ["monday"]}, "hours.days must be"),
+                              ({"start": "09:00", "end": "17:00", "days": [["mon"]]}, "hours.days must be")]],
     ({"triggers": [{"id": "x", "when": {"type": "action", "tool": "t", "unless": {"tool": "t2"}}, "actions": []}]},
      "when.unless is only valid on time triggers"),
     ({"triggers": [{"id": "x", "when": {"type": "time", "every": "PT1H", "unless": {"tool": "t2"}}, "actions": []}]},
@@ -445,7 +432,7 @@ async def test_an_executor_write_prompts_only_the_state_triggers_that_list_it(en
 
 
 @pytest.mark.asyncio
-async def test_a_delay_waits_its_virtual_time_before_the_action(engine, executor_calls, waits):
+async def test_a_delay_waits_its_virtual_time_before_the_action(engine, executor_calls, virtual_time):
     engine.register({"executors": {"bob": {"a2a_url": "http://bob", "role": "bob"}},
                      "triggers": [{"id": "x", "when": {"type": "action", "tool": "t"},
                                    "actions": [{"type": "nl", "executor": "bob", "instruction": "reply",
@@ -453,11 +440,39 @@ async def test_a_delay_waits_its_virtual_time_before_the_action(engine, executor
     engine.on_tool_call("default", "t", {}, _result())
     await asyncio.sleep(0.2)
 
-    assert waits == [1200.0] and len(executor_calls) == 1
-    kinds = [e["kind"] for e in engine._events if e.get("trigger_id") == "x"]
-    assert kinds.index("delayed") < kinds.index("action_ok")
+    assert virtual_time == [1200.0] and len(executor_calls) == 1
     [delayed] = [e for e in engine._events if e["kind"] == "delayed"]
+    [acted] = [e for e in engine._events if e["kind"] == "action_ok"]
     assert (delayed["virtual_seconds"], delayed["executor"]) == (1200.0, "bob")
+    assert (delayed["virtual_time"], acted["virtual_time"]) == ("2026-10-14T08:00:00Z", "2026-10-14T08:20:00Z")
+
+
+@pytest.mark.asyncio
+async def test_queued_calls_each_wait_out_their_delay_from_their_own_call(engine, virtual_time):
+    engine.register({"triggers": [{"id": "x", "when": {"type": "action", "tool": "t", "repeat": True},
+                                   "actions": [{"type": "tool", "tool": "slack_send_message",
+                                                "args": {"channel": "#c", "text": "hi"}, "delay": "PT1H"}]}]})
+    for _ in range(3):  # 08:00, 08:01 and 08:02, all before the first reply's turn
+        engine.on_tool_call("default", "t", {}, _result())
+        virtual_time.advance(60)
+    await asyncio.sleep(0.2)
+
+    replies = [e["virtual_time"] for e in engine._events if e["kind"] == "action_ok"]
+    assert replies == ["2026-10-14T09:00:00Z", "2026-10-14T09:01:00Z", "2026-10-14T09:02:00Z"]
+
+
+@pytest.mark.asyncio
+async def test_due_marks_wait_their_delay_from_the_mark_not_from_the_last_reply(engine, virtual_time):
+    engine.register({"triggers": [{"id": "x", "when": {"type": "time", "every": "PT1H"},
+                                   "actions": [{"type": "tool", "tool": "slack_send_message",
+                                                "args": {"channel": "#c", "text": "hi"}, "delay": "PT30M"}]}]})
+    engine._eval_time_triggers()
+    virtual_time.advance(3 * 3600)  # 11:00: the 09:00, 10:00 and 11:00 marks come due together
+    engine._eval_time_triggers()
+    await asyncio.sleep(0.2)
+
+    replies = [e["virtual_time"] for e in engine._events if e["kind"] == "action_ok"]
+    assert replies == ["2026-10-14T11:00:00Z", "2026-10-14T11:00:00Z", "2026-10-14T11:30:00Z"]
 
 
 @pytest.mark.asyncio
@@ -485,8 +500,31 @@ async def test_working_hours_defer_an_nl_action_until_they_open(engine, executor
     await asyncio.sleep(0.2)
 
     [deferred] = [e for e in engine._events if e["kind"] == "deferred"]
-    assert (deferred["until"], deferred["executor"]) == ("2026-10-14T09:00:00Z", "bob")
+    [acted] = [e for e in engine._events if e["kind"] == "action_ok"]
+    assert (deferred["until"], deferred["executor"], acted["virtual_time"]) == (
+        "2026-10-14T09:00:00Z", "bob", "2026-10-14T09:00:00Z")
     assert virtual_time == [3600.0] and len(executor_calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change, until", [
+    (lambda c: c.set_time("2026-10-19T10:00:00Z", rate=3600), ["2026-10-19T09:00:00Z"]),
+    (lambda c: c.set_time("2026-10-17T12:00:00Z", rate=3600), ["2026-10-19T09:00:00Z"] * 2),
+    (lambda c: c.clear(), ["2026-10-19T09:00:00Z"]),
+], ids=["re-armed-into-hours", "re-armed-still-closed", "cleared"])
+async def test_working_hours_are_reckoned_again_after_a_re_arm_and_lifted_by_a_clear(engine, monkeypatch, change,
+                                                                                      until):
+    stepped = _SteppedClock(engine, monkeypatch)
+    stepped.clock.set_time("2026-10-16T18:00:00Z", rate=3600)  # a Friday evening, closed until Monday 09:00
+    stepped.at[1] = lambda: change(stepped.clock)
+    trig = {"waiting": False}
+    hours = {"start": "09:00", "end": "17:00", "utc_offset": "+00:00", "days": ["mon", "tue", "wed", "thu", "fri"]}
+
+    await engine._await_hours("x", trig, 0, hours, {})
+
+    assert [e["until"] for e in engine._events if e["kind"] == "deferred"] == until and not trig["waiting"]
+    now = stepped.clock.now()
+    assert now is None or now.strftime("%a %H:%M") in ("Mon 09:00", "Mon 10:00")
 
 
 @pytest.mark.asyncio
@@ -578,6 +616,93 @@ async def test_a_deadline_nobody_cancels_fires_when_due(engine, virtual_time):
     engine._eval_time_triggers()
     await asyncio.sleep(0.1)
     assert engine._triggers["deadline"]["status"] == "fired"
+
+
+@pytest.mark.asyncio
+async def test_a_reply_while_the_anchor_is_still_acting_cancels_the_deadline(engine, monkeypatch, virtual_time):
+    async def bob_dms_and_is_answered_before_he_reports_back(self, executor, instruction, context_id):
+        engine.on_tool_call("default", "slack_send_message", {}, _result())
+        return "done"
+
+    monkeypatch.setattr(TriggerEngine, "_call_executor", bob_dms_and_is_answered_before_he_reports_back)
+    registration = _deadline()
+    registration["triggers"][0]["actions"] = [{"type": "nl", "executor": "bob", "instruction": "DM the solver"}]
+    engine.register(registration)
+    engine.on_tool_call("default", "t", {}, _result())
+    await asyncio.sleep(0.1)
+    assert (engine._triggers["dm"]["status"], engine._triggers["deadline"]["status"]) == ("fired", "cancelled")
+    assert not [e for e in engine._events if e["kind"] == "anchored"]
+
+    virtual_time.advance(3600)
+    engine._eval_time_triggers()
+    await asyncio.sleep(0.1)
+    assert engine._triggers["deadline"]["fire_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_reply_after_the_deadline_is_due_comes_too_late(engine, virtual_time):
+    engine.register(_deadline())
+    engine.on_tool_call("default", "t", {}, _result())
+    await asyncio.sleep(0.1)
+    virtual_time.advance(31 * 60)  # due, though nothing has looked yet
+    engine.on_tool_call("default", "slack_send_message", {}, _result())
+    await asyncio.sleep(0.1)
+    assert engine._triggers["deadline"]["status"] == "fired"
+    assert not [e for e in engine._events if e["kind"] == "cancelled"]
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_deadline_retires_the_triggers_anchored_on_it(engine, virtual_time):
+    engine.register({"triggers": [
+        {"id": "nudge", "when": {"type": "time", "at": "PT1H", "unless": {"tool": "slack_send_message"}}, "actions": []},
+        {"id": "escalate", "when": {"type": "time", "after": "nudge", "offset": "PT1H"}, "actions": []}]})
+    engine.on_tool_call("default", "slack_send_message", {}, _result())
+
+    assert {t["id"]: t["status"] for t in engine.state()["triggers"]} == {"nudge": "cancelled", "escalate": "cancelled"}
+    assert not engine._has_time_triggers
+    cancelled = [e for e in engine._events if e["kind"] == "cancelled"]
+    assert [(e["trigger_id"], e.get("anchor")) for e in cancelled] == [("nudge", None), ("escalate", "nudge")]
+
+
+def test_a_null_unless_means_none(engine):
+    engine.register({"triggers": [{"id": "a", "when": {"type": "action", "tool": "t", "unless": None}, "actions": []},
+                                  {"id": "b", "when": {"type": "time", "at": "PT1H", "unless": None}, "actions": []}]})
+    assert all("unless" not in t["spec"]["when"] for t in engine._triggers.values())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reset", ["remove", "clear"])
+async def test_removing_or_clearing_a_trigger_mid_delay_ends_its_fire_without_a_trace(engine, reset):
+    engine.register({"triggers": [{"id": "x", "when": {"type": "action", "tool": "t"},
+                                   "actions": [{"type": "tool", "tool": "slack_send_message",
+                                                "args": {"channel": "#c", "text": "hi"}, "delay": "PT1H"}]}]})
+    engine.on_tool_call("default", "t", {}, _result())
+    await asyncio.sleep(0.05)
+    assert engine.state()["triggers"][0]["waiting"] is True
+
+    engine.remove({"ids": ["x"]}) if reset == "remove" else engine.clear()
+    await asyncio.sleep(0.05)
+    assert engine._test_state["slack"] == []
+    expected = ["added", "detected", "delayed", "removed"] if reset == "remove" else []
+    assert [e["kind"] for e in engine._events] == expected
+
+
+@pytest.mark.asyncio
+async def test_each_fire_is_numbered_failed_ones_included(engine, monkeypatch):
+    seen, replies = [], iter([None, "done", "done"])
+
+    async def executor(self, executor, instruction, context_id):
+        seen.append(engine.caused_by("bob"))
+        return next(replies)
+
+    monkeypatch.setattr(TriggerEngine, "_call_executor", executor)
+    engine.register({"executors": {"bob": {"a2a_url": "http://bob", "role": "bob"}},
+                     "triggers": [{"id": "x", "when": {"type": "action", "tool": "t", "repeat": True},
+                                   "actions": [{"type": "nl", "executor": "bob", "instruction": "reply"}]}]})
+    for _ in range(3):
+        engine.on_tool_call("default", "t", {}, _result())
+        await asyncio.sleep(0.05)
+    assert [causes[0]["fire"] for causes in seen] == [1, 2, 3] and engine._triggers["x"]["fire_count"] == 2
 
 
 def test_generated_id_on_omit(engine):
@@ -814,16 +939,29 @@ class _ExecutorCalls(list):
 @pytest.mark.parametrize("rate, virtual_seconds, steps", [(60, 1200, [5.0, 5.0, 5.0, 5.0]), (None, 12, [5.0, 5.0, 2.0])],
                          ids=["armed-at-60x", "unarmed"])
 async def test_waiting_virtual_time_follows_the_clock_rate(engine, monkeypatch, rate, virtual_seconds, steps):
-    slept: list[float] = []
-
-    async def fake_sleep(seconds):
-        slept.append(seconds)
-
-    monkeypatch.setattr(triggers_module.asyncio, "sleep", fake_sleep)
+    stepped = _SteppedClock(engine, monkeypatch)
     if rate is not None:
-        engine._test_gw._clock.set_time("2026-10-14T08:00:00Z", rate=rate)
+        stepped.clock.set_time("2026-10-14T08:00:00Z", rate=rate)
     await engine._sleep_virtual(virtual_seconds)
-    assert slept == steps
+    assert stepped.slept == steps
+
+
+@pytest.mark.asyncio
+async def test_waiting_virtual_time_holds_while_frozen_follows_a_new_rate_and_skips_a_re_arm_s_jump(engine, monkeypatch):
+    stepped = _SteppedClock(engine, monkeypatch)
+    stepped.at[1] = lambda: stepped.clock.set_time("2026-10-14T08:00:00Z", rate=0)  # after 5 unarmed seconds
+    stepped.at[3] = lambda: stepped.clock.set_time("2026-10-20T08:00:00Z", rate=4)  # six days on, then 4x
+    await engine._sleep_virtual(13)
+    assert stepped.slept == [5.0, 5.0, 5.0, 2.0]
+
+
+@pytest.mark.asyncio
+async def test_a_wait_tied_to_a_clock_generation_ends_when_the_clock_moves_on(engine, monkeypatch):
+    stepped = _SteppedClock(engine, monkeypatch)
+    stepped.clock.set_time("2026-10-14T08:00:00Z")
+    stepped.at[1] = stepped.clock.clear
+    await engine._sleep_virtual(3600, generation=stepped.clock.generation)
+    assert stepped.slept == [5.0]
 
 
 @pytest.mark.asyncio
@@ -859,3 +997,39 @@ async def test_tool_call_events_carry_the_callers_role_and_the_fire_an_executor_
 
 class _Waits(list):
     advance = None
+
+
+def _fake_waits(engine, monkeypatch, armed_at=None) -> _Waits:
+    source = {"t": 0.0}
+    clock = Clock(now_fn=lambda: source["t"])
+    if armed_at is not None:
+        clock.set_time(armed_at)
+    engine._test_gw._clock = clock
+    waited = _Waits()
+    waited.advance = lambda seconds: source.__setitem__("t", source["t"] + seconds / clock.rate)
+
+    async def fake_sleep(self, seconds, generation=None):
+        waited.append(seconds)
+        waited.advance(max(0.0, seconds))
+
+    monkeypatch.setattr(TriggerEngine, "_sleep_virtual", fake_sleep)
+    return waited
+
+
+class _SteppedClock:
+    """The engine's clock on a fake source that asyncio.sleep advances, so the real virtual-time waits run at once;
+    `.at[n]` runs after the n-th sleep."""
+
+    def __init__(self, engine, monkeypatch):
+        self.t = 0.0
+        self.slept: list[float] = []
+        self.at: dict = {}
+        self.clock = engine._test_gw._clock = Clock(now_fn=lambda: self.t)
+
+        async def fake_sleep(seconds):
+            self.slept.append(seconds)
+            assert len(self.slept) < 100, "the wait never ended"
+            self.t += seconds
+            self.at.pop(len(self.slept), lambda: None)()
+
+        monkeypatch.setattr(triggers_module.asyncio, "sleep", fake_sleep)

@@ -119,9 +119,10 @@ class Clock:
         self._lock = threading.Lock()
         self._armed = False
         self._t0: datetime | None = None
-        self._anchor: float | None = None
+        self._anchor = now_fn()  # real time the current arm (or unarmed stretch) began
         self._rate = 1.0
         self._generation = 0
+        self._lived = 0.0  # virtual seconds run before the current arm/clear
 
     @property
     def armed(self) -> bool:
@@ -149,8 +150,8 @@ class Clock:
         if t0 > _MAX_T0 - timedelta(seconds=_OVERFLOW_HORIZON_S * r):
             raise ClockError(f"virtual_time {virtual_time!r} at rate {r:g} would overflow datetime near the max")
         with self._lock:
+            self._bank()
             self._t0 = t0
-            self._anchor = self._now()
             self._rate = r
             self._armed = True
             self._generation += 1
@@ -159,12 +160,17 @@ class Clock:
     def clear(self) -> dict:
         """Disarm (idempotent). Afterwards reads 404."""
         with self._lock:
+            self._bank()
             self._armed = False
             self._t0 = None
-            self._anchor = None
             self._rate = 1.0
             self._generation += 1
         return {"ok": True, "armed": False}
+
+    def elapsed(self) -> float:
+        """Virtual seconds run so far: real time at each arm's rate (1 while unarmed), not counting a re-arm's jump."""
+        with self._lock:
+            return self._lived + (self._now() - self._anchor) * self._rate
 
     def now(self) -> datetime | None:
         with self._lock:
@@ -187,3 +193,9 @@ class Clock:
             elapsed = self._now() - self._anchor
             return {"armed": True, "t0": _iso(self._t0), "virtual_seconds_per_real_second": self._rate,
                     "virtual_time": _iso(_advance(self._t0, elapsed * self._rate))}
+
+    def _bank(self) -> None:
+        """Fold the stretch since the last arm/clear into `_lived` at its rate, and start the next one now."""
+        now = self._now()
+        self._lived += (now - self._anchor) * self._rate
+        self._anchor = now

@@ -477,6 +477,13 @@ def test_settle_poll_still_waits_for_a_bounded_recurrence():
     assert PromptAgentTaskStep._is_settling(unbounded) is False
 
 
+def test_settle_poll_does_not_wait_out_a_delay_or_working_hours():
+    waiting = {"triggers": [{"id": "reply", "type": "action", "status": "firing", "waiting": True,
+                             "when": {"type": "action", "tool": "x"}}]}
+    assert PromptAgentTaskStep._is_settling(waiting) is False
+    assert PromptAgentTaskStep._capture_is_final(waiting) is False
+
+
 @pytest.mark.asyncio
 async def test_capture_noop_without_registrations():
     calls = {"n": 0}

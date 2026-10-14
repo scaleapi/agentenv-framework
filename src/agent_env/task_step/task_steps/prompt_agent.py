@@ -913,6 +913,8 @@ class PromptAgentTaskStep(TaskStep):
             # `pending` too: the queue itself, not a label, so it outlives a status we do not know.
             if t.get("status") not in TRIGGER_IN_FLIGHT_STATUSES and not t.get("pending"):
                 continue
+            if t.get("waiting"):  # waiting out a delay or its executor's hours, which can outlast the poll
+                continue
             when = t.get("when")
             if when is None:
                 # Older gateway with no ``when``: a scheduled next arrival is the only tell

@@ -9,6 +9,7 @@ import json
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
@@ -131,32 +132,32 @@ async def test_a_reply_waits_its_delay_and_hours_and_its_writes_name_the_fire(lo
         bob = _Executor("bob", "bob@example.com", deployed.gateway_url, host, started)
         context = TaskStepContext(deployed_envs=[deployed], deployed_agents=[bob.agent], metadata={})
         async with httpx.AsyncClient(base_url=deployed.gateway_url, timeout=60) as client:
-            # At 60x, 2 virtual minutes of delay then 1 to 09:00 are about 3 real seconds.
-            await _arm_clock(client, "2026-10-14T08:57:00Z", 60)
             await RegisterEnvTriggersStep(id="reg", version=None, env_id=env.id, triggers=triggers, watch_roles=["default"],
                                           executor_timeout_seconds=60,
                                           executor_hours={"bob": {"start": "09:00", "end": "17:00"}}).execute(context)
-            provoked = time.monotonic()
+            # At 60x the delay ends about 08:52, and bob's hours hold him to 09:00: some 10 real seconds in all.
+            await _arm_clock(client, "2026-10-14T08:50:00Z", 60)
             (await client.post("/step", json={"action": "call_tool", "tool_name": "list_items", "arguments": {}})).raise_for_status()
             state = await _quiet(client, {"bob-hears-solver": 1})
-            acted_after_s = bob.acted_at[0] - provoked
             trajectory = [json.loads(line) for line in (await client.get("/trajectory")).raise_for_status().text.splitlines()]
     finally:
         for executor in started:
             executor.stop()
         await env.close()
 
-    kinds = [e["kind"] for e in state["events"] if e.get("trigger_id") == "bob-hears-solver"]
-    assert [k for k in kinds if k in ("delayed", "deferred", "action_ok")] == ["delayed", "deferred", "action_ok"]
-    [deferred] = [e for e in state["events"] if e["kind"] == "deferred"]
+    paced = [e for e in state["events"] if e["kind"] in ("delayed", "deferred", "action_ok")]
+    assert [e["kind"] for e in paced] == ["delayed", "deferred", "action_ok"]
+    delayed, deferred, _ = paced
     assert deferred["until"] == "2026-10-14T09:00:00Z"
-    assert acted_after_s >= 2.5, acted_after_s
-    calls = [(e["tool_call"]["function_name"], e["role"], e.get("caused_by"))
-             for e in trajectory if e.get("event_type") == "tool_call"]
+    assert (_virtual(deferred) - _virtual(delayed)).total_seconds() >= 120
+    calls = [e for e in trajectory if e.get("event_type") == "tool_call"]
     cause = [{"trigger_id": "bob-hears-solver", "action_index": 0, "fire": 1}]
-    assert ("list_items", "default", None) in calls
-    assert [c for c in calls if c[1] == "bob@example.com"] == [("items_whoami", "bob@example.com", cause),
-                                                                ("items_add_item", "bob@example.com", cause)]
+    assert ("list_items", "default", None) in [(e["tool_call"]["function_name"], e["role"], e.get("caused_by"))
+                                               for e in calls]
+    bobs = [e for e in calls if e["role"] == "bob@example.com"]
+    assert [(e["tool_call"]["function_name"], e.get("caused_by")) for e in bobs] == [("items_whoami", cause),
+                                                                                     ("items_add_item", cause)]
+    assert all(_virtual(e) >= datetime(2026, 10, 14, 9, tzinfo=timezone.utc) for e in bobs)
 
 
 @pytest.mark.asyncio
@@ -203,7 +204,6 @@ class _Executor:
         self.role, self.gateway_url, self.replies = role, gateway_url, replies
         self.instructions: list[str] = []
         self.acted_as: list[str] = []
-        self.acted_at: list[float] = []
         self._server = ThreadingHTTPServer((host, 0), functools.partial(_ExecutorHandler, self))
         threading.Thread(target=self._server.serve_forever, daemon=True).start()
         started.append(self)
@@ -212,7 +212,6 @@ class _Executor:
 
     def act(self, instruction: str) -> None:
         self.instructions.append(instruction)
-        self.acted_at.append(time.monotonic())
         if self.replies is not None and len(self.instructions) > self.replies:
             return
         whoami = self._call("items_whoami", {})
@@ -280,6 +279,10 @@ async def _deploy_items(label: str):
     env = MultiEnv.put(id=f"{label}-{uid}", mcp_server_envs=[items], name="suite")
     deployed = await env.deploy(sandbox_type="local", ttl_seconds=900)
     return env, deployed, env._sandbox.host_ips[-1]
+
+
+def _virtual(event: dict) -> datetime:
+    return datetime.fromisoformat(event["virtual_time"].replace("Z", "+00:00"))
 
 
 async def _arm_clock(client: httpx.AsyncClient, virtual_time: str, rate: float) -> None:
