@@ -34,6 +34,7 @@ from agent_env.env.envs.website_browser import (
     WEBSITE_BROWSER_IMAGE_TAG,
     WEBSITE_BROWSER_ENVIRONMENT_NAME,
 )
+from agent_env.env.snapshot_store import compute_env_fingerprint
 from agent_env.config import get_config
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from tst.util.capabilities import (
@@ -1615,7 +1616,7 @@ async def test_snapshot_cli(multi_env, environment_universe_artifact):
     """Test env snapshot: deploy MultiEnv, load universe, snapshot, verify."""
     from agent_env.artifact import Artifact
     from agent_env.cli.env.snapshot import run_snapshot
-    from agent_env.env.snapshot_store import compute_env_fingerprint, get_env_snapshot_store
+    from agent_env.env.snapshot_store import get_env_snapshot_store
 
     multi_env_ref = multi_env
     multi_env = Env.get(multi_env_ref.id, version=multi_env_ref.version)
