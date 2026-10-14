@@ -83,7 +83,8 @@ contributors should not edit `version` in `pyproject.toml`. Each release publish
 `agentenv-framework` and `agentenv-framework-protocol` to PyPI (`.github/workflows/publish-pypi.yml`, trusted publishing
 on the release tag); the import package `agent_env` and the command `agent-env` keep their names. Once both are
 on PyPI, the same workflow creates the GitHub release, whose notes are the titles of the pull requests merged since
-the previous tag, so a clear pull request title is also the release note.
+the previous release, so a clear pull request title is also the release note. A tag whose commit does not pass
+`main`'s CI is not published and gets no release; its pull requests are in the next release's notes.
 
 ## Getting help
 

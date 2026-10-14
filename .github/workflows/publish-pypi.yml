@@ -126,7 +126,7 @@ jobs:
           args=(--verify-tag --title "$tag" --generate-notes --notes "$header")
           # From the newest earlier tag with a release, not the previous tag: a tag main's CI kept off PyPI has no
           # release, and its pull requests belong in these notes.
-          released=$(gh release list --limit 100 --json tagName --jq '.[].tagName')
+          released=$(gh api --paginate "repos/${GH_REPO}/releases?per_page=100" --jq '.[].tag_name')
           previous=$(git tag --list 'v*' --sort=-v:refname | awk -v tag="$tag" 'after; $0 == tag {after = 1}' |
             grep -m1 -Fx -f <(printf '%s\n' "$released") || true)
           if [ -n "$previous" ]; then
