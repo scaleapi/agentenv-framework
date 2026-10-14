@@ -4,8 +4,8 @@ it runs."""
 import pytest
 
 from agent_env.task import EpisodeError, EpisodeSpec, Task
-from agent_env.task.episode import _EpisodeAgentStep, _EpisodeTurnStep
-from agent_env.task.episode_rules import CHECKS, UNAFFECTED
+from agent_env.task.episode.rules import CHECKS, UNAFFECTED
+from agent_env.task.episode.steps import _EpisodeAgentStep, _EpisodeTurnStep
 from agent_env.task.task import substitute_seed_in_steps
 from agent_env.task_step.registry import _builtin_registry
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep

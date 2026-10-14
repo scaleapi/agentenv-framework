@@ -6,7 +6,7 @@ import pytest
 import pytest_asyncio
 from agentenv_protocol import EnvironmentTool, ToolResult
 
-import agent_env.task.episode as episode_module
+import agent_env.task.episode.run as episode_run
 from agent_env.config.runtime import Config
 from agent_env.env.env import DeployedEnv
 from agent_env.task import EpisodeError, EpisodeSpec, Task
@@ -142,13 +142,13 @@ async def teardowns(monkeypatch, local_stores):
     monkeypatch.setattr(Config, "task_step_registry", lambda self: steps)
     GATES.clear()
     teardowns = _Teardowns()
-    monkeypatch.setattr(episode_module, "teardown_run", teardowns)
+    monkeypatch.setattr(episode_run, "teardown_run", teardowns)
     yield teardowns
     for gate in GATES.values():
         gate.set()
     if teardowns.hold is not None:
         teardowns.hold.set()
-    for episode in list(episode_module._live.values()):
+    for episode in list(episode_run._live.values()):
         await episode.abandon("the test ended")
 
 
@@ -199,7 +199,7 @@ async def test_the_run_waits_at_an_outside_turn_and_carries_on_once_it_ends(tear
 
 @pytest.mark.asyncio
 async def test_a_turn_carries_the_headers_each_url_needs(teardowns, monkeypatch):
-    monkeypatch.setattr(episode_module, "sandbox_request_headers_for_url", lambda url: {"X-Sandbox": url})
+    monkeypatch.setattr(episode_run, "sandbox_request_headers_for_url", lambda url: {"X-Sandbox": url})
     episode = await _spec(ITEMS, ALICE, TURN, REPLIES).start()
 
     turn = await episode.next_turn()
@@ -214,8 +214,8 @@ STOCKED = {**ALICE, "env_ids": ["items", "pantry"]}
 
 def _tool_sessions(monkeypatch, offered):
     sessions = _ToolSessions(offered)
-    monkeypatch.setattr(episode_module, "ToolSession", sessions)
-    monkeypatch.setattr(episode_module, "sandbox_request_headers_for_url", lambda url: {"X-Sandbox": url})
+    monkeypatch.setattr(episode_run, "ToolSession", sessions)
+    monkeypatch.setattr(episode_run, "sandbox_request_headers_for_url", lambda url: {"X-Sandbox": url})
     return sessions
 
 
@@ -584,5 +584,5 @@ async def test_a_cancelled_start_takes_its_run_down_with_it(teardowns):
     with pytest.raises(asyncio.CancelledError):
         await starting
 
-    assert not episode_module._live
+    assert not episode_run._live
     assert teardowns.finished == teardowns.started and len(teardowns.finished) == 1

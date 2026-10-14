@@ -1,29 +1,20 @@
-"""Run a task with some of its agents played from outside AgentEnv, by a training loop's model or any other caller.
-
-AgentEnv runs everything else exactly as ``Task.run`` does, so its scores are the ones ``agent-env run`` would report.
-"""
-
 from __future__ import annotations
 
 import asyncio
 import logging
-import uuid
 from collections import deque
-from collections.abc import Mapping, Sequence
-from typing import Any, ClassVar, Optional
+from typing import TYPE_CHECKING, Any
 
 from agentenv_protocol import EnvironmentTool, ToolResult, ToolSession
 
-from agent_env.entity_refs import EntityRef
 from agent_env.providers.sandbox_providers.sandbox_provider import sandbox_request_headers_for_url
-from agent_env.task.episode_rules import problems
 from agent_env.task.store import record_task_cancelled
 from agent_env.task.task import Task, recorded_scores, substitute_seed_in_steps
 from agent_env.task.teardown import teardown_run
-from agent_env.task_step.context import PromptResponse, TaskStepContext
-from agent_env.task_step.task_step import TaskStep
-from agent_env.task_step.task_steps.deploy_agent import bound_deployment, live_mcp_url
-from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
+from agent_env.task_step.context import TaskStepContext
+
+if TYPE_CHECKING:
+    from agent_env.task.episode.steps import _EpisodeTurnStep
 
 logger = logging.getLogger(__name__)
 
@@ -32,47 +23,6 @@ _live: dict[str, Episode] = {}
 
 class EpisodeError(RuntimeError):
     """A task that can't run as an episode, or an episode asked for what it can't give."""
-
-
-class EpisodeSpec:
-    """A task read as an episode: the agents a loop plays, and the copy of the task that runs. Built by
-    ``from_task``."""
-
-    def __init__(self, *, copy: Task, trainer_agents: tuple[str, ...], seed: dict[str, str] | None):
-        self._copy = copy
-        self.trainer_agents = trainer_agents
-        self._seed = seed
-
-    @classmethod
-    def from_task(
-        cls, task: Task, *, trainer_agents: Sequence[str] | None = None, seed: Mapping[str, str] | None = None,
-        turn_timeout: float | None = None,
-    ) -> EpisodeSpec:
-        """``trainer_agents`` are the agents the loop plays, by default the task's only prompted agent.
-        ``turn_timeout`` is every turn's deadline in seconds, in place of its prompt's own ``timeout_seconds``,
-        which budgets an agent's run rather than the loop playing it."""
-        seed = dict(seed) if seed else None
-        seeded = substitute_seed_in_steps(task.steps, seed or {})
-        outside = _trainer_agents(task, seeded, trainer_agents)
-        if found := problems(seeded, outside):
-            raise EpisodeError(f"task {task.id!r} can't run as an episode: " + "; ".join(found))
-        deploys = {
-            as_run.agent_name: step for step, as_run in zip(task.steps, seeded)
-            if step.type == "deploy_agent" and as_run.agent_name in outside
-        }
-        steps = [_stand_in(step, as_run, deploys, turn_timeout) for step, as_run in zip(task.steps, seeded)]
-        return cls(copy=Task(id=task.id, version=task.version, steps=steps), trainer_agents=tuple(outside), seed=seed)
-
-    async def start(self) -> Episode:
-        """Start one run of the task, a new episode each call. It returns once the run's record exists, before
-        anything is deployed; ``next_turn()`` is where the deploys and setup are waited for."""
-        episode_id = uuid.uuid4().hex
-        metadata: dict[str, Any] = {"episode": {"id": episode_id, "trainer_agents": list(self.trainer_agents)}}
-        if self._seed:
-            metadata["seed"] = dict(self._seed)
-        episode = Episode(episode_id, self._copy, TaskStepContext(metadata=metadata))
-        await episode._launch()
-        return episode
 
 
 class Turn:
@@ -282,111 +232,3 @@ class Episode:
 
 def _episode_of(context: TaskStepContext) -> Episode:
     return _live[context.metadata["episode"]["id"]]
-
-
-def _trainer_agents(task: Task, steps: list[TaskStep], named: Sequence[str] | None) -> list[str]:
-    prompted = list(dict.fromkeys(step.agent_name for step in steps if step.type == "prompt_agent"))
-    if named is None:
-        if len(prompted) != 1:
-            raise EpisodeError(
-                f"task {task.id!r} prompts {prompted}; name the ones to play with trainer_agents=" if prompted
-                else f"task {task.id!r} prompts no agent"
-            )
-        return prompted
-    outside = list(dict.fromkeys(named))
-    if not outside:
-        raise EpisodeError(f"trainer_agents= names no agent; task {task.id!r} prompts {prompted}")
-    if unprompted := [name for name in outside if name not in prompted]:
-        raise EpisodeError(f"task {task.id!r} doesn't prompt {unprompted}; it prompts {prompted}")
-    return outside
-
-
-def _stand_in(step: TaskStep, as_run: TaskStep, deploys: dict[str, TaskStep], turn_timeout: float | None) -> TaskStep:
-    """The step the episode's copy of the task runs in place of ``step``, judged by ``as_run``, the step as the
-    seed makes it; ``deploys`` are the outside agents', by name. A stand-in keeps the step's own fields, which the
-    run seeds."""
-    if as_run.type == "deploy_agent" and as_run.agent_name in deploys:
-        return _EpisodeAgentStep(
-            id=step.id, version=step.version, depends_on=step.depends_on, fail_task_on_error=step.fail_task_on_error,
-            agent_name=step.agent_name, env_ids=step.env_ids, env_step_id=step.env_step_id, role=step.role,
-        )
-    if as_run.type == "prompt_agent" and as_run.agent_name in deploys:
-        timeout = step.timeout_seconds if turn_timeout is None else turn_timeout
-        return _EpisodeTurnStep(
-            id=step.id, version=step.version, depends_on=step.depends_on, fail_task_on_error=step.fail_task_on_error,
-            agent_name=step.agent_name, prompt_id=step.prompt_id, prompt=step.prompt,
-            system_prompt=step.system_prompt or deploys[as_run.agent_name].system_prompt,
-            timeout_seconds=PromptAgentTaskStep.DEFAULT_PROMPT_TIMEOUT_SECONDS if timeout is None else timeout,
-        )
-    return step
-
-
-class _EpisodeAgentStep(TaskStep):
-    """An outside agent's ``deploy_agent``: deploys nothing, and binds the agent to its envs where it stood."""
-
-    type: ClassVar[str] = "episode_agent"
-    entity_refs = (EntityRef.env("env_ids[]"),)
-
-    def __init__(
-        self, id: str, version: Optional[int], *, agent_name: str, env_ids: list[str], env_step_id: str | None,
-        role: str | None, depends_on: Optional[list] = None, fail_task_on_error: bool = True,
-    ):
-        super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
-        self.agent_name = agent_name
-        self.env_ids = list(env_ids)
-        self.env_step_id = env_step_id
-        self.role = role
-
-    def to_dict(self) -> dict[str, Any]:
-        return {**super().to_dict(), "agent_name": self.agent_name, "env_ids": self.env_ids,
-                "env_step_id": self.env_step_id, "role": self.role}
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> _EpisodeAgentStep:
-        return cls(**cls._base_from_dict(data), agent_name=data["agent_name"], env_ids=data["env_ids"],
-                   env_step_id=data["env_step_id"], role=data["role"])
-
-    async def execute(self, context: TaskStepContext) -> TaskStepContext:
-        mcp_urls = {}
-        for env_id in self.env_ids:
-            deployed = bound_deployment(context, env_id, env_step_id=self.env_step_id, step_id=self.id)
-            mcp_urls[env_id] = deployed.mcp_url if deployed is not None else live_mcp_url(env_id)
-        _episode_of(context)._bind(self.agent_name, self.role, mcp_urls)
-        return context
-
-
-class _EpisodeTurnStep(TaskStep):
-    """An outside agent's ``prompt_agent``: hands the turn to the caller and records the reply it gets back."""
-
-    type: ClassVar[str] = "episode_turn"
-    entity_refs = ()
-
-    def __init__(
-        self, id: str, version: Optional[int], *, agent_name: str, prompt_id: str, prompt: str,
-        system_prompt: str | None, timeout_seconds: float, depends_on: Optional[list] = None,
-        fail_task_on_error: bool = True,
-    ):
-        super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
-        self.agent_name = agent_name
-        self.prompt_id = prompt_id
-        self.prompt = prompt
-        self.system_prompt = system_prompt
-        self.timeout_seconds = timeout_seconds
-
-    def to_dict(self) -> dict[str, Any]:
-        return {**super().to_dict(), "agent_name": self.agent_name, "prompt_id": self.prompt_id,
-                "prompt": self.prompt, "system_prompt": self.system_prompt, "timeout_seconds": self.timeout_seconds}
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> _EpisodeTurnStep:
-        return cls(**cls._base_from_dict(data), agent_name=data["agent_name"], prompt_id=data["prompt_id"],
-                   prompt=data["prompt"], system_prompt=data["system_prompt"],
-                   timeout_seconds=data["timeout_seconds"])
-
-    async def execute(self, context: TaskStepContext) -> TaskStepContext:
-        reply = await _episode_of(context)._play(self)
-        context.prompt_responses.append(PromptResponse(
-            prompt_id=self.prompt_id, response=reply, prompt_text=self.prompt, agent_name=self.agent_name,
-            step_id=self.id,
-        ))
-        return context
