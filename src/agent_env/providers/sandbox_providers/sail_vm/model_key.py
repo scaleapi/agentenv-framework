@@ -61,8 +61,9 @@ MIN_KEY_LENGTH = 16
 # By secret name: the key, so a handle reconnected here can still scrub its agent's key, and the launches
 # and Sailboxes in this process that need it, so the key is forgotten once none does. Process memory only.
 _injected_keys: dict[str, str] = {}
-_injected_headers: dict[frozenset[str], dict[str, str]] = {}
+_injected_headers: dict[frozenset[str], tuple[dict[str, str], str | None]] = {}
 _holders: dict[str, set[str]] = {}
+_header_holders: dict[frozenset[str], set[str]] = {}
 # The env vars agent-env hands a model endpoint's headers in, and how each writes them.
 _HEADER_NAMES = (HEADERS_ENV, "ANTHROPIC_CUSTOM_HEADERS")
 
@@ -174,6 +175,11 @@ class ModelKeyInjection:
     headers: dict[str, str] = field(default_factory=dict)
     #: The headers as agent-env hands them to workloads, names as configured: what scrubbing replaces.
     header_values: dict[str, str] | None = field(default=None, repr=False)
+    #: ``LITELLM_EXTRA_HEADERS`` exactly as the deploy wrote it, when that isn't the JSON agent-env writes.
+    header_text: str | None = field(default=None, repr=False)
+    #: The model endpoint's path as a prefix (``/v1/``) the headers are scoped to, as they are in agent-env;
+    #: None when it has no path. The key goes with every request to the host either way.
+    path_prefix: str | None = None
     policy_id: str | None = None
     #: Saved policies a swap may or may not have applied (Sail couldn't say), deleted once it can.
     unsettled_policy_ids: list[str] = field(default_factory=list)
@@ -199,15 +205,23 @@ class ModelKeyInjection:
                 f"Sail model-key injection needs a {KEY_ENV} of at least {MIN_KEY_LENGTH} characters, to scrub it "
                 "safely; set inject_model_key = false in [sandbox.providers.sail_vm.config] to pass it in"
             )
-        values = json.loads(env.get(HEADERS_ENV) or "{}")
+        text = env.get(HEADERS_ENV) or ""
+        try:
+            values = json.loads(text or "{}")
+        except ValueError:
+            values = None
+        if not isinstance(values, dict) or not all(isinstance(value, str) for value in values.values()):
+            raise ValueError(f"{HEADERS_ENV} must be a JSON object of header names and values, not {text[:80]!r}")
         if clash := sorted(name for name in values if name.lower() in KEY_HEADERS):
             raise ValueError(
                 f"[model.headers] sets {clash}, which Sail sets from the model key; drop them, or set "
                 "inject_model_key = false in [sandbox.providers.sail_vm.config] to pass headers and key in"
             )
+        path = parsed.path.rstrip("/")
         return cls(host=parsed.hostname, secret=secret_name(key), key=key,
                    headers={name.lower(): header_secret_name(name, value) for name, value in values.items()},
-                   header_values=values or None)
+                   header_values=values or None, header_text=text if values and text != json.dumps(values) else None,
+                   path_prefix=f"{path}/" if values and path else None)
 
     @classmethod
     def from_document(cls, document: Any, policy_id: str | None) -> ModelKeyInjection | None:
@@ -216,9 +230,11 @@ class ModelKeyInjection:
         if not isinstance(rules, dict) or len(rules) != 1:
             return None
         (host, entries), = rules.items()
+        if not isinstance(entries, list) or len(entries) not in (1, 2):
+            return None
         try:
-            (entry,) = entries
-            refs = dict(entry["request"]["set"]["headers"])
+            refs = dict(entries[0]["request"]["set"]["headers"])
+            prefix = entries[0]["match"]["path"]["prefix"] if len(entries) == 2 else None
         except (TypeError, ValueError, KeyError, AttributeError):
             return None
         refs.pop("authorization", None)  # "Bearer ${secrets.…}", the key again: rules() below checks it
@@ -227,43 +243,59 @@ class ModelKeyInjection:
             return None
         secret = names.pop("x-api-key").group(1)
         headers = {header: match.group(1) for header, match in names.items()}
-        injection = cls(host=host, secret=secret, headers=headers, policy_id=policy_id)
+        injection = cls(host=host, secret=secret, headers=headers, path_prefix=prefix, policy_id=policy_id)
         own = secret.startswith(SECRET_PREFIX) and all(s.startswith(HEADER_SECRET_PREFIX) for s in headers.values())
         return injection if own and rules == injection.rules() else None
 
     def rules(self) -> dict[str, Any]:
-        """Sail egress rules setting the key as both auth headers model endpoints read, and each header."""
+        """Sail egress rules setting the key as both auth headers model endpoints read on every request to the
+        host, and each header on those under the endpoint's path."""
         ref = f"${{secrets.{self.secret}}}"
-        headers = {"authorization": f"Bearer {ref}", "x-api-key": ref,
-                   **{name: f"${{secrets.{secret}}}" for name, secret in self.headers.items()}}
-        return {self.host: [{"request": {"set": {"headers": headers}}}]}
+        key = {"request": {"set": {"headers": {"authorization": f"Bearer {ref}", "x-api-key": ref}}}}
+        if not self.headers:
+            return {self.host: [key]}
+        both = {"request": {"set": {"headers": {
+            **key["request"]["set"]["headers"], **{name: f"${{secrets.{secret}}}" for name, secret in self.headers.items()},
+        }}}}
+        if self.path_prefix is None:
+            return {self.host: [both]}
+        return {self.host: [{"match": {"path": {"prefix": self.path_prefix}}, **both}, key]}
 
     def header_secrets(self) -> dict[str, str]:
         """Each header's Sail secret -> its value, for the launch to store."""
         return {header_secret_name(name, value): value for name, value in (self.header_values or {}).items()}
 
     def matches(self, other: ModelKeyInjection | None) -> bool:
-        return other is not None and (other.host, other.secret, other.headers) == (self.host, self.secret, self.headers)
+        return other is not None and (other.host, other.secret, other.headers, other.path_prefix) == (
+            self.host, self.secret, self.headers, self.path_prefix)
 
     def _headers_id(self) -> frozenset[str]:
         return frozenset(self.headers.values())
 
     def hold(self, holder: str) -> None:
-        """Record ``holder`` (a launch or a Sailbox id) as needing this injection's secrets."""
+        """Record ``holder`` (a launch or a Sailbox id) as needing this injection's key, and its headers."""
         if self.key is not None:
             _injected_keys[self.secret] = self.key
-        if self.header_values:
-            _injected_headers[self._headers_id()] = self.header_values
         _holders.setdefault(self.secret, set()).add(holder)
+        if self.headers:
+            if self.header_values:
+                _injected_headers[self._headers_id()] = (self.header_values, self.header_text)
+            _header_holders.setdefault(self._headers_id(), set()).add(holder)
 
     def release(self, holder: str) -> None:
-        """Drop ``holder``, forgetting the key and headers once no launch or Sailbox in this process needs them."""
+        """Drop ``holder``, forgetting the key, and the headers, once no launch or Sailbox in this process needs
+        them; the two are counted apart, since Sailboxes with different keys can share headers."""
         holders = _holders.get(self.secret, set())
         holders.discard(holder)
         if not holders:
             _holders.pop(self.secret, None)
             _injected_keys.pop(self.secret, None)
-            _injected_headers.pop(self._headers_id(), None)
+        if self.headers:
+            held = _header_holders.get(self._headers_id(), set())
+            held.discard(holder)
+            if not held:
+                _header_holders.pop(self._headers_id(), None)
+                _injected_headers.pop(self._headers_id(), None)
 
     def recover_key(self, candidate: str | None) -> None:
         """Recover the key this injection's secret was named from: one this process injected, else
@@ -277,8 +309,9 @@ class ModelKeyInjection:
         ``candidate`` (the configured headers) when they are those."""
         if not self.headers:
             return
-        self.header_values = _injected_headers.get(self._headers_id())
-        if self.header_values is None and candidate and {
+        if remembered := _injected_headers.get(self._headers_id()):
+            self.header_values, self.header_text = remembered
+        elif candidate and {
             name.lower(): header_secret_name(name, value) for name, value in candidate.items()
         } == self.headers:
             self.header_values = dict(candidate)
@@ -292,6 +325,8 @@ class ModelKeyInjection:
             placeholders = dict.fromkeys(self.header_values, HEADER_PLACEHOLDER)
             pairs += [(json.dumps(self.header_values), json.dumps(placeholders)),
                       (header_lines(self.header_values), header_lines(placeholders))]
+            if self.header_text:
+                pairs.append((self.header_text, json.dumps(placeholders)))
         return [(encode(value), encode(placeholder)) for value, placeholder in pairs
                 for encode in (shlex.quote, lambda text: text.replace("'", "'\\''"), lambda text: text)]
 

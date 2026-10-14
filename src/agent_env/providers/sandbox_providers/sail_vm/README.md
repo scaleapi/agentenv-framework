@@ -197,8 +197,9 @@ values of the endpoint's `[model.headers]`:
 1. The key is stored as a Sail secret named `AGENTENV_LITELLM_<sha256(key)[:32]>`, one per distinct key.
    Each header value is a secret of its own, `AGENTENV_LITELLM_H_<sha256(name, value)[:32]>`.
 2. The Sailbox is created with a saved egress policy. On requests to `LITELLM_BASE_URL`'s host, the policy
-   sets the `authorization: Bearer …` and `x-api-key` headers from the key's secret, and each header from
-   its own. Sail adds them as each request leaves the box.
+   sets the `authorization: Bearer …` and `x-api-key` headers from the key's secret. On those under its path
+   (`/v1/` for `https://host/v1`), it also sets each header from its own, so another service on the same host
+   never gets them. Sail adds them as each request leaves the box.
 3. Inside the box, every command and file agent-env sends carries the placeholder
    `sail-injected-model-key` in place of the key. `LITELLM_EXTRA_HEADERS` (and the unit-test verifier's
    `ANTHROPIC_CUSTOM_HEADERS`) keep the header names with `sail-injected-header` as every value, which the

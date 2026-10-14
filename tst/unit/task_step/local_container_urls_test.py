@@ -241,6 +241,15 @@ def test_a_unit_test_verifier_whose_headers_dont_resolve_fails(monkeypatch, loca
         _run_verifier(monkeypatch, "local")
 
 
+def test_a_unit_test_verifier_given_its_own_headers_never_resolves_the_configured_ones(monkeypatch, local_stores, model_endpoint):
+    monkeypatch.setattr(local_stores, "_model_cfg", ModelConfig(headers={"X-Bill-To": "secret:fd_no_such_secret"}))
+
+    run = _run_verifier(monkeypatch, "local", env_vars={
+        "LITELLM_EXTRA_HEADERS": '{"X-Bill-To": "mine"}', "ANTHROPIC_CUSTOM_HEADERS": "X-Bill-To: mine"})
+
+    assert f"-e LITELLM_EXTRA_HEADERS={shlex.quote(json.dumps({'X-Bill-To': 'mine'}))} " in run
+
+
 def test_a_seed_column_cant_replace_the_verifiers_headers(monkeypatch, model_headers):
     run = _run_verifier(monkeypatch, "local", seed={"litellm_extra_headers": "{}", "anthropic_custom_headers": "x"})
 

@@ -96,6 +96,7 @@ def fresh_key_state(monkeypatch):
     monkeypatch.setattr(_sdk, "_apps", {})
     monkeypatch.setattr(model_key, "_injected_keys", {})
     monkeypatch.setattr(model_key, "_injected_headers", {})
+    monkeypatch.setattr(model_key, "_header_holders", {})
     monkeypatch.setattr(model_key, "_holders", {})
 
 
@@ -907,14 +908,29 @@ def test_header_secrets_are_named_from_the_header_and_its_value():
     assert header_secret_name("X-A", "v").startswith("AGENTENV_LITELLM_H_")
 
 
-def test_the_policy_sets_each_header_from_its_secret_and_never_holds_a_value():
+def test_the_policy_sets_each_header_from_its_secret_under_the_endpoint_path_and_the_key_everywhere():
     injection = ModelKeyInjection.for_env(_ENV_H)
-    (rule,) = injection.rules()["llm.example.com"]
-    headers = rule["request"]["set"]["headers"]
+    scoped, everywhere = injection.rules()["llm.example.com"]
 
+    assert scoped["match"] == {"path": {"prefix": "/v1/"}}
+    headers = scoped["request"]["set"]["headers"]
     assert set(headers) == {"authorization", "x-api-key", "x-hf-bill-to", "x-gateway-key"}
     assert headers["x-hf-bill-to"] == f"${{secrets.{header_secret_name('X-HF-Bill-To', 'acme-org')}}}"
+    assert everywhere == ModelKeyInjection.for_env(_ENV).rules()["llm.example.com"][0]
     assert not any(value in str(injection.rules()) or value in repr(injection) for value in _HEADERS.values())
+
+
+def test_an_endpoint_without_a_path_gets_its_headers_with_every_request_to_the_host():
+    injection = ModelKeyInjection.for_env({**_ENV_H, "LITELLM_BASE_URL": "https://llm.example.com"})
+
+    (rule,) = injection.rules()["llm.example.com"]
+    assert "match" not in rule and "x-hf-bill-to" in rule["request"]["set"]["headers"]
+
+
+@pytest.mark.parametrize("text", ["not json", '["X-A"]', '{"X-A": 1}'])
+def test_headers_that_arent_a_json_object_of_strings_are_refused(text):
+    with pytest.raises(ValueError, match="must be a JSON object of header names and values"):
+        ModelKeyInjection.for_env({**_ENV, "LITELLM_EXTRA_HEADERS": text})
 
 
 @pytest.mark.parametrize("name", ["Authorization", "X-Api-Key"])
@@ -928,10 +944,12 @@ def test_an_injection_with_headers_is_recovered_from_its_saved_policy_only():
     recovered = ModelKeyInjection.from_document({"rules": injection.rules()}, "ep_1")
     assert injection.matches(recovered) and recovered.header_values is None
     assert not injection.matches(ModelKeyInjection.for_env(_ENV))
-    (rule,) = injection.rules()["llm.example.com"]
-    widened = {**rule["request"]["set"]["headers"], "x-other": "${secrets.GITHUB_TOKEN}"}
-    assert ModelKeyInjection.from_document({"rules": {"llm.example.com": [{"request": {"set": {"headers": widened}}}]}},
-                                           "ep_2") is None
+    scoped, everywhere = injection.rules()["llm.example.com"]
+    widened = {**scoped, "request": {"set": {"headers": {**scoped["request"]["set"]["headers"],
+                                                         "x-other": "${secrets.GITHUB_TOKEN}"}}}}
+    assert ModelKeyInjection.from_document({"rules": {"llm.example.com": [widened, everywhere]}}, "ep_2") is None
+    moved = {**scoped, "match": {"path": {"prefix": "/"}}}
+    assert not injection.matches(ModelKeyInjection.from_document({"rules": {"llm.example.com": [moved, everywhere]}}, "ep_3"))
 
 
 @pytest.mark.asyncio
@@ -1039,3 +1057,33 @@ async def test_a_sailbox_without_injection_refuses_header_values_but_takes_place
 ])
 def test_a_header_assignment_is_detected_as_the_shell_reads_it(text, shell, carries):
     assert carries_model_key(text, shell=shell) is carries
+
+
+@pytest.mark.asyncio
+async def test_headers_a_deploy_writes_in_its_own_spelling_are_scrubbed_too():
+    compact = '{"X-HF-Bill-To":"acme-org","X-Gateway-Key":"it\'s-a-gateway-secret"}'
+    sailbox = _sailbox()
+    sailbox.exec.aio = AsyncMock(return_value=_process())
+    sdk, _, _ = _fake_sdk(sailbox)
+    sandbox = await SailVmSandboxProvider(api_key="sail-key", sdk=sdk).create_sandbox(
+        image_name="agent:1", port=8000, env={**_ENV, "LITELLM_EXTRA_HEADERS": compact})
+
+    await sandbox.exec_script(f"docker run -d -e LITELLM_EXTRA_HEADERS={shlex.quote(compact)} agent:1")
+
+    (run,) = [arg for call in sailbox.exec.aio.await_args_list for arg in call.args[0] if "docker run" in arg]
+    assert json.dumps(_PLACEHELD) in run and not any(value in run for value in _HEADERS.values())
+
+
+@pytest.mark.asyncio
+async def test_sailboxes_sharing_headers_but_not_a_key_keep_each_others_headers_to_scrub():
+    sdk, _, _ = _fake_sdk(_sailbox())
+    provider = SailVmSandboxProvider(api_key="sail-key", sdk=sdk)
+    first = await provider.create_sandbox(image_name="agent:1", port=8000, env=_ENV_H)
+    second = ModelKeyInjection.for_env({**_ENV_H, "LITELLM_API_KEY": "sk-another-model-key-9876543210"})
+    second.hold("sb_2")
+
+    await first.terminate()
+
+    reconnected = ModelKeyInjection.from_document({"rules": second.rules()}, "ep_9")
+    reconnected.recover_headers(None)
+    assert reconnected.header_values == _HEADERS
