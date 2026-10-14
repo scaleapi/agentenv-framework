@@ -41,7 +41,8 @@ def test_a_ref_is_registered_with_its_tag_pinned_and_no_tarball(local_stores, re
     ("ghcr.io/org/tool:v1", False),
 ], ids=["same ref", "another tag", "no digest"])
 def test_a_pin_an_earlier_version_recorded_is_kept_only_when_it_pins_the_same_ref(local_stores, resolved, pinned, kept):
-    image = DockerImageArtifact.put_ref("tool-image", description="d", image_name="ghcr.io/org/tool:v1", pinned=pinned)
+    image = DockerImageArtifact.put_ref("tool-image", description="d", image_name="ghcr.io/org/tool:v1",
+                                        earlier_pin=pinned)
 
     assert image.image_name == (pinned if kept else f"ghcr.io/org/tool:v1@{DIGEST}")
     assert resolved == ([] if kept else [("ghcr.io/org/tool:v1", None)])

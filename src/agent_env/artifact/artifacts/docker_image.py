@@ -207,11 +207,11 @@ class DockerImageArtifact(Artifact):
 
     @classmethod
     def put_ref(cls, id: str, *, description: str, image_name: str,
-                pinned: str | None = None) -> "DockerImageArtifact":
+                earlier_pin: str | None = None) -> "DockerImageArtifact":
         """Register ``image_name``, an image already in a registry, writing this document only: nothing is pushed,
         saved or uploaded, and a sandbox pulls the image. A tag is pinned to the digest the registry serves for it
         now, recorded as ``name:tag@sha256:...``, so every run gets the same image; a digest is checked to exist.
-        ``pinned``, a pin an earlier version recorded, is kept instead when it pins ``image_name``.
+        ``earlier_pin``, the pin an earlier version recorded, is kept instead when it pins ``image_name``.
 
         ``image_name`` must name its registry. The registry is read with the configured image store's credentials
         where it holds that registry, anonymously otherwise. One on this machine is refused unless ``id``'s image
@@ -227,7 +227,9 @@ class DockerImageArtifact(Artifact):
                 and not isinstance(config.get_image_store_for(id), LocalRegistryImageStore)):
             raise ValueError(f"{image_name} is in a registry on this machine, which only an image in the local "
                              "registry's store, such as an @local one, can name")
-        if pinned is None or not pinned_from(pinned, image_name):
+        if earlier_pin is not None and pinned_from(earlier_pin, image_name):
+            pinned = earlier_pin
+        else:
             pinned = pin_digest(image_name, config.get_image_store().auth(image_name))
         store = get_artifact_store()
         version = store.next_version(id)

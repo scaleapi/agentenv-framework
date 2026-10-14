@@ -34,7 +34,7 @@ from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM
 from .authoring import build_context_files
 from .parse import Bundle, BundleKind
 from .plan import Plan, Write, env_writer, folder_walk, unpinned_store_refs
-from .resolve import BuiltImage, ImpliedImage, ReferencedImage
+from .resolve import BuiltImage, BundleImage, ReferencedImage
 
 LEDGER_COLLECTION = "bundle_ledger"
 # Bumped by hand when what a digest covers changes, or a writer's output changes enough that every
@@ -213,7 +213,7 @@ def _tracked(write: Write) -> bool:
     toml and what it references. A built image is made from its build context, ``build_context_files``; what the
     build fetches (its base image, packages) isn't an input. A referenced image is made from its ref's text, so a tag
     that moves in its registry isn't a change. An image folder's image is also made from its description."""
-    if isinstance(write.source, ImpliedImage):
+    if isinstance(write.source, BundleImage):
         return True
     if write.kind in (BundleKind.ARTIFACT, BundleKind.SKILL):
         return folder_walk(get_artifact_registry().get(_type(write))) is not None
@@ -224,7 +224,7 @@ def _tracked(write: Write) -> bool:
 
 def _config(write: Write) -> Any:
     source = write.source
-    if not isinstance(source, ImpliedImage):
+    if not isinstance(source, BundleImage):
         return source.config
     config = {"dockerfile": source.dockerfile} if isinstance(source, BuiltImage) else {"ref": source.ref}
     if source.description is not None:  # only an image folder's, so an image key's digest is as before
@@ -233,7 +233,7 @@ def _config(write: Write) -> Any:
 
 
 def _type(write: Write) -> str:
-    if isinstance(write.source, ImpliedImage):
+    if isinstance(write.source, BundleImage):
         return "docker_image"
     type_ = write.source.entry.type
     return canonical_type(type_) if write.kind is BundleKind.ARTIFACT else type_

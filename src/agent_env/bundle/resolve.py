@@ -40,7 +40,7 @@ _INFRA_ENVS = {GatewayEnv.type: "default_gateway_env_id", ServiceDBEnv.type: "de
 
 
 @dataclass(frozen=True)
-class ImpliedImage:
+class BundleImage:
     """An image the bundle writes: one an env or agent folder's image key names, or an ``artifacts/<name>/`` image
     folder, under the folder's own id."""
 
@@ -50,14 +50,14 @@ class ImpliedImage:
 
 
 @dataclass(frozen=True)
-class BuiltImage(ImpliedImage):
+class BuiltImage(BundleImage):
     """The image built from the folder's Dockerfile."""
 
     dockerfile: str  # relative to the entry's folder
 
 
 @dataclass(frozen=True)
-class ReferencedImage(ImpliedImage):
+class ReferencedImage(BundleImage):
     """An image already in a registry, which the key names as ``{ ref = "<image>" }``."""
 
     ref: str
@@ -65,13 +65,13 @@ class ReferencedImage(ImpliedImage):
 
 @dataclass(frozen=True)
 class Reference:
-    """A resolved reference: to ``local``, this bundle's entity or implied image, or, when ``local`` is
+    """A resolved reference: to ``local``, this bundle's entity or image, or, when ``local`` is
     None, to a store id at ``version`` (None for its latest)."""
 
     kind: EntityKind
     id: str
     version: int | None
-    local: BundleEntry | ImpliedImage | None
+    local: BundleEntry | BundleImage | None
     where: str  # the referencing field, as problems name it
     artifact_type: str | None  # the type the field takes, when it names one: an artifact's, or an env's
 
@@ -101,8 +101,8 @@ class ResolvedEntry:
 @dataclass(frozen=True)
 class ResolvedBundle:
     bundle: Bundle
-    entries: tuple[ResolvedEntry, ...]
-    images: tuple[ImpliedImage, ...]
+    entries: tuple[ResolvedEntry, ...]  # every entry but the image folders, which are images
+    images: tuple[BundleImage, ...]  # the images the bundle writes: its image keys' and its image folders'
 
 
 def resolve_bundle(bundle: Bundle) -> ResolvedBundle:
@@ -118,7 +118,7 @@ class _Resolver:
     def __init__(self, bundle: Bundle):
         self.bundle = bundle
         self.problems: list[str] = []
-        self.images: list[ImpliedImage] = []
+        self.images: list[BundleImage] = []
         # By kind and exact name or id, by kind and folded name, and by folded name across the kinds a
         # step can name (steps never name tasks or evals).
         self.named: dict[tuple[EntityKind, str], BundleEntry] = {}
@@ -298,7 +298,7 @@ class _Resolver:
         self._implied(BuiltImage(derive_id(entry.id, role), entry, dockerfile), config, ref, references)
         return True
 
-    def _implied(self, image: ImpliedImage, config: dict, ref: EntityRef, references: list[Reference]) -> None:
+    def _implied(self, image: BundleImage, config: dict, ref: EntityRef, references: list[Reference]) -> None:
         config[ref.path] = image.id
         self.images.append(image)
         references.append(Reference(EntityKind.ARTIFACT, image.id, None, image, ref.path, ref.artifact_type))
