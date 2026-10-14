@@ -68,8 +68,9 @@ StreamingAgent = _streaming.StreamingAgent
     (None, "https://models.example/v1", {"Authorization": "Bearer request-scoped-key"}),
     ('{"X-Bill-To": "acme", "authorization": "Bearer theirs"}', "https://models.example/v1",
      {"X-Bill-To": "acme", "Authorization": "Bearer request-scoped-key"}),
+    ('{"X-Bill-To": "acme"}', "https://models.example/v1/", {"X-Bill-To": "acme", "Authorization": "Bearer request-scoped-key"}),
     ('{"X-Bill-To": "acme"}', "https://configured.example/v1", {"Authorization": "Bearer request-scoped-key"}),
-], ids=["no-endpoint-headers", "endpoint-headers", "another-endpoint"])
+], ids=["no-endpoint-headers", "endpoint-headers", "trailing-slash", "another-endpoint"])
 async def test_reference_model_forwards_generic_metadata_and_the_endpoints_headers(
     monkeypatch: pytest.MonkeyPatch,
     endpoint_headers: str | None,

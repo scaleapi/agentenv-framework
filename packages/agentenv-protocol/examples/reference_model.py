@@ -43,8 +43,9 @@ class OpenAICompatibleModel:
                 "LITELLM_BASE_URL must be set before running the agent"
             )
         # The endpoint's headers are for the endpoint AgentEnv configured, never one this client was pointed at.
+        configured = os.getenv("LITELLM_BASE_URL") or ""
         headers = (json.loads(os.getenv("LITELLM_EXTRA_HEADERS") or "{}")
-                   if base_url == os.getenv("LITELLM_BASE_URL") else {})
+                   if base_url.rstrip("/") == configured.rstrip("/") else {})
         base_url = base_url.rstrip("/")
         endpoint = (
             f"{base_url}/chat/completions"

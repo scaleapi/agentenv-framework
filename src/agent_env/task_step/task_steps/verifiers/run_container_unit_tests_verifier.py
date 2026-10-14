@@ -257,15 +257,14 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
         command, extra_env = self._resolve_command(context)
         merged_env.update(self.env_vars)
         merged_env.update(extra_env)
-        try:
-            headers = config.get_model_headers(merged_env.get("LITELLM_BASE_URL"))
-            if headers:
-                merged_env.setdefault(MODEL_HEADERS_ENV, json.dumps(headers))
-            headers = config.get_model_headers(merged_env.get("ANTHROPIC_BASE_URL"))
-            if headers:
-                merged_env.setdefault("ANTHROPIC_CUSTOM_HEADERS", "\n".join(f"{k}: {v}" for k, v in headers.items()))
-        except (KeyError, ConfigError):
-            logger.warning("[model.headers] unavailable; the verifier's model calls won't carry them")
+        # Unlike a missing key or URL, configured headers that don't resolve fail the step: a verifier that ran
+        # without them would grade against an endpoint that answers differently, or bills someone else.
+        headers = config.get_model_headers(merged_env.get("LITELLM_BASE_URL"))
+        if headers:
+            merged_env.setdefault(MODEL_HEADERS_ENV, json.dumps(headers))
+        headers = config.get_model_headers(merged_env.get("ANTHROPIC_BASE_URL"))
+        if headers:
+            merged_env.setdefault("ANTHROPIC_CUSTOM_HEADERS", "\n".join(f"{k}: {v}" for k, v in headers.items()))
         for key in _MODEL_URL_KEYS & merged_env.keys():
             merged_env[key] = host_url_for(merged_env[key], sandbox.type)
         env_flags = " ".join(f"-e {k}={shlex.quote(v)}" for k, v in merged_env.items())

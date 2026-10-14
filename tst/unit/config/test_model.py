@@ -73,6 +73,16 @@ def test_from_section_rejects_headers_that_are_not_strings(headers):
         ModelConfig.from_section({"headers": headers}, secret_resolver=lambda ref: None)
 
 
+@pytest.mark.parametrize("headers, problem", [
+    ({"X Bill To": "acme"}, "not an HTTP header name"),
+    ({"X-Bill-To": "café"}, "value HTTP can't carry"),
+    ({"X-Bill-To": "acme\r\nX-Injected: 1"}, "value HTTP can't carry"),
+])
+def test_from_section_rejects_a_header_http_cant_carry(headers, problem):
+    with pytest.raises(ConfigError, match=problem):
+        ModelConfig.from_section({"headers": headers}, secret_resolver=lambda ref: None)
+
+
 # --- model_for_role -----------------------------------------------------------
 
 def test_model_for_role_hit_and_fallback():
@@ -156,9 +166,10 @@ def test_base_override_to_a_foreign_url_does_not_inherit_the_configured_key():
     assert call.api_base == "https://elsewhere.example"
 
 
-def test_base_override_equal_to_the_configured_base_keeps_the_key():
+@pytest.mark.parametrize("override", ["https://proxy.example", "https://proxy.example/"])
+def test_base_override_equal_to_the_configured_base_keeps_the_key(override):
     call = ModelConfig(base_url="https://proxy.example", api_key="secret:k").resolve_call(
-        "m", base_override="https://proxy.example", secret_resolver=_secrets({"k": "sk-proxy"})
+        "m", base_override=override, secret_resolver=_secrets({"k": "sk-proxy"})
     )
     assert call.api_key == "sk-proxy"
 
@@ -194,6 +205,24 @@ _WITH_HEADERS = ModelConfig(base_url="https://gw/v1", headers={"X-Bill-To": "sec
 def test_headers_for_the_configured_endpoint_resolve_their_refs():
     assert _WITH_HEADERS.headers_for("https://gw/v1", secret_resolver=_secrets({"org": "acme"})) == {
         "X-Bill-To": "acme", "X-Plain": "v"}
+
+
+def test_headers_ignore_a_trailing_slash_on_either_url():
+    assert _WITH_HEADERS.headers_for("https://gw/v1/", secret_resolver=_secrets({"org": "acme"}))["X-Bill-To"] == "acme"
+    assert ModelConfig(base_url="https://gw/v1/", headers={"X-Plain": "v"}).headers_for(
+        "https://gw/v1", secret_resolver=_secrets({})) == {"X-Plain": "v"}
+
+
+def test_headers_held_back_from_another_endpoint_are_logged(caplog):
+    with caplog.at_level("INFO", logger="agent_env.config.model"):
+        _WITH_HEADERS.headers_for("https://elsewhere.example/v1", secret_resolver=_secrets({}))
+
+    assert "Not sending [model.headers] to elsewhere.example" in caplog.text
+
+
+def test_a_header_ref_that_resolves_to_a_value_http_cant_carry_fails_loud():
+    with pytest.raises(ConfigError, match="value HTTP can't carry"):
+        _WITH_HEADERS.headers_for("https://gw/v1", secret_resolver=_secrets({"org": "acme\nX-Injected: 1"}))
 
 
 def test_headers_follow_the_endpoint_the_env_var_configures(monkeypatch):

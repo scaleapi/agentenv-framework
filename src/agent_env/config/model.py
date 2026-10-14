@@ -4,18 +4,26 @@ provider params, and the endpoint's headers. A ``ModelConfig`` value object pars
 
 from __future__ import annotations
 
+import logging
 import os
+import re
 from dataclasses import dataclass, field, fields
 from enum import StrEnum
 from typing import Optional
+from urllib.parse import urlparse
 
 from agent_env.config.errors import ConfigError
-from agent_env.config.loader import SecretResolver, interpolate
+from agent_env.config.loader import ENV_REF_PREFIX, SECRET_REF_PREFIX, SecretResolver, interpolate
+
+logger = logging.getLogger(__name__)
 
 _ENV_BASE_URL = "LITELLM_BASE_URL"
 _ENV_API_KEY = "LITELLM_API_KEY"
 # Agents get ``[model.headers]`` here as a JSON object; unlike its two siblings, agent-env never reads it.
 MODEL_HEADERS_ENV = "LITELLM_EXTRA_HEADERS"
+# RFC 9110: a header name is a token; a value is visible ASCII, spaces and tabs (no CR or LF to split it on).
+_HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+\Z")
+_HEADER_VALUE = re.compile(r"[\t\x20-\x7e]*\Z")
 
 
 class ModelParam(StrEnum):
@@ -80,6 +88,8 @@ class ModelConfig:
         headers = section.get("headers", {})
         if not isinstance(headers, dict) or not all(isinstance(v, str) for v in headers.values()):
             raise ConfigError("[model.headers] maps header names to strings (an env:/secret: reference is fine)")
+        for name, value in headers.items():
+            _check_header(name, None if value.startswith((ENV_REF_PREFIX, SECRET_REF_PREFIX)) else value)
         cfg = interpolate(
             {k: v for k, v in section.items() if k not in ("api_key", "headers")},
             secret_resolver=secret_resolver,
@@ -116,10 +126,17 @@ class ModelConfig:
     def headers_for(self, base_url: Optional[str], *, secret_resolver: SecretResolver) -> dict[str, str]:
         """``[model.headers]``, resolved, for a call or an agent pointed at ``base_url``: none unless
         that is the configured endpoint, since a header may carry a credential."""
-        configured_base = os.getenv(_ENV_BASE_URL) or self.base_url
-        if not self.headers or not base_url or base_url != configured_base:
+        if not self.headers or not base_url:
             return {}
-        return interpolate(dict(self.headers), secret_resolver=secret_resolver)
+        configured_base = os.getenv(_ENV_BASE_URL) or self.base_url
+        if not configured_base or base_url.rstrip("/") != configured_base.rstrip("/"):
+            logger.info("Not sending [model.headers] to %s, which is not the configured model endpoint",
+                        urlparse(base_url).hostname or base_url)
+            return {}
+        headers = interpolate(dict(self.headers), secret_resolver=secret_resolver)
+        for name, value in headers.items():
+            _check_header(name, value)
+        return headers
 
     def resolve_call(
         self,
@@ -164,7 +181,7 @@ class ModelConfig:
         # The configured key is scoped to the configured endpoint (and native routing):
         # a base_override pointing elsewhere must not inherit it, or a caller-supplied
         # URL would receive the configured proxy's credential.
-        if key is None and (api_base is None or api_base == configured_base):
+        if key is None and (api_base is None or api_base.rstrip("/") == (configured_base or "").rstrip("/")):
             key = self._resolved_api_key(secret_resolver)
         params = dict(self.params)
         headers = self.headers_for(api_base, secret_resolver=secret_resolver)
@@ -173,3 +190,12 @@ class ModelConfig:
             overridden = {name.lower() for name in explicit}
             params["extra_headers"] = {**{k: v for k, v in headers.items() if k.lower() not in overridden}, **explicit}
         return ModelCallConfig(api_key=key, api_base=api_base, params=params)
+
+
+def _check_header(name: str, value: Optional[str]) -> None:
+    """Refuse a ``[model.headers]`` entry HTTP can't carry (``value`` None checks the name alone): a non-ASCII
+    value would fail inside an agent's client, and a CR or LF would split one header into two."""
+    if not _HEADER_NAME.match(name):
+        raise ConfigError(f"[model.headers] {name!r} is not an HTTP header name")
+    if value is not None and not _HEADER_VALUE.match(value):
+        raise ConfigError(f"[model.headers] {name!r} has a value HTTP can't carry: only visible ASCII, spaces and tabs")

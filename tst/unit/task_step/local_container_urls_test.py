@@ -17,6 +17,7 @@ from agent_env.a2a_agent import store as agent_store
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts.cli import CliArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
+from agent_env.config.errors import ConfigError
 from agent_env.config.model import ModelConfig
 from agent_env.env.env import DeployedGatewayEnv
 from agent_env.providers.sandbox_providers import sandbox_provider
@@ -231,6 +232,13 @@ def test_a_unit_test_verifier_pointed_elsewhere_gets_no_headers(monkeypatch, mod
     run = _run_verifier(monkeypatch, "local", env_vars={"LITELLM_BASE_URL": ELSEWHERE, "ANTHROPIC_BASE_URL": ELSEWHERE})
 
     assert "LITELLM_EXTRA_HEADERS" not in run and "ANTHROPIC_CUSTOM_HEADERS" not in run
+
+
+def test_a_unit_test_verifier_whose_headers_dont_resolve_fails(monkeypatch, local_stores, model_endpoint):
+    monkeypatch.setattr(local_stores, "_model_cfg", ModelConfig(headers={"X-Bill-To": "secret:fd_no_such_secret"}))
+
+    with pytest.raises(ConfigError, match="fd_no_such_secret"):
+        _run_verifier(monkeypatch, "local")
 
 
 def test_a_seed_column_cant_replace_the_verifiers_headers(monkeypatch, model_headers):
