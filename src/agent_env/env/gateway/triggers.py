@@ -1052,10 +1052,12 @@ class TriggerEngine:
         try:
             await self._gw._log_event({"event_type": "trigger_fired", "source": "trigger_engine", "trigger_id": tid})
             clock = self._gw._clock
-            for mark in marks:
+            now, elapsed = clock.now(), clock.elapsed()
+            # A mark's delay runs from the mark, so a backlog doesn't push each reply back further; reckoned before any
+            # wait, so a re-arm during one doesn't shorten the rest.
+            sinces = [elapsed - (max(0.0, (now - mark).total_seconds()) if now is not None else 0.0) for mark in marks]
+            for mark, since in zip(marks, sinces):
                 trig["attempts"] += 1
-                now = clock.now()  # a mark's delay runs from the mark, so a backlog doesn't push each reply back further
-                since = clock.elapsed() - (max(0.0, (now - mark).total_seconds()) if now is not None else 0.0)
                 for index, action in enumerate(trig["spec"]["actions"]):
                     if not await self._run_action(tid, trig, index, action, {}, since):
                         trig["status"] = "failed"
@@ -1467,7 +1469,7 @@ def _next_opening(now: datetime, hours: dict) -> datetime | None:
     local = now.astimezone(timezone((1 if sign == "+" else -1) * timedelta(hours=int(hh), minutes=int(mm))))
     start_h, start_m = map(int, hours["start"].split(":"))
     end_h, end_m = map(int, hours["end"].split(":"))
-    length = timedelta(minutes=((end_h - start_h) * 60 + end_m - start_m) % (24 * 60))
+    length = (timedelta(hours=end_h, minutes=end_m) - timedelta(hours=start_h, minutes=start_m)) % timedelta(days=1)
     midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
     for days_ahead in range(-1, 8):
         day = midnight + timedelta(days=days_ahead)

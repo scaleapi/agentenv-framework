@@ -491,6 +491,27 @@ async def test_a_stochastic_delay_draws_the_same_sequence_from_its_seed(engine, 
 
 
 @pytest.mark.asyncio
+async def test_a_re_arm_during_one_mark_s_delay_does_not_shorten_the_next(engine, virtual_time, monkeypatch):
+    engine.register({"triggers": [{"id": "x", "when": {"type": "time", "every": "PT1H"},
+                                   "actions": [{"type": "tool", "tool": "slack_send_message",
+                                                "args": {"channel": "#c", "text": "hi"}, "delay": "PT90M"}]}]})
+    record = TriggerEngine._sleep_virtual
+
+    async def re_arm_a_day_on_after_the_first_wait(self, seconds, generation=None):
+        await record(self, seconds, generation)
+        if len(virtual_time) == 1:
+            self._gw._clock.set_time("2026-10-15T10:30:00Z")
+
+    monkeypatch.setattr(TriggerEngine, "_sleep_virtual", re_arm_a_day_on_after_the_first_wait)
+    engine._eval_time_triggers()
+    virtual_time.advance(2 * 3600)  # 10:00: the 09:00 and 10:00 marks come due together
+    engine._eval_time_triggers()
+    await asyncio.sleep(0.2)
+
+    assert virtual_time == [1800.0, 3600.0]
+
+
+@pytest.mark.asyncio
 async def test_working_hours_defer_an_nl_action_until_they_open(engine, executor_calls, virtual_time):
     engine.register({"executors": {"bob": {"a2a_url": "http://bob", "role": "bob",
                                            "hours": {"start": "09:00", "end": "17:00"}}},
