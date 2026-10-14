@@ -108,9 +108,19 @@ jobs:
   # The slow tier: builds the env images and the echo A2A agent (tst/data/a2a_agent) and deploys
   # them on the runner's Docker. The tests that need a real model, a remote sandbox, a registered
   # default A2A agent or MCP server sources from outside this repository skip with the capability reason.
+  # The gateway tests take as long as the rest of the tier, so they run beside it as a check of their own.
   integration-local-slow:
+    name: ${{ matrix.check }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - check: integration-local-slow
+            tests: tst/integration --ignore=tst/integration/env/gateway/gateway_test.py
+          - check: integration-local-gateway
+            tests: tst/integration/env/gateway/gateway_test.py
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
@@ -158,7 +168,7 @@ jobs:
       - name: Slow integration tier on the local defaults
         run: |
           .venv/bin/python -m pytest -m int_test_slow -rA --timeout=1200 --junitxml=junit-integration-slow.xml \
-            tst/integration
+            ${{ matrix.tests }}
       - name: Skips must be declared capability gaps
         if: always()
         run: |

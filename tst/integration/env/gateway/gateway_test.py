@@ -36,7 +36,13 @@ from agent_env.env.envs.website_browser import (
 )
 from agent_env.config import get_config
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
-from tst.util.capabilities import MCP_SERVER_SOURCES, missing_capability_reason, skip_without_remote_sandbox
+from tst.util.capabilities import (
+    MCP_SERVER_SOURCES,
+    missing_capability_reason,
+    skip_without_default_a2a_agent,
+    skip_without_model_endpoint,
+    skip_without_remote_sandbox,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1609,7 +1615,7 @@ async def test_snapshot_cli(multi_env, environment_universe_artifact):
     """Test env snapshot: deploy MultiEnv, load universe, snapshot, verify."""
     from agent_env.artifact import Artifact
     from agent_env.cli.env.snapshot import run_snapshot
-    from agent_env.env.snapshot_store import get_env_snapshot_store
+    from agent_env.env.snapshot_store import compute_env_fingerprint, get_env_snapshot_store
 
     multi_env_ref = multi_env
     multi_env = Env.get(multi_env_ref.id, version=multi_env_ref.version)
@@ -1637,7 +1643,12 @@ async def test_snapshot_cli(multi_env, environment_universe_artifact):
         logger.info(f"Snapshot record: {snapshot}")
 
         # Verify get_clean returns the same snapshot
-        clean_snapshot = get_env_snapshot_store().get_clean(multi_env.id, environment_universe_artifact.id)
+        clean_snapshot = get_env_snapshot_store().get_clean(
+            multi_env.id,
+            environment_universe_artifact.id,
+            environment_universe_artifact.version,
+            env_fingerprint=compute_env_fingerprint(multi_env),
+        )
         assert clean_snapshot is not None, "Expected clean snapshot via get_clean"
         assert clean_snapshot.instance_id == result.instance_id
 
@@ -1758,6 +1769,8 @@ async def test_gateway_consistent_mode(multi_env, environment_universe_artifact)
 
 @pytest.mark.asyncio
 @pytest.mark.integration
+@skip_without_model_endpoint()
+@skip_without_default_a2a_agent()
 async def test_env_validator_task(mcp_server_envs):
     """Test MCPServerEnv.validate(): lazily creates task, runs validation, persists metadata."""
     from agent_env.task import Task
