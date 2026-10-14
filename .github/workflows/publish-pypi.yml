@@ -15,7 +15,37 @@ permissions:
   contents: read
 
 jobs:
+  explorer-ui:
+    # The explorer's built web UI ships inside the agentenv-framework wheel. It is built here, in a job that can't
+    # mint a PyPI token and uses no cache, so no npm package runs where it could publish; `framework` takes only
+    # the output.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: src/agent_env/explorer/ui
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+      - run: npm ci
+      - name: Build the static export
+        run: npm run build:static
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: explorer-ui
+          path: src/agent_env/explorer/ui/out
+          if-no-files-found: error
+          retention-days: 1
+
   protocol:
+    # Nothing publishes unless the whole release, UI included, has built.
+    needs: explorer-ui
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: pypi-protocol
@@ -43,7 +73,7 @@ jobs:
         run: uv publish --trusted-publishing always --check-url https://pypi.org/simple/ dist/*
 
   framework:
-    needs: protocol
+    needs: [protocol, explorer-ui]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: pypi
@@ -59,6 +89,10 @@ jobs:
           python-version: "3.12"
       - name: Install uv from public PyPI
         run: python -m pip install --quiet --index-url https://pypi.org/simple uv
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: explorer-ui
+          path: src/agent_env/explorer/static
       - name: Build agentenv-framework, pinned to this release's agentenv-framework-protocol
         run: |
           protocol=$(sed -n 's/^version = "\(.*\)"/\1/p' packages/agentenv-protocol/pyproject.toml)
@@ -67,6 +101,8 @@ jobs:
           sed -i "s/\"agentenv-framework-protocol[^\"]*\"/\"agentenv-framework-protocol==${protocol}\"/" pyproject.toml
           grep -q "\"agentenv-framework-protocol==${protocol}\"" pyproject.toml
           uv build --no-sources --out-dir dist
+      - name: Check the wheel carries the explorer UI
+        run: python .github/scripts/check_explorer_ui.py dist/*.whl
       - name: Check its metadata renders
         run: uvx --index-url https://pypi.org/simple twine check --strict dist/*
       - name: Publish agentenv-framework
