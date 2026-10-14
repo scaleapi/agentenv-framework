@@ -2,19 +2,25 @@
 from one folder's Dockerfile, runs as two agents that differ only in their agent.toml, and a third agent runs the echo
 agent pushed to this machine's local registry, through a folder naming it with ``ref``. A rerun builds nothing, an
 agent.toml edit rewrites only that agent, and an edit to the folder rebuilds its image once and rewrites both agents
-over it. Needs a Docker daemon and the local registry."""
+over it. Once the ref's tag moves, a new description rewrites the ref folder over the digest it pinned. Needs a Docker
+daemon and the local registry."""
 
 import json
 import logging
 import shutil
+import subprocess
 
 import pytest
 from click.testing import CliRunner
 
+from agent_env.artifact import DockerImageArtifact
 from agent_env.artifact.store import reset_artifact_store
+from agent_env.bundle import BundleKind, parse_bundle
 from agent_env.cli import cli
 from agent_env.config import configure, reset_config
+from agent_env.store.image_store.registry_api import pin_digest
 from agent_env.store.object_store.local.grant_server import grant_server
+from agent_env.store.routing import namespace_routing
 from tst.util.a2a_test_agent import AGENT_DIR, PROTOCOL_DIR, build_test_agent_image
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
@@ -87,6 +93,27 @@ def _run(root):
     return CliRunner().invoke(cli, ["run", str(root)])
 
 
+def _push(source, ref, label=None):
+    """Push ``source``, an image artifact, as ``ref``, or with ``label``, an image that differs from it by that
+    label."""
+    platform = ["--platform", source.platform] if source.platform else []
+    subprocess.run(["docker", "pull", "-q", *platform, source.image_name], check=True, capture_output=True)
+    if label is None:
+        subprocess.run(["docker", "tag", source.image_name, ref], check=True, capture_output=True)
+    else:
+        subprocess.run(["docker", "build", "-q", *platform, "-t", ref, "-"], text=True, check=True,
+                       input=f"FROM {source.image_name}\nLABEL moved={label}\n", capture_output=True)
+    subprocess.run(["docker", "push", "-q", ref], check=True, capture_output=True)
+
+
+def _pinned(root, name):
+    """The image name the image folder ``name``'s latest version records."""
+    entry = next(entry for entry in parse_bundle(root).entries
+                 if entry.kind is BundleKind.ARTIFACT and entry.name == name)
+    with namespace_routing():
+        return DockerImageArtifact.get(entry.id).image_name
+
+
 def _passed(output, fr=1):
     """Whether each task passed, at its version: fr's is rewritten when its greeting changes."""
     return all(f"tasks/{name}.json v{version}: passed" in output
@@ -94,8 +121,11 @@ def _passed(output, fr=1):
 
 
 def test_agents_sharing_an_image_folder_run_its_one_build_and_an_edit_to_it_rebuilds_it_once(state):
-    ref = build_test_agent_image("bundle-image-folder-echo").image_name
-    assert ref.startswith("localhost:"), ref
+    echo = build_test_agent_image("bundle-image-folder-echo")
+    assert echo.image_name.startswith("localhost:"), echo.image_name
+    # A tag this test owns, so it can move it: the echo image's own is shared by every suite that builds it.
+    ref = f"{echo.image_name.split('/', 1)[0]}/bundle-image-folder/echo:moving"
+    _push(echo, ref)
     root = _bundle(state / "folders-bundle", ref)
 
     first = _run(root)
@@ -133,3 +163,17 @@ def test_agents_sharing_an_image_folder_run_its_one_build_and_an_edit_to_it_rebu
     assert "agents/en: v2 (" in rebuilt.output and "agents/fr: v3 (" in rebuilt.output, rebuilt.output
     assert "agents/echo: v1, unchanged" in rebuilt.output, rebuilt.output
     assert _passed(rebuilt.output, fr=2), rebuilt.output
+
+    pinned = _pinned(root, "echo")
+    _push(echo, ref, label="1")
+    assert pin_digest(ref, None) != pinned, "the tag should name another image now"
+    (root / "artifacts/echo/artifact.toml").write_text(
+        f'type = "docker_image"\nref = "{ref}"\ndescription = "the echo agent, by a tag that moves"\n')
+
+    described = _run(root)
+
+    assert described.exit_code == 0, described.output
+    assert f"artifacts/echo ({ref} image): v2 (" in described.output, described.output
+    assert "agents/echo: v2 (" in described.output, described.output
+    assert _pinned(root, "echo") == pinned, described.output
+    assert _passed(described.output, fr=2), described.output
