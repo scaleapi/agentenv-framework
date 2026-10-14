@@ -1,8 +1,9 @@
 """``agent-env run`` on a bundle with a CLI folder, ``artifacts/<name>/`` with ``type = "cli"``: a task deploys an MCP
 server env through the gateway and the echo agent, loads the CLI into the agent and attaches it as a skill, and the
-agent runs it. The CLI reads a file of its own and the gateway URL installing it wrote beside its entrypoint. An edit
-to one of its files writes it again, and the next run installs the new one. Needs a Docker daemon and the local
-registry."""
+agent runs it. The CLI reads a file of its own and the gateway URL installing it wrote beside its entrypoint. The
+task also builds the env's own CLI with build_mcp_cli, as the worker does, and the agent adds an item through it and
+lists it back. An edit to the folder CLI's files writes it again, and the next run installs the new one. Needs a
+Docker daemon and the local registry."""
 
 import json
 import logging
@@ -24,6 +25,7 @@ REPO = Path(__file__).resolve().parents[3]
 ITEMS = REPO / "tst" / "data" / "agentenv_mcp"  # an in-memory MCP server whose card names it items
 NO_MODEL = 'LITELLM_API_KEY = "unused"\nLITELLM_BASE_URL = "http://unused.invalid"\n'
 ENTRYPOINT = "/opt/cli/hello/bin/hello"
+ITEMS_CLI = "/opt/cli/items/bin/items"  # the CLI build_mcp_cli generates for the items env
 # Prints its greeting file and the scheme of the gateway URL install_cli wrote to bin/.env.
 HELLO = '''#!/bin/sh
 here="$(dirname "$0")"
@@ -64,13 +66,19 @@ def _task(greeting):
         {"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "echo", "sandbox_type": "local"},
         {"id": "load", "type": "load_artifact", "env_id": "items", "artifact_id": "hello",
          "agent_name": "default-agent", "depends_on": ["env", "agent"]},
-        {"id": "skill", "type": "add_skills", "cli_artifact_ids": ["hello"], "depends_on": ["load"]},
-        {"id": "ask", "type": "prompt_agent", "prompt": f"run {ENTRYPOINT}\nlist-skills", "prompt_id": "ask",
-         "depends_on": ["skill"]},
+        {"id": "build", "type": "build_mcp_cli", "env_id": "items", "command_name": "items",
+         "cli_artifact_id": "items-cli", "depends_on": ["env"]},
+        {"id": "load-built", "type": "load_artifact", "env_id": "items", "artifact_id": "items-cli",
+         "agent_name": "default-agent", "depends_on": ["build", "agent"]},
+        {"id": "skill", "type": "add_skills", "cli_artifact_ids": ["hello"], "depends_on": ["load", "load-built"]},
+        {"id": "ask", "type": "prompt_agent", "prompt_id": "ask", "depends_on": ["skill"],
+         "prompt": f"run {ENTRYPOINT}\nrun {ITEMS_CLI} items-add-item --item from-cli\nrun {ITEMS_CLI} list-items\n"
+                   "list-skills"},
+        # The added item is quoted only in list-items' JSON, not in the prompt the agent echoes.
         {"id": "check", "type": "agent_prompt_response_verifier", "prompt_id": "ask", "verifier_id": "ran",
          "criteria": [{"type": "response_contains",
                        "needles": [f"ran {ENTRYPOINT}: {greeting} from a bundle cli, gateway http",
-                                   "skill hello-cli: SKILL.md="]}],
+                                   f"ran {ITEMS_CLI} list-items: ", '"from-cli"', "skill hello-cli: SKILL.md="]}],
          "depends_on": ["ask"]},
     ])
 
