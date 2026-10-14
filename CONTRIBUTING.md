@@ -22,16 +22,16 @@ Docker.
 ```bash
 git clone https://github.com/scaleapi/agentenv-framework.git
 cd agentenv-framework
-uv venv .venv
-uv pip install --python .venv/bin/python -e ./packages/agentenv-protocol -e '.[dev]'
+uv sync --locked --extra dev
+```
+
+This is the same install CI performs. `make install` installs the same packages with pip, but
+resolves them afresh instead of from `uv.lock`.
 
 The distribution is `agentenv-framework` (import `agent_env`, command `agent-env`). A virtualenv created
 when the distribution was still called `agent-env` holds both after a reinstall, because the two
 write the same files; run `uv pip uninstall --python .venv/bin/python agent-env` once before
 reinstalling.
-```
-
-This is the same install CI performs. `make install` is equivalent.
 
 ## Running the tests
 

@@ -184,7 +184,7 @@ orchestrators call it the same way. What callers rely on:
 
 The required checks on pull requests and `main` are `unit`, `integration-local`,
 `integration-local-slow`, `installer`, `plugin-api` and `clean-install`. `.github/workflows/local-backends.yml` runs
-the first four, all installed from public PyPI with no secrets and no external services (a `registry:2` service container for the integration jobs). The
+the first four, all installed from `uv.lock` (public PyPI only) with no secrets and no external services (a `registry:2` service container for the integration jobs). The
 `unit` job also fails if `uv.lock` resolves anything from a registry other than PyPI or if
 `agentenv-framework-protocol` is not the editable workspace member. The integration jobs run
 `.github/scripts/check_skip_policy.py` over the JUnit report: only `agentenv-capability-missing`
