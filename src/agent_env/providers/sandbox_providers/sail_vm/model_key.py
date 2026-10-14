@@ -61,7 +61,7 @@ MIN_KEY_LENGTH = 16
 # By secret name: the key, so a handle reconnected here can still scrub its agent's key, and the launches
 # and Sailboxes in this process that need it, so the key is forgotten once none does. Process memory only.
 _injected_keys: dict[str, str] = {}
-_injected_headers: dict[frozenset[str], tuple[dict[str, str], str | None]] = {}
+_injected_headers: dict[frozenset[str], tuple[dict[str, str], frozenset[str]]] = {}
 _holders: dict[str, set[str]] = {}
 _header_holders: dict[frozenset[str], set[str]] = {}
 # The env vars agent-env hands a model endpoint's headers in, and how each writes them.
@@ -175,8 +175,8 @@ class ModelKeyInjection:
     headers: dict[str, str] = field(default_factory=dict)
     #: The headers as agent-env hands them to workloads, names as configured: what scrubbing replaces.
     header_values: dict[str, str] | None = field(default=None, repr=False)
-    #: ``LITELLM_EXTRA_HEADERS`` exactly as the deploy wrote it, when that isn't the JSON agent-env writes.
-    header_text: str | None = field(default=None, repr=False)
+    #: ``LITELLM_EXTRA_HEADERS`` exactly as each deploy wrote it, where that isn't the JSON agent-env writes.
+    header_texts: frozenset[str] = field(default=frozenset(), repr=False)
     #: The model endpoint's path as a prefix (``/v1/``) the headers are scoped to, as they are in agent-env;
     #: None when it has no path. The key goes with every request to the host either way.
     path_prefix: str | None = None
@@ -211,7 +211,7 @@ class ModelKeyInjection:
         except ValueError:
             values = None
         if not isinstance(values, dict) or not all(isinstance(value, str) for value in values.values()):
-            raise ValueError(f"{HEADERS_ENV} must be a JSON object of header names and values, not {text[:80]!r}")
+            raise ValueError(f"{HEADERS_ENV} must be a JSON object of header names and values")
         if clash := sorted(name for name in values if name.lower() in KEY_HEADERS):
             raise ValueError(
                 f"[model.headers] sets {clash}, which Sail sets from the model key; drop them, or set "
@@ -220,7 +220,8 @@ class ModelKeyInjection:
         path = parsed.path.rstrip("/")
         return cls(host=parsed.hostname, secret=secret_name(key), key=key,
                    headers={name.lower(): header_secret_name(name, value) for name, value in values.items()},
-                   header_values=values or None, header_text=text if values and text != json.dumps(values) else None,
+                   header_values=values or None,
+                   header_texts=frozenset({text}) if values and text != json.dumps(values) else frozenset(),
                    path_prefix=f"{path}/" if values and path else None)
 
     @classmethod
@@ -279,7 +280,8 @@ class ModelKeyInjection:
         _holders.setdefault(self.secret, set()).add(holder)
         if self.headers:
             if self.header_values:
-                _injected_headers[self._headers_id()] = (self.header_values, self.header_text)
+                _, texts = _injected_headers.get(self._headers_id(), (None, frozenset()))
+                _injected_headers[self._headers_id()] = (self.header_values, texts | self.header_texts)
             _header_holders.setdefault(self._headers_id(), set()).add(holder)
 
     def release(self, holder: str) -> None:
@@ -310,7 +312,7 @@ class ModelKeyInjection:
         if not self.headers:
             return
         if remembered := _injected_headers.get(self._headers_id()):
-            self.header_values, self.header_text = remembered
+            self.header_values, self.header_texts = remembered
         elif candidate and {
             name.lower(): header_secret_name(name, value) for name, value in candidate.items()
         } == self.headers:
@@ -325,8 +327,7 @@ class ModelKeyInjection:
             placeholders = dict.fromkeys(self.header_values, HEADER_PLACEHOLDER)
             pairs += [(json.dumps(self.header_values), json.dumps(placeholders)),
                       (header_lines(self.header_values), header_lines(placeholders))]
-            if self.header_text:
-                pairs.append((self.header_text, json.dumps(placeholders)))
+            pairs += [(text, json.dumps(placeholders)) for text in sorted(self.header_texts)]
         return [(encode(value), encode(placeholder)) for value, placeholder in pairs
                 for encode in (shlex.quote, lambda text: text.replace("'", "'\\''"), lambda text: text)]
 

@@ -927,10 +927,12 @@ def test_an_endpoint_without_a_path_gets_its_headers_with_every_request_to_the_h
     assert "match" not in rule and "x-hf-bill-to" in rule["request"]["set"]["headers"]
 
 
-@pytest.mark.parametrize("text", ["not json", '["X-A"]', '{"X-A": 1}'])
-def test_headers_that_arent_a_json_object_of_strings_are_refused(text):
-    with pytest.raises(ValueError, match="must be a JSON object of header names and values"):
+@pytest.mark.parametrize("text", ["not json", '["X-A"]', '{"X-Gateway-Key": "private-token", "X-Retries": 3}'])
+def test_headers_that_arent_a_json_object_of_strings_are_refused_without_quoting_them(text):
+    with pytest.raises(ValueError, match="must be a JSON object of header names and values") as refused:
         ModelKeyInjection.for_env({**_ENV, "LITELLM_EXTRA_HEADERS": text})
+
+    assert "private-token" not in str(refused.value)
 
 
 @pytest.mark.parametrize("name", ["Authorization", "X-Api-Key"])
@@ -1087,3 +1089,17 @@ async def test_sailboxes_sharing_headers_but_not_a_key_keep_each_others_headers_
     reconnected = ModelKeyInjection.from_document({"rules": second.rules()}, "ep_9")
     reconnected.recover_headers(None)
     assert reconnected.header_values == _HEADERS
+
+
+def test_sailboxes_writing_the_same_headers_differently_each_keep_their_spelling_to_scrub():
+    spellings = ['{"X-HF-Bill-To":"acme-org","X-Gateway-Key":"it\'s-a-gateway-secret"}',
+                 '{ "X-HF-Bill-To" : "acme-org" , "X-Gateway-Key" : "it\'s-a-gateway-secret" }']
+    for holder, text in zip(("sb_1", "sb_2"), spellings):
+        ModelKeyInjection.for_env({**_ENV, "LITELLM_EXTRA_HEADERS": text}).hold(holder)
+
+    reconnected = ModelKeyInjection.from_document({"rules": ModelKeyInjection.for_env(_ENV_H).rules()}, "ep_9")
+    reconnected.recover_headers(None)
+
+    for text in spellings:
+        assert reconnected.scrub(f"LITELLM_EXTRA_HEADERS={shlex.quote(text)}") == (
+            f"LITELLM_EXTRA_HEADERS={shlex.quote(json.dumps(_PLACEHELD))}")
