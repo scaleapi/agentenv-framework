@@ -271,7 +271,7 @@ class _Walk:
         if ref.id in self.referenced:
             return _Image(what, self.referenced[ref.id])
         if ref.id in self.written:
-            return None  # another of the bundle's writes, which materialize refuses or writes first
+            return None  # another of the bundle's writes, which isn't an image: a plugin env's artifact
         try:
             return _Image(what, DockerImageArtifact.get(ref.id, self._planned_version(ref.kind, ref.id, ref.version)))
         except NotFoundError:
@@ -340,8 +340,6 @@ class _Walk:
                 return _Image(what, built=image_id)
             if image_id in self.referenced:
                 return _Image(what, self.referenced[image_id])
-            if image_id in self.written:
-                return None  # another of the bundle's writes, which materialize refuses or writes first
             planned = self._planned_version(EntityKind.ARTIFACT, image_id, image_version)
             return _Image(what, DockerImageArtifact.get(image_id, planned))
         try:

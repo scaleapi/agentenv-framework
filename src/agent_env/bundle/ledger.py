@@ -212,7 +212,7 @@ def _tracked(write: Write) -> bool:
     the files its type reads from its folder (``folder_walk``) and what it references; an agent or env from its
     toml and what it references. A built image is made from its build context, ``build_context_files``; what the
     build fetches (its base image, packages) isn't an input. A referenced image is made from its ref's text, so a tag
-    that moves in its registry isn't a change."""
+    that moves in its registry isn't a change. An image folder's image is also made from its description."""
     if isinstance(write.source, ImpliedImage):
         return True
     if write.kind in (BundleKind.ARTIFACT, BundleKind.SKILL):
@@ -223,11 +223,13 @@ def _tracked(write: Write) -> bool:
 
 
 def _config(write: Write) -> Any:
-    if isinstance(write.source, BuiltImage):
-        return {"dockerfile": write.source.dockerfile}
-    if isinstance(write.source, ReferencedImage):
-        return {"ref": write.source.ref}
-    return write.source.config
+    source = write.source
+    if not isinstance(source, ImpliedImage):
+        return source.config
+    config = {"dockerfile": source.dockerfile} if isinstance(source, BuiltImage) else {"ref": source.ref}
+    if source.description is not None:  # only an image folder's, so an image key's digest is as before
+        config["description"] = source.description
+    return config
 
 
 def _type(write: Write) -> str:

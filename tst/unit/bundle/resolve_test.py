@@ -382,6 +382,44 @@ def test_an_image_key_naming_a_registry_image_has_the_bundle_reference_it(make):
     assert refs(judge) == [(EntityKind.ARTIFACT, f"{ROOT}/judge__agent_image", None, "ghcr.io/acme/judge:2")]
 
 
+def test_an_image_folder_is_the_image_built_from_its_dockerfile_or_the_registry_image_its_toml_names(make):
+    result = resolve_bundle(make(files={
+        "artifacts/base-mcp/artifact.toml": 'description = "the shared server image"\n',
+        "artifacts/nginx/artifact.toml": 'type = "docker_image"\nref = "docker.io/library/nginx:1.27"\n',
+        "agents/judge/agent.toml": 'image = "nginx"\n',
+    }))
+    base, nginx = (next(entry for entry in result.bundle.entries if entry.name == name)
+                   for name in ("base-mcp", "nginx"))
+    judge = next(entry for entry in result.entries if entry.entry.name == "judge")
+
+    assert [image for image in result.images if image.entry in (base, nginx)] == [
+        BuiltImage(f"{ROOT}/base-mcp", base, "Dockerfile", description="the shared server image"),
+        ReferencedImage(f"{ROOT}/nginx", nginx, "docker.io/library/nginx:1.27"),
+    ]
+    assert not [entry for entry in result.entries if entry.entry in (base, nginx)]
+    assert (judge.config, refs(judge)) == (
+        {"image": f"{ROOT}/nginx"}, [(EntityKind.ARTIFACT, f"{ROOT}/nginx", None, "nginx")])
+
+
+@pytest.mark.parametrize("files, problem", [
+    ({"artifacts/img/artifact.toml": 'type = "docker_image"\n'},
+     'artifacts/img: an image folder needs a Dockerfile, or ref = "<image>" in its artifact.toml'),
+    ({"artifacts/img/Dockerfile": "FROM scratch\n", "artifacts/img/artifact.toml": 'ref = "ghcr.io/acme/img:1"\n'},
+     "artifacts/img: artifact.toml: ref names a registry image, so this folder builds none; remove ref or its "
+     "Dockerfile"),
+    ({"artifacts/img/artifact.toml": 'type = "docker_image"\nref = "img:1"\n'},
+     "artifacts/img: artifact.toml: ref: 'img:1' doesn't name its registry; spell it out, as in "
+     "docker.io/library/img:1"),
+    ({"artifacts/img/Dockerfile": "FROM scratch\n", "artifacts/img/artifact.toml": 'platform = "linux/amd64"\n'},
+     "artifacts/img: artifact.toml: unknown key 'platform'; a docker_image artifact takes description, ref, type "
+     "and id"),
+    ({"artifacts/img/Dockerfile": "FROM scratch\n", "artifacts/img/artifact.toml": "description = 1\n"},
+     "artifacts/img: artifact.toml: description must be a string, not 1"),
+], ids=["nothing to build", "both", "no registry", "unknown key", "description type"])
+def test_an_image_folder_its_toml_cant_describe_is_a_problem(make, files, problem):
+    assert problem in problems(make(files=files))
+
+
 def test_an_agent_names_a_store_image_or_builds_its_folder(make):
     result = resolve_bundle(make(files={"agents/judge/agent.toml": 'image = { artifact = "claude-image", version = 3 }\n'}))
     solver, judge = (next(e for e in result.entries if e.entry.name == name) for name in ("solver", "judge"))
@@ -462,9 +500,11 @@ def test_entities_without_references_resolve_to_a_copy_of_their_config(make):
     result = resolve_bundle(make())
     built = (BundleKind.AGENT, BundleKind.ENV)  # each names the image built from its folder
     assert {(e.entry.kind, e.entry.name): e.references for e in result.entries if e.entry.kind not in built} == {
-        (BundleKind.ARTIFACT, "greeting"): (), (BundleKind.ARTIFACT, "base-mcp"): (), (BundleKind.SKILL, "pdf"): (),
+        (BundleKind.ARTIFACT, "greeting"): (), (BundleKind.SKILL, "pdf"): (),
     }
-    assert {image.entry.kind for image in result.images} == set(built)
+    # base-mcp, an image folder, is the image built from it
+    assert {(image.entry.kind, image.entry.name) for image in result.images if image.entry.kind not in built} == {
+        (BundleKind.ARTIFACT, "base-mcp")}
 
 
 @pytest.mark.parametrize(("depends_on", "problem"), [

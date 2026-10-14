@@ -119,9 +119,12 @@ class _Planner:
         images: dict[BundleEntry, list[ImpliedImage]] = {}
         for image in resolved.images:
             images.setdefault(image.entry, []).append(image)
-        for entry in resolved.entries:
-            for image in images.get(entry.entry, ()):
+        entries = {entry.entry: entry for entry in resolved.entries}
+        for bundle_entry in resolved.bundle.entries:
+            for image in images.get(bundle_entry, ()):
                 self._add(_key(image), image, [])
+            if (entry := entries.get(bundle_entry)) is None:  # an image folder, which is its image
+                continue
             needs = dict.fromkeys(_key(ref.local) for ref in entry.references if ref.local is not None)
             self._add(_key(entry.entry), entry, list(needs))
         self.named = {fold(entry.entry.name): entry.entry for entry in resolved.entries}

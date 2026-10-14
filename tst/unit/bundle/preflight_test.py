@@ -241,6 +241,33 @@ def test_an_agent_the_bundle_builds_is_built_here_for_the_local_provider_and_a_b
     assert dry.images() == (f"agents/solver (Dockerfile image) v1: {form}",)
 
 
+@pytest.mark.parametrize("sandbox, form", [
+    ("local", "built on this machine"), ("modal_vm", CONTEXT), ("modal", CONTEXT),
+])
+def test_an_image_folder_an_agent_names_is_written_in_the_form_its_deploys_run(
+        bundle_dir, docker_on_path, sandbox, form):
+    layout(bundle_dir, {"artifacts/base/Dockerfile": "FROM scratch\n", "agents/solver/agent.toml": 'image = "base"\n'})
+    _task(bundle_dir, [AGENT])
+
+    dry = dry_run_bundle(bundle_dir, sandbox=sandbox)
+
+    assert dry.materialization.contexts == (set() if sandbox == "local" else {"@local/~/triage/base"})
+    assert dry.images() == (f"artifacts/base (Dockerfile image) v1: {form}",)
+
+
+def test_an_image_folder_naming_a_registry_on_this_machine_is_refused_where_a_sandbox_elsewhere_pulls_it(bundle_dir):
+    layout(bundle_dir, {
+        "artifacts/base/artifact.toml": 'type = "docker_image"\nref = "localhost:5000/team/solver:v1"\n',
+        "agents/solver/agent.toml": 'image = "base"\n',
+    })
+    _task(bundle_dir, [AGENT])
+
+    [problem] = _problems(lambda: dry_run_bundle(bundle_dir, sandbox="modal"))
+
+    assert problem.startswith("tasks/t.json: step 'agent': deploys agent ")
+    assert "localhost:5000/team/solver:v1 is in a registry on this machine" in problem
+
+
 class _ContainersOnly(SandboxProvider):
     """A plugin's provider that runs an agent's image in a container of its own, and creates no VM."""
 
@@ -641,14 +668,6 @@ def test_a_website_on_modal_is_refused_since_its_gateway_runs_in_containers(bund
         "tasks/t.json: step 'env': deploys env 'shop' on the 'modal' sandbox provider, which runs the gateway in "
         "containers, and they can't serve websites; run it on a VM provider, such as --sandbox local",
     ]
-
-
-def test_an_agent_over_another_of_the_bundles_writes_gets_that_writes_own_refusal(bundle_dir):
-    layout(bundle_dir, {"artifacts/base/Dockerfile": "FROM scratch\n", "agents/solver/agent.toml": 'image = "base"\n'})
-    _task(bundle_dir, [AGENT])
-
-    assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox="modal")) == [
-        "artifacts/base: writing a docker_image artifact isn't supported yet"]
 
 
 # The default agent

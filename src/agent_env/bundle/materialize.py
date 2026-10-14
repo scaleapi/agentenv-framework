@@ -167,7 +167,7 @@ def _write_build_context(plan: Plan, write: Write) -> int:
     with _staged(plan, image) as context:
         try:
             return DockerImageArtifact.put_context(
-                write.id, description=f"built from {_path(plan, write)}/{image.dockerfile}", context_path=str(context),
+                write.id, description=_built_description(plan, write), context_path=str(context),
                 dockerfile_path=str(context / image.dockerfile),
             ).version
         except (ValueError, RuntimeError) as e:  # a context it can't write, or the object store
@@ -177,8 +177,9 @@ def _write_build_context(plan: Plan, write: Write) -> int:
 def _write_referenced_image(plan: Plan, write: Write) -> int:
     """Register the registry image an entry's image key names, its tag pinned to the digest the registry serves now."""
     try:
-        return DockerImageArtifact.put_ref(write.id, description=f"referenced by {_path(plan, write)}",
-                                           image_name=write.source.ref).version
+        return DockerImageArtifact.put_ref(
+            write.id, description=write.source.description or f"referenced by {_path(plan, write)}",
+            image_name=write.source.ref).version
     except ValueError as e:  # the registry's answer, or a registry on this machine the image's store can't name
         raise BundleError([f"{_path(plan, write)}: {e}"]) from None
 
@@ -195,11 +196,15 @@ def _write_built_image(plan: Plan, write: Write) -> int:
             raise BundleError([f"{_path(plan, write)}: {_tail(str(e))}"]) from None
         try:
             return DockerImageArtifact.put(
-                id=write.id, description=f"built from {_path(plan, write)}/{image.dockerfile}", image_name=tag,
+                id=write.id, description=_built_description(plan, write), image_name=tag,
                 build_context_path=str(context), dockerfile_path=str(context / image.dockerfile),
             ).version
         except RuntimeError as e:  # the image store, docker push or docker save
             raise BundleError([f"{_path(plan, write)}: {e}"]) from None
+
+
+def _built_description(plan: Plan, write: Write) -> str:
+    return write.source.description or f"built from {_path(plan, write)}/{write.source.dockerfile}"
 
 
 _BUILD_OUTPUT_TAIL_LINES = 40

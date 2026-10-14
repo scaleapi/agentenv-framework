@@ -160,8 +160,8 @@ class DryRun:
         return relative(self.materialization.plan.bundle.bundle.root, entry.path)
 
     def images(self) -> tuple[str, ...]:
-        """A line per image a folder's image key has the bundle write: which, the version it would leave, and how it
-        would be written."""
+        """A line per image the bundle writes, an image key's or an image folder's: which, the version it would leave,
+        and how it would be written."""
         plan, contexts = self.materialization.plan, self.materialization.contexts
         return tuple(
             f"{_label(plan, done.write)} v{done.version}: "
