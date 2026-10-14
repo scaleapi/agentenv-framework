@@ -52,7 +52,7 @@ jobs:
       # would land on it.
       - name: Plugin surface against the base
         run: |
-          python -m pip install --quiet uv
+          python -m pip install --quiet -r .github/ci-requirements.txt
           title=$(cat "$RUNNER_TEMP/title")
           where=()
           [ -e "$RUNNER_TEMP/on-main" ] && where=(--on-main)

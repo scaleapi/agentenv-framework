@@ -6,6 +6,10 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 5
     groups:
+      # A dependency goes to the first group it matches. A ruff release can report findings that the
+      # lint step fails on, so it gets a pull request of its own.
+      ruff:
+        patterns: ["ruff"]
       python-minor-and-patch:
         update-types: ["minor", "patch"]
     ignore:
@@ -13,6 +17,12 @@ updates:
       # extra's fastmcp needs mcp<2, so a major update can't resolve.
       - dependency-name: "mcp"
         update-types: ["version-update:semver-major"]
+  # ci-requirements.txt: the uv the workflows install.
+  - package-ecosystem: "pip"
+    directory: "/.github"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
   - package-ecosystem: "npm"
     directory: "/src/agent_env/explorer/ui"
     schedule:

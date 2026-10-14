@@ -28,6 +28,6 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install uv from public PyPI
-        run: python -m pip install --quiet --index-url https://pypi.org/simple uv
+        run: python -m pip install --quiet --index-url https://pypi.org/simple -r .github/ci-requirements.txt
       - name: Build, install clean, run hello twice
         run: python .github/scripts/clean_install.py --work "$RUNNER_TEMP/clean-install"

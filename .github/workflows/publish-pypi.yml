@@ -57,7 +57,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install uv from public PyPI
-        run: python -m pip install --quiet --index-url https://pypi.org/simple uv
+        run: python -m pip install --quiet --index-url https://pypi.org/simple -r .github/ci-requirements.txt
       - name: Check the tag names the version being built
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)
@@ -85,7 +85,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install uv from public PyPI
-        run: python -m pip install --quiet --index-url https://pypi.org/simple uv
+        run: python -m pip install --quiet --index-url https://pypi.org/simple -r .github/ci-requirements.txt
       - name: Build agentenv-framework, pinned to this release's agentenv-framework-protocol
         run: |
           protocol=$(sed -n 's/^version = "\(.*\)"/\1/p' packages/agentenv-protocol/pyproject.toml)

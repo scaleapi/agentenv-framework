@@ -1,0 +1,2 @@
+# The uv every workflow installs. Dependabot raises it, and the installer tier runs on the change.
+uv==0.13.1
