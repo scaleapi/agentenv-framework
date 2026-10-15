@@ -11,6 +11,7 @@ from agent_env.utils.docker_build import DockerBuildError
 
 from .a2a_agent import a2a_agent
 from .artifact import artifact
+from .bundle import bundle
 from .config import config
 from .env import env
 from .eval import eval
@@ -78,6 +79,7 @@ def cli(ctx: click.Context, verbose: bool):
 cli.add_command(a2a_agent)
 cli.add_command(env)
 cli.add_command(artifact)
+cli.add_command(bundle)
 cli.add_command(config)
 cli.add_command(eval)
 cli.add_command(plugin)

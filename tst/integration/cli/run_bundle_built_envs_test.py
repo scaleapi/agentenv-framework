@@ -6,25 +6,30 @@ under a name of its own, one over a store image, a website, and a multi of bundl
 when a child is. Environments and a universe the bundle writes load into an MCP server deployed through the gateway,
 and an edit to their files loads anew. A universe composed every way a bundle composes one seeds each server of a multi
 of bundle and store servers, and a store universe shared across servers seeds the one server it's loaded into. The
-echo-mcp example agent-env ships runs by name, and a rerun writes nothing. Needs a Docker daemon and the local
-registry."""
+echo-mcp example agent-env ships runs by name, and a rerun writes nothing, and a task held under bare ids, as a registry
+holds it, imports as a bundle that runs through the gateway. Needs a Docker daemon and the local registry."""
 
 import hashlib
 import json
 import logging
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 
 from agent_env.artifact import EnvironmentArtifact, EnvironmentUniverseArtifact, FileArtifact
+from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import reset_artifact_store
 from agent_env.bundle import parse_bundle
+from agent_env.bundle.resolve import build_step
 from agent_env.cli import cli
 from agent_env.config import configure, reset_config
 from agent_env.env import Env
+from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.store.routing import namespace_routing
+from agent_env.task import Task
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
@@ -553,3 +558,29 @@ def test_the_shipped_echo_mcp_example_runs_by_name_and_a_rerun_writes_nothing(st
     for entry in ("envs/echo (Dockerfile image)", "envs/echo", "artifacts/check_echo", "tasks/smoke.json"):
         assert f"{entry}: v1, unchanged" in second.output, second.output
     assert "tasks/smoke.json v1: passed (echoes: 1)" in second.output, second.output
+
+
+def test_a_stored_mcp_task_imports_as_a_bundle_that_runs_through_the_gateway(state):
+    echo = REPO / "src" / "agent_env" / "examples" / "echo-mcp"
+    tag = "bundle-import-echo:test"
+    build = subprocess.run(["docker", "build", "-t", tag, str(echo / "envs" / "echo")], capture_output=True, text=True)
+    assert build.returncode == 0, build.stderr[-2000:]
+    image = DockerImageArtifact.put("echo-server-image", description="echo server", image_name=tag)
+    MCPServerEnv.put(id="echo-server", docker_image_artifact=image, environment_name="echo")
+    FileArtifact.put_bytes("echo-check", description="calls echo", filename="verify.py",
+                           content=(echo / "artifacts" / "check_echo" / "verify.py").read_bytes())
+    Task.put(id="echo-smoke", steps=[build_step(step) for step in [
+        {"id": "env", "type": "deploy_env", "env_id": "echo-server", "sandbox_type": "local"},
+        {"id": "echoes", "type": "env_outcome_verifier", "env_id": "echo-server", "file_artifact_id": "echo-check",
+         "verifier_id": "echoes"}]])
+
+    imported = CliRunner().invoke(cli, ["bundle", "init", str(state / "echo"), "--from-task", "echo-smoke"])
+
+    assert imported.exit_code == 0, imported.output
+    assert "  env echo-server v1: tasks/echo-smoke.json: step 'env': env_id" in imported.output.splitlines()
+    assert "  artifact echo-check v1: tasks/echo-smoke.json: step 'echoes': file_artifact_id" in imported.output
+    first, second = _run(state / "echo"), _run(state / "echo")
+    assert first.exit_code == 0, first.output
+    assert "tasks/echo-smoke.json v1: passed (echoes: 1)" in first.output, first.output
+    assert "tasks/echo-smoke.json: v1, unchanged" in second.output, second.output
+    assert "tasks/echo-smoke.json v1: passed (echoes: 1)" in second.output, second.output

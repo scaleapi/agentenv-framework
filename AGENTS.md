@@ -104,7 +104,7 @@ and deserialized through a registry.
 | `a2a_agent/` | The `A2AAgent` entity (`a2a_agent`), its stores and the validator steps. The protocol package provides the agent-side framework. |
 | `runner/` | The `[runner]` seam: `Runner.submit()` returns `(run_id, instance_id)`; `LocalRunner` is built in. |
 | `explorer/` | Optional local web UI: `agent-env up`, needs the `explorer` extra, binds loopback `:8234`. |
-| `cli/` | Click CLI with the groups `a2a-agent`, `artifact`, `config`, `env`, `eval`, `plugin`, `run`, `task`, `up`. |
+| `cli/` | Click CLI with the groups `a2a-agent`, `artifact`, `bundle`, `config`, `env`, `eval`, `plugin`, `run`, `task`, `up`. |
 | `examples/` | The bundles agent-env ships (`hello`, and `echo-mcp`, which needs Docker), registered under `agent_env.bundles` in `pyproject.toml`. Tests run them, but they are examples for users, not fixtures. |
 
 ## Extension points

@@ -18,7 +18,7 @@ uv tool install agentenv-framework
 agent-env run hello
 ```
 
-`agent-env run hello` runs the built-in hello task, which needs no Docker, model or configuration. `agent-env run echo-mcp` needs Docker: it builds an MCP server from a Dockerfile, deploys it through the gateway and checks it by calling its tool. `agent-env run` lists both. To try hello without installing anything, run it with uvx:
+`agent-env run hello` runs the built-in hello task, which needs no Docker, model or configuration. `agent-env run echo-mcp` needs Docker: it builds an MCP server from a Dockerfile, deploys it through the gateway and checks it by calling its tool. `agent-env run` lists both. `agent-env bundle init <folder> --from-task <id>` writes a task a store holds as a bundle folder, with each reference it makes pinned at the version the store holds, so you can run and edit it locally. To try hello without installing anything, run it with uvx:
 
 ```bash
 uvx --from agentenv-framework agent-env run hello

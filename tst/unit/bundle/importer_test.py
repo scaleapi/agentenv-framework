@@ -1,0 +1,316 @@
+"""Importing a stored task, or an eval and its tasks, as a bundle: each step as the store holds it, every store
+reference pinned at the version the store holds now, an id a step of the task writes left unpinned, secrets left
+out, and a folder that plans and materializes back to the stored steps. A failed import writes nothing."""
+
+import json
+import tomllib
+from typing import ClassVar
+
+import pytest
+from click.testing import CliRunner
+
+from agent_env.a2a_agent import A2AAgent
+from agent_env.artifact import FileArtifact
+from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
+from agent_env.artifact.store import get_artifact_store
+from agent_env.bundle import BundleError, parse_bundle
+from agent_env.bundle import importer as importer_module
+from agent_env.bundle.importer import import_eval, import_task
+from agent_env.bundle.materialize import materialize
+from agent_env.bundle.plan import plan_bundle
+from agent_env.bundle.resolve import resolve_bundle
+from agent_env.cli import cli
+from agent_env.config import get_config
+from agent_env.config.runtime import Config
+from agent_env.env.envs.mcp_server import MCPServerEnv
+from agent_env.eval import Eval
+from agent_env.eval.eval import EvalTask
+from agent_env.store import Filter
+from agent_env.store.routing import namespace_routing
+from agent_env.task import Task
+from agent_env.task_step.task_step import TaskStep
+
+STEPS = [
+    {"id": "env", "type": "deploy_env", "env_id": "crm-env"},
+    {"id": "load", "type": "load_artifact", "env_id": "crm-env", "artifacts": [{"id": "crm-data"}]},
+    {"id": "agent", "type": "deploy_agent", "env_ids": ["crm-env"], "a2a_agent_id": "solver",
+     "env_vars": {"LITELLM_API_KEY": "sk-1", "MODE": "fast", "DB": "postgres://admin:pw@db/crm"}},
+    {"id": "helper", "type": "deploy_agent", "agent_name": "helper", "env_ids": []},
+    {"id": "judge", "type": "rubrics_verifier", "verifier_id": "judge", "prompt_id": "agent",
+     "judge_a2a_agent_id": "solver",
+     "criteria": [{"id": "c1", "description": "cites https://user:hunter2@wiki.example.com/x"},
+                  {"id": "c2", "description": "clones ssh://git@github.com/org/repo"}]},
+    {"id": "cli", "type": "build_mcp_cli", "env_id": "crm-env", "command_name": "crm", "cli_artifact_id": "crm-cli"},
+    {"id": "skills", "type": "add_skills", "agent_name": "default-agent", "cli_artifact_ids": ["crm-cli"],
+     "depends_on": [{"task_step_id": "cli"}]},
+]
+
+
+def _image(id):
+    return get_artifact_store().put_document(DockerImageArtifact(
+        id=id, description=id, image_name=f"registry.example.com/{id}:v1", tar_gz_s3_url=f"file:///{id}.tar.gz"))
+
+
+@pytest.fixture
+def store(local_stores, tmp_path, monkeypatch):
+    """A registry of bare ids in the configured local store, holding the entities STEPS names: crm-env at v2."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    MCPServerEnv.put(id="crm-env", docker_image_artifact=_image("crm-image"), environment_name="crm")
+    MCPServerEnv.put(id="crm-env", docker_image_artifact=_image("crm-image"), environment_name="crm")
+    A2AAgent.put(id="solver", docker_image_artifact=_image("solver-image"))
+    (tmp_path / "crm.json").write_text("{}")
+    FileArtifact.put("crm-data", description="crm seed", file_path=str(tmp_path / "crm.json"))
+    _task("triage", STEPS)
+    return tmp_path
+
+
+def _task(task_id, steps):
+    from agent_env.bundle.resolve import build_step
+    return Task.put(id=task_id, steps=[build_step(dict(step)) for step in steps])
+
+
+def _steps(root, name):
+    return json.loads((root / "tasks" / f"{name}.json").read_text())
+
+
+def _left(root):
+    """Everything an import left beside its destination, staging folders included."""
+    return sorted(path.name for path in root.iterdir())
+
+
+def test_a_task_imports_as_its_stored_steps_with_each_store_reference_pinned_at_its_version_now(store):
+    imported = import_task("triage", store / "triage")
+    steps = _steps(store / "triage", "triage")
+    stored = Task.get("triage").to_dict()["steps"]
+
+    assert imported.files == ("README.md", "tasks/triage.json")
+    assert [(step["id"], step["type"]) for step in steps] == [(step["id"], step["type"]) for step in stored]
+    assert steps[0]["env_version"] == 2 and stored[0]["env_version"] is None
+    assert steps[1]["artifacts"] == [{"id": "crm-data", "version": 1}]
+    assert steps[2]["a2a_agent_version"] == 1
+    assert {k: v for k, v in steps[4].items() if k != "criteria"} == {
+        k: v for k, v in stored[4].items() if k != "criteria"}
+    assert sorted((pin.kind.value, pin.id, pin.version, pin.stored) for pin in imported.pinned) == [
+        ("agent", "solver", 1, False), ("artifact", "crm-data", 1, False), ("env", "crm-env", 2, False)]
+
+
+def test_an_id_a_step_of_the_task_writes_stays_unpinned_and_unchanged(store):
+    steps = _steps(import_task("triage", store / "triage").root, "triage")
+
+    assert steps[5]["cli_artifact_id"] == "crm-cli"
+    assert steps[6]["cli_artifact_ids"] == ["crm-cli"]
+
+
+def test_a_reference_that_takes_no_version_and_a_step_that_names_no_agent_are_reported_as_floating(store):
+    imported = import_task("triage", store / "triage")
+
+    assert sorted((ref.where, ref.kind.value, ref.id) for ref in imported.floating) == [
+        ("tasks/triage.json: step 'helper': a2a_agent_id", "agent", "a2a-default"),
+        ("tasks/triage.json: step 'judge': judge_a2a_agent_id", "agent", "solver"),
+    ]
+
+
+def test_env_vars_that_look_like_secrets_are_left_out_and_a_urls_credentials_masked_elsewhere(store):
+    imported = import_task("triage", store / "triage")
+    steps = _steps(imported.root, "triage")
+
+    assert steps[2]["env_vars"] == {"MODE": "fast"}
+    assert [c["description"] for c in steps[4]["criteria"]] == [
+        "cites https://***@wiki.example.com/x", "clones ssh://git@github.com/org/repo"]
+    assert [(drop.where, drop.why) for drop in imported.dropped] == [
+        ("tasks/triage.json: step 'agent': env_vars.LITELLM_API_KEY", "dropped: its name looks like a secret"),
+        ("tasks/triage.json: step 'agent': env_vars.DB", "dropped: its value holds a URL's credentials"),
+        ("tasks/triage.json: step 'judge': criteria[0].description", "masked: a URL's credentials"),
+    ]
+    written = (imported.root / "README.md").read_text() + (imported.root / "tasks/triage.json").read_text()
+    assert "sk-1" not in written and "hunter2" not in written and "admin:pw" not in written
+
+
+def test_the_readme_says_where_the_folder_came_from_and_how_each_reference_was_written(store):
+    readme = (import_task("triage", store / "triage").root / "README.md").read_text()
+
+    assert readme.splitlines()[0] == "Imported from the store's task triage v1."
+    assert "- env crm-env v2: tasks/triage.json: step 'env': env_id" in readme
+    assert "## Floating" in readme and "## Left out" in readme
+    assert parse_bundle(store / "triage").description == "Imported from the store's task triage v1."
+
+
+def test_the_folder_materializes_back_to_the_stored_steps(store):
+    imported = import_task("triage", store / "triage")
+    bundle = parse_bundle(imported.root)
+    with namespace_routing():
+        materialization = materialize(plan_bundle(resolve_bundle(bundle)))
+        written = Task.get(f"{bundle.id_root}/triage", materialization.version_of("task", f"{bundle.id_root}/triage"))
+    expected = _steps(imported.root, "triage")
+    output = f"{bundle.id_root}/triage/crm-cli"
+    expected[5]["cli_artifact_id"], expected[6]["cli_artifact_ids"] = output, [output]
+
+    assert written.to_dict()["steps"] == expected
+
+
+def test_an_eval_imports_with_each_task_it_names_once_under_names_taken_from_their_ids(store):
+    _task("team/run", [STEPS[0]])
+    _task("other/run", [STEPS[0]])
+    _task("RUN", [STEPS[0]])
+    Eval.put(id="nightly/regression", tasks=[EvalTask("team/run"), EvalTask("other/run"), EvalTask("RUN"),
+                                             EvalTask("team/run"), EvalTask("triage", 1)])
+
+    imported = import_eval("nightly/regression", store / "nightly")
+
+    assert imported.files == ("README.md", "evals/regression.toml", "tasks/RUN-3.json", "tasks/run-2.json",
+                              "tasks/run.json", "tasks/triage.json")
+    assert tomllib.loads((imported.root / "evals/regression.toml").read_text()) == {
+        "tasks": ["run", "run-2", "RUN-3", "triage"]}
+    assert imported.duplicates == ("task team/run v1",)
+    assert imported.eval == ("evals/regression.toml", "nightly/regression", 1)
+    plan = plan_bundle(resolve_bundle(parse_bundle(imported.root)))
+    assert [entry.entry.name for entry in plan.evals] == ["regression"]
+
+
+@pytest.mark.parametrize("task_id, name", [
+    ("crm#triage", "crm-triage"), ("..hidden", "hidden"), ("  edge  ", "edge"), ("org/", "task"), ("😀", "task"),
+    ("a" * 300, "a" * 200),
+])
+def test_a_name_is_the_ids_last_segment_made_valid(store, task_id, name):
+    _task(task_id, [STEPS[0]])
+
+    assert import_task(task_id, store / "named").tasks[0].path == f"tasks/{name}.json"
+
+
+@pytest.mark.parametrize("prepare, problem", [
+    (lambda dest: (dest.mkdir(), (dest / "x").write_text("x")), "not empty; import into a new or empty folder"),
+    (lambda dest: dest.write_text("x"), "not a folder; import into a new or empty folder"),
+])
+def test_a_destination_that_holds_anything_is_refused(store, prepare, problem):
+    dest = store / "dest"
+    prepare(dest)
+
+    with pytest.raises(BundleError) as e:
+        import_task("triage", dest)
+
+    assert e.value.problems == (f"{dest}: {problem}",)
+
+
+def test_a_destination_whose_folder_gives_no_id_or_has_no_parent_is_refused(store):
+    with pytest.raises(BundleError, match="rename the folder"):
+        import_task("triage", store / "bad​name")
+    with pytest.raises(BundleError, match="no such folder"):
+        import_task("triage", store / "missing" / "dest")
+    assert not (store / "missing").exists()
+
+
+def test_an_empty_destination_is_filled(store):
+    (store / "dest").mkdir()
+
+    assert import_task("triage", store / "dest").files == ("README.md", "tasks/triage.json")
+
+
+def test_a_reference_the_store_doesnt_hold_is_refused_with_every_problem_and_nothing_is_written(store):
+    _task("broken", [{"id": "env", "type": "deploy_env", "env_id": "gone"},
+                     {"id": "load", "type": "load_artifact", "env_id": "gone", "artifacts": [{"id": "lost"}]}])
+    before = _left(store)
+
+    with pytest.raises(BundleError) as e:
+        import_task("broken", store / "broken")
+
+    assert e.value.problems == (
+        "tasks/broken.json: step 'env': env_id: there is no env 'gone' in the store",
+        "tasks/broken.json: step 'load': artifacts[0].id: there is no artifact 'lost' in the store",
+    )
+    assert _left(store) == before
+
+
+def test_a_folder_that_fails_its_check_is_not_moved_into_place_and_its_staging_is_removed(store, monkeypatch):
+    (store / "dest").mkdir()
+    before = _left(store)
+
+    def refuse(resolved):
+        raise BundleError(["refused"])
+
+    monkeypatch.setattr(importer_module, "check_bundle", refuse)
+    with pytest.raises(BundleError):
+        import_task("triage", store / "dest")
+
+    assert _left(store) == before and not any((store / "dest").iterdir())
+
+
+def test_an_empty_destination_is_put_back_when_the_move_fails(store, monkeypatch):
+    (store / "dest").mkdir()
+    before = _left(store)
+
+    def fail(src, dst):
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(importer_module.os, "replace", fail)
+    with pytest.raises(OSError):
+        import_task("triage", store / "dest")
+
+    assert _left(store) == before and (store / "dest").is_dir()
+
+
+class _Undeclared(TaskStep):
+    """A plugin step type that declares no references."""
+
+    type: ClassVar[str] = "undeclared_import_test"
+
+    def __init__(self, target=None, **base):
+        super().__init__(**base)
+        self.target = target
+
+    @classmethod
+    def from_dict(cls, data):
+        return cls(**cls._base_from_dict(data), target=data.get("target"))
+
+    def to_dict(self):
+        return {**super().to_dict(), "target": self.target}
+
+    async def execute(self, context):
+        return context
+
+
+def test_a_step_whose_type_declares_no_references_is_copied_and_reported(store, monkeypatch):
+    steps = {**Config().task_step_registry(), _Undeclared.type: _Undeclared}
+    monkeypatch.setattr(Config, "task_step_registry", lambda self: steps)
+    _task("plugin", [{"id": "p", "type": _Undeclared.type, "target": "crm-env"}])
+
+    imported = import_task("plugin", store / "plugin")
+
+    assert _steps(imported.root, "plugin")[0]["target"] == "crm-env"
+    assert imported.undeclared == (f"tasks/plugin.json: step 'p' ({_Undeclared.type})",)
+
+
+def test_the_cli_imports_and_says_what_it_pinned_left_out_and_floats(store):
+    result = CliRunner().invoke(cli, ["bundle", "init", str(store / "triage"), "--from-task", "triage"])
+
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert lines[0] == f"Imported task triage v1 into {store / 'triage'}:"
+    assert lines[1:3] == ["  README.md", "  tasks/triage.json"]
+    assert "Pinned:" in lines and "Floating:" in lines and "Left out:" in lines
+    assert "  env crm-env v2: tasks/triage.json: step 'env': env_id" in lines
+    assert lines[-1] == f"Run it with: agent-env run {store / 'triage'}"
+
+
+@pytest.mark.parametrize("args", [[], ["--from-task", "triage", "--from-eval", "e"]])
+def test_the_cli_takes_exactly_one_source(store, args):
+    result = CliRunner().invoke(cli, ["bundle", "init", str(store / "x"), *args])
+
+    assert result.exit_code == 2
+    assert "give one of --from-task or --from-eval" in result.output
+
+
+def test_the_cli_says_in_one_line_when_the_store_has_no_such_task(store):
+    result = CliRunner().invoke(cli, ["bundle", "init", str(store / "x"), "--from-task", "nope"])
+
+    assert result.exit_code == 1
+    assert result.output.startswith("Error: ") and "Traceback" not in result.output
+    assert not (store / "x").exists()
+
+
+def test_reading_the_store_writes_nothing_to_it(store):
+    documents = get_config().get_document_store()
+    counts = {name: documents.count(name, Filter()) for name in ("tasks", "envs", "a2a_agents", "artifacts")}
+
+    import_task("triage", store / "triage")
+
+    assert {name: documents.count(name, Filter()) for name in counts} == counts
