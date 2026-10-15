@@ -127,10 +127,14 @@ Out-of-tree code plugs in either through `config.toml`, as a `module:Class` poin
   because that string is persisted and used to reconnect.
 - Entry points register the same kinds from an installed package, with the entry-point name as the
   registry key: `agent_env.envs`, `agent_env.artifacts`, `agent_env.task_steps`,
-  `agent_env.sandbox_providers`, `agent_env.state_providers`, `agent_env.explorer_plugins`, and
-  `agent_env.bundles` for bundles. A plugin whose name clashes with a built-in is skipped, a name two
-  plugins claim is left out and config cannot take it, and config that registers a plugin's name
-  takes it over. `agent-env plugin check` reports each plugin that did not take effect.
+  `agent_env.sandbox_providers`, `agent_env.state_providers` and `agent_env.explorer_plugins`. A
+  plugin whose name clashes with a built-in is skipped, a name two plugins claim is left out and
+  config cannot take it, and config that registers a plugin's name takes it over.
+  `agent-env plugin check` reports each plugin that did not take effect.
+- Bundles install through `agent_env.bundles` entry points (`<name> = "<package>"`, the folder at
+  `<package>/<name>/`), with ids rooted at `@local/<dist>/<name>`. A shared name is not left out:
+  a bundle runs by its bare name unless another distribution installs that name too, and then by
+  `<dist>/<name>`, except that agent-env's own bundles keep their bare names.
 - Environment providers have no table: an installed package registers one as an `agent_env.env_providers`
   entry point named its `type`, which records carry as `env_provider_type`.
 - `[plugins.<distribution name>]` is reserved for an installed plugin's own settings, read with
