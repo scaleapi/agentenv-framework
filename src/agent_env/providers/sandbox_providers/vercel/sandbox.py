@@ -30,6 +30,10 @@ _STREAM_CHUNK_BYTES = 2 * 1024 * 1024
 _UPLOAD_ATTEMPTS = 3
 _UPLOAD_RETRY_DELAY_SECONDS = 0.25
 _DOCKER_SETUP_TIMEOUT = 300
+_DOCKER_READY_ATTEMPTS = 30
+_DOCKER_READY_DELAY_SECONDS = 1
+_DOCKERD_LOG_TAIL_LINES = 40
+_SETUP_ERROR_TAIL_CHARS = 1000
 _policy_locks: weakref.WeakValueDictionary[
     tuple[asyncio.AbstractEventLoop, str], asyncio.Lock
 ] = weakref.WeakValueDictionary()
@@ -236,7 +240,7 @@ class VercelSandbox(VmSandbox):
         return await process.wait(), stdout.decode(errors="replace"), stderr.decode(errors="replace")
 
     async def wait_for_vm(self) -> None:
-        script = """
+        script = f"""
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
   exit 0
 fi
@@ -247,14 +251,14 @@ if ! command -v apt-get >/dev/null 2>&1; then
 fi
 DEBIAN_FRONTEND=noninteractive apt-get update -qq &&
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker.io docker-compose-v2 ||
-  { echo 'Docker installation failed; use a prepared Docker-capable image for restricted egress' >&2; exit 3; }
+  {{ echo 'Docker installation failed; use a prepared Docker-capable image for restricted egress' >&2; exit 3; }}
 fi
 docker info >/dev/null 2>&1 || (nohup dockerd >/var/log/agentenv-dockerd.log 2>&1 </dev/null &)
-for i in $(seq 1 30); do
+for i in $(seq 1 {_DOCKER_READY_ATTEMPTS}); do
   docker info >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 && exit 0
-  sleep 1
+  sleep {_DOCKER_READY_DELAY_SECONDS}
 done
-tail -40 /var/log/agentenv-dockerd.log >&2
+tail -{_DOCKERD_LOG_TAIL_LINES} /var/log/agentenv-dockerd.log >&2
 exit 1
 """
         exit_code, _, stderr = await self._exec_with_output(
@@ -263,7 +267,7 @@ exit 1
         if exit_code != 0:
             raise RuntimeError(
                 f"Docker and Compose are unavailable in Vercel sandbox {self.sandbox_id} "
-                f"(exit {exit_code}): {stderr[-1000:]}"
+                f"(exit {exit_code}): {stderr[-_SETUP_ERROR_TAIL_CHARS:]}"
             )
         logger.info("Docker and Compose ready in Vercel sandbox %s", self.sandbox_id)
 

@@ -20,7 +20,6 @@ from vercel.sandbox import (
 )
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
-from agent_env.providers.sandbox_providers import vercel as vercel_module
 from agent_env.providers.sandbox_providers.vercel import sandbox as vercel_sandbox_module
 from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy
 from agent_env.providers.sandbox_providers.vercel.sandbox import (
