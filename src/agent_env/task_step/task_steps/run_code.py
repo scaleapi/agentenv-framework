@@ -2,6 +2,10 @@
 
 The script defines ``run(input) -> JSON``, where ``input = {"args", "results"}``.
 The result is stored at ``context.metadata["script_results"][result_id]``.
+A script on an env's host also gets ``input["env"] = {"id", "gateway_url", "mcp_url"}``:
+the env's endpoints as that host reaches them, on loopback at the ports they're published
+on, since a host can't always call its own public URL. ``gateway_url`` is None for an env
+with no gateway.
 
 ``script_artifact_id`` is either a single-file ``FileArtifact`` or a
 ``FileArtifactUniverse`` whose ``.py`` members are staged side by side so the entry
@@ -28,7 +32,7 @@ from typing import Any, ClassVar, Optional, Protocol
 
 from agent_env.artifact import Artifact, FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
-from agent_env.env.env import require_sandbox
+from agent_env.env.env import DeployedGatewayEnv, require_sandbox
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity_refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
@@ -166,7 +170,7 @@ class RunCodeTaskStep(TaskStep):
         target = await self._resolve_target(context)
         run_dir = f"{_RUN_DIR}/{self.id}"
 
-        await self._stage(target, run_dir, files, self._build_input(context))
+        await self._stage(target, run_dir, files, self._build_input(context, target))
         await self._run(target, run_dir, script_file)
         result = await self._read_output(target, run_dir)
 
@@ -289,12 +293,15 @@ class RunCodeTaskStep(TaskStep):
             )
         return (script_file, files)
 
-    def _build_input(self, context: TaskStepContext) -> dict:
-        """Build the {args, results} input passed to the script."""
-        return {
+    def _build_input(self, context: TaskStepContext, target: _ExecTarget) -> dict:
+        """Build the {args, results} input passed to the script, and its env's endpoints on an env's host."""
+        script_input = {
             "args": self.args,
             "results": context.metadata.get("script_results", {}),
         }
+        if target.env is not None:
+            script_input["env"] = target.env
+        return script_input
 
     def _target_kind(self) -> str:
         if self.env_id is not None:
@@ -386,7 +393,7 @@ class RunCodeTaskStep(TaskStep):
             else get_env_sandbox_provider()
         )
         sandbox = await provider.get_sandbox(deployed.sandbox_id)
-        return _HostTarget(sandbox)
+        return _HostTarget(sandbox, env=_env_on_host(deployed, sandbox))
 
     async def _sandbox_target(self, context: TaskStepContext) -> _ExecTarget:
         from agent_env.providers.sandbox_providers.sandbox import VmSandbox
@@ -480,7 +487,31 @@ def _is_safe_member(name: str) -> bool:
     return ".." not in PurePosixPath(name).parts
 
 
+def _env_on_host(deployed: Any, sandbox: Any) -> dict:
+    """The env's id and endpoints as a script on its host reaches them."""
+    gateway_url = deployed.gateway_url if isinstance(deployed, DeployedGatewayEnv) else None
+    return {
+        "id": deployed.env_id,
+        "gateway_url": _on_host(gateway_url, sandbox),
+        "mcp_url": _on_host(deployed.mcp_url, sandbox),
+    }
+
+
+def _on_host(url: Optional[str], sandbox: Any) -> Optional[str]:
+    """``url`` as ``sandbox``'s own host reaches it: one under a tunnel goes to loopback at the port it publishes."""
+    if url is None:
+        return None
+    # The longest first, so a tunnel at a path under another's takes its own URLs.
+    for port, tunnel in sorted(sandbox.tunnel_urls.items(), key=lambda item: -len(item[1])):
+        base = tunnel.rstrip("/")
+        if url == base or url.startswith(f"{base}/"):
+            return f"http://127.0.0.1:{sandbox.host_port(port)}{url[len(base):]}"
+    return url
+
+
 class _ExecTarget(Protocol):
+    env: Optional[dict]  # the env's endpoints, for a script on an env's host
+
     async def reset_dir(self, path: str) -> None: ...
     async def write_file(self, path: str, content: str) -> None: ...
     async def run(self, *command: str) -> tuple[int, str, str]: ...
@@ -491,6 +522,7 @@ class _HostTarget:
     """Runs the script on a VM host (an env's or a deployed sandbox's; no agent)."""
 
     sandbox: Any
+    env: Optional[dict] = None
 
     async def reset_dir(self, path: str) -> None:
         await self.sandbox.exec_script(
@@ -511,6 +543,7 @@ class _AgentTarget:
 
     sandbox: Any
     prefix: tuple[str, ...]
+    env: Optional[dict] = None
 
     async def reset_dir(self, path: str) -> None:
         await self.run("rm", "-rf", path)

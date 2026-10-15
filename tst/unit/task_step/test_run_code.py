@@ -19,7 +19,8 @@ import pytest
 
 from agent_env.artifact import FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
-from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, EnvNeedsSandbox
+from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, DeployedSandboxEnv, EnvNeedsSandbox
+from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox
 from agent_env.providers.sandbox_providers.sandbox import VmSandbox
 from agent_env.task_step.context import DeployedAgent, DeployedSandbox, TaskStepContext
 from agent_env.task_step.task_steps import run_code as _run_code_module
@@ -102,6 +103,16 @@ def _get_member(artifact_id, version=None):
     return _file_artifact(artifact_id.removeprefix("fa-"), _BODIES[artifact_id.removeprefix("fa-")])
 
 
+def _vm_sandbox_mock():
+    """A VM sandbox at the boundary; tunnels and host ports are plain attributes of a real one."""
+    sandbox = AsyncMock()
+    sandbox.mode = "vm"
+    sandbox.container_name = "agent-api"
+    sandbox.tunnel_urls = {}
+    sandbox.host_port = MagicMock(side_effect=lambda port: port)
+    return sandbox
+
+
 @contextmanager
 def _sandbox(exec_results, *, artifact="single", agent_mode=True):
     """Mock only the external boundary: the Sandbox (VMs/docker), the sandbox
@@ -112,9 +123,7 @@ def _sandbox(exec_results, *, artifact="single", agent_mode=True):
 
     `artifact` is "single", "wrong-type", or a prebuilt artifact.
     """
-    sandbox = AsyncMock()
-    sandbox.mode = "vm"
-    sandbox.container_name = "agent-api"
+    sandbox = _vm_sandbox_mock()
     # Before the script runs: reset_dir's `rm -rf` + `mkdir -p` (agent mode only;
     # host mode clears via exec_script).
     prefix = [(0, "", ""), (0, "", "")] if agent_mode else []
@@ -248,6 +257,81 @@ async def test_host_target_on_an_env_outside_our_sandboxes_says_it_needs_one():
         await _step(env_id="env-x", result_id="filter")._host_target(ctx)
 
 
+class _Tunnels:
+    """A sandbox's tunnels and host ports, as a provider reports them."""
+
+    def __init__(self, tunnel_urls, port_map=None):
+        self.tunnel_urls = tunnel_urls
+        self._port_map = port_map or {}
+
+    def host_port(self, port):
+        return self._port_map.get(port, port)
+
+
+@pytest.mark.parametrize("tunnels,url,expected", [
+    ({18765: "https://abc.modal.host"}, "https://abc.modal.host", "http://127.0.0.1:18765"),
+    ({18765: "https://abc.modal.host"}, "https://abc.modal.host/mcp", "http://127.0.0.1:18765/mcp"),
+    # a proxy's path prefix, with another tunnel at a path above it
+    ({80: "https://proxy.example/sb/vm-1", 18765: "https://proxy.example/sb/vm-1/port/18765/"},
+     "https://proxy.example/sb/vm-1/port/18765/mcp", "http://127.0.0.1:18765/mcp"),
+    ({80: "https://proxy.example/sb/vm-1", 18765: "https://proxy.example/sb/vm-1/port/18765/"},
+     "https://proxy.example/sb/vm-1/web/", "http://127.0.0.1:80/web/"),
+    ({18765: "https://abc.modal.host"}, "https://elsewhere.example/mcp", "https://elsewhere.example/mcp"),
+    ({18765: "http://127.0.0.1:2000"}, "http://127.0.0.1:20001/mcp", "http://127.0.0.1:20001/mcp"),
+    ({18765: "https://abc.modal.host"}, None, None),
+])
+def test_a_url_under_its_hosts_tunnel_is_reached_on_loopback_at_the_published_port(tunnels, url, expected):
+    assert _run_code_module._on_host(url, _Tunnels(tunnels)) == expected
+
+
+def test_a_local_sandbox_reaches_its_gateway_at_the_host_port_it_mapped(tmp_path):
+    sandbox = LocalSandbox(work_dir=tmp_path, port_map={18765: 23456})
+    gateway = sandbox.tunnel_urls[18765]
+
+    assert _run_code_module._on_host(f"{gateway}/mcp", sandbox) == "http://127.0.0.1:23456/mcp"
+
+
+def test_an_env_with_no_gateway_gives_its_mcp_url_alone():
+    deployed = DeployedSandboxEnv(env_id="srv", env_version=1, sandbox_id="sb", mcp_url="https://abc.modal.host/mcp")
+
+    env = _run_code_module._env_on_host(deployed, _Tunnels({8000: "https://abc.modal.host"}))
+
+    assert env == {"id": "srv", "gateway_url": None, "mcp_url": "http://127.0.0.1:8000/mcp"}
+
+
+def _written_input(sandbox):
+    """The input.json the step staged, through whichever writer its target uses."""
+    for call in sandbox.write_host_file.await_args_list:
+        if str(call.args[1]).endswith("/input.json"):
+            return json.loads(call.args[0].decode())
+    for call in sandbox.write_file_from_text.await_args_list:
+        if str(call.args[1]).endswith("/input.json"):
+            return json.loads(call.args[0])
+    raise AssertionError("no input.json was staged")
+
+
+@pytest.mark.asyncio
+async def test_a_script_on_an_envs_host_gets_the_envs_endpoints_as_that_host_reaches_them():
+    ctx = _make_context(with_agent=False)
+    ctx.deployed_envs[0].gateway_url = "https://abc.modal.host"
+    ctx.deployed_envs[0].mcp_url = "https://abc.modal.host/mcp"
+    with _sandbox([(0, "", ""), (0, "2", ""), (0, "{}", "")], agent_mode=False) as sandbox:
+        sandbox.tunnel_urls = {18765: "https://abc.modal.host"}
+        await _step(env_id="env-x").execute(ctx)
+
+    assert _written_input(sandbox)["env"] == {
+        "id": "env-x", "gateway_url": "http://127.0.0.1:18765", "mcp_url": "http://127.0.0.1:18765/mcp",
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_script_in_an_agent_gets_no_env():
+    with _sandbox([(0, "", ""), (0, "2", ""), (0, "{}", "")]) as sandbox:
+        await _step().execute(_make_context())
+
+    assert set(_written_input(sandbox)) == {"args", "results"}
+
+
 @pytest.mark.asyncio
 async def test_host_target_honors_custom_env_sandbox_type():
     # custom sandbox_type must resolve via build_sandbox_provider, not the default provider
@@ -255,9 +339,7 @@ async def test_host_target_honors_custom_env_sandbox_type():
     ctx = _make_context(with_agent=False)
     ctx.deployed_envs[0].sandbox_type = "arp"
 
-    sandbox = AsyncMock()
-    sandbox.mode = "vm"
-    sandbox.container_name = "agent-api"
+    sandbox = _vm_sandbox_mock()
     sandbox.exec_with_output = AsyncMock(
         # leading entry is the `env` read execute() does for redaction
         # host mode clears via exec_script, so exec_with_output sees only:

@@ -8,7 +8,8 @@ and an edit to their files loads anew. A universe composed every way a bundle co
 of bundle and store servers, and a store universe shared across servers seeds the one server it's loaded into. The
 echo-mcp example agent-env ships runs by name, and a rerun writes nothing, and a task held under bare ids, as a registry
 holds it, imports as a bundle that runs through the gateway; an output a bundle's task wrote is written under the folder
-that imports the task. Needs a Docker daemon and the local registry."""
+that imports the task. A script run on an env's host reaches the env's gateway and MCP endpoint at the addresses its
+input gives. Needs a Docker daemon and the local registry."""
 
 import hashlib
 import json
@@ -572,6 +573,43 @@ def _store_echo_server() -> None:
     assert build.returncode == 0, build.stderr[-2000:]
     image = DockerImageArtifact.put("echo-server-image", description="echo server", image_name=tag)
     MCPServerEnv.put(id="echo-server", docker_image_artifact=image, environment_name="echo")
+
+
+# Fetches the env's card from the gateway and opens an MCP session at the env's endpoint, both at the addresses its
+# input gives: on the local provider, the host ports the sandbox mapped, not the gateway's own port.
+_REACH = """\
+import json, urllib.parse, urllib.request
+
+def run(inp):
+    env = inp["env"]
+    gateway = urllib.parse.urlsplit(env["gateway_url"])
+    assert (gateway.hostname, gateway.port != 18765) == ("127.0.0.1", True), env
+    with urllib.request.urlopen(env["gateway_url"] + "/.well-known/agent-env.json", timeout=30) as response:
+        card = json.load(response)
+    initialize = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "reach", "version": "1"}}}
+    request = urllib.request.Request(env["mcp_url"], data=json.dumps(initialize).encode(), headers={
+        "Content-Type": "application/json", "Accept": "application/json, text/event-stream"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        assert response.status == 200, response.status
+    return {"card": card["name"]}
+"""
+
+
+def test_a_script_on_an_envs_host_reaches_its_gateway_and_mcp_endpoint_at_the_addresses_its_input_gives(state):
+    root = state / "reach"
+    shutil.copytree(ECHO / "envs", root / "envs")
+    (root / "artifacts" / "reach").mkdir(parents=True)
+    (root / "artifacts" / "reach" / "run.py").write_text(_REACH)
+    (root / "tasks").mkdir()
+    (root / "tasks" / "reach.json").write_text(json.dumps([
+        {"id": "env", "type": "deploy_env", "env_id": "echo", "sandbox_type": "local"},
+        {"id": "reach", "type": "run_code", "env_id": "echo", "script_artifact_id": "reach", "depends_on": ["env"]}]))
+
+    result = _run(root)
+
+    assert result.exit_code == 0, result.output
+    assert "tasks/reach.json v1: unscored" in result.output, result.output
 
 
 def test_a_stored_mcp_task_imports_as_a_bundle_that_runs_through_the_gateway(state):
