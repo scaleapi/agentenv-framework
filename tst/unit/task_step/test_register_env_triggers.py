@@ -49,13 +49,11 @@ def test_round_trips_through_to_dict_from_dict():
     assert rebuilt.executor_agent_name == "exec-1"
     assert rebuilt.executor_timeout_seconds == 90
     assert rebuilt.executor_hours == {"exec-1": _HOURS}
-    assert (rebuilt.await_fired, rebuilt.await_status, rebuilt.await_timeout_seconds) == (None, "fired", 120)
+    assert (rebuilt.await_fired, rebuilt.await_timeout_seconds) == (None, 120)
 
-    awaiting = RegisterEnvTriggersStep.from_dict(_step(await_fired=["t1", "t1"], await_status="armed",
-                                                       await_timeout_seconds=7).to_dict())
-    assert (awaiting.await_fired, awaiting.await_status, awaiting.await_timeout_seconds) == (["t1"], "armed", 7.0)
-    stored_before_await = {k: v for k, v in _step().to_dict().items()
-                           if k not in ("await_fired", "await_status", "await_timeout_seconds")}
+    awaiting = RegisterEnvTriggersStep.from_dict(_step(await_fired=["t1", "t1"], await_timeout_seconds=7).to_dict())
+    assert (awaiting.await_fired, awaiting.await_timeout_seconds) == (["t1"], 7.0)
+    stored_before_await = {k: v for k, v in _step().to_dict().items() if k not in ("await_fired", "await_timeout_seconds")}
     assert RegisterEnvTriggersStep.from_dict(stored_before_await).await_fired is None
 
 
@@ -318,8 +316,6 @@ def _mock_gateway(monkeypatch, body: dict, status: int = 200) -> list[httpx.Requ
 def test_bad_await_config_rejected_at_construction():
     with pytest.raises(ValueError, match="await_fired must be a list of trigger ids"):
         _step(await_fired="t1")
-    with pytest.raises(ValueError, match="await_status must be one of"):
-        _step(await_fired=["t1"], await_status="done")
     with pytest.raises(ValueError, match="await_timeout_seconds must be a positive number"):
         _step(await_fired=["t1"], await_timeout_seconds=0)
 
@@ -385,7 +381,7 @@ async def test_await_times_out_naming_statuses_and_failure_events(monkeypatch):
         await _step(triggers=_TWO, await_fired=["t1", "t2"], await_timeout_seconds=1.2).execute(_context())
     assert time.monotonic() - started < 1.2
     message = str(err.value)
-    assert "did not all reach 'fired' within 1.2s" in message
+    assert "did not all fire within 1.2s" in message
     assert "{'t1': 'fired', 't2': 'armed'}" in message
     assert "action_failed" in message and "slack_send_message" in message
     assert "'seq'" not in message and "'kind': 'fired'" not in message
@@ -437,7 +433,7 @@ async def test_await_stops_early_on_a_failed_trigger(monkeypatch):
         "/triggers/state": [_state({"t1": "armed", "t2": "failed"},
                                    events=[{"seq": 1, "ts": "x", "kind": "failed", "trigger_id": "t2", "error": "boom"}])],
     })
-    with pytest.raises(RuntimeError, match=r"reached a terminal status before 'fired': \['t2'\].*boom"):
+    with pytest.raises(RuntimeError, match=r"reached a terminal status before firing: \['t2'\].*boom"):
         await _step(triggers=_TWO, await_fired=["t1", "t2"], await_timeout_seconds=60).execute(_context())
     assert [str(r.url.path) for r in sent] == ["/triggers/register", "/triggers/state"]
 

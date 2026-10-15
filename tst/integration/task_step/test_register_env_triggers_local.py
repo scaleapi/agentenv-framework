@@ -214,7 +214,7 @@ async def test_the_step_can_wait_for_start_of_run_time_triggers(local_stack):
                                           await_fired=["wf-1", "wf-2"], await_timeout_seconds=60).execute(context)
             waited = time.monotonic() - started
             state = (await client.get("/triggers/state")).raise_for_status().json()
-            with pytest.raises(RuntimeError, match=r"did not all reach 'fired' within 3s; statuses \{'later': 'armed'\}"):
+            with pytest.raises(RuntimeError, match=r"did not all fire within 3s; statuses \{'later': 'armed'\}"):
                 await RegisterEnvTriggersStep(id="reg-later", version=None, env_id=env.id, triggers=triggers[2:],
                                               watch_roles=["default"], await_fired=["later"],
                                               await_timeout_seconds=3).execute(context)

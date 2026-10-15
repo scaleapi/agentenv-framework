@@ -17,7 +17,6 @@ from agent_env.env.gateway.constants import (
     TRIGGER_EXECUTOR_HOURS,
     TRIGGER_NAMED_EXECUTORS,
     TRIGGER_PROVOKING_ROLES,
-    TRIGGER_STATUSES,
     TRIGGER_UNLESS,
 )
 from agent_env.task_step.context import TaskStepContext
@@ -27,7 +26,10 @@ from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 logger = logging.getLogger(__name__)
 
 # The await polls the gateway's trigger state once per interval; a read gets this long, retried this often with this
-# backoff, and never past the step's own deadline. A failure message quotes at most this many gateway events.
+# backoff, and never past the step's own deadline. A failure message quotes at most this many gateway events. A trigger
+# that reads one of the terminal statuses can no longer fire, so the wait stops there.
+_AWAIT_TARGET_STATUS = "fired"
+_AWAIT_TERMINAL_STATUSES = ("failed", "cancelled")
 _AWAIT_POLL_INTERVAL_S = 1.0
 _STATE_READ_TIMEOUT_S = 15
 _STATE_READ_ATTEMPTS = 3
@@ -41,8 +43,8 @@ class RegisterEnvTriggersStep(TaskStep):
     each other. Such a chain ends when a persona's turn makes no matching write, so give conversational nl actions no
     `verify` (its retry forces a write), give persona prompts a stop condition, and prefer a `where` off-ramp. An
     action's `delay` and `executor_hours` pace replies in virtual time, and a time trigger's `unless` makes it a deadline.
-    `await_fired` holds the step until the named one-shot triggers reach `await_status` (a recurrence re-arms after each
-    fire), so a dependent step starts only once start-of-run time triggers have landed in the world."""
+    `await_fired` holds the step until the named one-shot triggers have fired (a recurrence re-arms after each fire), so
+    a dependent step starts only once start-of-run time triggers have landed in the world."""
 
     type: ClassVar[str] = "register_env_triggers"
     entity_refs = (EntityRef.env("env_id"),)
@@ -58,7 +60,6 @@ class RegisterEnvTriggersStep(TaskStep):
         executor_timeout_seconds: float = 120,
         executor_hours: Optional[dict[str, dict]] = None,
         await_fired: Optional[list[str]] = None,
-        await_status: str = "fired",
         await_timeout_seconds: float = 120,
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
@@ -69,8 +70,6 @@ class RegisterEnvTriggersStep(TaskStep):
         if await_fired is not None and (not isinstance(await_fired, list)
                                         or not all(isinstance(i, str) and i for i in await_fired)):
             raise ValueError("await_fired must be a list of trigger ids")
-        if await_status not in TRIGGER_STATUSES:
-            raise ValueError(f"await_status must be one of {list(TRIGGER_STATUSES)}, not {await_status!r}")
         if not isinstance(await_timeout_seconds, (int, float)) or await_timeout_seconds <= 0:
             raise ValueError("await_timeout_seconds must be a positive number")
         self.env_id = env_id
@@ -80,7 +79,6 @@ class RegisterEnvTriggersStep(TaskStep):
         self.executor_timeout_seconds = executor_timeout_seconds
         self.executor_hours = executor_hours
         self.await_fired = list(dict.fromkeys(await_fired)) if await_fired else None
-        self.await_status = await_status
         self.await_timeout_seconds = float(await_timeout_seconds)
 
     def to_dict(self) -> dict:
@@ -92,7 +90,6 @@ class RegisterEnvTriggersStep(TaskStep):
         base["executor_timeout_seconds"] = self.executor_timeout_seconds
         base["executor_hours"] = self.executor_hours
         base["await_fired"] = self.await_fired
-        base["await_status"] = self.await_status
         base["await_timeout_seconds"] = self.await_timeout_seconds
         return base
 
@@ -107,7 +104,6 @@ class RegisterEnvTriggersStep(TaskStep):
             executor_timeout_seconds=data.get("executor_timeout_seconds", 120),
             executor_hours=data.get("executor_hours"),
             await_fired=data.get("await_fired"),
-            await_status=data.get("await_status", "fired"),
             await_timeout_seconds=data.get("await_timeout_seconds", 120),
         )
 
@@ -175,10 +171,9 @@ class RegisterEnvTriggersStep(TaskStep):
         return context
 
     async def _await_statuses(self, deployed: DeployedEnv, seen: dict[str, Optional[str]]) -> None:
-        """Poll the gateway, updating `seen` in place, until every awaited trigger reads `await_status`; raise on a
-        terminal miss or when the deadline passes. A read starts only with a full minimum read window left before the
-        deadline and is cut to that remainder, so the step never waits past `await_timeout_seconds`."""
-        terminal = {"failed", "cancelled"} - {self.await_status}
+        """Poll the gateway, updating `seen` in place, until every awaited trigger has fired; raise when one reaches a
+        terminal status first or when the deadline passes. A read starts only with a full minimum read window left
+        before the deadline and is cut to that remainder, so the step never waits past `await_timeout_seconds`."""
         deadline = time.monotonic() + self.await_timeout_seconds
         state: dict = {}
         while True:
@@ -188,17 +183,17 @@ class RegisterEnvTriggersStep(TaskStep):
             state = await _trigger_state(deployed, remaining)
             statuses = {t.get("id"): t.get("status") for t in state.get("triggers", []) if isinstance(t, dict)}
             seen.update({tid: statuses.get(tid) for tid in self.await_fired})
-            if all(status == self.await_status for status in seen.values()):
-                logger.info(f"awaited triggers on env={self.env_id} reached {self.await_status!r}: {sorted(seen)}")
+            if all(status == _AWAIT_TARGET_STATUS for status in seen.values()):
+                logger.info(f"awaited triggers on env={self.env_id} fired: {sorted(seen)}")
                 return
-            stuck = sorted(tid for tid, status in seen.items() if status in terminal)
+            stuck = sorted(tid for tid, status in seen.items() if status in _AWAIT_TERMINAL_STATUSES)
             if stuck:
                 raise RuntimeError(self._await_failure(seen, state, stuck))
             await asyncio.sleep(max(0.0, min(_AWAIT_POLL_INTERVAL_S, deadline - time.monotonic())))
 
     def _await_failure(self, seen: dict[str, Optional[str]], state: dict, stuck: list[str]) -> str:
-        why = (f"reached a terminal status before {self.await_status!r}: {stuck}" if stuck
-               else f"did not all reach {self.await_status!r} within {self.await_timeout_seconds:g}s")
+        why = (f"reached a terminal status before firing: {stuck}" if stuck
+               else f"did not all fire within {self.await_timeout_seconds:g}s")
         return f"Env '{self.env_id}': awaited triggers {why}; statuses {dict(seen)}" + _failure_detail(state, set(seen))
 
     def _executor_config(self, context: TaskStepContext, deployed: DeployedEnv, agent_name: str) -> dict:
