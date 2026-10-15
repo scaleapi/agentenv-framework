@@ -126,3 +126,48 @@ def test_round_trips_and_is_omitted_when_unset():
     assert v.to_dict()["grade_up_to_turn"] == 2
     assert RubricsVerifierTaskStep.from_dict(v.to_dict()).grade_up_to_turn == 2
     assert "grade_up_to_turn" not in _verifier().to_dict()
+
+
+@pytest.mark.asyncio
+async def test_a_later_turns_failure_does_not_skip_an_earlier_turn(monkeypatch):
+    v = _verifier(grade_up_to_turn=2)
+    captured = _judge_prompt(monkeypatch, v)
+    ctx = _three_turn_context()
+    ctx.prompt_responses[0].error_type = "agent_failed"
+
+    await v.execute(ctx)
+
+    assert "TURN_TWO_EVENTS" in captured["eval_prompt"]
+    assert ctx.metadata["verifications"]["vt"]["graded_up_to_turn"] == 2
+    assert ctx.prompt_responses[0].error_type == "agent_failed"
+
+
+@pytest.mark.asyncio
+async def test_a_cut_without_the_trajectory_is_refused(monkeypatch):
+    v = _verifier(grade_up_to_turn=2, use_trajectory=False)
+    _judge_prompt(monkeypatch, v)
+
+    with pytest.raises(RuntimeError, match="use_trajectory=True"):
+        await v.execute(_three_turn_context())
+
+
+@pytest.mark.asyncio
+async def test_a_cut_without_per_turn_trajectories_is_refused(monkeypatch):
+    v = _verifier(grade_up_to_turn=2)
+    _judge_prompt(monkeypatch, v)
+    ctx = _three_turn_context()
+    ctx.prompt_responses[0].target_agent_per_turn_trajectory_object_urls = None
+
+    with pytest.raises(RuntimeError, match="no stored trajectory for turn 2"):
+        await v.execute(ctx)
+
+
+@pytest.mark.asyncio
+async def test_a_cut_at_a_turn_whose_trajectory_was_lost_is_refused(monkeypatch):
+    v = _verifier(grade_up_to_turn=2)
+    _judge_prompt(monkeypatch, v)
+    ctx = _three_turn_context()
+    ctx.prompt_responses[0].target_agent_per_turn_trajectory_object_urls = ["s3://t/1.json", None, "s3://t/3.json"]
+
+    with pytest.raises(RuntimeError, match="no stored trajectory for turn 2"):
+        await v.execute(ctx)

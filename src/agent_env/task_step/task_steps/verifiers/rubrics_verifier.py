@@ -266,17 +266,30 @@ def _validated_turn(turn: Optional[int]) -> Optional[int]:
 def _as_of_turn(prompt_response: PromptResponse, turn: Optional[int]) -> PromptResponse:
     """A copy of a multi-turn PromptResponse cut off after ``turn``, or the original when there is
     nothing to cut. The stored response is the conversation's last reply, so a cut copy points the
-    judge at the end of the turn's own trajectory instead of leaking later turns."""
+    judge at the end of the turn's own trajectory instead of leaking later turns. A failed turn
+    ends the conversation, so every turn before the last completed: the stored error is the last
+    turn's and is dropped from a cut copy."""
     turn_urls = prompt_response.target_agent_per_turn_trajectory_object_urls or []
-    if turn is None or turn >= len(turn_urls):
-        return prompt_response
     prompt_parts = prompt_response.source_agent_per_turn_prompt_parts
+    # Per-turn prompt parts are recorded every turn; per-turn trajectories only when the agent
+    # exposes them, so the turn count comes from whichever is longer.
+    n_turns = max(len(turn_urls), len(prompt_parts or []))
+    if turn is None or turn >= n_turns:
+        return prompt_response
+    if len(turn_urls) < n_turns or turn_urls[turn - 1] is None:
+        raise RuntimeError(
+            f"grade_up_to_turn={turn}: the run has {n_turns} turns but no stored trajectory for turn "
+            f"{turn}, so the judge would see either later turns or nothing from turn {turn}."
+        )
     return replace(
         prompt_response,
         target_agent_per_turn_trajectory_object_urls=turn_urls[:turn],
         agent_trajectory_object_url=turn_urls[turn - 1],
         source_agent_per_turn_prompt_parts=prompt_parts[:turn] if prompt_parts is not None else None,
         structured_output=None,
+        error_type=None,
+        error_code=None,
+        error_message=None,
         response=(
             f"(Graded as of turn {turn} of {len(turn_urls)}: the agent's reply at this point is the "
             f"final message of turn {turn}'s trajectory.)"
@@ -498,7 +511,14 @@ class RubricsVerifierTaskStep(TaskStep):
             _validated_turn(overrides_for_step["grade_up_to_turn"])
             if "grade_up_to_turn" in overrides_for_step else self.grade_up_to_turn
         )
-        prompt_response = _as_of_turn(prompt_response, grade_up_to_turn)
+        as_of = _as_of_turn(prompt_response, grade_up_to_turn)
+        if as_of is not prompt_response and not self.use_trajectory:
+            # A cut copy's reply only points at turn k's trajectory, which use_trajectory=False never loads.
+            raise RuntimeError(
+                f"Verifier '{self.verifier_id}': grade_up_to_turn={grade_up_to_turn} needs "
+                "use_trajectory=True — turn k's reply is only in its trajectory."
+            )
+        prompt_response = as_of
 
         if prompt_response.error_type:
             logger.warning(f"Skipping verification '{self.verifier_id}': prompt had error_type={prompt_response.error_type}")
