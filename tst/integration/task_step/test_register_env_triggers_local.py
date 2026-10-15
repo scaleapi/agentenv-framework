@@ -221,8 +221,9 @@ async def test_the_step_can_wait_for_start_of_run_time_triggers(local_stack):
     finally:
         await env.close()
 
-    [audit] = context.metadata["env_trigger_registrations"]
-    assert audit["awaited"] == {"wf-1": "fired", "wf-2": "fired"}
+    awaited_first, awaited_later = (e["awaited"] for e in context.metadata["env_trigger_registrations"])
+    assert awaited_first == {"wf-1": "fired", "wf-2": "fired"}
+    assert awaited_later == {"later": "armed"}  # the failed wait still records its registration and last statuses
     assert waited >= 2.0, waited  # three virtual minutes at sixty-to-one
     assert {t["id"]: t["fire_count"] for t in state["triggers"]} == {"wf-1": 1, "wf-2": 1, "later": 0}, state["events"][-6:]
 
