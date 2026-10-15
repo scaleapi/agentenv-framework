@@ -168,7 +168,7 @@ class RunCodeTaskStep(TaskStep):
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         script_file, files = await asyncio.to_thread(self._load_script)
         target = await self._resolve_target(context)
-        run_dir = f"{_RUN_DIR}/{self.id}"
+        run_dir = target.run_dir(self.id)
 
         await self._stage(target, run_dir, files, self._build_input(context, target))
         await self._run(target, run_dir, script_file)
@@ -512,6 +512,7 @@ def _on_host(url: Optional[str], sandbox: Any) -> Optional[str]:
 class _ExecTarget(Protocol):
     env: Optional[dict]  # the env's endpoints, for a script on an env's host
 
+    def run_dir(self, step_id: str) -> str: ...
     async def reset_dir(self, path: str) -> None: ...
     async def write_file(self, path: str, content: str) -> None: ...
     async def run(self, *command: str) -> tuple[int, str, str]: ...
@@ -523,6 +524,10 @@ class _HostTarget:
 
     sandbox: Any
     env: Optional[dict] = None
+
+    def run_dir(self, step_id: str) -> str:
+        # The sandbox's own: runs on the local provider share this machine's /tmp, and teardown removes it there.
+        return f"{self.sandbox.scoped_name(_RUN_DIR)}/{step_id}"
 
     async def reset_dir(self, path: str) -> None:
         await self.sandbox.exec_script(
@@ -544,6 +549,9 @@ class _AgentTarget:
     sandbox: Any
     prefix: tuple[str, ...]
     env: Optional[dict] = None
+
+    def run_dir(self, step_id: str) -> str:
+        return f"{_RUN_DIR}/{step_id}"
 
     async def reset_dir(self, path: str) -> None:
         await self.run("rm", "-rf", path)

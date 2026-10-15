@@ -110,6 +110,7 @@ def _vm_sandbox_mock():
     sandbox.container_name = "agent-api"
     sandbox.tunnel_urls = {}
     sandbox.host_port = MagicMock(side_effect=lambda port: port)
+    sandbox.scoped_name = MagicMock(side_effect=lambda name: name)
     return sandbox
 
 
@@ -333,6 +334,34 @@ async def test_a_script_in_an_agent_gets_no_env():
 
 
 @pytest.mark.asyncio
+async def test_runs_of_one_step_on_this_machine_stage_into_dirs_of_their_own(tmp_path):
+    """Local sandboxes share this machine's /tmp: a run of the same step on another must not clear this one's files."""
+    sandboxes = {}
+    for sid in ("local-aaaa1111", "local-bbbb2222"):
+        (tmp_path / sid).mkdir()
+        sandboxes[sid] = LocalSandbox(sandbox_id=sid, work_dir=tmp_path / sid)
+    provider = MagicMock()
+    provider.get_sandbox = AsyncMock(side_effect=lambda sid: sandboxes[sid])
+    artifact = _file_artifact(body=b"def run(inp):\n    return inp['args']\n")
+    with patch(
+        "agent_env.providers.sandbox_providers.sandbox_provider.build_sandbox_provider", return_value=provider,
+    ), patch("agent_env.artifact.Artifact.get", return_value=artifact), patch.object(
+        FileArtifact, "load", _load_body
+    ), patch.object(_run_code_module, "_RUN_DIR", str(tmp_path / "run")):
+        for sid in sandboxes:
+            ctx = _make_context(with_agent=False)
+            ctx.deployed_sandboxes = [
+                DeployedSandbox(sandbox_name="box", sandbox_id=sid, sandbox_mode="vm", sandbox_type="local")
+            ]
+            await _step(sandbox_name="box", args={"who": sid}).execute(ctx)
+            assert ctx.metadata["script_results"]["run-code-1"] == {"who": sid}
+
+    for sid in sandboxes:
+        staged = json.loads((tmp_path / f"run-{sid}" / "run-code-1" / "input.json").read_text())
+        assert staged["args"] == {"who": sid}
+
+
+@pytest.mark.asyncio
 async def test_host_target_honors_custom_env_sandbox_type():
     # custom sandbox_type must resolve via build_sandbox_provider, not the default provider
     step = _step(env_id="env-x", result_id="filter")
@@ -370,8 +399,7 @@ def _sandbox_context(*, sandbox_type=None):
 
 
 def _host_sandbox():
-    sandbox = AsyncMock()
-    sandbox.mode = "vm"
+    sandbox = _vm_sandbox_mock()
     sandbox.exec_with_output = AsyncMock(
         side_effect=[(0, "", ""), (0, "13", ""), (0, '{"keep": true}', "")]
     )
@@ -527,9 +555,7 @@ async def test_agent_target_honors_the_agents_sandbox_type():
     ctx = _make_context()
     ctx.deployed_agents[0].sandbox_type = "modal"
 
-    sandbox = AsyncMock()
-    sandbox.mode = "vm"
-    sandbox.container_name = "agent-api"
+    sandbox = _vm_sandbox_mock()
     sandbox.exec_with_output = AsyncMock(
         # the `env` read execute() does for redaction, the clear, the script run, `wc -c`, then `cat`
         side_effect=[(0, "", ""), (0, "", ""), (0, "", ""), (0, "13", ""), (0, '{"keep": true}', "")]
@@ -571,9 +597,7 @@ async def test_host_installed_agent_on_a_vm_runs_on_the_host():
     ctx.deployed_agents[0].sandbox_type = "modal_vm"
     ctx.deployed_agents[0].on_host = True
 
-    sandbox = AsyncMock()
-    sandbox.mode = "vm"
-    sandbox.container_name = "agent-api"
+    sandbox = _vm_sandbox_mock()
     sandbox.exec_with_output = AsyncMock(
         side_effect=[(0, "", ""), (0, "13", ""), (0, '{"keep": true}', "")]
     )
