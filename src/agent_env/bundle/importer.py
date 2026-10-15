@@ -222,17 +222,20 @@ class _Importer:
         return imported
 
     def _move(self, staging: Path) -> None:
-        """Move ``staging`` to the destination, which is put back if it was an empty folder and the move fails."""
+        """Move ``staging`` to the destination, which is put back if it was an empty folder and the move fails or is
+        interrupted."""
         emptied = False
         try:
             if self.dest.is_dir():
                 self.dest.rmdir()  # empty, as _check_destination found it
                 emptied = True
             os.replace(staging, self.dest)
-        except OSError as e:
+        except BaseException as e:
             if emptied:
                 with contextlib.suppress(OSError):
                     self.dest.mkdir(exist_ok=True)
+            if not isinstance(e, OSError):
+                raise
             _check_destination(self.dest)  # something else wrote it meanwhile
             raise BundleError([f"{show(self.dest)}: can't move the import into place: {os_reason(e)}"]) from None
 
@@ -240,14 +243,28 @@ class _Importer:
     def _outputs(sites: list[Any]) -> dict[tuple[EntityKind, str], str]:
         """The name each id a step of the task writes keeps. One a bundle named under its own task when it wrote the
         task takes its last segment, so this bundle names it under its task rather than writing more versions of the
-        other's; the step that writes it is rewritten to the name."""
-        outputs = {}
+        other's, numbered when another output or a store reference of its kind has it; the step that writes it is
+        rewritten to the name."""
+        written = {(site.ref.kind, _nfc(site.value)) for site in sites if site.ref.role is RefRole.OUTPUT}
+        taken = {(site.ref.kind, _nfc(site.value)) for site in sites
+                 if (site.ref.kind, _nfc(site.value)) not in written or not site.value.startswith(LOCAL_PREFIX)}
+        outputs: dict[tuple[EntityKind, str], str] = {}
         for site in sites:
-            if site.ref.role is RefRole.OUTPUT:
-                name = site.value.rsplit("/", 1)[-1] if site.value.startswith(LOCAL_PREFIX) else site.value
-                outputs[site.ref.kind, _nfc(site.value)] = name
-                if name != site.value:
-                    site.rewrite(name)
+            key = (site.ref.kind, _nfc(site.value))
+            if site.ref.role is not RefRole.OUTPUT or key in outputs:
+                continue
+            name = site.value
+            if name.startswith(LOCAL_PREFIX):
+                base = name = name.rsplit("/", 1)[-1]
+                n = 1
+                while (site.ref.kind, _nfc(name)) in taken:
+                    n += 1
+                    name = f"{base}-{n}"
+                taken.add((site.ref.kind, _nfc(name)))
+            outputs[key] = name
+        for site in sites:
+            if site.ref.role is RefRole.OUTPUT and outputs[site.ref.kind, _nfc(site.value)] != site.value:
+                site.rewrite(outputs[site.ref.kind, _nfc(site.value)])
         return outputs
 
     def _pin(self, site: Any, where: str, deployed: set[str]) -> None:

@@ -161,6 +161,23 @@ def test_an_id_a_bundle_named_under_its_task_is_renamed_so_the_import_names_it_u
     assert (steps[1]["cli_artifact_id"], steps[2]["cli_artifact_ids"]) == ("crm-cli", ["crm-cli"])
 
 
+def test_a_renamed_output_is_numbered_when_another_output_or_a_store_reference_has_its_name(store):
+    old = "@local/~/old/triage"
+    with namespace_routing():
+        _task(old, [STEPS[0], STEPS[1],
+                    {**STEPS[5], "cli_artifact_id": f"{old}/crm-cli"},
+                    {**STEPS[5], "id": "cli2", "cli_artifact_id": "@local/~/other/triage/crm-cli"},
+                    {**STEPS[5], "id": "cli3", "cli_artifact_id": f"{old}/crm-data"},
+                    {**STEPS[6], "cli_artifact_ids": [f"{old}/crm-cli", "@local/~/other/triage/crm-cli"],
+                     "depends_on": [{"task_step_id": "cli"}, {"task_step_id": "cli2"}]}])
+        imported = import_task(old, store / "again")
+    steps = _steps(imported.root, "triage")
+
+    assert [step.get("cli_artifact_id") for step in steps[2:5]] == ["crm-cli", "crm-cli-2", "crm-data-2"]
+    assert steps[5]["cli_artifact_ids"] == ["crm-cli", "crm-cli-2"]
+    assert steps[1]["artifacts"] == [{"id": "crm-data", "version": 1}]
+
+
 def test_an_env_no_step_of_the_task_deploys_floats(store):
     _task("live", [{"id": "agent", "type": "deploy_agent", "env_ids": ["crm-env"], "a2a_agent_id": "solver"}])
 
@@ -291,6 +308,20 @@ def test_an_empty_destination_is_put_back_when_the_move_fails(store, monkeypatch
         import_task("triage", store / "dest")
 
     assert caught.value.problems == (f"{store / 'dest'}: can't move the import into place: disk gone",)
+    assert _left(store) == before and (store / "dest").is_dir()
+
+
+def test_an_empty_destination_is_put_back_when_an_interrupt_stops_the_move(store, monkeypatch):
+    (store / "dest").mkdir()
+    before = _left(store)
+
+    def interrupt(src, dst):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(importer_module.os, "replace", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        import_task("triage", store / "dest")
+
     assert _left(store) == before and (store / "dest").is_dir()
 
 
