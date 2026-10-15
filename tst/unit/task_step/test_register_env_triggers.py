@@ -373,7 +373,6 @@ async def test_no_await_means_no_state_read_and_no_awaited_key(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_await_times_out_naming_statuses_and_failure_events(monkeypatch):
-    _no_sleep(monkeypatch)
     _mock_gateway_by_path(monkeypatch, {
         "/triggers/register": [{"ok": True, "added": ["t1", "t2"], "all": ["t1", "t2"]}],
         "/triggers/state": [_state({"t1": "fired", "t2": "armed"},
@@ -381,10 +380,12 @@ async def test_await_times_out_naming_statuses_and_failure_events(monkeypatch):
                                             "error": "tool 'slack_send_message' refused"},
                                            {"seq": 4, "ts": "y", "kind": "fired", "trigger_id": "t1"}])],
     })
+    started = time.monotonic()
     with pytest.raises(RuntimeError) as err:
-        await _step(triggers=_TWO, await_fired=["t1", "t2"], await_timeout_seconds=0.01).execute(_context())
+        await _step(triggers=_TWO, await_fired=["t1", "t2"], await_timeout_seconds=1.2).execute(_context())
+    assert time.monotonic() - started < 1.2
     message = str(err.value)
-    assert "did not all reach 'fired' within 0.01s" in message
+    assert "did not all reach 'fired' within 1.2s" in message
     assert "{'t1': 'fired', 't2': 'armed'}" in message
     assert "action_failed" in message and "slack_send_message" in message
     assert "'seq'" not in message and "'kind': 'fired'" not in message
@@ -392,14 +393,13 @@ async def test_await_times_out_naming_statuses_and_failure_events(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_a_failed_wait_still_records_the_registration_with_the_last_statuses(monkeypatch):
-    _no_sleep(monkeypatch)
     _mock_gateway_by_path(monkeypatch, {
         "/triggers/register": [{"ok": True, "added": ["t1", "t2"], "all": ["t1", "t2"]}],
         "/triggers/state": [_state({"t1": "fired", "t2": "armed"})],
     })
     ctx = _context()
     with pytest.raises(RuntimeError):
-        await _step(triggers=_TWO, await_fired=["t1", "t2"], await_timeout_seconds=0.01).execute(ctx)
+        await _step(triggers=_TWO, await_fired=["t1", "t2"], await_timeout_seconds=1.2).execute(ctx)
     [audit] = ctx.metadata["env_trigger_registrations"]
     assert audit["added"] == ["t1", "t2"]
     assert audit["awaited"] == {"t1": "fired", "t2": "armed"}
@@ -423,10 +423,10 @@ async def test_slow_state_reads_cannot_outlive_the_await_budget(monkeypatch):
 
     monkeypatch.setattr(DeployedGatewayEnv, "invoke", stalled)
     started = time.monotonic()
-    with pytest.raises(RuntimeError, match="could not read /triggers/state for env 'env-x'.*gateway stalled"):
-        await _step(await_fired=["t1"], await_timeout_seconds=0.3).execute(_context())
-    assert time.monotonic() - started < 2.0
-    assert timeouts and all(t <= 1 for t in timeouts), timeouts
+    with pytest.raises(RuntimeError, match="could not read /triggers/state for env 'env-x' within the await budget.*gateway stalled"):
+        await _step(await_fired=["t1"], await_timeout_seconds=2.5).execute(_context())
+    assert time.monotonic() - started < 2.5
+    assert timeouts and all(t <= 2.5 for t in timeouts) and timeouts == sorted(timeouts, reverse=True), timeouts
 
 
 @pytest.mark.asyncio
@@ -444,13 +444,23 @@ async def test_await_stops_early_on_a_failed_trigger(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_a_trigger_missing_from_state_keeps_waiting_until_the_deadline(monkeypatch):
-    _no_sleep(monkeypatch)
-    _mock_gateway_by_path(monkeypatch, {
+    sent = _mock_gateway_by_path(monkeypatch, {
         "/triggers/register": [{"ok": True, "added": ["t1"], "all": ["t1"]}],
         "/triggers/state": [_state({})],
     })
-    with pytest.raises(RuntimeError, match=r"statuses \{'t1': None\}"):
-        await _step(await_fired=["t1"], await_timeout_seconds=0.01).execute(_context())
+    with pytest.raises(RuntimeError, match=r"within 1.2s; statuses \{'t1': None\}"):
+        await _step(await_fired=["t1"], await_timeout_seconds=1.2).execute(_context())
+    assert [str(r.url.path) for r in sent].count("/triggers/state") == 1  # one read, one poll interval, the deadline
+
+
+@pytest.mark.asyncio
+async def test_a_budget_shorter_than_one_read_fails_without_reading(monkeypatch):
+    sent = _mock_gateway_by_path(monkeypatch, {"/triggers/register": [{"ok": True, "added": ["t1"], "all": ["t1"]}]})
+    ctx = _context()
+    with pytest.raises(RuntimeError, match=r"within 0.5s; statuses \{'t1': None\}"):
+        await _step(await_fired=["t1"], await_timeout_seconds=0.5).execute(ctx)
+    assert [str(r.url.path) for r in sent] == ["/triggers/register"]
+    assert ctx.metadata["env_trigger_registrations"][0]["awaited"] == {"t1": None}
 
 
 @pytest.mark.asyncio
