@@ -11,11 +11,12 @@ from __future__ import annotations
 import copy
 import unicodedata
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from agent_env.a2a_agent import A2AAgent
+from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.registry import canonical_type, get_artifact_registry
 from agent_env.entity_refs import EntityKind, EntityRef, RefRole, RefSite, parse_toml_ref, ref_sites
 from agent_env.env.envs.gateway_server import GatewayEnv
@@ -24,12 +25,13 @@ from agent_env.env.registry import get_env_registry
 from agent_env.eval.eval import Eval
 from agent_env.plugins import _registration
 from agent_env.store.ids import LOCAL_PREFIX, derive_id, validate_local_id
+from agent_env.store.image_store.oci_registry_credentials import names_registry
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_step import TaskStep, attach_retry_config, dependencies
 
 from ._fs import fold, relative, show
-from .authoring import default_dockerfile
-from .parse import NAMED_BY, Bundle, BundleEntry, BundleError, BundleKind
+from .authoring import AuthoringContext, default_dockerfile
+from .parse import DOCKERFILE, NAMED_BY, Bundle, BundleEntry, BundleError, BundleKind
 
 # Step keys that hold step ids, never entity ids.
 _STEP_ID_KEYS = ("id", "type", "depends_on")
@@ -38,23 +40,38 @@ _INFRA_ENVS = {GatewayEnv.type: "default_gateway_env_id", ServiceDBEnv.type: "de
 
 
 @dataclass(frozen=True)
-class BuiltImage:
-    """The image built from an env or agent folder for one of its image keys."""
+class BundleImage:
+    """An image the bundle writes: one an env or agent folder's image key names, or an ``artifacts/<name>/`` image
+    folder, under the folder's own id."""
 
     id: str
     entry: BundleEntry
+    description: str | None = field(default=None, kw_only=True)  # an image folder's artifact.toml's
+
+
+@dataclass(frozen=True)
+class BuiltImage(BundleImage):
+    """The image built from the folder's Dockerfile."""
+
     dockerfile: str  # relative to the entry's folder
 
 
 @dataclass(frozen=True)
+class ReferencedImage(BundleImage):
+    """An image already in a registry, which the key names as ``{ ref = "<image>" }``."""
+
+    ref: str
+
+
+@dataclass(frozen=True)
 class Reference:
-    """A resolved reference: to ``local``, this bundle's entity or built image, or, when ``local`` is
+    """A resolved reference: to ``local``, this bundle's entity or image, or, when ``local`` is
     None, to a store id at ``version`` (None for its latest)."""
 
     kind: EntityKind
     id: str
     version: int | None
-    local: BundleEntry | BuiltImage | None
+    local: BundleEntry | BundleImage | None
     where: str  # the referencing field, as problems name it
     artifact_type: str | None  # the type the field takes, when it names one: an artifact's, or an env's
 
@@ -84,8 +101,8 @@ class ResolvedEntry:
 @dataclass(frozen=True)
 class ResolvedBundle:
     bundle: Bundle
-    entries: tuple[ResolvedEntry, ...]
-    built_images: tuple[BuiltImage, ...]
+    entries: tuple[ResolvedEntry, ...]  # every entry but the image folders, which are images
+    images: tuple[BundleImage, ...]  # the images the bundle writes: its image keys' and its image folders'
 
 
 def resolve_bundle(bundle: Bundle) -> ResolvedBundle:
@@ -101,7 +118,7 @@ class _Resolver:
     def __init__(self, bundle: Bundle):
         self.bundle = bundle
         self.problems: list[str] = []
-        self.built: list[BuiltImage] = []
+        self.images: list[BundleImage] = []
         # By kind and exact name or id, by kind and folded name, and by folded name across the kinds a
         # step can name (steps never name tasks or evals).
         self.named: dict[tuple[EntityKind, str], BundleEntry] = {}
@@ -124,13 +141,15 @@ class _Resolver:
     def resolve(self) -> ResolvedBundle:
         resolved = []
         for entry in self.bundle.entries:
+            if self._image_folder(entry):
+                continue
             try:
                 resolved.append(self._task(entry) if entry.kind is BundleKind.TASK else self._toml(entry))
             except _Skip:
                 pass
         if self.problems:
             raise BundleError(self.problems)
-        return ResolvedBundle(self.bundle, tuple(resolved), tuple(self.built))
+        return ResolvedBundle(self.bundle, tuple(resolved), tuple(self.images))
 
     # One method per kind of config
 
@@ -195,6 +214,31 @@ class _Resolver:
                               references)
         return ResolvedEntry(entry, steps, tuple(references), tuple(outputs.values()))
 
+    def _image_folder(self, entry: BundleEntry) -> bool:
+        """Record the image a docker_image artifact folder is: built from its Dockerfile, or the registry image its
+        artifact.toml's ref names. False for any other entry."""
+        cls = get_artifact_registry().get(canonical_type(entry.type)) if entry.kind is BundleKind.ARTIFACT else None
+        if cls is not DockerImageArtifact:
+            return False
+        ctx = AuthoringContext(self.bundle, entry)
+        fields, problems = ctx.accepted(entry.config, description=str, ref=str)
+        ref, built = fields.get("ref"), (entry.path / DOCKERFILE).is_file()
+        if ref is not None and built:
+            problems.append(ctx.config_problem(f"ref names a registry image, so this folder builds none; remove ref "
+                                               f"or its {DOCKERFILE}"))
+        elif ref is not None and (problem := _registry_problem("ref", ref)):
+            problems.append(ctx.config_problem(problem))
+        elif "ref" not in entry.config and not built:
+            problems.append(f"an image folder needs a {DOCKERFILE}, or ref = \"<image>\" in its artifact.toml")
+        if problems:
+            for problem in problems:
+                self._problem(entry, problem)
+            return True
+        description = fields.get("description")
+        self.images.append(ReferencedImage(entry.id, entry, ref, description=description) if ref is not None
+                           else BuiltImage(entry.id, entry, DOCKERFILE, description=description))
+        return True
+
     # Parts of a config
 
     def _toml_class(self, entry: BundleEntry) -> type:
@@ -219,13 +263,22 @@ class _Resolver:
         return cls
 
     def _image(self, entry: BundleEntry, config: dict, ref: EntityRef, references: list[Reference]) -> bool:
-        """Record the image an image key builds: the folder's Dockerfile when ``image`` is left out, or
-        ``{ dockerfile = "<path>" }``. False when the key names an image artifact instead."""
+        """Record the image an image key has the bundle write: the folder's Dockerfile when ``image`` is left out,
+        ``{ dockerfile = "<path>" }``, or a registry image, ``{ ref = "<image>" }``. False when the key names an image
+        artifact instead."""
         if ref.artifact_type != "docker_image" or ref.path != ref.field:
             return False
         value = config.get(ref.path)
+        role = f"{entry.kind.store}_image" if ref.path == "image" else ref.path
         if isinstance(value, dict) and "ref" in value:
-            self._problem(entry, f"{ref.path}: an external image ({{ ref = ... }}) isn't supported yet")
+            name = value["ref"]
+            if value.keys() != {"ref"}:
+                extra = ", ".join(sorted(value.keys() - {"ref"}))
+                self._problem(entry, f"{ref.path}: a registry image takes only ref, not {extra}")
+            elif problem := _registry_problem(ref.path, name):
+                self._problem(entry, problem)
+            else:
+                self._implied(ReferencedImage(derive_id(entry.id, role), entry, name), config, ref, references)
             return True
         if value is None:
             dockerfile = default_dockerfile(ref.path)
@@ -242,12 +295,13 @@ class _Resolver:
         if not (inside and path.is_file()):
             self._problem(entry, f"{ref.path}: there is no {dockerfile!r} in this folder to build")
             return True
-        role = f"{entry.kind.store}_image" if ref.path == "image" else ref.path
-        image = BuiltImage(derive_id(entry.id, role), entry, dockerfile)
-        config[ref.path] = image.id
-        self.built.append(image)
-        references.append(Reference(EntityKind.ARTIFACT, image.id, None, image, ref.path, ref.artifact_type))
+        self._implied(BuiltImage(derive_id(entry.id, role), entry, dockerfile), config, ref, references)
         return True
+
+    def _implied(self, image: BundleImage, config: dict, ref: EntityRef, references: list[Reference]) -> None:
+        config[ref.path] = image.id
+        self.images.append(image)
+        references.append(Reference(EntityKind.ARTIFACT, image.id, None, image, ref.path, ref.artifact_type))
 
     def _derived_outputs(self, entry: BundleEntry, step: dict, cls: type) -> bool:
         """Write in any output id the step's type derives when the field is left out (build_mcp_cli's
@@ -380,6 +434,13 @@ class _Resolver:
 
     def _problem(self, entry: BundleEntry, message: str) -> None:
         self.problems.append(f"{relative(self.bundle.root, entry.path)}: {message}")
+
+
+def _registry_problem(key: str, name: Any) -> str | None:
+    """Why ``name``, a registry image ``key`` gives, can't be pulled as written."""
+    if isinstance(name, str) and names_registry(name):
+        return None
+    return f"{key}: {name!r} doesn't name its registry; spell it out, as in docker.io/library/{name}"
 
 
 def build_step(step: dict) -> TaskStep:

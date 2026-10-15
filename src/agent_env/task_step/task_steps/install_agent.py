@@ -17,7 +17,7 @@ import json
 import logging
 import shlex
 from datetime import datetime, timezone
-from typing import Any, Callable, ClassVar, Optional
+from typing import Callable, ClassVar, Optional
 
 import httpx
 
@@ -96,6 +96,8 @@ def _build_param_resolvers(
         # Config-sourced (from agent-env config)
         "litellm_api_key":   lambda: litellm_api_key_override or config.get_litellm_api_key(),
         "litellm_base_url":  lambda: host_url_for(config.get_litellm_base_url(), sandbox_type),
+        # A JSON object, {} when [model.headers] is unset.
+        "litellm_extra_headers": lambda: json.dumps(config.get_model_headers(config.get_litellm_base_url())),
     }
 
 
@@ -290,7 +292,8 @@ class InstallAgentTaskStep(TaskStep):
                     f"{commands_key}[{i-1}] references undeclared placeholder {{{e.args[0]}}}; "
                     f"add it to the extension's required_params"
                 )
-            logger.info(f"  [{i}/{len(install_commands)}] {formatted.splitlines()[0][:140]}")
+            # The template, not the command: resolved params carry the model key and headers.
+            logger.info(f"  [{i}/{len(install_commands)}] {cmd.splitlines()[0][:140]}")
             await sandbox.exec_script(formatted)
         if not host_mode:  # copied into the container; a host install may run from it
             await sandbox.exec_script(f"rm -rf {shlex.quote(work_dir)}")

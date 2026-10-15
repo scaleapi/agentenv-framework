@@ -48,7 +48,6 @@ async def test_install_agent_writes_default_agent_model_not_agent_model():
     agent = MagicMock()
     agent.metadata = {"default_model": "gpt-5.3-codex"}
     context = TaskStepContext()
-    step = InstallAgentTaskStep(id="i", version=None, sandbox_name="sb", a2a_agent_id="codex-cli")
 
     with patch("agent_env.a2a_agent.A2AAgent.get", return_value=agent), \
          patch.object(InstallAgentTaskStep, "_wait_for_agent_card", AsyncMock(return_value={"name": "Codex"})), \

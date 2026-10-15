@@ -163,7 +163,6 @@ class A2AAgentValidator:
         from agent_env.task_step.task_steps.peer_agents import AgentPeers, PeerAgentsTaskStep
         from agent_env.task_step.task_steps.snapshot_agent_state import SnapshotAgentStateTaskStep
         from agent_env.task_step.task_step import TaskStep, TaskStepDependency
-        from agent_env.a2a_agent.a2a_agent import A2AAgent
 
         task_id = derive_id(agent.id, f"validate-a2a-v{agent.version}")
 

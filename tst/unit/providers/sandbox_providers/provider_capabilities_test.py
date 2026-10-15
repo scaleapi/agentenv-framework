@@ -27,6 +27,8 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     SandboxProvider,
     on_this_machine_provider,
 )
+from agent_env.providers.sandbox_providers.tenki.provider import TenkiSandboxProvider
+from agent_env.providers.sandbox_providers.tenki.sandbox import TenkiSandbox
 from agent_env.providers.sandbox_providers.tensorlake.provider import TensorlakeSandboxProvider
 from agent_env.providers.sandbox_providers.tensorlake.sandbox import TensorlakeSandbox
 
@@ -35,7 +37,7 @@ PROVIDERS = SRC / "providers" / "sandbox_providers"
 
 LOADABLE, NAME, NAME_OR_CONTEXT = Accepts.LOADABLE, Accepts.NAME, Accepts.NAME_OR_CONTEXT
 PROVIDER_CLASSES = [LocalSandboxProvider, ModalSandboxProvider, ModalVmSandboxProvider, E2BSandboxProvider,
-                    SailVmSandboxProvider, TensorlakeSandboxProvider, ChainedSandboxProvider]
+                    SailVmSandboxProvider, TensorlakeSandboxProvider, TenkiSandboxProvider, ChainedSandboxProvider]
 
 
 @pytest.mark.parametrize("cls, on_this_machine, creates_vms, sandbox, container, private_network", [
@@ -45,7 +47,8 @@ PROVIDER_CLASSES = [LocalSandboxProvider, ModalSandboxProvider, ModalVmSandboxPr
     (E2BSandboxProvider, False, True, LOADABLE, NAME, False),
     (SailVmSandboxProvider, False, True, LOADABLE, NAME, False),
     (TensorlakeSandboxProvider, False, True, LOADABLE, NAME, False),
-], ids=["local", "modal", "modal_vm", "e2b", "sail_vm", "tensorlake"])
+    (TenkiSandboxProvider, False, True, LOADABLE, NAME, False),
+], ids=["local", "modal", "modal_vm", "e2b", "sail_vm", "tensorlake", "tenki"])
 def test_each_provider_declares_where_it_runs_and_the_images_it_runs(cls, on_this_machine, creates_vms, sandbox,
                                                                     container, private_network):
     assert ((cls.ON_THIS_MACHINE, SANDBOX_MODE_VM in cls.SUPPORTED_SANDBOX_MODES, cls.PRIVATE_NETWORK)
@@ -266,7 +269,8 @@ def test_an_image_that_records_no_platform_isnt_checked():
     assert image.platform is None and image.load_problem(on_this_machine=False, platform="linux/arm64") is None
 
 
-@pytest.mark.parametrize("sandbox", [Sandbox, ModalSandbox, ModalVmSandbox, E2BSandbox, SailVmSandbox, TensorlakeSandbox])
+@pytest.mark.parametrize("sandbox", [Sandbox, ModalSandbox, ModalVmSandbox, E2BSandbox, SailVmSandbox, TensorlakeSandbox,
+                                     TenkiSandbox])
 def test_a_sandbox_runs_linux_amd64_unless_its_provider_sets_another(sandbox):
     assert sandbox.platform == "linux/amd64"
 

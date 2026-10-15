@@ -19,7 +19,7 @@ DEFAULT_TTL_SECONDS = 10800  # 3 hours
 @click.option("--gateway-mode", type=click.Choice([m.value for m in GatewayMode], case_sensitive=False),
               default=GatewayMode.PERFORMANCE.value, help="Gateway mode (performance or consistent)")
 @click.option("--sandbox", default=None,
-              help="Sandbox backend(s): a built-in (modal, modal_vm, e2b, tensorlake, local) "
+              help="Sandbox backend(s): a built-in (modal, modal_vm, e2b, tensorlake, tenki, local) "
                    "or a name from [sandbox.providers] in .agentenv/config.toml; comma-separated for a "
                    "fallback chain. Defaults to [sandbox].default (else local) when omitted.")
 @click.option("--service-db", "service_db_env_id", default=None,
@@ -91,7 +91,7 @@ def deploy(env_id: str, env_version: int | None, ttl_seconds: int, gateway_mode:
         click.echo(f"Error: {e}", err=True)
         raise SystemExit(1)
 
-    click.echo(f"Deployed!")
+    click.echo("Deployed!")
     if deployed_env.instance_id:
         click.echo("Instance ID: " + click.style(deployed_env.instance_id, fg="green"))
     click.echo("Env MCP Url: " + click.style(deployed_env.mcp_url, fg="blue"))

@@ -223,7 +223,7 @@ class TestServiceArtifact:
     def test_legacy_doc_falls_back_to_latest(self, caplog):
         """Pre-pinning EnvironmentArtifact (only file_artifact_id) must still load."""
         file_id = _unique_id("svc_legacy_file")
-        file_v1 = FileArtifact.put(
+        FileArtifact.put(
             id=file_id,
             description="v1",
             file_path=str(EMAIL_ARTIFACT_PATH),

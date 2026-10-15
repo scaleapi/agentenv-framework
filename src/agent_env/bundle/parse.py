@@ -299,7 +299,9 @@ class _Parser:
     def _artifact(self, name: str, path: Path) -> BundleEntry:
         children = self._children(path)
         config, config_path, declared = self._config(BundleKind.ARTIFACT, path, children)
-        if declared == "skill" or any(fold(child) == fold(SKILL_MD) for child in children):
+        # An image folder is a build context, which may hold a skill the image ships.
+        image = declared == "docker_image" if declared is not None else DOCKERFILE in children
+        if not image and (declared == "skill" or any(fold(child) == fold(SKILL_MD) for child in children)):
             self._skip(path, "this looks like a skill: skills live in skills/<name>/, not artifacts/")
         # A lone Dockerfile spelled another way decides nothing once a type is declared: then it's content.
         if (declared is None or DOCKERFILE in children) and self._near_miss(path, children, DOCKERFILE):

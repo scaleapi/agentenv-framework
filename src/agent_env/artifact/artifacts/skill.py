@@ -2,7 +2,7 @@
 
 A SkillArtifact references one FileArtifactUniverse bundling every file in the skill
 (SKILL.md + scripts/, references/, assets/, …) colocated under a single object-store prefix
-(`artifacts/skill/<key_segment(id)>/<version>/`). That prefix IS the bundle — no duplication, and
+(`artifacts/skill/<key_segment(id)>/<version>-<attempt>/`). That prefix IS the bundle — no duplication, and
 deployed A2A agents get its files through read grants.
 """
 
@@ -12,7 +12,7 @@ import contextlib
 import re
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterator, Literal, Optional
+from typing import TYPE_CHECKING, Any, Iterator, Literal, Mapping, Optional
 
 import yaml
 from pydantic import ConfigDict, Field, model_serializer
@@ -20,10 +20,11 @@ from pydantic import ConfigDict, Field, model_serializer
 from agent_env.artifact.artifact import Artifact, _write_twin
 from agent_env.config import get_config
 from agent_env.store.base import ObjectNotFoundError
-from agent_env.store.ids import derive_id, key_segment
+from agent_env.store.ids import derive_id
 
 if TYPE_CHECKING:
     from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
+    from agent_env.bundle.authoring import AuthoringContext
 
 
 AGENT_SKILLS_SPEC_VERSION = "0.1"
@@ -43,7 +44,7 @@ class SkillArtifact(Artifact):
     skill_object_url: str = Field(alias="skill_s3_url", description="Object-store prefix where the skill bundle lives")
     agent_skills_spec_version: str = Field(description="agentskills.io spec revision this skill was validated under")
 
-    skill_name: str = Field(description="Skill name from SKILL.md frontmatter; equals the artifact id")
+    skill_name: str = Field(description="Skill name from SKILL.md frontmatter; the last segment of the artifact id")
     description: str = Field(description="Skill description from SKILL.md frontmatter")
     license: Optional[str] = Field(default=None)
     compatibility: Optional[str] = Field(default=None)
@@ -74,31 +75,32 @@ class SkillArtifact(Artifact):
         _validate_frontmatter(frontmatter, expected_name=expected_name)
 
     @classmethod
-    def put(cls, id: str, *, skill_dir: Path) -> "SkillArtifact":
+    def put(cls, id: str, *, skill_dir: Optional[Path] = None,
+            files: Optional[Mapping[str, Path]] = None) -> "SkillArtifact":
+        """Write the skill in ``skill_dir``, or the ``files`` given by their paths in the skill, SKILL.md among them."""
         from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
         from agent_env.artifact.store import get_artifact_store
 
-        skill_md_path = skill_dir / _SKILL_MD_FILENAME
-        if not skill_md_path.is_file():
-            raise ValueError(f"{_SKILL_MD_FILENAME} not found at {skill_md_path}")
+        if (skill_dir is None) == (files is None):
+            raise ValueError("specify exactly one of skill_dir or files")
+        if skill_dir is not None:
+            if not (skill_dir / _SKILL_MD_FILENAME).is_file():
+                raise ValueError(f"{_SKILL_MD_FILENAME} not found at {skill_dir / _SKILL_MD_FILENAME}")
+            files = {p.relative_to(skill_dir).as_posix(): p for p in sorted(skill_dir.rglob("*")) if p.is_file()}
+        if _SKILL_MD_FILENAME not in files:
+            raise ValueError(f"{_SKILL_MD_FILENAME} isn't among the skill's files")
 
-        skill_md_bytes = skill_md_path.read_bytes()
-        cls.validate(skill_md=skill_md_bytes, expected_name=id)
+        skill_md_bytes = files[_SKILL_MD_FILENAME].read_bytes()
+        cls.validate(skill_md=skill_md_bytes, expected_name=skill_name_of(id))
         frontmatter, _body = parse_skill_md(skill_md_bytes)
-
-        files: dict[str, Path] = {}
-        for p in sorted(skill_dir.rglob("*")):
-            if p.is_file():
-                files[p.relative_to(skill_dir).as_posix()] = p
 
         store = get_artifact_store()
         version = store.next_version(id)
-        key = f"{get_config().get_artifact_key_prefix()}artifacts/skill/{key_segment(id)}/{version}/"
-        skill_object_url = get_config().get_object_store_for(id).object_url(key)
+        skill_object_url = store.attempt_prefix(cls.model_fields["type"].default, id)
 
         universe = FileArtifactUniverse.put_bundled(
             id=derive_id(id, "files"),
-            files=files,
+            files=dict(files),
             prefix_url=skill_object_url,
         )
 
@@ -117,9 +119,27 @@ class SkillArtifact(Artifact):
         )
         return store.put_document(instance)
 
+    @classmethod
+    def accept_toml(cls, data: Any, ctx: AuthoringContext) -> None:
+        """Check the folder's SKILL.md the way ``from_toml`` will, before anything is written."""
+        try:
+            cls.validate(skill_md=(ctx.dir / _SKILL_MD_FILENAME).read_bytes(), expected_name=skill_name_of(ctx.id))
+        except ValueError as e:
+            ctx.refuse([str(e)])
+
+    @classmethod
+    def from_toml(cls, data: Any, ctx: AuthoringContext) -> "SkillArtifact":
+        """Write the skill in the bundle folder: every file its folder walk lists."""
+        return cls.put(ctx.id, files=ctx.files())
+
     def get_skill_files(self) -> "FileArtifactUniverse":
         from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
         return FileArtifactUniverse.get(self.skill_files_id)
+
+
+def skill_name_of(id: str) -> str:
+    """The SKILL.md name a skill's artifact id calls for: its last segment."""
+    return id.rsplit("/", 1)[-1]
 
 
 def parse_skill_md(data: bytes) -> tuple[dict, str]:
@@ -134,7 +154,10 @@ def parse_skill_md(data: bytes) -> tuple[dict, str]:
         raise ValueError("SKILL.md frontmatter is not closed with '---'")
     frontmatter_text = after_open[: end_match.start()]
     body = after_open[end_match.end():].lstrip("\n")
-    parsed = yaml.safe_load(frontmatter_text) or {}
+    try:
+        parsed = yaml.safe_load(frontmatter_text) or {}
+    except yaml.YAMLError as e:
+        raise ValueError(f"SKILL.md frontmatter isn't valid YAML: {' '.join(str(e).split())}") from e
     if not isinstance(parsed, dict):
         raise ValueError("SKILL.md frontmatter must be a YAML mapping")
     return parsed, body
@@ -151,7 +174,7 @@ def _validate_frontmatter(fm: dict, expected_name: str) -> None:
         )
     if name != expected_name:
         raise ValueError(
-            f"SKILL.md frontmatter 'name' {name!r} must equal the SkillArtifact id {expected_name!r}"
+            f"SKILL.md frontmatter 'name' {name!r} must be {expected_name!r}"
         )
 
     description = fm.get("description")

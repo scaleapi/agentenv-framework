@@ -15,7 +15,7 @@ def _env_get_returns(env):
 @pytest.mark.parametrize("raw", ["https://mcp.example.com/mcp", " https://mcp.example.com/mcp\n"])
 def test_env_with_a_live_mcp_url_resolves(raw):
     with _env_get_returns(SimpleNamespace(mcp_url=raw)):
-        assert deploy_agent._live_mcp_url("live-env") == "https://mcp.example.com/mcp"
+        assert deploy_agent.live_mcp_url("live-env") == "https://mcp.example.com/mcp"
 
 
 @pytest.mark.parametrize(
@@ -33,4 +33,4 @@ def test_env_with_a_live_mcp_url_resolves(raw):
 )
 def test_env_without_a_live_mcp_url_is_an_error(env):
     with _env_get_returns(env), pytest.raises(RuntimeError, match="not in context.deployed_envs"):
-        deploy_agent._live_mcp_url("deployable-env")
+        deploy_agent.live_mcp_url("deployable-env")

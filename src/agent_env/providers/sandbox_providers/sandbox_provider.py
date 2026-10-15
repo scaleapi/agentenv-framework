@@ -112,12 +112,19 @@ class SandboxProvider(ABC):
         Caller still owns readiness polling for the container's own endpoints. ``private_network`` puts it on a
         network this provider's other such containers share, at its ``private_host``.
 
-        Default implementation: create_vm, authenticate Docker to ECR if applicable, docker pull,
-        docker run. Backends that bake the image in at sandbox-creation time (Modal) override.
+        Default implementation: a container-only backend uses create_sandbox; a VM backend creates
+        a VM, pulls the image, and starts it. Backends that bake the image in at creation override.
         """
         if private_network:
             raise ValueError(f"{type(self).__name__} runs each container in a VM of its own, so it can't put "
                              "containers on a private network they share")
+        if (type(self).create_vm is SandboxProvider.create_vm
+                and type(self).create_sandbox is not SandboxProvider.create_sandbox):
+            return await self.create_sandbox(
+                image_name=image_name, port=port, env=env, cpu=cpu, memory=memory,
+                disk_size_gb=disk_size_gb, timeout=timeout, attribution=attribution,
+                network_policy=network_policy,
+            )
         sandbox = await self.create_vm(
             cpu=cpu, memory=memory, disk_size_gb=disk_size_gb,
             exposed_ports=[port], timeout=timeout,
@@ -158,6 +165,15 @@ class SandboxProvider(ABC):
 
     async def get_sandbox(self, sandbox_id: str) -> Sandbox:
         raise NotImplementedError(f"{type(self).__name__} does not support get_sandbox")
+
+    async def terminate_sandbox(self, sandbox_id: str) -> None:
+        """Terminate a sandbox this provider made, by id; one that has already finished or is gone is terminated.
+        A backend that can terminate without a live handle overrides this, so teardown doesn't need one."""
+        try:
+            sandbox = await self.get_sandbox(sandbox_id)
+        except SandboxNotFoundError:
+            return
+        await sandbox.terminate()
 
     async def close(self) -> None:
         pass
@@ -299,8 +315,10 @@ _BUILTIN_SANDBOX_PROVIDERS: dict[str, str] = {
     "modal_vm": "agent_env.providers.sandbox_providers.modal_vm_sandbox:ModalVmSandboxProvider",
     "e2b": "agent_env.providers.sandbox_providers.e2b:E2BSandboxProvider",
     "sail_vm": "agent_env.providers.sandbox_providers.sail_vm.provider:SailVmSandboxProvider",
+    "smol_vm": "agent_env.providers.sandbox_providers.smol_vm.provider:SmolVmSandboxProvider",
     "tensorlake": "agent_env.providers.sandbox_providers.tensorlake.provider:TensorlakeSandboxProvider",
     "vercel": "agent_env.providers.sandbox_providers.vercel.provider:VercelSandboxProvider",
+    "tenki": "agent_env.providers.sandbox_providers.tenki.provider:TenkiSandboxProvider",
     "local": "agent_env.providers.sandbox_providers.local_sandbox:LocalSandboxProvider",
 }
 

@@ -328,3 +328,17 @@ async def test_adapter_construction_failure_kills_raw_sandbox():
         await provider.create_vm(exposed_ports=[8080], setup_for_gateway=False)
 
     raw.kill.assert_awaited_once_with()
+
+
+@pytest.mark.parametrize("killed", [True, False], ids=["killed", "already absent"])
+@pytest.mark.asyncio
+async def test_terminate_sandbox_kills_by_id_without_connecting(monkeypatch, killed):
+    kill = AsyncMock(return_value=killed)
+    monkeypatch.setattr(_AsyncSandboxSdk, "kill", kill, raising=False)
+    provider = E2BSandboxProvider(api_key="e2b-secret", base_template="agent-env-v1", template_resolver=_Resolver(),
+                                  sandbox_cls=_AsyncSandboxSdk)
+
+    await provider.terminate_sandbox("e2b-sandbox-1")
+
+    kill.assert_awaited_once_with("e2b-sandbox-1", api_key="e2b-secret")
+    _AsyncSandboxSdk.connect.assert_not_called()

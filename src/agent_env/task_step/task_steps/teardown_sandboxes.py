@@ -18,7 +18,6 @@ from agent_env.a2a_agent.staging import LAST_DRAIN_SECONDS, drain_all, staged_ch
 from agent_env.entity_refs import EntityRef
 from agent_env.env.env import DeployedSandboxEnv
 from agent_env.providers.sandbox_providers.sandbox_provider import (
-    SandboxNotFoundError,
     SandboxProvider,
     build_sandbox_provider,
     get_agent_sandbox_provider,
@@ -167,11 +166,10 @@ _DEFAULT_PROVIDERS = {
 
 
 async def _terminate(sandbox_id: str, sandbox_type: Optional[str], default_slot: str) -> None:
-    provider: SandboxProvider = (
-        build_sandbox_provider(sandbox_type) if sandbox_type else _DEFAULT_PROVIDERS[default_slot]()
-    )
-    try:
-        sandbox = await provider.get_sandbox(sandbox_id)
-    except SandboxNotFoundError:
+    """By id through the backend that made it; a record that doesn't name one goes through a live handle, since
+    "not found" from a provider that didn't make the sandbox doesn't mean it's gone."""
+    if sandbox_type:
+        await build_sandbox_provider(sandbox_type).terminate_sandbox(sandbox_id)
         return
-    await sandbox.terminate()
+    provider: SandboxProvider = _DEFAULT_PROVIDERS[default_slot]()
+    await (await provider.get_sandbox(sandbox_id)).terminate()

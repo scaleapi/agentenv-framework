@@ -18,10 +18,12 @@ from typing import Any
 from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact import (
     Artifact,
+    CliArtifact,
     EnvironmentArtifact,
     EnvironmentUniverseArtifact,
     FileArtifact,
     FileArtifactUniverse,
+    SkillArtifact,
 )
 from agent_env.artifact.registry import canonical_type, get_artifact_registry
 from agent_env.config import get_config
@@ -45,6 +47,7 @@ from agent_env.store.ids import LOCAL_PREFIX
 from agent_env.store.routing import namespace_routing_enabled
 from agent_env.task import Task
 from agent_env.task_step.registry import get_task_step_registry
+from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
 
 from ._fs import fold, relative, with_article
@@ -58,7 +61,7 @@ from .authoring import (
     universe_layout,
 )
 from .parse import BundleEntry, BundleError, BundleKind
-from .resolve import BuiltImage, Reference, ResolvedBundle, ResolvedEntry, build_step
+from .resolve import BuiltImage, BundleImage, Reference, ResolvedBundle, ResolvedEntry, build_step
 
 _Key = tuple[str, str]  # (store, id)
 
@@ -67,7 +70,7 @@ _GETTERS = {EntityKind.ENV: Env.get, EntityKind.AGENT: A2AAgent.get, EntityKind.
 
 # The artifact types written from their folders, and what each one's write reads there, which the ledger hashes.
 _FOLDER_WALKS = {FileArtifact: one_file, FileArtifactUniverse: entry_files, EnvironmentArtifact: environment_files,
-                 EnvironmentUniverseArtifact: universe_files}
+                 EnvironmentUniverseArtifact: universe_files, SkillArtifact: entry_files, CliArtifact: entry_files}
 # The env types whose from_toml reads only the toml and what it names, so a type built by one of them is written from
 # its env.toml and the ledger can list what it's made from.
 _ENV_FROM_TOMLS = (Env, MCPServerEnv, WebsiteEnv, MultiEnv)
@@ -81,7 +84,7 @@ class Write:
 
     kind: BundleKind  # a built image is an ARTIFACT; kind.store keys uniqueness
     id: str
-    source: ResolvedEntry | BuiltImage
+    source: ResolvedEntry | BundleImage
     needs: tuple[_Key, ...]  # (kind.store, id) of the earlier writes it references
 
 
@@ -112,15 +115,18 @@ class _Planner:
     def __init__(self, resolved: ResolvedBundle):
         self.resolved = resolved
         self.problems: list[str] = []
-        self.nodes: dict[_Key, ResolvedEntry | BuiltImage] = {}
+        self.nodes: dict[_Key, ResolvedEntry | BundleImage] = {}
         self.rank: dict[_Key, int] = {}
         self.edges: dict[_Key, list[_Key]] = {}
-        images: dict[BundleEntry, list[BuiltImage]] = {}
-        for image in resolved.built_images:
+        images: dict[BundleEntry, list[BundleImage]] = {}
+        for image in resolved.images:
             images.setdefault(image.entry, []).append(image)
-        for entry in resolved.entries:
-            for image in images.get(entry.entry, ()):
+        entries = {entry.entry: entry for entry in resolved.entries}
+        for bundle_entry in resolved.bundle.entries:
+            for image in images.get(bundle_entry, ()):
                 self._add(_key(image), image, [])
+            if (entry := entries.get(bundle_entry)) is None:  # an image folder, which is its image
+                continue
             needs = dict.fromkeys(_key(ref.local) for ref in entry.references if ref.local is not None)
             self._add(_key(entry.entry), entry, list(needs))
         self.named = {fold(entry.entry.name): entry.entry for entry in resolved.entries}
@@ -128,8 +134,9 @@ class _Planner:
         self.outputs = {(output.kind.value, output.id): (entry.entry, output)
                         for entry in resolved.entries for output in entry.outputs}
         self.accepted: dict[_Key, dict] = {}  # each toml a type checks, as it accepted it
+        self.steps: dict[_Key, list[TaskStep]] = {}  # each task's steps that build, as a write will build them
 
-    def _add(self, key: _Key, source: ResolvedEntry | BuiltImage, needs: list[_Key]) -> None:
+    def _add(self, key: _Key, source: ResolvedEntry | BundleImage, needs: list[_Key]) -> None:
         """Record a write in bundle order, a built image just before the entry that builds it."""
         self.nodes[key], self.rank[key], self.edges[key] = source, len(self.rank), needs
 
@@ -141,6 +148,7 @@ class _Planner:
         store_refs, store_latest = self._check_store_refs(closure)
         self._build_tasks(closure)
         self._check_files(closure)
+        self._check_cli_loads(closure)
         self._check_env_types(closure)
         self._check_multi_names(closure, store_latest)
         self._check_universes(closure, store_latest)
@@ -159,6 +167,7 @@ class _Planner:
         self._check_store_refs(everything, stores=False)
         self._build_tasks(everything)
         self._check_files(everything)
+        self._check_cli_loads(everything)
         self._check_universes(everything, None)
         self._check_loaded_environments(everything, None)
         if self.problems:
@@ -171,8 +180,9 @@ class _Planner:
         writers: dict[_Key, str] = {}
         claims: list[tuple[_Key, str, str]] = []
         for key, source in self.nodes.items():
-            if isinstance(source, BuiltImage):
-                claims.append((key, self._path(source.entry), f"the image built for {self._path(source.entry)}"))
+            if isinstance(source, BundleImage):
+                how = "built" if isinstance(source, BuiltImage) else "referenced"
+                claims.append((key, self._path(source.entry), f"the image {how} for {self._path(source.entry)}"))
             else:
                 claims.append((key, self._path(source.entry), self._path(source.entry)))
                 for id, folder in self._written_beside(source):
@@ -267,7 +277,7 @@ class _Planner:
         latest: dict[tuple[EntityKind, str], int] = {}
         for key in sorted(closure, key=self.rank.__getitem__):
             source = self.nodes[key]
-            if isinstance(source, BuiltImage):
+            if isinstance(source, BundleImage):
                 continue
             for ref in source.references:
                 if ref.local is not None:
@@ -334,7 +344,7 @@ class _Planner:
         registry = get_artifact_registry()
         for key in sorted(closure, key=self.rank.__getitem__):
             source = self.nodes[key]
-            if isinstance(source, BuiltImage):
+            if isinstance(source, BundleImage):
                 continue
             if source.entry.kind in (BundleKind.AGENT, BundleKind.ENV):
                 agent = source.entry.kind is BundleKind.AGENT
@@ -345,7 +355,7 @@ class _Planner:
                 except BundleError as e:
                     self.problems.extend(e.problems)
                 continue
-            if source.entry.kind is not BundleKind.ARTIFACT:
+            if source.entry.kind not in (BundleKind.ARTIFACT, BundleKind.SKILL):
                 continue
             cls = registry.get(canonical_type(source.entry.type))
             walk = folder_walk(cls)
@@ -365,6 +375,41 @@ class _Planner:
             except BundleError as e:
                 self.problems.extend(e.problems)
 
+    def _check_cli_loads(self, closure: set[_Key]) -> None:
+        """Each load of one of the bundle's CLIs names what installing it needs, an agent and an env whose gateway it
+        reads, and no two of a task's loads install one command into one agent, where the second would replace the
+        first."""
+        registry = get_artifact_registry()
+        clis = {source.entry.id: source.entry for source in self.nodes.values()
+                if isinstance(source, ResolvedEntry) and source.entry.kind is BundleKind.ARTIFACT
+                and issubclass(registry.get(canonical_type(source.entry.type)) or object, CliArtifact)}
+        for key in sorted(closure, key=self.rank.__getitem__):
+            installed: dict[tuple[str, str], tuple[Any, str]] = {}
+            for step in self.steps.get(key, ()):
+                if not isinstance(step, LoadArtifactTaskStep):
+                    continue
+                loaded = [clis[ref["id"]] for ref in step.artifacts if ref.get("id") in clis]
+                if not loaded:
+                    continue
+                where = f"{self._path(self.nodes[key].entry)}: step {step.id!r}"
+                if missing := [name for name in ("agent_name", "env_id") if not getattr(step, name)]:
+                    names, it = " and ".join(repr(cli.name) for cli in loaded), "them" if len(loaded) > 1 else "it"
+                    self.problems.append(f"{where}: loading the CLI{'s' * (it == 'them')} {names} installs {it} into "
+                                         f"an agent and points {it} at an env's gateway, so the step needs "
+                                         f"{' and '.join(missing)}")
+                    continue
+                for cli in loaded:
+                    command = self.accepted.get(_key(cli), {}).get("command_name")
+                    if command is None:
+                        continue  # its artifact.toml's problem is reported by the file check
+                    if (step.agent_name, command) in installed:
+                        first, name = installed[step.agent_name, command]
+                        self.problems.append(f"{where}: installs the CLI {cli.name!r} as {command!r} in agent "
+                                             f"{step.agent_name!r}, where step {first!r} already installed {name!r} "
+                                             "under that command; give one another command_name")
+                    else:
+                        installed[step.agent_name, command] = (step.id, cli.name)
+
     def _env_accept(self, entry: BundleEntry) -> Any:
         """How ``entry``'s env type checks its env.toml, when it's an env written from one and checks it at all."""
         cls = get_env_registry().get(entry.type) if entry.kind is BundleKind.ENV else None
@@ -376,7 +421,7 @@ class _Planner:
         store = get_config().get_document_store()
         for key in sorted(closure, key=self.rank.__getitem__):
             source = self.nodes[key]
-            if isinstance(source, BuiltImage) or source.entry.kind is not BundleKind.ENV:
+            if isinstance(source, BundleImage) or source.entry.kind is not BundleKind.ENV:
                 continue
             latest = Sort.by("version", descending=True)
             stored = store.find_one(ENVS_COLLECTION, Filter.of(id=source.entry.id), sort=latest)
@@ -392,7 +437,7 @@ class _Planner:
         apart."""
         for key in sorted(closure, key=self.rank.__getitem__):
             source = self.nodes[key]
-            if isinstance(source, BuiltImage) or source.entry.kind is not BundleKind.ENV:
+            if isinstance(source, BundleImage) or source.entry.kind is not BundleKind.ENV:
                 continue
             if not issubclass(get_env_registry().get(source.entry.type, Env), MultiEnv):
                 continue
@@ -432,7 +477,7 @@ class _Planner:
         registry = get_artifact_registry()
         for key in sorted(closure, key=self.rank.__getitem__):
             source = self.nodes[key]
-            if isinstance(source, BuiltImage) or source.entry.kind is not BundleKind.ARTIFACT:
+            if isinstance(source, BundleImage) or source.entry.kind is not BundleKind.ARTIFACT:
                 continue
             cls = registry.get(canonical_type(source.entry.type))
             if cls is None or not issubclass(cls, EnvironmentUniverseArtifact) or folder_walk(cls) is None:
@@ -566,6 +611,7 @@ class _Planner:
                     failed = True
                     self.problems.append(f"{self._path(source.entry)}: step {step.get('id')!r}: "
                                          f"{registry[step['type']].type} can't read it ({type(e).__name__}: {e})")
+            self.steps[key] = steps
             if not failed:
                 try:
                     Task(id=source.entry.id, version=None, steps=steps)
@@ -586,7 +632,7 @@ class _Planner:
         while ready:
             _, key = heapq.heappop(ready)
             source = self.nodes[key]
-            kind = BundleKind.ARTIFACT if isinstance(source, BuiltImage) else source.entry.kind
+            kind = BundleKind.ARTIFACT if isinstance(source, BundleImage) else source.entry.kind
             writes.append(Write(kind, key[1], source, tuple(self.edges[key])))
             for dependent in dependents.get(key, ()):
                 waiting[dependent] -= 1
@@ -602,7 +648,7 @@ def unpinned_store_refs(plan: Plan, write: Write) -> dict[tuple[EntityKind, str]
     """The version the plan read for each store entity ``write`` names without a version, by (kind, id). Its writer
     pins each to that version and the ledger hashes them, so a version the store gains in between isn't written,
     and one it gains later rewrites ``write``."""
-    if isinstance(write.source, BuiltImage):
+    if isinstance(write.source, BundleImage):
         return {}
     return {(ref.kind, ref.id): plan.store_latest[ref.kind, ref.id]
             for ref in write.source.references if ref.local is None and ref.version is None}
@@ -628,8 +674,8 @@ def keeps_base_from_toml(cls: type, base: type) -> bool:
     return next(c for c in cls.__mro__ if "from_toml" in vars(c)) is base
 
 
-def _key(entity: BundleEntry | BuiltImage) -> _Key:
-    kind = BundleKind.ARTIFACT if isinstance(entity, BuiltImage) else entity.kind
+def _key(entity: BundleEntry | BundleImage) -> _Key:
+    kind = BundleKind.ARTIFACT if isinstance(entity, BundleImage) else entity.kind
     return (kind.store, entity.id)
 
 

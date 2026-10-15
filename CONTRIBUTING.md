@@ -22,36 +22,36 @@ Docker.
 ```bash
 git clone https://github.com/scaleapi/agentenv-framework.git
 cd agentenv-framework
-uv venv .venv
-uv pip install --python .venv/bin/python -e ./packages/agentenv-protocol -e '.[dev]'
+uv sync --locked --extra dev
+```
+
+This is the same install CI performs. `make install` installs the same packages with pip, but
+resolves them afresh instead of from `uv.lock`.
 
 The distribution is `agentenv-framework` (import `agent_env`, command `agent-env`). A virtualenv created
 when the distribution was still called `agent-env` holds both after a reinstall, because the two
 write the same files; run `uv pip uninstall --python .venv/bin/python agent-env` once before
 reinstalling.
-```
-
-This is the same install CI performs. `make install` is equivalent.
 
 ## Running the tests
 
 | Command | What it runs | Needs |
 |---|---|---|
+| `make lint` | `ruff check`, with the rules in `pyproject.toml`; the `unit` job runs it too | nothing external |
 | `make unit-test` | unit suite for `agentenv-framework` and `agentenv-framework-protocol` | nothing external |
 | `make int-test-fast` | integration tests against the local backends | Docker |
 | `make int-test-slow` | tests that build images or deploy sandboxes, minutes each | Docker, and a sandbox backend for some |
 | `make clean-install-test` | both distributions built as the release builds them, installed into a fresh venv from public PyPI, and `agent-env run hello` run twice by name | Python 3.11, uv and git |
 | `make installer-test` | `plugin add` and `remove` through the real pip, uv and pipx, offline against wheels built from the checkout, and the new-user journey in containers with no network | uv, pipx and Docker; the first run downloads the dependencies once |
 
-CI runs the same tiers as the `unit`, `integration-local` and `integration-local-slow` jobs;
-all three must pass, and so must `plugin-api` (see "Making changes"). The `installer` job runs
+CI runs the same tiers as the `unit`, `integration-local`, `integration-local-slow` and
+`integration-local-gateway` jobs (the last runs the slow tier's gateway tests beside the rest);
+all four must pass, and so must `plugin-api` (see "Making changes"). The `installer` job runs
 `make installer-test` too, on pull requests that touch the plugin code, the installer tier or
-the lockfile, and must pass when it runs. One exception: the public jobs exclude
-`tst/integration/env/gateway/gateway_test.py`, which needs an x86 Chromium build that the
-hosted runners do not have; its virtual-clock tests also build MCP servers from sources outside
-this repository, found through `AGENT_ENV_TEST_MCP_SERVERS_DIR` (one `<server>/Dockerfile` per
-server), and skip without them. `make int-test-slow` does run it, so run that locally when your
-change touches the gateway, and say so in the pull request. A test may skip only when a capability is genuinely unavailable, and the skip reason
+the lockfile, and must pass when it runs. The gateway's virtual-clock tests build MCP servers
+from sources outside this repository, found through `AGENT_ENV_TEST_MCP_SERVERS_DIR` (one
+`<server>/Dockerfile` per server), and skip without them; when your change touches the virtual
+clock, run `make int-test-slow` with it set, and say so in the pull request. A test may skip only when a capability is genuinely unavailable, and the skip reason
 must name it (`agentenv-capability-missing: <name>`, see `tst/util/capabilities.py`); the
 `check_skip_policy` step fails the run otherwise. The `clean-install` job runs the same script as
 `make clean-install-test` on every pull request, and is one of the required checks.

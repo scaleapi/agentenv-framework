@@ -133,7 +133,7 @@ def test_a_new_user_installs_agent_env_adds_plugins_runs_a_task_and_removes_them
         container.ok("python", "-m", "pip", "install", "-q", "--no-index", "--find-links", "/wheels", "uv")
         container.ok("uv", "tool", "install", "agentenv-framework")
         rows = container.ok("agent-env", "plugin", "list").stdout.split("STATUS\n", 1)[1]
-        assert re.fullmatch(r"agentenv-framework +\S+ +bundle hello +ok\n", rows), rows
+        assert re.fullmatch(r"agentenv-framework +\S+ +bundle echo-mcp, bundle hello +ok\n", rows), rows
 
         added = container.ok("agent-env", "plugin", "add", browser, grader, "--yes")
         assert "toy_navigate active" in added.stdout and "toy_grade active" in added.stdout

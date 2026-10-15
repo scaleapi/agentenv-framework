@@ -10,7 +10,7 @@ import posixpath
 import shlex
 import uuid
 from dataclasses import dataclass
-from typing import Any, Callable, ClassVar, Optional
+from typing import Callable, ClassVar, Optional
 from urllib.parse import unquote, urlparse
 
 from agent_env.providers.sandbox_providers.sandbox_provider import reachable_url

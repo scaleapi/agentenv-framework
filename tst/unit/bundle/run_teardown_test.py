@@ -22,6 +22,7 @@ from agent_env.task import TaskInstanceStore, teardown
 from agent_env.env.env import DeployedGatewayEnv
 from agent_env.task_step.context import DeployedAgent, DeployedSandbox, TaskStepContext
 from agent_env.task_step.task_step import TaskStep
+from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 from tst.unit.bundle._support import layout, local_store
 
 pytestmark = pytest.mark.usefixtures("sigint_handled")
@@ -91,7 +92,7 @@ class _Terminated(list):
 def terminated(monkeypatch):
     log = _Terminated()
 
-    class _Provider:
+    class _Provider(SandboxProvider):
         async def get_sandbox(self, sandbox_id):
             return _FakeSandbox(log, sandbox_id)
 

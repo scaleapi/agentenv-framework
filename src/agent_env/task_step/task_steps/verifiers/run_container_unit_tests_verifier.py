@@ -33,6 +33,7 @@ import time
 import uuid
 from typing import Any, ClassVar, Optional
 
+from agent_env.config.model import MODEL_HEADERS_ENV
 from agent_env.providers.sandbox_providers.local_sandbox import host_url_for
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     all_sandbox_container_env,
@@ -65,6 +66,7 @@ _SAFE_ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
 _RESERVED_ENV_KEYS = frozenset({
     "LITELLM_API_KEY", "ANTHROPIC_API_KEY",
     "LITELLM_BASE_URL", "ANTHROPIC_BASE_URL",
+    MODEL_HEADERS_ENV,
     "PATH", "HOME",
 })
 _MODEL_URL_KEYS = frozenset({"LITELLM_BASE_URL", "ANTHROPIC_BASE_URL"})
@@ -201,7 +203,6 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
         return command, extra_env
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
-        from agent_env.artifact.artifacts.file import FileArtifact
         from agent_env.providers.sandbox_providers.sandbox_provider import (
             build_sandbox_provider,
             get_sandbox_provider,
@@ -255,6 +256,11 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
         command, extra_env = self._resolve_command(context)
         merged_env.update(self.env_vars)
         merged_env.update(extra_env)
+        # Unlike a missing key or URL, configured headers that don't resolve fail the step: a verifier that ran
+        # without them would grade against an endpoint that answers differently, or bills someone else.
+        if MODEL_HEADERS_ENV not in merged_env:
+            if headers := config.get_model_headers(merged_env.get("LITELLM_BASE_URL")):
+                merged_env[MODEL_HEADERS_ENV] = json.dumps(headers)
         for key in _MODEL_URL_KEYS & merged_env.keys():
             merged_env[key] = host_url_for(merged_env[key], sandbox.type)
         env_flags = " ".join(f"-e {k}={shlex.quote(v)}" for k, v in merged_env.items())

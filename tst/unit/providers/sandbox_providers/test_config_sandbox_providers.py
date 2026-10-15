@@ -18,6 +18,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     SandboxProviderTypeError,
     build_sandbox_provider,
 )
+from agent_env.providers.sandbox_providers.tenki.provider import TenkiSandboxProvider
 from agent_env.providers.sandbox_providers.tensorlake.provider import TensorlakeSandboxProvider
 
 
@@ -283,6 +284,35 @@ def test_tensorlake_missing_api_key_is_a_config_error(monkeypatch, tmp_path):
 
     with pytest.raises(ConfigError, match="requires a non-empty 'api_key'"):
         build_sandbox_provider("tensorlake")
+
+
+def test_tenki_builtin_receives_interpolated_key_and_snapshot(monkeypatch, tmp_path):
+    cfg = _write_config(tmp_path, """
+        [sandbox.providers.tenki.config]
+        api_key = "env:TENKI_TEST_API_KEY"
+        snapshot_id = "snap-docker"
+        min_disk_gb = 40
+    """)
+    monkeypatch.setenv("AGENT_ENV_CONFIG", str(cfg))
+    monkeypatch.setenv("TENKI_TEST_API_KEY", "resolved-test-key")
+
+    provider = build_sandbox_provider("tenki")
+
+    assert isinstance(provider, TenkiSandboxProvider)
+    assert provider._api_key == "resolved-test-key"
+    assert provider._snapshot_id == "snap-docker"
+    assert provider._min_disk_gb == 40
+
+
+def test_tenki_missing_api_key_is_a_config_error(monkeypatch, tmp_path):
+    cfg = _write_config(tmp_path, """
+        [sandbox.providers.tenki.config]
+        snapshot_id = "snap-docker"
+    """)
+    monkeypatch.setenv("AGENT_ENV_CONFIG", str(cfg))
+
+    with pytest.raises(ConfigError, match="requires a non-empty 'api_key'"):
+        build_sandbox_provider("tenki")
 
 
 def test_builtin_config_reaches_chain_members(monkeypatch, tmp_path):

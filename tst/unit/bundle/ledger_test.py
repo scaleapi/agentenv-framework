@@ -430,9 +430,7 @@ def test_the_ledger_never_touches_the_configured_store(bundle_dir, cli_routing):
     ({"artifacts/greeting/artifact.toml": 'type = "own_file_ledger_test"\n'}, None, GREETING),
     ({"envs/own/env.toml": 'type = "own_env_ledger_test"\n'},
      {"id": "own", "type": "deploy_env", "env_id": "own"}, f"{ROOT}/own"),
-    ({"skills/pdf/SKILL.md": "---\nname: pdf\n---\n"},
-     {"id": "pdf", "type": "load_artifact", "env_id": "tickets", "artifact_id": "pdf"}, f"{ROOT}/pdf"),
-], ids=["artifact-with-own-from_toml", "env-with-own-from_toml", "skill"])
+], ids=["artifact-with-own-from_toml", "env-with-own-from_toml"])
 def test_a_write_whose_inputs_arent_tracked_is_written_every_run(bundle_dir, files, step, id):
     for rel, text in files.items():
         (bundle_dir / rel).parent.mkdir(parents=True, exist_ok=True)

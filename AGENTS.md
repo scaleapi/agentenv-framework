@@ -39,6 +39,7 @@ or one of them only where it is used.
 
 | Command | What it does |
 |---|---|
+| `make lint` | `ruff check` over the repository, with the rules in `pyproject.toml` (pyflakes) |
 | `make unit-test` | `tst/unit` and `packages/agentenv-protocol/tests`, in parallel, no network |
 | `make int-test-fast` | `tst/integration` minus `int_test_slow`, in parallel; needs Docker and a local OCI registry (`docker run -d -p 5000:5000 public.ecr.aws/docker/library/registry:2`) |
 | `make int-test-slow` | the `int_test_slow` tests, serially (they build the same Docker tags from module fixtures and race under xdist) |
@@ -60,8 +61,8 @@ or one of them only where it is used.
 - Defaults are local and carry no external coordinates: SQLite document store, filesystem object
   store, an OCI registry at `localhost:5000`, env-var secret store, `LocalRunner`, `local` Docker
   sandboxes for envs and agents. MongoDB, S3, Cloud Storage, ECR, AWS Secrets Manager, Google Cloud
-  Secret Manager, Modal, E2B and Tensorlake exist as implementations and are selected by config
-  (Tensorlake through the `tensorlake` extra).
+  Secret Manager, Modal, E2B, Tensorlake and Tenki exist as implementations and are selected by config
+  (Tensorlake through the `tensorlake` extra, Tenki through the `tenki` extra).
 - The model endpoint is unset until `[model] base_url` / `api_key` (or `LITELLM_BASE_URL` /
   `LITELLM_API_KEY`) is configured. A loopback URL handed into a `local` container (the model
   endpoint, an agent, peer or gateway on this machine) becomes `host.docker.internal`. On Linux that
@@ -69,6 +70,9 @@ or one of them only where it is used.
   this machine that local containers call, a model proxy say, has to listen there: bind it to the
   bridge address and use that address in its URL. Binding `0.0.0.0` also works, but exposes the
   service to the network.
+- `[model.headers]` go with every call to the configured endpoint and nowhere else: `extra_headers` on
+  agent-env's own calls, `LITELLM_EXTRA_HEADERS` (JSON, written by core, never read) for agents and the
+  unit-test verifier. On `sail_vm` with `inject_model_key`, Sail sets them at egress like the key.
 - A host-mode `install_agent` (no `container_name`) on a `local` sandbox runs the agent's
   `install_commands_host` on this machine, with your privileges. Every command a local sandbox runs
   carries `AGENTENV_SANDBOX=<sandbox id>`, and teardown stops the processes that carry it, then removes
@@ -93,15 +97,15 @@ and deserialized through a registry.
 |---|---|
 | `env/` | `Env` base class: a subclass declares `type`, implements `from_dict` and `async deploy(...) -> DeployedEnv`, and may override `reset` and `load_file_artifact_universe`. Built-ins in `env/envs/`: `MCPServerEnv` (`mcp_server`), `MultiEnv` (`multi`, MCP servers plus websites), `ServiceDBEnv` (`service_db`, PostgreSQL), `WebsiteEnv` (`website`), `GatewayEnv` (`gateway_server`). `env/gateway/gateway.py` is the env-side gateway server, container-only code. |
 | `artifact/` | Immutable versioned artifacts; every `put()` creates a new version. The document goes to the document store, binary payloads to the object store. Built-ins: `CliArtifact` (`cli`), `FileArtifact` (`file`), `FileArtifactUniverse` (`file_artifact_universe`), `DockerImageArtifact` (`docker_image`), `EnvironmentArtifact` (`environment`; legacy `service`), `EnvironmentUniverseArtifact` (`environment_universe`; legacy `service_universe`), `SkillArtifact` (`skill`). A `DockerImageArtifact` holds a tar.gz of its image, or, written by `put_ref` (`--image-ref` on `env mcp-server put` and `a2a-agent put`), only a registry reference with its tag pinned to a digest, which sandboxes pull, or, written by `put_context`, only its build context, which a VM sandbox builds before running it (`VmSandbox.load_docker_images`) and Modal builds before creating its container (`ModalSandboxProvider.prepare_image`, outside a fallback chain's deadline); anything else that runs images by name (a container on the local provider, a lone server on any provider but Modal) refuses such an image. A build context (`utils/build_context.py`) is what `docker build` would send, `.dockerignore` applied, written so equal files give equal bytes and an equal `source_digest`. |
-| `task/`, `task_step/` | A `Task` holds its `TaskStep`s inline; `Task.run()` executes them as a DAG. `depends_on` (None means all prior steps) gates a step, independent steps run concurrently, `fail_task_on_error` makes a failure fatal or tolerated, `retry_config` rolls a failed span back through the step journal and re-dispatches it. Built-in steps live in `task_step/task_steps/` (`deploy_env`, `deploy_agent`, `prompt_agent`, the verifiers under `verifiers/`, and more). |
+| `task/`, `task_step/` | A `Task` holds its `TaskStep`s inline; `Task.run()` executes them as a DAG. `depends_on` (None means all prior steps) gates a step, independent steps run concurrently, `fail_task_on_error` makes a failure fatal or tolerated, `retry_config` rolls a failed span back through the step journal and re-dispatches it. Built-in steps live in `task_step/task_steps/` (`deploy_env`, `deploy_agent`, `prompt_agent`, the verifiers under `verifiers/`, and more). `task/episode/` runs a task with some of its agents played from outside, as a training loop does (`EpisodeSpec`). |
 | `store/` | Four store ABCs with local and cloud implementations: `DocumentStore` (SQLite, MongoDB), `ObjectStore` (filesystem, S3, Cloud Storage), `ImageStore` (local OCI registry, ECR), `SecretStore` (env vars or file, AWS Secrets Manager, Google Cloud Secret Manager). `VersionedEntityStore` implements the shared versioned get/put logic, `QueryBuilder` is the immutable chained query API, `store/base.py` holds the error types. A new backend must pass the conformance kits in `tst/store/`. |
 | `config/` | The `Config` singleton (`get_config`, `configure`, `reset_config`) in `config/runtime.py`, file discovery in `config/loader.py`, and `load_impl`, which resolves `module:Class` pointers. `agent_env.store` re-exports the config names for compatibility. |
-| `providers/` | `providers/sandbox_providers/` holds the sandbox providers `local`, `modal`, `modal_vm`, `e2b`, `sail_vm` (the `sail` extra), `tensorlake` (the `tensorlake` extra); `[sandbox] default` and `agent_default` accept a comma-separated fallback chain, whose deploys skip a provider that can't run them. A sandbox provider declares what it runs (`ON_THIS_MACHINE`, and for VMs on this machine the address their requests to it arrive at, `REACHES_HOST_AT`; `CONTAINER_ACCEPTS`, `PRIVATE_NETWORK`; `SUPPORTED_SANDBOX_MODES`, derived from whether it implements `create_sandbox` and `create_vm`; and `SANDBOX_ACCEPTS`, the images an agent's sandbox runs, which defaults to those a VM loads when it implements `create_vm` and to `CONTAINER_ACCEPTS` otherwise, so only a provider that implements `create_vm` yet gives an agent a container, like the local one, declares it), each sandbox carries the `platform` of the images it runs (linux/amd64 unless its provider sets another when it creates it; None, any, unchecked, for a local sandbox), and code outside `providers/sandbox_providers/` reads those, never which provider it has. `providers/env_providers/` holds the environment providers: `EnvironmentProvider` (an env's containers and state store) and `EnvironmentGatewayProvider`, which renders a docker-compose for the gateway and its MCP servers inside the sandbox; `providers/env_state/` holds env-state providers (`local_postgres` built in). |
+| `providers/` | `providers/sandbox_providers/` holds the sandbox providers `local`, `modal`, `modal_vm`, `e2b`, `sail_vm` (the `sail` extra), `tensorlake` (the `tensorlake` extra), `tenki` (the `tenki` extra); `[sandbox] default` and `agent_default` accept a comma-separated fallback chain, whose deploys skip a provider that can't run them. A sandbox provider declares what it runs (`ON_THIS_MACHINE`, and for VMs on this machine the address their requests to it arrive at, `REACHES_HOST_AT`; `CONTAINER_ACCEPTS`, `PRIVATE_NETWORK`; `SUPPORTED_SANDBOX_MODES`, derived from whether it implements `create_sandbox` and `create_vm`; and `SANDBOX_ACCEPTS`, the images an agent's sandbox runs, which defaults to those a VM loads when it implements `create_vm` and to `CONTAINER_ACCEPTS` otherwise, so only a provider that implements `create_vm` yet gives an agent a container, like the local one, declares it), each sandbox carries the `platform` of the images it runs (linux/amd64 unless its provider sets another when it creates it; None, any, unchecked, for a local sandbox), and code outside `providers/sandbox_providers/` reads those, never which provider it has. `providers/env_providers/` holds the environment providers: `EnvironmentProvider` (an env's containers and state store) and `EnvironmentGatewayProvider`, which renders a docker-compose for the gateway and its MCP servers inside the sandbox; `providers/env_state/` holds env-state providers (`local_postgres` built in). |
 | `a2a_agent/` | The `A2AAgent` entity (`a2a_agent`), its stores and the validator steps. The protocol package provides the agent-side framework. |
 | `runner/` | The `[runner]` seam: `Runner.submit()` returns `(run_id, instance_id)`; `LocalRunner` is built in. |
 | `explorer/` | Optional local web UI: `agent-env up`, needs the `explorer` extra, binds loopback `:8234`. |
 | `cli/` | Click CLI with the groups `a2a-agent`, `artifact`, `config`, `env`, `eval`, `plugin`, `run`, `task`, `up`. |
-| `examples/` | The bundles agent-env ships (`hello`), registered under `agent_env.bundles` in `pyproject.toml`. Tests run them, but they are examples for users, not fixtures. |
+| `examples/` | The bundles agent-env ships (`hello`, and `echo-mcp`, which needs Docker), registered under `agent_env.bundles` in `pyproject.toml`. Tests run them, but they are examples for users, not fixtures. |
 
 ## Extension points
 
@@ -156,6 +160,12 @@ orchestrators call it the same way. What callers rely on:
   a context with `TaskStepContext.to_dict()`, not `dataclasses.asdict`.
 - A run is resumable: pass a previously persisted `context`, a `start_step` and the existing
   `instance_id`; completed steps are seeded as SUCCESS.
+- An episode (`EpisodeSpec`, `task/episode/`) is one `Task.run()` of a copy of the task in which
+  the `deploy_agent` and `prompt_agent` steps of each of its `trainer_agents` are the plain-data
+  `episode_agent` and `episode_turn`, which wait for the caller instead of deploying or prompting. Its
+  record is tagged `context.metadata["episode"]` and names the original task, so it isn't resumable
+  with `start_step`. The episode tears down what its run deployed, and an abandoned one is recorded
+  `cancelled`.
 
 ## Tests
 
@@ -183,10 +193,12 @@ orchestrators call it the same way. What callers rely on:
 ## CI
 
 The required checks on pull requests and `main` are `unit`, `integration-local`,
-`integration-local-slow`, `installer`, `plugin-api` and `clean-install`. `.github/workflows/local-backends.yml` runs
-the first four, all installed from public PyPI with no secrets and no external services (a `registry:2` service container for the integration jobs). The
+`integration-local-slow`, `integration-local-gateway`, `installer`, `plugin-api` and `clean-install`.
+`.github/workflows/local-backends.yml` runs the first five (`integration-local-gateway` is the slow tier's
+`gateway_test.py`, run beside the rest of it), all installed from `uv.lock` (public PyPI only) with no secrets and no external services (a `registry:2` service container for the integration jobs). The
 `unit` job also fails if `uv.lock` resolves anything from a registry other than PyPI or if
-`agentenv-framework-protocol` is not the editable workspace member. The integration jobs run
+`agentenv-framework-protocol` is not the editable workspace member, or if `ruff check` reports a
+problem. The integration jobs run
 `.github/scripts/check_skip_policy.py` over the JUnit report: only `agentenv-capability-missing`
 skips for the allowed capabilities pass, and the fast job allows no skips under
 `tst/integration/store/`. The `installer` job runs `tst/installer` when a pull request or push

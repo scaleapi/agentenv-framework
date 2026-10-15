@@ -21,7 +21,7 @@ from mcp.server.fastmcp import FastMCP
 from pytest_socket import enable_socket
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
-from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, _mcp_url
+from agent_env.env.env import DeployedGatewayEnv, _mcp_url
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.service_db import SERVICE_DB_PORT
@@ -44,10 +44,10 @@ from agent_env.providers.sandbox_providers.sandbox_provider import Accepts
 from agent_env.providers.env_state import LocalPostgresStateProvider
 from agent_env.config import get_config, set_document_store
 from agent_env.store import EcrImageStore, NotFoundError
-from tst.unit.providers.env_state.fakes import (  # noqa: F401  (fixture)
+from tst.unit.providers.env_state.fakes import (
     EXTERNAL_READINESS_SERVICE,
     EXTERNAL_STATE_TYPE,
-    registered_external_provider,
+    registered_external_provider as registered_external_provider,
 )
 from tst.util.sandbox_providers import CONTAINERS, VMS_AND_CONTAINERS
 
@@ -925,7 +925,7 @@ async def test_build_local_store_no_services():
     async def _stand_up(spec):
         return "servicedb"
 
-    spec = await gp._build_local_store([], _stand_up)
+    await gp._build_local_store([], _stand_up)
     assert isinstance(gp._state_instance, EnvStateInstance)
     assert gp._state_instance.state_type == LOCAL_POSTGRES_STATE_TYPE
     assert gp._state_instance.metadata == {"host": "servicedb"}
@@ -1015,7 +1015,6 @@ def test_compose_remote_renders_probe_and_points_at_remote():
     """External backend: no servicedb/pgweb/db-mcp store containers, but the backend's OWN readiness
     probe is rendered, clients depend_on it, and per-service DATABASE_URL + gateway SERVICE_DB_URL
     point at the remote run-db handle."""
-    from agent_env.env.envs.service_db import ServiceDBConfig
     from agent_env.providers.env_state import EnvStateInstance
     from tst.unit.providers.env_state.fakes import ExternalDbStateProvider
 

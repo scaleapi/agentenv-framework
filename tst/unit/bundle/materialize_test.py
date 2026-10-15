@@ -6,16 +6,17 @@ import subprocess
 import sys
 import textwrap
 import time
-from pathlib import Path
 from typing import Literal
 
 import pytest
 
 from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact import Artifact, EnvironmentArtifact, EnvironmentUniverseArtifact
+from agent_env.artifact.artifacts import docker_image as docker_image_module
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
+from agent_env.artifact.artifacts.skill import SkillArtifact
 from agent_env.artifact.store import get_artifact_store
 from agent_env.bundle import BundleError
 from agent_env.bundle import materialize as materialize_module
@@ -35,7 +36,7 @@ from agent_env.store.routing import disable_namespace_routing
 from agent_env.task import Task
 from agent_env.task_step.task_step import TaskStep
 from agent_env.utils.build_context import BuildContext
-from tst.unit.bundle._support import RefusingStore, layout, local_store, plan_of
+from tst.unit.bundle._support import DIGEST, RefusingStore, layout, local_store, plan_of
 
 ROOT = "@local/~/triage"
 LAYOUT = {
@@ -220,8 +221,6 @@ def test_what_has_no_writer_yet_is_refused_before_anything_is_written(bundle_dir
         "envs/tickets/env.toml": 'environment_name = "tickets"\n',
         "envs/own/env.toml": 'type = "own_env_materialize_test"\n',
         "agents/solver/Dockerfile": "FROM scratch\n",
-        "skills/pdf/SKILL.md": "---\nname: pdf\n---\n",
-        "artifacts/base-mcp/Dockerfile": "FROM scratch\n",
         "artifacts/doc/artifact.toml": 'type = "document_only_materialize_test"\n',
         "evals/regression.toml": 'tasks = ["t"]\n',
     })
@@ -229,18 +228,145 @@ def test_what_has_no_writer_yet_is_refused_before_anything_is_written(bundle_dir
         {"id": "tickets", "type": "deploy_env", "env_id": "tickets"},
         {"id": "own", "type": "deploy_env", "env_id": "own"},
         {"id": "agent", "type": "deploy_agent", "env_ids": ["tickets"], "a2a_agent_id": "solver"},
-        {"id": "pdf", "type": "load_artifact", "env_id": "tickets", "artifact_id": "pdf"},
-        {"id": "image", "type": "load_artifact", "env_id": "tickets", "artifact_id": "base-mcp"},
         {"id": "doc", "type": "load_artifact", "env_id": "tickets", "artifact_id": "doc"},
     ])
 
     assert sorted(_problems(lambda: _run(bundle_dir, dry_run))) == [
-        "artifacts/base-mcp: writing a docker_image artifact isn't supported yet",
         "artifacts/doc: writing a document_only_materialize_test artifact isn't supported yet",
         "envs/own: writing an own_env_materialize_test env isn't supported yet",
-        "skills/pdf: writing a skill isn't supported yet",
     ]
     assert not local_store().path.exists()
+
+
+SKILL = {
+    "skills/pdf-extract/SKILL.md": "---\nname: pdf-extract\ndescription: Pull text out of PDFs.\n---\nBody\n",
+    "skills/pdf-extract/scripts/extract.py": "print('text')\n",
+    "skills/pdf-extract/.env.example": "TOKEN=\n",
+    "skills/pdf-extract/__pycache__/extract.cpython-312.pyc": "compiled\n",
+    "skills/pdf-extract/.DS_Store": "finder\n",
+}
+ADD_SKILL = {"id": "skill", "type": "add_skills", "skills": [{"skill_artifact_id": "pdf-extract"}]}
+
+
+def test_a_skill_folder_is_written_as_a_skill_named_after_it_from_the_files_the_ledger_hashes(bundle_dir):
+    layout(bundle_dir, SKILL)
+    _steps(bundle_dir, [ADD_SKILL])
+
+    done = _run(bundle_dir)
+
+    skill = SkillArtifact.get(f"{ROOT}/pdf-extract")
+    assert _summary(done)[skill.id] == (1, False, ("new",))
+    assert (skill.skill_name, skill.description) == ("pdf-extract", "Pull text out of PDFs.")
+    assert sorted(skill.get_skill_files().get_file_artifacts()) == [".env.example", "SKILL.md", "scripts/extract.py"]
+    task = Task.get(f"{ROOT}/t", done.version_of("task", f"{ROOT}/t"))
+    assert task.steps[0].skills[0].skill_artifact_id == skill.id
+
+
+def test_an_unchanged_skill_is_reused_and_one_whose_files_change_rewritten(bundle_dir):
+    layout(bundle_dir, SKILL)
+    _steps(bundle_dir, [ADD_SKILL])
+    _run(bundle_dir)
+    (bundle_dir / "skills/pdf-extract/__pycache__/extract.cpython-312.pyc").write_text("recompiled\n")
+
+    assert _summary(_run(bundle_dir))[f"{ROOT}/pdf-extract"] == (1, True, ())
+    (bundle_dir / "skills/pdf-extract/scripts/extract.py").write_text("print('more text')\n")
+    assert _summary(_run(bundle_dir))[f"{ROOT}/pdf-extract"] == (2, False, ("files changed: scripts/extract.py",))
+
+
+@_RUN_OR_DRY_RUN
+@pytest.mark.parametrize("skill_md, problem", [
+    ("---\nname: pdf\ndescription: d\n---\n",
+     "skills/pdf-extract: SKILL.md frontmatter 'name' 'pdf' must be 'pdf-extract'"),
+    ("---\nname: pdf-extract\n---\n",
+     "skills/pdf-extract: SKILL.md frontmatter 'description' is required and must be a non-empty string"),
+    ("# no frontmatter\n",
+     "skills/pdf-extract: SKILL.md must begin with a YAML frontmatter block delimited by '---'"),
+    ("---\nname: [pdf\n---\n", "skills/pdf-extract: SKILL.md frontmatter isn't valid YAML: "),
+], ids=["other-name", "no-description", "no-frontmatter", "bad-yaml"])
+def test_a_skill_md_its_write_would_refuse_is_refused_before_anything_is_written(bundle_dir, dry_run, skill_md,
+                                                                                problem):
+    layout(bundle_dir, {"skills/pdf-extract/SKILL.md": skill_md})
+    _steps(bundle_dir, [ADD_SKILL])
+
+    problems = _problems(lambda: _run(bundle_dir, dry_run))
+
+    assert len(problems) == 1 and problems[0].startswith(problem), problems
+    assert not local_store().path.exists()
+
+
+def test_a_skill_file_linking_out_of_the_bundle_is_refused_before_anything_is_written(bundle_dir, tmp_path):
+    layout(bundle_dir, SKILL)
+    (tmp_path / "outside.py").write_text("print('outside')\n")
+    (bundle_dir / "skills/pdf-extract/scripts/outside.py").symlink_to(tmp_path / "outside.py")
+    _steps(bundle_dir, [ADD_SKILL])
+
+    problems = _problems(lambda: _run(bundle_dir))
+
+    assert len(problems) == 1 and problems[0].startswith("skills/pdf-extract/scripts/outside.py"), problems
+    assert not local_store().path.exists()
+
+
+REF_AGENT = {"agents/solver/agent.toml": 'image = { ref = "ghcr.io/acme/solver:1" }\n'}
+DEPLOY_SOLVER = {"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}
+
+
+def test_a_registry_image_a_folder_names_is_pinned_once_and_read_again_only_when_its_ref_changes(bundle_dir, registry):
+    layout(bundle_dir, REF_AGENT)
+    _steps(bundle_dir, [DEPLOY_SOLVER])
+    image_id, agent_id = f"{ROOT}/solver__agent_image", f"{ROOT}/solver"
+
+    first = _run(bundle_dir)
+
+    image = DockerImageArtifact.get(image_id)
+    assert (image.image_name, image.tar_gz_object_url) == (f"ghcr.io/acme/solver:1@{DIGEST}", None)
+    assert A2AAgent.get(agent_id, first.version_of("agent", agent_id)).docker_image_artifact.id == image_id
+    assert _summary(_run(bundle_dir))[image_id] == (1, True, ())
+    assert registry == ["ghcr.io/acme/solver:1"]
+    (bundle_dir / "agents/solver/agent.toml").write_text('image = { ref = "ghcr.io/acme/solver:2" }\n')
+
+    assert _summary(_run(bundle_dir))[image_id][:2] == (2, False)
+    assert registry == ["ghcr.io/acme/solver:1", "ghcr.io/acme/solver:2"]
+
+
+@pytest.mark.parametrize("ref, pinned", [
+    ("ghcr.io/acme/solver:1", ", pinned to sha256:aaaaaaaaaaaa"),
+    (f"ghcr.io/acme/solver@{DIGEST}", ""),
+], ids=["tag", "digest"])
+def test_a_tag_refs_write_line_names_the_digest_it_runs(bundle_dir, registry, ref, pinned):
+    layout(bundle_dir, {"agents/solver/agent.toml": f'image = {{ ref = "{ref}" }}\n'})
+    _steps(bundle_dir, [DEPLOY_SOLVER])
+    plan = plan_of(bundle_dir)
+    lines = []
+
+    materialize(plan, on_write=lambda done: lines.append(_written(plan, done)))
+    materialize(plan, on_write=lambda done: lines.append(_written(plan, done)))
+
+    image = f"agents/solver ({ref} image): v1"
+    assert [line for line in lines if line.startswith(image)] == [
+        f"{image} (new){pinned}", f"{image}, unchanged{pinned}"]
+
+
+def test_an_env_folder_naming_a_registry_image_is_written_over_it(bundle_dir, registry):
+    layout(bundle_dir, {"envs/crm/env.toml": 'environment_name = "crm"\nimage = { ref = "ghcr.io/acme/crm:1" }\n'})
+    _steps(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
+
+    done = _run(bundle_dir)
+
+    env = Env.get(f"{ROOT}/crm", done.version_of("env", f"{ROOT}/crm"))
+    assert (env.docker_image_artifact.id, env.docker_image_artifact.image_name) == (
+        f"{ROOT}/crm__env_image", f"ghcr.io/acme/crm:1@{DIGEST}")
+
+
+def test_a_registry_image_its_registry_refuses_is_a_problem_naming_its_folder(bundle_dir, monkeypatch):
+    def refuse(ref, auth):
+        raise ValueError(f"{ref}: the registry answered 404 (manifest unknown)")
+
+    monkeypatch.setattr(docker_image_module, "pin_digest", refuse)
+    layout(bundle_dir, REF_AGENT)
+    _steps(bundle_dir, [DEPLOY_SOLVER])
+
+    assert _problems(lambda: _run(bundle_dir)) == (
+        "agents/solver: ghcr.io/acme/solver:1: the registry answered 404 (manifest unknown)",)
 
 
 AGENT_TOML = """\

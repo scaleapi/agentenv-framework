@@ -5,8 +5,9 @@ deploys and answers a verifier calling it: an MCP server built from its folder, 
 under a name of its own, one over a store image, a website, and a multi of bundle and store envs, which is rewritten
 when a child is. Environments and a universe the bundle writes load into an MCP server deployed through the gateway,
 and an edit to their files loads anew. A universe composed every way a bundle composes one seeds each server of a multi
-of bundle and store servers, and a store universe shared across servers seeds the one server it's loaded into. Needs a
-Docker daemon and the local registry."""
+of bundle and store servers, and a store universe shared across servers seeds the one server it's loaded into. The
+echo-mcp example agent-env ships runs by name, and a rerun writes nothing. Needs a Docker daemon and the local
+registry."""
 
 import hashlib
 import json
@@ -203,13 +204,16 @@ def _check(root, env, *, items=(), slack=False, websites=(), build="v1"):
 
 def _gateway_bundle(root):
     """An env of each kind a bundle writes, all deployed through the gateway: items and stock are the items server,
-    built from its folder and named by its card, and built from docker/Dockerfile under a name of its own; relay is an
-    MCP server over the store image the CLI put for mail; shop is a website; suite is a multi of items, mail and
-    shop."""
+    built from its folder and named by its card, and built from docker/Dockerfile under a name of its own; depot is
+    the items server built from an image folder, artifacts/depot-image; relay is an MCP server over the store image
+    the CLI put for mail; shop is a website; suite is a multi of items, mail and shop."""
     envs = root / "envs"
     _items(envs / "items", "v1")
     _items(envs / "stock", "v1", dockerfile="docker/Dockerfile")
     (envs / "stock/env.toml").write_text('image = { dockerfile = "docker/Dockerfile" }\nenvironment_name = "stock"\n')
+    _items(root / "artifacts/depot-image", "v1")
+    (envs / "depot").mkdir()
+    (envs / "depot/env.toml").write_text('image = "depot-image"\nenvironment_name = "depot"\n')
     (envs / "relay").mkdir()
     (envs / "relay/env.toml").write_text('image = "mail__env_image"\nenvironment_name = "relay"\n')
     _shop(envs / "shop")
@@ -218,6 +222,7 @@ def _gateway_bundle(root):
         'type = "multi"\nmcp_server_envs = ["items", "mail"]\nwebsite_envs = ["shop"]\nname = "suite"\n')
     _check(root, "items", items=["items"])
     _check(root, "stock", items=["stock"])
+    _check(root, "depot", items=["depot"])
     _check(root, "relay", slack=True)
     _check(root, "shop", websites=["shop"])
     _check(root, "suite", items=["items"], slack=True, websites=["shop"])
@@ -233,8 +238,9 @@ def _put_mail():
 
 
 GATEWAY_IMAGES = ("envs/items (Dockerfile image)", "envs/stock (docker/Dockerfile image)",
-                  "envs/shop (Dockerfile.backend image)", "envs/shop (Dockerfile.frontend image)")
-GATEWAY_ENVS = ("items", "stock", "relay", "shop", "suite")
+                  "artifacts/depot-image (Dockerfile image)", "envs/shop (Dockerfile.backend image)",
+                  "envs/shop (Dockerfile.frontend image)")
+GATEWAY_ENVS = ("items", "stock", "depot", "relay", "shop", "suite")
 
 
 def test_each_kind_of_bundle_env_deploys_through_the_gateway_and_a_child_edit_rewrites_its_multi(state):
@@ -254,7 +260,8 @@ def test_each_kind_of_bundle_env_deploys_through_the_gateway_and_a_child_edit_re
         written = {name: Env.get(ids[name]) for name in GATEWAY_ENVS}
         mail = Env.get("mail")
     assert {name: env.environment_name for name, env in written.items() if name != "suite"} == {
-        "items": "items", "stock": "stock", "relay": "relay", "shop": "shop"}
+        "items": "items", "stock": "stock", "depot": "depot", "relay": "relay", "shop": "shop"}
+    assert written["depot"].docker_image_artifact.id == ids["depot-image"]
     assert written["relay"].docker_image_artifact.id == mail.docker_image_artifact.id == "mail__env_image"
     assert [child.id for child in written["suite"].mcp_server_envs] == [ids["items"], "mail"]
     assert [child.id for child in written["suite"].website_envs] == [ids["shop"]]
@@ -535,3 +542,14 @@ def test_a_multi_whose_servers_share_a_tool_name_is_refused_at_deploy_naming_the
     assert "tasks/suite.json v1: failed at step 'env'" in result.output, result.output
     assert "serve duplicate tool names" in result.output, result.output
     assert "'list_items' from 'items' and 'stock'" in result.output, result.output
+
+
+def test_the_shipped_echo_mcp_example_runs_by_name_and_a_rerun_writes_nothing(state):
+    first, second = _run("echo-mcp"), _run("echo-mcp")
+
+    assert first.exit_code == 0, first.output
+    assert "tasks/smoke.json v1: passed (echoes: 1)" in first.output, first.output
+    assert second.exit_code == 0, second.output
+    for entry in ("envs/echo (Dockerfile image)", "envs/echo", "artifacts/check_echo", "tasks/smoke.json"):
+        assert f"{entry}: v1, unchanged" in second.output, second.output
+    assert "tasks/smoke.json v1: passed (echoes: 1)" in second.output, second.output

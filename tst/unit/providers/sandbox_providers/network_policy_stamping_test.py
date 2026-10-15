@@ -21,6 +21,7 @@ from agent_env.providers.sandbox_providers.sail_vm import _sdk as sail_sdk
 from agent_env.providers.sandbox_providers.sail_vm.provider import SailVmSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import Sandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import _BUILTIN_SANDBOX_PROVIDERS
+from agent_env.providers.sandbox_providers.tenki.provider import TenkiSandboxProvider
 from agent_env.providers.sandbox_providers.tensorlake.provider import TensorlakeSandboxProvider
 from agent_env.providers.sandbox_providers.vercel.provider import VercelSandboxProvider
 
@@ -112,6 +113,29 @@ async def _tensorlake() -> Sandbox:
     return await provider.create_vm(exposed_ports=[], setup_for_gateway=False)
 
 
+async def _tenki() -> Sandbox:
+    session = MagicMock(id="tenki-test")
+    session.wait_ready = AsyncMock()
+    session.info.timeout_at = None
+    client = MagicMock()
+    client.create = AsyncMock(return_value=session)
+    provider = TenkiSandboxProvider(api_key="test-key", client_cls=MagicMock(return_value=client))
+    return await provider.create_vm(exposed_ports=[], setup_for_gateway=False)
+async def _smol_vm() -> Sandbox:
+    pytest.importorskip("smol")
+    from agent_env.providers.sandbox_providers.smol_vm import provider as smol_module
+    from agent_env.providers.sandbox_providers.smol_vm.provider import SmolVmSandboxProvider
+    machine = MagicMock(id="agentenv-test")
+    machine.exec.return_value = SimpleNamespace(exit_code=0, stdout="x86_64\n", stderr="")
+    with (
+        patch.object(smol_module, "Machine", SimpleNamespace(create=lambda config, conn: machine)),
+        patch.object(smol_module, "_host_port", return_value=44112),
+        patch.object(SmolVmSandboxProvider, "_setup_docker", new_callable=AsyncMock),
+        patch.object(SmolVmSandboxProvider, "_configure_host_access", new_callable=AsyncMock),
+    ):
+        return await SmolVmSandboxProvider().create_vm(exposed_ports=[])
+
+
 FACTORIES = {
     "modal": _modal,
     "modal_vm": _modal_vm,
@@ -119,6 +143,8 @@ FACTORIES = {
     "sail_vm": _sail,
     "tensorlake": _tensorlake,
     "vercel": _vercel,
+    "tenki": _tenki,
+    "smol_vm": _smol_vm,
     "local": _local,
 }
 

@@ -259,6 +259,13 @@ class TestFolderRules:
         root = build(tmp_path / "b", spec)
         assert kinds(parse_bundle(root)) == [expected]
 
+    @pytest.mark.parametrize("spec", [
+        {"artifacts/img/Dockerfile": "FROM x", "artifacts/img/SKILL.md": "x"},
+        {"artifacts/img/artifact.toml": 'type = "docker_image"\n', "artifacts/img/SKILL.md": "x"},
+    ], ids=["built", "declared"])
+    def test_an_image_folder_may_hold_a_skill_its_image_ships(self, tmp_path, spec):
+        assert kinds(parse_bundle(build(tmp_path / "b", spec))) == [("artifacts", "img", "docker_image")]
+
     @pytest.mark.parametrize("spec, pair", [
         ({"envs/e/env.toml": "", "envs/e/ENV.toml": "app = 1\n"}, "envs/e/ENV.toml and envs/e/env.toml"),
         ({"tasks/t.json": "[]", "Tasks/notes.md": ""}, "Tasks and tasks"),

@@ -326,7 +326,6 @@ async def test_validator_anchors_trajectory_step_on_its_mcp_step(monkeypatch):
     async def noop(*_args, **_kwargs) -> None:
         return None
 
-    monkeypatch.setattr("agent_env.a2a_agent.validator.get_config", lambda: FakeConfig())
     monkeypatch.setattr(Task, "put", capture_task_put)
     monkeypatch.setattr(
         A2AAgentValidator,

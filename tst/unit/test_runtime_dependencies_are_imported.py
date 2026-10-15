@@ -20,6 +20,8 @@ SRC = Path(agent_env.__file__).resolve().parent
 PYPROJECT = SRC.parents[1] / "pyproject.toml"
 CONTAINER_ONLY = (SRC / "env" / "gateway",)
 SELF = "agentenv-framework"
+# The Smol SDK has no wheel for some development hosts and is deliberately absent from [dev].
+_UNINSTALLED_OPTIONAL_MODULES = {"smolmachines": frozenset({"smol"})}
 
 
 def _normalize(name: str) -> str:
@@ -53,7 +55,13 @@ def _import_names(distribution: str) -> frozenset[str]:
     }
     # Editable installs (the in-repo protocol package) publish no top-level map, and that distribution's name
     # differs from its import package's, so read the packages under the directory its .pth file adds.
-    return frozenset(names or _editable_import_names(distribution) or {distribution.replace("-", "_")})
+    if names:
+        return frozenset(names)
+    try:
+        editable = _editable_import_names(distribution)
+    except importlib.metadata.PackageNotFoundError:
+        return _UNINSTALLED_OPTIONAL_MODULES[distribution]
+    return frozenset(editable or {distribution.replace("-", "_")})
 
 
 def _editable_import_names(distribution: str) -> set[str]:
@@ -73,7 +81,11 @@ def _editable_import_names(distribution: str) -> set[str]:
 def _module_paths(distribution: str) -> frozenset[str]:
     """Every dotted module path the installed distribution's files provide, namespaces included."""
     paths: set[str] = set()
-    for file in importlib.metadata.distribution(distribution).files or []:
+    try:
+        files = importlib.metadata.distribution(distribution).files or []
+    except importlib.metadata.PackageNotFoundError:
+        return _UNINSTALLED_OPTIONAL_MODULES[distribution]
+    for file in files:
         if file.suffix != ".py" or ".." in file.parts:
             continue
         parts = file.with_suffix("").parts

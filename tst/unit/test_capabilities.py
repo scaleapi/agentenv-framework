@@ -151,7 +151,7 @@ def _fake_builder(monkeypatch, provider, outcome):
     monkeypatch.setattr("agent_env.providers.sandbox_providers.sandbox_provider.build_sandbox_provider", build)
 
 
-_CONFIGURED_PROVIDERS = pytest.mark.parametrize("provider", ["e2b", "sail_vm", "tensorlake"])
+_CONFIGURED_PROVIDERS = pytest.mark.parametrize("provider", ["e2b", "sail_vm", "tensorlake", "tenki"])
 
 
 @_CONFIGURED_PROVIDERS

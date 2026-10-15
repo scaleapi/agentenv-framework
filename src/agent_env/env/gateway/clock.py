@@ -119,13 +119,19 @@ class Clock:
         self._lock = threading.Lock()
         self._armed = False
         self._t0: datetime | None = None
-        self._anchor: float | None = None
+        self._anchor = now_fn()  # real time the current arm (or unarmed stretch) began
         self._rate = 1.0
         self._generation = 0
+        self._lived = 0.0  # virtual seconds run before the current arm/clear
 
     @property
     def armed(self) -> bool:
         return self._armed
+
+    @property
+    def rate(self) -> float:
+        """Virtual seconds per real second; 1.0 while unarmed."""
+        return self._rate
 
     @property
     def generation(self) -> int:
@@ -144,8 +150,8 @@ class Clock:
         if t0 > _MAX_T0 - timedelta(seconds=_OVERFLOW_HORIZON_S * r):
             raise ClockError(f"virtual_time {virtual_time!r} at rate {r:g} would overflow datetime near the max")
         with self._lock:
+            self._bank(t0)
             self._t0 = t0
-            self._anchor = self._now()
             self._rate = r
             self._armed = True
             self._generation += 1
@@ -154,12 +160,18 @@ class Clock:
     def clear(self) -> dict:
         """Disarm (idempotent). Afterwards reads 404."""
         with self._lock:
+            self._bank()
             self._armed = False
             self._t0 = None
-            self._anchor = None
             self._rate = 1.0
             self._generation += 1
         return {"ok": True, "armed": False}
+
+    def elapsed(self) -> float:
+        """Virtual seconds run so far: real time at each arm's rate (1 while unarmed), plus the jump of each re-arm
+        forward; one back counts nothing."""
+        with self._lock:
+            return self._lived + (self._now() - self._anchor) * self._rate
 
     def now(self) -> datetime | None:
         with self._lock:
@@ -182,3 +194,12 @@ class Clock:
             elapsed = self._now() - self._anchor
             return {"armed": True, "t0": _iso(self._t0), "virtual_seconds_per_real_second": self._rate,
                     "virtual_time": _iso(_advance(self._t0, elapsed * self._rate))}
+
+    def _bank(self, t0: datetime | None = None) -> None:
+        """Fold the stretch since the last arm/clear into `_lived` at its rate, and start the next one now."""
+        now = self._now()
+        ran = (now - self._anchor) * self._rate
+        self._lived += ran
+        if t0 is not None and self._armed:  # a re-arm forward is time the world lived through; one back adds nothing
+            self._lived += max(0.0, (t0 - _advance(self._t0, ran)).total_seconds())
+        self._anchor = now

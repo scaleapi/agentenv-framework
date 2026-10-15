@@ -451,3 +451,25 @@ async def test_get_sandbox_with_an_unknown_policy_fails_closed():
     sandbox = await provider.get_sandbox("tl-test")
 
     assert sandbox.network_policy is None
+
+
+@pytest.mark.asyncio
+async def test_terminate_sandbox_connects_by_id_and_terminates_without_reading_its_info():
+    raw = _raw_sandbox()
+    provider, sdk = _provider(raw)
+
+    await provider.terminate_sandbox("tl-test")
+
+    sdk.connect.assert_awaited_once()
+    raw.terminate.assert_awaited_once()
+    raw.info.assert_not_called()
+
+
+@pytest.mark.parametrize("where", ["connect", "terminate"])
+@pytest.mark.asyncio
+async def test_terminate_sandbox_counts_a_sandbox_tensorlake_no_longer_knows_as_gone(where):
+    raw = _raw_sandbox()
+    provider, sdk = _provider(raw)
+    (sdk.connect if where == "connect" else raw.terminate).side_effect = SandboxNotFoundError("tl-test")
+
+    await provider.terminate_sandbox("tl-test")

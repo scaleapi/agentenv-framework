@@ -55,7 +55,7 @@ async def test_deploy_sandbox_uses_budget_override():
 async def test_deploy_sandbox_container_mode_uses_budget_override():
     sb = MagicMock(sandbox_id="s1", mode="container", type="remote", tunnel_urls={}, vnc_url=None)
     provider = MagicMock()
-    provider.create_sandbox = AsyncMock(return_value=sb)
+    provider.create_container = AsyncMock(return_value=sb)
     step = DeploySandboxTaskStep(
         id="d", version=None, sandbox_name="sbx", sandbox_mode="container",
         image="img", port=8080, ttl_seconds=1800,
@@ -63,7 +63,7 @@ async def test_deploy_sandbox_container_mode_uses_budget_override():
     ctx = TaskStepContext(metadata={"user_overrides": {"ttl_seconds": 30600}})
     with patch("agent_env.providers.sandbox_providers.sandbox_provider.get_sandbox_provider", return_value=provider):
         await step.execute(ctx)
-    assert provider.create_sandbox.await_args.kwargs["timeout"] == 30600
+    assert provider.create_container.await_args.kwargs["timeout"] == 30600
 
 
 @pytest.mark.asyncio

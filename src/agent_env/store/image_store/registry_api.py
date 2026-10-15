@@ -50,6 +50,15 @@ def pin_digest(ref: str, auth: RegistryAuth | None) -> str:
     return ref
 
 
+def pinned_from(pinned: str, ref: str) -> bool:
+    """Whether ``pinned``, a ref as ``pin_digest`` returns it, pins ``ref``: ``ref`` itself when it gives a digest, else
+    the same name and tag (``latest`` when none is given) with a digest."""
+    if "@" in ref:
+        return pinned == ref
+    image, given = _parse(pinned), _parse(ref)
+    return image.digest is not None and (image.name, image.tag) == (given.name, given.tag or "latest")
+
+
 def _parse(ref: str) -> _ImageRef:
     name, _, digest = ref.partition("@")
     if digest and not _DIGEST.match(digest):

@@ -58,6 +58,11 @@ SANDBOX_LABEL = "agentenv.sandbox"
 _CONCURRENT_SIGNS = 8
 _sign_slots: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = weakref.WeakKeyDictionary()
 
+# Seconds before a VM's failed build or pull runs once more, since a registry's wrong answer, even a 404, can pass.
+_REGISTRY_RETRY_SECONDS = 5.0
+# How Docker's legacy builder and BuildKit report a failed RUN command, the one build failure not tried again.
+_RUN_FAILED = ("returned a non-zero code", "did not complete successfully")
+
 # A VM file is read off its host one range per exec, whose base64 every provider's exec returns in one response. A
 # provider serves each exec a fraction of its bandwidth, so many ranges are in flight.
 _READ_RANGE_BYTES = 4 * 1024 * 1024
@@ -323,7 +328,8 @@ class VmSandbox(Sandbox):
     async def build_images(self, artifacts: list) -> None:
         """Build each image from its build context, one build at a time, so heavy builds don't contend for one VM;
         images with the same ``source_digest`` share a build. The build pulls its base images and packages itself, so
-        a network policy restricting egress must allow them; only the context's download is let through."""
+        a network policy restricting egress must allow them; only the context's download is let through. A build that
+        fails other than in a RUN command runs once more."""
         builds: dict[str, list] = {}
         for artifact in artifacts:
             builds.setdefault(artifact.source_digest or artifact.build_context_object_url, []).append(artifact)
@@ -344,10 +350,13 @@ class VmSandbox(Sandbox):
         await self.exec_script(f"rm -rf {work} && mkdir -p {work}/context")
         try:
             await self.load_object_file(first.build_context_object_url, f"{work}/context.tar.gz")
-            await self.exec_script(
-                f"tar -xzf {work}/context.tar.gz -C {work}/context && cd {work}/context && "
-                f"docker build --platform {shlex.quote(platform)} -f {shlex.quote(first.dockerfile_path)} "
-                f"{tags} ."
+            await self.exec_script(f"tar -xzf {work}/context.tar.gz -C {work}/context")
+            await _once_more(
+                self,
+                f"cd {work}/context && docker build --platform {shlex.quote(platform)} "
+                f"-f {shlex.quote(first.dockerfile_path)} {tags} .",
+                f"Building {', '.join(names)}",
+                unless=_RUN_FAILED,
             )
         except RuntimeError as e:
             raise RuntimeError(f"Building {', '.join(names)} from its build context failed: {e}") from e
@@ -363,10 +372,10 @@ class VmSandbox(Sandbox):
 
     async def pull_images(self, image_names: list[str]) -> None:
         """``docker pull`` each of ``image_names``, concurrently, after logging in to each registry the image store
-        holds credentials for: once per registry, since minting a login can be a network round trip. The first pull
-        to fail cancels the rest, since one that stalls would otherwise hold the failure back; the command a cancelled
-        exec started keeps running on the VM until it ends or the VM does. A network policy restricting egress isn't
-        widened for them: it must allow the registries itself."""
+        holds credentials for: once per registry, since minting a login can be a network round trip. Each pull runs
+        once more if it fails, and the first to fail again cancels the rest, since one that stalls would otherwise hold
+        the failure back; the command a cancelled exec started keeps running on the VM until it ends or the VM does. A
+        network policy restricting egress isn't widened for them: it must allow the registries itself."""
         image_names = list(dict.fromkeys(image_names))
         store = get_config().get_image_store()
         one_per_registry = {registry_host_from_ref(image_name): image_name for image_name in reversed(image_names)}
@@ -559,17 +568,39 @@ def port_bindings(host_ips: Iterable[str], host_port: int, container_port: int) 
     return [f"{ip}:{host_port}:{container_port}" for ip in host_ips] or [f"{host_port}:{container_port}"]
 
 
-async def _pull(sandbox: VmSandbox, image_name: str) -> None:
-    """``docker pull image_name``. An image built for linux/amd64 only has nothing for an arm64 host (an
-    Apple Silicon Mac running the local provider), so that pull falls back to the amd64 image, which the
-    host's Docker runs emulated."""
+async def _once_more(sandbox: VmSandbox, script: str, what: str, *, unless: tuple[str, ...] = ()) -> None:
+    """Run ``script``, and again after ``_REGISTRY_RETRY_SECONDS`` if it fails with an error containing none of
+    ``unless``."""
     try:
-        await sandbox.exec_script(f"docker pull {shlex.quote(image_name)}")
+        await sandbox.exec_script(script)
+    except RuntimeError as e:
+        if any(marker in str(e) for marker in unless):
+            raise
+        logger.warning("%s on %s failed; trying once more in %ss: %s", what, sandbox.sandbox_id,
+                       _REGISTRY_RETRY_SECONDS, _last_output_line(str(e)))
+        await asyncio.sleep(_REGISTRY_RETRY_SECONDS)
+        await sandbox.exec_script(script)
+
+
+def _last_output_line(error: str) -> str:
+    """The last line of an ``exec_script`` error that says something, past its empty ``stdout:``/``stderr:`` labels."""
+    lines = (line.removeprefix("stdout: ").removeprefix("stderr: ").strip() for line in reversed(error.splitlines()))
+    return next((line for line in lines if line), "")
+
+
+async def _pull(sandbox: VmSandbox, image_name: str) -> None:
+    """``docker pull image_name``, once more if it fails. An image built for linux/amd64 only has nothing for an
+    arm64 host (an Apple Silicon Mac running the local provider), so that pull falls back to the amd64 image, which
+    the host's Docker runs emulated."""
+    try:
+        await _once_more(sandbox, f"docker pull {shlex.quote(image_name)}", f"Pulling {image_name}",
+                         unless=("no matching manifest",))
     except RuntimeError as e:
         if "no matching manifest" not in str(e):
             raise
         logger.warning("%s has no image for this host's platform; pulling linux/amd64, which runs emulated", image_name)
-        await sandbox.exec_script(f"docker pull --platform linux/amd64 {shlex.quote(image_name)}")
+        await _once_more(sandbox, f"docker pull --platform linux/amd64 {shlex.quote(image_name)}",
+                         f"Pulling {image_name} for linux/amd64")
 
 
 async def stage_files_into_container(sandbox: Sandbox, file_artifacts: dict[str, Any], destination: str) -> dict[str, str]:

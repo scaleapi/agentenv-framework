@@ -75,7 +75,7 @@ from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM, docker_unreacha
 from ._fs import relative
 from .parse import BundleError, BundleKind
 from .plan import Plan
-from .resolve import BuiltImage, Reference, ResolvedEntry, build_step
+from .resolve import BuiltImage, Reference, ReferencedImage, ResolvedEntry, build_step
 
 _SHOWN_DOCKER_USERS = 3
 
@@ -129,6 +129,9 @@ class _Walk:
         self.agents = {write.id: write.source for write in plan.writes if write.kind is BundleKind.AGENT}
         self.envs = {write.id: write.source for write in plan.writes if write.kind is BundleKind.ENV}
         self.built = {write.id: write.source for write in plan.writes if isinstance(write.source, BuiltImage)}
+        # Each image a folder names in a registry, as the store will hold it, so it's checked as a stored one is.
+        self.referenced = {write.id: DockerImageArtifact(id=write.id, description="", image_name=write.source.ref)
+                           for write in plan.writes if isinstance(write.source, ReferencedImage)}
         # Each deploy of an image the bundle builds: (where, what, its provider's links, the images it accepts on each)
         self.uses: dict[str, list[tuple[str, str, list[SandboxProvider], Callable[[SandboxProvider], Accepts]]]] = {}
 
@@ -265,8 +268,10 @@ class _Walk:
         what = f"env {env_id!r}'s image {ref.id!r}"
         if ref.id in self.built:
             return _Image(what, built=ref.id)
+        if ref.id in self.referenced:
+            return _Image(what, self.referenced[ref.id])
         if ref.id in self.written:
-            return None  # another of the bundle's writes, which materialize refuses or writes first
+            return None  # another of the bundle's writes, which isn't an image: a plugin env's artifact
         try:
             return _Image(what, DockerImageArtifact.get(ref.id, self._planned_version(ref.kind, ref.id, ref.version)))
         except NotFoundError:
@@ -333,8 +338,8 @@ class _Walk:
             image_id, image_version = parse_toml_ref(EntityKind.ARTIFACT, agent.config.get("image"))
             if image_id in self.built:
                 return _Image(what, built=image_id)
-            if image_id in self.written:
-                return None  # another of the bundle's writes, which materialize refuses or writes first
+            if image_id in self.referenced:
+                return _Image(what, self.referenced[image_id])
             planned = self._planned_version(EntityKind.ARTIFACT, image_id, image_version)
             return _Image(what, DockerImageArtifact.get(image_id, planned))
         try:

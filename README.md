@@ -18,7 +18,7 @@ uv tool install agentenv-framework
 agent-env run hello
 ```
 
-`agent-env run hello` runs the built-in hello task, which needs no Docker, model or configuration. To try it without installing anything, run it with uvx:
+`agent-env run hello` runs the built-in hello task, which needs no Docker, model or configuration. `agent-env run echo-mcp` needs Docker: it builds an MCP server from a Dockerfile, deploys it through the gateway and checks it by calling its tool. `agent-env run` lists both. To try hello without installing anything, run it with uvx:
 
 ```bash
 uvx --from agentenv-framework agent-env run hello
@@ -30,7 +30,7 @@ Or install it with pip, into a virtualenv:
 pip install agentenv-framework
 ```
 
-To use the SDK in your own project, add it as a dependency with `uv add agentenv-framework`. The explorer, `agent-env up`, needs the `explorer` extra (`uv tool install 'agentenv-framework[explorer]'`, or the same extra with uvx or pip) and an `.agentenv/config.toml` in the current folder or above it; an empty one keeps every local default. The `tensorlake` sandbox backend needs the `tensorlake` extra (`pip install 'agentenv-framework[tensorlake]'`) and an `api_key` in `[sandbox.providers.tensorlake.config]`. Its sandboxes boot from the public image `agentenv-dind-host-v1`; set `image` there to use another registered Docker-capable image.
+To use the SDK in your own project, add it as a dependency with `uv add agentenv-framework`. The explorer, `agent-env up`, needs the `explorer` extra (`uv tool install 'agentenv-framework[explorer]'`, or the same extra with uvx or pip) and an `.agentenv/config.toml` in the current folder or above it; an empty one keeps every local default. The `tensorlake` sandbox backend needs the `tensorlake` extra (`pip install 'agentenv-framework[tensorlake]'`) and an `api_key` in `[sandbox.providers.tensorlake.config]`. Its sandboxes boot from the public image `agentenv-dind-host-v1`; set `image` there to use another registered Docker-capable image. The `tenki` sandbox backend needs the `tenki` extra (`pip install 'agentenv-framework[tenki]'`) and an `api_key` in `[sandbox.providers.tenki.config]`; see [its README](src/agent_env/providers/sandbox_providers/tenki/README.md).
 
 A plain install runs on local stores and needs no cloud SDK. The cloud store backends are extras: `aws` for S3, Secrets Manager, DynamoDB and ECR (`pip install 'agentenv-framework[aws]'`), and `gcp` for Cloud Storage, Secret Manager, Firestore and Artifact Registry (`pip install 'agentenv-framework[gcp]'`). A config that names a backend without its extra fails, naming the extra to install.
 
@@ -81,6 +81,44 @@ git clone https://github.com/scaleapi/agentenv-framework && cd agentenv-framewor
 uv sync --extra dev
 source .venv/bin/activate
 ```
+
+## Run a task from your own loop
+
+An episode is one run of a task in which some of its agents are played from outside AgentEnv, by a training loop's model or any code of your own. AgentEnv runs the rest exactly as `agent-env run` does, deploying the envs, running the other agents and scoring, and waits at each of your agent's turns:
+
+```python
+from agent_env.task import EpisodeSpec, Task
+
+spec = EpisodeSpec.from_task(Task.get("my-task"), turn_timeout=900)
+episode = await spec.start()
+while (turn := await episode.next_turn()) is not None:
+    async with turn.tools() as tools:  # the agent's env tools, called as its role
+        ...  # your model reads turn.system_prompt and turn.prompt, and acts with tools.list() and tools.call()
+    await turn.end(response="Done.")
+scores = await episode.result()  # every score the run recorded, by step id
+```
+
+The scores are the ones `agent-env run` reports, so making a reward of them is yours. `trainer_agents=` names the agents you play when the task prompts several, `turn_timeout` is each turn's deadline in seconds (the prompt's own `timeout_seconds` otherwise), `episode.abandon(reason)` stops a run early, and `from_task` names any step an outside player can't stand behind. [Running tasks](https://www.agentenvframework.com/docs/tasks/running) covers the rest.
+
+## Run agents in local microVMs
+
+Install `agentenv-framework[smol]` and select the `smol_vm` sandbox provider in
+`.agentenv/config.toml`:
+
+```toml
+[sandbox]
+default = "smol_vm"
+agent_default = "smol_vm"
+```
+
+Each agent and environment gets its own local SmolVM machine with a Docker daemon,
+so workloads are isolated from the host Docker daemon. This needs a supported
+Apple Silicon macOS or Linux host; on Linux, `/dev/kvm` must be available. On Apple Silicon,
+build images for `linux/arm64` (or provide their build contexts so SmolVM can rebuild them);
+this provider does not install amd64 emulation in the guest. AgentEnv can still
+use its default local object and image stores: guest containers can fetch local
+object grants, and the VM forwards pulls from the host's loopback registry.
+Cloud image and object stores continue to work through the same provider.
 
 ## Plugins
 

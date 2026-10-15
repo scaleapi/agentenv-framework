@@ -9,6 +9,9 @@ from agent_env.bundle.resolve import resolve_bundle
 from agent_env.config import get_config
 from agent_env.store.document_store import DocumentStore
 
+# The digest the registry fixture pins every tag to.
+DIGEST = "sha256:" + "a" * 64
+
 
 def layout(root, files):
     for rel, text in files.items():

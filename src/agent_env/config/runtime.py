@@ -35,8 +35,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional
 
-import yaml
-
 from agent_env.config import loader as config_loader
 from agent_env.config import model as model_config
 from agent_env.config.errors import ConfigError, EmptySecretBundleError
@@ -406,6 +404,9 @@ class Config:
         if overrides:
             params.update(config_loader.interpolate(overrides, secret_resolver=self._resolve_secret))
         return params
+
+    def get_model_headers(self, base_url: str | None) -> dict[str, str]:
+        return self._model_config().headers_for(base_url, secret_resolver=self._resolve_secret)
 
     def resolve_model_call(
         self,

@@ -16,14 +16,13 @@ import sys
 import importlib.util
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy import (
     Boolean,
     Float,
     String,
     Text,
-    Enum as SQLEnum,
     desc,
 )
 from sqlalchemy.orm import (

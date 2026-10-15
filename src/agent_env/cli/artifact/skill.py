@@ -34,7 +34,8 @@ def skill():
 
 
 @skill.command("put")
-@click.option("--id", "artifact_id", required=True, help="SkillArtifact id (must match frontmatter 'name')")
+@click.option("--id", "artifact_id", required=True,
+              help="SkillArtifact id (its last segment must match frontmatter 'name')")
 @click.option(
     "--skill-dir",
     type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),

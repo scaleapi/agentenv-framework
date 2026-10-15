@@ -57,6 +57,32 @@ def test_from_section_rejects_unknown_key():
         ModelConfig.from_section({"base_ur": "typo"}, secret_resolver=lambda ref: None)
 
 
+def test_from_section_keeps_header_refs_raw():
+    calls = []
+    cfg = ModelConfig.from_section(
+        {"base_url": "https://gw/v1", "headers": {"X-Bill-To": "secret:org", "X-Plain": "v"}},
+        secret_resolver=lambda ref: calls.append(ref) or "resolved",
+    )
+    assert cfg.headers == {"X-Bill-To": "secret:org", "X-Plain": "v"}
+    assert calls == []
+
+
+@pytest.mark.parametrize("headers", [{"X-Retries": 3}, ["X-Bill-To"]])
+def test_from_section_rejects_headers_that_are_not_strings(headers):
+    with pytest.raises(ConfigError, match=r"\[model.headers\]"):
+        ModelConfig.from_section({"headers": headers}, secret_resolver=lambda ref: None)
+
+
+@pytest.mark.parametrize("headers, problem", [
+    ({"X Bill To": "acme"}, "not an HTTP header name"),
+    ({"X-Bill-To": "café"}, "value HTTP can't carry"),
+    ({"X-Bill-To": "acme\r\nX-Injected: 1"}, "value HTTP can't carry"),
+])
+def test_from_section_rejects_a_header_http_cant_carry(headers, problem):
+    with pytest.raises(ConfigError, match=problem):
+        ModelConfig.from_section({"headers": headers}, secret_resolver=lambda ref: None)
+
+
 # --- model_for_role -----------------------------------------------------------
 
 def test_model_for_role_hit_and_fallback():
@@ -140,9 +166,10 @@ def test_base_override_to_a_foreign_url_does_not_inherit_the_configured_key():
     assert call.api_base == "https://elsewhere.example"
 
 
-def test_base_override_equal_to_the_configured_base_keeps_the_key():
+@pytest.mark.parametrize("override", ["https://proxy.example", "https://proxy.example/"])
+def test_base_override_equal_to_the_configured_base_keeps_the_key(override):
     call = ModelConfig(base_url="https://proxy.example", api_key="secret:k").resolve_call(
-        "m", base_override="https://proxy.example", secret_resolver=_secrets({"k": "sk-proxy"})
+        "m", base_override=override, secret_resolver=_secrets({"k": "sk-proxy"})
     )
     assert call.api_key == "sk-proxy"
 
@@ -168,3 +195,67 @@ def test_client_kwargs_omits_none_api_base_and_splats_params():
     cc = ModelCallConfig(api_key="k", api_base=None, params={"aws_region_name": "us-west-2"})
     assert cc.client_kwargs() == {"api_key": "k", "aws_region_name": "us-west-2"}
     assert ModelCallConfig("k", "https://b", {}).client_kwargs() == {"api_key": "k", "api_base": "https://b"}
+
+
+# --- headers ------------------------------------------------------------------
+
+_HEADERS = {"X-Bill-To": "secret:org", "X-Plain": "v"}
+_RESOLVED = {"X-Bill-To": "acme", "X-Plain": "v"}
+_WITH_HEADERS = ModelConfig(base_url="https://gw/v1", headers=_HEADERS)
+
+
+@pytest.mark.parametrize("configured, env_base, asked, expected", [
+    ("https://gw/v1", None, "https://gw/v1", _RESOLVED),
+    ("https://gw/v1", None, "https://gw/v1/", _RESOLVED),
+    ("https://gw/v1/", None, "https://gw/v1", _RESOLVED),
+    ("https://gw/v1", "https://env-gw/v1", "https://env-gw/v1", _RESOLVED),
+    ("https://gw/v1", "https://env-gw/v1", "https://gw/v1", {}),
+    ("https://gw/v1", None, "https://elsewhere.example/v1", {}),
+    ("https://gw/v1", None, None, {}),
+    (None, None, "https://gw/v1", {}),
+], ids=["configured", "trailing-slash-asked", "trailing-slash-configured", "env-configured", "file-shadowed-by-env",
+        "elsewhere", "no-url", "no-endpoint"])
+def test_headers_go_only_to_the_configured_endpoint_and_resolve_only_for_it(monkeypatch, configured, env_base, asked,
+                                                                           expected):
+    if env_base:
+        monkeypatch.setenv("LITELLM_BASE_URL", env_base)
+    resolved = []
+
+    headers = ModelConfig(base_url=configured, headers=_HEADERS).headers_for(
+        asked, secret_resolver=lambda key: resolved.append(key) or {"org": "acme"}.get(key))
+
+    assert headers == expected
+    assert bool(resolved) is bool(expected)
+
+
+def test_headers_held_back_from_another_endpoint_are_logged(caplog):
+    with caplog.at_level("INFO", logger="agent_env.config.model"):
+        _WITH_HEADERS.headers_for("https://elsewhere.example/v1", secret_resolver=_secrets({}))
+
+    assert "Not sending [model.headers] to elsewhere.example" in caplog.text
+
+
+@pytest.mark.parametrize("secrets, problem", [
+    ({}, "Unresolved secret:org"),
+    ({"org": "acme\nX-Injected: 1"}, "value HTTP can't carry"),
+], ids=["unresolvable", "resolves-to-a-value-http-cant-carry"])
+def test_a_header_ref_that_cant_be_sent_fails_loud(secrets, problem):
+    with pytest.raises(ConfigError, match=problem):
+        _WITH_HEADERS.headers_for("https://gw/v1", secret_resolver=_secrets(secrets))
+
+
+@pytest.mark.parametrize("call, expected", [
+    ({}, {"extra_headers": _RESOLVED}),
+    ({"base_override": "https://elsewhere.example"}, {}),
+    ({"model_overrides": {"m": {"secret_key": "k", "base_url": "https://gw/v1"}}}, {}),
+], ids=["configured", "foreign-override", "model-override"])
+def test_resolve_call_sends_the_headers_only_to_the_configured_endpoint(call, expected):
+    assert _WITH_HEADERS.resolve_call("m", secret_resolver=_secrets({"org": "acme", "k": "sk"}), **call).params == expected
+
+
+def test_params_extra_headers_win_per_header_whatever_its_case():
+    cfg = ModelConfig(base_url="https://gw/v1", headers={"X-Bill-To": "acme", "X-Plain": "v"},
+                      params={"temperature": 0, "extra_headers": {"x-bill-to": "other"}})
+    call = cfg.resolve_call("m", secret_resolver=_secrets({}))
+    assert call.params == {"temperature": 0, "extra_headers": {"X-Plain": "v", "x-bill-to": "other"}}
+    assert cfg.params == {"temperature": 0, "extra_headers": {"x-bill-to": "other"}}
