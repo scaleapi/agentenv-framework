@@ -1,4 +1,7 @@
 import asyncio
+import signal
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import click
 
@@ -9,6 +12,19 @@ from agent_env.providers.env_providers.env_server_provider import EnvironmentSer
 from agent_env.store.base import NotFoundError
 from agent_env.utils.build_metadata import detect_base_metadata, detect_env_metadata  # noqa: F401  re-exported for the put commands
 from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM
+
+
+@contextmanager
+def interruptible() -> Iterator[None]:
+    """SIGTERM interrupts like Ctrl-C, raising KeyboardInterrupt, so cleanup runs for both."""
+    def interrupt(signum, frame):
+        raise KeyboardInterrupt
+
+    previous = signal.signal(signal.SIGTERM, interrupt)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 def build_platform_option(f):

@@ -9,6 +9,7 @@ secrets are dropped. Nothing is written to a store, and the folder is written be
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -22,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_env.bundle import _toml
-from agent_env.bundle._fs import fold, show
+from agent_env.bundle._fs import fold, os_reason, show
 from agent_env.bundle.parse import BundleError, parse_bundle, root_problems, segment_problem
 from agent_env.bundle.plan import STORE_GETTERS, check_bundle
 from agent_env.bundle.resolve import resolve_bundle
@@ -31,6 +32,7 @@ from agent_env.config.describe import is_secret_key
 from agent_env.entity_refs import EntityKind, RefRole, ref_sites
 from agent_env.eval import Eval
 from agent_env.store.base import NotFoundError
+from agent_env.store.ids import LOCAL_PREFIX
 from agent_env.task import Task
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
@@ -145,7 +147,7 @@ def import_eval(eval_id: str, dest: Path | str, *, version: int | None = None) -
 
 class _Importer:
     def __init__(self, dest: Path):
-        self.dest = dest.expanduser()
+        self.dest = Path(os.path.abspath(dest.expanduser()))  # so ``.`` has a name, and a sibling to stage in
         self.files: dict[str, str] = {}
         self.taken: dict[str, dict[str, str]] = {"tasks": {}, "evals": {}}
         self.tasks: list[ImportedTask] = []
@@ -156,7 +158,7 @@ class _Importer:
         self.undeclared: list[str] = []
         self.duplicates: list[str] = []
         self.problems: list[str] = []
-        self.latest: dict[tuple[EntityKind, str], int | str] = {}
+        self.read: dict[tuple[EntityKind, str, int | None], int | str] = {}
         _check_destination(self.dest)
 
     def add_task(self, task: Task) -> str:
@@ -165,21 +167,27 @@ class _Importer:
         path = f"tasks/{name}.json"
         steps = task.to_dict()["steps"]
         registry = get_task_step_registry()
-        classes = [registry[step["type"]] for step in steps]
-        outputs = {(site.ref.kind, _nfc(site.value))
-                   for step, cls in zip(steps, classes) for site in ref_sites(cls.entity_refs or (), step)
-                   if site.ref.role is RefRole.OUTPUT and isinstance(site.value, str)}
-        for step, cls in zip(steps, classes):
+        found = [(step, cls, list(ref_sites(cls.entity_refs or (), step)))
+                 for step in steps for cls in (registry[step["type"]],)]
+        sites = [site for _, _, step_sites in found for site in step_sites
+                 if isinstance(site.value, str) and site.value]
+        outputs = self._outputs(sites)
+        deployed = {_nfc(site.value) for site in sites if site.ref.kind is EntityKind.ENV
+                    and site.ref.role is RefRole.INPUT and site.version_key is not None}
+        for step, cls, step_sites in found:
             where = f"{path}: step {step.get('id')!r}"
             self._drop_secrets(step, where)
             if cls.entity_refs is None:
                 self.undeclared.append(f"{where} ({cls.type})")
-            for site in ref_sites(cls.entity_refs or (), step):
+            for site in step_sites:
                 if site.ref.role is RefRole.OUTPUT or not (isinstance(site.value, str) and site.value):
                     continue
-                if (site.ref.kind, _nfc(site.value)) in outputs:
-                    continue  # written by a step of this task, which the bundle names under the task
-                self._pin(site, f"{where}: {site.path}")
+                output = outputs.get((site.ref.kind, _nfc(site.value)))
+                if output is not None:  # written by a step of this task, which the bundle names under the task
+                    if output != site.value:
+                        site.rewrite(output)
+                    continue
+                self._pin(site, f"{where}: {site.path}", deployed)
             self._default_agents(step, where)
         self.files[path] = json.dumps(steps, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
         self.tasks.append(ImportedTask(path, task.id, task.version, len(steps)))
@@ -201,48 +209,81 @@ class _Importer:
         self.files["README.md"] = _readme(description, imported)
         staging = self.dest.parent / f".{self.dest.name}.import-{uuid.uuid4().hex[:8]}"
         try:
-            for path, text in self.files.items():
-                (staging / path).parent.mkdir(parents=True, exist_ok=True)
-                (staging / path).write_text(text, encoding="utf-8")
-            check_bundle(resolve_bundle(parse_bundle(staging)))
-            emptied = self.dest.is_dir()
-            if emptied:
-                self.dest.rmdir()  # empty, as _check_destination found it
             try:
-                os.replace(staging, self.dest)
-            except OSError:
-                if emptied:
-                    self.dest.mkdir(exist_ok=True)
-                raise
+                for path, text in self.files.items():
+                    (staging / path).parent.mkdir(parents=True, exist_ok=True)
+                    (staging / path).write_text(text, encoding="utf-8")
+            except OSError as e:
+                raise BundleError([f"{show(self.dest.parent)}: can't write the import there: {os_reason(e)}"]) from None
+            check_bundle(resolve_bundle(parse_bundle(staging)))
+            self._move(staging)
         finally:
             shutil.rmtree(staging, ignore_errors=True)
         return imported
 
-    def _pin(self, site: Any, where: str) -> None:
+    def _move(self, staging: Path) -> None:
+        """Move ``staging`` to the destination, which is put back if it was an empty folder and the move fails."""
+        emptied = False
+        try:
+            if self.dest.is_dir():
+                self.dest.rmdir()  # empty, as _check_destination found it
+                emptied = True
+            os.replace(staging, self.dest)
+        except OSError as e:
+            if emptied:
+                with contextlib.suppress(OSError):
+                    self.dest.mkdir(exist_ok=True)
+            _check_destination(self.dest)  # something else wrote it meanwhile
+            raise BundleError([f"{show(self.dest)}: can't move the import into place: {os_reason(e)}"]) from None
+
+    @staticmethod
+    def _outputs(sites: list[Any]) -> dict[tuple[EntityKind, str], str]:
+        """The name each id a step of the task writes keeps. One a bundle named under its own task when it wrote the
+        task takes its last segment, so this bundle names it under its task rather than writing more versions of the
+        other's; the step that writes it is rewritten to the name."""
+        outputs = {}
+        for site in sites:
+            if site.ref.role is RefRole.OUTPUT:
+                name = site.value.rsplit("/", 1)[-1] if site.value.startswith(LOCAL_PREFIX) else site.value
+                outputs[site.ref.kind, _nfc(site.value)] = name
+                if name != site.value:
+                    site.rewrite(name)
+        return outputs
+
+    def _pin(self, site: Any, where: str, deployed: set[str]) -> None:
         kind, entity_id = site.ref.kind, site.value
         if site.version is not None:
-            self.pinned.append(Pinned(where, kind, entity_id, site.version, stored=True))
-        elif site.version_key is not None:
-            latest = self._latest(kind, entity_id)
-            if isinstance(latest, int):
-                site.rewrite(entity_id, latest)
-                self.pinned.append(Pinned(where, kind, entity_id, latest, stored=False))
+            read = self._read(kind, entity_id, site.version)
+            if isinstance(read, int):
+                self.pinned.append(Pinned(where, kind, entity_id, site.version, stored=True))
             else:
-                self.problems.append(f"{where}: {latest}")
-        elif kind is not EntityKind.ENV:  # an env field with no version names an env the task deployed
+                self.problems.append(f"{where}: {read}")
+        elif site.version_key is not None:
+            read = self._read(kind, entity_id)
+            if isinstance(read, int):
+                site.rewrite(entity_id, read)
+                self.pinned.append(Pinned(where, kind, entity_id, read, stored=False))
+            else:
+                self.problems.append(f"{where}: {read}")
+        elif kind is not EntityKind.ENV:
             self.floating.append(Floating(where, kind, entity_id, "the field takes no version, so a run reads the "
                                                                   "latest"))
+        elif _nfc(entity_id) not in deployed:  # an env field with no version names an env a step deploys, if one does
+            self.floating.append(Floating(where, kind, entity_id, "the field takes no version and no step of the task "
+                                                                  "deploys it, so a run reads the latest"))
 
-    def _latest(self, kind: EntityKind, entity_id: str) -> int | str:
-        """The version of ``entity_id`` the store holds now, or why it can't be read."""
-        if (kind, entity_id) not in self.latest:
+    def _read(self, kind: EntityKind, entity_id: str, version: int | None = None) -> int | str:
+        """The version of ``entity_id`` the store holds, at ``version`` or its latest, or why it can't be read."""
+        if (kind, entity_id, version) not in self.read:
             try:
-                self.latest[kind, entity_id] = STORE_GETTERS[kind](entity_id, None).version
+                self.read[kind, entity_id, version] = STORE_GETTERS[kind](entity_id, version).version
             except NotFoundError:
-                self.latest[kind, entity_id] = f"there is no {kind.value} {entity_id!r} in the store"
+                at = f" v{version}" if version is not None else ""
+                self.read[kind, entity_id, version] = f"there is no {kind.value} {entity_id!r}{at} in the store"
             except (ValueError, KeyError, TypeError) as e:
-                self.latest[kind, entity_id] = f"{kind.value} {entity_id!r} can't be read ({type(e).__name__}: {e})"
-        return self.latest[kind, entity_id]
+                self.read[kind, entity_id, version] = (f"{kind.value} {entity_id!r} can't be read "
+                                                       f"({type(e).__name__}: {e})")
+        return self.read[kind, entity_id, version]
 
     def _default_agents(self, step: dict, where: str) -> None:
         """A step that names no agent deploys the configured default, which no field pins."""

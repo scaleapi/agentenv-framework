@@ -3,6 +3,8 @@ reference pinned at the version the store holds now, an id a step of the task wr
 out, and a folder that plans and materializes back to the stored steps. A failed import writes nothing."""
 
 import json
+import os
+import signal
 import tomllib
 from typing import ClassVar
 
@@ -148,6 +150,49 @@ def test_the_folder_materializes_back_to_the_stored_steps(store):
     assert written.to_dict()["steps"] == expected
 
 
+def test_an_id_a_bundle_named_under_its_task_is_renamed_so_the_import_names_it_under_its_own(store):
+    old = "@local/~/old/triage"
+    with namespace_routing():
+        _task(old, [STEPS[0], {**STEPS[5], "cli_artifact_id": f"{old}/crm-cli"},
+                    {**STEPS[6], "cli_artifact_ids": [f"{old}/crm-cli"]}])
+        imported = import_task(old, store / "again")
+    steps = _steps(imported.root, "triage")
+
+    assert (steps[1]["cli_artifact_id"], steps[2]["cli_artifact_ids"]) == ("crm-cli", ["crm-cli"])
+
+
+def test_an_env_no_step_of_the_task_deploys_floats(store):
+    _task("live", [{"id": "agent", "type": "deploy_agent", "env_ids": ["crm-env"], "a2a_agent_id": "solver"}])
+
+    imported = import_task("live", store / "live")
+
+    assert [(ref.kind.value, ref.id, ref.where) for ref in imported.floating] == [
+        ("env", "crm-env", "tasks/live.json: step 'agent': env_ids[0]")]
+
+
+def test_a_pin_the_task_already_has_is_kept_when_the_store_holds_it_and_refused_when_it_doesnt(store):
+    _task("pinned", [{"id": "env", "type": "deploy_env", "env_id": "crm-env", "env_version": 1}])
+    _task("gone", [{"id": "env", "type": "deploy_env", "env_id": "crm-env", "env_version": 9}])
+
+    kept = import_task("pinned", store / "pinned")
+    with pytest.raises(BundleError) as e:
+        import_task("gone", store / "gone")
+
+    assert [(pin.id, pin.version, pin.stored) for pin in kept.pinned] == [("crm-env", 1, True)]
+    assert e.value.problems == ("tasks/gone.json: step 'env': env_id: there is no env 'crm-env' v9 in the store",)
+
+
+def test_the_current_folder_imports_when_it_is_empty(store, monkeypatch):
+    (store / "here").mkdir()
+    monkeypatch.chdir(store / "here")
+    before = _left(store)
+
+    result = CliRunner().invoke(cli, ["bundle", "init", ".", "--from-task", "triage"])
+
+    assert result.exit_code == 0, result.output
+    assert (store / "here" / "tasks" / "triage.json").exists() and _left(store) == before
+
+
 def test_an_eval_imports_with_each_task_it_names_once_under_names_taken_from_their_ids(store):
     _task("team/run", [STEPS[0]])
     _task("other/run", [STEPS[0]])
@@ -242,10 +287,55 @@ def test_an_empty_destination_is_put_back_when_the_move_fails(store, monkeypatch
         raise OSError("disk gone")
 
     monkeypatch.setattr(importer_module.os, "replace", fail)
-    with pytest.raises(OSError):
+    with pytest.raises(BundleError) as caught:
         import_task("triage", store / "dest")
 
+    assert caught.value.problems == (f"{store / 'dest'}: can't move the import into place: disk gone",)
     assert _left(store) == before and (store / "dest").is_dir()
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_a_destination_something_else_writes_during_the_import_is_left_as_it_wrote_it(store, monkeypatch, empty):
+    dest = store / "dest"
+    if empty:
+        dest.mkdir()
+
+    def land(resolved):
+        dest.mkdir(exist_ok=True)
+        (dest / "theirs.txt").write_text("theirs")
+
+    monkeypatch.setattr(importer_module, "check_bundle", land)
+    with pytest.raises(BundleError) as caught:
+        import_task("triage", dest)
+
+    assert caught.value.problems == (f"{dest}: not empty; import into a new or empty folder",)
+    assert sorted(path.name for path in dest.iterdir()) == ["theirs.txt"]
+    assert not [name for name in _left(store) if ".import-" in name]
+
+
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() == 0, reason="root writes anywhere")
+def test_a_folder_the_import_cant_write_in_is_refused_in_one_line(store):
+    (store / "ro").mkdir()
+    (store / "ro").chmod(0o555)
+    try:
+        with pytest.raises(BundleError) as caught:
+            import_task("triage", store / "ro" / "dest")
+        left = list((store / "ro").iterdir())
+    finally:
+        (store / "ro").chmod(0o755)
+
+    assert caught.value.problems == (f"{store / 'ro'}: can't write the import there: permission denied",)
+    assert left == []
+
+
+def test_sigterm_during_an_import_leaves_nothing_beside_its_destination(store, monkeypatch):
+    before = _left(store)
+    monkeypatch.setattr(importer_module, "check_bundle", lambda resolved: os.kill(os.getpid(), signal.SIGTERM))
+
+    result = CliRunner().invoke(cli, ["bundle", "init", str(store / "dest"), "--from-task", "triage"])
+
+    assert result.exit_code == 1 and "Aborted!" in result.output
+    assert _left(store) == before
 
 
 class _Undeclared(TaskStep):

@@ -7,6 +7,7 @@ from pathlib import Path
 import click
 
 from agent_env.bundle.importer import BundleImport, import_eval, import_task
+from agent_env.cli.utils import interruptible
 
 
 @click.group()
@@ -28,8 +29,9 @@ def init(folder: Path, task_id: str | None, eval_id: str | None, version: int | 
     writes nothing."""
     if (task_id is None) == (eval_id is None):
         raise click.UsageError("give one of --from-task or --from-eval")
-    imported = (import_task(task_id, folder, version=version) if task_id is not None
-                else import_eval(eval_id, folder, version=version))
+    with interruptible():
+        imported = (import_task(task_id, folder, version=version) if task_id is not None
+                    else import_eval(eval_id, folder, version=version))
     _report(imported, folder)
 
 
