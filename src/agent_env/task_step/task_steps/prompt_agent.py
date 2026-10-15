@@ -490,6 +490,9 @@ class PromptAgentTaskStep(TaskStep):
 
         current_user_parts = initial_parts
         final_terminal = protocol.TerminalResponse(response_text="")
+        # Each turn's terminal reports only that turn's tool calls, so the conversation's count is
+        # their sum. None until a turn reports one, so agents that don't report it stay None.
+        conversation_tool_call_count: Optional[int] = None
         final_task_id = ""
         per_turn_trajectory_urls: list[str | None] = []
         source_agent_per_turn_prompt_parts: list[list[dict] | None] = []
@@ -544,6 +547,8 @@ class PromptAgentTaskStep(TaskStep):
                         live_turn.ended(target_state)
                 status_msg = (result.get("status") or {}).get("message") or {}
                 final_terminal = protocol.TerminalResponse.from_message(status_msg)
+                if final_terminal.tool_call_count is not None:
+                    conversation_tool_call_count = (conversation_tool_call_count or 0) + final_terminal.tool_call_count
                 agent_response_parts = status_msg.get("parts") or [{"kind": "text", "text": final_terminal.response_text}]
 
                 conversation_store.complete_a2a_task(
@@ -713,7 +718,7 @@ class PromptAgentTaskStep(TaskStep):
             agent_trajectory_object_prefix=trajectory_output_prefix,
             target_agent_per_turn_trajectory_object_urls=per_turn_trajectory_urls or None,
             source_agent_per_turn_prompt_parts=source_agent_per_turn_prompt_parts or None,
-            tool_call_count=final_terminal.tool_call_count,
+            tool_call_count=conversation_tool_call_count,
             model=model,
             error_type=final_terminal.error_type,
             error_code=final_terminal.error_code,
