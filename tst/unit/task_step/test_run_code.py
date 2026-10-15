@@ -5,9 +5,12 @@ and S3 reads; `_real_run` swaps in a sandbox that actually executes the script."
 
 from __future__ import annotations
 
+import ast
 import json
+import signal
 import subprocess
 import sys
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -171,8 +174,6 @@ class _RealSandbox:
 
     async def exec_with_output(self, *args):
         args = [a for a in args if a != "sudo"]
-        if args[0] == "timeout":  # macOS has no coreutils `timeout`
-            args = args[2:]
         proc = subprocess.run(args, capture_output=True)
         return proc.returncode, proc.stdout.decode(), proc.stderr.decode()
 
@@ -515,7 +516,7 @@ async def test_host_installed_agent_on_a_vm_runs_on_the_host():
 
 @pytest.mark.asyncio
 async def test_timeout_is_reported():
-    with _sandbox([(124, "", "")]):  # `timeout` coreutil exit code
+    with _sandbox([(124, "", "")]):  # the runner's status at the limit
         with pytest.raises(RunCodeExecutionError, match="timed out"):
             await _step(timeout_seconds=5).execute(_make_context())
 
@@ -525,6 +526,26 @@ async def test_script_crash_surfaces_stderr():
     with _sandbox([(1, "", "Traceback: boom")]):
         with pytest.raises(RunCodeExecutionError, match="boom"):
             await _step().execute(_make_context())
+
+
+@pytest.mark.asyncio
+async def test_a_script_past_its_timeout_is_stopped_and_reported(tmp_path):
+    artifact = _file_artifact(body=b"import time\ndef run(inp):\n    time.sleep(300)\n")
+    started = time.monotonic()
+    with _real_run(tmp_path, artifact):
+        with pytest.raises(RunCodeExecutionError, match="timed out after 1s"):
+            await _step(timeout_seconds=1).execute(_make_context())
+    assert time.monotonic() - started < 30
+
+
+@pytest.mark.asyncio
+async def test_a_crash_reports_all_of_stderr_through_to_the_exception(tmp_path):
+    body = b"import sys\ndef run(inp):\n    print('x' * 5000, file=sys.stderr)\n    raise ValueError('the cause')\n"
+    with _real_run(tmp_path, _file_artifact(body=body)):
+        with pytest.raises(RunCodeExecutionError) as exc:
+            await _step().execute(_make_context())
+    assert "x" * 5000 in str(exc.value)
+    assert str(exc.value).rstrip().endswith("ValueError: the cause")
 
 
 class _LocalExec:
@@ -624,6 +645,97 @@ def test_runner_imports_sibling_modules_from_the_run_dir(tmp_path):
         [sys.executable, str(_RUNNER), str(tmp_path), "run", "run.py"], check=True
     )
     assert json.loads((tmp_path / "output.json").read_text()) == {"from": "helper"}
+
+
+def test_runner_parses_as_python_3_9():
+    # macOS's /usr/bin/python3 is 3.9, and the runner runs on whatever python3 a host has.
+    ast.parse(_RUNNER.read_text(), feature_version=(3, 9))
+
+
+def _runner_args(run_dir, body, timeout):
+    (run_dir / "script.py").write_text(body)
+    (run_dir / "input.json").write_text(json.dumps({"args": {}, "results": {}}))
+    return [sys.executable, str(_RUNNER), str(run_dir), "run", "script.py", str(timeout)]
+
+
+def _supervised(run_dir, body, timeout=60):
+    return subprocess.run(_runner_args(run_dir, body, timeout), capture_output=True, text=True, timeout=60)
+
+
+def _running(pid):
+    """True while `pid` is a live process; a zombie awaiting its reaper counts as gone."""
+    stat = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    return bool(stat) and not stat.startswith("Z")
+
+
+def _gone_within(pid, seconds=5.0):
+    deadline = time.monotonic() + seconds
+    while _running(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return not _running(pid)
+
+
+# Writes the pid of a `sleep` it starts, so a test can check the whole group was stopped.
+_STARTS_A_CHILD = """\
+import os, subprocess, time
+def run(inp):
+    child = subprocess.Popen(["sleep", "300"])
+    with open(os.path.join(os.path.dirname(__file__), "pid.tmp"), "w") as f:
+        f.write(str(child.pid))
+    os.rename(f.name, f.name[:-len(".tmp")])
+    time.sleep(300)
+"""
+
+
+def _wait_for_pid(run_dir):
+    deadline = time.monotonic() + 30
+    while not (run_dir / "pid").exists():
+        assert time.monotonic() < deadline, "the script never started its child"
+        time.sleep(0.05)
+    return int((run_dir / "pid").read_text())
+
+
+def test_a_supervised_script_writes_its_result(tmp_path):
+    result = _supervised(tmp_path, "def run(inp):\n    return {'ok': True}\n")
+    assert result.returncode == 0, result.stderr
+    assert json.loads((tmp_path / "output.json").read_text()) == {"ok": True}
+
+
+def test_a_supervised_scripts_exit_status_and_stderr_pass_through(tmp_path):
+    result = _supervised(tmp_path, "import sys\ndef run(inp):\n    print('boom', file=sys.stderr)\n    sys.exit(3)\n")
+    assert (result.returncode, result.stderr) == (3, "boom\n")
+
+
+def test_a_script_killed_by_a_signal_exits_128_plus_its_number(tmp_path):
+    result = _supervised(tmp_path, "import os, signal\ndef run(inp):\n    os.kill(os.getpid(), signal.SIGKILL)\n")
+    assert result.returncode == 128 + signal.SIGKILL
+
+
+def test_the_limit_stops_the_script_and_everything_it_started(tmp_path):
+    started = time.monotonic()
+    proc = subprocess.Popen(_runner_args(tmp_path, _STARTS_A_CHILD, 1))
+    child = _wait_for_pid(tmp_path)
+    assert proc.wait(timeout=30) == 124
+    assert time.monotonic() - started < 30
+    assert _gone_within(child)
+
+
+def test_a_script_that_ignores_sigterm_is_killed_after_the_grace_period(tmp_path):
+    body = "import signal, time\ndef run(inp):\n    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n    time.sleep(300)\n"
+    started = time.monotonic()
+    result = _supervised(tmp_path, body, timeout=1)
+    elapsed = time.monotonic() - started
+    assert result.returncode == 124
+    assert 5 <= elapsed < 30
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT, signal.SIGHUP])
+def test_a_signal_to_the_runner_stops_the_script_and_everything_it_started(tmp_path, signum):
+    proc = subprocess.Popen(_runner_args(tmp_path, _STARTS_A_CHILD, 60))
+    child = _wait_for_pid(tmp_path)
+    proc.send_signal(signum)
+    assert proc.wait(timeout=30) == 128 + signum
+    assert _gone_within(child)
 
 
 def test_config_round_trips_through_to_dict_from_dict():
