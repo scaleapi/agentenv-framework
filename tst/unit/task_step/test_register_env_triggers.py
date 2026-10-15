@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import json
+import time
 
 import httpx
 import pytest
@@ -387,6 +388,45 @@ async def test_await_times_out_naming_statuses_and_failure_events(monkeypatch):
     assert "{'t1': 'fired', 't2': 'armed'}" in message
     assert "action_failed" in message and "slack_send_message" in message
     assert "'seq'" not in message and "'kind': 'fired'" not in message
+
+
+@pytest.mark.asyncio
+async def test_a_failed_wait_still_records_the_registration_with_the_last_statuses(monkeypatch):
+    _no_sleep(monkeypatch)
+    _mock_gateway_by_path(monkeypatch, {
+        "/triggers/register": [{"ok": True, "added": ["t1", "t2"], "all": ["t1", "t2"]}],
+        "/triggers/state": [_state({"t1": "fired", "t2": "armed"})],
+    })
+    ctx = _context()
+    with pytest.raises(RuntimeError):
+        await _step(triggers=_TWO, await_fired=["t1", "t2"], await_timeout_seconds=0.01).execute(ctx)
+    [audit] = ctx.metadata["env_trigger_registrations"]
+    assert audit["added"] == ["t1", "t2"]
+    assert audit["awaited"] == {"t1": "fired", "t2": "armed"}
+
+
+@pytest.mark.asyncio
+async def test_slow_state_reads_cannot_outlive_the_await_budget(monkeypatch):
+    """Each read's timeout and each retry's backoff are cut to the time left, so a stalled gateway cannot hold the step
+    for three full reads past the deadline."""
+    import asyncio as real_asyncio
+
+    _mock_gateway_by_path(monkeypatch, {"/triggers/register": [{"ok": True, "added": ["t1"], "all": ["t1"]}]})
+    timeouts: list[float] = []
+
+    async def stalled(self, uri, method, params=None, *, environment_name=None, timeout=30):
+        if method == "register":
+            return {"ok": True, "added": ["t1"], "all": ["t1"]}
+        timeouts.append(timeout)
+        await real_asyncio.sleep(min(timeout, 0.05))
+        raise httpx.ReadTimeout("gateway stalled")
+
+    monkeypatch.setattr(DeployedGatewayEnv, "invoke", stalled)
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="could not read /triggers/state for env 'env-x'.*gateway stalled"):
+        await _step(await_fired=["t1"], await_timeout_seconds=0.3).execute(_context())
+    assert time.monotonic() - started < 2.0
+    assert timeouts and all(t <= 1 for t in timeouts), timeouts
 
 
 @pytest.mark.asyncio

@@ -26,6 +26,15 @@ from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)
 
+# The await polls the gateway's trigger state once per interval; a read gets this long, retried this often with this
+# backoff, and never past the step's own deadline. A failure message quotes at most this many gateway events.
+_AWAIT_POLL_INTERVAL_S = 1.0
+_STATE_READ_TIMEOUT_S = 15
+_STATE_READ_ATTEMPTS = 3
+_STATE_READ_BACKOFF_S = 0.5
+_STATE_READ_MIN_TIMEOUT_S = 1
+_AWAIT_FAILURE_EVENTS_SHOWN = 6
+
 
 class RegisterEnvTriggersStep(TaskStep):
     """An nl action may name its `executor`, and a trigger's `when.roles` may list executor roles so personas react to
@@ -157,30 +166,35 @@ class RegisterEnvTriggersStep(TaskStep):
             "executor_agent_name": self.executor_agent_name,
             "executor_agent_names": named,
         }
-        if self.await_fired:
-            entry["awaited"] = await self._await_statuses(deployed)
+        # Recorded before the wait: the triggers are on the gateway whether or not the wait succeeds, and later steps
+        # look them up here. `awaited` then carries the last statuses seen, complete on success.
         context.metadata.setdefault("env_trigger_registrations", []).append(entry)
+        if self.await_fired:
+            entry["awaited"] = {tid: None for tid in self.await_fired}
+            await self._await_statuses(deployed, entry["awaited"])
         return context
 
-    async def _await_statuses(self, deployed: DeployedEnv) -> dict[str, Optional[str]]:
-        """Poll the gateway until every awaited trigger reads `await_status`; raise on a terminal miss or the deadline."""
+    async def _await_statuses(self, deployed: DeployedEnv, seen: dict[str, Optional[str]]) -> None:
+        """Poll the gateway, updating `seen` in place, until every awaited trigger reads `await_status`; raise on a
+        terminal miss or when the deadline passes. Every read and retry is bounded by what is left of the deadline."""
         terminal = {"failed", "cancelled"} - {self.await_status}
         deadline = time.monotonic() + self.await_timeout_seconds
         while True:
-            state = await _trigger_state(deployed)
+            remaining = deadline - time.monotonic()
+            state = await _trigger_state(deployed, remaining)
             statuses = {t.get("id"): t.get("status") for t in state.get("triggers", []) if isinstance(t, dict)}
-            seen = {tid: statuses.get(tid) for tid in self.await_fired}
+            seen.update({tid: statuses.get(tid) for tid in self.await_fired})
             if all(status == self.await_status for status in seen.values()):
                 logger.info(f"awaited triggers on env={self.env_id} reached {self.await_status!r}: {sorted(seen)}")
-                return seen
+                return
             stuck = sorted(tid for tid, status in seen.items() if status in terminal)
-            timed_out = time.monotonic() >= deadline
-            if stuck or timed_out:
-                why = (f"did not all reach {self.await_status!r} within {self.await_timeout_seconds:g}s" if timed_out
-                       else f"reached a terminal status before {self.await_status!r}: {stuck}")
-                raise RuntimeError(f"Env '{self.env_id}': awaited triggers {why}; statuses {seen}"
+            remaining = deadline - time.monotonic()
+            if stuck or remaining <= 0:
+                why = (f"reached a terminal status before {self.await_status!r}: {stuck}" if stuck
+                       else f"did not all reach {self.await_status!r} within {self.await_timeout_seconds:g}s")
+                raise RuntimeError(f"Env '{self.env_id}': awaited triggers {why}; statuses {dict(seen)}"
                                    + _failure_detail(state, set(seen)))
-            await asyncio.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+            await asyncio.sleep(min(_AWAIT_POLL_INTERVAL_S, remaining))
 
     def _executor_config(self, context: TaskStepContext, deployed: DeployedEnv, agent_name: str) -> dict:
         agent = next((a for a in context.deployed_agents if a.agent_name == agent_name), None)
@@ -204,14 +218,20 @@ class RegisterEnvTriggersStep(TaskStep):
         return config
 
 
-async def _trigger_state(deployed: DeployedEnv) -> dict:
+async def _trigger_state(deployed: DeployedEnv, budget_s: float) -> dict:
+    """One trigger-state read, retried on failure, with each read and backoff cut to the remaining `budget_s`."""
+    deadline = time.monotonic() + budget_s
     last_exc: Optional[Exception] = None
-    for attempt in range(3):
+    for attempt in range(_STATE_READ_ATTEMPTS):
+        remaining = deadline - time.monotonic()
+        if attempt and remaining <= 0:
+            break
+        timeout = max(_STATE_READ_MIN_TIMEOUT_S, min(_STATE_READ_TIMEOUT_S, remaining))
         try:
-            return await deployed.invoke(EXT_TRIGGERS_URI, "state", timeout=15)
+            return await deployed.invoke(EXT_TRIGGERS_URI, "state", timeout=timeout)
         except Exception as e:  # noqa: BLE001 - any read failure is retried, then reported with its cause
             last_exc = e
-            await asyncio.sleep(0.5 * (attempt + 1))
+            await asyncio.sleep(max(0.0, min(_STATE_READ_BACKOFF_S * (attempt + 1), deadline - time.monotonic())))
     raise RuntimeError(f"could not read /triggers/state for env '{deployed.env_id}': {last_exc}")
 
 
@@ -221,7 +241,8 @@ def _failure_detail(state: dict, trigger_ids: set) -> str:
               and e.get("kind") in ("failed", "eval_error", "action_failed")]
     if not events:
         return ""
-    shown = [{k: v for k, v in e.items() if k not in ("seq", "ts", "virtual_time")} for e in events[-6:]]
+    shown = [{k: v for k, v in e.items() if k not in ("seq", "ts", "virtual_time")}
+             for e in events[-_AWAIT_FAILURE_EVENTS_SHOWN:]]
     return f"; failures: {shown}"
 
 
