@@ -44,6 +44,18 @@ _ENV_VAR_MAPS = ("env_vars", "default_env_vars")
 _MAX_NAME_BYTES = 200
 # A URL's user info when it holds a password, or is long enough to be a token rather than a user name such as git.
 _URL_CREDENTIALS = re.compile(r"(?P<scheme>[a-zA-Z][\w+.-]*://)(?:[^/@\s]*:[^/@\s]*|[^/@\s:]{16,})@")
+# Credentials by the shape their issuers give them, wherever they sit.
+_TOKENS = (
+    ("an API key", re.compile(r"\bsk[-_](?=[\w-]*\d)[\w-]{20,}")),
+    ("a GitHub token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_\w{22,})")),
+    ("an AWS access key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
+    ("a Slack token", re.compile(r"\bxox[abposr]-[A-Za-z0-9-]{10,}")),
+    ("a Google API key", re.compile(r"\bAIza[\w-]{35}")),
+    ("a Hugging Face token", re.compile(r"\bhf_[A-Za-z0-9]{30,}")),
+    ("a JWT", re.compile(r"\beyJ[\w-]{8,}\.eyJ[\w-]{8,}\.[\w-]{8,}")),
+    ("a private key", re.compile(r"-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----"
+                                 r"(?:.*?-----END (?:[A-Z]+ )*PRIVATE KEY-----|.*)", re.DOTALL)),
+)
 
 
 @dataclass(frozen=True)
@@ -315,21 +327,24 @@ class _Importer:
                                       f"the step {what}, so a run deploys the configured default"))
 
     def _drop_secrets(self, value: Any, where: str, path: str = "") -> None:
-        """Drop each variable of an env-var map whose name looks like a secret or whose value holds a URL's
-        credentials, and mask the credentials of a URL anywhere else, in place."""
+        """Drop each variable of an env-var map whose name looks like a secret or whose value holds a credential, and
+        mask each credential anywhere else, in place."""
         items = value.items() if isinstance(value, dict) else enumerate(value) if isinstance(value, list) else ()
         for key, item in list(items):
             at = f"{path}.{key}" if path and isinstance(key, str) else f"{path}[{key}]" if path else str(key)
             if isinstance(value, dict) and key in _ENV_VAR_MAPS and isinstance(item, dict):
                 for name, setting in list(item.items()):
                     secret = is_secret_key(name)
-                    if secret or (isinstance(setting, str) and _URL_CREDENTIALS.search(setting)):
+                    found = _masked(setting)[1] if isinstance(setting, str) and not secret else []
+                    if secret or found:
                         del item[name]
-                        why = "its name looks like a secret" if secret else "its value holds a URL's credentials"
+                        why = "its name looks like a secret" if secret else f"its value holds {found[0]}"
                         self.dropped.append(Dropped(f"{where}: {at}.{name}", f"dropped: {why}"))
-            elif isinstance(item, str) and _URL_CREDENTIALS.search(item):
-                value[key] = _URL_CREDENTIALS.sub(r"\g<scheme>***@", item)
-                self.dropped.append(Dropped(f"{where}: {at}", "masked: a URL's credentials"))
+            elif isinstance(item, str):
+                masked, found = _masked(item)
+                if found:
+                    value[key] = masked
+                    self.dropped.append(Dropped(f"{where}: {at}", f"masked: {', '.join(found)}"))
             else:
                 self._drop_secrets(item, where, at)
 
@@ -378,6 +393,19 @@ def _valid_name(text: str) -> str:
     while len(name.encode("utf-8")) > _MAX_NAME_BYTES:
         name = name[:-1].rstrip(" ")
     return name if any(char.isalnum() for char in name) and segment_problem(name) is None else ""
+
+
+def _masked(text: str) -> tuple[str, list[str]]:
+    """``text`` with each credential in it replaced by ``***``, and what kinds it held."""
+    found = []
+    if _URL_CREDENTIALS.search(text):
+        text = _URL_CREDENTIALS.sub(r"\g<scheme>***@", text)
+        found.append("a URL's credentials")
+    for what, pattern in _TOKENS:
+        if pattern.search(text):
+            text = pattern.sub("***", text)
+            found.append(what)
+    return text, found
 
 
 def _nfc(text: str) -> str:

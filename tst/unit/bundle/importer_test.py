@@ -128,6 +128,51 @@ def test_env_vars_that_look_like_secrets_are_left_out_and_a_urls_credentials_mas
     assert "sk-1" not in written and "hunter2" not in written and "admin:pw" not in written
 
 
+# Each in the shape its issuer gives it, joined at run time so no scanner takes it for a real one.
+TOKENS = {
+    "an API key": "sk" + "-proj-" + "a1B2" * 6,
+    "a GitHub token": "gh" + "p_" + "a1B2c3" * 6,
+    "an AWS access key": "AK" + "IA" + "Q4ZX7" * 3 + "W",
+    "a Slack token": "xo" + "xb-" + "1234-5678-abcd",
+    "a Google API key": "AI" + "za" + "Sy" + "a1B2c" * 6 + "d3E",
+    "a Hugging Face token": "hf" + "_" + "a1B2c3" * 6,
+    "a JWT": "ey" + "JhbGciOiJIUzI1NiJ9." + "ey" + "JzdWIiOiIxMjM0In0." + "c2lnbmF0dXJlMTIz",
+    "a private key": "-----BEGIN " + "RSA PRIVATE KEY-----\nMIIBOgIBAAJBAK\n-----END RSA PRIVATE KEY-----",
+}
+
+
+@pytest.mark.parametrize("what", TOKENS)
+def test_a_credential_by_its_shape_is_dropped_from_an_env_var_and_masked_anywhere_else(store, what):
+    token = TOKENS[what]
+    _task("creds", [STEPS[0], STEPS[1], {**STEPS[2], "env_vars": {"SETTING": token}},
+                    {**STEPS[4], "criteria": [{"id": "c1", "description": f"logs in with {token} today"}]}])
+
+    imported = import_task("creds", store / "creds")
+    steps = _steps(imported.root, "creds")
+
+    assert steps[2]["env_vars"] == {}
+    assert steps[3]["criteria"][0]["description"] == "logs in with *** today"
+    assert [(drop.where, drop.why) for drop in imported.dropped] == [
+        ("tasks/creds.json: step 'agent': env_vars.SETTING", f"dropped: its value holds {what}"),
+        ("tasks/creds.json: step 'judge': criteria[0].description", f"masked: {what}"),
+    ]
+    assert not any(token in path.read_text() for path in imported.root.rglob("*") if path.is_file())
+
+
+def test_text_that_only_resembles_a_credential_is_kept(store):
+    kept = ["sk-learn-is-a-python-library", "max_tokens=4096", "eyJ is how a JWT starts", "ssh://git@github.com/o/r",
+            "commit 5a3c2bf0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6"]
+    _task("kept", [STEPS[0], STEPS[1], {**STEPS[2], "env_vars": {f"V{i}": text for i, text in enumerate(kept)}},
+                   {**STEPS[4], "criteria": [{"id": f"c{i}", "description": text} for i, text in enumerate(kept)]}])
+
+    imported = import_task("kept", store / "kept")
+    steps = _steps(imported.root, "kept")
+
+    assert list(steps[2]["env_vars"].values()) == kept
+    assert [criterion["description"] for criterion in steps[3]["criteria"]] == kept
+    assert imported.dropped == ()
+
+
 def test_the_readme_says_where_the_folder_came_from_and_how_each_reference_was_written(store):
     readme = (import_task("triage", store / "triage").root / "README.md").read_text()
 
