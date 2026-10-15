@@ -6,11 +6,8 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 5
     groups:
-      ruff:
-        patterns: ["ruff"]
       python-minor-and-patch:
         update-types: ["minor", "patch"]
-        exclude-patterns: ["ruff"]
     ignore:
       # mcp 2 removed mcp.server.fastmcp, which env/gateway imports at module scope, and the dev
       # extra's fastmcp needs mcp<2, so a major update can't resolve.
