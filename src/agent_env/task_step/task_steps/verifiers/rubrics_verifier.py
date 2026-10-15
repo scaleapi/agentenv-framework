@@ -7,7 +7,7 @@ import json
 import logging
 import re
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import ClassVar, Optional
 
 from agent_env.a2a_agent.object_transfer import (
@@ -254,6 +254,36 @@ def _is_per_criterion(tf: TrajectoryFilter | None) -> bool:
             and tf.frame_strategy == FrameStrategy.PER_CRITERION)
 
 
+
+def _validated_turn(turn: Optional[int]) -> Optional[int]:
+    if turn is None:
+        return None
+    if isinstance(turn, bool) or not isinstance(turn, int) or turn < 1:
+        raise ValueError(f"grade_up_to_turn must be a positive (1-based) turn number, got {turn!r}")
+    return turn
+
+
+def _as_of_turn(prompt_response: PromptResponse, turn: Optional[int]) -> PromptResponse:
+    """A copy of a multi-turn PromptResponse cut off after ``turn``, or the original when there is
+    nothing to cut. The stored response is the conversation's last reply, so a cut copy points the
+    judge at the end of the turn's own trajectory instead of leaking later turns."""
+    turn_urls = prompt_response.target_agent_per_turn_trajectory_object_urls or []
+    if turn is None or turn >= len(turn_urls):
+        return prompt_response
+    prompt_parts = prompt_response.source_agent_per_turn_prompt_parts
+    return replace(
+        prompt_response,
+        target_agent_per_turn_trajectory_object_urls=turn_urls[:turn],
+        agent_trajectory_object_url=turn_urls[turn - 1],
+        source_agent_per_turn_prompt_parts=prompt_parts[:turn] if prompt_parts is not None else None,
+        structured_output=None,
+        response=(
+            f"(Graded as of turn {turn} of {len(turn_urls)}: the agent's reply at this point is the "
+            f"final message of turn {turn}'s trajectory.)"
+        ),
+    )
+
+
 class RubricsVerifierTaskStep(TaskStep):
     type: ClassVar[str] = "rubrics_verifier"
     entity_refs = (EntityRef.agent("judge_a2a_agent_id"),)
@@ -296,10 +326,14 @@ class RubricsVerifierTaskStep(TaskStep):
         output_format: JudgeOutputFormat | str = JudgeOutputFormat.RUBRIC_BINARY,
         grading_policy_prompt: Optional[str] = None,
         context_facts_for_judge: Optional[dict[str, str]] = None,
+        grade_up_to_turn: Optional[int] = None,
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
     ):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
+        # Grade a multi-turn run as it stood after this (1-based) turn: the judge sees turns 1..k only,
+        # so a per-turn env snapshot can be scored on what the agent had done by then. None grades all.
+        self.grade_up_to_turn = _validated_turn(grade_up_to_turn)
         # Task-authored rules the criteria alone do not state, appended as a "## Grading policy" section;
         # with rubric_evidence its findings come back as `checks`.
         self.grading_policy_prompt = grading_policy_prompt
@@ -412,6 +446,8 @@ class RubricsVerifierTaskStep(TaskStep):
         base["output_format"] = self.output_format.value
         base["grading_policy_prompt"] = self.grading_policy_prompt
         base["context_facts_for_judge"] = self.context_facts_for_judge
+        if self.grade_up_to_turn is not None:
+            base["grade_up_to_turn"] = self.grade_up_to_turn
         return base
 
     @classmethod
@@ -440,6 +476,7 @@ class RubricsVerifierTaskStep(TaskStep):
             output_format=data.get("output_format", "rubric_binary"),
             grading_policy_prompt=data.get("grading_policy_prompt"),
             context_facts_for_judge=data.get("context_facts_for_judge"),
+            grade_up_to_turn=data.get("grade_up_to_turn"),
         )
 
     def _resolved_criteria(self, context: TaskStepContext) -> list[dict]:
@@ -456,6 +493,12 @@ class RubricsVerifierTaskStep(TaskStep):
         prompt_response = next((pr for pr in context.prompt_responses if pr.prompt_id == self.prompt_id), None)
         if prompt_response is None:
             raise RuntimeError(f"PromptResponse with prompt_id='{self.prompt_id}' not found in context")
+        overrides_for_step = self.step_param_overrides(context)
+        grade_up_to_turn = (
+            _validated_turn(overrides_for_step["grade_up_to_turn"])
+            if "grade_up_to_turn" in overrides_for_step else self.grade_up_to_turn
+        )
+        prompt_response = _as_of_turn(prompt_response, grade_up_to_turn)
 
         if prompt_response.error_type:
             logger.warning(f"Skipping verification '{self.verifier_id}': prompt had error_type={prompt_response.error_type}")
@@ -697,6 +740,8 @@ class RubricsVerifierTaskStep(TaskStep):
             judge_call_fields["judge_output_retries"] = judge_output_retries
         if judge_output_discrepancies:
             judge_call_fields["judge_output_discrepancies"] = judge_output_discrepancies
+        if grade_up_to_turn is not None:
+            judge_call_fields["graded_up_to_turn"] = grade_up_to_turn
         self._write_entries(context, verification_results, judge_call_fields)
         return context
 
