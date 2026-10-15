@@ -1,5 +1,5 @@
-"""Behavior tests for RegisterEnvTriggersStep: executor-name resolution, the POST body/audit, and 4xx
-propagation. Only the gateway HTTP boundary is mocked; the step logic runs real."""
+"""Behavior tests for RegisterEnvTriggersStep: executor-name resolution, the POST body/audit, 4xx propagation, and
+the optional await of trigger statuses. Only the gateway HTTP boundary is mocked; the step logic runs real."""
 
 from __future__ import annotations
 
@@ -48,6 +48,14 @@ def test_round_trips_through_to_dict_from_dict():
     assert rebuilt.executor_agent_name == "exec-1"
     assert rebuilt.executor_timeout_seconds == 90
     assert rebuilt.executor_hours == {"exec-1": _HOURS}
+    assert (rebuilt.await_fired, rebuilt.await_status, rebuilt.await_timeout_seconds) == (None, "fired", 120)
+
+    awaiting = RegisterEnvTriggersStep.from_dict(_step(await_fired=["t1", "t1"], await_status="armed",
+                                                       await_timeout_seconds=7).to_dict())
+    assert (awaiting.await_fired, awaiting.await_status, awaiting.await_timeout_seconds) == (["t1"], "armed", 7.0)
+    stored_before_await = {k: v for k, v in _step().to_dict().items()
+                           if k not in ("await_fired", "await_status", "await_timeout_seconds")}
+    assert RegisterEnvTriggersStep.from_dict(stored_before_await).await_fired is None
 
 
 def test_bad_triggers_rejected_at_construction():
@@ -300,6 +308,170 @@ def _mock_gateway(monkeypatch, body: dict, status: int = 200) -> list[httpx.Requ
 
     def handle(request: httpx.Request) -> httpx.Response:
         sent.append(request)
+        return httpx.Response(status, json=body)
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.MockTransport(handle)))
+    return sent
+
+
+def test_bad_await_config_rejected_at_construction():
+    with pytest.raises(ValueError, match="await_fired must be a list of trigger ids"):
+        _step(await_fired="t1")
+    with pytest.raises(ValueError, match="await_status must be one of"):
+        _step(await_fired=["t1"], await_status="done")
+    with pytest.raises(ValueError, match="await_timeout_seconds must be a positive number"):
+        _step(await_fired=["t1"], await_timeout_seconds=0)
+
+
+def test_preflight_names_an_awaited_trigger_this_step_does_not_register():
+    assert _step(await_fired=["t1"]).preflight() == []
+    [problem] = _step(await_fired=["t1", "nope"]).preflight()
+    assert "await_fired names ['nope']" in problem and "reg-1" in problem
+
+
+@pytest.mark.asyncio
+async def test_an_unregistered_awaited_trigger_raises_before_any_request(monkeypatch):
+    sent = _mock_gateway(monkeypatch, {})
+    with pytest.raises(RuntimeError, match=r"await_fired names \['nope'\]"):
+        await _step(await_fired=["nope"]).execute(_context())
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_card_without_triggers_state_refuses_the_await_before_any_request(monkeypatch):
+    sent = _mock_gateway(monkeypatch, {})
+    ctx = TaskStepContext(deployed_envs=[_record(extensions=_extensions_without_state())], deployed_agents=[], metadata={})
+    with pytest.raises(RuntimeError, match="does not offer 'state', which await_fired needs"):
+        await _step(await_fired=["t1"]).execute(ctx)
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_await_returns_once_each_named_trigger_reads_fired(monkeypatch):
+    _no_sleep(monkeypatch)
+    sent = _mock_gateway_by_path(monkeypatch, {
+        "/triggers/register": [{"ok": True, "added": ["t1", "t2"], "all": ["t1", "t2"]}],
+        "/triggers/state": [_state({"t1": "fired", "t2": "armed"}), _state({"t1": "fired", "t2": "firing"}),
+                            _state({"t1": "fired", "t2": "fired"})],
+    })
+    out = await _step(triggers=_TWO, await_fired=["t1", "t2"]).execute(_context())
+
+    assert [str(r.url.path) for r in sent] == ["/triggers/register"] + ["/triggers/state"] * 3
+    [audit] = out.metadata["env_trigger_registrations"]
+    assert audit["added"] == ["t1", "t2"]
+    assert audit["awaited"] == {"t1": "fired", "t2": "fired"}
+
+
+@pytest.mark.asyncio
+async def test_no_await_means_no_state_read_and_no_awaited_key(monkeypatch):
+    sent = _mock_gateway_by_path(monkeypatch, {"/triggers/register": [{"ok": True, "added": ["t1"], "all": ["t1"]}]})
+    out = await _step().execute(_context())
+    assert [str(r.url.path) for r in sent] == ["/triggers/register"]
+    assert "awaited" not in out.metadata["env_trigger_registrations"][0]
+
+
+@pytest.mark.asyncio
+async def test_await_times_out_naming_statuses_and_failure_events(monkeypatch):
+    _no_sleep(monkeypatch)
+    _mock_gateway_by_path(monkeypatch, {
+        "/triggers/register": [{"ok": True, "added": ["t1", "t2"], "all": ["t1", "t2"]}],
+        "/triggers/state": [_state({"t1": "fired", "t2": "armed"},
+                                   events=[{"seq": 3, "ts": "x", "kind": "action_failed", "trigger_id": "t2",
+                                            "error": "tool 'slack_send_message' refused"},
+                                           {"seq": 4, "ts": "y", "kind": "fired", "trigger_id": "t1"}])],
+    })
+    with pytest.raises(RuntimeError) as err:
+        await _step(triggers=_TWO, await_fired=["t1", "t2"], await_timeout_seconds=0.01).execute(_context())
+    message = str(err.value)
+    assert "did not all reach 'fired' within 0.01s" in message
+    assert "{'t1': 'fired', 't2': 'armed'}" in message
+    assert "action_failed" in message and "slack_send_message" in message
+    assert "'seq'" not in message and "'kind': 'fired'" not in message
+
+
+@pytest.mark.asyncio
+async def test_await_stops_early_on_a_failed_trigger(monkeypatch):
+    _no_sleep(monkeypatch)
+    sent = _mock_gateway_by_path(monkeypatch, {
+        "/triggers/register": [{"ok": True, "added": ["t1", "t2"], "all": ["t1", "t2"]}],
+        "/triggers/state": [_state({"t1": "armed", "t2": "failed"},
+                                   events=[{"seq": 1, "ts": "x", "kind": "failed", "trigger_id": "t2", "error": "boom"}])],
+    })
+    with pytest.raises(RuntimeError, match=r"reached a terminal status before 'fired': \['t2'\].*boom"):
+        await _step(triggers=_TWO, await_fired=["t1", "t2"], await_timeout_seconds=60).execute(_context())
+    assert [str(r.url.path) for r in sent] == ["/triggers/register", "/triggers/state"]
+
+
+@pytest.mark.asyncio
+async def test_a_trigger_missing_from_state_keeps_waiting_until_the_deadline(monkeypatch):
+    _no_sleep(monkeypatch)
+    _mock_gateway_by_path(monkeypatch, {
+        "/triggers/register": [{"ok": True, "added": ["t1"], "all": ["t1"]}],
+        "/triggers/state": [_state({})],
+    })
+    with pytest.raises(RuntimeError, match=r"statuses \{'t1': None\}"):
+        await _step(await_fired=["t1"], await_timeout_seconds=0.01).execute(_context())
+
+
+@pytest.mark.asyncio
+async def test_a_flaky_state_read_is_retried_then_reported(monkeypatch):
+    _no_sleep(monkeypatch)
+    sent = _mock_gateway_by_path(monkeypatch, {
+        "/triggers/register": [{"ok": True, "added": ["t1"], "all": ["t1"]}],
+        "/triggers/state": [(503, {"error": "busy"}), _state({"t1": "fired"})],
+    })
+    out = await _step(await_fired=["t1"]).execute(_context())
+    assert out.metadata["env_trigger_registrations"][0]["awaited"] == {"t1": "fired"}
+    assert [str(r.url.path) for r in sent].count("/triggers/state") == 2
+
+
+@pytest.mark.asyncio
+async def test_a_state_read_that_keeps_failing_is_reported_with_its_cause(monkeypatch):
+    _no_sleep(monkeypatch)
+    sent = _mock_gateway_by_path(monkeypatch, {
+        "/triggers/register": [{"ok": True, "added": ["t1"], "all": ["t1"]}],
+        "/triggers/state": [(503, {"error": "busy"})],
+    })
+    with pytest.raises(RuntimeError, match="could not read /triggers/state for env 'env-x'.*503"):
+        await _step(await_fired=["t1"]).execute(_context())
+    assert [str(r.url.path) for r in sent].count("/triggers/state") == 3
+
+
+_TWO = [{"id": "t1", "when": {"type": "time", "at": "2026-07-01T17:00:02-05:00"},
+         "actions": [{"type": "tool", "tool": "slack_send_message", "args": {"channel_id": "C1", "message": "hi"}}]},
+        {"id": "t2", "when": {"type": "time", "at": "2026-07-01T17:00:04-05:00"},
+         "actions": [{"type": "tool", "tool": "slack_send_message", "args": {"channel_id": "C1", "message": "hi"}}]}]
+
+
+def _state(statuses: dict[str, str], events: list | None = None) -> dict:
+    return {"config": {}, "triggers": [{"id": tid, "type": "time", "status": status, "fire_count": int(status == "fired")}
+                                       for tid, status in statuses.items()],
+            "events": events or [], "events_dropped": 0}
+
+
+def _extensions_without_state() -> list:
+    extensions = copy.deepcopy(GATEWAY_EXTENSIONS)
+    del next(e for e in extensions if e["uri"] == EXT_TRIGGERS_URI)["params"]["methods"]["state"]
+    return extensions
+
+
+def _no_sleep(monkeypatch) -> None:
+    """Polls and retries run back to back; the deadline still comes from the monotonic clock."""
+    async def instant(_seconds):
+        return None
+    monkeypatch.setattr("agent_env.task_step.task_steps.register_env_triggers.asyncio.sleep", instant)
+
+
+def _mock_gateway_by_path(monkeypatch, scripted: dict[str, list]) -> list[httpx.Request]:
+    """Answer each path from its scripted list in order, repeating the last entry; an entry may be `(status, body)`."""
+    sent, real, served = [], httpx.AsyncClient, {path: 0 for path in scripted}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        answers = scripted[request.url.path]
+        entry = answers[min(served[request.url.path], len(answers) - 1)]
+        served[request.url.path] += 1
+        status, body = entry if isinstance(entry, tuple) else (200, entry)
         return httpx.Response(status, json=body)
 
     monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.MockTransport(handle)))
