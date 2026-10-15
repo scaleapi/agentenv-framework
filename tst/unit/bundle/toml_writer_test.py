@@ -23,13 +23,7 @@ DOCUMENT = {
 
 
 def test_what_it_writes_reads_back_the_same():
-    assert tomllib.loads(dumps(DOCUMENT, tables=("metadata",))) == DOCUMENT
-
-
-def test_a_table_key_is_written_as_a_table_after_the_other_keys():
-    text = dumps({"metadata": {"default_model": "m"}, "image": "x"}, tables=("metadata",))
-
-    assert text == 'image = "x"\n\n[metadata]\ndefault_model = "m"\n'
+    assert tomllib.loads(dumps(DOCUMENT)) == DOCUMENT
 
 
 def test_a_list_of_several_spans_lines_only_at_the_top():

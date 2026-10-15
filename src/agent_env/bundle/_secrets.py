@@ -9,19 +9,20 @@ from agent_env.config.describe import is_secret_key
 
 # The fields that map environment variable names to values, where a credential is most often set.
 _ENV_VAR_MAPS = ("env_vars", "default_env_vars")
-# A URL's user info when it holds a password, or is long enough to be a token rather than a user name such as git.
-_URL_CREDENTIALS = re.compile(r"(?P<scheme>[a-zA-Z][\w+.-]*://)(?:[^/@\s]*:[^/@\s]*|[^/@\s:]{16,})@")
-# Credentials by the shape their issuers give them, wherever they sit.
-_TOKENS = (
-    ("an API key", re.compile(r"\bsk[-_](?=[\w-]*\d)[\w-]{20,}")),
-    ("a GitHub token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_\w{22,})")),
-    ("an AWS access key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
-    ("a Slack token", re.compile(r"\bxox[abposr]-[A-Za-z0-9-]{10,}")),
-    ("a Google API key", re.compile(r"\bAIza[\w-]{35}")),
-    ("a Hugging Face token", re.compile(r"\bhf_[A-Za-z0-9]{30,}")),
-    ("a JWT", re.compile(r"\beyJ[\w-]{8,}\.eyJ[\w-]{8,}\.[\w-]{8,}")),
+# Each credential a value can hold, how to find it and what masks it: a URL's user info when it holds a password or is
+# long enough to be a token rather than a user name such as git, then values in the shape their issuers give them.
+_CREDENTIALS = (
+    ("a URL's credentials", re.compile(r"(?P<scheme>[a-zA-Z][\w+.-]*://)(?:[^/@\s]*:[^/@\s]*|[^/@\s:]{16,})@"),
+     r"\g<scheme>***@"),
+    ("an API key", re.compile(r"\bsk[-_](?=[\w-]*\d)[\w-]{20,}"), "***"),
+    ("a GitHub token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_\w{22,})"), "***"),
+    ("an AWS access key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), "***"),
+    ("a Slack token", re.compile(r"\bxox[abposr]-[A-Za-z0-9-]{10,}"), "***"),
+    ("a Google API key", re.compile(r"\bAIza[\w-]{35}"), "***"),
+    ("a Hugging Face token", re.compile(r"\bhf_[A-Za-z0-9]{30,}"), "***"),
+    ("a JWT", re.compile(r"\beyJ[\w-]{8,}\.eyJ[\w-]{8,}\.[\w-]{8,}"), "***"),
     ("a private key", re.compile(r"-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----"
-                                 r"(?:.*?-----END (?:[A-Z]+ )*PRIVATE KEY-----|.*)", re.DOTALL)),
+                                 r"(?:.*?-----END (?:[A-Z]+ )*PRIVATE KEY-----|.*)", re.DOTALL), "***"),
 )
 
 
@@ -52,11 +53,8 @@ def scrub(value: Any, path: str = "") -> list[tuple[str, str]]:
 def _masked(text: str) -> tuple[str, list[str]]:
     """``text`` with each credential replaced by ``***``, and the kinds it held."""
     found = []
-    if _URL_CREDENTIALS.search(text):
-        text = _URL_CREDENTIALS.sub(r"\g<scheme>***@", text)
-        found.append("a URL's credentials")
-    for what, pattern in _TOKENS:
-        if pattern.search(text):
-            text = pattern.sub("***", text)
+    for what, pattern, mask in _CREDENTIALS:
+        text, count = pattern.subn(mask, text)
+        if count:
             found.append(what)
     return text, found

@@ -116,7 +116,7 @@ def import_eval(eval_id: str, dest: Path | str, *, version: int | None = None) -
     """Write the stored eval ``eval_id``, at ``version`` or its latest, and the tasks it names as a bundle."""
     importer = _Importer(Path(dest))
     stored = Eval.get(eval_id, version)
-    names, seen = [], {}
+    names, seen = [], set()
     for entry in stored.tasks:
         try:
             task = Task.get(entry.task_id, entry.task_version)
@@ -128,8 +128,8 @@ def import_eval(eval_id: str, dest: Path | str, *, version: int | None = None) -
         if (task.id, task.version) in seen:
             importer.duplicates.append(f"task {task.id} v{task.version}")
             continue
-        seen[task.id, task.version] = importer.add_task(task)
-        names.append(seen[task.id, task.version])
+        seen.add((task.id, task.version))
+        names.append(importer.add_task(task))
     if names:
         importer.add_eval(stored, names)
     return importer.write(f"Imported from the store's eval {stored.id} v{stored.version} and the tasks it names.")
@@ -139,7 +139,7 @@ class _Importer:
     def __init__(self, dest: Path):
         self.dest = Path(os.path.abspath(dest.expanduser()))  # so ``.`` has a name, and a sibling to stage in
         self.files: dict[str, str] = {}
-        self.taken: dict[str, dict[str, str]] = {"tasks": {}, "evals": {}}
+        self.taken: dict[str, set[str]] = {"tasks": set(), "evals": set()}  # folded names, per folder
         self.tasks: list[ImportedTask] = []
         self.eval: ImportedEval | None = None
         self.pinned: list[Pinned] = []
@@ -192,9 +192,10 @@ class _Importer:
         if self.problems:
             raise BundleError(self.problems)
         files = sorted([*self.files, "README.md"])
-        imported = BundleImport(self.dest, tuple(files), tuple(self.tasks), self.eval, tuple(self.pinned),
-                                tuple(self.floating), tuple(self.dropped), tuple(self.undeclared),
-                                tuple(self.duplicates))
+        imported = BundleImport(root=self.dest, files=tuple(files), tasks=tuple(self.tasks), eval=self.eval,
+                                pinned=tuple(self.pinned), floating=tuple(self.floating),
+                                dropped=tuple(self.dropped), undeclared=tuple(self.undeclared),
+                                duplicates=tuple(self.duplicates))
         self.files["README.md"] = _readme(description, imported)
         staging = self.dest.parent / f".{self.dest.name}.import-{uuid.uuid4().hex[:8]}"
         try:
@@ -276,7 +277,7 @@ class _Importer:
         while fold(name) in self.taken[kind]:
             n += 1
             name = f"{base}-{n}"
-        self.taken[kind][fold(name)] = name
+        self.taken[kind].add(fold(name))
         return name
 
 
@@ -333,7 +334,7 @@ def _check_destination(dest: Path) -> None:
 
 def _valid_name(text: str) -> str:
     """``text`` as one bundle name, each character an id can't hold made ``-``; empty with no letter or digit left."""
-    text = unicodedata.normalize("NFC", text)
+    text = _nfc(text)
     name = "".join(char if char.isalnum() or unicodedata.category(char).startswith("M") or char in " ._-~@()+,&"
                    else "-" for char in text).strip(" ").lstrip(".")
     while len(name.encode("utf-8")) > _MAX_NAME_BYTES:

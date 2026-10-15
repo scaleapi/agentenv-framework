@@ -4,19 +4,15 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Collection
 from typing import Any
 
 _BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
 _ESCAPES = {'"': '\\"', "\\": "\\\\", "\b": "\\b", "\t": "\\t", "\n": "\\n", "\f": "\\f", "\r": "\\r"}
 
 
-def dumps(document: dict[str, Any], *, tables: Collection[str] = ()) -> str:
-    """``document`` as TOML, keys in ``tables`` as ``[table]``s after the rest; ValueError for what TOML can't hold."""
-    lines = [f"{_key(key)} = {_value(value)}" for key, value in document.items() if key not in tables]
-    for key in (key for key in document if key in tables):
-        lines += ["", f"[{_key(key)}]", *(f"{_key(k)} = {_value(v)}" for k, v in document[key].items())]
-    return "\n".join(lines).lstrip("\n") + "\n" if lines else ""
+def dumps(document: dict[str, Any]) -> str:
+    """``document`` as TOML, each dict an inline table; ValueError for a value TOML can't hold."""
+    return "".join(f"{_key(key)} = {_value(value)}\n" for key, value in document.items())
 
 
 def _key(key: str) -> str:
