@@ -69,6 +69,8 @@ class RunCodeTaskStep(TaskStep):
     # chosen when several .py members exist.
     ENTRY_WHEN_AMBIGUOUS: ClassVar[str] = "run.py"
     _TIMEOUT_EXIT_CODE: ClassVar[int] = 124  # the runner's status at the limit, after GNU timeout's
+    # The end of a failed script's stderr that its error keeps: the error is stored and raised whole.
+    _STDERR_TAIL_BYTES: ClassVar[int] = 1024 * 1024
     # A collect_artifacts universe can hold hundreds of non-.py members; name a few.
     _SKIPPED_MEMBERS_LOGGED: ClassVar[int] = 10
 
@@ -333,7 +335,7 @@ class RunCodeTaskStep(TaskStep):
         reason = (
             f"timed out after {self.timeout_seconds}s"
             if exit_code == self._TIMEOUT_EXIT_CODE
-            else f"exited {exit_code}: {stderr}"
+            else f"exited {exit_code}: {self._stderr_tail(stderr)}"
         )
         raise self._exec_error(reason)
 
@@ -346,14 +348,14 @@ class RunCodeTaskStep(TaskStep):
         path = f"{run_dir}/output.json"
         exit_code, size_out, stderr = await target.run("wc", "-c", path)
         if exit_code != 0:
-            raise self._exec_error(f"wrote no result file: {stderr}")
+            raise self._exec_error(f"wrote no result file: {self._stderr_tail(stderr)}")
         if int(size_out.split()[0]) > self.MAX_OUTPUT_BYTES:
             raise self._validation_error(
                 f"result exceeds {self.MAX_OUTPUT_BYTES}-byte cap"
             )
         exit_code, stdout, stderr = await target.run("cat", path)
         if exit_code != 0:
-            raise self._exec_error(f"could not read result file: {stderr}")
+            raise self._exec_error(f"could not read result file: {self._stderr_tail(stderr)}")
         try:
             return json.loads(stdout)
         except json.JSONDecodeError as exc:
@@ -445,6 +447,14 @@ class RunCodeTaskStep(TaskStep):
         return _AgentTarget(sandbox, prefix)
 
     # --- errors ---
+
+    def _stderr_tail(self, stderr: str) -> str:
+        """``stderr`` within ``_STDERR_TAIL_BYTES``, kept from the end, where the exception is."""
+        data = stderr.encode("utf-8", "replace")
+        if len(data) <= self._STDERR_TAIL_BYTES:
+            return stderr
+        tail = data[-self._STDERR_TAIL_BYTES:].decode("utf-8", "ignore")  # a character cut in two goes
+        return f"[first {len(data) - len(tail.encode('utf-8')):,} bytes of stderr cut]\n{tail}"
 
     def _exec_error(self, msg: str) -> RunCodeExecutionError:
         return RunCodeExecutionError(f"run_code '{self.id}': {msg}")

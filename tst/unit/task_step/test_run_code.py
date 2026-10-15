@@ -529,6 +529,24 @@ async def test_script_crash_surfaces_stderr():
 
 
 @pytest.mark.asyncio
+async def test_a_long_stderr_keeps_its_end_and_says_how_much_was_cut():
+    stderr = "x" * 500 + "\nValueError: the cause\n"
+    step = _step()
+    step._STDERR_TAIL_BYTES = 100
+    with _sandbox([(1, "", stderr)]):
+        with pytest.raises(RunCodeExecutionError) as exc:
+            await step.execute(_make_context())
+    assert str(exc.value).endswith(f"[first {len(stderr) - 100:,} bytes of stderr cut]\n{stderr[-100:]}")
+
+
+def test_a_cut_inside_a_character_drops_the_rest_of_it_and_counts_it():
+    step = _step()
+    step._STDERR_TAIL_BYTES = 5  # the last 5 bytes of "éééé" start inside its second é
+    assert step._stderr_tail("éééé") == "[first 4 bytes of stderr cut]\néé"
+    assert step._stderr_tail("éé") == "éé"
+
+
+@pytest.mark.asyncio
 async def test_a_script_past_its_timeout_is_stopped_and_reported(tmp_path):
     artifact = _file_artifact(body=b"import time\ndef run(inp):\n    time.sleep(300)\n")
     started = time.monotonic()
@@ -723,7 +741,9 @@ def test_the_limit_stops_the_script_and_everything_it_started(tmp_path):
 
 
 def test_a_script_that_ignores_sigterm_is_killed_after_the_grace_period(tmp_path):
-    body = "import signal, time\ndef run(inp):\n    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n    time.sleep(300)\n"
+    body = (
+        "import signal, time\ndef run(inp):\n    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n    time.sleep(300)\n"
+    )
     started = time.monotonic()
     result = _supervised(tmp_path, body, timeout=1)
     elapsed = time.monotonic() - started
@@ -754,7 +774,8 @@ def test_a_signal_to_the_runner_stops_the_script_and_everything_it_started(tmp_p
 
 
 def test_a_forwarded_signal_the_script_ignores_is_followed_by_sigkill(tmp_path):
-    body = _STARTS_A_CHILD.replace("def run(inp):\n", "def run(inp):\n    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n")
+    ignore_term = "def run(inp):\n    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+    body = _STARTS_A_CHILD.replace("def run(inp):\n", ignore_term)
     proc = _start_runner(tmp_path, "import signal\n" + body, 60)
     child = _wait_for_pid(tmp_path)
     started = time.monotonic()
