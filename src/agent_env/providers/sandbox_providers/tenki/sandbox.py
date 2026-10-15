@@ -174,30 +174,13 @@ class TenkiSandbox(VmSandbox):
         self.network_policy = network_policy
 
     async def terminate(self) -> None:
-        """Terminate the VM. One another handle already terminated, while this handle's cached state still says
-        running, is not an error."""
-        try:
-            await self._session.close_if_open()
-        except SessionNotFoundError:
-            logger.info("Tenki session %s was already gone at terminate", self.sandbox_id)
-        except (InvalidStateError, SessionTerminatedError):
-            if await self._current_state() not in ENDED_STATES:
-                raise
-            logger.info("Tenki session %s was already terminating at terminate", self.sandbox_id)
-        await self.release()
+        await close_session(self._session)
 
     async def release(self) -> None:
-        """Stop the session's data-plane credential renewal, which close_if_open leaves to the caller for a session
-        that is already ending."""
-        reset = getattr(self._session, "_reset_data_plane", None)
-        if reset is not None:
-            await reset()
+        await release_session(self._session)
 
     async def _current_state(self) -> str:
-        try:
-            return (await self._session.refresh()).state
-        except SessionNotFoundError:
-            return "GONE"
+        return await _session_state(self._session)
 
     async def exec(self, *command: str) -> _CompletedProcess:
         """Run argv to completion as root, so a leading ``sudo`` is dropped. A lost stream is exit -1, which
@@ -329,3 +312,32 @@ class TenkiSandbox(VmSandbox):
         signed_urls = await self._signed_image_urls(artifacts)
         reachable = [url if self._can_download(url) else None for url in signed_urls]
         await self._load_docker_images(artifacts, reachable)
+
+
+async def close_session(session: Any) -> None:
+    """Terminate a session's VM. One another handle already terminated, while this one's cached state still says
+    running, is not an error."""
+    try:
+        await session.close_if_open()
+    except SessionNotFoundError:
+        logger.info("Tenki session %s was already gone at terminate", session.id)
+    except (InvalidStateError, SessionTerminatedError):
+        if await _session_state(session) not in ENDED_STATES:
+            raise
+        logger.info("Tenki session %s was already terminating at terminate", session.id)
+    await release_session(session)
+
+
+async def release_session(session: Any) -> None:
+    """Stop the session's data-plane credential renewal, which close_if_open leaves to the caller for a session
+    that is already ending."""
+    reset = getattr(session, "_reset_data_plane", None)
+    if reset is not None:
+        await reset()
+
+
+async def _session_state(session: Any) -> str:
+    try:
+        return (await session.refresh()).state
+    except SessionNotFoundError:
+        return "GONE"

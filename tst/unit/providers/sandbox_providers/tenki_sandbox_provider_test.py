@@ -21,7 +21,7 @@ from agent_env.providers.sandbox_providers.tenki.provider import (
     vm_shape,
 )
 from agent_env.providers.sandbox_providers.tenki.sandbox import DOCKER_BOOTSTRAP, TenkiSandbox
-from tenki import SandboxError
+from tenki import SandboxError, SessionNotFoundError
 
 from tst.unit.providers.sandbox_providers.tenki_fakes import FakeSession, fake_client_cls, result
 
@@ -383,3 +383,26 @@ async def test_get_sandbox_restores_ports_policy_and_lifetime(client_cls):
         mode=ALLOWLIST, allow_hosts=("pypi.org",), allow_cidrs=("10.0.0.0/8",),
     )
     assert 1700 <= sandbox.command_timeout <= 1800
+
+
+@pytest.mark.asyncio
+async def test_terminate_sandbox_closes_the_session_by_id(client_cls):
+    provider = _provider(client_cls)
+    created = await provider.create_vm(setup_for_gateway=False)
+    session = client_cls.instances[0].sessions[created.sandbox_id]
+
+    await provider.terminate_sandbox(created.sandbox_id)
+
+    assert (session.closed, session.info.state) == (1, "TERMINATED")
+
+
+@pytest.mark.asyncio
+async def test_terminate_sandbox_counts_a_session_tenki_no_longer_knows_as_gone(client_cls, monkeypatch):
+    provider = _provider(client_cls)
+    client = provider._client()
+
+    async def gone(sandbox_id):
+        raise SessionNotFoundError("gone")
+
+    monkeypatch.setattr(client, "get", gone)
+    await provider.terminate_sandbox("sess-gone")

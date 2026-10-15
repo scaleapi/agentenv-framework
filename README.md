@@ -18,7 +18,7 @@ uv tool install agentenv-framework
 agent-env run hello
 ```
 
-`agent-env run hello` runs the built-in hello task, which needs no Docker, model or configuration. To try it without installing anything, run it with uvx:
+`agent-env run hello` runs the built-in hello task, which needs no Docker, model or configuration. `agent-env run echo-mcp` needs Docker: it builds an MCP server from a Dockerfile, deploys it through the gateway and checks it by calling its tool. `agent-env run` lists both. `agent-env bundle init <folder> --from-task <id>` writes a task a store holds as a bundle folder, with each reference it makes pinned at the version the store holds, so you can run and edit it locally. To try hello without installing anything, run it with uvx:
 
 ```bash
 uvx --from agentenv-framework agent-env run hello
@@ -35,6 +35,44 @@ To use the SDK in your own project, add it as a dependency with `uv add agentenv
 A plain install runs on local stores and needs no cloud SDK. The cloud store backends are extras: `aws` for S3, Secrets Manager, DynamoDB and ECR (`pip install 'agentenv-framework[aws]'`), and `gcp` for Cloud Storage, Secret Manager, Firestore and Artifact Registry (`pip install 'agentenv-framework[gcp]'`). A config that names a backend without its extra fails, naming the extra to install.
 
 The distribution is named `agentenv-framework`, the import package is `agent_env` and the command is `agent-env`. It depends on `agentenv-framework-protocol`, whose import package is `agentenv_protocol`, and installs it too.
+
+### Sandbox providers
+
+For a complete evaluation using your existing Vercel login, follow the [Vercel Sandbox demo](https://github.com/vercel-labs/agentenv-framework/tree/vercel-demo/examples/vercel-sandbox).
+
+The default provider runs environments and agents as containers on the local Docker daemon. The `vercel` provider runs each environment or agent in an ephemeral, Docker-capable Vercel Sandbox and exposes declared ports through public `*.vercel.run` routes. From this source checkout, install the optional extra and select it in `.agentenv/config.toml`. This provider is not yet in a published PyPI release:
+
+```bash
+uv sync --frozen --extra vercel
+```
+
+```toml
+[sandbox]
+default = "vercel"
+agent_default = "vercel"
+
+[sandbox.providers.vercel.config]
+# Optional. The default managed image installs Docker and Compose v2 when apt is available;
+# a prepared image avoids that download under a restrictive network policy.
+image = "vercel/sandbox/universal"
+# region = "iad1"
+# failover_regions = ["cle1", "sfo1"]
+# network_id = "your-secure-compute-network"
+# Omit all three credential fields to use the SDK's default OIDC credentials.
+# token = "secret:vercel_token"
+# team_id = "your-team"
+# project_id = "your-project"
+```
+
+Credentials are resolved by AgentEnv's `env:` and `secret:` references before the provider builds its scoped Vercel SDK client; the provider never changes the process environment or makes its SDK session the active one. Each sandbox is ephemeral, its execution time follows AgentEnv's timeout, and teardown destroys the sandbox and its orphan snapshots. Vercel currently provisions 64 GB of ephemeral disk: requests above 64 GB are rejected rather than silently ignored. Resource sizing uses the smallest supported even vCPU count (or one vCPU) that covers both the requested CPU and memory (2048 MB per vCPU), up to 32 vCPUs and 64 GB at the provider-wide ceiling; the account's plan may impose lower limits.
+
+See the [Vercel resource limits](https://vercel.com/docs/sandbox/pricing#resource-limits) and [firewall policy](https://vercel.com/docs/sandbox/concepts/firewall) documentation. The provider treats CPU and memory requests as minimums. If a request does not already match a supported shape, AgentEnv logs both the requested and allocated CPU and memory before provisioning. For example, `cpu = 0.5` and `memory = 5000` allocate four vCPUs and 8192 MB. A disk request below 64 GB is also ignored: every sandbox receives the fixed 64 GB disk, and the provider logs the ignored request. Configure all three of `token`, `team_id`, and `project_id` for an explicit scoped token, or omit all three to continue using the SDK's OIDC credentials.
+
+Attribution is limited to five tags. When more are supplied, the provider keeps `pipeline_step` and `run_id` first, then fills the remaining slots by key name in alphabetical order. It warns with the omitted key names without logging their values. Invalid empty keys or values are still rejected.
+
+A missing sandbox raises `SandboxNotFoundError` when reconnecting. Run cleanup and the `teardown_sandboxes` step treat this condition as already cleaned up; authentication and transport errors still fail cleanup.
+
+Outbound policy supports AgentEnv's allow-all and allowlist forms, including hostname and CIDR entries. Vercel's custom transforms, forwarding rules, and denied CIDR exceptions are not reconstructed as ordinary allowlists: reconnect leaves such a policy unknown and image loading fails closed. At creation, public Vercel routes are added to a restricted workload's platform egress floor so it can reach another Vercel sandbox's declared route. Image and file downloads add their exact signed-URL hostnames to the current allowlist; these hosts remain allowed until the policy is replaced. A CIDR-only Vercel policy allows unrestricted DNS resolution; use domain rules to restrict DNS, or deny-all to block it.
 
 To work on agent-env itself, install from a clone with [uv](https://docs.astral.sh/uv/):
 

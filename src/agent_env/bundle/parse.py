@@ -152,25 +152,11 @@ class _Parser:
         )
 
     def _derive_id_root(self) -> str:
-        user_home = home()
-        home_relative = user_home is not None and self.root.is_relative_to(user_home)
-        if home_relative:
-            parts = ["~", *self.root.relative_to(user_home).parts]
-            above = user_home
-        else:
-            parts = list(self.root.parts[1:])
-            above = Path(self.root.anchor)
-            if parts[0] == "~":
-                self._problem(above / "~", "a folder named '~' at the filesystem root would read as home; "
-                              "move the bundle")
-                self.root_ok = False
-        for part in parts[1:] if home_relative else parts:
-            above = above / part
-            reason = _refused(part)
-            if reason:
-                self._problem(above, f"move the bundle, or rename the folder: {reason}")
-                self.root_ok = False
-        return LOCAL_PREFIX + "/".join(unicodedata.normalize("NFC", part) for part in parts)
+        id_root, problems = _id_root(self.root)
+        for path, message in problems:
+            self._problem(path, message)
+            self.root_ok = False
+        return id_root
 
     # Walking the tree
 
@@ -381,7 +367,7 @@ class _Parser:
         if declared is not None:
             self._check_declared(declared, declared_in or path, artifact=kind.store == "artifact")
             return declared
-        reason = _refused(name)
+        reason = segment_problem(name)
         if reason:
             self._skip(path, f"rename it: {reason}")
         # The root and the name are each validated, so only the length is left to check.
@@ -538,6 +524,34 @@ class _Parser:
         return show(text)
 
 
+def root_problems(root: Path) -> list[str]:
+    """Why a bundle at ``root``, which needn't exist yet, would have no id; empty when it would have one."""
+    parent = _canonical(Path(root).expanduser().parent)
+    return [f"{show(path)}: {message}" for path, message in _id_root(parent / Path(root).name)[1]]
+
+
+def _id_root(root: Path) -> tuple[str, list[tuple[Path, str]]]:
+    """The ``@local`` id root for the canonical path ``root``, and each part of it that can't be an id segment."""
+    problems = []
+    user_home = home()
+    home_relative = user_home is not None and root.is_relative_to(user_home)
+    if home_relative:
+        parts = ["~", *root.relative_to(user_home).parts]
+        above = user_home
+    else:
+        parts = list(root.parts[1:])
+        above = Path(root.anchor)
+        if parts[0] == "~":
+            problems.append((above / "~", "a folder named '~' at the filesystem root would read as home; "
+                             "move the bundle"))
+    for part in parts[1:] if home_relative else parts:
+        above = above / part
+        reason = segment_problem(part)
+        if reason:
+            problems.append((above, f"move the bundle, or rename the folder: {reason}"))
+    return LOCAL_PREFIX + "/".join(unicodedata.normalize("NFC", part) for part in parts), problems
+
+
 def _canonical(root: Path) -> Path:
     try:
         resolved = root.expanduser().resolve(strict=True)
@@ -552,7 +566,7 @@ def _canonical(root: Path) -> Path:
     return on_disk(resolved)
 
 
-def _refused(segment: str) -> str | None:
+def segment_problem(segment: str) -> str | None:
     """Why ``segment`` can't be one segment of an id, or None; the reason names the segment."""
     try:
         segment.encode("utf-8")

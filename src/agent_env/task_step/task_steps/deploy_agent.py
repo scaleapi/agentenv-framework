@@ -286,6 +286,19 @@ class DeployAgentTaskStep(TaskStep):
             enable_docker=data.get("enable_docker", False),
         )
 
+    def _resolve_agent_ref(self, context: TaskStepContext) -> tuple[str, Optional[int]]:
+        """Agent id and version for this run: this step's ``step_overrides`` win over the run-wide override and the stored values; an overridden id takes the override's version (latest when unset), never the stored agent's pin."""
+        step_overrides = self.step_param_overrides(context)
+        user_overrides = context.metadata.get("user_overrides", {})
+        if "a2a_agent_id" in step_overrides:
+            return step_overrides["a2a_agent_id"], step_overrides.get("a2a_agent_version")
+        agent_id = user_overrides.get("a2a_agent_id") or self.a2a_agent_id or get_config().get_default_a2a_agent_id()
+        if "a2a_agent_version" in step_overrides:
+            return agent_id, step_overrides["a2a_agent_version"]
+        if "a2a_agent_version" in user_overrides:
+            return agent_id, user_overrides["a2a_agent_version"]
+        return agent_id, self.a2a_agent_version
+
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         # An agent is recorded in the context only once it is configured, so one that fails on the way there
         # (a snapshot or changelog that can't be loaded, say) is closed here, or no teardown would find it.
@@ -335,12 +348,7 @@ class DeployAgentTaskStep(TaskStep):
 
         config = get_config()
         user_overrides = context.metadata.get("user_overrides", {})
-        a2a_agent_id = user_overrides.get("a2a_agent_id") or self.a2a_agent_id or config.get_default_a2a_agent_id()
-        a2a_agent_version = (
-            user_overrides["a2a_agent_version"]
-            if "a2a_agent_version" in user_overrides
-            else self.a2a_agent_version
-        )
+        a2a_agent_id, a2a_agent_version = self._resolve_agent_ref(context)
         agent = A2AAgent.get(a2a_agent_id, a2a_agent_version)
         requested_disk = user_overrides.get("agent_disk_size_gb") or self.disk_size_gb
         min_disk = agent.metadata.get("min_disk_size_gb")

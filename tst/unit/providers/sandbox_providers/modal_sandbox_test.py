@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import modal
 import pytest
 
 from agent_env.config import get_config
@@ -437,3 +438,34 @@ async def test_write_file_from_object_reads_a_url_from_the_store_that_holds_it(c
     sandbox._write_stream_via_exec = collect
     await sandbox.write_file_from_object(url, "/data/a.json")
     assert written == [(b"LOCAL", "/data/a.json")]
+
+
+@pytest.mark.asyncio
+async def test_terminate_sandbox_terminates_by_id_without_reading_its_tunnels(_patched_provider):
+    sb = MagicMock()
+    sb.tunnels.aio = AsyncMock(side_effect=modal.exception.ConflictError("Sandbox has already finished with status terminated"))
+    sb.terminate.aio = AsyncMock()
+    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox.from_id") as from_id:
+        from_id.aio = AsyncMock(return_value=sb)
+        await _patched_provider.terminate_sandbox("sb-finished")
+
+    sb.terminate.aio.assert_awaited_once()
+    sb.tunnels.aio.assert_not_called()
+    sb.exec.aio.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_terminate_sandbox_counts_a_sandbox_modal_no_longer_knows_as_gone(_patched_provider):
+    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox.from_id") as from_id:
+        from_id.aio = AsyncMock(side_effect=modal.exception.NotFoundError("Sandbox not found"))
+        await _patched_provider.terminate_sandbox("sb-gone")
+
+
+@pytest.mark.asyncio
+async def test_get_sandbox_still_raises_for_a_finished_sandbox_so_a_reattach_sees_it_dead(_patched_provider):
+    sb = MagicMock()
+    sb.tunnels.aio = AsyncMock(side_effect=modal.exception.ConflictError("Sandbox has already finished with status terminated"))
+    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox.from_id") as from_id:
+        from_id.aio = AsyncMock(return_value=sb)
+        with pytest.raises(modal.exception.ConflictError):
+            await _patched_provider.get_sandbox("sb-finished")

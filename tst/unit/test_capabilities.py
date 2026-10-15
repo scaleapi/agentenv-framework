@@ -171,3 +171,44 @@ def test_configured_provider_present_when_the_provider_builds(monkeypatch, provi
 def test_configured_provider_other_failures_read_as_present_rather_than_absent(monkeypatch, provider):
     _fake_builder(monkeypatch, provider, RuntimeError("api key rejected"))
     assert capabilities.remote_sandbox_is_available(provider) is True
+
+
+def _fake_vercel_config(monkeypatch, config):
+    monkeypatch.setattr(
+        "agent_env.config.get_config",
+        lambda: type("Cfg", (), {"section": lambda self, _name: {"providers": {"vercel": {"config": config}}}})(),
+    )
+
+
+def test_vercel_is_absent_without_configured_or_ambient_credentials(monkeypatch):
+    monkeypatch.setattr(
+        "agent_env.providers.sandbox_providers.sandbox_provider.build_sandbox_provider",
+        lambda spec: object(),
+    )
+    for name in ("VERCEL_TOKEN", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID", "VERCEL_OIDC_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    _fake_vercel_config(monkeypatch, {})
+    assert capabilities.remote_sandbox_is_available("vercel") is False
+
+
+def test_vercel_is_present_with_complete_config_credentials(monkeypatch):
+    monkeypatch.setattr(
+        "agent_env.providers.sandbox_providers.sandbox_provider.build_sandbox_provider",
+        lambda spec: object(),
+    )
+    _fake_vercel_config(
+        monkeypatch,
+        {"token": "secret:vercel_token", "team_id": "team", "project_id": "project"},
+    )
+    assert capabilities.remote_sandbox_is_available("vercel") is True
+
+
+def test_vercel_is_present_with_all_ambient_credential_names(monkeypatch):
+    monkeypatch.setattr(
+        "agent_env.providers.sandbox_providers.sandbox_provider.build_sandbox_provider",
+        lambda spec: object(),
+    )
+    for name in ("VERCEL_TOKEN", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID"):
+        monkeypatch.setenv(name, "configured")
+    _fake_vercel_config(monkeypatch, {})
+    assert capabilities.remote_sandbox_is_available("vercel") is True

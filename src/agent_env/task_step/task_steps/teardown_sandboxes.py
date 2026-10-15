@@ -166,8 +166,10 @@ _DEFAULT_PROVIDERS = {
 
 
 async def _terminate(sandbox_id: str, sandbox_type: Optional[str], default_slot: str) -> None:
-    provider: SandboxProvider = (
-        build_sandbox_provider(sandbox_type) if sandbox_type else _DEFAULT_PROVIDERS[default_slot]()
-    )
-    sandbox = await provider.get_sandbox(sandbox_id)
-    await sandbox.terminate()
+    """By id through the backend that made it; a record that doesn't name one goes through a live handle, since
+    "not found" from a provider that didn't make the sandbox doesn't mean it's gone."""
+    if sandbox_type:
+        await build_sandbox_provider(sandbox_type).terminate_sandbox(sandbox_id)
+        return
+    provider: SandboxProvider = _DEFAULT_PROVIDERS[default_slot]()
+    await (await provider.get_sandbox(sandbox_id)).terminate()

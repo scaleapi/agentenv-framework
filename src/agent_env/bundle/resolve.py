@@ -9,8 +9,9 @@ whether store ids exist is checked later, with the other checks that read a stor
 from __future__ import annotations
 
 import copy
+import functools
 import unicodedata
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -197,7 +198,7 @@ class _Resolver:
             elif self._derived_outputs(entry, step, cls):
                 declared.append((index, step, cls))
         outputs = self._outputs(entry, declared)
-        upstream = _upstream(steps, self._depends_on(entry, steps))
+        edges = _step_edges(steps, self._depends_on(entry, steps))
         references: list[Reference] = []
         for index, step, cls in declared:
             where = f"step {step.get('id')!r}: "
@@ -210,8 +211,8 @@ class _Resolver:
                 if not (isinstance(site.value, str) and site.value):
                     self._problem(entry, f"{where}{site.path} must be an id, not {site.value!r}")
                     continue
-                self._resolve(entry, site, f"{where}{site.path}", site.value, site.version, outputs, upstream[index],
-                              references)
+                self._resolve(entry, site, f"{where}{site.path}", site.value, site.version, outputs,
+                              functools.partial(_upstream, edges, index), references)
         return ResolvedEntry(entry, steps, tuple(references), tuple(outputs.values()))
 
     def _image_folder(self, entry: BundleEntry) -> bool:
@@ -374,12 +375,12 @@ class _Resolver:
         return depends
 
     def _resolve(self, entry: BundleEntry, site: RefSite, where: str, name: str, version: int | None,
-                 outputs: dict[tuple[EntityKind, str], Output], upstream: set[int],
+                 outputs: dict[tuple[EntityKind, str], Output], upstream: Callable[[], set[int]],
                  references: list[Reference]) -> None:
         kind, expected, key = site.ref.kind, site.ref.artifact_type or site.ref.env_type, _nfc(name)
         output = outputs.get((kind, key))
         if output is not None:
-            if output.step not in upstream:
+            if output.step not in upstream():
                 self._problem(entry, f"{where}: {name!r} is written by step {output.step_id!r}, which this step "
                               "doesn't depend on")
             elif version is not None:
@@ -455,26 +456,30 @@ def _nfc(name: str) -> str:
     return unicodedata.normalize("NFC", name)
 
 
-def _upstream(steps: list[dict], depends: list[list[str] | None]) -> list[set[int]]:
-    """The indexes of the steps each step runs after: the step ids ``depends`` holds for it or, when it has
-    none, every step before it, followed transitively; the rule the task scheduler runs steps by."""
+def _step_edges(steps: list[dict], depends: list[list[str] | None]) -> list[list[int] | None]:
+    """The indexes of the steps each step's ``depends`` names; None for a step that names none."""
     index_of: dict[str, int] = {}
     for index, step in enumerate(steps):
         if isinstance(step.get("id"), str):
             index_of.setdefault(step["id"], index)
-    direct = [set(range(index)) if ids is None else {index_of[dep_id] for dep_id in ids}
-              for index, ids in enumerate(depends)]
-    upstream = []
-    for index in range(len(steps)):
-        seen: set[int] = set()
-        frontier = list(direct[index])
-        while frontier:
-            current = frontier.pop()
-            if current not in seen:
-                seen.add(current)
-                frontier.extend(direct[current])
-        upstream.append(seen)
-    return upstream
+    return [None if ids is None else [index_of[dep_id] for dep_id in ids] for ids in depends]
+
+
+def _upstream(edges: list[list[int] | None], index: int) -> set[int]:
+    """The steps step ``index`` runs after: those its edges name, or all before it when it names none, transitively."""
+    seen: set[int] = set()
+    below = 0  # each step under it is already seen, which keeps the walk linear
+    frontier = [index]
+    while frontier:
+        current = frontier.pop()
+        named = edges[current]
+        if named is None:
+            named, below = range(below, current), max(below, current)
+        for step in named:
+            if step not in seen:
+                seen.add(step)
+                frontier.append(step)
+    return seen
 
 
 def _same_type(artifact_type: str, expected: str) -> bool:

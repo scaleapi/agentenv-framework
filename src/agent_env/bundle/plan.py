@@ -65,8 +65,8 @@ from .resolve import BuiltImage, BundleImage, Reference, ResolvedBundle, Resolve
 
 _Key = tuple[str, str]  # (store, id)
 
-_GETTERS = {EntityKind.ENV: Env.get, EntityKind.AGENT: A2AAgent.get, EntityKind.ARTIFACT: Artifact.get,
-            EntityKind.TASK: Task.get}
+STORE_GETTERS = {EntityKind.ENV: Env.get, EntityKind.AGENT: A2AAgent.get, EntityKind.ARTIFACT: Artifact.get,
+                 EntityKind.TASK: Task.get}
 
 # The artifact types written from their folders, and what each one's write reads there, which the ledger hashes.
 _FOLDER_WALKS = {FileArtifact: one_file, FileArtifactUniverse: entry_files, EnvironmentArtifact: environment_files,
@@ -320,7 +320,7 @@ class _Planner:
         lookup = (ref.kind, ref.id, ref.version)
         if lookup not in read:
             try:
-                read[lookup] = _GETTERS[ref.kind](ref.id, ref.version)
+                read[lookup] = STORE_GETTERS[ref.kind](ref.id, ref.version)
             except NotFoundError:
                 read[lookup] = None
             except (ValueError, KeyError, TypeError) as e:
@@ -590,8 +590,8 @@ class _Planner:
         if store_latest is None:
             return None
         try:
-            entity = _GETTERS[ref.kind](ref.id, ref.version if ref.version is not None
-                                        else store_latest.get((ref.kind, ref.id)))
+            entity = STORE_GETTERS[ref.kind](ref.id, ref.version if ref.version is not None
+                                             else store_latest.get((ref.kind, ref.id)))
         except (NotFoundError, ValueError, KeyError, TypeError):
             return None  # reported by the store ref check
         return getattr(entity, "environment_name", None)
