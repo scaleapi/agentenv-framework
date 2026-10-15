@@ -13,18 +13,10 @@ Stdlib only, and Python 3.9 compatible: it runs in the sandbox, which may not ha
 agent_env installed, or anything newer than macOS's /usr/bin/python3.
 """
 
-import importlib.machinery
-import importlib.util
-import json
-import os
-import signal
-import subprocess
 import sys
-import time
 
 _TIMEOUT_EXIT_CODE = 124  # GNU timeout's, which run_code reports as a timeout
 _GRACE_SECONDS = 5  # between SIGTERM and SIGKILL
-_FORWARDED_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 _POLL_SECONDS = 0.1
 
 
@@ -51,7 +43,7 @@ def _supervise(command, timeout_seconds):
         _signal_group(child.pid, signum)
         kill_at = kill_at or time.monotonic() + _GRACE_SECONDS
 
-    for signum in _FORWARDED_SIGNALS:
+    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(signum, forward)
     while child.poll() is None:
         now = time.monotonic()
@@ -74,7 +66,24 @@ def _supervise(command, timeout_seconds):
 
 
 if len(sys.argv) == 5:
+    # Only the supervisor imports these, and not from the run dir (sys.path[0]): an artifact member named after one
+    # would otherwise run here, outside the limit. The script's own process imports just what it always has.
+    import os  # loaded at startup, so never from the run dir
+
+    # Python puts the realpath there, and the run dir is often reached through a symlink (macOS's /tmp).
+    here = os.path.dirname(os.path.realpath(__file__))
+    sys.path[:] = [entry for entry in sys.path if os.path.realpath(entry or ".") != here]
+    import signal
+    import subprocess
+    import time
+
     sys.exit(_supervise([sys.executable] + sys.argv[:4], float(sys.argv[4])))
+
+# Below the supervisor, which must not import these.
+import importlib.machinery
+import importlib.util
+import json
+import os
 
 run_dir, entrypoint, script_file = sys.argv[1], sys.argv[2], sys.argv[3]
 

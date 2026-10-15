@@ -653,9 +653,11 @@ def test_runner_parses_as_python_3_9():
 
 
 def _runner_args(run_dir, body, timeout):
+    """Stage the runner, script and input as run_code does, the runner inside the run dir."""
+    (run_dir / "runner.py").write_text(_RUNNER.read_text())
     (run_dir / "script.py").write_text(body)
     (run_dir / "input.json").write_text(json.dumps({"args": {}, "results": {}}))
-    return [sys.executable, str(_RUNNER), str(run_dir), "run", "script.py", str(timeout)]
+    return [sys.executable, str(run_dir / "runner.py"), str(run_dir), "run", "script.py", str(timeout)]
 
 
 def _supervised(run_dir, body, timeout=60):
@@ -729,13 +731,55 @@ def test_a_script_that_ignores_sigterm_is_killed_after_the_grace_period(tmp_path
     assert 5 <= elapsed < 30
 
 
+# CI can start the tests with SIGINT ignored (a background job), and an ignored signal is inherited: this starts the
+# runner with the defaults, as a sandbox's exec does.
+_WITH_DEFAULT_SIGNALS = (
+    "import os, signal, sys\n"
+    "for s in (signal.SIGINT, signal.SIGHUP):\n    signal.signal(s, signal.SIG_DFL)\n"
+    "os.execv(sys.executable, [sys.executable] + sys.argv[1:])\n"
+)
+
+
+def _start_runner(run_dir, body, timeout):
+    return subprocess.Popen([sys.executable, "-c", _WITH_DEFAULT_SIGNALS, *_runner_args(run_dir, body, timeout)[1:]])
+
+
 @pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT, signal.SIGHUP])
 def test_a_signal_to_the_runner_stops_the_script_and_everything_it_started(tmp_path, signum):
-    proc = subprocess.Popen(_runner_args(tmp_path, _STARTS_A_CHILD, 60))
+    proc = _start_runner(tmp_path, _STARTS_A_CHILD, 60)
     child = _wait_for_pid(tmp_path)
     proc.send_signal(signum)
     assert proc.wait(timeout=30) == 128 + signum
     assert _gone_within(child)
+
+
+def test_a_forwarded_signal_the_script_ignores_is_followed_by_sigkill(tmp_path):
+    body = _STARTS_A_CHILD.replace("def run(inp):\n", "def run(inp):\n    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n")
+    proc = _start_runner(tmp_path, "import signal\n" + body, 60)
+    child = _wait_for_pid(tmp_path)
+    started = time.monotonic()
+    proc.send_signal(signal.SIGTERM)
+    assert proc.wait(timeout=30) == 128 + signal.SIGKILL
+    assert 5 <= time.monotonic() - started < 30
+    assert _gone_within(child)
+
+
+def test_artifact_files_named_after_the_supervisors_imports_never_run_in_it(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (tmp_path / "link").symlink_to(run_dir)  # reached through a symlink, as macOS's /tmp is
+    for name in ("signal", "subprocess", "time"):
+        (run_dir / f"{name}.py").write_text("raise SystemExit('ran in the supervisor')\n")
+    result = _supervised(tmp_path / "link", "def run(inp):\n    return {'ok': True}\n")
+    assert result.returncode == 0, result.stderr
+    assert json.loads((run_dir / "output.json").read_text()) == {"ok": True}
+
+
+def test_the_script_still_imports_its_own_module_named_like_one_the_supervisor_uses(tmp_path):
+    (tmp_path / "signal.py").write_text("VALUE = 'mine'\n")
+    result = _supervised(tmp_path, "import signal\ndef run(inp):\n    return {'from': signal.VALUE}\n")
+    assert result.returncode == 0, result.stderr
+    assert json.loads((tmp_path / "output.json").read_text()) == {"from": "mine"}
 
 
 def test_config_round_trips_through_to_dict_from_dict():
