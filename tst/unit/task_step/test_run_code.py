@@ -731,17 +731,17 @@ def test_a_script_that_ignores_sigterm_is_killed_after_the_grace_period(tmp_path
     assert 5 <= elapsed < 30
 
 
-# CI can start the tests with SIGINT ignored (a background job), and an ignored signal is inherited: this starts the
-# runner with the defaults, as a sandbox's exec does.
-_WITH_DEFAULT_SIGNALS = (
+# Starts the runner with SIGINT and SIGHUP ignored, as a background job is (CI runs the tier as one). The script must
+# still get their defaults, as it does under GNU timeout.
+_WITH_SIGNALS_IGNORED = (
     "import os, signal, sys\n"
-    "for s in (signal.SIGINT, signal.SIGHUP):\n    signal.signal(s, signal.SIG_DFL)\n"
+    "for s in (signal.SIGINT, signal.SIGHUP):\n    signal.signal(s, signal.SIG_IGN)\n"
     "os.execv(sys.executable, [sys.executable] + sys.argv[1:])\n"
 )
 
 
 def _start_runner(run_dir, body, timeout):
-    return subprocess.Popen([sys.executable, "-c", _WITH_DEFAULT_SIGNALS, *_runner_args(run_dir, body, timeout)[1:]])
+    return subprocess.Popen([sys.executable, "-c", _WITH_SIGNALS_IGNORED, *_runner_args(run_dir, body, timeout)[1:]])
 
 
 @pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT, signal.SIGHUP])

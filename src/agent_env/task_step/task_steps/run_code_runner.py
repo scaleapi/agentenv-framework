@@ -33,18 +33,27 @@ def _supervise(command, timeout_seconds):
     At the limit, or on a signal forwarded to it, the group gets that signal (SIGTERM at the
     limit), then SIGKILL once the child exits or the grace period runs out.
     """
-    child = subprocess.Popen(command, start_new_session=True)
+    child = None
+    early = []  # signals that came before the child did
     deadline = time.monotonic() + timeout_seconds
     kill_at = None
     timed_out = False
 
     def forward(signum, _frame):
         nonlocal kill_at
-        _signal_group(child.pid, signum)
+        if child is None:
+            early.append(signum)
+        else:
+            _signal_group(child.pid, signum)
         kill_at = kill_at or time.monotonic() + _GRACE_SECONDS
 
+    # Caught before the child starts, as GNU timeout does, so it gets their defaults: one ignored here (a background
+    # job's SIGINT) would stay ignored in it.
     for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(signum, forward)
+    child = subprocess.Popen(command, start_new_session=True)
+    for signum in early:
+        _signal_group(child.pid, signum)
     while child.poll() is None:
         now = time.monotonic()
         if kill_at is not None and now >= kill_at:
