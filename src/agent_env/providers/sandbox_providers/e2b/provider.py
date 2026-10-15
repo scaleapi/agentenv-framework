@@ -381,3 +381,7 @@ class E2BSandboxProvider(SandboxProvider):
             )
             sandbox.network_policy = None
         return sandbox
+
+    async def terminate_sandbox(self, sandbox_id: str) -> None:
+        if not await self._get_sandbox_cls().kill(sandbox_id, api_key=self._api_key):
+            logger.info("E2B sandbox %s was already absent during terminate", sandbox_id)

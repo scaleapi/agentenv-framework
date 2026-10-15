@@ -1,6 +1,7 @@
 """Resolving a parsed bundle: every declared reference rewritten to the id it names, before any write."""
 
 import json
+import random
 
 import pytest
 
@@ -251,6 +252,38 @@ def test_an_output_resolves_for_a_step_that_depends_on_its_writer(make, depends_
          "depends_on": depends_on},
     ]}), "t")
     assert entry.config[2]["artifact_id"] == f"{ROOT}/t/tickets-cli"
+
+
+def _walked(edges, index):
+    """The steps ``index`` runs after, by the plain transitive walk of the scheduler's rule."""
+    direct = [set(range(i)) if named is None else set(named) for i, named in enumerate(edges)]
+    seen, frontier = set(), list(direct[index])
+    while frontier:
+        current = frontier.pop()
+        if current not in seen:
+            seen.add(current)
+            frontier.extend(direct[current])
+    return seen
+
+
+def test_a_steps_upstream_is_what_the_scheduler_runs_it_after_cycles_and_later_steps_included():
+    rng = random.Random(0)
+    for _ in range(500):
+        size = rng.randint(1, 10)
+        edges = [None if rng.random() < 0.4 else rng.sample(range(size), rng.randint(0, min(3, size)))
+                 for _ in range(size)]
+        for index in range(size):
+            assert resolve_module._upstream(edges, index) == _walked(edges, index), (edges, index)
+
+
+@pytest.mark.timeout(60)
+def test_a_task_of_thousands_of_steps_resolves(make):
+    steps = [{"id": "cli", "type": "build_mcp_cli", "env_id": "tickets", "command_name": "c",
+              "cli_artifact_id": "tickets-cli"}]
+    steps += [{"id": f"d{i}", "type": "deploy_env", "env_id": "tickets"} for i in range(3000)]
+    steps.append({"id": "install", "type": "load_artifact", "agent_name": "solver", "artifact_id": "tickets-cli"})
+
+    assert resolved(make(tasks={"t": steps}), "t").config[-1]["artifact_id"] == f"{ROOT}/t/tickets-cli"
 
 
 @pytest.mark.parametrize(("depends_on", "problem"), [

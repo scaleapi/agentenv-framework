@@ -93,6 +93,10 @@ jobs:
           # workspace members, and the bare name keys [tool.uv.sources]; none of those may be rewritten.
           sed -i "s/\"agentenv-framework-protocol[^\"]*\"/\"agentenv-framework-protocol==${protocol}\"/" pyproject.toml
           grep -q "\"agentenv-framework-protocol==${protocol}\"" pyproject.toml
+          # The echo-mcp example's server image installs the protocol this release ships with.
+          echo_requirements=src/agent_env/examples/echo-mcp/envs/echo/requirements.txt
+          sed -i "s/^agentenv-framework-protocol.*/agentenv-framework-protocol==${protocol}/" "$echo_requirements"
+          grep -qx "agentenv-framework-protocol==${protocol}" "$echo_requirements"
           uv build --no-sources --out-dir dist
       - name: Check its metadata renders
         run: uvx --index-url https://pypi.org/simple twine check --strict dist/*

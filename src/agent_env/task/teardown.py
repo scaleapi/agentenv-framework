@@ -98,14 +98,14 @@ async def teardown_run(context: TaskStepContext, *, timeout: float = TERMINATE_T
             return
         try:
             async with asyncio.timeout(timeout):
-                handle = await _terminate(sandbox)
+                on_this_machine = await _terminate(sandbox)
         except Exception as e:
             reason = f"timed out after {timeout:g}s" if isinstance(e, TimeoutError) else _described(e)
             logger.warning("teardown: %s (%s) was not terminated: %s", sandbox.sandbox_id, kind(sandbox), reason)
             failed.append((sandbox, reason))
             return
         context.metadata[TORN_DOWN_KEY] = [*context.metadata.get(TORN_DOWN_KEY, []), sandbox.sandbox_id]
-        if handle.ON_THIS_MACHINE and (why := await _remove_folder(sandbox)):
+        if on_this_machine and (why := await _remove_folder(sandbox)):
             failed.append((sandbox, why))
         else:
             terminated.append(sandbox)
@@ -133,12 +133,17 @@ async def _remove_folder(sandbox: RecordedSandbox) -> str | None:
     return None
 
 
-async def _terminate(sandbox: RecordedSandbox):
-    provider = (build_sandbox_provider(sandbox.sandbox_type) if sandbox.sandbox_type
-                else _DEFAULT_PROVIDERS[sandbox.slot]())
-    handle = await provider.get_sandbox(sandbox.sandbox_id)
+async def _terminate(sandbox: RecordedSandbox) -> bool:
+    """Terminate ``sandbox`` and say whether it ran on this machine: by id through the backend that made it, or, for
+    a record that doesn't name one, through a live handle, since "not found" from a provider that didn't make the
+    sandbox doesn't mean it's gone."""
+    if sandbox.sandbox_type:
+        provider = build_sandbox_provider(sandbox.sandbox_type)
+        await provider.terminate_sandbox(sandbox.sandbox_id)
+        return provider.ON_THIS_MACHINE
+    handle = await _DEFAULT_PROVIDERS[sandbox.slot]().get_sandbox(sandbox.sandbox_id)
     await handle.terminate()
-    return handle
+    return handle.ON_THIS_MACHINE
 
 
 def _described(error: Exception) -> str:

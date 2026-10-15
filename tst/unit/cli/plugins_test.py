@@ -348,6 +348,7 @@ def test_bare_install_core_commands_unchanged():
     assert sorted(cli.commands) == [
         "a2a-agent",
         "artifact",
+        "bundle",
         "config",
         "env",
         "eval",
