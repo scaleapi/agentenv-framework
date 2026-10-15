@@ -26,6 +26,7 @@ from agent_env.store.document_store.document_store import (
     Predicate,
     Sort,
     SortKey,
+    UnknownDocumentTypeError,
     UpdateSpec,
     VersionedEntityStore,
     VersionedEntityStoreCache,
@@ -39,6 +40,7 @@ from agent_env.store.document_store.sqlite_document_store import LocalSqliteDocu
 __all__ = [
     "DocumentStore",
     "DuplicateKeyError",
+    "UnknownDocumentTypeError",
     "MongoDocumentStore",
     "LocalSqliteDocumentStore",
     "VersionedEntityStore",

@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Callable, Optional, Self
 
 from agent_env.store.base import NotFoundError
 from agent_env.config import get_config
-from agent_env.store.document_store import DocumentStore, DuplicateKeyError, Filter, Lte, Ne, Sort, SortKey, UpdateSpec, VersionedEntityStore, VersionedEntityStoreCache, compare_and_swap
+from agent_env.store.document_store import DocumentStore, DuplicateKeyError, Filter, Lte, Ne, Sort, SortKey, UnknownDocumentTypeError, UpdateSpec, VersionedEntityStore, VersionedEntityStoreCache, compare_and_swap
 from agent_env.store.query import QueryBuilder, to_document_query
 from agent_env.task.step_journal import (
     _RESERVED_STEP_IDS,
@@ -115,7 +115,7 @@ class TaskStore:
         registry = get_task_registry()
         cls = registry.get(task_type)
         if cls is None:
-            raise ValueError(f"Unknown task type: {task_type}")
+            raise UnknownDocumentTypeError(f"Unknown task type: {task_type}")
         return cls.from_dict(doc)
 
     def execute_query(self, query: TaskQuery) -> list[Task]:

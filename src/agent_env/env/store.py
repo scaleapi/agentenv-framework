@@ -18,6 +18,7 @@ from agent_env.store.document_store import (
     Filter,
     LteOrAbsent,
     Sort,
+    UnknownDocumentTypeError,
     UpdateSpec,
     VersionedEntityStore,
     VersionedEntityStoreCache,
@@ -156,7 +157,7 @@ class EnvStore:
         registry = get_env_registry()
         cls = registry.get(env_type)
         if cls is None:
-            raise ValueError(f"Unknown env type: {env_type}{_registration.failure_note(_registration.ENVS, env_type)}")
+            raise UnknownDocumentTypeError(f"Unknown env type: {env_type}{_registration.failure_note(_registration.ENVS, env_type)}")
         return cls.from_dict(doc)
 
     def execute_query(self, query: EnvQuery) -> list[Env]:

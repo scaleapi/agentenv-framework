@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Callable, ClassVar, Optional
 
 from agent_env.plugins import _registration
+from agent_env.store.document_store import UnknownDocumentTypeError
 from agent_env.store.routing import run_scope
 from agent_env.task_step.context import TaskStepContext, regraft_redacted_keys
 from agent_env.task_step.context_ops import ContextUpdateOps, build_context_update_ops
@@ -385,7 +386,7 @@ class Task:
             step_type = step_dict["type"]
             step_cls = registry.get(step_type)
             if step_cls is None:
-                raise ValueError(
+                raise UnknownDocumentTypeError(
                     f"Unknown task step type: {step_type}{_registration.failure_note(_registration.TASK_STEPS, step_type)}"
                 )
             from agent_env.task_step.task_step import attach_retry_config

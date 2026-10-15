@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable, Generic, Optional, TypeVar, Union
 
 from agent_env.store.ids import is_local_id
+
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
@@ -155,6 +158,10 @@ class UpdateSpec:
 class DuplicateKeyError(Exception):
     """Raised by a ``DocumentStore`` write that would violate a unique index: an ``insert``, or the
     insert an upsert falls back to when its filter matches nothing."""
+
+
+class UnknownDocumentTypeError(ValueError):
+    """Raised when a stored document's ``type`` has no class in the registry that loads it."""
 
 
 def _dig(doc: dict, path: str) -> tuple[bool, Any]:
@@ -476,10 +483,16 @@ class VersionedEntityStore(Generic[T]):
         limit: Optional[int] = None,
         offset: Optional[int] = None,
     ) -> list[T]:
-        return [
-            self._deserialize(doc)
-            for doc in self._doc_store.query(self._collection, filter, sort, limit, offset)
-        ]
+        entities = []
+        for doc in self._doc_store.query(self._collection, filter, sort, limit, offset):
+            try:
+                entities.append(self._deserialize(doc))
+            except UnknownDocumentTypeError as e:
+                logger.warning(
+                    "Skipping a document in %s (id=%r version=%r type=%r): %s",
+                    self._collection, doc.get("id"), doc.get("version"), doc.get("type"), e,
+                )
+        return entities
 
     def count(self, filter: Filter) -> int:
         return self._doc_store.count(self._collection, filter)

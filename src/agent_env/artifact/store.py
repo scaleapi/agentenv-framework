@@ -18,6 +18,7 @@ from agent_env.store.document_store import (
     DuplicateKeyError,
     Filter,
     In,
+    UnknownDocumentTypeError,
     UpdateSpec,
     VersionedEntityStore,
     VersionedEntityStoreCache,
@@ -258,8 +259,8 @@ class ArtifactStore:
         if cls is None:
             # A plugin that claims the name says why it is missing; the config remedies are for a name none claims.
             if note := _registration.failure_note(_registration.ARTIFACTS, artifact_type):
-                raise ValueError(f"Unknown artifact type {doc['type']!r}{note}")
-            raise ValueError(
+                raise UnknownDocumentTypeError(f"Unknown artifact type {doc['type']!r}{note}")
+            raise UnknownDocumentTypeError(
                 f"Unknown artifact type {doc['type']!r}; register it under [artifacts].impls "
                 f"in .agentenv/config.toml, or map a renamed type to its current spelling "
                 f"under [artifacts].type_aliases"

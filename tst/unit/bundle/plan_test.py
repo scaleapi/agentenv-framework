@@ -328,7 +328,7 @@ def test_a_store_id_that_cant_be_read_is_reported(make, monkeypatch):
     put_env("crm")
     monkeypatch.setattr("agent_env.env.registry.get_env_registry", lambda: {})
     (problem,) = problems(make(tasks={"t": [deploy("crm")]}))
-    assert problem.startswith("tasks/t.json: step 'deploy': env_id: env 'crm' can't be read (ValueError: Unknown env "
+    assert problem.startswith("tasks/t.json: step 'deploy': env_id: env 'crm' can't be read (UnknownDocumentTypeError: Unknown env "
                               "type: note_test")
 
 
