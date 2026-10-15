@@ -6,9 +6,6 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 5
     groups:
-      # A ruff release can report findings that the lint step fails on, so it gets a pull request of
-      # its own. The exclusion keeps it out of the other group too, which a refresh of that group's
-      # open pull request would otherwise put it back in.
       ruff:
         patterns: ["ruff"]
       python-minor-and-patch:
