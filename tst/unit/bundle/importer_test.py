@@ -17,7 +17,7 @@ from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store
 from agent_env.bundle import BundleError, parse_bundle
 from agent_env.bundle import importer as importer_module
-from agent_env.bundle.importer import import_eval, import_task
+from agent_env.bundle.importer import ImportedEval, import_eval, import_task
 from agent_env.bundle.materialize import materialize
 from agent_env.bundle.plan import plan_bundle
 from agent_env.bundle.resolve import resolve_bundle
@@ -269,9 +269,30 @@ def test_an_eval_imports_with_each_task_it_names_once_under_names_taken_from_the
     assert tomllib.loads((imported.root / "evals/regression.toml").read_text()) == {
         "tasks": ["run", "run-2", "RUN-3", "triage"]}
     assert imported.duplicates == ("task team/run v1",)
-    assert imported.eval == ("evals/regression.toml", "nightly/regression", 1)
+    assert imported.eval == ImportedEval("evals/regression.toml", "nightly/regression", 1)
     plan = plan_bundle(resolve_bundle(parse_bundle(imported.root)))
     assert [entry.entry.name for entry in plan.evals] == ["regression"]
+
+
+def test_an_eval_naming_a_task_the_store_doesnt_hold_is_refused_and_writes_nothing(store):
+    Eval.put(id="broken", tasks=[EvalTask("triage"), EvalTask("gone"), EvalTask("triage", 7)])
+    before = _left(store)
+
+    with pytest.raises(BundleError) as caught:
+        import_eval("broken", store / "broken")
+
+    assert caught.value.problems == ("eval broken v1 names task gone, which isn't in the store",
+                                     "eval broken v1 names task triage v7, which isn't in the store")
+    assert _left(store) == before
+
+
+def test_an_older_version_imports_when_asked_for(store):
+    _task("triage", [STEPS[0]])
+
+    old, new = import_task("triage", store / "old", version=1), import_task("triage", store / "new")
+
+    assert [(task.version, task.steps) for task in old.tasks + new.tasks] == [(1, len(STEPS)), (2, 1)]
+    assert (old.root / "README.md").read_text().splitlines()[0] == "Imported from the store's task triage v1."
 
 
 @pytest.mark.parametrize("task_id, name", [

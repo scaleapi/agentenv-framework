@@ -36,14 +36,12 @@ def init(folder: Path, task_id: str | None, eval_id: str | None, version: int | 
 
 
 def _report(imported: BundleImport, folder: Path) -> None:
-    what = f"eval {imported.eval[1]} v{imported.eval[2]} and its tasks" if imported.eval else (
-        f"task {imported.tasks[0].id} v{imported.tasks[0].version}")
+    what = (f"eval {imported.eval.id} v{imported.eval.version} and its tasks" if imported.eval
+            else f"task {imported.tasks[0].id} v{imported.tasks[0].version}")
     click.echo(f"Imported {what} into {folder}:")
     for path in imported.files:
         click.echo(f"  {path}")
-    for title, lines in imported.sections():
-        if title in ("Tasks", "Eval"):
-            continue
+    for title, lines in imported.report():
         click.echo(f"{title}:")
         for line in lines:
             click.echo(f"  {line}")

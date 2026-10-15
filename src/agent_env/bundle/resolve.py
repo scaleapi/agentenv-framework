@@ -466,11 +466,9 @@ def _step_edges(steps: list[dict], depends: list[list[str] | None]) -> list[list
 
 
 def _upstream(edges: list[list[int] | None], index: int) -> set[int]:
-    """The indexes of the steps step ``index`` runs after: those its edges name or, when it has none, every step
-    before it, followed transitively; the rule the task scheduler runs steps by. Linear in the task's size, as
-    the steps below the highest edge-less step reached are all upstream."""
+    """The steps step ``index`` runs after: those its edges name, or all before it when it names none, transitively."""
     seen: set[int] = set()
-    below = 0
+    below = 0  # each step under it is already seen, which keeps the walk linear
     frontier = [index]
     while frontier:
         current = frontier.pop()

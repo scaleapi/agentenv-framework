@@ -525,15 +525,13 @@ class _Parser:
 
 
 def root_problems(root: Path) -> list[str]:
-    """Why a bundle at ``root``, a folder that needn't exist yet in one that does, would have no id; empty when it
-    would."""
+    """Why a bundle at ``root``, which needn't exist yet, would have no id; empty when it would have one."""
     parent = _canonical(Path(root).expanduser().parent)
     return [f"{show(path)}: {message}" for path, message in _id_root(parent / Path(root).name)[1]]
 
 
 def _id_root(root: Path) -> tuple[str, list[tuple[Path, str]]]:
-    """The ``@local`` id root of a bundle at the canonical path ``root``, and each part of the path that can't be one
-    segment of an id."""
+    """The ``@local`` id root for the canonical path ``root``, and each part of it that can't be an id segment."""
     problems = []
     user_home = home()
     home_relative = user_home is not None and root.is_relative_to(user_home)

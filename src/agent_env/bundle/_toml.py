@@ -1,5 +1,4 @@
-"""TOML for the tomls a bundle import writes, since ``tomllib`` only reads: strings, numbers, booleans, lists and
-inline tables, and tables of those under named top-level keys."""
+"""A TOML writer for the tomls a bundle import writes, since ``tomllib`` only reads."""
 
 from __future__ import annotations
 
@@ -13,8 +12,7 @@ _ESCAPES = {'"': '\\"', "\\": "\\\\", "\b": "\\b", "\t": "\\t", "\n": "\\n", "\f
 
 
 def dumps(document: dict[str, Any], *, tables: Collection[str] = ()) -> str:
-    """``document`` as TOML. A value under a key in ``tables`` is written as a ``[table]`` after the other keys;
-    every other dict is an inline table. Raises ValueError for a value TOML can't hold, such as None."""
+    """``document`` as TOML, keys in ``tables`` as ``[table]``s after the rest; ValueError for what TOML can't hold."""
     lines = [f"{_key(key)} = {_value(value)}" for key, value in document.items() if key not in tables]
     for key in (key for key in document if key in tables):
         lines += ["", f"[{_key(key)}]", *(f"{_key(k)} = {_value(v)}" for k, v in document[key].items())]
@@ -26,7 +24,7 @@ def _key(key: str) -> str:
 
 
 def _value(value: Any, *, top: bool = True) -> str:
-    """``value`` as TOML; a list of several items spans lines only at the top, since an inline table can't."""
+    """``value`` as TOML; a list of several items spans lines only at the top, as an inline table can't."""
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, int):
