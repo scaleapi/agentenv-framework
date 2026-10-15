@@ -350,6 +350,14 @@ class PromptAgentTaskStep(TaskStep):
                 f"after turn {cfg.max_snapshots} and the rest are recorded as skipped"
             )
 
+    def _resolve_model_and_effort(self, context: TaskStepContext) -> tuple[Optional[str], Optional[str]]:
+        """Model and effort for this run: this step's ``step_overrides`` win over the run-wide ``agent_model`` / ``agent_effort`` and the stored values."""
+        step_overrides = self.step_param_overrides(context)
+        overrides = context.metadata.get("user_overrides", {})
+        model = step_overrides.get("model") or context.agent_model or self.model or context.default_agent_model
+        effort = step_overrides.get("effort") or overrides.get("agent_effort") or self.effort
+        return model, effort
+
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         # A changelog staged on the agent moves into the store while it works, and the rest when it is done.
         async with draining(staged_changelogs(context.metadata, agent_name=self.agent_name)):
@@ -411,10 +419,9 @@ class PromptAgentTaskStep(TaskStep):
         initial_parts = self._apply_seed(self._effective_parts(), seed)
         prompt_text = initial_parts[0]["text"] if self.prompt is not None else None
 
-        model = context.agent_model or self.model or context.default_agent_model
+        model, effort = self._resolve_model_and_effort(context)
         harness = context.agent_harness or self.harness
         overrides = context.metadata.get("user_overrides", {})
-        effort = overrides.get("agent_effort") or self.effort
         max_thinking_tokens = overrides.get("agent_max_thinking_tokens") or self.max_thinking_tokens
         max_turns = overrides.get("agent_max_turns") or self.max_turns
 

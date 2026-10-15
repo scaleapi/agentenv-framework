@@ -243,7 +243,7 @@ def test_an_id_has_one_writer(make, tasks, files, problem):
 def test_store_ids_the_selection_reaches_are_read_once_and_kept(make, monkeypatch):
     put_env("crm")
     reads = []
-    monkeypatch.setitem(plan_module._GETTERS, EntityKind.ENV, lambda *key: reads.append(key) or Env.get(*key))
+    monkeypatch.setitem(plan_module.STORE_GETTERS, EntityKind.ENV, lambda *key: reads.append(key) or Env.get(*key))
     plan = plan_bundle(make(tasks={"t": [deploy("crm")], "u": [deploy("crm")]}))
     assert reads == [("crm", None)]
     ((kind, env_id, version, where),) = [(r.kind, r.id, r.version, r.where) for r in plan.store_refs]
@@ -291,7 +291,7 @@ def test_an_id_under_the_bundles_own_root_that_it_doesnt_write_is_refused_withou
     def read(*_):
         raise AssertionError("the plan read a store")
 
-    monkeypatch.setattr(plan_module, "_GETTERS", dict.fromkeys(plan_module._GETTERS, read))
+    monkeypatch.setattr(plan_module, "STORE_GETTERS", dict.fromkeys(plan_module.STORE_GETTERS, read))
     assert problems(make(tasks={"t": [deploy(f"{ROOT}/crm")]})) == (
         f"tasks/t.json: step 'deploy': env_id: '{ROOT}/crm' isn't in this bundle",
     )
@@ -347,7 +347,7 @@ def test_a_check_covers_every_task_and_eval_and_reads_no_store(make, monkeypatch
     def read(*_):
         raise AssertionError("the check read a store")
 
-    monkeypatch.setattr(plan_module, "_GETTERS", dict.fromkeys(plan_module._GETTERS, read))
+    monkeypatch.setattr(plan_module, "STORE_GETTERS", dict.fromkeys(plan_module.STORE_GETTERS, read))
     check_bundle(make(tasks={"t": [deploy("tickets")], "u": [deploy("crm")]}, evals={"e": 'tasks = ["t"]\n'}))
 
     resolved = make(tasks={"u": [deploy("tickets", "d"), deploy("tickets", "d")], "v": [deploy("@local/~/other/crm")]},

@@ -18,7 +18,7 @@ from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.deploy_sandbox import DeploySandboxTaskStep
 from tst.integration.env.envs.multi_env_local_test import _items_universe
 from tst.integration.env.envs.server_env_local_test import _put_items_image
-from tst.integration.store.local_parallel_deploy_test import _seed_bootstrap_envs, local_stack  # noqa: F401
+from tst.integration.store.local_parallel_deploy_test import _seed_bootstrap_envs, local_stack as local_stack
 from tst.util.a2a_test_agent import put_test_agent
 
 

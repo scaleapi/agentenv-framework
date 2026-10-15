@@ -28,6 +28,7 @@ import click
 
 from agent_env.cli import _installers
 from agent_env.cli._installers import Environment, InstallerError, Plan, ToolReceipt, normalize
+from agent_env.cli.utils import interruptible
 from agent_env.config import get_config
 from agent_env.config.loader import interpolate
 from agent_env.config.paths import state_root
@@ -501,7 +502,7 @@ def _uninstall(plan: Plan, saved: _Rollback, targets: list[str], also: list[str]
 
 def _apply(saved: _Rollback, change: Callable[[], list[str]], tools: Tools, *, keep: bool = False) -> int:
     """Make the change, and put the environment back as it was unless it took effect."""
-    with _interruptible():
+    with interruptible():  # so SIGTERM reaches the rollback
         try:
             problems = change()
         except KeyboardInterrupt:
@@ -551,19 +552,6 @@ def _locked(env: Environment) -> Iterator[None]:
 def _lock_path(env: Environment) -> Path:
     digest = hashlib.sha256(str(env.prefix.resolve()).encode()).hexdigest()[:16]
     return state_root() / "locks" / f"plugin-{digest}.lock"
-
-
-@contextmanager
-def _interruptible() -> Iterator[None]:
-    """SIGTERM interrupts like Ctrl-C, so both reach the rollback."""
-    def interrupt(signum, frame):
-        raise KeyboardInterrupt
-
-    previous = signal.signal(signal.SIGTERM, interrupt)
-    try:
-        yield
-    finally:
-        signal.signal(signal.SIGTERM, previous)
 
 
 @contextmanager

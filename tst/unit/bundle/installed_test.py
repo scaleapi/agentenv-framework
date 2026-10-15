@@ -117,7 +117,7 @@ def test_agent_env_ships_hello_rooted_at_its_own_distribution():
     ]
 
 
-def test_the_plugin_report_counts_the_bundle_agent_env_ships(monkeypatch, quiet_logs):
+def test_the_plugin_report_counts_the_bundles_agent_env_ships(monkeypatch, quiet_logs):
     monkeypatch.setattr(sys.modules["agent_env.cli.plugin"], "config_effect", lambda name: None)
 
     result = CliRunner().invoke(cli, ["plugin", "show", CORE, "--json"])
@@ -125,7 +125,8 @@ def test_the_plugin_report_counts_the_bundle_agent_env_ships(monkeypatch, quiet_
 
     assert result.exit_code == 0, result.output
     (core,) = json.loads(result.stdout)["plugins"]
-    assert [(c["group"], c["name"], c["status"]) for c in core["contributions"]] == [(BUNDLES, "hello", "active")]
+    assert [(c["group"], c["name"], c["status"]) for c in core["contributions"]] == [
+        (BUNDLES, "echo-mcp", "active"), (BUNDLES, "hello", "active")]
     assert "\n  agent-env itself\n" in shown and "requires:" not in shown
 
 

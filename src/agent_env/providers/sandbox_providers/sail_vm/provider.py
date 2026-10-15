@@ -429,3 +429,14 @@ class SailVmSandboxProvider(SandboxProvider):
                 sandbox_id, applied,
             )
         return sandbox
+
+    async def terminate_sandbox(self, sandbox_id: str) -> None:
+        """Through the handle: terminating also deletes the Sailbox's model-key policy, which only its applied
+        policy names."""
+        sdk, _ = await self._connect()
+        try:
+            sandbox = await self.get_sandbox(sandbox_id)
+        except sdk.NotFoundError:
+            logger.info("Sailbox %s was already gone at terminate", sandbox_id)
+            return
+        await sandbox.terminate()

@@ -37,6 +37,10 @@ class SandboxProviderTypeError(ConfigError):
     """A config-registered provider produced a Sandbox whose ``.type`` != its ``[sandbox.providers.<name>]`` key."""
 
 
+class SandboxNotFoundError(LookupError):
+    """The requested sandbox no longer exists; cleanup may treat it as already done."""
+
+
 class Accepts(Enum):
     """The images a sandbox provider can run, by the form the store keeps an image in."""
 
@@ -161,6 +165,15 @@ class SandboxProvider(ABC):
 
     async def get_sandbox(self, sandbox_id: str) -> Sandbox:
         raise NotImplementedError(f"{type(self).__name__} does not support get_sandbox")
+
+    async def terminate_sandbox(self, sandbox_id: str) -> None:
+        """Terminate a sandbox this provider made, by id; one that has already finished or is gone is terminated.
+        A backend that can terminate without a live handle overrides this, so teardown doesn't need one."""
+        try:
+            sandbox = await self.get_sandbox(sandbox_id)
+        except SandboxNotFoundError:
+            return
+        await sandbox.terminate()
 
     async def close(self) -> None:
         pass
@@ -304,6 +317,7 @@ _BUILTIN_SANDBOX_PROVIDERS: dict[str, str] = {
     "sail_vm": "agent_env.providers.sandbox_providers.sail_vm.provider:SailVmSandboxProvider",
     "smol_vm": "agent_env.providers.sandbox_providers.smol_vm.provider:SmolVmSandboxProvider",
     "tensorlake": "agent_env.providers.sandbox_providers.tensorlake.provider:TensorlakeSandboxProvider",
+    "vercel": "agent_env.providers.sandbox_providers.vercel.provider:VercelSandboxProvider",
     "tenki": "agent_env.providers.sandbox_providers.tenki.provider:TenkiSandboxProvider",
     "local": "agent_env.providers.sandbox_providers.local_sandbox:LocalSandboxProvider",
 }

@@ -15,6 +15,7 @@ from agent_env.eval import Eval
 from agent_env.task import Task, teardown
 from agent_env.task.teardown import TeardownReport
 from agent_env.task_step.context import DeployedSandbox
+from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 
 eval_run = importlib.import_module("agent_env.cli.eval.run")  # the package's ``run`` is the click command
 pytestmark = pytest.mark.usefixtures("sigint_handled")
@@ -81,7 +82,7 @@ def test_ctrl_c_cancels_the_running_runs_lets_a_finished_ones_teardown_finish_an
                 await asyncio.sleep(0.2)
             terminated.append(self.sandbox_id)
 
-    class _Provider:
+    class _Provider(SandboxProvider):
         async def get_sandbox(self, sandbox_id):
             return _Sandbox(sandbox_id)
 
