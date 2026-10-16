@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import functools
+import itertools
 import json
+import re
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -11,7 +14,7 @@ from mcp.shared.memory import create_connected_server_and_client_session
 from mcp.types import Tool as MCPTool
 
 from agent_env.env.gateway import InternalMCPServer
-from agent_env.env.gateway.clock import ClockError
+from agent_env.env.gateway.clock import Clock, ClockError
 from agent_env.env.gateway.constants import DEFAULT_ROLE
 from agent_env.env.gateway.get_time import GET_TIME_TOOL_DESCRIPTION, GET_TIME_TOOL_NAME
 from agent_env.env.gateway.gateway import Gateway
@@ -258,11 +261,38 @@ def test_tokyo_is_already_on_the_next_date(gw):
 
 
 def test_local_time_is_the_same_reading_at_second_precision(gw):
-    gw._clock.set_time(T, 3600)
+    """Each read of this clock lands 1.5 virtual seconds after the last, so a second read for local_time would name
+    another second."""
+    gw._clock = Clock(now_fn=functools.partial(next, itertools.count(step=1.5)))
+    gw._clock.set_time("2019-06-15T12:00:00.250Z", 1)
     gw._register_get_time_tool()
     payload = asyncio.run(_tools(gw)[GET_TIME_TOOL_NAME].fn(time_zone="Asia/Kolkata"))
     assert payload["local_time"].endswith("+05:30") and "." not in payload["local_time"]
     assert datetime.fromisoformat(payload["local_time"]) == datetime.fromisoformat(payload["current_time"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("now, zone", [
+    ("9999-12-31T20:00:00Z", "Asia/Tokyo"),
+    ("0001-01-01T02:00:00Z", "America/New_York"),
+], ids=["after-the-last-date", "before-the-first-date"])
+async def test_a_time_the_zone_cannot_show_is_a_tool_error_naming_it(gw, now, zone):
+    gw._clock.set_time(now, 0)
+    gw._register_get_time_tool()
+    message = f"the current time {now} can't be shown in time zone {zone!r}: its local date is out of range"
+
+    assert await _mcp_call(gw, {"time_zone": zone}) == {
+        "content": [{"type": "text", "text": message}], "isError": True}
+    status, body = await _step_call(gw, {"time_zone": zone})
+    assert (status, json.loads(body)) == (
+        200, {"content": [{"type": "text", "text": message}], "isError": True, "changelog_id": None})
+
+
+def test_the_description_asks_for_a_zone_only_from_an_agent_told_one():
+    assert ("If you have been told your user's IANA time zone, pass it as time_zone and take dates such as "
+            '"today" from the local_time it adds') in GET_TIME_TOOL_DESCRIPTION
+    assert "otherwise use current_time" in GET_TIME_TOOL_DESCRIPTION
+    assert not re.search(r"[A-Z][a-z]+/[A-Z]", GET_TIME_TOOL_DESCRIPTION)
 
 
 @pytest.mark.asyncio
