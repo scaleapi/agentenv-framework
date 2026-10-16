@@ -29,6 +29,7 @@ from agent_env.env.gateway.constants import EXT_TRIGGERS_URI, TRIGGER_WEBSITE
 from agent_env.env.gateway.get_time import (
     GET_TIME_TOOL_DESCRIPTION as GET_TIME_DESC,
     GET_TIME_TOOL_NAME as GET_TIME,
+    _SCHEMA as GET_TIME_SCHEMA,
 )
 from agent_env.env.envs.service_db import ServiceDBEnv
 from agent_env.env.envs.website_browser import (
@@ -3096,6 +3097,15 @@ async def _get_time_values(client, gw: str, mcp_url: str) -> tuple[str, str]:
     return payload["current_time"], json.loads(_step_content_text(r.json()))["current_time"]
 
 
+async def _get_time_in_zone(client, gw: str, mcp_url: str, zone: str) -> list[dict]:
+    """get_time with a `time_zone` over both call paths."""
+    arguments = {"time_zone": zone}
+    r = await client.post(f"{gw}/step", json={"action": "call_tool", "tool_name": GET_TIME, "arguments": arguments},
+                          timeout=30)
+    assert r.status_code == 200 and not r.json().get("isError"), f"/step get_time in {zone} failed: {r.text}"
+    return [json.loads(_step_content_text(r.json())), json.loads(await _clock_call_tool(mcp_url, GET_TIME, arguments))]
+
+
 @pytest.mark.asyncio
 @pytest.mark.integration
 async def test_gateway_clock_extension(sandbox_provider, mcp_server_envs):
@@ -3179,13 +3189,17 @@ async def test_gateway_clock_extension(sandbox_provider, mcp_server_envs):
             assert armed.servers - {"gateway"} == unarmed.servers, armed.servers
             tool = armed.mcp[GET_TIME]
             assert tool.description == GET_TIME_DESC
-            assert tool.inputSchema == {"type": "object", "properties": {}, "additionalProperties": False}
+            assert tool.inputSchema == GET_TIME_SCHEMA
             assert tool.annotations.readOnlyHint is True, tool.annotations
             # Bound to the LIVE armed clock, not a stale t0 captured at registration. Both call
             # paths, generous window because the clock is running at 3600x.
             for v in await _get_time_values(client, gw, result.mcp_url):
                 drift = (_dt(v) - _dt(t0a)).total_seconds()
                 assert 0 <= drift <= 3600 * (time.monotonic() - armed_at + 2), (v, t0a, drift)
+            # The gateway image has a tz database: a named zone answers with its offset on both call paths.
+            for payload in await _get_time_in_zone(client, gw, result.mcp_url, "Asia/Tokyo"):
+                assert payload["time_zone"] == "Asia/Tokyo" and payload["local_time"].endswith("+09:00"), payload
+                assert datetime.fromisoformat(payload["local_time"]) == _dt(payload["current_time"]), payload
 
             # rate cap: 1 real s = 1 virtual day is the ceiling.
             assert (await client.put(f"{gw}/clock/set-time",

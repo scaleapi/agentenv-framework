@@ -3,13 +3,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
+from mcp.shared.memory import create_connected_server_and_client_session
 from mcp.types import Tool as MCPTool
 
 from agent_env.env.gateway import InternalMCPServer
 from agent_env.env.gateway.clock import ClockError
+from agent_env.env.gateway.constants import DEFAULT_ROLE
 from agent_env.env.gateway.get_time import GET_TIME_TOOL_DESCRIPTION, GET_TIME_TOOL_NAME
 from agent_env.env.gateway.gateway import Gateway
 
@@ -171,7 +174,10 @@ def test_advertised_contract(gw):
     gw._register_get_time_tool()
     tool = _tools(gw)[GET_TIME_TOOL_NAME]
     assert tool.description == GET_TIME_TOOL_DESCRIPTION
-    assert tool.parameters["properties"] == {}
+    assert list(tool.parameters["properties"]) == ["time_zone"]
+    assert tool.parameters["properties"]["time_zone"]["type"] == "string"
+    assert "required" not in tool.parameters and tool.parameters["additionalProperties"] is False
+    assert gw._server_tools["gateway"][0].inputSchema == tool.parameters
     # readOnlyHint keeps a clock read from re-evaluating every armed state trigger
     assert tool.annotations.readOnlyHint is True
     assert gw._trigger_engine._is_readonly(GET_TIME_TOOL_NAME) is True
@@ -207,6 +213,70 @@ def test_answers_on_the_armed_clock_at_second_precision(gw, rate):
     assert payload["current_time"].startswith("2019-06-15T12:")
     # every synthetic server formats to second precision; a bare isoformat leaks microseconds at rate>0
     assert "." not in payload["current_time"]
+
+
+async def _mcp_call(gw: Gateway, arguments: dict) -> dict:
+    async with create_connected_server_and_client_session(gw._mcp) as session:
+        result = await session.call_tool(GET_TIME_TOOL_NAME, arguments)
+    return result.model_dump(mode="json", exclude_none=True)
+
+
+async def _step_call(gw: Gateway, arguments: dict) -> tuple[int, bytes]:
+    response = await gw._step_call_tool({"tool_name": GET_TIME_TOOL_NAME, "arguments": arguments}, DEFAULT_ROLE)
+    return response.status_code, response.body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arguments", [{}, {"time_zone": None}], ids=["no-argument", "explicit-null"])
+async def test_no_argument_answers_exactly_as_before(gw, arguments):
+    gw._clock.set_time(T, 0)
+    gw._register_get_time_tool()
+
+    assert await _mcp_call(gw, arguments) == {
+        "content": [{"type": "text", "text": '{\n  "current_time": "2019-06-15T12:00:00Z"\n}'}], "isError": False}
+    assert await _step_call(gw, arguments) == (200, b'{"content": [{"type": "text", "text": "{\\"current_time\\": '
+                                                   b'\\"2019-06-15T12:00:00Z\\"}"}], "isError": false, '
+                                                   b'"changelog_id": null}')
+
+
+@pytest.mark.parametrize("now, local_time", [
+    ("2026-03-08T06:59:59Z", "2026-03-08T01:59:59-05:00"),
+    ("2026-03-08T07:00:00Z", "2026-03-08T03:00:00-04:00"),
+], ids=["before", "after"])
+def test_new_york_across_the_spring_forward_change(gw, now, local_time):
+    gw._clock.set_time(now, 0)
+    gw._register_get_time_tool()
+    assert asyncio.run(_tools(gw)[GET_TIME_TOOL_NAME].fn(time_zone="America/New_York")) == {
+        "current_time": now, "time_zone": "America/New_York", "local_time": local_time}
+
+
+def test_tokyo_is_already_on_the_next_date(gw):
+    gw._clock.set_time("2026-10-16T15:30:00Z", 0)
+    gw._register_get_time_tool()
+    assert asyncio.run(_tools(gw)[GET_TIME_TOOL_NAME].fn(time_zone="Asia/Tokyo")) == {
+        "current_time": "2026-10-16T15:30:00Z", "time_zone": "Asia/Tokyo", "local_time": "2026-10-17T00:30:00+09:00"}
+
+
+def test_local_time_is_the_same_reading_at_second_precision(gw):
+    gw._clock.set_time(T, 3600)
+    gw._register_get_time_tool()
+    payload = asyncio.run(_tools(gw)[GET_TIME_TOOL_NAME].fn(time_zone="Asia/Kolkata"))
+    assert payload["local_time"].endswith("+05:30") and "." not in payload["local_time"]
+    assert datetime.fromisoformat(payload["local_time"]) == datetime.fromisoformat(payload["current_time"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("zone", ["Mars/Olympus_Mons", "", 5], ids=["unknown", "empty", "not-a-string"])
+async def test_an_unknown_zone_is_a_tool_error_naming_it(gw, zone):
+    gw._clock.set_time(T, 0)
+    gw._register_get_time_tool()
+    message = f"unknown time zone {zone!r}: pass an IANA time zone name such as 'America/New_York'"
+
+    assert await _mcp_call(gw, {"time_zone": zone}) == {
+        "content": [{"type": "text", "text": message}], "isError": True}
+    status, body = await _step_call(gw, {"time_zone": zone})
+    assert status == 200
+    assert json.loads(body) == {"content": [{"type": "text", "text": message}], "isError": True, "changelog_id": None}
 
 
 def test_unarmed_clock_fails_loud_without_disclosing_why(gw):
