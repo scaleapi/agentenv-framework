@@ -19,6 +19,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 
 from agentenv_protocol import (
+    HIDDEN_BY_DEFAULT_META_KEY,
     AgentEnvEnvironment,
     AgentEnvFastMCPApplication,
     AgentEnvStarletteApplication,
@@ -1141,6 +1142,49 @@ async def test_create_fastmcp_app_encodes_deploy_contract(monkeypatch):
         assert r.json()["result"]["parts"][0]["data"] == {"items": []}
     await app.call_tool("items_add_item", {"item": "x", "times": 2})
     assert handler.store == ["x", "x"]
+
+
+class _PlumbingHandler(_ToolHandler):
+    @tool(name="{environment_name}_insert_item", hidden_by_default=True)
+    async def insert_item(self, item: str) -> dict:
+        """Put an item in the store as if it had arrived."""
+        self.store.append(item)
+        return {"count": len(self.store)}
+
+
+def test_hidden_by_default_meta_key_is_the_literal_the_gateway_mirrors():
+    assert HIDDEN_BY_DEFAULT_META_KEY == "agentenv.io/hiddenByDefault"
+
+
+@pytest.mark.asyncio
+async def test_hidden_by_default_tool_is_listed_with_the_meta_flag_and_others_without(monkeypatch):
+    pytest.importorskip("mcp.server.fastmcp")
+    monkeypatch.delenv("SERVICE_NAME", raising=False)
+    handler = _PlumbingHandler()
+    app = create_fastmcp_app(handler, card=EnvironmentCard(name="items"))
+    listed = {t.name: t for t in await app.list_tools()}
+    assert listed["items_insert_item"].meta == {HIDDEN_BY_DEFAULT_META_KEY: True}
+    assert listed["items_add_item"].meta is None and listed["count_items"].meta is None
+    wire = listed["items_insert_item"].model_dump(by_alias=True, exclude_none=True)
+    assert wire["_meta"] == {"agentenv.io/hiddenByDefault": True}
+    await app.call_tool("items_insert_item", {"item": "x"})
+    assert handler.store == ["x"]
+
+
+@pytest.mark.asyncio
+async def test_hidden_by_default_reaches_tools_list_on_standalone_fastmcp():
+    fastmcp = pytest.importorskip("fastmcp")
+    app = fastmcp.FastMCP("items")
+    AgentEnvFastMCPApplication(environment_card=EnvironmentCard(name="items"), handler=_PlumbingHandler()).add_routes_to_app(app)
+    async with fastmcp.Client(app) as client:
+        listed = {t.name: t for t in await client.list_tools()}
+    assert (listed["items_insert_item"].meta or {}).get(HIDDEN_BY_DEFAULT_META_KEY) is True
+    assert not (listed["items_add_item"].meta or {}).get(HIDDEN_BY_DEFAULT_META_KEY)
+
+
+def test_an_unflagged_tool_mounts_on_a_target_without_the_meta_parameter():
+    """FastMCP-shaped targets that predate `meta` (this file's _FakeMCP) still mount every unflagged tool."""
+    assert set(_mounted(_ToolHandler()).tools) == {"count_items", "items_add_item"}
 
 
 def test_create_fastmcp_app_uses_card_verbatim(monkeypatch):

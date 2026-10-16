@@ -81,6 +81,12 @@ environment-prefixed tools without knowing the name at class-definition time; an
 servers an env deploys behind one gateway: if two serve a name, the gateway serves none of their
 tools and the deploy fails naming it, so prefix with `{environment_name}` when servers may share one.
 
+`@tool(..., hidden_by_default=True)` is for plumbing a task drives (a trigger's tool action, a
+simulated party) that the agent under test must not see. The tool is listed with `_meta`
+`{"agentenv.io/hiddenByDefault": true}` (`HIDDEN_BY_DEFAULT_META_KEY`), and the gateway hides it
+from every role, in its MCP `tools/list` and `/step`, until a tool-access rule names it for that
+role; rules for `"*"` tools never show it. Trigger tool actions call it as usual.
+
 `AgentEnvStarletteApplication` mounts the same handler onto a Starlette/FastAPI app instead of
 FastMCP; since those apps have no MCP tool registry, constructing one with `@tool` methods
 raises.

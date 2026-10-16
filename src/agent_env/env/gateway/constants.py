@@ -127,6 +127,8 @@ AGENT_ENV_ROLE_HEADER = "AgentEnv-Role"
 # key naming the inbound session, so a child can keep per-caller state behind the gateway's one shared session.
 AGENT_ENV_ROLE_META_KEY = "agentenv.io/role"
 AGENT_ENV_SESSION_META_KEY = "agentenv.io/session"
+# MCP tools/list `_meta` key on a tool every role starts without: only a rule naming the tool shows it to a role.
+AGENT_ENV_HIDDEN_BY_DEFAULT_META_KEY = "agentenv.io/hiddenByDefault"
 DEFAULT_ROLE = "default"
 WILDCARD = "*"
 TOOL_DISABLE_ACTION = "disable"
