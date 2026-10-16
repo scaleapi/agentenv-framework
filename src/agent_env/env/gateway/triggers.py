@@ -13,13 +13,14 @@ import random
 import re
 import uuid
 from collections import deque
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone, tzinfo
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 from mcp.types import CallToolResult, TextContent
 
-from .clock import ClockError, _advance, _iso, _parse_duration, _parse_rfc3339
+from .clock import ClockError, _advance, _iso, _parse_duration, _parse_rfc3339, _zone
 from .caller import Caller
 from .constants import DEFAULT_ROLE, TRIGGER_IN_FLIGHT_STATUSES, TRIGGER_STATUSES
 
@@ -1536,39 +1537,56 @@ def _normalize_unless(unless: Any, w: str) -> None:
 
 
 def _normalize_hours(raw: Any, where: str) -> dict:
-    """Validate an executor's working hours, returning them with `utc_offset` and `days` filled in."""
+    """Validate an executor's working hours, returning them with `days`, and `utc_offset` unless they name an IANA
+    `time_zone`, filled in."""
     if not isinstance(raw, dict):
-        raise TriggerError(f"{where}.hours must be an object {{start, end, utc_offset?, days?}}")
+        raise TriggerError(f"{where}.hours must be an object {{start, end, utc_offset? or time_zone?, days?}}")
     for key in ("start", "end"):
         if not isinstance(raw.get(key), str) or not _HHMM_RE.fullmatch(raw[key]):
             raise TriggerError(f"{where}.hours.{key} must be a 24-hour 'HH:MM'")
     if raw["start"] == raw["end"]:
         raise TriggerError(f"{where}.hours: start equals end, so the executor would never be available")
-    offset = raw.get("utc_offset", "+00:00")
-    if not isinstance(offset, str) or not _UTC_OFFSET_RE.fullmatch(offset):
-        raise TriggerError(f"{where}.hours.utc_offset must look like '-07:00' or '+05:30'")
+    if "time_zone" in raw:
+        if "utc_offset" in raw:
+            raise TriggerError(f"{where}.hours take utc_offset or time_zone, not both")
+        if _zone(raw["time_zone"]) is None:
+            raise TriggerError(f"{where}.hours.time_zone must be an IANA time zone name such as 'America/New_York', "
+                               f"got {raw['time_zone']!r}")
+        zone = {"time_zone": raw["time_zone"]}
+    else:
+        offset = raw.get("utc_offset", "+00:00")
+        if not isinstance(offset, str) or not _UTC_OFFSET_RE.fullmatch(offset):
+            raise TriggerError(f"{where}.hours.utc_offset must look like '-07:00' or '+05:30'")
+        zone = {"utc_offset": offset}
     days = raw.get("days", list(_DAYS))
     if not isinstance(days, list) or not days or not all(day in _DAYS for day in days):
         raise TriggerError(f"{where}.hours.days must be a non-empty list of {list(_DAYS)}")
-    return {"start": raw["start"], "end": raw["end"], "utc_offset": offset, "days": [d for d in _DAYS if d in days]}
+    return {"start": raw["start"], "end": raw["end"], **zone, "days": [d for d in _DAYS if d in days]}
 
 
 def _next_opening(now: datetime, hours: dict) -> datetime | None:
     """None if ``now`` is within the working hours, else when they next open. A window starts on each listed day and
-    runs to `end`, past midnight when `end` is earlier than `start`."""
-    sign, hh, mm = _UTC_OFFSET_RE.fullmatch(hours["utc_offset"]).groups()
-    local = now.astimezone(timezone((1 if sign == "+" else -1) * timedelta(hours=int(hh), minutes=int(mm))))
+    runs to `end`, past midnight when `end` is earlier than `start`. Its local bounds are compared with the UTC ``now``
+    as instants, so it keeps its local hours across a daylight-saving change."""
+    zone = _hours_zone(hours)
     start_h, start_m = map(int, hours["start"].split(":"))
     end_h, end_m = map(int, hours["end"].split(":"))
     length = (timedelta(hours=end_h, minutes=end_m) - timedelta(hours=start_h, minutes=start_m)) % timedelta(days=1)
-    midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    today = now.astimezone(zone).date()
     for days_ahead in range(-1, 8):
-        day = midnight + timedelta(days=days_ahead)
+        day = today + timedelta(days=days_ahead)
         if _DAYS[day.weekday()] not in hours["days"]:
             continue
-        opens = day.replace(hour=start_h, minute=start_m)
-        if opens <= local < opens + length:
+        opens = datetime.combine(day, time(start_h, start_m), zone)
+        if opens <= now < opens + length:
             return None
-        if opens > local:
+        if opens > now:
             return opens
     return None
+
+
+def _hours_zone(hours: dict) -> tzinfo:
+    if "time_zone" in hours:
+        return ZoneInfo(hours["time_zone"])
+    sign, hh, mm = _UTC_OFFSET_RE.fullmatch(hours["utc_offset"]).groups()
+    return timezone((1 if sign == "+" else -1) * timedelta(hours=int(hh), minutes=int(mm)))
