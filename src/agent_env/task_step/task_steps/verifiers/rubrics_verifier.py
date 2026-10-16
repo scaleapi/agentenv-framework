@@ -864,7 +864,16 @@ class RubricsVerifierTaskStep(TaskStep):
             image_blocks = [_image_url_block(f) for f in final]
             attached = [f.data for f in final]
         if action_log_text:
-            inline_text = action_log(transcript.actions, messages=transcript.messages, max_lines=tf.action_log_max_lines)
+            if transcript.source is None:
+                # JSON the action log cannot read: grading its empty log would grade a run the judge cannot
+                # see. (Text that is not JSON at all stays a failed run, as before.)
+                raise RuntimeError(
+                    f"trajectory_text=action_log, but the trajectory at {raw_uri} is in no format the action "
+                    "log reads (OTel spans, coding-agent CLI stream-json, OpenCode events)"
+                )
+            inline_text = action_log(transcript.actions, messages=transcript.messages, max_lines=tf.action_log_max_lines,
+                                     max_args_chars=tf.action_log_max_args_chars,
+                                     max_result_chars=tf.action_log_max_result_chars)
         else:
             inline_text = strip_trajectory_images(raw_text, attached=attached)
         # A trajectory with no screenshots selects nothing: the judge gets the text alone, with no frame rules.
