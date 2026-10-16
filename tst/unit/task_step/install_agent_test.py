@@ -97,6 +97,9 @@ class _FakeConfig:
     def get_litellm_api_key(self):
         return "config-key"
 
+    def resolve_reference(self, value):
+        return value
+
 
 def test_litellm_key_resolver_prefers_per_run_override():
     r = _build_param_resolvers(
@@ -203,3 +206,21 @@ async def test_a_per_run_key_given_by_reference_is_resolved_through_the_secret_s
     await step.execute(context)
 
     assert [s for s in sandbox.scripts if s.startswith("start ")] == ["start --key sk-from-the-store"]
+
+
+def test_a_per_run_reference_is_resolved_only_when_the_install_asks_for_the_key():
+    resolved = []
+
+    class _Config(_FakeConfig):
+        def resolve_reference(self, value):
+            resolved.append(value)
+            return "sk-resolved"
+
+    r = _build_param_resolvers(
+        container_name="c", work_dir="/tmp/stage", agent_ctx_tar="/tmp/stage/ctx.tar.gz",
+        a2a_port=8000, config=_Config(), agent_name="default-agent", workspace_dir=None,
+        litellm_api_key_override="secret:team_key",
+    )
+    assert resolved == []
+    assert r["litellm_api_key"]() == "sk-resolved"
+    assert resolved == ["secret:team_key"]

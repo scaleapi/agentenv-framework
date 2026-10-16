@@ -94,7 +94,8 @@ def _build_param_resolvers(
         "agent_name":     lambda: agent_name,
         "workspace_dir":  _resolve_workspace_dir,
         # Config-sourced (from agent-env config)
-        "litellm_api_key":   lambda: litellm_api_key_override or config.get_litellm_api_key(),
+        "litellm_api_key":   lambda: (config.resolve_reference(litellm_api_key_override) if litellm_api_key_override
+                                      else config.get_litellm_api_key()),
         "litellm_base_url":  lambda: host_url_for(config.get_litellm_base_url(), sandbox_type),
         # A JSON object, {} when [model.headers] is unset.
         "litellm_extra_headers": lambda: json.dumps(config.get_model_headers(config.get_litellm_base_url())),
@@ -262,7 +263,7 @@ class InstallAgentTaskStep(TaskStep):
             config=get_config(),
             workspace_dir=self.workspace_dir,
             agent_name=self.agent_name,
-            litellm_api_key_override=get_config().resolve_reference(user_overrides.get("litellm_api_key")),
+            litellm_api_key_override=user_overrides.get("litellm_api_key"),
             # A host install on a local sandbox runs on this machine itself, not in a container.
             sandbox_type=None if host_mode else sandbox.type,
         )
