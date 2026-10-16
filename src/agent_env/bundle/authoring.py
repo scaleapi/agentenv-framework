@@ -380,7 +380,7 @@ def universe_layout(bundle: Bundle, entry: BundleEntry) -> UniverseLayout:
 def _child_id(base: str, name: str, *, environment: bool) -> str:
     """The id a universe's environment or metadata file named ``name`` is written under: ``<base>__<name>``, or, for
     a name holding ``__``, which could clash with another's ids, or one an id can't hold (with an environment's file
-    id, ``<id>__file``), a hash of it in its place."""
+    id, ``<id>__file``), ``<base>__sha256__<16 hex of its hash>``, which holds ``__``, so no name's own id can be."""
     if "__" not in name:
         id = derive_id(base, name)
         try:
@@ -389,16 +389,16 @@ def _child_id(base: str, name: str, *, environment: bool) -> str:
             return id
         except ValueError:
             pass
-    return derive_id(base, hashlib.sha256(name.encode("utf-8")).hexdigest()[:16])
+    return derive_id(base, f"sha256__{hashlib.sha256(name.encode('utf-8')).hexdigest()[:16]}")
 
 
 def _subfolders(path: Path) -> set[tuple[str, ...]]:
-    """Every folder under ``path``, as the names on its path from there, spelled as the walk spells them; a link
-    back to a folder already listed, or a folder that can't be listed, is left to the walk to report."""
+    """Every folder under ``path``, by every path to it, as the names on that path, spelled as the walk spells
+    them; a link back to a folder that holds it, or a folder that can't be listed, is left to the walk to report."""
     found: set[tuple[str, ...]] = set()
-    pending, seen = [(path, ())], {os.path.realpath(path)}
+    pending = [(path, (), frozenset({os.path.realpath(path)}))]
     while pending:
-        folder, parts = pending.pop()
+        folder, parts, holders = pending.pop()
         try:
             with os.scandir(folder) as listing:
                 children = [child for child in listing if child.name not in LEAVINGS and child.is_dir()]
@@ -406,12 +406,11 @@ def _subfolders(path: Path) -> set[tuple[str, ...]]:
             continue
         for child in children:
             real = os.path.realpath(child.path)
-            if real in seen:
+            if real in holders:
                 continue
-            seen.add(real)
             sub = (*parts, unicodedata.normalize("NFC", child.name))
             found.add(sub)
-            pending.append((Path(child.path), sub))
+            pending.append((Path(child.path), sub, holders | {real}))
     return found
 
 

@@ -306,7 +306,7 @@ def test_a_name_an_id_can_hold_keeps_its_id_and_any_other_is_written_under_its_h
     _run(bundle_dir)
 
     def hashed(name):
-        return hashlib.sha256(name.encode()).hexdigest()[:16]
+        return f"sha256__{hashlib.sha256(name.encode()).hexdigest()[:16]}"
 
     world = EnvironmentUniverseArtifact.get(f"{ROOT}/w")
     assert sorted((env.environment_name, env.id, env.get_file_artifact().id)
@@ -319,6 +319,31 @@ def test_a_name_an_id_can_hold_keeps_its_id_and_any_other_is_written_under_its_h
         "scenarios/x.yaml": f"{ROOT}/w__metadata__scenarios/x.yaml",
         "q&a?": f"{ROOT}/w__metadata__{hashed('q&a?')}",
     }
+
+
+def test_a_name_spelled_like_another_names_hash_keeps_an_id_of_its_own(bundle_dir):
+    digest = hashlib.sha256("q&a?".encode()).hexdigest()[:16]
+    _bundle(bundle_dir, _universe("w") | {
+        "artifacts/w/gmail/a.json": "{}", f"artifacts/w/{digest}/b.json": "{}", "artifacts/w/q&a?/c.json": "{}",
+        f"artifacts/w/metadata/{digest}/m.json": "{}", "artifacts/w/metadata/q&a?/n.json": "{}",
+    }, "w")
+
+    _run(bundle_dir)
+
+    world = EnvironmentUniverseArtifact.get(f"{ROOT}/w")
+    assert {env.environment_name: env.id for env in world.get_environment_artifacts()} == {
+        "gmail": f"{ROOT}/w__gmail", digest: f"{ROOT}/w__{digest}", "q&a?": f"{ROOT}/w__sha256__{digest}"}
+    assert {key: file.id for key, file in world.get_metadata().items()} == {
+        digest: f"{ROOT}/w__metadata__{digest}", "q&a?": f"{ROOT}/w__metadata__sha256__{digest}"}
+
+
+def test_metadata_in_another_case_is_refused_even_as_a_link_to_an_environments_folder(bundle_dir):
+    layout(bundle_dir, _refused(_universe("x") | {"artifacts/x/gmail/a.json": "{}"}))
+    (bundle_dir / "artifacts/x/Metadata").symlink_to("gmail")
+
+    assert _problems(bundle_dir) == (
+        "artifacts/x/Metadata: rename to metadata; names are case-sensitive, and an environment named Metadata goes "
+        "in an artifact folder of its own, named in environment_artifacts",)
 
 
 def test_a_folder_holding_its_own_file_and_nested_ones_is_an_entry_of_each(bundle_dir):
