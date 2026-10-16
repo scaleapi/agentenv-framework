@@ -32,7 +32,7 @@ from typing import Any, ClassVar, Optional, Protocol
 
 from agent_env.artifact import Artifact, FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
-from agent_env.env.env import DeployedGatewayEnv, require_sandbox
+from agent_env.env.env import DeployedGatewayEnv, DeployedSandboxEnv, require_sandbox
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity_refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
@@ -299,8 +299,8 @@ class RunCodeTaskStep(TaskStep):
             "args": self.args,
             "results": context.metadata.get("script_results", {}),
         }
-        if target.env is not None:
-            script_input["env"] = target.env
+        if self.env_id is not None:
+            script_input["env"] = _env_on_host(self._deployed_env(context), target.sandbox)
         return script_input
 
     def _target_kind(self) -> str:
@@ -370,12 +370,8 @@ class RunCodeTaskStep(TaskStep):
 
     # --- run targets ---
 
-    async def _host_target(self, context: TaskStepContext) -> _ExecTarget:
-        from agent_env.providers.sandbox_providers.sandbox_provider import (
-            build_sandbox_provider,
-            get_env_sandbox_provider,
-        )
-
+    def _deployed_env(self, context: TaskStepContext) -> DeployedSandboxEnv:
+        """The record of ``env_id``'s deploy, which must be in one of agent-env's sandboxes."""
         deployed = next(
             (d for d in context.deployed_envs if d.env_id == self.env_id), None
         )
@@ -386,6 +382,15 @@ class RunCodeTaskStep(TaskStep):
                 f"Env '{self.env_id}' not found in context.deployed_envs "
                 "(or missing sandbox_id)"
             )
+        return deployed
+
+    async def _host_target(self, context: TaskStepContext) -> _ExecTarget:
+        from agent_env.providers.sandbox_providers.sandbox_provider import (
+            build_sandbox_provider,
+            get_env_sandbox_provider,
+        )
+
+        deployed = self._deployed_env(context)
         # env sandbox provider, honoring a custom sandbox_type
         provider = (
             build_sandbox_provider(deployed.sandbox_type)
@@ -393,7 +398,7 @@ class RunCodeTaskStep(TaskStep):
             else get_env_sandbox_provider()
         )
         sandbox = await provider.get_sandbox(deployed.sandbox_id)
-        return _HostTarget(sandbox, env=_env_on_host(deployed, sandbox))
+        return _HostTarget(sandbox)
 
     async def _sandbox_target(self, context: TaskStepContext) -> _ExecTarget:
         from agent_env.providers.sandbox_providers.sandbox import VmSandbox
@@ -510,7 +515,7 @@ def _on_host(url: Optional[str], sandbox: Any) -> Optional[str]:
 
 
 class _ExecTarget(Protocol):
-    env: Optional[dict]  # the env's endpoints, for a script on an env's host
+    sandbox: Any
 
     def run_dir(self, step_id: str) -> str: ...
     async def reset_dir(self, path: str) -> None: ...
@@ -523,7 +528,6 @@ class _HostTarget:
     """Runs the script on a VM host (an env's or a deployed sandbox's; no agent)."""
 
     sandbox: Any
-    env: Optional[dict] = None
 
     def run_dir(self, step_id: str) -> str:
         # The sandbox's own: runs on the local provider share this machine's /tmp, and teardown removes it there.
@@ -548,7 +552,6 @@ class _AgentTarget:
 
     sandbox: Any
     prefix: tuple[str, ...]
-    env: Optional[dict] = None
 
     def run_dir(self, step_id: str) -> str:
         return f"{_RUN_DIR}/{step_id}"
