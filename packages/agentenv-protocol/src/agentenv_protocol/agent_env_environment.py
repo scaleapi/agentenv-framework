@@ -36,7 +36,7 @@ _CARD_CONFIG_ATTR = "_aee_card_config"
 #: Set on the tool dispatch installed by ``_bind_tool_calls``; a guard downstream checks it at boot.
 _TOOL_CONTEXT_BOUND_ATTR = "__agentenv_tool_context__"
 
-#: MCP tools/list ``_meta`` key marking a tool a gateway hides from every role until a rule names it.
+#: MCP tools/list ``_meta`` key marking a tool a gateway hides from every role until a tool-access step names it.
 HIDDEN_BY_DEFAULT_META_KEY = "agentenv.io/hiddenByDefault"
 
 OP_RESET_DATA = "reset_data"
@@ -126,9 +126,10 @@ def tool(name: str | None = None, *, description: str | None = None, hidden_by_d
     from tools/list; a FastMCP ``Context`` parameter is likewise omitted from the card while FastMCP
     keeps injecting it.
 
-    ``hidden_by_default=True`` marks plumbing a task drives but the agent under test must not see: the
-    tool is listed with ``_meta`` ``{HIDDEN_BY_DEFAULT_META_KEY: true}``, and a gateway hides it from
-    every role until a rule names it for that role. Wildcard rules (``tools="*"``) never show it.
+    ``hidden_by_default=True`` makes being hidden a fixed property of the tool, for plumbing a task
+    drives but the agent under test must not see: it is listed with ``_meta``
+    ``{HIDDEN_BY_DEFAULT_META_KEY: true}``, and a gateway hides it from every role until a tool-access
+    step names it. Steps for every tool (``tools="*"``) cover ordinary tools only.
     """
     if callable(name):
         raise TypeError("use @tool(...) with parentheses, not bare @tool")

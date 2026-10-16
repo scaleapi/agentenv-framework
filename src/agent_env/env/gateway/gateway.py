@@ -136,7 +136,7 @@ class Gateway:
         self._tool_server_urls: dict[str, str] = {}
         self._tool_call_lock: asyncio.Lock | None = asyncio.Lock() if self.gateway_mode == GatewayMode.CONSISTENT else None
         self._role_rules: dict[str, dict[str, bool]] = {}
-        self._hidden_by_default: set[str] = set()  # tools a server listed as hidden until a rule names them
+        self._hidden_by_default: set[str] = set()  # tools a server listed hidden: only rules naming them apply
         self._role_rules_lock = asyncio.Lock()
 
         self._event_counter = 0
@@ -396,7 +396,7 @@ class Gateway:
 
     def _is_disabled(self, role: str, name: str) -> bool:
         """Walk the rule chain (role first, then WILDCARD) returning the first concrete True/False; default False.
-        A tool its server listed as hidden by default answers only to rules naming it, and is disabled otherwise."""
+        A tool listed hidden by default skips "*"-tool rules: only rules naming it apply, and with none it is hidden."""
         hidden = name in self._hidden_by_default
         for r in (role, WILDCARD):
             rules = self._role_rules.get(r, {})

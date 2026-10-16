@@ -1,8 +1,10 @@
 """A tool its server lists with `_meta` {"agentenv.io/hiddenByDefault": true} is plumbing a task drives (a trigger's
-tool action, a simulated party) that the agent under test must not see: discovery records it, and the MCP tools/list,
-/step list_tools and both call paths hide it from every role until a rule names it for that role."""
+tool action, a simulated party) that the agent under test must not see. Being hidden is a property of the tool:
+discovery records it, and the MCP tools/list, /step list_tools and both call paths hide it from every role until a
+rule names it. Rules naming it work as for any tool; rules for every tool (`"*"`) cover ordinary tools only."""
 from __future__ import annotations
 
+import random
 from types import SimpleNamespace
 
 import httpx
@@ -111,4 +113,93 @@ async def test_calling_it_by_name_is_refused_on_both_paths():
             await gw._mcp._tool_manager.call_tool(HIDDEN, {})
     finally:
         Caller.reset(token)
+    await gw._close_child_sessions()
+
+
+def _expected_disabled(steps: list[tuple[str, str, bool]], role: str, tool: str, hidden: bool) -> bool:
+    """The documented behavior, read from the steps alone (newest first), as a task author would: the newest step
+    that covers `role` and `tool` decides. A step for every role and every tool also wipes all earlier steps, and a
+    step for every tool of `role` wipes that role's earlier steps that named a tool. A step for every tool (`"*"`)
+    never covers a hidden tool, so a hidden tool no step names is disabled; any other tool is enabled."""
+    role_wiped = False
+    for step_role, step_tool, disabled in reversed(steps):
+        if step_role == "*" and step_tool == "*":
+            return hidden or disabled
+        if step_tool == "*":
+            if step_role == role:
+                if not hidden:
+                    return disabled
+                role_wiped = True
+            continue
+        if step_tool != tool:
+            continue
+        if step_role == "*" or (step_role == role and not role_wiped):
+            return disabled
+    return hidden
+
+
+ROLES = ("default", "grader", "sim")
+
+
+def test_every_mix_of_steps_matches_the_documented_behavior():
+    """Thousands of random step sequences mixing a hidden and an ordinary tool, named and `"*"` tools, one role and
+    every role, enables and disables; every role, including one no step mentions, sees what the rule above says."""
+    rng = random.Random(20261016)
+    for _ in range(5000):
+        gw = Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[])
+        gw._hidden_by_default = {"h"}
+        steps = [(rng.choice(ROLES + ("*",)), rng.choice(("h", "n", "*")), rng.random() < 0.5)
+                 for _ in range(rng.randint(0, 8))]
+        for step in steps:
+            gw._apply_rule(*step)
+        for role in ROLES + ("never-mentioned",):
+            for tool, hidden in (("h", True), ("n", False)):
+                assert gw._is_disabled(role, tool) is _expected_disabled(steps, role, tool, hidden), (steps, role, tool)
+
+
+@pytest.mark.parametrize("steps,role,shown", [
+    ([("*", "*", False)], "default", False),
+    ([("*", "*", False), ("sim", "*", False)], "sim", False),
+    ([("*", "*", False), ("sim", HIDDEN, False)], "sim", True),
+    ([("*", "*", False), ("sim", HIDDEN, False)], "default", False),
+    ([("sim", "*", True), ("sim", HIDDEN, False)], "sim", True),
+    ([("sim", HIDDEN, False), ("sim", "*", True)], "sim", False),
+    ([("sim", HIDDEN, False), ("sim", "*", False)], "sim", False),
+    ([("sim", HIDDEN, False), ("*", "*", False)], "sim", False),
+    ([("sim", HIDDEN, False), ("sim", HIDDEN, True)], "sim", False),
+    ([("*", HIDDEN, False)], "default", True),
+    ([("*", HIDDEN, False), ("default", "*", False)], "default", True),
+    ([("*", HIDDEN, False), ("default", HIDDEN, True)], "default", False),
+    ([("*", HIDDEN, False), ("default", HIDDEN, True)], "grader", True),
+])
+def test_the_steps_a_task_writes(steps, role, shown):
+    gw = Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[])
+    gw._hidden_by_default = {HIDDEN}
+    for step in steps:
+        gw._apply_rule(*step)
+    assert gw._is_disabled(role, HIDDEN) is (not shown)
+    assert gw._is_disabled(role, "mail_send") is _expected_disabled(steps, role, "mail_send", False)
+
+
+@pytest.mark.asyncio
+async def test_a_trigger_permission_action_naming_it_shows_it_and_one_for_every_tool_does_not():
+    gw = _mail()
+    await gw._ensure_tools_discovered()
+    run = gw._trigger_engine._run_action
+    await run("grant", {}, 0, {"type": "permission", "action": "enable", "role": "sim", "tools": ["*"]}, {}, 0.0)
+    assert await _step_listed(gw, "sim") == {"mail_send"}
+    await run("grant", {}, 0, {"type": "permission", "action": "enable", "role": "sim", "tools": [HIDDEN]}, {}, 0.0)
+    assert await _step_listed(gw, "sim") == {"mail_send", HIDDEN}
+    await run("grant", {}, 0, {"type": "permission", "action": "disable", "role": "sim", "tools": [HIDDEN]}, {}, 0.0)
+    assert await _step_listed(gw, "sim") == {"mail_send"}
+    await gw._close_child_sessions()
+
+
+@pytest.mark.asyncio
+async def test_state_reports_a_named_grant_like_any_other_rule():
+    gw = _mail()
+    await gw._ensure_tools_discovered()
+    await _request(gw, "POST", "/tools/enable", json={"role": "sim", "tools": [HIDDEN]})
+    roles = (await _request(gw, "GET", "/state")).json()["roles"]
+    assert roles["sim"] == {"disabled": [], "allowed": [HIDDEN]}
     await gw._close_child_sessions()

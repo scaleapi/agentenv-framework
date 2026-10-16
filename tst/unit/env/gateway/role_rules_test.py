@@ -1,7 +1,7 @@
 """Role-rule precedence in Gateway._is_disabled / _apply_rule: a role's own rules (explicit, then its
 wildcard) fully decide before the global "*" role is consulted, which is only a default for roles that
-say nothing. A hide that must survive any later wildcard rule is a tool its server lists hidden by default,
-not a "*"-role rule: such a tool answers only to rules that name it."""
+say nothing. A hide that must survive any later "*"-tool rule is a tool its server lists hidden by default,
+not a "*"-role rule: "*"-tool rules cover ordinary tools only, so only rules naming it apply."""
 from __future__ import annotations
 
 import asyncio
