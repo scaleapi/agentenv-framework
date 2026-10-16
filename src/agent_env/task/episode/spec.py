@@ -8,7 +8,7 @@ from agent_env.task.episode.rules import problems
 from agent_env.task.episode.run import Episode, EpisodeError
 from agent_env.task.episode.steps import _EpisodeAgentStep, _EpisodeTurnStep
 from agent_env.task.task import Task, substitute_seed_in_steps
-from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.context import TaskStepContext, sandbox_overrides
 from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 
@@ -42,13 +42,23 @@ class EpisodeSpec:
         steps = [_stand_in(step, as_run, deploys, turn_timeout) for step, as_run in zip(task.steps, seeded)]
         return cls(copy=Task(id=task.id, version=task.version, steps=steps), trainer_agents=tuple(outside), seed=seed)
 
-    async def start(self) -> Episode:
+    @property
+    def prompts(self) -> tuple[tuple[str, str | None], ...]:
+        """Each outside turn's prompt and system prompt as the run hands them over, in step order: what a dataset
+        row can carry before anything is deployed."""
+        seeded = substitute_seed_in_steps(self._copy.steps, self._seed or {})
+        return tuple((step.prompt, step.system_prompt) for step in seeded if isinstance(step, _EpisodeTurnStep))
+
+    async def start(self, *, sandbox: str | None = None) -> Episode:
         """Start one run of the task, a new episode each call. It returns once the run's record exists, before
-        anything is deployed; ``next_turn()`` is where the deploys and setup are waited for."""
+        anything is deployed; ``next_turn()`` is where the deploys and setup are waited for. ``sandbox`` is the
+        provider its envs, agents, sandboxes and judge deploy on, as ``agent-env run --sandbox`` sets it."""
         episode_id = uuid.uuid4().hex
         metadata: dict[str, Any] = {"episode": {"id": episode_id, "trainer_agents": list(self.trainer_agents)}}
         if self._seed:
             metadata["seed"] = dict(self._seed)
+        if sandbox:
+            metadata["user_overrides"] = sandbox_overrides(sandbox)
         episode = Episode(episode_id, self._copy, TaskStepContext(metadata=metadata))
         await episode._launch()
         return episode

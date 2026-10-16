@@ -17,7 +17,7 @@ from click.testing import CliRunner
 import agent_env
 from agent_env.bundle import BundleError, BundleKind
 from agent_env.bundle import installed as installed_module
-from agent_env.bundle.installed import BUNDLES, CORE, checked, find_bundle, installed_bundles, run_name
+from agent_env.bundle.installed import BUNDLES, CORE, checked, find_bundle, installed_bundles, locate_bundle, run_name
 from agent_env.cli import cli
 from agent_env.config.runtime import Config
 from agent_env.plugins import _discovery
@@ -272,6 +272,9 @@ def test_a_folder_wins_over_an_installed_name_and_a_folder_that_isnt_a_bundle_na
     _registered(monkeypatch, _ep("hello", "demo_bundles"))
     monkeypatch.chdir(tmp_path)
     (tmp_path / "hello").mkdir()
+    assert locate_bundle("hello") == (Path("hello"), None)
+    assert locate_bundle("./elsewhere") == (Path("./elsewhere"), None)
+    assert locate_bundle("demo-bundles/hello") == (site / "demo_bundles" / "hello", "@local/demo-bundles/hello")
 
     result = CliRunner().invoke(cli, ["run", "hello"])
 

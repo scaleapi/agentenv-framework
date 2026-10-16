@@ -540,6 +540,24 @@ def test_an_interrupted_runs_version_is_written_over_once_the_store_or_the_files
     assert check.reasons == (f"the store's latest, v{stored}, wasn't recorded by this bundle",)
 
 
+def test_a_bundle_of_more_entries_than_the_open_file_limit_allows_is_locked_whole(tmp_path):
+    many = tmp_path / "many"
+    (many / "tasks").mkdir(parents=True)
+    for n in range(300):
+        (many / f"tasks/t{n}.json").write_text('[{"id": "s", "type": "noop"}]')
+    held = subprocess.run([sys.executable, "-c", textwrap.dedent(f"""
+        import pathlib, resource
+        from agent_env.bundle import parse_bundle
+        from agent_env.bundle.ledger import materializing
+        resource.setrlimit(resource.RLIMIT_NOFILE, (64, resource.getrlimit(resource.RLIMIT_NOFILE)[1]))
+        with materializing(parse_bundle(pathlib.Path({str(many)!r}))):
+            print(len(list(pathlib.Path("/dev/fd").iterdir())))
+    """)], capture_output=True, text=True)
+
+    assert held.returncode == 0, held.stderr
+    assert int(held.stdout) > 300
+
+
 @pytest.mark.parametrize("other", [
     "the-same-folder", "another-folder-with-its-id-root", "another-bundle-declaring-its-id",
 ])

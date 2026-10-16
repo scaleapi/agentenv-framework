@@ -31,7 +31,7 @@ from agent_env.task import Task, record_task_cancelled
 from agent_env.task.interrupts import Interrupts
 from agent_env.task.task import recorded_scores
 from agent_env.task.teardown import TeardownReport, teardown_run
-from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.context import TaskStepContext, sandbox_overrides
 from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM
 
 from ._fs import relative
@@ -39,7 +39,7 @@ from .materialize import Materialization, Materialized, materialize
 from .parse import BundleEntry, BundleError, BundleKind, parse_bundle
 from .plan import Plan, Write, plan_bundle
 from .preflight import Preflight, preflight_run
-from .resolve import BuiltImage, BundleImage, Reference, ReferencedImage, resolve_bundle
+from .resolve import BuiltImage, BundleImage, Reference, ReferencedImage, resolve_bundle, without_played_agents
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +168,16 @@ class DryRun:
         )
 
 
+@dataclass(frozen=True)
+class PreparedBundle:
+    """A bundle as ``run_bundle`` leaves it before its first task: planned, its deploys checked, what changed
+    written and its infra envs built. ``tasks`` are the selected ones, each at the version written or reused."""
+
+    plan: Plan
+    materialization: Materialization
+    tasks: tuple[tuple[BundleEntry, Task], ...]
+
+
 class RunInterrupted(KeyboardInterrupt):
     """Ctrl-C or SIGTERM stopped ``run_bundle``. ``result`` holds every run, those it cancelled included, each
     torn down unless a second signal stopped that."""
@@ -215,22 +225,13 @@ def run_bundle(
         build_sandbox_provider(sandbox)
     say = _progress(on_progress)
     with namespace_routing():
-        plan, preflight = _planned(root, tasks, evals, id_root, sandbox)
-        materialization = materialize(
-            plan,
-            on_wait=lambda: say("waiting for another agent-env run to finish writing this bundle's ids"),
-            on_build=lambda write: say(f"{_label(plan, write)}: building with docker, which can take minutes"),
-            on_write=lambda done: say(_written(plan, done)),
-            contexts=preflight.contexts,
-        )
-        entries = _to_run(plan)
-        to_run = [(entry, Task.get(entry.id, materialization.version_of("task", entry.id))) for entry in entries]
-        if preflight.infra:
-            ensure_default_envs(preflight.infra_kinds, say=say)
+        prepared = _prepare(root, tasks, evals, sandbox, id_root, False, say)
+        plan, entries = prepared.plan, [entry for entry, _ in prepared.tasks]
         with Interrupts() as interrupts:
-            runs = interrupts.run(_run_all(plan, to_run, model, sandbox, keep, say, interrupts))
+            runs = interrupts.run(_run_all(plan, list(prepared.tasks), model, sandbox, keep, say, interrupts))
             _mark_cancelled(runs, interrupts.reason)
-            result = _bundle_run(plan, materialization, runs, _skipped(plan, entries, every=not tasks and not evals))
+            result = _bundle_run(plan, prepared.materialization, runs,
+                                 _skipped(plan, entries, every=not tasks and not evals))
             if not interrupts.count:
                 return result
             if interrupts.count == 1:
@@ -239,6 +240,28 @@ def run_bundle(
                 except RunInterrupted as stopped:
                     result = stopped.result
             raise RunInterrupted(result, interrupts.signum)
+
+
+def prepare_bundle(
+    root: Path | str,
+    *,
+    tasks: Sequence[str] = (),
+    evals: Sequence[str] = (),
+    sandbox: str | None = None,
+    on_progress: Callable[[str], None] | None = None,
+    id_root: str | None = None,
+    played: bool = False,
+) -> PreparedBundle:
+    """Do what ``run_bundle`` with these arguments does before its first task runs, and stop there. ``played``
+    leaves out what each task's only prompted agent would deploy, for a caller that plays that agent itself
+    (``EpisodeSpec``), so the agent needn't exist.
+
+    It doesn't turn namespace routing on: the caller keeps it on for as long as it runs the tasks
+    (``agent_env.store.routing.namespace_routing``), which suits a service that runs nothing else. Raises what
+    ``run_bundle`` raises before its first task runs, except for a running event loop, which it doesn't need."""
+    if sandbox:
+        build_sandbox_provider(sandbox)
+    return _prepare(root, tasks, evals, sandbox, id_root, played, _progress(on_progress))
 
 
 def dry_run_bundle(
@@ -290,13 +313,31 @@ def _bundle_run(plan: Plan, materialization: Materialization, runs: tuple[TaskRu
     return BundleRun(materialization, runs, eval_runs, skipped)
 
 
+def _prepare(root: Path | str, tasks: Sequence[str], evals: Sequence[str], sandbox: str | None, id_root: str | None,
+             played: bool, say: Callable[[str], None]) -> PreparedBundle:
+    plan, preflight = _planned(root, tasks, evals, id_root, sandbox, played=played)
+    materialization = materialize(
+        plan,
+        on_wait=lambda: say("waiting for another agent-env run to finish writing this bundle's ids"),
+        on_build=lambda write: say(f"{_label(plan, write)}: building with docker, which can take minutes"),
+        on_write=lambda done: say(_written(plan, done)),
+        contexts=preflight.contexts,
+    )
+    to_run = tuple((entry, Task.get(entry.id, materialization.version_of("task", entry.id))) for entry in _to_run(plan))
+    if preflight.infra:
+        ensure_default_envs(preflight.infra_kinds, say=say)
+    return PreparedBundle(plan, materialization, to_run)
+
+
 def _planned(root: Path | str, tasks: Sequence[str], evals: Sequence[str], id_root: str | None,
-             sandbox: str | None) -> tuple[Plan, Preflight]:
-    plan = plan_bundle(resolve_bundle(parse_bundle(Path(root), id_root=id_root)), tasks=tasks, evals=evals)
+             sandbox: str | None, *, played: bool = False) -> tuple[Plan, Preflight]:
+    resolved = resolve_bundle(parse_bundle(Path(root), id_root=id_root))
+    plan = plan_bundle(without_played_agents(resolved) if played else resolved, tasks=tasks, evals=evals)
     refuse_store_tasks(plan)
     to_run = set(_to_run(plan))
     return plan, preflight_run(plan, [write.source for write in plan.writes
-                                      if write.kind is BundleKind.TASK and write.source.entry in to_run], sandbox)
+                                      if write.kind is BundleKind.TASK and write.source.entry in to_run], sandbox,
+                               played=played)
 
 
 def _to_run(plan: Plan) -> tuple[BundleEntry, ...]:
@@ -349,7 +390,7 @@ async def _run_all(
         tag = f"[{_path(plan, entry)}]"
         metadata = {"run_group_id": run_group_id, "task_id": task.id}
         if sandbox:
-            metadata["user_overrides"] = {"env_sandbox": sandbox, "agent_sandbox": sandbox, "sandbox": sandbox}
+            metadata["user_overrides"] = sandbox_overrides(sandbox)
         context = TaskStepContext(metadata=metadata)
         try:
             await semaphore.acquire()

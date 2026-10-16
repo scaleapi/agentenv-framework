@@ -184,9 +184,11 @@ async def test_the_run_waits_at_an_outside_turn_and_carries_on_once_it_ends(tear
     assert (turn.agent, turn.step_id, turn.prompt, turn.system_prompt, turn.role) == (
         "alice", "turn", "Add a crate.", "You keep the items.", "alice@example.com")
     assert (turn.mcp_urls, turn.headers) == ({"items": "http://127.0.0.1:20031/items/mcp"}, {"items": {}})
+    assert not episode.finished
 
     await turn.end("Added a crate.")
     assert await episode.result() == {"replies": 1.0}
+    assert episode.finished
     assert await episode.next_turn() is None
     assert teardowns.finished == [episode.id]
     record = Task.get_instance(episode.id)
@@ -328,6 +330,17 @@ async def test_a_turn_not_taken_by_its_deadline_fails_the_run_and_is_never_hande
     with pytest.raises(TimeoutError, match="turn 'turn' of agent 'alice' wasn't ended within 0.05s"):
         await episode.next_turn()
     assert Task.get_instance(episode.id).status == "failed"
+    assert episode.finished
+
+
+@pytest.mark.asyncio
+async def test_a_sandbox_named_at_start_is_where_the_run_deploys(teardowns):
+    episode = await _spec(ITEMS, ALICE, TURN, REPLIES).start(sandbox="modal")
+    await (await episode.next_turn()).end("Added a crate.")
+    await episode.result()
+
+    assert Task.get_instance(episode.id).context["metadata"]["user_overrides"] == {
+        "env_sandbox": "modal", "agent_sandbox": "modal", "sandbox": "modal"}
 
 
 @pytest.mark.asyncio

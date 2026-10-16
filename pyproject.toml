@@ -46,6 +46,7 @@ dependencies = [
     "uvicorn>=0.47",  # 0.47 adds ssl_context_factory, how the local grant server gets its TLS context
     "modal>=1.5.2.dev22",  # dev22 adds _experimental_create(tags=); dev2 added VM-mode V2 (vm_runtime)
     "e2b~=2.46.4",  # AsyncSandbox/AsyncTemplate APIs validated against the 2.46 line
+    "openenv>=0.8,<0.10",  # serves bundle tasks as OpenEnv envs; the range spans OpenEnv's two-minor deprecation window
 ]
 
 [project.optional-dependencies]
@@ -53,12 +54,6 @@ dependencies = [
 aws = [
     "boto3>=1.35.0",
     "botocore>=1.35.0",
-]
-# The local explorer / `agent-env up` (Part 5). Optional so a library or worker install
-# stays lean; `agent-env up` fails fast with an install hint when it is absent.
-explorer = [
-    "fastapi>=0.110",
-    "uvicorn>=0.29",
 ]
 # The Google Cloud store backends, selected by impl pointer in config.toml.
 gcp = [
@@ -86,7 +81,7 @@ tenki = [
     "tenki[async]~=1.4.1",  # AsyncClient/AsyncSandbox exec, stdin, ports and egress APIs validated against the 1.4 line
 ]
 dev = [
-    "agentenv-framework[aws,explorer,gcp,sail,tensorlake,tenki,vercel]",  # exercise portable optional providers and stores in CI
+    "agentenv-framework[aws,gcp,sail,tensorlake,tenki,vercel]",  # exercise portable optional providers and stores in CI
     "fastmcp>=3.4,<4",  # the standalone-fastmcp mount path of the protocol; <4 keeps mcp 1.x
     "griffelib==2.3.0",  # the plugin API check; exact, since what it reports as a break changes between releases
     "moto>=5.0.0",

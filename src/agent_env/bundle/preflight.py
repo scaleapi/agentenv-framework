@@ -75,7 +75,7 @@ from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM, docker_unreacha
 from ._fs import relative
 from .parse import BundleError, BundleKind
 from .plan import Plan
-from .resolve import BuiltImage, Reference, ReferencedImage, ResolvedEntry, build_step
+from .resolve import BuiltImage, Reference, ReferencedImage, ResolvedEntry, build_step, played_deploys
 
 _SHOWN_DOCKER_USERS = 3
 
@@ -89,12 +89,13 @@ class Preflight:
     contexts: frozenset[str] = frozenset()  # the ids of the images the bundle builds that it writes as build contexts
 
 
-def preflight_run(plan: Plan, tasks: Iterable[ResolvedEntry], sandbox: str | None) -> Preflight:
+def preflight_run(plan: Plan, tasks: Iterable[ResolvedEntry], sandbox: str | None, *, played: bool = False) -> Preflight:
     """Check where each of ``tasks`` deploys, with ``sandbox`` overriding every deploy's provider, and name the infra
-    envs the run builds. Raises BundleError listing every problem found. Reads the store but writes nothing."""
+    envs the run builds; ``played`` skips each task's played agent's deploys (``played_deploys``). Raises BundleError
+    listing every problem found. Reads the store but writes nothing."""
     walk = _Walk(plan, sandbox)
     for task in tasks:
-        walk.task(task)
+        walk.task(task, skip=played_deploys(task) if played else frozenset())
     return walk.finish()
 
 
@@ -135,10 +136,12 @@ class _Walk:
         # Each deploy of an image the bundle builds: (where, what, its provider's links, the images it accepts on each)
         self.uses: dict[str, list[tuple[str, str, list[SandboxProvider], Callable[[SandboxProvider], Accepts]]]] = {}
 
-    def task(self, task: ResolvedEntry) -> None:
+    def task(self, task: ResolvedEntry, skip: frozenset[str]) -> None:
         steps = [build_step(config) for config in task.config]
         sandboxes = {step.sandbox_name: step for step in steps if isinstance(step, DeploySandboxTaskStep)}
         for step in steps:
+            if step.id in skip:
+                continue
             where = f"{relative(self.plan.bundle.bundle.root, task.entry.path)}: step {step.id!r}"
             try:
                 if isinstance(step, DeployEnvTaskStep):

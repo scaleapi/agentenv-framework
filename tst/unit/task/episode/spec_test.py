@@ -69,6 +69,14 @@ def test_each_prompt_of_a_trainer_agent_becomes_a_turn():
     assert [step.id for step in spec._copy.steps if step.type == "episode_turn"] == ["play", "replan"]
 
 
+def test_each_turns_prompt_is_read_seeded_before_anything_runs():
+    again = {**PLAY, "id": "replan", "prompt_id": "replan", "prompt": "Replan <port>.", "system_prompt": "Berths only.",
+             "depends_on": ["play"]}
+
+    assert EpisodeSpec.from_task(_portsim(again), seed=SEED).prompts == (
+        ("Plan week 3.", "You plan Valencia."), ("Replan Valencia.", "Berths only."))
+
+
 def test_a_task_prompting_several_agents_needs_the_ones_to_play_named():
     task = _portsim(BOB, ASK_BOB)
 

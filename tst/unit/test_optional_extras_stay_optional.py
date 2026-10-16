@@ -26,12 +26,11 @@ class Refuse(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, Refuse())
 """
 
-# Not core: the explorer, Sail and Smol providers need their optional extras, and the gateway runs
-# only in its container image, and the code runner is a script that reads its arguments on import.
+# Not core: the Sail and Smol providers need their optional extras, and the gateway runs only in
+# its container image, and the code runner is a script that reads its arguments on import.
 _NOT_CORE = (
-    "agent_env.explorer", "agent_env.providers.sandbox_providers.sail_vm",
-    "agent_env.providers.sandbox_providers.smol_vm", "agent_env.env.gateway",
-    "agent_env.task_step.task_steps.run_code_runner",
+    "agent_env.providers.sandbox_providers.sail_vm", "agent_env.providers.sandbox_providers.smol_vm",
+    "agent_env.env.gateway", "agent_env.task_step.task_steps.run_code_runner",
 )
 
 _IMPORT_CORE = _BLOCKING + """

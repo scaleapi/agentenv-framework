@@ -12,6 +12,7 @@ import difflib
 import importlib.util
 import os
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 from importlib.metadata import EntryPoint
 from pathlib import Path
@@ -70,6 +71,23 @@ def installed_bundles() -> tuple[InstalledBundle, ...]:
         for plugin, ep in registrations:
             found.append(_installed(name, plugin, ep, repeated=per_package[plugin.dist] > 1))
     return tuple(found)
+
+
+def locate_bundle(
+    text: str, installed: Callable[[], tuple[InstalledBundle, ...]] = installed_bundles,
+) -> tuple[Path, str | None]:
+    """The folder ``text`` names, and the id root of an installed bundle's, as ``agent-env run BUNDLE`` reads it: an
+    existing folder wins, and text that starts like a path is always one; anything else names a bundle ``installed``
+    lists. Raises BundleError."""
+    if path_like(text) or os.path.isdir(text):
+        return Path(text), None
+    found = find_bundle(text, installed())
+    return found.root, found.id_root
+
+
+def path_like(text: str) -> bool:
+    """Text that names a folder even when there is none there."""
+    return text.startswith((".", "/", "~"))
 
 
 def find_bundle(text: str, bundles: tuple[InstalledBundle, ...] | None = None) -> InstalledBundle:

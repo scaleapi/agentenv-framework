@@ -30,7 +30,7 @@ Or install it with pip, into a virtualenv:
 pip install agentenv-framework
 ```
 
-To use the SDK in your own project, add it as a dependency with `uv add agentenv-framework`. The explorer, `agent-env up`, needs the `explorer` extra (`uv tool install 'agentenv-framework[explorer]'`, or the same extra with uvx or pip) and an `.agentenv/config.toml` in the current folder or above it; an empty one keeps every local default. The `tensorlake` sandbox backend needs the `tensorlake` extra (`pip install 'agentenv-framework[tensorlake]'`) and an `api_key` in `[sandbox.providers.tensorlake.config]`. Its sandboxes boot from the public image `agentenv-dind-host-v1`; set `image` there to use another registered Docker-capable image. The `tenki` sandbox backend needs the `tenki` extra (`pip install 'agentenv-framework[tenki]'`) and an `api_key` in `[sandbox.providers.tenki.config]`; see [its README](src/agent_env/providers/sandbox_providers/tenki/README.md).
+To use the SDK in your own project, add it as a dependency with `uv add agentenv-framework`. The explorer, `agent-env up`, needs an `.agentenv/config.toml` in the current folder or above it; an empty one keeps every local default. The `tensorlake` sandbox backend needs the `tensorlake` extra (`pip install 'agentenv-framework[tensorlake]'`) and an `api_key` in `[sandbox.providers.tensorlake.config]`. Its sandboxes boot from the public image `agentenv-dind-host-v1`; set `image` there to use another registered Docker-capable image. The `tenki` sandbox backend needs the `tenki` extra (`pip install 'agentenv-framework[tenki]'`) and an `api_key` in `[sandbox.providers.tenki.config]`; see [its README](src/agent_env/providers/sandbox_providers/tenki/README.md).
 
 A plain install runs on local stores and needs no cloud SDK. The cloud store backends are extras: `aws` for S3, Secrets Manager, DynamoDB and ECR (`pip install 'agentenv-framework[aws]'`), and `gcp` for Cloud Storage, Secret Manager, Firestore and Artifact Registry (`pip install 'agentenv-framework[gcp]'`). A config that names a backend without its extra fails, naming the extra to install.
 
@@ -99,6 +99,29 @@ scores = await episode.result()  # every score the run recorded, by step id
 ```
 
 The scores are the ones `agent-env run` reports, so making a reward of them is yours. `trainer_agents=` names the agents you play when the task prompts several, `turn_timeout` is each turn's deadline in seconds (the prompt's own `timeout_seconds` otherwise), `episode.abandon(reason)` stops a run early, and `from_task` names any step an outside player can't stand behind. [Running tasks](https://www.agentenvframework.com/docs/tasks/running) covers the rest.
+
+## Serve tasks as OpenEnv envs
+
+Every task in a bundle is an [OpenEnv](https://github.com/huggingface/OpenEnv) env: any OpenEnv client resets it, acts through its tools and gets its reward.
+
+```python
+# app.py, served with `uvicorn app:app`
+from agent_env.openenv import build_app
+
+app = build_app("portsim")  # a folder or an installed bundle, or {"train": "dock-v1-train/", "eval": "dock-v1-eval/"}
+```
+
+```python
+from openenv.core.generic_client import GenericEnvClient
+
+async with GenericEnvClient(base_url="http://localhost:8000") as env:
+    await env.reset(split="all", index=0)  # deploys the task's envs; the observation carries the prompt
+    await env.step({"type": "call_tool", "tool_name": "get_situation", "arguments": {}})
+    result = await env.step({"type": "call_tool", "tool_name": "end_turn", "arguments": {"response": "Done."}})
+    result.reward  # the task's verifier score, as agent-env run reports it
+```
+
+Each session plays one episode at a time: reset deploys the task's envs and opens its agent's turn, the envs' MCP tools are the actions, and `end_turn` hands the reply back, after which the task's verifiers score it. A bundle's evals are splits beside `all`, which OpenEnv's Task API lists with each task's prompt. The bundle is prepared as `agent-env run` prepares it, except that the agent the client plays is never deployed, so it needn't exist. A task that records several scores takes `reward=<step id>`, `sandbox=` is where envs deploy, and `max_concurrent_envs` caps the sessions, each holding a deployment. A failure that ends an episode is an observation with `done`, no reward and `metadata["status"] == "error"`; a failed tool call is a tool error, and the episode goes on.
 
 ## Run agents in local microVMs
 
