@@ -304,6 +304,24 @@ async def test_a_gateway_without_time_zone_hours_refuses_them(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("executor_hours", [{"bob": _ZONE_HOURS}, {"exec-1": _HOURS, "bob": _ZONE_HOURS}],
+                         ids=["named-executor", "beside-the-default-executor"])
+async def test_a_gateway_without_time_zone_hours_refuses_them_on_a_named_executor(monkeypatch, executor_hours):
+    sent = _mock_gateway(monkeypatch, {})
+    context = TaskStepContext(deployed_envs=[_record(_with_features(
+        "named_executors", "provoking_roles", "action_delay", "executor_hours", "unless"))], deployed_agents=[
+        DeployedAgent(agent_name="exec-1", api_url="http://exec:9000", role="executor"),
+        DeployedAgent(agent_name="alice", api_url="http://alice:9000", role="alice@example.com"),
+        DeployedAgent(agent_name="bob", api_url="http://bob:9000", role="bob@example.com"),
+    ], metadata={})
+
+    with pytest.raises(RuntimeError, match=r"does not declare \['executor_hours_time_zone'\]"):
+        await _step(triggers=_NAMED_TRIGGERS, executor_agent_name="exec-1",
+                    executor_hours=executor_hours).execute(context)
+    assert sent == []
+
+
+@pytest.mark.asyncio
 async def test_executor_hours_in_a_time_zone_reach_a_gateway_that_takes_them_as_given(monkeypatch):
     sent = _mock_gateway(monkeypatch, {"ok": True, "added": ["x"], "all": ["x"]})
     await _step(triggers=_NL_TRIGGERS, executor_agent_name="exec-1",
