@@ -21,6 +21,7 @@ from agent_env.bundle.resolve import resolve_bundle
 from agent_env.cli import cli
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
+from agent_env.store import ids as ids_module
 from agent_env.store.routing import namespace_routing
 from tst.unit.bundle._support import RefusingStore, layout, local_store, plan_of
 
@@ -335,6 +336,18 @@ def test_a_name_spelled_like_another_names_hash_keeps_an_id_of_its_own(bundle_di
         "gmail": f"{ROOT}/w__gmail", digest: f"{ROOT}/w__{digest}", "q&a?": f"{ROOT}/w__sha256__{digest}"}
     assert {key: file.id for key, file in world.get_metadata().items()} == {
         digest: f"{ROOT}/w__metadata__{digest}", "q&a?": f"{ROOT}/w__metadata__sha256__{digest}"}
+
+
+def test_a_universe_whose_id_leaves_no_room_for_a_hashed_childs_id_is_refused_naming_the_fix(bundle_dir,
+                                                                                          monkeypatch):
+    # Room for gmail's ids beside the universe's, and none for a hashed name's, which are longer.
+    monkeypatch.setattr(ids_module, "MAX_LOCAL_ID_BYTES", len(f"{ROOT}/x__gmail__file"))
+    layout(bundle_dir, _refused(_universe("x") | {"artifacts/x/gmail/a.json": "{}", "artifacts/x/q&a?/b.json": "{}"}))
+
+    (problem,) = _problems(bundle_dir)
+    assert problem.startswith("artifacts/x/q&a?: can't name the artifacts written from it (local id is ")
+    assert problem.endswith("); give the universe a shorter name")
+    assert not local_store().path.exists()
 
 
 def test_metadata_in_another_case_is_refused_even_as_a_link_to_an_environments_folder(bundle_dir):
