@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
 import unicodedata
@@ -19,7 +20,7 @@ from agent_env.env.envs._deployment import provider_refusal
 from agent_env.providers.env_providers.constants import GATEWAY_SERVICE_NAMES
 from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider
 from agent_env.providers.env_providers.env_provider import _env_provider_class
-from agent_env.store.ids import validate_local_id
+from agent_env.store.ids import derive_id, validate_local_id
 from agent_env.utils.card_naming import card_names_in_files
 
 from ._fs import fold, os_reason, relative, show, with_article
@@ -303,7 +304,7 @@ class LaidOut:
 class UniverseLayout:
     """An environment_universe folder, laid out as ``environment-universe get --output-dir`` writes one: each
     ``<environment_name>/`` folder holds one environment's file, and each ``metadata/<key>/`` folder one metadata
-    file. ``files`` lists them all, as ``entry_files`` does."""
+    file, a name or key holding ``/`` in nested folders. ``files`` lists them all, as ``entry_files`` does."""
 
     environments: tuple[LaidOut, ...]
     metadata: tuple[LaidOut, ...]
@@ -311,69 +312,63 @@ class UniverseLayout:
 
 
 def universe_layout(bundle: Bundle, entry: BundleEntry) -> UniverseLayout:
-    """The environments and metadata files an environment_universe's folder holds, each with the ids it's
-    written under: ``<universe>__<name>`` over ``<universe>__<name>__file`` for an environment, and
-    ``<universe>__metadata__<key>`` for a metadata file. Raises BundleError listing every problem."""
+    """The environments and metadata files an environment_universe's folder holds, read as the inverse of
+    ``environment-universe get --output-dir``: each folder directly holding one file is an environment named by its
+    path from the universe's folder, or, under ``metadata/``, a metadata key named by its path from there. An
+    environment is written as ``<universe>__<name>`` over ``<universe>__<name>__file`` and a metadata file as
+    ``<universe>__metadata__<key>``, with a hash of the name in its place where an id can't hold it. An environment
+    whose name starts with ``metadata/`` reads back as a metadata key, so it needs an artifact folder of its own.
+    Raises BundleError listing every problem."""
     files = entry_files(bundle, entry, empty_ok=True)
     where = relative(bundle.root, entry.path)
-    top = _folders(entry.path)
+    folders = _subfolders(entry.path)
     # A metadata/ folder spelled in another case is a typo, as for every reserved name in a bundle.
-    near = sorted(name for name in top if name != UNIVERSE_METADATA and fold(name) == fold(UNIVERSE_METADATA))
+    near = sorted(parts[0] for parts in folders
+                  if len(parts) == 1 and parts[0] != UNIVERSE_METADATA and fold(parts[0]) == fold(UNIVERSE_METADATA))
     problems = [f"{where}/{name}: rename to {UNIVERSE_METADATA}; names are case-sensitive, and an environment named "
                 f"{name} goes in an artifact folder of its own, named in environment_artifacts" for name in near]
     # Every folder counts, so one left without its file is refused rather than dropped.
-    folders: dict[tuple[bool, str], list[str]] = {(False, name): [] for name in top
-                                                  if name != UNIVERSE_METADATA and name not in near}
-    folders.update({(True, name): [] for name in _folders(entry.path / UNIVERSE_METADATA)})
+    held: dict[tuple[str, ...], list[str]] = {parts: [] for parts in folders
+                                              if parts[0] not in near and parts != (UNIVERSE_METADATA,)}
     for key in files:
-        parts = key.split("/")
+        parts = tuple(key.split("/"))
         if parts[0] in near:
             continue
-        metadata = parts[0] == UNIVERSE_METADATA
-        if len(parts) == (3 if metadata else 2):
-            folders.setdefault((metadata, parts[-2]), []).append(key)
-        elif len(parts) == 1:
+        if len(parts) == 1:
             problems.append(f"{where}/{key}: a universe folder holds only artifact.toml and a folder for each "
                             "environment; move it into <environment_name>/, or give it an artifact folder of its own")
-        elif metadata and len(parts) == 2:
+        elif parts[:-1] == (UNIVERSE_METADATA,):
             problems.append(f"{where}/{key}: {UNIVERSE_METADATA}/ holds a folder for each key, with that key's one "
                             f"file in it ({UNIVERSE_METADATA}/<key>/<file>); an environment named "
                             f"{UNIVERSE_METADATA} goes in an artifact folder of its own, named in "
                             "environment_artifacts")
         else:
-            folder = "/".join(parts[:2]) if metadata else parts[0]
-            what = "a metadata key's" if metadata else "an environment's"
-            problems.append(f"{where}/{key}: {what} folder holds its one file directly, {folder}/<file>, with no "
-                            "folders inside")
+            held.setdefault(parts[:-1], []).append(key)
     environments, metadata_files = [], []
-    for (metadata, name), keys in sorted(folders.items()):
-        folder = f"{where}/{UNIVERSE_METADATA}/{name}" if metadata else f"{where}/{name}"
+    # A folder holding only folders is part of their names.
+    holders = {parts[:depth] for parts in held for depth in range(1, len(parts))}
+    for parts, keys in sorted(held.items(), key=lambda item: "/".join(item[0])):
+        folder = f"{where}/{'/'.join(parts)}"
+        if not keys and parts in holders:
+            continue
         if len(keys) != 1:
             listed = f" ({', '.join(repr(key.rsplit('/', 1)[-1]) for key in keys)})" if keys else ""
             problems.append(f"{folder}: holds one file, and has {len(keys)}{listed}")
             continue
-        # Renaming an environment's folder renames the environment, so say how to keep its name.
-        rename = "rename the folder" if metadata else (
-            f"rename the folder, which renames the environment, or keep the name by giving the environment an "
-            f'artifact folder of its own, with environment_name = "{name}", named in environment_artifacts')
-        if name != name.strip():
-            problems.append(f"{folder}: a name that opens or closes with a space can't name the artifacts written "
-                            "from it; rename the folder")
-            continue
-        if "__" in name:
-            problems.append(f"{folder}: a name holding __ could clash with the ids derived from it; {rename}")
-            continue
+        metadata = parts[0] == UNIVERSE_METADATA
+        name = "/".join(parts[1:] if metadata else parts)
         if metadata:
-            environment_id, file_id = None, EnvironmentUniverseArtifact.derived_metadata_id(entry.id, name)
+            environment_id, file_id = None, _child_id(derive_id(entry.id, UNIVERSE_METADATA), name, environment=False)
         else:
-            environment_id = EnvironmentUniverseArtifact.derived_environment_id(entry.id, name)
+            environment_id = _child_id(entry.id, name, environment=True)
             file_id = EnvironmentArtifact.derived_file_id(environment_id)
         try:
             for id in (environment_id, file_id):
                 if id is not None:
                     validate_local_id(id)
         except ValueError as e:
-            problems.append(f"{folder}: can't name the artifacts written from it ({e}); {rename}")
+            problems.append(f"{folder}: can't name the artifacts written from it ({e}); give the universe a shorter "
+                            "name")
             continue
         laid = LaidOut(name, keys[0].rsplit("/", 1)[-1], files[keys[0]], file_id, environment_id)
         (metadata_files if metadata else environments).append(laid)
@@ -382,14 +377,42 @@ def universe_layout(bundle: Bundle, entry: BundleEntry) -> UniverseLayout:
     return UniverseLayout(tuple(environments), tuple(metadata_files), files)
 
 
-def _folders(path: Path) -> list[str]:
-    """The names of the folders directly in ``path``, as the walk spells them, or none when it isn't one."""
-    try:
-        with os.scandir(path) as listing:
-            return [unicodedata.normalize("NFC", child.name) for child in listing
-                    if child.name not in LEAVINGS and child.is_dir()]
-    except OSError:
-        return []  # the walk reports why it can't be listed
+def _child_id(base: str, name: str, *, environment: bool) -> str:
+    """The id a universe's environment or metadata file named ``name`` is written under: ``<base>__<name>``, or, for
+    a name holding ``__``, which could clash with another's ids, or one an id can't hold (with an environment's file
+    id, ``<id>__file``), a hash of it in its place."""
+    if "__" not in name:
+        id = derive_id(base, name)
+        try:
+            for derived in (id, EnvironmentArtifact.derived_file_id(id)) if environment else (id,):
+                validate_local_id(derived)
+            return id
+        except ValueError:
+            pass
+    return derive_id(base, hashlib.sha256(name.encode("utf-8")).hexdigest()[:16])
+
+
+def _subfolders(path: Path) -> set[tuple[str, ...]]:
+    """Every folder under ``path``, as the names on its path from there, spelled as the walk spells them; a link
+    back to a folder already listed, or a folder that can't be listed, is left to the walk to report."""
+    found: set[tuple[str, ...]] = set()
+    pending, seen = [(path, ())], {os.path.realpath(path)}
+    while pending:
+        folder, parts = pending.pop()
+        try:
+            with os.scandir(folder) as listing:
+                children = [child for child in listing if child.name not in LEAVINGS and child.is_dir()]
+        except OSError:
+            continue
+        for child in children:
+            real = os.path.realpath(child.path)
+            if real in seen:
+                continue
+            seen.add(real)
+            sub = (*parts, unicodedata.normalize("NFC", child.name))
+            found.add(sub)
+            pending.append((Path(child.path), sub))
+    return found
 
 
 def universe_files(bundle: Bundle, entry: BundleEntry) -> dict[str, Path]:
