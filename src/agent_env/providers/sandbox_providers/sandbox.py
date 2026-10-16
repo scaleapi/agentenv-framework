@@ -169,6 +169,18 @@ class Sandbox(ABC):
         """``url``, of a service this process reaches, as this sandbox reaches it."""
         return url
 
+    def url_on_host(self, url: str) -> str:
+        """``url``, of a service this sandbox publishes, as a process on its host (or in it, for a container) reaches
+        it: one under a tunnel goes to the host port the tunnel's port is published on, and any other is left alone."""
+        address = "127.0.0.1" if not self.host_ips or "127.0.0.1" in self.host_ips else self.host_ips[0]
+        address = f"[{address}]" if ":" in address else address
+        # The longest first, so a tunnel at a path under another's takes its own URLs.
+        for port, tunnel in sorted(self.tunnel_urls.items(), key=lambda item: -len(item[1])):
+            base = tunnel.rstrip("/")
+            if url == base or url.startswith(f"{base}/"):
+                return f"http://{address}:{self.host_port(port)}{url[len(base):]}"
+        return url
+
     _VM_READY_TIMEOUT = 1200      # wait_for_vm wall-clock budget (s)
     _VM_READY_POLL_INTERVAL = 30  # sparse polling (s)
 

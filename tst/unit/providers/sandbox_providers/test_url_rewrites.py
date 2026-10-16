@@ -7,8 +7,10 @@ import pytest
 
 from agent_env.config import reset_config
 from agent_env.env.env import DeployedEnv, DeployedSandboxEnv
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider, host_url_for
+from agent_env.providers.sandbox_providers import local_sandbox as local_sandbox_module
+from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider, host_url_for
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
+from agent_env.providers.sandbox_providers.sandbox import Sandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SandboxProvider,
     all_sandbox_url_rewrites,
@@ -211,3 +213,61 @@ def test_choose_mcp_url_matrix(env_type, agent_type, rewritten):
 def test_an_env_outside_our_sandboxes_keeps_its_own_mcp_url():
     hosted = DeployedEnv(env_id="e", env_version=1, env_provider_type="hosted", mcp_url=f"https://{_INTERNAL}/mcp")
     assert _choose_mcp_url(_record("modal"), hosted) == f"https://{_INTERNAL}/mcp"
+
+# --- a sandbox's own URLs, as its host reaches them ------------------------------
+
+
+class _Published(Sandbox):
+    """A sandbox's tunnels, the addresses it publishes on and its host ports, as a provider reports them."""
+
+    type = "published"
+    mode = "vm"
+    vnc_url = None
+
+    def __init__(self, tunnel_urls, host_ips=(), port_map=None):
+        self.sandbox_id = "sb"
+        self.tunnel_urls = tunnel_urls
+        self.host_ips = host_ips
+        self._port_map = port_map or {}
+
+    def host_port(self, port):
+        return self._port_map.get(port, port)
+
+    async def terminate(self):  # pragma: no cover - never provisioned here
+        pass
+
+
+_PROXY = {80: "https://proxy.example/sb/vm-1", 18765: "https://proxy.example/sb/vm-1/port/18765/"}
+
+
+@pytest.mark.parametrize("tunnels,url,expected", [
+    ({18765: "https://abc.modal.host"}, "https://abc.modal.host", "http://127.0.0.1:18765"),
+    ({18765: "https://abc.modal.host"}, "https://abc.modal.host/mcp", "http://127.0.0.1:18765/mcp"),
+    # a proxy's path prefix, with another tunnel at a path above it
+    (_PROXY, "https://proxy.example/sb/vm-1/port/18765/mcp", "http://127.0.0.1:18765/mcp"),
+    (_PROXY, "https://proxy.example/sb/vm-1/web/", "http://127.0.0.1:80/web/"),
+    # a host that only starts like the tunnel's, and one elsewhere
+    ({18765: "https://abc.modal.host"}, "https://abc.modal.hostile/mcp", "https://abc.modal.hostile/mcp"),
+    ({18765: "https://abc.modal.host"}, "https://elsewhere.example/mcp", "https://elsewhere.example/mcp"),
+])
+def test_a_url_under_a_sandboxs_tunnel_is_reached_at_the_port_it_publishes(tunnels, url, expected):
+    assert _Published(tunnels).url_on_host(url) == expected
+
+
+@pytest.mark.parametrize("host_ips,expected", [
+    ((), "http://127.0.0.1:23456/mcp"),
+    (("127.0.0.1", "172.17.0.1"), "http://127.0.0.1:23456/mcp"),
+    (("10.0.0.5",), "http://10.0.0.5:23456/mcp"),
+    (("fd00::5",), "http://[fd00::5]:23456/mcp"),
+])
+def test_a_sandbox_is_reached_on_the_address_it_publishes_on(host_ips, expected):
+    sandbox = _Published({18765: "https://abc.modal.host"}, host_ips, port_map={18765: 23456})
+
+    assert sandbox.url_on_host("https://abc.modal.host/mcp") == expected
+
+
+def test_a_local_sandbox_is_reached_at_the_host_port_it_mapped(tmp_path, monkeypatch):
+    monkeypatch.setattr(local_sandbox_module, "_host_ips", lambda: ("127.0.0.1", "172.17.0.1"))
+    sandbox = LocalSandbox(work_dir=tmp_path, port_map={18765: 23456})
+
+    assert sandbox.url_on_host(f"{sandbox.tunnel_urls[18765]}/mcp") == "http://127.0.0.1:23456/mcp"

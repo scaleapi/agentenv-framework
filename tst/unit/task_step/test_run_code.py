@@ -21,7 +21,7 @@ from agent_env.artifact import FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, DeployedSandboxEnv, EnvNeedsSandbox
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox
-from agent_env.providers.sandbox_providers.sandbox import VmSandbox
+from agent_env.providers.sandbox_providers.sandbox import Sandbox, VmSandbox
 from agent_env.task_step.context import DeployedAgent, DeployedSandbox, TaskStepContext
 from agent_env.task_step.task_steps import run_code as _run_code_module
 from tst.unit.event_loop_probe import on_event_loop
@@ -104,13 +104,16 @@ def _get_member(artifact_id, version=None):
 
 
 def _vm_sandbox_mock():
-    """A VM sandbox at the boundary; tunnels and host ports are plain attributes of a real one."""
-    sandbox = AsyncMock()
+    """A VM sandbox at the boundary; tunnels and host ports are plain attributes of a real one, which reaches its own
+    URLs as the base class does."""
+    sandbox = AsyncMock(spec=VmSandbox)
     sandbox.mode = "vm"
     sandbox.container_name = "agent-api"
     sandbox.tunnel_urls = {}
+    sandbox.host_ips = ()
     sandbox.host_port = MagicMock(side_effect=lambda port: port)
     sandbox.scoped_name = MagicMock(side_effect=lambda name: name)
+    sandbox.url_on_host = MagicMock(side_effect=lambda url: Sandbox.url_on_host(sandbox, url))
     return sandbox
 
 
@@ -258,46 +261,54 @@ async def test_host_target_on_an_env_outside_our_sandboxes_says_it_needs_one():
         await _step(env_id="env-x", result_id="filter")._host_target(ctx)
 
 
-class _Tunnels:
-    """A sandbox's tunnels and host ports, as a provider reports them."""
+class _ContainerEnvSandbox(Sandbox):
+    """A container sandbox, as Modal's is, whose commands really run here: it has no host to stage on or run scripts on."""
 
-    def __init__(self, tunnel_urls, port_map=None):
+    type = "modal"
+    mode = "container"
+
+    def __init__(self, tunnel_urls):
+        self.sandbox_id = "sb-env"
         self.tunnel_urls = tunnel_urls
-        self._port_map = port_map or {}
+        self.vnc_url = None
+        self.commands = []
 
-    def host_port(self, port):
-        return self._port_map.get(port, port)
+    async def terminate(self):
+        pass
+
+    async def write_file_from_text(self, content, path):
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text(content)
+
+    async def exec_with_output(self, *args):
+        self.commands.append(args)
+        proc = subprocess.run(list(args), capture_output=True)
+        return proc.returncode, proc.stdout.decode(), proc.stderr.decode()
 
 
-@pytest.mark.parametrize("tunnels,url,expected", [
-    ({18765: "https://abc.modal.host"}, "https://abc.modal.host", "http://127.0.0.1:18765"),
-    ({18765: "https://abc.modal.host"}, "https://abc.modal.host/mcp", "http://127.0.0.1:18765/mcp"),
-    # a proxy's path prefix, with another tunnel at a path above it
-    ({80: "https://proxy.example/sb/vm-1", 18765: "https://proxy.example/sb/vm-1/port/18765/"},
-     "https://proxy.example/sb/vm-1/port/18765/mcp", "http://127.0.0.1:18765/mcp"),
-    ({80: "https://proxy.example/sb/vm-1", 18765: "https://proxy.example/sb/vm-1/port/18765/"},
-     "https://proxy.example/sb/vm-1/web/", "http://127.0.0.1:80/web/"),
-    ({18765: "https://abc.modal.host"}, "https://elsewhere.example/mcp", "https://elsewhere.example/mcp"),
-    ({18765: "http://127.0.0.1:2000"}, "http://127.0.0.1:20001/mcp", "http://127.0.0.1:20001/mcp"),
-    ({18765: "https://abc.modal.host"}, None, None),
+_CARD_URL = "https://abc.modal.host/.well-known/agent-env.json"
+
+
+@pytest.mark.parametrize("deployed,expected", [
+    (DeployedGatewayEnv(env_id="gw", env_version=1, sandbox_id="sb", gateway_url="https://abc.modal.host",
+                        environment_card_url=_CARD_URL, environment_card={"name": "gw"}),
+     {"id": "gw", "url": "http://127.0.0.1:18765", "mcp_url": "http://127.0.0.1:18765/mcp"}),
+    (DeployedSandboxEnv(env_id="srv", env_version=1, sandbox_id="sb", env_provider_type="server",
+                        environment_card_url=_CARD_URL, environment_card={"name": "srv"}),
+     {"id": "srv", "url": "http://127.0.0.1:18765", "mcp_url": "http://127.0.0.1:18765/mcp"}),
+    # a plugin's env, whose card puts its MCP endpoint elsewhere
+    (DeployedSandboxEnv(env_id="plug", env_version=1, sandbox_id="sb", env_provider_type="a-plugins",
+                        environment_card_url=_CARD_URL,
+                        environment_card={"name": "plug", "additionalInterfaces": [{"transport": "mcp", "url": "/v2/mcp"}]}),
+     {"id": "plug", "url": "http://127.0.0.1:18765", "mcp_url": "http://127.0.0.1:18765/v2/mcp"}),
+    # a record from before the card, which kept only its MCP URL
+    (DeployedSandboxEnv(env_id="old", env_version=1, sandbox_id="sb", mcp_url="https://abc.modal.host/mcp"),
+     {"id": "old", "url": None, "mcp_url": "http://127.0.0.1:18765/mcp"}),
 ])
-def test_a_url_under_its_hosts_tunnel_is_reached_on_loopback_at_the_published_port(tunnels, url, expected):
-    assert _run_code_module._on_host(url, _Tunnels(tunnels)) == expected
+def test_an_envs_address_and_mcp_endpoint_come_from_its_card_whatever_deployed_it(deployed, expected):
+    sandbox = _ContainerEnvSandbox({18765: "https://abc.modal.host"})
 
-
-def test_a_local_sandbox_reaches_its_gateway_at_the_host_port_it_mapped(tmp_path):
-    sandbox = LocalSandbox(work_dir=tmp_path, port_map={18765: 23456})
-    gateway = sandbox.tunnel_urls[18765]
-
-    assert _run_code_module._on_host(f"{gateway}/mcp", sandbox) == "http://127.0.0.1:23456/mcp"
-
-
-def test_an_env_with_no_gateway_gives_its_mcp_url_alone():
-    deployed = DeployedSandboxEnv(env_id="srv", env_version=1, sandbox_id="sb", mcp_url="https://abc.modal.host/mcp")
-
-    env = _run_code_module._env_on_host(deployed, _Tunnels({8000: "https://abc.modal.host"}))
-
-    assert env == {"id": "srv", "gateway_url": None, "mcp_url": "http://127.0.0.1:8000/mcp"}
+    assert _run_code_module._env_on_host(deployed, sandbox) == expected
 
 
 def _written_input(sandbox):
@@ -312,17 +323,43 @@ def _written_input(sandbox):
 
 
 @pytest.mark.asyncio
-async def test_a_script_on_an_envs_host_gets_the_envs_endpoints_as_that_host_reaches_them():
+async def test_a_script_on_an_envs_host_gets_the_envs_address_and_mcp_endpoint_as_that_host_reaches_them():
     ctx = _make_context(with_agent=False)
-    ctx.deployed_envs[0].gateway_url = "https://abc.modal.host"
-    ctx.deployed_envs[0].mcp_url = "https://abc.modal.host/mcp"
+    ctx.deployed_envs[0] = DeployedGatewayEnv(
+        env_id="env-x", env_version=1, sandbox_id="sb-env", gateway_url="https://abc.modal.host",
+        environment_card_url=_CARD_URL, environment_card={"name": "env-x"},
+    )
     with _sandbox([(0, "", ""), (0, "2", ""), (0, "{}", "")], agent_mode=False) as sandbox:
         sandbox.tunnel_urls = {18765: "https://abc.modal.host"}
         await _step(env_id="env-x").execute(ctx)
 
     assert _written_input(sandbox)["env"] == {
-        "id": "env-x", "gateway_url": "http://127.0.0.1:18765", "mcp_url": "http://127.0.0.1:18765/mcp",
+        "id": "env-x", "url": "http://127.0.0.1:18765", "mcp_url": "http://127.0.0.1:18765/mcp",
     }
+
+
+@pytest.mark.asyncio
+async def test_a_script_for_an_env_in_a_container_sandbox_runs_in_that_container_and_reaches_the_env_there(tmp_path):
+    sandbox = _ContainerEnvSandbox({18765: "https://abc.modal.host"})
+    provider = MagicMock()
+    provider.get_sandbox = AsyncMock(return_value=sandbox)
+    ctx = _make_context(with_agent=False)
+    ctx.deployed_envs = [DeployedSandboxEnv(
+        env_id="env-x", env_version=1, sandbox_id="sb-env", env_provider_type="server",
+        environment_card_url=_CARD_URL, environment_card={"name": "srv"},
+    )]
+    artifact = _file_artifact(body=b"def run(inp):\n    return inp['env']\n")
+    with patch(
+        "agent_env.providers.sandbox_providers.sandbox_provider.get_env_sandbox_provider", return_value=provider,
+    ), patch("agent_env.artifact.Artifact.get", return_value=artifact), patch.object(
+        FileArtifact, "load", _load_body
+    ), patch.object(_run_code_module, "_RUN_DIR", str(tmp_path)):
+        ctx = await _step(env_id="env-x").execute(ctx)
+
+    assert ctx.metadata["script_results"]["run-code-1"] == {
+        "id": "env-x", "url": "http://127.0.0.1:18765", "mcp_url": "http://127.0.0.1:18765/mcp",
+    }
+    assert not any(command[0] in ("sudo", "docker") for command in sandbox.commands)
 
 
 @pytest.mark.asyncio

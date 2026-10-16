@@ -575,16 +575,16 @@ def _store_echo_server() -> None:
     MCPServerEnv.put(id="echo-server", docker_image_artifact=image, environment_name="echo")
 
 
-# Fetches the env's card from the gateway and opens an MCP session at the env's endpoint, both at the addresses its
-# input gives: on the local provider, the host ports the sandbox mapped, not the gateway's own port.
+# Fetches the env's card at its address and opens an MCP session at its endpoint, both as its input gives them: on the
+# local provider, the host port the sandbox mapped, not the port the env serves on.
 _REACH = """\
 import json, urllib.parse, urllib.request
 
 def run(inp):
     env = inp["env"]
-    gateway = urllib.parse.urlsplit(env["gateway_url"])
-    assert (gateway.hostname, gateway.port != 18765) == ("127.0.0.1", True), env
-    with urllib.request.urlopen(env["gateway_url"] + "/.well-known/agent-env.json", timeout=30) as response:
+    address = urllib.parse.urlsplit(env["url"])
+    assert (address.hostname, address.port != 18765) == ("127.0.0.1", True), env
+    with urllib.request.urlopen(env["url"] + "/.well-known/agent-env.json", timeout=30) as response:
         card = json.load(response)
     initialize = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
         "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "reach", "version": "1"}}}
@@ -596,9 +596,13 @@ def run(inp):
 """
 
 
-def test_a_script_on_an_envs_host_reaches_its_gateway_and_mcp_endpoint_at_the_addresses_its_input_gives(state):
+@pytest.mark.parametrize("env_provider_type", ["gateway", "server"])
+def test_a_script_on_an_envs_host_reaches_it_and_its_mcp_endpoint_at_the_addresses_its_input_gives(
+    state, env_provider_type
+):
     root = state / "reach"
     shutil.copytree(ECHO / "envs", root / "envs")
+    (root / "envs" / "echo" / "env.toml").write_text(f'env_provider_type = "{env_provider_type}"\n')
     (root / "artifacts" / "reach").mkdir(parents=True)
     (root / "artifacts" / "reach" / "run.py").write_text(_REACH)
     (root / "tasks").mkdir()
