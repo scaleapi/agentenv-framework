@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import os
 import stat
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn, TypeVar, overload
@@ -20,7 +21,7 @@ from agent_env.env.envs._deployment import provider_refusal
 from agent_env.providers.env_providers.constants import GATEWAY_SERVICE_NAMES
 from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider
 from agent_env.providers.env_providers.env_provider import _env_provider_class
-from agent_env.store.ids import derive_id, validate_local_id
+from agent_env.store.ids import validate_local_id
 from agent_env.utils.card_naming import card_names_in_files
 
 from ._fs import fold, os_reason, relative, show, with_article
@@ -319,9 +320,9 @@ def universe_layout(bundle: Bundle, entry: BundleEntry) -> UniverseLayout:
     ``<universe>__metadata__<key>``, with a hash of the name in its place where an id can't hold it. An environment
     whose name starts with ``metadata/`` reads back as a metadata key, so it needs an artifact folder of its own.
     Raises BundleError listing every problem."""
-    files = entry_files(bundle, entry, empty_ok=True)
+    walk = _Walk(bundle, entry, empty_ok=True)
+    files, folders = walk.files(), walk.folders
     where = relative(bundle.root, entry.path)
-    folders = _subfolders(entry.path)
     # A metadata/ folder spelled in another case is a typo, as for every reserved name in a bundle.
     near = sorted(parts[0] for parts in folders
                   if len(parts) == 1 and parts[0] != UNIVERSE_METADATA and fold(parts[0]) == fold(UNIVERSE_METADATA))
@@ -358,9 +359,11 @@ def universe_layout(bundle: Bundle, entry: BundleEntry) -> UniverseLayout:
         metadata = parts[0] == UNIVERSE_METADATA
         name = "/".join(parts[1:] if metadata else parts)
         if metadata:
-            environment_id, file_id = None, _child_id(derive_id(entry.id, UNIVERSE_METADATA), name, environment=False)
+            derive = functools.partial(EnvironmentUniverseArtifact.derived_metadata_id, entry.id)
+            environment_id, file_id = None, _child_id(derive, name, environment=False)
         else:
-            environment_id = _child_id(entry.id, name, environment=True)
+            derive = functools.partial(EnvironmentUniverseArtifact.derived_environment_id, entry.id)
+            environment_id = _child_id(derive, name, environment=True)
             file_id = EnvironmentArtifact.derived_file_id(environment_id)
         try:
             for id in (environment_id, file_id):
@@ -377,41 +380,20 @@ def universe_layout(bundle: Bundle, entry: BundleEntry) -> UniverseLayout:
     return UniverseLayout(tuple(environments), tuple(metadata_files), files)
 
 
-def _child_id(base: str, name: str, *, environment: bool) -> str:
-    """The id a universe's environment or metadata file named ``name`` is written under: ``<base>__<name>``, or, for
-    a name holding ``__``, which could clash with another's ids, or one an id can't hold (with an environment's file
-    id, ``<id>__file``), ``<base>__sha256__<16 hex of its hash>``, which holds ``__``, so no name's own id can be."""
+def _child_id(derive: Callable[[str], str], name: str, *, environment: bool) -> str:
+    """The id a universe's environment or metadata file named ``name`` is written under, as ``derive``, the
+    universe's own naming, derives it from a name: from ``name``, or, for a name holding ``__``, which could clash
+    with another's ids, or one an id can't hold (with an environment's file id, ``<id>__file``), from
+    ``sha256__<16 hex of its hash>``, which holds ``__``, so no name's own id can be."""
     if "__" not in name:
-        id = derive_id(base, name)
+        id = derive(name)
         try:
             for derived in (id, EnvironmentArtifact.derived_file_id(id)) if environment else (id,):
                 validate_local_id(derived)
             return id
         except ValueError:
             pass
-    return derive_id(base, f"sha256__{hashlib.sha256(name.encode('utf-8')).hexdigest()[:16]}")
-
-
-def _subfolders(path: Path) -> set[tuple[str, ...]]:
-    """Every folder under ``path``, by every path to it, as the names on that path, spelled as the walk spells
-    them; a link back to a folder that holds it, or a folder that can't be listed, is left to the walk to report."""
-    found: set[tuple[str, ...]] = set()
-    pending = [(path, (), frozenset({os.path.realpath(path)}))]
-    while pending:
-        folder, parts, holders = pending.pop()
-        try:
-            with os.scandir(folder) as listing:
-                children = [child for child in listing if child.name not in LEAVINGS and child.is_dir()]
-        except OSError:
-            continue
-        for child in children:
-            real = os.path.realpath(child.path)
-            if real in holders:
-                continue
-            sub = (*parts, unicodedata.normalize("NFC", child.name))
-            found.add(sub)
-            pending.append((Path(child.path), sub, holders | {real}))
-    return found
+    return derive(f"sha256__{hashlib.sha256(name.encode('utf-8')).hexdigest()[:16]}")
 
 
 def universe_files(bundle: Bundle, entry: BundleEntry) -> dict[str, Path]:
@@ -420,7 +402,8 @@ def universe_files(bundle: Bundle, entry: BundleEntry) -> dict[str, Path]:
 
 
 class _Walk:
-    """Lists an entry's folder, following a link only when its target is inside the bundle."""
+    """Lists an entry's folder, following a link only when its target is inside the bundle. ``folders`` then holds
+    every folder under it, by every path to it, as the names on that path in NFC."""
 
     def __init__(self, bundle: Bundle, entry: BundleEntry, empty_ok: bool = False):
         self.bundle = bundle
@@ -429,6 +412,7 @@ class _Walk:
         self.root = _identity(bundle.root)
         self.problems: list[str] = []
         self.found: dict[str, Path] = {}
+        self.folders: set[tuple[str, ...]] = set()
 
     def files(self) -> dict[str, Path]:
         top = self.entry.path
@@ -474,6 +458,7 @@ class _Walk:
                     if identity in holders:
                         self._problem(path, "links back to a folder that holds it")
                     else:
+                        self.folders.add(tuple(unicodedata.normalize("NFC", part) for part in (*parts, child.name)))
                         pending.append((path, (*parts, child.name), holders | {identity}))
                 elif kind == stat.S_IFREG:
                     if os.access(path, os.R_OK):
