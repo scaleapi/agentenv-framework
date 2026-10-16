@@ -11,6 +11,7 @@ import json
 import logging
 import time
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Callable, ClassVar, Optional
@@ -121,13 +122,61 @@ def substitute_seed_in_steps(steps: list["TaskStep"], seed: dict) -> list["TaskS
 def recorded_scores(steps: list["TaskStep"], context: TaskStepContext) -> dict[str, float]:
     """Every score a run of ``steps`` recorded, by the id of the step that recorded it, or by its verification's key
     when that isn't a step's verifier id."""
-    step_ids = {step.verifier_id: step.id for step in steps if getattr(step, "verifier_id", None)}
-    scores = {}
-    for key, verification in (context.metadata.get("verifications") or {}).items():
+    return {name: float(verification["score"]) for name, verification in _verifications(steps, context)
+            if isinstance(verification.get("score"), (int, float))}
+
+
+@dataclass(frozen=True)
+class FailedCriterion:
+    """A criterion a verification recorded as failed."""
+
+    step: str  # the id of the step that recorded it, or its verification's key
+    criterion: str
+    reason: str  # the verifier's justification or message, "" when it gave none
+
+
+def failed_criteria(steps: list["TaskStep"], context: TaskStepContext) -> list[FailedCriterion]:
+    """Each criterion that failed in a verification scoring below 1, named as ``recorded_scores`` names its score."""
+    failed = []
+    for name, verification in _verifications(steps, context):
         score = verification.get("score")
-        if isinstance(score, (int, float)):
-            scores[step_ids.get(key, key)] = float(score)
-    return scores
+        if not isinstance(score, (int, float)) or score >= 1:
+            continue
+        for index, result in enumerate(verification.get("results") or []):
+            if isinstance(result, dict) and _failed(result):
+                reason = _first_text(result, ("justification", "message", "reason", "description"))
+                failed.append(FailedCriterion(name, _criterion(result, index), reason))
+    return failed
+
+
+def _verifications(steps: list["TaskStep"], context: TaskStepContext) -> Iterator[tuple[str, dict]]:
+    """Each verification a run of ``steps`` recorded, by the id of the step that recorded it, or by its key when
+    that isn't a step's verifier id."""
+    step_ids = {step.verifier_id: step.id for step in steps if getattr(step, "verifier_id", None)}
+    for key, verification in (context.metadata.get("verifications") or {}).items():
+        yield step_ids.get(key, key), verification
+
+
+def _failed(result: dict) -> bool:
+    """A result fails when its result is false or, recording none, its score is below 1; a skipped one never does."""
+    if result.get("skipped"):
+        return False
+    if "result" in result:
+        return not result["result"]
+    score = result.get("score")
+    return isinstance(score, (int, float)) and score < 1
+
+
+def _criterion(result: dict, index: int) -> str:
+    """How a result names its criterion: verifiers name it differently, and some only by its type."""
+    if name := _first_text(result, ("criterion", "id", "name")):
+        return name
+    return f"{result['type']} #{index}" if isinstance(result.get("type"), str) else f"#{index}"
+
+
+def _first_text(result: dict, keys: tuple[str, ...]) -> str:
+    """The first of ``keys`` that holds text in ``result``, or "" when none does."""
+    return next((result[key] for key in keys if isinstance(result.get(key), str) and result[key].strip()), "")
 
 
 def _dependency_ids(steps: list["TaskStep"]) -> dict[str, set[str]]:

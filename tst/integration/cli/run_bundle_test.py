@@ -120,10 +120,66 @@ def test_a_bundle_runs_from_its_folder_and_a_rerun_writes_only_what_changed(bund
     third = _run(bundle)
     assert "artifacts/greeting: v2 (files changed: hello.txt)" in third
     assert "tasks/hello.json v1: scored below 1 (hello: 0)" in third
+    assert "\n    hello: greets: does not contain 'hello'\n" in third
     (instance_id,) = re.findall(r"instance (\S+)", third)
     with namespace_routing():
         results = Task.get_instance(instance_id).context["metadata"]["verifications"]["hello"]["results"]
-    assert [(result["criterion"], result["result"]) for result in results] == [("greets", False), ("check passes", False)]
+    assert [(result["criterion"], result["result"]) for result in results] == [
+        ("greets", False), ("check passes", False)]
+
+    gated = CliRunner().invoke(cli, ["run", str(bundle), "--fail-under", "1"])
+    assert gated.exit_code == 1, gated.output
+    assert gated.output.endswith("\nBelow --fail-under 1: tasks/hello.json (0)\n"), gated.output
+
+
+def test_a_run_whose_reader_leaves_finishes_quietly_and_tears_down(bundle):
+    """As when piped into head: the reader closes the pipe after one line, and the run goes on to its end."""
+    code, errors = _reader_leaves([bundle], "")
+
+    assert code == 0, errors
+    assert "BrokenPipeError" not in errors, errors
+
+
+def test_a_kept_run_whose_reader_leaves_still_tears_down_on_ctrl_c(bundle, sigint_handled):
+    """As when piped into tee, which Ctrl-C stops too: the reader leaves while the run holds its sandbox up."""
+    code, errors = _reader_leaves([bundle, "--keep"], "Holding 1 sandbox up", signal.SIGINT)
+
+    assert code == 0, errors
+    assert "BrokenPipeError" not in errors, errors
+
+
+def test_a_stream_whose_reader_has_gone_drops_its_lines_and_the_other_stream_still_prints():
+    """As with --verbose piped from, when only stderr's reader leaves."""
+    read, write = os.pipe()
+    os.close(read)
+    echo = "from agent_env.cli.run import _echo; _echo('a'); _echo('x', err=True); _echo('b'); _echo('y', err=True)"
+    try:
+        result = subprocess.run([sys.executable, "-c", echo], stdout=subprocess.PIPE, stderr=write, text=True,
+                                timeout=120)
+    finally:
+        os.close(write)
+
+    assert (result.returncode, result.stdout) == (0, "a\nb\n")
+
+
+def _reader_leaves(args, when, signum=None):
+    """Run ``agent-env run ARGS`` in its own process group, close its stdout once a line containing ``when`` is
+    printed, then send ``signum`` to the group, if given. Returns the exit code and what it printed on stderr."""
+    process = subprocess.Popen([sys.executable, "-m", "agent_env.cli", "run", *map(str, args)], stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True, start_new_session=True)
+    watchdog = threading.Timer(120, process.kill)
+    watchdog.start()
+    try:
+        for line in process.stdout:
+            if when in line:
+                break
+        process.stdout.close()
+        if signum is not None:
+            os.killpg(process.pid, signum)
+        _, errors = process.communicate()
+        return process.returncode, errors
+    finally:
+        watchdog.cancel()
 
 
 @skip_without_gnu_stat()

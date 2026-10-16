@@ -29,7 +29,7 @@ from agent_env.store.base import NotFoundError
 from agent_env.store.routing import namespace_routing, run_scope
 from agent_env.task import Task, record_task_cancelled
 from agent_env.task.interrupts import Interrupts
-from agent_env.task.task import recorded_scores
+from agent_env.task.task import FailedCriterion, failed_criteria, recorded_scores
 from agent_env.task.teardown import TeardownReport, teardown_run
 from agent_env.task_step.context import TaskStepContext
 from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM
@@ -84,6 +84,11 @@ class TaskRun:
         return recorded_scores(self.task.steps, self.context)
 
     @property
+    def failed_criteria(self) -> list[FailedCriterion]:
+        """Each criterion a verification scoring below 1 recorded as failed, with the reason it gave."""
+        return failed_criteria(self.task.steps, self.context)
+
+    @property
     def outcome(self) -> Outcome:
         if self.cancelled:
             return Outcome.CANCELLED
@@ -111,6 +116,11 @@ class BundleRun:
     @property
     def failed(self) -> bool:
         return any(run.outcome is Outcome.FAILED for run in self.runs)
+
+    def below(self, threshold: float) -> tuple[TaskRun, ...]:
+        """The runs that finished but scored below ``threshold``, or recorded no score, which can't show it passed."""
+        return tuple(run for run in self.runs if run.outcome in (Outcome.PASSED, Outcome.BELOW_ONE, Outcome.UNSCORED)
+                     and (not run.scores or min(run.scores.values()) < threshold))
 
     def path(self, entry: BundleEntry) -> str:
         """``entry``'s path in the bundle, as the summary names it (``tasks/hello.json``)."""
