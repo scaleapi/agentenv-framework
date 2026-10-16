@@ -326,3 +326,9 @@ def test_triggers_advertised_as_one_extension():
     assert len(trigger) == 1
     assert set(trigger[0]["params"]["methods"]) == {"register", "remove", "clear", "state"}
     assert not any(e["uri"] == "urn:agentenv:get-triggers/v1" for e in exts)
+
+
+def test_the_card_declares_executor_hours_in_a_time_zone():
+    exts = _gateway({})._gateway_extensions()
+    [trigger] = [e for e in exts if e["uri"] == "urn:agentenv:triggers/v1"]
+    assert "executor_hours_time_zone" in trigger["params"]["features"]

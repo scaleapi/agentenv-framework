@@ -15,6 +15,7 @@ from agent_env.env.gateway.constants import (
     EXT_TRIGGERS_URI,
     TRIGGER_ACTION_DELAY,
     TRIGGER_EXECUTOR_HOURS,
+    TRIGGER_EXECUTOR_HOURS_TIME_ZONE,
     TRIGGER_NAMED_EXECUTORS,
     TRIGGER_PROVOKING_ROLES,
     TRIGGER_UNLESS,
@@ -143,13 +144,14 @@ class RegisterEnvTriggersStep(TaskStep):
                 f"Env '{self.env_id}' runs a gateway whose triggers/v1 does not offer 'state', which await_fired needs; "
                 f"redeploy it on a gateway image that does.")
         # An older gateway ignores what it does not declare: named actions would go to the default executor, a
-        # trigger's when.roles would leave it to the watched roles, delays and hours would not wait, and a deadline
-        # would fire even after its `unless` call.
+        # trigger's when.roles would leave it to the watched roles, delays and hours would not wait, a deadline
+        # would fire even after its `unless` call, and hours in a time zone would be read as UTC.
         used = {TRIGGER_NAMED_EXECUTORS: bool(named), TRIGGER_PROVOKING_ROLES: _when_has(self.triggers, "roles"),
                 TRIGGER_ACTION_DELAY: _delays(self.triggers), TRIGGER_EXECUTOR_HOURS: bool(self.executor_hours),
                 TRIGGER_UNLESS: _when_has(self.triggers, "unless"),
                 TRIGGER_WEBSITE: any(isinstance(t.get("when"), dict) and t["when"].get("type") == "website"
-                                     for t in self.triggers)}
+                                     for t in self.triggers),
+                TRIGGER_EXECUTOR_HOURS_TIME_ZONE: _hours_in_a_time_zone(self.executor_hours)}
         missing = [feature for feature, needed in used.items() if needed and feature not in _trigger_features(deployed)]
         if missing:
             raise RuntimeError(
@@ -262,6 +264,10 @@ def _when_has(triggers: list[dict], key: str) -> bool:
 def _delays(triggers: list[dict]) -> bool:
     return any(isinstance(action, dict) and action.get("delay") is not None
                for trigger in triggers for action in trigger.get("actions") or [])
+
+
+def _hours_in_a_time_zone(executor_hours: Optional[dict[str, dict]]) -> bool:
+    return any(isinstance(hours, dict) and "time_zone" in hours for hours in (executor_hours or {}).values())
 
 
 def _trigger_features(deployed: DeployedEnv) -> list:
