@@ -17,7 +17,7 @@ def _provider(on_this_machine: bool):
     sandbox = AsyncMock()
     sandbox.sandbox_id, sandbox.mode, sandbox.type = "sb-1", "container", "local"
     sandbox.tunnel_urls, sandbox.vnc_url, sandbox.network_policy = {}, None, NetworkPolicy()
-    provider = AsyncMock(ON_THIS_MACHINE=on_this_machine)
+    provider = AsyncMock(ON_THIS_MACHINE=on_this_machine, DEPLOY_SANDBOX_CPU=1.0)
     provider.links = (provider,)
     provider.create_container.return_value = sandbox
     return provider

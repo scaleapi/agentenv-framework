@@ -275,6 +275,8 @@ class ModalVmSandbox(VmSandbox):
 
 class ModalVmSandboxProvider(SandboxProvider):
     EGRESS_HOSTS: ClassVar[tuple[str, ...]] = ("*.modal.host", "*.w.modal.host")
+    # As ModalSandboxProvider's: a reservation the VM bursts above.
+    DEPLOY_SANDBOX_CPU: ClassVar[float] = 1.0
 
     @classmethod
     def supports_network_policy(cls, policy: NetworkPolicy) -> bool:

@@ -185,6 +185,8 @@ class SandboxProvider(ABC):
 
     # Internal→external host rewrites for URLs issued on this platform ({} = none).
     URL_REWRITES: ClassVar[dict[str, str]] = {}
+    # vCPUs a deploy_sandbox step that sets no cpu reserves here.
+    DEPLOY_SANDBOX_CPU: ClassVar[float] = 2.0
 
     # What it declares, which nothing outside the providers reads any other way. A provider that declares nothing has
     # its sandboxes off this machine, runs its containers' images by name on no private network, and gives an agent's

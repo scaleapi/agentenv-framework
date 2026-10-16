@@ -222,6 +222,8 @@ class ModalSandbox(Sandbox):
 
 class ModalSandboxProvider(SandboxProvider):
     EGRESS_HOSTS: ClassVar[tuple[str, ...]] = ("*.modal.host", "*.w.modal.host")
+    # A reservation, not a cap: the sandbox bursts above it, and Modal bills the higher of reservation and use.
+    DEPLOY_SANDBOX_CPU: ClassVar[float] = 1.0
     # Sandbox class this provider produces. A subclass or instance registered under a different
     # ``[sandbox.providers.<name>]`` key can set it to a ``ModalSandbox`` subclass whose
     # ``type`` equals that name — the registry's type-guard requires the produced

@@ -31,7 +31,7 @@ class DeploySandboxTaskStep(TaskStep):
         sandbox_name: str,
         sandbox_mode: str,
         image: Optional[str] = None,
-        cpu: float = 2.0,
+        cpu: Optional[float] = None,
         memory_mb: int = 8192,
         disk_size_gb: float = 10,
         ttl_seconds: int = TaskStep.DEFAULT_TTL_SECONDS,
@@ -88,7 +88,7 @@ class DeploySandboxTaskStep(TaskStep):
             sandbox_name=data["sandbox_name"],
             sandbox_mode=data["sandbox_mode"],
             image=data.get("image"),
-            cpu=data.get("cpu", 2.0),
+            cpu=data.get("cpu"),
             memory_mb=data.get("memory_mb", 8192),
             disk_size_gb=data.get("disk_size_gb", 10),
             ttl_seconds=data.get("ttl_seconds", TaskStep.DEFAULT_TTL_SECONDS),
@@ -122,12 +122,13 @@ class DeploySandboxTaskStep(TaskStep):
             else get_sandbox_provider()
         )
 
+        cpu = self.cpu if self.cpu is not None else provider.DEPLOY_SANDBOX_CPU
         _ttl_override = user_overrides.get("ttl_seconds")
         resolved_ttl = _ttl_override if _ttl_override is not None else self.ttl_seconds
         attribution = deploy_attribution(self, context)
         logger.info(
             f"Deploying sandbox '{self.sandbox_name}' (mode={self.sandbox_mode}, "
-            f"image={self.image}, cpu={self.cpu}, memory_mb={self.memory_mb}, "
+            f"image={self.image}, cpu={cpu}, memory_mb={self.memory_mb}, "
             f"disk_size_gb={self.disk_size_gb}, ttl_seconds={resolved_ttl}, "
             f"sandbox_type={resolved_sandbox_type}, attribution={attribution})"
         )
@@ -140,7 +141,7 @@ class DeploySandboxTaskStep(TaskStep):
             sandbox = await provider.create_vm(
                 image=self.image,
                 boot_mode=self.boot_mode,
-                cpu=self.cpu,
+                cpu=cpu,
                 memory=self.memory_mb,
                 disk_size_gb=self.disk_size_gb,
                 timeout=resolved_ttl,
@@ -156,7 +157,7 @@ class DeploySandboxTaskStep(TaskStep):
                 image_name=self.image,
                 port=self.port,
                 env=self.env_vars or {},
-                cpu=self.cpu,
+                cpu=cpu,
                 memory=self.memory_mb,
                 disk_size_gb=self.disk_size_gb,
                 timeout=resolved_ttl,

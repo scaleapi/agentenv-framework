@@ -33,6 +33,11 @@ class ChainedSandboxProvider(SandboxProvider):
     def links(self) -> tuple[SandboxProvider, ...]:
         return self.providers
 
+    @property
+    def DEPLOY_SANDBOX_CPU(self) -> float:  # noqa: N802
+        """Its providers' largest, so a fallback is never given less than it would get on its own."""
+        return max(p.DEPLOY_SANDBOX_CPU for p in self._providers)
+
     @staticmethod
     def filter_sandbox_providers(
         providers: list[SandboxProvider], policy: NetworkPolicy | None
