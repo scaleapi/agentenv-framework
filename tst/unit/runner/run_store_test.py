@@ -48,3 +48,13 @@ def test_set_running_advances_only_a_queued_run(docs):
     run_store.insert_run(_record("c", RunStatus.CANCELED))
     run_store.set_running("c")
     assert run_store.get_run("c").status == RunStatus.CANCELED
+
+
+def test_the_index_never_holds_a_per_run_key_but_keeps_a_reference(docs):
+    record = _record("r", RunStatus.QUEUED)
+    record.overrides = {"metadata": {"user_overrides": {
+        "litellm_api_key": "sk-raw", "judge_litellm_api_key": "secret:judge", "agent_sandbox": "local"}}}
+    run_store.insert_run(record)
+    assert run_store.get_run("r").overrides["metadata"]["user_overrides"] == {
+        "judge_litellm_api_key": "secret:judge", "agent_sandbox": "local"}
+    assert record.overrides["metadata"]["user_overrides"]["litellm_api_key"] == "sk-raw"

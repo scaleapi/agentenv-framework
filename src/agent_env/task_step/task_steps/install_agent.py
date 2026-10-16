@@ -262,7 +262,7 @@ class InstallAgentTaskStep(TaskStep):
             config=get_config(),
             workspace_dir=self.workspace_dir,
             agent_name=self.agent_name,
-            litellm_api_key_override=user_overrides.get("litellm_api_key"),
+            litellm_api_key_override=get_config().resolve_reference(user_overrides.get("litellm_api_key")),
             # A host install on a local sandbox runs on this machine itself, not in a container.
             sandbox_type=None if host_mode else sandbox.type,
         )
