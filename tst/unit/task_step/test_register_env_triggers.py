@@ -318,6 +318,8 @@ def test_bad_await_config_rejected_at_construction():
         _step(await_fired="t1")
     with pytest.raises(ValueError, match="await_timeout_seconds must be a positive number"):
         _step(await_fired=["t1"], await_timeout_seconds=0)
+    with pytest.raises(ValueError, match="await_timeout_seconds must be a positive number"):
+        _step(await_fired=["t1"], await_timeout_seconds=True)
 
 
 def test_preflight_names_an_awaited_trigger_this_step_does_not_register():
@@ -329,7 +331,7 @@ def test_preflight_names_an_awaited_trigger_this_step_does_not_register():
 @pytest.mark.asyncio
 async def test_an_unregistered_awaited_trigger_raises_before_any_request(monkeypatch):
     sent = _mock_gateway(monkeypatch, {})
-    with pytest.raises(RuntimeError, match=r"await_fired names \['nope'\]"):
+    with pytest.raises(RuntimeError, match=r"register_env_triggers 'reg-1': await_fired names \['nope'\]"):
         await _step(await_fired=["nope"]).execute(_context())
     assert sent == []
 
@@ -403,8 +405,8 @@ async def test_a_failed_wait_still_records_the_registration_with_the_last_status
 
 @pytest.mark.asyncio
 async def test_slow_state_reads_cannot_outlive_the_await_budget(monkeypatch):
-    """Each read's timeout and each retry's backoff are cut to the time left, so a stalled gateway cannot hold the step
-    for three full reads past the deadline."""
+    """Each read's timeout is cut to the time left and no read starts inside the last minimum window, so a stalled
+    gateway cannot hold the step past the deadline."""
     import asyncio as real_asyncio
 
     _mock_gateway_by_path(monkeypatch, {"/triggers/register": [{"ok": True, "added": ["t1"], "all": ["t1"]}]})
@@ -419,7 +421,7 @@ async def test_slow_state_reads_cannot_outlive_the_await_budget(monkeypatch):
 
     monkeypatch.setattr(DeployedGatewayEnv, "invoke", stalled)
     started = time.monotonic()
-    with pytest.raises(RuntimeError, match="could not read /triggers/state for env 'env-x' within the await budget.*gateway stalled"):
+    with pytest.raises(RuntimeError, match=r"could not read /triggers/state within the 2.5s await budget: gateway stalled; statuses \{'t1': None\}"):
         await _step(await_fired=["t1"], await_timeout_seconds=2.5).execute(_context())
     assert time.monotonic() - started < 2.5
     assert timeouts and all(t <= 2.5 for t in timeouts) and timeouts == sorted(timeouts, reverse=True), timeouts
@@ -460,7 +462,7 @@ async def test_a_budget_shorter_than_one_read_fails_without_reading(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_a_flaky_state_read_is_retried_then_reported(monkeypatch):
+async def test_a_failed_state_read_is_retried_on_the_next_poll(monkeypatch):
     _no_sleep(monkeypatch)
     sent = _mock_gateway_by_path(monkeypatch, {
         "/triggers/register": [{"ok": True, "added": ["t1"], "all": ["t1"]}],
@@ -472,15 +474,14 @@ async def test_a_flaky_state_read_is_retried_then_reported(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_state_read_that_keeps_failing_is_reported_with_its_cause(monkeypatch):
-    _no_sleep(monkeypatch)
+async def test_a_state_read_that_keeps_failing_is_reported_with_its_cause_at_the_deadline(monkeypatch):
     sent = _mock_gateway_by_path(monkeypatch, {
         "/triggers/register": [{"ok": True, "added": ["t1"], "all": ["t1"]}],
         "/triggers/state": [(503, {"error": "busy"})],
     })
-    with pytest.raises(RuntimeError, match="could not read /triggers/state for env 'env-x'.*503"):
-        await _step(await_fired=["t1"]).execute(_context())
-    assert [str(r.url.path) for r in sent].count("/triggers/state") == 3
+    with pytest.raises(RuntimeError, match=r"(?s)could not read /triggers/state within the 2.5s await budget: .*503.*; statuses \{'t1': None\}"):
+        await _step(await_fired=["t1"], await_timeout_seconds=2.5).execute(_context())
+    assert [str(r.url.path) for r in sent].count("/triggers/state") == 2  # reads at 0 s and 1 s; 2 s leaves no full window
 
 
 _TWO = [{"id": "t1", "when": {"type": "time", "at": "2026-07-01T17:00:02-05:00"},
