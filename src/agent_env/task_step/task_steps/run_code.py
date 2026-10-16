@@ -12,10 +12,10 @@ file can import its siblings; non-``.py`` members are skipped. ``script_file`` n
 the entry, defaulting to the sole ``.py`` member or to ``run.py``.
 
 Target: with ``env_id`` set, the script runs on that env's VM host, or in its container for an
-env in a container sandbox, whose image needs python3 (no agent, no LLM key); with ``sandbox_name`` set, on a ``deploy_sandbox`` sandbox (its VM host, or its
-container for a container-mode sandbox);
-otherwise it runs inside the agent container (``agent_name``), where it can see the
-agent's workspace.
+env in a container sandbox, whose image needs python3 (no agent, no LLM key); with
+``sandbox_name`` set, on a ``deploy_sandbox`` sandbox (its VM host, or its container for a
+container-mode sandbox); otherwise it runs inside the agent container (``agent_name``), where
+it can see the agent's workspace.
 """
 
 from __future__ import annotations

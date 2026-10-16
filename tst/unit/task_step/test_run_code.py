@@ -262,7 +262,7 @@ async def test_host_target_on_an_env_outside_our_sandboxes_says_it_needs_one():
 
 
 class _ContainerEnvSandbox(Sandbox):
-    """A container sandbox, as Modal's is, whose commands really run here: it has no host to stage on or run scripts on."""
+    """A container sandbox, as Modal's is, whose commands really run here; it has no host to stage on or run on."""
 
     type = "modal"
     mode = "container"
@@ -299,7 +299,8 @@ _CARD_URL = "https://abc.modal.host/.well-known/agent-env.json"
     # a plugin's env, whose card puts its MCP endpoint elsewhere
     (DeployedSandboxEnv(env_id="plug", env_version=1, sandbox_id="sb", env_provider_type="a-plugins",
                         environment_card_url=_CARD_URL,
-                        environment_card={"name": "plug", "additionalInterfaces": [{"transport": "mcp", "url": "/v2/mcp"}]}),
+                        environment_card={"name": "plug",
+                                          "additionalInterfaces": [{"transport": "mcp", "url": "/v2/mcp"}]}),
      {"id": "plug", "url": "http://127.0.0.1:18765", "mcp_url": "http://127.0.0.1:18765/v2/mcp"}),
     # a record from before the card, which kept only its MCP URL
     (DeployedSandboxEnv(env_id="old", env_version=1, sandbox_id="sb", mcp_url="https://abc.modal.host/mcp"),
