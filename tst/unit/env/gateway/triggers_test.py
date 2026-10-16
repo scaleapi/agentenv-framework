@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -594,14 +594,28 @@ def test_next_opening(now, hours, opens):
     ("2026-11-01T13:00:00Z", {"start": "09:00", "end": "17:00"}, "2026-11-01T14:00:00Z"),
     ("2026-11-01T06:15:00Z", {"start": "01:30", "end": "09:00"}, None),
     ("2026-11-01T06:15:00Z", {"start": "22:00", "end": "01:30"}, "2026-11-02T03:00:00Z"),
+    ("2026-03-08T06:00:00Z", {"start": "02:30", "end": "03:15"}, "2026-03-09T06:30:00Z"),
+    ("2026-03-08T06:00:00Z", {"start": "02:00", "end": "03:00"}, "2026-03-09T06:00:00Z"),
 ], ids=["july-weekday", "july-closed-at-17-local", "december-weekday", "december-closed-at-17-local",
         "into-spring-forward-sunday", "overnight-across-spring-forward", "overnight-closes-at-06-edt",
         "start-in-the-skipped-hour", "into-fall-back-sunday", "fall-back-sunday-at-08-est",
-        "opened-in-the-repeated-hour-stays-open", "closed-in-the-repeated-hour-stays-closed"])
+        "opened-in-the-repeated-hour-stays-open", "closed-in-the-repeated-hour-stays-closed",
+        "window-the-skipped-hour-empties", "window-inside-the-skipped-hour"])
 def test_next_opening_in_a_named_time_zone(now, hours, opens):
     hours = _normalize_hours({"time_zone": "America/New_York", **hours}, "executor")
     got = _next_opening(datetime.fromisoformat(now.replace("Z", "+00:00")), hours)
     assert (got.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if got else None) == opens
+
+
+@pytest.mark.parametrize("start, end", [("09:00", "17:00"), ("22:00", "06:00"), ("02:30", "10:00"), ("02:30", "03:15"),
+                                        ("02:00", "03:00"), ("01:30", "02:30"), ("01:15", "01:45"), ("22:00", "01:30")])
+def test_hours_in_a_time_zone_are_open_when_they_say_they_open(start, end):
+    hours = _normalize_hours({"start": start, "end": end, "time_zone": "America/New_York"}, "executor")
+    for first in ("2026-03-07T00:00:00+00:00", "2026-10-31T00:00:00+00:00"):
+        for quarter in range(3 * 24 * 4):
+            now = datetime.fromisoformat(first) + timedelta(minutes=15 * quarter)
+            opens = _next_opening(now, hours)
+            assert opens is None or _next_opening(opens.astimezone(timezone.utc), hours) is None, (now, opens)
 
 
 def test_hours_without_a_time_zone_normalize_as_before():
@@ -622,7 +636,9 @@ def test_hours_without_a_time_zone_normalize_as_before():
                         "got -5"),
     ({"time_zone": None}, "executors['bob'].hours.time_zone must be an IANA time zone name such as 'America/New_York', "
                           "got None"),
-], ids=["both", "unknown", "not-a-string", "null"])
+    ({"timezone": "America/New_York"}, "executors['bob'].hours has unknown key(s) ['timezone']; expected "
+                                       "['start', 'end', 'utc_offset', 'time_zone', 'days']"),
+], ids=["both", "unknown", "not-a-string", "null", "misspelled-time-zone"])
 def test_executor_hours_in_a_time_zone_refuse_bad_input(engine, hours, message):
     with pytest.raises(TriggerError) as excinfo:
         engine.register({"executors": {"bob": {"a2a_url": "http://b", "role": "bob",
