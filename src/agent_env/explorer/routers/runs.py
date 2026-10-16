@@ -235,7 +235,7 @@ def list_runs(
     from agent_env.runner import store as run_store
 
     records = run_store.list_runs(task_id=task_id, limit=limit, offset=offset)
-    total = docs().count("runs", Filter.of(task_id=task_id))
+    total = run_store.count_runs(task_id)
     return PaginatedResponse(
         items=[r.to_dict() for r in records], total=total, limit=limit, offset=offset,
         has_more=offset + len(records) < total,

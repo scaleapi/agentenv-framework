@@ -87,7 +87,7 @@ class RunRecord:
 
 
 class Runner(ABC):
-    """Dispatches task runs and reports on them.
+    """Dispatches task runs and reports on them, recording each run in ``agent_env.runner.store``.
 
     ``type`` is persisted on every run record: a hub restarted under a different
     ``[runner]`` reports on a run it does not own rather than misreporting it.

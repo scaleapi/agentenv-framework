@@ -32,6 +32,7 @@ BASES = (
     "agent_env.providers.env_state.env_state_provider.EnvStateProvider",
     "agent_env.providers.env_providers.env_provider.EnvironmentProvider",
     "agent_env.explorer.plugin.ExplorerPlugin",
+    "agent_env.runner.runner.Runner",
 )
 USED = (
     "agent_env.task_step.context.TaskStepContext", "agent_env.plugins",
@@ -39,6 +40,11 @@ USED = (
     # What a plugin reads of recorded runs.
     "agent_env.task.store.task_instances", "agent_env.task.store.count_task_instances",
     "agent_env.task.store.find_task_instance", "agent_env.task.store.TaskInstance",
+    # What a runner returns and the run index it records each run in.
+    "agent_env.runner.runner.RunStatus", "agent_env.runner.runner.RunHandle", "agent_env.runner.runner.RunRecord",
+    "agent_env.runner.store.ensure_indexes", "agent_env.runner.store.insert_run", "agent_env.runner.store.get_run",
+    "agent_env.runner.store.list_runs", "agent_env.runner.store.count_runs", "agent_env.runner.store.active_runs",
+    "agent_env.runner.store.set_running", "agent_env.runner.store.mark_terminal",
     # What an environment provider reads to deploy a built-in env.
     "agent_env.env.envs.mcp_server.MCPServerEnv.docker_image_artifact", "agent_env.env.envs.mcp_server.MCPServerEnv.environment_name",
     "agent_env.env.envs.website.WebsiteEnv.backend_docker_image_artifact",
