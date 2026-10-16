@@ -131,8 +131,9 @@ class EnvironmentUniverseArtifact(Universe):
         ``environment-universe get --output-dir`` writes one: each ``<environment_name>/`` folder's file is written as
         an environment of that name, ``<id>__<name>`` over ``<id>__<name>__file``, and each ``metadata/<key>/``
         folder's file as ``<id>__metadata__<key>``: a name or key holding ``/`` is nested folders, and one an id can't
-        hold is written under a hash of it (``universe_layout``). Its environments are the folders', in name order,
-        then the ones ``environment_artifacts`` names. Nothing is written when it has none, or two of one name."""
+        hold is written under a hash of it (``environment_universe_folder``). Its environments are the folders', in
+        name order, then the ones ``environment_artifacts`` names. Nothing is written when it has none, or two of one
+        name."""
         fields = cls.accept_toml(data, ctx)
         layout = ctx.universe()
         named = [ctx.artifact(ref, EnvironmentArtifact) for ref in fields.get("environment_artifacts", [])]

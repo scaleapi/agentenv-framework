@@ -25,6 +25,7 @@ from agent_env.artifact import (
     FileArtifactUniverse,
     SkillArtifact,
 )
+from agent_env.artifact.artifacts.environment_universe_folder import METADATA
 from agent_env.artifact.registry import canonical_type, get_artifact_registry
 from agent_env.config import get_config
 from agent_env.entity_refs import EntityKind
@@ -52,7 +53,6 @@ from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
 
 from ._fs import fold, relative, with_article
 from .authoring import (
-    UNIVERSE_METADATA,
     AuthoringContext,
     entry_files,
     environment_files,
@@ -213,7 +213,7 @@ class _Planner:
                 layout = universe_layout(bundle, source.entry)
                 return [*((id, f"{where}/{laid.name}") for laid in layout.environments
                           for id in (laid.environment_id, laid.file_id)),
-                        *((laid.file_id, f"{where}/{UNIVERSE_METADATA}/{laid.name}") for laid in layout.metadata)]
+                        *((laid.file_id, f"{where}/{METADATA}/{laid.name}") for laid in layout.metadata)]
         except BundleError:
             pass
         return []

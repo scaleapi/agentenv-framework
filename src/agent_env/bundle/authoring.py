@@ -2,29 +2,26 @@
 
 from __future__ import annotations
 
-import functools
-import hashlib
 import os
 import stat
 import unicodedata
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn, TypeVar, overload
 
 from agent_env.artifact.artifact import Artifact
 from agent_env.artifact.artifacts.environment import EnvironmentArtifact
-from agent_env.artifact.artifacts.environment_universe import EnvironmentUniverseArtifact
+from agent_env.artifact.artifacts.environment_universe_folder import UniverseFolder, UniverseFolderError, read_folder
 from agent_env.entity_refs import EntityKind, parse_toml_ref
 from agent_env.env.env import Env
 from agent_env.env.envs._deployment import provider_refusal
 from agent_env.providers.env_providers.constants import GATEWAY_SERVICE_NAMES
 from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider
 from agent_env.providers.env_providers.env_provider import _env_provider_class
-from agent_env.store.ids import validate_local_id
 from agent_env.utils.card_naming import card_names_in_files
 
-from ._fs import fold, os_reason, relative, show, with_article
+from ._fs import os_reason, relative, show, with_article
 from .parse import CONFIG_FILES, LEAVINGS, NAMED_BY, Bundle, BundleEntry, BundleError
 
 A = TypeVar("A", bound=Artifact)
@@ -74,7 +71,7 @@ class AuthoringContext:
     def file(self) -> tuple[str, Path]:
         return entry_file(self.bundle, self.entry)
 
-    def universe(self) -> UniverseLayout:
+    def universe(self) -> UniverseFolder:
         return universe_layout(self.bundle, self.entry)
 
     def renamed(self, data: dict, names: Mapping[str, str]) -> tuple[dict, list[str]]:
@@ -286,114 +283,16 @@ def environment_files(bundle: Bundle, entry: BundleEntry) -> dict[str, Path]:
     return {}
 
 
-# The folder of a universe's metadata files, as `environment-universe get --output-dir` writes them.
-UNIVERSE_METADATA = EnvironmentUniverseArtifact.metadata_name
-
-
-@dataclass(frozen=True)
-class LaidOut:
-    """One file of a universe folder, and the ids it's written under."""
-
-    name: str  # its environment's name, or its metadata key
-    filename: str
-    path: Path
-    file_id: str
-    environment_id: str | None  # None for a metadata file
-
-
-@dataclass(frozen=True)
-class UniverseLayout:
-    """An environment_universe folder, laid out as ``environment-universe get --output-dir`` writes one: each
-    ``<environment_name>/`` folder holds one environment's file, and each ``metadata/<key>/`` folder one metadata
-    file, a name or key holding ``/`` in nested folders. ``files`` lists them all, as ``entry_files`` does."""
-
-    environments: tuple[LaidOut, ...]
-    metadata: tuple[LaidOut, ...]
-    files: dict[str, Path]
-
-
-def universe_layout(bundle: Bundle, entry: BundleEntry) -> UniverseLayout:
-    """The environments and metadata files an environment_universe's folder holds, read as the inverse of
-    ``environment-universe get --output-dir``: each folder directly holding one file is an environment named by its
-    path from the universe's folder, or, under ``metadata/``, a metadata key named by its path from there. An
-    environment is written as ``<universe>__<name>`` over ``<universe>__<name>__file`` and a metadata file as
-    ``<universe>__metadata__<key>``, with a hash of the name in its place where an id can't hold it. An environment
-    whose name starts with ``metadata/`` reads back as a metadata key, so it needs an artifact folder of its own.
-    Raises BundleError listing every problem."""
+def universe_layout(bundle: Bundle, entry: BundleEntry) -> UniverseFolder:
+    """An environment_universe's folder, read as ``environment-universe get --output-dir`` writes one
+    (``read_folder``). Raises BundleError listing every problem."""
     walk = _Walk(bundle, entry, empty_ok=True)
-    files, folders = walk.files(), walk.folders
-    where = relative(bundle.root, entry.path)
-    # A metadata/ folder spelled in another case is a typo, as for every reserved name in a bundle.
-    near = sorted(parts[0] for parts in folders
-                  if len(parts) == 1 and parts[0] != UNIVERSE_METADATA and fold(parts[0]) == fold(UNIVERSE_METADATA))
-    problems = [f"{where}/{name}: rename to {UNIVERSE_METADATA}; names are case-sensitive, and an environment named "
-                f"{name} goes in an artifact folder of its own, named in environment_artifacts" for name in near]
-    # Every folder counts, so one left without its file is refused rather than dropped.
-    held: dict[tuple[str, ...], list[str]] = {parts: [] for parts in folders
-                                              if parts[0] not in near and parts != (UNIVERSE_METADATA,)}
-    for key in files:
-        parts = tuple(key.split("/"))
-        if parts[0] in near:
-            continue
-        if len(parts) == 1:
-            problems.append(f"{where}/{key}: a universe folder holds only artifact.toml and a folder for each "
-                            "environment; move it into <environment_name>/, or give it an artifact folder of its own")
-        elif parts[:-1] == (UNIVERSE_METADATA,):
-            problems.append(f"{where}/{key}: {UNIVERSE_METADATA}/ holds a folder for each key, with that key's one "
-                            f"file in it ({UNIVERSE_METADATA}/<key>/<file>); an environment named "
-                            f"{UNIVERSE_METADATA} goes in an artifact folder of its own, named in "
-                            "environment_artifacts")
-        else:
-            held.setdefault(parts[:-1], []).append(key)
-    environments, metadata_files = [], []
-    # A folder holding only folders is part of their names.
-    holders = {parts[:depth] for parts in held for depth in range(1, len(parts))}
-    for parts, keys in sorted(held.items(), key=lambda item: "/".join(item[0])):
-        folder = f"{where}/{'/'.join(parts)}"
-        if not keys and parts in holders:
-            continue
-        if len(keys) != 1:
-            listed = f" ({', '.join(repr(key.rsplit('/', 1)[-1]) for key in keys)})" if keys else ""
-            problems.append(f"{folder}: holds one file, and has {len(keys)}{listed}")
-            continue
-        metadata = parts[0] == UNIVERSE_METADATA
-        name = "/".join(parts[1:] if metadata else parts)
-        if metadata:
-            derive = functools.partial(EnvironmentUniverseArtifact.derived_metadata_id, entry.id)
-            environment_id, file_id = None, _child_id(derive, name, environment=False)
-        else:
-            derive = functools.partial(EnvironmentUniverseArtifact.derived_environment_id, entry.id)
-            environment_id = _child_id(derive, name, environment=True)
-            file_id = EnvironmentArtifact.derived_file_id(environment_id)
-        try:
-            for id in (environment_id, file_id):
-                if id is not None:
-                    validate_local_id(id)
-        except ValueError as e:
-            problems.append(f"{folder}: can't name the artifacts written from it ({e}); give the universe a shorter "
-                            "name")
-            continue
-        laid = LaidOut(name, keys[0].rsplit("/", 1)[-1], files[keys[0]], file_id, environment_id)
-        (metadata_files if metadata else environments).append(laid)
-    if problems:
-        raise BundleError(problems)
-    return UniverseLayout(tuple(environments), tuple(metadata_files), files)
-
-
-def _child_id(derive: Callable[[str], str], name: str, *, environment: bool) -> str:
-    """The id a universe's environment or metadata file named ``name`` is written under, as ``derive``, the
-    universe's own naming, derives it from a name: from ``name``, or, for a name holding ``__``, which could clash
-    with another's ids, or one an id can't hold (with an environment's file id, ``<id>__file``), from
-    ``sha256__<16 hex of its hash>``, which holds ``__``, so no name's own id can be."""
-    if "__" not in name:
-        id = derive(name)
-        try:
-            for derived in (id, EnvironmentArtifact.derived_file_id(id)) if environment else (id,):
-                validate_local_id(derived)
-            return id
-        except ValueError:
-            pass
-    return derive(f"sha256__{hashlib.sha256(name.encode('utf-8')).hexdigest()[:16]}")
+    files = walk.files()
+    try:
+        return read_folder(entry.id, files, walk.folders)
+    except UniverseFolderError as e:
+        where = relative(bundle.root, entry.path)
+        raise BundleError([f"{where}/{problem}" for problem in e.problems]) from None
 
 
 def universe_files(bundle: Bundle, entry: BundleEntry) -> dict[str, Path]:

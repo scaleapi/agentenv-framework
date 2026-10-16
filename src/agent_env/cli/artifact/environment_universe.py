@@ -4,6 +4,7 @@ from typing import Optional, Tuple
 import click
 
 from agent_env.artifact import FileArtifact, EnvironmentArtifact, EnvironmentUniverseArtifact
+from agent_env.artifact.artifacts.environment_universe_folder import environment_path, metadata_path
 from agent_env.cli.utils import parse_artifact_ref
 
 
@@ -126,9 +127,8 @@ def environment_universe_get(
     for sa in environment_artifacts:
         file_artifact = sa.get_file_artifact()
         data = file_artifact.load()
-        sa_dir = out / sa.environment_name
-        sa_dir.mkdir(parents=True, exist_ok=True)
-        dest = sa_dir / file_artifact.filename
+        dest = environment_path(out, sa.environment_name, file_artifact.filename)
+        dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(data)
         click.echo(f"  {sa.environment_name} -> {dest}")
 
@@ -137,9 +137,8 @@ def environment_universe_get(
         click.echo(f"Downloading {len(metadata_artifacts)} metadata file(s)...")
         for key, file_artifact in metadata_artifacts.items():
             data = file_artifact.load()
-            metadata_dir = out / EnvironmentUniverseArtifact.metadata_name / key
-            metadata_dir.mkdir(parents=True, exist_ok=True)
-            dest = metadata_dir / file_artifact.filename
+            dest = metadata_path(out, key, file_artifact.filename)
+            dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(data)
             click.echo(f"  {key} -> {dest}")
 
