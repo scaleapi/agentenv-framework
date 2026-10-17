@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional
 
 from pydantic import ConfigDict, Field, model_serializer
 
-from agent_env.artifact.artifact import _write_twin
+from agent_env.artifact.artifact import ArtifactFolder, _write_twin
 from agent_env.artifact.ref import ArtifactRef
 from agent_env.artifact.universe import Universe
 from agent_env.config import get_config
@@ -175,6 +175,11 @@ class FileArtifactUniverse(Universe):
         """Write the folder's files, each a file artifact keyed by its path in the folder."""
         ctx.accept(data, **cls.toml_keys)
         return cls.put_bundled(ctx.id, files=ctx.files())
+
+    @classmethod
+    def bundle_folder(cls, ctx: AuthoringContext) -> ArtifactFolder:
+        """What ``from_toml`` reads from the folder: every file it holds."""
+        return ArtifactFolder(ctx.files())
 
     @classmethod
     def put_existing(

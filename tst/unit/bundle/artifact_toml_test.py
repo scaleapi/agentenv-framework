@@ -453,8 +453,8 @@ def _refused(files):
      "an artifact folder of its own, named in environment_artifacts"),
     (_universe("x", environment_artifacts='["gmail-data"]') | {"artifacts/x/gmail/a.json": "{}"}
      | _environment("gmail-data", "gmail") | {"artifacts/gmail-data/a.json": "{}"},
-     "artifacts/x: environment_artifacts[0]: environment_name 'gmail' is also the gmail/ folder's; a universe's "
-     "environments need names of their own"),
+     "artifacts/x: environment_artifacts[0]: environment_name 'gmail' is also artifacts/x/gmail's; an "
+     "environment_universe's environments need names of their own"),
     (_universe("x", service_artifact_refs='["a"]', metadata='{ m = "f" }') | {"artifacts/x/gmail/a.json": "{}"},
      "artifacts/x: artifact.toml: service_artifact_refs is what the stored document calls it; write "
      "environment_artifacts instead"),
@@ -593,8 +593,9 @@ def test_a_universe_naming_a_store_environment_with_the_name_of_one_of_its_folde
     _bundle(bundle_dir, {**_universe("world", environment_artifacts='["mail-data"]'),
                          "artifacts/world/gmail/a.json": "{}"}, "world")
 
-    assert _problems(bundle_dir) == ("artifacts/world: environment_artifacts[0]: environment_name 'gmail' is also the "
-                                     "gmail/ folder's; a universe's environments need names of their own",)
+    assert _problems(bundle_dir) == ("artifacts/world: environment_artifacts[0]: environment_name 'gmail' is also "
+                                     "artifacts/world/gmail's; an environment_universe's environments need names of "
+                                     "their own",)
 
 
 def test_a_check_reports_artifact_toml_problems_without_reading_a_store(bundle_dir, monkeypatch):

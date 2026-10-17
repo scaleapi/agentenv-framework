@@ -8,14 +8,25 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional
 
 from pydantic import AliasChoices, ConfigDict, Field, model_serializer
 
+from agent_env.artifact.artifact import ArtifactFolder, FolderChild
 from agent_env.artifact.artifacts.environment import EnvironmentArtifact
+from agent_env.artifact.artifacts.environment_universe_folder import (
+    METADATA,
+    UniverseFolder,
+    UniverseFolderError,
+    environment_id,
+    metadata_id,
+    read_folder,
+)
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.ref import ArtifactRef
 from agent_env.artifact.universe import Universe
 from agent_env.entity_refs import EntityRef
-from agent_env.store.ids import derive_id
 
 logger = logging.getLogger(__name__)
+
+_NEEDS_AN_ENVIRONMENT = ("a universe needs an environment: a folder of its own, named after it and holding its file, or "
+                         "one environment_artifacts names")
 
 if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
@@ -37,7 +48,7 @@ class EnvironmentUniverseArtifact(Universe):
         "metadata_refs": "a metadata/<key>/ folder holding its file"}
     # What a universe's metadata is called: the folder `environment-universe get --output-dir` writes its files to, and
     # the segment of the ids they're written under.
-    metadata_name: ClassVar[str] = "metadata"
+    metadata_name: ClassVar[str] = METADATA
 
     type: Literal["environment_universe"] = "environment_universe"
     # serialization_alias pins the emitted key: the attribute is renamed, the document is not.
@@ -117,12 +128,12 @@ class EnvironmentUniverseArtifact(Universe):
     @staticmethod
     def derived_environment_id(id: str, environment_name: str) -> str:
         """The id an environment is written under when it's written with the universe: ``<id>__<environment_name>``."""
-        return derive_id(id, environment_name)
+        return environment_id(id, environment_name)
 
-    @classmethod
-    def derived_metadata_id(cls, id: str, key: str) -> str:
+    @staticmethod
+    def derived_metadata_id(id: str, key: str) -> str:
         """The id a metadata file is written under when it's written with the universe: ``<id>__metadata__<key>``."""
-        return derive_id(derive_id(id, cls.metadata_name), key)
+        return metadata_id(id, key)
 
     @classmethod
     def from_toml(cls, data: dict, ctx: AuthoringContext) -> EnvironmentUniverseArtifact:
@@ -135,12 +146,11 @@ class EnvironmentUniverseArtifact(Universe):
         name order, then the ones ``environment_artifacts`` names. Nothing is written when it has none, or two of one
         name."""
         fields = cls.accept_toml(data, ctx)
-        layout = ctx.universe()
+        layout = cls._read_folder(ctx)
         named = [ctx.artifact(ref, EnvironmentArtifact) for ref in fields.get("environment_artifacts", [])]
         names = Counter([laid.name for laid in layout.environments] + [env.environment_name for env in named])
         if not names:
-            ctx.refuse([ctx.config_problem("a universe needs an environment: a folder of its own, named after it and "
-                                           "holding its file, or one environment_artifacts names")])
+            ctx.refuse([ctx.config_problem(_NEEDS_AN_ENVIRONMENT)])
         if repeated := sorted(name for name, count in names.items() if count > 1):
             ctx.refuse([ctx.config_problem(f"two of its environments are named {name!r}; a universe's environments "
                                            "need names of their own") for name in repeated])
@@ -154,6 +164,30 @@ class EnvironmentUniverseArtifact(Universe):
                                                         file_path=str(laid.path), filename=laid.filename)
                     for laid in layout.metadata}
         return cls.put(ctx.id, environment_artifacts=environments + named, metadata=metadata or None)
+
+    @classmethod
+    def bundle_folder(cls, ctx: AuthoringContext) -> ArtifactFolder:
+        """What ``from_toml`` reads from the folder, every file ``read_folder`` lays out, and writes besides the
+        universe: each environment, seeding the environment of its name, its file, and each metadata file. A folder
+        holding no environment needs an artifact.toml naming one."""
+        layout = cls._read_folder(ctx)
+        if not layout.environments and not (isinstance(ctx.entry.config, dict)
+                                            and ctx.entry.config.get("environment_artifacts")):
+            ctx.refuse([_NEEDS_AN_ENVIRONMENT])
+        environments = (child for laid in layout.environments for child in (
+            FolderChild(laid.environment_id, laid.name, environment_name=laid.name), FolderChild(laid.file_id, laid.name)))
+        metadata = (FolderChild(laid.file_id, f"{METADATA}/{laid.name}") for laid in layout.metadata)
+        return ArtifactFolder(layout.files, (*environments, *metadata))
+
+    @classmethod
+    def _read_folder(cls, ctx: AuthoringContext) -> UniverseFolder:
+        """The universe's folder, read as ``environment-universe get --output-dir`` writes one (``read_folder``).
+        Raises BundleError listing every problem."""
+        files, folders = ctx.listing()
+        try:
+            return read_folder(ctx.id, files, folders)
+        except UniverseFolderError as e:
+            ctx.refuse_within(e.problems)
 
     @classmethod
     def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:

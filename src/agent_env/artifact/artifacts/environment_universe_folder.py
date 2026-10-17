@@ -2,7 +2,8 @@
 
 ``environment-universe get --output-dir`` writes each environment's file to ``<environment_name>/<file>`` and each
 metadata file to ``metadata/<key>/<file>`` (``environment_path``, ``metadata_path``), a name or key holding ``/`` in
-nested folders. ``read_folder`` is its exact inverse, which a bundle's environment_universe folder is written from.
+nested folders. ``read_folder`` is its exact inverse, which a bundle's environment_universe folder is written from,
+and ``environment_id`` and ``metadata_id`` name what's written from each folder.
 The format's own limits: an environment whose name starts with ``metadata/`` reads back as a metadata key, names are
 read in NFC, and names that differ only in case are one folder on a case-insensitive disk.
 """
@@ -17,10 +18,20 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agent_env.artifact.artifacts.environment import EnvironmentArtifact
-from agent_env.artifact.artifacts.environment_universe import EnvironmentUniverseArtifact
-from agent_env.store.ids import validate_local_id
+from agent_env.store.ids import derive_id, validate_local_id
 
-METADATA = EnvironmentUniverseArtifact.metadata_name
+# What a universe's metadata is called: the folder its files go in, and the segment of the ids they're written under.
+METADATA = "metadata"
+
+
+def environment_id(universe_id: str, environment_name: str) -> str:
+    """The id an environment is written under when it's written with its universe: ``<universe>__<name>``."""
+    return derive_id(universe_id, environment_name)
+
+
+def metadata_id(universe_id: str, key: str) -> str:
+    """The id a metadata file is written under when it's written with its universe: ``<universe>__metadata__<key>``."""
+    return derive_id(derive_id(universe_id, METADATA), key)
 
 
 def environment_path(folder: Path, environment_name: str, filename: str) -> Path:
@@ -105,21 +116,19 @@ def read_folder(universe_id: str, files: Mapping[str, Path],
         metadata = parts[0] == METADATA
         name = "/".join(parts[1:] if metadata else parts)
         if metadata:
-            derive = functools.partial(EnvironmentUniverseArtifact.derived_metadata_id, universe_id)
-            environment_id, file_id = None, _child_id(derive, name, environment=False)
+            env_id, file_id = None, _child_id(functools.partial(metadata_id, universe_id), name, environment=False)
         else:
-            derive = functools.partial(EnvironmentUniverseArtifact.derived_environment_id, universe_id)
-            environment_id = _child_id(derive, name, environment=True)
-            file_id = EnvironmentArtifact.derived_file_id(environment_id)
+            env_id = _child_id(functools.partial(environment_id, universe_id), name, environment=True)
+            file_id = EnvironmentArtifact.derived_file_id(env_id)
         try:
-            for id in (environment_id, file_id):
+            for id in (env_id, file_id):
                 if id is not None:
                     validate_local_id(id)
         except ValueError as e:
             problems.append(f"{folder}: can't name the artifacts written from it ({e}); give the universe a shorter "
                             "name")
             continue
-        entry = FolderEntry(name, keys[0].rsplit("/", 1)[-1], files[keys[0]], file_id, environment_id)
+        entry = FolderEntry(name, keys[0].rsplit("/", 1)[-1], files[keys[0]], file_id, env_id)
         (metadata_files if metadata else environments).append(entry)
     if problems:
         raise UniverseFolderError(problems)

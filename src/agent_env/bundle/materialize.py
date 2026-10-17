@@ -42,7 +42,7 @@ from ._fs import relative, with_article
 from .authoring import AuthoringContext, build_context_files
 from .ledger import Ledger, materializing
 from .parse import BundleError, BundleKind
-from .plan import Plan, Write, env_writer, folder_walk, unpinned_store_refs
+from .plan import Plan, Write, artifact_writer, env_writer, unpinned_store_refs
 from .resolve import BuiltImage, BundleImage, ReferencedImage, build_step
 
 @dataclass(frozen=True)
@@ -310,7 +310,7 @@ def _unwritable(write: Write) -> str | None:
     if write.kind not in _WRITERS:
         return with_article(write.kind.value.removesuffix("s"))
     type_ = write.source.entry.type
-    if write.kind is BundleKind.ARTIFACT and folder_walk(get_artifact_registry().get(canonical_type(type_))) is None:
+    if write.kind is BundleKind.ARTIFACT and not artifact_writer(get_artifact_registry().get(canonical_type(type_))):
         return with_article(f"{type_} artifact")
     if write.kind is BundleKind.ENV and not env_writer(get_env_registry().get(type_)):
         return with_article(f"{type_} env")

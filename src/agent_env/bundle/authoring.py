@@ -11,8 +11,6 @@ from pathlib import Path
 from typing import Any, NoReturn, TypeVar, overload
 
 from agent_env.artifact.artifact import Artifact
-from agent_env.artifact.artifacts.environment import EnvironmentArtifact
-from agent_env.artifact.artifacts.environment_universe_folder import UniverseFolder, UniverseFolderError, read_folder
 from agent_env.entity_refs import EntityKind, parse_toml_ref
 from agent_env.env.env import Env
 from agent_env.env.envs._deployment import provider_refusal
@@ -28,6 +26,7 @@ A = TypeVar("A", bound=Artifact)
 E = TypeVar("E", bound=Env)
 
 _BRING_IT_IN = "copy what it points to into the bundle, or put it in a store and refer to it by id"
+_AS_UNIVERSE = "leave out its declared type to write the folder as a file_artifact_universe"
 _TOML_TYPES = {str: "a string", dict: "a table", list: "a list"}
 
 
@@ -58,8 +57,8 @@ class AuthoringContext:
     def dir(self) -> Path:
         return self.entry.path
 
-    def files(self) -> dict[str, Path]:
-        return entry_files(self.bundle, self.entry)
+    def files(self, *, empty_ok: bool = False) -> dict[str, Path]:
+        return entry_files(self.bundle, self.entry, empty_ok=empty_ok)
 
     def try_files(self) -> dict[str, Path] | None:
         """``files``, or None when the folder can't be listed, which the plan's walk reports."""
@@ -71,8 +70,20 @@ class AuthoringContext:
     def file(self) -> tuple[str, Path]:
         return entry_file(self.bundle, self.entry)
 
-    def universe(self) -> UniverseFolder:
-        return universe_layout(self.bundle, self.entry)
+    def only(self, files: dict[str, Path], remedy: str = _AS_UNIVERSE) -> dict[str, Path]:
+        """``files``, which must be one file. Raises BundleError otherwise, suggesting ``remedy``."""
+        return _only(self.bundle, self.entry, files, remedy)
+
+    def listing(self) -> tuple[dict[str, Path], set[tuple[str, ...]]]:
+        """The folder's ``files``, none at all included, and every folder under it, by every path to it, as the names
+        on that path in NFC."""
+        walk = _Walk(self.bundle, self.entry, empty_ok=True)
+        return walk.files(), walk.folders
+
+    @property
+    def leavings(self) -> tuple[str, ...]:
+        """The names a folder walk leaves out, which the OS or Python leaves behind."""
+        return tuple(sorted(LEAVINGS))
 
     def renamed(self, data: dict, names: Mapping[str, str]) -> tuple[dict, list[str]]:
         """``data`` less each key ``names`` maps to the key an author writes instead, and a problem for each:
@@ -183,6 +194,12 @@ class AuthoringContext:
         where = relative(self.bundle.root, self.entry.path)
         raise BundleError([f"{where}: {problem}" for problem in problems])
 
+    def refuse_within(self, problems: list[str]) -> NoReturn:
+        """Raise BundleError with ``problems``, each ``<path in the folder>: <why>``, named by its path in the
+        bundle."""
+        where = relative(self.bundle.root, self.entry.path)
+        raise BundleError([f"{where}/{problem}" for problem in problems])
+
     @overload
     def env(self, ref: str | dict[str, Any]) -> Env: ...
     @overload
@@ -243,9 +260,6 @@ def entry_file(bundle: Bundle, entry: BundleEntry) -> tuple[str, Path]:
     return key.rsplit("/", 1)[-1], path
 
 
-_AS_UNIVERSE = "leave out its declared type to write the folder as a file_artifact_universe"
-
-
 def one_file(bundle: Bundle, entry: BundleEntry, remedy: str = _AS_UNIVERSE) -> dict[str, Path]:
     """``entry_files`` of a folder that must hold one file. Raises BundleError otherwise, suggesting ``remedy``."""
     return _only(bundle, entry, entry_files(bundle, entry), remedy)
@@ -257,47 +271,6 @@ def _only(bundle: Bundle, entry: BundleEntry, files: dict[str, Path], remedy: st
         raise BundleError([f"{relative(bundle.root, entry.path)}: {with_article(f'{entry.type} {entry.kind.store}')} "
                            f"holds one file, and this folder has {len(files)} ({listed}); {remedy}"])
     return files
-
-
-# The keys that name the file an environment artifact wraps: ``file``, and the stored document's names for it, which
-# its toml check refuses with a pointer to ``file``.
-_NAMES_ITS_FILE = ("file", *(stored for stored, key in EnvironmentArtifact.toml_stored_names.items() if key == "file"))
-
-
-def environment_files(bundle: Bundle, entry: BundleEntry) -> dict[str, Path]:
-    """What an environment artifact's write reads from its folder: its one file, or none when its artifact.toml's
-    ``file`` names the artifact to wrap instead. Raises BundleError otherwise."""
-    files = entry_files(bundle, entry, empty_ok=True)
-    if not (isinstance(entry.config, dict) and any(name in entry.config for name in _NAMES_ITS_FILE)):
-        if not files:
-            raise BundleError([f"{relative(bundle.root, entry.path)}: has no file for the environment to wrap "
-                               f"({', '.join(sorted(LEAVINGS))} don't count); put its one file here, or name the "
-                               "artifact to wrap with file"])
-        return _only(bundle, entry, files, "name the artifact to wrap with file, or give each other file an artifact "
-                                           "folder of its own")
-    if files:
-        listed = ", ".join(repr(name) for name in files)
-        raise BundleError([f"{relative(bundle.root, entry.path)}: its file is the artifact file names, so the folder "
-                           f"holds only artifact.toml, and it also has {listed}; give the file an artifact folder of "
-                           "its own, or leave out file to wrap the folder's one file"])
-    return {}
-
-
-def universe_layout(bundle: Bundle, entry: BundleEntry) -> UniverseFolder:
-    """An environment_universe's folder, read as ``environment-universe get --output-dir`` writes one
-    (``read_folder``). Raises BundleError listing every problem."""
-    walk = _Walk(bundle, entry, empty_ok=True)
-    files = walk.files()
-    try:
-        return read_folder(entry.id, files, walk.folders)
-    except UniverseFolderError as e:
-        where = relative(bundle.root, entry.path)
-        raise BundleError([f"{where}/{problem}" for problem in e.problems]) from None
-
-
-def universe_files(bundle: Bundle, entry: BundleEntry) -> dict[str, Path]:
-    """What an environment_universe's write reads from its folder: every file ``universe_layout`` lays out."""
-    return universe_layout(bundle, entry).files
 
 
 class _Walk:
