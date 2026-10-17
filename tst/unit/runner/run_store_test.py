@@ -1,4 +1,4 @@
-"""Run-store invariants for the in-process runner: a terminal run is never overwritten,
+"""Run-index invariants: a terminal run is never overwritten,
 and set_running only advances a still-queued one."""
 
 import pytest
@@ -48,3 +48,11 @@ def test_set_running_advances_only_a_queued_run(docs):
     run_store.insert_run(_record("c", RunStatus.CANCELED))
     run_store.set_running("c")
     assert run_store.get_run("c").status == RunStatus.CANCELED
+
+
+def test_count_runs_counts_one_task_or_every_task(docs):
+    run_store.insert_run(_record("a", RunStatus.QUEUED))
+    run_store.insert_run(RunRecord(run_id="b", runner="other", task_id="u", task_version=1, instance_id="j"))
+    assert run_store.count_runs("t") == 1
+    assert run_store.count_runs("missing") == 0
+    assert run_store.count_runs() == 2
