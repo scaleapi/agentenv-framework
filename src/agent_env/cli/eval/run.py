@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import click
 
+from agent_env.cli import submitted_runs
 from agent_env.cli.banner import print_banner
 from agent_env.cli.identity import get_agent_env_client_id
 from agent_env.cli.teardown_output import echo_teardown
@@ -73,6 +74,48 @@ async def _run_single(task, tag, output_dir, agent_model=None, agent_artifact_id
     return task.id, tag, context
 
 
+def _run_submitted(tasks, k: int, base_metadata: dict | None, output_dir: str | None, agent_model: str | None,
+                   agent_artifact_id: str | None) -> None:
+    """``--submit``: the configured ``[runner]`` runs every task ``k`` times and tears the runs down; this follows
+    them and reports each run's score from its task instance."""
+    submissions = [(f"[{task.id} run {i}]" if k > 1 else f"[{task.id}]", task, copy.deepcopy(base_metadata or {}))
+                   for task in tasks for i in range(1, k + 1)]
+    runs: list[submitted_runs.SubmittedRun] = []
+    with Interrupts() as interrupts:
+        [outcome] = interrupts.run(interrupts.gather(
+            [submitted_runs.submit_and_follow(submissions, runs, agent_model=agent_model,
+                                              agent_artifact_id=agent_artifact_id)],
+            submitted_runs.on_signal))
+    if not outcome.cancelled() and outcome.exception() is not None:
+        raise outcome.exception()
+    click.echo()
+    results = []
+    for run in runs:
+        instance = run.instance()
+        context = TaskStepContext.from_dict(instance.context) if instance and instance.context else None
+        if output_dir and context is not None:
+            _write_context(context, run.task_id, output_dir, prefix=f"{run.tag} ")
+        results.append((run, context.metadata.get("score") if context else None))
+    passed = [(run, score) for run, score in results if run.completed]
+    if passed:
+        click.echo(click.style("Results:", fg="blue"))
+        for run, score in passed:
+            click.echo(click.style(f"  {run.tag} PASSED{f' score={score}' if score is not None else ''}", fg="green"))
+    for run, _ in results:
+        if not run.completed:
+            outcome_text = f"{run.record.status}: {run.record.error}" if run.done else "CANCELLED"
+            click.echo(click.style(f"  {run.tag} {outcome_text}", fg="red"))
+    total = len(submissions)
+    if len(passed) == total:
+        click.echo(click.style(f"\nAll {total} runs completed!", fg="blue"))
+    else:
+        click.echo(click.style(f"\n{len(passed)}/{total} runs completed, {total - len(passed)}/{total} failed.", fg="red"))
+    if interrupts.count:
+        raise SystemExit(128 + interrupts.signum)
+    if len(passed) < total:
+        raise SystemExit(1)
+
+
 @click.command()
 @click.option("--id", "eval_id", required=True, help="Eval id")
 @click.option("--version", "eval_version", default=None, type=int, help="Eval version (defaults to latest)")
@@ -81,12 +124,19 @@ async def _run_single(task, tag, output_dir, agent_model=None, agent_artifact_id
 @click.option("--max-concurrency", default=None, type=int, help="Maximum number of concurrent task runs")
 @click.option("--agent-model", default=None, type=str, help="Override the model used by prompt_agent steps")
 @click.option("--agent-artifact-id", default=None, type=str, help="Override the agent image artifact for deploy_agent steps")
-def run(eval_id: str, eval_version: int | None, output_dir: str | None, k: int, max_concurrency: int | None, agent_model: str | None, agent_artifact_id: str | None):
+@click.option("--submit", is_flag=True,
+              help="Hand the runs to the configured [runner] and follow them, instead of running them in this process; "
+                   "the runner bounds their concurrency and tears them down, and Ctrl-C asks it to cancel them. "
+                   "Not with --max-concurrency.")
+def run(eval_id: str, eval_version: int | None, output_dir: str | None, k: int, max_concurrency: int | None, agent_model: str | None, agent_artifact_id: str | None, submit: bool):
     """Run all tasks in an eval concurrently."""
     if k < 1:
         raise click.BadParameter("must be at least 1", param_hint="'--k'")
     if max_concurrency is not None and max_concurrency < 1:
         raise click.BadParameter("must be at least 1", param_hint="'--max-concurrency'")
+    if submit and max_concurrency is not None:
+        raise click.UsageError("--submit hands the runs to the configured [runner], which bounds their concurrency: "
+                               "drop --max-concurrency")
 
     from agent_env.eval import Eval
     from agent_env.task import Task
@@ -104,6 +154,12 @@ def run(eval_id: str, eval_version: int | None, output_dir: str | None, k: int, 
 
     print_banner()
 
+    client_id = get_agent_env_client_id()
+    base_metadata = {"agent_env_hub": {"caller": client_id}} if client_id else None
+    if submit:
+        _run_submitted(tasks, k, base_metadata, output_dir, agent_model, agent_artifact_id)
+        return
+
     total_runs = len(tasks) * k
     concurrency_note = f" (max concurrency: {max_concurrency})" if max_concurrency else ""
     click.echo(click.style(
@@ -111,9 +167,6 @@ def run(eval_id: str, eval_version: int | None, output_dir: str | None, k: int, 
         fg="blue",
     ))
     click.echo()
-
-    client_id = get_agent_env_client_id()
-    base_metadata = {"agent_env_hub": {"caller": client_id}} if client_id else None
 
     async def _run_safe(task, tag, slot):
         """Wrap _run_single so failures, and a cancel while it waits for its slot, carry task identity."""
