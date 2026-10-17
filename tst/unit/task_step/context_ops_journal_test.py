@@ -83,3 +83,12 @@ def test_the_judge_key_never_reaches_the_store_but_survives_a_rebuild():
     assert "sk-judge" not in repr(build_context_update_ops(None, live).to_journal_dict())
     _rebuild_context(live, stored)
     assert live.metadata["user_overrides"] == {"judge_litellm_api_key": "sk-judge", "agent_effort": "high"}
+
+
+def test_a_per_run_key_by_reference_is_persisted_but_not_one_carrying_a_default():
+    live = TaskStepContext(metadata={"user_overrides": {
+        "litellm_api_key": "secret:team_key", "judge_litellm_api_key": "env:JUDGE_KEY?sk-raw-default"}})
+    stored = live.to_safe_dict()
+    assert stored["metadata"]["user_overrides"] == {"litellm_api_key": "secret:team_key"}
+    journal = repr(build_context_update_ops(None, live).to_journal_dict())
+    assert "secret:team_key" in journal and "sk-raw-default" not in journal

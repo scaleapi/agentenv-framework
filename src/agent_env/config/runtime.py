@@ -315,6 +315,11 @@ class Config:
             self._secret = bundle
         return self._secret
 
+    def resolve_reference(self, value: Any) -> Any:
+        """``value`` with an ``env:NAME`` / ``secret:KEY`` reference resolved, the latter through ``[stores.secret]``;
+        any other value as it is."""
+        return config_loader.interpolate(value, secret_resolver=self._resolve_secret)
+
     def get_litellm_api_key(self) -> str:
         return self._model_config().resolve_api_key(secret_resolver=self._resolve_secret)
 
