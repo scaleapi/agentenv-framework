@@ -1470,7 +1470,6 @@ def _named_executor(action: dict) -> dict:
 _DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 _HHMM_RE = re.compile(r"([01]\d|2[0-3]):([0-5]\d)")
 _UTC_OFFSET_RE = re.compile(r"([+-])([01]\d|2[0-3]):([0-5]\d)")
-_HOURS_KEYS = ("start", "end", "utc_offset", "time_zone", "days")
 
 
 def _normalize_delay(delay: Any, w: str) -> None:
@@ -1543,9 +1542,6 @@ def _normalize_hours(raw: Any, where: str) -> dict:
     `time_zone`, filled in."""
     if not isinstance(raw, dict):
         raise TriggerError(f"{where}.hours must be an object {{start, end, utc_offset? or time_zone?, days?}}")
-    unknown = sorted(set(raw) - set(_HOURS_KEYS))
-    if unknown:
-        raise TriggerError(f"{where}.hours has unknown key(s) {unknown}; expected {list(_HOURS_KEYS)}")
     for key in ("start", "end"):
         if not isinstance(raw.get(key), str) or not _HHMM_RE.fullmatch(raw[key]):
             raise TriggerError(f"{where}.hours.{key} must be a 24-hour 'HH:MM'")
