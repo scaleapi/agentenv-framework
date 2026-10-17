@@ -131,7 +131,7 @@ def test_template_unresolved_ctx_raises_and_bare_names_stay_literal():
 
 @pytest.mark.parametrize("bad,fragment", [
     ({"id": "x", "when": {"type": "time", "at": "PT1H"},
-      "actions": [{"type": "tool", "tool": "t", "args": {"a": "${args.b}"}}]}, "only action triggers carry"),
+      "actions": [{"type": "tool", "tool": "t", "args": {"a": "${args.b}"}}]}, "only action and website triggers carry"),
     ({"id": "x", "when": {"type": "action", "tool": "t", "repeat": "yes"}, "actions": []}, "repeat must be a boolean"),
     ({"id": "x", "when": {"type": "action", "tool": "t"}, "barrier": True, "actions": []},
      "barrier must be an object"),
@@ -146,15 +146,15 @@ def test_template_unresolved_ctx_raises_and_bare_names_stay_literal():
       "barrier": {"at": "provoking_call", "timeout_seconds": 0}, "actions": []},
      "timeout_seconds must be a positive, finite number"),
     ({"id": "x", "when": {"type": "time", "at": "PT1H"}, "barrier": {"at": "provoking_call"}, "actions": []},
-     "only valid on action triggers"),
+     "only valid on action and website triggers"),
     ({"id": "x", "when": {"type": "action", "tool": "t"},
       "actions": [{"type": "tool", "tool": "t2", "args": {"a": "${bogus.path}"}}]}, "must be a check binding name"),
     ({"id": "x", "when": {"type": "action", "tool": "t", "where": {"result.a b": {"exists": True}}},
       "actions": []}, "invalid path segment"),
     ({"id": "x", "when": {"type": "state", "check": {"tool": "t", "predicate": {"exists": True}}, "repeat": True},
-      "actions": []}, "only valid on action triggers"),
+      "actions": []}, "only valid on action and website triggers"),
     ({"id": "x", "when": {"type": "state", "check": {"tool": "t", "args": {"q": "${args.x}"}, "predicate": {"exists": True}}},
-      "actions": []}, "only action triggers carry"),
+      "actions": []}, "only action and website triggers carry"),
     ({"id": "x", "when": {"type": "action", "tool": "t"},
       "actions": [{"type": "tool", "tool": "t2", "args": {"a": "${result.}"}}]}, "has an empty path"),
 ])
@@ -478,7 +478,7 @@ def test_optional_placeholder_validates_like_a_required_one(monkeypatch):
     engine = _make_engine(monkeypatch, {})
     engine.register({"triggers": [{"id": "ok", "when": {"type": "action", "tool": "t"},
                                    "actions": [{"type": "tool", "tool": "t2", "args": {"a": "${args.x?}", "b": "${result.y[0]?}"}}]}]})
-    with pytest.raises(TriggerError, match="only action triggers carry"):
+    with pytest.raises(TriggerError, match="only action and website triggers carry"):
         engine.register({"triggers": [{"id": "bad", "when": {"type": "time", "at": "PT1H"},
                                        "actions": [{"type": "tool", "tool": "t2", "args": {"a": "${args.x?}"}}]}]})
 

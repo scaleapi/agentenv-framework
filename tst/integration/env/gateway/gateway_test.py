@@ -25,6 +25,7 @@ from agent_env.env import Env, GatewayEnv, MCPServerEnv, MultiEnv
 from agentenv_protocol import DataPart, FilePart, ToolSession, client as protocol_v1
 from agent_env.env.envs import WebsiteEnv
 from agent_env.env.gateway import AGENT_ENV_ROLE_HEADER, GatewayMode, TOOL_DISABLE_ACTION, TOOL_ENABLE_ACTION
+from agent_env.env.gateway.constants import EXT_TRIGGERS_URI, TRIGGER_WEBSITE
 from agent_env.env.gateway.get_time import (
     GET_TIME_TOOL_DESCRIPTION as GET_TIME_DESC,
     GET_TIME_TOOL_NAME as GET_TIME,
@@ -2717,11 +2718,11 @@ async def test_gateway_trigger_registration_is_fail_loud(sandbox_provider, mcp_s
                                   "barrier": {"at": "provoking_call", "timeout_seconds": 0}, "actions": []},
          "positive, finite"),
         ("repeat on a state trigger", {"id": "b", "when": dict(state_when, repeat=True), "actions": []},
-         "only valid on action triggers"),
+         "only valid on action and website triggers"),
         ("ctx placeholder on a state trigger", {"id": "b", "when": state_when,
                                                 "actions": [{"type": "tool", "tool": "move_email",
                                                              "args": {"email_id": "${result.email_id}"}}]},
-         "only action triggers carry"),
+         "only action and website triggers carry"),
     ]
     try:
         result = await email_env.deploy()
@@ -2747,6 +2748,44 @@ async def test_gateway_trigger_registration_is_fail_loud(sandbox_provider, mcp_s
             assert ok.status_code == 200, f"an unknown top-level key was rejected: {ok.text}"
     finally:
         await email_env.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_gateway_website_trigger_fires_on_a_request_through_the_website_proxy(slack_website_env):
+    """A request to the env's website through the gateway's /website proxy, as an agent's own browser makes it,
+    provokes a website trigger: the barrier holds the page until the action has landed, and the firing log attributes
+    the request. Only the request the trigger names fires it."""
+    visit = {"id": "visit", "when": {"type": "website", "app": "slack", "method": "GET", "path": {"equals": "/"}},
+             "barrier": {"at": "provoking_call"},
+             "actions": [{"type": "permission", "action": "disable", "role": "default", "tools": ["list_website_urls"]}]}
+    try:
+        result = await slack_website_env.deploy()
+        gw = result.gateway_url
+        card = await protocol_v1.get_card(gw)
+        assert TRIGGER_WEBSITE in protocol_v1.extension_params(card, EXT_TRIGGERS_URI)["features"], card
+
+        async with httpx.AsyncClient() as client:
+            unknown = await client.post(f"{gw}/triggers/register", timeout=30, json={
+                "triggers": [{**visit, "when": {**visit["when"], "app": "calendar"}}]})
+            assert unknown.status_code == 400 and "unknown website 'calendar'" in unknown.text, unknown.text
+            registered = await client.post(f"{gw}/triggers/register", json={"triggers": [visit]}, timeout=30)
+            assert registered.status_code == 200, registered.text
+
+            missing = await client.get(f"{gw}/website/slack/missing.css", timeout=30)
+            assert missing.status_code == 404
+            page = await client.get(f"{gw}/website/slack/", timeout=30)
+            assert page.status_code == 200 and "Slack Workspace" in page.text
+            roles = (await client.get(f"{gw}/state", timeout=30)).json()["roles"]
+            assert roles.get("default", {}).get("disabled") == ["list_website_urls"], roles
+
+            state = await _triggers_state(client, gw)
+            [row] = state["triggers"]
+            assert (row["type"], row["status"], row["fire_count"]) == ("website", "fired", 1), row
+            assert [e["provoking"] for e in state["events"] if e["kind"] == "detected"] == [
+                {"source": "website", "app": "slack", "method": "GET", "path": "/", "status": 200, "role": "default"}]
+    finally:
+        await slack_website_env.close()
 
 
 # One internal MCP round trip each, measured at ~8ms. A `queued` trigger exists only while a fire

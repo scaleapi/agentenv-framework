@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import parse_qsl
 from uuid import uuid4
 
 import anyio
@@ -177,14 +178,14 @@ class Gateway:
                 methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
             )
             async def proxy_to_frontend(request: Request) -> Response:
-                return await self._proxy_rest_request(request, url_map=self.website_urls)
+                return await self._proxy_website_request(request)
 
             @self._mcp.custom_route(
                 "/website/{service_name}",
                 methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
             )
             async def proxy_to_frontend_root(request: Request) -> Response:
-                return await self._proxy_rest_request(request, url_map=self.website_urls)
+                return await self._proxy_website_request(request)
 
         @self._mcp.custom_route(f"/tools/{TOOL_DISABLE_ACTION}", methods=["POST"])
         async def tools_disable(request: Request) -> Response:
@@ -507,6 +508,30 @@ class Gateway:
             return self._json_response({"error": f"Unknown service: {service_name}"}, 404)
         return await forward(request, base_url, role=self._request_role(request), timeout=self.REST_PROXY_TIMEOUT,
                              mcp_server=url_map is self.rest_proxy_urls and service_name.startswith("mcp-"))
+
+    async def _proxy_website_request(self, request: Request) -> Response:
+        """Proxy a request to one of the env's websites, then, once the website has answered, feed it to the trigger
+        engine and hold the response for the barriers it provokes: an agent browsing with its own browser or HTTP
+        client provokes triggers as a tool call does."""
+        response = await self._proxy_rest_request(request, url_map=self.website_urls)
+        app = request.path_params["service_name"]
+        if app in self.website_urls:
+            barrier_tasks, barrier_timeout_s = self._fire_website_triggers(request, app, response.status_code,
+                                                                           await request.body())
+            await self._await_barriers(barrier_tasks, barrier_timeout_s)
+        return response
+
+    def _fire_website_triggers(self, request: Request, app: str, status: int,
+                               body: bytes) -> tuple[list[asyncio.Task], float | None]:
+        """Feed an answered website request to the trigger engine (fail-open), with its path beneath the website's root
+        and its query and body fields as its args."""
+        try:
+            path = "/" + request.path_params.get("path", "")
+            return self._trigger_engine.on_website_request(self._request_role(request), app, request.method, path,
+                                                           status, _request_args(request, body))
+        except Exception:
+            logger.exception("Trigger evaluation failed (fail-open)")
+            return [], None
 
     @staticmethod
     def _request_role(request: Request) -> str:
@@ -1191,6 +1216,30 @@ class _ProxyArgModelBase(ArgModelBase):
             output_name = field_info.alias if field_info.alias else field_name
             kwargs[output_name] = value
         return kwargs
+
+
+def _request_args(request: Request, body: bytes) -> dict:
+    """A website request's args, as a trigger reads them: its query parameters, then the fields of a urlencoded form or
+    JSON-object body, which win a clash. A parameter given more than once is the list of its values."""
+    args = _fields(parse_qsl(request.url.query, keep_blank_values=True))
+    media_type = request.headers.get("content-type", "").partition(";")[0].strip().lower()
+    if media_type == "application/x-www-form-urlencoded":
+        args.update(_fields(parse_qsl(body.decode("utf-8", "replace"), keep_blank_values=True)))
+    elif media_type == "application/json" or media_type.endswith("+json"):
+        try:
+            parsed = json.loads(body)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict):
+            args.update(parsed)
+    return args
+
+
+def _fields(pairs: list[tuple[str, str]]) -> dict:
+    grouped: dict[str, list[str]] = {}
+    for key, value in pairs:
+        grouped.setdefault(key, []).append(value)
+    return {key: values[0] if len(values) == 1 else values for key, values in grouped.items()}
 
 
 def _is_dead_session(exc: BaseException) -> bool:

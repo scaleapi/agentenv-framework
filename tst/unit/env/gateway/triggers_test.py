@@ -207,7 +207,7 @@ def _registration(**overrides):
     *[({"triggers": [{"id": "x", "when": {"type": "action", "tool": "t", "roles": roles}, "actions": []}]},
        "when.roles must be a non-empty list") for roles in ("denise", [], [""], [5])],
     ({"triggers": [{"id": "x", "when": {"type": "time", "after": "y", "offset": "PT1S", "roles": ["denise"]},
-                    "actions": []}]}, "only valid on action and state triggers"),
+                    "actions": []}]}, "only valid on action, state and website triggers"),
     ({"executors": {"denise": {"a2a_url": "http://d", "role": "denise@example.com"}},
       "triggers": [{"id": "x", "when": {"type": "action", "tool": "t", "roles": ["denise@example.com"]},
                     "actions": [{"type": "nl", "instruction": "hi", "executor": "denise"}]}]},

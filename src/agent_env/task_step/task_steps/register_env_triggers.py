@@ -42,6 +42,8 @@ class RegisterEnvTriggersStep(TaskStep):
     each other. Such a chain ends when a persona's turn makes no matching write, so give conversational nl actions no
     `verify` (its retry forces a write), give persona prompts a stop condition, and prefer a `where` off-ramp. An
     action's `delay` and `executor_hours` pace replies in virtual time, and a time trigger's `unless` makes it a deadline.
+    A `website` trigger matches the requests the gateway proxies to one of the env's websites, so an agent that browses
+    with its own browser or HTTP client provokes triggers as one calling tools does.
     `await_fired` holds the step until the named one-shot triggers have fired (a recurrence re-arms after each fire), so
     a dependent step starts only once start-of-run time triggers have landed in the world."""
 
