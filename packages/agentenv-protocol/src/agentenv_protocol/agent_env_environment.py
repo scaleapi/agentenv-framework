@@ -129,7 +129,8 @@ def tool(name: str | None = None, *, description: str | None = None, hidden_by_d
     ``hidden_by_default=True`` makes being hidden a fixed property of the tool, for plumbing a task
     drives but the agent under test must not see: it is listed with ``_meta``
     ``{HIDDEN_BY_DEFAULT_META_KEY: true}``, and a gateway hides it from every role until a tool-access
-    step names it. Steps for every tool (``tools="*"``) cover ordinary tools only.
+    step names it. Steps for every tool (``tools="*"``) never show it, though they still clear earlier
+    named steps as they do for any tool.
     """
     if callable(name):
         raise TypeError("use @tool(...) with parentheses, not bare @tool")

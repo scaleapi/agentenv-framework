@@ -1,7 +1,8 @@
 """A tool its server lists with `_meta` {"agentenv.io/hiddenByDefault": true} is plumbing a task drives (a trigger's
 tool action, a simulated party) that the agent under test must not see. Being hidden is a property of the tool:
 discovery records it, and the MCP tools/list, /step list_tools and both call paths hide it from every role until a
-rule names it. Rules naming it work as for any tool; rules for every tool (`"*"`) cover ordinary tools only."""
+rule names it. Rules naming it work as for any tool; rules for every tool (`"*"`) never show it, though they still
+replace earlier named rules as they do for any tool."""
 from __future__ import annotations
 
 import random
