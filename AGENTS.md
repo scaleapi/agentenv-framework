@@ -265,6 +265,8 @@ Actions are pinned to commit SHAs; Dependabot updates them, the pinned uv, `uv.l
 
 ## Docs
 
-`README.md` is the user-facing front door (configuration, custom envs, steps, artifacts and
-providers, the CLI). `packages/agentenv-protocol/README.md` documents the
-protocol and the A2A agent framework.
+`README.md` is the front door: what AgentEnv Framework is, how to install it, and links. The user
+guide (configuration, environments, steps, artifacts, providers, the CLI) is
+www.agentenvframework.com/docs. A new feature, provider or option is documented there, not in the
+README: say in the pull request what the docs should cover, and a maintainer updates the site.
+`packages/agentenv-protocol/README.md` documents the protocol and the A2A agent framework.
