@@ -24,6 +24,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     Accepts,
     SandboxProvider,
     apply_default_attribution,
+    idle_timeout_kwargs,
 )
 from agent_env.providers.sandbox_providers.modal_image_build import context_image, fmt_exc
 
@@ -323,6 +324,7 @@ class ModalSandboxProvider(SandboxProvider):
         expose_externally: bool = True,
         vnc_port: Optional[int] = None,
         private_network: bool = False,
+        idle_timeout: Optional[int] = None,
     ) -> Sandbox:
         # The private network is i6pn, Modal's network between sandboxes, in the configured region.
         i6pn = private_network
@@ -356,7 +358,7 @@ class ModalSandboxProvider(SandboxProvider):
         logger.info(
             f"Creating Modal sandbox from image {image_name} "
             f"(app={app_name}, tags={app_tags}, sandbox_tags={sandbox_tags}, port={port}, "
-            f"cpu={cpu}, memory={memory}MB, "
+            f"cpu={cpu}, memory={memory}MB, idle_timeout={idle_timeout}, "
             f"gpu={self._gpu}, i6pn={i6pn}, region={region}, expose_externally={expose_externally})"
         )
         client = await self._get_client()
@@ -378,6 +380,7 @@ class ModalSandboxProvider(SandboxProvider):
         )
         if region is not None:
             create_kwargs["region"] = region
+        create_kwargs.update(idle_timeout_kwargs(idle_timeout))
 
         async def create(image: modal.Image) -> modal.Sandbox:
             if self._gpu:
@@ -451,6 +454,7 @@ class ModalSandboxProvider(SandboxProvider):
                 i6pn_address=i6pn_address,
                 network_policy=effective,
             )
+            sandbox.idle_timeout = idle_timeout
             if vnc_port in tunnel_urls:
                 sandbox.vnc_url = f"{tunnel_urls[vnc_port]}/vnc.html"
                 logger.info(f"Modal sandbox vnc_url: {sandbox.vnc_url}")
@@ -472,12 +476,14 @@ class ModalSandboxProvider(SandboxProvider):
         cpu: float = 0.125, memory: int = 8192, disk_size_gb: float = 10, timeout: int = 3600 * 2,
         attribution: Optional[Attribution] = None,
         network_policy: Optional[NetworkPolicy] = None,
+        idle_timeout: Optional[int] = None,
     ) -> Sandbox:
         return await self.create_container(
             image_name=image_name, port=port, env=env,
             cpu=cpu, memory=memory, disk_size_gb=disk_size_gb, timeout=timeout,
             attribution=attribution,
             network_policy=network_policy,
+            idle_timeout=idle_timeout,
         )
 
     async def get_sandbox(self, sandbox_id: str) -> Sandbox:

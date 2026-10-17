@@ -151,6 +151,9 @@ class Sandbox(ABC):
     vnc_url: str | None
     # Effective, as applied by the backend; None when it cannot tell us.
     network_policy: NetworkPolicy | None = None
+    # Seconds without activity before the backend reclaims it, as applied at create; None when none was asked for, the
+    # backend has none, or it was reconnected (get_sandbox can't tell).
+    idle_timeout: int | None = None
     # Host IPs published ports bind to; empty binds every interface.
     host_ips: tuple[str, ...] = ()
     # ``name:address`` entries the containers started on this sandbox add to their hosts file.

@@ -16,7 +16,7 @@ from agent_env.task_step.task_steps.deploy_sandbox import DeploySandboxTaskStep
 def _provider(on_this_machine: bool):
     sandbox = AsyncMock()
     sandbox.sandbox_id, sandbox.mode, sandbox.type = "sb-1", "container", "local"
-    sandbox.tunnel_urls, sandbox.vnc_url, sandbox.network_policy = {}, None, NetworkPolicy()
+    sandbox.tunnel_urls, sandbox.vnc_url, sandbox.network_policy, sandbox.idle_timeout = {}, None, NetworkPolicy(), None
     provider = AsyncMock(ON_THIS_MACHINE=on_this_machine)
     provider.links = (provider,)
     provider.create_container.return_value = sandbox
@@ -33,7 +33,7 @@ class _CustomContainerProvider(SandboxProvider):
         self.calls.append(kwargs)
         return SimpleNamespace(
             sandbox_id="custom-1", mode="container", type="custom", tunnel_urls={},
-            vnc_url=None, network_policy=NetworkPolicy(),
+            vnc_url=None, network_policy=NetworkPolicy(), idle_timeout=None,
         )
 
 

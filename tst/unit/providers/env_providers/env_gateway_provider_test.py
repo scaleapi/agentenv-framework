@@ -1772,7 +1772,8 @@ async def test_create_gateway_hands_the_deploy_path_every_argument(attribution, 
     gp, provider = EnvironmentGatewayProvider(), _vm_provider()
     args = dict(mcp_servers=[MagicMock()], mcp_server_images=[MagicMock()], gateway_port=18999, website_configs=[MagicMock()],
                 website_images=[MagicMock()], gateway_mode=GatewayMode.CONSISTENT, ttl_seconds=61, disk_size_gb=11, cpu=1.5,
-                memory_mb=3072, existing_sandbox=MagicMock(), sidecars=[MagicMock()], mcp_server_name="crm")
+                memory_mb=3072, existing_sandbox=MagicMock(), sidecars=[MagicMock()], mcp_server_name="crm",
+                idle_timeout_seconds=900)
     with patch.object(gp, "_deploy_via_vm", AsyncMock(return_value=_probed())) as vm, \
          patch.object(env_gateway_provider, "_tool_names", AsyncMock(return_value=set())):
         await gp.create_gateway(sandbox_provider=provider, env_id="crm-env", attribution=attribution, **args)
@@ -1792,7 +1793,7 @@ async def test_deploy_returns_the_gateway_record_for_the_env(caplog):
     caplog.set_level(logging.INFO, logger="agent_env.providers.env_providers")
     gp, external = EnvironmentGatewayProvider(), MagicMock(state_type="remote", instance_id="st-ext")
     state_provider = MagicMock(spec=DatabaseStateProvider, prepare=AsyncMock(), teardown=AsyncMock())
-    vm = MagicMock(sandbox_id="vm-1", type="modal_vm", tunnel_urls={18765: "https://vm.example"}, host_port=lambda port: port, host_ips=(),
+    vm = MagicMock(sandbox_id="vm-1", type="modal_vm", idle_timeout=None, tunnel_urls={18765: "https://vm.example"}, host_port=lambda port: port, host_ips=(),
                    load_docker_images=AsyncMock(), exec_script=AsyncMock(), exec_with_output=AsyncMock(return_value=(0, "gateway", "")))
     env = MagicMock(id="crm-env", version=3, environment_name="slack", docker_image_artifact=_loadable("mcp-slack"))
     card = {"name": "env1234", "children_environments": []}
@@ -1880,7 +1881,7 @@ async def test_a_deploy_on_an_external_state_store_needs_no_servicedb_env(make):
     gp = EnvironmentGatewayProvider()
 
     async def deploy_gateway(sandbox_provider, **kwargs):
-        gp._sandbox = MagicMock(sandbox_id="vm-1", type="modal_vm")
+        gp._sandbox = MagicMock(sandbox_id="vm-1", type="modal_vm", idle_timeout=None)
         return DeployedGateway(gateway_url="https://gw", mcp_url="https://gw/mcp", db_web_url=None, env_state_instance_ids=["st-ext"])
 
     external = MagicMock(state_type="remote", instance_id="st-ext")
@@ -1918,7 +1919,7 @@ async def test_deploy_fronts_a_multi_envs_servers_and_websites_under_its_name():
 
     async def deploy_gateway(sandbox_provider, **kwargs):
         seen.update(kwargs)
-        gp._sandbox = MagicMock(sandbox_id="vm-1", type="modal_vm")
+        gp._sandbox = MagicMock(sandbox_id="vm-1", type="modal_vm", idle_timeout=None)
         return DeployedGateway(gateway_url="https://gw", mcp_url="https://gw/mcp", db_web_url="https://pg/", website_frontend_urls={"shop": "https://shop"},
                                environment_card={"name": "crm"}, env_state_instance_ids=["st-1"])
 
@@ -1964,7 +1965,7 @@ async def test_deploy_fronts_a_website_env():
 
     async def deploy_gateway(sandbox_provider, **kwargs):
         seen.update(kwargs)
-        gp._sandbox = MagicMock(sandbox_id="vm-1", type="modal_vm")
+        gp._sandbox = MagicMock(sandbox_id="vm-1", type="modal_vm", idle_timeout=None)
         return DeployedGateway(gateway_url="https://gw", mcp_url="https://gw/mcp", db_web_url=None, website_frontend_urls={"shop": "https://shop"},
                                env_state_instance_ids=["st-1"])
 

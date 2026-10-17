@@ -221,8 +221,10 @@ class SailVmSandboxProvider(SandboxProvider):
         setup_for_gateway: bool = True,
         attribution: Attribution | None = None,
         network_policy: NetworkPolicy | None = None,
+        idle_timeout: int | None = None,
     ) -> SailVmSandbox:
-        """Create a Sailbox from the devbox image; ``timeout`` is its hard maximum lifetime."""
+        """Create a Sailbox from the devbox image; ``timeout`` is its hard maximum lifetime. ``idle_timeout`` has no Sail
+        equivalent and is ignored."""
         if image is not None:
             raise ValueError("the Sail provider boots its own Docker-capable image; image overrides are unsupported")
         del boot_mode
@@ -374,6 +376,7 @@ class SailVmSandboxProvider(SandboxProvider):
         timeout: int = 3600 * 2,
         attribution: Attribution | None = None,
         network_policy: NetworkPolicy | None = None,
+        idle_timeout: int | None = None,
     ) -> SailVmSandbox:
         """A bare VM the caller loads and starts ``image_name`` in, as on the other VM providers. A model key in
         ``env``, and the endpoint's headers, are injected by Sail rather than passed in (unless

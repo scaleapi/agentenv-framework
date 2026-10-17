@@ -151,13 +151,15 @@ class TensorlakeSandboxProvider(SandboxProvider):
         setup_for_gateway: bool = True,
         attribution: Attribution | None = None,
         network_policy: NetworkPolicy | None = None,
+        idle_timeout: int | None = None,
     ) -> TensorlakeSandbox:
         """Create an ephemeral Tensorlake sandbox and expose ``exposed_ports`` publicly.
 
         ``image`` overrides the configured image and must be a registered Docker-capable
         Tensorlake image. ``timeout`` becomes Tensorlake's idle timeout, after which the
-        sandbox terminates. ``boot_mode`` has no Tensorlake equivalent and is ignored. Tensorlake
-        sandboxes have no labels, so ``attribution`` goes into the started event, keyed by sandbox id.
+        sandbox terminates, so ``idle_timeout`` is ignored. ``boot_mode`` has no Tensorlake
+        equivalent and is ignored. Tensorlake sandboxes have no labels, so ``attribution`` goes
+        into the started event, keyed by sandbox id.
         """
         refuse_unenforceable_policy(self, network_policy)
         if boot_mode is not None:
@@ -308,6 +310,7 @@ class TensorlakeSandboxProvider(SandboxProvider):
         timeout: int = 3600 * 2,
         attribution: Attribution | None = None,
         network_policy: NetworkPolicy | None = None,
+        idle_timeout: int | None = None,
     ) -> TensorlakeSandbox:
         # A VM backend: the gateway and agent paths start image_name inside the VM afterwards.
         del image_name, env

@@ -54,6 +54,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_VM,
     Accepts,
     SandboxProvider,
+    idle_timeout_kwargs,
 )
 
 if TYPE_CHECKING:
@@ -562,6 +563,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         env_state_type: str | None = None,
         env_state_instance_id: str | None = None,
         ttl_seconds: int = 10800,
+        idle_timeout_seconds: int | None = None,
         disk_size_gb: float = 10,
         cpu: float | None = None,
         memory_mb: int | None = None,
@@ -587,7 +589,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             sandbox_provider, env.id, state_instance=state_instance, mcp_servers=topology.mcp_servers,
             mcp_server_images=topology.mcp_server_images, website_configs=topology.website_configs,
             website_images=topology.website_images, mcp_server_name=topology.mcp_server_name, gateway_mode=gateway_mode,
-            ttl_seconds=ttl_seconds, disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb, attribution=attribution,
+            ttl_seconds=ttl_seconds, idle_timeout_seconds=idle_timeout_seconds, disk_size_gb=disk_size_gb, cpu=cpu,
+            memory_mb=memory_mb, attribution=attribution,
         )
         return DeployedGatewayEnv(
             env_id=env.id,
@@ -596,6 +599,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             gateway_url=deployed.gateway_url,
             db_web_url=deployed.db_web_url,
             sandbox_id=self._sandbox.sandbox_id, sandbox_type=self._sandbox.type,
+            idle_timeout_seconds=self._sandbox.idle_timeout,
             sandbox_ids=self._sandbox_ids(always_name_gateway=topology.names_gateway_on_vm),
             db_mcp_url=deployed.db_mcp_url,
             environment_card_url=f"{deployed.gateway_url}{WELL_KNOWN_PATH}",
@@ -626,6 +630,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         mcp_server_name: str | None = None,
         *,
         attribution: Optional[Attribution] = None,
+        idle_timeout_seconds: int | None = None,
     ) -> DeployedGateway:
         """Create and start a gateway from explicit topology, for a caller that builds its own record rather than calling ``deploy()``.
 
@@ -645,7 +650,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             gateway_port=gateway_port, website_configs=website_configs, website_images=website_images,
             gateway_mode=gateway_mode, ttl_seconds=ttl_seconds, disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb,
             existing_sandbox=existing_sandbox, sidecars=sidecars, mcp_server_name=mcp_server_name,
-            attribution=attribution,
+            attribution=attribution, idle_timeout_seconds=idle_timeout_seconds,
         )
 
     async def _launch(self, sandbox_provider: SandboxProvider, env_id: str | None, *, mcp_server_name: str | None = None, **gateway) -> DeployedGateway:
@@ -704,6 +709,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         existing_sandbox: Sandbox | None = None,
         sidecars: list[SidecarConfig] | None = None,
         mcp_server_name: str | None = None,
+        idle_timeout_seconds: int | None = None,
     ) -> DeployedGateway:
         from agent_env.env.env import Env
         from agent_env.config import get_config
@@ -745,7 +751,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         if existing_sandbox is not None:
             self._sandbox = existing_sandbox
         else:
-            vm_kwargs: dict = {}
+            vm_kwargs: dict = idle_timeout_kwargs(idle_timeout_seconds)
             if cpu is not None:
                 vm_kwargs["cpu"] = cpu
             if memory_mb is not None:
@@ -1280,6 +1286,7 @@ COMPOSE_EOF'''
         sidecars: list[SidecarConfig] | None = None,
         mcp_server_name: str | None = None,
         attribution: Optional[Attribution] = None,
+        idle_timeout_seconds: int | None = None,
     ) -> DeployedGateway:
         """One gateway deploy on one (unchained) sandbox provider: a VM on one that creates VMs, else a container per
         server on its private network."""
@@ -1300,6 +1307,10 @@ COMPOSE_EOF'''
                 raise ValueError("existing_sandbox is only supported for VM-mode providers")
             if sidecars:
                 raise NotImplementedError("sidecars are only supported for VM-mode gateway deploys")
+            if idle_timeout_seconds is not None:
+                logger.warning(f"A gateway on {type(sandbox_provider).__name__} deploys without an idle timeout: its servers "
+                               "are reached only over the private network, which doesn't count as activity; deploy on a "
+                               "provider whose gateway runs in a VM to get one")
             return await self._deploy_via_containers(
                 sandbox_provider, mcp_servers, mcp_server_images,
                 gateway_port=gateway_port, website_configs=website_configs, gateway_mode=gateway_mode,
@@ -1313,7 +1324,7 @@ COMPOSE_EOF'''
                 gateway_port=gateway_port, website_configs=website_configs, website_images=website_images,
                 gateway_mode=gateway_mode, ttl_seconds=ttl_seconds, disk_size_gb=disk_size_gb,
                 cpu=cpu, memory_mb=memory_mb, existing_sandbox=existing_sandbox, sidecars=sidecars,
-                mcp_server_name=mcp_server_name, **deploy_kwargs,
+                mcp_server_name=mcp_server_name, idle_timeout_seconds=idle_timeout_seconds, **deploy_kwargs,
             )
         except BaseException:
             await self._terminate_new_sandbox(earlier_sandbox=earlier_sandbox, existing_sandbox=existing_sandbox)

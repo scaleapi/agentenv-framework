@@ -179,18 +179,29 @@ async def test_a_deploy_hands_the_gateway_its_sizing_state_and_attribution_and_r
     env, state, seen = _env(), SimpleNamespace(state_type="remote", instance_id="st-ext"), {}
 
     record = await _deploy(env, {"gw": _sandbox("gw")}, seen, state, gateway_mode=GatewayMode.CONSISTENT, env_state_type="remote",
-                           ttl_seconds=60, disk_size_gb=20, cpu=2.0, memory_mb=4096, attribution={"team": "t1"})
+                           ttl_seconds=60, idle_timeout_seconds=900, disk_size_gb=20, cpu=2.0, memory_mb=4096,
+                           attribution={"team": "t1"})
 
     assert ([c.environment_name for c in seen["mcp_servers"]], seen["mcp_server_images"]) == (["email"], [env.docker_image_artifact])
-    assert {k: seen[k] for k in ("ttl_seconds", "disk_size_gb", "cpu", "memory_mb", "attribution", "gateway_mode")} == {
-        "ttl_seconds": 60, "disk_size_gb": 20, "cpu": 2.0, "memory_mb": 4096, "attribution": {"team": "t1"},
-        "gateway_mode": GatewayMode.CONSISTENT}
+    assert {k: seen[k] for k in ("ttl_seconds", "idle_timeout_seconds", "disk_size_gb", "cpu", "memory_mb", "attribution",
+                                 "gateway_mode")} == {
+        "ttl_seconds": 60, "idle_timeout_seconds": 900, "disk_size_gb": 20, "cpu": 2.0, "memory_mb": 4096,
+        "attribution": {"team": "t1"}, "gateway_mode": GatewayMode.CONSISTENT}
     assert (seen["gateway_port"], seen["website_configs"], seen["website_images"], seen["existing_sandbox"], seen["sidecars"]) == (
         18765, None, None, None, None)
     assert seen["state_instance"] is state and (seen["acquired_for"], seen["acquired_type"]) == ("mcp-email", "remote")
     assert re.fullmatch(r"env\d{4}", seen["mcp_server_name"])
     assert (record.mcp_server_name, record.gateway_mode, record.environment_card_url) == ("env1234", "consistent", f"{_GW}{WELL_KNOWN_PATH}")
     assert (record.instance_id, env._instance_id, env._deployed) == ("inst-1", "inst-1", record)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("applied", [900, None], ids=["applied", "not-applied"])
+async def test_a_gateway_record_carries_the_idle_timeout_its_sandbox_applied(applied):
+    sandboxes = {"gw": _sandbox("gw")}
+    sandboxes["gw"].idle_timeout = applied
+    record = await _deploy(_env(), sandboxes, idle_timeout_seconds=900)
+    assert record.idle_timeout_seconds == applied
 
 
 def test_the_env_provider_type_round_trips_and_defaults_to_the_gateway(monkeypatch):
@@ -233,9 +244,10 @@ async def test_a_deploy_without_a_gateway_records_the_servers_own_card():
 async def test_a_deploy_without_a_gateway_hands_the_server_its_sizing_and_attribution():
     seen = {}
     await _deploy(_env("server"), {"srv": _sandbox("srv")}, seen, gateway_mode=GatewayMode.PERFORMANCE,  # the deploy_env step's default
-                  ttl_seconds=60, disk_size_gb=20, cpu=2.0, memory_mb=4096, attribution={"team": "t1"})
+                  ttl_seconds=60, idle_timeout_seconds=900, disk_size_gb=20, cpu=2.0, memory_mb=4096, attribution={"team": "t1"})
 
-    assert seen == {"ttl_seconds": 60, "disk_size_gb": 20, "cpu": 2.0, "memory_mb": 4096, "attribution": {"team": "t1"}}
+    assert seen == {"ttl_seconds": 60, "idle_timeout_seconds": 900, "disk_size_gb": 20, "cpu": 2.0, "memory_mb": 4096,
+                    "attribution": {"team": "t1"}}
 
 
 @pytest.mark.asyncio
@@ -304,7 +316,7 @@ async def test_validation_deploys_a_server_env_as_declared_on_the_default_sandbo
     [record] = context.deployed_envs
     assert (record.env_provider_type, record.environment_card_url) == ("server", f"{_SRV}{WELL_KNOWN_PATH}")  # the card the gate records
     assert seen["sandbox_provider"] is default
-    assert set(seen["options"]) == {"ttl_seconds", "disk_size_gb", "cpu", "memory_mb", "attribution"}
+    assert set(seen["options"]) == {"ttl_seconds", "idle_timeout_seconds", "disk_size_gb", "cpu", "memory_mb", "attribution"}
 
 
 def _env(env_provider_type: str = "gateway") -> MCPServerEnv:

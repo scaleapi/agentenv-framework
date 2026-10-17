@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, ClassVar, Optional
 from agent_env.artifact.artifacts.docker_image import pull_problem
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import skip_refusing
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
+from agent_env.providers.sandbox_providers.sandbox_provider import idle_timeout_kwargs
 from agent_env.task_step.context import DeployedSandbox, TaskStepContext
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.attribution import deploy_attribution
@@ -44,6 +45,7 @@ class DeploySandboxTaskStep(TaskStep):
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
         metadata: Optional[dict] = None,
+        idle_timeout_seconds: Optional[int] = None,
     ):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
         if sandbox_mode not in _SUPPORTED_MODES:
@@ -55,6 +57,7 @@ class DeploySandboxTaskStep(TaskStep):
         self.memory_mb = memory_mb
         self.disk_size_gb = disk_size_gb
         self.ttl_seconds = ttl_seconds
+        self.idle_timeout_seconds = idle_timeout_seconds
         self.exposed_ports = exposed_ports
         self.boot_mode = boot_mode
         self.port = port
@@ -72,6 +75,7 @@ class DeploySandboxTaskStep(TaskStep):
         base["memory_mb"] = self.memory_mb
         base["disk_size_gb"] = self.disk_size_gb
         base["ttl_seconds"] = self.ttl_seconds
+        base["idle_timeout_seconds"] = self.idle_timeout_seconds
         base["exposed_ports"] = self.exposed_ports
         base["boot_mode"] = self.boot_mode
         base["port"] = self.port
@@ -92,6 +96,7 @@ class DeploySandboxTaskStep(TaskStep):
             memory_mb=data.get("memory_mb", 8192),
             disk_size_gb=data.get("disk_size_gb", 10),
             ttl_seconds=data.get("ttl_seconds", TaskStep.DEFAULT_TTL_SECONDS),
+            idle_timeout_seconds=data.get("idle_timeout_seconds"),
             exposed_ports=data.get("exposed_ports"),
             boot_mode=data.get("boot_mode"),
             port=data.get("port"),
@@ -124,6 +129,8 @@ class DeploySandboxTaskStep(TaskStep):
 
         _ttl_override = user_overrides.get("ttl_seconds")
         resolved_ttl = _ttl_override if _ttl_override is not None else self.ttl_seconds
+        _idle_override = user_overrides.get("idle_timeout_seconds")
+        resolved_idle = _idle_override if _idle_override is not None else self.idle_timeout_seconds
         attribution = deploy_attribution(self, context)
         logger.info(
             f"Deploying sandbox '{self.sandbox_name}' (mode={self.sandbox_mode}, "
@@ -147,6 +154,7 @@ class DeploySandboxTaskStep(TaskStep):
                 exposed_ports=self.exposed_ports or [],
                 attribution=attribution,
                 network_policy=policy,
+                **idle_timeout_kwargs(resolved_idle),
             )
         else:
             if self.image is None or self.port is None:
@@ -162,8 +170,11 @@ class DeploySandboxTaskStep(TaskStep):
                 timeout=resolved_ttl,
                 attribution=attribution,
                 network_policy=policy,
+                **idle_timeout_kwargs(resolved_idle),
             )
 
+        if resolved_idle is not None:
+            logger.info(f"Sandbox '{self.sandbox_name}' idle_timeout requested={resolved_idle} applied={sandbox.idle_timeout}")
         context.deployed_sandboxes.append(DeployedSandbox(
             sandbox_name=self.sandbox_name,
             sandbox_id=sandbox.sandbox_id,
@@ -172,5 +183,6 @@ class DeploySandboxTaskStep(TaskStep):
             tunnel_urls={str(p): u for p, u in sandbox.tunnel_urls.items()} if sandbox.tunnel_urls else None,
             vnc_url=sandbox.vnc_url,
             network_policy=sandbox.network_policy.to_dict() if sandbox.network_policy else None,
+            idle_timeout_seconds=sandbox.idle_timeout,
         ))
         return context

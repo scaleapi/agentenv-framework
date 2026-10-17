@@ -277,7 +277,9 @@ class VercelSandboxProvider(SandboxProvider):
         setup_for_gateway: bool = True,
         attribution: Attribution | None = None,
         network_policy: NetworkPolicy | None = None,
+        idle_timeout: int | None = None,
     ) -> VercelSandbox:
+        """A Vercel Sandbox, which has no idle-timeout control, so ``idle_timeout`` is ignored."""
         if image is not None:
             raise ValueError("the Vercel outer image is configured by the provider; image overrides are unsupported")
         if boot_mode is not None:
@@ -387,6 +389,7 @@ class VercelSandboxProvider(SandboxProvider):
         timeout: int = 3600 * 2,
         attribution: Attribution | None = None,
         network_policy: NetworkPolicy | None = None,
+        idle_timeout: int | None = None,
     ) -> VercelSandbox:
         del image_name, env
         return await self.create_vm(

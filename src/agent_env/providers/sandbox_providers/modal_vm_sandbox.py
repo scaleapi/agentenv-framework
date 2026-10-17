@@ -39,7 +39,7 @@ from agent_env.providers.sandbox_providers.modal_sandbox import (
 from agent_env.attribution import Attribution
 from agent_env.config import get_config
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, VmSandbox, push_object_over_stdin
-from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_VM, SandboxProvider
+from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_VM, SandboxProvider, idle_timeout_kwargs
 
 if TYPE_CHECKING:
     from agent_env.store.object_store import ObjectStore
@@ -326,6 +326,7 @@ class ModalVmSandboxProvider(SandboxProvider):
         setup_for_gateway: bool = True,
         attribution: Optional[Attribution] = None,
         network_policy: Optional[NetworkPolicy] = None,
+        idle_timeout: Optional[int] = None,
     ) -> ModalVmSandbox:
         # image/boot_mode/disk_size_gb accepted for interface parity but inert here.
         # disk_size_gb: Modal has no disk-size knob on Sandbox.create; a VM sandbox's rootfs is
@@ -342,7 +343,7 @@ class ModalVmSandboxProvider(SandboxProvider):
             f"Creating Modal VM sandbox (vm_runtime; app={app_name}, tags={app_tags}, "
             f"sandbox_tags={sandbox_tags}, "
             f"ports={ports}, cpu={cpu}, memory={memory}MB, timeout={timeout}s, "
-            f"policy={effective.mode.value})"
+            f"idle_timeout={idle_timeout}, policy={effective.mode.value})"
         )
 
         # No retry around create: retrying a create can orphan a half-provisioned sandbox
@@ -355,6 +356,7 @@ class ModalVmSandboxProvider(SandboxProvider):
                 encrypted_ports=ports, experimental_options={"vm_runtime": True}, client=client,
                 tags=sandbox_tags or None,
                 **_modal_network_kwargs(effective),
+                **idle_timeout_kwargs(idle_timeout),
             )
         except Exception as e:
             raise RuntimeError(f"Modal VM sandbox create failed [{type(e).__name__}: {e}]") from e
@@ -367,6 +369,7 @@ class ModalVmSandboxProvider(SandboxProvider):
                 if p not in tunnel_urls:
                     raise RuntimeError(f"No Modal tunnel for exposed port {p}; got {sorted(tunnel_urls)}")
             sandbox = ModalVmSandbox(sb, tunnel_urls, network_policy=effective)
+            sandbox.idle_timeout = idle_timeout
             logger.info(f"Modal VM sandbox created: {sb.object_id} (tunnels={tunnel_urls})")
             await _log_sandbox_started(
                 sb, app_name=app_name, sandbox_tags=sandbox_tags,
@@ -394,6 +397,7 @@ class ModalVmSandboxProvider(SandboxProvider):
         timeout: int = 3600 * 2,
         attribution: Optional[Attribution] = None,
         network_policy: Optional[NetworkPolicy] = None,
+        idle_timeout: Optional[int] = None,
     ) -> ModalVmSandbox:
         # Like the other VM providers' create_sandbox: return a bare VM (image_name/env are
         # ignored at create). The caller sees mode == "vm" and loads + runs the image
@@ -403,6 +407,7 @@ class ModalVmSandboxProvider(SandboxProvider):
             timeout=timeout,
             attribution=attribution,
             network_policy=network_policy,
+            idle_timeout=idle_timeout,
         )
 
     async def get_sandbox(self, sandbox_id: str) -> ModalVmSandbox:

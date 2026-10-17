@@ -1,4 +1,4 @@
-"""Every successful create must stamp the effective policy on the sandbox it returns.
+"""Every successful create must stamp the effective policy on the sandbox it returns, and the idle timeout it applied.
 
 `Sandbox.network_policy = None` means "the backend cannot tell us", which is only a useful
 signal if the *only* way to get it is a reconnect via get_sandbox. A create path that
@@ -47,25 +47,25 @@ def _patched_create(sb):
     return patch("modal.Sandbox._experimental_create", create)
 
 
-async def _modal_vm() -> Sandbox:
+async def _modal_vm(**create) -> Sandbox:
     with _patched_create(_modal_sb()):
         return await _modal_provider(ModalVmSandboxProvider).create_vm(
-            exposed_ports=[], setup_for_gateway=False
+            exposed_ports=[], setup_for_gateway=False, **create
         )
 
 
-async def _modal() -> Sandbox:
+async def _modal(**create) -> Sandbox:
     with _patched_create(_modal_sb()):
         return await _modal_provider(ModalSandboxProvider).create_container(
-            image_name="public.ecr.aws/x/y:1", port=8000, env={}, expose_externally=False
+            image_name="public.ecr.aws/x/y:1", port=8000, env={}, expose_externally=False, **create
         )
 
 
-async def _local() -> Sandbox:
-    return await LocalSandboxProvider().create_vm()
+async def _local(**create) -> Sandbox:
+    return await LocalSandboxProvider().create_vm(**create)
 
 
-async def _e2b() -> Sandbox:
+async def _e2b(**create) -> Sandbox:
     resolver = MagicMock()
     resolver.resolve = AsyncMock(return_value="agent-env-docker-base-v1-1c-8192m")
     sdk = MagicMock()
@@ -76,20 +76,20 @@ async def _e2b() -> Sandbox:
         template_resolver=resolver,
         sandbox_cls=sdk,
     )
-    return await provider.create_vm(exposed_ports=[], setup_for_gateway=False)
+    return await provider.create_vm(exposed_ports=[], setup_for_gateway=False, **create)
 
 
-async def _sail() -> Sandbox:
+async def _sail(**create) -> Sandbox:
     sailbox = MagicMock(sailbox_id="sb_test", status="running")
     sailbox.listeners.aio = AsyncMock(return_value=[])
     sdk = MagicMock()
     sdk.Sailbox.create.aio = AsyncMock(return_value=sailbox)
     with patch.object(sail_sdk, "connect", return_value=(sdk, SimpleNamespace(id="app_test"))):
         provider = SailVmSandboxProvider(api_key="test-key", sdk=sdk)
-        return await provider.create_vm(exposed_ports=[], setup_for_gateway=False)
+        return await provider.create_vm(exposed_ports=[], setup_for_gateway=False, **create)
 
 
-async def _vercel() -> Sandbox:
+async def _vercel(**create) -> Sandbox:
     raw = MagicMock(name="vercel-test")
     raw.name = "vercel-test"
     raw.routes = ()
@@ -97,12 +97,12 @@ async def _vercel() -> Sandbox:
     client = MagicMock()
     client.create_sandbox = AsyncMock(return_value=raw)
     provider = VercelSandboxProvider(client_factory=lambda: client)
-    sandbox = await provider.create_vm(exposed_ports=[], setup_for_gateway=False)
+    sandbox = await provider.create_vm(exposed_ports=[], setup_for_gateway=False, **create)
     assert sandbox._client is client
     return sandbox
 
 
-async def _tensorlake() -> Sandbox:
+async def _tensorlake(**create) -> Sandbox:
     sdk = MagicMock()
     pending = MagicMock(sandbox_id="tl-test")
     pending.ready = AsyncMock(return_value=MagicMock(sandbox_id="tl-test"))
@@ -110,18 +110,18 @@ async def _tensorlake() -> Sandbox:
     provider = TensorlakeSandboxProvider(
         api_key="test-key", sandbox_cls=sdk, client_cls=MagicMock(),
     )
-    return await provider.create_vm(exposed_ports=[], setup_for_gateway=False)
+    return await provider.create_vm(exposed_ports=[], setup_for_gateway=False, **create)
 
 
-async def _tenki() -> Sandbox:
+async def _tenki(**create) -> Sandbox:
     session = MagicMock(id="tenki-test")
     session.wait_ready = AsyncMock()
     session.info.timeout_at = None
     client = MagicMock()
     client.create = AsyncMock(return_value=session)
     provider = TenkiSandboxProvider(api_key="test-key", client_cls=MagicMock(return_value=client))
-    return await provider.create_vm(exposed_ports=[], setup_for_gateway=False)
-async def _smol_vm() -> Sandbox:
+    return await provider.create_vm(exposed_ports=[], setup_for_gateway=False, **create)
+async def _smol_vm(**create) -> Sandbox:
     pytest.importorskip("smol")
     from agent_env.providers.sandbox_providers.smol_vm import provider as smol_module
     from agent_env.providers.sandbox_providers.smol_vm.provider import SmolVmSandboxProvider
@@ -133,7 +133,7 @@ async def _smol_vm() -> Sandbox:
         patch.object(SmolVmSandboxProvider, "_setup_docker", new_callable=AsyncMock),
         patch.object(SmolVmSandboxProvider, "_configure_host_access", new_callable=AsyncMock),
     ):
-        return await SmolVmSandboxProvider().create_vm(exposed_ports=[])
+        return await SmolVmSandboxProvider().create_vm(exposed_ports=[], **create)
 
 
 FACTORIES = {
@@ -163,3 +163,19 @@ async def test_a_successful_create_stamps_the_effective_policy(name):
         f"{name} returned a sandbox with no policy; None must mean 'reconnect', not 'forgot'"
     )
     assert sandbox.network_policy.to_dict()["mode"] == "allow_all"
+
+
+_ENFORCE_IDLE_TIMEOUT = {"modal", "modal_vm"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", sorted(FACTORIES))
+async def test_a_successful_create_stamps_the_idle_timeout_it_applied(name):
+    sandbox = await FACTORIES[name](idle_timeout=900)
+    assert sandbox.idle_timeout == (900 if name in _ENFORCE_IDLE_TIMEOUT else None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", sorted(_ENFORCE_IDLE_TIMEOUT))
+async def test_a_create_without_an_idle_timeout_stamps_none(name):
+    assert (await FACTORIES[name]()).idle_timeout is None

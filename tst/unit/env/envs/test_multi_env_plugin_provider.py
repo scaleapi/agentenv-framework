@@ -168,7 +168,7 @@ async def test_deploy_env_deploys_a_stock_multi_env_through_the_plugin_and_the_r
     [(deployed_env, options)] = SEEN["deploys"]
     assert deployed_env is env and set(options) == {"ttl_seconds", "disk_size_gb", "gateway_mode", "cpu", "memory_mb",
                                                      "env_state_type", "env_state_instance_id", "attribution",
-                                                     "artifact_id", "artifact_version"}
+                                                     "artifact_id", "artifact_version", "idle_timeout_seconds"}
     assert (deployed.instance_id, deployed.mcp_url, env._sandbox, env._deployed) == ("inst-7", f"{_URL}/mcp", None, deployed)
     for child in [*env.mcp_server_envs, *env.website_envs]:
         assert (child._env_provider, child._deployed, child._sandbox) == (env._env_provider, deployed, None)
@@ -610,3 +610,11 @@ async def test_every_built_in_env_forwards_the_universe_artifact_to_its_provider
     await _deploy(make_env())
     [(_, options)] = SEEN["deploys"]
     assert (options["artifact_id"], options["artifact_version"]) == (None, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("make_env", [_multi, lambda: _site("shop", t="plugin_pods")], ids=["multi", "website"])
+async def test_the_env_hands_its_provider_the_idle_timeout(make_env):
+    await _deploy(make_env(), idle_timeout_seconds=900)
+    [(_, options)] = SEEN["deploys"]
+    assert options["idle_timeout_seconds"] == 900

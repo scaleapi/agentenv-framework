@@ -37,6 +37,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     SandboxProvider,
     all_sandbox_container_env,
     all_sandbox_url_rewrites,
+    idle_timeout_kwargs,
 )
 from agent_env.attribution import Attribution
 
@@ -76,6 +77,7 @@ class DeployedA2AAgent:
     created_at_utc: str | None = None
     expires_at_utc: str | None = None
     network_policy: dict | None = None
+    idle_timeout_seconds: int | None = None
 
     @classmethod
     def from_dict(cls, data: dict) -> "DeployedA2AAgent":
@@ -90,6 +92,7 @@ class DeployedA2AAgent:
             created_at_utc=data.get("created_at_utc"),
             expires_at_utc=data.get("expires_at_utc"),
             network_policy=data.get("network_policy"),
+            idle_timeout_seconds=data.get("idle_timeout_seconds"),
         )
 
 
@@ -418,6 +421,7 @@ class A2AAgent:
         network_policy: NetworkPolicy | None = None,
         *,
         attribution: Optional[Attribution] = None,
+        idle_timeout_seconds: int | None = None,
     ) -> DeployedA2AAgent:
         from agent_env.providers.sandbox_providers.sandbox_provider import (
             build_sandbox_provider,
@@ -466,6 +470,7 @@ class A2AAgent:
                     cpu=cpu, memory=memory, disk_size_gb=disk_size_gb, timeout=ttl_seconds,
                     attribution=attribution,
                     network_policy=network_policy,
+                    **idle_timeout_kwargs(idle_timeout_seconds),
                 )
                 self._owns_sandbox = True
                 logger.info(f"Sandbox created: {self._sandbox.sandbox_id} (mode={self._sandbox.mode})")
@@ -505,6 +510,7 @@ class A2AAgent:
                 a2a_url=a2a_url, sandbox_id=self._sandbox.sandbox_id,
                 agent_card=agent_card, sandbox_type=self._sandbox.type,
                 network_policy=self._sandbox.network_policy.to_dict() if self._sandbox.network_policy else None,
+                idle_timeout_seconds=self._sandbox.idle_timeout,
             )
             from agent_env.a2a_agent.store import get_a2a_agent_instance_store
             deployed = get_a2a_agent_instance_store().create_instance(deployed, ttl_seconds)

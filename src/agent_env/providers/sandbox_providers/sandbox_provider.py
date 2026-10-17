@@ -73,6 +73,7 @@ class SandboxProvider(ABC):
         timeout: int = 3600 * 2,
         attribution: Optional[Attribution] = None,
         network_policy: Optional[NetworkPolicy] = None,
+        idle_timeout: Optional[int] = None,
     ) -> Sandbox:
         raise NotImplementedError(f"{type(self).__name__} does not support create_sandbox")
 
@@ -89,6 +90,7 @@ class SandboxProvider(ABC):
         setup_for_gateway: bool = True,
         attribution: Optional[Attribution] = None,
         network_policy: Optional[NetworkPolicy] = None,
+        idle_timeout: Optional[int] = None,
     ) -> VmSandbox:
         raise NotImplementedError(f"{type(self).__name__} does not support create_vm")
 
@@ -105,12 +107,15 @@ class SandboxProvider(ABC):
         attribution: Optional[Attribution] = None,
         network_policy: Optional[NetworkPolicy] = None,
         private_network: bool = False,
+        idle_timeout: Optional[int] = None,
     ) -> Sandbox:
         """Provision a sandbox with the registry image already running as a container.
 
         On return, ``tunnel_urls[port]`` is populated and the container listens on ``port``.
         Caller still owns readiness polling for the container's own endpoints. ``private_network`` puts it on a
-        network this provider's other such containers share, at its ``private_host``.
+        network this provider's other such containers share, at its ``private_host``. ``idle_timeout``, on every create, is
+        best effort: the seconds without activity after which the backend reclaims the sandbox, which a backend with no
+        such limit ignores; the sandbox's ``idle_timeout`` is the one that applied.
 
         Default implementation: a container-only backend uses create_sandbox; a VM backend creates
         a VM, pulls the image, and starts it. Backends that bake the image in at creation override.
@@ -123,13 +128,14 @@ class SandboxProvider(ABC):
             return await self.create_sandbox(
                 image_name=image_name, port=port, env=env, cpu=cpu, memory=memory,
                 disk_size_gb=disk_size_gb, timeout=timeout, attribution=attribution,
-                network_policy=network_policy,
+                network_policy=network_policy, **idle_timeout_kwargs(idle_timeout),
             )
         sandbox = await self.create_vm(
             cpu=cpu, memory=memory, disk_size_gb=disk_size_gb,
             exposed_ports=[port], timeout=timeout,
             attribution=attribution,
             network_policy=network_policy,
+            **idle_timeout_kwargs(idle_timeout),
         )
         try:
             await sandbox.pull_images([image_name])
@@ -328,6 +334,12 @@ def _sandbox_config(source: Config | None = None) -> dict:
     
 
     return (source or runtime.get_config()).section("sandbox")
+
+
+def idle_timeout_kwargs(idle_timeout: Optional[int]) -> dict:
+    """``idle_timeout`` as a create_* keyword when it is set, so a provider whose create_* predates the parameter is
+    still called as before when it isn't."""
+    return {} if idle_timeout is None else {"idle_timeout": idle_timeout}
 
 
 def apply_default_attribution(attribution: Attribution) -> Attribution:

@@ -116,10 +116,11 @@ class E2BSandboxProvider(SandboxProvider):
         setup_for_gateway: bool = True,
         attribution: Attribution | None = None,
         network_policy: NetworkPolicy | None = None,
+        idle_timeout: int | None = None,
     ) -> E2BSandbox:
         """Create an E2B VM using its derived immutable template.
 
-        ``boot_mode`` and ``disk_size_gb`` exist for
+        ``boot_mode``, ``disk_size_gb`` and ``idle_timeout`` exist for
         ``SandboxProvider`` parity only: E2B's sandbox-create API has no
         corresponding controls.  In particular, disk size is never sent to
         E2B.  ``image`` is rejected rather than silently overriding the
@@ -226,6 +227,7 @@ class E2BSandboxProvider(SandboxProvider):
         timeout: int = 3600 * 2,
         attribution: Attribution | None = None,
         network_policy: NetworkPolicy | None = None,
+        idle_timeout: int | None = None,
     ) -> E2BSandbox:
         # Like the other remote VM backends, E2B is a VM backend.  The gateway/agent
         # path loads and starts image_name after receiving the VM, so image_name

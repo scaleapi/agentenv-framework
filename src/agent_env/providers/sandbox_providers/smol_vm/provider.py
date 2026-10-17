@@ -87,7 +87,8 @@ class SmolVmSandboxProvider(SandboxProvider):
     async def create_sandbox(self, *, image_name: str, port: int, env: dict[str, str],
                              cpu: float = 1.0, memory: int = 8192, disk_size_gb: float = 10,
                              timeout: int = 7200, attribution: Attribution | None = None,
-                             network_policy: NetworkPolicy | None = None) -> SmolVmSandbox:
+                             network_policy: NetworkPolicy | None = None,
+                             idle_timeout: int | None = None) -> SmolVmSandbox:
         return await self.create_vm(
             exposed_ports=[port], cpu=cpu, memory=memory, disk_size_gb=disk_size_gb,
             timeout=timeout, attribution=attribution, network_policy=network_policy,
@@ -97,7 +98,9 @@ class SmolVmSandboxProvider(SandboxProvider):
                         cpu: float = 1.0, memory: int = 8192, disk_size_gb: float = 10,
                         timeout: int = 7200, exposed_ports: list[int] | None = None,
                         setup_for_gateway: bool = True, attribution: Attribution | None = None,
-                        network_policy: NetworkPolicy | None = None) -> SmolVmSandbox:
+                        network_policy: NetworkPolicy | None = None,
+                        idle_timeout: int | None = None) -> SmolVmSandbox:
+        """A microVM on this machine, which has no idle limit, so ``idle_timeout`` is ignored."""
         refuse_unenforceable_policy(self, network_policy)
         if image is not None or boot_mode is not None:
             raise ValueError("smol_vm provisions its own Docker-capable guest; image and boot_mode overrides are unsupported")

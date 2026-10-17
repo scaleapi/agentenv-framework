@@ -564,7 +564,9 @@ class LocalSandboxProvider(SandboxProvider):
         setup_for_gateway: bool = True,
         attribution: Optional[Attribution] = None,
         network_policy: Optional[NetworkPolicy] = None,
+        idle_timeout: Optional[int] = None,
     ) -> LocalSandbox:
+        """A sandbox on this machine's Docker, which has no idle limit, so ``idle_timeout`` is ignored."""
         refuse_unenforceable_policy(self, network_policy)
         # Allocated here rather than in the sandbox constructor: probing for a free port
         # is I/O, and callers that only need a handle must not pay for it. Off the event
@@ -587,6 +589,7 @@ class LocalSandboxProvider(SandboxProvider):
         timeout: int = 3600 * 2,
         attribution: Optional[Attribution] = None,
         network_policy: Optional[NetworkPolicy] = None,
+        idle_timeout: Optional[int] = None,
     ) -> LocalSandbox:
         sandbox = await super().create_container(
             image_name=image_name,
@@ -650,6 +653,7 @@ class LocalSandboxProvider(SandboxProvider):
         timeout: int = 3600 * 2,
         attribution: Optional[Attribution] = None,
         network_policy: Optional[NetworkPolicy] = None,
+        idle_timeout: Optional[int] = None,
     ) -> LocalSandbox:
         return await self.create_container(
             image_name=image_name, port=port, env=env, cpu=cpu, memory=memory, disk_size_gb=disk_size_gb,

@@ -144,6 +144,8 @@ class DeployedSandboxEnv(DeployedEnv):
     sandbox_id: str
     sandbox_type: Optional[str] = None
     sandbox_ids: dict[str, str | dict[str, str]] = field(default_factory=dict)
+    # The idle timeout its sandboxes were created with, as applied; None when they have no idle limit.
+    idle_timeout_seconds: Optional[int] = None
 
     @classmethod
     def _fields_from(cls, data: dict) -> dict:
@@ -152,6 +154,7 @@ class DeployedSandboxEnv(DeployedEnv):
             "sandbox_id": data.get("sandbox_id"),
             "sandbox_type": data.get("sandbox_type"),
             "sandbox_ids": data.get("sandbox_ids") or {},
+            "idle_timeout_seconds": data.get("idle_timeout_seconds"),
         }
 
 

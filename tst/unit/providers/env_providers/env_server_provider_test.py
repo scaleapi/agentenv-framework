@@ -30,6 +30,7 @@ _ENV = SimpleNamespace(id="slack-bare", version=2, environment_name="slack", doc
 
 class _Container:
     type = "fake"
+    idle_timeout = None
 
     def __init__(self, sandbox_id: str, port: int, url: str):
         self.sandbox_id, self.tunnel_urls, self.terminated = sandbox_id, {port: url}, False
@@ -194,6 +195,15 @@ async def test_its_records_load_back_as_sandbox_records():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("idle", [900, None], ids=["set", "unset"])
+async def test_its_server_is_created_with_the_idle_timeout_and_its_record_carries_it(idle):
+    run = await _run_server_deploy(idle_timeout_seconds=idle)
+    assert run.calls[0].get("idle_timeout") == idle
+    assert run.result.idle_timeout_seconds == idle
+    assert DeployedEnv.from_dict(dataclasses.asdict(run.result)).idle_timeout_seconds == idle
+
+
+@pytest.mark.asyncio
 async def test_it_has_no_changelog_triggers_to_install():
     assert await EnvironmentServerProvider().install_changelog_triggers("slack") is None
 
@@ -223,6 +233,7 @@ async def _run_server_deploy(sandbox_provider=None, *, env=_ENV, card=_SERVER_CA
         if provider.error:
             raise provider.error
         created.append(_Container(f"sb-{kwargs['image_name']}-{len(calls)}", kwargs["port"], f"https://{kwargs['image_name']}.fake.host"))
+        created[-1].idle_timeout = kwargs.get("idle_timeout")
         return created[-1]
 
     gp._wait_for_tunnel = AsyncMock(side_effect=wait_for_tunnel) if wait_for_tunnel else AsyncMock(return_value=card)

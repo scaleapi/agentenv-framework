@@ -277,10 +277,11 @@ class TenkiSandboxProvider(SandboxProvider):
         setup_for_gateway: bool = True,
         attribution: Attribution | None = None,
         network_policy: NetworkPolicy | None = None,
+        idle_timeout: int | None = None,
     ) -> TenkiSandbox:
         """Create a Tenki VM and expose ``exposed_ports`` publicly. ``timeout`` is the VM's hard maximum lifetime. The
         VM boots the configured image or snapshot, so a per-call ``image`` is refused rather than ignored;
-        ``boot_mode`` has no Tenki equivalent and is ignored."""
+        ``boot_mode`` and ``idle_timeout`` have no Tenki equivalent and are ignored."""
         if image is not None:
             raise ValueError(
                 "Tenki VMs boot the image or snapshot_id in [sandbox.providers.tenki.config]; "
@@ -389,6 +390,7 @@ class TenkiSandboxProvider(SandboxProvider):
         timeout: int = 3600 * 2,
         attribution: Attribution | None = None,
         network_policy: NetworkPolicy | None = None,
+        idle_timeout: int | None = None,
     ) -> TenkiSandbox:
         # A VM backend: the gateway and agent paths start image_name inside the VM afterwards.
         del image_name, env

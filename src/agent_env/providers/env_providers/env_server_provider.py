@@ -14,7 +14,7 @@ from agent_env.env.env import DeployedSandboxEnv
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT
 from agent_env.env.gateway.constants import WELL_KNOWN_PATH
 from agent_env.providers.env_providers.env_provider import _SandboxEnvironmentProvider, _size_kwargs, _tool_names
-from agent_env.providers.sandbox_providers.sandbox_provider import Accepts, SandboxProvider
+from agent_env.providers.sandbox_providers.sandbox_provider import Accepts, SandboxProvider, idle_timeout_kwargs
 
 if TYPE_CHECKING:
     from agent_env.env.env import Env
@@ -37,6 +37,7 @@ class EnvironmentServerProvider(_SandboxEnvironmentProvider):
         sandbox_provider: SandboxProvider,
         *,
         ttl_seconds: int = 10800,
+        idle_timeout_seconds: int | None = None,
         disk_size_gb: float = 10,
         cpu: float | None = None,
         memory_mb: int | None = None,
@@ -51,8 +52,8 @@ class EnvironmentServerProvider(_SandboxEnvironmentProvider):
         if isinstance(env, (MultiEnv, WebsiteEnv)):
             raise TypeError(f"env_provider_type '{self.type}' deploys one MCP server, not a {env.type} env")
         attempt = functools.partial(
-            self._deploy_server, env, ttl_seconds=ttl_seconds, disk_size_gb=disk_size_gb,
-            cpu=cpu, memory_mb=memory_mb, attribution=attribution,
+            self._deploy_server, env, ttl_seconds=ttl_seconds, idle_timeout_seconds=idle_timeout_seconds,
+            disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb, attribution=attribution,
         )
         return await self._run(sandbox_provider, env.id, attempt)
 
@@ -65,6 +66,7 @@ class EnvironmentServerProvider(_SandboxEnvironmentProvider):
         sandbox_provider: SandboxProvider,
         *,
         ttl_seconds: int,
+        idle_timeout_seconds: int | None,
         disk_size_gb: float,
         cpu: float | None,
         memory_mb: int | None,
@@ -88,6 +90,7 @@ class EnvironmentServerProvider(_SandboxEnvironmentProvider):
                 "DATABASE_URL": f"sqlite:////tmp/{name}.sqlite",
             },
             **_size_kwargs(cpu, memory_mb),
+            **idle_timeout_kwargs(idle_timeout_seconds),
             disk_size_gb=disk_size_gb, timeout=ttl_seconds,
             attribution=dict(attribution or {}),
         )
@@ -116,6 +119,7 @@ class EnvironmentServerProvider(_SandboxEnvironmentProvider):
             sandbox_id=server.sandbox_id,
             sandbox_type=server.type,
             sandbox_ids={MCPServerEnv.type: {name: server.sandbox_id}},
+            idle_timeout_seconds=server.idle_timeout,
         )
         await _require_tools(name, record.mcp_url)
         return record

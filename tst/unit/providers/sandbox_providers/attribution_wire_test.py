@@ -139,7 +139,7 @@ async def test_a_chain_forwards_the_dict_as_is():
         async def create_sandbox(self, *, attribution=None, **kwargs):
             seen["attribution"] = attribution
             seen["kwargs"] = kwargs
-            return SimpleNamespace(type="modern", network_policy=None)
+            return SimpleNamespace(type="modern", network_policy=None, idle_timeout=None)
 
     attribution = {"team": "t"}
     await ChainedSandboxProvider([Provider()]).create_sandbox(attribution=attribution, cpu=2.0)

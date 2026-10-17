@@ -66,6 +66,7 @@ class DeployedAgent:
     network_policy: dict | None = None
     # Installed straight onto the sandbox host (install_agent host mode), not into a container.
     on_host: bool = False
+    idle_timeout_seconds: int | None = None
 
     @classmethod
     def from_dict(cls, data: dict) -> DeployedAgent:
@@ -79,6 +80,7 @@ class DeployedAgent:
             instance_id=data.get("instance_id"),
             role=data.get("role"),
             network_policy=data.get("network_policy"),
+            idle_timeout_seconds=data.get("idle_timeout_seconds"),
             on_host=bool(data.get("on_host", False)),
         )
 
@@ -106,6 +108,7 @@ class DeployedSandbox:
     created_at_utc: str | None = None
     expires_at_utc: str | None = None
     network_policy: dict | None = None
+    idle_timeout_seconds: int | None = None
 
     @classmethod
     def from_dict(cls, data: dict) -> DeployedSandbox:
@@ -120,6 +123,7 @@ class DeployedSandbox:
             created_at_utc=data.get("created_at_utc"),
             expires_at_utc=data.get("expires_at_utc"),
             network_policy=data.get("network_policy"),
+            idle_timeout_seconds=data.get("idle_timeout_seconds"),
         )
 
 

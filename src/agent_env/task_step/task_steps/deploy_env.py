@@ -6,6 +6,7 @@ import inspect
 import logging
 from typing import ClassVar, Optional
 
+from agent_env.env.env import DeployedSandboxEnv
 from agent_env.env.gateway import GatewayMode
 from agent_env.env.store import update_env_instance_metadata
 from agent_env.task_step.context import TaskStepContext
@@ -42,6 +43,7 @@ class DeployEnvTaskStep(TaskStep):
         metadata: Optional[dict] = None,
         artifact_id: Optional[str] = None,
         artifact_version: Optional[int] = None,
+        idle_timeout_seconds: Optional[int] = None,
     ):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
         self.env_id = env_id
@@ -49,6 +51,7 @@ class DeployEnvTaskStep(TaskStep):
         self.artifact_id = artifact_id
         self.artifact_version = artifact_version
         self.ttl_seconds = ttl_seconds
+        self.idle_timeout_seconds = idle_timeout_seconds
         self.disk_size_gb = disk_size_gb
         self.gateway_mode = gateway_mode
         self.cpu = cpu
@@ -66,6 +69,7 @@ class DeployEnvTaskStep(TaskStep):
         base["artifact_id"] = self.artifact_id
         base["artifact_version"] = self.artifact_version
         base["ttl_seconds"] = self.ttl_seconds
+        base["idle_timeout_seconds"] = self.idle_timeout_seconds
         base["disk_size_gb"] = self.disk_size_gb
         base["gateway_mode"] = self.gateway_mode
         base["cpu"] = self.cpu
@@ -85,6 +89,7 @@ class DeployEnvTaskStep(TaskStep):
             artifact_id=data.get("artifact_id"),
             artifact_version=data.get("artifact_version"),
             ttl_seconds=data.get("ttl_seconds", TaskStep.DEFAULT_TTL_SECONDS),
+            idle_timeout_seconds=data.get("idle_timeout_seconds"),
             disk_size_gb=data.get("disk_size_gb", 10),
             gateway_mode=data.get("gateway_mode", GatewayMode.PERFORMANCE.value),
             cpu=data.get("cpu"),
@@ -136,6 +141,8 @@ class DeployEnvTaskStep(TaskStep):
         )
         _ttl_override = user_overrides.get("ttl_seconds")
         resolved_ttl = _ttl_override if _ttl_override is not None else self.ttl_seconds
+        _idle_override = user_overrides.get("idle_timeout_seconds")
+        resolved_idle = _idle_override if _idle_override is not None else self.idle_timeout_seconds
         attribution = deploy_attribution(self, context)
         logger.info(
             f"Deploying env '{self.env_id}' (ttl={resolved_ttl}s, "
@@ -172,7 +179,15 @@ class DeployEnvTaskStep(TaskStep):
             deploy_kwargs["artifact_id"] = self.artifact_id
         if self.artifact_version is not None and ("artifact_version" in params or accepts_kwargs):
             deploy_kwargs["artifact_version"] = self.artifact_version
+        if resolved_idle is not None:
+            if "idle_timeout_seconds" in params or accepts_kwargs:
+                deploy_kwargs["idle_timeout_seconds"] = resolved_idle
+            else:
+                logger.warning(f"Env '{self.env_id}' ({type(env).__name__}) doesn't take idle_timeout_seconds; it deploys without")
         deployed_env = await env.deploy(**deploy_kwargs)
+        if resolved_idle is not None:
+            applied = deployed_env.idle_timeout_seconds if isinstance(deployed_env, DeployedSandboxEnv) else None
+            logger.info(f"Env '{self.env_id}' idle_timeout requested={resolved_idle} applied={applied}")
         # create_instance runs inside env.deploy(), so an annotation set after it
         # returns has to be persisted explicitly to reach the instance record.
         annotations = {"deploy_step_id": self.id}

@@ -70,7 +70,7 @@ async def test_a_deploy_records_the_mcp_url_and_name_its_gateway_card_gives():
                              env_state_instance_ids=[], mcp_server_name="crm")
 
     async def deploy_gateway(self, sandbox_provider, **kwargs):
-        self._sandbox = SimpleNamespace(sandbox_id="gw", type="modal_vm")
+        self._sandbox = SimpleNamespace(sandbox_id="gw", type="modal_vm", idle_timeout=None)
         return result
 
     with patch.object(EnvironmentGatewayProvider, "_deploy_gateway", deploy_gateway), \

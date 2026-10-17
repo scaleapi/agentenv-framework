@@ -136,6 +136,7 @@ class _ContainerSandbox:
     sandbox_id = "sb-container"
     mode = "container"
     tunnel_urls = {}
+    idle_timeout = None
 
     def url_from_sandbox(self, url):
         return url
@@ -195,7 +196,8 @@ async def test_the_local_provider_is_asked_for_a_sandbox_for_an_image_in_its_own
 class _Container:
     """A container sandbox, recording whether it was terminated."""
 
-    sandbox_id, mode, type, tunnel_urls, vnc_url, network_policy = "sb-agent", "container", "fake", {}, None, None
+    sandbox_id, mode, type, tunnel_urls, vnc_url, network_policy, idle_timeout = (
+        "sb-agent", "container", "fake", {}, None, None, None)
     ON_THIS_MACHINE = False
 
     def __init__(self):
