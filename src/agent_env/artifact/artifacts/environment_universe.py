@@ -6,7 +6,7 @@ import logging
 from collections import Counter
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional
 
-from pydantic import AliasChoices, ConfigDict, Field, model_serializer
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_serializer
 
 from agent_env.artifact.artifacts.environment import EnvironmentArtifact
 from agent_env.artifact.artifacts.file import FileArtifact
@@ -19,6 +19,13 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
+
+
+class VirtualClockReading(BaseModel):
+    """An env's gateway clock as a snapshot read it: the virtual time and the rate it was advancing at."""
+
+    virtual_time: str = Field(description="RFC3339 virtual time")
+    virtual_seconds_per_real_second: float = Field(default=1.0, description="Virtual seconds per real second")
 
 
 class EnvironmentUniverseArtifact(Universe):
@@ -62,6 +69,11 @@ class EnvironmentUniverseArtifact(Universe):
         alias="metadata",
         description="Legacy unpinned metadata FileArtifact ids",
     )
+    virtual_clock: Optional[VirtualClockReading] = Field(
+        default=None,
+        description="The env's armed gateway clock when this universe was snapshotted from it, for a restore to "
+                    "resume from; None when it had no armed clock or wasn't a snapshot",
+    )
 
     # No return annotation: pydantic builds the serialization schema from one, and a dict drops the fields.
     @model_serializer(mode="wrap")
@@ -69,6 +81,9 @@ class EnvironmentUniverseArtifact(Universe):
         # `@model_serializer(mode="wrap")` is the only hook invoked by both
         # `model_dump` and the Rust-implemented `model_dump_json`.
         data = handler(self)
+        # Written only when recorded, so a universe without one keeps the document it always had.
+        if data.get("virtual_clock") is None:
+            data.pop("virtual_clock", None)
         if "legacy_environment_artifact_ids" in data:
             data["service_artifact_ids"] = data.pop("legacy_environment_artifact_ids")
         if "legacy_metadata" in data:
@@ -100,6 +115,7 @@ class EnvironmentUniverseArtifact(Universe):
         *,
         environment_artifacts: list[EnvironmentArtifact],
         metadata: Optional[dict[str, FileArtifact]] = None,
+        virtual_clock: Optional[VirtualClockReading] = None,
     ) -> EnvironmentUniverseArtifact:
         from agent_env.artifact.store import get_artifact_store
 
@@ -111,6 +127,7 @@ class EnvironmentUniverseArtifact(Universe):
             metadata_refs=(
                 {k: fa.as_ref() for k, fa in metadata.items()} if metadata else None
             ),
+            virtual_clock=virtual_clock,
         )
         return get_artifact_store().put_document(instance)
 

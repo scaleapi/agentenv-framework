@@ -97,7 +97,8 @@ async def test_a_service_taking_the_form_uploads_through_a_grant_and_is_register
     assert (grant["max_objects"], grant["max_object_bytes"]) == (1, ENV_SNAPSHOT_LIMITS.max_object_bytes)
     assert datetime.fromisoformat(grant["expires_at"]) >= datetime.now(UTC) + timedelta(seconds=MIN_GRANT_LIFETIME_SECONDS - 60)
     assert pushes == [_CARD]  # still pushed, for a bundle too large for the grant
-    assert [str(r.url) for r in sent] == [f"{_CARD}/svc/mcp-gdrive/agentenv"]
+    # Besides the snapshot's own read of the env clock, the one request is the service's data/get.
+    assert [str(r.url) for r in sent if not r.url.path.endswith("/clock/state")] == [f"{_CARD}/svc/mcp-gdrive/agentenv"]
     (bundle,) = EnvironmentUniverseArtifact.get(result.environment_universe_artifact_id).get_file_artifacts().values()
     assert bundle.object_url == store.object_url(f"{grant['root_path']}/gdrive.zip")
     assert (bundle.filename, bundle.content_type) == ("gdrive.zip", "application/zip")

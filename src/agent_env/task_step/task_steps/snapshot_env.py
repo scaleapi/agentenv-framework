@@ -11,7 +11,7 @@ import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import ClassVar, Optional
+from typing import TYPE_CHECKING, ClassVar, Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -21,7 +21,8 @@ from agentenv_protocol.client import find_extension
 from agentenv_protocol.transfers import WriteNamespaceGrant
 
 from agent_env.a2a_agent.object_transfer import ObjectLimits, namespace_grant
-from agent_env.env.gateway.constants import EXT_TRAJECTORY_URI
+from agent_env.env.env import EnvCapabilityUnsupported
+from agent_env.env.gateway.constants import EXT_CLOCK_URI, EXT_TRAJECTORY_URI
 from agent_env.store import get_config
 from agent_env.store.base import GrantUnavailableError
 from agent_env.store.ids import derive_id, is_local_id, validate_local_id
@@ -32,6 +33,9 @@ from agent_env.task_step.context import TaskStepContext
 from agent_env.entity_refs import EntityRef, RefRole
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
+if TYPE_CHECKING:
+    from agent_env.artifact.artifacts.environment_universe import VirtualClockReading
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_EXPORT_TIMEOUT_SECONDS = 600
@@ -39,6 +43,7 @@ DEFAULT_EXPORT_CONCURRENCY = 3
 _CONNECT_TIMEOUT_SECONDS = 30
 
 _TRAJECTORY_CAPTURE_BUDGET_SECONDS = 300
+_CLOCK_READ_TIMEOUT_SECONDS = 10
 
 # Must match the S3 credentials extension URI the server-side credentials mixin advertises.
 _S3_CREDENTIALS_EXTENSION_URI = "urn:agentenv:add-s3-credentials/v1"
@@ -153,6 +158,16 @@ class SnapshotEnvTaskStep(TaskStep):
 
     Output: ``context.metadata["env_snapshotted_universes"][self.id]`` =
     ``{"id", "version"}``. Fails the step if any service fails to export.
+
+    When the env's gateway clock is armed, the snapshot records it as the universe's
+    ``virtual_clock`` (``{"virtual_time", "virtual_seconds_per_real_second"}``), for
+    ``sync_env_clock``'s ``resume_from_loaded_universe`` to resume the clock of an env
+    the snapshot is later loaded into. It's read once every service has exported, so
+    it is the env's "now" when the snapshot completes, not when the agent stopped. It
+    leads the agent's last action by the clock's rate times the real time in between,
+    the trajectory capture and the export included (at 86400, a 60 s export alone is
+    60 virtual days). Read any earlier and a record written during the export could
+    postdate it.
     """
 
     type: ClassVar[str] = "snapshot_env"
@@ -270,6 +285,29 @@ class SnapshotEnvTaskStep(TaskStep):
         return context
 
     # ── internals ────────────────────────────────────────────────────────────
+
+    @staticmethod
+    async def _read_virtual_clock(deployed) -> Optional[VirtualClockReading]:
+        """The armed gateway clock's reading, else None.
+        Best effort: an unreachable, unarmed or malformed clock never fails the snapshot."""
+        from agent_env.artifact.artifacts.environment_universe import VirtualClockReading
+
+        if deployed is None:
+            return None
+        try:
+            state = await deployed.invoke(EXT_CLOCK_URI, "state", timeout=_CLOCK_READ_TIMEOUT_SECONDS)
+        except EnvCapabilityUnsupported:
+            return None
+        except Exception as e:
+            logger.warning(f"snapshot_env: could not read the env clock (continuing): {type(e).__name__}: {str(e)[:200]}")
+            return None
+        if not isinstance(state, dict) or not state.get("armed") or not isinstance(state.get("virtual_time"), str):
+            return None
+        rate = state.get("virtual_seconds_per_real_second", 1.0)
+        return VirtualClockReading(
+            virtual_time=state["virtual_time"],
+            virtual_seconds_per_real_second=rate if isinstance(rate, (int, float)) and not isinstance(rate, bool) else 1.0,
+        )
 
     @staticmethod
     def _deploy_step_of(deployed_env) -> Optional[str]:
@@ -671,15 +709,23 @@ class SnapshotEnvTaskStep(TaskStep):
                 f"(missing={sorted(skipped)}): {public_summary}"
             )
 
+        # Read once every service has exported, so no record in the snapshot postdates it; from the deployment
+        # in context only, as the stored card is: an override aimed elsewhere runs on another clock.
+        virtual_clock = await cls._read_virtual_clock(card_record)
+        if card_record is None and deployed is not None:
+            logger.info(f"snapshot_env: gateway {gateway} is not the deployed env's {gateway_url_of(deployed)}; "
+                        f"recording no virtual clock")
         universe = await asyncio.to_thread(
             EnvironmentUniverseArtifact.put,
             id=snapshot_id,
             environment_artifacts=environment_artifacts,
             metadata=snapshot_metadata,
+            virtual_clock=virtual_clock,
         )
         logger.info(
             f"snapshot_env: created {universe.id} v{universe.version} "
-            f"({len(environment_artifacts)} services)"
+            f"({len(environment_artifacts)} services"
+            + (f", virtual clock {virtual_clock.virtual_time}" if virtual_clock else "") + ")"
         )
         return EnvSnapshotResult(
             environment_universe_artifact_id=universe.id,
