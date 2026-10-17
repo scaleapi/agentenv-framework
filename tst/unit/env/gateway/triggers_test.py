@@ -637,6 +637,10 @@ def test_hours_without_a_time_zone_normalize_as_before():
     assert list(_normalize_hours({"start": "09:00", "end": "17:00"}, "executor").items()) == [
         ("start", "09:00"), ("end", "17:00"), ("utc_offset", "+00:00"),
         ("days", ["mon", "tue", "wed", "thu", "fri", "sat", "sun"])]
+    assert list(_normalize_hours({"start": "09:00", "end": "17:00", "utc_offset": "-07:00", "label": "pacific"},
+                                 "executor").items()) == [
+        ("start", "09:00"), ("end", "17:00"), ("utc_offset", "-07:00"),
+        ("days", ["mon", "tue", "wed", "thu", "fri", "sat", "sun"])]
     assert list(_normalize_hours({"start": "09:00", "end": "17:00", "time_zone": "Asia/Tokyo", "days": ["fri", "mon"]},
                                  "executor").items()) == [
         ("start", "09:00"), ("end", "17:00"), ("time_zone", "Asia/Tokyo"), ("days", ["mon", "fri"])]
@@ -651,9 +655,7 @@ def test_hours_without_a_time_zone_normalize_as_before():
                         "got -5"),
     ({"time_zone": None}, "executors['bob'].hours.time_zone must be an IANA time zone name such as 'America/New_York', "
                           "got None"),
-    ({"timezone": "America/New_York"}, "executors['bob'].hours has unknown key(s) ['timezone']; expected "
-                                       "['start', 'end', 'utc_offset', 'time_zone', 'days']"),
-], ids=["both", "unknown", "not-a-string", "null", "misspelled-time-zone"])
+], ids=["both", "unknown", "not-a-string", "null"])
 def test_executor_hours_in_a_time_zone_refuse_bad_input(engine, hours, message):
     with pytest.raises(TriggerError) as excinfo:
         engine.register({"executors": {"bob": {"a2a_url": "http://b", "role": "bob",
