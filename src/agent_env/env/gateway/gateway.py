@@ -41,6 +41,8 @@ from .constants import (
     AGENT_ENV_ROLE_META_KEY,  # noqa: F401  (the server module serves the whole vocabulary, used in this file or not)
     AGENT_ENV_SESSION_META_KEY,  # noqa: F401
     CARD_FETCH_TIMEOUT_S,
+    CHANGES_PAGE_DEFAULT,
+    CHANGES_PAGE_MAX,
     CHILD_DISCOVERY_TIMEOUT_S,
     DATA_PLANE_LOAD_TIMEOUT_MAX_S,
     DEFAULT_ROLE,
@@ -62,6 +64,7 @@ from .constants import (
     tool_name_clashes_text,
 )
 from .caller import Caller
+from .changes import ChangeAttribution
 from .child_transport import child_http_client
 from .clock import Clock, ClockError, _iso
 from .get_time import GET_TIME_TOOL_NAME, build_get_time_tool
@@ -69,6 +72,9 @@ from .rest_proxy import ROLE_HEADER_BYTES, fetch_child_card, forward, rewrite_ch
 from .triggers import TriggerEngine, TriggerError
 
 logger = logging.getLogger(__name__)
+
+# RFC 9110's safe methods: a request using one asks for no change, so the REST proxy logs no write window for it.
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 
 
 class ToolNameClash(ValueError):
@@ -139,6 +145,7 @@ class Gateway:
 
         self._event_counter = 0
         self._event_lock = asyncio.Lock()
+        self._changes = ChangeAttribution()
         Path(GATEWAY_TRAJECTORY_FILE).parent.mkdir(parents=True, exist_ok=True)
         self._trajectory_file = open(GATEWAY_TRAJECTORY_FILE, "a")
         atexit.register(self._close_trajectory_file)
@@ -290,6 +297,10 @@ class Gateway:
         @self._mcp.custom_route("/trajectory", methods=["GET"])
         async def env_trajectory(request: Request) -> Response:
             return self._serve_trajectory()
+
+        @self._mcp.custom_route("/changes", methods=["GET"])
+        async def env_changes(request: Request) -> Response:
+            return await self._serve_changes(request)
 
         @self._mcp.custom_route(WELL_KNOWN_PATH, methods=["GET"])
         async def get_env_card(request: Request) -> Response:
@@ -486,7 +497,7 @@ class Gateway:
             return None
         try:
             with self._db_conn.cursor() as cur:
-                cur.execute("SELECT MAX(id) FROM public._changelog")
+                cur.execute("SELECT COALESCE(MAX(id), 0) FROM public._changelog")
                 row = cur.fetchone()
                 return row[0] if row else None
         except Exception:
@@ -499,14 +510,35 @@ class Gateway:
             return None
 
     async def _proxy_rest_request(self, request: Request, url_map: dict[str, str] | None = None) -> Response:
-        """Reverse-proxy an HTTP request to an internal service, streaming the response through."""
+        """Reverse-proxy an HTTP request to an internal service, streaming the response through. A request that may
+        write is logged as an ``http_request`` with the changelog ids it spanned, so the rows it wrote name it."""
         url_map = self.rest_proxy_urls if url_map is None else url_map
         service_name = request.path_params["service_name"]
         base_url = url_map.get(service_name)
         if base_url is None:
             return self._json_response({"error": f"Unknown service: {service_name}"}, 404)
-        return await forward(request, base_url, role=self._request_role(request), timeout=self.REST_PROXY_TIMEOUT,
-                             mcp_server=url_map is self.rest_proxy_urls and service_name.startswith("mcp-"))
+        role = self._request_role(request)
+        mcp_server = url_map is self.rest_proxy_urls and service_name.startswith("mcp-")
+        if request.method in _SAFE_METHODS:
+            return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server)
+        changelog_before = self._query_changelog_id()
+
+        async def log_write(status: int) -> None:
+            # Once the response has ended: a streamed one (an MCP call's SSE answer) writes after its headers.
+            await self._log_event({
+                "event_type": "http_request",
+                "route": "website" if url_map is self.website_urls else "svc",
+                "service": service_name,
+                "method": request.method,
+                "path": "/" + request.path_params.get("path", ""),
+                "status": status,
+                **self._attribution(role),
+                "changelog_id_before": changelog_before,
+                "changelog_id_after": self._query_changelog_id(),
+            })
+
+        return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server,
+                             on_done=log_write)
 
     @staticmethod
     def _request_role(request: Request) -> str:
@@ -950,6 +982,7 @@ class Gateway:
         })
         try:
             async with self._tool_call_guard():
+                changelog_before = self._query_changelog_id()
                 result = await self._call_child_tool(server_url, tool_name, arguments, caller=Caller(role=role))
                 changelog_id = self._query_changelog_id()
 
@@ -958,6 +991,7 @@ class Gateway:
                 "source": "step_api",
                 "tool_call_event_id": tool_call_event_id,
                 "tool_call_result": result.model_dump(mode="json"),
+                "changelog_id_before": changelog_before,
                 "changelog_id": changelog_id,
             })
             barrier_tasks, barrier_timeout_s = self._fire_triggers(role, tool_name, arguments, result)
@@ -1073,6 +1107,7 @@ class Gateway:
             })
 
             async with self._tool_call_guard():
+                changelog_before = self._query_changelog_id()
                 result = await self._call_child_tool(server_url, tool_name, kwargs, caller=caller)
                 changelog_id = self._query_changelog_id()
 
@@ -1080,6 +1115,7 @@ class Gateway:
                 "event_type": "tool_call_result",
                 "tool_call_event_id": tool_call_event_id,
                 "tool_call_result": result.model_dump(mode="json"),
+                "changelog_id_before": changelog_before,
                 "changelog_id": changelog_id,
             })
             return result
@@ -1156,7 +1192,41 @@ class Gateway:
                 event, default=lambda o: o.model_dump(mode="json") if hasattr(o, "model_dump") else str(o),
             ) + "\n")
             self._trajectory_file.flush()
+            self._changes.observe(event)
         return event_id
+
+    async def _serve_changes(self, request: Request) -> Response:
+        """The env's changelog rows after ``after_id``, oldest first and at most ``limit`` of them, each with the actors
+        whose write window holds it (see ``changes``); ``has_more`` says a later page has rows."""
+        try:
+            after_id = int(request.query_params.get("after_id", 0))
+            limit = int(request.query_params.get("limit", CHANGES_PAGE_DEFAULT))
+        except ValueError:
+            return self._json_response({"ok": False, "error": "after_id and limit must be integers"}, 400)
+        if after_id < 0 or not 1 <= limit <= CHANGES_PAGE_MAX:
+            return self._json_response(
+                {"ok": False, "error": f"after_id must be >= 0 and limit between 1 and {CHANGES_PAGE_MAX}"}, 400)
+        if self._db_conn is None:
+            return self._json_response({"ok": False, "error": "this env keeps no changelog"}, 404)
+        try:
+            rows = await asyncio.to_thread(self._read_changelog, after_id, limit + 1)
+        except Exception as e:
+            logger.exception("Reading the changelog failed")
+            return self._json_response({"ok": False, "error": f"changelog unavailable: {e}"}, 503)
+        rows, has_more = rows[:limit], len(rows) > limit
+        actors = self._changes.actors([row["id"] for row in rows])
+        return self._json_response(
+            {"changes": [{**row, "actors": who} for row, who in zip(rows, actors)], "has_more": has_more}, 200)
+
+    def _read_changelog(self, after_id: int, count: int) -> list[dict]:
+        with self._db_conn.cursor() as cur:
+            cur.execute('SELECT id, "timestamp", schema_name, table_name, operation, row_id, summary, changed_fields '
+                        "FROM public._changelog WHERE id > %s ORDER BY id LIMIT %s", (after_id, count))
+            names = [column[0] for column in cur.description]
+            rows = [dict(zip(names, values)) for values in cur.fetchall()]
+        for row in rows:
+            row["timestamp"] = row["timestamp"].isoformat()
+        return rows
 
     def _serve_trajectory(self) -> Response:
         """Stream the whole env trajectory as JSONL; only a mid-write tail line can arrive torn."""
