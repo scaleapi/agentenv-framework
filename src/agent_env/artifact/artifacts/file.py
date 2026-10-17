@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
 
 from pydantic import ConfigDict, Field, model_serializer
 
-from agent_env.artifact.artifact import Artifact, _write_twin
+from agent_env.artifact.artifact import Artifact, ArtifactFolder, _write_twin
 from agent_env.config import get_config
 
 if TYPE_CHECKING:
@@ -135,6 +135,11 @@ class FileArtifact(Artifact):
         filename, path = ctx.file()
         return cls.put_attempt(ctx.id, description=fields.get("description", filename), file_path=str(path),
                                filename=filename)
+
+    @classmethod
+    def bundle_folder(cls, ctx: AuthoringContext) -> ArtifactFolder:
+        """What ``from_toml`` reads from the folder: its one file."""
+        return ArtifactFolder(ctx.only(ctx.files()))
 
     @classmethod
     def put_attempt(cls, id: str, *, description: str, file_path: str, filename: str) -> Self:

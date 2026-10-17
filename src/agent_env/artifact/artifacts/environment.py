@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional
 
 from pydantic import ConfigDict, Field, model_serializer
 
-from agent_env.artifact.artifact import Artifact
+from agent_env.artifact.artifact import Artifact, ArtifactFolder, FolderChild
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.ref import ArtifactRef
 from agent_env.entity_refs import EntityRef
@@ -95,10 +95,30 @@ class EnvironmentArtifact(Artifact):
         if "file" in fields:
             file = ctx.artifact(fields["file"], FileArtifact)
         else:
-            filename, path = ctx.file()
+            [(key, path)] = cls.bundle_folder(ctx).files.items()
+            filename = key.rsplit("/", 1)[-1]
             file = FileArtifact.put_attempt(cls.derived_file_id(ctx.id), file_path=str(path), filename=filename,
                                             description=fields.get("description", filename))
         return cls.put(ctx.id, environment_name=fields["environment_name"], file_artifact=file)
+
+    @classmethod
+    def bundle_folder(cls, ctx: AuthoringContext) -> ArtifactFolder:
+        """What ``from_toml`` reads from the folder, its one file, and writes besides the environment, the file, as
+        ``<id>__file``; or nothing, when ``file`` names the artifact to wrap and the folder holds only artifact.toml."""
+        files = ctx.files(empty_ok=True)
+        names_its_file = ("file", *(stored for stored, key in cls.toml_stored_names.items() if key == "file"))
+        if not (isinstance(ctx.entry.config, dict) and any(name in ctx.entry.config for name in names_its_file)):
+            if not files:
+                ctx.refuse([f"has no file for the environment to wrap ({', '.join(ctx.leavings)} don't count); put "
+                            "its one file here, or name the artifact to wrap with file"])
+            files = ctx.only(files, "name the artifact to wrap with file, or give each other file an artifact folder "
+                                    "of its own")
+            return ArtifactFolder(files, (FolderChild(cls.derived_file_id(ctx.id), ""),))
+        if files:
+            ctx.refuse([f"its file is the artifact file names, so the folder holds only artifact.toml, and it also has "
+                        f"{', '.join(repr(name) for name in files)}; give the file an artifact folder of its own, or "
+                        "leave out file to wrap the folder's one file"])
+        return ArtifactFolder({})
 
     @classmethod
     def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:

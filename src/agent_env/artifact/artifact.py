@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 
 from pydantic import BaseModel, Field, field_validator
@@ -21,6 +24,23 @@ def _write_twin(data: dict[str, Any], legacy: str, neutral: str, value: Any) -> 
         data[legacy] = data[neutral] = value
 
 
+@dataclass(frozen=True)
+class FolderChild:
+    """An artifact written from a bundle folder besides the one the folder is for."""
+
+    id: str
+    path: str  # where in the folder it's written from; "" for the folder itself
+    environment_name: str | None = None  # the environment it seeds, for one that seeds an env's server
+
+
+@dataclass(frozen=True)
+class ArtifactFolder:
+    """What writing an artifact from its bundle folder reads there, and writes besides the artifact itself."""
+
+    files: Mapping[str, Path]  # every file its write reads, keyed by its path in the folder; the ledger hashes them
+    children: tuple[FolderChild, ...] = ()
+
+
 class Artifact(BaseModel):
     """Base class for all environment artifacts. Immutable - each modification creates a new version."""
 
@@ -29,6 +49,7 @@ class Artifact(BaseModel):
     type: str = Field(description="The type of Artifact")
 
     toml_refs: ClassVar[tuple[EntityRef, ...]] = ()
+    toml_keys: ClassVar[dict[str, type]] = {}  # what an artifact.toml may set, for a type without an accept_toml
 
     @field_validator("type", mode="before")
     @classmethod
@@ -73,6 +94,14 @@ class Artifact(BaseModel):
         document; one whose ``put`` uploads files or images overrides this."""
         fields = {key: value for key, value in data.items() if key not in ("id", "type", "version")}
         return cls.put(id=ctx.id, **fields)
+
+    @classmethod
+    def bundle_folder(cls, ctx: AuthoringContext) -> ArtifactFolder | None:
+        """What ``from_toml`` reads from the entry's folder and writes besides ``ctx.id``, which a bundle checks and
+        its ledger hashes before anything is written; None for a type a bundle doesn't write from a folder. A type
+        is written from one only when the class defining its ``from_toml`` defines this too. Raises BundleError
+        (``ctx.refuse``) listing what's wrong with the folder."""
+        return None
 
     @classmethod
     def query(cls) -> "ArtifactQuery":
