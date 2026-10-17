@@ -35,6 +35,7 @@ from agent_env.task_step.snapshot_utils.agent_state_capture import (
 )
 from agent_env.entity_refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_steps.verifiers.run_context import RunContext, load_run_context
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (
     agent_error_text,
@@ -167,6 +168,62 @@ def resolve_context_facts(facts: dict[str, str], metadata: dict) -> list[tuple[s
                 text = text[:CONTEXT_FACT_MAX_CHARS] + "…"
         rendered.append((label, text))
     return rendered
+
+
+# What of the run beyond its trajectory `run_context_for_judge` may show the judge, and the bounds on how much.
+RUN_CONTEXT_PARTS = ("conversation", "trigger_log")
+RUN_CONTEXT_MESSAGE_MAX_CHARS = 4000  # a longer message is cut and ends in "…"
+RUN_CONTEXT_EVENTS_MAX = 200          # per firing log, the most recent; the rest are counted
+
+
+def _validated_run_context_parts(parts: Optional[list[str]]) -> Optional[list[str]]:
+    if parts is None:
+        return None
+    if not isinstance(parts, list) or not parts or any(p not in RUN_CONTEXT_PARTS for p in parts):
+        raise ValueError(f"run_context_for_judge must be a non-empty list of {list(RUN_CONTEXT_PARTS)}, got {parts!r}")
+    return list(dict.fromkeys(parts))
+
+
+def _cut(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def render_run_context(run: RunContext, parts: list[str]) -> str:
+    """The judge-prompt sections for ``parts`` of ``run``: the conversation turn by turn, and each firing log as one
+    compact JSON line per event, the most recent ``RUN_CONTEXT_EVENTS_MAX`` of each."""
+    sections: list[str] = []
+    if "conversation" in parts:
+        lines = ["## Conversation", "The run's messages, turn by turn: the user side (the task's prompt, then each "
+                 "later message of a user simulator, a human or the triggers) and the agent's replies."]
+        if "conversation" in run.unavailable:
+            lines.append(f"(not available: {run.unavailable['conversation']})")
+        for turn in range(1, run.turns + 1):
+            lines.append(f"### Turn {turn}")
+            for m in (m for m in run.conversation if m["turn"] == turn):
+                who = ", ".join(filter(None, [m.get("author"),
+                                              f"written by triggers {m['fired']}" if m.get("fired") else None]))
+                files = sum(1 for p in m["parts"] if p.get("kind") != "text")
+                extra = f" (+{files} non-text part{'s' if files != 1 else ''})" if files else ""
+                lines.append(f"- {m['role']}{f' ({who})' if who else ''}: "
+                             f"{_cut(m['text'], RUN_CONTEXT_MESSAGE_MAX_CHARS)}{extra}")
+        sections.append("\n".join(lines))
+    if "trigger_log" in parts:
+        lines = ["## Trigger firings", "What the env's triggers and the user agent's triggers did during the run, "
+                 "oldest first, one firing-log event per line."]
+        logs = [(f"env {env_id}", events) for env_id, events in run.env_trigger_events.items()]
+        logs += [("user agent", run.agent_trigger_events)] if run.agent_trigger_events else []
+        for name, events in logs:
+            lines.append(f"### {name}")
+            if len(events) > RUN_CONTEXT_EVENTS_MAX:
+                lines.append(f"({len(events) - RUN_CONTEXT_EVENTS_MAX} earlier events not shown)")
+            lines += [f"- {json.dumps({k: v for k, v in e.items() if k != 'seq'}, default=str)}"
+                      for e in events[-RUN_CONTEXT_EVENTS_MAX:]]
+        lines += [f"(not available: {what}: {why})" for what, why in run.unavailable.items()
+                  if what.startswith("env_trigger_events.")]
+        if len(lines) == 2:
+            lines.append("(no trigger firings were recorded)")
+        sections.append("\n".join(lines))
+    return "\n\n".join(sections)
 
 
 # Only fall back from structured output when the error clearly says the response
@@ -340,10 +397,14 @@ class RubricsVerifierTaskStep(TaskStep):
         grading_policy_prompt: Optional[str] = None,
         context_facts_for_judge: Optional[dict[str, str]] = None,
         grade_up_to_turn: Optional[int] = None,
+        run_context_for_judge: Optional[list[str]] = None,
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
     ):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
+        # What of the run beyond its trajectory the judge also sees (RUN_CONTEXT_PARTS): the conversation with every
+        # user-side turn, and the trigger firing logs; cut at grade_up_to_turn like the trajectory.
+        self.run_context_for_judge = _validated_run_context_parts(run_context_for_judge)
         # Grade a multi-turn run as it stood after this (1-based) turn: the judge sees turns 1..k only,
         # so a per-turn env snapshot can be scored on what the agent had done by then. None grades all.
         self.grade_up_to_turn = _validated_turn(grade_up_to_turn)
@@ -461,6 +522,8 @@ class RubricsVerifierTaskStep(TaskStep):
         base["context_facts_for_judge"] = self.context_facts_for_judge
         if self.grade_up_to_turn is not None:
             base["grade_up_to_turn"] = self.grade_up_to_turn
+        if self.run_context_for_judge is not None:
+            base["run_context_for_judge"] = self.run_context_for_judge
         return base
 
     @classmethod
@@ -490,6 +553,7 @@ class RubricsVerifierTaskStep(TaskStep):
             grading_policy_prompt=data.get("grading_policy_prompt"),
             context_facts_for_judge=data.get("context_facts_for_judge"),
             grade_up_to_turn=data.get("grade_up_to_turn"),
+            run_context_for_judge=data.get("run_context_for_judge"),
         )
 
     def _resolved_criteria(self, context: TaskStepContext) -> list[dict]:
@@ -525,6 +589,11 @@ class RubricsVerifierTaskStep(TaskStep):
             self._write_skipped_entries(
                 context, "prompt_error", f"Skipped: prompt had error_type={prompt_response.error_type}")
             return context
+        run_context = None
+        if self.run_context_for_judge:
+            run_context = await load_run_context(context, prompt_response)
+            if grade_up_to_turn is not None:
+                run_context = run_context.as_of_turn(grade_up_to_turn)
 
         per_turn_uris = [u for u in (prompt_response.target_agent_per_turn_trajectory_object_urls or []) if u]
         if self.use_trajectory and not (per_turn_uris or prompt_response.agent_trajectory_object_url):
@@ -692,6 +761,7 @@ class RubricsVerifierTaskStep(TaskStep):
                     trajectory_path=trajectory_path,
                     loaded_artifacts=loaded_for_judge,
                     context_facts=context_facts,
+                    run_context=run_context,
                 )
                 if self.use_trajectory and multiturn:
                     eval_prompt += self._MULTITURN_DIR_NOTE.format(n=len(per_turn_uris))
@@ -712,6 +782,7 @@ class RubricsVerifierTaskStep(TaskStep):
                     image_blocks=image_blocks,
                     per_criterion_frames=compacted.per_criterion,
                     context_facts=context_facts,
+                    run_context=run_context,
                 )
                 if image_blocks:
                     logger.info(
@@ -1285,9 +1356,11 @@ class RubricsVerifierTaskStep(TaskStep):
         image_blocks: Optional[list[dict]] = None,
         per_criterion_frames: bool = False,
         context_facts: Optional[list[tuple[str, str]]] = None,
+        run_context: Optional[RunContext] = None,
     ) -> str:
         """``context_facts`` are rendered ``(label, value)`` pairs (``resolve_context_facts``); ``image_blocks``
-        are the blocks attached to the judge message, labels included when ``per_criterion_frames``."""
+        are the blocks attached to the judge message, labels included when ``per_criterion_frames``; ``run_context``
+        is shown as ``run_context_for_judge`` asks."""
         spec = self._spec()
         # Only the rubric_evidence templates have this placeholder; the others ignore the argument.
         checks_instruction = evidence_checks_instruction(has_policy=bool(self.grading_policy_prompt))
@@ -1316,6 +1389,8 @@ class RubricsVerifierTaskStep(TaskStep):
             )
         if loaded_artifacts:
             base += "\n\n" + self._build_loaded_artifacts_block(loaded_artifacts)
+        if run_context is not None and self.run_context_for_judge:
+            base += "\n\n" + render_run_context(run_context, self.run_context_for_judge)
         if context_facts:
             # Facts before the policy: they are inputs, the policy is how to read them.
             base += "\n\n## Context facts\n" + self._CONTEXT_FACTS_LEAD + "\n" + "\n".join(
