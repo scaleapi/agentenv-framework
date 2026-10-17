@@ -9,6 +9,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -3196,10 +3197,14 @@ async def test_gateway_clock_extension(sandbox_provider, mcp_server_envs):
             for v in await _get_time_values(client, gw, result.mcp_url):
                 drift = (_dt(v) - _dt(t0a)).total_seconds()
                 assert 0 <= drift <= 3600 * (time.monotonic() - armed_at + 2), (v, t0a, drift)
-            # The gateway image has a tz database: a named zone answers with its offset on both call paths.
+            # The gateway image resolves IANA names, link names such as US/Eastern too, on both call paths.
             for payload in await _get_time_in_zone(client, gw, result.mcp_url, "Asia/Tokyo"):
                 assert payload["time_zone"] == "Asia/Tokyo" and payload["local_time"].endswith("+09:00"), payload
                 assert datetime.fromisoformat(payload["local_time"]) == _dt(payload["current_time"]), payload
+            for payload in await _get_time_in_zone(client, gw, result.mcp_url, "US/Eastern"):
+                local = datetime.fromisoformat(payload["local_time"])
+                assert local == _dt(payload["current_time"]), payload
+                assert local.utcoffset() == local.astimezone(ZoneInfo("America/New_York")).utcoffset(), payload
 
             # rate cap: 1 real s = 1 virtual day is the ceiling.
             assert (await client.put(f"{gw}/clock/set-time",
