@@ -34,7 +34,7 @@ BASES = (
     "agent_env.explorer.plugin.ExplorerPlugin",
 )
 USED = (
-    "agent_env.task_step.context.TaskStepContext", "agent_env.plugins",
+    "agent_env.task_step.context.TaskStepContext", "agent_env.task_step.context.HEARTBEAT_KEY", "agent_env.plugins",
     "agent_env.providers.env_providers.env_provider.build_env_provider", "agent_env.env.store.register_env_instance",
     # What a plugin reads of recorded runs.
     "agent_env.task.store.task_instances", "agent_env.task.store.count_task_instances",

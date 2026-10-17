@@ -5,7 +5,7 @@ context rebuilt from the store gets its secrets regrafted."""
 from __future__ import annotations
 
 from agent_env.task.task import _rebuild_context
-from agent_env.task_step.context import TaskStepContext, regraft_redacted_keys
+from agent_env.task_step.context import HEARTBEAT_KEY, TaskStepContext, regraft_redacted_keys
 from agent_env.task_step.context_ops import ContextUpdateOps, build_context_update_ops
 
 
@@ -83,3 +83,15 @@ def test_the_judge_key_never_reaches_the_store_but_survives_a_rebuild():
     assert "sk-judge" not in repr(build_context_update_ops(None, live).to_journal_dict())
     _rebuild_context(live, stored)
     assert live.metadata["user_overrides"] == {"judge_litellm_api_key": "sk-judge", "agent_effort": "high"}
+
+
+def test_the_runner_heartbeat_is_never_persisted_but_survives_a_rebuild():
+    def beat():
+        return None
+
+    live = TaskStepContext(metadata={HEARTBEAT_KEY: beat, "workflow_id": "w"})
+    stored = live.to_safe_dict()
+    assert stored["metadata"] == {"workflow_id": "w"}
+    assert HEARTBEAT_KEY not in repr(build_context_update_ops(None, live).to_journal_dict())
+    _rebuild_context(live, stored)
+    assert live.metadata[HEARTBEAT_KEY] is beat

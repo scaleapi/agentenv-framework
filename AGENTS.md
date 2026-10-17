@@ -176,6 +176,9 @@ orchestrators call it the same way. What callers rely on:
   a context with `TaskStepContext.to_dict()`, not `dataclasses.asdict`.
 - A run is resumable: pass a previously persisted `context`, a `start_step` and the existing
   `instance_id`; completed steps are seeded as SUCCESS.
+- A runner that must hear from a long step puts a zero-argument callable at
+  `context.metadata[HEARTBEAT_KEY]` (`task_step/context.py`); a step that blocks for long calls
+  `context.heartbeat()`, a no-op without one. The key is in `_REDACTED_KEYS`, so it is never persisted.
 - An episode (`EpisodeSpec`, `task/episode/`) is one `Task.run()` of a copy of the task in which
   the `deploy_agent` and `prompt_agent` steps of each of its `trainer_agents` are the plain-data
   `episode_agent` and `episode_turn`, which wait for the caller instead of deploying or prompting. Its
