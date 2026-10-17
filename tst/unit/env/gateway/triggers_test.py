@@ -596,26 +596,41 @@ def test_next_opening(now, hours, opens):
     ("2026-11-01T06:15:00Z", {"start": "22:00", "end": "01:30"}, "2026-11-02T03:00:00Z"),
     ("2026-03-08T06:00:00Z", {"start": "02:30", "end": "03:15"}, "2026-03-09T06:30:00Z"),
     ("2026-03-08T06:00:00Z", {"start": "02:00", "end": "03:00"}, "2026-03-09T06:00:00Z"),
+    ("2026-03-07T08:00:00Z", {"start": "02:00", "end": "03:00", "days": ["sun"]}, "2026-03-15T06:00:00Z"),
+    ("2026-03-01T09:00:00Z", {"start": "02:00", "end": "03:00", "days": ["sun"]}, "2026-03-15T06:00:00Z"),
 ], ids=["july-weekday", "july-closed-at-17-local", "december-weekday", "december-closed-at-17-local",
         "into-spring-forward-sunday", "overnight-across-spring-forward", "overnight-closes-at-06-edt",
         "start-in-the-skipped-hour", "into-fall-back-sunday", "fall-back-sunday-at-08-est",
         "opened-in-the-repeated-hour-stays-open", "closed-in-the-repeated-hour-stays-closed",
-        "window-the-skipped-hour-empties", "window-inside-the-skipped-hour"])
+        "window-the-skipped-hour-empties", "window-inside-the-skipped-hour",
+        "only-window-of-the-week-the-skipped-hour-empties", "a-week-before-an-only-window-the-skipped-hour-empties"])
 def test_next_opening_in_a_named_time_zone(now, hours, opens):
     hours = _normalize_hours({"time_zone": "America/New_York", **hours}, "executor")
     got = _next_opening(datetime.fromisoformat(now.replace("Z", "+00:00")), hours)
     assert (got.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if got else None) == opens
 
 
-@pytest.mark.parametrize("start, end", [("09:00", "17:00"), ("22:00", "06:00"), ("02:30", "10:00"), ("02:30", "03:15"),
-                                        ("02:00", "03:00"), ("01:30", "02:30"), ("01:15", "01:45"), ("22:00", "01:30")])
-def test_hours_in_a_time_zone_are_open_when_they_say_they_open(start, end):
-    hours = _normalize_hours({"start": start, "end": end, "time_zone": "America/New_York"}, "executor")
+@pytest.mark.parametrize("start, end, days", [
+    ("09:00", "17:00", None), ("22:00", "06:00", None), ("02:30", "10:00", None), ("02:30", "03:15", None),
+    ("02:00", "03:00", None), ("01:30", "02:30", None), ("01:15", "01:45", None), ("22:00", "01:30", None),
+    ("02:00", "03:00", ["sun"]), ("02:30", "03:15", ["sun"]), ("01:30", "02:30", ["sun"]), ("22:00", "02:30", ["sat"]),
+], ids=["day", "overnight", "starts-in-the-skipped-hour", "the-skipped-hour-empties", "inside-the-skipped-hour",
+        "across-the-repeated-hour", "inside-the-repeated-hour", "overnight-into-the-repeated-hour",
+        "sundays-inside-the-skipped-hour", "sundays-the-skipped-hour-empties", "sundays-across-the-repeated-hour",
+        "saturday-nights-into-the-change"])
+def test_hours_in_a_time_zone_are_open_when_they_say_they_open(start, end, days):
+    hours = _normalize_hours({"start": start, "end": end, "time_zone": "America/New_York",
+                              **({"days": days} if days else {})}, "executor")
+    longest = ((datetime.strptime(end, "%H:%M") - datetime.strptime(start, "%H:%M")) % timedelta(days=1)
+               + timedelta(hours=1))
     for first in ("2026-03-07T00:00:00+00:00", "2026-10-31T00:00:00+00:00"):
+        open_since = None
         for quarter in range(3 * 24 * 4):
             now = datetime.fromisoformat(first) + timedelta(minutes=15 * quarter)
             opens = _next_opening(now, hours)
             assert opens is None or _next_opening(opens.astimezone(timezone.utc), hours) is None, (now, opens)
+            open_since = (open_since or now) if opens is None else None
+            assert open_since is None or now - open_since < longest, (now, open_since)
 
 
 def test_hours_without_a_time_zone_normalize_as_before():
@@ -680,6 +695,23 @@ async def test_working_hours_in_a_named_time_zone_defer_until_they_open_there(en
     [acted] = [e for e in engine._events if e["kind"] == "action_ok"]
     assert (deferred["until"], acted["virtual_time"]) == (opens, opens)
     assert waits == [waited] and len(executor_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_executor_whose_only_window_the_skipped_hour_empties_waits_for_the_next_week(engine, executor_calls,
+                                                                                              monkeypatch):
+    waits = _fake_waits(engine, monkeypatch, armed_at="2026-03-07T08:00:00Z")
+    engine.register({"executors": {"bob": {"a2a_url": "http://bob", "role": "bob", "hours": {
+                         "start": "02:00", "end": "03:00", "time_zone": "America/New_York", "days": ["sun"]}}},
+                     "triggers": [{"id": "x", "when": {"type": "action", "tool": "t"},
+                                   "actions": [{"type": "nl", "executor": "bob", "instruction": "reply"}]}]})
+    engine.on_tool_call("default", "t", {}, _result())
+    await asyncio.sleep(0.2)
+
+    [deferred] = [e for e in engine._events if e["kind"] == "deferred"]
+    [acted] = [e for e in engine._events if e["kind"] == "action_ok"]
+    assert (deferred["until"], acted["virtual_time"]) == ("2026-03-15T06:00:00Z", "2026-03-15T06:00:00Z")
+    assert waits == [190 * 3600.0] and len(executor_calls) == 1
 
 
 def _deadline(**unless) -> dict:

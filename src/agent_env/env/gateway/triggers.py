@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import copy
 import hashlib
+import itertools
 import json
 import logging
 import math
@@ -1578,7 +1579,7 @@ def _next_opening(now: datetime, hours: dict) -> datetime | None:
     end_h, end_m = map(int, hours["end"].split(":"))
     length = (timedelta(hours=end_h, minutes=end_m) - timedelta(hours=start_h, minutes=start_m)) % timedelta(days=1)
     today = now.astimezone(zone).date()
-    for days_ahead in range(-1, 8):
+    for days_ahead in itertools.count(-1):
         day = today + timedelta(days=days_ahead)
         if _DAYS[day.weekday()] not in hours["days"]:
             continue
@@ -1590,7 +1591,6 @@ def _next_opening(now: datetime, hours: dict) -> datetime | None:
             return None
         if opens > now:
             return opens
-    return None
 
 
 def _hours_zone(hours: dict) -> tzinfo:
