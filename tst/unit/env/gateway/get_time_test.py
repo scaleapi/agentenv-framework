@@ -13,6 +13,7 @@ import pytest
 from mcp.shared.memory import create_connected_server_and_client_session
 from mcp.types import Tool as MCPTool
 
+from agent_env.env.bootstrap import GATEWAY_CONTEXT
 from agent_env.env.gateway import InternalMCPServer
 from agent_env.env.gateway.clock import Clock, ClockError
 from agent_env.env.gateway.constants import DEFAULT_ROLE
@@ -307,6 +308,12 @@ async def test_an_unknown_zone_is_a_tool_error_naming_it(gw, zone):
     status, body = await _step_call(gw, {"time_zone": zone})
     assert status == 200
     assert json.loads(body) == {"content": [{"type": "text", "text": message}], "isError": True, "changelog_id": None}
+
+
+def test_the_gateway_image_brings_its_own_iana_time_zone_names():
+    """The base image's tz database can leave out IANA link names such as US/Eastern; zoneinfo then finds them in
+    tzdata."""
+    assert "tzdata" in (GATEWAY_CONTEXT / "requirements.txt").read_text().split()
 
 
 def test_unarmed_clock_fails_loud_without_disclosing_why(gw):
