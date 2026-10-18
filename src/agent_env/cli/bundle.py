@@ -22,7 +22,7 @@ def bundle():
 @click.option("--from-eval", "eval_id", default=None, help="Import this stored eval and every task it names, by id.")
 @click.option("--version", type=int, default=None, help="The version to import (defaults to the latest).")
 @click.option("--include-scope", "include_scopes", multiple=True,
-              type=click.Choice([scope.value for scope in FieldScope]),
+              type=click.Choice([scope.value for scope in FieldScope if scope is not FieldScope.TASK]),
               help="Keep the fields of this scope as stored, for a folder run against the same store. Repeatable.")
 def init(folder: Path, task_id: str | None, eval_id: str | None, version: int | None,
          include_scopes: tuple[str, ...]):

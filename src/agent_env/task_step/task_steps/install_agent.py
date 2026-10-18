@@ -26,6 +26,7 @@ from agent_env.providers.sandbox_providers.local_sandbox import host_url_for
 from agent_env.store.base import NotFoundError
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
 from agent_env.entity_refs import EntityRef
+from agent_env.field_scope import FieldScope
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)
@@ -104,6 +105,7 @@ def _build_param_resolvers(
 class InstallAgentTaskStep(TaskStep):
     type: ClassVar[str] = "install_agent"
     entity_refs = (EntityRef.agent("a2a_agent_id", version_field="a2a_agent_version"),)
+    field_scopes = {**TaskStep.field_scopes, "a2a_agent_id": FieldScope.USER, "a2a_agent_version": FieldScope.USER}
 
     def __init__(
         self,

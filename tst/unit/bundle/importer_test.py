@@ -83,7 +83,7 @@ def _left(root):
 
 
 def test_a_task_imports_as_its_stored_steps_with_each_store_reference_pinned_at_its_version_now(store):
-    imported = import_task("triage", store / "triage")
+    imported = import_task("triage", store / "triage", include_scopes=[FieldScope.USER])
     steps = _steps(store / "triage", "triage")
     stored = Task.get("triage").to_dict()["steps"]
 
@@ -109,13 +109,19 @@ def test_a_reference_that_takes_no_version_and_a_step_that_names_no_agent_are_re
     imported = import_task("triage", store / "triage")
 
     assert sorted((ref.where, ref.kind.value, ref.id) for ref in imported.floating) == [
+        ("tasks/triage.json: step 'agent': a2a_agent_id", "agent", "a2a-default"),
+        ("tasks/triage.json: step 'helper': a2a_agent_id", "agent", "a2a-default"),
+        ("tasks/triage.json: step 'judge': judge_a2a_agent_id", "agent", "a2a-default"),
+    ]
+    kept = import_task("triage", store / "kept", include_scopes=[FieldScope.USER])
+    assert sorted((ref.where, ref.kind.value, ref.id) for ref in kept.floating) == [
         ("tasks/triage.json: step 'helper': a2a_agent_id", "agent", "a2a-default"),
         ("tasks/triage.json: step 'judge': judge_a2a_agent_id", "agent", "solver"),
     ]
 
 
 def test_env_vars_that_look_like_secrets_are_left_out_and_a_urls_credentials_masked_elsewhere(store):
-    imported = import_task("triage", store / "triage")
+    imported = import_task("triage", store / "triage", include_scopes=[FieldScope.USER])
     steps = _steps(imported.root, "triage")
 
     assert steps[2]["env_vars"] == {"MODE": "fast"}
@@ -149,7 +155,7 @@ def test_a_credential_by_its_shape_is_dropped_from_an_env_var_and_masked_anywher
     _task("creds", [STEPS[0], STEPS[1], {**STEPS[2], "env_vars": {"SETTING": token}},
                     {**STEPS[4], "criteria": [{"id": "c1", "description": f"logs in with {token} today"}]}])
 
-    imported = import_task("creds", store / "creds")
+    imported = import_task("creds", store / "creds", include_scopes=[FieldScope.USER])
     steps = _steps(imported.root, "creds")
 
     assert steps[2]["env_vars"] == {}
@@ -167,7 +173,7 @@ def test_text_that_only_resembles_a_credential_is_kept(store):
     _task("kept", [STEPS[0], STEPS[1], {**STEPS[2], "env_vars": {f"V{i}": text for i, text in enumerate(kept)}},
                    {**STEPS[4], "criteria": [{"id": f"c{i}", "description": text} for i, text in enumerate(kept)]}])
 
-    imported = import_task("kept", store / "kept")
+    imported = import_task("kept", store / "kept", include_scopes=[FieldScope.USER])
     steps = _steps(imported.root, "kept")
 
     assert list(steps[2]["env_vars"].values()) == kept
@@ -185,7 +191,7 @@ def test_the_readme_says_where_the_folder_came_from_and_how_each_reference_was_w
 
 
 def test_the_folder_materializes_back_to_the_stored_steps(store):
-    imported = import_task("triage", store / "triage")
+    imported = import_task("triage", store / "triage", include_scopes=[FieldScope.USER])
     bundle = parse_bundle(imported.root)
     with namespace_routing():
         materialization = materialize(plan_bundle(resolve_bundle(bundle)))
@@ -231,7 +237,8 @@ def test_an_env_no_step_of_the_task_deploys_floats(store):
     imported = import_task("live", store / "live")
 
     assert [(ref.kind.value, ref.id, ref.where) for ref in imported.floating] == [
-        ("env", "crm-env", "tasks/live.json: step 'agent': env_ids[0]")]
+        ("env", "crm-env", "tasks/live.json: step 'agent': env_ids[0]"),
+        ("agent", "a2a-default", "tasks/live.json: step 'agent': a2a_agent_id")]
 
 
 def test_a_pin_the_task_already_has_is_kept_when_the_store_holds_it_and_refused_when_it_doesnt(store):
@@ -516,8 +523,10 @@ SCOPED = [
      "judge_sandbox_type": "modal", "criteria": [{"id": "c1", "description": "closed every duplicate"}]},
 ]
 SCOPED_FIELDS = {"env": ["sandbox_type", "metadata.attribution"],
-                 "agent": ["sandbox_type", "litellm_base_url", "metadata.attribution"],
-                 "prompt": ["trajectory_output_prefix", "user_a2a_url"], "judge": ["judge_sandbox_type"]}
+                 "agent": ["a2a_agent_id", "sandbox_type", "litellm_base_url", "metadata.attribution"],
+                 "prompt": ["trajectory_output_prefix", "user_a2a_url"],
+                 # A stored judge always holds a model: its author's, or the one its store's config named for judges.
+                 "judge": ["default_model", "judge_sandbox_type"]}
 
 
 def _value(step, path):

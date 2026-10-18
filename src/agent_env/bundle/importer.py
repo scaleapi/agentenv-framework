@@ -165,7 +165,7 @@ def import_eval(eval_id: str, dest: Path | str, *, version: int | None = None,
 class _Importer:
     def __init__(self, dest: Path, include_scopes: Collection[FieldScope] = ()):
         self.dest = Path(os.path.abspath(dest.expanduser()))  # so ``.`` has a name, and a sibling to stage in
-        self.include_scopes = frozenset(include_scopes)
+        self.include_scopes = frozenset({FieldScope.TASK, *include_scopes})
         self.files: dict[str, str] = {}
         self.taken: dict[str, set[str]] = {"tasks": set(), "evals": set()}  # folded names, per folder
         self.tasks: list[ImportedTask] = []
@@ -191,20 +191,19 @@ class _Importer:
         found = []
         for step in steps:
             cls = registry[step["type"]]
-            found.append((step, cls, [site for site in ref_sites(cls.entity_refs or (), step)
-                                      if isinstance(site.value, str) and site.value]))
-        sites = [site for _, _, step_sites in found for site in step_sites]
+            pruned = _prune(step, cls.field_scopes, self.include_scopes)  # first, so no pruned field is pinned
+            found.append((step, cls, pruned, [site for site in ref_sites(cls.entity_refs or (), step)
+                                              if isinstance(site.value, str) and site.value]))
+        sites = [site for *_, step_sites in found for site in step_sites]
         outputs = _output_names(sites)
-        deployed = {_nfc(site.value) for _, cls, step_sites in found if issubclass(cls, DeployEnvTaskStep)
+        deployed = {_nfc(site.value) for _, cls, _, step_sites in found if issubclass(cls, DeployEnvTaskStep)
                     for site in step_sites if site.ref.kind is EntityKind.ENV}
         for site in sites:  # each output, and each step that reads it, takes the output's name
             if outputs.get(_key(site), site.value) != site.value:
                 site.rewrite(outputs[_key(site)])
-        for step, cls, step_sites in found:
+        for step, cls, pruned, step_sites in found:
             where = f"{path}: step {step.get('id')!r}"
-            self.dropped += [Dropped(f"{where}: {at}", why) for at, why in _prune(step, cls.field_scopes,
-                                                                                  self.include_scopes)]
-            self.dropped += [Dropped(f"{where}: {at}", why) for at, why in scrub(step)]
+            self.dropped += [Dropped(f"{where}: {at}", why) for at, why in pruned + scrub(step)]
             self._need(where, "step type", TASK_STEPS, cls.type)
             if cls.entity_refs is None:
                 self.undeclared.append(f"{where} ({cls.type})")

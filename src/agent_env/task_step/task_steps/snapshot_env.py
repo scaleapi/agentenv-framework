@@ -162,7 +162,7 @@ class SnapshotEnvTaskStep(TaskStep):
         EntityRef.artifact("snapshot_id", role=RefRole.OUTPUT, artifact_type="environment_universe"),
         EntityRef.artifact("original_universe_artifact_id", artifact_type="environment_universe"),
     )
-    field_scopes = {**TaskStep.field_scopes, "gateway_url": FieldScope.USER}
+    field_scopes = {**TaskStep.field_scopes, "env_instance_id": FieldScope.USER, "gateway_url": FieldScope.USER}
     DEFAULT_EXPORT_TIMEOUT_SECONDS: ClassVar[int] = DEFAULT_EXPORT_TIMEOUT_SECONDS
 
     def __init__(

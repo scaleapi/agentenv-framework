@@ -118,8 +118,9 @@ _DEFAULT_USER_SIM_OUTPUT_FORMAT: dict[str, Any] = {
 class PromptAgentTaskStep(TaskStep):
     type: ClassVar[str] = "prompt_agent"
     entity_refs = (EntityRef.env("snapshot_config.env_id"),)
-    field_scopes = {**TaskStep.field_scopes, "trajectory_output_prefix": FieldScope.USER,
-                    "user_a2a_url": FieldScope.USER}
+    field_scopes = {**TaskStep.field_scopes, **dict.fromkeys(
+        ("model", "model_params", "effort", "max_thinking_tokens", "harness", "user_model", "user_a2a_url",
+         "trajectory_output_prefix"), FieldScope.USER)}
     DEFAULT_PROMPT_TIMEOUT_SECONDS: ClassVar[int] = 600
     DEFAULT_POLL_INTERVAL_SECONDS: ClassVar[int] = 2
 
