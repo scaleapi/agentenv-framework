@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, Mapping, Optional
 
 from pydantic import ConfigDict, Field, model_serializer
 
-from agent_env.artifact.artifact import Artifact, ArtifactFolder, _write_twin
+from agent_env.artifact.artifact import Artifact, _write_twin
 from agent_env.store.ids import derive_id
 
 if TYPE_CHECKING:
@@ -128,11 +128,6 @@ class CliArtifact(Artifact):
         fields = cls.accept_toml(data, ctx)
         return cls.put(ctx.id, command_name=fields["command_name"], entrypoint=fields["entrypoint"],
                        files=ctx.files())
-
-    @classmethod
-    def bundle_folder(cls, ctx: AuthoringContext) -> ArtifactFolder:
-        """What ``from_toml`` reads from the folder: every file it holds."""
-        return ArtifactFolder(ctx.files())
 
     def get_cli_files(self) -> "FileArtifactUniverse":
         from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse

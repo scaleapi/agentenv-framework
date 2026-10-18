@@ -96,12 +96,12 @@ class Artifact(BaseModel):
         return cls.put(id=ctx.id, **fields)
 
     @classmethod
-    def bundle_folder(cls, ctx: AuthoringContext) -> ArtifactFolder | None:
+    def bundle_folder(cls, ctx: AuthoringContext) -> ArtifactFolder:
         """What ``from_toml`` reads from the entry's folder and writes besides ``ctx.id``, which a bundle checks and
-        its ledger hashes before anything is written; None for a type a bundle doesn't write from a folder. A type
-        is written from one only when the class defining its ``from_toml`` defines this too. Raises BundleError
+        its ledger hashes before anything is written: by default, every file in the folder and nothing besides. A
+        type whose ``from_toml`` writes other artifacts too overrides this to name them. Raises BundleError
         (``ctx.refuse``) listing what's wrong with the folder."""
-        return None
+        return ArtifactFolder(ctx.files())
 
     @classmethod
     def query(cls) -> "ArtifactQuery":

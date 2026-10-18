@@ -643,20 +643,16 @@ def env_writer(cls: type | None) -> bool:
 
 
 def artifact_writer(cls: type | None) -> bool:
-    """Whether an artifact of type ``cls`` is written from its bundle folder: by a ``from_toml`` whose class defines
-    ``bundle_folder`` too, so what the plan checks and the ledger hashes is what the write reads."""
-    if cls is None:
-        return False
-    writer = next(c for c in cls.__mro__ if "from_toml" in vars(c))
-    return writer is not Artifact and writer is next(c for c in cls.__mro__ if "bundle_folder" in vars(c))
+    """Whether an artifact of type ``cls`` is written from its bundle folder: by a ``from_toml`` of its own or one it
+    inherits from a type that has one, not the base's, which writes a document and no folder."""
+    return cls is not None and next(c for c in cls.__mro__ if "from_toml" in vars(c)) is not Artifact
 
 
 def folder_files(bundle: Bundle, entry: BundleEntry) -> Mapping[str, Path]:
     """The files the write of the artifact ``entry`` reads from its folder, as its type's ``bundle_folder`` lists
     them. Raises BundleError."""
     cls = get_artifact_registry()[canonical_type(entry.type)]
-    folder = cls.bundle_folder(AuthoringContext(bundle, entry))
-    return folder.files if folder is not None else {}
+    return cls.bundle_folder(AuthoringContext(bundle, entry)).files
 
 
 def _key(entity: BundleEntry | BundleImage) -> _Key:

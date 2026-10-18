@@ -1,5 +1,5 @@
-"""A bundle writes an artifact type from its folder through the type's own ``bundle_folder`` and ``from_toml``, so a
-plugin's type is planned, checked, written and reused as a core type is."""
+"""A bundle writes an artifact type from its folder through the type's own ``from_toml``, and ``bundle_folder`` when it
+writes other artifacts too, so a plugin's type is planned, checked, written and reused as a core type is."""
 
 import json
 from typing import Literal
@@ -42,17 +42,14 @@ class _Rooms(Artifact):
 
 
 class _OwnFile(FileArtifact):
-    """A plugin's file type with a from_toml and a bundle_folder of its own, keeping only the first line."""
+    """A plugin's file type with only a from_toml of its own, describing the file by its first line."""
 
     type: Literal["own_file_folder_test"] = "own_file_folder_test"
 
     @classmethod
-    def bundle_folder(cls, ctx):
-        return ArtifactFolder(ctx.only(ctx.files()))
-
-    @classmethod
     def from_toml(cls, data, ctx):
-        [(name, path)] = cls.bundle_folder(ctx).files.items()
+        cls.accept_toml(data, ctx)
+        name, path = ctx.file()
         return cls.put_attempt(ctx.id, description=path.read_text().splitlines()[0], file_path=str(path),
                                filename=name)
 
@@ -142,10 +139,22 @@ def test_two_children_seeding_one_environment_are_refused(bundle_dir):
                                      "their own",)
 
 
-def test_a_core_types_subclass_with_both_hooks_of_its_own_is_written_by_them(bundle_dir):
+def test_a_type_with_only_a_from_toml_of_its_own_is_written_by_it_and_rewritten_when_its_folder_changes(bundle_dir):
     layout(bundle_dir, _sandbox_loading({"artifacts/note/artifact.toml": 'type = "own_file_folder_test"\n',
                                          "artifacts/note/n.txt": "first\nsecond\n"}, "note"))
 
     assert _summary(materialize(plan_of(bundle_dir)))[f"{ROOT}/note"] == (1, False)
     assert Artifact.get(f"{ROOT}/note").description == "first"
     assert _summary(materialize(plan_of(bundle_dir)))[f"{ROOT}/note"] == (1, True)
+    (bundle_dir / "artifacts/note/n.txt").write_text("changed\n")
+    assert _summary(materialize(plan_of(bundle_dir)))[f"{ROOT}/note"] == (2, False)
+    assert Artifact.get(f"{ROOT}/note").description == "changed"
+
+
+def test_a_type_with_only_a_from_toml_of_its_own_is_checked_by_the_accept_toml_it_inherits(bundle_dir):
+    layout(bundle_dir, _sandbox_loading({"artifacts/note/artifact.toml": 'type = "own_file_folder_test"\n',
+                                         "artifacts/note/a.txt": "a", "artifacts/note/b.txt": "b"}, "note"))
+
+    assert _problems(bundle_dir) == ("artifacts/note: an own_file_folder_test artifact holds one file, and this folder "
+                                     "has 2 ('a.txt', 'b.txt'); leave out its declared type to write the folder as a "
+                                     "file_artifact_universe",)

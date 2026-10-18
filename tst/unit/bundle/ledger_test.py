@@ -83,7 +83,7 @@ class _NoteEnv(Env):
 
 
 class _OwnFile(FileArtifact):
-    """A plugin's file type whose from_toml is its own, so its inputs aren't the ledger's to list."""
+    """A plugin's file type whose from_toml is its own, read from the files its folder holds."""
 
     type: Literal["own_file_ledger_test"] = "own_file_ledger_test"
 
@@ -426,20 +426,22 @@ def test_the_ledger_never_touches_the_configured_store(bundle_dir, cli_routing):
     assert _latest_version("envs", f"{ROOT}/shelf") == 2
 
 
-@pytest.mark.parametrize("files, step, id", [
-    ({"artifacts/greeting/artifact.toml": 'type = "own_file_ledger_test"\n'}, None, GREETING),
-    ({"envs/own/env.toml": 'type = "own_env_ledger_test"\n'},
-     {"id": "own", "type": "deploy_env", "env_id": "own"}, f"{ROOT}/own"),
-], ids=["artifact-with-own-from_toml", "env-with-own-from_toml"])
-def test_a_write_whose_inputs_arent_tracked_is_written_every_run(bundle_dir, files, step, id):
-    for rel, text in files.items():
-        (bundle_dir / rel).parent.mkdir(parents=True, exist_ok=True)
-        (bundle_dir / rel).write_text(text)
-    if step is not None:
-        (bundle_dir / "tasks/t.json").write_text(_steps(step))
+def test_an_env_whose_inputs_arent_tracked_is_written_every_run(bundle_dir):
+    (bundle_dir / "envs/own").mkdir(parents=True)
+    (bundle_dir / "envs/own/env.toml").write_text('type = "own_env_ledger_test"\n')
+    (bundle_dir / "tasks/t.json").write_text(_steps({"id": "own", "type": "deploy_env", "env_id": "own"}))
 
-    assert _run(bundle_dir)[id].reasons == UNTRACKED
-    assert _run(bundle_dir)[id].reasons == UNTRACKED
+    assert _run(bundle_dir)[f"{ROOT}/own"].reasons == UNTRACKED
+    assert _run(bundle_dir)[f"{ROOT}/own"].reasons == UNTRACKED
+
+
+def test_an_artifact_type_with_a_from_toml_of_its_own_is_made_from_the_files_its_folder_holds(bundle_dir):
+    (bundle_dir / "artifacts/greeting/artifact.toml").write_text('type = "own_file_ledger_test"\n')
+
+    assert _run(bundle_dir)[GREETING].reasons == ("new",)
+    assert _run(bundle_dir)[GREETING].unchanged
+    (bundle_dir / "artifacts/greeting/hello.txt").write_text("changed\n")
+    assert _run(bundle_dir)[GREETING].reasons == ("files changed: hello.txt",)
 
 
 def test_a_built_image_is_made_from_every_file_of_its_folder_the_toml_too(bundle_dir):

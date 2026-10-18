@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
 
 from pydantic import ConfigDict, Field, model_serializer
 
-from agent_env.artifact.artifact import Artifact, ArtifactFolder, _write_twin
+from agent_env.artifact.artifact import Artifact, _write_twin
 from agent_env.config import get_config
 
 if TYPE_CHECKING:
@@ -131,15 +131,21 @@ class FileArtifact(Artifact):
     @classmethod
     def from_toml(cls, data: dict, ctx: AuthoringContext) -> Self:
         """Write the folder's one file (``put_attempt``); ``description`` defaults to the file's name."""
-        fields = ctx.accept(data, **cls.toml_keys)
+        fields = cls.accept_toml(data, ctx)
         filename, path = ctx.file()
         return cls.put_attempt(ctx.id, description=fields.get("description", filename), file_path=str(path),
                                filename=filename)
 
     @classmethod
-    def bundle_folder(cls, ctx: AuthoringContext) -> ArtifactFolder:
-        """What ``from_toml`` reads from the folder: its one file."""
-        return ArtifactFolder(ctx.only(ctx.files()))
+    def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:
+        """The keys of ``data``, an artifact.toml, a file takes, and the folder's one file. Raises BundleError listing
+        every problem."""
+        fields, problems = ctx.accepted(data, **cls.toml_keys)
+        if (files := ctx.try_files()) is not None and (problem := ctx.not_one_file(files)) is not None:
+            problems.append(problem)
+        if problems:
+            ctx.refuse(problems)
+        return fields
 
     @classmethod
     def put_attempt(cls, id: str, *, description: str, file_path: str, filename: str) -> Self:

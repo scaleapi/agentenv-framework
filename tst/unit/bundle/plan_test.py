@@ -386,7 +386,7 @@ def test_a_file_artifact_the_selection_reaches_is_listed_before_any_write(make, 
     assert names(plan_bundle(resolved, tasks=["u"]).tasks) == ["u"]
 
 
-def test_a_plugin_file_type_is_listed_when_it_writes_as_file_artifact_does(make, monkeypatch, tmp_path):
+def test_a_plugin_file_type_is_checked_as_a_file_artifact_is_whichever_from_toml_it_has(make, monkeypatch, tmp_path):
     artifacts = resolve_module.get_artifact_registry()
     registry = {**artifacts, _PluginFile.model_fields["type"].default: _PluginFile,
                 _OwnFile.model_fields["type"].default: _OwnFile}
@@ -400,6 +400,8 @@ def test_a_plugin_file_type_is_listed_when_it_writes_as_file_artifact_does(make,
     (tmp_path / "triage" / "artifacts" / "mine" / "b.txt").write_text("b")
     assert problems(resolved) == (
         "artifacts/mine: a plugin_file_test artifact holds one file, and this folder has 2 ('a.txt', 'b.txt'); "
+        "leave out its declared type to write the folder as a file_artifact_universe",
+        "artifacts/theirs: an own_file_test artifact holds one file, and this folder has 2 ('a.txt', 'b.txt'); "
         "leave out its declared type to write the folder as a file_artifact_universe",
     )
 

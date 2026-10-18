@@ -74,6 +74,10 @@ class AuthoringContext:
         """``files``, which must be one file. Raises BundleError otherwise, suggesting ``remedy``."""
         return _only(self.bundle, self.entry, files, remedy)
 
+    def not_one_file(self, files: dict[str, Path], remedy: str = _AS_UNIVERSE) -> str | None:
+        """Why ``files`` isn't one file, suggesting ``remedy``, ready for ``refuse``; None when it is."""
+        return _not_one_file(self.entry, files, remedy)
+
     def listing(self) -> tuple[dict[str, Path], set[tuple[str, ...]]]:
         """The folder's ``files``, none at all included, and every folder under it, by every path to it, as the names
         on that path in NFC."""
@@ -266,11 +270,17 @@ def one_file(bundle: Bundle, entry: BundleEntry, remedy: str = _AS_UNIVERSE) -> 
 
 
 def _only(bundle: Bundle, entry: BundleEntry, files: dict[str, Path], remedy: str) -> dict[str, Path]:
-    if len(files) != 1:
-        listed = ", ".join(repr(name) for name in files)
-        raise BundleError([f"{relative(bundle.root, entry.path)}: {with_article(f'{entry.type} {entry.kind.store}')} "
-                           f"holds one file, and this folder has {len(files)} ({listed}); {remedy}"])
+    if (problem := _not_one_file(entry, files, remedy)) is not None:
+        raise BundleError([f"{relative(bundle.root, entry.path)}: {problem}"])
     return files
+
+
+def _not_one_file(entry: BundleEntry, files: dict[str, Path], remedy: str) -> str | None:
+    if len(files) == 1:
+        return None
+    listed = ", ".join(repr(name) for name in files)
+    return (f"{with_article(f'{entry.type} {entry.kind.store}')} holds one file, and this folder has {len(files)} "
+            f"({listed}); {remedy}")
 
 
 class _Walk:

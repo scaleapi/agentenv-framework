@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, Iterator, Literal, Mapping, Optional
 import yaml
 from pydantic import ConfigDict, Field, model_serializer
 
-from agent_env.artifact.artifact import Artifact, ArtifactFolder, _write_twin
+from agent_env.artifact.artifact import Artifact, _write_twin
 from agent_env.config import get_config
 from agent_env.store.base import ObjectNotFoundError
 from agent_env.store.ids import derive_id
@@ -131,11 +131,6 @@ class SkillArtifact(Artifact):
     def from_toml(cls, data: Any, ctx: AuthoringContext) -> "SkillArtifact":
         """Write the skill in the bundle folder: every file its folder walk lists."""
         return cls.put(ctx.id, files=ctx.files())
-
-    @classmethod
-    def bundle_folder(cls, ctx: AuthoringContext) -> ArtifactFolder:
-        """What ``from_toml`` reads from the folder: every file it holds."""
-        return ArtifactFolder(ctx.files())
 
     def get_skill_files(self) -> "FileArtifactUniverse":
         from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse

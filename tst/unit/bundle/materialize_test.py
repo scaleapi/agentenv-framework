@@ -11,7 +11,7 @@ from typing import Literal
 import pytest
 
 from agent_env.a2a_agent import A2AAgent
-from agent_env.artifact import Artifact, EnvironmentArtifact, EnvironmentUniverseArtifact
+from agent_env.artifact import Artifact
 from agent_env.artifact.artifacts import docker_image as docker_image_module
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.file import FileArtifact
@@ -101,36 +101,6 @@ class _PluginFile(FileArtifact):
     type: Literal["plugin_file_materialize_test"] = "plugin_file_materialize_test"
 
 
-class _OwnFile(FileArtifact):
-    """A plugin's file type with a from_toml of its own."""
-
-    type: Literal["own_file_materialize_test"] = "own_file_materialize_test"
-
-    @classmethod
-    def from_toml(cls, data, ctx):
-        raise NotImplementedError
-
-
-class _OwnEnvironment(EnvironmentArtifact):
-    """A plugin's environment type with a from_toml of its own."""
-
-    type: Literal["own_environment_materialize_test"] = "own_environment_materialize_test"
-
-    @classmethod
-    def from_toml(cls, data, ctx):
-        raise NotImplementedError
-
-
-class _OwnUniverse(EnvironmentUniverseArtifact):
-    """A plugin's universe type with a from_toml of its own."""
-
-    type: Literal["own_universe_materialize_test"] = "own_universe_materialize_test"
-
-    @classmethod
-    def from_toml(cls, data, ctx):
-        raise NotImplementedError
-
-
 class _DocumentOnly(Artifact):
     """A plugin's artifact type that is only a document, which a bundle has no writer for yet."""
 
@@ -152,7 +122,7 @@ def registries(monkeypatch):
     steps = {**Config().task_step_registry(), **{cls.type: cls for cls in (_Checked, _Writes, _Consuming)}}
     envs = {**Config().env_registry(), _OwnEnv.type: _OwnEnv}
     plugins = {cls.model_fields["type"].default: cls
-               for cls in (_PluginFile, _OwnFile, _OwnEnvironment, _OwnUniverse, _DocumentOnly)}
+               for cls in (_PluginFile, _DocumentOnly)}
     artifacts = {**Config().artifact_registry(), **plugins}
     monkeypatch.setattr(Config, "task_step_registry", lambda self: steps)
     monkeypatch.setattr(Config, "env_registry", lambda self: envs)
@@ -679,17 +649,6 @@ def test_a_plugin_file_type_is_written_when_it_writes_as_file_artifact_does(bund
     assert _summary(_run(bundle_dir))[f"{ROOT}/greeting"] == (1, False, ("new",))
     assert Artifact.get(f"{ROOT}/greeting").type == "plugin_file_materialize_test"
     assert _summary(_run(bundle_dir))[f"{ROOT}/greeting"] == (1, True, ())
-
-
-@pytest.mark.parametrize("type_, written", [
-    ("own_file_materialize_test", "an own_file_materialize_test artifact"),
-    ("own_environment_materialize_test", "an own_environment_materialize_test artifact"),
-    ("own_universe_materialize_test", "an own_universe_materialize_test artifact"),
-])
-def test_a_plugin_type_with_a_from_toml_of_its_own_is_refused(bundle_dir, type_, written):
-    (bundle_dir / "artifacts/greeting/artifact.toml").write_text(f'type = "{type_}"\n')
-
-    assert _problems(lambda: _run(bundle_dir)) == (f"artifacts/greeting: writing {written} isn't supported yet",)
 
 
 def test_an_eval_is_rewritten_only_when_it_changes(bundle_dir):

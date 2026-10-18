@@ -207,9 +207,8 @@ def materializing(bundle: Bundle, on_wait: Callable[[], None] | None = None) -> 
 
 
 def _tracked(write: Write) -> bool:
-    """Whether the ledger can list everything ``write`` is made from. Not for an artifact type whose ``from_toml``
-    doesn't come with a ``bundle_folder`` saying what it reads, nor yet for an env type with a ``from_toml`` of its
-    own, which may read its folder in ways it can't see. An artifact, a skill included, is made from its toml,
+    """Whether the ledger can list everything ``write`` is made from. Not yet for an env type with a ``from_toml`` of
+    its own, which may read its folder in ways it can't see. An artifact, a skill included, is made from its toml,
     the files its type reads from its folder (``bundle_folder``) and what it references; an agent or env from its
     toml and what it references. A built image is made from its build context, ``build_context_files``; what the
     build fetches (its base image, packages) isn't an input. A referenced image is made from its ref's text, so a tag
