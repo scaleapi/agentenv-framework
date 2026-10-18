@@ -112,8 +112,8 @@ class EnvironmentArtifact(Artifact):
                                     f"it also has {', '.join(repr(name) for name in files)}; give the file an artifact "
                                     "folder of its own, or leave out file to wrap the folder's one file")
             elif not files:
-                problems.append(f"has no file for the environment to wrap ({', '.join(ctx.leavings)} don't count); put "
-                                "its one file here, or name the artifact to wrap with file")
+                problems.append(ctx.no_files("file for the environment to wrap",
+                                             "put its one file here, or name the artifact to wrap with file"))
             elif problem := ctx.not_one_file(files, "name the artifact to wrap with file, or give each other file an "
                                                     "artifact folder of its own"):
                 problems.append(problem)
@@ -131,6 +131,13 @@ class EnvironmentArtifact(Artifact):
         if problems:
             ctx.refuse(problems)
         return fields
+
+    @classmethod
+    def seeded_environments(cls, ctx: AuthoringContext) -> tuple[tuple[str, str], ...]:
+        """``(path in the folder, environment_name)`` of the environment it seeds, its own, the path ``""`` for the
+        folder itself, which a bundle checks against the servers of the env a task loads it into."""
+        name = ctx.entry.config.get("environment_name") if isinstance(ctx.entry.config, dict) else None
+        return (("", name),) if isinstance(name, str) and name else ()
 
     def get_file_artifact(self) -> FileArtifact:
         if self.file_artifact_ref is not None:

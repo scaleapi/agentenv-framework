@@ -26,7 +26,6 @@ A = TypeVar("A", bound=Artifact)
 E = TypeVar("E", bound=Env)
 
 _BRING_IT_IN = "copy what it points to into the bundle, or put it in a store and refer to it by id"
-_AS_UNIVERSE = "leave out its declared type to write the folder as a file_artifact_universe"
 _TOML_TYPES = {str: "a string", dict: "a table", list: "a list"}
 
 
@@ -70,9 +69,13 @@ class AuthoringContext:
     def file(self) -> tuple[str, Path]:
         return entry_file(self.bundle, self.entry)
 
-    def not_one_file(self, files: dict[str, Path], remedy: str = _AS_UNIVERSE) -> str | None:
+    def not_one_file(self, files: dict[str, Path], remedy: str) -> str | None:
         """Why ``files`` isn't one file, suggesting ``remedy``, ready for ``refuse``; None when it is."""
         return _not_one_file(self.entry, files, remedy)
+
+    def no_files(self, what: str, remedy: str) -> str:
+        """The problem with a folder holding no ``what``, suggesting ``remedy``, ready for ``refuse``."""
+        return f"has no {what} ({', '.join(sorted(LEAVINGS))} don't count); {remedy}"
 
     def listing(self) -> tuple[dict[str, Path], set[tuple[str, ...]]]:
         """The folder's ``files``, none at all included, and every folder under it, by every path to it, as the names
@@ -86,11 +89,6 @@ class AuthoringContext:
             return self.listing()
         except BundleError:
             return None
-
-    @property
-    def leavings(self) -> tuple[str, ...]:
-        """The names a folder walk leaves out, which the OS or Python leaves behind."""
-        return tuple(sorted(LEAVINGS))
 
     def renamed(self, data: dict, names: Mapping[str, str]) -> tuple[dict, list[str]]:
         """``data`` less each key ``names`` maps to the key an author writes instead, and a problem for each:
@@ -200,7 +198,8 @@ class AuthoringContext:
         """Raise BundleError with ``problems``, each named by the entry's folder, after ``within``, each ``<path in the
         folder>: <why>`` and named by its path in the bundle."""
         where = relative(self.bundle.root, self.entry.path)
-        raise BundleError([f"{where}/{problem}" for problem in within] + [f"{where}: {problem}" for problem in problems])
+        raise BundleError([*(f"{where}/{problem}" for problem in within),
+                           *(f"{where}: {problem}" for problem in problems)])
 
     @overload
     def env(self, ref: str | dict[str, Any]) -> Env: ...
@@ -260,6 +259,9 @@ def entry_file(bundle: Bundle, entry: BundleEntry) -> tuple[str, Path]:
     """The one file in an entry's folder, as ``(name, path)``. Raises BundleError otherwise."""
     key, path = next(iter(one_file(bundle, entry).items()))
     return key.rsplit("/", 1)[-1], path
+
+
+_AS_UNIVERSE = "leave out its declared type to write the folder as a file_artifact_universe"
 
 
 def one_file(bundle: Bundle, entry: BundleEntry, remedy: str = _AS_UNIVERSE) -> dict[str, Path]:

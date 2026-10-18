@@ -196,9 +196,9 @@ class _Planner:
         return None if isinstance(children, BundleError) else children
 
     def _folder_environments(self, entry: BundleEntry) -> tuple[tuple[str, str], ...] | None:
-        """``(path in the folder, environment_name)`` of each environment the artifact ``entry``'s folder holds, as
-        a type seeding environments from its folder answers ``seeded_environments``, and none for another type: None
-        for one its type doesn't write from a folder, or whose folder the file check refuses."""
+        """``(path in the folder, environment_name)`` of each environment the artifact ``entry`` seeds, as a type
+        seeding environments answers ``seeded_environments`` (the path ``""`` for the folder itself), and none for
+        another type: None for one its type doesn't write from a folder, or whose folder the file check refuses."""
         held = self._answer(entry, "seeded_environments")
         return None if isinstance(held, BundleError) else held
 
@@ -378,7 +378,7 @@ class _Planner:
                 self.problems.extend(e.problems)
             for hook in ("written_besides", "seeded_environments"):
                 if isinstance(refused := self._answer(source.entry, hook), BundleError):
-                    # What only the hook refuses: a universe's accept_toml reports its layout problems too.
+                    # What only the hook refuses, less what the type's accept_toml already reported.
                     self.problems.extend([problem for problem in refused.problems if problem not in self.problems])
 
     def _check_cli_loads(self, closure: set[_Key]) -> None:
@@ -478,15 +478,16 @@ class _Planner:
 
     def _check_environment_names(self, closure: set[_Key],
                                  store_latest: dict[tuple[EntityKind, str], int] | None) -> None:
-        """The environments one artifact holds need names of their own: those its folder holds
-        (``seeded_environments``), and the environment artifacts it references, named by their tomls or, from the store, at the version the plan read. Without
-        ``store_latest`` (a check that reads no store), the store's environments aren't counted."""
+        """The environments one artifact holds need names of their own: those its type names
+        (``seeded_environments``), and the environment artifacts it references, named by their tomls or, from the
+        store, at the version the plan read. Without ``store_latest`` (a check that reads no store), the store's
+        environments aren't counted."""
         for key in sorted(closure, key=self.rank.__getitem__):
             source = self.nodes[key]
             if isinstance(source, BundleImage) or (environments := self._folder_environments(source.entry)) is None:
                 continue
             where = self._path(source.entry)
-            held = [*((f"{where}/{path}", name) for path, name in environments),
+            held = [*((_within(where, path), name) for path, name in environments),
                     *((f"{where}: {ref.where}", name) for ref, name in self._referenced(source, store_latest))]
             taken: dict[str, str] = {}  # who has each name
             for who, name in held:
@@ -564,21 +565,22 @@ class _Planner:
 
     def _seeded(self, ref: Reference, store_latest: dict[tuple[EntityKind, str], int] | None) -> list[tuple[str, str]]:
         """Each environment the bundle's own artifact ``ref`` names seeds, as (where it's named, its
-        environment_name): its own, the ones its folder holds and the environment artifacts it references. Nothing
-        for a store artifact, or one whose folder the file check refuses."""
+        environment_name): the ones its type names (``seeded_environments``) and the environment artifacts it
+        references. Nothing for a store artifact, or one whose folder the file check refuses."""
         entry = ref.local
         if not isinstance(entry, BundleEntry) or (environments := self._folder_environments(entry)) is None:
             return []
-        where, accepted = self._path(entry), self.accepted.get(_key(entry))
-        own = accepted.get("environment_name") if isinstance(accepted, dict) else None
-        return [*([(where, own)] if own else []),
-                *((f"{where}/{path}", name) for path, name in environments),
+        where = self._path(entry)
+        return [*((_within(where, path), name) for path, name in environments),
                 *((f"{where}: {named.where}", name) for named, name in self._referenced(self.nodes[_key(entry)],
                                                                                        store_latest))]
 
     def _environment_name(self, ref: Reference, store_latest: dict[tuple[EntityKind, str], int] | None) -> str | None:
-        """The environment_name of the env or environment artifact ``ref`` names: a bundle one's from its accepted
-        toml, a store one's at the version the plan read, or None when that's unknown."""
+        """The environment_name of the env or environment artifact ``ref`` names: a bundle env's from its accepted
+        toml, a bundle artifact's as its type names it (``seeded_environments``), a store one's at the version the
+        plan read, or None when that's unknown."""
+        if isinstance(ref.local, BundleEntry) and ref.kind is EntityKind.ARTIFACT:
+            return next((name for path, name in self._folder_environments(ref.local) or () if not path), None)
         if ref.local is not None:
             return self.accepted.get(_key(ref.local), {}).get("environment_name")
         if store_latest is None:
@@ -666,6 +668,11 @@ def folder_files(bundle: Bundle, entry: BundleEntry) -> Mapping[str, Path]:
     environment's ``file`` and a universe's ``environment_artifacts`` do. Raises BundleError."""
     cls = get_artifact_registry()[canonical_type(entry.type)]
     return entry_files(bundle, entry, empty_ok=bool(cls.toml_refs))
+
+
+def _within(where: str, path: str) -> str:
+    """Where ``path`` in the folder at ``where`` is, ``""`` being the folder itself."""
+    return f"{where}/{path}" if path else where
 
 
 def _key(entity: BundleEntry | BundleImage) -> _Key:

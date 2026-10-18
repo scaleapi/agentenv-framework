@@ -62,7 +62,8 @@ class _OwnFile(FileArtifact):
 
 @pytest.fixture(autouse=True)
 def registries(monkeypatch):
-    artifacts = {**Config().artifact_registry(), **{cls.model_fields["type"].default: cls for cls in (_Rooms, _OwnFile)}}
+    plugins = {cls.model_fields["type"].default: cls for cls in (_Rooms, _OwnFile)}
+    artifacts = {**Config().artifact_registry(), **plugins}
     monkeypatch.setattr(Config, "artifact_registry", lambda self: artifacts)
 
 
@@ -81,7 +82,8 @@ def _sandbox_loading(files, *artifacts):
 
 
 def _env_loading(files, artifact, env):
-    return {**files, f"envs/{env}/Dockerfile": "FROM scratch\n", f"envs/{env}/env.toml": f'environment_name = "{env}"\n',
+    return {**files, f"envs/{env}/Dockerfile": "FROM scratch\n",
+            f"envs/{env}/env.toml": f'environment_name = "{env}"\n',
             "tasks/t.json": json.dumps([
                 {"id": "env", "type": "deploy_env", "env_id": env},
                 {"id": "load", "type": "load_artifact", "env_id": env, "artifact_id": artifact, "depends_on": ["env"]},

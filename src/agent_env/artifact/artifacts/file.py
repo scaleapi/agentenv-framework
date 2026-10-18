@@ -141,7 +141,8 @@ class FileArtifact(Artifact):
         """The keys of ``data``, an artifact.toml, a file takes, and the folder's one file. Raises BundleError listing
         every problem."""
         fields, problems = ctx.accepted(data, **cls.toml_keys)
-        if (files := ctx.try_files()) is not None and (problem := ctx.not_one_file(files)) is not None:
+        remedy = "leave out its declared type to write the folder as a file_artifact_universe"
+        if (files := ctx.try_files()) is not None and (problem := ctx.not_one_file(files, remedy)) is not None:
             problems.append(problem)
         if problems:
             ctx.refuse(problems)
