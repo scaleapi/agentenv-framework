@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import importlib
 import json
 import os
 import shutil
@@ -14,7 +15,7 @@ from datetime import datetime, timezone
 from importlib.metadata import version as package_version
 from pathlib import Path
 
-from agent_env.artifact.registry import ARTIFACT_REGISTRY, canonical_type
+from agent_env.artifact.registry import ARTIFACT_REGISTRY, canonical_type, get_artifact_registry
 from agent_env.bundle import _toml
 from agent_env.bundle._fs import fold, os_reason, show
 from agent_env.bundle._secrets import scrub
@@ -24,6 +25,7 @@ from agent_env.bundle.resolve import resolve_bundle
 from agent_env.config import get_config
 from agent_env.entity_refs import EntityKind, RefRole, RefSite, ref_sites
 from agent_env.env import registry as env_registry
+from agent_env.env.registry import get_env_registry
 from agent_env.eval import Eval
 from agent_env.field_scope import FieldScope
 from agent_env.plugins import ARTIFACTS, ENVS, TASK_STEPS, inventory
@@ -204,7 +206,7 @@ class _Importer:
         for step, cls, pruned, step_sites in found:
             where = f"{path}: step {step.get('id')!r}"
             self.dropped += [Dropped(f"{where}: {at}", why) for at, why in pruned + scrub(step)]
-            self._need(where, "step type", TASK_STEPS, cls.type)
+            self._need(where, "step type", TASK_STEPS, cls.type, cls)
             if cls.entity_refs is None:
                 self.undeclared.append(f"{where} ({cls.type})")
             for site in step_sites:
@@ -302,19 +304,23 @@ class _Importer:
         if (type_ := self.types.get((site.ref.kind, site.value, site.version))) is None:
             return  # the store can't read it, which pinning reports, or a run reads it later
         if site.ref.kind is EntityKind.ENV:
-            self._need(where, "env type", ENVS, type_)
+            self._need(where, "env type", ENVS, type_, get_env_registry().get(type_))
         else:
-            self._need(where, "artifact type", ARTIFACTS, canonical_type(type_))
+            self._need(where, "artifact type", ARTIFACTS, (name := canonical_type(type_)),
+                       get_artifact_registry().get(name))
 
-    def _need(self, where: str, what: str, group: str, name: str) -> None:
-        """``name``, of the plugin ``group``, is a need when core doesn't ship it, named with what registers it."""
+    def _need(self, where: str, what: str, group: str, name: str, cls: type | None) -> None:
+        """``name``, of the plugin ``group``, is a need when core doesn't ship it, named with what registers ``cls``,
+        the class it resolves to here: the distribution whose entry point names that class, or configuration."""
         if name in _BUILTINS[group]():
             return
         if self.origins is None:
-            self.origins = {(contribution.group, contribution.name): distribution.name
+            self.origins = {(contribution.group, contribution.name): (distribution.name, contribution.value)
                             for distribution in inventory(load=False).distributions
                             for contribution in distribution.contributions}
-        self.needs.append(Need(where, what, name, self.origins.get((group, name), "configuration")))
+        distribution, value = self.origins.get((group, name), (None, None))
+        by = distribution if value is not None and cls is not None and _names(value, cls) else "configuration"
+        self.needs.append(Need(where, what, name, by))
 
     def _default_agents(self, step: dict, where: str) -> None:
         """A step that names no agent deploys the configured default, which no field pins."""
@@ -342,6 +348,18 @@ class _Importer:
 # What core ships, per plugin group: anything else a task uses is a need.
 _BUILTINS = {TASK_STEPS: task_step_registry._builtin_registry, ENVS: env_registry._builtin_registry,
              ARTIFACTS: lambda: ARTIFACT_REGISTRY}
+
+
+def _names(value: str, cls: type) -> bool:
+    """Whether the entry point ``value``, ``module:attribute``, names ``cls``."""
+    module, _, attribute = value.partition(":")
+    try:
+        named = importlib.import_module(module)
+        for part in attribute.split("."):
+            named = getattr(named, part)
+    except (ImportError, AttributeError):
+        return False
+    return named is cls
 
 
 def _prune(step: dict, scopes: Mapping[str, FieldScope], include: frozenset[FieldScope]) -> list[tuple[str, str]]:

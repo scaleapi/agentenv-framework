@@ -524,7 +524,7 @@ SCOPED = [
 ]
 SCOPED_FIELDS = {"env": ["sandbox_type", "metadata.attribution"],
                  "agent": ["a2a_agent_id", "sandbox_type", "litellm_base_url", "metadata.attribution"],
-                 "prompt": ["trajectory_output_prefix", "user_a2a_url"],
+                 "prompt": ["trajectory_output_prefix"],
                  # A stored judge always holds a model: its author's, or the one its store's config named for judges.
                  "judge": ["default_model", "judge_sandbox_type"]}
 
@@ -550,6 +550,7 @@ def test_a_steps_user_scoped_fields_are_left_out_and_reported_and_the_rest_of_it
         "dropped: user scope, so a run takes its own; --include-scope user keeps it"}
     assert steps["env"]["metadata"] == {"note": "kept"}
     assert steps["prompt"]["prompt"] == stored["prompt"]["prompt"]
+    assert steps["prompt"]["user_a2a_url"] == stored["prompt"]["user_a2a_url"]  # it also says the user is a human
     assert steps["judge"]["criteria"] == stored["judge"]["criteria"]
 
 
@@ -576,7 +577,8 @@ def test_what_only_a_plugin_or_a_config_file_registers_is_named_as_a_need_by_wha
     monkeypatch.setattr(Config, "task_step_registry", lambda self: steps)
     artifacts = {**Config().artifact_registry(), "acme_file_import_test": _AcmeFile}
     monkeypatch.setattr(Config, "artifact_registry", lambda self: artifacts)
-    acme = Distribution("agentenv-acme", "1.0", (Contribution(TASK_STEPS, _Undeclared.type, "acme:Step", "active"),))
+    acme = Distribution("agentenv-acme", "1.0", (
+        Contribution(TASK_STEPS, _Undeclared.type, f"{_Undeclared.__module__}:{_Undeclared.__qualname__}", "active"),))
     monkeypatch.setattr(importer_module, "inventory", lambda load: Inventory(
         distributions=(acme,), group_errors={}, discovery_errors={}, config_path=None, config_error=None, loaded=load))
     (store / "acme.json").write_text("{}")
@@ -596,6 +598,19 @@ def test_what_only_a_plugin_or_a_config_file_registers_is_named_as_a_need_by_wha
         "configuration: acme_file_import_test (artifact type), at tasks/acme.json: step 'load': artifacts[0].id",
     ])
     assert "## Needs beyond core" in (imported.root / "README.md").read_text()
+
+
+def test_a_plugins_type_a_config_file_replaces_is_credited_to_configuration(store, monkeypatch):
+    steps = {**Config().task_step_registry(), _Undeclared.type: _Undeclared}
+    monkeypatch.setattr(Config, "task_step_registry", lambda self: steps)
+    replaced = Distribution("agentenv-acme", "1.0", (
+        Contribution(TASK_STEPS, _Undeclared.type, f"{_AcmeFile.__module__}:{_AcmeFile.__qualname__}", "replaced"),))
+    monkeypatch.setattr(importer_module, "inventory", lambda load: Inventory(
+        distributions=(replaced,), group_errors={}, discovery_errors={}, config_path=None, config_error=None,
+        loaded=load))
+    _task("acme", [{"id": "p", "type": _Undeclared.type}])
+
+    assert [need.by for need in import_task("acme", store / "acme").needs] == ["configuration"]
 
 
 def test_a_task_that_uses_only_what_core_ships_needs_nothing(store):

@@ -162,7 +162,8 @@ class SnapshotEnvTaskStep(TaskStep):
         EntityRef.artifact("snapshot_id", role=RefRole.OUTPUT, artifact_type="environment_universe"),
         EntityRef.artifact("original_universe_artifact_id", artifact_type="environment_universe"),
     )
-    field_scopes = {**TaskStep.field_scopes, "env_instance_id": FieldScope.USER, "gateway_url": FieldScope.USER}
+    # gateway_url stays the task's: with no deployed env, it's how the step finds the gateway to snapshot.
+    field_scopes = {**TaskStep.field_scopes, "env_instance_id": FieldScope.USER}
     DEFAULT_EXPORT_TIMEOUT_SECONDS: ClassVar[int] = DEFAULT_EXPORT_TIMEOUT_SECONDS
 
     def __init__(
