@@ -119,7 +119,7 @@ class _Planner:
         self.outputs = {(output.kind.value, output.id): (entry.entry, output)
                         for entry in resolved.entries for output in entry.outputs}
         self.accepted: dict[_Key, dict] = {}  # each toml a type checks, as it accepted it
-        self.children: dict[_Key, tuple[FolderChild, ...] | BundleError | None] = {}  # what each writes besides itself
+        self.answers: dict[tuple[_Key, str], tuple | BundleError | None] = {}  # each artifact type's folder hooks
         self.steps: dict[_Key, list[TaskStep]] = {}  # each task's steps that build, as a write will build them
 
     def _add(self, key: _Key, source: ResolvedEntry | BundleImage, needs: list[_Key]) -> None:
@@ -192,22 +192,34 @@ class _Planner:
     def _children(self, entry: BundleEntry) -> tuple[FolderChild, ...] | None:
         """What the artifact ``entry`` writes besides itself (``written_besides``): None for one its type doesn't
         write from a folder, or whose folder the file check refuses."""
-        children = self._read_children(entry)
+        children = self._answer(entry, "written_besides")
         return None if isinstance(children, BundleError) else children
 
-    def _read_children(self, entry: BundleEntry) -> tuple[FolderChild, ...] | BundleError | None:
-        """``_children``, or the BundleError ``written_besides`` raised, read once."""
+    def _folder_environments(self, entry: BundleEntry) -> tuple[tuple[str, str], ...] | None:
+        """``(path in the folder, environment_name)`` of each environment the artifact ``entry``'s folder holds, as
+        a type seeding environments from its folder answers ``seeded_environments``, and none for another type: None
+        for one its type doesn't write from a folder, or whose folder the file check refuses."""
+        held = self._answer(entry, "seeded_environments")
+        return None if isinstance(held, BundleError) else held
+
+    def _answer(self, entry: BundleEntry, hook: str) -> tuple | BundleError | None:
+        """What the artifact ``entry``'s type answers to ``hook`` for its folder, read once: () for a type without
+        it, None for one its type doesn't write from a folder, or the BundleError the hook raised."""
         if entry.kind not in (BundleKind.ARTIFACT, BundleKind.SKILL):
             return None
-        key = _key(entry)
-        if key not in self.children:
+        key = (_key(entry), hook)
+        if key not in self.answers:
             cls = get_artifact_registry().get(canonical_type(entry.type))
             try:
-                self.children[key] = (cls.written_besides(AuthoringContext(self.resolved.bundle, entry))
-                                      if artifact_writer(cls) else None)
+                if not artifact_writer(cls):
+                    self.answers[key] = None
+                elif (ask := getattr(cls, hook, None)) is None:
+                    self.answers[key] = ()
+                else:
+                    self.answers[key] = ask(AuthoringContext(self.resolved.bundle, entry))
             except BundleError as e:
-                self.children[key] = e
-        return self.children[key]
+                self.answers[key] = e
+        return self.answers[key]
 
     def _check_loops(self) -> None:
         for component in _components(self.nodes, self.edges, self.rank):
@@ -364,9 +376,10 @@ class _Planner:
                     self.accepted[key] = accept(source.config, ctx)
             except BundleError as e:
                 self.problems.extend(e.problems)
-            if isinstance(written := self._read_children(source.entry), BundleError):
-                # What only written_besides refuses: a universe's accept_toml reports its layout problems too.
-                self.problems.extend([problem for problem in written.problems if problem not in self.problems])
+            for hook in ("written_besides", "seeded_environments"):
+                if isinstance(refused := self._answer(source.entry, hook), BundleError):
+                    # What only the hook refuses: a universe's accept_toml reports its layout problems too.
+                    self.problems.extend([problem for problem in refused.problems if problem not in self.problems])
 
     def _check_cli_loads(self, closure: set[_Key]) -> None:
         """Each load of one of the bundle's CLIs names what installing it needs, an agent and an env whose gateway it
@@ -465,15 +478,15 @@ class _Planner:
 
     def _check_environment_names(self, closure: set[_Key],
                                  store_latest: dict[tuple[EntityKind, str], int] | None) -> None:
-        """The environments one artifact holds need names of their own: those its folder writes, and the environment
-        artifacts it references, named by their tomls or, from the store, at the version the plan read. Without
+        """The environments one artifact holds need names of their own: those its folder holds
+        (``seeded_environments``), and the environment artifacts it references, named by their tomls or, from the store, at the version the plan read. Without
         ``store_latest`` (a check that reads no store), the store's environments aren't counted."""
         for key in sorted(closure, key=self.rank.__getitem__):
             source = self.nodes[key]
-            if isinstance(source, BundleImage) or (children := self._children(source.entry)) is None:
+            if isinstance(source, BundleImage) or (environments := self._folder_environments(source.entry)) is None:
                 continue
             where = self._path(source.entry)
-            held = [*((f"{where}/{child.path}", child.environment_name) for child in children if child.environment_name),
+            held = [*((f"{where}/{path}", name) for path, name in environments),
                     *((f"{where}: {ref.where}", name) for ref, name in self._referenced(source, store_latest))]
             taken: dict[str, str] = {}  # who has each name
             for who, name in held:
@@ -551,15 +564,15 @@ class _Planner:
 
     def _seeded(self, ref: Reference, store_latest: dict[tuple[EntityKind, str], int] | None) -> list[tuple[str, str]]:
         """Each environment the bundle's own artifact ``ref`` names seeds, as (where it's named, its
-        environment_name): its own, the ones its folder writes and the environment artifacts it references. Nothing
+        environment_name): its own, the ones its folder holds and the environment artifacts it references. Nothing
         for a store artifact, or one whose folder the file check refuses."""
         entry = ref.local
-        if not isinstance(entry, BundleEntry) or (children := self._children(entry)) is None:
+        if not isinstance(entry, BundleEntry) or (environments := self._folder_environments(entry)) is None:
             return []
         where, accepted = self._path(entry), self.accepted.get(_key(entry))
         own = accepted.get("environment_name") if isinstance(accepted, dict) else None
         return [*([(where, own)] if own else []),
-                *((f"{where}/{child.path}", child.environment_name) for child in children if child.environment_name),
+                *((f"{where}/{path}", name) for path, name in environments),
                 *((f"{where}: {named.where}", name) for named, name in self._referenced(self.nodes[_key(entry)],
                                                                                        store_latest))]
 

@@ -1,6 +1,6 @@
 """A bundle writes an artifact type from its folder through the type's own ``from_toml``, checked by its
-``accept_toml`` and with ``written_besides`` naming what else it writes, so a plugin's type is planned, checked, written
-and reused as a core type is."""
+``accept_toml``, with ``written_besides`` naming what else it writes and ``seeded_environments`` the environments its
+folder holds, so a plugin's type is planned, checked, written and reused as a core type is."""
 
 import json
 from typing import Literal
@@ -32,12 +32,16 @@ class _Rooms(Artifact):
         files = ctx.files()
         if strays := [key for key in files if not key.endswith((".json", ".yaml"))]:
             ctx.refuse([f"{key}: a room is a .json or .yaml file" for key in strays])
-        return tuple(FolderChild(f"{ctx.id}-{key}", key, environment_name=key.split(".")[0]) for key in files)
+        return tuple(FolderChild(f"{ctx.id}-{key}", key) for key in files)
+
+    @classmethod
+    def seeded_environments(cls, ctx):
+        return tuple((key, key.split(".")[0]) for key in ctx.files())
 
     @classmethod
     def from_toml(cls, data, ctx):
         files = ctx.files()
-        rooms = {child.environment_name: FileArtifact.put_attempt(
+        rooms = {child.path.split(".")[0]: FileArtifact.put_attempt(
             child.id, description=child.path, file_path=str(files[child.path]), filename=child.path).as_ref()
             for child in cls.written_besides(ctx)}
         return cls.put(id=ctx.id, rooms=rooms)

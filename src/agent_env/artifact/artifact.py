@@ -28,7 +28,6 @@ class FolderChild:
 
     id: str
     path: str  # where in the folder it's written from
-    environment_name: str | None = None  # the environment it seeds, for one that seeds an env's server
 
 
 class Artifact(BaseModel):

@@ -163,12 +163,18 @@ class EnvironmentUniverseArtifact(Universe):
     @classmethod
     def written_besides(cls, ctx: AuthoringContext) -> tuple[FolderChild, ...]:
         """What ``from_toml`` writes besides the universe, as ``read_folder`` names it: each environment its folder
-        holds, seeding the environment of its name, that environment's file, and each metadata file."""
+        holds, that environment's file, and each metadata file."""
         layout = cls._read_folder(ctx)
-        environments = (child for laid in layout.environments for child in (
-            FolderChild(laid.environment_id, laid.name, environment_name=laid.name), FolderChild(laid.file_id, laid.name)))
-        metadata = (FolderChild(laid.file_id, f"{METADATA}/{laid.name}") for laid in layout.metadata)
-        return (*environments, *metadata)
+        return (*(FolderChild(id, laid.name) for laid in layout.environments for id in (laid.environment_id,
+                                                                                         laid.file_id)),
+                *(FolderChild(laid.file_id, f"{METADATA}/{laid.name}") for laid in layout.metadata))
+
+    @classmethod
+    def seeded_environments(cls, ctx: AuthoringContext) -> tuple[tuple[str, str], ...]:
+        """``(path in the folder, environment_name)`` of each environment the folder holds, which a bundle checks
+        against the servers of the env a task loads the universe into. Raises BundleError when the folder can't be
+        read."""
+        return tuple((laid.name, laid.name) for laid in cls._read_folder(ctx).environments)
 
     @classmethod
     def _read_folder(cls, ctx: AuthoringContext) -> UniverseFolder:
