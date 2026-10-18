@@ -104,8 +104,12 @@ boat = [
     "boat-sdk~=1.13.0",  # sandboxes, labels, hosted ports, detached commands and their output stream validated against 1.13
     "urllib3>=2.1.0,<3",  # the SDK's transport, whose errors are what a dropped connection raises
 ]
+# The CoreWeave Sandbox provider, selected as the built-in `coreweave` backend.
+coreweave = [
+    "cwsandbox>=1.19.6,<2",  # Reject exec streams that close without an exit status.
+]
 dev = [
-    "agentenv-framework[aws,boat,boxd,daytona,gcp,openenv,sail,tensorlake,tenki,trl,vercel]",  # exercise portable optional providers and stores in CI
+    "agentenv-framework[aws,boat,boxd,coreweave,daytona,gcp,openenv,sail,tensorlake,tenki,trl,vercel]",  # exercise portable optional providers and stores in CI
     "fastmcp>=3.4,<4",  # the standalone-fastmcp mount path of the protocol; <4 keeps mcp 1.x
     "Pillow>=10.4",  # the protocol's computer extra, whose tests the unit tier runs
     "av>=17",  # the protocol's computer extra, whose tests the unit tier runs and which the recording tests decode with
