@@ -38,7 +38,7 @@ from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_step import TaskStep
 from agent_env.utils.docker_build import DockerBuildError, build_image
 
-from ._fs import relative, with_article
+from ._fs import with_article
 from .authoring import AuthoringContext, build_context_files
 from .ledger import Ledger, materializing
 from .parse import BundleError, BundleKind
@@ -156,7 +156,7 @@ def _staged(plan: Plan, image: BuiltImage) -> Iterator[Path]:
     what it hashed."""
     with tempfile.TemporaryDirectory(prefix="agent-env-build-") as staged:
         context = Path(staged)
-        for key, path in build_context_files(plan.bundle.bundle, image.entry).items():
+        for key, path in build_context_files(plan.bundle_of(image.entry), image.entry).items():
             (context / key).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, context / key)
         yield context
@@ -237,19 +237,19 @@ def _tail(message: str) -> str:
 def _write_artifact(plan: Plan, write: Write) -> int:
     entry = write.source.entry
     cls = get_artifact_registry()[canonical_type(entry.type)]
-    return cls.from_toml(_pinned(plan, write, cls.toml_refs), AuthoringContext(plan.bundle.bundle, entry)).version
+    return cls.from_toml(_pinned(plan, write, cls.toml_refs), AuthoringContext(plan.bundle_of(entry), entry)).version
 
 
 def _write_agent(plan: Plan, write: Write) -> int:
     entry = write.source.entry
     return A2AAgent.from_toml(_pinned(plan, write, A2AAgent.toml_refs),
-                              AuthoringContext(plan.bundle.bundle, entry)).version
+                              AuthoringContext(plan.bundle_of(entry), entry)).version
 
 
 def _write_env(plan: Plan, write: Write) -> int:
     entry = write.source.entry
     cls = get_env_registry()[entry.type]
-    return cls.from_toml(_pinned(plan, write, cls.toml_refs), AuthoringContext(plan.bundle.bundle, entry)).version
+    return cls.from_toml(_pinned(plan, write, cls.toml_refs), AuthoringContext(plan.bundle_of(entry), entry)).version
 
 
 def _pinned(plan: Plan, write: Write, refs: tuple[EntityRef, ...]) -> Any:
@@ -361,4 +361,4 @@ def _key(write: Write) -> tuple[str, str]:
 
 
 def _path(plan: Plan, write: Write) -> str:
-    return relative(plan.bundle.bundle.root, write.source.entry.path)
+    return plan.path(write.source.entry)

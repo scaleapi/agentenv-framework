@@ -73,7 +73,6 @@ from agent_env.task_step.task_steps.deploy_sandbox import DeploySandboxTaskStep
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
 from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM, docker_unreachable
 
-from ._fs import relative
 from .parse import BundleError, BundleKind
 from .plan import Plan
 from .resolve import BuiltImage, Reference, ReferencedImage, ResolvedEntry, build_step
@@ -140,7 +139,7 @@ class _Walk:
         steps = [build_step(config) for config in task.config]
         sandboxes = {step.sandbox_name: step for step in steps if isinstance(step, DeploySandboxTaskStep)}
         for step in steps:
-            where = f"{relative(self.plan.bundle.bundle.root, task.entry.path)}: step {step.id!r}"
+            where = f"{self.plan.path(task.entry)}: step {step.id!r}"
             try:
                 if isinstance(step, DeployEnvTaskStep):
                     self._env(where, step)
@@ -432,7 +431,7 @@ class _Walk:
         contexts = set()
         for image_id, uses in self.uses.items():
             built = self.built[image_id]
-            source = f"{relative(self.plan.bundle.bundle.root, built.entry.path)}/{built.dockerfile}"
+            source = f"{self.plan.path(built.entry)}/{built.dockerfile}"
             local, vms = [], []
             for where, what, links, accepts in uses:
                 for link in links:

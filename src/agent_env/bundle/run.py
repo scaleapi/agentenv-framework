@@ -34,7 +34,6 @@ from agent_env.task.teardown import TeardownReport, teardown_run
 from agent_env.task_step.context import TaskStepContext
 from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM
 
-from ._fs import relative
 from .materialize import Materialization, Materialized, materialize
 from .parse import BundleEntry, BundleError, BundleKind, parse_bundle
 from .plan import Plan, Write, plan_bundle
@@ -119,7 +118,7 @@ class BundleRun:
 
     def path(self, entry: BundleEntry) -> str:
         """``entry``'s path in the bundle, as the summary names it (``tasks/hello.json``)."""
-        return relative(self.materialization.plan.bundle.bundle.root, entry.path)
+        return self.materialization.plan.path(entry)
 
     def teardown(self) -> BundleRun:
         """Tear down the runs whose sandboxes were kept up, as ``run_bundle(keep=True)`` leaves them, and
@@ -157,7 +156,7 @@ class DryRun:
 
     def path(self, entry: BundleEntry) -> str:
         """``entry``'s path in the bundle (``tasks/hello.json``)."""
-        return relative(self.materialization.plan.bundle.bundle.root, entry.path)
+        return self.materialization.plan.path(entry)
 
     def images(self) -> tuple[str, ...]:
         """A line per image the bundle writes, an image key's or an image folder's: which, the version it would leave,
@@ -327,7 +326,7 @@ def _skipped(plan: Plan, runs: Sequence[BundleEntry], every: bool) -> tuple[Bund
 def refuse_store_tasks(plan: Plan) -> None:
     """Refuse a selected eval that names a store task: a bundle's evals run only the bundle's own tasks."""
     problems = [
-        f"{_path(plan, entry.entry)}: {ref.where.partition('.')[0]}: {ref.id!r} is a store task, and a bundle's "
+        f"{plan.path(entry.entry)}: {ref.where.partition('.')[0]}: {ref.id!r} is a store task, and a bundle's "
         f"evals run only the bundle's own tasks for now; run it on its own with {_task_run_command(ref)}"
         for entry in plan.evals for ref in entry.references if ref.local is None
     ]
@@ -362,7 +361,7 @@ async def _run_all(
             return TeardownReport.skipped(context)
 
     async def run_one(entry: BundleEntry, task: Task) -> TaskRun:
-        tag = f"[{_path(plan, entry)}]"
+        tag = f"[{plan.path(entry)}]"
         metadata = {"run_group_id": run_group_id, "task_id": task.id}
         if overrides:
             metadata["user_overrides"] = dict(overrides)
@@ -474,11 +473,7 @@ def _pinned(done: Materialized) -> str:
 
 def _label(plan: Plan, write: Write) -> str:
     """How a write is named: its entry's folder, and for an image built from it, which image."""
-    path = _path(plan, write.source.entry)
+    path = plan.path(write.source.entry)
     if isinstance(write.source, BuiltImage):
         return f"{path} ({write.source.dockerfile} image)"
     return f"{path} ({write.source.ref} image)" if isinstance(write.source, ReferencedImage) else path
-
-
-def _path(plan: Plan, entry: BundleEntry) -> str:
-    return relative(plan.bundle.bundle.root, entry.path)

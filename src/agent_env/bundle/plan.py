@@ -12,7 +12,7 @@ from __future__ import annotations
 import heapq
 import unicodedata
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -84,6 +84,16 @@ class Plan:
     evals: tuple[ResolvedEntry, ...]
     store_refs: tuple[Reference, ...]  # the store ids the writes reference, checked to exist
     store_latest: dict[tuple[EntityKind, str], int]  # the version each unpinned store ref named when planned
+    origins: Mapping[BundleEntry, Bundle] = field(default_factory=dict)  # each entry from another bundle, with it
+
+    def bundle_of(self, entry: BundleEntry) -> Bundle:
+        """The bundle ``entry`` comes from: the installed one for an entry pulled in from one, else the run's."""
+        return self.origins.get(entry, self.bundle.bundle)
+
+    def path(self, entry: BundleEntry) -> str:
+        """``entry``'s path, as messages name it: in the run's bundle, or after the name of the bundle it comes from
+        (``agentenv-framework/agents:agents/claude-code``)."""
+        return _shown_path(self.bundle_of(entry), entry, pulled=entry in self.origins)
 
 
 def plan_bundle(resolved: ResolvedBundle, *, tasks: Sequence[str] = (), evals: Sequence[str] = ()) -> Plan:
@@ -124,6 +134,7 @@ class _Planner:
         self.accepted: dict[_Key, dict] = {}  # each toml a type checks, as it accepted it
         self.answers: dict[tuple[_Key, str], tuple | BundleError | None] = {}  # each artifact type's folder hooks
         self.steps: dict[_Key, list[TaskStep]] = {}  # each task's steps that build, as a write will build them
+        self.origins: dict[BundleEntry, Bundle] = {}  # each entry from another bundle, with it
 
     def _add(self, key: _Key, source: ResolvedEntry | BundleImage, needs: list[_Key]) -> None:
         """Record a write in bundle order, a built image just before the entry that builds it."""
@@ -145,7 +156,7 @@ class _Planner:
         if self.problems:
             raise BundleError(self.problems)
         return Plan(self.resolved, self._ordered(closure), tuple(selected_tasks), tuple(selected_evals), store_refs,
-                    store_latest)
+                    store_latest, dict(self.origins))
 
     def check(self) -> None:
         self._check_writers()
@@ -221,7 +232,7 @@ class _Planner:
                 elif not issubclass(cls, _FOLDER_HOOKS[hook]):
                     self.answers[key] = ()
                 else:
-                    self.answers[key] = getattr(cls, hook)(AuthoringContext(self.resolved.bundle, entry))
+                    self.answers[key] = getattr(cls, hook)(self._ctx(entry))
             except BundleError as e:
                 self.answers[key] = e
         return self.answers[key]
@@ -359,7 +370,7 @@ class _Planner:
                 accept = A2AAgent.accept_toml if agent else self._env_accept(source.entry)
                 try:
                     if accept is not None:
-                        self.accepted[key] = accept(source.config, AuthoringContext(self.resolved.bundle, source.entry))
+                        self.accepted[key] = accept(source.config, self._ctx(source.entry))
                 except BundleError as e:
                     self.problems.extend(e.problems)
                 continue
@@ -369,10 +380,10 @@ class _Planner:
             if not artifact_writer(cls):
                 continue
             try:
-                folder_files(self.resolved.bundle, source.entry)
+                folder_files(self._bundle_of(source.entry), source.entry)
             except BundleError as e:
                 self.problems.extend(e.problems)
-            ctx = AuthoringContext(self.resolved.bundle, source.entry)
+            ctx = self._ctx(source.entry)
             accept = getattr(cls, "accept_toml", None)
             try:
                 if accept is None:
@@ -641,8 +652,14 @@ class _Planner:
                     heapq.heappush(ready, (self.rank[dependent], dependent))
         return tuple(writes)
 
+    def _bundle_of(self, entry: BundleEntry) -> Bundle:
+        return self.origins.get(entry, self.resolved.bundle)
+
+    def _ctx(self, entry: BundleEntry) -> AuthoringContext:
+        return AuthoringContext(self._bundle_of(entry), entry)
+
     def _path(self, entry: BundleEntry) -> str:
-        return relative(self.resolved.bundle.root, entry.path)
+        return _shown_path(self._bundle_of(entry), entry, pulled=entry in self.origins)
 
 
 def unpinned_store_refs(plan: Plan, write: Write) -> dict[tuple[EntityKind, str], int]:
@@ -671,6 +688,11 @@ def folder_files(bundle: Bundle, entry: BundleEntry) -> Mapping[str, Path]:
     """What the write of the artifact ``entry`` reads from its folder, which the ledger hashes: every file in it, none
     at all included; a type whose write needs a file says so in its ``accept_toml``. Raises BundleError."""
     return entry_files(bundle, entry, empty_ok=True)
+
+
+def _shown_path(bundle: Bundle, entry: BundleEntry, *, pulled: bool) -> str:
+    where = relative(bundle.root, entry.path)
+    return f"{bundle.id_root.removeprefix(LOCAL_PREFIX)}:{where}" if pulled else where
 
 
 def _within(where: str, path: str) -> str:

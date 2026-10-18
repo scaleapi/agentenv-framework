@@ -128,7 +128,7 @@ class Ledger:
         if write.kind in (BundleKind.ARTIFACT, BundleKind.SKILL) and not isinstance(write.source, ReferencedImage):
             built = isinstance(write.source, BuiltImage)
             listing = build_context_files if built else folder_files
-            for key, path in listing(self._plan.bundle.bundle, write.source.entry).items():
+            for key, path in listing(self._plan.bundle_of(write.source.entry), write.source.entry).items():
                 inputs["files"][key] = _file_sha256(path) + (_mode(path) if built else "")
             if built and write.id in self._contexts:
                 # Only then, so an image built on this machine is hashed as before and earlier rows stay reused.
