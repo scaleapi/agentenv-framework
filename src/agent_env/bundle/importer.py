@@ -23,7 +23,7 @@ from agent_env.bundle.parse import BundleError, parse_bundle, root_problems, seg
 from agent_env.bundle.plan import STORE_GETTERS, check_bundle
 from agent_env.bundle.resolve import resolve_bundle
 from agent_env.config import get_config
-from agent_env.entity.refs import EntityKind, RefRole, RefSite, ref_sites
+from agent_env.entity.refs import EntityKind, EntityRef, RefRole, RefSite, default_agent_refs, ref_sites
 from agent_env.env import registry as env_registry
 from agent_env.env.registry import get_env_registry
 from agent_env.eval import Eval
@@ -34,10 +34,7 @@ from agent_env.store.ids import LOCAL_PREFIX
 from agent_env.task import Task
 from agent_env.task_step import registry as task_step_registry
 from agent_env.task_step.registry import get_task_step_registry
-from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
-from agent_env.task_step.task_steps.install_agent import InstallAgentTaskStep
-from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
 
 # How long a name taken from an id may be, in bytes; ids are capped far above it, and a longer name helps nobody.
 _MAX_NAME_BYTES = 200
@@ -214,7 +211,7 @@ class _Importer:
                 if _key(site) not in outputs:  # the run writes an output again, so it takes no pin
                     self._pin(site, f"{where}: {site.path}", deployed)
                     self._need_type(site, f"{where}: {site.path}")
-            self._default_agents(step, where)
+            self._default_agents(step, cls.entity_refs or (), where)
         self.files[path] = json.dumps(steps, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
         self.tasks.append(ImportedTask(path, task.id, task.version, len(steps)))
         return name
@@ -325,17 +322,12 @@ class _Importer:
         by = distribution if registered and _names(value, cls) else "configuration"
         self.needs.append(Need(where, what, name, by))
 
-    def _default_agents(self, step: dict, where: str) -> None:
-        """A step that names no agent deploys the configured default, which no field pins."""
-        if step["type"] in (DeployAgentTaskStep.type, InstallAgentTaskStep.type) and step.get("a2a_agent_id") is None:
-            field, what = "a2a_agent_id", "names no agent"
-        elif (step["type"] == RubricsVerifierTaskStep.type and step.get("use_agent_judge")
-              and step.get("agent_name") is None and step.get("judge_a2a_agent_id") is None):
-            field, what = "judge_a2a_agent_id", "names no judge agent"
-        else:
-            return
-        self.floating.append(Floating(f"{where}: {field}", EntityKind.AGENT, get_config().get_default_a2a_agent_id(),
-                                      f"the step {what}, so a run deploys the configured default"))
+    def _default_agents(self, step: dict, refs: tuple[EntityRef, ...], where: str) -> None:
+        """A step that leaves an agent field unset deploys the configured default, which no field pins."""
+        for ref in default_agent_refs(refs, step):
+            self.floating.append(Floating(f"{where}: {ref.path}", EntityKind.AGENT,
+                                          get_config().get_default_a2a_agent_id(),
+                                          f"the step leaves {ref.path} unset, so a run deploys the configured default"))
 
     def _name(self, kind: str, entity_id: str) -> str:
         """A name in the ``kind`` folder: the id's last segment made valid, numbered when taken, caselessly."""
