@@ -217,6 +217,11 @@ def test_core_and_every_store_module_import_without_any_extra():
             "agent_env.providers.sandbox_providers.sandbox_provider:SandboxProvider",
         ),
         (
+            "coreweave",
+            "agent_env.providers.sandbox_providers.coreweave.provider:CoreWeaveSandboxProvider",
+            "agent_env.providers.sandbox_providers.sandbox_provider:SandboxProvider",
+        ),
+        (
             "daytona",
             "agent_env.providers.sandbox_providers.daytona.provider:DaytonaSandboxProvider",
             "agent_env.providers.sandbox_providers.sandbox_provider:SandboxProvider",
@@ -227,7 +232,7 @@ def test_core_and_every_store_module_import_without_any_extra():
         ),
     ],
     ids=["gcs", "secret-manager", "s3", "s3-reexport", "secrets-manager-reexport", "dynamodb", "dynamodb-reexport", "tensorlake",
-         "tenki", "boxd", "daytona", "smol"],
+         "tenki", "boxd", "coreweave", "daytona", "smol"],
 )
 def test_an_impl_without_its_extra_names_the_extra_to_install(extra, impl, base):
     message = _run(_LOAD_IMPL, _only_in(extra), impl, base)
