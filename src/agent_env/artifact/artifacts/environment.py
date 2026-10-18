@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional
 
 from pydantic import ConfigDict, Field, model_serializer
@@ -19,7 +20,18 @@ if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
 
 
-class EnvironmentArtifact(Artifact):
+class SeedsEnvironments(ABC):
+    """An artifact type whose write seeds environments: a bundle checks each against the servers of the env a task
+    loads it into, and that one artifact's environments have names of their own."""
+
+    @classmethod
+    @abstractmethod
+    def seeded_environments(cls, ctx: AuthoringContext) -> tuple[tuple[str, str], ...]:
+        """``(path in the folder, environment_name)`` of each environment writing it from ``ctx``'s folder seeds, the
+        path ``""`` for the folder itself. Raises BundleError when the folder can't be read."""
+
+
+class EnvironmentArtifact(Artifact, SeedsEnvironments):
     """A FileArtifact wrapped with the name of the environment it seeds."""
 
     model_config = ConfigDict(populate_by_name=True)
@@ -134,8 +146,7 @@ class EnvironmentArtifact(Artifact):
 
     @classmethod
     def seeded_environments(cls, ctx: AuthoringContext) -> tuple[tuple[str, str], ...]:
-        """``(path in the folder, environment_name)`` of the environment it seeds, its own, the path ``""`` for the
-        folder itself, which a bundle checks against the servers of the env a task loads it into."""
+        """Its own environment, seeded from the folder itself."""
         name = ctx.entry.config.get("environment_name") if isinstance(ctx.entry.config, dict) else None
         return (("", name),) if isinstance(name, str) and name else ()
 

@@ -8,7 +8,7 @@ from typing import ClassVar, Literal
 import pytest
 from pydantic import Field
 
-from agent_env.artifact import Artifact, FileArtifact
+from agent_env.artifact import Artifact, FileArtifact, SeedsEnvironments
 from agent_env.artifact.artifact import FolderChild
 from agent_env.artifact.ref import ArtifactRef
 from agent_env.bundle import BundleError
@@ -20,7 +20,7 @@ ROOT = "@local/~/triage"
 TOML = {"artifacts/rooms/artifact.toml": 'type = "rooms_folder_test"\n'}
 
 
-class _Rooms(Artifact):
+class _Rooms(Artifact, SeedsEnvironments):
     """A plugin's type, no core type's subclass: each file seeds the environment it's named after, written as a file
     artifact of its own beside the rooms."""
 

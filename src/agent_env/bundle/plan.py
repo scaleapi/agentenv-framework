@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_env.a2a_agent import A2AAgent
-from agent_env.artifact import Artifact, CliArtifact, EnvironmentArtifact
+from agent_env.artifact import Artifact, CliArtifact, EnvironmentArtifact, SeedsEnvironments
 from agent_env.artifact.artifact import FolderChild
 from agent_env.artifact.registry import canonical_type, get_artifact_registry
 from agent_env.config import get_config
@@ -56,6 +56,9 @@ STORE_GETTERS = {EntityKind.ENV: Env.get, EntityKind.AGENT: A2AAgent.get, Entity
 
 # The type a field naming an environment artifact takes: what an artifact referencing one holds.
 _ENVIRONMENT = EnvironmentArtifact.model_fields["type"].default
+# The folder hooks the plan asks an artifact type, each with the class declaring it: every artifact type answers
+# written_besides, and a type opts into seeded_environments by declaring SeedsEnvironments.
+_FOLDER_HOOKS = {"written_besides": Artifact, "seeded_environments": SeedsEnvironments}
 # The env types whose from_toml reads only the toml and what it names, so a type built by one of them is written from
 # its env.toml and the ledger can list what it's made from.
 _ENV_FROM_TOMLS = (Env, MCPServerEnv, WebsiteEnv, MultiEnv)
@@ -197,14 +200,16 @@ class _Planner:
 
     def _folder_environments(self, entry: BundleEntry) -> tuple[tuple[str, str], ...] | None:
         """``(path in the folder, environment_name)`` of each environment the artifact ``entry`` seeds, as a type
-        seeding environments answers ``seeded_environments`` (the path ``""`` for the folder itself), and none for
-        another type: None for one its type doesn't write from a folder, or whose folder the file check refuses."""
+        declaring SeedsEnvironments answers ``seeded_environments`` (the path ``""`` for the folder itself), and none
+        for another type: None for one its type doesn't write from a folder, or whose folder the file check
+        refuses."""
         held = self._answer(entry, "seeded_environments")
         return None if isinstance(held, BundleError) else held
 
     def _answer(self, entry: BundleEntry, hook: str) -> tuple | BundleError | None:
-        """What the artifact ``entry``'s type answers to ``hook`` for its folder, read once: () for a type without
-        it, None for one its type doesn't write from a folder, or the BundleError the hook raised."""
+        """What the artifact ``entry``'s type answers to ``hook``, one of ``_FOLDER_HOOKS``, for its folder, read
+        once: () for a type not declaring it, None for one its type doesn't write from a folder, or the BundleError the
+        hook raised."""
         if entry.kind not in (BundleKind.ARTIFACT, BundleKind.SKILL):
             return None
         key = (_key(entry), hook)
@@ -213,10 +218,10 @@ class _Planner:
             try:
                 if not artifact_writer(cls):
                     self.answers[key] = None
-                elif (ask := getattr(cls, hook, None)) is None:
+                elif not issubclass(cls, _FOLDER_HOOKS[hook]):
                     self.answers[key] = ()
                 else:
-                    self.answers[key] = ask(AuthoringContext(self.resolved.bundle, entry))
+                    self.answers[key] = getattr(cls, hook)(AuthoringContext(self.resolved.bundle, entry))
             except BundleError as e:
                 self.answers[key] = e
         return self.answers[key]
@@ -376,7 +381,7 @@ class _Planner:
                     self.accepted[key] = accept(source.config, ctx)
             except BundleError as e:
                 self.problems.extend(e.problems)
-            for hook in ("written_besides", "seeded_environments"):
+            for hook in _FOLDER_HOOKS:
                 if isinstance(refused := self._answer(source.entry, hook), BundleError):
                     # What only the hook refuses, less what the type's accept_toml already reported.
                     self.problems.extend([problem for problem in refused.problems if problem not in self.problems])

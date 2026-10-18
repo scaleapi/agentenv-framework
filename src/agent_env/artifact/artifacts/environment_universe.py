@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional
 from pydantic import AliasChoices, ConfigDict, Field, model_serializer
 
 from agent_env.artifact.artifact import FolderChild
-from agent_env.artifact.artifacts.environment import EnvironmentArtifact
+from agent_env.artifact.artifacts.environment import EnvironmentArtifact, SeedsEnvironments
 from agent_env.artifact.artifacts.environment_universe_folder import (
     METADATA,
     UniverseFolder,
@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
 
 
-class EnvironmentUniverseArtifact(Universe):
+class EnvironmentUniverseArtifact(Universe, SeedsEnvironments):
     """A universe artifact that bundles EnvironmentArtifacts together."""
 
     model_config = ConfigDict(populate_by_name=True)
@@ -171,9 +171,7 @@ class EnvironmentUniverseArtifact(Universe):
 
     @classmethod
     def seeded_environments(cls, ctx: AuthoringContext) -> tuple[tuple[str, str], ...]:
-        """``(path in the folder, environment_name)`` of each environment the folder holds, which a bundle checks
-        against the servers of the env a task loads the universe into. Raises BundleError when the folder can't be
-        read."""
+        """Each environment its folder holds, at the path naming it."""
         return tuple((laid.name, laid.name) for laid in cls._read_folder(ctx).environments)
 
     @classmethod
