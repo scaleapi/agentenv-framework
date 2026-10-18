@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 
 from pydantic import BaseModel, Field, field_validator
@@ -29,16 +27,8 @@ class FolderChild:
     """An artifact written from a bundle folder besides the one the folder is for."""
 
     id: str
-    path: str  # where in the folder it's written from; "" for the folder itself
+    path: str  # where in the folder it's written from
     environment_name: str | None = None  # the environment it seeds, for one that seeds an env's server
-
-
-@dataclass(frozen=True)
-class ArtifactFolder:
-    """What writing an artifact from its bundle folder reads there, and writes besides the artifact itself."""
-
-    files: Mapping[str, Path]  # every file its write reads, keyed by its path in the folder; the ledger hashes them
-    children: tuple[FolderChild, ...] = ()
 
 
 class Artifact(BaseModel):
@@ -96,12 +86,11 @@ class Artifact(BaseModel):
         return cls.put(id=ctx.id, **fields)
 
     @classmethod
-    def bundle_folder(cls, ctx: AuthoringContext) -> ArtifactFolder:
-        """What ``from_toml`` reads from the entry's folder and writes besides ``ctx.id``, which a bundle checks and
-        its ledger hashes before anything is written: by default, every file in the folder and nothing besides. A
-        type whose ``from_toml`` writes other artifacts too overrides this to name them. Raises BundleError
-        (``ctx.refuse``) listing what's wrong with the folder."""
-        return ArtifactFolder(ctx.files())
+    def written_besides(cls, ctx: AuthoringContext) -> tuple[FolderChild, ...]:
+        """The artifacts ``from_toml`` writes from the entry's folder besides ``ctx.id``, which a bundle checks
+        before anything is written: none, unless a type writing others too overrides this to name them. Raises
+        BundleError when the folder can't be read."""
+        return ()
 
     @classmethod
     def query(cls) -> "ArtifactQuery":

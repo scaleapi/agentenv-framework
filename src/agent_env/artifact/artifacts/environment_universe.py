@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional
 
 from pydantic import AliasChoices, ConfigDict, Field, model_serializer
 
-from agent_env.artifact.artifact import ArtifactFolder, FolderChild
+from agent_env.artifact.artifact import FolderChild
 from agent_env.artifact.artifacts.environment import EnvironmentArtifact
 from agent_env.artifact.artifacts.environment_universe_folder import (
     METADATA,
@@ -24,9 +24,6 @@ from agent_env.artifact.universe import Universe
 from agent_env.entity_refs import EntityRef
 
 logger = logging.getLogger(__name__)
-
-_NEEDS_AN_ENVIRONMENT = ("a universe needs an environment: a folder of its own, named after it and holding its file, or "
-                         "one environment_artifacts names")
 
 if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
@@ -149,8 +146,6 @@ class EnvironmentUniverseArtifact(Universe):
         layout = cls._read_folder(ctx)
         named = [ctx.artifact(ref, EnvironmentArtifact) for ref in fields.get("environment_artifacts", [])]
         names = Counter([laid.name for laid in layout.environments] + [env.environment_name for env in named])
-        if not names:
-            ctx.refuse([ctx.config_problem(_NEEDS_AN_ENVIRONMENT)])
         if repeated := sorted(name for name, count in names.items() if count > 1):
             ctx.refuse([ctx.config_problem(f"two of its environments are named {name!r}; a universe's environments "
                                            "need names of their own") for name in repeated])
@@ -166,18 +161,14 @@ class EnvironmentUniverseArtifact(Universe):
         return cls.put(ctx.id, environment_artifacts=environments + named, metadata=metadata or None)
 
     @classmethod
-    def bundle_folder(cls, ctx: AuthoringContext) -> ArtifactFolder:
-        """What ``from_toml`` reads from the folder, every file ``read_folder`` lays out, and writes besides the
-        universe: each environment, seeding the environment of its name, its file, and each metadata file. A folder
-        holding no environment needs an artifact.toml naming one."""
+    def written_besides(cls, ctx: AuthoringContext) -> tuple[FolderChild, ...]:
+        """What ``from_toml`` writes besides the universe, as ``read_folder`` names it: each environment its folder
+        holds, seeding the environment of its name, that environment's file, and each metadata file."""
         layout = cls._read_folder(ctx)
-        if not layout.environments and not (isinstance(ctx.entry.config, dict)
-                                            and ctx.entry.config.get("environment_artifacts")):
-            ctx.refuse([_NEEDS_AN_ENVIRONMENT])
         environments = (child for laid in layout.environments for child in (
             FolderChild(laid.environment_id, laid.name, environment_name=laid.name), FolderChild(laid.file_id, laid.name)))
         metadata = (FolderChild(laid.file_id, f"{METADATA}/{laid.name}") for laid in layout.metadata)
-        return ArtifactFolder(layout.files, (*environments, *metadata))
+        return (*environments, *metadata)
 
     @classmethod
     def _read_folder(cls, ctx: AuthoringContext) -> UniverseFolder:
@@ -187,15 +178,27 @@ class EnvironmentUniverseArtifact(Universe):
         try:
             return read_folder(ctx.id, files, folders)
         except UniverseFolderError as e:
-            ctx.refuse_within(e.problems)
+            ctx.refuse([], within=e.problems)
 
     @classmethod
     def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:
-        """The keys of ``data``, an artifact.toml, a universe takes. Raises BundleError listing every problem."""
+        """The keys of ``data``, an artifact.toml, a universe takes, and its folder, read as ``environment-universe
+        get --output-dir`` writes one, which needs an environment of its own unless ``environment_artifacts`` names
+        one. Raises BundleError listing every problem."""
         data, problems = ctx.renamed(data, cls.toml_stored_names)
         fields, more = ctx.accepted(data, **cls.toml_keys)
-        if problems + more:
-            ctx.refuse(problems + more)
+        problems, within = problems + more, []
+        if (listing := ctx.try_listing()) is not None:  # None when the plan's walk reports why
+            try:
+                layout = read_folder(ctx.id, *listing)
+            except UniverseFolderError as e:
+                within = e.problems
+            else:
+                if not layout.environments and not data.get("environment_artifacts"):
+                    problems.append("a universe needs an environment: a folder of its own, named after it and holding "
+                                    "its file, or one environment_artifacts names")
+        if problems or within:
+            ctx.refuse(problems, within=within)
         return fields
 
     def get_environment_artifacts(self) -> list[EnvironmentArtifact]:

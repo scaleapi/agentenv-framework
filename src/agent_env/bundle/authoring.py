@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import stat
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn, TypeVar, overload
@@ -60,19 +60,15 @@ class AuthoringContext:
     def files(self, *, empty_ok: bool = False) -> dict[str, Path]:
         return entry_files(self.bundle, self.entry, empty_ok=empty_ok)
 
-    def try_files(self) -> dict[str, Path] | None:
+    def try_files(self, *, empty_ok: bool = False) -> dict[str, Path] | None:
         """``files``, or None when the folder can't be listed, which the plan's walk reports."""
         try:
-            return self.files()
+            return self.files(empty_ok=empty_ok)
         except BundleError:
             return None
 
     def file(self) -> tuple[str, Path]:
         return entry_file(self.bundle, self.entry)
-
-    def only(self, files: dict[str, Path], remedy: str = _AS_UNIVERSE) -> dict[str, Path]:
-        """``files``, which must be one file. Raises BundleError otherwise, suggesting ``remedy``."""
-        return _only(self.bundle, self.entry, files, remedy)
 
     def not_one_file(self, files: dict[str, Path], remedy: str = _AS_UNIVERSE) -> str | None:
         """Why ``files`` isn't one file, suggesting ``remedy``, ready for ``refuse``; None when it is."""
@@ -83,6 +79,13 @@ class AuthoringContext:
         on that path in NFC."""
         walk = _Walk(self.bundle, self.entry, empty_ok=True)
         return walk.files(), walk.folders
+
+    def try_listing(self) -> tuple[dict[str, Path], set[tuple[str, ...]]] | None:
+        """``listing``, or None when the folder can't be listed, which the plan's walk reports."""
+        try:
+            return self.listing()
+        except BundleError:
+            return None
 
     @property
     def leavings(self) -> tuple[str, ...]:
@@ -193,16 +196,11 @@ class AuthoringContext:
         """``message`` as a problem with the entry's toml, ready for ``refuse``."""
         return f"{CONFIG_FILES[self.entry.kind]}: {message}"
 
-    def refuse(self, problems: list[str]) -> NoReturn:
-        """Raise BundleError with ``problems``, each named by the entry's folder."""
+    def refuse(self, problems: list[str], *, within: Sequence[str] = ()) -> NoReturn:
+        """Raise BundleError with ``problems``, each named by the entry's folder, after ``within``, each ``<path in the
+        folder>: <why>`` and named by its path in the bundle."""
         where = relative(self.bundle.root, self.entry.path)
-        raise BundleError([f"{where}: {problem}" for problem in problems])
-
-    def refuse_within(self, problems: list[str]) -> NoReturn:
-        """Raise BundleError with ``problems``, each ``<path in the folder>: <why>``, named by its path in the
-        bundle."""
-        where = relative(self.bundle.root, self.entry.path)
-        raise BundleError([f"{where}/{problem}" for problem in problems])
+        raise BundleError([f"{where}/{problem}" for problem in within] + [f"{where}: {problem}" for problem in problems])
 
     @overload
     def env(self, ref: str | dict[str, Any]) -> Env: ...

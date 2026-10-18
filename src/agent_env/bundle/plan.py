@@ -18,7 +18,7 @@ from typing import Any
 
 from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact import Artifact, CliArtifact, EnvironmentArtifact
-from agent_env.artifact.artifact import ArtifactFolder
+from agent_env.artifact.artifact import FolderChild
 from agent_env.artifact.registry import canonical_type, get_artifact_registry
 from agent_env.config import get_config
 from agent_env.entity_refs import EntityKind
@@ -45,7 +45,7 @@ from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
 
 from ._fs import fold, relative, with_article
-from .authoring import AuthoringContext
+from .authoring import AuthoringContext, entry_files
 from .parse import Bundle, BundleEntry, BundleError, BundleKind
 from .resolve import BuiltImage, BundleImage, Reference, ResolvedBundle, ResolvedEntry, build_step
 
@@ -119,7 +119,7 @@ class _Planner:
         self.outputs = {(output.kind.value, output.id): (entry.entry, output)
                         for entry in resolved.entries for output in entry.outputs}
         self.accepted: dict[_Key, dict] = {}  # each toml a type checks, as it accepted it
-        self.folders: dict[_Key, ArtifactFolder | BundleError | None] = {}  # each artifact's, as its type read it
+        self.children: dict[_Key, tuple[FolderChild, ...] | None] = {}  # what each artifact writes besides itself
         self.steps: dict[_Key, list[TaskStep]] = {}  # each task's steps that build, as a write will build them
 
     def _add(self, key: _Key, source: ResolvedEntry | BundleImage, needs: list[_Key]) -> None:
@@ -184,34 +184,25 @@ class _Planner:
                 writers[key] = writer
 
     def _written_beside(self, source: ResolvedEntry) -> list[tuple[str, str]]:
-        """The ids an artifact writes besides its own, its folder's children, each with the folder it's written
-        from. A folder that can't be written names none; the file check reports why."""
-        folder, where = self._folder(source.entry), self._path(source.entry)
-        return [(child.id, self._within(where, child.path)) for child in folder.children] if folder else []
+        """The ids an artifact writes besides its own, each with the folder it's written from. A folder that can't
+        be written names none; the file check reports why."""
+        children, where = self._children(source.entry), self._path(source.entry)
+        return [(child.id, f"{where}/{child.path}") for child in children or ()]
 
-    def _folder(self, entry: BundleEntry) -> ArtifactFolder | None:
-        """What the artifact ``entry``'s type reads from its folder and writes besides it (``bundle_folder``), or
-        None for one its type doesn't write from a folder, or whose folder the file check refuses."""
-        folder = self._read_folder(entry)
-        return folder if isinstance(folder, ArtifactFolder) else None
-
-    def _read_folder(self, entry: BundleEntry) -> ArtifactFolder | BundleError | None:
-        """``_folder``, or the BundleError its type raised for the folder, read once."""
+    def _children(self, entry: BundleEntry) -> tuple[FolderChild, ...] | None:
+        """What the artifact ``entry`` writes besides itself (``written_besides``), read once: None for one its type
+        doesn't write from a folder, or whose folder the file check refuses."""
         if entry.kind not in (BundleKind.ARTIFACT, BundleKind.SKILL):
             return None
         key = _key(entry)
-        if key not in self.folders:
+        if key not in self.children:
             cls = get_artifact_registry().get(canonical_type(entry.type))
             try:
-                self.folders[key] = (cls.bundle_folder(AuthoringContext(self.resolved.bundle, entry))
-                                     if artifact_writer(cls) else None)
-            except BundleError as e:
-                self.folders[key] = e
-        return self.folders[key]
-
-    @staticmethod
-    def _within(where: str, path: str) -> str:
-        return f"{where}/{path}" if path else where
+                self.children[key] = (cls.written_besides(AuthoringContext(self.resolved.bundle, entry))
+                                      if artifact_writer(cls) else None)
+            except BundleError:
+                self.children[key] = None
+        return self.children[key]
 
     def _check_loops(self) -> None:
         for component in _components(self.nodes, self.edges, self.rank):
@@ -355,8 +346,10 @@ class _Planner:
             cls = registry.get(canonical_type(source.entry.type))
             if not artifact_writer(cls):
                 continue
-            if isinstance(folder := self._read_folder(source.entry), BundleError):
-                self.problems.extend(folder.problems)
+            try:
+                folder_files(self.resolved.bundle, source.entry)
+            except BundleError as e:
+                self.problems.extend(e.problems)
             ctx = AuthoringContext(self.resolved.bundle, source.entry)
             accept = getattr(cls, "accept_toml", None)
             try:
@@ -469,11 +462,10 @@ class _Planner:
         ``store_latest`` (a check that reads no store), the store's environments aren't counted."""
         for key in sorted(closure, key=self.rank.__getitem__):
             source = self.nodes[key]
-            if isinstance(source, BundleImage) or (folder := self._folder(source.entry)) is None:
+            if isinstance(source, BundleImage) or (children := self._children(source.entry)) is None:
                 continue
             where = self._path(source.entry)
-            held = [*((self._within(where, child.path), child.environment_name)
-                      for child in folder.children if child.environment_name),
+            held = [*((f"{where}/{child.path}", child.environment_name) for child in children if child.environment_name),
                     *((f"{where}: {ref.where}", name) for ref, name in self._referenced(source, store_latest))]
             taken: dict[str, str] = {}  # who has each name
             for who, name in held:
@@ -554,13 +546,12 @@ class _Planner:
         environment_name): its own, the ones its folder writes and the environment artifacts it references. Nothing
         for a store artifact, or one whose folder the file check refuses."""
         entry = ref.local
-        if not isinstance(entry, BundleEntry) or (folder := self._folder(entry)) is None:
+        if not isinstance(entry, BundleEntry) or (children := self._children(entry)) is None:
             return []
         where, accepted = self._path(entry), self.accepted.get(_key(entry))
         own = accepted.get("environment_name") if isinstance(accepted, dict) else None
         return [*([(where, own)] if own else []),
-                *((self._within(where, child.path), child.environment_name)
-                  for child in folder.children if child.environment_name),
+                *((f"{where}/{child.path}", child.environment_name) for child in children if child.environment_name),
                 *((f"{where}: {named.where}", name) for named, name in self._referenced(self.nodes[_key(entry)],
                                                                                        store_latest))]
 
@@ -649,10 +640,11 @@ def artifact_writer(cls: type | None) -> bool:
 
 
 def folder_files(bundle: Bundle, entry: BundleEntry) -> Mapping[str, Path]:
-    """The files the write of the artifact ``entry`` reads from its folder, as its type's ``bundle_folder`` lists
-    them. Raises BundleError."""
+    """What the write of the artifact ``entry`` reads from its folder, which the ledger hashes: every file in it. A
+    folder may hold none when its type's toml can name what the artifact is made of instead (``toml_refs``), as an
+    environment's ``file`` and a universe's ``environment_artifacts`` do. Raises BundleError."""
     cls = get_artifact_registry()[canonical_type(entry.type)]
-    return cls.bundle_folder(AuthoringContext(bundle, entry)).files
+    return entry_files(bundle, entry, empty_ok=bool(cls.toml_refs))
 
 
 def _key(entity: BundleEntry | BundleImage) -> _Key:

@@ -1,5 +1,6 @@
-"""A bundle writes an artifact type from its folder through the type's own ``from_toml``, and ``bundle_folder`` when it
-writes other artifacts too, so a plugin's type is planned, checked, written and reused as a core type is."""
+"""A bundle writes an artifact type from its folder through the type's own ``from_toml``, checked by its
+``accept_toml`` and with ``written_besides`` naming what else it writes, so a plugin's type is planned, checked, written
+and reused as a core type is."""
 
 import json
 from typing import Literal
@@ -8,7 +9,7 @@ import pytest
 from pydantic import Field
 
 from agent_env.artifact import Artifact, FileArtifact
-from agent_env.artifact.artifact import ArtifactFolder, FolderChild
+from agent_env.artifact.artifact import FolderChild
 from agent_env.artifact.ref import ArtifactRef
 from agent_env.bundle import BundleError
 from agent_env.bundle.materialize import materialize
@@ -27,17 +28,15 @@ class _Rooms(Artifact):
     rooms: dict[str, ArtifactRef] = Field(default_factory=dict)
 
     @classmethod
-    def bundle_folder(cls, ctx):
-        files = ctx.files()
-        return ArtifactFolder(files, tuple(FolderChild(f"{ctx.id}-{key}", key, environment_name=key.split(".")[0])
-                                           for key in files))
+    def written_besides(cls, ctx):
+        return tuple(FolderChild(f"{ctx.id}-{key}", key, environment_name=key.split(".")[0]) for key in ctx.files())
 
     @classmethod
     def from_toml(cls, data, ctx):
-        folder = cls.bundle_folder(ctx)
+        files = ctx.files()
         rooms = {child.environment_name: FileArtifact.put_attempt(
-            child.id, description=child.path, file_path=str(folder.files[child.path]), filename=child.path).as_ref()
-            for child in folder.children}
+            child.id, description=child.path, file_path=str(files[child.path]), filename=child.path).as_ref()
+            for child in cls.written_besides(ctx)}
         return cls.put(id=ctx.id, rooms=rooms)
 
 
