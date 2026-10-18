@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from cwsandbox import CidrBlock, Container, EgressRule, HttpsEndpointStatus, SandboxExecutionError, SandboxNotFoundError
-from cwsandbox import EndpointAuth, EndpointKind
+from cwsandbox import EndpointAuth, EndpointKind, SandboxStatus
 
 # A runner's default egress: the public IPv4 internet.
 DEFAULT_EGRESS = (EgressRule(cidr=CidrBlock(cidr="0.0.0.0/0", except_cidrs=("10.0.0.0/8", "192.168.0.0/16"))),)
@@ -99,6 +99,7 @@ class FakeSandbox:
         self.kwargs = kwargs
         self.sandbox_id: str | None = None
         self.runner_id = "runner-a"
+        self.status = SandboxStatus.RUNNING
         self.effective_egress = DEFAULT_EGRESS if kwargs.get("network") is None else self._egress(kwargs["network"])
         self.service_endpoints = tuple(
             HttpsEndpointStatus(port=service.port, name="", kind=EndpointKind.HTTPS, auth=EndpointAuth.OPEN,
