@@ -6,7 +6,7 @@ import json
 import os
 import signal
 import tomllib
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 import pytest
 from click.testing import CliRunner
@@ -27,6 +27,8 @@ from agent_env.config.runtime import Config
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.eval import Eval
 from agent_env.eval.eval import EvalTask
+from agent_env.field_scope import FieldScope
+from agent_env.plugins import TASK_STEPS, Contribution, Distribution, Inventory
 from agent_env.store import Filter
 from agent_env.store.routing import namespace_routing
 from agent_env.task import Task
@@ -501,3 +503,105 @@ def test_reading_the_store_writes_nothing_to_it(store):
     import_task("triage", store / "triage")
 
     assert {name: documents.count(name, Filter()) for name in counts} == counts
+
+
+SCOPED = [
+    {"id": "env", "type": "deploy_env", "env_id": "crm-env", "sandbox_type": "modal_vm,modal",
+     "metadata": {"attribution": {"project_id": "p-123"}, "note": "kept"}},
+    {"id": "agent", "type": "deploy_agent", "env_ids": ["crm-env"], "a2a_agent_id": "solver", "sandbox_type": "local",
+     "litellm_base_url": "https://litellm.internal.example.com", "metadata": {"attribution": {"project_id": "p-123"}}},
+    {"id": "prompt", "type": "prompt_agent", "prompt": "close the duplicates", "agent_name": "default-agent",
+     "trajectory_output_prefix": "s3://their-bucket/trajectories/", "user_a2a_url": "https://hub.example.com/a2a"},
+    {"id": "judge", "type": "rubrics_verifier", "verifier_id": "judge", "prompt_id": "prompt",
+     "judge_sandbox_type": "modal", "criteria": [{"id": "c1", "description": "closed every duplicate"}]},
+]
+SCOPED_FIELDS = {"env": ["sandbox_type", "metadata.attribution"],
+                 "agent": ["sandbox_type", "litellm_base_url", "metadata.attribution"],
+                 "prompt": ["trajectory_output_prefix", "user_a2a_url"], "judge": ["judge_sandbox_type"]}
+
+
+def _value(step, path):
+    for key in path.split("."):
+        step = step.get(key) if isinstance(step, dict) else None
+    return step
+
+
+def test_a_steps_user_scoped_fields_are_left_out_and_reported_and_the_rest_of_it_is_kept(store):
+    _task("scoped", SCOPED)
+    stored = {step["id"]: step for step in Task.get("scoped").to_dict()["steps"]}
+
+    imported = import_task("scoped", store / "scoped")
+
+    steps = {step["id"]: step for step in _steps(imported.root, "scoped")}
+    assert {id: [path for path in paths if _value(steps[id], path) is not None]
+            for id, paths in SCOPED_FIELDS.items()} == {id: [] for id in SCOPED_FIELDS}
+    assert sorted(drop.where for drop in imported.dropped) == sorted(
+        f"tasks/scoped.json: step {id!r}: {path}" for id, paths in SCOPED_FIELDS.items() for path in paths)
+    assert {drop.why for drop in imported.dropped} == {
+        "dropped: user scope, so a run takes its own; --include-scope user keeps it"}
+    assert steps["env"]["metadata"] == {"note": "kept"}
+    assert steps["prompt"]["prompt"] == stored["prompt"]["prompt"]
+    assert steps["judge"]["criteria"] == stored["judge"]["criteria"]
+
+
+def test_including_the_user_scope_keeps_each_scoped_field_as_stored(store):
+    _task("scoped", SCOPED)
+    stored = {step["id"]: step for step in Task.get("scoped").to_dict()["steps"]}
+
+    imported = import_task("scoped", store / "scoped", include_scopes=[FieldScope.USER])
+
+    steps = {step["id"]: step for step in _steps(imported.root, "scoped")}
+    assert {(id, path): _value(steps[id], path) for id, paths in SCOPED_FIELDS.items() for path in paths} == {
+        (id, path): _value(stored[id], path) for id, paths in SCOPED_FIELDS.items() for path in paths}
+    assert imported.dropped == ()
+
+
+class _AcmeFile(FileArtifact):
+    """A plugin's artifact type, which a config file registers here."""
+
+    type: Literal["acme_file_import_test"] = "acme_file_import_test"
+
+
+def test_what_only_a_plugin_or_a_config_file_registers_is_named_as_a_need_by_what_registers_it(store, monkeypatch):
+    steps = {**Config().task_step_registry(), _Undeclared.type: _Undeclared}
+    monkeypatch.setattr(Config, "task_step_registry", lambda self: steps)
+    artifacts = {**Config().artifact_registry(), "acme_file_import_test": _AcmeFile}
+    monkeypatch.setattr(Config, "artifact_registry", lambda self: artifacts)
+    acme = Distribution("agentenv-acme", "1.0", (Contribution(TASK_STEPS, _Undeclared.type, "acme:Step", "active"),))
+    monkeypatch.setattr(importer_module, "inventory", lambda load: Inventory(
+        distributions=(acme,), group_errors={}, discovery_errors={}, config_path=None, config_error=None, loaded=load))
+    (store / "acme.json").write_text("{}")
+    _AcmeFile.put("acme-data", description="acme rows", file_path=str(store / "acme.json"))
+    _task("acme", [{"id": "env", "type": "deploy_env", "env_id": "crm-env"},
+                   {"id": "load", "type": "load_artifact", "env_id": "crm-env", "artifacts": [{"id": "acme-data"}]},
+                   {"id": "p", "type": _Undeclared.type, "depends_on": [{"task_step_id": "load"}]}])
+
+    imported = import_task("acme", store / "acme")
+
+    assert sorted((need.by, need.name, need.what, need.where) for need in imported.needs) == [
+        ("agentenv-acme", _Undeclared.type, "step type", "tasks/acme.json: step 'p'"),
+        ("configuration", "acme_file_import_test", "artifact type", "tasks/acme.json: step 'load': artifacts[0].id"),
+    ]
+    assert imported.report()[0] == ("Needs beyond core", [
+        "agentenv-acme: undeclared_import_test (step type), at tasks/acme.json: step 'p'",
+        "configuration: acme_file_import_test (artifact type), at tasks/acme.json: step 'load': artifacts[0].id",
+    ])
+    assert "## Needs beyond core" in (imported.root / "README.md").read_text()
+
+
+def test_a_task_that_uses_only_what_core_ships_needs_nothing(store):
+    assert import_task("triage", store / "triage").needs == ()
+
+
+def test_the_cli_leaves_out_scoped_fields_unless_told_to_include_their_scope(store):
+    _task("scoped", SCOPED)
+
+    left = CliRunner().invoke(cli, ["bundle", "init", str(store / "left"), "--from-task", "scoped"])
+    kept = CliRunner().invoke(cli, ["bundle", "init", str(store / "kept"), "--from-task", "scoped",
+                                    "--include-scope", "user"])
+
+    assert left.exit_code == 0 and kept.exit_code == 0, left.output + kept.output
+    assert ("  tasks/scoped.json: step 'agent': litellm_base_url: dropped: user scope, so a run takes its own; "
+            "--include-scope user keeps it") in left.output.splitlines()
+    assert "user scope" not in kept.output
+    assert _steps(store / "kept", "scoped")[1]["litellm_base_url"] == "https://litellm.internal.example.com"

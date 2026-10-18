@@ -29,6 +29,7 @@ from agent_env.store import DuplicateKeyError, get_config
 from agent_env.store.object_store import ObjectStore
 from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.entity_refs import EntityRef
+from agent_env.field_scope import FieldScope
 from agent_env.task_step.task_step import RetryConfig, TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (
     agent_error_text,
@@ -117,6 +118,8 @@ _DEFAULT_USER_SIM_OUTPUT_FORMAT: dict[str, Any] = {
 class PromptAgentTaskStep(TaskStep):
     type: ClassVar[str] = "prompt_agent"
     entity_refs = (EntityRef.env("snapshot_config.env_id"),)
+    field_scopes = {**TaskStep.field_scopes, "trajectory_output_prefix": FieldScope.USER,
+                    "user_a2a_url": FieldScope.USER}
     DEFAULT_PROMPT_TIMEOUT_SECONDS: ClassVar[int] = 600
     DEFAULT_POLL_INTERVAL_SECONDS: ClassVar[int] = 2
 

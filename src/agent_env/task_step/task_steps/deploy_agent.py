@@ -38,6 +38,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
 from agent_env.entity_refs import EntityRef
+from agent_env.field_scope import FieldScope
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.mcp_cli_builder.codegen import ROLE_ENV_VAR
 from agent_env.attribution import deploy_attribution
@@ -154,6 +155,7 @@ class DeployAgentTaskStep(TaskStep):
             artifact_type="file_artifact_universe",
         ),
     )
+    field_scopes = {**TaskStep.field_scopes, "sandbox_type": FieldScope.USER, "litellm_base_url": FieldScope.USER}
 
     def __init__(
         self,

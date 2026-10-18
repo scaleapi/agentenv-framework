@@ -30,6 +30,7 @@ from agent_env.store.object_store.object_store import issues_grants_to
 from agent_env.store.routing import in_local_run
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity_refs import EntityRef, RefRole
+from agent_env.field_scope import FieldScope
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)
@@ -161,6 +162,7 @@ class SnapshotEnvTaskStep(TaskStep):
         EntityRef.artifact("snapshot_id", role=RefRole.OUTPUT, artifact_type="environment_universe"),
         EntityRef.artifact("original_universe_artifact_id", artifact_type="environment_universe"),
     )
+    field_scopes = {**TaskStep.field_scopes, "gateway_url": FieldScope.USER}
     DEFAULT_EXPORT_TIMEOUT_SECONDS: ClassVar[int] = DEFAULT_EXPORT_TIMEOUT_SECONDS
 
     def __init__(

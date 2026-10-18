@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import dataclasses
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity_refs import EntityRef
+from agent_env.field_scope import FieldScope
 
 if TYPE_CHECKING:
     from agent_env.task_step.store import TaskStepQuery
@@ -89,6 +91,9 @@ class TaskStep(ABC):
     DEFAULT_AGENT_NAME: ClassVar[str] = "default-agent"
     # Fields holding env, A2A agent or artifact ids; None means undeclared.
     entity_refs: ClassVar[tuple[EntityRef, ...] | None] = None
+    # Each scoped field, by its path in the stored step, and its scope; any other field is material. A subclass merges
+    # its parent's. A scoped field is optional, so a step written out without it still builds and runs.
+    field_scopes: ClassVar[Mapping[str, FieldScope]] = {"metadata.attribution": FieldScope.USER}
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)

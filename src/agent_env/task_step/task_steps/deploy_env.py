@@ -10,6 +10,7 @@ from agent_env.env.gateway import GatewayMode
 from agent_env.env.store import update_env_instance_metadata
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity_refs import EntityRef
+from agent_env.field_scope import FieldScope
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.attribution import deploy_attribution
 
@@ -22,6 +23,7 @@ class DeployEnvTaskStep(TaskStep):
         EntityRef.env("env_id", version_field="env_version"),
         EntityRef.artifact("artifact_id", version_field="artifact_version"),
     )
+    field_scopes = {**TaskStep.field_scopes, "sandbox_type": FieldScope.USER}
 
     def __init__(
         self,
