@@ -663,11 +663,9 @@ def artifact_writer(cls: type | None) -> bool:
 
 
 def folder_files(bundle: Bundle, entry: BundleEntry) -> Mapping[str, Path]:
-    """What the write of the artifact ``entry`` reads from its folder, which the ledger hashes: every file in it. A
-    folder may hold none when its type's toml can name what the artifact is made of instead (``toml_refs``), as an
-    environment's ``file`` and a universe's ``environment_artifacts`` do. Raises BundleError."""
-    cls = get_artifact_registry()[canonical_type(entry.type)]
-    return entry_files(bundle, entry, empty_ok=bool(cls.toml_refs))
+    """What the write of the artifact ``entry`` reads from its folder, which the ledger hashes: every file in it, none
+    at all included; a type whose write needs a file says so in its ``accept_toml``. Raises BundleError."""
+    return entry_files(bundle, entry, empty_ok=True)
 
 
 def _within(where: str, path: str) -> str:

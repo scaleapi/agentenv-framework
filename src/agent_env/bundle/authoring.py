@@ -73,9 +73,9 @@ class AuthoringContext:
         """Why ``files`` isn't one file, suggesting ``remedy``, ready for ``refuse``; None when it is."""
         return _not_one_file(self.entry, files, remedy)
 
-    def no_files(self, what: str, remedy: str) -> str:
+    def no_files(self, what: str, remedy: str | None = None) -> str:
         """The problem with a folder holding no ``what``, suggesting ``remedy``, ready for ``refuse``."""
-        return f"has no {what} ({', '.join(sorted(LEAVINGS))} don't count); {remedy}"
+        return f"has no {what} ({', '.join(sorted(LEAVINGS))} don't count)" + (f"; {remedy}" if remedy else "")
 
     def listing(self) -> tuple[dict[str, Path], set[tuple[str, ...]]]:
         """The folder's ``files``, none at all included, and every folder under it, by every path to it, as the names

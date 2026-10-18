@@ -3,7 +3,7 @@
 folder holds, so a plugin's type is planned, checked, written and reused as a core type is."""
 
 import json
-from typing import Literal
+from typing import ClassVar, Literal
 
 import pytest
 from pydantic import Field
@@ -60,9 +60,21 @@ class _OwnFile(FileArtifact):
                                filename=name)
 
 
+class _Setting(Artifact):
+    """A plugin's type made only of its artifact.toml's values, so its folder holds nothing else."""
+
+    type: Literal["setting_folder_test"] = "setting_folder_test"
+    toml_keys: ClassVar[dict[str, type]] = {"value": str}
+    value: str = ""
+
+    @classmethod
+    def from_toml(cls, data, ctx):
+        return cls.put(id=ctx.id, value=ctx.accept(data, **cls.toml_keys).get("value", ""))
+
+
 @pytest.fixture(autouse=True)
 def registries(monkeypatch):
-    plugins = {cls.model_fields["type"].default: cls for cls in (_Rooms, _OwnFile)}
+    plugins = {cls.model_fields["type"].default: cls for cls in (_Rooms, _OwnFile, _Setting)}
     artifacts = {**Config().artifact_registry(), **plugins}
     monkeypatch.setattr(Config, "artifact_registry", lambda self: artifacts)
 
@@ -173,3 +185,24 @@ def test_a_type_with_only_a_from_toml_of_its_own_is_checked_by_the_accept_toml_i
     assert _problems(bundle_dir) == ("artifacts/note: an own_file_folder_test artifact holds one file, and this folder "
                                      "has 2 ('a.txt', 'b.txt'); leave out its declared type to write the folder as a "
                                      "file_artifact_universe",)
+
+
+def test_a_type_made_only_of_its_toml_is_written_from_a_folder_holding_nothing_else(bundle_dir):
+    layout(bundle_dir, _sandbox_loading({"artifacts/mode/artifact.toml": 'type = "setting_folder_test"\nvalue = "a"\n'},
+                                        "mode"))
+
+    assert _summary(materialize(plan_of(bundle_dir)))[f"{ROOT}/mode"] == (1, False)
+    assert Artifact.get(f"{ROOT}/mode").value == "a"
+    assert _summary(materialize(plan_of(bundle_dir)))[f"{ROOT}/mode"] == (1, True)
+    (bundle_dir / "artifacts/mode/artifact.toml").write_text('type = "setting_folder_test"\nvalue = "b"\n')
+    assert _summary(materialize(plan_of(bundle_dir)))[f"{ROOT}/mode"] == (2, False)
+
+
+@pytest.mark.parametrize("toml", ['type = "file"\n', 'type = "file_artifact_universe"\n',
+                                  'type = "cli"\ncommand_name = "t"\nentrypoint = "t.sh"\n'],
+                         ids=["file", "file-universe", "cli"])
+def test_a_core_type_that_needs_a_file_refuses_an_empty_folder_before_anything_is_written(bundle_dir, toml):
+    layout(bundle_dir, _sandbox_loading({"artifacts/x/artifact.toml": toml}, "x"))
+
+    assert ("artifacts/x: has no files to write (.DS_Store, Thumbs.db, __pycache__, desktop.ini don't count)"
+            in _problems(bundle_dir))
