@@ -29,7 +29,10 @@ class _Rooms(Artifact):
 
     @classmethod
     def written_besides(cls, ctx):
-        return tuple(FolderChild(f"{ctx.id}-{key}", key, environment_name=key.split(".")[0]) for key in ctx.files())
+        files = ctx.files()
+        if strays := [key for key in files if not key.endswith((".json", ".yaml"))]:
+            ctx.refuse([f"{key}: a room is a .json or .yaml file" for key in strays])
+        return tuple(FolderChild(f"{ctx.id}-{key}", key, environment_name=key.split(".")[0]) for key in files)
 
     @classmethod
     def from_toml(cls, data, ctx):
@@ -111,6 +114,13 @@ def test_a_plugin_types_folder_problem_is_reported_before_anything_is_written(bu
 
     assert _problems(bundle_dir) == ("artifacts/rooms: has no files to write (.DS_Store, Thumbs.db, __pycache__, "
                                      "desktop.ini don't count)",)
+
+
+def test_a_folder_only_written_besides_refuses_is_reported_before_anything_is_written(bundle_dir):
+    layout(bundle_dir, _sandbox_loading({**TOML, "artifacts/rooms/crm.json": "{}", "artifacts/rooms/notes.txt": "x"},
+                                        "rooms"))
+
+    assert _problems(bundle_dir) == ("artifacts/rooms: notes.txt: a room is a .json or .yaml file",)
 
 
 def test_a_child_whose_id_another_write_claims_is_refused(bundle_dir):
