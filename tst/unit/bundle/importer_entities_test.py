@@ -408,3 +408,21 @@ def test_what_the_os_or_python_leaves_in_a_file_universe_is_left_out_and_said_so
     assert held == ["artifact.toml", "b.txt"]
     assert ("artifacts/docs: __pycache__/audit.cpython-314.pyc", "dropped: a bundle leaves out __pycache__ as the OS or "
             "Python's own") in [(d.where, d.why) for d in imported.dropped]
+
+
+def test_a_step_naming_no_version_of_an_artifact_another_step_pins_reads_the_latest_as_the_store_run_does(home):
+    MCPServerEnv.put(id="crm", docker_image_artifact=_context_image(home, "crm-image"), environment_name="crm")
+    for version in ("one", "two"):
+        (home / f"{version}.json").write_text(json.dumps({"version": version}))
+        FileArtifact.put("rows", description="rows.json", file_path=str(home / f"{version}.json"))
+    _task([DEPLOY,
+           {"id": "pinned", "type": "load_artifact", "env_id": "crm", "artifacts": [{"id": "rows", "version": 1}]},
+           {"id": "latest", "type": "load_artifact", "env_id": "crm", "artifacts": [{"id": "rows"}]}])
+
+    imported = import_task("t", home / "t")
+
+    steps = json.loads((imported.root / "tasks/t.json").read_text())
+    assert [steps[1]["artifacts"][0]["id"], steps[2]["artifacts"][0]["id"]] == ["rows", "rows-2"]
+    assert sorted((written.folder, written.version) for written in imported.written
+                  if written.kind.value == "artifact") == [("artifacts/rows", 1), ("artifacts/rows-2", 2)]
+    assert not any(d.why.startswith("pinned:") for d in imported.dropped)
