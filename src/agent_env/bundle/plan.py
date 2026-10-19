@@ -127,7 +127,6 @@ def check_bundle(resolved: ResolvedBundle, *, installed: Installed | None = None
 class _Pullable:
     """An installed bundle, resolved, with its entities and images by (kind, id)."""
 
-    name: str  # <dist>/<bundle>, as messages name it
     resolved: ResolvedBundle
     by_id: dict[tuple[EntityKind, str], BundleEntry | BundleImage]
     by_entry: dict[BundleEntry, ResolvedEntry]
@@ -263,7 +262,7 @@ class _Planner:
                         for kind in _PULLED:
                             if entry.entry.kind in NAMED_BY[kind]:
                                 by_id[kind, entry.entry.id] = entry.entry
-                    self.pullable[installed.id_root] = _Pullable(installed.qualified, resolved, by_id,
+                    self.pullable[installed.id_root] = _Pullable(resolved, by_id,
                                                                  {entry.entry: entry for entry in resolved.entries})
         return self.pullable[installed.id_root]
 
@@ -813,7 +812,7 @@ class _Planner:
         an entry pulled in comes from."""
         if entry not in self.origins:
             return list(problems)
-        return [f"{self.origins[entry].id_root.removeprefix(LOCAL_PREFIX)}:{problem}" for problem in problems]
+        return [f"{_bundle_name(self.origins[entry])}:{problem}" for problem in problems]
 
 
 def unpinned_store_refs(plan: Plan, write: Write) -> dict[tuple[EntityKind, str], int]:
@@ -855,7 +854,12 @@ def _kind_of(found: BundleEntry | BundleImage) -> str:
 
 def _shown_path(bundle: Bundle, entry: BundleEntry, *, pulled: bool) -> str:
     where = relative(bundle.root, entry.path)
-    return f"{bundle.id_root.removeprefix(LOCAL_PREFIX)}:{where}" if pulled else where
+    return f"{_bundle_name(bundle)}:{where}" if pulled else where
+
+
+def _bundle_name(bundle: Bundle) -> str:
+    """An installed bundle's name as messages give it, ``<dist>/<bundle>``: its id root, less the namespace."""
+    return bundle.id_root.removeprefix(LOCAL_PREFIX)
 
 
 def _within(where: str, path: str) -> str:

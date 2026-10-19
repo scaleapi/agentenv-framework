@@ -81,7 +81,9 @@ or one of them only where it is used.
   what steps staged in `/tmp` under that id. Those processes are found through `/proc`, so on macOS
   they keep running; files the install wrote elsewhere (`/opt`, packages) stay.
 - `[agents] default_a2a_agent_id`: the agent a `deploy_agent` step without an id deploys; built-in
-  `a2a-default`, overridable by `configure(default_a2a_agent_id=...)`.
+  `a2a-default`, overridable by `configure(default_a2a_agent_id=...)`. Any step's agent field left unset
+  means it (`entity_refs.default_agent_refs`); a field that means something else unset in some steps, as
+  the rubrics judge's does, declares `default_when`.
 - Secrets never live in the file: use `secret:KEY` or `env:NAME` references, resolved through
   `[stores.secret]`.
 - agent-env has no stage concept: "dev" versus "prod" is which file `AGENT_ENV_CONFIG` names. A
@@ -134,7 +136,10 @@ Out-of-tree code plugs in either through `config.toml`, as a `module:Class` poin
 - Bundles install through `agent_env.bundles` entry points (`<name> = "<package>"`, the folder at
   `<package>/<name>/`), with ids rooted at `@local/<dist>/<name>`. A shared name is not left out:
   a bundle runs by its bare name unless another distribution installs that name too, and then by
-  `<dist>/<name>`, except that agent-env's own bundles keep their bare names.
+  `<dist>/<name>`, except that agent-env's own bundles keep their bare names. Another bundle uses an
+  installed bundle's env, agent or artifact by its id, or as the configured default agent: the planner
+  pulls it into the run as one of the bundle's own (`bundle/plan.py`), and its ledger row is keyed by the
+  installed bundle, so every bundle shares one write of it. Such an id takes no version pin.
 - Environment providers have no table: an installed package registers one as an `agent_env.env_providers`
   entry point named its `type`, which records carry as `env_provider_type`.
 - `[plugins.<distribution name>]` is reserved for an installed plugin's own settings, read with
