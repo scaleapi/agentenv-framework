@@ -2,16 +2,28 @@ import asyncio
 import signal
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 
 import click
 
 from agent_env.config import get_config
+from agent_env.entity.export import FolderExport, Unwritable
 from agent_env.env import Env
 from agent_env.providers.env_providers.env_provider import _env_provider_class
 from agent_env.providers.env_providers.env_server_provider import EnvironmentServerProvider
 from agent_env.store.base import NotFoundError
 from agent_env.utils.docker.metadata import detect_base_metadata, detect_env_metadata  # noqa: F401  re-exported for the put commands
 from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM
+
+
+def write_out(entity, folder: Path) -> Path:
+    """Write ``entity``'s files into ``folder`` as its ``to_toml`` lays them out, naming each one written."""
+    folder.mkdir(parents=True, exist_ok=True)
+    try:
+        entity.to_toml(FolderExport(folder, on_file=lambda path, dest: click.echo(f"  {path} -> {dest}")))
+    except Unwritable as e:
+        raise click.ClickException(f"{entity.type} {entity.id} v{entity.version} can't be written to {folder}: {e}")
+    return folder
 
 
 @contextmanager

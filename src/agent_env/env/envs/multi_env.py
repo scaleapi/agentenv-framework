@@ -26,6 +26,7 @@ def _snapshot_after_load_default() -> bool:
 if TYPE_CHECKING:
     from agent_env.artifact import EnvironmentArtifact, EnvironmentUniverseArtifact
     from agent_env.bundle.authoring import AuthoringContext
+    from agent_env.entity.export import ExportContext
     from agent_env.env.env import DeployedEnv, LoadEnvironmentUniverseArtifactResult, LoadFileArtifactUniverseResult
     from agent_env.providers.env_state import DatabaseStateProvider
 
@@ -108,6 +109,15 @@ class MultiEnv(Env):
         if refusal := cls(id=ctx.id, version=None, **env).deploy_refusal():
             ctx.refuse([refusal])
         return cls.put(id=ctx.id, **env)
+
+    def to_toml(self, out: ExportContext) -> dict:
+        """The env.toml of a multi env naming its envs, which ``from_toml`` reads back as it."""
+        toml = {"type": self.type, "mcp_server_envs": [out.ref(env) for env in self.mcp_server_envs]}
+        if self.website_envs:
+            toml["website_envs"] = [out.ref(env) for env in self.website_envs]
+        if self.name:
+            toml["name"] = self.name
+        return {**toml, **self.provider_toml(out, self.env_provider_type)}
 
     @classmethod
     def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:

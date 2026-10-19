@@ -24,6 +24,7 @@ from agent_env.env.gateway import GatewayMode
 from agent_env.attribution import Attribution
 if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
+    from agent_env.entity.export import ExportContext
     from agent_env.env.env import DeployedEnv, LoadFileArtifactUniverseResult
     from agent_env.providers.env_providers.env_provider import EnvironmentProvider
 
@@ -109,6 +110,13 @@ class WebsiteEnv(Env):
                        backend_docker_image_artifact=ctx.artifact(fields["backend_image"], DockerImageArtifact),
                        frontend_docker_image_artifact=ctx.artifact(fields["frontend_image"], DockerImageArtifact),
                        environment_name=fields["environment_name"], env_provider_type=fields["env_provider_type"])
+
+    def to_toml(self, out: ExportContext) -> dict:
+        """The env.toml of a folder both of this env's images are built from, which ``from_toml`` reads back as it."""
+        return {"type": self.type, "environment_name": self.environment_name,
+                "backend_image": out.image(self.backend_docker_image_artifact, "backend_image"),
+                "frontend_image": out.image(self.frontend_docker_image_artifact, "frontend_image"),
+                **self.provider_toml(out, self.env_provider_type)}
 
     @classmethod
     def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:
