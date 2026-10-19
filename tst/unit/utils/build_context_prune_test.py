@@ -1,5 +1,4 @@
-"""What a Dockerfile's build reads of its context, and writing each of several images only that part of a context
-they share, from its tar.gz."""
+"""What a Dockerfile's build reads of its context, and ``write_pruned`` writing only that part."""
 
 import io
 import tarfile
@@ -277,6 +276,22 @@ def test_each_image_names_its_largest_files_for_the_report(tmp_path):
     assert pruned.largest == (("data/f7.bin", 700), ("data/f6.bin", 600), ("data/f5.bin", 500), ("data/f4.bin", 400),
                               ("data/f3.bin", 300))
     assert pruned.dockerfile == "Dockerfile"
+
+
+def test_a_name_the_archive_holds_twice_counts_once_at_the_size_left_in_the_folder(tmp_path):
+    archive = tmp_path / "ctx.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        for name, text in (("Dockerfile", "FROM python\nCOPY data/ /data/\n"), ("data/a.bin", "x" * 5000),
+                           ("data/b.bin", "x" * 100), ("data/a.bin", "x" * 10)):
+            info = tarfile.TarInfo(name)
+            info.size = len(text)
+            tar.addfile(info, io.BytesIO(text.encode()))
+
+    pruned = write_pruned(archive, {tmp_path / "out": "Dockerfile"})[tmp_path / "out"]
+
+    assert (tmp_path / "out" / "data" / "a.bin").stat().st_size == 10
+    assert (pruned.files, pruned.size) == (3, 30 + 100 + 10)
+    assert pruned.largest == (("data/b.bin", 100), ("Dockerfile", 30), ("data/a.bin", 10))
 
 
 def test_a_dockerfile_missing_from_the_archive_is_refused(tmp_path):

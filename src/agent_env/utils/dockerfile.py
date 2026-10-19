@@ -9,20 +9,18 @@ from dataclasses import dataclass
 _DIRECTIVE = re.compile(r"#\s*([A-Za-z][A-Za-z0-9_-]*)\s*=\s*(\S+)\s*")
 # ``<<<`` is a shell here-string, which docker build leaves to the shell, not a heredoc.
 _HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)([\"']?)([A-Za-z_][A-Za-z0-9_]*)\2")
-# The instructions whose arguments can open a heredoc.
 _HEREDOC_KEYWORDS = frozenset({"RUN", "COPY", "ADD"})
 
 
 @dataclass(frozen=True)
 class Instruction:
-    """One instruction, or one line between instructions (``keyword`` None: blank, a comment, a parser directive).
-    ``text`` is what the Dockerfile holds for it, so the texts of all of them joined are the Dockerfile."""
+    """An instruction, or a line between them (``keyword`` None); all their ``text`` joined is the Dockerfile."""
 
     keyword: str | None  # upper case
-    arguments: str  # on one line, escaped line breaks removed as docker build removes them, heredoc bodies left out
+    arguments: str  # on one line, continued lines joined, heredoc bodies left out
     text: str
     heredocs: tuple[str, ...] = ()  # each heredoc's body, in order
-    complete: bool = True  # False when a heredoc it opens runs to the end of the Dockerfile unclosed
+    complete: bool = True  # False when a heredoc it opens is never closed
 
 
 @dataclass(frozen=True)
@@ -38,8 +36,7 @@ class CopyArguments:
 
 
 def instructions(dockerfile: str) -> list[Instruction]:
-    """``dockerfile``'s instructions and the lines between them, in order: an instruction's escaped line breaks
-    continue it, a comment line among them is dropped from its arguments, and a heredoc's body is part of it."""
+    """``dockerfile``'s instructions and the lines between them, in order, as ``docker build`` splits them."""
     lines = dockerfile.splitlines(keepends=True)
     escape, at = "\\", 0
     while at < len(lines) and (directive := _DIRECTIVE.fullmatch(lines[at].strip())):
@@ -104,8 +101,7 @@ def leading_flags(arguments: str) -> tuple[list[str], str]:
 
 
 def _json_strings(arguments: str) -> list[str] | None:
-    """``arguments`` as the JSON list of strings of an exec-form instruction; None when it's shell form, as docker
-    build reads anything that doesn't parse as one, a ``[`` it opens with included."""
+    """``arguments`` as an exec-form JSON list of strings; None when ``docker build`` reads it as shell form."""
     if not arguments.startswith("["):
         return None
     try:
@@ -121,8 +117,7 @@ def opens_heredoc(word: str) -> bool:
 
 
 def _heredoc_names(arguments: str) -> list[tuple[str, str]]:
-    """Each heredoc ``arguments`` opens, as (its ``-`` if any, its name): a ``<<NAME`` outside quotes, in shell form only,
-    since docker build reads a quoted one as text and an exec-form (JSON) instruction opens none."""
+    """Each heredoc ``arguments`` opens, as (its ``-``, its name): an unquoted ``<<NAME``, in shell form only."""
     if _json_strings(arguments) is not None:
         return []
     found, quote, at = [], None, 0
@@ -144,9 +139,7 @@ def _heredoc_names(arguments: str) -> list[tuple[str, str]]:
 
 
 def copy_arguments(instruction: Instruction) -> CopyArguments | None:
-    """A COPY or ADD's arguments; None for any other instruction, or one whose arguments it can't read: a quoted
-    shell-form path, or fewer than a source and a destination. Arguments that don't parse as a JSON list of strings are
-    shell form, as docker build reads them."""
+    """A COPY or ADD's arguments; None for another instruction, a quoted shell-form path, or fewer than two paths."""
     if instruction.keyword not in ("COPY", "ADD"):
         return None
     flags, rest = leading_flags(instruction.arguments)

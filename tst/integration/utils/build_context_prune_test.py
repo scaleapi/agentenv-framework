@@ -1,6 +1,4 @@
-"""An image built from the part of a context ``write_pruned`` keeps holds exactly the files one built from the whole
-context does: a multi-stage build with wildcards, a local archive ADD unpacks, a bind mount, an ignore file and a linked
-folder, from a context full of what the build never reads. Needs Docker."""
+"""An image built from what ``write_pruned`` keeps holds what one built from the whole context does. Needs Docker."""
 
 import hashlib
 import io

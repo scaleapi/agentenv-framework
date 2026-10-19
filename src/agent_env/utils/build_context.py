@@ -118,8 +118,7 @@ def extract(archive: Path, out: Path) -> None:
 
 @dataclass(frozen=True)
 class ContextReads:
-    """What a Dockerfile's build reads of its context: the context paths in ``paths``, each of which may hold Docker's
-    wildcards, or all of it when ``whole`` says why: it copies all of it, or reads what can't be told before a build."""
+    """The context paths a build reads, each of which may hold Docker's wildcards, or why it reads all of it."""
 
     paths: tuple[str, ...] = ()
     whole: str | None = None
@@ -127,8 +126,7 @@ class ContextReads:
 
 @dataclass(frozen=True)
 class Pruned:
-    """What ``write_pruned`` wrote into a folder for the Dockerfile at ``dockerfile`` in it: ``files`` files of
-    ``size`` bytes, the biggest of them by bytes, and why it wrote everything the context sends when it did."""
+    """What ``write_pruned`` wrote into one folder, and why it wrote all the context sends when it did."""
 
     dockerfile: str
     files: int
@@ -139,11 +137,12 @@ class Pruned:
 
 # The COPY and ADD flags that change how a source is written, not which one it is.
 _SOURCE_KEEPING_FLAGS = ("--chown=", "--chmod=", "--link", "--checksum=", "--keep-git-dir", "--unpack")
+_WILDCARD = re.compile(r"[*?\[\\]")
+_LARGEST = 5
 
 
 def context_reads(dockerfile: str) -> ContextReads:
-    """What a build of ``dockerfile`` reads of its context: each local COPY and ADD source of every stage and each bind
-    mount's source, but not a COPY --from, a URL or git source, or a heredoc."""
+    """The context paths a build of ``dockerfile`` reads: its local COPY and ADD sources and bind-mount sources."""
     paths: list[str] = []
     for instruction in instructions(dockerfile):
         if not instruction.complete:
@@ -160,13 +159,7 @@ def context_reads(dockerfile: str) -> ContextReads:
 
 
 def write_pruned(archive: Path, images: Mapping[Path, str | None]) -> dict[Path, Pruned]:
-    """Write into each folder ``images`` names the part of the build context tar.gz at ``archive`` that its
-    Dockerfile, at the path ``images`` gives in the context, reads: what ``context_reads`` finds, less what the
-    context's ignore file leaves out and what the OS or Python leaves behind, with the Dockerfile, the ignore file
-    and the targets of kept links. An image with no path given builds the context's ``Dockerfile``, or, with none at
-    its root, the only one in it. Reads the archive twice, a third time for a Dockerfile found or reached through a
-    link, and never unpacks the rest of it. Raises ValueError when a Dockerfile isn't in the archive or can't be told
-    apart from others, or on a member ``extract`` refuses."""
+    """Write into each folder what its Dockerfile's build reads of the context tar.gz (None: the one it finds)."""
     dockerfiles = {folder: posixpath.normpath(dockerfile) for folder, dockerfile in images.items() if dockerfile}
     wanted = {name for dockerfile in dockerfiles.values() for name in (dockerfile, *_ignore_files(dockerfile))}
     links: dict[str, str | None] = {}
@@ -199,7 +192,8 @@ def write_pruned(archive: Path, images: Mapping[Path, str | None]) -> dict[Path,
         if missing := next((path for path in reads.paths if not any(_matches(path, name) for name in links)), None):
             reads, crossed = ContextReads(whole=f"{missing} matches nothing in the context"), set()
         plans[folder] = (_kept(links, reads, dockerfile, ignore, matcher, crossed), reads.whole)
-    written: dict[Path, list[tuple[str, int]]] = {folder: [] for folder in images}
+    # By name, since a name the archive holds twice is written over: what's left is its last entry.
+    written: dict[Path, dict[str, int]] = {folder: {} for folder in images}
     with tarfile.open(archive, "r:gz") as tar:
         for member in tar:
             name = _member_name(member)
@@ -213,14 +207,12 @@ def write_pruned(archive: Path, images: Mapping[Path, str | None]) -> dict[Path,
                     tar.extract(member, folder, filter=_context_member)
                     first = folder / name if member.isreg() else None
                 if member.isreg():
-                    written[folder].append((name, member.size))
-    return {folder: Pruned(dockerfiles[folder], len(files), sum(size for _, size in files), plans[folder][1],
-                           tuple(heapq.nlargest(_LARGEST, files, key=lambda file: file[1])))
+                    written[folder][name] = member.size
+                else:
+                    written[folder].pop(name, None)
+    return {folder: Pruned(dockerfiles[folder], len(files), sum(files.values()), plans[folder][1],
+                           tuple(heapq.nlargest(_LARGEST, files.items(), key=lambda file: file[1])))
             for folder, files in written.items()}
-
-
-# How many of an image's biggest files its Pruned names, for an import to show what it wrote.
-_LARGEST = 5
 
 
 def _found_dockerfile(links: Mapping[str, str | None]) -> str:
@@ -265,8 +257,7 @@ def _copy_reads(instruction: Instruction, paths: list[str]) -> str | None:
 
 
 def _mount_reads(instruction: Instruction, paths: list[str]) -> str | None:
-    """Add the context paths a RUN's bind mounts read to ``paths``; why it reads all of the context, when it does. A
-    bind mount names no other image or stage with ``from``, and its source defaults to the whole context."""
+    """Add the context paths a RUN's bind mounts read to ``paths``; why it reads all of the context, when it does."""
     for flag in leading_flags(instruction.arguments)[0]:
         if not flag.startswith("--mount="):
             continue
@@ -293,8 +284,7 @@ def _context_path(source: str) -> str | None:
 
 
 def _through_links(reads: ContextReads, links: Mapping[str, str | None]) -> tuple[ContextReads, set[str]]:
-    """``reads`` with each source that names nothing itself followed through the links its leading parts name, as
-    docker build follows them, and the links it crossed. A wildcard source is left as it is."""
+    """``reads`` with each source that names nothing followed through the links on its path, and the links crossed."""
     if reads.whole is not None:
         return reads, set()
     paths, crossed = [], set()
@@ -309,8 +299,7 @@ def _through_links(reads: ContextReads, links: Mapping[str, str | None]) -> tupl
 
 
 def _resolve(path: str, links: Mapping[str, str | None]) -> tuple[str, set[str]]:
-    """``path`` with each part that is a link in the context replaced by where it leads, and the links that took; as it
-    is, crossing nothing, when a link leads out of the context or round in a loop."""
+    """``path`` with its links followed, and the links crossed; as it is when a link leads out or loops."""
     resolved, crossed = "", set()
     for part in path.split("/"):
         resolved = posixpath.join(resolved, part)
@@ -325,8 +314,7 @@ def _resolve(path: str, links: Mapping[str, str | None]) -> tuple[str, set[str]]
 
 def _kept(links: Mapping[str, str | None], reads: ContextReads, dockerfile: str, ignore: str | None,
           matcher: FilePatternMatcher | None, crossed: set[str] = frozenset()) -> set[str]:
-    """The names in ``links`` (each name's link target, None when it's no link) that a build reads, as ``write_pruned``
-    keeps them, and the folders above them. What the OS or Python leaves behind is dropped, as ``BuildContext`` drops it."""
+    """The names in ``links`` (name to link target) that ``write_pruned`` keeps for ``reads``, and their folders."""
     def sent(name: str) -> bool:
         return not LEAVINGS.intersection(name.split("/")) and (matcher is None or not matcher(Path(name)))
 
@@ -367,14 +355,9 @@ def _matches(path: str, name: str) -> bool:
         for part, glob in zip(have, want))
 
 
-_WILDCARD = re.compile(r"[*?\[\\]")
-
-
 @functools.lru_cache(maxsize=1024)
 def _part_pattern(glob: str) -> re.Pattern[str] | None:
-    """A path part's wildcard pattern as Go's ``filepath.Match``, which docker build matches COPY sources with, reads
-    it: ``*`` any characters and ``?`` any one, ``[...]`` a class that ``^`` negates (``!`` is a character like any
-    other), and ``\\`` the next character as it is. None when the pattern is malformed, which docker build refuses."""
+    """A path part's wildcard as Go's ``filepath.Match``, which docker build uses, reads it; None when malformed."""
     out, at = [], 0
     while at < len(glob):
         char = glob[at]
@@ -413,8 +396,7 @@ def _part_pattern(glob: str) -> re.Pattern[str] | None:
 
 
 def _ignore_files(dockerfile: str) -> tuple[str, ...]:
-    """Where ``docker build`` looks for its ignore file, in order: ``<Dockerfile>.dockerignore`` beside the
-    Dockerfile, then the context's ``.dockerignore``."""
+    """Where ``docker build`` looks for a Dockerfile's ignore file, in order."""
     return f"{dockerfile}.dockerignore", ".dockerignore"
 
 
