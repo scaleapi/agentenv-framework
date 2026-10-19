@@ -286,6 +286,29 @@ def test_a_name_the_archive_holds_twice_counts_once_at_the_size_left_in_the_fold
     assert pruned.largest == (("data/b.bin", 100), ("Dockerfile", 30), ("data/a.bin", 10))
 
 
+def test_the_dockerfiles_link_target_is_kept_even_when_the_ignore_file_leaves_it_out(tmp_path):
+    # docker build reads the Dockerfile and its ignore file where they lead, whatever the ignore file says.
+    files = {"docker/real.Dockerfile": "FROM python\nCOPY app/ /app/\n", "docker/Dockerfile.dockerignore": "docker\n",
+             "app/main.py": "m"}
+    archive = _archive(tmp_path / "ctx.tar.gz", files, links={"docker/Dockerfile": "real.Dockerfile"})
+
+    write_pruned(archive, {tmp_path / "out": "docker/Dockerfile"})
+
+    assert set(_files(tmp_path / "out")) == {"docker/real.Dockerfile", "docker/Dockerfile.dockerignore", "app/main.py"}
+
+
+@pytest.mark.parametrize("dockerfile", ["FROM python\nCOPY . /app\n", "FROM python\nCOPY sub/ /app/\n"],
+                         ids=["whole", "copied"])
+def test_a_folder_the_archive_only_implies_is_written_when_the_ignore_file_leaves_out_all_it_holds(tmp_path, dockerfile):
+    # docker build sends sub/ as an empty folder here, and COPY sub/ copies it.
+    archive = _archive(tmp_path / "ctx.tar.gz", {"Dockerfile": dockerfile, ".dockerignore": "sub/*.md\n",
+                                                 "sub/notes.md": "n"})
+
+    write_pruned(archive, {tmp_path / "out": "Dockerfile"})
+
+    assert (tmp_path / "out" / "sub").is_dir() and not any((tmp_path / "out" / "sub").iterdir())
+
+
 def test_each_file_is_written_at_the_time_of_writing_not_the_stored_contexts(tmp_path):
     # A stored context's files carry the time 0; docker build would read a rewritten one as unchanged.
     archive = _archive(tmp_path / "ctx.tar.gz", SERVERS)

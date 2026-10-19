@@ -5,6 +5,7 @@ from __future__ import annotations
 import bisect
 import functools
 import heapq
+import os
 import posixpath
 import re
 import shutil
@@ -103,6 +104,11 @@ def _write(archive: Path, kept: Mapping[Path, set[str]]) -> dict[Path, dict[str,
                     written[folder][name] = member.size
                 else:
                     written[folder].pop(name, None)
+    # A folder the archive only implies, as the parent of what it holds, has no member of its own.
+    for folder, names in kept.items():
+        for name in names:
+            if not os.path.lexists(folder / name):
+                (folder / name).mkdir(parents=True, exist_ok=True)
     return written
 
 
@@ -177,17 +183,22 @@ def _link_target(name: str, links: Mapping[str, str | None]) -> str:
 
 def _kept(links: Mapping[str, str | None], reads: ContextReads, dockerfile: str, ignore: str | None,
           matcher: FilePatternMatcher | None, crossed: set[str] = frozenset()) -> set[str]:
-    """The names in ``links`` that ``write_pruned`` keeps for ``reads``, and their folders."""
+    """The names in ``links``, and the folders they imply, that ``write_pruned`` keeps for ``reads``."""
     def sent(name: str) -> bool:
         return not LEAVINGS.intersection(name.split("/")) and (matcher is None or not matcher(Path(name)))
 
+    implied = {str(parent) for name in links for parent in PurePosixPath(name).parents if str(parent) != "."}
+    candidates = links.keys() | implied
     if reads.whole is not None:
-        kept = {name for name in links if sent(name)}
+        kept = {name for name in candidates if sent(name)}
     else:
-        kept = {name for name in links if sent(name) and any(_matches(path, name) for path in reads.paths)}
-    kept |= {name for name in (dockerfile, ignore) if name in links}
+        kept = {name for name in candidates if sent(name) and any(_matches(path, name) for path in reads.paths)}
+    # docker build reads the Dockerfile and ignore file where they lead, whatever the ignore file says.
+    for name in filter(None, (dockerfile, ignore)):
+        resolved, hops = _resolve(name, links)
+        kept |= {other for other in (name, resolved, *hops) if other in links}
     # A link a source only crosses is needed for its path, not for all it leads to.
-    pending = [name for name in kept if links[name]]
+    pending = [name for name in kept if links.get(name)]
     kept |= {name for name in crossed if sent(name)}
     names = sorted(links)
     while pending:
