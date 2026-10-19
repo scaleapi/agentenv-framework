@@ -397,3 +397,37 @@ def test_supported_tags_are_preserved_without_warning(tags, caplog):
 def test_invalid_tag_is_not_hidden_by_overflow():
     with pytest.raises(ValueError, match="non-empty"):
         VercelSandboxProvider._tags({**{str(i): "v" for i in range(6)}, "z": ""})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [404, 409])
+async def test_terminate_by_id_cancels_streams_only_when_remote_is_gone(status):
+    raw = _raw()
+    started = asyncio.Event()
+
+    async def stalled(*args, **kwargs):
+        kwargs["stdout"].write("partial")
+        started.set()
+        await asyncio.Event().wait()
+
+    raw.run_process = AsyncMock(side_effect=stalled)
+    original = await _provider(raw).get_sandbox(raw.name)
+    process = await original.exec("command")
+    await started.wait()
+    fresh = _provider(raw)
+    error = type("LookupError", (Exception,), {"status_code": status})()
+    fresh._client.get_sandbox.side_effect = error
+    try:
+        if status == 404:
+            await fresh.terminate_sandbox(raw.name)
+            assert not original._processes
+            with pytest.raises(asyncio.CancelledError):
+                await process.wait()
+            assert await process.stdout.read() == b"partial"
+        else:
+            with pytest.raises(type(error)):
+                await fresh.terminate_sandbox(raw.name)
+            assert not process._task.done()
+    finally:
+        process._task.cancel()
+        await asyncio.gather(process._task, return_exceptions=True)

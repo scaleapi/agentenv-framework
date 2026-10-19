@@ -47,6 +47,13 @@ _MISSING_RETURN_CODE = (
 )
 
 
+async def _cancel_processes(sandbox_id: str) -> None:
+    tasks = tuple(_process_tasks.get((asyncio.get_running_loop(), sandbox_id), ()))
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
 def network_policy_from_vercel(policy: Any) -> NetworkPolicy | None:
     """Translate a Vercel policy, or return None for one agent-env cannot represent."""
     mode = getattr(policy, "mode", None)
@@ -182,6 +189,10 @@ class _OutputReader:
         self._read_at += len(data)
         if self.at_eof():
             self._file.close()
+        elif self._read_at == self._written:
+            self._file.seek(0)
+            self._file.truncate()
+            self._read_at = self._written = 0
         return data
 
     async def read(self, size: int = -1) -> bytes:
@@ -309,10 +320,7 @@ class VercelSandbox(VmSandbox):
             if not _is_missing_resource(error):
                 raise
             logger.info("Vercel sandbox %s was already gone at terminate", self.sandbox_id)
-        tasks = tuple(_process_tasks.get((asyncio.get_running_loop(), self.sandbox_id), ()))
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await _cancel_processes(self.sandbox_id)
 
     async def exec(self, *command: str) -> _VercelProcess:
         return await self._run(*command)

@@ -2,6 +2,7 @@
 
 import asyncio
 import io
+import os
 import subprocess
 import ssl
 import tracemalloc
@@ -697,3 +698,20 @@ async def test_signed_download_refreshes_even_an_unrestricted_or_unknown_cached_
         assert sandbox.network_policy == NetworkPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=("bucket.example",))
         sandbox._sandbox.update_network_policy.assert_awaited_once()
     sandbox._client.get_sandbox.assert_awaited_once_with(name=sandbox.sandbox_id)
+
+
+@pytest.mark.asyncio
+async def test_consumed_output_releases_disk_space_before_command_finishes():
+    reader = vercel_sandbox_module._OutputReader()
+    chunk = b"x" * (1024 * 1024)
+    try:
+        for _ in range(8):
+            reader.feed_data(chunk)
+            assert await reader.read(len(chunk)) == chunk
+            assert os.fstat(reader._file.fileno()).st_size == 0
+        reader.feed_data(b"last\n")
+        reader.feed_eof()
+        assert await reader.readline() == b"last\n"
+        assert await reader.read() == b""
+    finally:
+        reader._file.close()
