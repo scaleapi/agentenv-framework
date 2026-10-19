@@ -23,7 +23,7 @@ from pathlib import Path, PurePosixPath
 
 from modal import FilePatternMatcher
 
-from agent_env.utils.dockerfile import Instruction, copy_arguments, instructions, leading_flags
+from agent_env.utils.dockerfile import Instruction, copy_arguments, directives, instructions, leading_flags
 from agent_env.utils.paths import LEAVINGS
 
 # Bumped when what source_digest covers changes, so a digest is never compared across meanings.
@@ -137,12 +137,18 @@ class Pruned:
 
 # The COPY and ADD flags that change how a source is written, not which one it is.
 _SOURCE_KEEPING_FLAGS = ("--chown=", "--chmod=", "--link", "--checksum=", "--keep-git-dir", "--unpack")
+# The RUN --mount types that never read the build context.
+_OFF_CONTEXT_MOUNTS = frozenset({"cache", "tmpfs", "secret", "ssh"})
+# The Dockerfile frontend this reading follows; another may read the context its own way.
+_DOCKERFILE_SYNTAX = re.compile(r"(?:docker\.io/)?docker/dockerfile(?:-upstream)?(?::[\w.-]+)?(?:@sha256:[0-9a-f]{64})?")
 _WILDCARD = re.compile(r"[*?\[\\]")
 _LARGEST = 5
 
 
 def context_reads(dockerfile: str) -> ContextReads:
     """The context paths a build of ``dockerfile`` reads: its local COPY and ADD sources and bind-mount sources."""
+    if (syntax := directives(dockerfile).get("syntax")) and not _DOCKERFILE_SYNTAX.fullmatch(syntax):
+        return ContextReads(whole=f"# syntax={syntax} isn't followed")
     paths: list[str] = []
     for instruction in instructions(dockerfile):
         if not instruction.complete:
@@ -265,9 +271,12 @@ def _mount_reads(instruction: Instruction, paths: list[str]) -> str | None:
         options = {}
         for field in next(csv.reader([flag.removeprefix("--mount=")])):
             key, _, value = field.partition("=")
-            options[key.strip()] = value.strip().strip("\"'")
-        if options.get("type", "bind") != "bind" or "from" in options:
+            options[key.strip().lower()] = value.strip().strip("\"'")
+        kind = options.get("type", "bind").lower()
+        if kind in _OFF_CONTEXT_MOUNTS or (kind == "bind" and "from" in options):
             continue
+        if kind != "bind":
+            return f"RUN --mount type={kind} isn't followed"
         source = options.get("source") or options.get("src") or "."
         if "$" in source:
             return f"RUN --mount source {source} names a variable"

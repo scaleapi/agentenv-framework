@@ -38,11 +38,8 @@ class CopyArguments:
 def instructions(dockerfile: str) -> list[Instruction]:
     """``dockerfile``'s instructions and the lines between them, in order, as ``docker build`` splits them."""
     lines = dockerfile.splitlines(keepends=True)
-    escape, at = "\\", 0
-    while at < len(lines) and (directive := _DIRECTIVE.fullmatch(lines[at].strip())):
-        if directive.group(1).lower() == "escape":
-            escape = directive.group(2)
-        at += 1
+    parsed, at = _directives(lines)
+    escape = parsed.get("escape", "\\")
     # The escape character ending a line, spaces or tabs after it, joins the next line on as it is.
     continued = re.compile(re.escape(escape) + r"[ \t]*$")
     found = [Instruction(None, "", line) for line in lines[:at]]
@@ -82,6 +79,20 @@ def instructions(dockerfile: str) -> list[Instruction]:
                 complete = complete and closed
         found.append(Instruction(keyword, arguments, "".join(text), tuple(heredocs), complete))
     return found
+
+
+def directives(dockerfile: str) -> dict[str, str]:
+    """The parser directives ``dockerfile`` opens with, by lower-case name."""
+    return _directives(dockerfile.splitlines())[0]
+
+
+def _directives(lines: list[str]) -> tuple[dict[str, str], int]:
+    """The parser directives ``lines`` open with, and how many lines they take."""
+    found, at = {}, 0
+    while at < len(lines) and (directive := _DIRECTIVE.fullmatch(lines[at].strip())):
+        found[directive.group(1).lower()] = directive.group(2)
+        at += 1
+    return found, at
 
 
 def leading_flags(arguments: str) -> tuple[list[str], str]:

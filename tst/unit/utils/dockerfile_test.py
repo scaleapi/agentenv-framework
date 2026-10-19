@@ -2,7 +2,7 @@
 
 import pytest
 
-from agent_env.utils.dockerfile import copy_arguments, instructions, leading_flags
+from agent_env.utils.dockerfile import copy_arguments, directives, instructions, leading_flags
 
 DOCKERFILE = """# syntax=docker/dockerfile:1
 FROM python:3.12-slim AS base
@@ -40,6 +40,11 @@ def test_the_escape_directive_changes_what_continues_a_line():
     found = instructions("# escape=`\nFROM windows\nCOPY a.txt `\n  C:\\app\\\n")
 
     assert [(i.keyword, i.arguments) for i in found if i.keyword] == [("FROM", "windows"), ("COPY", "a.txt   C:\\app\\")]
+
+
+def test_the_directives_a_dockerfile_opens_with_by_name():
+    assert directives("# syntax=docker/dockerfile:1\n# Escape=`\nFROM x\n# check=skip=all\n") == {
+        "syntax": "docker/dockerfile:1", "escape": "`"}
 
 
 def test_a_directive_after_the_first_instruction_is_a_comment():

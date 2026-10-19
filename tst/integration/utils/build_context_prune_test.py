@@ -29,7 +29,7 @@ COPY current/ /release/
 COPY current/app.txt /through-link.txt
 COPY lit/[!a].txt /lit/
 RUN --network=none	--mount=type=bind,"source=my dir",target=/m cp /m/f /out/spaced.txt
-RUN --mount=type=bind,source=scripts,target=/scripts cp /scripts/run.sh /out/run.sh
+RUN --mount=type=cache,target=/root/.cache --mount=type=BIND,source=scripts,target=/scripts cp /scripts/run.sh /out/run.sh
 """
 # What the build reads, beside a context ten times bigger it never does.
 CONTEXT = {

@@ -53,6 +53,29 @@ def test_a_heredoc_left_open_reads_all_of_the_context_rather_than_miss_a_copy_it
         whole="a heredoc in RUN never ends, so the rest can't be read")
 
 
+@pytest.mark.parametrize("syntax", ["docker/dockerfile:1", "docker.io/docker/dockerfile:1.7-labs",
+                                    "docker/dockerfile-upstream:master", f"docker/dockerfile:1@sha256:{'0' * 64}"])
+def test_a_syntax_directive_naming_dockers_own_frontend_is_read(syntax):
+    assert context_reads(f"# syntax={syntax}\nFROM x\nCOPY a /a\n") == ContextReads(paths=("a",))
+
+
+def test_a_frontend_of_its_own_keeps_all_of_the_context():
+    assert context_reads("# syntax=example.com/acme/frontend:1\nFROM x\nCOPY a /a\n") == ContextReads(
+        whole="# syntax=example.com/acme/frontend:1 isn't followed")
+
+
+def test_mounts_that_never_read_the_context_add_nothing_and_options_read_in_any_case():
+    dockerfile = ("FROM x\nRUN --mount=type=cache,target=/c --mount=type=secret,id=k --mount=type=ssh "
+                  "--mount=type=tmpfs,target=/t ls\nRUN --mount=TYPE=BIND,Source=tools,target=/m ls\n")
+
+    assert context_reads(dockerfile) == ContextReads(paths=("tools",))
+
+
+def test_a_mount_type_it_doesnt_know_keeps_all_of_the_context():
+    assert context_reads("FROM x\nRUN --mount=type=future,source=a,target=/a ls\n") == ContextReads(
+        whole="RUN --mount type=future isn't followed")
+
+
 def _archive(path: Path, files: dict[str, str], links: dict[str, str] | None = None,
              executable: tuple[str, ...] = ()) -> Path:
     """A context tar.gz holding ``files`` and ``links``, everything in it as another tool might have written it."""
