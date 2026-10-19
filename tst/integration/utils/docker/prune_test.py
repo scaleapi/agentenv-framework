@@ -126,3 +126,25 @@ def test_an_image_built_from_the_pruned_context_holds_what_one_from_the_whole_co
             "release/app.txt", "through-link.txt", "lit/!.txt", "lit/a.txt", "out/spaced.txt"} <= set(built)
     assert "lit/b.txt" not in built
     assert not any(name.startswith("app/tests") or name.endswith(".pyc") for name in built)
+
+
+def test_folders_of_one_name_written_from_two_stored_contexts_each_build_their_own_files(tmp_path, docker):
+    # docker build skips sending a file whose path, size and time match one it was sent before, as a stored context's
+    # fixed times would make them, and builds the old file.
+    name = f"gmail-{uuid.uuid4().hex[:8]}"
+    built = []
+    for version in ("1", "2"):
+        archive = tmp_path / f"v{version}.tar.gz"
+        with tarfile.open(archive, "w:gz") as tar:
+            _add(tar, "Dockerfile", f"FROM {BASE}\nCOPY version.txt /version.txt\n".encode())
+            _add(tar, "version.txt", f"version {version}\n".encode())
+        folder = tmp_path / f"bundle-v{version}" / "envs" / name
+        write_pruned(archive, {folder: "Dockerfile"})
+        docker.append(f"prune-{name}-v{version}")
+        result = subprocess.run(["docker", "build", "-q", "--no-cache", "-t", docker[-1], str(folder)],
+                                capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        built.append(subprocess.run(["docker", "run", "--rm", docker[-1], "cat", "/version.txt"], capture_output=True,
+                                    text=True, check=True).stdout)
+
+    assert built == ["version 1\n", "version 2\n"]

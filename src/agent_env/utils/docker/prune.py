@@ -21,8 +21,6 @@ from agent_env.utils.paths import LEAVINGS
 
 _WILDCARD = re.compile(r"[*?\[]")
 _LARGEST = 5
-# A link is written as it is, as docker build sends one, wherever it leads; nothing is written through one leading out.
-_MEMBER = functools.partial(context_member, links_out=True)
 
 
 @dataclass(frozen=True)
@@ -99,13 +97,21 @@ def _write(archive: Path, kept: Mapping[Path, set[str]]) -> dict[Path, dict[str,
                     shutil.copy2(first, folder / name)
                 else:
                     folder.mkdir(parents=True, exist_ok=True)
-                    tar.extract(member, folder, filter=_MEMBER)
+                    tar.extract(member, folder, filter=_member)
                     first = folder / name if member.isreg() else None
                 if member.isreg():
                     written[folder][name] = member.size
                 else:
                     written[folder].pop(name, None)
     return written
+
+
+def _member(member: tarfile.TarInfo, out: str) -> tarfile.TarInfo | None:
+    """``member`` as ``write_pruned`` writes it: a link as it is, wherever it leads, and at the time of writing."""
+    if (member := context_member(member, out, links_out=True)) is None:
+        return None
+    # A stored context's times are fixed, and docker build skips sending a file whose time and size it has seen before.
+    return member.replace(mtime=None, deep=False)
 
 
 def _found_dockerfile(links: Mapping[str, str | None]) -> str:

@@ -2,6 +2,7 @@
 
 import io
 import tarfile
+import time
 from pathlib import Path
 
 import pytest
@@ -283,6 +284,17 @@ def test_a_name_the_archive_holds_twice_counts_once_at_the_size_left_in_the_fold
     assert (tmp_path / "out" / "data" / "a.bin").stat().st_size == 10
     assert (pruned.files, pruned.size) == (3, 30 + 100 + 10)
     assert pruned.largest == (("data/b.bin", 100), ("Dockerfile", 30), ("data/a.bin", 10))
+
+
+def test_each_file_is_written_at_the_time_of_writing_not_the_stored_contexts(tmp_path):
+    # A stored context's files carry the time 0; docker build would read a rewritten one as unchanged.
+    archive = _archive(tmp_path / "ctx.tar.gz", SERVERS)
+    before = time.time()
+
+    write_pruned(archive, {tmp_path / "gmail": "gmail/Dockerfile", tmp_path / "slack": "slack/Dockerfile"})
+
+    for name in ("gmail/BaseService/base.py", "slack/BaseService/base.py", "slack/slack/main.py"):
+        assert (tmp_path / name).stat().st_mtime >= before - 1
 
 
 def test_a_dockerfile_missing_from_the_archive_is_refused(tmp_path):
