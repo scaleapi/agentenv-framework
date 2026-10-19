@@ -7,14 +7,19 @@ import gzip
 import hashlib
 import json
 import os
+import posixpath
+import shutil
 import stat
 import tarfile
 import unicodedata
+from collections.abc import Mapping
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
 
 from modal import FilePatternMatcher
 
+from agent_env.utils.dockerfile import Instruction, copy_arguments, instructions
 from agent_env.utils.paths import LEAVINGS
 
 # Bumped when what source_digest covers changes, so a digest is never compared across meanings.
@@ -105,6 +110,186 @@ def extract(archive: Path, out: Path) -> None:
     written by ``BuildContext.write`` holds: a hard link, a device, a name that leads out of ``out``."""
     with tarfile.open(archive, "r:gz") as tar:
         tar.extractall(out, filter=_context_member)
+
+
+@dataclass(frozen=True)
+class ContextReads:
+    """What a Dockerfile's build reads of its context: the context paths in ``paths``, each of which may hold Docker's
+    wildcards, or all of it when ``whole`` says why: it copies all of it, or reads what can't be told before a build."""
+
+    paths: tuple[str, ...] = ()
+    whole: str | None = None
+
+
+@dataclass(frozen=True)
+class Pruned:
+    """What ``write_pruned`` wrote into a folder: ``files`` files of ``size`` bytes, and why it wrote everything the
+    context sends when it did."""
+
+    files: int
+    size: int
+    whole: str | None
+
+
+# The COPY and ADD flags that change how a source is written, not which one it is.
+_SOURCE_KEEPING_FLAGS = ("--chown=", "--chmod=", "--link", "--checksum=", "--keep-git-dir", "--unpack")
+
+
+def context_reads(dockerfile: str) -> ContextReads:
+    """What a build of ``dockerfile`` reads of its context: each local COPY and ADD source of every stage and each bind
+    mount's source, but not a COPY --from, a URL or git source, or a heredoc."""
+    paths: list[str] = []
+    for instruction in instructions(dockerfile):
+        if instruction.keyword in ("COPY", "ADD"):
+            whole = _copy_reads(instruction, paths)
+        elif instruction.keyword == "RUN":
+            whole = _mount_reads(instruction, paths)
+        else:
+            continue
+        if whole:
+            return ContextReads(whole=whole)
+    return ContextReads(paths=tuple(dict.fromkeys(paths)))
+
+
+def write_pruned(archive: Path, images: Mapping[Path, str]) -> dict[Path, Pruned]:
+    """Write into each folder ``images`` names the part of the build context tar.gz at ``archive`` that its
+    Dockerfile, at the path ``images`` gives in the context, reads: what ``context_reads`` finds, less what the
+    context's ignore file leaves out and what the OS or Python leaves behind, with the Dockerfile, the ignore file
+    and the targets of kept links. Reads the
+    archive twice and never unpacks the rest of it. Raises ValueError when a Dockerfile isn't in the archive, or on a
+    member ``extract`` refuses."""
+    dockerfiles = {folder: posixpath.normpath(dockerfile) for folder, dockerfile in images.items()}
+    wanted = {name for dockerfile in dockerfiles.values() for name in (dockerfile, *_ignore_files(dockerfile))}
+    links: dict[str, str | None] = {}
+    texts: dict[str, str] = {}
+    with tarfile.open(archive, "r:gz") as tar:
+        for member in tar:
+            if (name := _member_name(member)) is None:
+                continue
+            links[name] = member.linkname if member.issym() else None
+            if name in wanted and member.isreg():
+                texts[name] = tar.extractfile(member).read().decode("utf-8", "replace")
+    plans: dict[Path, tuple[set[str], str | None]] = {}
+    for folder, dockerfile in dockerfiles.items():
+        if dockerfile not in texts:
+            raise ValueError(f"the build context has no {dockerfile}")
+        ignore = next((name for name in _ignore_files(dockerfile) if name in texts), None)
+        matcher = FilePatternMatcher(*_patterns(texts[ignore])) if ignore else None
+        reads = context_reads(texts[dockerfile])
+        plans[folder] = (_kept(links, reads, dockerfile, ignore, matcher), reads.whole)
+    counts = {folder: [0, 0] for folder in images}
+    with tarfile.open(archive, "r:gz") as tar:
+        for member in tar:
+            name = _member_name(member)
+            first: Path | None = None
+            for folder in (folder for folder, (kept, _) in plans.items() if name in kept):
+                if member.isreg() and first is not None:
+                    (folder / name).parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(first, folder / name)
+                else:
+                    folder.mkdir(parents=True, exist_ok=True)
+                    tar.extract(member, folder, filter=_context_member)
+                    first = folder / name if member.isreg() else None
+                if member.isreg():
+                    counts[folder][0] += 1
+                    counts[folder][1] += member.size
+    return {folder: Pruned(*counts[folder], plans[folder][1]) for folder in images}
+
+
+def _copy_reads(instruction: Instruction, paths: list[str]) -> str | None:
+    """Add the context paths a COPY or ADD reads to ``paths``; why it reads all of the context, when it does."""
+    args = copy_arguments(instruction)
+    if args is None:
+        return f"{instruction.keyword} {instruction.arguments} can't be read"
+    if any(flag.startswith("--from=") for flag in args.flags):
+        return None
+    if unknown := next((flag for flag in args.flags if not flag.startswith(_SOURCE_KEEPING_FLAGS)), None):
+        return f"{args.keyword} {unknown} isn't followed"
+    for source in args.sources:
+        if args.keyword == "ADD" and ("://" in source or source.startswith("git@")):
+            continue
+        if "$" in source:
+            return f"{args.keyword} {source} names a variable"
+        if (path := _context_path(source)) is None:
+            return f"{args.keyword} {source} copies all of it"
+        paths.append(path)
+    return None
+
+
+def _mount_reads(instruction: Instruction, paths: list[str]) -> str | None:
+    """Add the context paths a RUN's bind mounts read to ``paths``; why it reads all of the context, when it does. A
+    bind mount names no other image or stage with ``from``, and its source defaults to the whole context."""
+    rest = instruction.arguments
+    while rest.startswith("--"):
+        flag, _, rest = rest.partition(" ")
+        rest = rest.strip()
+        if not flag.startswith("--mount="):
+            continue
+        options = dict(option.partition("=")[::2] for option in flag.removeprefix("--mount=").split(","))
+        if options.get("type", "bind") != "bind" or "from" in options:
+            continue
+        source = options.get("source") or options.get("src") or "."
+        if "$" in source:
+            return f"RUN --mount source {source} names a variable"
+        if (path := _context_path(source)) is None:
+            return f"RUN --mount binds {source}, all of it"
+        paths.append(path)
+    return None
+
+
+def _context_path(source: str) -> str | None:
+    """``source``'s path in the context; None for the context itself, or a path that would leave it."""
+    path = posixpath.normpath(source.lstrip("/"))
+    return None if path == "." or path == ".." or path.startswith("../") else path
+
+
+def _kept(links: Mapping[str, str | None], reads: ContextReads, dockerfile: str, ignore: str | None,
+          matcher: FilePatternMatcher | None) -> set[str]:
+    """The names in ``links`` (each name's link target, None when it's no link) that a build reads, as ``write_pruned``
+    keeps them, and the folders above them. What the OS or Python leaves behind is dropped, as ``BuildContext`` drops it."""
+    def sent(name: str) -> bool:
+        return not LEAVINGS.intersection(name.split("/")) and (matcher is None or not matcher(Path(name)))
+
+    if reads.whole is not None:
+        kept = {name for name in links if sent(name)}
+    else:
+        kept = {name for name in links if sent(name) and any(_matches(path, name) for path in reads.paths)}
+    kept |= {name for name in (dockerfile, ignore) if name in links}
+    pending = [name for name in kept if links[name]]
+    while pending:
+        name = pending.pop()
+        target = posixpath.normpath(posixpath.join(posixpath.dirname(name), links[name]))
+        if links[name].startswith("/") or target == ".." or target.startswith("../"):
+            continue
+        for other in links:
+            if other not in kept and (other == target or other.startswith(f"{target}/")) and sent(other):
+                kept.add(other)
+                if links[other]:
+                    pending.append(other)
+    return kept | {str(parent) for name in kept for parent in PurePosixPath(name).parents if str(parent) in links}
+
+
+def _matches(path: str, name: str) -> bool:
+    """Whether ``name`` is ``path`` or under it, each part matched as Docker matches a COPY source's."""
+    want, have = path.split("/"), name.split("/")
+    return len(have) >= len(want) and all(fnmatchcase(part, glob.replace("[^", "[!")) for part, glob in zip(have, want))
+
+
+def _ignore_files(dockerfile: str) -> tuple[str, ...]:
+    """Where ``docker build`` looks for its ignore file, in order: ``<Dockerfile>.dockerignore`` beside the
+    Dockerfile, then the context's ``.dockerignore``."""
+    return f"{dockerfile}.dockerignore", ".dockerignore"
+
+
+def _patterns(ignore_file: str) -> list[str]:
+    """An ignore file's patterns, its comment lines left out as Docker leaves them out."""
+    return [line for line in ignore_file.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+
+
+def _member_name(member: tarfile.TarInfo) -> str | None:
+    """``member``'s path in the context; None for the context's own folder."""
+    name = posixpath.normpath(member.name.lstrip("/"))
+    return None if name == "." else name
 
 
 class _Walk:
