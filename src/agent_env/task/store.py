@@ -343,7 +343,8 @@ class TaskInstanceStore:
             updated = store.update_one_and_get(
                 TASK_INSTANCES_COLLECTION,
                 Filter.of(instance_id=instance_id),
-                UpdateSpec(set=dict(run_state), inc={_REV: 1, _GENERATION: 1}),
+                UpdateSpec(set={k: v for k, v in run_state.items() if k != "attempt_epoch"},
+                           inc={_REV: 1, _GENERATION: 1, "attempt_epoch": 1}),
                 return_after=True,
             )
             if updated is None:
@@ -530,6 +531,7 @@ class TaskInstanceStore:
         *,
         extra_ops: "Callable[[dict, dict], ContextUpdateOps] | None" = None,
         bump_epoch: bool = False,
+        attempt_epoch: int | None = None,
     ) -> dict | None:
         """Roll the named steps out by replaying the surviving committed entries over the seed,
         in one CAS on ``rev``, then delete those entries at the seq it read. None if the
@@ -549,6 +551,8 @@ class TaskInstanceStore:
         store = self._doc_store
 
         def _mutate(doc: dict) -> UpdateSpec:
+            if attempt_epoch is not None and doc.get("attempt_epoch", 0) > attempt_epoch:
+                raise ValueError(f"a later attempt owns instance {instance_id!r}; refusing to undo {sorted(step_ids)}")
             entries = self._journal_entries(store, instance_id, doc.get(_GENERATION, 0))
             # The seq this attempt read, so the trim can't delete a row a re-completion wrote after the CAS.
             undone_seqs.clear()
@@ -721,9 +725,11 @@ class TaskInstanceStore:
         context: "TaskStepContext",
         error: BaseException,
         completed_at_utc: str,
+        attempt_epoch: int | None = None,
     ) -> None:
         """Terminal failure write — one atomic update guarded on ``status != completed``
-        (so a sibling step that finished mid-cancel isn't overwritten)."""
+        (so a sibling step that finished mid-cancel isn't overwritten) and, given ``attempt_epoch``,
+        on no later attempt owning the instance."""
         spec = UpdateSpec(
             set={
                 "status": "failed",
@@ -736,11 +742,10 @@ class TaskInstanceStore:
         if failing_step_id is not None:
             entry = dataclasses.asdict(TaskStepResult(step_id=failing_step_id, status=TaskStepStatus.FAILURE))
             spec.add_to_set = {"completed_steps": [entry]}
-        self._doc_store.update(
-            TASK_INSTANCES_COLLECTION,
-            Filter.of(instance_id=instance_id).where("status", Ne("completed")),
-            spec,
-        )
+        match = Filter.of(instance_id=instance_id).where("status", Ne("completed"))
+        if attempt_epoch is not None:
+            match = match.where("attempt_epoch", Lte(attempt_epoch))
+        self._doc_store.update(TASK_INSTANCES_COLLECTION, match, spec)
 
     def record_task_cancelled_sync(self, instance_id: str, reason: str, completed_at_utc: str) -> None:
         """Mark a run cancelled, over the ``failed`` its unwinding recorded, but never a completed one."""
@@ -886,6 +891,7 @@ async def undo_steps(
     *,
     extra_ops: "Callable[[dict, dict], ContextUpdateOps] | None" = None,
     bump_epoch: bool = False,
+    attempt_epoch: int | None = None,
 ) -> dict | None:
     """Async ``TaskInstanceStore.undo_steps_sync``; None if the instance is missing or the
     write failed (logged). A refusal propagates: the store is saying it cannot rebuild that
@@ -893,7 +899,7 @@ async def undo_steps(
     try:
         return await asyncio.to_thread(
             get_task_instance_store().undo_steps_sync, instance_id, set(step_ids),
-            extra_ops=extra_ops, bump_epoch=bump_epoch,
+            extra_ops=extra_ops, bump_epoch=bump_epoch, attempt_epoch=attempt_epoch,
         )
     except ValueError:
         raise
@@ -912,6 +918,7 @@ async def record_task_failure(
     context: "TaskStepContext",
     error: BaseException,
     completed_at_utc: str,
+    attempt_epoch: int | None = None,
 ) -> None:
     """Write terminal failure state.
 
@@ -928,7 +935,7 @@ async def record_task_failure(
         try:
             await asyncio.to_thread(
                 store.record_task_failure_sync,
-                instance_id, failing_step_id, context, error, completed_at_utc,
+                instance_id, failing_step_id, context, error, completed_at_utc, attempt_epoch,
             )
             return
         except Exception as exc:  # noqa: BLE001
