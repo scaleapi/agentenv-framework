@@ -67,8 +67,21 @@ def test_what_the_ignore_file_leaves_out_stays_out_and_a_dockerfiles_own_ignore_
 
     assert set(_files(tmp_path / "root")) == {"Dockerfile", ".dockerignore", "app/main.py", "app/tests/keep.py",
                                               "app/notes.md"}
-    assert set(_files(tmp_path / "sub")) == {"sub/Dockerfile", "sub/Dockerfile.dockerignore", "app/main.py",
-                                             "app/tests/t.py", "app/tests/keep.py"}
+    assert set(_files(tmp_path / "sub")) == {"sub/Dockerfile", "sub/Dockerfile.dockerignore", ".dockerignore",
+                                             "app/main.py", "app/tests/t.py", "app/tests/keep.py"}
+
+
+def test_an_empty_dockerfiles_own_ignore_file_leaves_everything_in_and_both_ignore_files_stay(tmp_path):
+    # docker build's own frontend reads an empty Dockerfile.dockerignore as leaving nothing out; the docker/dockerfile:1
+    # frontend reads the context's .dockerignore instead. Both files stay, so either frontend reads what it would.
+    files = {"Dockerfile": "FROM python\nCOPY app/ /app/\n", "Dockerfile.dockerignore": "", ".dockerignore": "**/*.md\n",
+             "app/main.py": "m", "app/notes.md": "n"}
+    archive = _archive(tmp_path / "ctx.tar.gz", files)
+
+    write_pruned(archive, {tmp_path / "out": "Dockerfile"})
+
+    assert set(_files(tmp_path / "out")) == {"Dockerfile", "Dockerfile.dockerignore", ".dockerignore", "app/main.py",
+                                             "app/notes.md"}
 
 
 def test_a_dockerfile_that_reads_all_of_the_context_gets_what_docker_would_send_and_says_why(tmp_path):

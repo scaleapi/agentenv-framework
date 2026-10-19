@@ -81,7 +81,7 @@ def _plan(dockerfile: str, links: Mapping[str, str | None], texts: Mapping[str, 
     # A source the reading found that names nothing here is likelier a misreading than a build that fails.
     if missing := next((path for path in reads.paths if not any(_matches(path, name) for name in links)), None):
         reads, crossed = ContextReads(whole=f"{missing} matches nothing in the context"), set()
-    return _kept(links, reads, dockerfile, ignore, matcher, crossed), reads.whole
+    return _kept(links, reads, dockerfile, matcher, crossed), reads.whole
 
 
 def _write(archive: Path, kept: Mapping[Path, set[str]]) -> dict[Path, dict[str, int]]:
@@ -181,8 +181,8 @@ def _link_target(name: str, links: Mapping[str, str | None]) -> str:
     return "/".join(parts)
 
 
-def _kept(links: Mapping[str, str | None], reads: ContextReads, dockerfile: str, ignore: str | None,
-          matcher: FilePatternMatcher | None, crossed: set[str] = frozenset()) -> set[str]:
+def _kept(links: Mapping[str, str | None], reads: ContextReads, dockerfile: str, matcher: FilePatternMatcher | None,
+          crossed: set[str] = frozenset()) -> set[str]:
     """The names in ``links``, and the folders they imply, that ``write_pruned`` keeps for ``reads``."""
     def sent(name: str) -> bool:
         return not LEAVINGS.intersection(name.split("/")) and (matcher is None or not matcher(Path(name)))
@@ -193,8 +193,9 @@ def _kept(links: Mapping[str, str | None], reads: ContextReads, dockerfile: str,
         kept = {name for name in candidates if sent(name)}
     else:
         kept = {name for name in candidates if sent(name) and any(_matches(path, name) for path in reads.paths)}
-    # docker build reads the Dockerfile and ignore file where they lead, whatever the ignore file says.
-    for name in filter(None, (dockerfile, ignore)):
+    # docker build reads the Dockerfile and ignore file where they lead, whatever the ignore file says. Both ignore files
+    # stay, since docker build's frontends differ on which one an empty <Dockerfile>.dockerignore leaves in effect.
+    for name in (dockerfile, *ignore_names(dockerfile)):
         resolved, hops = _resolve(name, links)
         kept |= {other for other in (name, resolved, *hops) if other in links}
     # A link a source only crosses is needed for its path, not for all it leads to.
