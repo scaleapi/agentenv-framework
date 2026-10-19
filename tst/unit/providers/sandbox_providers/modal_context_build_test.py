@@ -146,13 +146,14 @@ async def test_a_failed_modal_build_keeps_modals_pointer_to_its_build_log(local_
 
 @pytest.mark.parametrize("line, built", [
     ('COPY ["a.txt", "/x/a.txt"]', "COPY a.txt /x/a.txt"),
+    ('COPY\t["a.txt", "/t/"]', "COPY a.txt /t/"),
     ('copy --chown=1:1 ["a.txt", "sub", "/y/"]', "COPY --chown=1:1 a.txt sub /y/"),
     ("ADD a.txt /added/", "COPY a.txt /added/"),
     ("ADD sub \\\n    /added/sub/", "COPY sub /added/sub/"),
     ("ADD *.txt /globbed/", "COPY *.txt /globbed/"),
     ('ADD ["a.txt", "/j/"]', "COPY a.txt /j/"),
     ("ADD --chmod=755 a.txt /c", "COPY --chmod=755 a.txt /c"),
-], ids=["json-copy", "json-copy-flags", "add-file", "add-folder-continued", "add-glob", "json-add", "add-chmod"])
+], ids=["json-copy", "json-copy-tab", "json-copy-flags", "add-file", "add-folder-continued", "add-glob", "json-add", "add-chmod"])
 def test_what_modal_cant_take_is_written_as_its_docker_equivalent(tmp_path, line, built):
     (tmp_path / "a.txt").write_text("a")
     (tmp_path / "sub").mkdir()

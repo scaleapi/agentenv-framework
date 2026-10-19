@@ -19,7 +19,7 @@ class Instruction:
     ``text`` is what the Dockerfile holds for it, so the texts of all of them joined are the Dockerfile."""
 
     keyword: str | None  # upper case
-    arguments: str  # on one line: escaped line breaks and the comment lines among them removed, heredoc bodies left out
+    arguments: str  # on one line, escaped line breaks removed as docker build removes them, heredoc bodies left out
     text: str
     heredocs: tuple[str, ...] = ()  # each heredoc's body, in order
     complete: bool = True  # False when a heredoc it opens runs to the end of the Dockerfile unclosed
@@ -46,6 +46,8 @@ def instructions(dockerfile: str) -> list[Instruction]:
         if directive.group(1).lower() == "escape":
             escape = directive.group(2)
         at += 1
+    # The escape character ending a line, spaces or tabs after it, joins the next line on as it is.
+    continued = re.compile(re.escape(escape) + r"[ \t]*$")
     found = [Instruction(None, "", line) for line in lines[:at]]
     while at < len(lines):
         line = lines[at]
@@ -60,16 +62,16 @@ def instructions(dockerfile: str) -> list[Instruction]:
             at += 1
             if parts and (not line.strip() or line.lstrip().startswith("#")):
                 continue
-            body = line.rstrip("\r\n").rstrip()
-            if not body.endswith(escape):
+            body = line.rstrip("\r\n")
+            if not (end := continued.search(body)):
                 parts.append(body)
                 break
-            parts.append(body[:-len(escape)])
-        keyword, _, arguments = " ".join(part.strip() for part in parts).partition(" ")
-        keyword, arguments = keyword.upper(), arguments.strip()
+            parts.append(body[:end.start()])
+        keyword, *rest = "".join(parts).split(None, 1)
+        keyword, arguments = keyword.upper(), rest[0].strip() if rest else ""
         heredocs, complete = [], True
         if keyword in _HEREDOC_KEYWORDS:
-            for strip_tabs, _, name in _HEREDOC.findall(arguments):
+            for strip_tabs, name in _heredoc_names(arguments):
                 body, closed = [], False
                 while at < len(lines):
                     line = lines[at]
@@ -82,6 +84,29 @@ def instructions(dockerfile: str) -> list[Instruction]:
                 heredocs.append("".join(body))
                 complete = complete and closed
         found.append(Instruction(keyword, arguments, "".join(text), tuple(heredocs), complete))
+    return found
+
+
+def _heredoc_names(arguments: str) -> list[tuple[str, str]]:
+    """Each heredoc ``arguments`` opens, as (its ``-`` if any, its name): a ``<<NAME`` outside quotes, in shell form only,
+    since docker build reads a quoted one as text and an exec-form (JSON) instruction opens none."""
+    if arguments.startswith("["):
+        return []
+    found, quote, at = [], None, 0
+    while at < len(arguments):
+        char = arguments[at]
+        if char == "\\" and quote != "'":
+            at += 2
+            continue
+        if quote:
+            quote = None if char == quote else quote
+        elif char in "\"'":
+            quote = char
+        elif heredoc := _HEREDOC.match(arguments, at):
+            found.append((heredoc.group(1), heredoc.group(3)))
+            at = heredoc.end()
+            continue
+        at += 1
     return found
 
 
@@ -109,6 +134,6 @@ def copy_arguments(instruction: Instruction) -> CopyArguments | None:
         args = rest.split()
     if len(args) < 2:
         return None
-    sources = tuple(source for source in args[:-1] if not _HEREDOC.fullmatch(source))
+    sources = tuple(source for source in args[:-1] if json_form or not _HEREDOC.fullmatch(source))
     return CopyArguments(instruction.keyword, tuple(flags), sources, args[-1], json_form,
                          heredoc=len(sources) < len(args) - 1)

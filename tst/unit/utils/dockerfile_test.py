@@ -28,8 +28,8 @@ def test_the_instructions_joined_are_the_dockerfile_and_each_reads_as_docker_rea
     assert "".join(instruction.text for instruction in found) == DOCKERFILE
     assert [(i.keyword, i.arguments) for i in found if i.keyword] == [
         ("FROM", "python:3.12-slim AS base"),
-        ("RUN", "apt-get update && apt-get install -y curl"),
-        ("COPY", "--chown=1:1 a.txt b/ /app/"),
+        ("RUN", "apt-get update     && apt-get install -y curl"),
+        ("COPY", "--chown=1:1 a.txt      b/ /app/"),
         ("RUN", "<<EOF"),
         ("COPY", "<<-EOT /etc/note"),
     ]
@@ -39,13 +39,30 @@ def test_the_instructions_joined_are_the_dockerfile_and_each_reads_as_docker_rea
 def test_the_escape_directive_changes_what_continues_a_line():
     found = instructions("# escape=`\nFROM windows\nCOPY a.txt `\n  C:\\app\\\n")
 
-    assert [(i.keyword, i.arguments) for i in found if i.keyword] == [("FROM", "windows"), ("COPY", "a.txt C:\\app\\")]
+    assert [(i.keyword, i.arguments) for i in found if i.keyword] == [("FROM", "windows"), ("COPY", "a.txt   C:\\app\\")]
 
 
 def test_a_directive_after_the_first_instruction_is_a_comment():
     found = instructions("FROM x\n# escape=`\nCOPY a `\n  b\n")
 
     assert [(i.keyword, i.arguments) for i in found if i.keyword] == [("FROM", "x"), ("COPY", "a `"), ("B", "")]
+
+
+def test_words_split_on_any_whitespace_and_a_continued_line_joins_on_as_it_is():
+    # docker build copies package.json for the second COPY: the escaped line break leaves no space behind.
+    found = instructions("FROM x\nCOPY\ta.txt /tab.txt\nCOPY pack\\\nage.json /joined.json\nCOPY a \\  \n  b /c\n")
+
+    assert [(i.keyword, i.arguments) for i in found if i.keyword] == [
+        ("FROM", "x"), ("COPY", "a.txt /tab.txt"), ("COPY", "package.json /joined.json"), ("COPY", "a   b /c")]
+
+
+def test_a_heredoc_is_only_ever_opened_outside_quotes_in_shell_form():
+    # docker build writes the quoted <<EOF as text, opens no heredoc for an exec-form one, and runs the COPY after both.
+    found = instructions('FROM x\nRUN echo "<<EOF" > /q\nRUN ["sh", "-c", "cat <<EOT"]\nRUN echo \'<<A\' > /a\n'
+                         'COPY a.txt /a.txt\n')
+
+    assert [(i.keyword, i.heredocs) for i in found if i.keyword] == [("FROM", ()), ("RUN", ()), ("RUN", ()), ("RUN", ()),
+                                                                      ("COPY", ())]
 
 
 def test_a_shell_here_string_is_no_heredoc_and_the_instructions_after_it_stand():

@@ -38,6 +38,13 @@ def test_a_build_that_reads_all_of_the_context_or_cant_be_told_says_why(dockerfi
     assert context_reads(f"FROM python\n{dockerfile}") == ContextReads(whole=why)
 
 
+def test_a_tab_a_continued_path_and_a_quoted_heredoc_are_read_as_docker_reads_them():
+    dockerfile = ('FROM x\nCOPY\ta.txt /tab.txt\nCOPY pack\\\nage.json /joined.json\nRUN echo "<<EOF" > /q\n'
+                  'RUN ["sh", "-c", "cat <<EOT"]\nCOPY b.txt /b.txt\n')
+
+    assert context_reads(dockerfile) == ContextReads(paths=("a.txt", "package.json", "b.txt"))
+
+
 def test_a_shell_here_string_leaves_the_copies_after_it_read():
     assert context_reads("FROM x\nRUN cat <<<word > /out\nCOPY a.txt /a.txt\n") == ContextReads(paths=("a.txt",))
 
