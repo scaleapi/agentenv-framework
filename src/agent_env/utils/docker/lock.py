@@ -3,6 +3,8 @@ what the stored image did."""
 
 from __future__ import annotations
 
+import itertools
+import os
 import posixpath
 import re
 import shlex
@@ -19,17 +21,22 @@ from agent_env.utils.docker.installed import Installed, normalized
 # A command that resolves Python packages and reads PIP_CONSTRAINT or UV_CONSTRAINT.
 _PIP_RESOLVES = re.compile(r"\b(?:pip3?|python3?(?:\.\d+)?\s+-m\s+pip|uv\s+pip)\s+(?:install|wheel|download)\b")
 # An npm install command, up to the shell's next separator, across escaped line breaks.
-_NPM_INSTALL = re.compile(r"\bnpm\s+(?:install|i|add)\b(?:[^&;|\n\\]|\\\n|\\.)*")
+_NPM_INSTALL = re.compile(r"(?P<command>\bnpm\s+(?:install|i|add)\b)(?P<arguments>(?:[^&;|\n\\]|\\\n|\\.)*)")
 _GLOBAL = re.compile(r"(?:^|\s)(?:-g|--global)(?=\s|$)")
-_WORD = re.compile(r"(?<=\s)[^\s'\"\\]+")
-# A project lock its build installs from pins its packages already.
-_LOCK_FILES = ("uv.lock", "poetry.lock", "pdm.lock", "Pipfile.lock")
+# A shell word in an npm install: bare, or wholly in single or double quotes.
+_WORD = re.compile(r"""(?<=\s)(?:"(?P<double>[^"\\]*)"|'(?P<single>[^']*)'|(?P<bare>[^\s'"\\]+))(?=\s|\\\n|$)""")
+# Each project lock, and the command that installs from it, which pins those packages already.
+_LOCK_FILES = {"uv.lock": re.compile(r"\buv\s+sync\b"), "poetry.lock": re.compile(r"\bpoetry\s+(?:install|sync)\b"),
+               "pdm.lock": re.compile(r"\bpdm\s+(?:install|sync)\b"),
+               "Pipfile.lock": re.compile(r"\bpipenv\s+(?:install|sync)\b")}
 # Files whose lines are requirements a pip command reads.
 _REQUIREMENT_FILES = re.compile(r".*(?:requirements|constraints).*\.(?:txt|in)")
 # pip applies constraints inside isolated builds too, where a package can need a newer build tool than the image holds.
 _BUILD_TOOLS = frozenset({"pip", "setuptools", "wheel"})
 CONSTRAINTS = "constraints.txt"
 _IN_IMAGE = "/tmp/agent-env-constraints.txt"
+# The first line of a constraints file agent-env writes, so pinning another image in the folder doesn't read it as asked.
+_HEADER = "# Pinned by agent-env to the versions of the image the store held.\n"
 
 
 @dataclass(frozen=True)
@@ -39,7 +46,7 @@ class Locked:
     python: int  # packages constraints.txt pins
     constraints: str | None  # its path in the folder, when one was written
     npm: tuple[str, ...]  # package@version, each written into an npm install -g
-    lock_file: str | None  # the project lock the build installs from, which pins its packages already
+    lock_file: str | None  # the project lock a command the build runs installs from, which pins its packages already
     not_covered: tuple[str, ...]
 
 
@@ -49,14 +56,16 @@ def lock(folder: Path, dockerfile: str, installed: Installed) -> Locked:
     parts = instructions((folder / dockerfile).read_text(encoding="utf-8"))
     not_covered: list[str] = []
     npm: list[str] = []
-    texts = [_pin_npm(part.text, installed.npm, npm) if part.keyword == "RUN" else part.text for part in parts]
+    unpinned: list[str] = []
+    texts = [_pin_npm(part.text, installed.npm, npm, unpinned) if part.keyword == "RUN" else part.text for part in parts]
     if npm:
         not_covered.append("npm packages' own dependencies, which a global install resolves afresh")
-    lock_file = next((path.relative_to(folder).as_posix() for name in _LOCK_FILES for path in sorted(folder.rglob(name))),
-                     None)
+    not_covered += [f"npm {name}, which an npm install -g names in a form agent-env doesn't rewrite"
+                    for name in dict.fromkeys(unpinned)]
+    lock_file = _lock_file(folder, parts)
     stages = _stages_running_pip(parts)
     constraints, pinned = None, 0
-    if stages and lock_file is None:
+    if stages:
         pins, left = _pins(installed, _asked_for(folder, parts))
         not_covered += left
         constraints = _constraints_path(folder, dockerfile)
@@ -64,8 +73,8 @@ def lock(folder: Path, dockerfile: str, installed: Installed) -> Locked:
             not_covered.append(f"Python packages, since the folder's ignore file leaves out {constraints}")
             constraints = None
         elif pins:
-            (folder / constraints).write_text("".join(f"{name}=={version}\n" for name, version in sorted(pins.items())),
-                                              encoding="utf-8")
+            (folder / constraints).write_text(
+                _HEADER + "".join(f"{name}=={version}\n" for name, version in sorted(pins.items())), encoding="utf-8")
             pinned = len(pins)
             arguments = (f'COPY ["{constraints}", "{_IN_IMAGE}"]\nARG PIP_CONSTRAINT={_IN_IMAGE}\n'
                          f"ARG UV_CONSTRAINT={_IN_IMAGE}\n")
@@ -75,6 +84,13 @@ def lock(folder: Path, dockerfile: str, installed: Installed) -> Locked:
             constraints = None
     (folder / dockerfile).write_text("".join(texts), encoding="utf-8")
     return Locked(pinned, constraints, tuple(npm), lock_file, tuple(not_covered))
+
+
+def _lock_file(folder: Path, parts: list[Instruction]) -> str | None:
+    """The project lock in the folder that a command the Dockerfile runs installs from."""
+    runs = " ".join(" ".join((part.arguments, *part.heredocs)) for part in parts if part.keyword == "RUN")
+    return next((path.relative_to(folder).as_posix() for name, command in _LOCK_FILES.items() if command.search(runs)
+                 for path in sorted(folder.rglob(name))), None)
 
 
 def _pins(installed: Installed, asked: dict[str, list[tuple[str, Requirement]]]) -> tuple[dict[str, str], list[str]]:
@@ -121,8 +137,10 @@ def _asked_for(folder: Path, parts: list[Instruction]) -> dict[str, list[tuple[s
                     asked.setdefault(normalized(requirement.name), []).append(("the Dockerfile", requirement))
     for path in sorted(folder.rglob("*")):
         if path.is_file() and not path.is_symlink() and _REQUIREMENT_FILES.fullmatch(path.name):
-            lines = (line.partition(" #")[0].partition(" --")[0].strip().rstrip("\\").strip()
-                     for line in path.read_text("utf-8", "replace").splitlines())
+            text = path.read_text("utf-8", "replace")
+            if text.startswith(_HEADER):
+                continue
+            lines = (line.partition(" #")[0].partition(" --")[0].strip().rstrip("\\").strip() for line in text.splitlines())
             for requirement in _requirements(lines):
                 asked.setdefault(normalized(requirement.name), []).append((path.relative_to(folder).as_posix(),
                                                                           requirement))
@@ -163,31 +181,45 @@ def _stages_running_pip(parts: list[Instruction]) -> set[int]:
     return stages
 
 
-def _pin_npm(text: str, versions: dict[str, str], pinned: list[str]) -> str:
-    """``text`` with each package an ``npm install -g`` in it names written at the version ``versions`` holds."""
+def _pin_npm(text: str, versions: dict[str, str], pinned: list[str], unpinned: list[str]) -> str:
+    """``text`` with each package an ``npm install -g`` in it names written at the version ``versions`` holds; one it
+    names in a form this doesn't rewrite goes in ``unpinned``."""
     def install(match: re.Match) -> str:
-        segment = match.group(0)
-        if not _GLOBAL.search(segment):
-            return segment
-        return _WORD.sub(lambda word: _pinned_word(word.group(0), versions, pinned), segment)
+        arguments = match["arguments"]
+        if not _GLOBAL.search(arguments):
+            return match.group(0)
+        here: list[str] = []
+        arguments = _WORD.sub(lambda word: _pinned_word(word, versions, here), arguments)
+        pinned.extend(f"{name}@{versions[name]}" for name in here)
+        unpinned.extend(name for word in _words(arguments) if (name := _package(word)) in versions and name not in here)
+        return match["command"] + arguments
     return _NPM_INSTALL.sub(install, text)
 
 
-def _pinned_word(word: str, versions: dict[str, str], pinned: list[str]) -> str:
-    if word.startswith("-"):
-        return word
-    name = "@" + word[1:].partition("@")[0] if word.startswith("@") else word.partition("@")[0]
+def _pinned_word(word: re.Match, versions: dict[str, str], pinned: list[str]) -> str:
+    """``word`` naming the version ``versions`` holds of the package it names, in the quotes it was written in."""
+    value = next(value for value in (word["double"], word["single"], word["bare"]) if value is not None)
+    name = _package(value)
     if name not in versions:
-        return word
-    pinned.append(f"{name}@{versions[name]}")
-    return f"{name}@{versions[name]}"
+        return word.group(0)
+    pinned.append(name)
+    quote = '"' if word["double"] is not None else "'" if word["single"] is not None else ""
+    return f"{quote}{name}@{versions[name]}{quote}"
+
+
+def _package(word: str) -> str | None:
+    """The package an npm install's ``word`` names, or None for a flag."""
+    if word.startswith("-"):
+        return None
+    return "@" + word[1:].partition("@")[0] if word.startswith("@") else word.partition("@")[0]
 
 
 def _constraints_path(folder: Path, dockerfile: str) -> str:
-    """Where the constraints go: beside the Dockerfile, under a name of the import's own when that one is taken."""
-    path = posixpath.join(posixpath.dirname(dockerfile), CONSTRAINTS)
-    return path if not (folder / path).exists() else posixpath.join(posixpath.dirname(dockerfile),
-                                                                    f"agent-env-{CONSTRAINTS}")
+    """Where the constraints go: beside the Dockerfile, under the first of the import's names nothing there has."""
+    names = itertools.chain([CONSTRAINTS, f"agent-env-{CONSTRAINTS}"],
+                            (f"agent-env-constraints-{n}.txt" for n in itertools.count(2)))
+    return next(path for name in names
+                if not os.path.lexists(folder / (path := posixpath.join(posixpath.dirname(dockerfile), name))))
 
 
 def _ignored(folder: Path, dockerfile: str, path: str) -> bool:

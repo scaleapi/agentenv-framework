@@ -14,6 +14,7 @@ from pathlib import Path
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.config import get_config
+from agent_env.store.base import NotFoundError
 from agent_env.utils.docker.installed import installed_packages
 from agent_env.utils.docker.lock import Locked, lock
 from agent_env.utils.docker.prune import Pruned, write_pruned
@@ -51,13 +52,21 @@ def context_groups(jobs: list[ImageJob]) -> list[list[ImageJob]]:
 def write_images(groups: list[list[ImageJob]], staging: Path, scratch: Path,
                  on_group: Callable[[list[ImageJob]], None] | None = None) -> None:
     """Download each group's context once, write each job's pruned folder into its entity's folder in ``staging``, and
-    note on a job why it can't be written."""
+    note on a job why it can't be written; then pin each written image's installs."""
+    placed: list[ImageJob] = []
     for index, group in enumerate(groups):
         if on_group is not None:
             on_group(group)
         url = group[0].artifact.build_context_object_url
         archive = scratch / f"context-{index}.tar.gz"
-        get_config().get_object_store_at(url).download_to_file(url, str(archive))
+        try:
+            get_config().get_object_store_at(url).download_to_file(url, str(archive))
+        except (NotFoundError, ValueError) as e:  # gone from the store, or in one this config can't read
+            for job in group:
+                job.problem = ("its build context can't be downloaded: the store no longer holds it"
+                               if isinstance(e, NotFoundError) else
+                               "its build context can't be downloaded: the configured stores can't read it")
+            continue
         folders = {job: scratch / f"image-{index}-{n}" for n, job in enumerate(group)}
         try:
             pruned = write_pruned(archive, {folders[job]: job.artifact.dockerfile_path for job in group})
@@ -76,7 +85,15 @@ def write_images(groups: list[list[ImageJob]], staging: Path, scratch: Path,
                 _place(job, folders[job], staging / job.folder)
             shutil.rmtree(folders[job], ignore_errors=True)
             if job.problem is None:
-                _lock(job, staging / job.folder)
+                placed.append(job)
+    # Pinning rewrites a Dockerfile, which another image placed in the same folder may hold too: so only once all are.
+    locked: dict[tuple[str, str], ImageJob] = {}
+    for job in placed:
+        first = locked.setdefault((job.folder, job.pruned.dockerfile), job)
+        if first is job:
+            _lock(job, staging / job.folder)
+        else:  # two images built from one Dockerfile in one folder: it's pinned once
+            job.locked, job.unlocked = first.locked, first.unlocked
 
 
 # What reading a stored context raises when it isn't one a folder can be written from, or is damaged.
@@ -89,14 +106,26 @@ def _lock(job: ImageJob, folder: Path) -> None:
     if not url:
         job.unlocked = "the store holds no image to read its versions from, so a build resolves them afresh"
         return
+    # Each reason leaves the image's url out, as everything the folder records does.
     try:
-        with get_config().get_object_store_at(url).open(url) as saved:
+        store = get_config().get_object_store_at(url)
+    except ValueError:
+        job.unlocked = "the configured stores can't read its saved image, so a build resolves them afresh"
+        return
+    try:
+        with store.open(url) as saved:
             installed = installed_packages(saved)
-    except (*_UNREADABLE, OSError) as e:
-        job.unlocked = f"its stored image can't be read ({e or type(e).__name__}), so a build resolves them afresh"
+    except NotFoundError:
+        job.unlocked = "the store no longer holds its saved image, so a build resolves them afresh"
+        return
+    except OSError as e:
+        job.unlocked = f"its saved image can't be read ({e.strerror or type(e).__name__}), so a build resolves them afresh"
+        return
+    except _UNREADABLE as e:
+        job.unlocked = f"its saved image can't be read ({e or type(e).__name__}), so a build resolves them afresh"
         return
     if installed is None:
-        job.unlocked = "its stored image's layers can't be read, so a build resolves them afresh"
+        job.unlocked = "its saved image's layers can't be read, so a build resolves them afresh"
         return
     job.locked = lock(folder, job.pruned.dockerfile, installed)
 

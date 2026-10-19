@@ -26,6 +26,7 @@ from agent_env.config import get_config
 from agent_env.config.runtime import Config
 from agent_env.entity.scopes import FieldScope
 from agent_env.env.envs.mcp_server import MCPServerEnv
+from agent_env.env.envs.website import WebsiteEnv
 from agent_env.store.object_store.object_store import ObjectMetadata
 from agent_env.task import Task
 from tst.unit.bundle._support import context_image, layout
@@ -303,7 +304,7 @@ def test_an_image_the_store_holds_built_is_pinned_to_its_python_versions_and_the
 
     imported = import_task("t", home / "t")
 
-    assert (imported.root / "envs/crm/constraints.txt").read_text() == "requests==2.31.0\n"
+    assert (imported.root / "envs/crm/constraints.txt").read_text().splitlines()[1:] == ["requests==2.31.0"]
     assert "ARG PIP_CONSTRAINT=/tmp/agent-env-constraints.txt\n" in (imported.root / "envs/crm/Dockerfile").read_text()
     assert not (imported.root / "envs/slack/constraints.txt").exists()
     readme = (imported.root / "README.md").read_text()
@@ -403,3 +404,81 @@ def test_a_step_naming_no_version_of_an_artifact_another_step_pins_reads_the_lat
     assert sorted((written.folder, written.version) for written in imported.written
                   if written.kind.value == "artifact") == [("artifacts/rows", 1), ("artifacts/rows-2", 2)]
     assert not any(d.why.startswith("pinned:") for d in imported.dropped)
+
+
+def _stored_image(home, id, context, dockerfile, installed, image_name=None):
+    """An image the store holds both as ``context``'s build context, built from ``dockerfile``, and as a saved image
+    holding ``installed``."""
+    url = context.build_context_object_url.rsplit("/", 1)[0] + f"/{id}-saved.tar.gz"
+    saved = _saved_image(home / f"{id}-saved.tar.gz", url, installed)
+    return get_artifact_store().put_document(DockerImageArtifact(
+        id=id, description=id, image_name=image_name or f"{id}:v1", tar_gz_s3_url=saved,
+        build_context_s3_url=context.build_context_object_url, dockerfile_path=dockerfile))
+
+
+def test_two_images_of_one_folder_built_from_one_context_are_both_written_and_pinned(home):
+    """A website's backend and frontend share a context, and the frontend's build reads all of it, the backend's
+    Dockerfile included, which pinning the backend rewrites."""
+    context = context_image(home, "web-context", {
+        "backend/Dockerfile": "FROM python:3.12-slim\nRUN pip install requests\nCOPY backend/ /app/\n",
+        "backend/app.py": "app\n", "frontend/Dockerfile": "FROM node:20\nRUN npm install -g typescript\nCOPY . /src/\n",
+        "frontend/index.html": "<p>hi</p>\n"}, "backend/Dockerfile")
+    site = "usr/local/lib/python3.12/site-packages"
+    backend = _stored_image(home, "web-backend", context, "backend/Dockerfile",
+                            {f"{site}/requests-2.31.0.dist-info/METADATA": "Name: requests\nVersion: 2.31.0\n"})
+    frontend = _stored_image(home, "web-frontend", context, "frontend/Dockerfile",
+                             {"usr/local/lib/node_modules/typescript/package.json":
+                              '{"name": "typescript", "version": "5.4.5"}'})
+    WebsiteEnv.put(id="web", backend_docker_image_artifact=backend, frontend_docker_image_artifact=frontend,
+                   environment_name="web")
+    _task([{"id": "env", "type": "deploy_env", "env_id": "web"}])
+
+    imported = import_task("t", home / "t")
+
+    toml = _toml(imported.root, "envs/web/env.toml")
+    assert (toml["backend_image"], toml["frontend_image"]) == ({"dockerfile": "backend/Dockerfile"},
+                                                               {"dockerfile": "frontend/Dockerfile"})
+    assert "ARG PIP_CONSTRAINT=" in (imported.root / "envs/web/backend/Dockerfile").read_text()
+    assert "typescript@5.4.5" in (imported.root / "envs/web/frontend/Dockerfile").read_text()
+    assert (imported.pulled, imported.pinned) == ((), ())
+
+
+@pytest.mark.parametrize("registry", [True, False], ids=["names-a-registry", "names-none"])
+def test_an_image_whose_stored_context_is_gone_is_pulled_by_its_ref_or_fails_naming_it_or_stays_pinned(home,
+                                                                                                         registry):
+    context = context_image(home, "crm-context")
+    image = get_artifact_store().put_document(DockerImageArtifact(
+        id="crm-image", description="gone", image_name="registry.example.com/crm:v1" if registry else "crm:v1",
+        build_context_s3_url=context.build_context_object_url, dockerfile_path="Dockerfile"))
+    os.unlink(context.build_context_object_url.removeprefix("file://"))
+    MCPServerEnv.put(id="crm", docker_image_artifact=image, environment_name="crm")
+    _task([DEPLOY])
+
+    if registry:
+        imported = import_task("t", home / "t")
+        assert _toml(imported.root, "envs/crm/env.toml")["image"] == {"ref": "registry.example.com/crm:v1"}
+        assert imported.pulled[0].why.startswith("its build context can't be downloaded: ")
+        return
+    with pytest.raises(BundleError) as caught:
+        import_task("t", home / "t")
+    assert caught.value.problems[0].startswith("envs/crm: image: artifact crm-image v1 can't be written into the "
+                                               "folder: its build context can't be downloaded: ")
+    kept = import_task("t", home / "t-user", include_scopes=[FieldScope.USER])
+    assert [(pin.id, pin.why.split(":")[0]) for pin in kept.pinned] == [("crm-image", "its build context can't be "
+                                                                                      "downloaded")]
+
+
+def test_an_image_whose_saved_image_is_gone_is_written_unpinned_and_the_reason_names_no_store_location(home):
+    context = context_image(home, "crm-context")
+    site = "usr/local/lib/python3.12/site-packages"
+    image = _stored_image(home, "crm-image", context, "Dockerfile",
+                          {f"{site}/requests-2.31.0.dist-info/METADATA": "Name: requests\nVersion: 2.31.0\n"})
+    os.unlink(image.tar_gz_object_url.removeprefix("file://"))
+    MCPServerEnv.put(id="crm", docker_image_artifact=image, environment_name="crm")
+    _task([DEPLOY])
+
+    imported = import_task("t", home / "t")
+
+    assert [written.unlocked for written in imported.images] == [
+        "the store no longer holds its saved image, so a build resolves them afresh"]
+    assert "file://" not in (imported.root / "README.md").read_text()
