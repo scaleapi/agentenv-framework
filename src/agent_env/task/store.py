@@ -699,7 +699,7 @@ class TaskInstanceStore:
             if rerecorded:
                 rerecords.append(step_id)
             set_fields[_RERECORDED] = rerecords
-            if len(completed) >= total_steps and doc.get("status") != "failed":
+            if len(completed) >= total_steps and doc.get("status") not in ("failed", "cancelled"):
                 set_fields["status"] = "completed"
                 set_fields["completed_at_utc"] = completed_at_utc
             return UpdateSpec(set=set_fields, unset=set(ops.unsets))
