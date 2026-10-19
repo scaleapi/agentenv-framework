@@ -28,6 +28,7 @@ COPY app/ /app/
 COPY conf/*.cfg /etc/svc/
 ADD vendor.tar.gz /vendor/
 COPY current/ /release/
+COPY current/app.txt /through-link.txt
 RUN --mount=type=bind,source=scripts,target=/scripts cp /scripts/run.sh /out/run.sh
 """
 # What the build reads, beside a context ten times bigger it never does.
@@ -81,7 +82,7 @@ def _image_files(tag: str) -> dict[str, tuple[int, str]]:
     found = {}
     with tarfile.open(fileobj=io.BytesIO(exported)) as tar:
         for member in tar:
-            if member.name.split("/", 1)[0] not in ("app", "out", "etc", "vendor", "release"):
+            if member.name.split("/", 1)[0] not in ("app", "out", "etc", "vendor", "release", "through-link.txt"):
                 continue
             content = hashlib.sha256(tar.extractfile(member).read()).hexdigest() if member.isreg() else member.linkname
             found[member.name] = (member.mode, content)
@@ -119,5 +120,5 @@ def test_an_image_built_from_the_pruned_context_holds_what_one_from_the_whole_co
     built = _image_files(docker[1])
     assert built == _image_files(docker[0])
     assert {"app/main.py", "out/built.txt", "out/run.sh", "etc/svc/a.cfg", "vendor/lib/vendored.py",
-            "release/app.txt"} <= set(built)
+            "release/app.txt", "through-link.txt"} <= set(built)
     assert not any(name.startswith("app/tests") or name.endswith(".pyc") for name in built)

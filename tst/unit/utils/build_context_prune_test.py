@@ -136,6 +136,27 @@ def test_a_kept_link_keeps_what_it_points_at_in_the_context_and_a_link_out_of_it
     assert not (tmp_path / "out" / "out").exists()
 
 
+def test_a_source_reached_through_a_link_keeps_the_link_and_what_it_leads_to(tmp_path):
+    files = {"Dockerfile": "FROM python\nCOPY current/app.py /app.py\n", "releases/v2/app.py": "2",
+             "releases/v1/app.py": "1"}
+    archive = _archive(tmp_path / "ctx.tar.gz", files, links={"current": "stable", "stable": "releases/v2"})
+
+    pruned = write_pruned(archive, {tmp_path / "out": "Dockerfile"})
+
+    assert set(_files(tmp_path / "out")) == {"Dockerfile", "releases/v2/app.py"}
+    assert (tmp_path / "out" / "current").is_symlink() and (tmp_path / "out" / "stable").is_symlink()
+    assert pruned[tmp_path / "out"].whole is None
+
+
+def test_a_link_loop_or_one_out_of_the_context_in_a_source_keeps_all_of_it(tmp_path):
+    files = {"Dockerfile": "FROM python\nCOPY loop/a.py /a.py\nCOPY out/b.py /b.py\n", "other.py": "o"}
+    archive = _archive(tmp_path / "ctx.tar.gz", files, links={"loop": "loop2", "loop2": "loop", "out": "../elsewhere"})
+
+    pruned = write_pruned(archive, {tmp_path / "out": "Dockerfile"})
+
+    assert pruned[tmp_path / "out"].whole == "loop/a.py matches nothing in the context"
+
+
 def test_wildcards_match_one_part_of_a_path_as_dockers_do(tmp_path):
     files = {"Dockerfile": "FROM python\nCOPY *.txt [^b]*.cfg /x/\n", "a.txt": "a", "sub/c.txt": "c", "a.cfg": "a",
              "b.cfg": "b"}

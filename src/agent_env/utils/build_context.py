@@ -178,11 +178,11 @@ def write_pruned(archive: Path, images: Mapping[Path, str]) -> dict[Path, Pruned
             raise ValueError(f"the build context has no {dockerfile}")
         ignore = next((name for name in _ignore_files(dockerfile) if name in texts), None)
         matcher = FilePatternMatcher(*_patterns(texts[ignore])) if ignore else None
-        reads = context_reads(texts[dockerfile])
+        reads, crossed = _through_links(context_reads(texts[dockerfile]), links)
         # A source the reading found that names nothing here is likelier a misreading than a build that fails.
         if missing := next((path for path in reads.paths if not any(_matches(path, name) for name in links)), None):
-            reads = ContextReads(whole=f"{missing} matches nothing in the context")
-        plans[folder] = (_kept(links, reads, dockerfile, ignore, matcher), reads.whole)
+            reads, crossed = ContextReads(whole=f"{missing} matches nothing in the context"), set()
+        plans[folder] = (_kept(links, reads, dockerfile, ignore, matcher, crossed), reads.whole)
     counts = {folder: [0, 0] for folder in images}
     with tarfile.open(archive, "r:gz") as tar:
         for member in tar:
@@ -249,8 +249,39 @@ def _context_path(source: str) -> str | None:
     return None if path == "." or path == ".." or path.startswith("../") else path
 
 
+def _through_links(reads: ContextReads, links: Mapping[str, str | None]) -> tuple[ContextReads, set[str]]:
+    """``reads`` with each source that names nothing itself followed through the links its leading parts name, as
+    docker build follows them, and the links it crossed. A wildcard source is left as it is."""
+    if reads.whole is not None:
+        return reads, set()
+    paths, crossed = [], set()
+    for path in reads.paths:
+        if any(char in path for char in "*?[") or any(_matches(path, name) for name in links):
+            paths.append(path)
+            continue
+        resolved, hops = _resolve(path, links)
+        paths.append(resolved)
+        crossed |= hops
+    return ContextReads(paths=tuple(paths)), crossed
+
+
+def _resolve(path: str, links: Mapping[str, str | None]) -> tuple[str, set[str]]:
+    """``path`` with each part that is a link in the context replaced by where it leads, and the links that took; as it
+    is, crossing nothing, when a link leads out of the context or round in a loop."""
+    resolved, crossed = "", set()
+    for part in path.split("/"):
+        resolved = posixpath.join(resolved, part)
+        while (target := links.get(resolved)) is not None:
+            following = posixpath.normpath(posixpath.join(posixpath.dirname(resolved), target))
+            if target.startswith("/") or following == ".." or following.startswith("../") or resolved in crossed:
+                return path, set()
+            crossed.add(resolved)
+            resolved = following
+    return resolved, crossed
+
+
 def _kept(links: Mapping[str, str | None], reads: ContextReads, dockerfile: str, ignore: str | None,
-          matcher: FilePatternMatcher | None) -> set[str]:
+          matcher: FilePatternMatcher | None, crossed: set[str] = frozenset()) -> set[str]:
     """The names in ``links`` (each name's link target, None when it's no link) that a build reads, as ``write_pruned``
     keeps them, and the folders above them. What the OS or Python leaves behind is dropped, as ``BuildContext`` drops it."""
     def sent(name: str) -> bool:
@@ -260,7 +291,7 @@ def _kept(links: Mapping[str, str | None], reads: ContextReads, dockerfile: str,
         kept = {name for name in links if sent(name)}
     else:
         kept = {name for name in links if sent(name) and any(_matches(path, name) for path in reads.paths)}
-    kept |= {name for name in (dockerfile, ignore) if name in links}
+    kept |= {name for name in (dockerfile, ignore) if name in links} | {name for name in crossed if sent(name)}
     names = sorted(links)
     pending = [name for name in kept if links[name]]
     while pending:
