@@ -12,6 +12,7 @@ from smol import ConnectOptions, Machine
 
 from agent_env.config import get_config
 from agent_env.providers.sandbox_providers.sandbox import CURL_RETRY_FLAGS, VmSandbox
+from agent_env.providers.sandbox_providers.host_images import host_platform, saved_here
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
 from agent_env.store.object_store.local.store import LocalFilesystemObjectStore
 from agent_env.store.object_store.local.tls import local_ca
@@ -44,6 +45,15 @@ class SmolVmSandbox(VmSandbox):
         if code or not stdout.strip():
             raise RuntimeError(f"Cannot determine SmolVM guest architecture: {stderr[-500:]}")
         self.platform = normalize_platform(f"linux/{stdout.strip()}")
+
+    async def build_images(self, artifacts: list) -> None:
+        """Load each image this machine builds natively, from the copy it saves, since a VM here starts with no build
+        cache; one for a VM of another platform is built in the VM."""
+        if self.platform != host_platform():
+            await super().build_images(artifacts)
+            return
+        saved = [artifact.model_copy(update={"tar_gz_object_url": await saved_here(artifact)}) for artifact in artifacts]
+        await self._load_tarballs(saved)
 
     async def terminate(self) -> None:
         await asyncio.to_thread(self._machine.delete)

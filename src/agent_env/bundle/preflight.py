@@ -8,13 +8,13 @@ its provider: an image the provider can't run, by the check the deploy itself ma
 would pull from this machine's registry; a VM asked of a provider that can't create one; or containers on the local
 provider without a Docker daemon. An image's tar.gz or build context
 that only this machine's object store holds isn't refused: agent-env pushes it to the sandbox. A deploy_agent step that
-names no agent, and a judge that names none, deploy the configured default agent, which must be in the store. An env the
-bundle writes is checked from its planned env.toml.
+names no agent, and a judge that names none, deploy the configured default agent: one this bundle or an installed one
+defines is planned as the bundle's own, and any other must be in the store. An env the bundle writes, or pulls in from an
+installed bundle, is checked from its planned env.toml.
 
-An image the bundle builds is written in the form its deploys can run: built on this machine when they deploy on the
-local provider, and as its build context alone when they deploy on providers that build it, in a VM or, as Modal does,
-themselves. One version is one of the two, so a run deploying it both ways is refused, as is one deploying it on a
-provider that runs an image by name.
+An image the bundle builds is written as its build context alone, whichever way its deploys run, and each deploy builds
+it where it runs: in a VM, or as Modal does, itself, or for a sandbox on this machine with this machine's Docker, which
+the run does before its tasks start. A deploy on a provider elsewhere that runs an image by name is refused.
 
 A gateway deploy runs on infra envs the store may not hold yet: the gateway, the service-db its local Postgres state
 runs from, and the website browser it adds for websites. In local stores the run builds those once its writes are done
@@ -73,7 +73,6 @@ from agent_env.task_step.task_steps.deploy_sandbox import DeploySandboxTaskStep
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
 from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, docker_unreachable
 
-from ._fs import relative
 from .parse import BundleError, BundleKind
 from .plan import Plan
 from .resolve import BuiltImage, Reference, ReferencedImage, ResolvedEntry, build_step
@@ -87,7 +86,7 @@ class Preflight:
 
     infra_kinds: frozenset[str]  # the infra its deploys on the local provider run on
     infra: tuple[InfraBuild, ...]  # those the store doesn't hold yet, or holds built from other inputs
-    contexts: frozenset[str] = frozenset()  # the ids of the images the bundle builds that it writes as build contexts
+    built_here: frozenset[str] = frozenset()  # the ids of the images the bundle builds that a deploy here runs
 
 
 def preflight_run(plan: Plan, tasks: Iterable[ResolvedEntry], sandbox: str | None) -> Preflight:
@@ -140,7 +139,7 @@ class _Walk:
         steps = [build_step(config) for config in task.config]
         sandboxes = {step.sandbox_name: step for step in steps if isinstance(step, DeploySandboxTaskStep)}
         for step in steps:
-            where = f"{relative(self.plan.bundle.bundle.root, task.entry.path)}: step {step.id!r}"
+            where = f"{self.plan.path(task.entry)}: step {step.id!r}"
             try:
                 if isinstance(step, DeployEnvTaskStep):
                     self._env(where, step)
@@ -161,7 +160,7 @@ class _Walk:
             infra = infra_to_build(self.infra)
         except InfraError as e:
             self.run_problems.extend(e.problems)
-        contexts = self._contexts()
+        built_here = self._built_here()
         self._default_agent()
         reason = docker_unreachable() if self.docker_users or infra else None
         if reason and self.docker_users:
@@ -178,7 +177,7 @@ class _Walk:
             problems.append(f"{first}{more}: {problem}")
         if problems:
             raise BundleError(problems)
-        return Preflight(frozenset(self.infra), tuple(infra), contexts)
+        return Preflight(frozenset(self.infra), tuple(infra), built_here)
 
     # Deploys, each resolving its provider as its step does when it runs
 
@@ -356,7 +355,7 @@ class _Walk:
         """The providers the deploy ``where`` may run on that take it, refusing the deploy, naming why each refuses
         (``_link_refusals``), when none does: a deploy skips a provider that refuses it, so one that takes it is enough.
         One on this machine that takes it runs it on this machine's Docker; one it skips needs none. An image the
-        bundle builds is noted with them, for ``_contexts`` to choose its form."""
+        bundle builds is noted with them, for ``_built_here``."""
         links = list(provider.links)
         refusals = [(link, self._link_refusals(link, accepts, images, vms_load=vms_load, elsewhere=elsewhere))
                     for link in links]
@@ -426,37 +425,25 @@ class _Walk:
                                                                          image), vms_load=True))]
         return found
 
-    def _contexts(self) -> frozenset[str]:
-        """The images the bundle builds that it writes as build contexts: those every deploy runs on providers that
-        build them. One its deploys run only on the local provider, or that none runs, is built on this machine."""
-        contexts = set()
+    def _built_here(self) -> frozenset[str]:
+        """The images the bundle builds that a deploy runs on this machine, which the run builds here before its tasks
+        start, with the Docker those deploys need. Any other deploy builds the image where it runs, a plugin step's
+        included, but not on a provider elsewhere that runs an image by name."""
+        here = set()
         for image_id, uses in self.uses.items():
             built = self.built[image_id]
-            source = f"{relative(self.plan.bundle.bundle.root, built.entry.path)}/{built.dockerfile}"
-            local, vms = [], []
+            source = f"{self.plan.path(built.entry)}/{built.dockerfile}"
             for where, what, links, accepts in uses:
                 for link in links:
                     if link.ON_THIS_MACHINE:
-                        local.append((where, what, links, link))
+                        here.add(image_id)
                     elif accepts(link) is Accepts.NAME:
                         self._problem(where, f"deploys {what} on the {_shown(link)} sandbox provider, which runs it by "
                                              f"name, and the bundle builds it from {source}, which a sandbox runs only "
                                              "once it's built on this machine or by the provider it runs on; run it "
                                              "with --sandbox local, or on a provider that builds it, such as --sandbox "
                                              "modal")
-                    else:
-                        vms.append((where, what, links, link))
-            if local and vms:
-                (where, what, links, link), (elsewhere, _, _, vm) = local[0], vms[0]
-                on = (f"{_named(links)} sandbox provider" if elsewhere == where else
-                      f"{_shown(link)} sandbox provider, and {elsewhere} on the {_shown(vm)} one")
-                self._problem(where, f"deploys {what} on the {on}: the bundle builds it from {source} on this machine "
-                                     "for the local provider, and as a build context for one that builds it, and a "
-                                     "run writes it one way; run its deploys on one kind, such as --sandbox local or "
-                                     "--sandbox modal_vm")
-            elif vms:
-                contexts.add(image_id)
-        return frozenset(contexts)
+        return frozenset(here)
 
     def _default_agent(self) -> None:
         if not self.default_agent_users:

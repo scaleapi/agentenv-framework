@@ -11,6 +11,7 @@ import pytest
 from agent_env.a2a_agent import A2AAgent
 from agent_env.config.model import ModelConfig
 from agent_env.providers.sandbox_providers import sandbox_provider
+from agent_env.store.secret_store.local_secret_store import LocalSecretStore
 from agent_env.task_step.context import DeployedSandbox, TaskStepContext
 from agent_env.task_step.task_steps.install_agent import (
     InstallAgentTaskStep,
@@ -98,6 +99,9 @@ class _FakeConfig:
     def get_litellm_api_key(self):
         return "config-key"
 
+    def resolve_reference(self, value):
+        return value
+
 
 def test_litellm_key_resolver_prefers_per_run_override():
     r = _build_param_resolvers(
@@ -176,6 +180,52 @@ async def test_install_logs_show_the_command_template_not_the_model_key_or_heade
     assert "sk-never-logged" in command and "org-never-logged" in command
     assert "start --key {litellm_api_key} --headers {litellm_extra_headers}" in caplog.text
     assert "never-logged" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_per_run_key_given_by_reference_is_resolved_through_the_secret_store(monkeypatch, local_stores):
+    monkeypatch.setenv("LITELLM_BASE_URL", "http://localhost:4000/v1")
+    local_stores.set_secret_store(LocalSecretStore(values={"team_key": "sk-from-the-store"}, use_env=False))
+    sandbox = _InstallSandbox()
+    monkeypatch.setattr(sandbox_provider, "build_sandbox_provider",
+                        lambda name: SimpleNamespace(get_sandbox=_resolved(sandbox)))
+    image = SimpleNamespace(image_name="img", build_context_object_url="s3://bucket/ctx.tar.gz")
+    monkeypatch.setattr(A2AAgent, "get", staticmethod(lambda *args: SimpleNamespace(
+        id="agent-x", version=1, metadata={}, docker_image_artifact=image)))
+    step = InstallAgentTaskStep(id="i", version=None, sandbox_name="vm", a2a_agent_id="agent-x", agent_name="solver")
+    monkeypatch.setattr(step, "_extract_install_extension", _resolved({"params": {
+        "install_commands_host": ["start --key {litellm_api_key}"],
+        "required_params_host": ["litellm_api_key"], "a2a_port": 8000}}))
+    monkeypatch.setattr(step, "_wait_for_agent_card", _resolved({}))
+    monkeypatch.setattr(step, "_register_instance", lambda *args: SimpleNamespace(instance_id="solver-1"))
+    context = TaskStepContext(
+        deployed_sandboxes=[DeployedSandbox(
+            sandbox_name="vm", sandbox_id="sb-1", sandbox_mode="vm", sandbox_type="local",
+            tunnel_urls={"8000": "http://127.0.0.1:8000"})],
+        metadata={"user_overrides": {"litellm_api_key": "secret:team_key"}},
+    )
+
+    await step.execute(context)
+
+    assert [s for s in sandbox.scripts if s.startswith("start ")] == ["start --key sk-from-the-store"]
+
+
+def test_a_per_run_reference_is_resolved_only_when_the_install_asks_for_the_key():
+    resolved = []
+
+    class _Config(_FakeConfig):
+        def resolve_reference(self, value):
+            resolved.append(value)
+            return "sk-resolved"
+
+    r = _build_param_resolvers(
+        container_name="c", work_dir="/tmp/stage", agent_ctx_tar="/tmp/stage/ctx.tar.gz",
+        a2a_port=8000, config=_Config(), agent_name="default-agent", workspace_dir=None,
+        litellm_api_key_override="secret:team_key",
+    )
+    assert resolved == []
+    assert r["litellm_api_key"]() == "sk-resolved"
+    assert resolved == ["secret:team_key"]
 
 
 @pytest.mark.asyncio

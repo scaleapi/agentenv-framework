@@ -17,6 +17,7 @@ from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.bundle import parse_bundle
 from agent_env.bundle import plan as plan_module
 from agent_env.bundle import resolve as resolve_module
+from agent_env.bundle import ledger as ledger_module
 from agent_env.bundle.ledger import LEDGER_COLLECTION, Ledger, materializing
 from agent_env.bundle.materialize import _pinned
 from agent_env.config import configure, get_config
@@ -294,7 +295,7 @@ def test_a_file_changed_during_its_write_is_written_again_even_once_changed_back
 
 def test_a_new_digest_scheme_rewrites_everything_and_says_only_that(bundle_dir, monkeypatch):
     _run(bundle_dir)
-    monkeypatch.setattr("agent_env.bundle.ledger.SCHEME", 2)
+    monkeypatch.setattr("agent_env.bundle.ledger.SCHEME", ledger_module.SCHEME + 1)
 
     assert {check.reasons for check in _run(bundle_dir).values()} == {("the ledger's digest scheme changed",)}
 
@@ -563,7 +564,7 @@ def test_a_second_run_writing_any_of_the_same_ids_waits_for_the_first_to_finish(
         import pathlib, time
         from agent_env.bundle import parse_bundle
         from agent_env.bundle.ledger import materializing
-        with materializing(parse_bundle(pathlib.Path({str(first)!r}), **{root!r})):
+        with materializing(entry.id for entry in parse_bundle(pathlib.Path({str(first)!r}), **{root!r}).entries):
             pathlib.Path({str(held)!r}).write_text("held")
             time.sleep(1.5)
             pathlib.Path({str(done)!r}).write_text("done")
@@ -574,7 +575,8 @@ def test_a_second_run_writing_any_of_the_same_ids_waits_for_the_first_to_finish(
                 break
             time.sleep(0.05)
         waited = []
-        with materializing(parse_bundle(second, **root), on_wait=lambda: waited.append(True)):
+        with materializing((entry.id for entry in parse_bundle(second, **root).entries),
+                           on_wait=lambda: waited.append(True)):
             assert done.exists()
         assert waited == [True]
     finally:

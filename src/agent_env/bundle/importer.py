@@ -19,11 +19,12 @@ from agent_env.artifact.registry import ARTIFACT_REGISTRY, canonical_type, get_a
 from agent_env.bundle import _toml
 from agent_env.bundle._fs import fold, os_reason, show
 from agent_env.bundle._secrets import scrub
+from agent_env.bundle.installed import InstalledBundle, installed_bundles
 from agent_env.bundle.parse import BundleError, parse_bundle, root_problems, segment_problem
 from agent_env.bundle.plan import STORE_GETTERS, check_bundle
 from agent_env.bundle.resolve import resolve_bundle
 from agent_env.config import get_config
-from agent_env.entity.refs import EntityKind, RefRole, RefSite, ref_sites
+from agent_env.entity.refs import EntityKind, EntityRef, RefRole, RefSite, default_agent_refs, ref_sites
 from agent_env.env import registry as env_registry
 from agent_env.env.registry import get_env_registry
 from agent_env.eval import Eval
@@ -34,10 +35,7 @@ from agent_env.store.ids import LOCAL_PREFIX
 from agent_env.task import Task
 from agent_env.task_step import registry as task_step_registry
 from agent_env.task_step.registry import get_task_step_registry
-from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
-from agent_env.task_step.task_steps.install_agent import InstallAgentTaskStep
-from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
 
 # How long a name taken from an id may be, in bytes; ids are capped far above it, and a longer name helps nobody.
 _MAX_NAME_BYTES = 200
@@ -183,6 +181,7 @@ class _Importer:
         self.read: dict[tuple[EntityKind, str, int | None], int | str] = {}
         self.types: dict[tuple[EntityKind, str, int | None], str] = {}  # each entity read, by its read key
         self.origins: dict[tuple[str, str], str] | None = None
+        self.installed: tuple[InstalledBundle, ...] | None = None
         _check_destination(self.dest)
 
     def add_task(self, task: Task) -> str:
@@ -214,7 +213,7 @@ class _Importer:
                 if _key(site) not in outputs:  # the run writes an output again, so it takes no pin
                     self._pin(site, f"{where}: {site.path}", deployed)
                     self._need_type(site, f"{where}: {site.path}")
-            self._default_agents(step, where)
+            self._default_agents(step, cls.entity_refs or (), where)
         self.files[path] = json.dumps(steps, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
         self.tasks.append(ImportedTask(path, task.id, task.version, len(steps)))
         return name
@@ -242,7 +241,7 @@ class _Importer:
                     (staging / path).write_text(text, encoding="utf-8")
             except OSError as e:
                 raise BundleError([f"{show(self.dest.parent)}: can't write the import there: {os_reason(e)}"]) from None
-            check_bundle(resolve_bundle(parse_bundle(staging)))
+            check_bundle(resolve_bundle(parse_bundle(staging)), installed=installed_bundles)
             self._move(staging)
         finally:
             shutil.rmtree(staging, ignore_errors=True)
@@ -267,6 +266,9 @@ class _Importer:
 
     def _pin(self, site: RefSite, where: str, deployed: set[str]) -> None:
         kind, entity_id = site.ref.kind, site.value
+        if (bundle := self._installed_for(kind, entity_id)) is not None:
+            self._from_installed(site, where, bundle)
+            return
         if site.version is not None or site.version_key is not None:
             read = self._read(kind, entity_id, site.version)
             if isinstance(read, str):
@@ -281,6 +283,23 @@ class _Importer:
         elif _nfc(entity_id) not in deployed:
             self.floating.append(Floating(where, kind, entity_id, "the field takes no version and no step of the task "
                                                                   "deploys it, so a run reads the latest"))
+
+    def _installed_for(self, kind: EntityKind, entity_id: str) -> InstalledBundle | None:
+        """The installed bundle whose ids ``entity_id``, an env, agent or artifact, is under: a run writes it from
+        there."""
+        if kind is EntityKind.TASK or not entity_id.startswith(LOCAL_PREFIX):
+            return None
+        if self.installed is None:
+            self.installed = installed_bundles()
+        return next((bundle for bundle in self.installed if entity_id.startswith(f"{bundle.id_root}/")), None)
+
+    def _from_installed(self, site: RefSite, where: str, bundle: InstalledBundle) -> None:
+        """An installed bundle's entity has no fixed version, so it isn't pinned, and a pin the store held is dropped."""
+        why = f"it comes with the installed bundle {bundle.qualified}, which a run writes it from"
+        if site.version is not None and site.version_key is not None:
+            site.owner[site.version_key] = None
+            why += f"; the stored pin to v{site.version} is dropped, as such an entity has no fixed version"
+        self.floating.append(Floating(where, site.ref.kind, site.value, why))
 
     def _read(self, kind: EntityKind, entity_id: str, version: int | None = None) -> int | str:
         """The version of ``entity_id`` the store holds, at ``version`` or its latest, or why it can't be read."""
@@ -325,17 +344,13 @@ class _Importer:
         by = distribution if registered and _names(value, cls) else "configuration"
         self.needs.append(Need(where, what, name, by))
 
-    def _default_agents(self, step: dict, where: str) -> None:
-        """A step that names no agent deploys the configured default, which no field pins."""
-        if step["type"] in (DeployAgentTaskStep.type, InstallAgentTaskStep.type) and step.get("a2a_agent_id") is None:
-            field, what = "a2a_agent_id", "names no agent"
-        elif (step["type"] == RubricsVerifierTaskStep.type and step.get("use_agent_judge")
-              and step.get("agent_name") is None and step.get("judge_a2a_agent_id") is None):
-            field, what = "judge_a2a_agent_id", "names no judge agent"
-        else:
-            return
-        self.floating.append(Floating(f"{where}: {field}", EntityKind.AGENT, get_config().get_default_a2a_agent_id(),
-                                      f"the step {what}, so a run deploys the configured default"))
+    def _default_agents(self, step: dict, refs: tuple[EntityRef, ...], where: str) -> None:
+        """A step that leaves an agent field unset falls back to the configured default, which no field pins."""
+        for ref in default_agent_refs(refs, step):
+            self.floating.append(Floating(f"{where}: {ref.path}", EntityKind.AGENT,
+                                          get_config().get_default_a2a_agent_id(),
+                                          f"the step leaves {ref.path} unset, so it falls back to the configured "
+                                          "default"))
 
     def _name(self, kind: str, entity_id: str) -> str:
         """A name in the ``kind`` folder: the id's last segment made valid, numbered when taken, caselessly."""

@@ -81,7 +81,8 @@ or one of them only where it is used.
   what steps staged in `/tmp` under that id. Those processes are found through `/proc`, so on macOS
   they keep running; files the install wrote elsewhere (`/opt`, packages) stay.
 - `[agents] default_a2a_agent_id`: the agent a `deploy_agent` step without an id deploys; built-in
-  `a2a-default`, overridable by `configure(default_a2a_agent_id=...)`.
+  `a2a-default`, overridable by `configure(default_a2a_agent_id=...)`. Any step's agent field left unset
+  falls back to it (`entity.refs.default_agent_refs`), so a bundle run plans the default for it.
 - Secrets never live in the file: use `secret:KEY` or `env:NAME` references, resolved through
   `[stores.secret]`.
 - agent-env has no stage concept: "dev" versus "prod" is which file `AGENT_ENV_CONFIG` names. A
@@ -104,7 +105,7 @@ and deserialized through a registry.
 | `config/` | The `Config` singleton (`get_config`, `configure`, `reset_config`) in `config/runtime.py`, file discovery in `config/loader.py`, and `load_impl`, which resolves `module:Class` pointers. `agent_env.store` re-exports the config names for compatibility. |
 | `providers/` | `providers/sandbox_providers/` holds the sandbox providers `local`, `modal`, `modal_vm`, `e2b`, `sail_vm` (the `sail` extra), `smol_vm` (the `smol` extra), `tensorlake` (the `tensorlake` extra), `tenki` (the `tenki` extra), `vercel` (the `vercel` extra); `[sandbox] default` and `agent_default` accept a comma-separated fallback chain, whose deploys skip a provider that can't run them. A sandbox provider declares what it runs (`ON_THIS_MACHINE`, and for VMs on this machine the address their requests to it arrive at, `REACHES_HOST_AT`; `CONTAINER_ACCEPTS`, `PRIVATE_NETWORK`; `SUPPORTED_SANDBOX_MODES`, derived from whether it implements `create_sandbox` and `create_vm`; and `SANDBOX_ACCEPTS`, the images an agent's sandbox runs, which defaults to those a VM loads when it implements `create_vm` and to `CONTAINER_ACCEPTS` otherwise, so only a provider that implements `create_vm` yet gives an agent a container, like the local one, declares it), each sandbox carries the `platform` of the images it runs (linux/amd64 unless its provider sets another when it creates it; None, any, unchecked, for a local sandbox), and code outside `providers/sandbox_providers/` reads those, never which provider it has. `providers/env_providers/` holds the environment providers: `EnvironmentProvider` (an env's containers and state store), `EnvironmentGatewayProvider` (`gateway`, an env's default), which renders a docker-compose for the gateway and its MCP servers inside the sandbox, and `EnvironmentServerProvider` (`server`), one MCP server in its own container with no gateway in front and no state store; `providers/env_state/` holds env-state providers (`local_postgres` built in). |
 | `a2a_agent/` | The `A2AAgent` entity (`a2a_agent`), its stores and the validator steps. The protocol package provides the agent-side framework. |
-| `runner/` | The `[runner]` seam: `Runner.submit()` returns a `RunHandle` (`run_id`, `instance_id`) before the run starts; `LocalRunner` is built in. |
+| `runner/` | The `[runner]` seam: `Runner.submit()` returns a `RunHandle` (`run_id`, `instance_id`) before the run starts; `LocalRunner` is built in. `runner/store.py` is the run index every runner writes and the explorer reads. |
 | `bundle/` | A bundle is a folder of entities (`envs/`, `agents/`, `artifacts/`, `skills/`, `tasks/<name>.json`, `evals/<name>.toml`) that runs without a registry: `agent-env run` plans it, writes it into the `@local` namespace (reusing each version whose inputs haven't changed) and runs its evals or tasks; `agent-env bundle init` writes a stored task or eval as one, with its references pinned. |
 | `eval/` | `Eval` (`eval`), a versioned list of task references, and its store. |
 | `plugins/` | Entry-point plugins (see Extension points): the group names, `inventory()`, which `agent-env plugin list/show/check` report, `load_failures` and `settings`. The top level is public; the underscored modules are internal. |
@@ -134,7 +135,10 @@ Out-of-tree code plugs in either through `config.toml`, as a `module:Class` poin
 - Bundles install through `agent_env.bundles` entry points (`<name> = "<package>"`, the folder at
   `<package>/<name>/`), with ids rooted at `@local/<dist>/<name>`. A shared name is not left out:
   a bundle runs by its bare name unless another distribution installs that name too, and then by
-  `<dist>/<name>`, except that agent-env's own bundles keep their bare names.
+  `<dist>/<name>`, except that agent-env's own bundles keep their bare names. Another bundle uses an
+  installed bundle's env, agent or artifact by its id, or as the configured default agent: the planner
+  pulls it into the run as one of the bundle's own (`bundle/plan.py`), and its ledger row is keyed by the
+  installed bundle, so every bundle shares one write of it. Such an id takes no version pin.
 - Environment providers have no table: an installed package registers one as an `agent_env.env_providers`
   entry point named its `type`, which records carry as `env_provider_type`.
 - `[plugins.<distribution name>]` is reserved for an installed plugin's own settings, read with
@@ -164,6 +168,10 @@ orchestrators call it the same way. What callers rely on:
   through `record_task_failure()`, retries through `undo_steps()`.
 - The runner writes its run identifier to `context.metadata["workflow_id"]` before calling `run()`;
   core stores it opaquely with the instance.
+- A runner records every run it accepts in the run index (`agent_env.runner.store`): `insert_run` at
+  submit, `set_running` when it starts, `mark_terminal` when it ends. The explorer lists, counts and
+  groups runs from that collection and never calls the runner to ask, so a run missing there is
+  invisible and one never marked terminal shows as in flight.
 - Per-run overrides travel in `context.metadata["user_overrides"]` (`litellm_api_key`,
   `a2a_agent_id`, `agent_sandbox`, `env_sandbox`, `env_state_type`, and more), never in `os.environ`;
   steps fall back to the configured `[model]` key. `step_params` maps a step id to overrides of that
@@ -174,8 +182,18 @@ orchestrators call it the same way. What callers rely on:
   Both write each prompt response through `PromptResponse.to_dict()`, which adds the S3-named key
   of every renamed trajectory field, since stored documents and raw-doc readers use them; serialize
   a context with `TaskStepContext.to_dict()`, not `dataclasses.asdict`.
+- A per-run secret given as a bare `secret:KEY` or `env:NAME` reference names the secret rather
+  than holding it, so redaction keeps it, and the step that uses it resolves it with
+  `Config.resolve_reference()`: a runner whose steps run on another host passes per-run keys this
+  way. A reference with a `?default` is stripped like a secret. The run index strips the same keys
+  from a run's overrides. A reference resolves against the environment and `[stores.secret]` of the
+  host running the step, so a runner that takes runs from callers who may not read those refuses
+  references it did not create.
 - A run is resumable: pass a previously persisted `context`, a `start_step` and the existing
   `instance_id`; completed steps are seeded as SUCCESS.
+- A runner that must hear from a long step puts a zero-argument callable at
+  `context.metadata[HEARTBEAT_KEY]` (`task_step/context.py`); a step that blocks for long calls
+  `context.heartbeat()`, a no-op without one. The key is in `_REDACTED_KEYS`, so it is never persisted.
 - An episode (`EpisodeSpec`, `task/episode/`) is one `Task.run()` of a copy of the task in which
   the `deploy_agent` and `prompt_agent` steps of each of its `trainer_agents` are the plain-data
   `episode_agent` and `episode_turn`, which wait for the caller instead of deploying or prompting. Its

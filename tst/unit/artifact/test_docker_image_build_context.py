@@ -41,9 +41,14 @@ def test_a_context_is_registered_with_no_image_and_a_name_that_names_no_registry
 
     stored = DockerImageArtifact.get("solver-image", image.version)
     assert (stored.tar_gz_object_url, stored.dockerfile_path, stored.platform) == (None, "Dockerfile", "linux/amd64")
-    assert stored.image_name.startswith("local/solver-image-") and stored.image_name.endswith(":v1")
+    sources = BuildContext.of(context, context / "Dockerfile").source_digest("linux/amd64")
+    assert stored.image_name.startswith("local/solver-image-")
+    assert stored.image_name.endswith(f":{sources.removeprefix('sha256:')[:16]}")
     assert not names_registry(stored.image_name)
-    assert stored.source_digest == BuildContext.of(context, context / "Dockerfile").source_digest("linux/amd64")
+    assert stored.source_digest == sources
+    again = DockerImageArtifact.put_context("solver-image", description="d", context_path=str(context),
+                                            dockerfile_path=str(context / "Dockerfile"))
+    assert (again.version, again.image_name) == (image.version + 1, stored.image_name)
     assert _names(stored) == [".dockerignore", "Dockerfile", "src", "src/app.py"]
 
 

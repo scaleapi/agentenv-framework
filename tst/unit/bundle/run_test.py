@@ -10,11 +10,12 @@ import pytest
 from click.testing import CliRunner
 
 import agent_env.bundle.run as run_module
-from agent_env.bundle import materialize as materialize_module
+from agent_env.providers.sandbox_providers import host_images
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.store import get_artifact_store
 from agent_env.bundle import BundleError, Outcome, TaskRun, dry_run_bundle, parse_bundle, run_bundle
+from agent_env.bundle.preflight import Preflight
 from agent_env.bundle.materialize import materialize
 from agent_env.bundle.plan import plan_bundle
 from agent_env.bundle.resolve import resolve_bundle
@@ -147,14 +148,15 @@ BUILT_AGENT = {
 
 @pytest.fixture
 def docker(monkeypatch):
-    """Stands in for docker: each build's tag is recorded, and the image written as a docker_image document."""
-    builds = []
-    monkeypatch.setattr(materialize_module.shutil, "which", lambda name: f"/usr/bin/{name}")
-    monkeypatch.setattr(materialize_module, "build_image",
-                        lambda dockerfile, context, tag, *, platform: builds.append(tag))
-    monkeypatch.setattr(materialize_module.DockerImageArtifact, "put", lambda id, **kwargs: get_artifact_store(
-    ).put_document(DockerImageArtifact(id=id, description="d", image_name=kwargs["image_name"],
-                                       tar_gz_s3_url=f"file:///{id}.tar.gz")))
+    """Stands in for this machine's Docker: each build's tag is recorded, and Docker then holds it."""
+    builds, held = [], {}
+
+    def build(dockerfile, context, tag, *, platform, labels=None):
+        builds.append(tag)
+        held[tag] = (labels or {}).get(host_images._SOURCES_LABEL)
+
+    monkeypatch.setattr(host_images, "build_image", build)
+    monkeypatch.setattr(host_images, "_built_from", held.get)
     return builds
 
 
@@ -318,7 +320,11 @@ def test_progress_is_reported_and_a_progress_callback_that_raises_stops_without_
     assert calls == ["tasks/a.json: v1, unchanged"]
 
 
-def test_a_run_says_before_it_builds_an_image_and_names_the_image_apart_from_its_agent(bundle_dir, docker):
+def test_a_run_says_before_it_builds_an_image_and_names_the_image_apart_from_its_agent(bundle_dir, docker,
+                                                                                      monkeypatch):
+    """As it does for an image a deploy on this machine runs, which preflight names."""
+    monkeypatch.setattr(run_module, "preflight_run",
+                        lambda plan, tasks, sandbox: Preflight(frozenset(), (), frozenset({f"{ROOT}/solver__agent_image"})))
     layout(bundle_dir, BUILT_AGENT)
     lines = []
 
@@ -561,7 +567,7 @@ def test_the_cli_dry_run_reads_another_bundles_entity_and_says_why_an_agent_pinn
     )
 
 
-def test_the_cli_dry_run_lists_an_image_it_would_build_and_builds_nothing(bundle_dir, docker, quiet_logs):
+def test_the_cli_dry_run_lists_an_image_it_would_write_and_builds_nothing(bundle_dir, docker, quiet_logs):
     layout(bundle_dir, BUILT_AGENT)
 
     result = CliRunner().invoke(cli, ["run", str(bundle_dir), "--task", "agent", "--dry-run"])
@@ -574,7 +580,8 @@ def test_the_cli_dry_run_lists_an_image_it_would_build_and_builds_nothing(bundle
         "tasks/agent.json: v1 (new)\n"
         "\n"
         "Images:\n"
-        "  agents/solver (Dockerfile image) v1: built on this machine\n"
+        "  agents/solver (Dockerfile image) v1: a build context, which each deploy builds where it runs, for its "
+        "sandbox's platform\n"
         "Would run:\n"
         "  tasks/agent.json v1\n"
         + DRY_RUN

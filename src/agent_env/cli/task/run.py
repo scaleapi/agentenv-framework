@@ -416,8 +416,8 @@ def _hold(tagged_contexts, interrupts: Interrupts) -> None:
 @click.option("--agent-artifact-id", default=None, type=str, help="Override the agent image artifact for deploy_agent steps")
 @click.option("--start-step", default=0, type=int, help="0-based step index to start execution from")
 @click.option("--context-json", default=None, type=click.Path(exists=True, dir_okay=False), help="Path to a JSON file to seed the TaskStepContext")
-@click.option("--litellm-api-key", default=None, type=str, help="Override LITELLM_API_KEY for this run")
-@click.option("--judge-litellm-api-key", default=None, type=str, help="Override LITELLM_API_KEY used by rubrics_verifier judge agents (falls back to --litellm-api-key, then to config secret)")
+@click.option("--litellm-api-key", default=None, type=str, help="Override LITELLM_API_KEY for this run; a secret:KEY or env:NAME reference is resolved where it is used")
+@click.option("--judge-litellm-api-key", default=None, type=str, help="Override LITELLM_API_KEY used by rubrics_verifier judge agents (falls back to --litellm-api-key, then to config secret); a secret:KEY or env:NAME reference is resolved where it is used")
 @click.option("--apply-trajectory-filter/--no-trajectory-filter", "apply_trajectory_filter", default=None, help="Force trajectory filtering on/off for rubrics_verifier (overrides the step's trajectory_filter setting)")
 @click.option("--a2a-agent-id", default=None, type=str, help="Override A2A agent id for deploy_agent steps")
 @click.option("--agent-sandbox", default=None,
@@ -558,8 +558,8 @@ def _seed_universe_id(task, seed: dict) -> str | None:
 @click.option("--user-model", default=None, type=str, help="Override the model the user simulator runs on")
 @click.option("--judge-model", default=None, type=str, help="Override the model rubrics_verifier judges grade with")
 @click.option("--agent-artifact-id", default=None, type=str, help="Override the agent image artifact for deploy_agent steps")
-@click.option("--litellm-api-key", default=None, type=str, help="Override LITELLM_API_KEY for all runs")
-@click.option("--judge-litellm-api-key", default=None, type=str, help="Override LITELLM_API_KEY used by rubrics_verifier judge agents")
+@click.option("--litellm-api-key", default=None, type=str, help="Override LITELLM_API_KEY for all runs; a secret:KEY or env:NAME reference is resolved where it is used")
+@click.option("--judge-litellm-api-key", default=None, type=str, help="Override LITELLM_API_KEY used by rubrics_verifier judge agents; a secret:KEY or env:NAME reference is resolved where it is used")
 @click.option("--apply-trajectory-filter/--no-trajectory-filter", "apply_trajectory_filter", default=None, help="Force trajectory filtering on/off for rubrics_verifier")
 @click.option("--agent-sandbox", default=None,
               help="Override agent sandbox backend(s) for deploy_agent steps; comma-separated for fallback chain (e.g. 'modal,local')")

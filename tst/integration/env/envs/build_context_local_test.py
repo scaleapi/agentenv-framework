@@ -54,6 +54,20 @@ async def test_an_image_that_is_only_a_build_context_is_built_on_the_vm(local_st
 
 
 @pytest.mark.asyncio
+async def test_a_build_context_recording_no_platform_is_built_for_the_vms(local_stack, vm_platform, tmp_path, caplog):
+    """As a bundle writes its images: a VM of either platform, such as an arm64 SmolVM, builds one for its own."""
+    _seed_bootstrap_envs()
+    uid = uuid.uuid4().hex[:8]
+    image = DockerImageArtifact.put_context(f"ctx-items-{uid}", description="build context e2e",
+                                            context_path=str(_items_context(tmp_path / "items")),
+                                            dockerfile_path="Dockerfile", platform=None)
+
+    await _deploys_and_answers(image, uid)
+
+    assert f"Building {image.image_name} from its build context, for {vm_platform}..." in caplog.messages
+
+
+@pytest.mark.asyncio
 async def test_an_image_whose_tar_gz_is_for_another_platform_is_built_from_the_context_beside_it(
         local_stack, vm_platform, tmp_path, caplog):
     _seed_bootstrap_envs()

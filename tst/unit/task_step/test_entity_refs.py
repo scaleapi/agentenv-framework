@@ -5,7 +5,7 @@ import inspect
 import pytest
 
 from agent_env.artifact.registry import get_artifact_registry
-from agent_env.entity.refs import EntityKind, EntityRef, parse_toml_ref, ref_sites
+from agent_env.entity.refs import EntityKind, EntityRef, default_agent_refs, parse_toml_ref, ref_sites
 from agent_env.task_step.registry import _builtin_registry
 from agent_env.task_step.snapshot_utils.snapshot_series import SnapshotConfig
 from agent_env.task_step.task_step import TaskStep
@@ -206,6 +206,25 @@ def test_a_subclass_is_undeclared_until_it_declares():
 def test_malformed_declarations_fail_where_they_are_written(bad):
     with pytest.raises(ValueError):
         bad()
+
+
+@pytest.mark.parametrize("step,unset", [
+    ({"type": "deploy_agent"}, ["a2a_agent_id"]),
+    ({"type": "deploy_agent", "a2a_agent_id": None}, ["a2a_agent_id"]),
+    ({"type": "deploy_agent", "a2a_agent_id": "solver"}, []),
+    ({"type": "rubrics_verifier"}, ["judge_a2a_agent_id"]),
+    ({"type": "rubrics_verifier", "use_agent_judge": True, "agent_name": None}, ["judge_a2a_agent_id"]),
+    ({"type": "rubrics_verifier", "judge_a2a_agent_id": "judge"}, []),
+    ({"type": "rubrics_verifier", "agent_name": "solver"}, ["judge_a2a_agent_id"]),
+    ({"type": "rubrics_verifier", "use_agent_judge": False}, ["judge_a2a_agent_id"]),
+    ({"type": "verify_a2a_agent_card", "a2a_agent_id": "solver"}, []),
+    ({"type": "install_agent", "sandbox_name": "box"}, ["a2a_agent_id"]),
+    ({"type": "install_agent", "sandbox_name": "box", "a2a_agent_id": "solver"}, []),
+])
+def test_an_unset_agent_field_falls_back_to_the_default_agent(step, unset):
+    refs = _builtin_registry()[step["type"]].entity_refs
+
+    assert [ref.path for ref in default_agent_refs(refs, step)] == unset
 
 
 def test_each_kind_has_a_constructor_and_only_artifacts_take_a_type():

@@ -19,6 +19,9 @@ form when asked to.
 Fields that name something else, such as another step's id, are left out. A step type's
 declarations are not inherited, so a subclass declares its own; ``toml_refs`` are, as ``from_toml``
 is.
+
+A step's agent field left unset falls back to the configured default agent (``[agents] default_a2a_agent_id``), so a
+tool reading a step knows which agent it may deploy without being told (``default_agent_refs``).
 """
 
 from __future__ import annotations
@@ -122,6 +125,13 @@ class RefSite(NamedTuple):
         self.owner[self.key] = value
         if version is not None:
             self.owner[self.version_key] = version
+
+
+def default_agent_refs(refs: Iterable[EntityRef], step: dict) -> list[EntityRef]:
+    """The agent fields ``step`` leaves unset, each falling back to the configured default agent: every top-level one it
+    doesn't set."""
+    return [ref for ref in refs if ref.kind is EntityKind.AGENT and ref.role is RefRole.INPUT and ref.path == ref.field
+            and step.get(ref.field) is None]
 
 
 def parse_toml_ref(kind: EntityKind, value: Any) -> tuple[str, int | None]:

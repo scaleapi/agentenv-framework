@@ -1,9 +1,8 @@
-"""Run-record persistence for the in-process runner.
+"""The run index every ``[runner]`` writes: ``insert_run`` at submit, ``set_running`` when the run
+starts, ``mark_terminal`` when it ends. The explorer lists, counts and groups runs from here and never
+asks the runner, so a run missing here is invisible and one never marked terminal stays in flight.
 
-Stored as a collection so the hub can list runs and report their status — not a durable
-work queue: the runner executes ``Task.run()`` in-process and holds the run's asyncio task
-in memory, so there is no lease or claim here. A run left non-terminal by a dead process
-is failed at ``start()``, not resumed. A durable, lease-based runner is a follow-up.
+It is an index, not a work queue: there is no lease or claim here.
 """
 
 from __future__ import annotations
@@ -14,6 +13,7 @@ from typing import Optional
 from agent_env.config import get_config
 from agent_env.runner.runner import RunRecord, RunStatus
 from agent_env.store import Eq, Filter, In, Sort, UpdateSpec
+from agent_env.task_step.context import _strip_redacted_keys
 
 RUNS_COLLECTION = "runs"
 
@@ -39,7 +39,9 @@ def ensure_indexes() -> None:
 
 def insert_run(record: RunRecord) -> RunRecord:
     record.created_at_utc = record.created_at_utc or _now()
-    _docs().insert(RUNS_COLLECTION, record.to_dict())
+    doc = record.to_dict()
+    doc["overrides"] = _strip_redacted_keys(doc["overrides"])
+    _docs().insert(RUNS_COLLECTION, doc)
     return record
 
 
@@ -57,6 +59,10 @@ def list_runs(
         limit=limit, offset=offset,
     )
     return [RunRecord.from_dict(d) for d in docs]
+
+
+def count_runs(task_id: Optional[str] = None) -> int:
+    return _docs().count(RUNS_COLLECTION, Filter.of(task_id=task_id) if task_id else Filter())
 
 
 def active_runs(runner: str, limit: int = 100_000) -> list[RunRecord]:
