@@ -80,15 +80,52 @@ def test_a_dockerfile_that_reads_all_of_the_context_gets_what_docker_would_send_
     assert pruned[tmp_path / "out"].whole == "COPY . copies all of it"
 
 
-def test_a_kept_link_keeps_what_it_points_at_in_the_context_and_a_link_out_of_it_is_left_out(tmp_path):
-    files = {"Dockerfile": "FROM python\nCOPY current/ /app/\nCOPY out /out\n", "v2/app.py": "2", "v1/app.py": "1"}
-    archive = _archive(tmp_path / "ctx.tar.gz", files, links={"current": "v2", "out": "../../etc/passwd"})
+def test_a_kept_link_keeps_what_it_points_at_and_one_leading_out_of_the_context_is_written_as_it_is(tmp_path):
+    files = {"Dockerfile": "FROM python\nCOPY current/ /app/\nCOPY lib/ /lib/\n", "v2/app.py": "2", "v1/app.py": "1",
+             "lib/a.py": "a"}
+    archive = _archive(tmp_path / "ctx.tar.gz", files, links={"current": "v2", "lib/out": "../../../etc/passwd",
+                                                              "lib/abs": "/usr/share/zoneinfo/UTC"})
 
     write_pruned(archive, {tmp_path / "out": "Dockerfile"})
 
-    assert set(_files(tmp_path / "out")) == {"Dockerfile", "v2/app.py"}
+    assert set(_files(tmp_path / "out")) == {"Dockerfile", "v2/app.py", "lib/a.py"}
     assert (tmp_path / "out" / "current").is_symlink()
-    assert not (tmp_path / "out" / "out").exists()
+    # docker build copies a link as a link, wherever it leads.
+    assert [(tmp_path / "out" / "lib" / name).readlink().as_posix() for name in ("out", "abs")] == [
+        "../../../etc/passwd", "/usr/share/zoneinfo/UTC"]
+
+
+def test_a_link_is_followed_as_docker_build_follows_it_its_root_standing_for_slash_and_any_dotdot_above_it(tmp_path):
+    # docker build copies a.txt, conf/f.cfg and a.txt again for this Dockerfile.
+    files = {"Dockerfile": "FROM python\nCOPY sub/deep/up /x/up\nCOPY sub/abs/f.cfg /x/\nCOPY sub/top/a.txt /x/top\n",
+             "a.txt": "a", "b.txt": "b", "conf/f.cfg": "f", "conf/g.cfg": "g"}
+    archive = _archive(tmp_path / "ctx.tar.gz", files, links={"sub/deep/up": "../../../a.txt", "sub/abs": "/conf",
+                                                              "sub/top": "../../../../.."})
+
+    pruned = write_pruned(archive, {tmp_path / "out": "Dockerfile"})[tmp_path / "out"]
+
+    assert pruned.whole is None
+    assert set(_files(tmp_path / "out")) == {"Dockerfile", "a.txt", "conf/f.cfg"}
+    assert all((tmp_path / "out" / name).is_symlink() for name in ("sub/deep/up", "sub/abs", "sub/top"))
+
+
+def test_nothing_is_written_through_a_link_that_leads_out_of_the_folder(tmp_path):
+    archive = tmp_path / "ctx.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        dockerfile = b"FROM python\nCOPY . /app\n"
+        info = tarfile.TarInfo("Dockerfile")
+        info.size = len(dockerfile)
+        tar.addfile(info, io.BytesIO(dockerfile))
+        link = tarfile.TarInfo("evil")
+        link.type, link.linkname = tarfile.SYMTYPE, str(tmp_path / "elsewhere")
+        tar.addfile(link)
+        through = tarfile.TarInfo("evil/planted")
+        through.size = 1
+        tar.addfile(through, io.BytesIO(b"x"))
+
+    with pytest.raises(ValueError, match="evil/planted"):
+        write_pruned(archive, {tmp_path / "out": "Dockerfile"})
+    assert not (tmp_path / "elsewhere" / "planted").exists()
 
 
 def test_a_source_reached_through_a_link_keeps_the_link_and_what_it_leads_to(tmp_path):
@@ -114,8 +151,8 @@ def test_a_link_loop_or_one_out_of_the_context_in_a_source_keeps_all_of_it(tmp_p
 
 @pytest.mark.parametrize(("glob", "kept"), [
     ("[!a].txt", {"!.txt", "a.txt"}), ("[^a].txt", {"!.txt", "b.txt"}), ("[a-b].txt", {"a.txt", "b.txt"}),
-    ("\\[x].txt", {"[x].txt"}), ("?.txt", {"!.txt", "a.txt", "b.txt"}),
-], ids=["bang-is-a-character", "caret-negates", "range", "escaped-bracket", "any-one"])
+    ("[!-a].txt", {"!.txt", "a.txt"}), ("?.txt", {"!.txt", "a.txt", "b.txt"}),
+], ids=["bang-is-a-character", "caret-negates", "range", "range-from-bang", "any-one"])
 def test_a_wildcard_class_reads_as_gos_filepath_match_reads_it(tmp_path, glob, kept):
     files = {"Dockerfile": f"FROM python\nCOPY {glob} /x/\n", "!.txt": "!", "a.txt": "a", "b.txt": "b", "[x].txt": "x"}
     archive = _archive(tmp_path / "ctx.tar.gz", files)
@@ -125,11 +162,16 @@ def test_a_wildcard_class_reads_as_gos_filepath_match_reads_it(tmp_path, glob, k
     assert set(_files(tmp_path / "out")) == {"Dockerfile", *kept}
 
 
-def test_a_malformed_wildcard_keeps_all_of_the_context(tmp_path):
-    archive = _archive(tmp_path / "ctx.tar.gz", {"Dockerfile": "FROM python\nCOPY [a /x/\n", "a": "a", "b": "b"})
+@pytest.mark.parametrize("glob", ["[a", "[z-a].txt", "[^z-a].txt", "[-a].txt", "[a-].txt", "[a-b-c].txt", "[]a].txt"],
+                         ids=["unclosed", "reversed", "negated-reversed", "leading-dash", "trailing-dash", "two-ranges",
+                              "leading-bracket"])
+def test_a_wildcard_docker_build_refuses_keeps_all_of_the_context_rather_than_fail(tmp_path, glob):
+    # docker build refuses each of these as a syntax error in the pattern.
+    files = {"Dockerfile": f"FROM python\nCOPY {glob} /x/\n", "a.txt": "a", "b.txt": "b", "z.txt": "z"}
+    archive = _archive(tmp_path / "ctx.tar.gz", files)
 
     assert write_pruned(archive, {tmp_path / "out": "Dockerfile"})[tmp_path / "out"].whole == (
-        "[a matches nothing in the context")
+        f"{glob} matches nothing in the context")
 
 
 def test_a_dockerfile_stored_as_a_link_is_read_where_it_leads(tmp_path):

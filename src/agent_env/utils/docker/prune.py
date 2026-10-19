@@ -19,8 +19,10 @@ from agent_env.utils.docker.context import context_member, ignore_matcher, ignor
 from agent_env.utils.docker.dockerfile import ContextReads, context_reads
 from agent_env.utils.paths import LEAVINGS
 
-_WILDCARD = re.compile(r"[*?\[\\]")
+_WILDCARD = re.compile(r"[*?\[]")
 _LARGEST = 5
+# A link is written as it is, as docker build sends one, wherever it leads; nothing is written through one leading out.
+_MEMBER = functools.partial(context_member, links_out=True)
 
 
 @dataclass(frozen=True)
@@ -97,7 +99,7 @@ def _write(archive: Path, kept: Mapping[Path, set[str]]) -> dict[Path, dict[str,
                     shutil.copy2(first, folder / name)
                 else:
                     folder.mkdir(parents=True, exist_ok=True)
-                    tar.extract(member, folder, filter=context_member)
+                    tar.extract(member, folder, filter=_MEMBER)
                     first = folder / name if member.isreg() else None
                 if member.isreg():
                     written[folder][name] = member.size
@@ -143,23 +145,28 @@ def _through_links(reads: ContextReads, links: Mapping[str, str | None]) -> tupl
 
 
 def _resolve(path: str, links: Mapping[str, str | None]) -> tuple[str, set[str]]:
-    """``path`` with its links followed, and the links crossed; as it is when a link leads out or loops."""
+    """``path`` with its links followed as docker build follows them, and the links crossed; as it is when they loop."""
     resolved, crossed = "", set()
     for part in path.split("/"):
         resolved = posixpath.join(resolved, part)
         while links.get(resolved) is not None:
-            if (following := _link_target(resolved, links)) is None or resolved in crossed:
+            if resolved in crossed:
                 return path, set()
             crossed.add(resolved)
-            resolved = following
+            resolved = _link_target(resolved, links)
     return resolved, crossed
 
 
-def _link_target(name: str, links: Mapping[str, str | None]) -> str | None:
-    """Where the link ``name`` leads in the context; None when it leads out of it."""
+def _link_target(name: str, links: Mapping[str, str | None]) -> str:
+    """Where the link ``name`` leads, as docker build follows it in the context: ``/`` and ``..`` stop at its root."""
     target = links[name]
-    following = posixpath.normpath(posixpath.join(posixpath.dirname(name), target))
-    return None if target.startswith("/") or following == ".." or following.startswith("../") else following
+    parts = [] if target.startswith("/") or "/" not in name else name.split("/")[:-1]
+    for part in target.split("/"):
+        if part == "..":
+            parts = parts[:-1]
+        elif part not in ("", "."):
+            parts.append(part)
+    return "/".join(parts)
 
 
 def _kept(links: Mapping[str, str | None], reads: ContextReads, dockerfile: str, ignore: str | None,
@@ -172,13 +179,14 @@ def _kept(links: Mapping[str, str | None], reads: ContextReads, dockerfile: str,
         kept = {name for name in links if sent(name)}
     else:
         kept = {name for name in links if sent(name) and any(_matches(path, name) for path in reads.paths)}
-    kept |= {name for name in (dockerfile, ignore) if name in links} | {name for name in crossed if sent(name)}
-    names = sorted(links)
+    kept |= {name for name in (dockerfile, ignore) if name in links}
+    # A link a source only crosses is needed for its path, not for all it leads to.
     pending = [name for name in kept if links[name]]
+    kept |= {name for name in crossed if sent(name)}
+    names = sorted(links)
     while pending:
-        if (target := _link_target(pending.pop(), links)) is None:
-            continue
-        for other in _at_or_under(names, target):
+        target = _link_target(pending.pop(), links)
+        for other in _at_or_under(names, target) if target else names:
             if other not in kept and sent(other):
                 kept.add(other)
                 if links[other]:
@@ -205,7 +213,7 @@ def _matches(path: str, name: str) -> bool:
 
 @functools.lru_cache(maxsize=1024)
 def _part_pattern(glob: str) -> re.Pattern[str] | None:
-    """A path part's wildcard as Go's ``filepath.Match``, which docker build uses, reads it; None when malformed."""
+    """A path part's wildcard as docker build matches it; None when docker build refuses it as malformed."""
     out, at = [], 0
     while at < len(glob):
         char = glob[at]
@@ -213,30 +221,25 @@ def _part_pattern(glob: str) -> re.Pattern[str] | None:
             out.append("[^/]*")
         elif char == "?":
             out.append("[^/]")
-        elif char == "\\":
-            if at + 1 == len(glob):
-                return None
-            at += 1
-            out.append(re.escape(glob[at]))
         elif char == "[":
             at += 1
             negated = at < len(glob) and glob[at] == "^"
             at += negated
-            members = []
-            while at < len(glob) and glob[at] != "]":
-                if glob[at] == "\\":
-                    at += 1
-                    if at == len(glob):
-                        return None
-                    members.append(re.escape(glob[at]))
-                elif glob[at] == "-" and members and at + 1 < len(glob) and glob[at + 1] != "]":
-                    members.append("-")
-                else:
-                    members.append(re.escape(glob[at]))
+            ranges = []
+            while not (at < len(glob) and glob[at] == "]" and ranges):
+                # A class's characters as Go's filepath.Match reads them: a range's ends neither - nor ], low to high.
+                if at + 1 >= len(glob) or glob[at] in "-]":
+                    return None
+                low = high = glob[at]
                 at += 1
-            if at == len(glob) or not members:
-                return None
-            out.append(f"[{'^' if negated else ''}{''.join(members)}]")
+                if glob[at] == "-":
+                    if at + 2 >= len(glob) or glob[at + 1] in "-]":
+                        return None
+                    high, at = glob[at + 1], at + 2
+                if low > high:
+                    return None
+                ranges.append(re.escape(low) if low == high else f"{re.escape(low)}-{re.escape(high)}")
+            out.append(f"[{'^' if negated else ''}{''.join(ranges)}]")
         else:
             out.append(re.escape(char))
         at += 1

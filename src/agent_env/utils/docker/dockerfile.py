@@ -217,8 +217,8 @@ def _copy_reads(instruction: Instruction) -> ContextReads:
     for source in args.sources:
         if args.keyword == "ADD" and ("://" in source or source.startswith("git@")):
             continue
-        if "$" in source:
-            return ContextReads(whole=f"{args.keyword} {source} names a variable")
+        if why := _unread(source):
+            return ContextReads(whole=f"{args.keyword} {source} {why}")
         if (path := _context_path(source)) is None:
             return ContextReads(whole=f"{args.keyword} {source} copies all of it")
         paths.append(path)
@@ -242,12 +242,21 @@ def _mount_reads(instruction: Instruction) -> ContextReads:
         if kind != "bind":
             return ContextReads(whole=f"RUN --mount type={kind} isn't followed")
         source = options.get("source") or options.get("src") or "."
-        if "$" in source:
-            return ContextReads(whole=f"RUN --mount source {source} names a variable")
+        if why := _unread(source):
+            return ContextReads(whole=f"RUN --mount source {source} {why}")
         if (path := _context_path(source)) is None:
             return ContextReads(whole=f"RUN --mount binds {source}, all of it")
         paths.append(path)
     return ContextReads(paths=tuple(paths))
+
+
+def _unread(source: str) -> str | None:
+    """Why ``source`` can't be read before a build, as docker build expands and unescapes it first; None when it can."""
+    if "$" in source:
+        return "names a variable"
+    if "\\" in source or "`" in source:
+        return "holds an escape"
+    return None
 
 
 def _context_path(source: str) -> str | None:

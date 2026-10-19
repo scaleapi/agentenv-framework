@@ -206,15 +206,15 @@ class _Hashing:
         return self._digest.hexdigest()
 
 
-def context_member(member: tarfile.TarInfo, out: str) -> tarfile.TarInfo | None:
-    """``member`` as ``extract`` writes it, None to leave it out."""
+def context_member(member: tarfile.TarInfo, out: str, *, links_out: bool = False) -> tarfile.TarInfo | None:
+    """``member`` as ``extract`` writes it; None for a link leading out of ``out``, unless ``links_out``."""
     if not (member.isreg() or member.isdir() or member.issym()):
         raise ValueError(f"{member.name!r} in the build context is neither a file, a folder nor a link")
     try:
         member = tarfile.tar_filter(member, out)
     except tarfile.FilterError as e:
         raise ValueError(f"{member.name!r} in the build context: {e}") from e
-    if member.issym():
+    if member.issym() and not links_out:
         top = os.path.realpath(out)
         target = os.path.realpath(os.path.join(top, os.path.dirname(member.name), member.linkname))
         if os.path.commonpath([top, target]) != top:

@@ -155,6 +155,16 @@ def test_a_shell_here_string_leaves_the_copies_after_it_read():
     assert context_reads("FROM x\nRUN cat <<<word > /out\nCOPY a.txt /a.txt\n") == ContextReads(paths=("a.txt",))
 
 
+@pytest.mark.parametrize(("line", "why"), [
+    ("COPY \\[x].txt /x/", "COPY \\[x].txt holds an escape"),
+    ('COPY ["a\\\\b", "/x/"]', "COPY a\\b holds an escape"),
+    ("RUN --mount=type=bind,source=a\\b,target=/m ls", "RUN --mount source a\\b holds an escape"),
+], ids=["shell", "json", "mount"])
+def test_a_source_holding_an_escape_keeps_all_of_the_context(line, why):
+    # docker build unescapes a source before matching it: COPY \[x].txt copies x.txt, not [x].txt.
+    assert context_reads(f"FROM x\n{line}\n") == ContextReads(whole=why)
+
+
 def test_a_heredoc_left_open_reads_all_of_the_context_rather_than_miss_a_copy_it_swallowed():
     assert context_reads("FROM x\nRUN <<EOF\necho hi\nCOPY a /a\n") == ContextReads(
         whole="a heredoc in RUN never ends, so the rest can't be read")
