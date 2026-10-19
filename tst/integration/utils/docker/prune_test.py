@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_env.utils.build_context import write_pruned
+from agent_env.utils.docker.prune import write_pruned
 from tst.util.capabilities import missing_capability_reason
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]

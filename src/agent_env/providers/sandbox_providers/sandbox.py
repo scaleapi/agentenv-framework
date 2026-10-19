@@ -24,7 +24,7 @@ from typing import IO, TYPE_CHECKING, Any, AsyncIterator, Callable, ClassVar, It
 
 from agent_env.config import get_config
 from agent_env.store.image_store.oci_registry_credentials import registry_host_from_ref
-from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM
+from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM
 from agent_env.utils.paths import validate_relative_filename
 
 if TYPE_CHECKING:

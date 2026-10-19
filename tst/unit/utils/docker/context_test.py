@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_env.utils.build_context import BuildContext, extract, ignore_file
+from agent_env.utils.docker.context import BuildContext, extract, ignore_file
 
 
 def _tree(root: Path, files: dict[str, str], executable: tuple[str, ...] = ()) -> Path:
@@ -79,6 +79,16 @@ def test_a_dockerfiles_own_ignore_file_replaces_the_contexts(tmp_path):
 
     assert {entry.name for entry in context.entries} >= {"app/main.py", "Dockerfile.dockerignore"}
     assert not any(entry.name.startswith("data") for entry in context.entries)
+
+
+def test_the_ignore_file_is_read_as_docker_reads_it_its_bom_dropped_and_a_line_opening_with_a_hash_a_comment(tmp_path):
+    # docker build sends "# notes.txt" and leaves out a.log and "#raw.txt" for this ignore file.
+    root = _tree(tmp_path / "ctx", {**SERVER, ".dockerignore": "﻿*.log\n# notes.txt\n  #raw.txt\n", "a.log": "",
+                                    "# notes.txt": "", "#raw.txt": ""})
+
+    names = {entry.name for entry in BuildContext.of(root, root / "Dockerfile").entries}
+
+    assert "# notes.txt" in names and "a.log" not in names and "#raw.txt" not in names
 
 
 def test_what_the_os_and_python_leave_behind_is_dropped(tmp_path):

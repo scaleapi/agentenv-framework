@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_env.utils import docker_build
-from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM, DockerBuildError, build_image, normalize_platform
+from agent_env.utils.docker import build as docker_build
+from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, DockerBuildError, build_image, normalize_platform
 
 
 @pytest.fixture
@@ -78,7 +78,7 @@ def test_a_missing_docker_raises_rather_than_crashing(monkeypatch):
 
 def test_importing_it_pulls_neither_cli_nor_providers():
     code = (
-        "import sys; import agent_env.utils.docker_build; "
+        "import sys; import agent_env.utils.docker.build; "
         "assert 'agent_env.cli' not in sys.modules, 'cli imported'; "
         "assert 'agent_env.providers' not in sys.modules, 'providers imported'"
     )

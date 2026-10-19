@@ -1,8 +1,9 @@
-"""A Dockerfile read into instructions as docker build reads it, and a COPY or ADD's arguments."""
+"""A Dockerfile read into instructions as docker build reads it, a COPY or ADD's arguments, and what it reads."""
 
 import pytest
 
-from agent_env.utils.dockerfile import copy_arguments, directives, instructions, leading_flags
+from agent_env.utils.docker.dockerfile import (ContextReads, context_reads, copy_arguments, directives, instructions,
+                                              leading_flags)
 
 DOCKERFILE = """# syntax=docker/dockerfile:1
 FROM python:3.12-slim AS base
@@ -113,3 +114,77 @@ def test_arguments_it_cant_read_are_none(line):
     [instruction] = [i for i in instructions(f"{line}\n") if i.keyword]
 
     assert copy_arguments(instruction) is None
+
+
+@pytest.mark.parametrize(("dockerfile", "paths"), [
+    ("COPY gmail/requirements.txt .\nCOPY BaseService/ ./svc/BaseService/\n", ("gmail/requirements.txt", "BaseService")),
+    ("FROM node AS cli\nFROM python\nCOPY --from=cli /usr/bin/node /usr/bin/node\nCOPY app /app\n", ("app",)),
+    ("ADD https://example.com/f /f\nADD git@github.com:o/r.git /r\nADD local.tar.gz /x\n", ("local.tar.gz",)),
+    ("COPY <<EOF /etc/x\nhi\nEOF\nCOPY a /a\n", ("a",)),
+    ("COPY src/*.py /app/\n", ("src/*.py",)),
+    ('COPY ["with space", "/app/"]\n', ("with space",)),
+    ("COPY ./a/../b /x\n", ("b",)),
+    ("RUN --mount=type=bind,source=tools,target=/t make\nRUN --mount=type=cache,target=/root/.cache pip install x\n"
+     "RUN --mount=type=bind,from=build,source=/out,target=/o ls\n", ("tools",)),
+], ids=["files-and-folders", "stage-copy", "add-remote-and-archive", "heredoc", "wildcard", "json", "normalized",
+        "mounts"])
+def test_a_build_reads_its_copy_and_add_sources_and_bind_mounts_from_the_context(dockerfile, paths):
+    assert context_reads(f"FROM python\n{dockerfile}") == ContextReads(paths=paths)
+
+
+@pytest.mark.parametrize(("dockerfile", "why"), [
+    ("COPY . /app\n", "COPY . copies all of it"),
+    ("RUN --mount=target=/src make\n", "RUN --mount binds ., all of it"),
+    ("ARG SRC=a\nCOPY $SRC /x\n", "COPY $SRC names a variable"),
+    ("COPY --parents a/b /x\n", "COPY --parents isn't followed"),
+    ("COPY [broken\n", "COPY [broken can't be read"),
+    ("COPY ../outside /x\n", "COPY ../outside copies all of it"),
+], ids=["copy-dot", "bind-default-source", "variable", "unknown-flag", "unreadable", "outside"])
+def test_a_build_that_reads_all_of_the_context_or_cant_be_told_says_why(dockerfile, why):
+    assert context_reads(f"FROM python\n{dockerfile}") == ContextReads(whole=why)
+
+
+def test_a_tab_a_continued_path_and_a_quoted_heredoc_are_read_as_docker_reads_them():
+    dockerfile = ('FROM x\nCOPY\ta.txt /tab.txt\nCOPY pack\\\nage.json /joined.json\nRUN echo "<<EOF" > /q\n'
+                  'RUN ["sh", "-c", "cat <<EOT"]\nCOPY b.txt /b.txt\n')
+
+    assert context_reads(dockerfile) == ContextReads(paths=("a.txt", "package.json", "b.txt"))
+
+
+def test_a_shell_here_string_leaves_the_copies_after_it_read():
+    assert context_reads("FROM x\nRUN cat <<<word > /out\nCOPY a.txt /a.txt\n") == ContextReads(paths=("a.txt",))
+
+
+def test_a_heredoc_left_open_reads_all_of_the_context_rather_than_miss_a_copy_it_swallowed():
+    assert context_reads("FROM x\nRUN <<EOF\necho hi\nCOPY a /a\n") == ContextReads(
+        whole="a heredoc in RUN never ends, so the rest can't be read")
+
+
+@pytest.mark.parametrize("syntax", ["docker/dockerfile:1", "docker.io/docker/dockerfile:1.7-labs",
+                                    "docker/dockerfile-upstream:master", f"docker/dockerfile:1@sha256:{'0' * 64}"])
+def test_a_syntax_directive_naming_dockers_own_frontend_is_read(syntax):
+    assert context_reads(f"# syntax={syntax}\nFROM x\nCOPY a /a\n") == ContextReads(paths=("a",))
+
+
+def test_a_frontend_of_its_own_keeps_all_of_the_context():
+    assert context_reads("# syntax=example.com/acme/frontend:1\nFROM x\nCOPY a /a\n") == ContextReads(
+        whole="# syntax=example.com/acme/frontend:1 isn't followed")
+
+
+def test_mounts_that_never_read_the_context_add_nothing_and_options_read_in_any_case():
+    dockerfile = ("FROM x\nRUN --mount=type=cache,target=/c --mount=type=secret,id=k --mount=type=ssh "
+                  "--mount=type=tmpfs,target=/t ls\nRUN --mount=TYPE=BIND,Source=tools,target=/m ls\n")
+
+    assert context_reads(dockerfile) == ContextReads(paths=("tools",))
+
+
+def test_a_mount_type_it_doesnt_know_keeps_all_of_the_context():
+    assert context_reads("FROM x\nRUN --mount=type=future,source=a,target=/a ls\n") == ContextReads(
+        whole="RUN --mount type=future isn't followed")
+
+
+def test_a_bind_mount_after_a_tab_or_with_a_quoted_source_is_read():
+    dockerfile = ('FROM x\nRUN --network=none\t--mount=type=bind,source=tools,target=/t ls\n'
+                  'RUN --mount=type=bind,"source=my dir",target=/m ls\nRUN --mount=type=bind,source="my lib",target=/l ls\n')
+
+    assert context_reads(dockerfile) == ContextReads(paths=("tools", "my dir", "my lib"))

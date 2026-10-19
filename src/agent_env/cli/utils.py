@@ -10,8 +10,8 @@ from agent_env.env import Env
 from agent_env.providers.env_providers.env_provider import _env_provider_class
 from agent_env.providers.env_providers.env_server_provider import EnvironmentServerProvider
 from agent_env.store.base import NotFoundError
-from agent_env.utils.build_metadata import detect_base_metadata, detect_env_metadata  # noqa: F401  re-exported for the put commands
-from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM
+from agent_env.utils.docker.metadata import detect_base_metadata, detect_env_metadata  # noqa: F401  re-exported for the put commands
+from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM
 
 
 @contextmanager

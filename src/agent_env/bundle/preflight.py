@@ -71,7 +71,7 @@ from agent_env.task_step.task_steps.install_agent import InstallAgentTaskStep
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.deploy_sandbox import DeploySandboxTaskStep
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
-from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM, docker_unreachable
+from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, docker_unreachable
 
 from ._fs import relative
 from .parse import BundleError, BundleKind

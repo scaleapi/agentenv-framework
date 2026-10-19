@@ -1,8 +1,11 @@
-"""A Dockerfile's instructions as ``docker build`` reads them, and the arguments of its COPY and ADD instructions."""
+"""A Dockerfile's instructions as ``docker build`` reads them, its COPY and ADD arguments, and what a build of it reads
+of its context."""
 
 from __future__ import annotations
 
+import csv
 import json
+import posixpath
 import re
 from dataclasses import dataclass
 
@@ -10,6 +13,12 @@ _DIRECTIVE = re.compile(r"#\s*([A-Za-z][A-Za-z0-9_-]*)\s*=\s*(\S+)\s*")
 # ``<<<`` is a shell here-string, which docker build leaves to the shell, not a heredoc.
 _HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)([\"']?)([A-Za-z_][A-Za-z0-9_]*)\2")
 _HEREDOC_KEYWORDS = frozenset({"RUN", "COPY", "ADD"})
+# The COPY and ADD flags that change how a source is written, not which one it is.
+_SOURCE_KEEPING_FLAGS = ("--chown=", "--chmod=", "--link", "--checksum=", "--keep-git-dir", "--unpack")
+# The RUN --mount types that never read the build context.
+_OFF_CONTEXT_MOUNTS = frozenset({"cache", "tmpfs", "secret", "ssh"})
+# The Dockerfile frontend this reading follows; another may read the context its own way.
+_DOCKERFILE_SYNTAX = re.compile(r"(?:docker\.io/)?docker/dockerfile(?:-upstream)?(?::[\w.-]+)?(?:@sha256:[0-9a-f]{64})?")
 
 
 @dataclass(frozen=True)
@@ -21,6 +30,14 @@ class Instruction:
     text: str
     heredocs: tuple[str, ...] = ()  # each heredoc's body, in order
     complete: bool = True  # False when a heredoc it opens is never closed
+
+
+@dataclass(frozen=True)
+class ContextReads:
+    """The context paths a build reads, each of which may hold Docker's wildcards, or why it reads all of it."""
+
+    paths: tuple[str, ...] = ()
+    whole: str | None = None
 
 
 @dataclass(frozen=True)
@@ -165,3 +182,75 @@ def copy_arguments(instruction: Instruction) -> CopyArguments | None:
     sources = tuple(source for source in args[:-1] if json_form or not _HEREDOC.fullmatch(source))
     return CopyArguments(instruction.keyword, tuple(flags), sources, args[-1], json_form,
                          heredoc=len(sources) < len(args) - 1)
+
+
+def context_reads(dockerfile: str) -> ContextReads:
+    """The context paths a build of ``dockerfile`` reads: its local COPY and ADD sources and bind-mount sources."""
+    if (syntax := directives(dockerfile).get("syntax")) and not _DOCKERFILE_SYNTAX.fullmatch(syntax):
+        return ContextReads(whole=f"# syntax={syntax} isn't followed")
+    paths: list[str] = []
+    for instruction in instructions(dockerfile):
+        if not instruction.complete:
+            return ContextReads(whole=f"a heredoc in {instruction.keyword} never ends, so the rest can't be read")
+        if instruction.keyword in ("COPY", "ADD"):
+            reads = _copy_reads(instruction)
+        elif instruction.keyword == "RUN":
+            reads = _mount_reads(instruction)
+        else:
+            continue
+        if reads.whole:
+            return reads
+        paths.extend(reads.paths)
+    return ContextReads(paths=tuple(dict.fromkeys(paths)))
+
+
+def _copy_reads(instruction: Instruction) -> ContextReads:
+    """The context paths a COPY or ADD reads."""
+    args = copy_arguments(instruction)
+    if args is None:
+        return ContextReads(whole=f"{instruction.keyword} {instruction.arguments} can't be read")
+    if any(flag.startswith("--from=") for flag in args.flags):
+        return ContextReads()
+    if unknown := next((flag for flag in args.flags if not flag.startswith(_SOURCE_KEEPING_FLAGS)), None):
+        return ContextReads(whole=f"{args.keyword} {unknown} isn't followed")
+    paths = []
+    for source in args.sources:
+        if args.keyword == "ADD" and ("://" in source or source.startswith("git@")):
+            continue
+        if "$" in source:
+            return ContextReads(whole=f"{args.keyword} {source} names a variable")
+        if (path := _context_path(source)) is None:
+            return ContextReads(whole=f"{args.keyword} {source} copies all of it")
+        paths.append(path)
+    return ContextReads(paths=tuple(paths))
+
+
+def _mount_reads(instruction: Instruction) -> ContextReads:
+    """The context paths a RUN's bind mounts read."""
+    paths = []
+    for flag in leading_flags(instruction.arguments)[0]:
+        if not flag.startswith("--mount="):
+            continue
+        # A mount's options are one CSV record, as docker build reads them, so a quoted field holds a comma or space.
+        options = {}
+        for field in next(csv.reader([flag.removeprefix("--mount=")])):
+            key, _, value = field.partition("=")
+            options[key.strip().lower()] = value.strip().strip("\"'")
+        kind = options.get("type", "bind").lower()
+        if kind in _OFF_CONTEXT_MOUNTS or (kind == "bind" and "from" in options):
+            continue
+        if kind != "bind":
+            return ContextReads(whole=f"RUN --mount type={kind} isn't followed")
+        source = options.get("source") or options.get("src") or "."
+        if "$" in source:
+            return ContextReads(whole=f"RUN --mount source {source} names a variable")
+        if (path := _context_path(source)) is None:
+            return ContextReads(whole=f"RUN --mount binds {source}, all of it")
+        paths.append(path)
+    return ContextReads(paths=tuple(paths))
+
+
+def _context_path(source: str) -> str | None:
+    """``source``'s path in the context; None for the context itself, or a path that would leave it."""
+    path = posixpath.normpath(source.lstrip("/"))
+    return None if path == "." or path == ".." or path.startswith("../") else path

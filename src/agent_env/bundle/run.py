@@ -32,7 +32,7 @@ from agent_env.task.interrupts import Interrupts
 from agent_env.task.task import recorded_scores
 from agent_env.task.teardown import TeardownReport, teardown_run
 from agent_env.task_step.context import TaskStepContext
-from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM
+from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM
 
 from ._fs import relative
 from .materialize import Materialization, Materialized, materialize

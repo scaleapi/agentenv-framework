@@ -15,8 +15,8 @@ from typing import TYPE_CHECKING
 import modal
 
 from agent_env.config import get_config
-from agent_env.utils.build_context import extract, ignore_file
-from agent_env.utils.dockerfile import Instruction, copy_arguments, instructions, opens_heredoc
+from agent_env.utils.docker.context import extract, ignore_file
+from agent_env.utils.docker.dockerfile import Instruction, copy_arguments, instructions, opens_heredoc
 
 if TYPE_CHECKING:
     from agent_env.artifact.artifacts.docker_image import DockerImageArtifact

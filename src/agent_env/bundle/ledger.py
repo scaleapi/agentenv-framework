@@ -29,7 +29,7 @@ from agent_env.store import Filter, Sort
 from agent_env.store.document_store import LocalSqliteDocumentStore
 from agent_env.store.local_state import holding_locks
 from agent_env.task.store import TASKS_COLLECTION
-from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM
+from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM
 
 from .authoring import build_context_files
 from .parse import Bundle, BundleKind

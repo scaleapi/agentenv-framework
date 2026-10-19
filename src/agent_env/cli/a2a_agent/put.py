@@ -7,7 +7,7 @@ from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact import DockerImageArtifact
 from agent_env.cli.utils import build_platform_option, detect_env_metadata, refuse_unwritable_ids
 from agent_env.store.ids import derive_id, image_repository
-from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM, build_image
+from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, build_image
 
 
 @click.command()
