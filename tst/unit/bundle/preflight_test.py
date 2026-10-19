@@ -303,6 +303,19 @@ def test_a_gateway_is_refused_on_a_provider_that_creates_no_vm_and_has_no_privat
     ]
 
 
+def test_an_image_only_a_step_the_walk_doesnt_model_uses_is_built_where_it_runs_and_needs_no_docker_here(bundle_dir,
+                                                                                                       monkeypatch):
+    monkeypatch.setattr(preflight_module, "docker_unreachable", lambda: "docker isn't on PATH")
+    layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\n"})
+    _task(bundle_dir, [
+        {"id": "box", "type": "deploy_sandbox", "sandbox_name": "box", "sandbox_mode": "vm", "sandbox_type": "modal_vm"},
+        {"id": "install", "type": "install_agent", "sandbox_name": "box", "a2a_agent_id": "solver"}])
+
+    dry = dry_run_bundle(bundle_dir)
+
+    assert dry.built_here == set() and dry.images() == (f"agents/solver (Dockerfile image) v1: {CONTEXT}",)
+
+
 def test_one_version_of_an_image_the_bundle_builds_deploys_both_here_and_on_vms(bundle_dir, docker_on_path):
     layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\n"})
     _task(bundle_dir, [{**AGENT, "sandbox_type": "local"},

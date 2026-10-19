@@ -426,10 +426,10 @@ class _Walk:
         return found
 
     def _built_here(self) -> frozenset[str]:
-        """The images the bundle builds that a deploy runs on this machine, or that no deploy the walk models runs, such
-        as a plugin step's, which the run builds here before its tasks start. A deploy elsewhere builds the image where
-        it runs, but not on a provider that runs an image by name."""
-        here = set(self.built) - set(self.uses)
+        """The images the bundle builds that a deploy runs on this machine, which the run builds here before its tasks
+        start, with the Docker those deploys need. Any other deploy builds the image where it runs, a plugin step's
+        included, but not on a provider elsewhere that runs an image by name."""
+        here = set()
         for image_id, uses in self.uses.items():
             built = self.built[image_id]
             source = f"{self.plan.path(built.entry)}/{built.dockerfile}"

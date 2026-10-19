@@ -1,6 +1,8 @@
 """Images built from their build context on this machine: natively, once per sources, labeled with them, and saved once
 for a VM here to load."""
 
+import gzip
+import io
 import threading
 import time
 
@@ -138,3 +140,25 @@ async def test_a_local_sandbox_builds_a_context_with_this_machines_docker(local_
     await LocalSandbox().build_images([image, image])
 
     assert [build[2:4] for build in builds] == [(image.image_name, None)]
+
+
+class _Save:
+    """``docker save``, writing the name it saves."""
+
+    def __init__(self, argv, **kwargs):
+        self.stdout, self.stderr = io.BytesIO(argv[-1].encode()), io.BytesIO()
+
+    def wait(self):
+        return 0
+
+
+def test_images_of_equal_sources_under_two_names_are_saved_once_each_so_each_loads_under_its_own(local_stores, context,
+                                                                                                docker, monkeypatch):
+    monkeypatch.setattr(host_images.subprocess, "Popen", _Save)
+    first, second = _put(context, "solver__agent_image"), _put(context, "helper__agent_image")
+
+    urls = [host_images._saved_here(image) for image in (first, second, first)]
+
+    assert first.source_digest == second.source_digest and urls[0] != urls[1] and urls[2] == urls[0]
+    store = local_stores.get_object_store()
+    assert [gzip.decompress(store.get(url)).decode() for url in urls[:2]] == [first.image_name, second.image_name]

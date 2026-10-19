@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+import hashlib
 import io
 import logging
 import platform as host
@@ -113,7 +114,9 @@ def _built_from(image_name: str) -> str | None:
 def _saved_here(image: DockerImageArtifact) -> str:
     build(image)
     objects = get_config().get_object_store()
-    key = f"{_SAVED_PREFIX}/{sources(image).removeprefix('sha256:')}-{host_platform().replace('/', '-')}.tar.gz"
+    # Per name too: images of equal sources under other names share a build, but a save loads under its own name.
+    name = hashlib.sha256(image.image_name.encode()).hexdigest()[:16]
+    key = f"{_SAVED_PREFIX}/{sources(image).removeprefix('sha256:')}-{host_platform().replace('/', '-')}-{name}.tar.gz"
     with holding_locks([f"image-save:{key}"]):
         if objects.exists(key):
             return objects.object_url(key)
