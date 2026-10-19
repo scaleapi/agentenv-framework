@@ -288,6 +288,7 @@ def test_the_cli_prints_a_sandbox_it_couldnt_tear_down_as_still_up(bundle_dir, t
     assert result.exit_code == 0, result.output
     assert "[tasks/ok.json] couldn't tear down sb-ok: RuntimeError: stuck\n" in result.output
     assert result.output.endswith("\nStill up, 1 sandbox:\n  sb-ok  fake\n")
+    assert result.stderr.endswith("Still up, 1 sandbox:\n  sb-ok  fake\n")
 
 
 def test_the_cli_keep_prints_the_endpoints_holds_and_tears_down_on_ctrl_c(bundle_dir, terminated, quiet_logs,

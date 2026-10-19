@@ -41,16 +41,17 @@ class _Scored(TaskStep):
     peak = 0
     seen: list[TaskStepContext] = []
 
-    def __init__(self, score=1.0, verifier_id=None, **base):
+    def __init__(self, score=1.0, verifier_id=None, results=None, **base):
         super().__init__(**base)
-        self.score, self.verifier_id = score, verifier_id
+        self.score, self.verifier_id, self.results = score, verifier_id, results
 
     @classmethod
     def from_dict(cls, data):
-        return cls(**cls._base_from_dict(data), score=data.get("score"), verifier_id=data.get("verifier_id"))
+        return cls(**cls._base_from_dict(data), score=data.get("score"), verifier_id=data.get("verifier_id"),
+                   results=data.get("results"))
 
     def to_dict(self):
-        return {**super().to_dict(), "score": self.score, "verifier_id": self.verifier_id}
+        return {**super().to_dict(), "score": self.score, "verifier_id": self.verifier_id, "results": self.results}
 
     async def execute(self, context):
         _Scored.seen.append(context)
@@ -61,7 +62,9 @@ class _Scored(TaskStep):
         finally:
             _Scored.active -= 1
         if self.verifier_id is not None:
-            context.metadata.setdefault("verifications", {})[self.verifier_id] = {"score": self.score}
+            verification = {"score": self.score} if self.results is None else {"score": self.score,
+                                                                                "results": self.results}
+            context.metadata.setdefault("verifications", {})[self.verifier_id] = verification
         return context
 
 
@@ -406,6 +409,71 @@ def test_the_cli_exits_0_when_no_run_failed_even_if_one_scored_below_1(bundle_di
 
     assert result.exit_code == 0, result.output
     assert "tasks/b.json v1: scored below 1" in result.output
+
+
+FAILED = [
+    {"criterion": "greets", "result": False, "justification": "does not contain 'hello'"},
+    {"criterion": "builds", "result": True, "justification": "exit=0"},
+    {"id": "loaded", "result": False, "description": "list_items lists ['a']: {'items': []}"},
+    {"type": "response_contains", "result": False, "justification": "missing:\n  'Echo: hi'"},
+    {"id": "row-1", "score": 0.0, "message": "x" * 300},
+    {"criterion": "slow", "result": False, "skipped": True, "justification": "not run"},
+    {"id": "exit_code", "result": False, "message": "exit_code=2 timed_out=False"},
+    {"id": "late", "result": False},
+]
+
+
+def _criteria_bundle(root):
+    layout(root, {"tasks/a.json": _scored(1.0), "tasks/t.json": json.dumps([
+        {"id": "check", "type": "scored_run_test", "verifier_id": "v", "score": 0.2, "results": FAILED}])})
+    return root
+
+
+def test_the_summary_names_each_failed_criterion_and_why_up_to_five(bundle_dir, quiet_logs):
+    result = CliRunner().invoke(cli, ["run", str(_criteria_bundle(bundle_dir)), "--task", "t"])
+
+    assert result.exit_code == 0, result.output
+    lines = result.output.split("tasks/t.json v1: scored below 1 (check: 0.2)", 1)[1].splitlines()[1:7]
+    assert lines == [
+        "    check: greets: does not contain 'hello'",
+        "    check: loaded: list_items lists ['a']: {'items': []}",
+        "    check: response_contains #3: missing: 'Echo: hi'",
+        f"    check: row-1: {'x' * 159}…",
+        "    check: exit_code: exit_code=2 timed_out=False",
+        "    and 1 more",
+    ]
+
+
+@pytest.mark.parametrize("args, code, below", [
+    (["--task", "a", "--task", "b", "--fail-under", "1"], 1, "Below --fail-under 1: tasks/b.json (0.5)"),
+    (["--task", "a", "--task", "b", "--fail-under", "0.5"], 0, None),
+    (["--task", "a", "--fail-under", "1"], 0, None),
+    (["--task", "a", "--task", "b"], 0, None),
+], ids=["below", "at the threshold", "all passed", "no threshold"])
+def test_fail_under_exits_1_when_a_task_scored_below_it(bundle_dir, quiet_logs, args, code, below):
+    result = CliRunner().invoke(cli, ["run", str(bundle_dir), *args])
+
+    assert result.exit_code == code, result.output
+    assert (result.output.rstrip().rsplit("\n", 1)[-1] == below) if below else "Below --fail-under" not in result.output
+
+
+def test_fail_under_fails_a_task_that_recorded_no_score(bundle_dir, quiet_logs):
+    layout(bundle_dir, {"tasks/quiet.json": json.dumps([{"id": "step", "type": "scored_run_test"}])})
+
+    result = CliRunner().invoke(cli, ["run", str(bundle_dir), "--task", "quiet", "--fail-under", "0"])
+
+    assert result.exit_code == 1, result.output
+    assert "tasks/quiet.json v1: unscored" in result.output
+    assert result.output.endswith("\nBelow --fail-under 0: tasks/quiet.json (no score)\n")
+
+
+def test_fail_under_needs_a_bundle_and_changes_nothing_a_dry_run_shows(bundle_dir, quiet_logs):
+    bare = CliRunner().invoke(cli, ["run", "--fail-under", "1"])
+    dry = CliRunner().invoke(cli, ["run", str(bundle_dir), "--task", "b", "--fail-under", "1", "--dry-run"])
+
+    assert bare.exit_code == 2 and "--fail-under needs a BUNDLE to run" in bare.output
+    assert dry.exit_code == 0, dry.output
+    assert "Below --fail-under" not in dry.output
 
 
 def test_the_cli_prints_an_unknown_sandbox_as_one_line(bundle_dir, quiet_logs):

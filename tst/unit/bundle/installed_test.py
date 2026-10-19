@@ -239,7 +239,10 @@ def test_the_cli_says_so_when_no_bundles_are_installed_and_needs_a_bundle_for_it
     for option in (["--task", "t"], ["--keep"], ["--dry-run"]):
         usage = CliRunner().invoke(cli, ["run", *option])
         assert usage.exit_code == 2
-        assert "--task, --eval, --model, --sandbox, --keep and --dry-run need a BUNDLE to run" in usage.output
+        assert f"{option[0]} needs a BUNDLE to run" in usage.output
+    several = CliRunner().invoke(cli, ["run", "--task", "t", "--model", "", "--keep"])
+    assert several.exit_code == 2
+    assert "--task, --model and --keep need a BUNDLE to run" in several.output
 
 
 def test_the_cli_runs_an_installed_bundle_by_name_with_ids_rooted_at_its_package(site, monkeypatch, quiet_logs,
