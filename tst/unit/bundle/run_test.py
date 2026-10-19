@@ -10,17 +10,18 @@ import pytest
 from click.testing import CliRunner
 
 import agent_env.bundle.run as run_module
-from agent_env.bundle import materialize as materialize_module
+from agent_env.providers.sandbox_providers import host_images
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.store import get_artifact_store
 from agent_env.bundle import BundleError, Outcome, TaskRun, dry_run_bundle, parse_bundle, run_bundle
+from agent_env.bundle.preflight import Preflight
 from agent_env.bundle.materialize import materialize
 from agent_env.bundle.plan import plan_bundle
 from agent_env.bundle.resolve import resolve_bundle
 from agent_env.cli import cli
 from agent_env.config.runtime import Config
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
 from agent_env.store import Filter
 from agent_env.store.routing import namespace_routing
 from agent_env.task import Task
@@ -79,6 +80,19 @@ class _Cancelled(_Scored):
         raise asyncio.CancelledError
 
 
+class _RecordsModels(_Scored):
+    """Records the models its solver, user simulator and judge ask for, as the real steps do."""
+
+    type = "records_models_run_test"
+
+    async def execute(self, context):
+        overrides = context.metadata.get("user_overrides", {})
+        context.record_model("solver", self.id, context.agent_model)
+        context.record_model("user simulator", self.id, overrides.get("user_model"))
+        context.record_model("judge", self.id, overrides.get("judge_model"))
+        return context
+
+
 class _NamesAgent(_Scored):
     """Names an agent, so the agent and its image are written, without deploying it."""
 
@@ -113,7 +127,8 @@ LAYOUT = {
 
 @pytest.fixture(autouse=True)
 def registries(monkeypatch):
-    steps = {**Config().task_step_registry(), **{cls.type: cls for cls in (_Scored, _Failing, _Cancelled, _NamesAgent)}}
+    steps = {**Config().task_step_registry(),
+             **{cls.type: cls for cls in (_Scored, _Failing, _Cancelled, _NamesAgent, _RecordsModels)}}
     monkeypatch.setattr(Config, "task_step_registry", lambda self: steps)
     monkeypatch.setattr(_Scored, "seen", [])
     monkeypatch.setattr(_Scored, "peak", 0)
@@ -133,14 +148,15 @@ BUILT_AGENT = {
 
 @pytest.fixture
 def docker(monkeypatch):
-    """Stands in for docker: each build's tag is recorded, and the image written as a docker_image document."""
-    builds = []
-    monkeypatch.setattr(materialize_module.shutil, "which", lambda name: f"/usr/bin/{name}")
-    monkeypatch.setattr(materialize_module, "build_image",
-                        lambda dockerfile, context, tag, *, platform: builds.append(tag))
-    monkeypatch.setattr(materialize_module.DockerImageArtifact, "put", lambda id, **kwargs: get_artifact_store(
-    ).put_document(DockerImageArtifact(id=id, description="d", image_name=kwargs["image_name"],
-                                       tar_gz_s3_url=f"file:///{id}.tar.gz")))
+    """Stands in for this machine's Docker: each build's tag is recorded, and Docker then holds it."""
+    builds, held = [], {}
+
+    def build(dockerfile, context, tag, *, platform, labels=None):
+        builds.append(tag)
+        held[tag] = (labels or {}).get(host_images._SOURCES_LABEL)
+
+    monkeypatch.setattr(host_images, "build_image", build)
+    monkeypatch.setattr(host_images, "_built_from", held.get)
     return builds
 
 
@@ -234,6 +250,15 @@ def test_the_model_and_sandbox_reach_each_run_and_one_invocation_shares_a_run_gr
     assert "user_overrides" not in _Scored.seen[2].metadata
 
 
+def test_the_user_and_judge_models_reach_each_run_as_overrides_beside_the_sandbox(bundle_dir):
+    run_bundle(bundle_dir, tasks=["a"], user_model="u", judge_model="j")
+    run_bundle(bundle_dir, tasks=["a"], user_model="u", sandbox="local")
+
+    assert [context.metadata["user_overrides"] for context in _Scored.seen] == [
+        {"user_model": "u", "judge_model": "j"},
+        {"env_sandbox": "local", "agent_sandbox": "local", "sandbox": "local", "user_model": "u"}]
+
+
 def test_an_eval_naming_a_store_task_is_refused_before_anything_is_written(bundle_dir):
     with namespace_routing():
         Task.put(id="shared-task", steps=[_Scored(id="check", version=None)])
@@ -295,7 +320,11 @@ def test_progress_is_reported_and_a_progress_callback_that_raises_stops_without_
     assert calls == ["tasks/a.json: v1, unchanged"]
 
 
-def test_a_run_says_before_it_builds_an_image_and_names_the_image_apart_from_its_agent(bundle_dir, docker):
+def test_a_run_says_before_it_builds_an_image_and_names_the_image_apart_from_its_agent(bundle_dir, docker,
+                                                                                      monkeypatch):
+    """As it does for an image a deploy on this machine runs, which preflight names."""
+    monkeypatch.setattr(run_module, "preflight_run",
+                        lambda plan, tasks, sandbox: Preflight(frozenset(), (), frozenset({f"{ROOT}/solver__agent_image"})))
     layout(bundle_dir, BUILT_AGENT)
     lines = []
 
@@ -399,6 +428,22 @@ def test_the_cli_prints_a_raised_runs_traceback_only_with_verbose(bundle_dir, qu
     assert verbose.stderr.startswith("\ntasks/c.json raised:\nTraceback (most recent call last):")
     assert verbose.stderr.rstrip().endswith("RuntimeError: boom")
     assert _normalized(verbose.stdout).split("\n\n", 1)[1] == _normalized(quiet.stdout).split("\n\n", 1)[1]
+
+
+def test_the_cli_runs_each_role_on_its_model_names_them_and_a_rerun_on_others_writes_nothing(bundle_dir, quiet_logs):
+    layout(bundle_dir, {"tasks/models.json": json.dumps([{"id": "roles", "type": "records_models_run_test"}])})
+    written = (bundle_dir / "tasks" / "models.json").read_text()
+
+    first = CliRunner().invoke(cli, ["run", str(bundle_dir), "--task", "models", "--model", "m", "--user-model", "u",
+                                     "--judge-model", "j"])
+    second = CliRunner().invoke(cli, ["run", str(bundle_dir), "--task", "models", "--judge-model", "k"])
+
+    assert first.exit_code == 0 and second.exit_code == 0, first.output + second.output
+    assert "    models: solver m; user simulator u; judge j" in first.output.splitlines()
+    assert "tasks/models.json: v1, unchanged" in second.output
+    assert ("    models: solver the agent's default; user simulator the agent's default; judge k"
+            in second.output.splitlines())
+    assert (bundle_dir / "tasks" / "models.json").read_text() == written
 
 
 def test_the_cli_exits_0_when_no_run_failed_even_if_one_scored_below_1(bundle_dir, quiet_logs):
@@ -522,7 +567,7 @@ def test_the_cli_dry_run_reads_another_bundles_entity_and_says_why_an_agent_pinn
     )
 
 
-def test_the_cli_dry_run_lists_an_image_it_would_build_and_builds_nothing(bundle_dir, docker, quiet_logs):
+def test_the_cli_dry_run_lists_an_image_it_would_write_and_builds_nothing(bundle_dir, docker, quiet_logs):
     layout(bundle_dir, BUILT_AGENT)
 
     result = CliRunner().invoke(cli, ["run", str(bundle_dir), "--task", "agent", "--dry-run"])
@@ -535,7 +580,8 @@ def test_the_cli_dry_run_lists_an_image_it_would_build_and_builds_nothing(bundle
         "tasks/agent.json: v1 (new)\n"
         "\n"
         "Images:\n"
-        "  agents/solver (Dockerfile image) v1: built on this machine\n"
+        "  agents/solver (Dockerfile image) v1: a build context, which each deploy builds where it runs, for its "
+        "sandbox's platform\n"
         "Would run:\n"
         "  tasks/agent.json v1\n"
         + DRY_RUN

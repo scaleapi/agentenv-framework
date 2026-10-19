@@ -365,6 +365,7 @@ class Task:
         """
         problems: list[str] = []
         for step in self.steps:
+            problems.extend(step.config_problems())
             problems.extend(step.preflight())
         return problems
 

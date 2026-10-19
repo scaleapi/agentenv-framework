@@ -103,9 +103,9 @@ class ModelConfig:
             headers=dict(headers),
         )
 
-    def model_for_role(self, role: str) -> Optional[str]:
-        """The ``[model.roles].<role>`` model, else ``default`` (open map)."""
-        return self.roles.get(role) or self.default
+    def model_for_role(self, role: str, *, or_default: bool = True) -> Optional[str]:
+        """The ``[model.roles].<role>`` model, else ``default`` unless ``or_default`` is False (open map)."""
+        return self.roles.get(role) or (self.default if or_default else None)
 
     def resolve_api_key(self, *, secret_resolver: SecretResolver) -> str:
         """Key: env ``LITELLM_API_KEY`` > ``api_key`` (resolving a reference lazily);

@@ -411,6 +411,8 @@ def _hold(tagged_contexts, interrupts: Interrupts) -> None:
 @click.option("--output-dir", default=None, type=click.Path(file_okay=False), help="Directory to write context JSON output")
 @click.option("--k", "k", default=1, type=int, help="Number of parallel task runs")
 @click.option("--agent-model", default=None, type=str, help="Override the model used by prompt_agent steps")
+@click.option("--user-model", default=None, type=str, help="Override the model the user simulator runs on")
+@click.option("--judge-model", default=None, type=str, help="Override the model rubrics_verifier judges grade with")
 @click.option("--agent-artifact-id", default=None, type=str, help="Override the agent image artifact for deploy_agent steps")
 @click.option("--start-step", default=0, type=int, help="0-based step index to start execution from")
 @click.option("--context-json", default=None, type=click.Path(exists=True, dir_okay=False), help="Path to a JSON file to seed the TaskStepContext")
@@ -434,7 +436,7 @@ def _hold(tagged_contexts, interrupts: Interrupts) -> None:
               help="Keep what a run deployed up when it ends, print it, and tear it down on Ctrl-C; while it holds, "
                    "another terminal can resume the run with --start-step and --context-json. Without it, each run "
                    "is torn down as it ends, as Ctrl-C mid-run always does.")
-def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, agent_model: str | None, agent_artifact_id: str | None, start_step: int, context_json: str | None, litellm_api_key: str | None, judge_litellm_api_key: str | None, apply_trajectory_filter: bool | None, a2a_agent_id: str | None, agent_sandbox: str | None, env_sandbox: str | None, gateway_env_id: str | None, service_db_env_id: str | None, env_state_type: str | None, env_state_instance_id: str | None, keep: bool):
+def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, agent_model: str | None, user_model: str | None, judge_model: str | None, agent_artifact_id: str | None, start_step: int, context_json: str | None, litellm_api_key: str | None, judge_litellm_api_key: str | None, apply_trajectory_filter: bool | None, a2a_agent_id: str | None, agent_sandbox: str | None, env_sandbox: str | None, gateway_env_id: str | None, service_db_env_id: str | None, env_state_type: str | None, env_state_instance_id: str | None, keep: bool):
     """Run a task by executing its steps sequentially.
 
     Each run's sandboxes are torn down as it ends, passed or failed; its instance and context JSON stay.
@@ -472,6 +474,10 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
         initial_context.metadata.setdefault("user_overrides", {})["apply_trajectory_filter"] = apply_trajectory_filter
     if a2a_agent_id:
         initial_context.metadata.setdefault("user_overrides", {})["a2a_agent_id"] = a2a_agent_id
+    if user_model:
+        initial_context.metadata.setdefault("user_overrides", {})["user_model"] = user_model
+    if judge_model:
+        initial_context.metadata.setdefault("user_overrides", {})["judge_model"] = judge_model
     if agent_sandbox:
         initial_context.metadata.setdefault("user_overrides", {})["agent_sandbox"] = agent_sandbox
     if env_sandbox:
@@ -549,6 +555,8 @@ def _seed_universe_id(task, seed: dict) -> str | None:
 @click.option("--concurrency", default=5, type=int, help="Max parallel task runs")
 @click.option("--output-dir", default=None, type=click.Path(file_okay=False), help="Directory to write context JSON outputs")
 @click.option("--agent-model", default=None, type=str, help="Override the model used by prompt_agent steps")
+@click.option("--user-model", default=None, type=str, help="Override the model the user simulator runs on")
+@click.option("--judge-model", default=None, type=str, help="Override the model rubrics_verifier judges grade with")
 @click.option("--agent-artifact-id", default=None, type=str, help="Override the agent image artifact for deploy_agent steps")
 @click.option("--litellm-api-key", default=None, type=str, help="Override LITELLM_API_KEY for all runs")
 @click.option("--judge-litellm-api-key", default=None, type=str, help="Override LITELLM_API_KEY used by rubrics_verifier judge agents")
@@ -564,7 +572,7 @@ def _seed_universe_id(task, seed: dict) -> str | None:
 @click.option("--keep", is_flag=True,
               help="Keep what each run deployed up when it ends, print it, and tear it down on Ctrl-C. Without it, "
                    "each run is torn down as it ends, as Ctrl-C mid-batch always does.")
-def run_batch(task_id: str, task_version: int | None, seeds: str, concurrency: int, output_dir: str | None, agent_model: str | None, agent_artifact_id: str | None, litellm_api_key: str | None, judge_litellm_api_key: str | None, apply_trajectory_filter: bool | None, agent_sandbox: str | None, env_sandbox: str | None, env_state_type: str | None, env_state_instance_id: str | None, keep: bool):
+def run_batch(task_id: str, task_version: int | None, seeds: str, concurrency: int, output_dir: str | None, agent_model: str | None, user_model: str | None, judge_model: str | None, agent_artifact_id: str | None, litellm_api_key: str | None, judge_litellm_api_key: str | None, apply_trajectory_filter: bool | None, agent_sandbox: str | None, env_sandbox: str | None, env_state_type: str | None, env_state_instance_id: str | None, keep: bool):
     """Run a task in batch against multiple seeds from a CSV file.
 
     Each run's sandboxes are torn down as it ends; --keep holds them up until Ctrl-C instead. Ctrl-C or
@@ -632,6 +640,10 @@ def run_batch(task_id: str, task_version: int | None, seeds: str, concurrency: i
                 ctx.metadata.setdefault("user_overrides", {})["judge_litellm_api_key"] = judge_litellm_api_key
             if apply_trajectory_filter is not None:
                 ctx.metadata.setdefault("user_overrides", {})["apply_trajectory_filter"] = apply_trajectory_filter
+            if user_model:
+                ctx.metadata.setdefault("user_overrides", {})["user_model"] = user_model
+            if judge_model:
+                ctx.metadata.setdefault("user_overrides", {})["judge_model"] = judge_model
             if agent_sandbox:
                 ctx.metadata.setdefault("user_overrides", {})["agent_sandbox"] = agent_sandbox
             if env_sandbox:

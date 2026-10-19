@@ -24,6 +24,8 @@ from agent_env.task_step.task_steps.teardown_sandboxes import _DEFAULT_PROVIDERS
 
 logger = logging.getLogger(__name__)
 
+PROVIDER_CLOSE_TIMEOUT_SECONDS = 5
+
 TERMINATE_TIMEOUT_SECONDS = 120
 
 
@@ -139,8 +141,15 @@ async def _terminate(sandbox: RecordedSandbox) -> bool:
     sandbox doesn't mean it's gone."""
     if sandbox.sandbox_type:
         provider = build_sandbox_provider(sandbox.sandbox_type)
-        await provider.terminate_sandbox(sandbox.sandbox_id)
-        return provider.ON_THIS_MACHINE
+        try:
+            await provider.terminate_sandbox(sandbox.sandbox_id)
+            return provider.ON_THIS_MACHINE
+        finally:
+            try:
+                async with asyncio.timeout(PROVIDER_CLOSE_TIMEOUT_SECONDS):
+                    await provider.close()
+            except Exception as error:
+                logger.warning("Closing teardown provider %s failed: %s: %s", sandbox.sandbox_type, type(error).__name__, error)
     handle = await _DEFAULT_PROVIDERS[sandbox.slot]().get_sandbox(sandbox.sandbox_id)
     await handle.terminate()
     return handle.ON_THIS_MACHINE

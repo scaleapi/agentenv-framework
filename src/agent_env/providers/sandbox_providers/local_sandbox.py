@@ -38,6 +38,7 @@ except ImportError:  # Windows, which agent-env does not target.
 from agent_env import config
 from agent_env.attribution import Attribution
 from agent_env.config.paths import state_root
+from agent_env.providers.sandbox_providers.host_images import build_here, built_here
 from agent_env.providers.sandbox_providers.sandbox import SANDBOX_LABEL, NetworkPolicy, VmSandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_CONTAINER,
@@ -204,6 +205,21 @@ class LocalSandbox(VmSandbox):
         self._work_dir = work_dir or Path(
             tempfile.mkdtemp(prefix=f"agent-env-{self.sandbox_id}-", dir=_local_sandbox_root())
         )
+
+    async def build_images(self, artifacts: list) -> None:
+        """Build each on this machine's Docker, which runs this sandbox's containers: natively, once per sources. One
+        given a platform of its own, as a remote VM records, builds as a VM does, for that platform."""
+        if self.platform is not None:
+            await super().build_images(artifacts)
+            return
+        for artifact in artifacts:
+            await build_here(artifact)
+
+    async def pull_images(self, image_names: list[str]) -> None:
+        """Pull each image but one this machine built from a build context, which no registry holds."""
+        built = await asyncio.gather(*(asyncio.to_thread(built_here, name) for name in image_names))
+        if pulled := [name for name, here in zip(image_names, built) if not here]:
+            await super().pull_images(pulled)
 
     def host_port(self, port: int) -> int:
         """The allocated host port for a published container port (identity if unmapped)."""
@@ -545,8 +561,10 @@ class LocalSandboxProvider(SandboxProvider):
 
     EXTRA_CONTAINER_RUN_ARGS = " ".join(f"--add-host {entry}" for entry in _EXTRA_HOSTS)
     ON_THIS_MACHINE = True
-    # An agent's sandbox is a container from its image's name, though a VM it creates (create_vm) loads images.
-    SANDBOX_ACCEPTS = Accepts.NAME
+    # Its containers start from an image's name, or one it builds first from the image's build context (prepare_image);
+    # a VM it creates (create_vm) loads images.
+    SANDBOX_ACCEPTS = Accepts.NAME_OR_CONTEXT
+    CONTAINER_ACCEPTS = Accepts.NAME_OR_CONTEXT
 
     def url_from_sandbox(self, url: str) -> str:
         return self.get_external_url(url)
@@ -637,6 +655,11 @@ class LocalSandboxProvider(SandboxProvider):
         args = self._container_args(sandbox, image_name=image_name, port=port, env={**LOCAL_TRUST_ENV, **env})
         await sandbox.exec_script(f"docker create {args} > /dev/null")
         await start_trusting(sandbox, sandbox.container_name, trust_dir)
+
+    async def prepare_image(self, image: Any, *, attribution: Optional[Attribution] = None) -> None:
+        """Build a context-only image on this machine, whose containers the local provider starts by name."""
+        if image.context_only:
+            await build_here(image)
 
     async def create_sandbox(
         self,

@@ -37,6 +37,9 @@ class _FakeProvider:
     async def terminate_sandbox(self, sandbox_id):
         await (await self.get_sandbox(sandbox_id)).terminate()
 
+    async def close(self):
+        pass
+
 
 class _Log(list):
     """The (provider, sandbox_id) terminate log, plus the sandbox ids whose terminate should fail."""

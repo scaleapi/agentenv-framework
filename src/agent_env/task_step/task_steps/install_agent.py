@@ -22,10 +22,12 @@ from typing import Callable, ClassVar, Optional
 import httpx
 
 from agent_env.a2a_agent import A2AAgent
+from agent_env.config import get_config
+from agent_env.entity.scopes import FieldScope
 from agent_env.providers.sandbox_providers.local_sandbox import host_url_for
 from agent_env.store.base import NotFoundError
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)
@@ -104,6 +106,7 @@ def _build_param_resolvers(
 class InstallAgentTaskStep(TaskStep):
     type: ClassVar[str] = "install_agent"
     entity_refs = (EntityRef.agent("a2a_agent_id", version_field="a2a_agent_version"),)
+    field_scopes = {**TaskStep.field_scopes, "a2a_agent_id": FieldScope.USER, "a2a_agent_version": FieldScope.USER}
 
     def __init__(
         self,
@@ -111,7 +114,7 @@ class InstallAgentTaskStep(TaskStep):
         version: Optional[int],
         sandbox_name: str,
         container_name: Optional[str] = None,
-        a2a_agent_id: str = "",
+        a2a_agent_id: Optional[str] = None,
         a2a_agent_version: Optional[int] = None,
         agent_name: str = TaskStep.DEFAULT_AGENT_NAME,
         a2a_port: Optional[int] = None,
@@ -120,8 +123,6 @@ class InstallAgentTaskStep(TaskStep):
         fail_task_on_error: bool = True,
     ):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
-        if not a2a_agent_id:
-            raise ValueError("a2a_agent_id is required")
         self.sandbox_name = sandbox_name
         self.container_name = container_name
         self.a2a_agent_id = a2a_agent_id
@@ -147,7 +148,7 @@ class InstallAgentTaskStep(TaskStep):
             **cls._base_from_dict(data),
             sandbox_name=data["sandbox_name"],
             container_name=data.get("container_name"),
-            a2a_agent_id=data["a2a_agent_id"],
+            a2a_agent_id=data.get("a2a_agent_id"),
             a2a_agent_version=data.get("a2a_agent_version"),
             agent_name=data.get("agent_name", TaskStep.DEFAULT_AGENT_NAME),
             a2a_port=data.get("a2a_port"),
@@ -156,9 +157,10 @@ class InstallAgentTaskStep(TaskStep):
 
     def preflight(self) -> list[str]:
         """An agent with no build context to install, reported at save instead. One the store can't give is left to the
-        run, whose ``a2a_agent_id`` override can name another, so a task saved naming a placeholder still saves."""
+        run, whose ``a2a_agent_id`` override can name another, so a task saved naming a placeholder still saves. A step
+        naming no agent installs the configured default."""
         try:
-            agent = A2AAgent.get(self.a2a_agent_id, self.a2a_agent_version)
+            agent = A2AAgent.get(self.a2a_agent_id or get_config().get_default_a2a_agent_id(), self.a2a_agent_version)
         except (NotFoundError, ValueError, KeyError, TypeError):
             return []
         problem = _install_problem(agent)
@@ -170,7 +172,7 @@ class InstallAgentTaskStep(TaskStep):
             build_sandbox_provider,
             get_sandbox_provider,
         )
-        from agent_env.config import ConfigError, get_config
+        from agent_env.config import ConfigError
 
         existing = next((a for a in context.deployed_agents if a.agent_name == self.agent_name), None)
         if existing is not None:
@@ -208,7 +210,7 @@ class InstallAgentTaskStep(TaskStep):
         # Honor `--a2a-agent-id` override (same pattern as DeployAgentTaskStep) — lets the
         # caller swap which agent gets installed without rewriting the task definition.
         user_overrides = context.metadata.get("user_overrides", {})
-        a2a_agent_id = user_overrides.get("a2a_agent_id") or self.a2a_agent_id
+        a2a_agent_id = user_overrides.get("a2a_agent_id") or self.a2a_agent_id or get_config().get_default_a2a_agent_id()
         agent = A2AAgent.get(a2a_agent_id, self.a2a_agent_version)
         if problem := _install_problem(agent):
             raise RuntimeError(problem)

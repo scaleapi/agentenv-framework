@@ -6,7 +6,7 @@ import json
 import os
 import signal
 import tomllib
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 import pytest
 from click.testing import CliRunner
@@ -18,6 +18,7 @@ from agent_env.artifact.store import get_artifact_store
 from agent_env.bundle import BundleError, parse_bundle
 from agent_env.bundle import importer as importer_module
 from agent_env.bundle.importer import ImportedEval, import_eval, import_task
+from agent_env.bundle.installed import InstalledBundle
 from agent_env.bundle.materialize import materialize
 from agent_env.bundle.plan import plan_bundle
 from agent_env.bundle.resolve import resolve_bundle
@@ -27,6 +28,8 @@ from agent_env.config.runtime import Config
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.eval import Eval
 from agent_env.eval.eval import EvalTask
+from agent_env.entity.scopes import FieldScope
+from agent_env.plugins import TASK_STEPS, Contribution, Distribution, Inventory
 from agent_env.store import Filter
 from agent_env.store.routing import namespace_routing
 from agent_env.task import Task
@@ -81,7 +84,7 @@ def _left(root):
 
 
 def test_a_task_imports_as_its_stored_steps_with_each_store_reference_pinned_at_its_version_now(store):
-    imported = import_task("triage", store / "triage")
+    imported = import_task("triage", store / "triage", include_scopes=[FieldScope.USER])
     steps = _steps(store / "triage", "triage")
     stored = Task.get("triage").to_dict()["steps"]
 
@@ -107,13 +110,19 @@ def test_a_reference_that_takes_no_version_and_a_step_that_names_no_agent_are_re
     imported = import_task("triage", store / "triage")
 
     assert sorted((ref.where, ref.kind.value, ref.id) for ref in imported.floating) == [
+        ("tasks/triage.json: step 'agent': a2a_agent_id", "agent", "a2a-default"),
+        ("tasks/triage.json: step 'helper': a2a_agent_id", "agent", "a2a-default"),
+        ("tasks/triage.json: step 'judge': judge_a2a_agent_id", "agent", "a2a-default"),
+    ]
+    kept = import_task("triage", store / "kept", include_scopes=[FieldScope.USER])
+    assert sorted((ref.where, ref.kind.value, ref.id) for ref in kept.floating) == [
         ("tasks/triage.json: step 'helper': a2a_agent_id", "agent", "a2a-default"),
         ("tasks/triage.json: step 'judge': judge_a2a_agent_id", "agent", "solver"),
     ]
 
 
 def test_env_vars_that_look_like_secrets_are_left_out_and_a_urls_credentials_masked_elsewhere(store):
-    imported = import_task("triage", store / "triage")
+    imported = import_task("triage", store / "triage", include_scopes=[FieldScope.USER])
     steps = _steps(imported.root, "triage")
 
     assert steps[2]["env_vars"] == {"MODE": "fast"}
@@ -147,7 +156,7 @@ def test_a_credential_by_its_shape_is_dropped_from_an_env_var_and_masked_anywher
     _task("creds", [STEPS[0], STEPS[1], {**STEPS[2], "env_vars": {"SETTING": token}},
                     {**STEPS[4], "criteria": [{"id": "c1", "description": f"logs in with {token} today"}]}])
 
-    imported = import_task("creds", store / "creds")
+    imported = import_task("creds", store / "creds", include_scopes=[FieldScope.USER])
     steps = _steps(imported.root, "creds")
 
     assert steps[2]["env_vars"] == {}
@@ -165,7 +174,7 @@ def test_text_that_only_resembles_a_credential_is_kept(store):
     _task("kept", [STEPS[0], STEPS[1], {**STEPS[2], "env_vars": {f"V{i}": text for i, text in enumerate(kept)}},
                    {**STEPS[4], "criteria": [{"id": f"c{i}", "description": text} for i, text in enumerate(kept)]}])
 
-    imported = import_task("kept", store / "kept")
+    imported = import_task("kept", store / "kept", include_scopes=[FieldScope.USER])
     steps = _steps(imported.root, "kept")
 
     assert list(steps[2]["env_vars"].values()) == kept
@@ -183,7 +192,7 @@ def test_the_readme_says_where_the_folder_came_from_and_how_each_reference_was_w
 
 
 def test_the_folder_materializes_back_to_the_stored_steps(store):
-    imported = import_task("triage", store / "triage")
+    imported = import_task("triage", store / "triage", include_scopes=[FieldScope.USER])
     bundle = parse_bundle(imported.root)
     with namespace_routing():
         materialization = materialize(plan_bundle(resolve_bundle(bundle)))
@@ -229,7 +238,8 @@ def test_an_env_no_step_of_the_task_deploys_floats(store):
     imported = import_task("live", store / "live")
 
     assert [(ref.kind.value, ref.id, ref.where) for ref in imported.floating] == [
-        ("env", "crm-env", "tasks/live.json: step 'agent': env_ids[0]")]
+        ("env", "crm-env", "tasks/live.json: step 'agent': env_ids[0]"),
+        ("agent", "a2a-default", "tasks/live.json: step 'agent': a2a_agent_id")]
 
 
 def test_a_pin_the_task_already_has_is_kept_when_the_store_holds_it_and_refused_when_it_doesnt(store):
@@ -352,7 +362,7 @@ def test_a_folder_that_fails_its_check_is_not_moved_into_place_and_its_staging_i
     (store / "dest").mkdir()
     before = _left(store)
 
-    def refuse(resolved):
+    def refuse(resolved, **_):
         raise BundleError(["refused"])
 
     monkeypatch.setattr(importer_module, "check_bundle", refuse)
@@ -397,7 +407,7 @@ def test_a_destination_something_else_writes_during_the_import_is_left_as_it_wro
     if empty:
         dest.mkdir()
 
-    def land(resolved):
+    def land(resolved, **_):
         dest.mkdir(exist_ok=True)
         (dest / "theirs.txt").write_text("theirs")
 
@@ -427,7 +437,7 @@ def test_a_folder_the_import_cant_write_in_is_refused_in_one_line(store):
 
 def test_sigterm_during_an_import_leaves_nothing_beside_its_destination(store, monkeypatch):
     before = _left(store)
-    monkeypatch.setattr(importer_module, "check_bundle", lambda resolved: os.kill(os.getpid(), signal.SIGTERM))
+    monkeypatch.setattr(importer_module, "check_bundle", lambda resolved, **_: os.kill(os.getpid(), signal.SIGTERM))
 
     result = CliRunner().invoke(cli, ["bundle", "init", str(store / "dest"), "--from-task", "triage"])
 
@@ -501,3 +511,183 @@ def test_reading_the_store_writes_nothing_to_it(store):
     import_task("triage", store / "triage")
 
     assert {name: documents.count(name, Filter()) for name in counts} == counts
+
+
+SCOPED = [
+    {"id": "env", "type": "deploy_env", "env_id": "crm-env", "sandbox_type": "modal_vm,modal",
+     "metadata": {"attribution": {"project_id": "p-123"}, "note": "kept"}},
+    {"id": "agent", "type": "deploy_agent", "env_ids": ["crm-env"], "a2a_agent_id": "solver", "sandbox_type": "local",
+     "litellm_base_url": "https://litellm.internal.example.com", "metadata": {"attribution": {"project_id": "p-123"}},
+     "agent_changelog_object_url": "s3://their-bucket/changelog/", "agent_changelog_toolcall_position_exclusive": 0},
+    {"id": "prompt", "type": "prompt_agent", "prompt": "close the duplicates", "agent_name": "default-agent",
+     "trajectory_output_prefix": "s3://their-bucket/trajectories/", "user_a2a_url": "https://hub.example.com/a2a",
+     "max_thinking_tokens": 0},
+    {"id": "judge", "type": "rubrics_verifier", "verifier_id": "judge", "prompt_id": "prompt",
+     "judge_sandbox_type": "modal", "criteria": [{"id": "c1", "description": "closed every duplicate"}]},
+    {"id": "box", "type": "deploy_sandbox", "sandbox_name": "box", "sandbox_mode": "vm"},
+    {"id": "install", "type": "install_agent", "sandbox_name": "box", "a2a_agent_id": "solver", "agent_name": "installed"},
+    {"id": "fetch", "type": "load_artifact", "sandbox_name": "box", "urls": ["s3://their-bucket/rows.csv"],
+     "destination_path": "/data"},
+    {"id": "build", "type": "run_docker_container", "sandbox_name": "box", "docker_context_url": "s3://their-bucket/ctx.zip"},
+    {"id": "skills", "type": "add_skills", "agent_name": "installed",
+     "skills": [{"name": "notes", "description": "how notes are kept", "object_url": "s3://their-bucket/skills/notes/"}]},
+]
+SCOPED_FIELDS = {"env": ["sandbox_type", "metadata.attribution"],
+                 "agent": ["a2a_agent_id", "sandbox_type", "litellm_base_url", "metadata.attribution"],
+                 "prompt": ["trajectory_output_prefix", "max_thinking_tokens"],  # a set zero is set
+                 # A stored judge always holds a model: its author's, or the one its store's config named for judges.
+                 "judge": ["default_model", "judge_sandbox_type"],
+                 "install": ["a2a_agent_id"],
+                 "fetch": ["urls"],
+                 "build": ["docker_context_url"],
+                 # A skill is stored under both spellings of its object_url.
+                 "skills": ["skills[0].object_url", "skills[0].s3_url"]}
+
+
+def _value(step, path):
+    for key in path.split("."):
+        key, _, index = key.removesuffix("]").partition("[")
+        step = step.get(key) if isinstance(step, dict) else None
+        if index and isinstance(step, list):
+            step = step[int(index)]
+    return step
+
+
+def test_a_steps_user_scoped_fields_are_left_out_and_reported_and_the_rest_of_it_is_kept(store):
+    _task("scoped", SCOPED)
+    stored = {step["id"]: step for step in Task.get("scoped").to_dict()["steps"]}
+
+    imported = import_task("scoped", store / "scoped")
+
+    steps = {step["id"]: step for step in _steps(imported.root, "scoped")}
+    assert {id: [path for path in paths if _value(steps[id], path) is not None]
+            for id, paths in SCOPED_FIELDS.items()} == {id: [] for id in SCOPED_FIELDS}
+    assert sorted(drop.where for drop in imported.dropped) == sorted(
+        f"tasks/scoped.json: step {id!r}: {path}" for id, paths in SCOPED_FIELDS.items() for path in paths)
+    assert {drop.why for drop in imported.dropped} == {
+        "dropped: user scope, so a run takes its own; --include-scope user keeps it"}
+    assert steps["env"]["metadata"] == {"note": "kept"}
+    assert steps["prompt"]["prompt"] == stored["prompt"]["prompt"]
+    assert steps["prompt"]["user_a2a_url"] == stored["prompt"]["user_a2a_url"]  # it also says the user is a human
+    assert steps["judge"]["criteria"] == stored["judge"]["criteria"]
+    assert steps["skills"]["skills"] == [{"name": "notes", "description": "how notes are kept"}]
+    assert steps["agent"]["agent_changelog_object_url"] == "s3://their-bucket/changelog/"  # the state it starts from
+    assert steps["agent"]["agent_changelog_toolcall_position_exclusive"] == 0
+    assert {(floating.where, floating.id) for floating in imported.floating} >= {
+        ("tasks/scoped.json: step 'agent': a2a_agent_id", "a2a-default"),
+        ("tasks/scoped.json: step 'install': a2a_agent_id", "a2a-default")}
+
+
+def test_including_the_user_scope_keeps_each_scoped_field_as_stored(store):
+    _task("scoped", SCOPED)
+    stored = {step["id"]: step for step in Task.get("scoped").to_dict()["steps"]}
+
+    imported = import_task("scoped", store / "scoped", include_scopes=[FieldScope.USER])
+
+    steps = {step["id"]: step for step in _steps(imported.root, "scoped")}
+    assert {(id, path): _value(steps[id], path) for id, paths in SCOPED_FIELDS.items() for path in paths} == {
+        (id, path): _value(stored[id], path) for id, paths in SCOPED_FIELDS.items() for path in paths}
+    assert imported.dropped == ()
+
+
+class _AcmeFile(FileArtifact):
+    """A plugin's artifact type, which a config file registers here."""
+
+    type: Literal["acme_file_import_test"] = "acme_file_import_test"
+
+
+def test_what_only_a_plugin_or_a_config_file_registers_is_named_as_a_need_by_what_registers_it(store, monkeypatch):
+    steps = {**Config().task_step_registry(), _Undeclared.type: _Undeclared}
+    monkeypatch.setattr(Config, "task_step_registry", lambda self: steps)
+    artifacts = {**Config().artifact_registry(), "acme_file_import_test": _AcmeFile}
+    monkeypatch.setattr(Config, "artifact_registry", lambda self: artifacts)
+    acme = Distribution("agentenv-acme", "1.0", (
+        Contribution(TASK_STEPS, _Undeclared.type, f"{_Undeclared.__module__}:{_Undeclared.__qualname__}", "active"),))
+    monkeypatch.setattr(importer_module, "inventory", lambda load: Inventory(
+        distributions=(acme,), group_errors={}, discovery_errors={}, config_path=None, config_error=None, loaded=load))
+    (store / "acme.json").write_text("{}")
+    _AcmeFile.put("acme-data", description="acme rows", file_path=str(store / "acme.json"))
+    _task("acme", [{"id": "env", "type": "deploy_env", "env_id": "crm-env"},
+                   {"id": "load", "type": "load_artifact", "env_id": "crm-env", "artifacts": [{"id": "acme-data"}]},
+                   {"id": "p", "type": _Undeclared.type, "depends_on": [{"task_step_id": "load"}]}])
+
+    imported = import_task("acme", store / "acme")
+
+    assert sorted((need.by, need.name, need.what, need.where) for need in imported.needs) == [
+        ("agentenv-acme", _Undeclared.type, "step type", "tasks/acme.json: step 'p'"),
+        ("configuration", "acme_file_import_test", "artifact type", "tasks/acme.json: step 'load': artifacts[0].id"),
+    ]
+    assert imported.report()[0] == ("Needs beyond core", [
+        "agentenv-acme: undeclared_import_test (step type), at tasks/acme.json: step 'p'",
+        "configuration: acme_file_import_test (artifact type), at tasks/acme.json: step 'load': artifacts[0].id",
+    ])
+    assert "## Needs beyond core" in (imported.root / "README.md").read_text()
+
+
+def test_a_plugins_type_a_config_file_replaces_is_credited_to_configuration(store, monkeypatch):
+    steps = {**Config().task_step_registry(), _Undeclared.type: _Undeclared}
+    monkeypatch.setattr(Config, "task_step_registry", lambda self: steps)
+    replaced = Distribution("agentenv-acme", "1.0", (
+        Contribution(TASK_STEPS, _Undeclared.type, f"{_AcmeFile.__module__}:{_AcmeFile.__qualname__}", "replaced"),))
+    monkeypatch.setattr(importer_module, "inventory", lambda load: Inventory(
+        distributions=(replaced,), group_errors={}, discovery_errors={}, config_path=None, config_error=None,
+        loaded=load))
+    _task("acme", [{"id": "p", "type": _Undeclared.type}])
+
+    assert [need.by for need in import_task("acme", store / "acme").needs] == ["configuration"]
+
+
+def test_a_skipped_plugins_type_a_config_file_supplies_is_credited_to_configuration_without_loading_it(
+        store, monkeypatch):
+    steps = {**Config().task_step_registry(), _Undeclared.type: _Undeclared}
+    monkeypatch.setattr(Config, "task_step_registry", lambda self: steps)
+    site = store / "site"
+    site.mkdir()
+    (site / "acme_broken_import_test.py").write_text("raise RuntimeError('acme is broken')\n")
+    monkeypatch.syspath_prepend(str(site))
+    broken = Distribution("agentenv-acme", "1.0", (
+        Contribution(TASK_STEPS, _Undeclared.type, "acme_broken_import_test:Step", "unloaded"),))
+    monkeypatch.setattr(importer_module, "inventory", lambda load: Inventory(
+        distributions=(broken,), group_errors={}, discovery_errors={}, config_path=None, config_error=None,
+        loaded=load))
+    monkeypatch.setattr(importer_module, "load_failures", lambda: {TASK_STEPS: {_Undeclared.type: "failed to load"}})
+    _task("acme", [{"id": "p", "type": _Undeclared.type}])
+
+    assert [need.by for need in import_task("acme", store / "acme").needs] == ["configuration"]
+
+
+def test_a_task_that_uses_only_what_core_ships_needs_nothing(store):
+    assert import_task("triage", store / "triage").needs == ()
+
+
+def test_the_cli_leaves_out_scoped_fields_unless_told_to_include_their_scope(store):
+    _task("scoped", SCOPED)
+
+    left = CliRunner().invoke(cli, ["bundle", "init", str(store / "left"), "--from-task", "scoped"])
+    kept = CliRunner().invoke(cli, ["bundle", "init", str(store / "kept"), "--from-task", "scoped",
+                                    "--include-scope", "user"])
+
+    assert left.exit_code == 0 and kept.exit_code == 0, left.output + kept.output
+    assert ("  tasks/scoped.json: step 'agent': litellm_base_url: dropped: user scope, so a run takes its own; "
+            "--include-scope user keeps it") in left.output.splitlines()
+    assert "user scope" not in kept.output
+    assert _steps(store / "kept", "scoped")[1]["litellm_base_url"] == "https://litellm.internal.example.com"
+
+
+@pytest.mark.parametrize("pin", [None, 3])
+def test_an_installed_bundles_entity_floats_unpinned_so_the_import_runs_it_from_there(store, monkeypatch, pin):
+    kit = store / "site" / "kit"
+    (kit / "agents/solver").mkdir(parents=True)
+    (kit / "agents/solver/Dockerfile").write_text("FROM scratch\n")
+    monkeypatch.setattr(importer_module, "installed_bundles",
+                        lambda: (InstalledBundle("kit", "demo-dist", "1.0", "demo", kit, None, None),))
+    agent = "@local/demo-dist/kit/solver"
+    with namespace_routing():
+        _task("@local/~/runs/t", [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": agent,
+                                   "a2a_agent_version": pin}])
+        imported = import_task("@local/~/runs/t", store / "imported", include_scopes=[FieldScope.USER])
+
+    assert [(ref.where, ref.id) for ref in imported.floating] == [("tasks/t.json: step 'agent': a2a_agent_id", agent)]
+    assert ("dropped" in imported.floating[0].why) == (pin is not None) and imported.pinned == ()
+    assert _steps(imported.root, "t")[0]["a2a_agent_version"] is None
+

@@ -131,10 +131,27 @@ class FileArtifact(Artifact):
     @classmethod
     def from_toml(cls, data: dict, ctx: AuthoringContext) -> Self:
         """Write the folder's one file (``put_attempt``); ``description`` defaults to the file's name."""
-        fields = ctx.accept(data, **cls.toml_keys)
+        fields = cls.accept_toml(data, ctx)
         filename, path = ctx.file()
         return cls.put_attempt(ctx.id, description=fields.get("description", filename), file_path=str(path),
                                filename=filename)
+
+    @classmethod
+    def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:
+        """The keys of ``data``, an artifact.toml, a file takes, and the folder's one file. Raises BundleError listing
+        every problem."""
+        problems = []
+        if (files := ctx.try_files(empty_ok=True)) is not None:  # None when the plan's walk reports why
+            remedy = "leave out its declared type to write the folder as a file_artifact_universe"
+            if not files:
+                problems.append(ctx.no_files("files to write"))
+            elif problem := ctx.not_one_file(files, remedy):
+                problems.append(problem)
+        fields, more = ctx.accepted(data, **cls.toml_keys)
+        problems += more
+        if problems:
+            ctx.refuse(problems)
+        return fields
 
     @classmethod
     def put_attempt(cls, id: str, *, description: str, file_path: str, filename: str) -> Self:

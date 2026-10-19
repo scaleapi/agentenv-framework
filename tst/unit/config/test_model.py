@@ -92,6 +92,12 @@ def test_model_for_role_hit_and_fallback():
     assert ModelConfig().model_for_role("judge") is None
 
 
+def test_a_role_asked_for_without_the_default_is_only_the_one_the_config_names():
+    cfg = ModelConfig(default="m-default", roles={"user": "m-user"})
+    assert cfg.model_for_role("user", or_default=False) == "m-user"
+    assert cfg.model_for_role("judge", or_default=False) is None
+
+
 # --- resolve_api_key ----------------------------------------------------------
 
 def test_api_key_env_wins_and_refs_stay_lazy(monkeypatch):

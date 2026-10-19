@@ -12,9 +12,8 @@ from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.store import get_artifact_store
 from agent_env.bundle.materialize import materialize
 from agent_env.env import Env
-from agent_env.store.ids import image_repository
 from agent_env.store.routing import namespace_routing
-from tst.unit.bundle._support import DIGEST, layout, plan_of
+from tst.unit.bundle._support import DIGEST, layout, local_builds, plan_of
 
 ROOT = "@local/~/triage"
 IMAGE = f"{ROOT}/crm-image"
@@ -43,7 +42,8 @@ def bundle_dir(tmp_path, monkeypatch, local_stores, cli_routing):
 
 
 def _run(root):
-    return materialize(plan_of(root))
+    plan = plan_of(root)
+    return materialize(plan, build_here=local_builds(plan))
 
 
 def _summary(materialization):
@@ -63,7 +63,7 @@ def test_an_image_folder_is_built_once_and_everything_naming_it_is_written_over_
     done = _run(bundle_dir)
 
     assert [call["build"][:3] for call in builds] == [
-        ("Dockerfile", ["Dockerfile", "server.py"], f"{image_repository(IMAGE)}:bundle")]
+        ("Dockerfile", ["Dockerfile", "server.py"], DockerImageArtifact.get(IMAGE).image_name)]
     assert DockerImageArtifact.get(IMAGE).description == "built from artifacts/crm-image/Dockerfile"
     assert _images_named(done) == [(IMAGE, 1)] * 3
     assert _summary(_run(bundle_dir))[IMAGE] == (1, True, ())

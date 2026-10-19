@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 
 from agentenv_protocol import client as protocol_v1
 
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
 from agent_env.utils.paths import validate_relative_filename
 
 from .gateway import GatewayMode

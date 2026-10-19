@@ -64,6 +64,9 @@ def _git_clone_commands(owner: str, repo: str, ref: str | None, token: str | Non
         f"trap 'rm -f /tmp/git-askpass.sh' EXIT; GIT_ASKPASS=/tmp/git-askpass.sh git clone --depth 1 {ref_flag} {clone_url} /tmp/repo",
     ]
 
+# How much of a build context's source digest its image's tag holds.
+_SOURCES_TAG_CHARS = 16
+
 class DockerImageArtifact(Artifact):
     """A Docker image artifact: a tar.gz of the image in the object store; without one, a registry reference a
     sandbox pulls; or, with neither, only its build context."""
@@ -235,37 +238,41 @@ class DockerImageArtifact(Artifact):
 
     @classmethod
     def put_context(cls, id: str, *, description: str, context_path: str, dockerfile_path: str,
-                    platform: str = DEFAULT_BUILD_PLATFORM) -> "DockerImageArtifact":
-        """Register an image by its build context alone, to be built where it runs: the context is uploaded and
-        nothing is built, pushed or saved, so no Docker is needed here. Its ``image_name``,
-        ``local/<slug>-<hash>:v<version>``, names no registry: it's the tag the build gives the image.
-        ``source_digest`` is equal for equal sources, so one build can serve both."""
+                    platform: str | None = DEFAULT_BUILD_PLATFORM) -> "DockerImageArtifact":
+        """Register an image by its build context alone, to be built where it runs, for ``platform``, or for each
+        sandbox's own when None: the context is uploaded and nothing is built, pushed or saved, so no Docker is needed
+        here. Its ``image_name``, ``local/<slug>-<hash>:<sources>``, names no registry: it's the tag the build gives the
+        image, the same for the same sources, so a build of one version serves another. ``source_digest`` is equal for
+        equal sources."""
         from agent_env.artifact.store import get_artifact_store
         from agent_env.config import get_config
 
-        platform = normalize_platform(platform)
-        root = Path(context_path)
-        dockerfile = _resolve_dockerfile(root, dockerfile_path)
-        if not dockerfile.is_file():
-            raise ValueError(f"no Dockerfile at {dockerfile}")
-        context = BuildContext.of(root, dockerfile)
-        if context.dockerfile is None:
-            raise ValueError(f"{dockerfile} is outside the build context {root}; the image is built from the context "
-                             "alone, so the Dockerfile must be in it")
+        platform = normalize_platform(platform) if platform else None
+        context = _context_of(Path(context_path), dockerfile_path)
         store = get_artifact_store()
         version = store.next_version(id)
         prefix = store.attempt_prefix("docker_image", id)
         build_context_object_url = _upload_context(get_config().get_object_store_to_write(prefix, id), prefix, context)
+        source_digest = context.source_digest(platform)
         return store.put_document(cls(
             id=id,
             version=version,
             description=description,
-            image_name=f"{local_image_repository(id)}:v{version}",
+            image_name=_context_image_name(id, source_digest),
             build_context_object_url=build_context_object_url,
             dockerfile_path=context.dockerfile,
             platform=platform,
-            source_digest=context.source_digest(platform),
+            source_digest=source_digest,
         ))
+
+    @staticmethod
+    def context_identity(id: str, context_path: str, dockerfile_path: str,
+                         platform: str | None = DEFAULT_BUILD_PLATFORM) -> tuple[str, str]:
+        """The ``source_digest`` and ``image_name`` ``put_context`` gives ``id`` for this build context, found without
+        writing anything."""
+        platform = normalize_platform(platform) if platform else None
+        source_digest = _context_of(Path(context_path), dockerfile_path).source_digest(platform)
+        return source_digest, _context_image_name(id, source_digest)
 
     def load(self) -> bytes:
         from agent_env.artifact.store import get_artifact_store
@@ -597,6 +604,22 @@ def _resolve_dockerfile(context_dir: Path, dockerfile_path: str | None) -> Path 
         return None
     dockerfile = Path(dockerfile_path)
     return dockerfile if dockerfile.is_absolute() or dockerfile.exists() else context_dir / dockerfile
+
+
+def _context_of(root: Path, dockerfile_path: str) -> BuildContext:
+    dockerfile = _resolve_dockerfile(root, dockerfile_path)
+    if not dockerfile.is_file():
+        raise ValueError(f"no Dockerfile at {dockerfile}")
+    context = BuildContext.of(root, dockerfile)
+    if context.dockerfile is None:
+        raise ValueError(f"{dockerfile} is outside the build context {root}; the image is built from the context "
+                         "alone, so the Dockerfile must be in it")
+    return context
+
+
+def _context_image_name(id: str, source_digest: str) -> str:
+    """The tag a build gives a context-only image: the same for the same sources."""
+    return f"{local_image_repository(id)}:{source_digest.removeprefix('sha256:')[:_SOURCES_TAG_CHARS]}"
 
 
 def _upload_context(objects, prefix: str, context: BuildContext) -> str:

@@ -2,8 +2,10 @@
 
 import asyncio
 import io
+import os
 import subprocess
 import ssl
+import tracemalloc
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -124,6 +126,98 @@ async def test_stdout_supports_async_iteration():
     raw.create_process = AsyncMock(return_value=_process(stdout="one\ntwo\n"))
     process = await _sandbox(raw).exec("cat", "log")
     assert [chunk async for chunk in process.stdout] == [b"one\n", b"two\n"]
+
+
+@pytest.mark.asyncio
+async def test_slow_readers_do_not_keep_all_command_output_in_memory():
+    raw = _raw()
+    chunk = "x" * (256 * 1024)
+
+    async def run(command, args, **kwargs):
+        for _ in range(64):
+            kwargs["stdout"].write(chunk)
+            kwargs["stderr"].write(chunk)
+        return SimpleNamespace(returncode=0)
+
+    raw.run_process.side_effect = run
+    tracemalloc.start()
+    try:
+        process = await _sandbox(raw).exec("command")
+        assert await process.wait() == 0
+        retained, _ = tracemalloc.get_traced_memory()
+        assert retained < 4 * 1024 * 1024
+    finally:
+        tracemalloc.stop()
+    for reader in (process.stdout, process.stderr):
+        total = 0
+        while data := await reader.read(256 * 1024):
+            assert data == b"x" * len(data)
+            total += len(data)
+        assert total == 16 * 1024 * 1024
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reconnect", [False, True])
+@pytest.mark.parametrize("missing", [False, True])
+async def test_terminate_finishes_running_commands_and_preserves_partial_output(reconnect, missing):
+    raw = _raw()
+    started = asyncio.Event()
+
+    async def run(command, args, **kwargs):
+        kwargs["stdout"].write("partial\n")
+        started.set()
+        await asyncio.Event().wait()
+
+    raw.run_process.side_effect = run
+    if missing:
+        raw.destroy.side_effect = type("Missing", (Exception,), {"status_code": 404})()
+    original = _sandbox(raw)
+    process = await original.exec("command")
+    await started.wait()
+    target = _sandbox(raw) if reconnect else original
+    try:
+        await target.terminate()
+        await target.terminate()
+        assert not original._processes
+        with pytest.raises(asyncio.CancelledError):
+            await process.wait()
+        assert await asyncio.wait_for(process.stdout.read(), 1) == b"partial\n"
+        assert await asyncio.wait_for(process.stderr.read(), 1) == b""
+    finally:
+        for task in original._processes:
+            task.cancel()
+        await asyncio.gather(*original._processes, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_local_command_timeout_ends_stalled_response():
+    raw = _raw()
+
+    async def run(command, args, **kwargs):
+        await asyncio.Event().wait()
+
+    raw.run_process.side_effect = run
+    sandbox = _sandbox(raw)
+    process = await sandbox._run("command", timeout=0.01)
+    try:
+        await asyncio.sleep(0.05)
+        assert not sandbox._processes
+        with pytest.raises(TimeoutError):
+            await process.wait()
+        with pytest.raises(TimeoutError):
+            await process.stdout.read()
+    finally:
+        for task in sandbox._processes:
+            task.cancel()
+        await asyncio.gather(*sandbox._processes, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_long_output_lines_are_not_dropped():
+    raw = _raw()
+    raw.create_process.return_value = _process(stdout="x" * 100000 + "\nlast")
+    process = await _sandbox(raw).exec("command")
+    assert [line async for line in process.stdout] == [b"x" * 100000 + b"\n", b"last"]
 
 
 @pytest.mark.asyncio
@@ -604,3 +698,20 @@ async def test_signed_download_refreshes_even_an_unrestricted_or_unknown_cached_
         assert sandbox.network_policy == NetworkPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=("bucket.example",))
         sandbox._sandbox.update_network_policy.assert_awaited_once()
     sandbox._client.get_sandbox.assert_awaited_once_with(name=sandbox.sandbox_id)
+
+
+@pytest.mark.asyncio
+async def test_consumed_output_releases_disk_space_before_command_finishes():
+    reader = vercel_sandbox_module._OutputReader()
+    chunk = b"x" * (1024 * 1024)
+    try:
+        for _ in range(8):
+            reader.feed_data(chunk)
+            assert await reader.read(len(chunk)) == chunk
+            assert os.fstat(reader._file.fileno()).st_size == 0
+        reader.feed_data(b"last\n")
+        reader.feed_eof()
+        assert await reader.readline() == b"last\n"
+        assert await reader.read() == b""
+    finally:
+        reader._file.close()

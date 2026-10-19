@@ -80,8 +80,10 @@ async def _run_single(task, tag, output_dir, agent_model=None, agent_artifact_id
 @click.option("--k", "k", default=1, type=int, help="Number of parallel runs per task")
 @click.option("--max-concurrency", default=None, type=int, help="Maximum number of concurrent task runs")
 @click.option("--agent-model", default=None, type=str, help="Override the model used by prompt_agent steps")
+@click.option("--user-model", default=None, type=str, help="Override the model the user simulator runs on")
+@click.option("--judge-model", default=None, type=str, help="Override the model rubrics_verifier judges grade with")
 @click.option("--agent-artifact-id", default=None, type=str, help="Override the agent image artifact for deploy_agent steps")
-def run(eval_id: str, eval_version: int | None, output_dir: str | None, k: int, max_concurrency: int | None, agent_model: str | None, agent_artifact_id: str | None):
+def run(eval_id: str, eval_version: int | None, output_dir: str | None, k: int, max_concurrency: int | None, agent_model: str | None, user_model: str | None, judge_model: str | None, agent_artifact_id: str | None):
     """Run all tasks in an eval concurrently."""
     if k < 1:
         raise click.BadParameter("must be at least 1", param_hint="'--k'")
@@ -113,7 +115,9 @@ def run(eval_id: str, eval_version: int | None, output_dir: str | None, k: int, 
     click.echo()
 
     client_id = get_agent_env_client_id()
-    base_metadata = {"agent_env_hub": {"caller": client_id}} if client_id else None
+    base_metadata = {"agent_env_hub": {"caller": client_id}} if client_id else {}
+    if overrides := {key: value for key, value in (("user_model", user_model), ("judge_model", judge_model)) if value}:
+        base_metadata["user_overrides"] = overrides
 
     async def _run_safe(task, tag, slot):
         """Wrap _run_single so failures, and a cancel while it waits for its slot, carry task identity."""

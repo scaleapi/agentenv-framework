@@ -173,8 +173,18 @@ class FileArtifactUniverse(Universe):
     @classmethod
     def from_toml(cls, data: dict, ctx: AuthoringContext) -> "FileArtifactUniverse":
         """Write the folder's files, each a file artifact keyed by its path in the folder."""
-        ctx.accept(data, **cls.toml_keys)
+        cls.accept_toml(data, ctx)
         return cls.put_bundled(ctx.id, files=ctx.files())
+
+    @classmethod
+    def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:
+        """The keys of ``data``, an artifact.toml, a file universe takes, and its folder, which needs a file. Raises
+        BundleError listing every problem."""
+        problems = [ctx.no_files("files to write")] if ctx.try_files(empty_ok=True) == {} else []
+        fields, more = ctx.accepted(data, **cls.toml_keys)
+        if problems + more:
+            ctx.refuse(problems + more)
+        return fields
 
     @classmethod
     def put_existing(

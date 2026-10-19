@@ -765,6 +765,20 @@ async def test_a_build_takes_the_recorded_dockerfile_and_platform_else_linux_amd
     assert "docker build --platform linux/arm64 -f Dockerfile -t local/b-0123456789ab:v1 ." in builds[1]
 
 
+@pytest.mark.asyncio
+async def test_a_context_recording_no_platform_is_built_for_the_vms_own(signing_store):
+    """As a bundle writes its images: a VM of any platform runs one, built for its own."""
+    image = _context_image("a", "sha256:" + "1" * 64, platform=None)
+    arm = _RecordingVmSandbox()
+    arm.platform = "linux/arm64"
+
+    assert arm.load_problems([image]) == []
+    await arm.load_docker_images([image])
+
+    assert any("docker build --platform linux/arm64 -f Dockerfile -t local/a-0123456789ab:v1 ." in script
+               for script in arm.scripts)
+
+
 class _BuildFailsVm(_RecordingVmSandbox):
     async def exec_with_output(self, *args):
         if args[:2] == ("sudo", "bash") and "docker build" in script_run(args):

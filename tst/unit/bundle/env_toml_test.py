@@ -20,7 +20,7 @@ from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.website import WebsiteEnv
 from agent_env.providers.env_providers import env_provider as env_provider_module
 from agent_env.store.routing import namespace_routing
-from tst.unit.bundle._support import RefusingStore, layout, local_store, plan_of
+from tst.unit.bundle._support import RefusingStore, layout, local_builds, local_store, plan_of
 
 ROOT = "@local/~/triage"
 
@@ -49,7 +49,8 @@ def _mcp(name, card=None):
 
 
 def _run(root, dry_run=False):
-    return materialize(plan_of(root), dry_run=dry_run)
+    plan = plan_of(root)
+    return materialize(plan, dry_run=dry_run, build_here=local_builds(plan))
 
 
 def _summary(materialization):

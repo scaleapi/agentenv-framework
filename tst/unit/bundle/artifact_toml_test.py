@@ -4,6 +4,7 @@ file its folder holds or the file artifact it names, and a universe laid out as 
 what it records changes, and equal, field for field, to one the CLI writes from the same files. Each environment
 the bundle writes must seed a server of the env a task loads it into."""
 
+import hashlib
 import json
 
 import pytest
@@ -20,6 +21,7 @@ from agent_env.bundle.resolve import resolve_bundle
 from agent_env.cli import cli
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
+from agent_env.store import ids as ids_module
 from agent_env.store.routing import namespace_routing
 from tst.unit.bundle._support import RefusingStore, layout, local_store, plan_of
 
@@ -260,6 +262,127 @@ def test_the_cli_names_the_files_it_writes_with_an_environment_and_a_universe_as
         assert EnvironmentUniverseArtifact.get("world").metadata_refs["manifest"].id == "world__metadata__manifest"
 
 
+# Names and keys the CLI writes as nested folders, beside ones that hold __ or characters no @local id can.
+_NAMES = ("gmail", "drive/shared", "g__mail", "crm: v2", "slack ")
+_KEYS = ("manifest", "scenarios", "scenarios/a.yaml", "scenarios/b.yaml", "deep/x/y/z.json", "m__k", "q&a?")
+
+
+def test_a_universe_the_cli_downloads_reads_back_whatever_its_names_and_keys_hold(bundle_dir, tmp_path):
+    for i, name in enumerate(_NAMES):
+        (tmp_path / f"env{i}.json").write_text(json.dumps({"environment": name}))
+        put = CliRunner().invoke(cli, ["artifact", "environment", "put", str(tmp_path / f"env{i}.json"), "--id",
+                                       f"env{i}", "--description", "d", "--environment-name", name])
+        assert put.exit_code == 0, put.output
+    for i, key in enumerate(_KEYS):
+        (tmp_path / f"meta{i}.json").write_text(json.dumps({"key": key}))
+    put = CliRunner().invoke(cli, [
+        "artifact", "environment-universe", "put", "--id", "original",
+        *(arg for i in range(len(_NAMES)) for arg in ("--environment-artifact", f"env{i}")),
+        *(arg for i, key in enumerate(_KEYS) for arg in ("--metadata", f"{key}={tmp_path / f'meta{i}.json'}"))])
+    assert put.exit_code == 0, put.output
+    got = CliRunner().invoke(cli, ["artifact", "environment-universe", "get", "--id", "original", "--output-dir",
+                                   str(bundle_dir / "artifacts/copy")])
+    assert got.exit_code == 0, got.output
+    _bundle(bundle_dir, _universe("copy"), "copy")
+
+    first = _summary(_run(bundle_dir))
+
+    with namespace_routing():
+        original, copy = EnvironmentUniverseArtifact.get("original"), EnvironmentUniverseArtifact.get(f"{ROOT}/copy")
+        assert _canonical(copy) == _canonical(original)
+        assert set(copy.get_metadata()) == set(_KEYS)
+    assert first[f"{ROOT}/copy"] == (1, False, ("new",))
+    assert all(reused for _, reused, _ in _summary(_run(bundle_dir)).values())
+    (bundle_dir / "artifacts/copy/metadata/deep/x/y/z.json/meta4.json").write_text('{"key": 2}')
+    assert _summary(_run(bundle_dir))[f"{ROOT}/copy"] == (
+        2, False, ("files changed: metadata/deep/x/y/z.json/meta4.json",))
+
+
+def test_a_name_an_id_can_hold_keeps_its_id_and_any_other_is_written_under_its_hash(bundle_dir):
+    _bundle(bundle_dir, _universe("w") | {
+        "artifacts/w/gmail/a.json": "{}", "artifacts/w/drive/shared/b.json": "{}", "artifacts/w/g__mail/c.json": "{}",
+        "artifacts/w/metadata/scenarios/x.yaml/x.yaml": "x: 1\n", "artifacts/w/metadata/q&a?/q.json": "{}",
+    }, "w")
+
+    _run(bundle_dir)
+
+    def hashed(name):
+        return f"sha256__{hashlib.sha256(name.encode()).hexdigest()[:16]}"
+
+    world = EnvironmentUniverseArtifact.get(f"{ROOT}/w")
+    assert sorted((env.environment_name, env.id, env.get_file_artifact().id)
+                  for env in world.get_environment_artifacts()) == [
+        ("drive/shared", f"{ROOT}/w__drive/shared", f"{ROOT}/w__drive/shared__file"),
+        ("g__mail", f"{ROOT}/w__{hashed('g__mail')}", f"{ROOT}/w__{hashed('g__mail')}__file"),
+        ("gmail", f"{ROOT}/w__gmail", f"{ROOT}/w__gmail__file"),
+    ]
+    assert {key: file.id for key, file in world.get_metadata().items()} == {
+        "scenarios/x.yaml": f"{ROOT}/w__metadata__scenarios/x.yaml",
+        "q&a?": f"{ROOT}/w__metadata__{hashed('q&a?')}",
+    }
+
+
+def test_a_name_spelled_like_another_names_hash_keeps_an_id_of_its_own(bundle_dir):
+    digest = hashlib.sha256("q&a?".encode()).hexdigest()[:16]
+    _bundle(bundle_dir, _universe("w") | {
+        "artifacts/w/gmail/a.json": "{}", f"artifacts/w/{digest}/b.json": "{}", "artifacts/w/q&a?/c.json": "{}",
+        f"artifacts/w/metadata/{digest}/m.json": "{}", "artifacts/w/metadata/q&a?/n.json": "{}",
+    }, "w")
+
+    _run(bundle_dir)
+
+    world = EnvironmentUniverseArtifact.get(f"{ROOT}/w")
+    assert {env.environment_name: env.id for env in world.get_environment_artifacts()} == {
+        "gmail": f"{ROOT}/w__gmail", digest: f"{ROOT}/w__{digest}", "q&a?": f"{ROOT}/w__sha256__{digest}"}
+    assert {key: file.id for key, file in world.get_metadata().items()} == {
+        digest: f"{ROOT}/w__metadata__{digest}", "q&a?": f"{ROOT}/w__metadata__sha256__{digest}"}
+
+
+def test_a_universe_whose_id_leaves_no_room_for_a_hashed_childs_id_is_refused_naming_the_fix(bundle_dir,
+                                                                                          monkeypatch):
+    # Room for gmail's ids beside the universe's, and none for a hashed name's, which are longer.
+    monkeypatch.setattr(ids_module, "MAX_LOCAL_ID_BYTES", len(f"{ROOT}/x__gmail__file"))
+    layout(bundle_dir, _refused(_universe("x") | {"artifacts/x/gmail/a.json": "{}", "artifacts/x/q&a?/b.json": "{}"}))
+
+    (problem,) = _problems(bundle_dir)
+    assert problem.startswith("artifacts/x/q&a?: can't name the artifacts written from it (local id is ")
+    assert problem.endswith("); give the universe a shorter name")
+    assert not local_store().path.exists()
+
+
+def test_metadata_in_another_case_is_refused_even_as_a_link_to_an_environments_folder(bundle_dir):
+    layout(bundle_dir, _refused(_universe("x") | {"artifacts/x/gmail/a.json": "{}"}))
+    (bundle_dir / "artifacts/x/Metadata").symlink_to("gmail")
+
+    assert _problems(bundle_dir) == (
+        "artifacts/x/Metadata: rename to metadata; names are case-sensitive, and an environment named Metadata goes "
+        "in an artifact folder of its own, named in environment_artifacts",)
+
+
+def test_a_folder_holding_its_own_file_and_nested_ones_is_an_entry_of_each(bundle_dir):
+    _bundle(bundle_dir, _universe("w") | {
+        "artifacts/w/crm/a.json": "{}", "artifacts/w/crm/eu/b.json": "{}", "artifacts/w/metadata/k/k.json": "{}",
+        "artifacts/w/metadata/k/sub/s.json": "{}", "artifacts/w/metadata/only/folders/here/h.json": "{}",
+    }, "w")
+
+    _run(bundle_dir)
+
+    world = EnvironmentUniverseArtifact.get(f"{ROOT}/w")
+    assert sorted(env.environment_name for env in world.get_environment_artifacts()) == ["crm", "crm/eu"]
+    assert {key: file.filename for key, file in world.get_metadata().items()} == {
+        "k": "k.json", "k/sub": "s.json", "only/folders/here": "h.json"}
+
+
+def test_a_nested_folder_holding_two_files_is_refused_naming_it(bundle_dir):
+    layout(bundle_dir, _refused(_universe("x") | {"artifacts/x/gmail/a.json": "{}",
+                                                  "artifacts/x/metadata/scenarios/x.yaml/one.yaml": "",
+                                                  "artifacts/x/metadata/scenarios/x.yaml/two.yaml": ""}))
+
+    assert _problems(bundle_dir) == (
+        "artifacts/x/metadata/scenarios/x.yaml: holds one file, and has 2 ('one.yaml', 'two.yaml')",)
+    assert not local_store().path.exists()
+
+
 def test_an_environment_written_either_way_equals_the_one_the_cli_writes(bundle_dir, tmp_path):
     (tmp_path / "data.json").write_text('{"rows": 1}\n')
     put = CliRunner().invoke(cli, ["artifact", "environment", "put", str(tmp_path / "data.json"), "--id", "original",
@@ -321,21 +444,6 @@ def _refused(files):
      "into <environment_name>/, or give it an artifact folder of its own"),
     (_universe("x") | {"artifacts/x/gmail/a.json": "{}", "artifacts/x/gmail/b.json": "{}"},
      "artifacts/x/gmail: holds one file, and has 2 ('a.json', 'b.json')"),
-    (_universe("x") | {"artifacts/x/gmail/inner/a.json": "{}"},
-     "artifacts/x/gmail/inner/a.json: an environment's folder holds its one file directly, gmail/<file>, with no "
-     "folders inside"),
-    (_universe("x") | {"artifacts/x/g__mail/a.json": "{}"},
-     "artifacts/x/g__mail: a name holding __ could clash with the ids derived from it; rename the folder, which "
-     "renames the environment, or keep the name by giving the environment an artifact folder of its own, with "
-     'environment_name = "g__mail", named in environment_artifacts'),
-    (_universe("x") | {"artifacts/x/gmail/a.json": "{}", "artifacts/x/metadata/m__k/m.json": "{}"},
-     "artifacts/x/metadata/m__k: a name holding __ could clash with the ids derived from it; rename the folder"),
-    (_universe("x") | {"artifacts/x/slack /a.json": "{}"},
-     "artifacts/x/slack : a name that opens or closes with a space can't name the artifacts written from it; rename "
-     "the folder"),
-    (_universe("x") | {"artifacts/x/ slack/a.json": "{}"},
-     "artifacts/x/ slack: a name that opens or closes with a space can't name the artifacts written from it; rename "
-     "the folder"),
     (_universe("x") | {"artifacts/x/gmail/a.json": "{}", "artifacts/x/metadata/m.json": "{}"},
      "artifacts/x/metadata/m.json: metadata/ holds a folder for each key, with that key's one file in it "
      "(metadata/<key>/<file>); an environment named metadata goes in an artifact folder of its own, named in "
@@ -343,23 +451,18 @@ def _refused(files):
     (_universe("x") | {"artifacts/x/gmail/a.json": "{}", "artifacts/x/Metadata/k/m.json": "{}"},
      "artifacts/x/Metadata: rename to metadata; names are case-sensitive, and an environment named Metadata goes in "
      "an artifact folder of its own, named in environment_artifacts"),
-    (_universe("x") | {"artifacts/x/gmail/a.json": "{}", "artifacts/x/metadata/k/sub/m.json": "{}"},
-     "artifacts/x/metadata/k/sub/m.json: a metadata key's folder holds its one file directly, metadata/k/<file>, "
-     "with no folders inside"),
     (_universe("x", environment_artifacts='["gmail-data"]') | {"artifacts/x/gmail/a.json": "{}"}
      | _environment("gmail-data", "gmail") | {"artifacts/gmail-data/a.json": "{}"},
-     "artifacts/x: environment_artifacts[0]: environment_name 'gmail' is also the gmail/ folder's; a universe's "
-     "environments need names of their own"),
+     "artifacts/x: environment_artifacts[0]: environment_name 'gmail' is also artifacts/x/gmail's; an "
+     "environment_universe's environments need names of their own"),
     (_universe("x", service_artifact_refs='["a"]', metadata='{ m = "f" }') | {"artifacts/x/gmail/a.json": "{}"},
      "artifacts/x: artifact.toml: service_artifact_refs is what the stored document calls it; write "
      "environment_artifacts instead"),
 ], ids=["environment-two-files", "environment-no-file", "environment-no-name", "environment-empty-name",
         "environment-service-name", "environment-file-artifact-id", "environment-file-and-description",
         "environment-file-and-a-file", "environment-over-a-universe", "universe-empty", "universe-root-file",
-        "universe-two-files", "universe-nested-folder", "universe-double-underscore",
-        "universe-metadata-double-underscore", "universe-trailing-space", "universe-leading-space",
-        "universe-flat-metadata", "universe-metadata-in-another-case", "universe-nested-metadata",
-        "universe-repeated-name", "universe-stored-names"])
+        "universe-two-files", "universe-flat-metadata", "universe-metadata-in-another-case", "universe-repeated-name",
+        "universe-stored-names"])
 def test_an_artifact_toml_that_cant_be_written_is_refused_before_any_write(bundle_dir, files, problem):
     layout(bundle_dir, _refused(files))
 
@@ -382,7 +485,7 @@ def test_a_universe_folder_left_without_its_file_is_refused_rather_than_dropped(
 
     assert sorted(_problems(bundle_dir)) == [
         "artifacts/x/drive: holds one file, and has 0",
-        "artifacts/x/gmail-old: holds one file, and has 0",
+        "artifacts/x/gmail-old/inner: holds one file, and has 0",
         "artifacts/x/metadata/manifest: holds one file, and has 0",
         "artifacts/x/slack: holds one file, and has 0",
     ]
@@ -490,8 +593,9 @@ def test_a_universe_naming_a_store_environment_with_the_name_of_one_of_its_folde
     _bundle(bundle_dir, {**_universe("world", environment_artifacts='["mail-data"]'),
                          "artifacts/world/gmail/a.json": "{}"}, "world")
 
-    assert _problems(bundle_dir) == ("artifacts/world: environment_artifacts[0]: environment_name 'gmail' is also the "
-                                     "gmail/ folder's; a universe's environments need names of their own",)
+    assert _problems(bundle_dir) == ("artifacts/world: environment_artifacts[0]: environment_name 'gmail' is also "
+                                     "artifacts/world/gmail's; an environment_universe's environments need names of "
+                                     "their own",)
 
 
 def test_a_check_reports_artifact_toml_problems_without_reading_a_store(bundle_dir, monkeypatch):
