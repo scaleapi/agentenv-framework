@@ -120,6 +120,10 @@ def compute(x):
     "runner/store.py": '''
 def count_runs(task_id=None):
     return 0
+
+
+def prune_runs(days=30):
+    return 0
 ''',
 }
 
@@ -219,9 +223,10 @@ def test_reports_a_break(tmp_path, edits, reported):
     [(CONTEXT, "    agent_model: str | None = None\n",
       "    agent_harness: str | None = None\n    agent_model: str | None = None\n")],
     [(ARTIFACT, 'Field(description="Unique id")', 'Field(description="The artifact\'s id")')],
+    [("runner/store.py", "def prune_runs(days=30):", "def prune_runs(days):")],
 ], ids=["docstring", "new-optional-method", "private-rename", "internal-module", "parameter-swallowed-by-kwargs",
         "annotation-gains-a-value", "instance-attribute-expression", "default-to-equal-literal",
-        "dataclass-field-inserted", "field-description"])
+        "dataclass-field-inserted", "field-description", "unused-sibling-of-a-used-function"])
 def test_passes_a_compatible_change(tmp_path, edits):
     result = _check(tmp_path, edits)
 
