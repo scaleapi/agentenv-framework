@@ -64,6 +64,15 @@ _DIND_NETWORK = "agent-docker-net"
 _DIND_PORT = 2375
 
 
+def unwritten_local_agent(agent_id: str, field: str) -> str:
+    """Why a step can't deploy ``agent_id``, an ``@local`` agent the store doesn't hold, which its ``field`` names or,
+    left unset, the configured default does: an ``agent-env run`` of a bundle writes one, and a step reads only the
+    store."""
+    return (f"there is no agent {agent_id!r} in the store: an @local agent is written by `agent-env run` of the bundle "
+            f"that defines it or uses it, so run the task through that bundle, or point {field} or [agents] "
+            "default_a2a_agent_id at an agent the store holds")
+
+
 @dataclass
 class DeployedA2AAgent:
     agent_id: str

@@ -29,7 +29,7 @@ from agent_env.config import get_config
 from agent_env.env.env import DeployedEnv, DeployedSandboxEnv, Env
 from agent_env.env.gateway import AGENT_ENV_ROLE_HEADER
 from agent_env.providers.sandbox_providers.local_sandbox import host_url_for
-from agent_env.a2a_agent.a2a_agent import DEFAULT_A2A_PORT
+from agent_env.a2a_agent.a2a_agent import DEFAULT_A2A_PORT, unwritten_local_agent
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_VM,
     reachable_url,
@@ -42,6 +42,8 @@ from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.mcp_cli_builder.codegen import ROLE_ENV_VAR
 from agent_env.attribution import deploy_attribution
+from agent_env.store.base import NotFoundError
+from agent_env.store.ids import is_local_id
 
 logger = logging.getLogger(__name__)
 
@@ -354,7 +356,12 @@ class DeployAgentTaskStep(TaskStep):
         config = get_config()
         user_overrides = context.metadata.get("user_overrides", {})
         a2a_agent_id, a2a_agent_version = self._resolve_agent_ref(context)
-        agent = A2AAgent.get(a2a_agent_id, a2a_agent_version)
+        try:
+            agent = A2AAgent.get(a2a_agent_id, a2a_agent_version)
+        except NotFoundError:
+            if not is_local_id(a2a_agent_id):
+                raise
+            raise NotFoundError(unwritten_local_agent(a2a_agent_id, "a2a_agent_id")) from None
         requested_disk = user_overrides.get("agent_disk_size_gb") or self.disk_size_gb
         min_disk = agent.metadata.get("min_disk_size_gb")
         agent_disk_size_gb = max(requested_disk or 0, min_disk or 0) or None

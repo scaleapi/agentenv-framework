@@ -15,6 +15,7 @@ from agent_env.a2a_agent.object_transfer import (
     fetch_trajectory,
     trajectory_mode,
 )
+from agent_env.a2a_agent.a2a_agent import unwritten_local_agent
 from agent_env.a2a_agent.staging import transfer_store
 from agent_env.config import get_config
 from agent_env.config.model import ModelParam
@@ -35,6 +36,8 @@ from agent_env.task_step.snapshot_utils.agent_state_capture import (
 )
 from agent_env.entity.refs import EntityRef
 from agent_env.entity.scopes import FieldScope
+from agent_env.store.base import NotFoundError
+from agent_env.store.ids import is_local_id
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (
@@ -639,7 +642,12 @@ class RubricsVerifierTaskStep(TaskStep):
                 )
                 env_vars = {"LITELLM_API_KEY": api_key, "LITELLM_BASE_URL": litellm_base_url}
                 resolved_judge_id = self.judge_a2a_agent_id or config.get_default_a2a_agent_id()
-                a2a_agent = A2AAgent.get(resolved_judge_id)
+                try:
+                    a2a_agent = A2AAgent.get(resolved_judge_id)
+                except NotFoundError:
+                    if not is_local_id(resolved_judge_id):
+                        raise
+                    raise NotFoundError(unwritten_local_agent(resolved_judge_id, "judge_a2a_agent_id")) from None
                 deploy_kwargs = {"env_vars": env_vars}
                 resolved_sandbox_type = overrides.get("agent_sandbox") or self.judge_sandbox_type
                 if resolved_sandbox_type:
