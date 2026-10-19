@@ -747,11 +747,17 @@ class TaskInstanceStore:
             match = match.where("attempt_epoch", Lte(attempt_epoch))
         self._doc_store.update(TASK_INSTANCES_COLLECTION, match, spec)
 
-    def record_task_cancelled_sync(self, instance_id: str, reason: str, completed_at_utc: str) -> None:
-        """Mark a run cancelled, over the ``failed`` its unwinding recorded, but never a completed one."""
+    def record_task_cancelled_sync(
+        self, instance_id: str, reason: str, completed_at_utc: str, attempt_epoch: int | None = None,
+    ) -> None:
+        """Mark a run cancelled, over the ``failed`` its unwinding recorded, but never a completed one, nor one a
+        later attempt than ``attempt_epoch`` owns."""
+        match = Filter.of(instance_id=instance_id).where("status", Ne("completed"))
+        if attempt_epoch is not None:
+            match = match.where("attempt_epoch", Lte(attempt_epoch))
         self._doc_store.update(
             TASK_INSTANCES_COLLECTION,
-            Filter.of(instance_id=instance_id).where("status", Ne("completed")),
+            match,
             UpdateSpec(
                 set={"status": "cancelled", "error": reason, "completed_at_utc": completed_at_utc},
                 inc={"rev": 1},
@@ -951,14 +957,14 @@ async def record_task_failure(
 
 
 
-def record_task_cancelled(instance_id: str, reason: str, completed_at_utc: str) -> None:
+def record_task_cancelled(instance_id: str, reason: str, completed_at_utc: str, attempt_epoch: int | None = None) -> None:
     """Write a cancelled run's terminal state, retried like ``record_task_failure``. It logs a write that keeps
     failing rather than raising. Synchronous: ``run_bundle`` calls it once its event loop has closed."""
     store = get_task_instance_store()
     last_exc: BaseException | None = None
     for attempt in range(_FAILURE_WRITE_MAX_ATTEMPTS):
         try:
-            store.record_task_cancelled_sync(instance_id, reason, completed_at_utc)
+            store.record_task_cancelled_sync(instance_id, reason, completed_at_utc, attempt_epoch)
             return
         except Exception as exc:  # noqa: BLE001
             last_exc = exc

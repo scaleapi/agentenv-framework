@@ -723,7 +723,11 @@ class Task:
                         _rearm()
         except (asyncio.CancelledError, Exception) as exc:
             await _drain_in_flight()
-            if instance_id:
+            if instance_id and first_error is None and isinstance(exc, asyncio.CancelledError):
+                await asyncio.to_thread(
+                    _store.record_task_cancelled, instance_id, str(exc) or "cancelled", Task._utc_now_str(), state.epoch,
+                )
+            elif instance_id:
                 # Record with the fatal step's attribution: a cancellation landing
                 # during the drain would otherwise overwrite the instance record
                 # with the CancelledError and a null failing-step id.

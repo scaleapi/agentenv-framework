@@ -702,7 +702,7 @@ async def test_cancel_during_the_undo_leaves_a_consistent_record(store, monkeypa
         await run_task
 
     inst = store.get(ctx.instance_id)
-    assert inst.status == "failed"
+    assert inst.status == "cancelled"
     # Stored record and live context agree: the span is gone from both.
     assert inst.completed_steps == []
     assert inst.context["deployed_envs"] == [] and ctx.deployed_envs == []
@@ -950,6 +950,18 @@ async def test_an_attempt_a_re_register_superseded_writes_nothing_to_the_run(sto
         await superseded
     d = _doc(store, "i")
     assert (d["status"], d["completed_steps"], d["context"]["metadata"]) == ("running", [], {})
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_run_is_recorded_cancelled(store):
+    run = asyncio.create_task(Task(id="t", version=1, steps=[_Gated("s0", asyncio.Event())]).run(instance_id="i"))
+    while _doc(store, "i") is None:
+        await asyncio.sleep(0)
+    run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run
+    d = _doc(store, "i")
+    assert (d["status"], d["error"]) == ("cancelled", "cancelled")
 
 
 # --------------------------------------------------------------------------- #
