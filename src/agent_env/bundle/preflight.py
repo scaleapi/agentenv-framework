@@ -67,6 +67,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
 )
 from agent_env.store.base import NotFoundError
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep, linked_sandbox_problem
+from agent_env.task_step.task_steps.install_agent import InstallAgentTaskStep
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.deploy_sandbox import DeploySandboxTaskStep
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
@@ -149,6 +150,8 @@ class _Walk:
                     self._sandbox(where, step)
                 elif isinstance(step, RubricsVerifierTaskStep):
                     self._judge(where, step)
+                elif isinstance(step, InstallAgentTaskStep) and step.a2a_agent_id is None:
+                    self.default_agent_users.append((where, "names no agent"))
             except ValueError as e:  # a provider that names no backend, or can't be built from its config
                 self._problem(where, str(e))
 

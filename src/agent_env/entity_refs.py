@@ -150,6 +150,15 @@ def ref_sites(refs: Iterable[EntityRef], data: dict, *, inline_pins: bool = Fals
                     yield from _leaf(ref, holder, leaf, (*trail, *rel), inline_pins)
 
 
+def field_sites(data: dict, path: str) -> Iterator[tuple[str, dict, str]]:
+    """Each place ``path``, dotted keys with ``[]`` for each element of a list, holds a value that isn't None in
+    ``data``: where, as a path with indexes, the dict holding it, and its key there."""
+    *parents, leaf = path.split(".")
+    for trail, holder in _descend(data, parents, ()):
+        if isinstance(holder, dict) and holder.get(leaf) is not None:
+            yield ".".join((*trail, leaf)), holder, leaf
+
+
 def _descend(node: Any, segments: list[str], trail: tuple[str, ...]) -> Iterator[tuple[tuple[str, ...], Any]]:
     if not segments:
         yield trail, node

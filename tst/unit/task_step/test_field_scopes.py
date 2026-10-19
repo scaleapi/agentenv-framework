@@ -12,13 +12,23 @@ from agent_env.task_step.task_step import TaskStep
 STEP_TYPES = sorted(get_task_step_registry().items())
 # A stored step of each built-in type that scopes fields of its own, holding only what the type requires.
 MINIMAL = {
+    "add_skills": {"skills": [{"name": "notes", "description": "how notes are kept"}]},
     "deploy_agent": {},
     "deploy_env": {"env_id": "crm-env"},
     "deploy_human_agent": {},
     "deploy_sandbox": {"sandbox_name": "box", "sandbox_mode": "vm"},
+    "install_agent": {"sandbox_name": "box"},
+    "load_artifact": {"sandbox_name": "box"},
     "prompt_agent": {"prompt": "hi"},
     "rubrics_verifier": {"prompt_id": "prompt", "criteria": [{"id": "c1", "description": "says hi"}]},
+    "run_docker_container": {"sandbox_name": "box"},
     "snapshot_env": {},
+}
+# What a step without a user-scoped field that has no default says it needs, before a run starts.
+UNSOURCED = {
+    "add_skills": "add_skills 's': skill 'notes' names no source",
+    "load_artifact": "load_artifact 's': names nothing to load",
+    "run_docker_container": "run_docker_container 's': names no build context",
 }
 
 
@@ -26,7 +36,7 @@ MINIMAL = {
 def test_each_scoped_field_is_an_optional_parameter_of_its_step_type_or_one_the_base_scopes_for_every_step(cls):
     parameters = inspect.signature(cls.__init__).parameters
     for path in cls.field_scopes:
-        top = path.split(".")[0]
+        top = path.split(".")[0].removesuffix("[]")
         if top in parameters:
             assert parameters[top].default is not inspect.Parameter.empty, f"{cls.type} scopes {top}, which it requires"
         else:
@@ -48,3 +58,11 @@ def test_a_step_with_every_scoped_field_left_out_still_builds(name):
     step = registry._builtin_registry()[name].from_dict({"id": "s", "type": name, **MINIMAL[name]})
 
     assert step.type == name
+
+
+@pytest.mark.parametrize("name", sorted(UNSOURCED))
+def test_a_step_left_without_a_scoped_field_that_has_no_default_names_it_before_a_run(name):
+    step = registry._builtin_registry()[name].from_dict({"id": "s", "type": name, **MINIMAL[name]})
+
+    [problem] = step.config_problems()
+    assert problem.startswith(UNSOURCED[name]) and "user scope, so an import leaves it out" in problem

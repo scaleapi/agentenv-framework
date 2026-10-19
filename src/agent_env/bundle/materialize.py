@@ -338,6 +338,7 @@ def _preflight(write: Write, task: Task, unwritten: set[tuple[str, str]]) -> tup
     outputs = {output.id for output in write.source.outputs}
     problems, unchecked = [], []
     for config, step in zip(write.source.config, task.steps):
+        problems.extend(step.config_problems())
         reads = _reads(config)
         if any(id in outputs for _, id in reads):
             continue

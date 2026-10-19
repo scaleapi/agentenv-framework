@@ -117,7 +117,9 @@ def test_secrets_left_out_of_an_import_stay_out_of_the_task_its_run_writes(regis
     ran = _cli("run", registry / "guarded")
 
     at = imported.index("Left out:")
-    assert imported[at + 1:at + 4] == [
+    assert imported[at + 1:at + 5] == [
+        "  tasks/guarded.json: step 'box': sandbox_type: dropped: user scope, so a run takes its own; --include-scope "
+        "user keeps it",
         "  tasks/guarded.json: step 'box': env_vars.API_TOKEN: dropped: its name looks like a secret",
         "  tasks/guarded.json: step 'box': env_vars.NOTE: dropped: its value holds an AWS access key",
         "  tasks/guarded.json: step 'hello': criteria[2].bash_cmd: masked: a URL's credentials"]

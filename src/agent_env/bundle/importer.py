@@ -23,7 +23,7 @@ from agent_env.bundle.parse import BundleError, parse_bundle, root_problems, seg
 from agent_env.bundle.plan import STORE_GETTERS, check_bundle
 from agent_env.bundle.resolve import resolve_bundle
 from agent_env.config import get_config
-from agent_env.entity_refs import EntityKind, RefRole, RefSite, ref_sites
+from agent_env.entity_refs import EntityKind, RefRole, RefSite, field_sites, ref_sites
 from agent_env.env import registry as env_registry
 from agent_env.env.registry import get_env_registry
 from agent_env.eval import Eval
@@ -36,6 +36,7 @@ from agent_env.task_step import registry as task_step_registry
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
+from agent_env.task_step.task_steps.install_agent import InstallAgentTaskStep
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
 
 # How long a name taken from an id may be, in bytes; ids are capped far above it, and a longer name helps nobody.
@@ -326,7 +327,7 @@ class _Importer:
 
     def _default_agents(self, step: dict, where: str) -> None:
         """A step that names no agent deploys the configured default, which no field pins."""
-        if step["type"] == DeployAgentTaskStep.type and step.get("a2a_agent_id") is None:
+        if step["type"] in (DeployAgentTaskStep.type, InstallAgentTaskStep.type) and step.get("a2a_agent_id") is None:
             field, what = "a2a_agent_id", "names no agent"
         elif (step["type"] == RubricsVerifierTaskStep.type and step.get("use_agent_judge")
               and step.get("agent_name") is None and step.get("judge_a2a_agent_id") is None):
@@ -371,14 +372,11 @@ def _prune(step: dict, scopes: Mapping[str, FieldScope], include: frozenset[Fiel
     for path, scope in scopes.items():
         if scope in include:
             continue
-        *parents, leaf = path.split(".")
-        holder: object = step
-        for key in parents:
-            holder = holder.get(key) if isinstance(holder, dict) else None
-        if isinstance(holder, dict) and holder.get(leaf):
-            del holder[leaf]
-            left.append((path, f"dropped: {scope.value} scope, so a run takes its own; --include-scope {scope.value} "
-                               "keeps it"))
+        for where, holder, key in list(field_sites(step, path)):
+            if holder[key]:
+                del holder[key]
+                left.append((where, f"dropped: {scope.value} scope, so a run takes its own; --include-scope "
+                                    f"{scope.value} keeps it"))
     return left
 
 

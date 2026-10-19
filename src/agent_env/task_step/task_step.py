@@ -129,6 +129,11 @@ class TaskStep(ABC):
         """
         return []
 
+    def config_problems(self) -> list[str]:
+        """Problems in this step's own fields, found without reading a store; empty when fine. Checked wherever
+        ``preflight`` is, and also for a step whose preflight a dry run skips."""
+        return []
+
     def step_param_overrides(self, context: TaskStepContext) -> dict[str, Any]:
         """Per-run overrides for this step's params, from a run's ``step_overrides``.
 

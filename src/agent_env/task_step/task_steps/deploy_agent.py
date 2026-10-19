@@ -155,8 +155,9 @@ class DeployAgentTaskStep(TaskStep):
             artifact_type="file_artifact_universe",
         ),
     )
-    field_scopes = {**TaskStep.field_scopes, "a2a_agent_id": FieldScope.USER, "a2a_agent_version": FieldScope.USER,
-                    "env_vars": FieldScope.USER, "sandbox_type": FieldScope.USER, "litellm_base_url": FieldScope.USER}
+    field_scopes = {**TaskStep.field_scopes, **dict.fromkeys(
+        ("a2a_agent_id", "a2a_agent_version", "env_vars", "sandbox_type", "litellm_base_url", "agent_changelog_object_url",
+         "agent_changelog_toolcall_position_exclusive"), FieldScope.USER)}
 
     def __init__(
         self,

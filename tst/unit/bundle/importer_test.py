@@ -516,22 +516,39 @@ SCOPED = [
     {"id": "env", "type": "deploy_env", "env_id": "crm-env", "sandbox_type": "modal_vm,modal",
      "metadata": {"attribution": {"project_id": "p-123"}, "note": "kept"}},
     {"id": "agent", "type": "deploy_agent", "env_ids": ["crm-env"], "a2a_agent_id": "solver", "sandbox_type": "local",
-     "litellm_base_url": "https://litellm.internal.example.com", "metadata": {"attribution": {"project_id": "p-123"}}},
+     "litellm_base_url": "https://litellm.internal.example.com", "metadata": {"attribution": {"project_id": "p-123"}},
+     "agent_changelog_object_url": "s3://their-bucket/changelog/", "agent_changelog_toolcall_position_exclusive": 3},
     {"id": "prompt", "type": "prompt_agent", "prompt": "close the duplicates", "agent_name": "default-agent",
      "trajectory_output_prefix": "s3://their-bucket/trajectories/", "user_a2a_url": "https://hub.example.com/a2a"},
     {"id": "judge", "type": "rubrics_verifier", "verifier_id": "judge", "prompt_id": "prompt",
      "judge_sandbox_type": "modal", "criteria": [{"id": "c1", "description": "closed every duplicate"}]},
+    {"id": "box", "type": "deploy_sandbox", "sandbox_name": "box", "sandbox_mode": "vm"},
+    {"id": "install", "type": "install_agent", "sandbox_name": "box", "a2a_agent_id": "solver", "agent_name": "installed"},
+    {"id": "fetch", "type": "load_artifact", "sandbox_name": "box", "urls": ["s3://their-bucket/rows.csv"],
+     "destination_path": "/data"},
+    {"id": "build", "type": "run_docker_container", "sandbox_name": "box", "docker_context_url": "s3://their-bucket/ctx.zip"},
+    {"id": "skills", "type": "add_skills", "agent_name": "installed",
+     "skills": [{"name": "notes", "description": "how notes are kept", "object_url": "s3://their-bucket/skills/notes/"}]},
 ]
 SCOPED_FIELDS = {"env": ["sandbox_type", "metadata.attribution"],
-                 "agent": ["a2a_agent_id", "sandbox_type", "litellm_base_url", "metadata.attribution"],
+                 "agent": ["a2a_agent_id", "sandbox_type", "litellm_base_url", "agent_changelog_object_url",
+                           "agent_changelog_toolcall_position_exclusive", "metadata.attribution"],
                  "prompt": ["trajectory_output_prefix"],
                  # A stored judge always holds a model: its author's, or the one its store's config named for judges.
-                 "judge": ["default_model", "judge_sandbox_type"]}
+                 "judge": ["default_model", "judge_sandbox_type"],
+                 "install": ["a2a_agent_id"],
+                 "fetch": ["urls"],
+                 "build": ["docker_context_url"],
+                 # A skill is stored under both spellings of its object_url.
+                 "skills": ["skills[0].object_url", "skills[0].s3_url"]}
 
 
 def _value(step, path):
     for key in path.split("."):
+        key, _, index = key.removesuffix("]").partition("[")
         step = step.get(key) if isinstance(step, dict) else None
+        if index and isinstance(step, list):
+            step = step[int(index)]
     return step
 
 
@@ -552,6 +569,10 @@ def test_a_steps_user_scoped_fields_are_left_out_and_reported_and_the_rest_of_it
     assert steps["prompt"]["prompt"] == stored["prompt"]["prompt"]
     assert steps["prompt"]["user_a2a_url"] == stored["prompt"]["user_a2a_url"]  # it also says the user is a human
     assert steps["judge"]["criteria"] == stored["judge"]["criteria"]
+    assert steps["skills"]["skills"] == [{"name": "notes", "description": "how notes are kept"}]
+    assert {(floating.where, floating.id) for floating in imported.floating} >= {
+        ("tasks/scoped.json: step 'agent': a2a_agent_id", "a2a-default"),
+        ("tasks/scoped.json: step 'install': a2a_agent_id", "a2a-default")}
 
 
 def test_including_the_user_scope_keeps_each_scoped_field_as_stored(store):
