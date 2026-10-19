@@ -11,7 +11,7 @@ from pydantic import ConfigDict, Field, model_serializer
 from agent_env.artifact.artifact import Artifact
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.ref import ArtifactRef
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
 from agent_env.store.ids import derive_id
 
 logger = logging.getLogger(__name__)

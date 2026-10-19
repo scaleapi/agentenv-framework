@@ -27,7 +27,7 @@ from agent_env.config.runtime import Config
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.eval import Eval
 from agent_env.eval.eval import EvalTask
-from agent_env.field_scope import FieldScope
+from agent_env.entity.scopes import FieldScope
 from agent_env.plugins import TASK_STEPS, Contribution, Distribution, Inventory
 from agent_env.store import Filter
 from agent_env.store.routing import namespace_routing

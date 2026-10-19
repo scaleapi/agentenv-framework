@@ -23,11 +23,11 @@ import httpx
 
 from agent_env.a2a_agent import A2AAgent
 from agent_env.config import get_config
-from agent_env.field_scope import FieldScope
+from agent_env.entity.scopes import FieldScope
 from agent_env.providers.sandbox_providers.local_sandbox import host_url_for
 from agent_env.store.base import NotFoundError
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)

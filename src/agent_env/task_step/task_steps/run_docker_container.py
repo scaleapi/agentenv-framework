@@ -10,8 +10,8 @@ from typing import ClassVar, Optional
 from urllib.parse import urlparse
 
 from agent_env.task_step.context import TaskStepContext
-from agent_env.entity_refs import EntityRef
-from agent_env.field_scope import FieldScope
+from agent_env.entity.refs import EntityRef
+from agent_env.entity.scopes import FieldScope
 from agent_env.providers.sandbox_providers.sandbox import SANDBOX_LABEL, port_bindings
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.utils.paths import validate_relative_filename

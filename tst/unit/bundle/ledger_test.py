@@ -20,7 +20,7 @@ from agent_env.bundle import resolve as resolve_module
 from agent_env.bundle.ledger import LEDGER_COLLECTION, Ledger, materializing
 from agent_env.bundle.materialize import _pinned
 from agent_env.config import configure, get_config
-from agent_env.entity_refs import EntityKind, EntityRef
+from agent_env.entity.refs import EntityKind, EntityRef
 from agent_env.env.env import Env
 from agent_env.store import Filter, Sort, UpdateSpec
 from tst.unit.bundle._support import RefusingStore, local_store, plan_of

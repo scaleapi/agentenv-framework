@@ -7,7 +7,7 @@ import logging
 from typing import ClassVar, Optional
 
 from agent_env.task_step.context import TaskStepContext
-from agent_env.entity_refs import EntityRef, RefRole
+from agent_env.entity.refs import EntityRef, RefRole
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.task_step.snapshot_utils import agent_state_capture
 

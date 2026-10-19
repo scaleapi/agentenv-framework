@@ -33,8 +33,8 @@ from agent_env.task_step.snapshot_utils.agent_state_capture import (
     store_trajectory,
     trajectory_object_url,
 )
-from agent_env.entity_refs import EntityRef
-from agent_env.field_scope import FieldScope
+from agent_env.entity.refs import EntityRef
+from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (

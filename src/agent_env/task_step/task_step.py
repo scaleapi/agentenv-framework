@@ -9,8 +9,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 
 from agent_env.task_step.context import TaskStepContext
-from agent_env.entity_refs import EntityRef
-from agent_env.field_scope import FieldScope
+from agent_env.entity.refs import EntityRef
+from agent_env.entity.scopes import FieldScope
 
 if TYPE_CHECKING:
     from agent_env.task_step.store import TaskStepQuery

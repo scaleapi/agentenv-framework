@@ -5,7 +5,7 @@ import inspect
 import pytest
 
 from agent_env.artifact.registry import get_artifact_registry
-from agent_env.entity_refs import EntityKind, EntityRef, parse_toml_ref, ref_sites
+from agent_env.entity.refs import EntityKind, EntityRef, parse_toml_ref, ref_sites
 from agent_env.task_step.registry import _builtin_registry
 from agent_env.task_step.snapshot_utils.snapshot_series import SnapshotConfig
 from agent_env.task_step.task_step import TaskStep

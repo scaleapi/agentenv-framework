@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, NoReturn, TypeVar, overload
 
 from agent_env.artifact.artifact import Artifact
-from agent_env.entity_refs import EntityKind, parse_toml_ref
+from agent_env.entity.refs import EntityKind, parse_toml_ref
 from agent_env.env.env import Env
 from agent_env.env.envs._deployment import provider_refusal
 from agent_env.providers.env_providers.constants import GATEWAY_SERVICE_NAMES

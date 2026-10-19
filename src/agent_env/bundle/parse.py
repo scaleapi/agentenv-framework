@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from agent_env.bundle._fs import Unreadable, fold, home, on_disk, os_reason, read_regular, show
-from agent_env.entity_refs import EntityKind
+from agent_env.entity.refs import EntityKind
 from agent_env.store.ids import LOCAL_PREFIX, MAX_AUTHORED_LOCAL_ID_BYTES, validate_local_id
 from agent_env.utils.paths import LEAVINGS
 

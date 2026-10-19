@@ -15,7 +15,7 @@ import logging
 from typing import Optional
 
 from agent_env.a2a_agent.staging import LAST_DRAIN_SECONDS, drain_all, staged_changelogs
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
 from agent_env.env.env import DeployedSandboxEnv
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SandboxProvider,

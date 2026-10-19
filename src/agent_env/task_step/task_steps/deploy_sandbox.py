@@ -9,7 +9,7 @@ from agent_env.artifact.artifacts.docker_image import pull_problem
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import skip_refusing
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
 from agent_env.task_step.context import DeployedSandbox, TaskStepContext
-from agent_env.field_scope import FieldScope
+from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.attribution import deploy_attribution
 

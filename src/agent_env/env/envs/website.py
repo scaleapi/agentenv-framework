@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional
 from agentenv_protocol import FilePart, client as protocol_v1
 from agent_env.artifact import Artifact, DockerImageArtifact, EnvironmentArtifact
 from agent_env.artifact.artifacts.docker_image import ProgressCallback, refuse_local_github_build
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
 from agent_env.env.env import Env, gateway_url_of
 from agent_env.store.ids import derive_id
 from agent_env.env import legacy_protocol

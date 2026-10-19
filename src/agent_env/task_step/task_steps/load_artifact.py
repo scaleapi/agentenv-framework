@@ -15,8 +15,8 @@ from urllib.parse import unquote, urlparse
 
 from agent_env.providers.sandbox_providers.sandbox_provider import reachable_url
 from agent_env.task_step.context import TaskStepContext
-from agent_env.entity_refs import EntityRef
-from agent_env.field_scope import FieldScope
+from agent_env.entity.refs import EntityRef
+from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.utils.paths import validate_relative_filename
 

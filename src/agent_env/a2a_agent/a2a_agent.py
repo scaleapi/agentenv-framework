@@ -14,7 +14,7 @@ from agentenv_protocol.a2a_agent import STANDARD_EXTENSIONS
 
 from agent_env.config import get_config
 from agent_env.config.model import MODEL_HEADERS_ENV
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
 from agent_env.providers.sandbox_providers.sandbox import (
     SANDBOX_LABEL,
     NetworkPolicy,

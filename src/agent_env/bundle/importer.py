@@ -9,7 +9,7 @@ import os
 import shutil
 import unicodedata
 import uuid
-from collections.abc import Collection, Mapping
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib.metadata import version as package_version
@@ -23,11 +23,11 @@ from agent_env.bundle.parse import BundleError, parse_bundle, root_problems, seg
 from agent_env.bundle.plan import STORE_GETTERS, check_bundle
 from agent_env.bundle.resolve import resolve_bundle
 from agent_env.config import get_config
-from agent_env.entity_refs import EntityKind, RefRole, RefSite, field_sites, ref_sites
+from agent_env.entity.refs import EntityKind, RefRole, RefSite, ref_sites
 from agent_env.env import registry as env_registry
 from agent_env.env.registry import get_env_registry
 from agent_env.eval import Eval
-from agent_env.field_scope import FieldScope
+from agent_env.entity.scopes import FieldScope, prune
 from agent_env.plugins import ARTIFACTS, ENVS, TASK_STEPS, inventory, load_failures
 from agent_env.store.base import NotFoundError
 from agent_env.store.ids import LOCAL_PREFIX
@@ -194,7 +194,7 @@ class _Importer:
         found = []
         for step in steps:
             cls = registry[step["type"]]
-            pruned = _prune(step, cls.field_scopes, self.include_scopes)  # first, so no pruned field is pinned
+            pruned = prune(step, cls.field_scopes, self.include_scopes)  # first, so no pruned field is pinned
             found.append((step, cls, pruned, [site for site in ref_sites(cls.entity_refs or (), step)
                                               if isinstance(site.value, str) and site.value]))
         sites = [site for *_, step_sites in found for site in step_sites]
@@ -363,22 +363,6 @@ def _names(value: str, cls: type) -> bool:
     except (ImportError, AttributeError):
         return False
     return named is cls
-
-
-def _prune(step: dict, scopes: Mapping[str, FieldScope], include: frozenset[FieldScope]) -> list[tuple[str, str]]:
-    """Leave out of ``step`` each set field ``scopes`` gives a scope ``include`` doesn't name, in place; each one's
-    path and why."""
-    left = []
-    for path, scope in scopes.items():
-        if scope in include:
-            continue
-        for where, holder, key in list(field_sites(step, path)):
-            if holder[key] in ("", [], {}):
-                continue  # set to nothing, so nothing is left out
-            del holder[key]
-            left.append((where, f"dropped: {scope.value} scope, so a run takes its own; --include-scope "
-                                f"{scope.value} keeps it"))
-    return left
 
 
 def _output_names(sites: list[RefSite]) -> dict[tuple[EntityKind, str], str]:

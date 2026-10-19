@@ -27,7 +27,7 @@ from agent_env.bundle.run import _written
 from agent_env.config import configure
 from agent_env.config.paths import state_root
 from agent_env.config.runtime import Config
-from agent_env.entity_refs import EntityRef, RefRole
+from agent_env.entity.refs import EntityRef, RefRole
 from agent_env.env.env import Env
 from agent_env.eval import Eval, EvalTask
 from agent_env.store import Filter

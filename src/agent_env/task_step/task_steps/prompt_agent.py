@@ -28,8 +28,8 @@ from agent_env.env.gateway.constants import EXT_CLOCK_URI, EXT_TRIGGERS_URI, TRI
 from agent_env.store import DuplicateKeyError, get_config
 from agent_env.store.object_store import ObjectStore
 from agent_env.task_step.context import PromptResponse, TaskStepContext
-from agent_env.entity_refs import EntityRef
-from agent_env.field_scope import FieldScope
+from agent_env.entity.refs import EntityRef
+from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import RetryConfig, TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (
     agent_error_text,

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 
 from pydantic import BaseModel, Field, field_validator
 
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
 
 if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext

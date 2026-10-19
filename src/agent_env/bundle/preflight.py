@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts.docker_image import PUT_AGAIN, DockerImageArtifact, pull_problem
 from agent_env.config import get_config
-from agent_env.entity_refs import EntityKind, parse_toml_ref
+from agent_env.entity.refs import EntityKind, parse_toml_ref
 from agent_env.env.bootstrap import (
     GATEWAY,
     SERVICE_DB,

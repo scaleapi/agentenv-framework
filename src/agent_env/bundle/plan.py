@@ -21,7 +21,7 @@ from agent_env.artifact import Artifact, CliArtifact, EnvironmentArtifact, Seeds
 from agent_env.artifact.artifact import FolderChild
 from agent_env.artifact.registry import canonical_type, get_artifact_registry
 from agent_env.config import get_config
-from agent_env.entity_refs import EntityKind
+from agent_env.entity.refs import EntityKind
 from agent_env.env.env import Env
 from agent_env.env.envs._deployment import provider_refusal
 from agent_env.env.envs.mcp_server import MCPServerEnv

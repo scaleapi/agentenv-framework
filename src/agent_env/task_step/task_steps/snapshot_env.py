@@ -29,8 +29,8 @@ from agent_env.store.object_store import MIN_GRANT_LIFETIME_SECONDS, ObjectStore
 from agent_env.store.object_store.object_store import issues_grants_to
 from agent_env.store.routing import in_local_run
 from agent_env.task_step.context import TaskStepContext
-from agent_env.entity_refs import EntityRef, RefRole
-from agent_env.field_scope import FieldScope
+from agent_env.entity.refs import EntityRef, RefRole
+from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)

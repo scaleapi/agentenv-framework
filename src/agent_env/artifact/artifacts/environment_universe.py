@@ -21,7 +21,7 @@ from agent_env.artifact.artifacts.environment_universe_folder import (
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.ref import ArtifactRef
 from agent_env.artifact.universe import Universe
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
 
 logger = logging.getLogger(__name__)
 

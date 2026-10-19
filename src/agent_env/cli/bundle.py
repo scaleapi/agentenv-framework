@@ -8,7 +8,7 @@ import click
 
 from agent_env.bundle.importer import BundleImport, import_eval, import_task
 from agent_env.cli.utils import interruptible
-from agent_env.field_scope import FieldScope
+from agent_env.entity.scopes import FieldScope
 
 
 @click.group()

@@ -14,7 +14,7 @@ from agent_env.bundle import resolve as resolve_module
 from agent_env.bundle.plan import check_bundle, plan_bundle
 from agent_env.bundle.resolve import resolve_bundle
 from agent_env.config import configure
-from agent_env.entity_refs import EntityKind, EntityRef
+from agent_env.entity.refs import EntityKind, EntityRef
 from agent_env.env.env import Env
 from agent_env.env.store import get_env_store, reset_env_store
 from agent_env.store import reset_config, set_document_store

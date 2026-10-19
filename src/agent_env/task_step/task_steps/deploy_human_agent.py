@@ -11,7 +11,7 @@ from typing import ClassVar, Optional
 import httpx
 
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
-from agent_env.field_scope import FieldScope
+from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)

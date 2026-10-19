@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, ClassVar, Optional
 
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
 from agent_env.task.episode.run import _episode_of
 from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.task_step.task_step import TaskStep

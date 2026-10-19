@@ -20,7 +20,7 @@ from agent_env.bundle.plan import plan_bundle
 from agent_env.bundle.resolve import resolve_bundle
 from agent_env.cli import cli
 from agent_env.config.runtime import Config
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
 from agent_env.store import Filter
 from agent_env.store.routing import namespace_routing
 from agent_env.task import Task
