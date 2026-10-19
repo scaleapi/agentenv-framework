@@ -158,6 +158,7 @@ class PromptAgentTaskStep(TaskStep):
         *,
         snapshot_config: Optional[SnapshotConfig] = None,
         live_trajectory: bool = False,
+        user_system_prompt: Optional[str] = None,
     ):
         # `prompt` is the legacy text-only field; `parts` is the multimodal
         # form that's the authoritative A2A wire shape. Exactly one must be set:
@@ -199,6 +200,11 @@ class PromptAgentTaskStep(TaskStep):
         self.user_agent_timeout_seconds = user_agent_timeout_seconds
         self.user_output_format = user_output_format
         self.user_model = user_model
+        # The user-sim's persona, set through its agent-config extension like the
+        # solver's system_prompt. For a user-sim with no other way to get one, e.g.
+        # an install_agent'd agent; one deployed with its own system_prompt doesn't
+        # need it, and this replaces that prompt when set.
+        self.user_system_prompt = user_system_prompt
         self.snapshot_config = snapshot_config
         self.live_trajectory = live_trajectory
 
@@ -272,6 +278,8 @@ class PromptAgentTaskStep(TaskStep):
         base["user_agent_timeout_seconds"] = self.user_agent_timeout_seconds
         base["user_output_format"] = self.user_output_format
         base["user_model"] = self.user_model
+        if self.user_system_prompt is not None:
+            base["user_system_prompt"] = self.user_system_prompt
         if self.snapshot_config:
             base["snapshot_config"] = self.snapshot_config.to_dict()
         if self.live_trajectory:
@@ -306,6 +314,7 @@ class PromptAgentTaskStep(TaskStep):
             user_agent_timeout_seconds=data.get("user_agent_timeout_seconds", 600),
             user_output_format=data.get("user_output_format"),
             user_model=data.get("user_model"),
+            user_system_prompt=data.get("user_system_prompt"),
             snapshot_config=(
                 SnapshotConfig.from_dict(data["snapshot_config"])
                 if data.get("snapshot_config")
@@ -448,13 +457,29 @@ class PromptAgentTaskStep(TaskStep):
             await protocol.post_agent_config(target_url + negotiated.endpoint, negotiated.fields)
 
         is_user_sim = user_sim is not None and self.user_a2a_url is None
+        user_system_prompt = self.user_system_prompt
+        if user_system_prompt is not None:
+            # Fail loud: a user-sim that never receives its persona answers as a
+            # generic assistant, and the conversation still "succeeds".
+            if not is_user_sim:
+                raise RuntimeError(
+                    f"user_system_prompt is set but there is no deployed user-sim '{self.user_agent_name}' "
+                    f"to configure (user_a2a_url and the default human agent can't take one)")
+            if seed:
+                for key, value in seed.items():
+                    user_system_prompt = user_system_prompt.replace(f"<{key}>", str(value))
         if is_user_sim:
             user_output_format = self.user_output_format or _DEFAULT_USER_SIM_OUTPUT_FORMAT
-            user_config = {k: v for k, v in {"output_format": user_output_format, "model": self.user_model}.items() if v is not None}
+            user_config = {k: v for k, v in {"output_format": user_output_format, "model": self.user_model,
+                                              "system_prompt": user_system_prompt}.items() if v is not None}
             negotiated = A2AAgent.negotiate_agent_config(user_sim.a2a_card or {}, user_config)
+            if user_system_prompt is not None and "system_prompt" not in (negotiated.fields if negotiated else {}):
+                raise RuntimeError(
+                    f"user-sim '{self.user_agent_name}' does not accept system_prompt through its agent-config "
+                    f"extension, so user_system_prompt cannot be applied")
             if negotiated:
                 await protocol.post_agent_config(user_url + negotiated.endpoint, negotiated.fields)
-                logger.info(f"Configured user-sim '{self.user_agent_name}' with structured output_format for done-signal")
+                logger.info(f"Configured user-sim '{self.user_agent_name}': {sorted(negotiated.fields)}")
 
         triggers_registered = is_user_sim and any(
             r.get("agent_name") == self.user_agent_name
