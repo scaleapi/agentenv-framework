@@ -4,23 +4,25 @@ from: what ``docker build`` would send from a folder, in a fixed order, with not
 from __future__ import annotations
 
 import bisect
+import csv
+import functools
 import gzip
 import hashlib
 import json
 import os
 import posixpath
+import re
 import shutil
 import stat
 import tarfile
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
-from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
 
 from modal import FilePatternMatcher
 
-from agent_env.utils.dockerfile import Instruction, copy_arguments, instructions
+from agent_env.utils.dockerfile import Instruction, copy_arguments, instructions, leading_flags
 from agent_env.utils.paths import LEAVINGS
 
 # Bumped when what source_digest covers changes, so a digest is never compared across meanings.
@@ -172,6 +174,11 @@ def write_pruned(archive: Path, images: Mapping[Path, str]) -> dict[Path, Pruned
             links[name] = member.linkname if member.issym() else None
             if name in wanted and member.isreg():
                 texts[name] = tar.extractfile(member).read().decode("utf-8", "replace")
+    # A Dockerfile or ignore file stored as a link is read where it leads, as docker build reads it.
+    linked = {name: _resolve(name, links)[0] for name in wanted if links.get(name)}
+    if unread := {target for target in linked.values() if target not in texts}:
+        texts |= _texts(archive, unread)
+    texts |= {name: texts[target] for name, target in linked.items() if target in texts}
     plans: dict[Path, tuple[set[str], str | None]] = {}
     for folder, dockerfile in dockerfiles.items():
         if dockerfile not in texts:
@@ -202,6 +209,16 @@ def write_pruned(archive: Path, images: Mapping[Path, str]) -> dict[Path, Pruned
     return {folder: Pruned(*counts[folder], plans[folder][1]) for folder in images}
 
 
+def _texts(archive: Path, names: set[str]) -> dict[str, str]:
+    """The text of each regular file ``names`` names in the tar.gz at ``archive``."""
+    texts = {}
+    with tarfile.open(archive, "r:gz") as tar:
+        for member in tar:
+            if member.isreg() and (name := _member_name(member)) in names:
+                texts[name] = tar.extractfile(member).read().decode("utf-8", "replace")
+    return texts
+
+
 def _copy_reads(instruction: Instruction, paths: list[str]) -> str | None:
     """Add the context paths a COPY or ADD reads to ``paths``; why it reads all of the context, when it does."""
     args = copy_arguments(instruction)
@@ -225,13 +242,14 @@ def _copy_reads(instruction: Instruction, paths: list[str]) -> str | None:
 def _mount_reads(instruction: Instruction, paths: list[str]) -> str | None:
     """Add the context paths a RUN's bind mounts read to ``paths``; why it reads all of the context, when it does. A
     bind mount names no other image or stage with ``from``, and its source defaults to the whole context."""
-    rest = instruction.arguments
-    while rest.startswith("--"):
-        flag, _, rest = rest.partition(" ")
-        rest = rest.strip()
+    for flag in leading_flags(instruction.arguments)[0]:
         if not flag.startswith("--mount="):
             continue
-        options = dict(option.partition("=")[::2] for option in flag.removeprefix("--mount=").split(","))
+        # A mount's options are one CSV record, as docker build reads them, so a quoted field holds a comma or space.
+        options = {}
+        for field in next(csv.reader([flag.removeprefix("--mount=")])):
+            key, _, value = field.partition("=")
+            options[key.strip()] = value.strip().strip("\"'")
         if options.get("type", "bind") != "bind" or "from" in options:
             continue
         source = options.get("source") or options.get("src") or "."
@@ -256,7 +274,7 @@ def _through_links(reads: ContextReads, links: Mapping[str, str | None]) -> tupl
         return reads, set()
     paths, crossed = [], set()
     for path in reads.paths:
-        if any(char in path for char in "*?[") or any(_matches(path, name) for name in links):
+        if _WILDCARD.search(path) or any(_matches(path, name) for name in links):
             paths.append(path)
             continue
         resolved, hops = _resolve(path, links)
@@ -319,7 +337,54 @@ def _at_or_under(names: list[str], path: str) -> list[str]:
 def _matches(path: str, name: str) -> bool:
     """Whether ``name`` is ``path`` or under it, each part matched as Docker matches a COPY source's."""
     want, have = path.split("/"), name.split("/")
-    return len(have) >= len(want) and all(fnmatchcase(part, glob.replace("[^", "[!")) for part, glob in zip(have, want))
+    return len(have) >= len(want) and all(
+        part == glob if not _WILDCARD.search(glob) else bool((pattern := _part_pattern(glob)) and pattern.fullmatch(part))
+        for part, glob in zip(have, want))
+
+
+_WILDCARD = re.compile(r"[*?\[\\]")
+
+
+@functools.lru_cache(maxsize=1024)
+def _part_pattern(glob: str) -> re.Pattern[str] | None:
+    """A path part's wildcard pattern as Go's ``filepath.Match``, which docker build matches COPY sources with, reads
+    it: ``*`` any characters and ``?`` any one, ``[...]`` a class that ``^`` negates (``!`` is a character like any
+    other), and ``\\`` the next character as it is. None when the pattern is malformed, which docker build refuses."""
+    out, at = [], 0
+    while at < len(glob):
+        char = glob[at]
+        if char == "*":
+            out.append("[^/]*")
+        elif char == "?":
+            out.append("[^/]")
+        elif char == "\\":
+            if at + 1 == len(glob):
+                return None
+            at += 1
+            out.append(re.escape(glob[at]))
+        elif char == "[":
+            at += 1
+            negated = at < len(glob) and glob[at] == "^"
+            at += negated
+            members = []
+            while at < len(glob) and glob[at] != "]":
+                if glob[at] == "\\":
+                    at += 1
+                    if at == len(glob):
+                        return None
+                    members.append(re.escape(glob[at]))
+                elif glob[at] == "-" and members and at + 1 < len(glob) and glob[at + 1] != "]":
+                    members.append("-")
+                else:
+                    members.append(re.escape(glob[at]))
+                at += 1
+            if at == len(glob) or not members:
+                return None
+            out.append(f"[{'^' if negated else ''}{''.join(members)}]")
+        else:
+            out.append(re.escape(char))
+        at += 1
+    return re.compile("".join(out))
 
 
 def _ignore_files(dockerfile: str) -> tuple[str, ...]:

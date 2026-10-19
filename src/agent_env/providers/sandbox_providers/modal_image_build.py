@@ -16,7 +16,7 @@ import modal
 
 from agent_env.config import get_config
 from agent_env.utils.build_context import extract, ignore_file
-from agent_env.utils.dockerfile import Instruction, copy_arguments, instructions
+from agent_env.utils.dockerfile import Instruction, copy_arguments, instructions, opens_heredoc
 
 if TYPE_CHECKING:
     from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
@@ -93,7 +93,8 @@ def _for_modal(instruction: Instruction, context: Path) -> str:
         return instruction.text
     paths = (*args.sources, args.destination)
     if args.json_form:
-        if not all(path and not any(c.isspace() for c in path) for path in paths):
+        # Written in shell form, a path with whitespace would split, and one like <<EOF would open a heredoc.
+        if not all(path and not any(c.isspace() for c in path) and not opens_heredoc(path) for path in paths):
             return instruction.text
     elif args.keyword != "ADD":
         return instruction.text

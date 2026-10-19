@@ -157,6 +157,43 @@ def test_a_link_loop_or_one_out_of_the_context_in_a_source_keeps_all_of_it(tmp_p
     assert pruned[tmp_path / "out"].whole == "loop/a.py matches nothing in the context"
 
 
+@pytest.mark.parametrize(("glob", "kept"), [
+    ("[!a].txt", {"!.txt", "a.txt"}), ("[^a].txt", {"!.txt", "b.txt"}), ("[a-b].txt", {"a.txt", "b.txt"}),
+    ("\\[x].txt", {"[x].txt"}), ("?.txt", {"!.txt", "a.txt", "b.txt"}),
+], ids=["bang-is-a-character", "caret-negates", "range", "escaped-bracket", "any-one"])
+def test_a_wildcard_class_reads_as_gos_filepath_match_reads_it(tmp_path, glob, kept):
+    files = {"Dockerfile": f"FROM python\nCOPY {glob} /x/\n", "!.txt": "!", "a.txt": "a", "b.txt": "b", "[x].txt": "x"}
+    archive = _archive(tmp_path / "ctx.tar.gz", files)
+
+    write_pruned(archive, {tmp_path / "out": "Dockerfile"})
+
+    assert set(_files(tmp_path / "out")) == {"Dockerfile", *kept}
+
+
+def test_a_malformed_wildcard_keeps_all_of_the_context(tmp_path):
+    archive = _archive(tmp_path / "ctx.tar.gz", {"Dockerfile": "FROM python\nCOPY [a /x/\n", "a": "a", "b": "b"})
+
+    assert write_pruned(archive, {tmp_path / "out": "Dockerfile"})[tmp_path / "out"].whole == (
+        "[a matches nothing in the context")
+
+
+def test_a_dockerfile_stored_as_a_link_is_read_where_it_leads(tmp_path):
+    files = {"docker/real.Dockerfile": "FROM python\nCOPY app/ /app/\n", "app/main.py": "m", "other.py": "o"}
+    archive = _archive(tmp_path / "ctx.tar.gz", files, links={"Dockerfile": "docker/real.Dockerfile"})
+
+    pruned = write_pruned(archive, {tmp_path / "out": "Dockerfile"})
+
+    assert set(_files(tmp_path / "out")) == {"docker/real.Dockerfile", "app/main.py"}
+    assert (tmp_path / "out" / "Dockerfile").is_symlink() and pruned[tmp_path / "out"].whole is None
+
+
+def test_a_bind_mount_after_a_tab_or_with_a_quoted_source_is_read():
+    dockerfile = ('FROM x\nRUN --network=none\t--mount=type=bind,source=tools,target=/t ls\n'
+                  'RUN --mount=type=bind,"source=my dir",target=/m ls\nRUN --mount=type=bind,source="my lib",target=/l ls\n')
+
+    assert context_reads(dockerfile) == ContextReads(paths=("tools", "my dir", "my lib"))
+
+
 def test_wildcards_match_one_part_of_a_path_as_dockers_do(tmp_path):
     files = {"Dockerfile": "FROM python\nCOPY *.txt [^b]*.cfg /x/\n", "a.txt": "a", "sub/c.txt": "c", "a.cfg": "a",
              "b.cfg": "b"}

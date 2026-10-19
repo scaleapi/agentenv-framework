@@ -2,7 +2,7 @@
 
 import pytest
 
-from agent_env.utils.dockerfile import copy_arguments, instructions
+from agent_env.utils.dockerfile import copy_arguments, instructions, leading_flags
 
 DOCKERFILE = """# syntax=docker/dockerfile:1
 FROM python:3.12-slim AS base
@@ -63,6 +63,13 @@ def test_a_heredoc_is_only_ever_opened_outside_quotes_in_shell_form():
 
     assert [(i.keyword, i.heredocs) for i in found if i.keyword] == [("FROM", ()), ("RUN", ()), ("RUN", ()), ("RUN", ()),
                                                                       ("COPY", ())]
+
+
+def test_flags_split_on_any_whitespace_outside_quotes():
+    assert leading_flags('--network=none\t--mount=type=bind,"source=my dir",target=/m  cp /m/f /f') == (
+        ["--network=none", '--mount=type=bind,"source=my dir",target=/m'], "cp /m/f /f")
+    args = copy_arguments(next(i for i in instructions("COPY --chown=0:0\ta.txt /a\n") if i.keyword))
+    assert (args.flags, args.sources) == (("--chown=0:0",), ("a.txt",))
 
 
 def test_a_shell_here_string_is_no_heredoc_and_the_instructions_after_it_stand():

@@ -87,10 +87,43 @@ def instructions(dockerfile: str) -> list[Instruction]:
     return found
 
 
+def leading_flags(arguments: str) -> tuple[list[str], str]:
+    """The ``--flag`` words ``arguments`` begins with, split on any whitespace outside quotes, and the rest of it."""
+    flags, at = [], 0
+    while arguments.startswith("--", at):
+        end, quote = at, None
+        while end < len(arguments) and (quote or not arguments[end].isspace()):
+            char = arguments[end]
+            quote = (None if char == quote else quote) if quote else (char if char in "\"'" else None)
+            end += 1
+        flags.append(arguments[at:end])
+        at = end
+        while at < len(arguments) and arguments[at].isspace():
+            at += 1
+    return flags, arguments[at:]
+
+
+def _json_strings(arguments: str) -> list[str] | None:
+    """``arguments`` as the JSON list of strings of an exec-form instruction; None when it's shell form, as docker
+    build reads anything that doesn't parse as one, a ``[`` it opens with included."""
+    if not arguments.startswith("["):
+        return None
+    try:
+        parsed = json.loads(arguments)
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, list) and all(isinstance(arg, str) for arg in parsed) else None
+
+
+def opens_heredoc(word: str) -> bool:
+    """Whether ``word``, written in a shell-form instruction, would open a heredoc."""
+    return _HEREDOC.fullmatch(word) is not None
+
+
 def _heredoc_names(arguments: str) -> list[tuple[str, str]]:
     """Each heredoc ``arguments`` opens, as (its ``-`` if any, its name): a ``<<NAME`` outside quotes, in shell form only,
     since docker build reads a quoted one as text and an exec-form (JSON) instruction opens none."""
-    if arguments.startswith("["):
+    if _json_strings(arguments) is not None:
         return []
     found, quote, at = [], None, 0
     while at < len(arguments):
@@ -111,24 +144,15 @@ def _heredoc_names(arguments: str) -> list[tuple[str, str]]:
 
 
 def copy_arguments(instruction: Instruction) -> CopyArguments | None:
-    """A COPY or ADD's arguments; None for any other instruction, or one whose arguments it can't read: JSON that
-    isn't a list of at least two strings, a quoted shell-form path, or fewer than a source and a destination."""
+    """A COPY or ADD's arguments; None for any other instruction, or one whose arguments it can't read: a quoted
+    shell-form path, or fewer than a source and a destination. Arguments that don't parse as a JSON list of strings are
+    shell form, as docker build reads them."""
     if instruction.keyword not in ("COPY", "ADD"):
         return None
-    rest, flags = instruction.arguments, []
-    while rest.startswith("--"):
-        flag, _, rest = rest.partition(" ")
-        flags.append(flag)
-        rest = rest.strip()
-    json_form = rest.startswith("[")
-    if json_form:
-        try:
-            args = json.loads(rest)
-        except ValueError:
-            return None
-        if not (isinstance(args, list) and all(isinstance(arg, str) for arg in args)):
-            return None
-    else:
+    flags, rest = leading_flags(instruction.arguments)
+    args = _json_strings(rest)
+    json_form = args is not None
+    if not json_form:
         if any(quote in rest for quote in "\"'"):
             return None
         args = rest.split()

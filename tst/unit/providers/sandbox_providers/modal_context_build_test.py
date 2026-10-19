@@ -172,9 +172,9 @@ def test_a_comment_among_the_lines_of_a_rewritten_instruction_is_kept_above_it(t
 @pytest.mark.parametrize("line", [
     'COPY ["with space.txt", "/z/"]', "ADD archive.tar.gz /unpacked/", "ADD https://example.com/f /f",
     "ADD --checksum=sha256:abc a.txt /c", "ADD missing.txt /m", "COPY --from=build /out /out", "COPY a.txt /x/",
-    'ADD "a.txt" /q/', "ADD <<EOF /h\nhi\nEOF",
+    'ADD "a.txt" /q/', "ADD <<EOF /h\nhi\nEOF", 'COPY ["<<EOF", "/out"]',
 ], ids=["json-with-space", "add-archive", "add-url", "add-checksum", "add-missing", "copy-from", "shell-copy",
-        "add-quoted", "add-heredoc"])
+        "add-quoted", "add-heredoc", "json-heredoc-like-path"])
 def test_everything_else_is_left_as_written(tmp_path, line):
     (tmp_path / "a.txt").write_text("a")
     with tarfile.open(tmp_path / "archive.tar.gz", "w:gz") as tar:
