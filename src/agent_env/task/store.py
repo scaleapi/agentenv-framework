@@ -627,7 +627,8 @@ class TaskInstanceStore:
             # Doc first, like the seed: the record is in the context already; a failed journal
             # write only means replay lacks it until the next undo rewrites this row.
             try:
-                self._journal_step(store, instance_id, _SCHEDULER_STEP_ID, applied_extra[0], "scheduler")
+                self._journal_step(store, instance_id, _SCHEDULER_STEP_ID, applied_extra[0], "scheduler",
+                                   attempt_epoch=result.get("attempt_epoch", 0))
             except Exception:
                 logger.warning("Failed to journal the scheduler record for instance_id=%s", instance_id, exc_info=True)
         return result
