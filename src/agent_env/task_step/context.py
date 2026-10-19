@@ -6,6 +6,7 @@ import dataclasses
 from dataclasses import dataclass, field
 from typing import Any
 
+from agent_env.a2a_agent.protocol import MAX_TURNS_ERROR_CODE
 from agent_env.env.env import DeployedEnv
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, host_url_for
 from agent_env.providers.sandbox_providers.sandbox_provider import reachable_url
@@ -201,6 +202,16 @@ class PromptResponse:
             step_id=data.get("step_id"),
             structured_output=data.get("structured_output"),
         )
+
+    @property
+    def is_gradable_despite_error(self) -> bool:
+        """True when this response carries an error that is nonetheless gradable.
+
+        A max-turns/step budget exhaustion is an expected outcome, not a crash:
+        the partial trajectory recorded before the failure is still worth grading.
+        Verifiers skip responses with an ``error_type`` *unless* this is set.
+        """
+        return self.error_code == MAX_TURNS_ERROR_CODE
 
 
 @dataclass

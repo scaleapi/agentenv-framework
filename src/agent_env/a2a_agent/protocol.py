@@ -34,6 +34,12 @@ class AgentUnreachableError(TimeoutError):
 
 _ERROR_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 
+# Terminal ``error_code`` a harness sets when it stops the agent for exhausting
+# its step/turn budget (as opposed to a genuine crash). Consumers treat it as an
+# expected budget outcome rather than a retryable failure. The string is the
+# cross-process contract — harnesses in other repos emit this exact value.
+MAX_TURNS_ERROR_CODE = "max_turns_reached"
+
 
 def raise_for_extension_status(
     response: httpx.Response, *, operation: str, include_body: bool = False

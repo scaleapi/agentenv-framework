@@ -524,7 +524,7 @@ class RubricsVerifierTaskStep(TaskStep):
             )
         prompt_response = as_of
 
-        if prompt_response.error_type:
+        if prompt_response.error_type and not prompt_response.is_gradable_despite_error:
             logger.warning(f"Skipping verification '{self.verifier_id}': prompt had error_type={prompt_response.error_type}")
             self._write_skipped_entries(
                 context, "prompt_error", f"Skipped: prompt had error_type={prompt_response.error_type}")
