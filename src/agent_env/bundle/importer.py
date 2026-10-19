@@ -304,6 +304,7 @@ class _Importer:
         self.tomls: dict[str, tuple[str, dict]] = {}  # each entity folder's toml: its file's name, and its keys
         self.downloads: dict[str, str] = {}  # each file to write: its path in the bundle, and its object's url
         self.jobs: list[ImageJob] = []
+        self.pins: dict[tuple[EntityKind, str], set[int]] = {}  # the versions the task being added pins each id at
         self.origins: dict[tuple[str, str], str] | None = None
         self.installed: tuple[InstalledBundle, ...] | None = None
         _check_destination(self.dest)
@@ -326,6 +327,10 @@ class _Importer:
         for site in sites:  # each output, and each step that reads it, takes the output's name
             if outputs.get(_key(site), site.value) != site.value:
                 site.rewrite(outputs[_key(site)])
+        self.pins = {}
+        for site in sites:
+            if site.version is not None:
+                self.pins.setdefault(_key(site), set()).add(site.version)
         for step, cls, pruned, step_sites in found:
             where = f"{path}: step {step.get('id')!r}"
             self.dropped += [Dropped(f"{where}: {at}", why) for at, why in pruned + scrub(step)]
@@ -495,7 +500,14 @@ class _Importer:
         if (bundle := self._installed_for(kind, entity_id)) is not None:
             self._from_installed(site, where, bundle)
             return
-        entity = self._entity(kind, entity_id, site.version)
+        version = site.version
+        if version is None and len(pinned := self.pins.get(_key(site), ())) == 1:
+            # A folder holds one version of each name, and the run reads this one where another step pins it: an env a
+            # step deploys is the one a later step names.
+            [version] = pinned
+            self.dropped.append(Dropped(where, f"pinned: it names no version, so it takes v{version}, the one the task "
+                                               "pins elsewhere"))
+        entity = self._entity(kind, entity_id, version)
         if isinstance(entity, str):
             self.problems.append(f"{where}: {entity}")
             return

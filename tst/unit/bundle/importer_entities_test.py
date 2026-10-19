@@ -373,3 +373,20 @@ def test_an_image_whose_context_cant_be_written_is_pulled_by_the_registry_ref_it
     assert pulled.why.startswith("its build context can't be written as a folder: the build context names no "
                                  "Dockerfile and holds 2: mail/Dockerfile, mail/website/Dockerfile")
     assert not (imported.root / "envs/crm/mail").exists()
+
+
+def test_a_step_naming_no_version_of_an_env_another_step_pins_takes_that_version_and_its_folder(home):
+    MCPServerEnv.put(id="crm", docker_image_artifact=_context_image(home, "crm-image"), environment_name="crm")
+    MCPServerEnv.put(id="crm", docker_image_artifact=_context_image(home, "crm-image-2"), environment_name="crm")
+    _task([{**DEPLOY, "env_version": 1},
+           {"id": "cli", "type": "build_mcp_cli", "env_id": "crm", "command_name": "crm", "cli_artifact_id": "crm-cli",
+            "depends_on": [{"task_step_id": "env"}]}])
+
+    imported = import_task("t", home / "t")
+
+    steps = json.loads((imported.root / "tasks/t.json").read_text())
+    assert (steps[0]["env_id"], steps[0].get("env_version"), steps[1]["env_id"]) == ("crm", None, "crm")
+    assert [(written.folder, written.version) for written in imported.written if written.kind.value == "env"] == [
+        ("envs/crm", 1)]
+    assert ("tasks/t.json: step 'cli': env_id", "pinned: it names no version, so it takes v1, the one the task pins "
+            "elsewhere") in [(d.where, d.why) for d in imported.dropped]
