@@ -82,8 +82,7 @@ or one of them only where it is used.
   they keep running; files the install wrote elsewhere (`/opt`, packages) stay.
 - `[agents] default_a2a_agent_id`: the agent a `deploy_agent` step without an id deploys; built-in
   `a2a-default`, overridable by `configure(default_a2a_agent_id=...)`. Any step's agent field left unset
-  means it (`entity.refs.default_agent_refs`); a field that means something else unset in some steps, as
-  the rubrics judge's does, declares `default_when`.
+  falls back to it (`entity.refs.default_agent_refs`), so a bundle run plans the default for it.
 - Secrets never live in the file: use `secret:KEY` or `env:NAME` references, resolved through
   `[stores.secret]`.
 - agent-env has no stage concept: "dev" versus "prod" is which file `AGENT_ENV_CONFIG` names. A

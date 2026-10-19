@@ -105,7 +105,9 @@ def test_a_step_falling_back_to_an_installed_default_agent_pulls_it_in(bundle_di
     task = plan.writes[-1].source
     assert [(ref.where, ref.local.id) for ref in task.references] == [
         ("step 'agent': a2a_agent_id (the default agent)", SOLVER),
-        ("step 'judge': judge_a2a_agent_id (the default agent)", SOLVER)]
+        ("step 'judge': judge_a2a_agent_id (the default agent)", SOLVER),
+        ("step 'llm': judge_a2a_agent_id (the default agent)", SOLVER),
+        ("step 'own': judge_a2a_agent_id (the default agent)", SOLVER)]
 
 
 def test_a_default_agent_the_bundle_defines_is_written_by_the_run(bundle_dir, default_agent):

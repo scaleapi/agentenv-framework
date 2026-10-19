@@ -20,9 +20,8 @@ Fields that name something else, such as another step's id, are left out. A step
 declarations are not inherited, so a subclass declares its own; ``toml_refs`` are, as ``from_toml``
 is.
 
-A step's agent field left unset means the configured default agent (``[agents] default_a2a_agent_id``), so a tool
-reading a step knows which agent it deploys without being told (``default_agent_refs``). A field that, unset, means
-something else in some steps says when it means the default with ``default_when``, a test of the step dict.
+A step's agent field left unset falls back to the configured default agent (``[agents] default_a2a_agent_id``), so a
+tool reading a step knows which agent it may deploy without being told (``default_agent_refs``).
 """
 
 from __future__ import annotations
@@ -67,7 +66,6 @@ class EntityRef:
     artifact_type: str | None = None
     env_type: str | None = None
     walk: Walker | None = None
-    default_when: Callable[[dict], bool] | None = None  # when this field, unset, means the default agent
 
     @classmethod
     def env(cls, path: str, **options: Any) -> EntityRef:
@@ -99,8 +97,6 @@ class EntityRef:
             raise ValueError(f"entity ref {self.path!r}: artifact_type is only for EntityKind.ARTIFACT")
         if self.env_type is not None and self.kind is not EntityKind.ENV:
             raise ValueError(f"entity ref {self.path!r}: env_type is only for EntityKind.ENV")
-        if self.default_when is not None and not _takes_default(self):
-            raise ValueError(f"entity ref {self.path!r}: default_when is only for a step's top-level agent field")
 
     @property
     def field(self) -> str:
@@ -132,14 +128,10 @@ class RefSite(NamedTuple):
 
 
 def default_agent_refs(refs: Iterable[EntityRef], step: dict) -> list[EntityRef]:
-    """The agent fields ``step`` leaves unset that deploy the configured default agent: each top-level one it doesn't
-    set, where its ``default_when``, if any, holds."""
-    return [ref for ref in refs if _takes_default(ref) and step.get(ref.field) is None
-            and (ref.default_when is None or ref.default_when(step))]
-
-
-def _takes_default(ref: EntityRef) -> bool:
-    return ref.kind is EntityKind.AGENT and ref.role is RefRole.INPUT and ref.path == ref.field
+    """The agent fields ``step`` leaves unset, each falling back to the configured default agent: every top-level one it
+    doesn't set."""
+    return [ref for ref in refs if ref.kind is EntityKind.AGENT and ref.role is RefRole.INPUT and ref.path == ref.field
+            and step.get(ref.field) is None]
 
 
 def parse_toml_ref(kind: EntityKind, value: Any) -> tuple[str, int | None]:

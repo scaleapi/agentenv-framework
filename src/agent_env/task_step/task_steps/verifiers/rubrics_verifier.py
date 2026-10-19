@@ -301,14 +301,9 @@ def _as_of_turn(prompt_response: PromptResponse, turn: Optional[int]) -> PromptR
     )
 
 
-def _deploys_own_judge(step: dict) -> bool:
-    """Whether the judge deploys an agent of its own: the agent judge, not one the task deployed."""
-    return bool(step.get("use_agent_judge", True)) and step.get("agent_name") is None
-
-
 class RubricsVerifierTaskStep(TaskStep):
     type: ClassVar[str] = "rubrics_verifier"
-    entity_refs = (EntityRef.agent("judge_a2a_agent_id", default_when=_deploys_own_judge),)
+    entity_refs = (EntityRef.agent("judge_a2a_agent_id"),)
     field_scopes = {**TaskStep.field_scopes, **dict.fromkeys(
         ("judge_a2a_agent_id", "default_model", "default_model_api_base", "effort", "max_thinking_tokens",
          "judge_sandbox_type"), FieldScope.USER)}

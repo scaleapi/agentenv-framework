@@ -345,11 +345,12 @@ class _Importer:
         self.needs.append(Need(where, what, name, by))
 
     def _default_agents(self, step: dict, refs: tuple[EntityRef, ...], where: str) -> None:
-        """A step that leaves an agent field unset deploys the configured default, which no field pins."""
+        """A step that leaves an agent field unset falls back to the configured default, which no field pins."""
         for ref in default_agent_refs(refs, step):
             self.floating.append(Floating(f"{where}: {ref.path}", EntityKind.AGENT,
                                           get_config().get_default_a2a_agent_id(),
-                                          f"the step leaves {ref.path} unset, so a run deploys the configured default"))
+                                          f"the step leaves {ref.path} unset, so it falls back to the configured "
+                                          "default"))
 
     def _name(self, kind: str, entity_id: str) -> str:
         """A name in the ``kind`` folder: the id's last segment made valid, numbered when taken, caselessly."""
