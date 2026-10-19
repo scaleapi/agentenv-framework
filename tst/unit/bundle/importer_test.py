@@ -613,6 +613,25 @@ def test_a_plugins_type_a_config_file_replaces_is_credited_to_configuration(stor
     assert [need.by for need in import_task("acme", store / "acme").needs] == ["configuration"]
 
 
+def test_a_skipped_plugins_type_a_config_file_supplies_is_credited_to_configuration_without_loading_it(
+        store, monkeypatch):
+    steps = {**Config().task_step_registry(), _Undeclared.type: _Undeclared}
+    monkeypatch.setattr(Config, "task_step_registry", lambda self: steps)
+    site = store / "site"
+    site.mkdir()
+    (site / "acme_broken_import_test.py").write_text("raise RuntimeError('acme is broken')\n")
+    monkeypatch.syspath_prepend(str(site))
+    broken = Distribution("agentenv-acme", "1.0", (
+        Contribution(TASK_STEPS, _Undeclared.type, "acme_broken_import_test:Step", "unloaded"),))
+    monkeypatch.setattr(importer_module, "inventory", lambda load: Inventory(
+        distributions=(broken,), group_errors={}, discovery_errors={}, config_path=None, config_error=None,
+        loaded=load))
+    monkeypatch.setattr(importer_module, "load_failures", lambda: {TASK_STEPS: {_Undeclared.type: "failed to load"}})
+    _task("acme", [{"id": "p", "type": _Undeclared.type}])
+
+    assert [need.by for need in import_task("acme", store / "acme").needs] == ["configuration"]
+
+
 def test_a_task_that_uses_only_what_core_ships_needs_nothing(store):
     assert import_task("triage", store / "triage").needs == ()
 

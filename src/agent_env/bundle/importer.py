@@ -28,7 +28,7 @@ from agent_env.env import registry as env_registry
 from agent_env.env.registry import get_env_registry
 from agent_env.eval import Eval
 from agent_env.field_scope import FieldScope
-from agent_env.plugins import ARTIFACTS, ENVS, TASK_STEPS, inventory
+from agent_env.plugins import ARTIFACTS, ENVS, TASK_STEPS, inventory, load_failures
 from agent_env.store.base import NotFoundError
 from agent_env.store.ids import LOCAL_PREFIX
 from agent_env.task import Task
@@ -311,7 +311,8 @@ class _Importer:
 
     def _need(self, where: str, what: str, group: str, name: str, cls: type | None) -> None:
         """``name``, of the plugin ``group``, is a need when core doesn't ship it, named with what registers ``cls``,
-        the class it resolves to here: the distribution whose entry point names that class, or configuration."""
+        the class it resolves to here: the distribution whose entry point names that class, or configuration. A plugin
+        the registry build skipped registers nothing, so it isn't loaded again to compare."""
         if name in _BUILTINS[group]():
             return
         if self.origins is None:
@@ -319,7 +320,8 @@ class _Importer:
                             for distribution in inventory(load=False).distributions
                             for contribution in distribution.contributions}
         distribution, value = self.origins.get((group, name), (None, None))
-        by = distribution if value is not None and cls is not None and _names(value, cls) else "configuration"
+        registered = value is not None and cls is not None and name not in load_failures().get(group, {})
+        by = distribution if registered and _names(value, cls) else "configuration"
         self.needs.append(Need(where, what, name, by))
 
     def _default_agents(self, step: dict, where: str) -> None:

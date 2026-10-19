@@ -5,10 +5,21 @@ import inspect
 
 import pytest
 
+from agent_env.task_step import registry
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_step import TaskStep
 
 STEP_TYPES = sorted(get_task_step_registry().items())
+# A stored step of each built-in type that scopes fields of its own, holding only what the type requires.
+MINIMAL = {
+    "deploy_agent": {},
+    "deploy_env": {"env_id": "crm-env"},
+    "deploy_human_agent": {},
+    "deploy_sandbox": {"sandbox_name": "box", "sandbox_mode": "vm"},
+    "prompt_agent": {"prompt": "hi"},
+    "rubrics_verifier": {"prompt_id": "prompt", "criteria": [{"id": "c1", "description": "says hi"}]},
+    "snapshot_env": {},
+}
 
 
 @pytest.mark.parametrize("cls", [cls for _, cls in STEP_TYPES], ids=[name for name, _ in STEP_TYPES])
@@ -25,3 +36,15 @@ def test_each_scoped_field_is_an_optional_parameter_of_its_step_type_or_one_the_
 @pytest.mark.parametrize("cls", [cls for _, cls in STEP_TYPES], ids=[name for name, _ in STEP_TYPES])
 def test_a_step_type_keeps_the_scopes_the_base_gives_every_step(cls):
     assert TaskStep.field_scopes.items() <= cls.field_scopes.items()
+
+
+def test_each_built_in_step_type_that_scopes_fields_of_its_own_has_a_minimal_step_here():
+    assert {name for name, cls in registry._builtin_registry().items()
+            if cls.field_scopes != TaskStep.field_scopes} == set(MINIMAL)
+
+
+@pytest.mark.parametrize("name", sorted(MINIMAL))
+def test_a_step_with_every_scoped_field_left_out_still_builds(name):
+    step = registry._builtin_registry()[name].from_dict({"id": "s", "type": name, **MINIMAL[name]})
+
+    assert step.type == name
