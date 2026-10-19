@@ -223,7 +223,7 @@ class TaskStepContext:
         return d
 
     def record_model(self, role: str, step_id: str, model: str | None) -> None:
-        """Record the model ``step_id`` asked for in ``role``, None leaving it to the agent, for the run's summary."""
+        """Record the model ``step_id`` ran ``role`` on, None when the agent chose its own, for the run's summary."""
         self.metadata.setdefault("models", {}).setdefault(role, {})[step_id] = model
 
     def to_safe_dict(self) -> dict[str, Any]:

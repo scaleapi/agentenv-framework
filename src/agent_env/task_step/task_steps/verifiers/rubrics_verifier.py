@@ -1060,6 +1060,7 @@ class RubricsVerifierTaskStep(TaskStep):
         }
         desired_config = {k: v for k, v in desired_config.items() if v is not None}
         config_ext = A2AAgent.find_extension(judge_agent_card, A2AAgent.EXT_AGENT_CONFIG)
+        config_payload = {}
         if config_ext and desired_config:
             supported = (config_ext.get("params") or {}).get("methods", {}).get("set", {}).get("request", {}).get("supported", [])
             config_payload = {k: v for k, v in desired_config.items() if k in supported}
@@ -1067,6 +1068,8 @@ class RubricsVerifierTaskStep(TaskStep):
                 endpoint = (config_ext.get("params") or {}).get("endpoint", "/ext/agent-config")
                 await protocol.post_agent_config(judge_a2a_url + endpoint, config_payload)
                 logger.info(f"Set judge agent config: {list(config_payload.keys())}")
+        # What the judge agent took; one that doesn't accept a model grades on its own.
+        context.record_model("judge", self.id, config_payload.get("model"))
 
     async def _invoke_judge_a2a(
         self,

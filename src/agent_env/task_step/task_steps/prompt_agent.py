@@ -432,7 +432,6 @@ class PromptAgentTaskStep(TaskStep):
         prompt_text = initial_parts[0]["text"] if self.prompt is not None else None
 
         model, effort = self._resolve_model_and_effort(context)
-        context.record_model("solver", self.id, model)
         harness = context.agent_harness or self.harness
         overrides = context.metadata.get("user_overrides", {})
         max_thinking_tokens = overrides.get("agent_max_thinking_tokens") or self.max_thinking_tokens
@@ -454,17 +453,19 @@ class PromptAgentTaskStep(TaskStep):
         negotiated = A2AAgent.negotiate_agent_config(card, desired_config)
         if negotiated:
             await protocol.post_agent_config(target_url + negotiated.endpoint, negotiated.fields)
+        # A model the agent's card doesn't accept is never sent, and the agent runs its own.
+        context.record_model("solver", self.id, negotiated.fields.get("model") if negotiated else None)
 
         is_user_sim = user_sim is not None and self.user_a2a_url is None
         if is_user_sim:
             user_output_format = self.user_output_format or _DEFAULT_USER_SIM_OUTPUT_FORMAT
             user_model = self._resolve_user_model(context)
-            context.record_model("user simulator", self.id, user_model)
             user_config = {k: v for k, v in {"output_format": user_output_format, "model": user_model}.items() if v is not None}
             negotiated = A2AAgent.negotiate_agent_config(user_sim.a2a_card or {}, user_config)
             if negotiated:
                 await protocol.post_agent_config(user_url + negotiated.endpoint, negotiated.fields)
                 logger.info(f"Configured user-sim '{self.user_agent_name}' with structured output_format for done-signal")
+            context.record_model("user simulator", self.id, negotiated.fields.get("model") if negotiated else None)
 
         triggers_registered = is_user_sim and any(
             r.get("agent_name") == self.user_agent_name
