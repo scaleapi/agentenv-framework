@@ -6,6 +6,7 @@ import inspect
 import logging
 from typing import ClassVar, Optional
 
+from agent_env.config import get_config
 from agent_env.env.gateway import GatewayMode
 from agent_env.env.store import update_env_instance_metadata
 from agent_env.task_step.context import TaskStepContext
@@ -170,7 +171,7 @@ class DeployEnvTaskStep(TaskStep):
         accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
         model_api_key = user_overrides.get("litellm_api_key")
         if model_api_key and ("litellm_api_key" in params or accepts_kwargs):
-            deploy_kwargs["litellm_api_key"] = model_api_key
+            deploy_kwargs["litellm_api_key"] = get_config().resolve_reference(model_api_key)
         if self.artifact_id is not None and ("artifact_id" in params or accepts_kwargs):
             deploy_kwargs["artifact_id"] = self.artifact_id
         if self.artifact_version is not None and ("artifact_version" in params or accepts_kwargs):

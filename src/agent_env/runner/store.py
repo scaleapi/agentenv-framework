@@ -13,6 +13,7 @@ from typing import Optional
 from agent_env.config import get_config
 from agent_env.runner.runner import RunRecord, RunStatus
 from agent_env.store import Eq, Filter, In, Sort, UpdateSpec
+from agent_env.task_step.context import _strip_redacted_keys
 
 RUNS_COLLECTION = "runs"
 
@@ -38,7 +39,9 @@ def ensure_indexes() -> None:
 
 def insert_run(record: RunRecord) -> RunRecord:
     record.created_at_utc = record.created_at_utc or _now()
-    _docs().insert(RUNS_COLLECTION, record.to_dict())
+    doc = record.to_dict()
+    doc["overrides"] = _strip_redacted_keys(doc["overrides"])
+    _docs().insert(RUNS_COLLECTION, doc)
     return record
 
 

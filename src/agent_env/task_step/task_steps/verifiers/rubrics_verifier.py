@@ -626,8 +626,7 @@ class RubricsVerifierTaskStep(TaskStep):
 
                 config = get_config()
                 api_key = (
-                    overrides.get("judge_litellm_api_key")
-                    or overrides.get("litellm_api_key")
+                    config.resolve_reference(overrides.get("judge_litellm_api_key") or overrides.get("litellm_api_key"))
                     or config.get_litellm_api_key()
                 )
                 litellm_base_url = (
@@ -993,7 +992,9 @@ class RubricsVerifierTaskStep(TaskStep):
         config = get_config()
         call_config = config.resolve_model_call(
             model,
-            default_api_key=overrides.get("judge_litellm_api_key") or overrides.get("litellm_api_key"),
+            default_api_key=config.resolve_reference(
+                overrides.get("judge_litellm_api_key") or overrides.get("litellm_api_key")
+            ),
             base_override=overrides.get("judge_litellm_base_url")
             or overrides.get("litellm_base_url")
             or self.default_model_api_base,

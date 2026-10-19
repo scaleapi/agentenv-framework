@@ -182,6 +182,13 @@ orchestrators call it the same way. What callers rely on:
   Both write each prompt response through `PromptResponse.to_dict()`, which adds the S3-named key
   of every renamed trajectory field, since stored documents and raw-doc readers use them; serialize
   a context with `TaskStepContext.to_dict()`, not `dataclasses.asdict`.
+- A per-run secret given as a bare `secret:KEY` or `env:NAME` reference names the secret rather
+  than holding it, so redaction keeps it, and the step that uses it resolves it with
+  `Config.resolve_reference()`: a runner whose steps run on another host passes per-run keys this
+  way. A reference with a `?default` is stripped like a secret. The run index strips the same keys
+  from a run's overrides. A reference resolves against the environment and `[stores.secret]` of the
+  host running the step, so a runner that takes runs from callers who may not read those refuses
+  references it did not create.
 - A run is resumable: pass a previously persisted `context`, a `start_step` and the existing
   `instance_id`; completed steps are seeded as SUCCESS.
 - A runner that must hear from a long step puts a zero-argument callable at
