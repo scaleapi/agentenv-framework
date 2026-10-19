@@ -117,6 +117,10 @@ def settings(package, config=None):
 def compute(x):
     return x
 ''',
+    "runner/store.py": '''
+def count_runs(task_id=None):
+    return 0
+''',
 }
 
 ENV, REGISTRY, STATE, CONTEXT, PLUGINS, ARTIFACT = (
@@ -188,11 +192,13 @@ def _check(tmp_path: Path, edits: list[tuple[str, str, str]], title: str | None 
      "agent_env.plugins.ENVS: Attribute value was changed"),
     ([(ARTIFACT, "Field(default=0,", "Field(default=1,")],
      "agent_env.artifact.artifact.Artifact.version: Attribute value was changed"),
+    ([("runner/store.py", "def count_runs(task_id=None):", "def count_runs(task_id):")],
+     "agent_env.runner.store.count_runs(task_id): Parameter is now required"),
 ], ids=["method-removed", "parameter-renamed", "required-parameter-added", "default-changed", "class-attribute-changed",
         "base-removed", "abstract-method-added", "method-became-abstract", "method-became-required",
         "hook-parameter-added", "async-to-sync", "classmethod-to-staticmethod", "required-private-method-changed",
         "dataclass-field-removed", "dropped-from-all", "export-removed", "settings-signature-changed",
-        "group-name-changed", "field-default-changed"])
+        "group-name-changed", "field-default-changed", "used-function-signature-changed"])
 def test_reports_a_break(tmp_path, edits, reported):
     result = _check(tmp_path, edits)
 

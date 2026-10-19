@@ -419,8 +419,10 @@ def caller_breaks(path: str, old: griffe.Object, new: griffe.Object, reshaped: s
         else:
             found += [f"{path}.{name}: no longer in __all__"
                       for name in sorted(set(before or ()) - set(after or ())) if name in new.members]
-    for breakage in griffe.find_breaking_changes(old, new):
-        if _benign(breakage, old, new) or breakage.obj.path in reshaped:
+    scope = (old.parent, new.parent) if old.is_function else (old, new)
+    for breakage in griffe.find_breaking_changes(*scope):
+        if (old.is_function and breakage.obj.path != old.path) or _benign(breakage, old, new) \
+                or breakage.obj.path in reshaped:
             continue
         found.append(_describe(breakage, public))
     return found
