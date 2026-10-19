@@ -21,6 +21,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
 )
 from agent_env.providers.sandbox_providers.vercel.sandbox import (
     VercelSandbox,
+    _cancel_processes,
     network_policy_from_vercel,
     vercel_network_policy,
 )
@@ -418,6 +419,10 @@ class VercelSandboxProvider(SandboxProvider):
             tunnel_urls={route.port: route.url for route in raw.routes},
             network_policy=applied,
         )
+
+    async def terminate_sandbox(self, sandbox_id: str) -> None:
+        await super().terminate_sandbox(sandbox_id)
+        await _cancel_processes(sandbox_id)
 
     async def close(self) -> None:
         while self._pending:

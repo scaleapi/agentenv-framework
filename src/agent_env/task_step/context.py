@@ -231,6 +231,10 @@ class TaskStepContext:
         d["prompt_responses"] = [response.to_dict() for response in self.prompt_responses]
         return d
 
+    def record_model(self, role: str, step_id: str, model: str | None) -> None:
+        """Record the model ``step_id`` ran ``role`` on, None when the agent chose its own, for the run's summary."""
+        self.metadata.setdefault("models", {}).setdefault(role, {})[step_id] = model
+
     def to_safe_dict(self) -> dict[str, Any]:
         """Return a dict representation with sensitive keys recursively removed."""
         d = self.to_dict()

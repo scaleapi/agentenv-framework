@@ -101,7 +101,10 @@ class CliArtifact(Artifact):
     def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:
         """The keys of ``data``, an artifact.toml, a CLI takes, checked against the folder's files the way installing
         it reads them. Raises BundleError listing every problem."""
-        fields, problems = ctx.accepted(data, **cls.toml_keys)
+        files = ctx.try_files(empty_ok=True)  # None when the plan's walk reports why
+        problems = [ctx.no_files("files to write")] if files == {} else []
+        fields, more = ctx.accepted(data, **cls.toml_keys)
+        problems += more
         for key in cls.toml_keys:
             if key not in data:
                 problems.append(ctx.config_problem(f"{key} is required"))
@@ -110,8 +113,7 @@ class CliArtifact(Artifact):
             problems.append(ctx.config_problem(
                 f"command_name must be a plain name, of letters, digits, '.', '_' and '-' and not starting with '.' or "
                 f"'-', since the CLI is installed at /opt/cli/<command_name>; not {command_name!r}"))
-        files = ctx.try_files()
-        if entrypoint is not None and files is not None:
+        if entrypoint is not None and files:
             gateway_env = posixpath.join(posixpath.dirname(entrypoint), GATEWAY_ENV_FILE)
             if entrypoint not in files:
                 problems.append(ctx.config_problem(f"entrypoint {entrypoint!r} isn't one of this folder's files"))

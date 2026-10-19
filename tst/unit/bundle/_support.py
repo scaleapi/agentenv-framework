@@ -5,7 +5,7 @@ from pathlib import Path
 
 from agent_env.bundle import parse_bundle
 from agent_env.bundle.plan import plan_bundle
-from agent_env.bundle.resolve import resolve_bundle
+from agent_env.bundle.resolve import BuiltImage, resolve_bundle
 from agent_env.config import get_config
 from agent_env.store.document_store import DocumentStore
 
@@ -28,6 +28,11 @@ def listing(folder):
 
 def plan_of(root):
     return plan_bundle(resolve_bundle(parse_bundle(root)))
+
+
+def local_builds(plan):
+    """The images ``plan`` builds, which a run whose deploys all run on this machine builds here as it writes them."""
+    return frozenset(write.id for write in plan.writes if isinstance(write.source, BuiltImage))
 
 
 def local_store():

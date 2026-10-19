@@ -8,6 +8,7 @@ import click
 
 from agent_env.bundle.importer import BundleImport, import_eval, import_task
 from agent_env.cli.utils import interruptible
+from agent_env.entity.scopes import FieldScope
 
 
 @click.group()
@@ -20,18 +21,25 @@ def bundle():
 @click.option("--from-task", "task_id", default=None, help="Import this stored task, by id.")
 @click.option("--from-eval", "eval_id", default=None, help="Import this stored eval and every task it names, by id.")
 @click.option("--version", type=int, default=None, help="The version to import (defaults to the latest).")
-def init(folder: Path, task_id: str | None, eval_id: str | None, version: int | None):
+@click.option("--include-scope", "include_scopes", multiple=True,
+              type=click.Choice([scope.value for scope in FieldScope if scope is not FieldScope.TASK]),
+              help="Keep the fields of this scope as stored, for a folder run against the same store. Repeatable.")
+def init(folder: Path, task_id: str | None, eval_id: str | None, version: int | None,
+         include_scopes: tuple[str, ...]):
     """Write a stored task, or an eval and its tasks, as a bundle at FOLDER, which must be new or empty.
 
     Each task is written as the store holds it, and every store reference it makes is pinned at the version the
     store holds now, so the folder runs what the store ran; what a step writes stays unpinned, since the run writes
-    it again. Values that look like secrets are left out. Nothing is written to a store, and an import that fails
+    it again. Fields scoped to who ran it (the sandbox provider, where outputs go, service endpoints, billing tags)
+    are left out, so a run takes its own, unless --include-scope names their scope. Values that look like secrets are
+    left out. What the task needs beyond core is listed. Nothing is written to a store, and an import that fails
     writes nothing."""
     if (task_id is None) == (eval_id is None):
         raise click.UsageError("give one of --from-task or --from-eval")
+    scopes = [FieldScope(scope) for scope in include_scopes]
     with interruptible():
-        imported = (import_task(task_id, folder, version=version) if task_id is not None
-                    else import_eval(eval_id, folder, version=version))
+        imported = (import_task(task_id, folder, version=version, include_scopes=scopes) if task_id is not None
+                    else import_eval(eval_id, folder, version=version, include_scopes=scopes))
     _report(imported, folder)
 
 

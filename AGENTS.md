@@ -81,7 +81,8 @@ or one of them only where it is used.
   what steps staged in `/tmp` under that id. Those processes are found through `/proc`, so on macOS
   they keep running; files the install wrote elsewhere (`/opt`, packages) stay.
 - `[agents] default_a2a_agent_id`: the agent a `deploy_agent` step without an id deploys; built-in
-  `a2a-default`, overridable by `configure(default_a2a_agent_id=...)`.
+  `a2a-default`, overridable by `configure(default_a2a_agent_id=...)`. Any step's agent field left unset
+  falls back to it (`entity.refs.default_agent_refs`), so a bundle run plans the default for it.
 - Secrets never live in the file: use `secret:KEY` or `env:NAME` references, resolved through
   `[stores.secret]`.
 - agent-env has no stage concept: "dev" versus "prod" is which file `AGENT_ENV_CONFIG` names. A
@@ -134,7 +135,10 @@ Out-of-tree code plugs in either through `config.toml`, as a `module:Class` poin
 - Bundles install through `agent_env.bundles` entry points (`<name> = "<package>"`, the folder at
   `<package>/<name>/`), with ids rooted at `@local/<dist>/<name>`. A shared name is not left out:
   a bundle runs by its bare name unless another distribution installs that name too, and then by
-  `<dist>/<name>`, except that agent-env's own bundles keep their bare names.
+  `<dist>/<name>`, except that agent-env's own bundles keep their bare names. Another bundle uses an
+  installed bundle's env, agent or artifact by its id, or as the configured default agent: the planner
+  pulls it into the run as one of the bundle's own (`bundle/plan.py`), and its ledger row is keyed by the
+  installed bundle, so every bundle shares one write of it. Such an id takes no version pin.
 - Environment providers have no table: an installed package registers one as an `agent_env.env_providers`
   entry point named its `type`, which records carry as `env_provider_type`.
 - `[plugins.<distribution name>]` is reserved for an installed plugin's own settings, read with
@@ -272,6 +276,8 @@ Actions are pinned to commit SHAs; Dependabot updates them, the pinned uv, `uv.l
 
 ## Docs
 
-`README.md` is the user-facing front door (configuration, custom envs, steps, artifacts and
-providers, the CLI). `packages/agentenv-protocol/README.md` documents the
-protocol and the A2A agent framework.
+`README.md` is the front door: what AgentEnv Framework is, how to install it, and links. The user
+guide (configuration, environments, steps, artifacts, providers, the CLI) is
+www.agentenvframework.com/docs. A new feature, provider or option is documented there, not in the
+README: say in the pull request what the docs should cover, and a maintainer updates the site.
+`packages/agentenv-protocol/README.md` documents the protocol and the A2A agent framework.

@@ -350,13 +350,14 @@ class VmSandbox(Sandbox):
 
     async def _build_image(self, images: list) -> None:
         """Download the context ``images`` share, extract it, and ``docker build`` it, tagged with each image's name,
-        for the platform it records, or this VM's when its tar.gz is for another. The work folder is this build's own,
-        since a host can run builds of one context at once: two of the local provider's sandboxes, or two deploys onto
-        one VM."""
+        for the platform it records, or this VM's when it records none or its tar.gz is for another. The work folder is
+        this build's own, since a host can run builds of one context at once: two of the local provider's sandboxes, or
+        two deploys onto one VM."""
         first = images[0]
         names = list(dict.fromkeys(image.image_name for image in images))
         work = f"/tmp/agent-env-build-{uuid.uuid4().hex}"
-        platform = self.platform if first.rebuilt_for(self.platform) else first.platform or DEFAULT_BUILD_PLATFORM
+        own = first.platform is None or first.rebuilt_for(self.platform)
+        platform = (self.platform if own else first.platform) or DEFAULT_BUILD_PLATFORM
         tags = " ".join(f"-t {shlex.quote(name)}" for name in names)
         logger.info(f"Building {', '.join(names)} from its build context, for {platform}...")
         await self.exec_script(f"rm -rf {work} && mkdir -p {work}/context")

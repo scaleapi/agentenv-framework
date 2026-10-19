@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import dataclasses
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 
 from agent_env.task_step.context import TaskStepContext
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
+from agent_env.entity.scopes import FieldScope
 
 if TYPE_CHECKING:
     from agent_env.task_step.store import TaskStepQuery
@@ -89,6 +91,9 @@ class TaskStep(ABC):
     DEFAULT_AGENT_NAME: ClassVar[str] = "default-agent"
     # Fields holding env, A2A agent or artifact ids; None means undeclared.
     entity_refs: ClassVar[tuple[EntityRef, ...] | None] = None
+    # Each field of a scope other than the task's, by its path in the stored step; any other field is task-scoped. A
+    # subclass merges its parent's. Such a field is optional, so a step written out without it still builds and runs.
+    field_scopes: ClassVar[Mapping[str, FieldScope]] = {"metadata.attribution": FieldScope.USER}
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -122,6 +127,11 @@ class TaskStep(ABC):
 
         Overrides must not need a sandbox or a deployed env.
         """
+        return []
+
+    def config_problems(self) -> list[str]:
+        """Problems in this step's own fields, found without reading a store; empty when fine. Checked wherever
+        ``preflight`` is, and also for a step whose preflight a dry run skips."""
         return []
 
     def step_param_overrides(self, context: TaskStepContext) -> dict[str, Any]:

@@ -32,12 +32,14 @@ class DockerBuildError(RuntimeError):
 
 
 def build_image(dockerfile: Path, context: Path, tag: str, *, platform: str | None,
-                build_args: Mapping[str, str] | None = None) -> None:
+                build_args: Mapping[str, str] | None = None, labels: Mapping[str, str] | None = None) -> None:
     """Build ``context`` with ``dockerfile`` into the local image ``tag``, for ``platform``, or for this host's
     platform when it's None or empty. Raises DockerBuildError, with the build's output, when it fails."""
     argv = ["docker", "build", *(["--platform", platform] if platform else [])]
     for name, value in (build_args or {}).items():
         argv += ["--build-arg", f"{name}={value}"]
+    for name, value in (labels or {}).items():
+        argv += ["--label", f"{name}={value}"]
     argv += ["-f", str(dockerfile), "-t", tag, str(context)]
     try:
         result = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")

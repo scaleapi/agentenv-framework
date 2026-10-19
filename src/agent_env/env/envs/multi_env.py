@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from agent_env.env.env import DeployedEnv, LoadEnvironmentUniverseArtifactResult, LoadFileArtifactUniverseResult
     from agent_env.providers.env_state import DatabaseStateProvider
 
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
 from agent_env.env.env import Env, gateway_url_of
 from agent_env.env.gateway import GatewayMode
 from agent_env.env.envs._deployment import (

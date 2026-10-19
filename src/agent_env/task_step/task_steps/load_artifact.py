@@ -15,7 +15,8 @@ from urllib.parse import unquote, urlparse
 
 from agent_env.providers.sandbox_providers.sandbox_provider import reachable_url
 from agent_env.task_step.context import TaskStepContext
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
+from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.utils.paths import validate_relative_filename
 
@@ -134,6 +135,7 @@ class LoadArtifactTaskStep(TaskStep):
         EntityRef.artifact("artifact_id", version_field="artifact_version"),
         EntityRef.artifact("artifacts[].id", version_field="version"),
     )
+    field_scopes = {**TaskStep.field_scopes, "urls": FieldScope.USER}
 
     def __init__(
         self,
@@ -168,11 +170,6 @@ class LoadArtifactTaskStep(TaskStep):
             raise ValueError(
                 "`artifact_from_step_id` is mutually exclusive with "
                 "`artifacts`/`artifact_id`/`urls`/`collected_artifacts_step_id`"
-            )
-        if not (artifacts or urls or collected_artifacts_step_id or artifact_from_step_id):
-            raise ValueError(
-                "Must pass at least one of `artifacts=[...]`, `artifact_id=...`, `urls=[...]`, "
-                "`artifact_from_step_id=...`, or `collected_artifacts_step_id=...`"
             )
         if agent_name is not None and container_name is not None:
             raise ValueError("Pass either `agent_name` or `container_name`, not both")
@@ -209,6 +206,17 @@ class LoadArtifactTaskStep(TaskStep):
         # None = defer to the AGENT_ENV_SNAPSHOT_AFTER_LOAD flag on the worker, so a task
         # doc doesn't hard-code a cost decision an operator may want to flip.
         self.snapshot_after_load = snapshot_after_load
+
+    def config_problems(self) -> list[str]:
+        """A step naming nothing to load."""
+        return [] if self._names_a_source() else [self._nothing_to_load()]
+
+    def _names_a_source(self) -> bool:
+        return bool(self.artifacts or self.urls or self.collected_artifacts_step_id or self.artifact_from_step_id)
+
+    def _nothing_to_load(self) -> str:
+        return (f"load_artifact '{self.id}': names nothing to load; set artifacts, urls, artifact_from_step_id or "
+                "collected_artifacts_step_id (urls is user scope, so an import leaves it out)")
 
     def to_dict(self) -> dict:
         base = super().to_dict()
@@ -322,6 +330,8 @@ class LoadArtifactTaskStep(TaskStep):
         Topology (env_id/agent_name/container_name) is not overridable here.
         """
         overrides = self.step_param_overrides(context)
+        if not self._names_a_source() and not overrides.keys() & {"artifacts", "artifact_id", "urls"}:
+            raise ValueError(self._nothing_to_load())
 
         if "artifacts" in overrides:
             resolved_artifacts = list(overrides.get("artifacts") or [])

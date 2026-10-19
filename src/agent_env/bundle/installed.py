@@ -102,7 +102,7 @@ def checked(bundle: InstalledBundle, *, load: bool = True) -> Bundle:
     store. Raises BundleError."""
     parsed = parse_bundle(bundle.root, id_root=bundle.id_root)
     if load:
-        check_bundle(resolve_bundle(parsed))
+        check_bundle(resolve_bundle(parsed), installed=installed_bundles)
     return parsed
 
 

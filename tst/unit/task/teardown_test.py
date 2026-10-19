@@ -52,6 +52,9 @@ class _FakeProvider:
     async def terminate_sandbox(self, sandbox_id):
         await (await self.get_sandbox(sandbox_id)).terminate()
 
+    async def close(self):
+        pass
+
 
 class _Log(list):
     """The (provider, sandbox_id) terminate log, and how given sandboxes misbehave."""
@@ -59,6 +62,31 @@ class _Log(list):
     def __init__(self):
         super().__init__()
         self.behaviors: dict[str, str] = {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("step_entry", [False, True])
+@pytest.mark.parametrize("failure", [False, True])
+@pytest.mark.parametrize("close_failure", [False, True, "stall"])
+async def test_owned_teardown_provider_is_closed(monkeypatch, step_entry, failure, close_failure):
+    provider = MagicMock(ON_THIS_MACHINE=False)
+    provider.terminate_sandbox = AsyncMock(side_effect=RuntimeError("denied") if failure else None)
+    async def stalled_close():
+        await asyncio.Event().wait()
+
+    provider.close = AsyncMock(side_effect=(stalled_close if close_failure == "stall" else
+                               RuntimeError("client close failed") if close_failure else None))
+    module = teardown_sandboxes if step_entry else teardown
+    monkeypatch.setattr(module, "build_sandbox_provider", lambda _: provider)
+    monkeypatch.setattr(module, "PROVIDER_CLOSE_TIMEOUT_SECONDS", 0.01, raising=False)
+    operation = (module._terminate("box", "vercel", "env") if step_entry else
+                 module._terminate(RecordedSandbox("box", "vercel", "env")))
+    if failure:
+        with pytest.raises(RuntimeError, match="denied"):
+            await asyncio.wait_for(operation, 0.5)
+    else:
+        await asyncio.wait_for(operation, 0.5)
+    provider.close.assert_awaited_once()
 
 
 @pytest.fixture

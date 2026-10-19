@@ -29,7 +29,8 @@ from agent_env.store.object_store import MIN_GRANT_LIFETIME_SECONDS, ObjectStore
 from agent_env.store.object_store.object_store import issues_grants_to
 from agent_env.store.routing import in_local_run
 from agent_env.task_step.context import TaskStepContext
-from agent_env.entity_refs import EntityRef, RefRole
+from agent_env.entity.refs import EntityRef, RefRole
+from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)
@@ -161,6 +162,8 @@ class SnapshotEnvTaskStep(TaskStep):
         EntityRef.artifact("snapshot_id", role=RefRole.OUTPUT, artifact_type="environment_universe"),
         EntityRef.artifact("original_universe_artifact_id", artifact_type="environment_universe"),
     )
+    # gateway_url stays the task's: with no deployed env, it's how the step finds the gateway to snapshot.
+    field_scopes = {**TaskStep.field_scopes, "env_instance_id": FieldScope.USER}
     DEFAULT_EXPORT_TIMEOUT_SECONDS: ClassVar[int] = DEFAULT_EXPORT_TIMEOUT_SECONDS
 
     def __init__(

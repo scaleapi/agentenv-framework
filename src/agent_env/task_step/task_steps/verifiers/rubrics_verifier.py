@@ -15,6 +15,7 @@ from agent_env.a2a_agent.object_transfer import (
     fetch_trajectory,
     trajectory_mode,
 )
+from agent_env.a2a_agent.a2a_agent import unwritten_local_agent
 from agent_env.a2a_agent.staging import transfer_store
 from agent_env.config import get_config
 from agent_env.config.model import ModelParam
@@ -33,7 +34,10 @@ from agent_env.task_step.snapshot_utils.agent_state_capture import (
     store_trajectory,
     trajectory_object_url,
 )
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
+from agent_env.entity.scopes import FieldScope
+from agent_env.store.base import NotFoundError
+from agent_env.store.ids import is_local_id
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (
@@ -300,6 +304,9 @@ def _as_of_turn(prompt_response: PromptResponse, turn: Optional[int]) -> PromptR
 class RubricsVerifierTaskStep(TaskStep):
     type: ClassVar[str] = "rubrics_verifier"
     entity_refs = (EntityRef.agent("judge_a2a_agent_id"),)
+    field_scopes = {**TaskStep.field_scopes, **dict.fromkeys(
+        ("judge_a2a_agent_id", "default_model", "default_model_api_base", "effort", "max_thinking_tokens",
+         "judge_sandbox_type"), FieldScope.USER)}
     DEFAULT_JUDGE_TIMEOUT_SECONDS: ClassVar[int] = 1000
     DEFAULT_MAX_RETRIES: ClassVar[int] = 3
     DEFAULT_POLL_INTERVAL_SECONDS: ClassVar[int] = 10
@@ -629,7 +636,12 @@ class RubricsVerifierTaskStep(TaskStep):
                 )
                 env_vars = {"LITELLM_API_KEY": api_key, "LITELLM_BASE_URL": litellm_base_url}
                 resolved_judge_id = self.judge_a2a_agent_id or config.get_default_a2a_agent_id()
-                a2a_agent = A2AAgent.get(resolved_judge_id)
+                try:
+                    a2a_agent = A2AAgent.get(resolved_judge_id)
+                except NotFoundError:
+                    if not is_local_id(resolved_judge_id):
+                        raise
+                    raise NotFoundError(unwritten_local_agent(resolved_judge_id, "judge_a2a_agent_id")) from None
                 deploy_kwargs = {"env_vars": env_vars}
                 resolved_sandbox_type = overrides.get("agent_sandbox") or self.judge_sandbox_type
                 if resolved_sandbox_type:
@@ -655,6 +667,7 @@ class RubricsVerifierTaskStep(TaskStep):
 
         try:
             model = overrides.get("judge_model") or self.default_model
+            context.record_model("judge", self.id, model)
             criteria_for_prompt = [
                 {**c, "negative": True} if (c.get("weight") is not None and c["weight"] < 0) else c
                 for c in criteria_for_judge
@@ -1056,6 +1069,7 @@ class RubricsVerifierTaskStep(TaskStep):
         }
         desired_config = {k: v for k, v in desired_config.items() if v is not None}
         config_ext = A2AAgent.find_extension(judge_agent_card, A2AAgent.EXT_AGENT_CONFIG)
+        config_payload = {}
         if config_ext and desired_config:
             supported = (config_ext.get("params") or {}).get("methods", {}).get("set", {}).get("request", {}).get("supported", [])
             config_payload = {k: v for k, v in desired_config.items() if k in supported}
@@ -1063,6 +1077,8 @@ class RubricsVerifierTaskStep(TaskStep):
                 endpoint = (config_ext.get("params") or {}).get("endpoint", "/ext/agent-config")
                 await protocol.post_agent_config(judge_a2a_url + endpoint, config_payload)
                 logger.info(f"Set judge agent config: {list(config_payload.keys())}")
+        # What the judge agent took; one that doesn't accept a model grades on its own.
+        context.record_model("judge", self.id, config_payload.get("model"))
 
     async def _invoke_judge_a2a(
         self,

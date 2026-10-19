@@ -6,7 +6,11 @@ agents in the task (user simulators, judges) keep their stored settings.
 
 from __future__ import annotations
 
+import pytest
+
+from agent_env.config.model import ModelConfig
 from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.task_steps import prompt_agent
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 
@@ -86,3 +90,43 @@ class TestPromptModelAndEffort:
     def test_default_model_is_the_last_resort(self):
         ctx = _ctx(default_agent_model="fallback")
         assert _prompt_step(model=None)._resolve_model_and_effort(ctx) == ("fallback", "stored-effort")
+
+
+class TestUserSimModel:
+    """The user simulator's model: a step override, then the run's ``user_model``, the stored value, and the config's
+    ``user`` role only when it names one."""
+
+    @pytest.fixture(autouse=True)
+    def config(self, monkeypatch):
+        roles = ModelConfig(default="config-default", roles={})
+        monkeypatch.setattr(prompt_agent, "get_config", lambda: type("C", (), {
+            "get_model_for_role": staticmethod(roles.model_for_role)})())
+        return roles
+
+    def test_stored_value_without_overrides(self):
+        assert _prompt_step(user_model="stored-user")._resolve_user_model(_ctx()) == "stored-user"
+
+    def test_run_override_wins_over_stored(self):
+        ctx = _ctx(run_overrides={"user_model": "run-user"})
+        assert _prompt_step(user_model="stored-user")._resolve_user_model(ctx) == "run-user"
+
+    def test_step_override_wins_over_run_override(self):
+        ctx = _ctx({"prompt": {"user_model": "step-user"}}, {"user_model": "run-user"})
+        assert _prompt_step(user_model="stored-user")._resolve_user_model(ctx) == "step-user"
+
+    def test_the_config_user_role_fills_in_and_its_default_doesnt(self, config):
+        assert _prompt_step()._resolve_user_model(_ctx()) is None
+        config.roles["user"] = "config-user"
+        assert _prompt_step()._resolve_user_model(_ctx()) == "config-user"
+
+    def test_the_run_wide_solver_model_leaves_the_user_simulator_alone(self):
+        assert _prompt_step(user_model="stored-user")._resolve_user_model(_ctx(agent_model="run-solver")) == "stored-user"
+
+
+def test_each_step_records_the_model_it_asks_for_by_role():
+    context = TaskStepContext()
+    context.record_model("solver", "prompt", "m")
+    context.record_model("judge", "judge", None)
+    context.record_model("judge", "judge-b", "j")
+
+    assert context.metadata["models"] == {"solver": {"prompt": "m"}, "judge": {"judge": None, "judge-b": "j"}}

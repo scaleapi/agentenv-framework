@@ -80,9 +80,11 @@ def test_host_mode_roundtrips_without_container_name():
     assert restored.a2a_agent_id == "agent"
 
 
-def test_a2a_agent_id_required():
-    with pytest.raises(ValueError, match="a2a_agent_id"):
-        InstallAgentTaskStep(id="s", version=None, sandbox_name="vm")
+def test_a_step_naming_no_agent_builds_and_round_trips_without_one():
+    step = InstallAgentTaskStep.from_dict({"id": "s", "type": "install_agent", "sandbox_name": "vm"})
+
+    assert step.a2a_agent_id is None
+    assert InstallAgentTaskStep.from_dict(step.to_dict()).a2a_agent_id is None
 
 
 def test_agent_name_resolver_supplies_step_name():
@@ -224,3 +226,28 @@ def test_a_per_run_reference_is_resolved_only_when_the_install_asks_for_the_key(
     assert resolved == []
     assert r["litellm_api_key"]() == "sk-resolved"
     assert resolved == ["secret:team_key"]
+
+
+@pytest.mark.asyncio
+async def test_a_step_naming_no_agent_installs_the_configured_default(monkeypatch, local_stores):
+    asked = []
+
+    class _Stop(Exception):
+        pass
+
+    def get(agent_id, version=None):
+        asked.append(agent_id)
+        raise _Stop
+
+    monkeypatch.setattr(sandbox_provider, "build_sandbox_provider",
+                        lambda name: SimpleNamespace(get_sandbox=_resolved(_InstallSandbox())))
+    monkeypatch.setattr(A2AAgent, "get", staticmethod(get))
+    step = InstallAgentTaskStep(id="i", version=None, sandbox_name="vm")
+    context = TaskStepContext(deployed_sandboxes=[DeployedSandbox(
+        sandbox_name="vm", sandbox_id="sb-1", sandbox_mode="vm", sandbox_type="local",
+        tunnel_urls={"8000": "http://127.0.0.1:8000"})])
+
+    with pytest.raises(_Stop):
+        await step.execute(context)
+
+    assert asked == [local_stores.get_default_a2a_agent_id()]

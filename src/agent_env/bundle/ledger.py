@@ -1,7 +1,8 @@
 """The bundle ledger: what each version a bundle wrote was made from, so a re-run writes only what changed.
 
 A row per written version records a digest of the write's inputs and one digest per input, so a new
-version can say why it was written ("files changed: server.py"). The ledger lives in the ``@local``
+version can say why it was written ("files changed: server.py"). A row is keyed by the bundle the write comes from, so
+an entity a run pulls in from an installed bundle has one row however many bundles use it. The ledger lives in the ``@local``
 namespace's own store, beside the entities it describes, and is never read through the router, so it
 never reaches a configured store. Reading it never creates the store.
 """
@@ -11,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import stat
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
@@ -29,20 +30,16 @@ from agent_env.store import Filter, Sort
 from agent_env.store.document_store import LocalSqliteDocumentStore
 from agent_env.store.local_state import holding_locks
 from agent_env.task.store import TASKS_COLLECTION
-from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM
 
 from .authoring import build_context_files
-from .parse import Bundle, BundleKind
-from .plan import Plan, Write, env_writer, folder_walk, unpinned_store_refs
+from .parse import BundleKind
+from .plan import Plan, Write, artifact_writer, env_writer, folder_files, unpinned_store_refs
 from .resolve import BuiltImage, BundleImage, ReferencedImage
 
 LEDGER_COLLECTION = "bundle_ledger"
 # Bumped by hand when what a digest covers changes, or a writer's output changes enough that every
-# version it wrote should be written again.
-SCHEME = 1
-
-_CONTEXT = "build context"
-_FORMS = {None: "an image built on this machine", _CONTEXT: "a build context, built where it runs"}
+# version it wrote should be written again: 2 writes every image the bundle builds as its build context alone.
+SCHEME = 2
 
 _COLLECTIONS = {"env": ENVS_COLLECTION, "agent": A2A_AGENTS_COLLECTION, "artifact": ARTIFACTS_COLLECTION,
                 "task": TASKS_COLLECTION, "eval": EVALS_COLLECTION}
@@ -52,8 +49,7 @@ _LISTED = 5
 @dataclass(frozen=True)
 class Digest:
     value: str
-    inputs: dict[str, Any]  # type, config, files {key: sha256}, needs and store_refs {"<kind> <id>": version}, and
-    # for an image written as its build context, its form and the platform it's built for
+    inputs: dict[str, Any]  # type, config, files {key: sha256}, needs and store_refs {"<kind> <id>": version}
 
 
 @dataclass(frozen=True)
@@ -81,15 +77,13 @@ class Check:
 class Ledger:
     """One plan's rows in the ``@local`` namespace's store."""
 
-    def __init__(self, store: LocalSqliteDocumentStore, plan: Plan, contexts: frozenset[str] = frozenset()):
+    def __init__(self, store: LocalSqliteDocumentStore, plan: Plan):
         self._store = store
         self._plan = plan
-        self._bundle = plan.bundle.bundle.id_root
-        self._contexts = contexts  # the built images written as build contexts
 
     @classmethod
-    def for_plan(cls, plan: Plan, contexts: frozenset[str] = frozenset()) -> Ledger:
-        return cls(get_config().local_namespace_document_store(), plan, contexts)
+    def for_plan(cls, plan: Plan) -> Ledger:
+        return cls(get_config().local_namespace_document_store(), plan)
 
     def check(self, write: Write, needs: Mapping[tuple[str, str], int]) -> Check:
         """Compare ``write`` with the latest version the ledger records for it. ``needs`` holds, by (store, id),
@@ -107,7 +101,7 @@ class Ledger:
         row = self._latest(write.kind.store, write.id)
         recorded = row["version"] if row else None
         reasons = []
-        if row is not None and row["bundle"] != self._bundle:
+        if row is not None and row["bundle"] != self._bundle(write):
             reasons.append(f"last written by the bundle {row['bundle']}")
         if stored is None:
             reasons.append("new" if row is None else f"its v{recorded} is not in the store")
@@ -127,12 +121,9 @@ class Ledger:
                   "files": {}, "needs": {}, "store_refs": {}}
         if write.kind in (BundleKind.ARTIFACT, BundleKind.SKILL) and not isinstance(write.source, ReferencedImage):
             built = isinstance(write.source, BuiltImage)
-            listing = build_context_files if built else folder_walk(get_artifact_registry().get(_type(write)))
-            for key, path in listing(self._plan.bundle.bundle, write.source.entry).items():
+            listing = build_context_files if built else folder_files
+            for key, path in listing(self._plan.bundle_of(write.source.entry), write.source.entry).items():
                 inputs["files"][key] = _file_sha256(path) + (_mode(path) if built else "")
-            if built and write.id in self._contexts:
-                # Only then, so an image built on this machine is hashed as before and earlier rows stay reused.
-                inputs.update(form=_CONTEXT, platform=DEFAULT_BUILD_PLATFORM)
         if write.kind not in (BundleKind.TASK, BundleKind.EVAL):
             # A document records the versions of what it references (an env its images, a universe its
             # environments), so one written anew means it must be written again. A task or eval names its
@@ -148,7 +139,7 @@ class Ledger:
         """Write ``check``'s entity with ``write``, which returns the version it wrote, and record it.
         A pending row marks the attempt until it's done, with its version once ``write`` returns. One an
         interrupted run of this bundle left is kept by ``check`` when its version can be, and dropped here."""
-        key = {"store": check.write.kind.store, "id": check.write.id, "bundle": self._bundle}
+        key = {"store": check.write.kind.store, "id": check.write.id, "bundle": self._bundle(check.write)}
         self._store.ensure_index(LEDGER_COLLECTION, ["store", "id", "status"])
         while self._store.delete(LEDGER_COLLECTION, Filter.of(**key, status="pending")):
             pass
@@ -169,7 +160,7 @@ class Ledger:
 
     def adopt(self, check: Check) -> None:
         """Record the version an interrupted run wrote, which ``check`` keeps, as that run would have."""
-        key = {"store": check.write.kind.store, "id": check.write.id, "bundle": self._bundle}
+        key = {"store": check.write.kind.store, "id": check.write.id, "bundle": self._bundle(check.write)}
         done = {**key, "status": "done", "scheme": SCHEME, "digest": check.digest.value, "inputs": check.digest.inputs,
                 "version": check.version, "at": _now()}
         self._store.replace(LEDGER_COLLECTION, Filter.of(**key, status="pending"), done, upsert=True)
@@ -177,11 +168,15 @@ class Ledger:
     def _orphan(self, write: Write, stored: int | None, digest: Digest) -> int | None:
         """The version an interrupted run of this bundle wrote and didn't record, when it's still the store's
         latest and was made from what ``write`` is now made from."""
-        pending = self._find(LEDGER_COLLECTION, Filter.of(store=write.kind.store, id=write.id, bundle=self._bundle,
-                                                          status="pending"))
+        pending = self._find(LEDGER_COLLECTION, Filter.of(store=write.kind.store, id=write.id,
+                                                          bundle=self._bundle(write), status="pending"))
         if pending is None or pending.get("version") is None or pending["version"] != stored:
             return None
         return stored if (pending["scheme"], pending["digest"]) == (SCHEME, digest.value) else None
+
+    def _bundle(self, write: Write) -> str:
+        """The id root of the bundle ``write`` comes from, which keys its rows."""
+        return self._plan.bundle_of(write.source.entry).id_root
 
     def _latest(self, store: str, id: str) -> dict | None:
         return self._find(LEDGER_COLLECTION, Filter.of(store=store, id=id, status="done"))
@@ -198,25 +193,30 @@ class Ledger:
 
 
 @contextmanager
-def materializing(bundle: Bundle, on_wait: Callable[[], None] | None = None) -> Iterator[None]:
-    """Hold a lock on every id the bundle's entries write while its entities are written. Another run that
-    writes any of those ids, of this bundle or another, waits here, calling ``on_wait`` first. Task runs don't
-    hold them."""
-    with holding_locks((entry.id for entry in bundle.entries), on_wait):
+def materializing(ids: Iterable[str], on_wait: Callable[[], None] | None = None) -> Iterator[None]:
+    """Hold a lock on each of ``ids`` while a run writes them: a plan's ``locked_ids``. Another run that writes any of
+    them, of this bundle or another, waits here, calling ``on_wait`` first. Task runs don't hold them."""
+    with holding_locks(ids, on_wait):
         yield
 
 
+def locked_ids(plan: Plan) -> list[str]:
+    """The ids a run of ``plan`` locks: every one its bundle's entries write, and each entity it pulls in from another
+    bundle, which another bundle's run can write too."""
+    return [*(entry.id for entry in plan.bundle.bundle.entries), *(entry.id for entry in plan.origins)]
+
+
 def _tracked(write: Write) -> bool:
-    """Whether the ledger can list everything ``write`` is made from. Not yet for a type with a ``from_toml`` of
+    """Whether the ledger can list everything ``write`` is made from. Not yet for an env type with a ``from_toml`` of
     its own, which may read its folder in ways it can't see. An artifact, a skill included, is made from its toml,
-    the files its type reads from its folder (``folder_walk``) and what it references; an agent or env from its
+    every file in its folder (``folder_files``) and what it references; an agent or env from its
     toml and what it references. A built image is made from its build context, ``build_context_files``; what the
     build fetches (its base image, packages) isn't an input. A referenced image is made from its ref's text, so a tag
     that moves in its registry isn't a change. An image folder's image is also made from its description."""
     if isinstance(write.source, BundleImage):
         return True
     if write.kind in (BundleKind.ARTIFACT, BundleKind.SKILL):
-        return folder_walk(get_artifact_registry().get(_type(write))) is not None
+        return artifact_writer(get_artifact_registry().get(_type(write)))
     if write.kind is BundleKind.ENV:
         return env_writer(get_env_registry().get(_type(write)))
     return True
@@ -253,10 +253,6 @@ def _changes(row: Mapping[str, Any], digest: Digest) -> list[str]:
         reasons.append(f"type changed: {before['type']} → {after['type']}")
     if before.get("config") != after["config"]:
         reasons.append("config changed")
-    if before.get("form") != after.get("form"):
-        reasons.append(f"now written as {_FORMS[after.get('form')]}, not {_FORMS[before.get('form')]}")
-    elif before.get("platform") != after.get("platform"):
-        reasons.append(f"platform changed: {before.get('platform')} → {after.get('platform')}")
     for label, names in zip(("files added", "files removed", "files changed"), _diff(before["files"], after["files"])):
         if names:
             shown = ", ".join(names[:_LISTED]) + (f" and {len(names) - _LISTED} more" if len(names) > _LISTED else "")

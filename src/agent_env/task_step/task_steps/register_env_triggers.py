@@ -20,7 +20,7 @@ from agent_env.env.gateway.constants import (
     TRIGGER_UNLESS,
 )
 from agent_env.task_step.context import TaskStepContext
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)
