@@ -162,3 +162,22 @@ def test_images_of_equal_sources_under_two_names_are_saved_once_each_so_each_loa
     assert first.source_digest == second.source_digest and urls[0] != urls[1] and urls[2] == urls[0]
     store = local_stores.get_object_store()
     assert [gzip.decompress(store.get(url)).decode() for url in urls[:2]] == [first.image_name, second.image_name]
+
+
+@pytest.mark.asyncio
+async def test_a_local_sandbox_given_a_platform_builds_as_a_vm_does(local_stores, context, docker, monkeypatch):
+    builds, _ = docker
+    built_in_vm = []
+
+    async def build_in_vm(self, artifacts):
+        built_in_vm.extend(artifact.image_name for artifact in artifacts)
+
+    monkeypatch.setattr(VmSandbox, "build_images", build_in_vm)
+    sandbox = LocalSandbox()
+    sandbox.platform = "linux/amd64"
+    image = _put(context)
+
+    await sandbox.build_images([image])
+
+    assert builds == [] and built_in_vm == [image.image_name]
+

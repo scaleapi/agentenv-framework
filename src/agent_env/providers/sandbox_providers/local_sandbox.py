@@ -207,7 +207,11 @@ class LocalSandbox(VmSandbox):
         )
 
     async def build_images(self, artifacts: list) -> None:
-        """Build each on this machine's Docker, which runs this sandbox's containers: natively, once per sources."""
+        """Build each on this machine's Docker, which runs this sandbox's containers: natively, once per sources. One
+        given a platform of its own, as a remote VM records, builds as a VM does, for that platform."""
+        if self.platform is not None:
+            await super().build_images(artifacts)
+            return
         for artifact in artifacts:
             await build_here(artifact)
 
