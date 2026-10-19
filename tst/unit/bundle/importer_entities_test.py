@@ -117,8 +117,9 @@ def test_an_image_its_registry_names_is_written_as_its_ref_and_reported_as_pulle
     assert _toml(imported.root, "envs/crm/env.toml")["image"] == {"ref": "registry.example.com/crm:v1"}
     assert [(pull.folder, pull.image) for pull in imported.pulled] == [("envs/crm", "registry.example.com/crm:v1")]
     assert imported.pinned == () and imported.images == ()
-    assert ("- Pull access to the registries its pulled images are in, a `docker login` to each that's private: "
-            "`registry.example.com`.") in (imported.root / "README.md").read_text().splitlines()
+    assert ("- Access to the registries its pulled images are in: `registry.example.com`. agent-env reads a private one "
+            "only through its configured image store, such as an ECR store for an ECR registry.") in (
+        imported.root / "README.md").read_text().splitlines()
 
 
 def test_contexts_stored_as_one_object_are_downloaded_once_and_pruned_for_each_image(home, monkeypatch):

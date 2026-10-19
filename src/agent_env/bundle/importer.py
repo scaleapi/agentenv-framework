@@ -802,8 +802,8 @@ def _needs_lines(imported: BundleImport) -> list[str]:
         lines.append("- The configuration that registers what *Needs beyond core* says configuration registers.")
     registries = sorted({host for pulled in imported.pulled if (host := registry_host_from_ref(pulled.image))})
     if registries:
-        lines.append(f"- Pull access to the registries its pulled images are in, a `docker login` to each that's "
-                     f"private: `{'`, `'.join(registries)}`.")
+        lines.append(f"- Access to the registries its pulled images are in: `{'`, `'.join(registries)}`. agent-env reads "
+                     "a private one only through its configured image store, such as an ECR store for an ECR registry.")
     return lines
 
 
