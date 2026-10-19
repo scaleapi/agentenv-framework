@@ -54,6 +54,7 @@ from agent_env.store.image_store.oci_registry_credentials import names_registry
 from agent_env.task import Task
 from agent_env.task_step import registry as task_step_registry
 from agent_env.task_step.registry import get_task_step_registry
+from agent_env.utils.docker.lock import Locked
 
 # How long a name taken from an id may be, in bytes; ids are capped far above it, and a longer name helps nobody.
 _MAX_NAME_BYTES = 200
@@ -127,6 +128,8 @@ class WrittenImage:
     size: int
     whole: str | None  # why all of the context was kept, when it was
     largest: tuple[tuple[str, int], ...]
+    locked: Locked | None  # what was pinned to the stored image's versions
+    unlocked: str | None  # why nothing was
 
 
 @dataclass(frozen=True)
@@ -429,11 +432,13 @@ class _Importer:
     def _download(self, staging: Path, scratch: Path) -> int:
         """Download every file and image the folder holds into ``staging``, saying how much first; return the bytes."""
         groups = context_groups(self.jobs)
+        saved = [job.artifact.tar_gz_object_url for job in self.jobs if job.artifact.tar_gz_object_url]
         with ThreadPoolExecutor(_DOWNLOADS) as pool:
-            sizes = list(pool.map(_size, self.downloads.values()))
+            sizes = [*pool.map(_size, self.downloads.values()), *pool.map(_saved_size, saved)]
         total = sum(size or 0 for size in sizes) + sum(group[0].size or 0 for group in groups)
         if self.downloads or groups:
-            self.progress(f"Downloading {len(self.downloads)} file(s) and {len(groups)} build context(s), "
+            stored = f", and {len(saved)} stored image(s) to read their versions from" if saved else ""
+            self.progress(f"Downloading {len(self.downloads)} file(s) and {len(groups)} build context(s){stored}, "
                           f"{_megabytes(total)}...")
         try:
             with ThreadPoolExecutor(_DOWNLOADS) as pool:
@@ -449,7 +454,7 @@ class _Importer:
                 self.images.append(WrittenImage(
                     job.folder, job.key, job.artifact.id, job.artifact.version, job.pruned.dockerfile,
                     found=not job.artifact.dockerfile_path, files=job.pruned.files, size=job.pruned.size,
-                    whole=job.pruned.whole, largest=job.pruned.largest))
+                    whole=job.pruned.whole, largest=job.pruned.largest, locked=job.locked, unlocked=job.unlocked))
         return total
 
     def _image_left_in_store(self, job: ImageJob) -> None:
@@ -627,6 +632,14 @@ def _size(url: str) -> int | None:
     return metadata.size if metadata is not None else None
 
 
+def _saved_size(url: str) -> int | None:
+    """A stored image's size, None when it can't be read: its versions are then left unpinned, not the import failed."""
+    try:
+        return _size(url)
+    except (ValueError, OSError):
+        return None
+
+
 def _fetch(url: str, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     get_config().get_object_store_at(url).download_to_file(url, str(dest))
@@ -642,7 +655,19 @@ def _image_line(image: WrittenImage) -> str:
     largest = ", ".join(f"{name} ({_megabytes(size)})" for name, size in image.largest)
     whole = f"; all of its build context, since {image.whole}" if image.whole else ""
     return (f"{image.folder}: {image.key} built from {image.dockerfile}{found}, {image.files} file(s), "
-            f"{_megabytes(image.size)}{whole}; largest: {largest}")
+            f"{_megabytes(image.size)}{whole}; largest: {largest}; {_locked_text(image)}")
+
+
+def _locked_text(image: WrittenImage) -> str:
+    """What of an image's installs is pinned to the stored image's versions, and what isn't."""
+    if image.locked is None:
+        return f"versions not pinned: {image.unlocked}"
+    locked = image.locked
+    pinned = ([f"{locked.python} Python package(s) by {locked.constraints}"] if locked.constraints else []) + (
+        [f"Python packages by {locked.lock_file}, as the build installs them"] if locked.lock_file else []) + list(
+        locked.npm)
+    left = f"; left as the build resolves them: {'; '.join(locked.not_covered)}" if locked.not_covered else ""
+    return f"pinned to the stored image: {', '.join(pinned) or 'nothing it installs'}{left}"
 
 
 def _names(value: str, cls: type) -> bool:
@@ -726,7 +751,9 @@ _RUN_IT = [
     "`api_key` in `.agentenv/config.toml`.",
     "- An agent where a step names none: the configured default (`[agents] default_a2a_agent_id`).",
     "",
-    "Its images are built from the build contexts in their folders on the machine that runs it.",
+    "Its images are built from the build contexts in their folders on the machine that runs it, pinned to the "
+    "Python and npm versions of the images the store held, as *Images* says. To build one unpinned, take out the "
+    "COPY and two ARG lines naming agent-env-constraints.txt after each FROM in its Dockerfile.",
 ]
 _SHARE_IT = [
     "## Share it",

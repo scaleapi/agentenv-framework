@@ -14,7 +14,6 @@ from click.testing import CliRunner
 from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact import FileArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
-from agent_env.artifact.store import get_artifact_store
 from agent_env.bundle import BundleError, parse_bundle
 from agent_env.bundle import importer as importer_module
 from agent_env.bundle.importer import ImportedEval, import_eval, import_task

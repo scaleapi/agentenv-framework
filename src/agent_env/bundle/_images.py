@@ -14,6 +14,8 @@ from pathlib import Path
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.config import get_config
+from agent_env.utils.docker.installed import installed_packages
+from agent_env.utils.docker.lock import Locked, lock
 from agent_env.utils.docker.prune import Pruned, write_pruned
 
 
@@ -29,6 +31,8 @@ class ImageJob:
     size: int | None = None  # of the stored context
     pruned: Pruned | None = None
     problem: str | None = None  # why it can't be written
+    locked: Locked | None = None
+    unlocked: str | None = None  # why its versions weren't pinned
 
 
 def context_groups(jobs: list[ImageJob]) -> list[list[ImageJob]]:
@@ -71,10 +75,30 @@ def write_images(groups: list[list[ImageJob]], staging: Path, scratch: Path,
                 job.pruned = pruned[folders[job]]
                 _place(job, folders[job], staging / job.folder)
             shutil.rmtree(folders[job], ignore_errors=True)
+            if job.problem is None:
+                _lock(job, staging / job.folder)
 
 
 # What reading a stored context raises when it isn't one a folder can be written from, or is damaged.
 _UNREADABLE = (ValueError, tarfile.TarError, EOFError)
+
+
+def _lock(job: ImageJob, folder: Path) -> None:
+    """Pin the folder's installs to the versions the stored image holds, or note on the job why it can't."""
+    url = job.artifact.tar_gz_object_url
+    if not url:
+        job.unlocked = "the store holds no image to read its versions from, so a build resolves them afresh"
+        return
+    try:
+        with get_config().get_object_store_at(url).open(url) as saved:
+            installed = installed_packages(saved)
+    except (*_UNREADABLE, OSError) as e:
+        job.unlocked = f"its stored image can't be read ({e or type(e).__name__}), so a build resolves them afresh"
+        return
+    if installed is None:
+        job.unlocked = "its stored image's layers can't be read, so a build resolves them afresh"
+        return
+    job.locked = lock(folder, job.pruned.dockerfile, installed)
 
 
 def _place(job: ImageJob, built: Path, dest: Path) -> None:

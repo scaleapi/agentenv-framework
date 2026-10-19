@@ -2,8 +2,10 @@
 stored build context, downloading a context stored as one object once; and what a folder can't hold fails the import,
 unless --include-scope user leaves it in the store, pinned."""
 
+import io
 import json
 import os
+import tarfile
 import tomllib
 from typing import ClassVar, Literal
 
@@ -287,3 +289,45 @@ def test_provenance_names_each_written_entity_and_image_by_store_id_and_version_
     assert provenance["images"] == [{"folder": "envs/crm", "key": "image", "id": "crm-image", "version": 1,
                                      "dockerfile": "Dockerfile", "dockerfile_found": False}]
     assert "file://" not in text and str(home) not in text
+
+
+def _saved_image(path, url, files):
+    """A one-layer ``docker save`` tarball holding ``files``, stored at ``url``."""
+    layer = io.BytesIO()
+    with tarfile.open(fileobj=layer, mode="w") as tar:
+        for name, text in files.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(text.encode())
+            tar.addfile(info, io.BytesIO(text.encode()))
+    with tarfile.open(path, "w:gz") as tar:
+        for name, data in {"0/layer.tar": layer.getvalue(),
+                           "manifest.json": json.dumps([{"Layers": ["0/layer.tar"]}]).encode()}.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return get_config().get_object_store_at(url).put_file_at(url, str(path), "application/gzip")
+
+
+def test_an_image_the_store_holds_built_is_pinned_to_its_python_versions_and_the_report_says_so(home):
+    context = _context_image(home, "context-only", {"Dockerfile": "FROM python:3.12-slim\nRUN pip install requests\n"})
+    site = "usr/local/lib/python3.12/site-packages"
+    url = context.build_context_object_url.rsplit("/", 1)[0] + "/saved.tar.gz"
+    saved = _saved_image(home / "saved.tar.gz", url, {
+        f"{site}/requests-2.31.0.dist-info/METADATA": "Name: requests\nVersion: 2.31.0\n",
+        f"{site}/pip-24.0.dist-info/METADATA": "Name: pip\nVersion: 24.0\n"})
+    image = get_artifact_store().put_document(DockerImageArtifact(
+        id="crm-image", description="built", image_name="crm-image:v1", tar_gz_s3_url=saved,
+        build_context_s3_url=context.build_context_object_url, dockerfile_path="Dockerfile"))
+    MCPServerEnv.put(id="crm", docker_image_artifact=image, environment_name="crm")
+    MCPServerEnv.put(id="slack", docker_image_artifact=_context_image(home, "slack-image"), environment_name="slack")
+    _task([DEPLOY, {"id": "slack", "type": "deploy_env", "env_id": "slack"}])
+
+    imported = import_task("t", home / "t")
+
+    assert (imported.root / "envs/crm/constraints.txt").read_text() == "requests==2.31.0\n"
+    assert "ARG PIP_CONSTRAINT=/tmp/agent-env-constraints.txt\n" in (imported.root / "envs/crm/Dockerfile").read_text()
+    assert not (imported.root / "envs/slack/constraints.txt").exists()
+    readme = (imported.root / "README.md").read_text()
+    assert ("pinned to the stored image: 1 Python package(s) by constraints.txt; left as the build resolves them: pip, "
+            "which isolated builds install their own versions of") in readme
+    assert "versions not pinned: the store holds no image to read its versions from" in readme
