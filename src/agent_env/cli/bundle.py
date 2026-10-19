@@ -52,7 +52,7 @@ def _report(imported: BundleImport, folder: Path) -> None:
     click.echo(f"Imported {what} into {folder}:")
     if imported.pinned:
         click.echo(f"  It still needs the store for {len(imported.pinned)} reference(s): see Still needs the store.")
-    for path in imported.files:
+    for path in sorted([*imported.files, *{f"{entity.folder}/" for entity in imported.written}]):
         click.echo(f"  {path}")
     for title, lines in imported.report():
         click.echo(f"{title}:")

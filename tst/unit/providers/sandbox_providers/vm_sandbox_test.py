@@ -718,7 +718,7 @@ async def test_a_context_only_image_is_built_in_the_vm_from_its_context(signing_
     assert sandbox.scripts == [
         f"rm -rf {work} && mkdir -p {work}/context",
         f"curl -fsSL {sandbox_module.CURL_RETRY_FLAGS} https://signed/build-context.tar.gz -o {work}/context.tar.gz",
-        f"tar -xzf {work}/context.tar.gz -C {work}/context",
+        f"tar -xzmf {work}/context.tar.gz -C {work}/context",
         f"cd {work}/context && docker build --platform linux/amd64 -f Dockerfile -t local/a-0123456789ab:v1 .",
         f"rm -rf {work}",
     ]
@@ -838,7 +838,7 @@ async def test_a_build_that_fails_fetching_an_image_runs_once_more(signing_store
 
     builds = [script for script in sandbox.scripts if "docker build" in script]
     assert len(builds) == 2 and builds[0] == builds[1]
-    assert sum(script.startswith("tar -xzf") for script in sandbox.scripts) == 1
+    assert sum(script.startswith("tar -xzmf") for script in sandbox.scripts) == 1
 
 
 @pytest.mark.asyncio

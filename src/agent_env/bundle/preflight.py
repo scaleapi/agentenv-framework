@@ -5,9 +5,10 @@ Each deploy, an env's, an agent's, a sandbox's or a rubrics judge's, runs on its
 comma-separated provider is a chain whose deploys skip a provider that refuses them and fall back from one provider to
 the next, so a deploy is refused only when every provider in it refuses it. A run is refused when a deploy would fail on
 its provider: an image the provider can't run, by the check the deploy itself makes, such as one a sandbox elsewhere
-would pull from this machine's registry; a VM asked of a provider that can't create one; or containers on the local
-provider without a Docker daemon. An image's tar.gz or build context
-that only this machine's object store holds isn't refused: agent-env pushes it to the sandbox. A deploy_agent step that
+would pull from this machine's registry; a VM asked of a provider that can't create one; containers on the local
+provider without a Docker daemon, or a gateway stack there without Docker's Compose plugin; an image built here without
+its Buildx plugin; or an agent or agent judge whose step gives it no model endpoint, with none configured. An image's
+tar.gz or build context that only this machine's object store holds isn't refused: agent-env pushes it to the sandbox. A deploy_agent step that
 names no agent, and a judge that names none, deploy the configured default agent: one this bundle or an installed one
 defines is planned as the bundle's own, and any other must be in the store. An env the bundle writes, or pulls in from an
 installed bundle, is checked from its planned env.toml.
@@ -31,6 +32,7 @@ from dataclasses import dataclass
 from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts.docker_image import PUT_AGAIN, DockerImageArtifact, pull_problem
 from agent_env.config import get_config
+from agent_env.config.errors import ConfigError
 from agent_env.entity.refs import EntityKind, parse_toml_ref
 from agent_env.env.bootstrap import (
     GATEWAY,
@@ -71,13 +73,13 @@ from agent_env.task_step.task_steps.install_agent import InstallAgentTaskStep
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.deploy_sandbox import DeploySandboxTaskStep
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
-from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, docker_unreachable
+from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, docker_plugin_missing, docker_unreachable
 
 from .parse import BundleError, BundleKind
 from .plan import Plan
 from .resolve import BuiltImage, Reference, ReferencedImage, ResolvedEntry, build_step
 
-_SHOWN_DOCKER_USERS = 3
+_SHOWN = 3
 
 
 @dataclass(frozen=True)
@@ -124,6 +126,8 @@ class _Walk:
         self.run_problems: list[str] = []  # the run's as a whole
         self.infra: set[str] = set()  # the infra kinds a deploy on the local provider needs
         self.docker_users: list[str] = []
+        self.compose_users: list[str] = []  # gateway deploys whose stack runs on this machine
+        self.model_users: list[str] = []  # agents and judges given the configured model endpoint
         self.default_agent_users: list[tuple[str, str]] = []  # (where, what names no agent)
         self.written = {write.id for write in plan.writes}
         self.agents = {write.id: write.source for write in plan.writes if write.kind is BundleKind.AGENT}
@@ -164,12 +168,15 @@ class _Walk:
         self._default_agent()
         reason = docker_unreachable() if self.docker_users or infra else None
         if reason and self.docker_users:
-            shown = ", ".join(self.docker_users[:_SHOWN_DOCKER_USERS])
-            more = len(self.docker_users) - _SHOWN_DOCKER_USERS
-            self.run_problems.append(f"the local sandbox provider runs containers for {shown}"
-                                     f"{f' and {more} more' if more > 0 else ''}, and {reason}")
+            self.run_problems.append(f"the local sandbox provider runs containers for {_listed(self.docker_users)}, "
+                                     f"and {reason}")
         elif reason:  # infra the run builds for deploys elsewhere
             self.run_problems.append(needs_docker(infra, reason))
+        else:
+            self._docker_plugins(built_here, infra)
+        if self.model_users and (missing := model_endpoint_missing()):
+            self.run_problems.append(f"{_listed(self.model_users)} deploy{'s' if len(self.model_users) == 1 else ''} an "
+                                     f"agent that calls the model endpoint, and {missing}")
         problems = list(self.run_problems)
         for problem, wheres in self.problems.items():
             first, *others = wheres
@@ -202,6 +209,8 @@ class _Walk:
         if any(link.ON_THIS_MACHINE for link in taking):
             self.infra |= kinds
             self.docker_users.append(where)
+            if GATEWAY in kinds:
+                self.compose_users.append(where)
         elif taking and stores_are_local():
             self.infra |= kinds
 
@@ -296,12 +305,16 @@ class _Walk:
             accepts = functools.partial(A2AAgent.accepts, sandbox_mode=linked.sandbox_mode)  # the VM loads its image
         else:
             provider = _provider(self.sandbox or step.sandbox_type, get_agent_sandbox_provider)
+        given = {*step.env_vars, *(["LITELLM_BASE_URL"] if step.litellm_base_url else [])}
+        if not {"LITELLM_API_KEY", "LITELLM_BASE_URL"} <= given:
+            self.model_users.append(where)
         self._agent_deploy(where, provider, step.a2a_agent_id, step.a2a_agent_version, "names no agent", accepts)
 
     def _judge(self, where: str, step: RubricsVerifierTaskStep) -> None:
         if not step.use_agent_judge or step.agent_name is not None:
             return  # the direct LLM judge, or a judge the task deployed itself
         provider = _provider(self.sandbox or step.judge_sandbox_type, get_agent_sandbox_provider)
+        self.model_users.append(where)
         self._agent_deploy(where, provider, step.judge_a2a_agent_id, None, "names no judge agent")
 
     def _agent_deploy(self, where: str, provider: SandboxProvider, agent_id: str | None, version: int | None,
@@ -445,6 +458,16 @@ class _Walk:
                                              "modal")
         return frozenset(here)
 
+    def _docker_plugins(self, built_here: frozenset[str], infra: list[InfraBuild]) -> None:
+        """The Docker plugins the run uses on this machine: Compose for each gateway stack it runs, Buildx for each
+        image it builds, as ``docker build`` does with BuildKit."""
+        if self.compose_users and (missing := docker_plugin_missing("compose")):
+            self.run_problems.append(f"the local sandbox provider runs a gateway's containers with docker compose for "
+                                     f"{_listed(self.compose_users)}, and {missing}")
+        builds = [f"image {image_id!r}" for image_id in sorted(built_here)] + [f"the {build.kind} env" for build in infra]
+        if builds and (missing := docker_plugin_missing("buildx")):
+            self.run_problems.append(f"the run builds {_listed(builds)} with this machine's Docker, and {missing}")
+
     def _default_agent(self) -> None:
         if not self.default_agent_users:
             return
@@ -487,6 +510,25 @@ def _state_type(step: DeployEnvTaskStep) -> str | None:
 
 def _provider(spec: str | None, default: Callable[[], SandboxProvider]) -> SandboxProvider:
     return build_sandbox_provider(spec) if spec else default()
+
+
+def model_endpoint_missing() -> str | None:
+    """Why the configured model endpoint can't be used, or None when it and its key are set."""
+    config = get_config()
+    try:
+        config.get_litellm_base_url()
+    except ConfigError:
+        return "no model endpoint is set: set LITELLM_BASE_URL, or [model] base_url in .agentenv/config.toml"
+    try:
+        config.get_litellm_api_key()
+    except ConfigError as e:
+        return f"its API key can't be read: {e}"
+    return None
+
+
+def _listed(items: list[str]) -> str:
+    more = len(items) - _SHOWN
+    return ", ".join(items[:_SHOWN]) + (f" and {more} more" if more > 0 else "")
 
 
 def _local_link(provider: SandboxProvider) -> bool:

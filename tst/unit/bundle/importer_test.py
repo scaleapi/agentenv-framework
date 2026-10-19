@@ -508,7 +508,10 @@ def test_the_cli_imports_and_says_what_it_wrote_left_out_and_floats(store):
     lines = result.output.splitlines()
     assert lines[0].startswith("Downloading 1 file(s) and 1 build context(s), ")
     imported = lines.index(f"Imported task triage v1 into {store / 'triage'}:")
-    assert lines[imported + 1:imported + 4] == ["  README.md", "  provenance.json", "  tasks/triage.json"]
+    listed = lines[imported + 1:lines.index("Written:")]
+    assert listed == sorted(listed)
+    assert {"  README.md", "  provenance.json", "  tasks/triage.json", "  envs/crm-env/", "  artifacts/crm-data/"} <= {
+        *listed}
     assert "Written:" in lines and "Images:" in lines and "Floating:" in lines and "Left out:" in lines
     assert "  envs/crm-env: mcp_server crm-env v2" in lines
     assert lines[-1] == f"Run it with: agent-env run {store / 'triage'}"

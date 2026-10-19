@@ -363,7 +363,9 @@ class VmSandbox(Sandbox):
         await self.exec_script(f"rm -rf {work} && mkdir -p {work}/context")
         try:
             await self.load_object_file(first.build_context_object_url, f"{work}/context.tar.gz")
-            await self.exec_script(f"tar -xzf {work}/context.tar.gz -C {work}/context")
+            # At extraction times, not the stored ones: BuildKit reuses a file it sent from a folder of the same name
+            # when its path, size and time match, so a changed file keeping its size would build as the old one.
+            await self.exec_script(f"tar -xzmf {work}/context.tar.gz -C {work}/context")
             await _once_more(
                 self,
                 f"cd {work}/context && docker build --platform {shlex.quote(platform)} "

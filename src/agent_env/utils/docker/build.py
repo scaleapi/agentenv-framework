@@ -49,6 +49,29 @@ def build_image(dockerfile: Path, context: Path, tag: str, *, platform: str | No
         raise DockerBuildError(f"docker build of {tag} failed (exit {result.returncode}):\n{result.stdout.rstrip()}")
 
 
+# Each plugin a run uses: its name, and its packages on Linux (Docker's, then a distribution's) and on Homebrew.
+_PLUGINS = {"compose": ("Compose", "docker-compose-plugin", "docker-compose-v2", "docker-compose"),
+            "buildx": ("Buildx", "docker-buildx-plugin", "docker-buildx", "docker-buildx")}
+
+
+def docker_plugin_missing(plugin: str) -> str | None:
+    """Why ``docker <plugin>`` can't be run here and how to install it, or None when ``docker <plugin> version``
+    answers."""
+    try:
+        result = subprocess.run(["docker", plugin, "version"], capture_output=True, text=True, errors="replace",
+                                timeout=DOCKER_INFO_TIMEOUT_SECONDS)
+    except FileNotFoundError:
+        return "docker isn't on PATH"
+    except subprocess.TimeoutExpired:
+        return f"`docker {plugin} version` didn't answer in {DOCKER_INFO_TIMEOUT_SECONDS}s"
+    if result.returncode == 0:
+        return None
+    name, docker_package, distribution_package, formula = _PLUGINS[plugin]
+    return (f"`docker {plugin}` isn't installed; install Docker's {name} plugin: on Linux `{docker_package}`, or "
+            f"`{distribution_package}`; on macOS `brew install {formula}`, with \"cliPluginsExtraDirs\": "
+            '["/opt/homebrew/lib/docker/cli-plugins"] in ~/.docker/config.json')
+
+
 def docker_unreachable() -> str | None:
     """Why this machine's Docker daemon can't be used, or None when ``docker info`` answers."""
     try:

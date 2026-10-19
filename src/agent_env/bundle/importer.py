@@ -439,7 +439,7 @@ class _Importer:
         if self.downloads or groups:
             stored = f", and {len(saved)} stored image(s) to read their versions from" if saved else ""
             self.progress(f"Downloading {len(self.downloads)} file(s) and {len(groups)} build context(s){stored}, "
-                          f"{_megabytes(total)}...")
+                          f"{_size_text(total)}...")
         try:
             with ThreadPoolExecutor(_DOWNLOADS) as pool:
                 list(pool.map(lambda item: _fetch(item[1], staging / item[0]), self.downloads.items()))
@@ -645,17 +645,17 @@ def _fetch(url: str, dest: Path) -> None:
     get_config().get_object_store_at(url).download_to_file(url, str(dest))
 
 
-def _megabytes(size: int) -> str:
-    return f"{size / 1_000_000:.1f} MB"
+def _size_text(size: int) -> str:
+    return f"{size} B" if size < 1_000 else f"{size / 1_000:.1f} KB" if size < 1_000_000 else f"{size / 1_000_000:.1f} MB"
 
 
 def _image_line(image: WrittenImage) -> str:
     """How an image was written: its Dockerfile, what its folder holds, and why it holds all of its context."""
     found = " (found: the image records no Dockerfile)" if image.found else ""
-    largest = ", ".join(f"{name} ({_megabytes(size)})" for name, size in image.largest)
+    largest = ", ".join(f"{name} ({_size_text(size)})" for name, size in image.largest)
     whole = f"; all of its build context, since {image.whole}" if image.whole else ""
     return (f"{image.folder}: {image.key} built from {image.dockerfile}{found}, {image.files} file(s), "
-            f"{_megabytes(image.size)}{whole}; largest: {largest}; {_locked_text(image)}")
+            f"{_size_text(image.size)}{whole}; largest: {largest}; {_locked_text(image)}")
 
 
 def _locked_text(image: WrittenImage) -> str:
