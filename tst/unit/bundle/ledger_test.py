@@ -563,7 +563,7 @@ def test_a_second_run_writing_any_of_the_same_ids_waits_for_the_first_to_finish(
         import pathlib, time
         from agent_env.bundle import parse_bundle
         from agent_env.bundle.ledger import materializing
-        with materializing(parse_bundle(pathlib.Path({str(first)!r}), **{root!r})):
+        with materializing(entry.id for entry in parse_bundle(pathlib.Path({str(first)!r}), **{root!r}).entries):
             pathlib.Path({str(held)!r}).write_text("held")
             time.sleep(1.5)
             pathlib.Path({str(done)!r}).write_text("done")
@@ -574,7 +574,8 @@ def test_a_second_run_writing_any_of_the_same_ids_waits_for_the_first_to_finish(
                 break
             time.sleep(0.05)
         waited = []
-        with materializing(parse_bundle(second, **root), on_wait=lambda: waited.append(True)):
+        with materializing((entry.id for entry in parse_bundle(second, **root).entries),
+                           on_wait=lambda: waited.append(True)):
             assert done.exists()
         assert waited == [True]
     finally:

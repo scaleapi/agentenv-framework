@@ -2,6 +2,10 @@
 it's pulled into the plan as one of the bundle's own is, named after the bundle it comes from."""
 
 import json
+import subprocess
+import sys
+import textwrap
+import time
 
 import pytest
 
@@ -9,6 +13,8 @@ from agent_env.bundle import BundleError, BundleKind, dry_run_bundle, parse_bund
 from agent_env.bundle import preflight as preflight_module
 from agent_env.bundle import run as run_module
 from agent_env.bundle.installed import InstalledBundle
+from agent_env.bundle.ledger import locked_ids
+from agent_env.bundle.materialize import materialize
 from agent_env.bundle.plan import check_bundle, plan_bundle
 from agent_env.bundle.resolve import resolve_bundle
 from tst.unit.bundle._support import RefusingStore, layout
@@ -229,3 +235,57 @@ def test_a_dry_run_preflights_a_pulled_default_agent_and_names_its_image_after_i
     assert [dry.path(entry) for entry in dry.runs] == ["tasks/t.json"]
     assert [line for line in said if "demo-dist/kit" in line] == [
         "demo-dist/kit:agents/solver (Dockerfile image): v1 (new)", "demo-dist/kit:agents/solver: v1 (new)"]
+
+
+def _user(tmp_path, name):
+    return layout(tmp_path / name, {"tasks/t.json": json.dumps([
+        {"id": "agent", "type": "deploy_agent", "a2a_agent_id": SOLVER}])})
+
+
+def _materialized(root, *installed, id_root=None):
+    return materialize(plan_bundle(resolve_bundle(parse_bundle(root, id_root=id_root)), installed=lambda: installed))
+
+
+def _kits(materialization):
+    return {done.write.id: (done.version, done.reused, done.reasons) for done in materialization.writes
+            if done.write.id.startswith(f"{SOLVER}")}
+
+
+def test_every_bundle_using_an_installed_agent_shares_one_write_of_it(bundle_dir, tmp_path, builds):
+    kit = _kit(tmp_path, {"tasks/smoke.json": json.dumps([{"id": "agent", "type": "deploy_agent",
+                                                            "a2a_agent_id": "solver"}])})
+    image = f"{SOLVER}__agent_image"
+
+    assert _kits(_materialized(_user(tmp_path, "first"), kit)) == {image: (1, False, ("new",)),
+                                                                   SOLVER: (1, False, ("new",))}
+    assert _kits(_materialized(_user(tmp_path, "second"), kit)) == {image: (1, True, ()), SOLVER: (1, True, ())}
+    assert _kits(_materialized(kit.root, kit, id_root=KIT)) == {image: (1, True, ()), SOLVER: (1, True, ())}
+
+    (kit.root / "agents/solver/Dockerfile").write_text("FROM scratch\nENV CHANGED=1\n")
+    assert _kits(_materialized(_user(tmp_path, "second"), kit)) == {
+        image: (2, False, ("files changed: Dockerfile",)),
+        SOLVER: (2, False, (f"artifact {image} is written anew (v1 → v2)",))}
+
+
+def test_a_run_locks_the_entities_it_pulls_in_as_it_does_its_own(bundle_dir, tmp_path, builds):
+    plan = plan_bundle(resolve_bundle(parse_bundle(_user(tmp_path, "first"))), installed=lambda: (_kit(tmp_path),))
+    held, done, waited = tmp_path / "held", tmp_path / "done", []
+    holder = subprocess.Popen([sys.executable, "-c", textwrap.dedent(f"""
+        import pathlib, time
+        from agent_env.bundle.ledger import materializing
+        with materializing([{SOLVER!r}]):
+            pathlib.Path({str(held)!r}).write_text("held")
+            time.sleep(1.5)
+            pathlib.Path({str(done)!r}).write_text("done")
+    """)])
+    try:
+        for _ in range(200):
+            if held.exists():
+                break
+            time.sleep(0.05)
+        materialize(plan, on_wait=lambda: waited.append(done.exists()))
+        assert done.exists()
+    finally:
+        holder.wait()
+
+    assert SOLVER in locked_ids(plan) and waited == [False]

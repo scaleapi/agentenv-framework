@@ -40,7 +40,7 @@ from agent_env.utils.docker_build import DockerBuildError, build_image
 
 from ._fs import with_article
 from .authoring import AuthoringContext, build_context_files
-from .ledger import Ledger, materializing
+from .ledger import Ledger, locked_ids, materializing
 from .parse import BundleError, BundleKind
 from .plan import Plan, Write, artifact_writer, env_writer, unpinned_store_refs
 from .resolve import BuiltImage, BundleImage, ReferencedImage, build_step
@@ -116,7 +116,7 @@ def materialize(
         if on_write is not None:
             on_write(done[_key(write)])
 
-    with nullcontext() if dry_run else materializing(plan.bundle.bundle, on_wait):
+    with nullcontext() if dry_run else materializing(locked_ids(plan), on_wait):
         _refuse_builds_without_docker(plan, ledger, contexts)  # once another run writing these ids is done
         for write in entities:
             through_ledger(write, lambda: _write_entity(plan, write, on_build, contexts))

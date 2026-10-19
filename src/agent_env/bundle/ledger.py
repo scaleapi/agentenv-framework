@@ -1,7 +1,8 @@
 """The bundle ledger: what each version a bundle wrote was made from, so a re-run writes only what changed.
 
 A row per written version records a digest of the write's inputs and one digest per input, so a new
-version can say why it was written ("files changed: server.py"). The ledger lives in the ``@local``
+version can say why it was written ("files changed: server.py"). A row is keyed by the bundle the write comes from, so
+an entity a run pulls in from an installed bundle has one row however many bundles use it. The ledger lives in the ``@local``
 namespace's own store, beside the entities it describes, and is never read through the router, so it
 never reaches a configured store. Reading it never creates the store.
 """
@@ -11,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import stat
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
@@ -32,7 +33,7 @@ from agent_env.task.store import TASKS_COLLECTION
 from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM
 
 from .authoring import build_context_files
-from .parse import Bundle, BundleKind
+from .parse import BundleKind
 from .plan import Plan, Write, artifact_writer, env_writer, folder_files, unpinned_store_refs
 from .resolve import BuiltImage, BundleImage, ReferencedImage
 
@@ -84,7 +85,6 @@ class Ledger:
     def __init__(self, store: LocalSqliteDocumentStore, plan: Plan, contexts: frozenset[str] = frozenset()):
         self._store = store
         self._plan = plan
-        self._bundle = plan.bundle.bundle.id_root
         self._contexts = contexts  # the built images written as build contexts
 
     @classmethod
@@ -107,7 +107,7 @@ class Ledger:
         row = self._latest(write.kind.store, write.id)
         recorded = row["version"] if row else None
         reasons = []
-        if row is not None and row["bundle"] != self._bundle:
+        if row is not None and row["bundle"] != self._bundle(write):
             reasons.append(f"last written by the bundle {row['bundle']}")
         if stored is None:
             reasons.append("new" if row is None else f"its v{recorded} is not in the store")
@@ -148,7 +148,7 @@ class Ledger:
         """Write ``check``'s entity with ``write``, which returns the version it wrote, and record it.
         A pending row marks the attempt until it's done, with its version once ``write`` returns. One an
         interrupted run of this bundle left is kept by ``check`` when its version can be, and dropped here."""
-        key = {"store": check.write.kind.store, "id": check.write.id, "bundle": self._bundle}
+        key = {"store": check.write.kind.store, "id": check.write.id, "bundle": self._bundle(check.write)}
         self._store.ensure_index(LEDGER_COLLECTION, ["store", "id", "status"])
         while self._store.delete(LEDGER_COLLECTION, Filter.of(**key, status="pending")):
             pass
@@ -169,7 +169,7 @@ class Ledger:
 
     def adopt(self, check: Check) -> None:
         """Record the version an interrupted run wrote, which ``check`` keeps, as that run would have."""
-        key = {"store": check.write.kind.store, "id": check.write.id, "bundle": self._bundle}
+        key = {"store": check.write.kind.store, "id": check.write.id, "bundle": self._bundle(check.write)}
         done = {**key, "status": "done", "scheme": SCHEME, "digest": check.digest.value, "inputs": check.digest.inputs,
                 "version": check.version, "at": _now()}
         self._store.replace(LEDGER_COLLECTION, Filter.of(**key, status="pending"), done, upsert=True)
@@ -177,11 +177,15 @@ class Ledger:
     def _orphan(self, write: Write, stored: int | None, digest: Digest) -> int | None:
         """The version an interrupted run of this bundle wrote and didn't record, when it's still the store's
         latest and was made from what ``write`` is now made from."""
-        pending = self._find(LEDGER_COLLECTION, Filter.of(store=write.kind.store, id=write.id, bundle=self._bundle,
-                                                          status="pending"))
+        pending = self._find(LEDGER_COLLECTION, Filter.of(store=write.kind.store, id=write.id,
+                                                          bundle=self._bundle(write), status="pending"))
         if pending is None or pending.get("version") is None or pending["version"] != stored:
             return None
         return stored if (pending["scheme"], pending["digest"]) == (SCHEME, digest.value) else None
+
+    def _bundle(self, write: Write) -> str:
+        """The id root of the bundle ``write`` comes from, which keys its rows."""
+        return self._plan.bundle_of(write.source.entry).id_root
 
     def _latest(self, store: str, id: str) -> dict | None:
         return self._find(LEDGER_COLLECTION, Filter.of(store=store, id=id, status="done"))
@@ -198,12 +202,17 @@ class Ledger:
 
 
 @contextmanager
-def materializing(bundle: Bundle, on_wait: Callable[[], None] | None = None) -> Iterator[None]:
-    """Hold a lock on every id the bundle's entries write while its entities are written. Another run that
-    writes any of those ids, of this bundle or another, waits here, calling ``on_wait`` first. Task runs don't
-    hold them."""
-    with holding_locks((entry.id for entry in bundle.entries), on_wait):
+def materializing(ids: Iterable[str], on_wait: Callable[[], None] | None = None) -> Iterator[None]:
+    """Hold a lock on each of ``ids`` while a run writes them: a plan's ``locked_ids``. Another run that writes any of
+    them, of this bundle or another, waits here, calling ``on_wait`` first. Task runs don't hold them."""
+    with holding_locks(ids, on_wait):
         yield
+
+
+def locked_ids(plan: Plan) -> list[str]:
+    """The ids a run of ``plan`` locks: every one its bundle's entries write, and each entity it pulls in from another
+    bundle, which another bundle's run can write too."""
+    return [*(entry.id for entry in plan.bundle.bundle.entries), *(entry.id for entry in plan.origins)]
 
 
 def _tracked(write: Write) -> bool:
