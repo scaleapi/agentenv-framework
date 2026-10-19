@@ -322,6 +322,50 @@ def test_a_folder_the_archive_only_implies_is_written_when_the_ignore_file_leave
     assert (tmp_path / "out" / "sub").is_dir() and not any((tmp_path / "out" / "sub").iterdir())
 
 
+def test_a_kept_links_target_is_followed_through_the_links_on_its_way(tmp_path):
+    # docker build copies releases/v2/app/main.py for COPY current here.
+    files = {"Dockerfile": "FROM python\nCOPY current /app\n", "releases/v2/app/main.py": "2", "releases/v1/app/old.py": "1"}
+    archive = _archive(tmp_path / "ctx.tar.gz", files, links={"current": "releases/latest/app", "releases/latest": "v2"})
+
+    write_pruned(archive, {tmp_path / "out": "Dockerfile"})
+
+    assert set(_files(tmp_path / "out")) == {"Dockerfile", "releases/v2/app/main.py"}
+    assert (tmp_path / "out" / "current").is_symlink() and (tmp_path / "out" / "releases" / "latest").is_symlink()
+
+
+def test_no_folder_sharing_the_archive_is_written_through_a_link_that_leads_out_of_it(tmp_path):
+    # The link leads into the first folder's own safe/, but out of the second one, into a folder beside it.
+    (tmp_path / "b" / "one" / "safe").mkdir(parents=True)
+    archive = tmp_path / "ctx.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        dockerfile = b"FROM python\nCOPY . /app\n"
+        info = tarfile.TarInfo("Dockerfile")
+        info.size = len(dockerfile)
+        tar.addfile(info, io.BytesIO(dockerfile))
+        folder = tarfile.TarInfo("safe")
+        folder.type, folder.mode = tarfile.DIRTYPE, 0o755
+        tar.addfile(folder)
+        link = tarfile.TarInfo("dir")
+        link.type, link.linkname = tarfile.SYMTYPE, "../one/safe"
+        tar.addfile(link)
+        planted = tarfile.TarInfo("dir/file")
+        planted.size = 1
+        tar.addfile(planted, io.BytesIO(b"x"))
+
+    with pytest.raises(ValueError, match="'dir/file' in the build context leads out of"):
+        write_pruned(archive, {tmp_path / "a" / "one": "Dockerfile", tmp_path / "b" / "two": "Dockerfile"})
+    assert not (tmp_path / "b" / "one" / "safe" / "file").exists()
+
+
+def test_a_member_whose_name_leads_out_of_the_context_is_refused_before_anything_is_written(tmp_path):
+    archive = _archive(tmp_path / "ctx.tar.gz", {"Dockerfile": "FROM python\nCOPY . /app\n",
+                                                 "../outside/__pycache__/payload": "x"})
+
+    with pytest.raises(ValueError, match="leads out of it"):
+        write_pruned(archive, {tmp_path / "out" / "here": "Dockerfile"})
+    assert not (tmp_path / "out" / "outside").exists() and not (tmp_path / "out" / "here").exists()
+
+
 def test_each_file_is_written_at_the_time_of_writing_not_the_stored_contexts(tmp_path):
     # A stored context's files carry the time 0; docker build would read a rewritten one as unchanged.
     archive = _archive(tmp_path / "ctx.tar.gz", SERVERS)

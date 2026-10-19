@@ -71,6 +71,25 @@ def test_a_heredoc_is_only_ever_opened_outside_quotes_in_shell_form():
                                                                       ("COPY", ())]
 
 
+@pytest.mark.parametrize(("line", "heredocs"), [
+    ("RUN <<EOF.sh\necho hi\nEOF.sh\n", ("echo hi\n",)),
+    ("RUN <<'EOF.x'\necho $HOME\nEOF.x\n", ("echo $HOME\n",)),
+    ("RUN 3<<EOF cat <&3\nhello\nEOF\n", ("hello\n",)),
+    ("RUN cat<<EOF > /x\n", ()),
+], ids=["dotted-delimiter", "quoted-dotted", "file-descriptor", "no-space-before"])
+def test_a_heredoc_is_a_word_opening_with_lt_lt_and_its_delimiter_is_the_rest_of_that_word(line, heredocs):
+    # docker build closes <<EOF.sh at EOF.sh, opens one for 3<<EOF, and none for cat<<EOF.
+    [instruction] = [i for i in instructions(f"FROM x\n{line}") if i.keyword == "RUN"]
+
+    assert instruction.heredocs == heredocs
+
+
+def test_a_copy_after_a_heredoc_whose_delimiter_holds_a_dot_is_read():
+    dockerfile = "FROM x\nRUN <<EOF.sh\necho hi\nEOF.sh\nCOPY app /app\nRUN <<EOF\necho\nEOF\n"
+
+    assert context_reads(dockerfile) == ContextReads(paths=("app",))
+
+
 def test_flags_split_on_any_whitespace_outside_quotes():
     assert leading_flags('--network=none\t--mount=type=bind,"source=my dir",target=/m  cp /m/f /f') == (
         ["--network=none", '--mount=type=bind,"source=my dir",target=/m'], "cp /m/f /f")

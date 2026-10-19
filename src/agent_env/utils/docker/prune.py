@@ -94,6 +94,7 @@ def _write(archive: Path, kept: Mapping[Path, set[str]]) -> dict[Path, dict[str,
             first: Path | None = None
             for folder in (folder for folder, names in kept.items() if name in names):
                 if member.isreg() and first is not None:
+                    _check_inside(folder, name)
                     (folder / name).parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(first, folder / name)
                 else:
@@ -108,8 +109,16 @@ def _write(archive: Path, kept: Mapping[Path, set[str]]) -> dict[Path, dict[str,
     for folder, names in kept.items():
         for name in names:
             if not os.path.lexists(folder / name):
+                _check_inside(folder, name)
                 (folder / name).mkdir(parents=True, exist_ok=True)
     return written
+
+
+def _check_inside(folder: Path, name: str) -> None:
+    """Raise ValueError when ``name`` in ``folder``, through any link written there, would land outside it."""
+    top = os.path.realpath(folder)
+    if os.path.commonpath([top, os.path.realpath(folder / name)]) != top:
+        raise ValueError(f"{name!r} in the build context leads out of {folder}")
 
 
 def _member(member: tarfile.TarInfo, out: str) -> tarfile.TarInfo | None:
@@ -203,7 +212,9 @@ def _kept(links: Mapping[str, str | None], reads: ContextReads, dockerfile: str,
     kept |= {name for name in crossed if sent(name)}
     names = sorted(links)
     while pending:
-        target = _link_target(pending.pop(), links)
+        # A target is followed through the links on its way, which stay for its path.
+        target, hops = _resolve(_link_target(pending.pop(), links), links)
+        kept |= {hop for hop in hops if sent(hop)}
         for other in _at_or_under(names, target) if target else names:
             if other not in kept and sent(other):
                 kept.add(other)
@@ -265,6 +276,8 @@ def _part_pattern(glob: str) -> re.Pattern[str] | None:
 
 
 def _member_name(member: tarfile.TarInfo) -> str | None:
-    """``member``'s path in the context; None for the context's own folder."""
+    """``member``'s path in the context; None for the context's own folder. Raises ValueError for one leading out."""
     name = posixpath.normpath(member.name.lstrip("/"))
+    if name == ".." or name.startswith("../"):
+        raise ValueError(f"{member.name!r} in the build context leads out of it")
     return None if name == "." else name

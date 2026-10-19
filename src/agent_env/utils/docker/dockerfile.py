@@ -10,8 +10,9 @@ import re
 from dataclasses import dataclass
 
 _DIRECTIVE = re.compile(r"#\s*([A-Za-z][A-Za-z0-9_-]*)\s*=\s*(\S+)\s*")
-# ``<<<`` is a shell here-string, which docker build leaves to the shell, not a heredoc.
-_HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)([\"']?)([A-Za-z_][A-Za-z0-9_]*)\2")
+# A word opening a heredoc, as BuildKit reads one: a file descriptor, <<, a -, and its delimiter, quoted or not. A
+# here-string (<<<) is left to the shell.
+_HEREDOC = re.compile(r"\d*<<(-?)([^<]+)")
 _HEREDOC_KEYWORDS = frozenset({"RUN", "COPY", "ADD"})
 # The COPY and ADD flags that change how a source is written, not which one it is.
 _SOURCE_KEEPING_FLAGS = ("--chown=", "--chmod=", "--link", "--checksum=", "--keep-git-dir", "--unpack")
@@ -141,29 +142,56 @@ def _json_strings(arguments: str) -> list[str] | None:
 
 def opens_heredoc(word: str) -> bool:
     """Whether ``word``, written in a shell-form instruction, would open a heredoc."""
-    return _HEREDOC.fullmatch(word) is not None
+    return _heredoc(word) is not None
 
 
 def _heredoc_names(arguments: str) -> list[tuple[str, str]]:
-    """Each heredoc ``arguments`` opens, as (its ``-``, its name): an unquoted ``<<NAME``, in shell form only."""
-    if _json_strings(arguments) is not None:
-        return []
-    found, quote, at = [], None, 0
+    """Each heredoc ``arguments`` opens, as (its ``-``, its delimiter): each word that opens one, as BuildKit reads it."""
+    return [heredoc for word in _words(arguments) if (heredoc := _heredoc(word))]
+
+
+def _heredoc(word: str) -> tuple[str, str] | None:
+    """The heredoc ``word`` opens, as (its ``-``, its delimiter, unquoted); None when it opens none."""
+    if not (match := _HEREDOC.fullmatch(word)):
+        return None
+    delimiter, quote, at = [], None, 0
+    while at < len(match.group(2)):
+        char = match.group(2)[at]
+        if char == "\\" and quote != "'" and at + 1 < len(match.group(2)):
+            at += 1
+            delimiter.append(match.group(2)[at])
+        elif char == quote:
+            quote = None
+        elif char in "\"'" and quote is None:
+            quote = char
+        else:
+            delimiter.append(char)
+        at += 1
+    return (match.group(1), "".join(delimiter)) if delimiter else None
+
+
+def _words(arguments: str) -> list[str]:
+    """``arguments`` split into words on whitespace outside quotes, each as written, quotes and escapes kept."""
+    words, word, quote, at = [], [], None, 0
     while at < len(arguments):
         char = arguments[at]
-        if char == "\\" and quote != "'":
+        if char == "\\" and quote != "'" and at + 1 < len(arguments):
+            word.append(arguments[at:at + 2])
             at += 2
             continue
         if quote:
             quote = None if char == quote else quote
         elif char in "\"'":
             quote = char
-        elif heredoc := _HEREDOC.match(arguments, at):
-            found.append((heredoc.group(1), heredoc.group(3)))
-            at = heredoc.end()
+        elif char.isspace():
+            if word:
+                words.append("".join(word))
+                word = []
+            at += 1
             continue
+        word.append(char)
         at += 1
-    return found
+    return words + (["".join(word)] if word else [])
 
 
 def copy_arguments(instruction: Instruction) -> CopyArguments | None:
@@ -179,7 +207,7 @@ def copy_arguments(instruction: Instruction) -> CopyArguments | None:
         args = rest.split()
     if len(args) < 2:
         return None
-    sources = tuple(source for source in args[:-1] if json_form or not _HEREDOC.fullmatch(source))
+    sources = tuple(source for source in args[:-1] if json_form or _heredoc(source) is None)
     return CopyArguments(instruction.keyword, tuple(flags), sources, args[-1], json_form,
                          heredoc=len(sources) < len(args) - 1)
 
