@@ -161,11 +161,13 @@ def _staged(plan: Plan, image: BuiltImage) -> Iterator[Path]:
 
 def _write_build_context(plan: Plan, write: Write, here: bool, on_build: Callable[[Write], None] | None) -> int:
     """Write the image an entry's Dockerfile describes as a docker_image artifact holding its build context alone,
-    which each deploy builds where it runs; ``here``, built first with this machine's Docker, for the deploys here."""
+    which each deploy builds where it runs, for its sandbox's platform; ``here``, built first with this machine's
+    Docker, for the deploys here."""
     image = write.source
     with _staged(plan, image) as context:
         if here:
-            sources, name = DockerImageArtifact.context_identity(write.id, str(context), str(context / image.dockerfile))
+            sources, name = DockerImageArtifact.context_identity(write.id, str(context), str(context / image.dockerfile),
+                                                                 platform=None)
             try:
                 build_staged(context, image.dockerfile, name, sources, _before(on_build, write))
             except DockerBuildError as e:
@@ -173,7 +175,7 @@ def _write_build_context(plan: Plan, write: Write, here: bool, on_build: Callabl
         try:
             return DockerImageArtifact.put_context(
                 write.id, description=_image_description(plan, write), context_path=str(context),
-                dockerfile_path=str(context / image.dockerfile),
+                dockerfile_path=str(context / image.dockerfile), platform=None,
             ).version
         except (ValueError, RuntimeError) as e:  # a context it can't write, or the object store
             raise BundleError([f"{_path(plan, write)}: {e}"]) from None

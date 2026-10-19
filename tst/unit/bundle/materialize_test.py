@@ -513,8 +513,8 @@ def test_an_image_written_as_its_build_context_is_uploaded_with_no_build_and_no_
     written = DockerImageArtifact.get(image, 1)
     folder = bundle_dir / "agents/solver"
     assert builds == [] and announced == []
-    assert written.context_only and (written.dockerfile_path, written.platform) == ("Dockerfile", "linux/amd64")
-    assert written.source_digest == BuildContext.of(folder, folder / "Dockerfile").source_digest("linux/amd64")
+    assert written.context_only and (written.dockerfile_path, written.platform) == ("Dockerfile", None)
+    assert written.source_digest == BuildContext.of(folder, folder / "Dockerfile").source_digest(None)
     assert A2AAgent.get(f"{ROOT}/solver").docker_image_artifact.version == 1
     assert _summary(materialize(plan_of(bundle_dir)))[image] == (1, True, ())
 

@@ -223,7 +223,7 @@ def test_a_remote_image_runs_anywhere_and_a_local_one_on_the_local_provider(bund
 BUILT = "@local/~/triage/solver__agent_image"
 
 
-CONTEXT = "a build context, which each deploy builds where it runs, for linux/amd64"
+CONTEXT = "a build context, which each deploy builds where it runs, for its sandbox's platform"
 BUILT_HERE = "a build context, built with docker on this machine"
 
 

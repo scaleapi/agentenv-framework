@@ -580,8 +580,8 @@ def test_the_cli_dry_run_lists_an_image_it_would_write_and_builds_nothing(bundle
         "tasks/agent.json: v1 (new)\n"
         "\n"
         "Images:\n"
-        "  agents/solver (Dockerfile image) v1: a build context, which each deploy builds where it runs, for "
-        "linux/amd64\n"
+        "  agents/solver (Dockerfile image) v1: a build context, which each deploy builds where it runs, for its "
+        "sandbox's platform\n"
         "Would run:\n"
         "  tasks/agent.json v1\n"
         + DRY_RUN

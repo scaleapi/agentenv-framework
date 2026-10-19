@@ -32,7 +32,6 @@ from agent_env.task.interrupts import Interrupts
 from agent_env.task.task import recorded_scores
 from agent_env.task.teardown import TeardownReport, teardown_run
 from agent_env.task_step.context import TaskStepContext
-from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM
 
 from .installed import installed_bundles
 from .materialize import Materialization, Materialized, materialize
@@ -170,7 +169,7 @@ class DryRun:
                if isinstance(done.write.source, ReferencedImage)
                else "a build context, built with docker on this machine"
                if done.write.id in self.built_here
-               else f"a build context, which each deploy builds where it runs, for {DEFAULT_BUILD_PLATFORM}")
+               else "a build context, which each deploy builds where it runs, for its sandbox's platform")
             for done in self.materialization.writes if isinstance(done.write.source, BundleImage)
         )
 

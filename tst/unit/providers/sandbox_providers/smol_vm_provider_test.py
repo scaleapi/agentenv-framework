@@ -346,3 +346,29 @@ async def test_a_smol_vm_of_this_machines_platform_loads_the_build_this_machine_
     await vm.build_images([image])
 
     assert loaded == ["file:///saved/local/solver-0123:abc.tar.gz"] and built == ["local/solver-0123:abc"]
+
+
+@pytest.mark.asyncio
+async def test_an_arm64_smol_vm_on_an_arm64_machine_runs_a_bundle_image_built_here(local_stores, tmp_path, monkeypatch):
+    """A bundle writes its image as a context recording no platform, which an arm64 VM runs, from this machine's
+    native build."""
+    (tmp_path / "Dockerfile").write_text("FROM scratch\n")
+    image = DockerImageArtifact.put_context("solver-image", description="d", context_path=str(tmp_path),
+                                            dockerfile_path=str(tmp_path / "Dockerfile"), platform=None)
+    loaded = []
+
+    async def saved(artifact):
+        return "file:///saved/solver.tar.gz"
+
+    async def load(self, artifacts):
+        loaded.extend(artifact.tar_gz_object_url for artifact in artifacts)
+
+    monkeypatch.setattr(sandbox_module, "host_platform", lambda: "linux/arm64")
+    monkeypatch.setattr(sandbox_module, "saved_here", saved)
+    monkeypatch.setattr(SmolVmSandbox, "_load_tarballs", load)
+    vm = object.__new__(SmolVmSandbox)
+    vm.platform = "linux/arm64"
+
+    await vm.load_docker_images([image])
+
+    assert image.platform is None and loaded == ["file:///saved/solver.tar.gz"]

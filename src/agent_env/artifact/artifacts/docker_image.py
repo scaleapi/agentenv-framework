@@ -238,15 +238,16 @@ class DockerImageArtifact(Artifact):
 
     @classmethod
     def put_context(cls, id: str, *, description: str, context_path: str, dockerfile_path: str,
-                    platform: str = DEFAULT_BUILD_PLATFORM) -> "DockerImageArtifact":
-        """Register an image by its build context alone, to be built where it runs: the context is uploaded and
-        nothing is built, pushed or saved, so no Docker is needed here. Its ``image_name``,
-        ``local/<slug>-<hash>:<sources>``, names no registry: it's the tag the build gives the image, the same for the
-        same sources, so a build of one version serves another. ``source_digest`` is equal for equal sources."""
+                    platform: str | None = DEFAULT_BUILD_PLATFORM) -> "DockerImageArtifact":
+        """Register an image by its build context alone, to be built where it runs, for ``platform``, or for each
+        sandbox's own when None: the context is uploaded and nothing is built, pushed or saved, so no Docker is needed
+        here. Its ``image_name``, ``local/<slug>-<hash>:<sources>``, names no registry: it's the tag the build gives the
+        image, the same for the same sources, so a build of one version serves another. ``source_digest`` is equal for
+        equal sources."""
         from agent_env.artifact.store import get_artifact_store
         from agent_env.config import get_config
 
-        platform = normalize_platform(platform)
+        platform = normalize_platform(platform) if platform else None
         context = _context_of(Path(context_path), dockerfile_path)
         store = get_artifact_store()
         version = store.next_version(id)
@@ -266,10 +267,11 @@ class DockerImageArtifact(Artifact):
 
     @staticmethod
     def context_identity(id: str, context_path: str, dockerfile_path: str,
-                         platform: str = DEFAULT_BUILD_PLATFORM) -> tuple[str, str]:
+                         platform: str | None = DEFAULT_BUILD_PLATFORM) -> tuple[str, str]:
         """The ``source_digest`` and ``image_name`` ``put_context`` gives ``id`` for this build context, found without
         writing anything."""
-        source_digest = _context_of(Path(context_path), dockerfile_path).source_digest(normalize_platform(platform))
+        platform = normalize_platform(platform) if platform else None
+        source_digest = _context_of(Path(context_path), dockerfile_path).source_digest(platform)
         return source_digest, _context_image_name(id, source_digest)
 
     def load(self) -> bytes:
