@@ -373,10 +373,11 @@ def _prune(step: dict, scopes: Mapping[str, FieldScope], include: frozenset[Fiel
         if scope in include:
             continue
         for where, holder, key in list(field_sites(step, path)):
-            if holder[key]:
-                del holder[key]
-                left.append((where, f"dropped: {scope.value} scope, so a run takes its own; --include-scope "
-                                    f"{scope.value} keeps it"))
+            if holder[key] in ("", [], {}):
+                continue  # set to nothing, so nothing is left out
+            del holder[key]
+            left.append((where, f"dropped: {scope.value} scope, so a run takes its own; --include-scope "
+                                f"{scope.value} keeps it"))
     return left
 
 

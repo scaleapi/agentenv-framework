@@ -517,9 +517,10 @@ SCOPED = [
      "metadata": {"attribution": {"project_id": "p-123"}, "note": "kept"}},
     {"id": "agent", "type": "deploy_agent", "env_ids": ["crm-env"], "a2a_agent_id": "solver", "sandbox_type": "local",
      "litellm_base_url": "https://litellm.internal.example.com", "metadata": {"attribution": {"project_id": "p-123"}},
-     "agent_changelog_object_url": "s3://their-bucket/changelog/", "agent_changelog_toolcall_position_exclusive": 3},
+     "agent_changelog_object_url": "s3://their-bucket/changelog/", "agent_changelog_toolcall_position_exclusive": 0},
     {"id": "prompt", "type": "prompt_agent", "prompt": "close the duplicates", "agent_name": "default-agent",
-     "trajectory_output_prefix": "s3://their-bucket/trajectories/", "user_a2a_url": "https://hub.example.com/a2a"},
+     "trajectory_output_prefix": "s3://their-bucket/trajectories/", "user_a2a_url": "https://hub.example.com/a2a",
+     "max_thinking_tokens": 0},
     {"id": "judge", "type": "rubrics_verifier", "verifier_id": "judge", "prompt_id": "prompt",
      "judge_sandbox_type": "modal", "criteria": [{"id": "c1", "description": "closed every duplicate"}]},
     {"id": "box", "type": "deploy_sandbox", "sandbox_name": "box", "sandbox_mode": "vm"},
@@ -531,9 +532,8 @@ SCOPED = [
      "skills": [{"name": "notes", "description": "how notes are kept", "object_url": "s3://their-bucket/skills/notes/"}]},
 ]
 SCOPED_FIELDS = {"env": ["sandbox_type", "metadata.attribution"],
-                 "agent": ["a2a_agent_id", "sandbox_type", "litellm_base_url", "agent_changelog_object_url",
-                           "agent_changelog_toolcall_position_exclusive", "metadata.attribution"],
-                 "prompt": ["trajectory_output_prefix"],
+                 "agent": ["a2a_agent_id", "sandbox_type", "litellm_base_url", "metadata.attribution"],
+                 "prompt": ["trajectory_output_prefix", "max_thinking_tokens"],  # a set zero is set
                  # A stored judge always holds a model: its author's, or the one its store's config named for judges.
                  "judge": ["default_model", "judge_sandbox_type"],
                  "install": ["a2a_agent_id"],
@@ -570,6 +570,8 @@ def test_a_steps_user_scoped_fields_are_left_out_and_reported_and_the_rest_of_it
     assert steps["prompt"]["user_a2a_url"] == stored["prompt"]["user_a2a_url"]  # it also says the user is a human
     assert steps["judge"]["criteria"] == stored["judge"]["criteria"]
     assert steps["skills"]["skills"] == [{"name": "notes", "description": "how notes are kept"}]
+    assert steps["agent"]["agent_changelog_object_url"] == "s3://their-bucket/changelog/"  # the state it starts from
+    assert steps["agent"]["agent_changelog_toolcall_position_exclusive"] == 0
     assert {(floating.where, floating.id) for floating in imported.floating} >= {
         ("tasks/scoped.json: step 'agent': a2a_agent_id", "a2a-default"),
         ("tasks/scoped.json: step 'install': a2a_agent_id", "a2a-default")}
