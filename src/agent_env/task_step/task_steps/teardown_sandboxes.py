@@ -29,6 +29,8 @@ from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)
 
+PROVIDER_CLOSE_TIMEOUT_SECONDS = 5
+
 TORN_DOWN_KEY = "torn_down_sandbox_ids"
 
 
@@ -169,7 +171,15 @@ async def _terminate(sandbox_id: str, sandbox_type: Optional[str], default_slot:
     """By id through the backend that made it; a record that doesn't name one goes through a live handle, since
     "not found" from a provider that didn't make the sandbox doesn't mean it's gone."""
     if sandbox_type:
-        await build_sandbox_provider(sandbox_type).terminate_sandbox(sandbox_id)
+        provider = build_sandbox_provider(sandbox_type)
+        try:
+            await provider.terminate_sandbox(sandbox_id)
+        finally:
+            try:
+                async with asyncio.timeout(PROVIDER_CLOSE_TIMEOUT_SECONDS):
+                    await provider.close()
+            except Exception as error:
+                logger.warning("Closing teardown provider %s failed: %s: %s", sandbox_type, type(error).__name__, error)
         return
     provider: SandboxProvider = _DEFAULT_PROVIDERS[default_slot]()
     await (await provider.get_sandbox(sandbox_id)).terminate()

@@ -324,6 +324,7 @@ def test_excess_tags_keep_run_and_step_then_sorted_keys_and_warn_without_values(
 @pytest.mark.parametrize("entry", ["run", "step"])
 async def test_cleanup_records_an_already_deleted_sandbox_as_torn_down(monkeypatch, entry):
     provider = _provider()
+    client = provider._client
     provider._client.get_sandbox.side_effect = type("Missing", (Exception,), {"status_code": 404})("gone")
     monkeypatch.setattr(teardown, "build_sandbox_provider", lambda _: provider)
     monkeypatch.setattr(teardown_sandboxes, "build_sandbox_provider", lambda _: provider)
@@ -339,7 +340,8 @@ async def test_cleanup_records_an_already_deleted_sandbox_as_torn_down(monkeypat
             id="cleanup", version=1, sandbox_names=["box"],
         ).execute(context)
     assert context.metadata[teardown_sandboxes.TORN_DOWN_KEY] == ["gone"]
-    provider._client.get_sandbox.assert_awaited_once_with(name="gone")
+    client.get_sandbox.assert_awaited_once_with(name="gone")
+    client.aclose.assert_awaited_once()
 
 
 @pytest.mark.asyncio
