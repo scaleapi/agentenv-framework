@@ -1,12 +1,10 @@
 """``installed_packages``: the Python and global npm packages a ``docker save`` tarball holds."""
 
-import gzip
-import hashlib
 import io
 import json
-import tarfile
 
 from agent_env.utils.docker.installed import Installed, installed_packages
+from tst.util.docker_save import saved_image, tar_bytes
 
 SITE = "usr/local/lib/python3.12/site-packages"
 NODE = "usr/local/lib/node_modules"
@@ -20,34 +18,8 @@ def _package_json(name: str, version: str) -> str:
     return json.dumps({"name": name, "version": version})
 
 
-def _tar(files: dict[str, str | bytes], links: dict[str, str] | None = None, gz: bool = False) -> bytes:
-    out = io.BytesIO()
-    with tarfile.open(fileobj=out, mode="w:gz" if gz else "w") as tar:
-        for name, content in files.items():
-            data = content.encode() if isinstance(content, str) else content
-            info = tarfile.TarInfo(name)
-            info.size = len(data)
-            tar.addfile(info, io.BytesIO(data))
-        for name, target in (links or {}).items():
-            info = tarfile.TarInfo(name)
-            info.type, info.linkname = tarfile.SYMTYPE, target
-            tar.addfile(info)
-    return out.getvalue()
-
-
-def _saved(layers: list[dict[str, str]], oci: bool = False, gz_layers: bool = False, gz: bool = False,
-           manifest_first: bool = False) -> io.BytesIO:
-    """A ``docker save`` tarball of ``layers``, bottom first, in the legacy or the OCI layout."""
-    blobs = [_tar(files, gz=gz_layers) for files in layers]
-    names = ([f"blobs/sha256/{hashlib.sha256(blob).hexdigest()}" for blob in blobs] if oci
-             else [f"{index:064x}/layer.tar" for index in range(len(blobs))])
-    config = json.dumps({"rootfs": {"type": "layers"}}).encode()
-    files = {name: blob for name, blob in zip(names, blobs)}
-    files["blobs/sha256/config" if oci else "config.json"] = config
-    manifest = {"manifest.json": json.dumps([{"Config": "config.json", "Layers": names}])}
-    extra = {"oci-layout": '{"imageLayoutVersion": "1.0.0"}', "index.json": "{}"} if oci else {}
-    data = _tar({**manifest, **files, **extra} if manifest_first else {**files, **extra, **manifest})
-    return io.BytesIO(gzip.compress(data) if gz else data)
+def _saved(layers, **kwargs) -> io.BytesIO:
+    return io.BytesIO(saved_image(layers, **kwargs))
 
 
 BASE = {f"{SITE}/pip-24.0.dist-info/METADATA": _metadata("pip", "24.0"),
@@ -112,18 +84,18 @@ def test_a_distribution_installed_from_a_path_or_url_is_direct_until_reinstalled
 
 
 def test_a_layer_saved_twice_as_a_link_is_followed():
-    blob = _tar(BASE)
-    data = _tar({"a/layer.tar": blob, "manifest.json": json.dumps([{"Layers": ["a/layer.tar", "b/layer.tar"]}])},
+    blob = tar_bytes(BASE)
+    data = tar_bytes({"a/layer.tar": blob, "manifest.json": json.dumps([{"Layers": ["a/layer.tar", "b/layer.tar"]}])},
                 links={"b/layer.tar": "../a/layer.tar"})
     assert installed_packages(io.BytesIO(data)) == installed_packages(_saved([BASE]))
 
 
 def test_no_manifest_or_an_unreadable_named_layer_is_none():
-    assert installed_packages(io.BytesIO(_tar({"0/layer.tar": _tar(BASE)}))) is None
-    assert installed_packages(io.BytesIO(_tar({"manifest.json": "[]", "0/layer.tar": _tar(BASE)}))) is None
-    unreadable = _tar({"0/layer.tar": b"not a tar" * 100, "manifest.json": json.dumps([{"Layers": ["0/layer.tar"]}])})
+    assert installed_packages(io.BytesIO(tar_bytes({"0/layer.tar": tar_bytes(BASE)}))) is None
+    assert installed_packages(io.BytesIO(tar_bytes({"manifest.json": "[]", "0/layer.tar": tar_bytes(BASE)}))) is None
+    unreadable = tar_bytes({"0/layer.tar": b"not a tar" * 100, "manifest.json": json.dumps([{"Layers": ["0/layer.tar"]}])})
     assert installed_packages(io.BytesIO(unreadable)) is None
-    missing = _tar({"manifest.json": json.dumps([{"Layers": ["0/layer.tar"]}])})
+    missing = tar_bytes({"manifest.json": json.dumps([{"Layers": ["0/layer.tar"]}])})
     assert installed_packages(io.BytesIO(missing)) is None
 
 

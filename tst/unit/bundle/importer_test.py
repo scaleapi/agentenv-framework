@@ -13,7 +13,6 @@ from click.testing import CliRunner
 
 from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact import FileArtifact
-from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.bundle import BundleError, parse_bundle
 from agent_env.bundle import importer as importer_module
 from agent_env.bundle.importer import ImportedEval, import_eval, import_task
@@ -33,6 +32,7 @@ from agent_env.store import Filter
 from agent_env.store.routing import namespace_routing
 from agent_env.task import Task
 from agent_env.task_step.task_step import TaskStep
+from tst.unit.bundle._support import context_image
 
 STEPS = [
     {"id": "env", "type": "deploy_env", "env_id": "crm-env"},
@@ -50,23 +50,13 @@ STEPS = [
 ]
 
 
-def _image(root, id):
-    """An image stored as its build context, as a put does: a Dockerfile, what it copies, and what it doesn't."""
-    context = root / "contexts" / id
-    context.mkdir(parents=True, exist_ok=True)
-    (context / "Dockerfile").write_text("FROM python:3.12-slim\nCOPY app.py /app.py\n")
-    (context / "app.py").write_text(f"print({id!r})\n")
-    (context / "notes.md").write_text("never copied\n")
-    return DockerImageArtifact.put_context(id, description=id, context_path=str(context), dockerfile_path="Dockerfile")
-
-
 @pytest.fixture
 def store(local_stores, tmp_path, monkeypatch):
     """A registry of bare ids in the configured local store, holding the entities STEPS names: crm-env at v2."""
     monkeypatch.setenv("HOME", str(tmp_path))
-    MCPServerEnv.put(id="crm-env", docker_image_artifact=_image(tmp_path, "crm-image"), environment_name="crm")
-    MCPServerEnv.put(id="crm-env", docker_image_artifact=_image(tmp_path, "crm-image"), environment_name="crm")
-    A2AAgent.put(id="solver", docker_image_artifact=_image(tmp_path, "solver-image"))
+    MCPServerEnv.put(id="crm-env", docker_image_artifact=context_image(tmp_path, "crm-image"), environment_name="crm")
+    MCPServerEnv.put(id="crm-env", docker_image_artifact=context_image(tmp_path, "crm-image"), environment_name="crm")
+    A2AAgent.put(id="solver", docker_image_artifact=context_image(tmp_path, "solver-image"))
     (tmp_path / "crm.json").write_text("{}")
     FileArtifact.put("crm-data", description="crm seed", file_path=str(tmp_path / "crm.json"))
     _task("triage", STEPS)

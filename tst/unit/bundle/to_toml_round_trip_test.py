@@ -10,7 +10,6 @@ import pytest
 from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact import FileArtifact
 from agent_env.artifact.artifacts.cli import CliArtifact
-from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.environment import EnvironmentArtifact
 from agent_env.artifact.artifacts.environment_universe import EnvironmentUniverseArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
@@ -29,6 +28,7 @@ from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.website import WebsiteEnv
 from agent_env.store.routing import namespace_routing
 from agent_env.task import Task
+from tst.unit.bundle._support import context_image, layout
 
 LOAD = {"id": "load", "type": "load_artifact", "env_id": "crm"}
 
@@ -39,23 +39,10 @@ def home(local_stores, tmp_path, monkeypatch):
     return tmp_path
 
 
-def _files(root, files):
-    root.mkdir(parents=True, exist_ok=True)
-    for name, text in files.items():
-        (root / name).parent.mkdir(parents=True, exist_ok=True)
-        (root / name).write_text(text)
-    return root
-
-
-def _image(home, id, files=None, dockerfile="Dockerfile"):
-    files = files or {dockerfile: "FROM python:3.12-slim\nCOPY app.py /app.py\n", "app.py": f"print({id!r})\n",
-                      "unread.md": "never copied\n"}
-    context = _files(home / "contexts" / id, files)
-    return DockerImageArtifact.put_context(id, description=id, context_path=str(context), dockerfile_path=dockerfile)
 
 
 def _env(home, id, name=None):
-    return MCPServerEnv.put(id=id, docker_image_artifact=_image(home, f"{id}-image"), environment_name=name or id)
+    return MCPServerEnv.put(id=id, docker_image_artifact=context_image(home, f"{id}-image"), environment_name=name or id)
 
 
 def _context(image):
@@ -110,8 +97,8 @@ def test_a_website_env_reads_back_with_both_images_built_from_its_one_folder(hom
     files = {"Dockerfile.backend": "FROM python:3.12-slim\nCOPY api.py /api.py\n",
              "Dockerfile.frontend": "FROM nginx\nCOPY site/ /usr/share/nginx/html/\n", "api.py": "api\n",
              "site/index.html": "<p>hi</p>\n"}
-    backend = _image(home, "shop-backend", files, "Dockerfile.backend")
-    frontend = _image(home, "shop-frontend", files, "Dockerfile.frontend")
+    backend = context_image(home, "shop-backend", files, "Dockerfile.backend")
+    frontend = context_image(home, "shop-frontend", files, "Dockerfile.frontend")
     WebsiteEnv.put(id="shop", backend_docker_image_artifact=backend, frontend_docker_image_artifact=frontend,
                    environment_name="shop")
 
@@ -123,7 +110,7 @@ def test_a_website_env_reads_back_with_both_images_built_from_its_one_folder(hom
 
 
 def test_an_agent_reads_back_with_its_env_vars_and_the_metadata_its_toml_carries(home):
-    A2AAgent.put(id="solver", docker_image_artifact=_image(home, "solver-image"),
+    A2AAgent.put(id="solver", docker_image_artifact=context_image(home, "solver-image"),
                  default_env_vars={"MODE": "fast", "OPENAI_API_KEY": "sk-not-real"},
                  metadata={"default_model": "claude", "min_disk_size_gb": 20, "agent_card": {"name": "x"}})
     _env(home, "crm")
@@ -153,7 +140,7 @@ def test_a_file_reads_back_with_its_bytes_name_and_description(home, description
                          ids=["one-file", "nested"])
 def test_a_file_universe_reads_back_with_each_file_at_its_path(home, files):
     _env(home, "crm")
-    paths = {name: path for name in files for path in [_files(home / "fau", files) / name]}
+    paths = {name: path for name in files for path in [layout(home / "fau", files) / name]}
     FileArtifactUniverse.put_bundled("docs", files=paths)
 
     with _read_back(home, [{**LOAD, "artifacts": [{"id": "docs"}]}], "artifact", "docs") as (read, _):
@@ -177,11 +164,11 @@ def test_an_environment_universe_reads_back_with_its_environments_and_metadata(h
     _env(home, "crm")
     environments = []
     for name, text in (("crm", "crm rows"), ("team/slack", "slack rows")):
-        path = _files(home / "u" / name, {"data.json": text}) / "data.json"
+        path = layout(home / "u" / name, {"data.json": text}) / "data.json"
         file = FileArtifact.put(f"u-{name.replace('/', '-')}-file", description="data.json", file_path=str(path))
         environments.append(EnvironmentArtifact.put(f"u-{name.replace('/', '-')}", environment_name=name,
                                                     file_artifact=file))
-    notes = _files(home / "u" / "meta", {"notes.md": "who's who"}) / "notes.md"
+    notes = layout(home / "u" / "meta", {"notes.md": "who's who"}) / "notes.md"
     EnvironmentUniverseArtifact.put("world", environment_artifacts=environments, metadata={
         "people/roster": FileArtifact.put("u-roster", description="notes.md", file_path=str(notes))})
     steps = [{"id": "env", "type": "deploy_env", "env_id": "crm", "artifact_id": "world"}]
@@ -194,8 +181,8 @@ def test_an_environment_universe_reads_back_with_its_environments_and_metadata(h
 
 
 def test_a_cli_reads_back_with_the_tree_of_the_version_the_task_names(home):
-    old = _files(home / "cli-v1", {"bin/crm": "#!/bin/sh\necho v1\n", "lib/util.sh": "v1\n"})
-    new = _files(home / "cli-v2", {"bin/crm": "#!/bin/sh\necho v2\n"})
+    old = layout(home / "cli-v1", {"bin/crm": "#!/bin/sh\necho v1\n", "lib/util.sh": "v1\n"})
+    new = layout(home / "cli-v2", {"bin/crm": "#!/bin/sh\necho v2\n"})
     CliArtifact.put("crm-cli", command_name="crm", entrypoint="bin/crm", cli_dir=old)
     CliArtifact.put("crm-cli", command_name="crm", entrypoint="bin/crm", cli_dir=new)
     _env(home, "crm")
@@ -209,7 +196,7 @@ def test_a_cli_reads_back_with_the_tree_of_the_version_the_task_names(home):
 
 
 def test_a_skill_reads_back_in_a_folder_named_for_it(home):
-    skill = _files(home / "skill", {"SKILL.md": "---\nname: triage-notes\ndescription: how triage is noted\n---\n"
+    skill = layout(home / "skill", {"SKILL.md": "---\nname: triage-notes\ndescription: how triage is noted\n---\n"
                                                 "Write it down.\n", "examples/one.md": "one\n"})
     SkillArtifact.put("team/triage-notes", skill_dir=skill)
     steps = [{"id": "skills", "type": "add_skills", "agent_name": "default-agent",

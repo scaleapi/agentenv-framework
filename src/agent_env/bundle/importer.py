@@ -12,9 +12,6 @@ import unicodedata
 import uuid
 from collections.abc import Callable, Collection
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from importlib.metadata import version as package_version
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +23,22 @@ from agent_env.artifact.registry import ARTIFACT_REGISTRY, canonical_type, get_a
 from agent_env.bundle import _toml
 from agent_env.bundle._fs import fold, os_reason, show
 from agent_env.bundle._images import ImageJob, context_groups, write_images
+from agent_env.bundle._import_report import (
+    PROVENANCE,
+    BundleImport,
+    Dropped,
+    Floating,
+    ImportedEval,
+    ImportedTask,
+    Need,
+    Pinned,
+    Pulled,
+    Written,
+    WrittenImage,
+    provenance,
+    readme,
+    size_text,
+)
 from agent_env.bundle._secrets import scrub
 from agent_env.bundle.installed import InstalledBundle, installed_bundles
 from agent_env.bundle.parse import (
@@ -53,150 +66,12 @@ from agent_env.store.ids import LOCAL_PREFIX
 from agent_env.store.image_store.oci_registry_credentials import names_registry
 from agent_env.task import Task
 from agent_env.task_step import registry as task_step_registry
-from agent_env.store.image_store.oci_registry_credentials import registry_host_from_ref
 from agent_env.task_step.registry import get_task_step_registry
-from agent_env.utils.docker.lock import Locked
 
 # How long a name taken from an id may be, in bytes; ids are capped far above it, and a longer name helps nobody.
 _MAX_NAME_BYTES = 200
-# The file an import records what it wrote in, and from where, for publishing the folder back.
-PROVENANCE = "provenance.json"
 _DOWNLOADS = 8  # objects downloaded at once
 _FOLDERS = {EntityKind.ENV: BundleKind.ENV, EntityKind.AGENT: BundleKind.AGENT, EntityKind.ARTIFACT: BundleKind.ARTIFACT}
-
-
-@dataclass(frozen=True)
-class Pinned:
-    """A reference left to the store, pinned at the version the store held: the folder can't hold what it names."""
-
-    where: str
-    kind: EntityKind
-    id: str
-    version: int
-    why: str
-
-
-@dataclass(frozen=True)
-class Floating:
-    """A store reference written without a version, so a run reads whatever version is current then."""
-
-    where: str
-    kind: EntityKind
-    id: str
-    why: str
-
-
-@dataclass(frozen=True)
-class Dropped:
-    """A value left out of the folder, or masked in it: a secret, a scoped field, or one its toml has no key for."""
-
-    where: str
-    why: str
-
-
-@dataclass(frozen=True)
-class Need:
-    """Something a task uses that core doesn't ship, and what registers it here."""
-
-    where: str
-    what: str  # step type, env type or artifact type
-    name: str
-    by: str  # the installed distribution that registers it, or "configuration" for a config file's impls
-
-
-@dataclass(frozen=True)
-class Written:
-    """An entity written into the folder."""
-
-    folder: str  # in the bundle: envs/<name>, agents/<name>, artifacts/<name> or skills/<name>
-    kind: EntityKind
-    id: str
-    version: int
-    type: str
-
-
-@dataclass(frozen=True)
-class WrittenImage:
-    """An image written into its entity's folder, from its stored build context."""
-
-    folder: str
-    key: str
-    artifact: str
-    version: int
-    dockerfile: str
-    found: bool  # the image records no Dockerfile, so the context's one was taken
-    files: int
-    size: int
-    whole: str | None  # why all of the context was kept, when it was
-    largest: tuple[tuple[str, int], ...]
-    locked: Locked | None  # what was pinned to the stored image's versions
-    unlocked: str | None  # why nothing was
-
-
-@dataclass(frozen=True)
-class Pulled:
-    """An image a folder names by its registry ref, which the machine running it pulls."""
-
-    folder: str
-    key: str
-    image: str
-    why: str | None = None  # why it's pulled though it has a build context: the context can't be written
-
-
-@dataclass(frozen=True)
-class ImportedTask:
-    path: str  # in the bundle: tasks/<name>.json
-    id: str
-    version: int
-    steps: int
-
-
-@dataclass(frozen=True)
-class ImportedEval:
-    path: str  # in the bundle: evals/<name>.toml
-    id: str
-    version: int
-
-
-@dataclass(frozen=True)
-class BundleImport:
-    """What an import wrote, and how it treated each reference and secret."""
-
-    root: Path
-    files: tuple[str, ...]  # what it wrote beside the entities' folders
-    tasks: tuple[ImportedTask, ...]
-    eval: ImportedEval | None
-    written: tuple[Written, ...]
-    images: tuple[WrittenImage, ...]
-    pulled: tuple[Pulled, ...]
-    pinned: tuple[Pinned, ...]
-    floating: tuple[Floating, ...]
-    dropped: tuple[Dropped, ...]
-    needs: tuple[Need, ...]
-    undeclared: tuple[str, ...]  # the steps whose type declares no references, so any they make float
-    duplicates: tuple[str, ...]  # the eval's entries that named a task it already named
-    downloaded: int  # bytes, of what the store said its objects' sizes are
-
-    def report(self) -> list[tuple[str, list[str]]]:
-        """What still needs the store, what the task needs beyond core, what was written, and how each reference,
-        secret and scoped field was treated, as titled lists of lines; an empty section is left out."""
-        needed: dict[tuple[str, str, str], list[str]] = {}
-        for need in self.needs:
-            needed.setdefault((need.by, need.name, need.what), []).append(need.where)
-        return _sections([
-            ("Still needs the store", [f"{pin.kind.value} {pin.id} v{pin.version}: {pin.where}: {pin.why}"
-                                       for pin in self.pinned]),
-            ("Needs beyond core", [f"{by}: {name} ({what}), at {'; '.join(wheres)}"
-                                   for (by, name, what), wheres in sorted(needed.items())]),
-            ("Written", [f"{entity.folder}: {entity.type} {entity.id} v{entity.version}" for entity in self.written]),
-            ("Images", [_image_line(image) for image in self.images]
-             + [f"{pull.folder}: {pull.key} is pulled from its registry, as {pull.image}"
-                + (f", since {pull.why}" if pull.why else "") for pull in self.pulled]),
-            ("Floating", [f"{ref.kind.value} {ref.id}: {ref.where}: {ref.why}" for ref in self.floating]
-             + [f"{step}: its type declares no references, so any it makes float" for step in self.undeclared]),
-            ("Left out", [f"{drop.where}: {drop.why}" for drop in self.dropped]
-             + [f"{entry}, which the eval names more than once" for entry in self.duplicates]),
-        ])
 
 
 def import_task(task_id: str, dest: Path | str, *, version: int | None = None,
@@ -413,15 +288,15 @@ class _Importer:
             if self.problems:
                 raise BundleError(self.problems)
             shutil.rmtree(scratch)
-            self.files[PROVENANCE] = _provenance(source, self)
-            files = sorted([*self.files, "README.md"])
+            files = sorted([*self.files, PROVENANCE, "README.md"])
             imported = BundleImport(
                 root=self.dest, files=tuple(files), tasks=tuple(self.tasks), eval=self.eval,
                 written=tuple(self.written), images=tuple(self.images), pulled=tuple(self.pulled),
                 pinned=tuple(self.pinned), floating=tuple(self.floating), dropped=tuple(self.dropped),
                 needs=tuple(self.needs), undeclared=tuple(self.undeclared), duplicates=tuple(self.duplicates),
                 downloaded=downloaded)
-            self.files["README.md"] = _readme(description, imported)
+            self.files[PROVENANCE] = provenance(source, imported)
+            self.files["README.md"] = readme(description, imported)
             try:
                 for folder, (name, toml) in self.tomls.items():
                     (staging / folder).mkdir(parents=True, exist_ok=True)
@@ -447,7 +322,7 @@ class _Importer:
         if self.downloads or groups:
             stored = f", and {len(saved)} stored image(s) to read their versions from" if saved else ""
             self.progress(f"Downloading {len(self.downloads)} file(s) and {len(groups)} build context(s){stored}, "
-                          f"{_size_text(total)}...")
+                          f"{size_text(total)}...")
         try:
             with ThreadPoolExecutor(_DOWNLOADS) as pool:
                 list(pool.map(lambda item: _fetch(item[1], staging / item[0]), self.downloads.items()))
@@ -459,10 +334,9 @@ class _Importer:
             if job.problem is not None:
                 self._image_left_in_store(job)
             else:
-                self.images.append(WrittenImage(
-                    job.folder, job.key, job.artifact.id, job.artifact.version, job.pruned.dockerfile,
-                    found=not job.artifact.dockerfile_path, files=job.pruned.files, size=job.pruned.size,
-                    whole=job.pruned.whole, largest=job.pruned.largest, locked=job.locked, unlocked=job.unlocked))
+                self.images.append(WrittenImage(job.folder, job.key, job.artifact.id, job.artifact.version,
+                                                found=not job.artifact.dockerfile_path, pruned=job.pruned,
+                                                locked=job.locked, unlocked=job.unlocked))
         return total
 
     def _image_left_in_store(self, job: ImageJob) -> None:
@@ -675,31 +549,6 @@ def _fetch(url: str, dest: Path) -> None:
     get_config().get_object_store_at(url).download_to_file(url, str(dest))
 
 
-def _size_text(size: int) -> str:
-    return f"{size} B" if size < 1_000 else f"{size / 1_000:.1f} KB" if size < 1_000_000 else f"{size / 1_000_000:.1f} MB"
-
-
-def _image_line(image: WrittenImage) -> str:
-    """How an image was written: its Dockerfile, what its folder holds, and why it holds all of its context."""
-    found = " (found: the image records no Dockerfile)" if image.found else ""
-    largest = ", ".join(f"{name} ({_size_text(size)})" for name, size in image.largest)
-    whole = f"; all of its build context, since {image.whole}" if image.whole else ""
-    return (f"{image.folder}: {image.key} built from {image.dockerfile}{found}, {image.files} file(s), "
-            f"{_size_text(image.size)}{whole}; largest: {largest}; {_locked_text(image)}")
-
-
-def _locked_text(image: WrittenImage) -> str:
-    """What of an image's installs is pinned to the stored image's versions, and what isn't."""
-    if image.locked is None:
-        return f"versions not pinned: {image.unlocked}"
-    locked = image.locked
-    pinned = ([f"{locked.python} Python package(s) by {locked.constraints}"] if locked.constraints else []) + (
-        [f"Python packages by {locked.lock_file}, as the build installs them"] if locked.lock_file else []) + list(
-        locked.npm)
-    left = f"; left as the build resolves them: {'; '.join(locked.not_covered)}" if locked.not_covered else ""
-    return f"pinned to the stored image: {', '.join(pinned) or 'nothing it installs'}{left}"
-
-
 def _names(value: str, cls: type) -> bool:
     """Whether the entry point ``value``, ``module:attribute``, names ``cls``."""
     module, _, attribute = value.partition(":")
@@ -730,84 +579,6 @@ def _output_names(sites: list[RefSite]) -> dict[tuple[EntityKind, str], str]:
             taken.add((site.ref.kind, _nfc(name)))
         names[_key(site)] = name
     return names
-
-
-def _provenance(source: dict, importer: _Importer) -> str:
-    """What the folder was imported from and what it holds, by store id and version: no store's locations."""
-    return json.dumps({
-        "agent_env": package_version("agentenv-framework"),
-        "imported_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "from": source,
-        "written": [{"folder": entity.folder, "kind": entity.kind.value, "type": entity.type, "id": entity.id,
-                     "version": entity.version} for entity in importer.written],
-        "images": [{"folder": job.folder, "key": job.key, "id": job.artifact.id, "version": job.artifact.version,
-                    "dockerfile": job.toml.get("dockerfile"), "dockerfile_found": not job.artifact.dockerfile_path}
-                   for job in importer.jobs if job.problem is None],
-        "store": [{"where": pin.where, "kind": pin.kind.value, "id": pin.id, "version": pin.version, "why": pin.why}
-                  for pin in importer.pinned],
-    }, indent=2, ensure_ascii=False) + "\n"
-
-
-def _readme(description: str, imported: BundleImport) -> str:
-    """The bundle's README: its description, where it came from, how to run and share it, what it holds, then the
-    import's report."""
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    held = ("Every env, agent and artifact it uses is written here, so `agent-env run` runs it with no store"
-            + (", except what *Still needs the store* lists, which it reads from the store this was imported from."
-               if imported.pinned else "."))
-    lines = [description, "", f"Imported with agent-env {package_version('agentenv-framework')} on {stamp}. {held}", "",
-             *_RUN_IT, *_needs_lines(imported), "", *_SHARE_IT, ""]
-    contents = _sections([("Tasks", [f"{task.path}: task {task.id} v{task.version}" for task in imported.tasks]),
-                          ("Eval", [f"{imported.eval.path}: eval {imported.eval.id} v{imported.eval.version}"]
-                           if imported.eval else [])])
-    for title, items in [*contents, *imported.report()]:
-        lines += [f"## {title}", "", *(f"- {item}" for item in items), ""]
-    return "\n".join(lines).rstrip("\n") + "\n"
-
-
-_RUN_IT = [
-    "## Run it",
-    "",
-    "    agent-env run .",
-    "",
-    "A machine running it needs:",
-    "",
-    "- agent-env (`pip install agentenv-framework`).",
-    "- Docker with its Compose and Buildx plugins. On Linux, Docker Engine and the `docker-compose-plugin` and "
-    "`docker-buildx-plugin` packages (or a distribution's `docker.io`, `docker-compose-v2` and `docker-buildx`). On "
-    "macOS, a Docker VM such as Docker Desktop or colima, and the `docker`, `docker-compose` and `docker-buildx` CLIs; "
-    "Homebrew's plugins are found once `~/.docker/config.json` lists their folder in `cliPluginsExtraDirs`.",
-    "- A model endpoint for its agents and judges: `LITELLM_BASE_URL` and `LITELLM_API_KEY`, or `[model] base_url` and "
-    "`api_key` in `.agentenv/config.toml`.",
-    "- An agent where a step names none: the configured default (`[agents] default_a2a_agent_id`).",
-    "",
-    "Its images are built from the build contexts in their folders on the machine that runs it, pinned to the "
-    "Python and npm versions of the images the store held, as *Images* says. To build one unpinned, take out the "
-    "COPY and two ARG lines naming agent-env-constraints.txt after each FROM in its Dockerfile.",
-]
-_SHARE_IT = [
-    "## Share it",
-    "",
-    "The folder is source: commit it to git, or archive it without macOS's extended attributes, which tar on Linux warns "
-    "about for every file (`COPYFILE_DISABLE=1 tar -czf` on macOS, or GNU tar's `--no-xattrs`).",
-]
-
-
-def _needs_lines(imported: BundleImport) -> list[str]:
-    plugins = sorted({need.by for need in imported.needs if need.by != "configuration"})
-    configured = any(need.by == "configuration" for need in imported.needs)
-    lines = [f"- The plugins it uses: `{'`, `'.join(plugins)}`."] if plugins else []
-    if configured:
-        lines.append("- The configuration that registers what *Needs beyond core* says configuration registers.")
-    registries = sorted({host for pulled in imported.pulled if (host := registry_host_from_ref(pulled.image))})
-    if registries:
-        lines.append(f"- Access to the registries its pulled images are in: `{'`, `'.join(registries)}`. agent-env reads "
-                     "a private one only through its configured image store, such as an ECR store for an ECR registry.")
-    return lines
-
-
-def _sections(sections: list[tuple[str, list[str]]]) -> list[tuple[str, list[str]]]:
-    return [(title, lines) for title, lines in sections if lines]
 
 
 def _check_destination(dest: Path) -> None:

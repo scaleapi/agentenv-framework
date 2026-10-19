@@ -3,6 +3,7 @@ configured store that fails any test reaching it."""
 
 from pathlib import Path
 
+from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.bundle import parse_bundle
 from agent_env.bundle.plan import plan_bundle
 from agent_env.bundle.resolve import BuiltImage, resolve_bundle
@@ -18,6 +19,15 @@ def layout(root, files):
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
         (root / rel).write_text(text)
     return root
+
+
+def context_image(root, id, files=None, dockerfile="Dockerfile", folder=None):
+    """An image stored as its build context, as a put does, from ``root``/contexts/``folder``: by default a Dockerfile,
+    the file it copies, and one it doesn't."""
+    files = files or {dockerfile: "FROM python:3.12-slim\nCOPY app.py /app.py\n", "app.py": f"print({id!r})\n",
+                      "unread.md": "never copied\n"}
+    context = layout(root / "contexts" / (folder or id), files)
+    return DockerImageArtifact.put_context(id, description=id, context_path=str(context), dockerfile_path=dockerfile)
 
 
 def listing(folder):
