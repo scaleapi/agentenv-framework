@@ -814,7 +814,8 @@ def register_task_instance(
 ) -> TaskInstance | None:
     """Register a task_instance row.
 
-    With ``instance_id``: idempotent upsert. Without: random-id insert.
+    With ``instance_id``: idempotent upsert, and a failure raises, since the caller already handed that id out.
+    Without: random-id insert, and a failure is logged and the run goes unrecorded.
     """
     try:
         store = get_task_instance_store()
@@ -831,6 +832,8 @@ def register_task_instance(
             completed_steps,
         )
     except Exception:
+        if instance_id is not None:
+            raise
         logger.warning("Failed to create task instance record", exc_info=True)
         return None
 
