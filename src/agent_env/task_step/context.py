@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 from dataclasses import dataclass, field
 from typing import Any
@@ -11,8 +12,11 @@ from agent_env.env.env import DeployedEnv
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, host_url_for
 from agent_env.providers.sandbox_providers.sandbox_provider import reachable_url
 
+HEARTBEAT_KEY = "_heartbeat_fn"
+
 _REDACTED_KEYS = {
     "litellm_api_key", "judge_litellm_api_key", "usersim_api_key", "remote_tokens", "cf_access_client_secret",
+    HEARTBEAT_KEY,
 }
 
 
@@ -230,6 +234,14 @@ class TaskStepContext:
         d = dataclasses.asdict(dataclasses.replace(self, prompt_responses=[]))
         d["prompt_responses"] = [response.to_dict() for response in self.prompt_responses]
         return d
+
+    def heartbeat(self) -> None:
+        """Tell the runner this step is still alive, through the callable it put at ``metadata[HEARTBEAT_KEY]``.
+        A no-op without one; a beat that raises is dropped, never failing the step."""
+        beat = self.metadata.get(HEARTBEAT_KEY)
+        if callable(beat):
+            with contextlib.suppress(Exception):
+                beat()
 
     def record_model(self, role: str, step_id: str, model: str | None) -> None:
         """Record the model ``step_id`` ran ``role`` on, None when the agent chose its own, for the run's summary."""
