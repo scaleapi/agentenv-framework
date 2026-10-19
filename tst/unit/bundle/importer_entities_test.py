@@ -211,8 +211,7 @@ def test_a_universe_name_that_would_leave_its_folder_is_refused_before_anything_
 
 @pytest.mark.parametrize("names, why", [
     (["A.txt", "a.txt"], "by names that differ only in case"),
-    ([".DS_Store", "b.txt"], "a bundle leaves out .DS_Store as the OS or Python's own"),
-], ids=["case", "leavings"])
+], ids=["case"])
 def test_a_file_universe_a_folder_cant_hold_as_it_is_fails_the_import(home, names, why):
     MCPServerEnv.put(id="crm", docker_image_artifact=_context_image(home, "crm-image"), environment_name="crm")
     files = {name: FileArtifact.put(f"doc-{n}", description=name, file_path=str(_files(home / f"u{n}", {name: name}) / name))
@@ -391,3 +390,21 @@ def test_a_step_naming_no_version_of_an_env_another_step_pins_takes_that_version
         ("envs/crm", 1)]
     assert ("tasks/t.json: step 'cli': env_id", "pinned: it names no version, so it takes v1, the one the task pins "
             "elsewhere") in [(d.where, d.why) for d in imported.dropped]
+
+
+def test_what_the_os_or_python_leaves_in_a_file_universe_is_left_out_and_said_so(home):
+    MCPServerEnv.put(id="crm", docker_image_artifact=_context_image(home, "crm-image"), environment_name="crm")
+    names = ["b.txt", "__pycache__/audit.cpython-314.pyc", ".DS_Store"]
+    files = {name: FileArtifact.put(f"doc-{n}", description=name,
+                                    file_path=str(_files(home / f"u{n}", {name: name}) / name))
+             for n, name in enumerate(names)}
+    FileArtifactUniverse.put("docs", file_artifacts=files)
+    _task([DEPLOY, {"id": "load", "type": "load_artifact", "env_id": "crm", "artifacts": [{"id": "docs"}]}])
+
+    imported = import_task("t", home / "t")
+
+    held = sorted(str(p.relative_to(imported.root / "artifacts/docs")) for p in (imported.root / "artifacts/docs").rglob("*")
+                  if p.is_file())
+    assert held == ["artifact.toml", "b.txt"]
+    assert ("artifacts/docs: __pycache__/audit.cpython-314.pyc", "dropped: a bundle leaves out __pycache__ as the OS or "
+            "Python's own") in [(d.where, d.why) for d in imported.dropped]

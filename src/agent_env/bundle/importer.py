@@ -268,8 +268,8 @@ class _EntityOut(ExportContext):
         if path == self.toml_name:
             raise Unwritable(f"it holds a file named {path}, which its folder's own {self.toml_name} would replace")
         if leaving := LEAVINGS.intersection(path.split("/")):
-            raise Unwritable(f"it holds {path}, and a bundle leaves out {', '.join(sorted(leaving))} as the OS or "
-                             "Python's own")
+            self.left_out(path, f"dropped: a bundle leaves out {', '.join(sorted(leaving))} as the OS or Python's own")
+            return
         if fold(path) in self.folded:
             raise Unwritable(f"it holds two files at {path}, by names that differ only in case")
         self.folded.add(fold(path))
