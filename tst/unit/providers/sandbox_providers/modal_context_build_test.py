@@ -161,6 +161,13 @@ def test_what_modal_cant_take_is_written_as_its_docker_equivalent(tmp_path, line
         f"FROM python\n{built}\nRUN true\n"
 
 
+def test_a_comment_among_the_lines_of_a_rewritten_instruction_is_kept_above_it(tmp_path):
+    (tmp_path / "sub").mkdir()
+
+    assert modal_image_build.modal_dockerfile("FROM python\nADD sub \\\n    # the vendored copy\n    /added/\n",
+                                              tmp_path) == "FROM python\n    # the vendored copy\nCOPY sub /added/\n"
+
+
 @pytest.mark.parametrize("line", [
     'COPY ["with space.txt", "/z/"]', "ADD archive.tar.gz /unpacked/", "ADD https://example.com/f /f",
     "ADD --checksum=sha256:abc a.txt /c", "ADD missing.txt /m", "COPY --from=build /out /out", "COPY a.txt /x/",

@@ -38,6 +38,15 @@ def test_a_build_that_reads_all_of_the_context_or_cant_be_told_says_why(dockerfi
     assert context_reads(f"FROM python\n{dockerfile}") == ContextReads(whole=why)
 
 
+def test_a_shell_here_string_leaves_the_copies_after_it_read():
+    assert context_reads("FROM x\nRUN cat <<<word > /out\nCOPY a.txt /a.txt\n") == ContextReads(paths=("a.txt",))
+
+
+def test_a_heredoc_left_open_reads_all_of_the_context_rather_than_miss_a_copy_it_swallowed():
+    assert context_reads("FROM x\nRUN <<EOF\necho hi\nCOPY a /a\n") == ContextReads(
+        whole="a heredoc in RUN never ends, so the rest can't be read")
+
+
 def _archive(path: Path, files: dict[str, str], links: dict[str, str] | None = None,
              executable: tuple[str, ...] = ()) -> Path:
     """A context tar.gz holding ``files`` and ``links``, everything in it as another tool might have written it."""
@@ -138,6 +147,26 @@ def test_what_the_os_or_python_leaves_behind_in_a_copied_folder_is_left_out(tmp_
     write_pruned(archive, {tmp_path / "out": "Dockerfile"})
 
     assert set(_files(tmp_path / "out")) == {"Dockerfile", "lib/mod.py"}
+
+
+def test_a_source_that_matches_nothing_in_the_context_keeps_all_of_it_and_says_which(tmp_path):
+    files = {"Dockerfile": "FROM python\nCOPY app/ /app/\nCOPY gone.txt /gone\n", "app/main.py": "m", "other.py": "o"}
+    archive = _archive(tmp_path / "ctx.tar.gz", files)
+
+    pruned = write_pruned(archive, {tmp_path / "out": "Dockerfile"})
+
+    assert set(_files(tmp_path / "out")) == {"Dockerfile", "app/main.py", "other.py"}
+    assert pruned[tmp_path / "out"].whole == "gone.txt matches nothing in the context"
+
+
+def test_a_chain_of_kept_links_keeps_what_its_last_link_points_at(tmp_path):
+    files = {"Dockerfile": "FROM python\nCOPY current /app\n", "releases/v3/app.py": "3", "releases/v2/app.py": "2"}
+    archive = _archive(tmp_path / "ctx.tar.gz", files, links={"current": "stable", "stable": "releases/v3"})
+
+    write_pruned(archive, {tmp_path / "out": "Dockerfile"})
+
+    assert set(_files(tmp_path / "out")) == {"Dockerfile", "releases/v3/app.py"}
+    assert (tmp_path / "out" / "stable").is_symlink()
 
 
 def test_a_dockerfile_missing_from_the_archive_is_refused(tmp_path):

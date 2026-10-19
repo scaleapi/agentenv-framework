@@ -7,7 +7,8 @@ import re
 from dataclasses import dataclass
 
 _DIRECTIVE = re.compile(r"#\s*([A-Za-z][A-Za-z0-9_-]*)\s*=\s*(\S+)\s*")
-_HEREDOC = re.compile(r"<<(-?)([\"']?)([A-Za-z_][A-Za-z0-9_]*)\2")
+# ``<<<`` is a shell here-string, which docker build leaves to the shell, not a heredoc.
+_HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)([\"']?)([A-Za-z_][A-Za-z0-9_]*)\2")
 # The instructions whose arguments can open a heredoc.
 _HEREDOC_KEYWORDS = frozenset({"RUN", "COPY", "ADD"})
 
@@ -21,6 +22,7 @@ class Instruction:
     arguments: str  # on one line: escaped line breaks and the comment lines among them removed, heredoc bodies left out
     text: str
     heredocs: tuple[str, ...] = ()  # each heredoc's body, in order
+    complete: bool = True  # False when a heredoc it opens runs to the end of the Dockerfile unclosed
 
 
 @dataclass(frozen=True)
@@ -65,19 +67,21 @@ def instructions(dockerfile: str) -> list[Instruction]:
             parts.append(body[:-len(escape)])
         keyword, _, arguments = " ".join(part.strip() for part in parts).partition(" ")
         keyword, arguments = keyword.upper(), arguments.strip()
-        heredocs = []
+        heredocs, complete = [], True
         if keyword in _HEREDOC_KEYWORDS:
             for strip_tabs, _, name in _HEREDOC.findall(arguments):
-                body = []
+                body, closed = [], False
                 while at < len(lines):
                     line = lines[at]
                     text.append(line)
                     at += 1
                     if (line.rstrip("\r\n").lstrip("\t") if strip_tabs else line.rstrip("\r\n")) == name:
+                        closed = True
                         break
                     body.append(line)
                 heredocs.append("".join(body))
-        found.append(Instruction(keyword, arguments, "".join(text), tuple(heredocs)))
+                complete = complete and closed
+        found.append(Instruction(keyword, arguments, "".join(text), tuple(heredocs), complete))
     return found
 
 

@@ -3,6 +3,7 @@ from: what ``docker build`` would send from a folder, in a fixed order, with not
 
 from __future__ import annotations
 
+import bisect
 import gzip
 import hashlib
 import json
@@ -140,6 +141,8 @@ def context_reads(dockerfile: str) -> ContextReads:
     mount's source, but not a COPY --from, a URL or git source, or a heredoc."""
     paths: list[str] = []
     for instruction in instructions(dockerfile):
+        if not instruction.complete:
+            return ContextReads(whole=f"a heredoc in {instruction.keyword} never ends, so the rest can't be read")
         if instruction.keyword in ("COPY", "ADD"):
             whole = _copy_reads(instruction, paths)
         elif instruction.keyword == "RUN":
@@ -176,6 +179,9 @@ def write_pruned(archive: Path, images: Mapping[Path, str]) -> dict[Path, Pruned
         ignore = next((name for name in _ignore_files(dockerfile) if name in texts), None)
         matcher = FilePatternMatcher(*_patterns(texts[ignore])) if ignore else None
         reads = context_reads(texts[dockerfile])
+        # A source the reading found that names nothing here is likelier a misreading than a build that fails.
+        if missing := next((path for path in reads.paths if not any(_matches(path, name) for name in links)), None):
+            reads = ContextReads(whole=f"{missing} matches nothing in the context")
         plans[folder] = (_kept(links, reads, dockerfile, ignore, matcher), reads.whole)
     counts = {folder: [0, 0] for folder in images}
     with tarfile.open(archive, "r:gz") as tar:
@@ -255,18 +261,28 @@ def _kept(links: Mapping[str, str | None], reads: ContextReads, dockerfile: str,
     else:
         kept = {name for name in links if sent(name) and any(_matches(path, name) for path in reads.paths)}
     kept |= {name for name in (dockerfile, ignore) if name in links}
+    names = sorted(links)
     pending = [name for name in kept if links[name]]
     while pending:
         name = pending.pop()
         target = posixpath.normpath(posixpath.join(posixpath.dirname(name), links[name]))
         if links[name].startswith("/") or target == ".." or target.startswith("../"):
             continue
-        for other in links:
-            if other not in kept and (other == target or other.startswith(f"{target}/")) and sent(other):
+        for other in _at_or_under(names, target):
+            if other not in kept and sent(other):
                 kept.add(other)
                 if links[other]:
                     pending.append(other)
     return kept | {str(parent) for name in kept for parent in PurePosixPath(name).parents if str(parent) in links}
+
+
+def _at_or_under(names: list[str], path: str) -> list[str]:
+    """The names in ``names``, sorted, that are ``path`` or under it."""
+    at = bisect.bisect_left(names, path)
+    found = [path] if at < len(names) and names[at] == path else []
+    start = bisect.bisect_left(names, f"{path}/")
+    end = bisect.bisect_left(names, f"{path}0")  # "0" sorts right after "/"
+    return found + names[start:end]
 
 
 def _matches(path: str, name: str) -> bool:

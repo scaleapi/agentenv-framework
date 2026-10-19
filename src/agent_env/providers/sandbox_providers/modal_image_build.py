@@ -103,7 +103,9 @@ def _for_modal(instruction: Instruction, context: Path) -> str:
                 or not all(_local_and_not_an_archive(source, context) for source in args.sources):
             return instruction.text
         keyword = "COPY"
-    return " ".join([keyword, *args.flags, *paths]) + "\n"
+    # The rewrite is one line, so comment lines among the continued ones go above it rather than be lost.
+    comments = [line for line in instruction.text.splitlines(keepends=True)[1:] if line.lstrip().startswith("#")]
+    return "".join(comments) + " ".join([keyword, *args.flags, *paths]) + "\n"
 
 
 def _local_and_not_an_archive(source: str, context: Path) -> bool:

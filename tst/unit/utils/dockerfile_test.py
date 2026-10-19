@@ -48,6 +48,21 @@ def test_a_directive_after_the_first_instruction_is_a_comment():
     assert [(i.keyword, i.arguments) for i in found if i.keyword] == [("FROM", "x"), ("COPY", "a `"), ("B", "")]
 
 
+def test_a_shell_here_string_is_no_heredoc_and_the_instructions_after_it_stand():
+    # docker build runs ``RUN cat <<<word`` as written and reads the COPY after it as its own instruction.
+    found = instructions("FROM x\nRUN cat <<<word > /out\nCOPY a.txt /a.txt\nword\n")
+
+    assert [(i.keyword, i.heredocs) for i in found if i.keyword] == [("FROM", ()), ("RUN", ()), ("COPY", ()),
+                                                                      ("WORD", ())]
+
+
+def test_a_heredoc_left_open_runs_to_the_end_and_says_so():
+    found = [i for i in instructions("FROM x\nRUN <<EOF\necho hi\nCOPY a /a\n") if i.keyword]
+
+    assert [(i.keyword, i.complete) for i in found] == [("FROM", True), ("RUN", False)]
+    assert found[1].heredocs == ("echo hi\nCOPY a /a\n",)
+
+
 @pytest.mark.parametrize(("line", "flags", "sources", "destination", "json_form", "heredoc"), [
     ("COPY a b /dst/", (), ("a", "b"), "/dst/", False, False),
     ('COPY --chown=1:1 --link ["a b", "c", "/dst"]', ("--chown=1:1", "--link"), ("a b", "c"), "/dst", True, False),
