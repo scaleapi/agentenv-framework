@@ -353,3 +353,23 @@ def test_a_field_naming_an_entity_it_cant_take_is_left_out_and_said_so_and_the_e
     assert ("tasks/t.json: step 'snapshot': universe_artifact_id", "dropped: 'vireo' is environment, and this field "
             "takes environment_universe, so the step can't read it") in [(d.where, d.why) for d in imported.dropped]
     assert _toml(imported.root, "artifacts/vireo/artifact.toml")["type"] == "environment"
+
+
+def test_an_image_whose_context_cant_be_written_is_pulled_by_the_registry_ref_it_names_and_said_why(home):
+    context = _context_image(home, "two-dockerfiles", {"mail/Dockerfile": "FROM python\nCOPY mail/ /app/\n",
+                                                       "mail/website/Dockerfile": "FROM node\n", "mail/app.py": "app\n"},
+                             "mail/Dockerfile")
+    image = get_artifact_store().put_document(DockerImageArtifact(
+        id="mail-image", description="no dockerfile recorded", image_name="registry.example.com/mail:v1",
+        build_context_s3_url=context.build_context_object_url))
+    MCPServerEnv.put(id="crm", docker_image_artifact=image, environment_name="crm")
+    _task([DEPLOY])
+
+    imported = import_task("t", home / "t")
+
+    assert _toml(imported.root, "envs/crm/env.toml")["image"] == {"ref": "registry.example.com/mail:v1"}
+    assert imported.images == () and imported.pinned == ()
+    [pulled] = imported.pulled
+    assert pulled.why.startswith("its build context can't be written as a folder: the build context names no "
+                                 "Dockerfile and holds 2: mail/Dockerfile, mail/website/Dockerfile")
+    assert not (imported.root / "envs/crm/mail").exists()

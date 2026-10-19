@@ -140,6 +140,7 @@ class Pulled:
     folder: str
     key: str
     image: str
+    why: str | None = None  # why it's pulled though it has a build context: the context can't be written
 
 
 @dataclass(frozen=True)
@@ -189,7 +190,8 @@ class BundleImport:
                                    for (by, name, what), wheres in sorted(needed.items())]),
             ("Written", [f"{entity.folder}: {entity.type} {entity.id} v{entity.version}" for entity in self.written]),
             ("Images", [_image_line(image) for image in self.images]
-             + [f"{pull.folder}: {pull.key} is pulled from its registry, as {pull.image}" for pull in self.pulled]),
+             + [f"{pull.folder}: {pull.key} is pulled from its registry, as {pull.image}"
+                + (f", since {pull.why}" if pull.why else "") for pull in self.pulled]),
             ("Floating", [f"{ref.kind.value} {ref.id}: {ref.where}: {ref.why}" for ref in self.floating]
              + [f"{step}: its type declares no references, so any it makes float" for step in self.undeclared]),
             ("Left out", [f"{drop.where}: {drop.why}" for drop in self.dropped]
@@ -459,7 +461,13 @@ class _Importer:
         return total
 
     def _image_left_in_store(self, job: ImageJob) -> None:
-        """An image whose context the folder can't hold: a problem, or a pinned store image when the import keeps one."""
+        """An image whose context the folder can't hold: its registry ref when it names one, else a problem, or a pinned
+        store image when the import keeps one."""
+        if names_registry(job.artifact.image_name):
+            job.toml.clear()
+            job.toml["ref"] = job.artifact.image_name
+            self.pulled.append(Pulled(job.folder, job.key, job.artifact.image_name, job.problem))
+            return
         key = (EntityKind.ARTIFACT, job.artifact.id, job.artifact.version)
         try:
             self._unwritable(key, f"{job.folder}: {job.key}", job.problem)
