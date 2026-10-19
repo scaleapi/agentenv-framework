@@ -7,6 +7,7 @@ import bisect
 import csv
 import functools
 import gzip
+import heapq
 import hashlib
 import json
 import os
@@ -126,12 +127,14 @@ class ContextReads:
 
 @dataclass(frozen=True)
 class Pruned:
-    """What ``write_pruned`` wrote into a folder: ``files`` files of ``size`` bytes, and why it wrote everything the
-    context sends when it did."""
+    """What ``write_pruned`` wrote into a folder for the Dockerfile at ``dockerfile`` in it: ``files`` files of
+    ``size`` bytes, the biggest of them by bytes, and why it wrote everything the context sends when it did."""
 
+    dockerfile: str
     files: int
     size: int
     whole: str | None
+    largest: tuple[tuple[str, int], ...] = ()
 
 
 # The COPY and ADD flags that change how a source is written, not which one it is.
@@ -156,14 +159,15 @@ def context_reads(dockerfile: str) -> ContextReads:
     return ContextReads(paths=tuple(dict.fromkeys(paths)))
 
 
-def write_pruned(archive: Path, images: Mapping[Path, str]) -> dict[Path, Pruned]:
+def write_pruned(archive: Path, images: Mapping[Path, str | None]) -> dict[Path, Pruned]:
     """Write into each folder ``images`` names the part of the build context tar.gz at ``archive`` that its
     Dockerfile, at the path ``images`` gives in the context, reads: what ``context_reads`` finds, less what the
     context's ignore file leaves out and what the OS or Python leaves behind, with the Dockerfile, the ignore file
-    and the targets of kept links. Reads the
-    archive twice and never unpacks the rest of it. Raises ValueError when a Dockerfile isn't in the archive, or on a
-    member ``extract`` refuses."""
-    dockerfiles = {folder: posixpath.normpath(dockerfile) for folder, dockerfile in images.items()}
+    and the targets of kept links. An image with no path given builds the context's ``Dockerfile``, or, with none at
+    its root, the only one in it. Reads the archive twice, a third time for a Dockerfile found or reached through a
+    link, and never unpacks the rest of it. Raises ValueError when a Dockerfile isn't in the archive or can't be told
+    apart from others, or on a member ``extract`` refuses."""
+    dockerfiles = {folder: posixpath.normpath(dockerfile) for folder, dockerfile in images.items() if dockerfile}
     wanted = {name for dockerfile in dockerfiles.values() for name in (dockerfile, *_ignore_files(dockerfile))}
     links: dict[str, str | None] = {}
     texts: dict[str, str] = {}
@@ -174,6 +178,11 @@ def write_pruned(archive: Path, images: Mapping[Path, str]) -> dict[Path, Pruned
             links[name] = member.linkname if member.issym() else None
             if name in wanted and member.isreg():
                 texts[name] = tar.extractfile(member).read().decode("utf-8", "replace")
+    for folder in images.keys() - dockerfiles.keys():
+        dockerfiles[folder] = _found_dockerfile(links)
+        wanted |= {dockerfiles[folder], *_ignore_files(dockerfiles[folder])}
+    if unread := {name for name in wanted if name in links and not links[name] and name not in texts}:
+        texts |= _texts(archive, unread)
     # A Dockerfile or ignore file stored as a link is read where it leads, as docker build reads it.
     linked = {name: _resolve(name, links)[0] for name in wanted if links.get(name)}
     if unread := {target for target in linked.values() if target not in texts}:
@@ -190,7 +199,7 @@ def write_pruned(archive: Path, images: Mapping[Path, str]) -> dict[Path, Pruned
         if missing := next((path for path in reads.paths if not any(_matches(path, name) for name in links)), None):
             reads, crossed = ContextReads(whole=f"{missing} matches nothing in the context"), set()
         plans[folder] = (_kept(links, reads, dockerfile, ignore, matcher, crossed), reads.whole)
-    counts = {folder: [0, 0] for folder in images}
+    written: dict[Path, list[tuple[str, int]]] = {folder: [] for folder in images}
     with tarfile.open(archive, "r:gz") as tar:
         for member in tar:
             name = _member_name(member)
@@ -204,9 +213,25 @@ def write_pruned(archive: Path, images: Mapping[Path, str]) -> dict[Path, Pruned
                     tar.extract(member, folder, filter=_context_member)
                     first = folder / name if member.isreg() else None
                 if member.isreg():
-                    counts[folder][0] += 1
-                    counts[folder][1] += member.size
-    return {folder: Pruned(*counts[folder], plans[folder][1]) for folder in images}
+                    written[folder].append((name, member.size))
+    return {folder: Pruned(dockerfiles[folder], len(files), sum(size for _, size in files), plans[folder][1],
+                           tuple(heapq.nlargest(_LARGEST, files, key=lambda file: file[1])))
+            for folder, files in written.items()}
+
+
+# How many of an image's biggest files its Pruned names, for an import to show what it wrote.
+_LARGEST = 5
+
+
+def _found_dockerfile(links: Mapping[str, str | None]) -> str:
+    """The Dockerfile an image that names none builds: the context's ``Dockerfile``, else the only one in it."""
+    if "Dockerfile" in links:
+        return "Dockerfile"
+    found = sorted(name for name in links if posixpath.basename(name) == "Dockerfile")
+    if len(found) != 1:
+        raise ValueError(f"the build context names no Dockerfile and holds {len(found)}"
+                         f"{': ' + ', '.join(found) if found else ''}; name the one it builds")
+    return found[0]
 
 
 def _texts(archive: Path, names: set[str]) -> dict[str, str]:

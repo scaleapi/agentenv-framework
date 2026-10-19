@@ -234,6 +234,51 @@ def test_a_chain_of_kept_links_keeps_what_its_last_link_points_at(tmp_path):
     assert (tmp_path / "out" / "stable").is_symlink()
 
 
+def test_an_image_naming_no_dockerfile_builds_the_contexts_or_the_only_one_in_it(tmp_path):
+    root = _archive(tmp_path / "root.tar.gz", {"Dockerfile": "FROM python\nCOPY a /a\n", "a": "a",
+                                                "sub/Dockerfile": "FROM python\n"})
+    nested = tmp_path / "nested.tar.gz"
+    with tarfile.open(nested, "w:gz") as tar:  # the only Dockerfile, written three times as a stored context had it
+        for text in ("FROM python\n", "FROM python\nCOPY b /b\n", "FROM python\nCOPY app/ /app/\n"):
+            info = tarfile.TarInfo("claude_code/Dockerfile")
+            info.size = len(text)
+            tar.addfile(info, io.BytesIO(text.encode()))
+        info = tarfile.TarInfo("app/main.py")
+        info.size = 1
+        tar.addfile(info, io.BytesIO(b"m"))
+
+    from_root = write_pruned(root, {tmp_path / "root": None})[tmp_path / "root"]
+    from_nested = write_pruned(nested, {tmp_path / "nested": None})[tmp_path / "nested"]
+
+    assert from_root.dockerfile == "Dockerfile" and set(_files(tmp_path / "root")) == {"Dockerfile", "a"}
+    assert from_nested.dockerfile == "claude_code/Dockerfile"
+    assert _files(tmp_path / "nested") == {"claude_code/Dockerfile": "FROM python\nCOPY app/ /app/\n",
+                                           "app/main.py": "m"}
+
+
+@pytest.mark.parametrize(("files", "problem"), [
+    ({"a/Dockerfile": "FROM x\n", "b/Dockerfile": "FROM x\n"}, "holds 2: a/Dockerfile, b/Dockerfile; name the one"),
+    ({"a.py": "a"}, "names no Dockerfile and holds 0; name the one it builds"),
+], ids=["two", "none"])
+def test_an_image_naming_no_dockerfile_is_refused_when_the_context_doesnt_settle_which(tmp_path, files, problem):
+    archive = _archive(tmp_path / "ctx.tar.gz", files)
+
+    with pytest.raises(ValueError, match=problem):
+        write_pruned(archive, {tmp_path / "out": None})
+
+
+def test_each_image_names_its_largest_files_for_the_report(tmp_path):
+    files = {"Dockerfile": "FROM python\nCOPY data/ /data/\n",
+             **{f"data/f{n}.bin": "x" * (100 * n) for n in range(1, 8)}, "big-unread.bin": "x" * 10_000}
+    archive = _archive(tmp_path / "ctx.tar.gz", files)
+
+    pruned = write_pruned(archive, {tmp_path / "out": "Dockerfile"})[tmp_path / "out"]
+
+    assert pruned.largest == (("data/f7.bin", 700), ("data/f6.bin", 600), ("data/f5.bin", 500), ("data/f4.bin", 400),
+                              ("data/f3.bin", 300))
+    assert pruned.dockerfile == "Dockerfile"
+
+
 def test_a_dockerfile_missing_from_the_archive_is_refused(tmp_path):
     archive = _archive(tmp_path / "ctx.tar.gz", {"a.py": "a"})
 
