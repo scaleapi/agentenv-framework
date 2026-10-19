@@ -84,6 +84,11 @@ class TaskRun:
         return recorded_scores(self.task.steps, self.context)
 
     @property
+    def models(self) -> dict[str, dict[str, str | None]]:
+        """The model each step asked for, by role then step id; None leaves it to the agent."""
+        return self.context.metadata.get("models") or {}
+
+    @property
     def outcome(self) -> Outcome:
         if self.cancelled:
             return Outcome.CANCELLED
@@ -184,14 +189,17 @@ def run_bundle(
     tasks: Sequence[str] = (),
     evals: Sequence[str] = (),
     model: str | None = None,
+    user_model: str | None = None,
+    judge_model: str | None = None,
     sandbox: str | None = None,
     on_progress: Callable[[str], None] | None = None,
     id_root: str | None = None,
     keep: bool = False,
 ) -> BundleRun:
     """Write what the tasks and evals selected in ``root`` need, as ``plan_bundle`` selects them, then run
-    each of their tasks once. ``model`` replaces the agent's model but not the judge's; ``sandbox`` is the
-    provider that envs, agents, sandboxes and the judge deploy on. ``on_progress`` is given a line of text
+    each of their tasks once. ``model``, ``user_model`` and ``judge_model`` replace the models the solver, the
+    user simulator and the judges run on, leaving the tasks as written; ``sandbox`` is the provider that envs,
+    agents, sandboxes and the judge deploy on. ``on_progress`` is given a line of text
     at each write and step. ``id_root`` roots the ids of a bundle an installed package provides
     (``InstalledBundle.id_root``); a folder's ids otherwise come from its path.
 
@@ -228,7 +236,8 @@ def run_bundle(
         if preflight.infra:
             ensure_default_envs(preflight.infra_kinds, say=say)
         with Interrupts() as interrupts:
-            runs = interrupts.run(_run_all(plan, to_run, model, sandbox, keep, say, interrupts))
+            overrides = _overrides(sandbox, user_model, judge_model)
+            runs = interrupts.run(_run_all(plan, to_run, model, overrides, keep, say, interrupts))
             _mark_cancelled(runs, interrupts.reason)
             result = _bundle_run(plan, materialization, runs, _skipped(plan, entries, every=not tasks and not evals))
             if not interrupts.count:
@@ -326,8 +335,15 @@ def refuse_store_tasks(plan: Plan) -> None:
         raise BundleError(problems)
 
 
+def _overrides(sandbox: str | None, user_model: str | None, judge_model: str | None) -> dict[str, str]:
+    """The run's ``user_overrides``: where everything deploys, and the models the user simulator and judges run on."""
+    overrides = {"env_sandbox": sandbox, "agent_sandbox": sandbox, "sandbox": sandbox} if sandbox else {}
+    return {**overrides, **{key: value for key, value in (("user_model", user_model), ("judge_model", judge_model))
+                            if value}}
+
+
 async def _run_all(
-    plan: Plan, to_run: list[tuple[BundleEntry, Task]], model: str | None, sandbox: str | None, keep: bool,
+    plan: Plan, to_run: list[tuple[BundleEntry, Task]], model: str | None, overrides: dict[str, str], keep: bool,
     say: Callable[[str], None], interrupts: Interrupts,
 ) -> tuple[TaskRun, ...]:
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_RUNS)
@@ -348,8 +364,8 @@ async def _run_all(
     async def run_one(entry: BundleEntry, task: Task) -> TaskRun:
         tag = f"[{_path(plan, entry)}]"
         metadata = {"run_group_id": run_group_id, "task_id": task.id}
-        if sandbox:
-            metadata["user_overrides"] = {"env_sandbox": sandbox, "agent_sandbox": sandbox, "sandbox": sandbox}
+        if overrides:
+            metadata["user_overrides"] = dict(overrides)
         context = TaskStepContext(metadata=metadata)
         try:
             await semaphore.acquire()

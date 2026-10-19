@@ -396,8 +396,8 @@ class Config:
     def get_default_model(self) -> str | None:
         return self._model_config().default
 
-    def get_model_for_role(self, role: str) -> str | None:
-        return self._model_config().model_for_role(role)
+    def get_model_for_role(self, role: str, *, or_default: bool = True) -> str | None:
+        return self._model_config().model_for_role(role, or_default=or_default)
 
     def get_model_params(self, overrides: dict | None = None) -> dict:
         params = dict(self._model_config().params)

@@ -31,7 +31,9 @@ _DRY_RUN = "Dry run: nothing is written or run."
 @click.argument("bundle", required=False)
 @click.option("--task", "tasks", multiple=True, help="Run this task, by name or id. Repeatable.")
 @click.option("--eval", "evals", multiple=True, help="Run this eval's tasks, by name or id. Repeatable.")
-@click.option("--model", default=None, help="The model the agent runs on. The judge keeps its own.")
+@click.option("--model", default=None, help="The model the solver agent runs on, whatever the tasks name.")
+@click.option("--user-model", default=None, help="The model the user simulator runs on, whatever the tasks name.")
+@click.option("--judge-model", default=None, help="The model the judges grade with, whatever the tasks name.")
 @click.option("--sandbox", default=None,
               help="The sandbox provider envs, agents, sandboxes and the judge deploy on; comma-separated for a "
                    "fallback chain.")
@@ -41,7 +43,7 @@ _DRY_RUN = "Dry run: nothing is written or run."
               help="Check the bundle as the run does and show what it would write and run; write and run nothing.")
 @click.pass_context
 def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: tuple[str, ...], model: str | None,
-        sandbox: str | None, keep: bool, dry_run: bool):
+        user_model: str | None, judge_model: str | None, sandbox: str | None, keep: bool, dry_run: bool):
     """Run a bundle's tasks and evals, or list the installed bundles.
 
     BUNDLE is a folder, or the name of a bundle an installed package provides (PACKAGE/NAME when several
@@ -49,11 +51,12 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
 
     With no --task or --eval, it runs every eval or, in a bundle without evals, every task. Each task runs
     once, at most four at a time, and the run exits 1 if any of them failed. With --verbose, a run that
-    raised prints its traceback.
+    raised prints its traceback. --model, --user-model and --judge-model choose the models for this run only,
+    leaving the tasks as written, and the summary names the model each role ran on.
 
     --dry-run makes the checks the run makes before its first task, reading the stores as the run does, and
     prints what it would write and run, writing and running nothing. It exits 1 on a problem the run would
-    stop at, and 0 otherwise; --model and --keep change nothing it shows. It takes no lock, so another run
+    stop at, and 0 otherwise; the models and --keep change nothing it shows. It takes no lock, so another run
     can write first and change what it shows.
 
     Each run's sandboxes are torn down as it ends; its instance and outputs stay. --keep holds them up
@@ -61,8 +64,9 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
     exits 130 (143 for SIGTERM); a second one stops the teardown and prints what is still up.
     """
     if bundle is None:
-        if tasks or evals or model or sandbox or keep or dry_run:
-            raise click.UsageError("--task, --eval, --model, --sandbox, --keep and --dry-run need a BUNDLE to run")
+        if tasks or evals or model or user_model or judge_model or sandbox or keep or dry_run:
+            raise click.UsageError("--task, --eval, --model, --user-model, --judge-model, --sandbox, --keep and "
+                                   "--dry-run need a BUNDLE to run")
         _list_installed()
         return
     root, id_root = _locate(bundle)
@@ -73,8 +77,9 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
             _report_dry_run(dry_run_bundle(root, tasks=tasks, evals=evals, sandbox=sandbox, on_progress=click.echo,
                                            id_root=id_root))
             return
-        result = run_bundle(root, tasks=tasks, evals=evals, model=model, sandbox=sandbox, on_progress=click.echo,
-                            id_root=id_root, keep=keep)
+        result = run_bundle(root, tasks=tasks, evals=evals, model=model, user_model=user_model,
+                            judge_model=judge_model, sandbox=sandbox, on_progress=click.echo, id_root=id_root,
+                            keep=keep)
     except BundleError as e:
         _note_an_installed_namesake(e, bundle, root, id_root)
         raise
@@ -173,6 +178,8 @@ def _summarize(result: BundleRun, verbose: bool) -> None:
     click.echo("Tasks:")
     for run in result.runs:
         click.echo(click.style(f"  {_described(result, run)}", fg=_COLORS[run.outcome]))
+        if models := _models(run):
+            click.echo(f"    models: {models}")
     if result.evals:
         click.echo("Evals:")
     for eval_run in result.evals:
@@ -237,6 +244,15 @@ def _described(result: BundleRun, run: TaskRun) -> str:
         return f"{result.path(run.entry)} v{run.task.version}: didn't start"
     return (f"{result.path(run.entry)} v{run.task.version}: {_outcome(run)}, {run.duration:.1f}s, "
             f"{f'instance {run.instance_id}' if run.instance_id else 'no instance recorded'}")
+
+
+def _models(run: TaskRun) -> str:
+    """Each role's models in ``run``, distinct ones joined, as ``solver M; user simulator M; judge M``."""
+    roles = []
+    for role, by_step in run.models.items():
+        names = sorted({model or "the agent's default" for model in by_step.values()})
+        roles.append(f"{role} {', '.join(names)}")
+    return "; ".join(roles)
 
 
 def _outcome(run: TaskRun) -> str:

@@ -1292,6 +1292,9 @@ class _Conversation:
             def get_default_human_a2a_url(self):
                 return _Conversation.USER_URL
 
+            def get_model_for_role(self, role, *, or_default=True):
+                return None
+
         monkeypatch.setattr(pa_mod, "get_config", lambda: _Cfg())
 
     def context(self) -> TaskStepContext:

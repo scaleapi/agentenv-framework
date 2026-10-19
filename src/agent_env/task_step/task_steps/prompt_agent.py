@@ -363,6 +363,13 @@ class PromptAgentTaskStep(TaskStep):
         effort = step_overrides.get("effort") or overrides.get("agent_effort") or self.effort
         return model, effort
 
+    def _resolve_user_model(self, context: TaskStepContext) -> Optional[str]:
+        """The user simulator's model for this run: this step's ``step_overrides``, then the run's ``user_model``, the
+        stored value, and the config's ``user`` role when it names one."""
+        return (self.step_param_overrides(context).get("user_model")
+                or context.metadata.get("user_overrides", {}).get("user_model") or self.user_model
+                or get_config().get_model_for_role("user", or_default=False))
+
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         # A changelog staged on the agent moves into the store while it works, and the rest when it is done.
         async with draining(staged_changelogs(context.metadata, agent_name=self.agent_name)):
@@ -425,6 +432,7 @@ class PromptAgentTaskStep(TaskStep):
         prompt_text = initial_parts[0]["text"] if self.prompt is not None else None
 
         model, effort = self._resolve_model_and_effort(context)
+        context.record_model("solver", self.id, model)
         harness = context.agent_harness or self.harness
         overrides = context.metadata.get("user_overrides", {})
         max_thinking_tokens = overrides.get("agent_max_thinking_tokens") or self.max_thinking_tokens
@@ -450,7 +458,9 @@ class PromptAgentTaskStep(TaskStep):
         is_user_sim = user_sim is not None and self.user_a2a_url is None
         if is_user_sim:
             user_output_format = self.user_output_format or _DEFAULT_USER_SIM_OUTPUT_FORMAT
-            user_config = {k: v for k, v in {"output_format": user_output_format, "model": self.user_model}.items() if v is not None}
+            user_model = self._resolve_user_model(context)
+            context.record_model("user simulator", self.id, user_model)
+            user_config = {k: v for k, v in {"output_format": user_output_format, "model": user_model}.items() if v is not None}
             negotiated = A2AAgent.negotiate_agent_config(user_sim.a2a_card or {}, user_config)
             if negotiated:
                 await protocol.post_agent_config(user_url + negotiated.endpoint, negotiated.fields)

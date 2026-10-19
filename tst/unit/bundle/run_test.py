@@ -79,6 +79,19 @@ class _Cancelled(_Scored):
         raise asyncio.CancelledError
 
 
+class _RecordsModels(_Scored):
+    """Records the models its solver, user simulator and judge ask for, as the real steps do."""
+
+    type = "records_models_run_test"
+
+    async def execute(self, context):
+        overrides = context.metadata.get("user_overrides", {})
+        context.record_model("solver", self.id, context.agent_model)
+        context.record_model("user simulator", self.id, overrides.get("user_model"))
+        context.record_model("judge", self.id, overrides.get("judge_model"))
+        return context
+
+
 class _NamesAgent(_Scored):
     """Names an agent, so the agent and its image are written, without deploying it."""
 
@@ -113,7 +126,8 @@ LAYOUT = {
 
 @pytest.fixture(autouse=True)
 def registries(monkeypatch):
-    steps = {**Config().task_step_registry(), **{cls.type: cls for cls in (_Scored, _Failing, _Cancelled, _NamesAgent)}}
+    steps = {**Config().task_step_registry(),
+             **{cls.type: cls for cls in (_Scored, _Failing, _Cancelled, _NamesAgent, _RecordsModels)}}
     monkeypatch.setattr(Config, "task_step_registry", lambda self: steps)
     monkeypatch.setattr(_Scored, "seen", [])
     monkeypatch.setattr(_Scored, "peak", 0)
@@ -232,6 +246,15 @@ def test_the_model_and_sandbox_reach_each_run_and_one_invocation_shares_a_run_gr
     assert first[0].metadata["run_group_id"] == first[1].metadata["run_group_id"]
     assert _Scored.seen[2].metadata["run_group_id"] != first[0].metadata["run_group_id"]
     assert "user_overrides" not in _Scored.seen[2].metadata
+
+
+def test_the_user_and_judge_models_reach_each_run_as_overrides_beside_the_sandbox(bundle_dir):
+    run_bundle(bundle_dir, tasks=["a"], user_model="u", judge_model="j")
+    run_bundle(bundle_dir, tasks=["a"], user_model="u", sandbox="local")
+
+    assert [context.metadata["user_overrides"] for context in _Scored.seen] == [
+        {"user_model": "u", "judge_model": "j"},
+        {"env_sandbox": "local", "agent_sandbox": "local", "sandbox": "local", "user_model": "u"}]
 
 
 def test_an_eval_naming_a_store_task_is_refused_before_anything_is_written(bundle_dir):
@@ -399,6 +422,22 @@ def test_the_cli_prints_a_raised_runs_traceback_only_with_verbose(bundle_dir, qu
     assert verbose.stderr.startswith("\ntasks/c.json raised:\nTraceback (most recent call last):")
     assert verbose.stderr.rstrip().endswith("RuntimeError: boom")
     assert _normalized(verbose.stdout).split("\n\n", 1)[1] == _normalized(quiet.stdout).split("\n\n", 1)[1]
+
+
+def test_the_cli_runs_each_role_on_its_model_names_them_and_a_rerun_on_others_writes_nothing(bundle_dir, quiet_logs):
+    layout(bundle_dir, {"tasks/models.json": json.dumps([{"id": "roles", "type": "records_models_run_test"}])})
+    written = (bundle_dir / "tasks" / "models.json").read_text()
+
+    first = CliRunner().invoke(cli, ["run", str(bundle_dir), "--task", "models", "--model", "m", "--user-model", "u",
+                                     "--judge-model", "j"])
+    second = CliRunner().invoke(cli, ["run", str(bundle_dir), "--task", "models", "--judge-model", "k"])
+
+    assert first.exit_code == 0 and second.exit_code == 0, first.output + second.output
+    assert "    models: solver m; user simulator u; judge j" in first.output.splitlines()
+    assert "tasks/models.json: v1, unchanged" in second.output
+    assert ("    models: solver the agent's default; user simulator the agent's default; judge k"
+            in second.output.splitlines())
+    assert (bundle_dir / "tasks" / "models.json").read_text() == written
 
 
 def test_the_cli_exits_0_when_no_run_failed_even_if_one_scored_below_1(bundle_dir, quiet_logs):

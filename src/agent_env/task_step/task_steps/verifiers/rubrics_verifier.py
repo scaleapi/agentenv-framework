@@ -660,6 +660,7 @@ class RubricsVerifierTaskStep(TaskStep):
 
         try:
             model = overrides.get("judge_model") or self.default_model
+            context.record_model("judge", self.id, model)
             criteria_for_prompt = [
                 {**c, "negative": True} if (c.get("weight") is not None and c["weight"] < 0) else c
                 for c in criteria_for_judge
