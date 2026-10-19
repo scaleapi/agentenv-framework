@@ -8,8 +8,9 @@ its provider: an image the provider can't run, by the check the deploy itself ma
 would pull from this machine's registry; a VM asked of a provider that can't create one; or containers on the local
 provider without a Docker daemon. An image's tar.gz or build context
 that only this machine's object store holds isn't refused: agent-env pushes it to the sandbox. A deploy_agent step that
-names no agent, and a judge that names none, deploy the configured default agent, which must be in the store. An env the
-bundle writes is checked from its planned env.toml.
+names no agent, and a judge that names none, deploy the configured default agent: one this bundle or an installed one
+defines is planned as the bundle's own, and any other must be in the store. An env the bundle writes, or pulls in from an
+installed bundle, is checked from its planned env.toml.
 
 An image the bundle builds is written in the form its deploys can run: built on this machine when they deploy on the
 local provider, and as its build context alone when they deploy on providers that build it, in a VM or, as Modal does,

@@ -34,6 +34,7 @@ from agent_env.task.teardown import TeardownReport, teardown_run
 from agent_env.task_step.context import TaskStepContext
 from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM
 
+from .installed import installed_bundles
 from .materialize import Materialization, Materialized, materialize
 from .parse import BundleEntry, BundleError, BundleKind, parse_bundle
 from .plan import Plan, Write, plan_bundle
@@ -300,7 +301,8 @@ def _bundle_run(plan: Plan, materialization: Materialization, runs: tuple[TaskRu
 
 def _planned(root: Path | str, tasks: Sequence[str], evals: Sequence[str], id_root: str | None,
              sandbox: str | None) -> tuple[Plan, Preflight]:
-    plan = plan_bundle(resolve_bundle(parse_bundle(Path(root), id_root=id_root)), tasks=tasks, evals=evals)
+    plan = plan_bundle(resolve_bundle(parse_bundle(Path(root), id_root=id_root)), tasks=tasks, evals=evals,
+                       installed=installed_bundles)
     refuse_store_tasks(plan)
     to_run = set(_to_run(plan))
     return plan, preflight_run(plan, [write.source for write in plan.writes

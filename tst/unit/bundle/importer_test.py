@@ -361,7 +361,7 @@ def test_a_folder_that_fails_its_check_is_not_moved_into_place_and_its_staging_i
     (store / "dest").mkdir()
     before = _left(store)
 
-    def refuse(resolved):
+    def refuse(resolved, **_):
         raise BundleError(["refused"])
 
     monkeypatch.setattr(importer_module, "check_bundle", refuse)
@@ -406,7 +406,7 @@ def test_a_destination_something_else_writes_during_the_import_is_left_as_it_wro
     if empty:
         dest.mkdir()
 
-    def land(resolved):
+    def land(resolved, **_):
         dest.mkdir(exist_ok=True)
         (dest / "theirs.txt").write_text("theirs")
 
@@ -436,7 +436,7 @@ def test_a_folder_the_import_cant_write_in_is_refused_in_one_line(store):
 
 def test_sigterm_during_an_import_leaves_nothing_beside_its_destination(store, monkeypatch):
     before = _left(store)
-    monkeypatch.setattr(importer_module, "check_bundle", lambda resolved: os.kill(os.getpid(), signal.SIGTERM))
+    monkeypatch.setattr(importer_module, "check_bundle", lambda resolved, **_: os.kill(os.getpid(), signal.SIGTERM))
 
     result = CliRunner().invoke(cli, ["bundle", "init", str(store / "dest"), "--from-task", "triage"])
 

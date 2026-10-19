@@ -19,6 +19,7 @@ from agent_env.artifact.registry import ARTIFACT_REGISTRY, canonical_type, get_a
 from agent_env.bundle import _toml
 from agent_env.bundle._fs import fold, os_reason, show
 from agent_env.bundle._secrets import scrub
+from agent_env.bundle.installed import installed_bundles
 from agent_env.bundle.parse import BundleError, parse_bundle, root_problems, segment_problem
 from agent_env.bundle.plan import STORE_GETTERS, check_bundle
 from agent_env.bundle.resolve import resolve_bundle
@@ -239,7 +240,7 @@ class _Importer:
                     (staging / path).write_text(text, encoding="utf-8")
             except OSError as e:
                 raise BundleError([f"{show(self.dest.parent)}: can't write the import there: {os_reason(e)}"]) from None
-            check_bundle(resolve_bundle(parse_bundle(staging)))
+            check_bundle(resolve_bundle(parse_bundle(staging)), installed=installed_bundles)
             self._move(staging)
         finally:
             shutil.rmtree(staging, ignore_errors=True)
