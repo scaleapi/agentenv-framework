@@ -125,11 +125,12 @@ def check_bundle(resolved: ResolvedBundle, *, installed: Installed | None = None
 
 @dataclass(frozen=True)
 class _Pullable:
-    """An installed bundle, resolved, with its entities and images by (kind, id)."""
+    """An installed bundle, resolved: its entities by (kind, id), as a reference names one, each with its resolved
+    entry or, for an image folder, its image."""
 
     resolved: ResolvedBundle
-    by_id: dict[tuple[EntityKind, str], BundleEntry | BundleImage]
-    by_entry: dict[BundleEntry, ResolvedEntry]
+    by_id: dict[tuple[EntityKind, str], BundleEntry]
+    by_entry: dict[BundleEntry, ResolvedEntry | BundleImage]
 
 
 class _Planner:
@@ -152,6 +153,7 @@ class _Planner:
         self.pullable: dict[str, _Pullable | str] = {}  # each installed bundle read, by id root, or why it can't be
         self.unpulled: dict[tuple[EntityKind, str, int | None], str] = {}  # why an installed bundle's id isn't pulled
         self.pulling: set[_Key] = set()
+        self.own = _by_id(resolved.bundle)  # what a pulled entity's id names in this bundle
         images: dict[BundleEntry, list[BundleImage]] = {}
         for image in resolved.images:
             images.setdefault(image.entry, []).append(image)
@@ -191,26 +193,26 @@ class _Planner:
         for step in task.config:
             cls = registry.get(step.get("type")) if isinstance(step.get("type"), str) else None
             for field_ref in default_agent_refs(cls.entity_refs or () if cls is not None else (), step):
-                agent_id = get_config().get_default_a2a_agent_id()
-                ref = Reference(EntityKind.AGENT, agent_id, None, None,
+                version = step.get(field_ref.version_field) if field_ref.version_field else None
+                ref = Reference(EntityKind.AGENT, get_config().get_default_a2a_agent_id(), version, None,
                                 f"step {step.get('id')!r}: {field_ref.path} (the default agent)", None)
-                own = self.identified.get(_nfc(agent_id))
-                if own is not None and own.kind is BundleKind.AGENT:
-                    found.append(replace(ref, local=own))
-                elif (pulled := self._pulled(ref)).local is not None or (ref.kind, ref.id, None) in self.unpulled:
+                pulled = self._pulled(ref)
+                if pulled.local is not None or (ref.kind, ref.id, ref.version) in self.unpulled:
                     found.append(pulled)
         return found
 
     def _pulled(self, ref: Reference) -> Reference:
-        """``ref``, a store reference, pointing at the installed bundle's entity its id names, pulled into the plan.
-        One naming no installed bundle's id stays a store reference, as does one that can't be pulled, whose problem
-        the store ref check reports."""
-        if ref.kind not in _PULLED or not ref.id.startswith(LOCAL_PREFIX):
+        """``ref``, a store reference, pointing at what its id names: this bundle's entity, for a reference a pulled
+        entity or a default makes, or an installed bundle's, pulled into the plan. One naming neither stays a store
+        reference, as does one that can't be pulled, whose problem the store ref check reports."""
+        if ref.kind not in _PULLED:
             return ref
-        installed = self._installed_for(ref.id)
-        if installed is None:
+        if (own := self.own.get((ref.kind, ref.id))) is not None:
+            target, problem = own, _misnamed(own, ref, "this bundle's", "is defined in this bundle")
+        elif ref.id.startswith(LOCAL_PREFIX) and (installed := self._installed_for(ref.id)) is not None:
+            target, problem = self._target(installed, ref)
+        else:
             return ref
-        target, problem = self._target(installed, ref)
         if problem is not None:
             self.unpulled[ref.kind, ref.id, ref.version] = problem
             return ref
@@ -224,11 +226,9 @@ class _Planner:
             self.others = tuple(bundle for bundle in self.installed() if bundle.id_root != self.resolved.bundle.id_root)
         return next((bundle for bundle in self.others if entity_id.startswith(f"{bundle.id_root}/")), None)
 
-    def _target(self, installed: InstalledBundle, ref: Reference) -> tuple[BundleEntry | BundleImage | None, str | None]:
+    def _target(self, installed: InstalledBundle, ref: Reference) -> tuple[BundleEntry | None, str | None]:
         """What ``ref`` names in ``installed``, pulled into the plan, or why it names nothing there."""
         name = installed.qualified
-        if ref.version is not None:
-            return None, f"{ref.id!r} comes with the installed bundle {name}, so it has no fixed version; drop the pin"
         pullable = self._pullable(installed)
         if isinstance(pullable, str):
             return None, f"{ref.id!r} comes with the installed bundle {name}, which can't be read: {pullable}"
@@ -236,12 +236,11 @@ class _Planner:
         if target is None:
             other = next((found for (kind, id), found in pullable.by_id.items() if id == ref.id), None)
             if other is not None:
-                return None, (f"{ref.id!r} is the installed bundle {name}'s {_kind_of(other)}, but this field takes "
+                return None, (f"{ref.id!r} is the installed bundle {name}'s {other.kind.store}, but this field takes "
                               f"{with_article(ref.kind.value)}")
             return None, f"there is no {ref.kind.value} {ref.id!r} in the installed bundle {name}"
-        type_ = "docker_image" if isinstance(target, BundleImage) else target.type
-        if ref.artifact_type and canonical_type(type_) != canonical_type(ref.artifact_type):
-            return None, f"{ref.id!r} is the installed bundle {name}'s {type_}, but this field takes {ref.artifact_type}"
+        if problem := _misnamed(target, ref, f"the installed bundle {name}'s", f"comes with the installed bundle {name}"):
+            return None, problem
         self._pull(pullable, target)
         return target, None
 
@@ -256,14 +255,10 @@ class _Planner:
                 except BundleError as e:
                     self.pullable[installed.id_root] = e.summary
                 else:
-                    by_id: dict[tuple[EntityKind, str], BundleEntry | BundleImage] = {
-                        (EntityKind.ARTIFACT, image.id): image for image in resolved.images}
-                    for entry in resolved.entries:
-                        for kind in _PULLED:
-                            if entry.entry.kind in NAMED_BY[kind]:
-                                by_id[kind, entry.entry.id] = entry.entry
-                    self.pullable[installed.id_root] = _Pullable(resolved, by_id,
-                                                                 {entry.entry: entry for entry in resolved.entries})
+                    sources: dict[BundleEntry, ResolvedEntry | BundleImage] = {
+                        image.entry: image for image in resolved.images if image.entry.id == image.id}
+                    sources.update({entry.entry: entry for entry in resolved.entries})
+                    self.pullable[installed.id_root] = _Pullable(resolved, _by_id(resolved.bundle), sources)
         return self.pullable[installed.id_root]
 
     def _pull(self, pullable: _Pullable, target: BundleEntry | BundleImage) -> None:
@@ -272,12 +267,12 @@ class _Planner:
         key = _key(target)
         if key in self.nodes or key in self.pulling:
             return
-        self.origins[target.entry if isinstance(target, BundleImage) else target] = pullable.resolved.bundle
-        if isinstance(target, BundleImage):
-            self._add(key, target, [])
+        source = target if isinstance(target, BundleImage) else pullable.by_entry[target]
+        self.origins[source.entry] = pullable.resolved.bundle
+        if isinstance(source, BundleImage):  # an image key's, or an image folder, which is its image
+            self._add(key, source, [])
             return
         self.pulling.add(key)
-        source = pullable.by_entry[target]
         for ref in source.references:
             if ref.local is not None:
                 self._pull(pullable, ref.local)
@@ -848,8 +843,18 @@ def _needs(entry: ResolvedEntry) -> list[_Key]:
     return list(dict.fromkeys(_key(ref.local) for ref in entry.references if ref.local is not None))
 
 
-def _kind_of(found: BundleEntry | BundleImage) -> str:
-    return "docker_image artifact" if isinstance(found, BundleImage) else found.kind.store
+def _by_id(bundle: Bundle) -> dict[tuple[EntityKind, str], BundleEntry]:
+    """``bundle``'s envs, agents and artifacts by (kind, id), image folders included, as a reference names one."""
+    return {(kind, entry.id): entry for entry in bundle.entries for kind in _PULLED if entry.kind in NAMED_BY[kind]}
+
+
+def _misnamed(target: BundleEntry, ref: Reference, whose: str, comes: str) -> str | None:
+    """Why ``ref`` can't name ``target``, an entity a run writes: a pin, or a type its field doesn't take."""
+    if ref.version is not None:
+        return f"{ref.id!r} {comes}, so it has no fixed version; drop the pin"
+    if ref.artifact_type and canonical_type(target.type) != canonical_type(ref.artifact_type):
+        return f"{ref.id!r} is {whose} {target.type}, but this field takes {ref.artifact_type}"
+    return None
 
 
 def _shown_path(bundle: Bundle, entry: BundleEntry, *, pulled: bool) -> str:

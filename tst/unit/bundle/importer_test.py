@@ -18,6 +18,7 @@ from agent_env.artifact.store import get_artifact_store
 from agent_env.bundle import BundleError, parse_bundle
 from agent_env.bundle import importer as importer_module
 from agent_env.bundle.importer import ImportedEval, import_eval, import_task
+from agent_env.bundle.installed import InstalledBundle
 from agent_env.bundle.materialize import materialize
 from agent_env.bundle.plan import plan_bundle
 from agent_env.bundle.resolve import resolve_bundle
@@ -671,3 +672,22 @@ def test_the_cli_leaves_out_scoped_fields_unless_told_to_include_their_scope(sto
             "--include-scope user keeps it") in left.output.splitlines()
     assert "user scope" not in kept.output
     assert _steps(store / "kept", "scoped")[1]["litellm_base_url"] == "https://litellm.internal.example.com"
+
+
+@pytest.mark.parametrize("pin", [None, 3])
+def test_an_installed_bundles_entity_floats_unpinned_so_the_import_runs_it_from_there(store, monkeypatch, pin):
+    kit = store / "site" / "kit"
+    (kit / "agents/solver").mkdir(parents=True)
+    (kit / "agents/solver/Dockerfile").write_text("FROM scratch\n")
+    monkeypatch.setattr(importer_module, "installed_bundles",
+                        lambda: (InstalledBundle("kit", "demo-dist", "1.0", "demo", kit, None, None),))
+    agent = "@local/demo-dist/kit/solver"
+    with namespace_routing():
+        _task("@local/~/runs/t", [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": agent,
+                                   "a2a_agent_version": pin}])
+        imported = import_task("@local/~/runs/t", store / "imported", include_scopes=[FieldScope.USER])
+
+    assert [(ref.where, ref.id) for ref in imported.floating] == [("tasks/t.json: step 'agent': a2a_agent_id", agent)]
+    assert ("dropped" in imported.floating[0].why) == (pin is not None) and imported.pinned == ()
+    assert _steps(imported.root, "t")[0]["a2a_agent_version"] is None
+

@@ -116,6 +116,17 @@ def test_a_default_agent_the_bundle_defines_is_written_by_the_run(bundle_dir, de
     assert plan.writes[-1].needs == (("agent", f"{ROOT}/solver"),) and plan.origins == {}
 
 
+@pytest.mark.parametrize("default", [SOLVER, f"{ROOT}/solver"])
+def test_a_pin_on_a_default_agent_a_bundle_defines_is_refused(bundle_dir, tmp_path, default_agent, default):
+    default_agent(default)
+    resolved = _task(bundle_dir, [{"id": "agent", "type": "deploy_agent", "a2a_agent_version": 2}],
+                     {"agents/solver/Dockerfile": "FROM scratch\n"})
+
+    [problem] = _problems(resolved, _kit(tmp_path))
+    assert problem.startswith(f"tasks/t.json: step 'agent': a2a_agent_id (the default agent): {default!r} ")
+    assert "so it has no fixed version; drop" in problem
+
+
 def test_a_default_agent_neither_bundle_defines_is_left_to_the_store(bundle_dir, tmp_path, default_agent):
     default_agent("house-agent")
     plan = _plan(_task(bundle_dir, [{"id": "agent", "type": "deploy_agent"}]), _kit(tmp_path))
@@ -161,6 +172,28 @@ def test_an_installed_bundle_naming_another_ones_entity_pulls_that_in_too(bundle
     assert _writes(plan) == [(BundleKind.ARTIFACT, "@local/base-dist/base/base"), (BundleKind.AGENT, f"{KIT}/coder"),
                              (BundleKind.TASK, f"{ROOT}/t")]
     assert plan.path(plan.writes[0].source.entry) == "base-dist/base:artifacts/base"
+
+
+def test_a_pulled_entity_naming_an_image_folder_of_its_bundle_pulls_the_image(bundle_dir, tmp_path):
+    kit = _kit(tmp_path, {"artifacts/base/Dockerfile": "FROM scratch\n", "agents/coder/agent.toml": 'image = "base"\n'})
+    plan = _plan(_task(bundle_dir, [{"id": "agent", "type": "deploy_agent", "a2a_agent_id": f"{KIT}/coder"}]), kit)
+
+    assert _writes(plan) == [(BundleKind.ARTIFACT, f"{KIT}/base"), (BundleKind.AGENT, f"{KIT}/coder"),
+                             (BundleKind.TASK, f"{ROOT}/t")]
+
+
+def test_a_pulled_entity_naming_the_running_bundles_own_entity_uses_it(tmp_path, local_stores, cli_routing):
+    base = _installed(tmp_path / "site" / "base", {
+        "artifacts/base/Dockerfile": "FROM scratch\n",
+        "tasks/t.json": json.dumps([{"id": "agent", "type": "deploy_agent", "a2a_agent_id": f"{KIT}/coder"}])},
+        dist="base-dist", name="base")
+    kit = _kit(tmp_path, {"agents/coder/agent.toml": 'image = "@local/base-dist/base/base"\n'})
+    plan = _plan(resolve_bundle(parse_bundle(base.root, id_root=base.id_root)), kit, base)
+
+    assert _writes(plan) == [(BundleKind.ARTIFACT, "@local/base-dist/base/base"), (BundleKind.AGENT, f"{KIT}/coder"),
+                             (BundleKind.TASK, "@local/base-dist/base/t")]
+    assert [plan.path(write.source.entry) for write in plan.writes] == [
+        "artifacts/base", "demo-dist/kit:agents/coder", "tasks/t.json"]
 
 
 def test_the_bundles_own_entity_wins_over_an_installed_one_with_its_id(bundle_dir, tmp_path):

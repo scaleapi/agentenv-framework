@@ -19,7 +19,7 @@ from agent_env.artifact.registry import ARTIFACT_REGISTRY, canonical_type, get_a
 from agent_env.bundle import _toml
 from agent_env.bundle._fs import fold, os_reason, show
 from agent_env.bundle._secrets import scrub
-from agent_env.bundle.installed import installed_bundles
+from agent_env.bundle.installed import InstalledBundle, installed_bundles
 from agent_env.bundle.parse import BundleError, parse_bundle, root_problems, segment_problem
 from agent_env.bundle.plan import STORE_GETTERS, check_bundle
 from agent_env.bundle.resolve import resolve_bundle
@@ -181,6 +181,7 @@ class _Importer:
         self.read: dict[tuple[EntityKind, str, int | None], int | str] = {}
         self.types: dict[tuple[EntityKind, str, int | None], str] = {}  # each entity read, by its read key
         self.origins: dict[tuple[str, str], str] | None = None
+        self.installed: tuple[InstalledBundle, ...] | None = None
         _check_destination(self.dest)
 
     def add_task(self, task: Task) -> str:
@@ -265,6 +266,9 @@ class _Importer:
 
     def _pin(self, site: RefSite, where: str, deployed: set[str]) -> None:
         kind, entity_id = site.ref.kind, site.value
+        if (bundle := self._installed_for(kind, entity_id)) is not None:
+            self._from_installed(site, where, bundle)
+            return
         if site.version is not None or site.version_key is not None:
             read = self._read(kind, entity_id, site.version)
             if isinstance(read, str):
@@ -279,6 +283,23 @@ class _Importer:
         elif _nfc(entity_id) not in deployed:
             self.floating.append(Floating(where, kind, entity_id, "the field takes no version and no step of the task "
                                                                   "deploys it, so a run reads the latest"))
+
+    def _installed_for(self, kind: EntityKind, entity_id: str) -> InstalledBundle | None:
+        """The installed bundle whose ids ``entity_id``, an env, agent or artifact, is under: a run writes it from
+        there."""
+        if kind is EntityKind.TASK or not entity_id.startswith(LOCAL_PREFIX):
+            return None
+        if self.installed is None:
+            self.installed = installed_bundles()
+        return next((bundle for bundle in self.installed if entity_id.startswith(f"{bundle.id_root}/")), None)
+
+    def _from_installed(self, site: RefSite, where: str, bundle: InstalledBundle) -> None:
+        """An installed bundle's entity has no fixed version, so it isn't pinned, and a pin the store held is dropped."""
+        why = f"it comes with the installed bundle {bundle.qualified}, which a run writes it from"
+        if site.version is not None and site.version_key is not None:
+            site.owner[site.version_key] = None
+            why += f"; the stored pin to v{site.version} is dropped, as such an entity has no fixed version"
+        self.floating.append(Floating(where, site.ref.kind, site.value, why))
 
     def _read(self, kind: EntityKind, entity_id: str, version: int | None = None) -> int | str:
         """The version of ``entity_id`` the store holds, at ``version`` or its latest, or why it can't be read."""
