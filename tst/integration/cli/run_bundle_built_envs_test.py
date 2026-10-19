@@ -628,8 +628,8 @@ def test_a_stored_mcp_task_imports_as_a_bundle_that_runs_through_the_gateway(sta
     imported = CliRunner().invoke(cli, ["bundle", "init", str(state / "echo"), "--from-task", "echo-smoke"])
 
     assert imported.exit_code == 0, imported.output
-    assert "  env echo-server v1: tasks/echo-smoke.json: step 'env': env_id" in imported.output.splitlines()
-    assert "  artifact echo-check v1: tasks/echo-smoke.json: step 'echoes': file_artifact_id" in imported.output
+    lines = imported.output.splitlines()
+    assert {"  envs/echo-server: mcp_server echo-server v1", "  artifacts/echo-check: file echo-check v1"} <= {*lines}
     first, second = _run(state / "echo"), _run(state / "echo")
     assert first.exit_code == 0, first.output
     assert "tasks/echo-smoke.json v1: passed (echoes: 1)" in first.output, first.output

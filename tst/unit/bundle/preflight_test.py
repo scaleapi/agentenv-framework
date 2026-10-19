@@ -1107,3 +1107,22 @@ def test_an_agent_or_agent_judge_needs_a_model_endpoint_unless_its_step_gives_on
                               "calls the model endpoint, and its API key can't be read: No model API key configured")
     monkeypatch.setenv("LITELLM_API_KEY", "sk-1")
     assert len(dry_run_bundle(bundle_dir, sandbox="local").runs) == 2
+
+
+def test_an_agent_declaring_the_model_variables_itself_needs_no_endpoint_but_its_judge_does(bundle_dir, no_model):
+    with namespace_routing():
+        A2AAgent.put(id="echo", docker_image_artifact=_image("echo-image"),
+                     default_env_vars={"LITELLM_API_KEY": "unused", "LITELLM_BASE_URL": "http://unused.invalid"})
+    layout(bundle_dir, {"agents/folder-echo/agent.toml": 'image = { ref = "docker.io/library/python:3.12-slim" }\n\n'
+                                                         '[default_env_vars]\nLITELLM_API_KEY = "unused"\n'
+                                                         'LITELLM_BASE_URL = "http://unused.invalid"\n'})
+    judge = {"id": "judge", "type": "rubrics_verifier", "verifier_id": "judge", "prompt_id": "agent",
+             "judge_a2a_agent_id": "echo", "criteria": [{"id": "c1", "description": "done"}]}
+    _task(bundle_dir, [{**AGENT, "a2a_agent_id": "echo"}, {**AGENT, "id": "local", "a2a_agent_id": "folder-echo"}],
+          name="echo")
+    _task(bundle_dir, [{**AGENT, "a2a_agent_id": "echo"}, judge], name="judged")
+
+    assert [entry.name for entry in dry_run_bundle(bundle_dir, tasks=["echo"], sandbox="local").runs] == ["echo"]
+    assert _problems(lambda: dry_run_bundle(bundle_dir, tasks=["judged"], sandbox="local")) == [
+        "tasks/judged.json: step 'judge' deploys an agent that calls the model endpoint, and no model endpoint is set: "
+        "set LITELLM_BASE_URL, or [model] base_url in .agentenv/config.toml"]

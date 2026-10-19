@@ -53,6 +53,7 @@ from agent_env.store.ids import LOCAL_PREFIX
 from agent_env.store.image_store.oci_registry_credentials import names_registry
 from agent_env.task import Task
 from agent_env.task_step import registry as task_step_registry
+from agent_env.store.image_store.oci_registry_credentials import registry_host_from_ref
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.utils.docker.lock import Locked
 
@@ -490,6 +491,16 @@ class _Importer:
         if isinstance(entity, str):
             self.problems.append(f"{where}: {entity}")
             return
+        expected = site.ref.artifact_type or site.ref.env_type
+        actual = canonical_type(entity.type) if kind is EntityKind.ARTIFACT else entity.type
+        if expected and actual != canonical_type(expected) and isinstance(site.key, str):
+            # The store holds the step as it is, though the step can't read what it names; a folder can't.
+            site.rewrite(None)
+            if site.version_key is not None:
+                site.owner[site.version_key] = None
+            self.dropped.append(Dropped(where, f"dropped: {entity_id!r} is {actual}, and this field takes {expected}, "
+                                               "so the step can't read it"))
+            return
         self._need_type(site, entity, where)
         try:
             local = self.local(kind, entity, where)
@@ -769,6 +780,10 @@ def _needs_lines(imported: BundleImport) -> list[str]:
     lines = [f"- The plugins it uses: `{'`, `'.join(plugins)}`."] if plugins else []
     if configured:
         lines.append("- The configuration that registers what *Needs beyond core* says configuration registers.")
+    registries = sorted({host for pulled in imported.pulled if (host := registry_host_from_ref(pulled.image))})
+    if registries:
+        lines.append(f"- Pull access to the registries its pulled images are in, a `docker login` to each that's "
+                     f"private: `{'`, `'.join(registries)}`.")
     return lines
 
 

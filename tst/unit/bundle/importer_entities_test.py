@@ -117,6 +117,8 @@ def test_an_image_its_registry_names_is_written_as_its_ref_and_reported_as_pulle
     assert _toml(imported.root, "envs/crm/env.toml")["image"] == {"ref": "registry.example.com/crm:v1"}
     assert [(pull.folder, pull.image) for pull in imported.pulled] == [("envs/crm", "registry.example.com/crm:v1")]
     assert imported.pinned == () and imported.images == ()
+    assert ("- Pull access to the registries its pulled images are in, a `docker login` to each that's private: "
+            "`registry.example.com`.") in (imported.root / "README.md").read_text().splitlines()
 
 
 def test_contexts_stored_as_one_object_are_downloaded_once_and_pruned_for_each_image(home, monkeypatch):
@@ -331,3 +333,23 @@ def test_an_image_the_store_holds_built_is_pinned_to_its_python_versions_and_the
     assert ("pinned to the stored image: 1 Python package(s) by constraints.txt; left as the build resolves them: pip, "
             "which isolated builds install their own versions of") in readme
     assert "versions not pinned: the store holds no image to read its versions from" in readme
+
+
+def test_a_field_naming_an_entity_it_cant_take_is_left_out_and_said_so_and_the_entity_still_written(home):
+    """The store holds a step as it is, though the step can't read what it names; a folder can't hold it so."""
+    MCPServerEnv.put(id="crm", docker_image_artifact=_context_image(home, "crm-image"), environment_name="crm")
+    (home / "seed.json").write_text("{}")
+    file = FileArtifact.put("seed", description="seed.json", file_path=str(home / "seed.json"))
+    EnvironmentArtifact.put("vireo", environment_name="crm", file_artifact=file)
+    _task([DEPLOY,
+           {"id": "load", "type": "load_artifact", "env_id": "crm", "artifacts": [{"id": "vireo"}]},
+           {"id": "snapshot", "type": "snapshot_agent_state", "artifact_id": "snap", "agent_name": "agent", "prompt_id": "ask",
+            "env_id": "crm", "universe_artifact_id": "vireo"}])
+
+    imported = import_task("t", home / "t")
+
+    snapshot = json.loads((imported.root / "tasks/t.json").read_text())[2]
+    assert snapshot.get("universe_artifact_id") is None
+    assert ("tasks/t.json: step 'snapshot': universe_artifact_id", "dropped: 'vireo' is environment, and this field "
+            "takes environment_universe, so the step can't read it") in [(d.where, d.why) for d in imported.dropped]
+    assert _toml(imported.root, "artifacts/vireo/artifact.toml")["type"] == "environment"

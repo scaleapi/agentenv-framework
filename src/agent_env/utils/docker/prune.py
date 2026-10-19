@@ -57,7 +57,7 @@ def _read(archive: Path,
             if (name := _member_name(member)) is None:
                 continue
             links[name] = member.linkname if member.issym() else None
-            if name in wanted and member.isreg():
+            if name in wanted and (member.isreg() or member.islnk()):
                 texts[name] = tar.extractfile(member).read().decode("utf-8", "replace")
     for folder in images.keys() - dockerfiles.keys():
         dockerfiles[folder] = _found_dockerfile(links)
@@ -93,7 +93,9 @@ def _write(archive: Path, kept: Mapping[Path, set[str]]) -> dict[Path, dict[str,
             name = _member_name(member)
             first: Path | None = None
             for folder in (folder for folder, names in kept.items() if name in names):
-                if member.isreg() and first is not None:
+                if member.islnk():
+                    _write_copy(tar, member, folder, name)
+                elif member.isreg() and first is not None:
                     _check_inside(folder, name)
                     (folder / name).parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(first, folder / name)
@@ -101,8 +103,8 @@ def _write(archive: Path, kept: Mapping[Path, set[str]]) -> dict[Path, dict[str,
                     folder.mkdir(parents=True, exist_ok=True)
                     tar.extract(member, folder, filter=_member)
                     first = folder / name if member.isreg() else None
-                if member.isreg():
-                    written[folder][name] = member.size
+                if member.isreg() or member.islnk():
+                    written[folder][name] = (folder / name).stat().st_size if member.islnk() else member.size
                 else:
                     written[folder].pop(name, None)
     # A folder the archive only implies, as the parent of what it holds, has no member of its own.
@@ -112,6 +114,25 @@ def _write(archive: Path, kept: Mapping[Path, set[str]]) -> dict[Path, dict[str,
                 _check_inside(folder, name)
                 (folder / name).mkdir(parents=True, exist_ok=True)
     return written
+
+
+def _write_copy(tar: tarfile.TarFile, member: tarfile.TarInfo, folder: Path, name: str) -> None:
+    """Write hard link ``member`` at ``name`` in ``folder`` as a file of its own holding what it links to, read from the
+    archive, so a change to one name, as pinning a Dockerfile makes, never changes another."""
+    context_member(member, str(folder), links_out=True)
+    _check_inside(folder, name)
+    path = folder / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if os.path.lexists(path) and not path.is_dir():
+        os.unlink(path)  # the link's own target, when it names itself, which the archive still holds
+    try:
+        source = tar.extractfile(member)
+    except KeyError as e:
+        raise ValueError(f"{member.name!r} in the build context is a hard link to {member.linkname!r}, which it doesn't "
+                         "hold") from e
+    with source, path.open("wb") as out:
+        shutil.copyfileobj(source, out)
+    path.chmod(0o755 if member.mode & 0o100 else 0o644)
 
 
 def _check_inside(folder: Path, name: str) -> None:
@@ -145,7 +166,7 @@ def _texts(archive: Path, names: set[str]) -> dict[str, str]:
     texts = {}
     with tarfile.open(archive, "r:gz") as tar:
         for member in tar:
-            if member.isreg() and (name := _member_name(member)) in names:
+            if (member.isreg() or member.islnk()) and (name := _member_name(member)) in names:
                 texts[name] = tar.extractfile(member).read().decode("utf-8", "replace")
     return texts
 

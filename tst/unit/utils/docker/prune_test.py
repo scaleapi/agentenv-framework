@@ -384,6 +384,19 @@ def test_a_dockerfile_missing_from_the_archive_is_refused(tmp_path):
         write_pruned(archive, {tmp_path / "out": "gmail/Dockerfile"})
 
 
+def _with_members(path: Path, members: list[tuple[str, bytes, str | None]]) -> Path:
+    """A context tar.gz of ``members``, each a name, its content and, for a hard link, the name it links to."""
+    with tarfile.open(path, "w:gz") as tar:
+        for name, data, target in members:
+            info = tarfile.TarInfo(name)
+            if target is not None:
+                info.type, info.linkname = tarfile.LNKTYPE, target
+            else:
+                info.size = len(data)
+            tar.addfile(info, io.BytesIO(data) if target is None else None)
+    return path
+
+
 def test_a_member_no_context_holds_is_refused(tmp_path):
     archive = tmp_path / "ctx.tar.gz"
     with tarfile.open(archive, "w:gz") as tar:
@@ -391,9 +404,37 @@ def test_a_member_no_context_holds_is_refused(tmp_path):
         info = tarfile.TarInfo("Dockerfile")
         info.size = len(dockerfile)
         tar.addfile(info, io.BytesIO(dockerfile))
-        hard = tarfile.TarInfo("hard")
-        hard.type, hard.linkname = tarfile.LNKTYPE, "Dockerfile"
-        tar.addfile(hard)
+        pipe = tarfile.TarInfo("pipe")
+        pipe.type = tarfile.FIFOTYPE
+        tar.addfile(pipe)
 
     with pytest.raises(ValueError, match="neither a file, a folder nor a link"):
         write_pruned(archive, {tmp_path / "out": "Dockerfile"})
+
+
+def test_a_dockerfile_stored_as_a_hard_link_to_itself_is_read_and_written_as_the_file(tmp_path):
+    dockerfile = b"FROM python\nCOPY contacts/main.py /app/\n"
+    archive = _with_members(tmp_path / "ctx.tar.gz", [("contacts/Dockerfile", dockerfile, None),
+                                                      ("contacts/main.py", b"main", None),
+                                                      ("contacts/Dockerfile", b"", "contacts/Dockerfile")])
+
+    pruned = write_pruned(archive, {tmp_path / "out": "contacts/Dockerfile"})
+
+    assert _files(tmp_path / "out") == {"contacts/Dockerfile": dockerfile.decode(), "contacts/main.py": "main"}
+    assert pruned[tmp_path / "out"].size == len(dockerfile) + 4
+
+
+def test_a_hard_link_is_written_as_a_file_of_its_own_holding_what_it_links_to_kept_or_not(tmp_path):
+    archive = _with_members(tmp_path / "ctx.tar.gz", [("Dockerfile", b"FROM python\nCOPY app/ /app/\n", None),
+                                                      ("data/real.txt", b"real", None),
+                                                      ("app/kept.txt", b"kept", None),
+                                                      ("app/twin.txt", b"", "app/kept.txt"),
+                                                      ("app/far.txt", b"", "data/real.txt")])
+
+    write_pruned(archive, {tmp_path / "out": "Dockerfile"})
+
+    out = tmp_path / "out"
+    assert _files(out) == {"Dockerfile": "FROM python\nCOPY app/ /app/\n", "app/kept.txt": "kept",
+                           "app/twin.txt": "kept", "app/far.txt": "real"}
+    assert not (out / "data").exists()
+    assert (out / "app/kept.txt").stat().st_ino != (out / "app/twin.txt").stat().st_ino

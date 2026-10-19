@@ -36,7 +36,7 @@ def _docker_answers(monkeypatch):
     monkeypatch.setattr("agent_env.bundle.preflight.docker_unreachable", lambda: None)
     monkeypatch.setattr("agent_env.env.bootstrap.docker_unreachable", lambda: None)
     monkeypatch.setattr("agent_env.bundle.preflight.docker_plugin_missing", lambda plugin: None)
-    monkeypatch.setattr("agent_env.bundle.preflight.model_endpoint_missing", lambda: None)
+    monkeypatch.setattr("agent_env.bundle.preflight.model_endpoint_missing", lambda needed: None)
 
 
 @pytest.fixture(autouse=True)

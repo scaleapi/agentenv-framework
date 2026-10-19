@@ -80,6 +80,7 @@ from .plan import Plan
 from .resolve import BuiltImage, Reference, ReferencedImage, ResolvedEntry, build_step
 
 _SHOWN = 3
+_MODEL_VARS = frozenset({"LITELLM_BASE_URL", "LITELLM_API_KEY"})
 
 
 @dataclass(frozen=True)
@@ -127,7 +128,7 @@ class _Walk:
         self.infra: set[str] = set()  # the infra kinds a deploy on the local provider needs
         self.docker_users: list[str] = []
         self.compose_users: list[str] = []  # gateway deploys whose stack runs on this machine
-        self.model_users: list[str] = []  # agents and judges given the configured model endpoint
+        self.model_users: list[tuple[str, frozenset[str]]] = []  # each deploy given what the config sets of _MODEL_VARS
         self.default_agent_users: list[tuple[str, str]] = []  # (where, what names no agent)
         self.written = {write.id for write in plan.writes}
         self.agents = {write.id: write.source for write in plan.writes if write.kind is BundleKind.AGENT}
@@ -174,9 +175,12 @@ class _Walk:
             self.run_problems.append(needs_docker(infra, reason))
         else:
             self._docker_plugins(built_here, infra)
-        if self.model_users and (missing := model_endpoint_missing()):
-            self.run_problems.append(f"{_listed(self.model_users)} deploy{'s' if len(self.model_users) == 1 else ''} an "
-                                     f"agent that calls the model endpoint, and {missing}")
+        needed = frozenset().union(*(names for _, names in self.model_users))
+        if needed and (missing := model_endpoint_missing(needed)):
+            name, why = missing
+            users = [where for where, names in self.model_users if name in names]
+            self.run_problems.append(f"{_listed(users)} deploy{'s' if len(users) == 1 else ''} an agent that calls the "
+                                     f"model endpoint, and {why}")
         problems = list(self.run_problems)
         for problem, wheres in self.problems.items():
             first, *others = wheres
@@ -305,23 +309,26 @@ class _Walk:
             accepts = functools.partial(A2AAgent.accepts, sandbox_mode=linked.sandbox_mode)  # the VM loads its image
         else:
             provider = _provider(self.sandbox or step.sandbox_type, get_agent_sandbox_provider)
-        given = {*step.env_vars, *(["LITELLM_BASE_URL"] if step.litellm_base_url else [])}
-        if not {"LITELLM_API_KEY", "LITELLM_BASE_URL"} <= given:
-            self.model_users.append(where)
-        self._agent_deploy(where, provider, step.a2a_agent_id, step.a2a_agent_version, "names no agent", accepts)
+        given = frozenset({*step.env_vars, *(["LITELLM_BASE_URL"] if step.litellm_base_url else [])})
+        self._agent_deploy(where, provider, step.a2a_agent_id, step.a2a_agent_version, "names no agent", accepts,
+                           given=given)
 
     def _judge(self, where: str, step: RubricsVerifierTaskStep) -> None:
         if not step.use_agent_judge or step.agent_name is not None:
             return  # the direct LLM judge, or a judge the task deployed itself
         provider = _provider(self.sandbox or step.judge_sandbox_type, get_agent_sandbox_provider)
-        self.model_users.append(where)
-        self._agent_deploy(where, provider, step.judge_a2a_agent_id, None, "names no judge agent")
+        # The judge is given the configured endpoint whatever its agent declares.
+        self._agent_deploy(where, provider, step.judge_a2a_agent_id, None, "names no judge agent", needs=_MODEL_VARS)
 
     def _agent_deploy(self, where: str, provider: SandboxProvider, agent_id: str | None, version: int | None,
-                      unnamed: str, accepts: Callable[[SandboxProvider], Accepts] = A2AAgent.accepts) -> None:
+                      unnamed: str, accepts: Callable[[SandboxProvider], Accepts] = A2AAgent.accepts, *,
+                      given: frozenset[str] = frozenset(), needs: frozenset[str] | None = None) -> None:
+        """Check an agent deploy, ``given`` the model variables its step sets, or ``needs`` those the config must."""
         if agent_id is None:
             self.default_agent_users.append((where, unnamed))
             agent_id = get_config().get_default_a2a_agent_id()
+        if needed := needs if needs is not None else _MODEL_VARS - given - self._agent_env_vars(agent_id, version):
+            self.model_users.append((where, needed))
         image = self._agent_image(agent_id, version)
         taking = self._check(where, provider, accepts, [image] if image else [], vms_load=True)
         if any(link.ON_THIS_MACHINE for link in taking):
@@ -344,6 +351,15 @@ class _Walk:
                                      f"{problem}; run it with --sandbox local")
 
     # What a deploy runs
+
+    def _agent_env_vars(self, agent_id: str, version: int | None) -> frozenset[str]:
+        """The variables the agent ``agent_id`` declares for itself, which a deploy doesn't take from the config."""
+        if (agent := self.agents.get(agent_id)) is not None:
+            return frozenset(agent.config.get("default_env_vars") or {})
+        try:
+            return frozenset(A2AAgent.get(agent_id, version).default_env_vars or {})
+        except (NotFoundError, ValueError, KeyError, TypeError):
+            return frozenset()
 
     def _agent_image(self, agent_id: str, version: int | None) -> _Image | None:
         """The image the agent ``agent_id`` runs, or None when the store doesn't hold the agent or can't read it, which
@@ -512,17 +528,20 @@ def _provider(spec: str | None, default: Callable[[], SandboxProvider]) -> Sandb
     return build_sandbox_provider(spec) if spec else default()
 
 
-def model_endpoint_missing() -> str | None:
-    """Why the configured model endpoint can't be used, or None when it and its key are set."""
+def model_endpoint_missing(needed: frozenset[str]) -> tuple[str, str] | None:
+    """The first of the ``needed`` model variables the config can't give, and why; None when it gives them all."""
     config = get_config()
-    try:
-        config.get_litellm_base_url()
-    except ConfigError:
-        return "no model endpoint is set: set LITELLM_BASE_URL, or [model] base_url in .agentenv/config.toml"
-    try:
-        config.get_litellm_api_key()
-    except ConfigError as e:
-        return f"its API key can't be read: {e}"
+    if "LITELLM_BASE_URL" in needed:
+        try:
+            config.get_litellm_base_url()
+        except ConfigError:
+            return "LITELLM_BASE_URL", ("no model endpoint is set: set LITELLM_BASE_URL, or [model] base_url in "
+                                        ".agentenv/config.toml")
+    if "LITELLM_API_KEY" in needed:
+        try:
+            config.get_litellm_api_key()
+        except ConfigError as e:
+            return "LITELLM_API_KEY", f"its API key can't be read: {e}"
     return None
 
 

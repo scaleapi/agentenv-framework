@@ -225,10 +225,10 @@ def _member(name: str, kind: bytes = tarfile.REGTYPE, linkname: str = "") -> tar
 
 
 @pytest.mark.parametrize("member, problem", [
-    (_member("hard", tarfile.LNKTYPE, "Dockerfile"), "is neither a file, a folder nor a link"),
     (_member("pipe", tarfile.FIFOTYPE), "is neither a file, a folder nor a link"),
     (_member("../outside"), "would be extracted to"),
-], ids=["hard link", "fifo", "name leading out"])
+    (_member("hard", tarfile.LNKTYPE, "../Dockerfile"), "is a hard link to '../Dockerfile', outside it"),
+], ids=["fifo", "name leading out", "hard link leading out"])
 def test_extract_refuses_what_no_build_context_holds(tmp_path, member, problem):
     archive = _archive(tmp_path, (_member("Dockerfile"), b"FROM scratch\n"), (member, b""))
 
@@ -279,3 +279,13 @@ def test_two_folders_one_name_once_normalized_are_refused(tmp_path):
 
     with pytest.raises(ValueError, match="café: two entries have this name once normalized to NFC"):
         BuildContext.of(root, root / "Dockerfile")
+
+
+def test_extract_writes_a_hard_link_as_the_file_it_links_to_and_one_to_itself_as_the_file(tmp_path):
+    archive = _archive(tmp_path, (_member("Dockerfile"), b"FROM scratch\n"), (_member("copy", tarfile.LNKTYPE,
+                                                                                      "Dockerfile"), b""),
+                       (_member("Dockerfile", tarfile.LNKTYPE, "Dockerfile"), b""))
+
+    extract(archive, tmp_path / "out")
+
+    assert (tmp_path / "out" / "Dockerfile").read_text() == (tmp_path / "out" / "copy").read_text() == "FROM scratch\n"

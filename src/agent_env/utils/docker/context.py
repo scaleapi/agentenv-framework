@@ -7,6 +7,7 @@ import gzip
 import hashlib
 import json
 import os
+import posixpath
 import stat
 import tarfile
 import unicodedata
@@ -100,9 +101,9 @@ class BuildContext:
 
 
 def extract(archive: Path, out: Path) -> None:
-    """Unpack a build context's tar.gz into the folder ``out``: its files, folders and links. A link that leads out
-    of ``out`` is left out, as nothing there is the build's. Raises ValueError on anything else, which no context
-    written by ``BuildContext.write`` holds: a hard link, a device, a name that leads out of ``out``."""
+    """Unpack a build context's tar.gz into the folder ``out``: its files, folders, links and hard links. A link that
+    leads out of ``out`` is left out, as nothing there is the build's. Raises ValueError on anything else, which no
+    context written by ``BuildContext.write`` holds: a device, a name that leads out of ``out``."""
     with tarfile.open(archive, "r:gz") as tar:
         tar.extractall(out, filter=context_member)
 
@@ -208,8 +209,10 @@ class _Hashing:
 
 def context_member(member: tarfile.TarInfo, out: str, *, links_out: bool = False) -> tarfile.TarInfo | None:
     """``member`` as ``extract`` writes it; None for a link leading out of ``out``, unless ``links_out``."""
-    if not (member.isreg() or member.isdir() or member.issym()):
+    if not (member.isreg() or member.isdir() or member.issym() or member.islnk()):
         raise ValueError(f"{member.name!r} in the build context is neither a file, a folder nor a link")
+    if member.islnk() and (posixpath.isabs(member.linkname) or posixpath.normpath(member.linkname).startswith("..")):
+        raise ValueError(f"{member.name!r} in the build context is a hard link to {member.linkname!r}, outside it")
     try:
         member = tarfile.tar_filter(member, out)
     except tarfile.FilterError as e:
