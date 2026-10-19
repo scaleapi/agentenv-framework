@@ -13,6 +13,9 @@ import pytest
 
 pytest.importorskip("smol")
 
+from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
+from agent_env.providers.sandbox_providers import host_images
+from agent_env.providers.sandbox_providers.sandbox import VmSandbox
 from agent_env.providers.sandbox_providers.smol_vm import provider as module
 from agent_env.providers.sandbox_providers.smol_vm import sandbox as sandbox_module
 from agent_env.providers.sandbox_providers.smol_vm.sandbox import SmolVmSandbox
@@ -315,3 +318,31 @@ async def test_terminate_sandbox_deletes_a_listed_machine_without_setting_it_up(
     assert deleted == ([True] if listed else [])
     assert connect.called is listed
     setup.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_smol_vm_of_this_machines_platform_loads_the_build_this_machine_saves(monkeypatch):
+    image = DockerImageArtifact(id="solver-image", version=1, description="d", image_name="local/solver-0123:abc",
+                                build_context_object_url="file:///ctx.tar.gz", dockerfile_path="Dockerfile")
+    loaded, built = [], []
+
+    async def saved(artifact):
+        return f"file:///saved/{artifact.image_name}.tar.gz"
+
+    async def load(self, artifacts):
+        loaded.extend(artifact.tar_gz_object_url for artifact in artifacts)
+
+    async def build_in_vm(self, artifacts):
+        built.extend(artifact.image_name for artifact in artifacts)
+
+    monkeypatch.setattr(sandbox_module, "saved_here", saved)
+    monkeypatch.setattr(SmolVmSandbox, "_load_tarballs", load)
+    monkeypatch.setattr(VmSandbox, "build_images", build_in_vm)
+    vm = object.__new__(SmolVmSandbox)
+
+    vm.platform = host_images.host_platform()
+    await vm.build_images([image])
+    vm.platform = "linux/riscv64"
+    await vm.build_images([image])
+
+    assert loaded == ["file:///saved/local/solver-0123:abc.tar.gz"] and built == ["local/solver-0123:abc"]

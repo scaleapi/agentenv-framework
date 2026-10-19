@@ -154,6 +154,7 @@ class DryRun:
     runs: tuple[BundleEntry, ...]  # the tasks that would run, each once, in the plan's order
     skipped: tuple[BundleEntry, ...]  # the tasks no eval names, which running every eval leaves out
     infra: tuple[InfraBuild, ...] = ()  # the infra envs the run would build first
+    built_here: frozenset[str] = frozenset()  # the images the run would build on this machine, for its deploys here
 
     def path(self, entry: BundleEntry) -> str:
         """``entry``'s path in the bundle (``tasks/hello.json``)."""
@@ -162,13 +163,14 @@ class DryRun:
     def images(self) -> tuple[str, ...]:
         """A line per image the bundle writes, an image key's or an image folder's: which, the version it would leave,
         and how it would be written."""
-        plan, contexts = self.materialization.plan, self.materialization.contexts
+        plan = self.materialization.plan
         return tuple(
             f"{_label(plan, done.write)} v{done.version}: "
             + ("pulled from its registry, its tag pinned to a digest when it's written"
                if isinstance(done.write.source, ReferencedImage)
-               else f"a build context, which each deploy builds where it runs, for {DEFAULT_BUILD_PLATFORM}"
-               if done.write.id in contexts else "built on this machine")
+               else "a build context, built with docker on this machine"
+               if done.write.id in self.built_here
+               else f"a build context, which each deploy builds where it runs, for {DEFAULT_BUILD_PLATFORM}")
             for done in self.materialization.writes if isinstance(done.write.source, BundleImage)
         )
 
@@ -229,7 +231,7 @@ def run_bundle(
             on_wait=lambda: say("waiting for another agent-env run to finish writing this bundle's ids"),
             on_build=lambda write: say(f"{_label(plan, write)}: building with docker, which can take minutes"),
             on_write=lambda done: say(_written(plan, done)),
-            contexts=preflight.contexts,
+            build_here=preflight.built_here,
         )
         entries = _to_run(plan)
         to_run = [(entry, Task.get(entry.id, materialization.version_of("task", entry.id))) for entry in entries]
@@ -272,10 +274,10 @@ def dry_run_bundle(
     say = _progress(on_progress)
     with namespace_routing():
         plan, preflight = _planned(root, tasks, evals, id_root, sandbox)
-        materialization = materialize(plan, dry_run=True, on_write=lambda done: say(_written(plan, done)),
-                                      contexts=preflight.contexts)
+        materialization = materialize(plan, dry_run=True, on_write=lambda done: say(_written(plan, done)))
         runs = _to_run(plan)
-        return DryRun(materialization, runs, _skipped(plan, runs, every=not tasks and not evals), preflight.infra)
+        return DryRun(materialization, runs, _skipped(plan, runs, every=not tasks and not evals), preflight.infra,
+                      preflight.built_here)
 
 
 def _mark_cancelled(runs: tuple[TaskRun, ...], reason: str) -> None:

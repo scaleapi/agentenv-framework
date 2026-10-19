@@ -17,6 +17,7 @@ from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.bundle import parse_bundle
 from agent_env.bundle import plan as plan_module
 from agent_env.bundle import resolve as resolve_module
+from agent_env.bundle import ledger as ledger_module
 from agent_env.bundle.ledger import LEDGER_COLLECTION, Ledger, materializing
 from agent_env.bundle.materialize import _pinned
 from agent_env.config import configure, get_config
@@ -294,7 +295,7 @@ def test_a_file_changed_during_its_write_is_written_again_even_once_changed_back
 
 def test_a_new_digest_scheme_rewrites_everything_and_says_only_that(bundle_dir, monkeypatch):
     _run(bundle_dir)
-    monkeypatch.setattr("agent_env.bundle.ledger.SCHEME", 2)
+    monkeypatch.setattr("agent_env.bundle.ledger.SCHEME", ledger_module.SCHEME + 1)
 
     assert {check.reasons for check in _run(bundle_dir).values()} == {("the ledger's digest scheme changed",)}
 

@@ -17,7 +17,7 @@ from agent_env.bundle.ledger import locked_ids
 from agent_env.bundle.materialize import materialize
 from agent_env.bundle.plan import check_bundle, plan_bundle
 from agent_env.bundle.resolve import resolve_bundle
-from tst.unit.bundle._support import RefusingStore, layout
+from tst.unit.bundle._support import RefusingStore, layout, local_builds
 
 ROOT = "@local/~/triage"
 KIT = "@local/demo-dist/kit"
@@ -264,7 +264,8 @@ def test_a_dry_run_preflights_a_pulled_default_agent_and_names_its_image_after_i
 
     dry = dry_run_bundle(bundle_dir, sandbox="local", on_progress=said.append)
 
-    assert dry.images() == ("demo-dist/kit:agents/solver (Dockerfile image) v1: built on this machine",)
+    assert dry.images() == ("demo-dist/kit:agents/solver (Dockerfile image) v1: a build context, built with docker on "
+                            "this machine",)
     assert [dry.path(entry) for entry in dry.runs] == ["tasks/t.json"]
     assert [line for line in said if "demo-dist/kit" in line] == [
         "demo-dist/kit:agents/solver (Dockerfile image): v1 (new)", "demo-dist/kit:agents/solver: v1 (new)"]
@@ -276,7 +277,8 @@ def _user(tmp_path, name):
 
 
 def _materialized(root, *installed, id_root=None):
-    return materialize(plan_bundle(resolve_bundle(parse_bundle(root, id_root=id_root)), installed=lambda: installed))
+    plan = plan_bundle(resolve_bundle(parse_bundle(root, id_root=id_root)), installed=lambda: installed)
+    return materialize(plan, build_here=local_builds(plan))
 
 
 def _kits(materialization):

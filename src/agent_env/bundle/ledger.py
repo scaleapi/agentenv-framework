@@ -30,7 +30,6 @@ from agent_env.store import Filter, Sort
 from agent_env.store.document_store import LocalSqliteDocumentStore
 from agent_env.store.local_state import holding_locks
 from agent_env.task.store import TASKS_COLLECTION
-from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM
 
 from .authoring import build_context_files
 from .parse import BundleKind
@@ -39,11 +38,8 @@ from .resolve import BuiltImage, BundleImage, ReferencedImage
 
 LEDGER_COLLECTION = "bundle_ledger"
 # Bumped by hand when what a digest covers changes, or a writer's output changes enough that every
-# version it wrote should be written again.
-SCHEME = 1
-
-_CONTEXT = "build context"
-_FORMS = {None: "an image built on this machine", _CONTEXT: "a build context, built where it runs"}
+# version it wrote should be written again: 2 writes every image the bundle builds as its build context alone.
+SCHEME = 2
 
 _COLLECTIONS = {"env": ENVS_COLLECTION, "agent": A2A_AGENTS_COLLECTION, "artifact": ARTIFACTS_COLLECTION,
                 "task": TASKS_COLLECTION, "eval": EVALS_COLLECTION}
@@ -53,8 +49,7 @@ _LISTED = 5
 @dataclass(frozen=True)
 class Digest:
     value: str
-    inputs: dict[str, Any]  # type, config, files {key: sha256}, needs and store_refs {"<kind> <id>": version}, and
-    # for an image written as its build context, its form and the platform it's built for
+    inputs: dict[str, Any]  # type, config, files {key: sha256}, needs and store_refs {"<kind> <id>": version}
 
 
 @dataclass(frozen=True)
@@ -82,14 +77,13 @@ class Check:
 class Ledger:
     """One plan's rows in the ``@local`` namespace's store."""
 
-    def __init__(self, store: LocalSqliteDocumentStore, plan: Plan, contexts: frozenset[str] = frozenset()):
+    def __init__(self, store: LocalSqliteDocumentStore, plan: Plan):
         self._store = store
         self._plan = plan
-        self._contexts = contexts  # the built images written as build contexts
 
     @classmethod
-    def for_plan(cls, plan: Plan, contexts: frozenset[str] = frozenset()) -> Ledger:
-        return cls(get_config().local_namespace_document_store(), plan, contexts)
+    def for_plan(cls, plan: Plan) -> Ledger:
+        return cls(get_config().local_namespace_document_store(), plan)
 
     def check(self, write: Write, needs: Mapping[tuple[str, str], int]) -> Check:
         """Compare ``write`` with the latest version the ledger records for it. ``needs`` holds, by (store, id),
@@ -130,9 +124,6 @@ class Ledger:
             listing = build_context_files if built else folder_files
             for key, path in listing(self._plan.bundle_of(write.source.entry), write.source.entry).items():
                 inputs["files"][key] = _file_sha256(path) + (_mode(path) if built else "")
-            if built and write.id in self._contexts:
-                # Only then, so an image built on this machine is hashed as before and earlier rows stay reused.
-                inputs.update(form=_CONTEXT, platform=DEFAULT_BUILD_PLATFORM)
         if write.kind not in (BundleKind.TASK, BundleKind.EVAL):
             # A document records the versions of what it references (an env its images, a universe its
             # environments), so one written anew means it must be written again. A task or eval names its
@@ -262,10 +253,6 @@ def _changes(row: Mapping[str, Any], digest: Digest) -> list[str]:
         reasons.append(f"type changed: {before['type']} → {after['type']}")
     if before.get("config") != after["config"]:
         reasons.append("config changed")
-    if before.get("form") != after.get("form"):
-        reasons.append(f"now written as {_FORMS[after.get('form')]}, not {_FORMS[before.get('form')]}")
-    elif before.get("platform") != after.get("platform"):
-        reasons.append(f"platform changed: {before.get('platform')} → {after.get('platform')}")
     for label, names in zip(("files added", "files removed", "files changed"), _diff(before["files"], after["files"])):
         if names:
             shown = ", ".join(names[:_LISTED]) + (f" and {len(names) - _LISTED} more" if len(names) > _LISTED else "")
