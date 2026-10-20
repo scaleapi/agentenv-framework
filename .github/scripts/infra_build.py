@@ -6,7 +6,7 @@ agent-env (``infra_images.py``) is checked against the images agent-env ships be
 ships, with its Dockerfile, context, repository and a source tag. ``exists REF`` exits 0 when the registry has REF, 1
 when it says it doesn't, and 2 when it can't tell. ``smoke NAME IMAGE`` checks that IMAGE, a local build of NAME, runs.
 ``verify-record PATH`` fails unless PATH records each image agent-env ships once, with the digest the registry serves
-under its tag now.
+under its tag now. ``retry COMMAND...`` runs COMMAND, again while a registry rate-limits it.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import re
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 REGISTRY = "ghcr.io/scaleapi"
@@ -35,6 +36,11 @@ _HEALTHY_WITHIN_SECONDS = 120
 _HEALTH_POLL_SECONDS = 2
 _LOG_TAIL_LINES = 30  # of a container that never turned healthy, in the error
 _PRINTED_CHARS = 200  # of what docker printed in place of a manifest, in the error
+# What a registry answers when it rate-limits a request: ECR Public's 429, and the toomanyrequests error code GHCR and
+# Docker Hub send.
+_RATE_LIMITED = re.compile(r"429 Too Many Requests|toomanyrequests", re.IGNORECASE)
+# How long to wait before each try again, so a burst of builds starting together spreads out.
+_RATE_LIMIT_WAITS_SECONDS = (30, 60, 120)
 
 # Each image's check, beyond its build: the gateway imports its server, Postgres turns healthy, and the sidecars and the
 # browser answer their own commands.
@@ -57,7 +63,10 @@ def main() -> int:
     smoke.add_argument("name", choices=sorted(IMAGES))
     smoke.add_argument("image")
     commands.add_parser("verify-record").add_argument("path", type=Path)
+    commands.add_parser("retry").add_argument("argv", nargs=argparse.REMAINDER, metavar="COMMAND")
     args = parser.parse_args()
+    if args.command == "retry":
+        return _until_not_rate_limited(lambda: _streamed(args.argv)).returncode
     if args.command == "exists":
         return _exists(args.ref)
     if args.command == "smoke":
@@ -87,11 +96,34 @@ def _check(entry: str) -> list[str]:
     return problems
 
 
+def _until_not_rate_limited(attempt: Callable[[], subprocess.CompletedProcess]) -> subprocess.CompletedProcess:
+    """``attempt()``, and again after each of ``_RATE_LIMIT_WAITS_SECONDS`` while what it printed says a registry
+    rate-limited it: public.ecr.aws allows one anonymous pull a second, which builds starting together pass."""
+    for wait in _RATE_LIMIT_WAITS_SECONDS:
+        result = attempt()
+        if result.returncode == 0 or not _RATE_LIMITED.search(f"{result.stdout}{result.stderr}"):
+            return result
+        print(f"::warning::a registry rate-limited `{' '.join(result.args)[:_PRINTED_CHARS]}`; trying again in {wait}s")
+        time.sleep(wait)
+    return attempt()
+
+
+def _streamed(argv: list[str]) -> subprocess.CompletedProcess:
+    """Run ``argv``, printing what it prints as it prints it, which is kept too, to look for a rate limit in."""
+    process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    printed = []
+    for line in process.stdout:
+        sys.stdout.write(line)
+        printed.append(line)
+    return subprocess.CompletedProcess(argv, process.wait(), "".join(printed), "")
+
+
 def _served(ref: str) -> tuple[str | None, str]:
     """The digest the registry serves under ``ref``, or None, and what docker said when it serves none. The manifest as
     JSON, since buildx before 0.35 doesn't know the ``.Manifest.Digest`` template and prints the whole listing."""
-    result = subprocess.run(["docker", "buildx", "imagetools", "inspect", ref, "--format", "{{json .Manifest}}"],
-                            capture_output=True, text=True)
+    result = _until_not_rate_limited(lambda: subprocess.run(
+        ["docker", "buildx", "imagetools", "inspect", ref, "--format", "{{json .Manifest}}"],
+        capture_output=True, text=True))
     if result.returncode != 0:
         return None, result.stderr.strip()
     try:

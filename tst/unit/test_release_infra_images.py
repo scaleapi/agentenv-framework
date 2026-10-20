@@ -108,3 +108,14 @@ def test_nothing_reaches_pypi_from_a_run_by_hand():
 def test_a_run_by_hand_goes_ahead_only_on_main_or_a_release_tag(job):
     """main-ci waits for CI runs on main, which a branch has none of: off main, every job is skipped instead."""
     assert "github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')" in JOBS[job]["if"]
+
+
+def test_what_a_registry_can_rate_limit_is_tried_again():
+    """A 429 on a base image's pull would fail the build, and with it the release's PyPI jobs."""
+    build = "\n".join(_runs("infra-build"))
+    publish = "\n".join(_runs("infra-publish"))
+
+    assert re.search(r"infra_build\.py retry \\\s+docker build", build)
+    assert 'infra_build.py retry docker push "$BUILT"' in build
+    assert "infra_build.py retry docker buildx imagetools create" in publish
+    assert JOBS["infra-build"]["strategy"]["max-parallel"] <= 4

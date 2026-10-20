@@ -88,6 +88,8 @@ jobs:
     if: needs.infra-plan.outputs.missing != '[]'
     strategy:
       fail-fast: true
+      # A few at a time: each pulls its base images anonymously, and public.ecr.aws allows one such pull a second.
+      max-parallel: 4
       matrix:
         image: ${{ fromJSON(needs.infra-plan.outputs.missing) }}
         arch: [amd64, arm64]
@@ -127,7 +129,8 @@ jobs:
         if: steps.wanted.outputs.build == 'true'
         run: |
           # No provenance attestation, which would show in the multi-platform image as an unknown platform.
-          docker build --platform "$PLATFORM" --provenance=false -f "$DOCKERFILE" -t "$BUILT" \
+          python3 .github/scripts/infra_build.py retry \
+            docker build --platform "$PLATFORM" --provenance=false -f "$DOCKERFILE" -t "$BUILT" \
             --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
             --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
             --label "io.agentenv.source-tag=${TAG}" "$CONTEXT"
@@ -136,7 +139,7 @@ jobs:
         run: python3 .github/scripts/infra_build.py smoke "$NAME" "$BUILT"
       - name: Push it under its tag and platform
         if: steps.wanted.outputs.build == 'true'
-        run: docker push "$BUILT"
+        run: python3 .github/scripts/infra_build.py retry docker push "$BUILT"
 
   # Tags each new image's two platform builds as one multi-platform image under its source tag, which installs look up.
   # A tag that exists is never moved, so an image a wheel or an install pinned stays the one its tag names.
@@ -168,7 +171,7 @@ jobs:
               continue
             fi
             [ "$code" = 1 ] || exit 1
-            docker buildx imagetools create -t "$ref" \
+            python3 .github/scripts/infra_build.py retry docker buildx imagetools create -t "$ref" \
               --annotation "index:org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
               --annotation "index:org.opencontainers.image.revision=${GITHUB_SHA}" \
               "${ref}-amd64" "${ref}-arm64"

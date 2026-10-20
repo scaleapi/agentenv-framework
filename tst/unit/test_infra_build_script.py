@@ -218,3 +218,75 @@ def test_exists_cant_tell_when_docker_prints_no_manifest(script, monkeypatch, ca
     assert _run(script, monkeypatch, "exists", ref) == 2
 
     assert "docker printed no manifest: Name: a listing" in capsys.readouterr().out
+
+
+_LIMITED = ("#2 ERROR: failed to copy: httpReadSeeker: failed open: unexpected status code https://public.ecr.aws/v2/"
+            "docker/library/python/manifests/sha256:c208: 429 Too Many Requests\n")
+
+
+class _Process:
+    """What ``subprocess.Popen`` returns, printing ``printed`` and exiting ``code``."""
+
+    def __init__(self, printed: str, code: int):
+        self.stdout, self._code = iter(printed.splitlines(keepends=True)), code
+
+    def wait(self) -> int:
+        return self._code
+
+
+def _attempts(script, monkeypatch, answers: list[tuple[str, int]]) -> tuple[list[list[str]], list[float]]:
+    """Each run of the command prints and exits as the next of ``answers``; returns the commands run and the waits."""
+    runs, waits = [], []
+
+    def popen(argv, **kw):
+        runs.append(argv)
+        return _Process(*answers[len(runs) - 1])
+
+    monkeypatch.setattr(script.subprocess, "Popen", popen)
+    monkeypatch.setattr(script.time, "sleep", waits.append)
+    return runs, waits
+
+
+def test_retry_runs_a_command_once_when_it_works_and_prints_what_it_printed(script, monkeypatch, capsys):
+    runs, waits = _attempts(script, monkeypatch, [("#1 DONE 0.0s\n", 0)])
+
+    assert _run(script, monkeypatch, "retry", "docker", "build", "--platform", "linux/amd64", ".") == 0
+
+    assert runs == [["docker", "build", "--platform", "linux/amd64", "."]] and waits == []
+    assert capsys.readouterr().out == "#1 DONE 0.0s\n"
+
+
+def test_retry_tries_again_while_a_registry_rate_limits_it(script, monkeypatch, capsys):
+    runs, waits = _attempts(script, monkeypatch, [(_LIMITED, 1), ("toomanyrequests: retry-after: 1s\n", 1),
+                                                  ("pushed\n", 0)])
+
+    assert _run(script, monkeypatch, "retry", "docker", "push", "img") == 0
+
+    assert len(runs) == 3 and waits == list(script._RATE_LIMIT_WAITS_SECONDS[:2])
+    assert capsys.readouterr().out.count("::warning::a registry rate-limited `docker push img`; trying again in") == 2
+
+
+def test_retry_gives_up_after_its_waits(script, monkeypatch, capsys):
+    runs, waits = _attempts(script, monkeypatch, [(_LIMITED, 1)] * (len(script._RATE_LIMIT_WAITS_SECONDS) + 1))
+
+    assert _run(script, monkeypatch, "retry", "docker", "build", ".") == 1
+
+    assert len(runs) == len(script._RATE_LIMIT_WAITS_SECONDS) + 1 and waits == list(script._RATE_LIMIT_WAITS_SECONDS)
+
+
+def test_retry_doesnt_try_again_a_command_that_fails_otherwise(script, monkeypatch, capsys):
+    runs, waits = _attempts(script, monkeypatch, [("ERROR: failed to solve: process \"/bin/sh -c pip install\"\n", 1)])
+
+    assert _run(script, monkeypatch, "retry", "docker", "build", ".") == 1
+
+    assert len(runs) == 1 and waits == []
+
+
+def test_a_rate_limited_registry_lookup_is_tried_again(script, monkeypatch, capsys):
+    ref = f"{REGISTRY}/agentenv-gateway:{_TAG}"
+    answers = [subprocess.CompletedProcess([], 1, "", "ERROR: toomanyrequests: retry-after: 1s\n"),
+               subprocess.CompletedProcess([], 0, json.dumps({"digest": _DIGEST}), "")]
+    monkeypatch.setattr(script.subprocess, "run", lambda command, **kw: answers.pop(0))
+    monkeypatch.setattr(script.time, "sleep", lambda seconds: None)
+
+    assert _run(script, monkeypatch, "exists", ref) == 0
