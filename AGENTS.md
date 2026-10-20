@@ -110,7 +110,7 @@ and deserialized through a registry.
 | `eval/` | `Eval` (`eval`), a versioned list of task references, and its store. |
 | `plugins/` | Entry-point plugins (see Extension points): the group names, `inventory()`, which `agent-env plugin list/show/check` report, `load_failures` and `settings`. The top level is public; the underscored modules are internal. |
 | `explorer/` | Optional local web UI: `agent-env up`, needs the `explorer` extra, binds loopback `:8234`. |
-| `cli/` | Click CLI with the groups `a2a-agent`, `artifact`, `bundle`, `config`, `env`, `eval`, `plugin`, `run`, `task`, `up`. `task run` and `eval run` hand their runs to the configured `[runner]` and follow them. |
+| `cli/` | Click CLI with the groups `a2a-agent`, `artifact`, `bundle`, `config`, `env`, `eval`, `plugin`, `run`, `task`, `up`. `task run`, `task run-batch` and `eval run` hand their runs to the configured `[runner]` and follow them. |
 | `examples/` | The bundles agent-env ships (`hello`, and `echo-mcp`, which needs Docker), registered under `agent_env.bundles` in `pyproject.toml`. Tests run them, but they are examples for users, not fixtures. |
 
 ## Extension points

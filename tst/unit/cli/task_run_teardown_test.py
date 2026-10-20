@@ -154,6 +154,20 @@ def test_each_seed_of_a_batch_is_torn_down(monkeypatch, tmp_path, torn_down):
 
     assert result.exit_code == 0, result.output
     assert len(torn_down) == 2
+    assert [r.status for r in run_store.list_runs(task_id="t")] == [RunStatus.COMPLETED] * 2
+    assert sorted(c.metadata["seed"]["name"] for c in task.contexts) == ["first", "second"]
+
+
+def test_keep_holds_a_batchs_runs_up_until_ctrl_c_then_tears_them_down(monkeypatch, tmp_path, torn_down):
+    seeds = tmp_path / "seeds.csv"
+    seeds.write_text("name\nfirst\nsecond\n")
+    task = _Deploys()
+
+    result = _invoke(monkeypatch, tmp_path, task, "run-batch", "--seeds", str(seeds), "--keep", signal_after=1.0)
+
+    assert result.exit_code == 0, result.output
+    assert "Holding 2 sandboxes up; Ctrl-C tears them down." in result.output
+    assert _ids(torn_down) == ["sb-1", "sb-2"]
 
 
 class _OneQuickOneSlow(_Deploys):
