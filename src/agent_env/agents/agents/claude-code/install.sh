@@ -2,7 +2,7 @@
 # Install this agent from the folder this script is in, and start it on PORT, without an image of its own:
 #
 #   install.sh container NAME PORT     into the running container NAME, as root, in its working directory
-#   install.sh host NAME PORT WORKDIR  onto this Linux host, beside this script, as agent NAME, in WORKDIR
+#   install.sh host NAME PORT WORKDIR  onto this Linux host, as agent NAME, in WORKDIR
 #
 # It brings Claude Code's native build and uv, each checked against its published checksum, and the agent's
 # requirements in a private Python, so the target's own Python and packages are never touched; only a target with
@@ -34,7 +34,10 @@ case $mode in
     ;;
   host)
     [ "$(uname -s)" = Linux ] || { echo "a host install needs a Linux host, not $(uname -s)" >&2; exit 1; }
-    root=$here/../agent-$target
+    # Outside the work dir install_agent empties before each attempt, as a container's is, so a retry stops the agent an
+    # earlier attempt started. It ends in the sandbox's id, which names what a local sandbox's teardown removes from
+    # /tmp; a VM's host goes with the VM.
+    root=/tmp/agentenv-agent-$target-$port${AGENTENV_SANDBOX:+-$AGENTENV_SANDBOX}
     workdir=$4
     on() { sh -c "$1"; }
     put() { cp "$1" "$2.new" && mv -f "$2.new" "$2"; }

@@ -4,6 +4,7 @@ a read grant, over the local transfer CA's TLS, and the agent answers through a 
 running a command where the task's files are. Needs a Docker daemon, and network access for Claude Code, uv, Python and
 the agent's requirements."""
 
+import glob
 import json
 import logging
 import platform
@@ -151,8 +152,9 @@ def test_a_retried_install_replaces_the_agent_an_earlier_attempt_left_running_in
     assert endpoint.tool_results() == [f"{NOTES}\n/workspace/task_repo\n{SKILL_BODY}"], seen
 
 
-@pytest.mark.skipif(platform.system() != "Linux", reason="a host install needs a Linux host")
-def test_install_agent_with_no_container_installs_claude_code_onto_the_sandboxs_host(monkeypatch, state, endpoint):
+def _run_on_the_host(monkeypatch, state: Path, bundle: Path):
+    """``agent-env run`` on ``bundle``, with the grants a process on the host reaches, and what it left in /tmp of a
+    host install's root."""
     # A process on the host can't resolve host.docker.internal: the grants name the bridge address, which it reaches.
     bridge = _host_ips()[-1]
     config = state / "config.toml"
@@ -162,14 +164,45 @@ def test_install_agent_with_no_container_installs_claude_code_onto_the_sandboxs_
     monkeypatch.delenv("AGENT_ENV_OBJECT_STORE")
     configure()
     reset_artifact_store()
-    endpoint.respond = tool_then_answer("Bash", {"command": f"echo {NOTES}; {READ_SKILL}"})
-
+    before = set(glob.glob("/tmp/agentenv-agent-*"))
     try:
-        # A name with a space, which the install's paths carry.
-        result = CliRunner().invoke(cli, ["run", str(_bundle(state / "bundle", None, agents=("code helper",)))])
+        result = CliRunner().invoke(cli, ["run", str(bundle)])
     finally:
         grant_server(bridge, bridge).close()
+    return result, set(glob.glob("/tmp/agentenv-agent-*")) - before
 
-    seen = (result.output, endpoint.tool_results())
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="a host install needs a Linux host")
+def test_install_agent_with_no_container_installs_claude_code_onto_the_sandboxs_host(monkeypatch, state, endpoint):
+    endpoint.respond = tool_then_answer("Bash", {"command": f"echo {NOTES}; {READ_SKILL}"})
+
+    # A name with a space, which the install's paths carry.
+    result, left = _run_on_the_host(monkeypatch, state, _bundle(state / "bundle", None, agents=("code helper",)))
+
+    seen = (result.output, endpoint.tool_results(), left)
     assert result.exit_code == 0 and "tasks/install.json v1: passed" in result.output, seen
     assert endpoint.tool_results() == [f"{NOTES}\n{SKILL_BODY}"], seen
+    assert not left, seen  # the sandbox's teardown removed the install
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="a host install needs a Linux host")
+def test_a_retried_host_install_stops_the_agent_an_earlier_attempt_started(monkeypatch, state, endpoint):
+    """install_agent empties its work dir before each attempt, so the first install's agent must live outside it:
+    found there, it is stopped, rather than keeping the port the retry's agent needs."""
+    endpoint.respond = tool_then_answer("Bash", {"command": f"echo {NOTES}; {READ_SKILL}"})
+    endpoint.fail_next(Fault("status", status=400))
+    bundle = _bundle(state / "bundle", None, agents=("helper",))
+    task = bundle / "tasks/install.json"
+    steps = json.loads(task.read_text())
+    for step in steps:
+        if step["id"] == "ask-helper":
+            step["retry_config"] = {"retry_from_step_id": "install-helper", "max_retries": 1}
+    task.write_text(json.dumps(steps))
+
+    result, left = _run_on_the_host(monkeypatch, state, bundle)
+
+    seen = (result.output, endpoint.tool_results(), left)
+    assert result.exit_code == 0 and "tasks/install.json v1: passed" in result.output, seen
+    assert result.output.count("install-helper (install_agent)") == 2, seen
+    assert endpoint.tool_results() == [f"{NOTES}\n{SKILL_BODY}"], seen
+    assert not left, seen
