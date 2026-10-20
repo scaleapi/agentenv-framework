@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Optional
 
+KEEP_KEY = "keep"
+
 
 class RunStatus(StrEnum):
     """Run lifecycle, engine-neutral: a backend maps its own states onto these. ``QUEUED``
@@ -109,8 +111,13 @@ class Runner(ABC):
         agent_model: Optional[str] = None,
         agent_artifact_id: Optional[str] = None,
         metadata: Optional[dict] = None,
+        instance_id: Optional[str] = None,
     ) -> RunHandle:
-        """Enqueue a run and return its handle immediately, without waiting for it."""
+        """Enqueue a run and return its handle immediately, without waiting for it.
+
+        With ``instance_id`` the run continues that instance from its stored context, at ``metadata["start_step"]``.
+        A run whose ``metadata[KEEP_KEY]`` is set and that ends on its own, passed or failed, is left up: whoever
+        submitted it tears it down. A cancelled run is torn down either way."""
 
     @abstractmethod
     async def status(self, run_id: str) -> Optional[RunRecord]:

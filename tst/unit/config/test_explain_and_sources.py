@@ -175,7 +175,7 @@ def _env_vars_read_by(root):
     found = set()
     for module in root.rglob("*.py"):
         tree = ast.parse(module.read_text())
-        # `os.getenv(_ENV_API_KEY)` is as much a read as the literal; resolving the
+        # `os.getenv(ENV_API_KEY)` is as much a read as the literal; resolving the
         # constant is what stops a new variable hiding behind a name.
         consts = {t.id: n.value.value
                   for n in ast.walk(tree)
@@ -208,7 +208,7 @@ def test_every_env_var_agent_env_reads_is_declared():
 
 
 def test_the_guard_resolves_a_variable_hidden_behind_a_module_constant():
-    # LITELLM_API_KEY is only ever read as `os.getenv(_ENV_API_KEY)`, so a guard that
+    # LITELLM_API_KEY is only ever read as `os.getenv(ENV_API_KEY)`, so a guard that
     # matched literals alone would never have seen it.
     assert "LITELLM_API_KEY" in _env_vars_read_by(pathlib.Path(agent_env.__file__).parent)
 

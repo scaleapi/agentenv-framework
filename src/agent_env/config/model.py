@@ -17,8 +17,8 @@ from agent_env.config.loader import ENV_REF_PREFIX, SECRET_REF_PREFIX, SecretRes
 
 logger = logging.getLogger(__name__)
 
-_ENV_BASE_URL = "LITELLM_BASE_URL"
-_ENV_API_KEY = "LITELLM_API_KEY"
+ENV_BASE_URL = "LITELLM_BASE_URL"
+ENV_API_KEY = "LITELLM_API_KEY"
 # Agents get ``[model.headers]`` here as a JSON object; unlike its two siblings, agent-env never reads it.
 MODEL_HEADERS_ENV = "LITELLM_EXTRA_HEADERS"
 # RFC 9110: a header name is a token; a value is visible ASCII, spaces and tabs (no CR or LF to split it on).
@@ -110,11 +110,11 @@ class ModelConfig:
     def resolve_api_key(self, *, secret_resolver: SecretResolver) -> str:
         """Key: env ``LITELLM_API_KEY`` > ``api_key`` (resolving a reference lazily);
         actionable failure when neither is set."""
-        key = os.getenv(_ENV_API_KEY) or self._resolved_api_key(secret_resolver)
+        key = os.getenv(ENV_API_KEY) or self._resolved_api_key(secret_resolver)
         if not key:
             raise ConfigError(
                 "No model API key configured: set [model] api_key in .agentenv/config.toml "
-                f"(an env:/secret: reference is fine) or the {_ENV_API_KEY} env var."
+                f"(an env:/secret: reference is fine) or the {ENV_API_KEY} env var."
             )
         return key
 
@@ -128,7 +128,7 @@ class ModelConfig:
         that is the configured endpoint, since a header may carry a credential."""
         if not self.headers or not base_url:
             return {}
-        configured_base = os.getenv(_ENV_BASE_URL) or self.base_url
+        configured_base = os.getenv(ENV_BASE_URL) or self.base_url
         if not configured_base or base_url.rstrip("/") != configured_base.rstrip("/"):
             logger.info("Not sending [model.headers] to %s, which is not the configured model endpoint",
                         urlparse(base_url).hostname or base_url)
@@ -164,8 +164,8 @@ class ModelConfig:
                     params={},
                 )
 
-        key = default_api_key or os.getenv(_ENV_API_KEY)
-        configured_base = os.getenv(_ENV_BASE_URL) or self.base_url
+        key = default_api_key or os.getenv(ENV_API_KEY)
+        configured_base = os.getenv(ENV_BASE_URL) or self.base_url
         if base_override:
             api_base = base_override
         elif configured_base:
@@ -175,7 +175,7 @@ class ModelConfig:
         else:
             raise ConfigError(
                 f"No model endpoint configured for {model!r}: set [model] base_url in "
-                f".agentenv/config.toml or {_ENV_BASE_URL}, or use a provider-prefixed "
+                f".agentenv/config.toml or {ENV_BASE_URL}, or use a provider-prefixed "
                 "model name (e.g. 'openai/gpt-4o') for native routing."
             )
         # The configured key is scoped to the configured endpoint (and native routing):

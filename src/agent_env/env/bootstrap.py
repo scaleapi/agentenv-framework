@@ -27,9 +27,9 @@ from agent_env.store.image_store import LocalRegistryImageStore
 from agent_env.store.local_state import holding_locks
 from agent_env.store.object_store import LocalFilesystemObjectStore
 from agent_env.store.routing import configured_store
-from agent_env.utils.build_context import BuildContext
-from agent_env.utils.build_metadata import detect_env_metadata
-from agent_env.utils.docker_build import build_image, docker_unreachable
+from agent_env.utils.docker.context import BuildContext
+from agent_env.utils.docker.metadata import detect_env_metadata
+from agent_env.utils.docker.build import build_image, docker_unreachable
 
 _ENV_PACKAGE = Path(__file__).parent
 GATEWAY_DOCKERFILE = _ENV_PACKAGE / "gateway" / "Dockerfile"

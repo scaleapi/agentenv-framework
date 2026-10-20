@@ -6,6 +6,7 @@ import click
 
 from agent_env.artifact import SkillArtifact
 from agent_env.artifact.artifacts.skill import parse_skill_md, download_skill
+from agent_env.cli.utils import write_out
 
 
 # ---------------------------------------------------------------------------
@@ -115,15 +116,5 @@ def skill_get(artifact_id: str, artifact_version: Optional[int], output_dir: Pat
         f"name={skill_artifact.skill_name}"
     )
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    skill_files = skill_artifact.get_skill_files()
-    file_artifacts = skill_files.get_file_artifacts()
-    click.echo(f"Downloading {len(file_artifacts)} file(s)...")
-    for rel_path, fa in file_artifacts.items():
-        dest = output_dir / rel_path
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(fa.load())
-        click.echo(f"  {rel_path} -> {dest}")
-
+    write_out(skill_artifact, output_dir)
     click.echo(f"Done. Files written to {output_dir}")

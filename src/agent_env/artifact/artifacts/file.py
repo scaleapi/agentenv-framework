@@ -13,6 +13,7 @@ from agent_env.config import get_config
 
 if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
+    from agent_env.entity.export import ExportContext
 
 
 class FileArtifact(Artifact):
@@ -135,6 +136,11 @@ class FileArtifact(Artifact):
         filename, path = ctx.file()
         return cls.put_attempt(ctx.id, description=fields.get("description", filename), file_path=str(path),
                                filename=filename)
+
+    def to_toml(self, out: ExportContext) -> dict:
+        """The artifact.toml of a folder holding this file, which ``from_toml`` reads back as it."""
+        out.file(self.filename, self.object_url)
+        return {"type": self.type, **({} if self.description == self.filename else {"description": self.description})}
 
     @classmethod
     def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:

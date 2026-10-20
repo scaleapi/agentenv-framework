@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Callable, ClassVar, Optional
 
+from agent_env.config import run_env_ids
 from agent_env.plugins import _registration
 from agent_env.store.document_store import UnknownDocumentTypeError
 from agent_env.store.routing import run_scope
@@ -186,14 +187,16 @@ async def _roll_back_span(
     windows: dict[str, tuple[int, int]],
     completed_ids: set[str],
     log_prefix: str,
-) -> tuple[set[str], int] | None:
+    state: _SchedulerState,
+) -> set[str] | None:
     """Roll back a failed span so the scheduler can re-dispatch it on a clean world.
 
     The span is ``resume_from`` plus everything that transitively depends on it (the world is
     rebuilt from there, so every step built on top re-runs; the failed step is in that closure
     by ``_validate_dag``'s ancestry check), plus any sibling cancelled mid-execute (it may
-    hold partial writes). Returns the rolled-back step ids and the epoch to dispatch under, or
-    None to abort: the task then fails with the original error and the live context untouched.
+    hold partial writes). Returns the rolled-back step ids, with ``state.epoch`` moved to the epoch to
+    dispatch under, or None to abort: the task then fails with the original error and the live context
+    untouched.
 
     The rollback is the store's ``undo_steps``: it replays the surviving steps' journaled
     diffs over the run's seed in one CAS, so everything the span wrote goes, whatever it was
@@ -258,7 +261,7 @@ async def _roll_back_span(
         })
 
     persist = asyncio.ensure_future(
-        _store.undo_steps(instance_id, rollback_ids, extra_ops=_audit, bump_epoch=True)
+        _store.undo_steps(instance_id, rollback_ids, extra_ops=_audit, bump_epoch=True, attempt_epoch=state.epoch)
     )
     try:
         doc = await asyncio.shield(persist)
@@ -268,6 +271,7 @@ async def _roll_back_span(
         landed = (await asyncio.gather(persist, return_exceptions=True))[0]
         if isinstance(landed, dict):
             _rebuild_context(context, landed["context"])
+            state.epoch = landed.get("attempt_epoch", 0)
         raise
     except ValueError as refusal:
         logger.error(
@@ -283,7 +287,8 @@ async def _roll_back_span(
         )
         return None
     _rebuild_context(context, doc["context"])
-    return rollback_ids, doc.get("attempt_epoch", 0)
+    state.epoch = doc.get("attempt_epoch", 0)
+    return rollback_ids
 
 
 @dataclass
@@ -295,6 +300,7 @@ class _SchedulerState:
     - `pending[step_id]`: count of deps that still need to complete before `step_id` runs.
     - `completed`: seeded with steps skipped by `start_step`.
     - `ready`: steps whose deps are all satisfied and can launch immediately.
+    - `epoch`: the attempt epoch steps dispatch under; registration and each rollback set it.
     """
     step_by_id: dict[str, "TaskStep"]
     dependencies: dict[str, set[str]]
@@ -302,6 +308,7 @@ class _SchedulerState:
     pending: dict[str, int]
     completed: set[str]
     ready: list["TaskStep"]
+    epoch: int = 0
 
 
 class Task:
@@ -415,7 +422,7 @@ class Task:
         context.metadata['failed_steps']. The run is scoped to this task's id, so under namespace
         routing an ``@local`` task's records stay in the local stores.
         """
-        with run_scope(self.id):
+        with run_scope(self.id), run_env_ids((context.metadata.get("user_overrides") or {}) if context else {}):
             return await self._run(
                 on_step_start, on_step_complete, agent_model, agent_artifact_id,
                 start_step, end_step, context, instance_id,
@@ -471,6 +478,10 @@ class Task:
             context.agent_model = agent_model
         if agent_artifact_id is not None:
             context.agent_artifact_id = agent_artifact_id
+        rerun = {step.id for step in steps[start_step:end_step]}
+        if context.metadata.get("failed_steps"):
+            context.metadata["failed_steps"] = [
+                f for f in context.metadata["failed_steps"] if not (isinstance(f, dict) and f.get("step_id") in rerun)]
 
         # Pre-format a bracketed prefix for pass@k-correlated log lines.
         # agent-env's log pipeline doesn't index ad-hoc `key=value` fields, so
@@ -500,13 +511,15 @@ class Task:
             seed_task_instance_context(instance_id, context)
 
         state = self._build_scheduler_state(steps, start_step, end_step)
+        if instance:
+            state.epoch = instance.attempt_epoch
         # _drive_dag drains in-flight steps and records the failure itself if it raises.
         first_error, first_error_step_id = await self._drive_dag(
             steps, state, total, context, instance_id,
             on_step_start, on_step_complete, log_prefix,
         )
         if first_error is not None:
-            await self._handle_failure(first_error_step_id, first_error, context, instance_id)
+            await self._handle_failure(first_error_step_id, first_error, context, instance_id, state.epoch)
         return context
 
     async def _drive_dag(
@@ -545,7 +558,6 @@ class Task:
         first_error: BaseException | None = None
         first_error_step_id: str | None = None
         retry_counts: dict[str, int] = {}
-        epoch = 0
         # Execution windows (dispatch tick, end tick) per step, for the retry's concurrency
         # gate: a step that ran while a span member ran may have journaled its writes.
         clock = itertools.count()
@@ -645,7 +657,7 @@ class Task:
                 while state.ready and first_error is None:
                     step = state.ready.pop(0)
                     started[step.id] = next(clock)
-                    t = asyncio.create_task(_run_one(step, index_of[step.id], epoch))
+                    t = asyncio.create_task(_run_one(step, index_of[step.id], state.epoch))
                     in_flight[step.id] = t
                     task_to_step_id[t] = step.id
                 if not in_flight:
@@ -704,26 +716,29 @@ class Task:
                         failed_id=step_obj.id, resume_from=retry_cfg.retry_from_step_id,
                         cancelled_ids=cancelled, attempt=retry_counts[step_obj.id] + 1,
                         windows={sid: (t0, ended.get(sid, now_tick)) for sid, t0 in started.items()},
-                        completed_ids=set(state.completed), log_prefix=log_prefix,
+                        completed_ids=set(state.completed), log_prefix=log_prefix, state=state,
                     )
                     if outcome is None:
                         # Could not roll back (refused, unpersisted, or a concurrent survivor):
                         # fail with the original error, live context untouched.
                         first_error, first_error_step_id = exc, step_obj.id
                     else:
-                        rollback_ids, epoch = outcome
-                        for sid in rollback_ids:
+                        for sid in outcome:
                             state.completed.discard(sid)
                         _rearm()
         except (asyncio.CancelledError, Exception) as exc:
             await _drain_in_flight()
-            if instance_id:
+            if instance_id and first_error is None and isinstance(exc, asyncio.CancelledError):
+                await asyncio.to_thread(
+                    _store.record_task_cancelled, instance_id, str(exc) or "cancelled", Task._utc_now_str(), state.epoch,
+                )
+            elif instance_id:
                 # Record with the fatal step's attribution: a cancellation landing
                 # during the drain would otherwise overwrite the instance record
                 # with the CancelledError and a null failing-step id.
                 await _store.record_task_failure(
                     instance_id, first_error_step_id, context,
-                    first_error if first_error is not None else exc, Task._utc_now_str(),
+                    first_error if first_error is not None else exc, Task._utc_now_str(), state.epoch,
                 )
             raise
 
@@ -779,13 +794,14 @@ class Task:
         error: BaseException,
         context: TaskStepContext,
         instance_id: str | None,
+        attempt_epoch: int,
     ) -> None:
         """Record the terminal failure on the instance and re-raise it."""
         from .store import record_task_failure
 
         if instance_id:
             await record_task_failure(
-                instance_id, failing_step_id, context, error, Task._utc_now_str(),
+                instance_id, failing_step_id, context, error, Task._utc_now_str(), attempt_epoch,
             )
         raise error
 

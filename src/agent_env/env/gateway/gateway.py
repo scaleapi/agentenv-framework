@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 
 # Relative import — gateway runs as a standalone container with no agent_env.*
 from .constants import (
+    AGENT_ENV_HIDDEN_BY_DEFAULT_META_KEY,
     AGENT_ENV_ROLE_HEADER,
     AGENT_ENV_ROLE_META_KEY,  # noqa: F401  (the server module serves the whole vocabulary, used in this file or not)
     AGENT_ENV_SESSION_META_KEY,  # noqa: F401
@@ -135,6 +136,7 @@ class Gateway:
         self._tool_server_urls: dict[str, str] = {}
         self._tool_call_lock: asyncio.Lock | None = asyncio.Lock() if self.gateway_mode == GatewayMode.CONSISTENT else None
         self._role_rules: dict[str, dict[str, bool]] = {}
+        self._hidden_by_default: set[str] = set()  # tools a server listed hidden: only rules naming them apply
         self._role_rules_lock = asyncio.Lock()
 
         self._event_counter = 0
@@ -393,14 +395,16 @@ class Gateway:
         return sock
 
     def _is_disabled(self, role: str, name: str) -> bool:
-        """Walk the rule chain (role first, then WILDCARD) returning the first concrete True/False; default False."""
+        """Walk the rule chain (role first, then WILDCARD) returning the first concrete True/False; default False.
+        A tool listed hidden by default skips "*"-tool rules: only rules naming it apply, and with none it is hidden."""
+        hidden = name in self._hidden_by_default
         for r in (role, WILDCARD):
             rules = self._role_rules.get(r, {})
             if name in rules:
                 return rules[name]
-            if WILDCARD in rules:
+            if WILDCARD in rules and not hidden:
                 return rules[WILDCARD]
-        return False
+        return hidden
 
     def _install_role_filters(self) -> None:
         """Wrap the FastMCP tool manager so MCP tools/list and tools/call honor the current caller's role."""
@@ -833,6 +837,9 @@ class Gateway:
             logger.debug(f"Registered proxy tool: {tool.name}")
         for server, tools in listed:
             self._server_tools[server.name] = tools
+        self._hidden_by_default = {
+            tool.name for _, tools in listed for tool in tools
+            if (tool.meta or {}).get(AGENT_ENV_HIDDEN_BY_DEFAULT_META_KEY) is True}
         self._tools_discovered = True
         if self._mirror_get_time_descriptor():
             logger.info(f"Re-mirrored '{GET_TIME_TOOL_NAME}' descriptor after tool discovery")

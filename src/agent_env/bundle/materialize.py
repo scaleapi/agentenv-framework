@@ -36,7 +36,7 @@ from agent_env.store.routing import namespace_routing_enabled
 from agent_env.task import Task
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_step import TaskStep
-from agent_env.utils.docker_build import DockerBuildError
+from agent_env.utils.docker.build import DockerBuildError
 
 from ._fs import with_article
 from .authoring import AuthoringContext, build_context_files

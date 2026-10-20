@@ -30,10 +30,13 @@ def _disable_network():
 
 @pytest.fixture(autouse=True)
 def _docker_answers(monkeypatch):
-    """A bundle run asks whether Docker answers before it deploys containers locally or builds an infra env; unit
-    tests never reach a daemon, so it answers. Tests of the probe itself patch ``subprocess.run``."""
+    """A bundle run asks whether Docker and its plugins answer before it deploys containers locally or builds an
+    image, and whether a model endpoint is set before it deploys an agent; unit tests never reach a daemon or a model,
+    so they answer. Tests of the probes themselves patch ``subprocess.run`` or the config."""
     monkeypatch.setattr("agent_env.bundle.preflight.docker_unreachable", lambda: None)
     monkeypatch.setattr("agent_env.env.bootstrap.docker_unreachable", lambda: None)
+    monkeypatch.setattr("agent_env.bundle.preflight.docker_plugin_missing", lambda plugin: None)
+    monkeypatch.setattr("agent_env.bundle.preflight.model_endpoint_missing", lambda needed: None)
 
 
 @pytest.fixture(autouse=True)

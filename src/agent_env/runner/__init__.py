@@ -1,8 +1,8 @@
 """Run dispatch: the seam between "run this task" and ``Task.run()``."""
 
-from agent_env.runner.runner import RunHandle, RunRecord, Runner, RunStatus
+from agent_env.runner.runner import KEEP_KEY, RunHandle, RunRecord, Runner, RunStatus
 
-__all__ = ["RunHandle", "RunRecord", "Runner", "RunStatus", "LocalRunner", "get_runner"]
+__all__ = ["KEEP_KEY", "RunHandle", "RunRecord", "Runner", "RunStatus", "LocalRunner", "get_runner"]
 
 
 def __getattr__(name: str):

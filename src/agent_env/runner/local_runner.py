@@ -17,7 +17,7 @@ import uuid
 from typing import Optional
 
 from agent_env.runner import store as run_store
-from agent_env.runner.runner import RunHandle, RunRecord, Runner, RunStatus
+from agent_env.runner.runner import KEEP_KEY, RunHandle, RunRecord, Runner, RunStatus
 from agent_env.task.teardown import TERMINATE_TIMEOUT_SECONDS, teardown_run
 
 logger = logging.getLogger(__name__)
@@ -111,9 +111,10 @@ class LocalRunner(Runner):
         agent_model: Optional[str] = None,
         agent_artifact_id: Optional[str] = None,
         metadata: Optional[dict] = None,
+        instance_id: Optional[str] = None,
     ) -> RunHandle:
         run_id = f"local-{uuid.uuid4().hex}"
-        instance_id = uuid.uuid4().hex        # minted here so callers can link immediately
+        instance_id = instance_id or uuid.uuid4().hex        # minted here so callers can link immediately
         record = RunRecord(
             run_id=run_id, runner=self.type, task_id=task_id, task_version=task_version,
             instance_id=instance_id, status=RunStatus.QUEUED,
@@ -153,6 +154,7 @@ class LocalRunner(Runner):
 
     async def _run(self, record: RunRecord) -> None:
         from agent_env.task import Task
+        from agent_env.task.store import find_task_instance
 
         run_task: Optional[asyncio.Task] = None
         context = None
@@ -162,11 +164,16 @@ class LocalRunner(Runner):
                     return                            # canceled while it waited for a slot
                 run_store.set_running(record.run_id)
                 logger.info("Run %s starting (task=%s v%s)", record.run_id, record.task_id, record.task_version)
-                task = Task.get(record.task_id, record.task_version)
+                stored = find_task_instance(record.instance_id)
+                version = record.task_version if record.task_version is not None or stored is None else stored.task_version
+                if stored is not None and (stored.task_id, stored.task_version) != (record.task_id, version):
+                    raise ValueError(f"Instance {record.instance_id} is a run of {stored.task_id} v{stored.task_version}, "
+                                     f"not of {record.task_id} v{version}")
+                task = Task.get(record.task_id, version)
                 if task is None:
-                    raise LookupError(f"Task {record.task_id} v{record.task_version} not found")
+                    raise LookupError(f"Task {record.task_id} v{version} not found")
 
-                context = self._seed_context(record)
+                context = self._seed_context(record, stored)
                 self._contexts[record.run_id] = context
                 # start_step rides in metadata but Task.run takes it as a keyword;
                 # without lifting it out here every resume re-ran from zero.
@@ -202,7 +209,9 @@ class LocalRunner(Runner):
             run_store.mark_terminal(record.run_id, RunStatus.FAILED, error=f"{type(e).__name__}: {e}")
         finally:
             try:
-                if context is not None and record.run_id not in self._abandoned:
+                kept = (context is not None and context.metadata.get(KEEP_KEY) and run_task is not None
+                        and run_task.done() and not run_task.cancelled())
+                if context is not None and record.run_id not in self._abandoned and not kept:
                     self._tearing_down.add(record.run_id)
                     try:
                         async with asyncio.timeout(self.TEARDOWN_WAIT_SECONDS):
@@ -243,15 +252,16 @@ class LocalRunner(Runner):
             run_store.mark_terminal(run_id, RunStatus.COMPLETED)
             logger.info("Run %s completed", run_id)
 
-    def _seed_context(self, record: RunRecord):
-        """Build the context ``Task.run()`` mutates, carrying the run identity in metadata.
+    def _seed_context(self, record: RunRecord, stored):
+        """Build the context ``Task.run()`` mutates, from the ``stored`` instance it continues if any, carrying the run
+        identity in metadata.
 
         ``workflow_id`` holds the run id — the hub, instance documents and UI all key off it —
         so nothing downstream needs a special case for the local runner.
         """
         from agent_env.task_step import TaskStepContext
 
-        context = TaskStepContext()
+        context = TaskStepContext.from_dict(stored.context) if stored and stored.context else TaskStepContext()
         context.metadata.update(record.overrides.get("metadata") or {})
         context.metadata["workflow_id"] = record.run_id
         context.metadata["instance_id"] = record.instance_id

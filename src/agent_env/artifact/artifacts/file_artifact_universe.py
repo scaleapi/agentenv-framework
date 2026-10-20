@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from agent_env.artifact.artifacts.file import FileArtifact
     from agent_env.bundle.authoring import AuthoringContext
+    from agent_env.entity.export import ExportContext
 
 
 class FileArtifactUniverse(Universe):
@@ -175,6 +176,12 @@ class FileArtifactUniverse(Universe):
         """Write the folder's files, each a file artifact keyed by its path in the folder."""
         cls.accept_toml(data, ctx)
         return cls.put_bundled(ctx.id, files=ctx.files())
+
+    def to_toml(self, out: ExportContext) -> dict:
+        """The artifact.toml of a folder holding each file at its path, which ``from_toml`` reads back as this."""
+        for path, file in self.get_file_artifacts().items():
+            out.file(path, file.object_url)
+        return {"type": self.type}
 
     @classmethod
     def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:

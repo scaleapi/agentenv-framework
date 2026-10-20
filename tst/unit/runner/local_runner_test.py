@@ -11,7 +11,7 @@ import pytest
 from agent_env.config import configure, reset_config, set_document_store
 from agent_env.runner import store as run_store
 from agent_env.runner.local_runner import LocalRunner
-from agent_env.runner.runner import RunRecord, RunStatus
+from agent_env.runner.runner import KEEP_KEY, RunRecord, RunStatus
 from agent_env.store.document_store.sqlite_document_store import LocalSqliteDocumentStore
 
 
@@ -326,6 +326,81 @@ async def test_what_a_run_deployed_is_torn_down_however_it_ends(docs, monkeypatc
         await runner.stop()
 
     assert torn_down == [handle.run_id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("ending", "torn_down_count"), [("completes", 0), ("is cancelled", 1)])
+async def test_a_kept_run_is_left_up_unless_it_is_cancelled(docs, monkeypatch, ending, torn_down_count):
+    from agent_env.runner import local_runner
+    from agent_env.task.teardown import TeardownReport
+
+    torn_down = []
+
+    async def teardown_run(context):
+        torn_down.append(context)
+        return TeardownReport()
+
+    async def on_run(_):
+        started.set()
+        if ending == "is cancelled":
+            await asyncio.sleep(30)
+
+    monkeypatch.setattr(local_runner, "teardown_run", teardown_run)
+    started = asyncio.Event()
+    _install_task(monkeypatch, _FakeTask(on_run=on_run))
+    runner = LocalRunner(workers=1)
+    handle = await runner.submit("t1", 1, metadata={KEEP_KEY: True})
+    try:
+        if ending == "is cancelled":
+            await asyncio.wait_for(started.wait(), 5)
+            await runner.cancel(handle.run_id)
+        await _drain(runner, handle.run_id)
+        await _settled(runner, handle.run_id)
+    finally:
+        await runner.stop()
+
+    assert len(torn_down) == torn_down_count
+
+
+@pytest.mark.asyncio
+async def test_a_run_given_an_instance_continues_it_from_its_stored_context(docs, monkeypatch):
+    from agent_env.task.store import register_task_instance, seed_task_instance_context
+    from agent_env.task_step.context import TaskStepContext
+
+    from agent_env.task import Task
+
+    register_task_instance("t1", 3, 2, 1, instance_id="inst-1")
+    seed_task_instance_context("inst-1", TaskStepContext(metadata={"done": "s0"}))
+    task, versions = _FakeTask(), []
+    monkeypatch.setattr(Task, "get", classmethod(lambda cls, tid, ver=None: versions.append(ver) or task))
+    runner = LocalRunner(workers=1)
+    handle = await runner.submit("t1", metadata={"start_step": 1}, instance_id="inst-1")
+    try:
+        await _drain(runner, handle.run_id)
+    finally:
+        await runner.stop()
+
+    [call] = task.calls
+    assert handle.instance_id == call["instance_id"] == "inst-1"
+    assert (call["start_step"], call["context"].metadata["done"], versions) == (1, "s0", [3])
+
+
+@pytest.mark.asyncio
+async def test_a_run_given_an_instance_of_another_version_fails_without_running(docs, monkeypatch):
+    from agent_env.task.store import register_task_instance
+
+    register_task_instance("t1", 3, 2, 1, instance_id="inst-1")
+    task = _FakeTask()
+    _install_task(monkeypatch, task)
+    runner = LocalRunner(workers=1)
+    handle = await runner.submit("t1", 4, instance_id="inst-1")
+    try:
+        record = await _drain(runner, handle.run_id)
+    finally:
+        await runner.stop()
+
+    assert record.status is RunStatus.FAILED and "is a run of t1 v3, not of t1 v4" in record.error
+    assert task.calls == []
 
 
 @pytest.mark.asyncio

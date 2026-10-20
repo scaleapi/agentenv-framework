@@ -21,6 +21,7 @@ from agent_env.store.ids import derive_id
 if TYPE_CHECKING:
     from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
     from agent_env.bundle.authoring import AuthoringContext
+    from agent_env.entity.export import ExportContext
 
 # A command a bundle's CLI is installed as, at /opt/cli/<command_name>/.
 _COMMAND_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*")
@@ -130,6 +131,11 @@ class CliArtifact(Artifact):
         fields = cls.accept_toml(data, ctx)
         return cls.put(ctx.id, command_name=fields["command_name"], entrypoint=fields["entrypoint"],
                        files=ctx.files())
+
+    def to_toml(self, out: ExportContext) -> dict:
+        """The artifact.toml of a folder holding the CLI's tree, as this version wrote it under its own prefix."""
+        out.tree(self.cli_object_url)
+        return {"type": self.type, "command_name": self.command_name, "entrypoint": self.entrypoint}
 
     def get_cli_files(self) -> "FileArtifactUniverse":
         from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse

@@ -1527,12 +1527,12 @@ async def test_task_dag_parallel_e2e(
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_task_external_cancel_marks_failed():
+async def test_task_external_cancel_marks_cancelled():
     """Cancel-path: external cancel of Task.run() (a runner's timeout,
     worker SIGTERM, etc.) should:
 
       1. Cancel any in-flight steps.
-      2. Mark the Mongo task instance as failed (not stuck `running`).
+      2. Mark the Mongo task instance as cancelled (not stuck `running`).
       3. Re-raise the original CancelledError so the runner sees a cancel,
          not a generic step failure.
 
@@ -1578,10 +1578,10 @@ async def test_task_external_cancel_marks_failed():
     # a moment to drain. The cancel handler also writes to Mongo, so allow time.
     await asyncio.sleep(0.5)
 
-    # Mongo assertions: the instance should be marked failed, NOT still running.
+    # Mongo assertions: the instance should be marked cancelled, NOT still running.
     inst = Task.get_instance(instance_id)
-    assert inst.status == "failed", (
-        f"Expected status=failed after external cancel, got {inst.status!r}. "
+    assert inst.status == "cancelled", (
+        f"Expected status=cancelled after external cancel, got {inst.status!r}. "
         "The new try/except in Task.run() didn't fire — in-flight tasks were "
         "GC'd silently and the Mongo doc stayed `running`."
     )
@@ -1594,7 +1594,7 @@ async def test_task_external_cancel_marks_failed():
         f"Pre-cancel completed step's data missing from Mongo: {persisted}"
     )
 
-    logger.info(f"Cancel-path test passed: instance {instance_id} correctly marked failed")
+    logger.info(f"Cancel-path test passed: instance {instance_id} correctly marked cancelled")
 
 
 # ---------- Multi-turn PromptAgentTaskStep integration tests ----------

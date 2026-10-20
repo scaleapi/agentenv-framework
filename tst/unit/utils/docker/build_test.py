@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_env.utils import docker_build
-from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM, DockerBuildError, build_image, normalize_platform
+from agent_env.utils.docker import build as docker_build
+from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, DockerBuildError, build_image, normalize_platform
 
 
 @pytest.fixture
@@ -78,7 +78,7 @@ def test_a_missing_docker_raises_rather_than_crashing(monkeypatch):
 
 def test_importing_it_pulls_neither_cli_nor_providers():
     code = (
-        "import sys; import agent_env.utils.docker_build; "
+        "import sys; import agent_env.utils.docker.build; "
         "assert 'agent_env.cli' not in sys.modules, 'cli imported'; "
         "assert 'agent_env.providers' not in sys.modules, 'providers imported'"
     )
@@ -114,3 +114,31 @@ def test_docker_unreachable_says_why_docker_info_didnt_answer(monkeypatch, outco
 def test_a_platform_is_named_by_os_and_architecture_keeping_only_32_bit_arms_variant(platform, normalized):
     assert normalize_platform(platform) == normalized
 
+
+
+@pytest.mark.parametrize("plugin", ["compose", "buildx"])
+def test_a_docker_plugin_that_answers_is_not_missing_and_one_that_doesnt_says_how_to_install_it(monkeypatch, plugin):
+    calls = []
+    monkeypatch.setattr(docker_build.subprocess, "run", lambda argv, **kwargs: calls.append(argv) or SimpleNamespace(
+        returncode=0, stdout="", stderr=""))
+    assert docker_build.docker_plugin_missing(plugin) is None
+    assert calls == [["docker", plugin, "version"]]
+    monkeypatch.setattr(docker_build.subprocess, "run", lambda argv, **kwargs: SimpleNamespace(
+        returncode=1, stdout="", stderr=f"docker: '{plugin}' is not a docker command."))
+    missing = docker_build.docker_plugin_missing(plugin)
+    assert missing.startswith(f"`docker {plugin}` isn't installed; install Docker's ")
+    assert f"brew install docker-{plugin}" in missing and "cliPluginsExtraDirs" in missing
+
+
+def test_a_docker_plugin_probe_without_docker_or_an_answer_says_why(monkeypatch):
+    def absent(argv, **kwargs):
+        raise FileNotFoundError(argv[0])
+
+    monkeypatch.setattr(docker_build.subprocess, "run", absent)
+    assert docker_build.docker_plugin_missing("compose") == "docker isn't on PATH"
+
+    def hangs(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr(docker_build.subprocess, "run", hangs)
+    assert docker_build.docker_plugin_missing("buildx") == "`docker buildx version` didn't answer in 10s"

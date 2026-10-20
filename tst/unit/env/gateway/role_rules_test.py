@@ -1,6 +1,7 @@
 """Role-rule precedence in Gateway._is_disabled / _apply_rule: a role's own rules (explicit, then its
 wildcard) fully decide before the global "*" role is consulted, which is only a default for roles that
-say nothing. A hide that must survive any later rule is an internal_only_tool, not a "*"-role rule."""
+say nothing. A hide that must survive any later "*"-tool rule is a tool its server lists hidden by default,
+not a "*"-role rule: "*"-tool rules never show it, so only rules naming it can."""
 from __future__ import annotations
 
 import asyncio
@@ -34,7 +35,7 @@ def test_deny_all_then_allow_one_for_a_role():
 def test_a_global_hide_is_only_a_default_for_roles_that_say_nothing():
     """A "*"-role rule covers every role that has no rule of its own, but it does not outrank a role's
     own wildcard: `enable role=default tools="*"` means what it says. A hide that must survive that is
-    an internal_only_tool (see below), which is guarded unconditionally."""
+    a tool listed hidden by default (see below), which only a rule naming it shows."""
     gw = _gw()
     gw._apply_rule("*", "gdrive_touch_file", True)
     assert gw._is_disabled("default", "gdrive_touch_file") is True
@@ -64,6 +65,56 @@ def test_global_deny_all_with_role_wildcard_enable():
     gw._apply_rule("default", "*", False)
     assert gw._is_disabled("default", "anything") is False
     assert gw._is_disabled("other", "anything") is True
+
+
+def _hidden(*names: str) -> Gateway:
+    gw = _gw()
+    gw._hidden_by_default = set(names)
+    return gw
+
+
+def test_a_hidden_by_default_tool_is_hidden_from_every_role_until_a_rule_names_it():
+    gw = _hidden("gmail_insert_email")
+    assert gw._is_disabled("default", "gmail_insert_email") is True
+    assert gw._is_disabled("brand-new-role", "gmail_insert_email") is True
+    assert gw._is_disabled("default", "gmail_send_message") is False
+    gw._apply_rule("applicant", "gmail_insert_email", False)
+    assert gw._is_disabled("applicant", "gmail_insert_email") is False
+    assert gw._is_disabled("default", "gmail_insert_email") is True
+
+
+def test_wildcard_enables_never_show_a_hidden_by_default_tool():
+    """The reset most tasks open with (`enable role="*" tools="*"`) and a role-wide enable both leave it hidden."""
+    gw = _hidden("gmail_insert_email")
+    gw._apply_rule("*", "*", False)
+    assert gw._is_disabled("default", "gmail_insert_email") is True
+    assert gw._is_disabled("default", "gmail_send_message") is False
+    gw._apply_rule("default", "*", False)
+    assert gw._is_disabled("default", "gmail_insert_email") is True
+
+
+def test_deny_all_then_allow_by_name_shows_it_to_that_role_only():
+    gw = _hidden("gmail_insert_email")
+    gw._apply_rule("*", "*", False)
+    gw._apply_rule("applicant", "*", True)
+    gw._apply_rule("applicant", "gmail_insert_email", False)
+    gw._apply_rule("applicant", "gmail_search_messages", False)
+    assert gw._is_disabled("applicant", "gmail_insert_email") is False
+    assert gw._is_disabled("applicant", "gmail_search_messages") is False
+    assert gw._is_disabled("applicant", "gmail_send_message") is True
+    assert gw._is_disabled("default", "gmail_insert_email") is True
+    assert gw._is_disabled("grader", "gmail_insert_email") is True
+
+
+def test_naming_it_for_every_role_shows_it_and_a_reset_hides_it_again():
+    gw = _hidden("gmail_insert_email")
+    gw._apply_rule("*", "gmail_insert_email", False)
+    assert gw._is_disabled("default", "gmail_insert_email") is False
+    assert gw._is_disabled("brand-new-role", "gmail_insert_email") is False
+    gw._apply_rule("default", "gmail_insert_email", True)
+    assert gw._is_disabled("default", "gmail_insert_email") is True
+    gw._apply_rule("*", "*", False)
+    assert gw._is_disabled("brand-new-role", "gmail_insert_email") is True
 
 
 def test_fire_triggers_forwards_the_engine_s_tasks_and_bound(monkeypatch):

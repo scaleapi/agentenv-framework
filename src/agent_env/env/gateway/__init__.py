@@ -4,6 +4,7 @@ container code: it needs the Postgres driver, so it is deliberately not re-expor
 from dataclasses import dataclass
 
 from .constants import (
+    AGENT_ENV_HIDDEN_BY_DEFAULT_META_KEY,
     AGENT_ENV_ROLE_HEADER,
     AGENT_ENV_ROLE_META_KEY,
     AGENT_ENV_SESSION_META_KEY,
@@ -28,6 +29,7 @@ class InternalMCPServer:
 
 __all__ = [
     "AGENT_ENV_GATEWAY_MCP_PORT",
+    "AGENT_ENV_HIDDEN_BY_DEFAULT_META_KEY",
     "AGENT_ENV_ROLE_HEADER",
     "AGENT_ENV_ROLE_META_KEY",
     "AGENT_ENV_SESSION_META_KEY",
