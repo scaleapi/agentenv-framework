@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import io
 import json
+import os
 import tarfile
 from pathlib import Path
 
@@ -316,3 +317,30 @@ def test_a_directory_link_is_archived_as_a_link_and_one_the_load_would_refuse_is
 
     assert links == {"current": "report"}
     assert (workspace / "current").is_symlink() and (workspace / "current" / "answer.txt").read_text() == "done"
+
+
+def test_a_named_pipe_is_left_out_so_the_workspace_still_loads(monkeypatch, tmp_path):
+    workspace, _ = _snapshot_roots(monkeypatch, tmp_path)
+    os.mkfifo(workspace / "report" / "pipe")
+    archive = tmp_path / "workspace.tar.gz"
+
+    file_count, _ = a2a_server._build_workspace_archive(archive)
+    (workspace / "report" / "pipe").unlink()
+    a2a_server._restore_workspace_archive(archive)
+
+    assert file_count == 2
+    assert (workspace / "report" / "answer.txt").read_text() == "done" and not (workspace / "report" / "pipe").exists()
+
+
+def test_a_saved_conversation_holds_no_key_an_api_error_echoed(monkeypatch, tmp_path):
+    _, state = _snapshot_roots(monkeypatch, tmp_path)
+    key = "sk-FAKEfake0000fake0000fak"
+    ok = json.dumps({"type": "assistant", "message": {"role": "assistant", "content": "working"}})
+    failed = json.dumps({"type": "assistant", "isApiErrorMessage": True, "error": "unknown", "message": {
+        "role": "assistant", "content": [{"type": "text", "text": f"API Error: 400 Budget exceeded! Key={key}"}]}})
+    transcript = state / "projects" / "-app" / "session-1.jsonl"
+    transcript.write_text(f"{ok}\n{failed}\n")
+
+    saved = a2a_server._read_complete_session_jsonl(transcript).decode()
+
+    assert key not in saved and "[redacted]" in saved and saved.startswith(f"{ok}\n")

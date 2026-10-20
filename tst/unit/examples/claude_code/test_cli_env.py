@@ -133,10 +133,19 @@ def test_a_404_from_the_endpoint_says_it_may_not_serve_anthropics_messages_api(m
 
 @pytest.mark.parametrize("workspace, project", [
     ("/app", "-app"),
-    ("/tmp/my_ws.x-y/Sub Dir", "-tmp-my-ws-x-y-Sub-Dir"),  # as the CLI names it, checked against 2.1.280
+    ("/workspaces/my_ws.x-y/Sub Dir", "-workspaces-my-ws-x-y-Sub-Dir"),  # as the CLI names it, checked against 2.1.280
 ])
 def test_a_sessions_transcripts_are_where_the_cli_keeps_them_for_its_workspace(workspace, project):
     assert claude_bridge.project_dir(Path(workspace)) == claude_bridge.CLAUDE_STATE_DIR / "projects" / project
+
+
+def test_a_workspace_reached_through_a_link_keeps_its_transcripts_where_the_cli_does_for_its_real_path(tmp_path):
+    # The CLI names the directory for its working directory, which the OS gives it resolved.
+    (tmp_path / "real").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / "real", target_is_directory=True)
+
+    assert claude_bridge.project_dir(tmp_path / "link") == claude_bridge.project_dir(tmp_path / "real")
+    assert "-link" not in claude_bridge.project_dir(tmp_path / "link").name
 
 
 def test_the_workspace_is_the_configured_one_else_the_working_directory_but_never_the_root(monkeypatch, tmp_path):

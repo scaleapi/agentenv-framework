@@ -13,6 +13,7 @@ import logging
 import os
 import posixpath
 import shutil
+import stat
 import tarfile
 import tempfile
 import uuid
@@ -59,6 +60,7 @@ from claude_bridge import (
     SESSION_JSONL_DIR,
     WORKSPACE_DIR,
     read_partial_session_trajectory,
+    redact_session_records,
     run_claude,
     session_jsonl_path,
 )
@@ -148,9 +150,13 @@ def _restorable_link(path: Path, arcname: str) -> bool:
 
 def _add_workspace_entry(tar: tarfile.TarFile, path: Path, arcname: str, *, stage_source: bool) -> bool:
     try:
-        if path.is_symlink() and not _restorable_link(path, arcname):
+        mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode) and not _restorable_link(path, arcname):
             return False
     except OSError:
+        return False
+    # The load's data filter refuses pipes, sockets and devices, so leaving them out keeps the snapshot loadable.
+    if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode) or stat.S_ISLNK(mode)):
         return False
     if not stage_source:
         try:
@@ -233,20 +239,20 @@ def _build_workspace_archive(archive_path: Path) -> tuple[int, int]:
 
 
 def _read_complete_session_jsonl(path: Path) -> bytes:
-    """The transcript's newline-complete records, while the CLI may still be appending."""
+    """The transcript's newline-complete records, while the CLI may still be appending, its API error records
+    redacted."""
     data = path.read_bytes()
     if not data:
         raise ValueError("session transcript is empty")
-    if data.endswith(b"\n"):
-        return data
-    complete, separator, tail = data.rpartition(b"\n")
-    if separator:
-        return complete + b"\n"
-    try:
-        json.loads(tail)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise ValueError("session transcript has no complete JSONL record") from exc
-    return tail + b"\n"
+    if not data.endswith(b"\n"):
+        complete, separator, tail = data.rpartition(b"\n")
+        if not separator:
+            try:
+                json.loads(tail)
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise ValueError("session transcript has no complete JSONL record") from exc
+        data = (complete if separator else tail) + b"\n"
+    return redact_session_records(data)
 
 
 def _clear_directory(path: Path) -> None:

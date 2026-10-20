@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import signal
+import stat
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
@@ -32,9 +33,9 @@ def _workspace() -> Path:
 
 
 def project_dir(workspace: Path) -> Path:
-    """Where the CLI keeps the transcripts of sessions run in ``workspace``: a directory named for it, each character
-    but a letter or digit as -."""
-    return CLAUDE_STATE_DIR / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(workspace))
+    """Where the CLI keeps the transcripts of sessions run in ``workspace``: a directory named for its real path, as
+    the CLI's working directory has it, each character but a letter or digit as -."""
+    return CLAUDE_STATE_DIR / "projects" / re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(workspace))
 
 
 WORKSPACE_DIR = _workspace()
@@ -96,7 +97,7 @@ def read_partial_session_trajectory(session_id: str) -> tuple[list[dict], int]:
         if not isinstance(record, dict):
             continue
         session_lines += 1
-        event = _session_record_to_stream_event(record)
+        event = _session_record_to_stream_event(_redact_values(record) if _is_api_error(record) else record)
         if event is not None:
             trajectory.append(event)
     return trajectory, session_lines
@@ -278,6 +279,57 @@ def _redact(text: str) -> str:
     return _SECRET_PATTERN.sub("[redacted]", _HEADER_VALUE_PATTERN.sub(r"\1[redacted]'", text))
 
 
+def _is_api_error(record: dict) -> bool:
+    """A record of a failed call to the endpoint, whose text can echo its key: the stream's error `result` and
+    `assistant` events, and the transcript's error messages."""
+    return bool(record.get("is_error") or record.get("is_api_error_message") or record.get("isApiErrorMessage"))
+
+
+def _redact_values(value: object) -> object:
+    """``value`` with every string in it redacted."""
+    if isinstance(value, str):
+        return _redact(value)
+    if isinstance(value, list):
+        return [_redact_values(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _redact_values(item) for key, item in value.items()}
+    return value
+
+
+def redact_session_records(jsonl: bytes) -> bytes:
+    """A session transcript with its API error records redacted, and every other line as it was."""
+    lines = jsonl.split(b"\n")
+    for index, line in enumerate(lines):
+        if b"isApiErrorMessage" not in line:
+            continue
+        try:
+            record = json.loads(line)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if isinstance(record, dict) and _is_api_error(record):
+            lines[index] = json.dumps(_redact_values(record), ensure_ascii=False, separators=(",", ":")).encode()
+    return b"\n".join(lines)
+
+
+def scrub_session_transcript(session_id: str | None) -> None:
+    """Redact the API error records an exited CLI left in the session's transcript, which trajectories and snapshots
+    read."""
+    if not session_id:
+        return
+    path = session_jsonl_path(session_id)
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError:
+        return
+    scrubbed = redact_session_records(data)
+    if scrubbed == data:
+        return
+    staged = path.with_name(f".{path.name}.scrubbed")
+    staged.write_bytes(scrubbed)
+    os.chmod(staged, stat.S_IMODE(path.stat().st_mode))
+    os.replace(staged, path)
+
+
 def _one_line(text: str) -> str:
     return _LINE_BREAK_PATTERN.sub(" ", text).strip()
 
@@ -353,8 +405,13 @@ async def run_claude(
         attempts += 1
         attempt_timeout_s = (timeout_s if attempts == 1
                              else max(int(deadline - time.monotonic()) - _DEADLINE_HEADROOM_S, 1))
-        result = await spawn(prompt=attempt_prompt, session_id=attempt_session, resume=attempt_resume,
-                             timeout_s=attempt_timeout_s)
+        try:
+            result = await spawn(prompt=attempt_prompt, session_id=attempt_session, resume=attempt_resume,
+                                 timeout_s=attempt_timeout_s)
+        finally:
+            await asyncio.to_thread(scrub_session_transcript, attempt_session)
+        if result.session_id != attempt_session:
+            await asyncio.to_thread(scrub_session_transcript, result.session_id)
         tool_calls += result.tool_call_count
 
         failure = _resumable_api_failure(result)
@@ -575,6 +632,9 @@ async def _spawn_claude(
         if not isinstance(event, dict):
             logger.warning(f"claude CLI emitted a non-object JSON line: {line[:_LOGGED_LINE_CHARS]}")
             return
+        if _is_api_error(event):
+            # A failure's text can echo the endpoint's key, and the event is kept and streamed like any other.
+            event = _redact_values(event)
         trajectory.append(event)
         etype = event.get("type")
         if etype == "system" and event.get("subtype") == "init":

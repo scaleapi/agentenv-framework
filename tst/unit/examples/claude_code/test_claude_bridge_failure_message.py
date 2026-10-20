@@ -49,14 +49,14 @@ def run(monkeypatch, tmp_path):
     monkeypatch.delenv("CLAUDE_API_ERROR_RETRIES", raising=False)
     (tmp_path / "sess-1.jsonl").write_text('{"type":"assistant"}\n')
 
-    def _run(*invocations):
+    def _run(*invocations, **kwargs):
         queue = list(invocations)
 
         async def _exec(*cmd, **kwargs):
             return FakeCLI(*queue.pop(0))
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", _exec)
-        return asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False))
+        return asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, **kwargs))
 
     return _run
 
@@ -210,6 +210,22 @@ def test_a_key_in_the_cli_error_is_redacted_from_error_response_and_logs(run, ca
     assert "[redacted]" in result.error
     for text in (result.error, result.response, caplog.text):
         assert _FAKE_KEY not in text
+
+
+def test_a_key_a_failed_call_echoes_is_redacted_from_the_events_streamed_and_kept_and_from_the_transcript(run, tmp_path):
+    text = f"API Error: 400 Budget has been exceeded! Key={_FAKE_KEY}"
+    # The pinned CLI's failure, captured: an error `assistant` event, the error `result`, and the transcript's record.
+    failed = {"type": "assistant", "is_api_error_message": True, "error": "unknown", "session_id": "sess-1",
+              "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}
+    transcript = tmp_path / "sess-1.jsonl"
+    transcript.write_text(json.dumps({"type": "assistant", "isApiErrorMessage": True, "message": failed["message"]}) + "\n")
+    streamed: list[dict] = []
+
+    result = run((_stdout(failed, _api_error(text, api_error_status=400)), 1), event_callback=streamed.append)
+
+    kept = json.dumps([streamed, result.trajectory, claude_bridge.read_partial_session_trajectory("sess-1")[0]])
+    assert _FAKE_KEY not in kept and _FAKE_KEY not in transcript.read_text()
+    assert "[redacted]" in kept and "[redacted]" in transcript.read_text()
 
 
 def test_redaction_leaves_masked_keys_and_ids_alone():
