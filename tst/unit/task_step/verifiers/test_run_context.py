@@ -476,3 +476,15 @@ async def test_an_earlier_prompt_sees_only_the_env_events_from_before_the_next_p
 
     assert [f.trigger_id for f in graded_first.firings(env="calendar")] == ["lunch_confirm"]
     assert [f.trigger_id for f in graded_last.firings(env="calendar")] == ["lunch_confirm", "dinner_confirm"]
+
+
+@pytest.mark.asyncio
+async def test_an_earlier_prompt_sharing_the_next_prompts_conversation_has_its_env_firings_withheld():
+    context, prompt_response, _ = recorded_run()
+    context.prompt_responses.append(PromptResponse(prompt_id="p2", response="ok", prompt_text="again", step_id="again"))
+    context.metadata["a2a_conversations"]["again"] = context.metadata["a2a_conversations"]["prompt"]
+
+    run = await load_run_context(context, prompt_response)
+
+    with pytest.raises(RunRecordUnavailable, match="when the next prompt began is unknown"):
+        run.firings(env="calendar")

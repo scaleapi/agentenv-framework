@@ -296,7 +296,11 @@ def _until_next_prompt(env_events: dict[str, list[dict]], context: TaskStepConte
     index = next((i for i, pr in enumerate(context.prompt_responses) if pr is prompt_response), None)
     if index is None or index + 1 >= len(context.prompt_responses) or not env_events:
         return env_events
-    start = _first_message_ts(context, context.prompt_responses[index + 1])
+    following = context.prompt_responses[index + 1]
+    conversations = context.metadata.get("a2a_conversations") or {}
+    # Prompts sharing one conversation (one context_id) leave no boundary in it to cut at.
+    shared = conversations.get(following.step_id) == conversations.get(prompt_response.step_id)
+    start = None if shared else _first_message_ts(context, following)
     if start is None:
         why = "withheld: when the next prompt began is unknown, so its events can't be told apart"
         unavailable.update(dict.fromkeys((f"env:{env_id}" for env_id in env_events), why))
