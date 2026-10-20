@@ -368,7 +368,7 @@ class DeployAgentTaskStep(TaskStep):
         env_vars = dict(self.env_vars) if self.env_vars else {}
         override_litellm_key = user_overrides.get("litellm_api_key")
         if override_litellm_key:
-            env_vars["LITELLM_API_KEY"] = override_litellm_key
+            env_vars["LITELLM_API_KEY"] = config.resolve_reference(override_litellm_key)
         resolved_litellm_base_url = user_overrides.get("litellm_base_url") or self.litellm_base_url
         if resolved_litellm_base_url:
             env_vars["LITELLM_BASE_URL"] = resolved_litellm_base_url

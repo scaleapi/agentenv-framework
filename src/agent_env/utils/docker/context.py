@@ -7,6 +7,7 @@ import gzip
 import hashlib
 import json
 import os
+import posixpath
 import stat
 import tarfile
 import unicodedata
@@ -59,7 +60,7 @@ class BuildContext:
         named = None
         if dockerfile is not None and _inside(top, Path(os.path.realpath(dockerfile))):
             named = _inside(top, dockerfile)
-        matcher = FilePatternMatcher.from_file(ignores) if ignores else None
+        matcher = ignore_matcher(ignores.read_text(encoding="utf-8")) if ignores else None
         walk = _Walk(top, matcher, kept)
         walk.run()
         if walk.problems:
@@ -100,11 +101,11 @@ class BuildContext:
 
 
 def extract(archive: Path, out: Path) -> None:
-    """Unpack a build context's tar.gz into the folder ``out``: its files, folders and links. A link that leads out
-    of ``out`` is left out, as nothing there is the build's. Raises ValueError on anything else, which no context
-    written by ``BuildContext.write`` holds: a hard link, a device, a name that leads out of ``out``."""
+    """Unpack a build context's tar.gz into the folder ``out``: its files, folders, links and hard links. A link that
+    leads out of ``out`` is left out, as nothing there is the build's. Raises ValueError on anything else, which no
+    context written by ``BuildContext.write`` holds: a device, a name that leads out of ``out``."""
     with tarfile.open(archive, "r:gz") as tar:
-        tar.extractall(out, filter=_context_member)
+        tar.extractall(out, filter=context_member)
 
 
 class _Walk:
@@ -206,15 +207,17 @@ class _Hashing:
         return self._digest.hexdigest()
 
 
-def _context_member(member: tarfile.TarInfo, out: str) -> tarfile.TarInfo | None:
-    """``member`` as ``extract`` writes it, None to leave it out."""
-    if not (member.isreg() or member.isdir() or member.issym()):
+def context_member(member: tarfile.TarInfo, out: str, *, links_out: bool = False) -> tarfile.TarInfo | None:
+    """``member`` as ``extract`` writes it; None for a link leading out of ``out``, unless ``links_out``."""
+    if not (member.isreg() or member.isdir() or member.issym() or member.islnk()):
         raise ValueError(f"{member.name!r} in the build context is neither a file, a folder nor a link")
+    if member.islnk() and (posixpath.isabs(member.linkname) or posixpath.normpath(member.linkname).startswith("..")):
+        raise ValueError(f"{member.name!r} in the build context is a hard link to {member.linkname!r}, outside it")
     try:
         member = tarfile.tar_filter(member, out)
     except tarfile.FilterError as e:
         raise ValueError(f"{member.name!r} in the build context: {e}") from e
-    if member.issym():
+    if member.issym() and not links_out:
         top = os.path.realpath(out)
         target = os.path.realpath(os.path.join(top, os.path.dirname(member.name), member.linkname))
         if os.path.commonpath([top, target]) != top:
@@ -227,6 +230,17 @@ def ignore_file(top: Path, dockerfile: Path | None) -> Path | None:
     context's ``.dockerignore``."""
     candidates = [dockerfile.with_name(f"{dockerfile.name}.dockerignore")] if dockerfile is not None else []
     return next((path for path in (*candidates, top / ".dockerignore") if path.is_file()), None)
+
+
+def ignore_names(dockerfile: str) -> tuple[str, str]:
+    """``ignore_file``'s candidates, in order, for a Dockerfile at ``dockerfile`` in the context."""
+    return f"{dockerfile}.dockerignore", ".dockerignore"
+
+
+def ignore_matcher(ignore_file: str) -> FilePatternMatcher:
+    """A matcher for an ignore file's patterns, as docker build reads them: a line opening with ``#`` is a comment."""
+    lines = ignore_file.removeprefix("\ufeff").splitlines()
+    return FilePatternMatcher(*(line for line in lines if not line.startswith("#")))
 
 
 def _inside(top: Path, path: Path) -> str | None:

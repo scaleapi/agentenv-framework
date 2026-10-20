@@ -4,6 +4,7 @@ from typing import Optional
 import click
 
 from agent_env.artifact import CliArtifact
+from agent_env.cli.utils import write_out
 
 
 @click.group(name="cli")
@@ -70,14 +71,6 @@ def cli_get(artifact_id: str, artifact_version: Optional[int], output_dir: Path)
         f"command_name={cli_artifact.command_name} entrypoint={cli_artifact.entrypoint}"
     )
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    file_artifacts = cli_artifact.get_cli_files().get_file_artifacts()
-    click.echo(f"Downloading {len(file_artifacts)} file(s)...")
-    for rel_path, fa in file_artifacts.items():
-        dest = output_dir / rel_path
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(fa.load())
-        click.echo(f"  {rel_path} -> {dest}")
-
+    write_out(cli_artifact, output_dir)
     click.echo(f"Done. Files written to {output_dir}")
     click.echo(f"Entrypoint: {output_dir / cli_artifact.entrypoint}")

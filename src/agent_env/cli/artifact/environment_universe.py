@@ -4,8 +4,7 @@ from typing import Optional, Tuple
 import click
 
 from agent_env.artifact import FileArtifact, EnvironmentArtifact, EnvironmentUniverseArtifact
-from agent_env.artifact.artifacts.environment_universe_folder import environment_path, metadata_path
-from agent_env.cli.utils import parse_artifact_ref
+from agent_env.cli.utils import parse_artifact_ref, write_out
 
 
 # ---------------------------------------------------------------------------
@@ -119,29 +118,7 @@ def environment_universe_get(
         f"environment_artifacts={children} metadata={md}"
     )
 
-    out = Path(output_dir)
-    out.mkdir(parents=True, exist_ok=True)
-
-    environment_artifacts = universe.get_environment_artifacts()
-    click.echo(f"Downloading {len(environment_artifacts)} environment artifact(s)...")
-    for sa in environment_artifacts:
-        file_artifact = sa.get_file_artifact()
-        data = file_artifact.load()
-        dest = environment_path(out, sa.environment_name, file_artifact.filename)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(data)
-        click.echo(f"  {sa.environment_name} -> {dest}")
-
-    metadata_artifacts = universe.get_metadata()
-    if metadata_artifacts:
-        click.echo(f"Downloading {len(metadata_artifacts)} metadata file(s)...")
-        for key, file_artifact in metadata_artifacts.items():
-            data = file_artifact.load()
-            dest = metadata_path(out, key, file_artifact.filename)
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(data)
-            click.echo(f"  {key} -> {dest}")
-
+    out = write_out(universe, Path(output_dir))
     click.echo(f"Done. Files written to {out}")
 
 

@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
+    from agent_env.entity.export import ExportContext
 
 
 class SeedsEnvironments(ABC):
@@ -111,6 +112,13 @@ class EnvironmentArtifact(Artifact, SeedsEnvironments):
             file = FileArtifact.put_attempt(cls.derived_file_id(ctx.id), file_path=str(path), filename=filename,
                                             description=fields.get("description", filename))
         return cls.put(ctx.id, environment_name=fields["environment_name"], file_artifact=file)
+
+    def to_toml(self, out: ExportContext) -> dict:
+        """The artifact.toml of a folder holding the environment's file, which ``from_toml`` reads back as this."""
+        file = self.get_file_artifact()
+        out.file(file.filename, file.object_url)
+        described = {} if file.description == file.filename else {"description": file.description}
+        return {"type": self.type, "environment_name": self.environment_name, **described}
 
     @classmethod
     def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:

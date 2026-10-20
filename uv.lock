@@ -42,7 +42,7 @@ http-server = [
 
 [[package]]
 name = "agentenv-framework"
-version = "0.9.1335"
+version = "0.9.1336"
 source = { editable = "." }
 dependencies = [
     { name = "a2a-sdk" },
@@ -178,7 +178,7 @@ provides-extras = ["aws", "explorer", "gcp", "sail", "vercel", "tensorlake", "te
 
 [[package]]
 name = "agentenv-framework-protocol"
-version = "0.1.350"
+version = "0.1.351"
 source = { editable = "packages/agentenv-protocol" }
 dependencies = [
     { name = "httpx" },
@@ -189,6 +189,7 @@ dependencies = [
 [package.optional-dependencies]
 agent = [
     { name = "a2a-sdk", extra = ["http-server"] },
+    { name = "mcp" },
     { name = "python-multipart" },
     { name = "regex" },
     { name = "uvicorn" },
@@ -209,6 +210,7 @@ requires-dist = [
     { name = "a2a-sdk", extras = ["http-server"], marker = "extra == 'dev'", specifier = ">=0.3.26,<0.4" },
     { name = "fastmcp", marker = "extra == 'dev'", specifier = ">=3.4,<4" },
     { name = "httpx", specifier = ">=0.27" },
+    { name = "mcp", marker = "extra == 'agent'", specifier = ">=1.25,<2" },
     { name = "mcp", marker = "extra == 'dev'", specifier = ">=1.25,<2" },
     { name = "pydantic", specifier = ">=2.11" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0" },

@@ -277,6 +277,7 @@ class S3ObjectStore(ObjectStore):
             size=head.get("ContentLength"),
             last_modified=head.get("LastModified"),
             content_encoding=head.get("ContentEncoding"),
+            etag=head.get("ETag"),
         )
 
     def _list_keys(self, bucket: str, prefix: str) -> list[str]:

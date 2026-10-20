@@ -50,6 +50,16 @@ def test_set_running_advances_only_a_queued_run(docs):
     assert run_store.get_run("c").status == RunStatus.CANCELED
 
 
+def test_the_index_never_holds_a_per_run_key_but_keeps_a_reference(docs):
+    record = _record("r", RunStatus.QUEUED)
+    record.overrides = {"metadata": {"user_overrides": {
+        "litellm_api_key": "sk-raw", "judge_litellm_api_key": "secret:judge", "agent_sandbox": "local"}}}
+    run_store.insert_run(record)
+    assert run_store.get_run("r").overrides["metadata"]["user_overrides"] == {
+        "judge_litellm_api_key": "secret:judge", "agent_sandbox": "local"}
+    assert record.overrides["metadata"]["user_overrides"]["litellm_api_key"] == "sk-raw"
+
+
 def test_count_runs_counts_one_task_or_every_task(docs):
     run_store.insert_run(_record("a", RunStatus.QUEUED))
     run_store.insert_run(RunRecord(run_id="b", runner="other", task_id="u", task_version=1, instance_id="j"))

@@ -11,7 +11,7 @@ import sys
 from click.testing import CliRunner
 from unittest.mock import MagicMock, patch
 
-from agent_env.utils.docker_build import DockerBuildError
+from agent_env.utils.docker.build import DockerBuildError
 
 
 def test_old_cli_path_no_longer_re_exports_the_helper():

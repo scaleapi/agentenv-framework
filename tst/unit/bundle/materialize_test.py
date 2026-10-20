@@ -35,7 +35,7 @@ from agent_env.store.base import NotFoundError
 from agent_env.store.routing import disable_namespace_routing
 from agent_env.task import Task
 from agent_env.task_step.task_step import TaskStep
-from agent_env.utils.build_context import BuildContext
+from agent_env.utils.docker.context import BuildContext
 from tst.unit.bundle._support import DIGEST, RefusingStore, layout, local_builds, local_store, plan_of
 
 ROOT = "@local/~/triage"

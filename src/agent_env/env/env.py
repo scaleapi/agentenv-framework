@@ -23,6 +23,7 @@ _EXTENSION_CALL_TIMEOUT_S = 30
 
 if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
+    from agent_env.entity.export import ExportContext
     from .store import EnvQuery
 
 
@@ -297,6 +298,12 @@ class Env(ABC):
         to ids) under ``ctx.id`` and return it. The default reads ``data`` as ``from_dict`` reads a
         stored document; a type whose toml differs overrides this."""
         return get_env_store().put_document(cls.from_dict({**data, "id": ctx.id, "version": None}))
+
+    def provider_toml(self, out: ExportContext, env_provider_type: str) -> dict:
+        """The env.toml keys every env type writes: its provider, unless it's the gateway a toml defaults to."""
+        if self.metadata:
+            out.left_out("metadata", "an env.toml carries no metadata")
+        return {} if env_provider_type == "gateway" else {"env_provider_type": env_provider_type}
 
     async def deploy(self, **kwargs) -> DeployedEnv:
         raise NotImplementedError(f"{type(self).__name__} must implement deploy()")

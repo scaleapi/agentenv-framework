@@ -7,6 +7,7 @@ import dataclasses
 from dataclasses import dataclass, field
 from typing import Any
 
+from agent_env.config.loader import ENV_REF_PREFIX, SECRET_REF_PREFIX
 from agent_env.env.env import DeployedEnv
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, host_url_for
 from agent_env.providers.sandbox_providers.sandbox_provider import reachable_url
@@ -17,6 +18,14 @@ _REDACTED_KEYS = {
     "litellm_api_key", "judge_litellm_api_key", "usersim_api_key", "remote_tokens", "cf_access_client_secret",
     HEARTBEAT_KEY,
 }
+
+
+def _is_redacted(key: str, value: Any) -> bool:
+    """Whether ``key`` holds a secret kept out of storage. A bare ``env:`` / ``secret:`` reference names one rather
+    than holding it, so it is kept; one with a ``?default`` may carry the secret itself, so it is not."""
+    return key in _REDACTED_KEYS and not (
+        isinstance(value, str) and value.startswith((ENV_REF_PREFIX, SECRET_REF_PREFIX)) and "?" not in value
+    )
 
 
 def _holds_redacted_key(value: Any) -> bool:
@@ -51,7 +60,7 @@ def _strip_redacted_keys(value: Any) -> Any:
     never reach Mongo regardless of which code path persists them.
     """
     if isinstance(value, dict):
-        return {k: _strip_redacted_keys(v) for k, v in value.items() if k not in _REDACTED_KEYS}
+        return {k: _strip_redacted_keys(v) for k, v in value.items() if not _is_redacted(k, v)}
     if isinstance(value, list):
         return [_strip_redacted_keys(v) for v in value]
     return value

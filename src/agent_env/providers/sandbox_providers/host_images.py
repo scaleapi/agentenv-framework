@@ -23,7 +23,7 @@ from pathlib import Path
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.config import get_config
 from agent_env.store.local_state import holding_locks
-from agent_env.utils.docker_build import build_image, normalize_platform
+from agent_env.utils.docker.build import build_image, normalize_platform
 
 logger = logging.getLogger(__name__)
 

@@ -7,6 +7,7 @@ import functools
 import json
 import logging
 import re
+import shlex
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -66,6 +67,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _TRAJECTORY_READ_ATTEMPTS = 3
+
+# How much of a service's output a failed deploy's error carries: enough for the end of a traceback.
+_LOG_TAIL_LINES = 30
+_LOG_LINE_CHARS = 300
+# Gathering it may stall with the connection; past this, the deploy raises the error it had.
+_DOWN_SERVICES_TIMEOUT_S = 60.0
 
 # MCP server health-check budget. Some servers wait on an upstream before they bind; a server
 # that is up passes its first probe, so the long start period only delays failing a broken one.
@@ -573,7 +580,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
 
         A MultiEnv's gateway fronts its MCP servers and websites, a WebsiteEnv's its website, and any other env's its one MCP server.
         """
-        from agent_env.config import get_config
+        from agent_env.config import get_config, service_db_env_id
         from agent_env.env.env import Env
         from agent_env.providers.env_state import LOCAL_POSTGRES_STATE_TYPE, acquire_state_for_deploy
 
@@ -582,7 +589,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             env_state_type=env_state_type, ttl_seconds=ttl_seconds, name_hint=env.id, env_state_instance_id=env_state_instance_id,
         )
         if state_instance is None or state_instance.state_type == LOCAL_POSTGRES_STATE_TYPE:
-            Env.get(get_config().default_service_db_env_id)  # the local store runs from it: check it before any sandbox
+            Env.get(service_db_env_id(get_config()))  # the local store runs from it: check it before any sandbox
         deployed = await self._launch(
             sandbox_provider, env.id, state_instance=state_instance, mcp_servers=topology.mcp_servers,
             mcp_server_images=topology.mcp_server_images, website_configs=topology.website_configs,
@@ -706,14 +713,14 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         mcp_server_name: str | None = None,
     ) -> DeployedGateway:
         from agent_env.env.env import Env
-        from agent_env.config import get_config
+        from agent_env.config import gateway_env_id, get_config
 
         website_configs = website_configs or []
         website_images = website_images or []
         sidecars = sidecars or []
 
         config = get_config()
-        gateway_env = Env.get(config.default_gateway_env_id)
+        gateway_env = Env.get(gateway_env_id(config))
 
         # Auto-include website_browser MCP server when websites are present
         if website_configs:
@@ -820,7 +827,7 @@ COMPOSE_EOF'''
 
         # Start MCP services with docker compose
         logger.info("Starting MCP services...")
-        await sandbox.exec_script(f"cd {GATEWAY_APP_DIR} && docker compose up -d", max_retries=2)
+        await self._compose_up(sandbox)
 
         # Wait for containers to start
         await asyncio.sleep(10)
@@ -835,7 +842,9 @@ COMPOSE_EOF'''
         # Check gateway container is running
         exit_code, stdout, stderr = await sandbox.exec_with_output( "sudo", "docker", "ps")
         if GATEWAY_SERVICE_NAME not in stdout:
-            raise RuntimeError(f"Gateway container not running. docker ps: {stdout}")
+            down = await self._down_services(sandbox)
+            raise RuntimeError(f"Gateway container not running:\n{down}" if down else
+                               f"Gateway container not running. docker ps: {stdout}")
 
         # Wait for gateway to be fully ready (needs time to discover internal servers)
         # Host-side port: exec_with_output runs inside the VM on per-VM backends but on
@@ -846,7 +855,8 @@ COMPOSE_EOF'''
         logger.info("Gateway logs:")
         await self._log_service(sandbox, GATEWAY_SERVICE_NAME)
         if not gateway_ready:
-            raise RuntimeError("Gateway did not become ready in time")
+            down = await self._down_services(sandbox)
+            raise RuntimeError("Gateway did not become ready in time" + (f":\n{down}" if down else ""))
 
         # Check container status only on the sidecars the provider actually rendered
         sidecar_names = (
@@ -910,10 +920,9 @@ COMPOSE_EOF'''
         mcp_server_name: str | None = None,
     ) -> DeployedGateway:
         from agent_env.env.env import Env
-        from agent_env.config import get_config
+        from agent_env.config import gateway_env_id, get_config
 
-        config = get_config()
-        gateway_env = Env.get(config.default_gateway_env_id)
+        gateway_env = Env.get(gateway_env_id(get_config()))
         # Each image is checked, and prepared (one the provider can't pull, built from its build context), before
         # anything is created, so an image the provider can't run, or a failed build, leaves nothing.
         images = [gateway_env.docker_image_artifact, *mcp_server_images]
@@ -1108,6 +1117,59 @@ COMPOSE_EOF'''
             if line:
                 events.append(json.loads(line))
         return events
+
+    async def _compose_up(self, sandbox: VmSandbox, args: str = "") -> None:
+        """``docker compose up -d`` the stack, whose failure names each service that went down and ends with its
+        output, which compose's own error leaves out."""
+        try:
+            await sandbox.exec_script(f"cd {GATEWAY_APP_DIR} && docker compose up -d {args}".rstrip(), max_retries=2)
+        except RuntimeError as e:
+            down = await self._down_services(sandbox)
+            if down is None:
+                raise
+            logger.info(f"docker compose up failed: {e}")
+            raise RuntimeError(f"The env's services didn't start:\n{down}") from e
+
+    async def _down_services(self, sandbox: VmSandbox) -> str | None:
+        """Each compose service that exited, keeps restarting or failed its health check, with the end of its output,
+        or None when none did. Diagnostics only: a lookup that fails or runs past its time is a warning and None."""
+        try:
+            return await asyncio.wait_for(self._read_down_services(sandbox), _DOWN_SERVICES_TIMEOUT_S)
+        except TimeoutError:
+            logger.warning(f"Can't list the stack's services: no answer in {_DOWN_SERVICES_TIMEOUT_S:.0f}s")
+            return None
+
+    async def _read_down_services(self, sandbox: VmSandbox) -> str | None:
+        try:
+            exit_code, stdout, stderr = await sandbox.exec_with_output(
+                "sudo", "docker", "compose", "-f", DOCKER_COMPOSE_PATH, "ps", "-a", "--format", "json"
+            )
+            if exit_code != 0:
+                logger.warning(f"Can't list the stack's services: docker compose ps exited {exit_code}: {stderr.strip()[-500:]}")
+                return None
+            down = [(row, why) for row in _compose_ps_rows(stdout) if (why := _why_down(row))]
+            reports = []
+            for row, why in down:
+                tail = await self._log_tail(sandbox, str(row.get("ID") or ""))
+                reports.append(f"{row.get('Service')} {why}" + (f":\n{tail}" if tail else ""))
+        except Exception as e:
+            logger.warning(f"Can't list the stack's services: {e}")
+            return None
+        return "\n".join(reports) or None
+
+    async def _log_tail(self, sandbox: VmSandbox, container_id: str) -> str | None:
+        """The last lines a container wrote, stdout and stderr in order, indented; None when there are none."""
+        if not container_id:
+            return None
+        try:
+            exit_code, logs, _ = await sandbox.exec_with_output(
+                "sudo", "bash", "-c", f"docker logs --tail {_LOG_TAIL_LINES} {shlex.quote(container_id)} 2>&1"
+            )
+        except Exception as e:
+            logger.warning(f"Can't read container {container_id}'s logs: {e}")
+            return None
+        lines = [line[:_LOG_LINE_CHARS] for line in logs.splitlines() if line.strip()] if exit_code == 0 else []
+        return "\n".join(f"    {line}" for line in lines) or None
 
     async def _log_service(self, sandbox: VmSandbox, compose_service: str) -> bool:
         """Log a compose service's container output; False when it has no container. Diagnostics only, so
@@ -1440,6 +1502,33 @@ def _gateway_topology(env: Env) -> _GatewayTopology:
 # rendered compose is logged. Matches the key to the left of the first '=' on an
 # `      - KEY=VALUE` env line.
 _SECRET_ENV_KEY_RE = re.compile(r"^(\s*-\s*)([A-Za-z0-9_]*(?:SECRET|PASSWORD|TOKEN|API_KEY)[A-Za-z0-9_]*)=.*$")
+
+
+def _compose_ps_rows(text: str) -> list[dict]:
+    """``docker compose ps --format json``'s services: one JSON array in older Compose releases, an object a line in
+    newer ones."""
+    text = text.strip()
+    if not text:
+        return []
+    try:
+        rows = json.loads(text)
+    except json.JSONDecodeError:
+        rows = [json.loads(line) for line in text.splitlines() if line.strip()]
+    rows = rows if isinstance(rows, list) else [rows]
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _why_down(row: dict) -> str | None:
+    """How a compose service went down, or None when it didn't. One that was never started, waiting on another, is
+    not down. Every service is meant to keep running, so any exit is one."""
+    state, health, code = row.get("State"), row.get("Health"), row.get("ExitCode")
+    if state in ("exited", "dead"):
+        return f"exited ({code})"
+    if state == "restarting":
+        return f"keeps restarting (last exit {code})"
+    if health == "unhealthy":
+        return "failed its health check"
+    return None
 
 
 def _redact_compose_secrets(compose_content: str) -> str:

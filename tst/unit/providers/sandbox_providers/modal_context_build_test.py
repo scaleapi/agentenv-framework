@@ -146,13 +146,14 @@ async def test_a_failed_modal_build_keeps_modals_pointer_to_its_build_log(local_
 
 @pytest.mark.parametrize("line, built", [
     ('COPY ["a.txt", "/x/a.txt"]', "COPY a.txt /x/a.txt"),
+    ('COPY\t["a.txt", "/t/"]', "COPY a.txt /t/"),
     ('copy --chown=1:1 ["a.txt", "sub", "/y/"]', "COPY --chown=1:1 a.txt sub /y/"),
     ("ADD a.txt /added/", "COPY a.txt /added/"),
     ("ADD sub \\\n    /added/sub/", "COPY sub /added/sub/"),
     ("ADD *.txt /globbed/", "COPY *.txt /globbed/"),
     ('ADD ["a.txt", "/j/"]', "COPY a.txt /j/"),
     ("ADD --chmod=755 a.txt /c", "COPY --chmod=755 a.txt /c"),
-], ids=["json-copy", "json-copy-flags", "add-file", "add-folder-continued", "add-glob", "json-add", "add-chmod"])
+], ids=["json-copy", "json-copy-tab", "json-copy-flags", "add-file", "add-folder-continued", "add-glob", "json-add", "add-chmod"])
 def test_what_modal_cant_take_is_written_as_its_docker_equivalent(tmp_path, line, built):
     (tmp_path / "a.txt").write_text("a")
     (tmp_path / "sub").mkdir()
@@ -161,12 +162,19 @@ def test_what_modal_cant_take_is_written_as_its_docker_equivalent(tmp_path, line
         f"FROM python\n{built}\nRUN true\n"
 
 
+def test_a_comment_among_the_lines_of_a_rewritten_instruction_is_kept_above_it(tmp_path):
+    (tmp_path / "sub").mkdir()
+
+    assert modal_image_build.modal_dockerfile("FROM python\nADD sub \\\n    # the vendored copy\n    /added/\n",
+                                              tmp_path) == "FROM python\n    # the vendored copy\nCOPY sub /added/\n"
+
+
 @pytest.mark.parametrize("line", [
     'COPY ["with space.txt", "/z/"]', "ADD archive.tar.gz /unpacked/", "ADD https://example.com/f /f",
     "ADD --checksum=sha256:abc a.txt /c", "ADD missing.txt /m", "COPY --from=build /out /out", "COPY a.txt /x/",
-    'ADD "a.txt" /q/', "ADD <<EOF /h\nhi\nEOF",
+    'ADD "a.txt" /q/', "ADD <<EOF /h\nhi\nEOF", 'COPY ["<<EOF", "/out"]',
 ], ids=["json-with-space", "add-archive", "add-url", "add-checksum", "add-missing", "copy-from", "shell-copy",
-        "add-quoted", "add-heredoc"])
+        "add-quoted", "add-heredoc", "json-heredoc-like-path"])
 def test_everything_else_is_left_as_written(tmp_path, line):
     (tmp_path / "a.txt").write_text("a")
     with tarfile.open(tmp_path / "archive.tar.gz", "w:gz") as tar:

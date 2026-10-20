@@ -16,7 +16,7 @@ from agent_env.providers.sandbox_providers.host_images import host_platform, sav
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
 from agent_env.store.object_store.local.store import LocalFilesystemObjectStore
 from agent_env.store.object_store.local.tls import local_ca
-from agent_env.utils.docker_build import normalize_platform
+from agent_env.utils.docker.build import normalize_platform
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_VM
 
 _PORTS_FILE = "/storage/agentenv-ports.json"

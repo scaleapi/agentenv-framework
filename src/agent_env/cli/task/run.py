@@ -416,8 +416,8 @@ def _hold(tagged_contexts, interrupts: Interrupts) -> None:
 @click.option("--agent-artifact-id", default=None, type=str, help="Override the agent image artifact for deploy_agent steps")
 @click.option("--start-step", default=0, type=int, help="0-based step index to start execution from")
 @click.option("--context-json", default=None, type=click.Path(exists=True, dir_okay=False), help="Path to a JSON file to seed the TaskStepContext")
-@click.option("--litellm-api-key", default=None, type=str, help="Override LITELLM_API_KEY for this run")
-@click.option("--judge-litellm-api-key", default=None, type=str, help="Override LITELLM_API_KEY used by rubrics_verifier judge agents (falls back to --litellm-api-key, then to config secret)")
+@click.option("--litellm-api-key", default=None, type=str, help="Override LITELLM_API_KEY for this run; a secret:KEY or env:NAME reference is resolved where it is used")
+@click.option("--judge-litellm-api-key", default=None, type=str, help="Override LITELLM_API_KEY used by rubrics_verifier judge agents (falls back to --litellm-api-key, then to config secret); a secret:KEY or env:NAME reference is resolved where it is used")
 @click.option("--apply-trajectory-filter/--no-trajectory-filter", "apply_trajectory_filter", default=None, help="Force trajectory filtering on/off for rubrics_verifier (overrides the step's trajectory_filter setting)")
 @click.option("--a2a-agent-id", default=None, type=str, help="Override A2A agent id for deploy_agent steps")
 @click.option("--agent-sandbox", default=None,
@@ -445,16 +445,9 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
     if k < 1:
         raise click.BadParameter("must be at least 1", param_hint="'--k'")
 
-    from agent_env.config import get_config
     from agent_env.task import Task
     from agent_env.task_step.context import TaskStepContext
 
-    if gateway_env_id:
-        get_config().default_gateway_env_id = gateway_env_id
-        click.echo(f"Override default_gateway_env_id: {gateway_env_id}")
-    if service_db_env_id:
-        get_config().default_service_db_env_id = service_db_env_id
-        click.echo(f"Override default_service_db_env_id: {service_db_env_id}")
     if output_dir is None:
         output_dir = f"/tmp/taskid={fs_safe(task_id)}-run{uuid4().hex[:6]}"
     if context_json:
@@ -486,6 +479,10 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
         initial_context.metadata.setdefault("user_overrides", {})["env_state_type"] = env_state_type
     if env_state_instance_id:
         initial_context.metadata.setdefault("user_overrides", {})["env_state_instance_id"] = env_state_instance_id
+    if gateway_env_id:
+        initial_context.metadata.setdefault("user_overrides", {})["gateway_env_id"] = gateway_env_id
+    if service_db_env_id:
+        initial_context.metadata.setdefault("user_overrides", {})["service_db_env_id"] = service_db_env_id
     initial_context.metadata["task_id"] = task_id
 
     click.echo(f"Fetching task: id={task_id} version={task_version or 'latest'}...")
@@ -558,8 +555,8 @@ def _seed_universe_id(task, seed: dict) -> str | None:
 @click.option("--user-model", default=None, type=str, help="Override the model the user simulator runs on")
 @click.option("--judge-model", default=None, type=str, help="Override the model rubrics_verifier judges grade with")
 @click.option("--agent-artifact-id", default=None, type=str, help="Override the agent image artifact for deploy_agent steps")
-@click.option("--litellm-api-key", default=None, type=str, help="Override LITELLM_API_KEY for all runs")
-@click.option("--judge-litellm-api-key", default=None, type=str, help="Override LITELLM_API_KEY used by rubrics_verifier judge agents")
+@click.option("--litellm-api-key", default=None, type=str, help="Override LITELLM_API_KEY for all runs; a secret:KEY or env:NAME reference is resolved where it is used")
+@click.option("--judge-litellm-api-key", default=None, type=str, help="Override LITELLM_API_KEY used by rubrics_verifier judge agents; a secret:KEY or env:NAME reference is resolved where it is used")
 @click.option("--apply-trajectory-filter/--no-trajectory-filter", "apply_trajectory_filter", default=None, help="Force trajectory filtering on/off for rubrics_verifier")
 @click.option("--agent-sandbox", default=None,
               help="Override agent sandbox backend(s) for deploy_agent steps; comma-separated for fallback chain (e.g. 'modal,local')")

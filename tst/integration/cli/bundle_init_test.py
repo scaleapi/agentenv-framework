@@ -1,7 +1,8 @@
 """``agent-env bundle init`` on tasks and an eval held in a store, with no infra: the local stores and a local VM-mode
-sandbox. The imported folder runs, reruns writing nothing, and keeps running what the store held at import after the
-store moves on; an older version imports as asked, a task a bundle ran imports into another folder and runs there, and
-secrets left out never reach the run. Needs `bash` and the usual shell tools on PATH."""
+sandbox. The imported folder holds what its task uses, so it runs against an empty store, reruns writing nothing, and
+keeps running what the store held at import after the store moves on; an older version imports as asked, a task a
+bundle ran imports into another folder and runs there, and secrets left out never reach the run. Needs `bash` and the
+usual shell tools on PATH."""
 
 import json
 import logging
@@ -65,10 +66,12 @@ def _cli(*args):
     return result.output
 
 
-def test_an_imported_task_runs_reruns_writing_nothing_and_keeps_its_pins_when_the_store_moves_on(registry):
+def test_an_imported_task_runs_reruns_writing_nothing_and_keeps_what_it_was_imported_with_when_the_store_moves_on(
+        registry):
     imported = _cli("bundle", "init", registry / "greet", "--from-task", "greet")
 
-    assert "  artifact greeting v1: tasks/greet.json: step 'load': artifacts[0].id" in imported.splitlines()
+    assert "  artifacts/greeting: file_artifact_universe greeting v1" in imported.splitlines()
+    assert (registry / "greet" / "artifacts" / "greeting" / "hello.txt").is_file()
     first = _cli("run", registry / "greet")
     assert "tasks/greet.json v1: passed (hello: 1)" in first
     second = _cli("run", registry / "greet")
@@ -77,6 +80,16 @@ def test_an_imported_task_runs_reruns_writing_nothing_and_keeps_its_pins_when_th
 
     (registry / "bye.txt").write_text("bye\n")
     FileArtifactUniverse.put_bundled("greeting", files={"hello.txt": registry / "bye.txt"})
+    assert "tasks/greet.json v1: passed (hello: 1)" in _cli("run", registry / "greet")
+
+
+def test_an_imported_task_runs_against_an_empty_store(registry, monkeypatch):
+    _cli("bundle", "init", registry / "greet", "--from-task", "greet")
+    monkeypatch.setenv("XDG_STATE_HOME", str(registry / "empty"))
+    reset_artifact_store()
+    reset_config()
+    configure()
+
     assert "tasks/greet.json v1: passed (hello: 1)" in _cli("run", registry / "greet")
 
 
@@ -100,7 +113,7 @@ def test_a_task_a_bundle_ran_imports_into_another_folder_and_runs_there(registry
 
     imported = _cli("bundle", "init", registry / "second", "--from-task", f"{first}/hello")
 
-    assert f"  artifact {first}/greeting v1: tasks/hello.json: step 'load': artifacts[0].id" in imported.splitlines()
+    assert f"  artifacts/greeting: file_artifact_universe {first}/greeting v1" in imported.splitlines()
     assert "tasks/hello.json v1: passed (hello: 1)" in _cli("run", registry / "second")
     assert "tasks/hello.json: v1, unchanged" in _cli("run", registry / "second")
 
@@ -135,7 +148,7 @@ def test_secrets_left_out_of_an_import_stay_out_of_the_task_its_run_writes(regis
 def test_an_imported_eval_runs_its_tasks(registry):
     imported = _cli("bundle", "init", registry / "nightly", "--from-eval", "smoke")
 
-    assert imported.splitlines()[0] == f"Imported eval smoke v1 and its tasks into {registry / 'nightly'}:"
+    assert f"Imported eval smoke v1 and its tasks into {registry / 'nightly'}:" in imported.splitlines()
     output = _cli("run", registry / "nightly")
     assert "tasks/greet.json v1: passed (hello: 1)" in output
     assert "evals/smoke.toml v1: 1 of 1 passed" in output

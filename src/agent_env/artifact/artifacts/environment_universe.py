@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional
 
 from pydantic import AliasChoices, ConfigDict, Field, model_serializer
@@ -15,18 +16,22 @@ from agent_env.artifact.artifacts.environment_universe_folder import (
     UniverseFolder,
     UniverseFolderError,
     environment_id,
+    environment_path,
     metadata_id,
+    metadata_path,
     read_folder,
 )
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.ref import ArtifactRef
 from agent_env.artifact.universe import Universe
+from agent_env.entity.export import Unwritable
 from agent_env.entity.refs import EntityRef
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
+    from agent_env.entity.export import ExportContext
 
 
 class EnvironmentUniverseArtifact(Universe, SeedsEnvironments):
@@ -159,6 +164,18 @@ class EnvironmentUniverseArtifact(Universe, SeedsEnvironments):
                                                         file_path=str(laid.path), filename=laid.filename)
                     for laid in layout.metadata}
         return cls.put(ctx.id, environment_artifacts=environments + named, metadata=metadata or None)
+
+    def to_toml(self, out: ExportContext) -> dict:
+        """The artifact.toml of a folder laid out as ``environment-universe get --output-dir`` writes one."""
+        for environment in self.get_environment_artifacts():
+            name = environment.environment_name
+            if name.split("/", 1)[0] == METADATA:
+                raise Unwritable(f"its environment {name!r} would read back as metadata, from its {METADATA}/ folder")
+            file = environment.get_file_artifact()
+            out.file(environment_path(Path(), name, file.filename).as_posix(), file.object_url)
+        for key, file in (self.get_metadata() or {}).items():
+            out.file(metadata_path(Path(), key, file.filename).as_posix(), file.object_url)
+        return {"type": self.type}
 
     @classmethod
     def written_besides(cls, ctx: AuthoringContext) -> tuple[FolderChild, ...]:

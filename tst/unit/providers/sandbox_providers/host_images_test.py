@@ -12,7 +12,7 @@ from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.providers.sandbox_providers import host_images
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox
 from agent_env.providers.sandbox_providers.sandbox import VmSandbox
-from agent_env.utils.docker_build import DockerBuildError
+from agent_env.utils.docker.build import DockerBuildError
 
 
 @pytest.fixture

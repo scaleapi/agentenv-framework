@@ -1106,11 +1106,11 @@ PEER_AGENTS_V1 = ExtensionDefinition(
             "set",
             "POST",
             "/ext/peer-agents",
-            RUNTIME,
+            SDK,
             request_model=PeerAgentsSetRequest,
         ),
         "list": _op(
-            "list", "GET", "/ext/peer-agents", RUNTIME, response_required=("peers",)
+            "list", "GET", "/ext/peer-agents", SDK, response_required=("peers",)
         ),
     },
 )
