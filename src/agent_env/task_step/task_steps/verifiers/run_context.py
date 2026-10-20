@@ -37,6 +37,7 @@ class Message:
     written_by_triggers: tuple[str, ...] = ()  # the user agent's triggers that wrote this user message
     user_sim: Optional[Mapping[str, Any]] = None  # the user sim's extra fields for this turn
     parts: tuple[Mapping[str, Any], ...] = ()
+    env_clock: Optional[Mapping[str, Optional[datetime]]] = None  # each env's virtual time when it was recorded
 
 
 @dataclass(frozen=True)
@@ -260,7 +261,8 @@ def _conversation(context: TaskStepContext, prompt_response: PromptResponse,
                 user = role == "user"
                 messages.append(_message(turn, role, stored.get("parts") or [], ts=stored.get("ts"),
                                          author=authors.get(role), fired=fired.get(turn) if user else None,
-                                         user_sim=fields.get(turn) if user else None))
+                                         user_sim=fields.get(turn) if user else None,
+                                         env_clock=stored.get("env_clock")))
     except (TypeError, ValueError) as e:
         unavailable["conversation"] = f"unreadable conversation: {_error(e)}"
         return []
@@ -268,10 +270,12 @@ def _conversation(context: TaskStepContext, prompt_response: PromptResponse,
 
 
 def _message(turn: int, role: str, parts: list[dict], *, ts: Optional[str] = None, author: Optional[str] = None,
-             fired: Optional[list[str]] = None, user_sim: Optional[Mapping[str, Any]] = None) -> Message:
+             fired: Optional[list[str]] = None, user_sim: Optional[Mapping[str, Any]] = None,
+             env_clock: Optional[Mapping[str, Optional[str]]] = None) -> Message:
     text = "\n".join(p.get("text", "") for p in parts if p.get("kind") == "text")
+    clock = None if env_clock is None else {env_id: _time(t) for env_id, t in env_clock.items()}
     return Message(turn=turn, role=role, text=text, sent_at=_time(ts), author=author or None,
-                   written_by_triggers=tuple(fired or ()), user_sim=user_sim, parts=tuple(parts))
+                   written_by_triggers=tuple(fired or ()), user_sim=user_sim, parts=tuple(parts), env_clock=clock)
 
 
 def _env_trigger_events(context: TaskStepContext, unavailable: dict[str, str]) -> dict[str, list[dict]]:

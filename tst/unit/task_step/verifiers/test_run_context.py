@@ -488,3 +488,21 @@ async def test_an_earlier_prompt_sharing_the_next_prompts_conversation_has_its_e
 
     with pytest.raises(RunRecordUnavailable, match="when the next prompt began is unknown"):
         run.firings(env="calendar")
+
+
+@pytest.mark.asyncio
+async def test_a_message_carries_each_envs_virtual_time_when_the_conversation_recorded_it(monkeypatch):
+    context, prompt_response, _ = recorded_run()
+    original = conversation_store.get_conversation
+
+    def with_clock(conversation_id):
+        doc = original(conversation_id)
+        doc["messages"][0]["env_clock"] = {"calendar": "2026-10-17T09:00:00+00:00", "mail": None}
+        return doc
+
+    monkeypatch.setattr(conversation_store, "get_conversation", with_clock)
+    run = await load_run_context(context, prompt_response)
+
+    first, reply = run.turn(1).message, run.turn(1).reply
+    assert first.env_clock == {"calendar": datetime.fromisoformat("2026-10-17T09:00:00+00:00"), "mail": None}
+    assert reply.env_clock is None  # a message stored without a clock has none
