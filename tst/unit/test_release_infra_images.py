@@ -77,3 +77,8 @@ def test_nothing_is_pushed_before_mains_ci_passes():
     jobs = WORKFLOW["jobs"]
 
     assert "main-ci" in jobs["infra-build"]["needs"] and "main-ci" in jobs["infra-publish"]["needs"]
+
+
+@pytest.mark.parametrize("job", ["infra-publish", "framework"])
+def test_a_job_that_publishes_or_records_images_warns_about_private_ones(job):
+    assert any("infra_images.py public" in step.get("run", "") for step in _steps(job))

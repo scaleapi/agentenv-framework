@@ -3,8 +3,9 @@
 ``plan`` prints each image's name, repository, tag, Dockerfile and context as JSON, ``--missing`` only those whose tag
 the registry doesn't have; ``smoke NAME IMAGE`` checks that IMAGE, a local build of NAME, runs; ``write PATH`` records
 the digest the registry serves under every image's tag as a release wheel carries them, and fails if any is missing;
-``notes PATH`` prints that record as the release notes list it.
-The registry is read with ``GHCR_TOKEN`` (as ``GITHUB_ACTOR``) when it's set, anonymously otherwise.
+``notes PATH`` prints that record as the release notes list it; ``public`` warns about each image a user, who pulls
+anonymously, can't. The registry is read with ``GHCR_TOKEN`` (as ``GITHUB_ACTOR``) when it's set, anonymously otherwise,
+and always anonymously by ``public``.
 """
 
 from __future__ import annotations
@@ -37,6 +38,7 @@ def main() -> int:
     smoke.add_argument("image")
     commands.add_parser("write").add_argument("path", type=Path)
     commands.add_parser("notes").add_argument("path", type=Path)
+    commands.add_parser("public")
     args = parser.parse_args()
     if args.command == "plan":
         print(json.dumps([_described(image) for image in PUBLISHED_IMAGES
@@ -44,6 +46,9 @@ def main() -> int:
         return 0
     if args.command == "smoke":
         return _smoke(args.name, args.image)
+    if args.command == "public":
+        _warn_unless_public()
+        return 0
     if args.command == "notes":
         print("Infra images this release pulls, by digest:")
         print("\n".join(f"- `{ref}@{digest}`" for ref, digest in release_digests(args.path).items()))
@@ -68,6 +73,19 @@ def _digest(image: PublishedImage) -> str | None:
         return pin_digest(image.ref(), _auth()).rpartition("@")[2]
     except NoSuchImageError:
         return None
+
+
+def _warn_unless_public() -> None:
+    """A warning for each image an anonymous pull doesn't get, which a new package's first push leaves it as: GHCR makes
+    a package private until its admin makes it public, and an install that can't pull it builds the image instead."""
+    for image in PUBLISHED_IMAGES:
+        try:
+            pin_digest(image.ref(), None)
+        except ValueError as e:
+            why = str(e).split(": ", 1)[-1].split(";")[0]  # what the registry answered, without the ref
+            settings = f"https://github.com/orgs/{REGISTRY.split('/')[1]}/packages/container/{image.name}/settings"
+            print(f"::warning title={image.name} isn't public::{image.ref()}: {why}. Make the package public at "
+                  f"{settings}; until then an install can't pull it and builds the image instead.")
 
 
 def _auth() -> RegistryAuth | None:

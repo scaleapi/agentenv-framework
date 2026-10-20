@@ -175,3 +175,27 @@ def test_notes_list_each_recorded_image_pinned_by_its_digest(script, monkeypatch
     lines = capsys.readouterr().out.splitlines()
     assert lines[0] == "Infra images this release pulls, by digest:"
     assert sorted(lines[1:]) == sorted(f"- `{image.ref()}@{_DIGEST}`" for image in bootstrap.PUBLISHED_IMAGES)
+
+
+def test_public_warns_about_each_image_an_anonymous_pull_doesnt_get(script, monkeypatch, capsys):
+    gateway, db_web, *rest = bootstrap.PUBLISHED_IMAGES
+    seen = []
+
+    def pin_digest(ref, auth):
+        seen.append(auth)
+        if ref == gateway.ref():
+            raise ValueError(f"{ref}: ghcr.io refused to serve it (HTTP 401); agent-env reaches a private registry only")
+        if ref == db_web.ref():
+            raise NoSuchImageError(f"{ref}: ghcr.io has no such image")
+        return f"{ref}@{_DIGEST}"
+
+    monkeypatch.setattr(script, "pin_digest", pin_digest)
+    monkeypatch.setenv("GHCR_TOKEN", "a-token")
+
+    assert _run(script, monkeypatch, "public") == 0
+
+    warnings = [line for line in capsys.readouterr().out.splitlines() if line.startswith("::warning")]
+    assert [line.split("::")[1] for line in warnings] == [f"warning title={gateway.name} isn't public",
+                                                          f"warning title={db_web.name} isn't public"]
+    assert "HTTP 401" in warnings[0] and "https://github.com/orgs/scaleapi/packages/container/agentenv-gateway/settings" in warnings[0]
+    assert set(seen) == {None}
