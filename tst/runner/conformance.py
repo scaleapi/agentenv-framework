@@ -50,9 +50,10 @@ async def a_run_completes_and_is_recorded_under_its_handle(runner):
     task = _put(Step(id="a", version=None))
     handle = await runner.submit(task.id, task.version, metadata={"carried": "yes"})
     record = await _until_ended(runner, handle.run_id)
-    assert (record.status, record.run_id, record.instance_id, record.task_id) == (
-        RunStatus.COMPLETED, handle.run_id, handle.instance_id, task.id)
-    assert run_store.get_run(handle.run_id).status is RunStatus.COMPLETED
+    saved = run_store.get_run(handle.run_id)
+    for record in (record, saved):
+        assert (record.status, record.run_id, record.instance_id, record.task_id) == (
+            RunStatus.COMPLETED, handle.run_id, handle.instance_id, task.id)
     metadata = find_task_instance(handle.instance_id).context["metadata"]
     assert (metadata["workflow_id"], metadata["carried"], metadata["a"]) == (handle.run_id, "yes", True)
 
