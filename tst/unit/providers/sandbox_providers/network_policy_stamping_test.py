@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from agent_env.providers.sandbox_providers.boxd.provider import BoxdSandboxProvider
 from agent_env.providers.sandbox_providers.e2b.provider import E2BSandboxProvider
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
@@ -121,6 +122,15 @@ async def _tenki() -> Sandbox:
     client.create = AsyncMock(return_value=session)
     provider = TenkiSandboxProvider(api_key="test-key", client_cls=MagicMock(return_value=client))
     return await provider.create_vm(exposed_ports=[], setup_for_gateway=False)
+
+
+async def _boxd() -> Sandbox:
+    client = MagicMock()
+    client.machines.create = AsyncMock(return_value=MagicMock(id="boxd-test"))
+    client.machines.proxies.list = AsyncMock(return_value=[])
+    client.machines.wait_until_ready = AsyncMock()
+    provider = BoxdSandboxProvider(api_key="test-key", client_cls=MagicMock(return_value=client))
+    return await provider.create_vm(exposed_ports=[], setup_for_gateway=False)
 async def _smol_vm() -> Sandbox:
     pytest.importorskip("smol")
     from agent_env.providers.sandbox_providers.smol_vm import provider as smol_module
@@ -144,6 +154,7 @@ FACTORIES = {
     "tensorlake": _tensorlake,
     "vercel": _vercel,
     "tenki": _tenki,
+    "boxd": _boxd,
     "smol_vm": _smol_vm,
     "local": _local,
 }
