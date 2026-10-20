@@ -2,9 +2,9 @@
 semaphore. ``submit()`` fires the run in the background and returns immediately; there is no
 persisted queue or lease, so the run's asyncio task lives only in this process.
 
-Consequence: a run does not survive a hub restart. ``start()`` fails any run a previous
-process left non-terminal (it can't still be executing), and ``stop()`` cancels the ones in
-flight. A durable, lease-based runner that resurrects a run across a restart — and supports
+Consequence: a run does not survive its process. Each run records the process that owns it, which marks it seen
+while it runs; ``start()``, and a started runner from then on, fails a run left non-terminal by an owner that is
+gone (it can't still be executing), and ``stop()`` cancels the ones in flight. A durable, lease-based runner that resurrects a run across a restart — and supports
 multiple worker processes — is a follow-up; configure an external durable ``[runner]`` where that matters.
 """
 
@@ -13,11 +13,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
+import socket
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from agent_env.runner import store as run_store
 from agent_env.runner.runner import KEEP_KEY, RunHandle, RunRecord, Runner, RunStatus
+from agent_env.task.store import new_instance_id
 from agent_env.task.teardown import TERMINATE_TIMEOUT_SECONDS, teardown_run
 
 logger = logging.getLogger(__name__)
@@ -34,6 +38,10 @@ class LocalRunner(Runner):
     STOP_WAIT_SECONDS = 60
     # After those waits, how long stop() gives a run it cancels again before shutting down without it.
     ABANDON_WAIT_SECONDS = 1
+    # How often a runner marks its runs seen, and a started one reconciles orphans.
+    OWNER_SEEN_SECONDS = 30
+    # How long after it last marked a run seen an owner on another host still counts as alive.
+    OWNER_LEASE_SECONDS = 120
 
     def __init__(self, workers: int = 2) -> None:
         if workers < 1:
@@ -45,15 +53,41 @@ class LocalRunner(Runner):
         self._contexts: dict = {}  # each run's context, so stop() can still tear down a run it gives up on
         self._abandoned: set[str] = set()  # runs stop() gave up on and tore down itself
         self._stopping = False
+        self._reconciles = False
+        self._watch: Optional[asyncio.Task] = None
 
     # --- lifecycle ---------------------------------------------------------
 
     async def start(self) -> None:
-        """Reconcile orphans from a previous process: a run left QUEUED/RUNNING has no live
-        task here, so fail it rather than leave it hanging. There is no queue to resume."""
+        """Reconcile orphans now and every ``OWNER_SEEN_SECONDS`` after: a run left QUEUED/RUNNING by an owner that is
+        gone has no live task anywhere, so fail it rather than leave it hanging. One a live process owns, such as a
+        CLI following its runs, is left to it. There is no queue to resume."""
         run_store.ensure_indexes()
+        self._reconciles = True
+        self._reconcile()
+        self._watching()
+
+    def _watching(self) -> None:
+        if self._watch is None:
+            self._watch = asyncio.create_task(self._watch_runs(), name="agent-env-local-runner-watch")
+
+    async def _watch_runs(self) -> None:
+        while True:
+            await asyncio.sleep(self.OWNER_SEEN_SECONDS)
+            try:
+                for run_id in list(self._inflight):
+                    run_store.see(run_id)
+                if self._reconciles:
+                    self._reconcile()
+            except Exception:
+                logger.warning("Couldn't mark runs seen or reconcile orphans; trying again in %ss",
+                               self.OWNER_SEEN_SECONDS, exc_info=True)
+
+    def _reconcile(self) -> None:
         orphaned = 0
         for record in run_store.active_runs(self.type):
+            if _owner_alive(record.owner):
+                continue
             run_store.mark_terminal(record.run_id, RunStatus.FAILED, error="interrupted by a hub restart")
             orphaned += 1
         if orphaned:
@@ -64,6 +98,9 @@ class LocalRunner(Runner):
         its own teardown by TEARDOWN_WAIT_SECONDS. A run still going after a run's whole allowance, a step that
         ignored its cancel or a teardown that never ended, is cancelled again and left behind."""
         self._stopping = True
+        if self._watch is not None:
+            self._watch.cancel()
+            self._watch = None
         for run_id, task in list(self._inflight.items()):
             if run_id not in self._tearing_down:
                 task.cancel()
@@ -114,10 +151,11 @@ class LocalRunner(Runner):
         instance_id: Optional[str] = None,
     ) -> RunHandle:
         run_id = f"local-{uuid.uuid4().hex}"
-        instance_id = instance_id or uuid.uuid4().hex        # minted here so callers can link immediately
+        instance_id = instance_id or new_instance_id(task_id)        # minted here so callers can link immediately
         record = RunRecord(
             run_id=run_id, runner=self.type, task_id=task_id, task_version=task_version,
             instance_id=instance_id, status=RunStatus.QUEUED,
+            owner={"host": socket.gethostname(), "pid": os.getpid(), "seen": datetime.now(timezone.utc).isoformat()},
             overrides={
                 "agent_model": agent_model,
                 "agent_artifact_id": agent_artifact_id,
@@ -126,6 +164,7 @@ class LocalRunner(Runner):
         )
         run_store.insert_run(record)
         self._inflight[run_id] = asyncio.create_task(self._run(record), name=f"agent-env-run-{run_id}")
+        self._watching()
         logger.info("Submitted run %s for task %s v%s", run_id, task_id, task_version)
         return RunHandle(run_id=run_id, instance_id=instance_id)
 
@@ -137,17 +176,15 @@ class LocalRunner(Runner):
         return record
 
     async def cancel(self, run_id: str) -> bool:
+        """Cancel a run this runner is running; False for any other, whose record it leaves to the process running it."""
         record = run_store.get_run(run_id)
-        if record is None or record.status.is_terminal:
-            return False
         task = self._inflight.get(run_id)
-        if task is not None:
-            # Signal only. `_run` is the sole writer of the terminal state, so a cancel that
-            # races the run's completion can't mislabel a finished run (see `_run`). This
-            # preempts Task.run() at its current await; it unwinds its in-flight step cleanly.
-            task.cancel()
-        else:
-            run_store.mark_terminal(run_id, RunStatus.CANCELED)   # no live task here (defensive)
+        if record is None or record.status.is_terminal or task is None:
+            return False
+        # Signal only. `_run` is the sole writer of the terminal state, so a cancel that
+        # races the run's completion can't mislabel a finished run (see `_run`). This
+        # preempts Task.run() at its current await; it unwinds its in-flight step cleanly.
+        task.cancel()
         return True
 
     # --- execution ---------------------------------------------------------
@@ -267,3 +304,21 @@ class LocalRunner(Runner):
         context.metadata["instance_id"] = record.instance_id
         context.metadata["runner"] = self.type
         return context
+
+
+def _owner_alive(owner: Optional[dict]) -> bool:
+    """Whether the process that submitted a run may still be running it: on this host, whether its pid is alive; on
+    another, whether it marked the run seen within ``OWNER_LEASE_SECONDS``. A run naming no owner predates owners."""
+    if not owner:
+        return False
+    if owner["host"] == socket.gethostname():
+        try:
+            os.kill(owner["pid"], 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+    seen = owner.get("seen")
+    lease = timedelta(seconds=LocalRunner.OWNER_LEASE_SECONDS)
+    return seen is not None and datetime.now(timezone.utc) - datetime.fromisoformat(seen) < lease

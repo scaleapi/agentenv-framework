@@ -8,14 +8,14 @@ import types
 import pytest
 from click.testing import CliRunner
 
-from agent_env.cli import cli
+from agent_env.cli import cli, submitted_runs
 from agent_env.eval import Eval
+from agent_env.runner import local_runner
 from agent_env.task import Task
 from agent_env.task.teardown import TeardownReport
 
 task_run = importlib.import_module("agent_env.cli.task.run")  # the package's ``run`` is the click command
-eval_run = importlib.import_module("agent_env.cli.eval.run")
-pytestmark = pytest.mark.usefixtures("sigint_handled")
+pytestmark = pytest.mark.usefixtures("sigint_handled", "local_stores")
 
 
 class _Recorded:
@@ -37,7 +37,8 @@ def task(monkeypatch):
         return TeardownReport()
 
     monkeypatch.setattr(task_run, "teardown_run", teardown_run)
-    monkeypatch.setattr(eval_run, "teardown_run", teardown_run)
+    monkeypatch.setattr(local_runner, "teardown_run", teardown_run)
+    monkeypatch.setattr(submitted_runs, "POLL_SECONDS", 0.02)
     recorded = _Recorded()
     monkeypatch.setattr(Task, "get", classmethod(lambda cls, id, version=None: recorded))
     monkeypatch.setattr(Eval, "get", classmethod(lambda cls, id, version=None: types.SimpleNamespace(

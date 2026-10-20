@@ -201,11 +201,12 @@ def test_rewrite_child_card_drops_the_childs_interfaces():
     assert _gateway({"mcp-slack": "http://slack:18765"})._rewrite_child_card("mcp-slack", child)["additionalInterfaces"] == []
 
 
-def test_gateway_card_lists_its_seven_extensions():
+def test_gateway_card_lists_its_eight_extensions():
     assert _gateway({})._gateway_extensions() is gateway_constants.GATEWAY_EXTENSIONS
     assert [e["uri"] for e in _gateway({})._gateway_extensions()] == [
         "urn:agentenv:disable-tool/v1", "urn:agentenv:enable-tool/v1", "urn:agentenv:triggers/v1",
         "urn:agentenv:clock/v1", "urn:agentenv:trajectory/v1", "urn:agentenv:step/v1", "urn:agentenv:state/v1",
+        "urn:agentenv:changes/v1",
     ]
 
 
