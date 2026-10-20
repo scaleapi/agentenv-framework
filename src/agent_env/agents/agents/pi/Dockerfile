@@ -1,4 +1,4 @@
-# docker build -t pi-a2a plugins/agents/pi
+# docker build -t pi-a2a src/agent_env/agents/agents/pi
 FROM mirror.gcr.io/library/ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
 WORKDIR /app
 # Named sources: agent-env packs the build context install/v1 copies from the COPY sources.

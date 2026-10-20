@@ -1,7 +1,8 @@
 # pi A2A agent
 
 The [pi coding agent](https://github.com/earendil-works/pi/tree/main/packages/coding-agent) wrapped
-with the `agentenv_protocol.a2a_agent` framework. This directory is the whole build context: the
+with the `agentenv_protocol.a2a_agent` framework, shipped in the `agents` bundle as
+`@local/agentenv-framework/agents/pi`. This directory is the whole build context: the
 protocol package comes from PyPI (`requirements.txt`), and `install.sh` installs Node, pi and the
 agent's environment both for the image and for `install/v1`.
 
@@ -40,7 +41,8 @@ within them, replay writes only under them, and a replaying agent must share the
 one. While a changelog is enabled, tasks run one at a time:
 
 ```bash
-agent-env a2a-agent put --id pi --dockerfile plugins/agents/pi/Dockerfile --context plugins/agents/pi \
+agent-env a2a-agent put --id pi --dockerfile src/agent_env/agents/agents/pi/Dockerfile \
+  --context src/agent_env/agents/agents/pi \
   --env-var 'PI_A2A_MODEL_PARAMS={"user":"<project id>"}'
 ```
 
@@ -53,7 +55,7 @@ metadata, and the generated `models.json` sets none. A `stopReason` of `error` i
 (`pi.model_error`), `aborted` is an `agent_error`, and a timeout kills pi's process group.
 
 ```bash
-docker build -t pi-a2a plugins/agents/pi
+docker build -t pi-a2a src/agent_env/agents/agents/pi
 docker run -p 8000:8000 -e LITELLM_BASE_URL=... -e LITELLM_API_KEY=... pi-a2a
-pytest plugins/agents/pi
+pytest tst/unit/agents/pi
 ```

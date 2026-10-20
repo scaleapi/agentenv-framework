@@ -411,8 +411,8 @@ class PiAgent(AgentEnvAgent):
 
     async def run(self, request: TaskRequest[PiConfig]) -> TaskResult:
         config = request.config
-        if not config.model and os.environ.get(DEFAULT_MODEL_ENV):
-            config = config.model_copy(update={"model": os.environ[DEFAULT_MODEL_ENV]})
+        if not config.model and (fallback := os.environ.get(DEFAULT_MODEL_ENV)):
+            config = config.model_copy(update={"model": fallback})
         if not config.model:
             return TaskResult.failure("pi.no_model", "no model is configured; set 'model' through agent-config")
         base_url = os.environ.get("LITELLM_BASE_URL")

@@ -12,10 +12,9 @@ import httpx
 import pytest
 from starlette.testclient import TestClient
 
-import changelog
-import peers
-import pi_agent
-from pi_agent import PiAgent
+from tst.unit.agents.pi.agent import a2a_server, changelog, peers, pi_agent
+
+PiAgent = pi_agent.PiAgent
 
 FAKE_PI = Path(__file__).with_name("fake_pi.py")
 
@@ -741,8 +740,6 @@ def test_unattachable_files_are_left_on_disk_for_tools(client: TestClient, recor
 
 
 def test_a2a_server_exposes_the_card_install_reads() -> None:
-    import a2a_server
-
     assert a2a_server.AGENT_CARD.name == "pi"
     assert any(e.uri == "urn:agentenv:install/v1" for e in a2a_server.AGENT_CARD.capabilities.extensions)
 
