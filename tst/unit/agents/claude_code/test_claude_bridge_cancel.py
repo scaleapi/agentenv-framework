@@ -100,6 +100,8 @@ def test_a_turn_cancelled_while_the_cli_starts_kills_it_once_it_has(monkeypatch,
 
     async def slow_to_start(*_cmd, **kwargs):
         proc = await spawn("sh", "-c", f'sleep 600 & echo "$$ $!" > {pids}; wait', **kwargs)
+        while not (pids.exists() and len(pids.read_text().split()) == 2):  # under load the shell is slow to write
+            await asyncio.sleep(0.01)
         starting.set()
         await asyncio.sleep(0.5)  # still starting when the cancel arrives
         return proc
