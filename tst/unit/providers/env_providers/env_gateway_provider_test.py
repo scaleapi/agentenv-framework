@@ -2237,3 +2237,21 @@ async def test_a_service_whose_logs_cant_be_read_is_still_named(caplog):
 
     assert await EnvironmentGatewayProvider()._down_services(sandbox) == "email exited (1)"
     assert "Can't read container c-email's logs: host lost" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_service_listing_that_stalls_gives_way_to_composes_own_error(monkeypatch, caplog):
+    monkeypatch.setattr(env_gateway_provider, "_DOWN_SERVICES_TIMEOUT_S", 0.05)
+    sandbox = MagicMock()
+    sandbox.exec_script = AsyncMock(side_effect=_COMPOSE_ERROR)
+
+    async def stalls(*args):
+        await asyncio.Event().wait()
+
+    sandbox.exec_with_output = AsyncMock(side_effect=stalls)
+
+    with pytest.raises(RuntimeError) as raised:
+        await EnvironmentGatewayProvider()._compose_up(sandbox)
+
+    assert raised.value is _COMPOSE_ERROR
+    assert "Can't list the stack's services: no answer in 0s" in caplog.text

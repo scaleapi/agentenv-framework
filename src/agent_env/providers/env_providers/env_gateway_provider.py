@@ -71,6 +71,8 @@ _TRAJECTORY_READ_ATTEMPTS = 3
 # How much of a service's output a failed deploy's error carries: enough for the end of a traceback.
 _LOG_TAIL_LINES = 30
 _LOG_LINE_CHARS = 300
+# Gathering it may stall with the connection; past this, the deploy raises the error it had.
+_DOWN_SERVICES_TIMEOUT_S = 60.0
 
 # MCP server health-check budget. Some servers wait on an upstream before they bind; a server
 # that is up passes its first probe, so the long start period only delays failing a broken one.
@@ -1130,7 +1132,14 @@ COMPOSE_EOF'''
 
     async def _down_services(self, sandbox: VmSandbox) -> str | None:
         """Each compose service that exited, keeps restarting or failed its health check, with the end of its output,
-        or None when none did. Diagnostics only: a lookup that fails is a warning and None, never raised."""
+        or None when none did. Diagnostics only: a lookup that fails or runs past its time is a warning and None."""
+        try:
+            return await asyncio.wait_for(self._read_down_services(sandbox), _DOWN_SERVICES_TIMEOUT_S)
+        except TimeoutError:
+            logger.warning(f"Can't list the stack's services: no answer in {_DOWN_SERVICES_TIMEOUT_S:.0f}s")
+            return None
+
+    async def _read_down_services(self, sandbox: VmSandbox) -> str | None:
         try:
             exit_code, stdout, stderr = await sandbox.exec_with_output(
                 "sudo", "docker", "compose", "-f", DOCKER_COMPOSE_PATH, "ps", "-a", "--format", "json"
