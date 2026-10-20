@@ -16,6 +16,7 @@ from agentenv_protocol.a2a_agent import (
     PEER_AGENTS_V1,
     AgentEnvAgent,
     AgentIdentity,
+    DataPart,
     PeerAgentsSetRequest,
     TaskRequest,
     TaskResult,
@@ -46,16 +47,20 @@ class Lead(AgentEnvAgent):
 
 @a2a_agent(identity=AgentIdentity(name="reviewer", description="Reviews what it is sent", version="1"))
 class Reviewer(AgentEnvAgent):
+    """Answers "reviewed: <prompt>"; holds a "slow" prompt until released, and answers "report" in three parts."""
+
     def __init__(self) -> None:
         self.contexts: list[str] = []
         self.release = asyncio.Event()
-        self.hold = False
 
     async def run(self, request: TaskRequest) -> TaskResult:
         self.contexts.append(request.context_id)
-        if self.hold:
-            await self.release.wait()
         text = " ".join(part.text for part in request.parts if isinstance(part, TextPart))
+        if text == "slow":
+            await self.release.wait()
+        if text == "report":
+            return TaskResult.success(parts=(TextPart(text="first"), DataPart(data={"score": 3}),
+                                             TextPart(text="second")))
         return TaskResult.text(f"reviewed: {text}")
 
 
@@ -135,6 +140,9 @@ def test_the_server_lists_the_six_tools() -> None:
         tools = _mcp(client, "tools/list").json()["result"]["tools"]
 
     assert [tool["name"] for tool in tools] == TOOLS
+    # A peer waiting on its caller can't progress, so the model is told to stop polling and answer.
+    assert all("input-required" in tool["description"] for tool in tools
+               if tool["name"] in {"peer_send_message", "peer_start_task", "peer_get_task"})
     send = next(tool for tool in tools if tool["name"] == "peer_send_message")
     assert send["inputSchema"]["required"] == ["name"]
     assert set(send["inputSchema"]["properties"]) == {"name", "prompt", "parts", "context_id", "timeout_seconds"}
@@ -179,7 +187,6 @@ def test_peer_start_task_returns_at_once_and_peer_get_task_reads_the_result(revi
 
 
 def test_peer_cancel_task_cancels_a_running_task(reviewer, card) -> None:
-    reviewer.hold = True
     with TestClient(Lead().create_app(), **LOOPBACK) as client:
         _set(client, [{"name": "reviewer", "url": REVIEWER_URL, "card": card}])
         _, started = _tool(client, "peer_start_task", name="reviewer", prompt="slow")
@@ -188,14 +195,46 @@ def test_peer_cancel_task_cancels_a_running_task(reviewer, card) -> None:
     assert not failed and cancelled == {"task_id": started["task_id"], "state": "canceled"}
 
 
-def test_a_peer_that_runs_past_the_wait_leaves_the_task_working(reviewer, card) -> None:
-    reviewer.hold = True
+def test_a_peer_that_runs_past_the_wait_leaves_the_task_working(reviewer, card, monkeypatch) -> None:
+    timeouts: list[float] = []
+    call = peer_agents_module._call
+
+    async def recording(rpc_url: str, method: str, params: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        if method == "tasks/get":
+            timeouts.append(kwargs.get("timeout", peer_agents_module._REQUEST_TIMEOUT_SECONDS))
+        return await call(rpc_url, method, params, **kwargs)
+
+    monkeypatch.setattr(peer_agents_module, "_call", recording)
     with TestClient(Lead().create_app(), **LOOPBACK) as client:
         _set(client, [{"name": "reviewer", "url": REVIEWER_URL, "card": card}])
         _, waited = _tool(client, "peer_send_message", name="reviewer", prompt="slow", timeout_seconds=1)
         reviewer.release.set()
 
     assert waited["state"] == "working" and set(waited) == {"task_id", "context_id", "state"}
+    # A poll may outlast the wait by the last poll's budget, not by a whole request timeout.
+    assert timeouts and max(timeouts) <= peer_agents_module._LAST_POLL_TIMEOUT_SECONDS
+
+
+def test_a_reply_keeps_every_part_the_peer_answered_with(reviewer, card) -> None:
+    with TestClient(Lead().create_app(), **LOOPBACK) as client:
+        _set(client, [{"name": "reviewer", "url": REVIEWER_URL, "card": card}])
+        _, reply = _tool(client, "peer_send_message", name="reviewer", prompt="report")
+
+    assert reply["response"] == "first\nsecond"
+    assert [(part["kind"], part["data"]) for part in reply["parts"]] == [("data", {"score": 3})]
+
+
+def test_a_running_task_outlives_finished_ones_at_the_tracking_limit(reviewer, card, monkeypatch) -> None:
+    monkeypatch.setattr(peer_agents_module, "_MAX_TRACKED_TASKS", 2)
+    with TestClient(Lead().create_app(), **LOOPBACK) as client:
+        _set(client, [{"name": "reviewer", "url": REVIEWER_URL, "card": card}])
+        _, running = _tool(client, "peer_start_task", name="reviewer", prompt="slow")
+        for prompt in ("one", "two"):
+            _tool(client, "peer_send_message", name="reviewer", prompt=prompt)
+        failed, still = _tool(client, "peer_get_task", task_id=running["task_id"])
+        reviewer.release.set()
+
+    assert not failed and still["task_id"] == running["task_id"]
 
 
 def test_an_unknown_peer_or_task_is_a_tool_error_naming_what_there_is(reviewer) -> None:

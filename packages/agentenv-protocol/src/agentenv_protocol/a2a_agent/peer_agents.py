@@ -35,12 +35,15 @@ logger = logging.getLogger(__name__)
 PEER_MCP_SERVER_NAME = "peer_agents"
 PEER_MCP_PATH = "/ext/peer-agents/mcp"
 
+_TERMINAL_STATES = frozenset({"completed", "failed", "canceled", "rejected"})
 # A2A states a task doesn't leave without its caller: finished, or waiting on the caller.
-_SETTLED_STATES = frozenset({"completed", "failed", "canceled", "rejected", "input-required", "auth-required"})
+_SETTLED_STATES = _TERMINAL_STATES | {"input-required", "auth-required"}
 _DEFAULT_RPC_PATH = "/a2a"
 _DEFAULT_WAIT_SECONDS = 120
 _SEND_TIMEOUT_SECONDS = 60
 _REQUEST_TIMEOUT_SECONDS = 30
+# The most a wait's last poll may run past the wait's own limit.
+_LAST_POLL_TIMEOUT_SECONDS = 5.0
 _POLL_INTERVAL_SECONDS = 5.0
 _POLL_BACKOFF_STEP_SECONDS = 5.0
 _POLL_BACKOFF_MAX_SECONDS = 60.0
@@ -94,13 +97,13 @@ class _Tool:
     run: Callable[[Any], Awaitable[Any]]
 
 
-@dataclass(frozen=True)
+@dataclass
 class _StartedTask:
     task_id: str
     peer_name: str
     rpc_url: str
     context_id: str | None
-    state: str
+    state: str  # as last seen
 
 
 class PeerAgents:
@@ -120,18 +123,23 @@ class PeerAgents:
                 "when peer_list's summary isn't enough."), self._peer_get_card),
             "peer_send_message": _Tool(_MessageAndWait, (
                 "Send a message to a peer A2A agent and wait for the result.\n"
-                "Returns {task_id, context_id, state, response?, artifacts?}. If state is 'working' after "
+                "Returns {task_id, context_id, state, response?, parts?, artifacts?}. If state is 'working' after "
                 "timeout_seconds, the call returned without a result; switch to peer_get_task(task_id) to keep "
-                "polling.\nFor tasks expected to take longer than a few minutes, prefer peer_start_task + "
+                "polling. If state is 'input-required' or 'auth-required', the peer is waiting on you: answer it "
+                "with peer_send_message in the same context_id.\nFor tasks expected to take longer than a few minutes, prefer peer_start_task + "
                 "peer_get_task from the start so you stay responsive."), self._peer_send_message),
             "peer_start_task": _Tool(_Message, (
                 "Start a peer A2A task and return immediately without waiting for it to finish. Returns "
                 "{task_id, context_id, state}. You must then call peer_get_task(task_id) repeatedly until state is "
-                "one of 'completed' | 'failed' | 'canceled' | 'rejected'."), self._peer_start_task),
+                "one of 'completed' | 'failed' | 'canceled' | 'rejected'. If state becomes 'input-required' or "
+                "'auth-required', the peer is waiting on you: stop polling and answer it with peer_send_message in "
+                "the task's context_id."), self._peer_start_task),
             "peer_get_task": _Tool(_TaskQuery, (
-                "Fetch the current state of a peer task by id. Returns {state, response?, artifacts?, history?, "
-                "error?}. Call repeatedly (with a small delay between calls) until state is terminal ('completed', "
-                "'failed', 'canceled', or 'rejected')."), self._peer_get_task),
+                "Fetch the current state of a peer task by id. Returns {state, response?, parts?, artifacts?, "
+                "history?, error?}. Call repeatedly (with a small delay between calls) until state is terminal "
+                "('completed', 'failed', 'canceled', or 'rejected'). 'input-required' or 'auth-required' means the "
+                "peer is waiting on you: stop polling and answer it with peer_send_message in the task's "
+                "context_id."), self._peer_get_task),
             "peer_cancel_task": _Tool(_TaskId, (
                 "Request cancellation of an in-flight peer task. Returns the task's final state. Fails if the task "
                 "is already in a terminal state."), self._peer_cancel_task),
@@ -233,7 +241,8 @@ class PeerAgents:
     async def _peer_cancel_task(self, arguments: _TaskId) -> dict[str, Any]:
         task = self._tracked(arguments.task_id)
         result = await _call(task.rpc_url, "tasks/cancel", {"id": task.task_id})
-        return {"task_id": task.task_id, "state": _state(result)}
+        task.state = _state(result)
+        return {"task_id": task.task_id, "state": task.state}
 
     async def _start(self, arguments: _Message) -> _StartedTask:
         peer = self._resolve(arguments.name)
@@ -249,7 +258,10 @@ class PeerAgents:
                             context_id=arguments.context_id or result.get("contextId"), state=_state(result))
         self._tasks[task_id] = task
         while len(self._tasks) > _MAX_TRACKED_TASKS:
-            self._tasks.popitem(last=False)
+            # The oldest task known finished goes first, so a running one stays reachable.
+            evicted = next((tracked for tracked, seen in self._tasks.items() if seen.state in _TERMINAL_STATES),
+                           next(iter(self._tasks)))
+            del self._tasks[evicted]
         return task
 
     def _resolve(self, name: str) -> PeerAgent:
@@ -336,14 +348,16 @@ async def _send(rpc_url: str, message: dict[str, Any]) -> dict[str, Any]:
 
 async def _wait(rpc_url: str, task_id: str, timeout_seconds: float) -> dict[str, Any]:
     """Poll ``tasks/get`` until the task settles, backing off while polls fail; TimeoutError after
-    ``timeout_seconds``. A client error is the task's own answer, so it is raised at once."""
+    ``timeout_seconds``, which a poll overruns by at most ``_LAST_POLL_TIMEOUT_SECONDS``. A client error is the
+    task's own answer, so it is raised at once."""
     deadline = time.monotonic() + timeout_seconds
     failures = 0
     while (remaining := deadline - time.monotonic()) > 0:
         pause = _POLL_INTERVAL_SECONDS + failures * _POLL_BACKOFF_STEP_SECONDS
         await asyncio.sleep(min(pause, _POLL_BACKOFF_MAX_SECONDS, remaining))
+        budget = max(deadline - time.monotonic(), _LAST_POLL_TIMEOUT_SECONDS)
         try:
-            result = await _call(rpc_url, "tasks/get", {"id": task_id})
+            result = await _call(rpc_url, "tasks/get", {"id": task_id}, timeout=min(budget, _REQUEST_TIMEOUT_SECONDS))
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code < 500:
                 raise
@@ -376,13 +390,17 @@ def _summary(peer: PeerAgent) -> dict[str, Any]:
 
 
 def _outcome(task: _StartedTask, result: dict[str, Any], *, history: bool = False) -> dict[str, Any]:
-    """A settled or running task as the tools return it: its state, the reply's text, any artifacts, and its
-    messages when ``history`` asks for them."""
-    payload: dict[str, Any] = {"task_id": task.task_id, "context_id": task.context_id, "state": _state(result)}
+    """A settled or running task as the tools return it, recording its state: the reply's text and its other
+    parts, any artifacts, and its messages when ``history`` asks for them."""
+    task.state = _state(result)
+    payload: dict[str, Any] = {"task_id": task.task_id, "context_id": task.context_id, "state": task.state}
     message = (result.get("status") or {}).get("message") or {}
-    text = next((part.get("text", "") for part in message.get("parts") or [] if part.get("kind") == "text"), None)
-    if text is not None:
-        payload["response"] = text
+    parts = message.get("parts") or []
+    texts = [part.get("text", "") for part in parts if part.get("kind") == "text"]
+    if texts:
+        payload["response"] = "\n".join(texts)
+    if others := [part for part in parts if part.get("kind") != "text"]:
+        payload["parts"] = others
     if result.get("artifacts"):
         payload["artifacts"] = list(result["artifacts"])
     if history and result.get("history"):
