@@ -943,6 +943,10 @@ class TriggerEngine:
     def has_website_triggers(self) -> bool:
         return any(t["spec"]["when"]["type"] == "website" for t in self._triggers.values())
 
+    @property
+    def has_state_triggers(self) -> bool:
+        return any(t["spec"]["when"]["type"] == "state" for t in self._triggers.values())
+
     def _provoked_by(self, trig: dict, role: str) -> bool:
         """Whether a call by ``role`` can provoke ``trig``: the roles its `when` (or a deadline's `unless`) lists, else the
         watched ones. Unlisted, an executor's own calls never provoke anything, so it cannot set off a cascade unasked."""

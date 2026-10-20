@@ -9,6 +9,7 @@ import httpx
 import pytest
 from mcp.types import CallToolResult, TextContent
 
+from agent_env.env.gateway import gateway as gateway_module
 from agent_env.env.gateway import rest_proxy as rest_proxy_module
 from agent_env.env.gateway.clock import Clock
 from agent_env.env.gateway.constants import EXT_TRIGGERS_URI, GATEWAY_EXTENSIONS, TRIGGER_WEBSITE
@@ -346,7 +347,7 @@ async def test_the_proxy_hands_the_engine_the_role_path_status_and_args_of_each_
 
 
 @pytest.mark.asyncio
-async def test_without_a_website_trigger_the_proxy_neither_reads_requests_nor_rechecks_state_triggers(monkeypatch):
+async def test_without_a_website_trigger_a_mutating_website_request_still_rechecks_the_state_triggers(monkeypatch):
     _Website(status=201).install(monkeypatch)
     calls: list[str] = []
 
@@ -358,15 +359,30 @@ async def test_without_a_website_trigger_the_proxy_neither_reads_requests_nor_re
     gw = _gateway()
     gw._trigger_engine.register({"triggers": [{"id": "sent", "actions": [], "when": {"type": "state", "check": {
         "tool": "mail_list_messages", "extract": "subjects", "predicate": {"regex": "Lunch"}}}}]})
+    parsed: list[bytes] = []
+    real_args = gateway_module._request_args
+    monkeypatch.setattr(gateway_module, "_request_args", lambda request, body: parsed.append(body) or real_args(request, body))
+
+    assert await _request(gw, "POST", "/website/mail/api/messages", headers={"content-type": "application/json"},
+                          body=json.dumps(MESSAGE).encode()) == 201
+    await asyncio.sleep(0.1)
+
+    assert parsed == [] and calls == ["mail_list_messages"] and gw._trigger_engine._triggers["sent"]["status"] == "fired"
+
+
+@pytest.mark.asyncio
+async def test_with_neither_a_website_nor_a_state_trigger_the_proxy_never_reaches_the_engine(monkeypatch):
+    _Website(status=201).install(monkeypatch)
+    gw = _gateway()
+    gw._trigger_engine.register({"triggers": [{"id": "later", "actions": [], "when": {"type": "time", "at": "PT1H"}}]})
     seen: list[tuple] = []
     real = gw._trigger_engine.on_website_request
     gw._trigger_engine.on_website_request = lambda *a: seen.append(a) or real(*a)
 
     assert await _request(gw, "POST", "/website/mail/api/messages", headers={"content-type": "application/json"},
                           body=json.dumps(MESSAGE).encode()) == 201
-    await asyncio.sleep(0.1)
 
-    assert seen == [] and calls == [] and gw._trigger_engine._triggers["sent"]["status"] == "armed"
+    assert seen == []
 
 
 @pytest.mark.asyncio

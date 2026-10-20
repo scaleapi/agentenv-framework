@@ -228,6 +228,14 @@ async def test_a_gateway_without_provoking_roles_refuses_a_trigger_that_lists_ro
     assert sent == []
 
 
+@pytest.mark.asyncio
+async def test_a_gateway_that_declares_website_triggers_takes_them(monkeypatch):
+    sent = _mock_gateway(monkeypatch, {"ok": True, "added": ["visit"], "all": ["visit"]})
+    triggers = [{"id": "visit", "when": {"type": "website", "app": "mail", "method": "GET"}, "actions": []}]
+    await _step(triggers=triggers).execute(_context())
+    assert json.loads(sent[0].content)["triggers"] == triggers
+
+
 _HOURS = {"start": "09:00", "end": "17:00", "utc_offset": "-07:00"}
 
 
@@ -264,7 +272,8 @@ async def test_executor_hours_for_an_agent_no_trigger_uses_raise(monkeypatch):
      None, "unless"),
     ([{"id": "x", "when": {"type": "action", "tool": "t"}, "actions": [{"type": "nl", "instruction": "x"}]}],
      {"exec-1": _HOURS}, "executor_hours"),
-], ids=["delay", "unless", "hours"])
+    ([{"id": "x", "when": {"type": "website", "app": "mail", "method": "POST"}, "actions": []}], None, "website"),
+], ids=["delay", "unless", "hours", "website"])
 async def test_a_gateway_without_a_feature_refuses_the_triggers_that_use_it(monkeypatch, triggers, hours, missing):
     sent = _mock_gateway(monkeypatch, {})
     context = _context(with_executor=True)

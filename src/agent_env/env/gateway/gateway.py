@@ -510,10 +510,11 @@ class Gateway:
                              mcp_server=url_map is self.rest_proxy_urls and service_name.startswith("mcp-"))
 
     async def _proxy_website_request(self, request: Request) -> Response:
-        """Proxy a website request; with a website trigger registered, feed it to the engine and hold it for barriers."""
+        """Proxy a website request; with a website or state trigger registered, feed it to the engine and hold barriers."""
         response = await self._proxy_rest_request(request, url_map=self.website_urls)
         app = request.path_params["service_name"]
-        if app in self.website_urls and self._trigger_engine.has_website_triggers:
+        engine = self._trigger_engine
+        if app in self.website_urls and (engine.has_website_triggers or engine.has_state_triggers):
             barrier_tasks, barrier_timeout_s = await self._fire_website_triggers(request, app, response.status_code)
             await self._await_barriers(barrier_tasks, barrier_timeout_s)
         return response
@@ -522,7 +523,8 @@ class Gateway:
                                      status: int) -> tuple[list[asyncio.Task], float | None]:
         """Feed an answered website request to the trigger engine (fail-open)."""
         try:
-            args = _request_args(request, await request.body())
+            # Only a website trigger reads the request's args; a state re-check needs just the method and status.
+            args = _request_args(request, await request.body()) if self._trigger_engine.has_website_triggers else {}
             return self._trigger_engine.on_website_request(self._request_role(request), app, request.method,
                                                            "/" + request.path_params.get("path", ""), status, args)
         except Exception:
