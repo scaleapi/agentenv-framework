@@ -6,6 +6,7 @@ import re
 import tomllib
 from pathlib import Path
 
+import pytest
 import yaml
 
 from agent_env.env.published_images import PLATFORMS, RELEASE_FILE
@@ -47,5 +48,17 @@ def test_each_image_is_built_for_every_platform_it_is_published_for():
 
 
 def test_nothing_reaches_pypi_from_a_run_by_hand():
-    assert WORKFLOW["jobs"]["protocol"]["if"] == "github.event_name == 'push'"
+    assert "github.event_name == 'push'" in WORKFLOW["jobs"]["protocol"]["if"]
     assert "needs.protocol.result == 'success'" in WORKFLOW["jobs"]["framework"]["if"]
+
+
+@pytest.mark.parametrize("job", ["protocol", "framework"])
+def test_a_failed_image_job_sends_neither_package_to_pypi(job):
+    """Each waits for every image job, and runs only when each succeeded or, nothing to publish, was skipped."""
+    spec = WORKFLOW["jobs"][job]
+    images = ["infra-plan", "infra-build", "infra-publish"]
+
+    assert set(images) <= set(spec["needs"])
+    for image_job in images:
+        assert f"""contains(fromJSON('["success", "skipped"]'), needs.{image_job}.result)""" in spec["if"]
+    assert spec["if"].startswith("!cancelled()")

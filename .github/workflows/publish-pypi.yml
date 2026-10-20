@@ -71,7 +71,8 @@ jobs:
           GHCR_TOKEN: ${{ github.token }}
         run: |
           uv sync --locked --no-dev
-          echo "missing=$(uv run --no-sync python .github/scripts/infra_images.py plan --missing)" >> "$GITHUB_OUTPUT"
+          missing=$(uv run --no-sync python .github/scripts/infra_images.py plan --missing)
+          echo "missing=$missing" >> "$GITHUB_OUTPUT"
 
   # Builds each missing image on a runner of each platform, checks that it runs, and pushes it under its tag and
   # platform (src-<digest>-amd64), which nothing looks up: infra-publish tags the multi-platform image once main's CI
@@ -145,9 +146,14 @@ jobs:
               "${ref}-amd64" "${ref}-arm64"
           done
 
+  # Both packages wait for the infra images when they're published, so a failed image job sends neither to PyPI.
   protocol:
-    needs: main-ci
-    if: github.event_name == 'push'
+    needs: [main-ci, infra-plan, infra-build, infra-publish]
+    if: >-
+      !cancelled() && github.event_name == 'push' && needs.main-ci.result == 'success'
+      && contains(fromJSON('["success", "skipped"]'), needs.infra-plan.result)
+      && contains(fromJSON('["success", "skipped"]'), needs.infra-build.result)
+      && contains(fromJSON('["success", "skipped"]'), needs.infra-publish.result)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: pypi-protocol
@@ -174,7 +180,7 @@ jobs:
       - name: Publish agentenv-framework-protocol
         run: uv publish --trusted-publishing always --check-url https://pypi.org/simple/ dist/*
 
-  # Waits for the infra images when they're published: a release's wheel names only images the registry holds.
+  # A release's wheel names only images the registry holds.
   framework:
     needs: [protocol, infra-plan, infra-build, infra-publish]
     if: >-
