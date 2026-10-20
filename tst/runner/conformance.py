@@ -17,6 +17,7 @@ from agent_env.task.store import find_task_instance
 from agent_env.task_step.task_step import TaskStep
 
 ENDED_WITHIN_SECONDS = 60
+POLL_SECONDS = 0.05
 
 
 class Step(TaskStep):
@@ -60,8 +61,9 @@ async def a_run_whose_step_fails_fails_with_its_error(runner):
     task = _put(Step(id="a", version=None, needs=["never"]))
     handle = await runner.submit(task.id, task.version)
     record = await _until_ended(runner, handle.run_id)
-    assert record.status is RunStatus.FAILED and "conformance step needs ['never']" in record.error
-    assert run_store.get_run(handle.run_id).status is RunStatus.FAILED
+    saved = run_store.get_run(handle.run_id)
+    for record in (record, saved):
+        assert record.status is RunStatus.FAILED and "conformance step needs ['never']" in record.error
 
 
 async def a_cancelled_run_ends_canceled(runner):
@@ -113,5 +115,5 @@ async def _until(runner, run_id, done):
     deadline = time.monotonic() + ENDED_WITHIN_SECONDS
     while (record := await runner.status(run_id)) is None or not done(record):
         assert time.monotonic() < deadline, f"run {run_id} is still {record and record.status}"
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(POLL_SECONDS)
     return record
