@@ -17,11 +17,11 @@ from urllib.parse import urlparse
 import httpx
 
 from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI, FilePart, uploaded_object_path
-from agentenv_protocol.client import find_extension
+from agentenv_protocol.client import find_extension, find_extension_method
 from agentenv_protocol.transfers import WriteNamespaceGrant
 
 from agent_env.a2a_agent.object_transfer import ObjectLimits, namespace_grant
-from agent_env.env.gateway.constants import EXT_TRAJECTORY_URI
+from agent_env.env.gateway.constants import CHANGES_PAGE_MAX, EXT_CHANGES_URI, EXT_TRAJECTORY_URI
 from agent_env.store import get_config
 from agent_env.store.base import GrantUnavailableError
 from agent_env.store.ids import derive_id, is_local_id, validate_local_id
@@ -40,6 +40,7 @@ DEFAULT_EXPORT_CONCURRENCY = 3
 _CONNECT_TIMEOUT_SECONDS = 30
 
 _TRAJECTORY_CAPTURE_BUDGET_SECONDS = 300
+_CHANGES_CAPTURE_BUDGET_SECONDS = 300
 
 # Must match the S3 credentials extension URI the server-side credentials mixin advertises.
 _S3_CREDENTIALS_EXTENSION_URI = "urn:agentenv:add-s3-credentials/v1"
@@ -154,6 +155,8 @@ class SnapshotEnvTaskStep(TaskStep):
 
     Output: ``context.metadata["env_snapshotted_universes"][self.id]`` =
     ``{"id", "version"}``. Fails the step if any service fails to export.
+
+    ``include_env_changes`` also stores who changed what (urn:agentenv:changes/v1) under ``metadata["env_changes"]``.
     """
 
     type: ClassVar[str] = "snapshot_env"
@@ -178,6 +181,7 @@ class SnapshotEnvTaskStep(TaskStep):
         original_universe_artifact_id: Optional[str] = None,
         export_timeout_seconds: int = DEFAULT_EXPORT_TIMEOUT_SECONDS,
         include_env_trajectory: bool = False,
+        include_env_changes: bool = False,
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
     ):
@@ -190,6 +194,7 @@ class SnapshotEnvTaskStep(TaskStep):
         self.original_universe_artifact_id = original_universe_artifact_id
         self.export_timeout_seconds = export_timeout_seconds
         self.include_env_trajectory = include_env_trajectory
+        self.include_env_changes = include_env_changes
 
     def to_dict(self) -> dict:
         base = super().to_dict()
@@ -201,6 +206,7 @@ class SnapshotEnvTaskStep(TaskStep):
         base["original_universe_artifact_id"] = self.original_universe_artifact_id
         base["export_timeout_seconds"] = self.export_timeout_seconds
         base["include_env_trajectory"] = self.include_env_trajectory
+        base["include_env_changes"] = self.include_env_changes
         return base
 
     @classmethod
@@ -217,6 +223,7 @@ class SnapshotEnvTaskStep(TaskStep):
                 "export_timeout_seconds", cls.DEFAULT_EXPORT_TIMEOUT_SECONDS
             ),
             include_env_trajectory=data.get("include_env_trajectory", False),
+            include_env_changes=data.get("include_env_changes", False),
         )
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
@@ -245,6 +252,17 @@ class SnapshotEnvTaskStep(TaskStep):
                 logger.warning(f"snapshot_env: env trajectory capture aborted (continuing): {detail}")
                 entry["error"] = detail
             context.metadata.setdefault("env_trajectory", {})[env_id] = entry
+
+        if self.include_env_changes:
+            entry = {"captured_at_utc": datetime.now(timezone.utc).isoformat(), "capture_step_id": self.id}
+            try:
+                await asyncio.wait_for(self._capture_env_changes(entry, context, env_id, deployed),
+                                       timeout=_CHANGES_CAPTURE_BUDGET_SECONDS)
+            except Exception as e:
+                detail = f"{type(e).__name__}: {str(e)[:200]}"
+                logger.warning(f"snapshot_env: env changes capture aborted (continuing): {detail}")
+                entry["error"] = detail
+            context.metadata.setdefault("env_changes", {})[env_id] = entry
 
         # Pin the env version the sandbox actually runs, so service enumeration
         # can't drift if the env was re-registered since this sandbox deployed.
@@ -365,6 +383,40 @@ class SnapshotEnvTaskStep(TaskStep):
             os.unlink(tmp.name)
         entry["object_url"] = object_url
         entry["event_count"] = event_count
+
+    async def _capture_env_changes(self, entry: dict, context: TaskStepContext, env_id: str, deployed) -> None:
+        """Page the gateway's changes into a JSONL upload; fill ``entry`` with its url and attribution counts."""
+        method, url = _changes_route(deployed, self.gateway_url)
+        counts = {"change_count": 0, "attributed_count": 0, "ambiguous_count": 0}
+        timeout = httpx.Timeout(_CHANGES_CAPTURE_BUDGET_SECONDS, connect=_CONNECT_TIMEOUT_SECONDS)
+        tmp = tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False)
+        try:
+            after_id, has_more = 0, True
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                while has_more:
+                    response = await client.request(method, url, params={"after_id": after_id, "limit": CHANGES_PAGE_MAX})
+                    response.raise_for_status()
+                    page = response.json()
+                    for change in page["changes"]:
+                        tmp.write((json.dumps(change, default=str) + "\n").encode())
+                        counts["change_count"] += 1
+                        counts["attributed_count"] += len(change["actors"]) == 1
+                        counts["ambiguous_count"] += len(change["actors"]) > 1
+                        after_id = change["id"]
+                    has_more = page["has_more"]
+            tmp.close()
+            instance_key = context.instance_id or f"adhoc-{uuid.uuid4().hex[:12]}"
+            key = (
+                f"{get_config().get_artifact_key_prefix()}env_changes/"
+                f"instance_id={instance_key}/{env_id}-{uuid.uuid4().hex[:8]}.jsonl"
+            )
+            object_url = await asyncio.to_thread(get_config().get_object_store().put_file, key, tmp.name,
+                                                 "application/jsonl")
+        finally:
+            tmp.close()
+            os.unlink(tmp.name)
+        entry["object_url"] = object_url
+        entry.update(counts)
 
     def _derive_snapshot_id(self, context: TaskStepContext) -> str:
         if self.snapshot_id:
@@ -690,6 +742,15 @@ class SnapshotEnvTaskStep(TaskStep):
             environments_snapshotted=[sa.environment_name for sa in environment_artifacts],
             total=len(services),
         )
+
+
+def _changes_route(deployed, override_url: Optional[str]) -> tuple[str, str]:
+    """The verb and URL of the env's changes: an override keeps `{override}/changes`, else the stored card names them."""
+    if override_url:
+        return "GET", f"{override_url.rstrip('/')}/changes"
+    deployed.require(EXT_CHANGES_URI, "get")
+    op = find_extension_method(deployed.environment_card, EXT_CHANGES_URI, "get")
+    return op["method"], f"{deployed.environment_url}{op['endpoint']}"
 
 
 def _trajectory_route(deployed, override_url: Optional[str]) -> tuple[str, str]:

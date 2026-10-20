@@ -77,6 +77,11 @@ EXT_CLOCK_URI = "urn:agentenv:clock/v1"
 EXT_TRAJECTORY_URI = "urn:agentenv:trajectory/v1"
 EXT_STEP_URI = "urn:agentenv:step/v1"
 EXT_STATE_URI = "urn:agentenv:state/v1"
+EXT_CHANGES_URI = "urn:agentenv:changes/v1"
+
+# Rows per GET /changes page: the default, and the most a client may ask for.
+CHANGES_PAGE_DEFAULT = 1000
+CHANGES_PAGE_MAX = 10000
 
 # Gateway's compose service name — how backing servers reach it to build env_get_time_url (compose path).
 GATEWAY_COMPOSE_HOST = "gateway"
@@ -200,7 +205,7 @@ GATEWAY_EXTENSIONS = [
     },
     {
         "uri": EXT_TRAJECTORY_URI,
-        "description": "Env trajectory (urn:agentenv:trajectory/v1): the env's append-only JSONL record of tool calls, results, and trigger firings, virtual_time-stamped while the clock is armed.",
+        "description": "Env trajectory (urn:agentenv:trajectory/v1): the env's append-only JSONL record of tool calls, results, trigger firings and the requests that may write through its REST proxy, each write with the changelog ids it spanned, virtual_time-stamped while the clock is armed.",
         "params": {"endpoint": "/trajectory", "methods": {
             "get": {"method": "GET", "endpoint": "/trajectory"}}},
         "required": False,
@@ -217,6 +222,15 @@ GATEWAY_EXTENSIONS = [
         "description": "State (urn:agentenv:state/v1): the env's MCP servers and their tools, any tool name more than one of them serves, its changelog id and its role rules.",
         "params": {"endpoint": "/state", "methods": {
             "get": {"method": "GET", "endpoint": "/state"}}},
+        "required": False,
+    },
+    {
+        "uri": EXT_CHANGES_URI,
+        "description": "Changes (urn:agentenv:changes/v1): the env's changelog rows after after_id, oldest first, each with the actors whose write window holds it: the role, the tool call, trigger action or request, and the trigger fires it was made for. None for a write the gateway did not serve; several for one written while calls overlapped.",
+        "params": {"endpoint": "/changes", "methods": {
+            "get": {"method": "GET", "endpoint": "/changes", "request": {"type": "object", "properties": {
+                "after_id": {"type": "integer", "minimum": 0},
+                "limit": {"type": "integer", "minimum": 1, "maximum": CHANGES_PAGE_MAX}}}}}},
         "required": False,
     },
 ]
