@@ -474,7 +474,7 @@ def _seed_universe_id(task, seed: dict) -> str | None:
 @click.option("--id", "task_id", required=True, help="Task id")
 @click.option("--version", "task_version", default=None, type=int, help="Task version (defaults to latest)")
 @click.option("--seeds", required=True, type=click.Path(exists=True, dir_okay=False), help="CSV file with one row per seed")
-@click.option("--concurrency", default=5, type=int, help="Max parallel task runs")
+@click.option("--concurrency", default=5, type=click.IntRange(min=1), help="Max parallel task runs")
 @click.option("--output-dir", default=None, type=click.Path(file_okay=False), help="Directory to write context JSON outputs")
 @click.option("--agent-model", default=None, type=str, help="Override the model used by prompt_agent steps")
 @click.option("--user-model", default=None, type=str, help="Override the model the user simulator runs on")
