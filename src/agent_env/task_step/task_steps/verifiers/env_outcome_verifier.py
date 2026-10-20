@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 class EnvOutcomeVerifierTaskStep(TaskStep):
-    """Runs the artifact's ``verify(mcp_url)``; a ``run`` parameter also gets the ``RunContext`` of ``prompt_id``."""
+    """Runs the artifact's ``verify(mcp_url)``; a ``run`` parameter also gets the ``Run`` of ``prompt_id``."""
 
     type: ClassVar[str] = "env_outcome_verifier"
     entity_refs = (

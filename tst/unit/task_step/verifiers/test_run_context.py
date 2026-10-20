@@ -15,8 +15,10 @@ from agent_env.artifact import FileArtifact
 from agent_env.config import get_config
 from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.task_step.task_steps.verifiers.env_outcome_verifier import EnvOutcomeVerifierTaskStep
-from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep, render_run_context
-from agent_env.task_step.task_steps.verifiers.run_context import RunContext, load_run_context
+from agent_env.task_step.task_steps.verifiers import Run, RunRecordUnavailable
+from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
+from agent_env.task_step.task_steps.verifiers.run_context import (_fold, _message, _run, load_run_context,
+                                                                  render_run_context)
 
 TURNS = [("Can you book lunch with Dana?", "Booked for noon."),
          ("Make it 12:30 instead.", "Moved to 12:30."),
@@ -30,6 +32,11 @@ def _text(text: str) -> list[dict]:
 def _between(earlier: str, later: str) -> str:
     a, b = datetime.fromisoformat(earlier), datetime.fromisoformat(later)
     return (a + (b - a) / 2).isoformat()
+
+
+def _render(run: Run, parts: list[str]) -> str:
+    return render_run_context(run, parts, message_max_chars=RubricsVerifierTaskStep.RUN_CONTEXT_MESSAGE_MAX_CHARS,
+                              firings_max=RubricsVerifierTaskStep.RUN_CONTEXT_FIRINGS_MAX)
 
 
 def recorded_run(turns=TURNS) -> tuple[TaskStepContext, PromptResponse, dict]:
@@ -46,7 +53,8 @@ def recorded_run(turns=TURNS) -> tuple[TaskStepContext, PromptResponse, dict]:
     turn_starts = [m["ts"] for m in messages if m["role"] == "user"]
     after_reply_1 = _between(messages[1]["ts"], turn_starts[1])
     env_events = [
-        {"seq": 1, "ts": after_reply_1, "kind": "detected", "trigger_id": "confirm"},
+        {"seq": 1, "ts": after_reply_1, "kind": "detected", "trigger_id": "confirm",
+         "provoking": {"tool": "book", "role": "solver"}},
         {"seq": 2, "ts": after_reply_1, "kind": "fired", "trigger_id": "confirm", "fire_count": 1},
         {"seq": 3, "ts": _between(turn_starts[2], messages[5]["ts"]), "kind": "fired", "trigger_id": "late",
          "fire_count": 1},
@@ -69,38 +77,60 @@ def recorded_run(turns=TURNS) -> tuple[TaskStepContext, PromptResponse, dict]:
 
 
 @pytest.mark.asyncio
-async def test_the_run_context_has_every_turn_and_both_firing_logs():
+async def test_the_run_has_every_turn_and_one_firing_per_fire_each_in_its_turn():
     context, prompt_response, recorded = recorded_run()
 
     run = await load_run_context(context, prompt_response)
 
-    assert run.turns == 3 and run.unavailable == {}
-    assert [(m["turn"], m["role"], m.get("author"), m["text"]) for m in run.conversation] == [
-        (1, "user", "dana_sim", TURNS[0][0]), (1, "agent", "solver", TURNS[0][1]),
-        (2, "user", "dana_sim", TURNS[1][0]), (2, "agent", "solver", TURNS[1][1]),
-        (3, "user", "dana_sim", TURNS[2][0]), (3, "agent", "solver", TURNS[2][1]),
+    assert len(run.turns) == 3 and run.unavailable == {}
+    assert [(t.number, t.message.author, t.message.text, t.reply.author, t.reply.text) for t in run.turns] == [
+        (n, "dana_sim", user, "solver", agent) for n, (user, agent) in enumerate(TURNS, 1)]
+    assert [t.message.written_by_triggers for t in run.turns] == [(), ("reschedule",), ()]
+    assert [t.message.user_sim for t in run.turns] == [None, None, {"mood": "satisfied"}]
+    assert run.turn(2).message.sent_at == datetime.fromisoformat(recorded["turn_starts"][1])
+    assert [(f.source, f.trigger_id, f.turn, f.ok) for f in run.firings()] == [
+        ("env:calendar", "confirm", 1, True), ("user_agent", "reschedule", 1, True), ("env:calendar", "late", 3, True)]
+    confirm = run.firing("confirm", env="calendar")
+    assert confirm.provoked_by == {"tool": "book", "role": "solver"} and confirm.at == datetime.fromisoformat(
+        recorded["env"][1]["ts"])
+    assert run.firing("late").provoked_by is None and run.firing("never") is None
+    assert [f.trigger_id for f in run.turn(1).firings] == ["confirm", "reschedule"] and run.turn(2).firings == ()
+    assert run.firings(env="calendar") == run.firings("confirm") + run.firings("late")
+
+
+def test_the_gateway_log_folds_into_one_firing_per_fire():
+    ts = [f"2026-10-20T10:00:0{i}+00:00" for i in range(8)]
+    events = [
+        {"seq": 1, "ts": ts[0], "kind": "detected", "trigger_id": "mirror", "provoking": {"tool": "a"}},
+        {"seq": 2, "ts": ts[1], "kind": "detected", "trigger_id": "mirror", "provoking": {"tool": "b"}, "queued": 1},
+        {"seq": 3, "ts": ts[2], "kind": "action_ok", "trigger_id": "mirror", "action_index": 0},
+        {"seq": 4, "ts": ts[3], "kind": "fired", "trigger_id": "mirror", "fire_count": 1},
+        {"seq": 5, "ts": ts[4], "kind": "failed", "trigger_id": "mirror", "action_index": 0},
+        {"seq": 6, "ts": ts[5], "kind": "detected", "trigger_id": "tick", "provoking": {"tool": "c"}, "due": 2,
+         "virtual_time": "2026-12-03T07:00:00Z"},
+        {"seq": 7, "ts": ts[6], "kind": "fired", "trigger_id": "tick", "virtual_time": "2026-12-03T07:00:00Z"},
+        {"seq": 8, "ts": ts[7], "kind": "fired", "trigger_id": "tick", "virtual_time": "2026-12-03T08:00:00Z"},
     ]
-    user = [m for m in run.conversation if m["role"] == "user"]
-    assert "fired" not in user[0] and user[1]["fired"] == ["reschedule"] and "fired" not in user[2]
-    assert user[2]["fields"] == {"mood": "satisfied"} and "fields" not in user[1]
-    assert run.env_trigger_events == {"calendar": recorded["env"]}
-    assert run.agent_trigger_events == recorded["agent"]
-    assert json.loads(json.dumps(run.to_dict()))["conversation"][0]["parts"] == _text(TURNS[0][0])
+
+    firings = _fold("env:calendar", events, [])
+
+    assert [(f.trigger_id, f.ok, f.provoked_by, f.turn) for f in firings] == [
+        ("mirror", True, {"tool": "a"}, 0), ("mirror", False, {"tool": "b"}, 0),
+        ("tick", True, {"tool": "c"}, 0), ("tick", True, {"tool": "c"}, 0)]
+    assert firings[3].virtual_time == datetime.fromisoformat("2026-12-03T08:00:00+00:00")
 
 
 @pytest.mark.asyncio
 async def test_as_of_a_turn_the_run_stops_before_the_next_turn_begins():
-    context, prompt_response, recorded = recorded_run()
+    context, prompt_response, _ = recorded_run()
     run = await load_run_context(context, prompt_response)
 
-    first, second = run.as_of_turn(1), run.as_of_turn(2)
+    first, second = run.as_of(1), run.as_of(2)
 
-    assert [m["turn"] for m in first.conversation] == [1, 1]
-    assert first.env_trigger_events == {"calendar": recorded["env"][:2]}
-    assert first.agent_trigger_events == recorded["agent"]
-    assert [m["turn"] for m in second.conversation] == [1, 1, 2, 2]
-    assert second.env_trigger_events == {"calendar": recorded["env"][:2]}
-    assert run.as_of_turn(3) is run and run.as_of_turn(7) is run
+    assert [t.number for t in first.turns] == [1] and [t.number for t in second.turns] == [1, 2]
+    assert [f.trigger_id for f in first.firings()] == ["confirm", "reschedule"] == [
+        f.trigger_id for f in second.firings()]
+    assert run.as_of(3) is run and run.as_of(7) is run
 
 
 @pytest.mark.asyncio
@@ -109,12 +139,13 @@ async def test_a_prompt_with_no_stored_conversation_is_one_turn_of_its_prompt_an
 
     run = await load_run_context(TaskStepContext(prompt_responses=[prompt_response]), prompt_response)
 
-    assert [(m["turn"], m["role"], m["text"]) for m in run.conversation] == [(1, "user", "do it"), (1, "agent", "done")]
-    assert run.env_trigger_events == {} and run.agent_trigger_events == [] and run.unavailable == {}
+    [turn] = run.turns
+    assert (turn.message.role, turn.message.text, turn.reply.role, turn.reply.text) == ("user", "do it", "agent", "done")
+    assert run.firings() == () and run.unavailable == {}
 
 
 @pytest.mark.asyncio
-async def test_what_the_run_meant_to_record_but_cannot_be_read_is_named_not_left_empty():
+async def test_what_the_run_meant_to_record_but_cannot_be_read_raises_rather_than_reading_as_empty():
     context, prompt_response, _ = recorded_run()
     context.metadata["a2a_conversations"]["prompt"] = "conv-gone"
     context.metadata["env_trigger_state"] = {
@@ -124,10 +155,38 @@ async def test_what_the_run_meant_to_record_but_cannot_be_read_is_named_not_left
 
     run = await load_run_context(context, prompt_response)
 
-    assert run.conversation == [] and run.env_trigger_events == {}
     assert run.unavailable["conversation"] == "conversation 'conv-gone' is not in the store"
-    assert run.unavailable["env_trigger_events.calendar"] == "TimeoutError: capture budget of 90s exceeded"
-    assert "env_trigger_events.mail" in run.unavailable
+    assert run.unavailable["env:calendar"] == "TimeoutError: capture budget of 90s exceeded"
+    assert "env:mail" in run.unavailable
+    with pytest.raises(RunRecordUnavailable, match="conv-gone") as raised:
+        run.turns
+    assert raised.value.source == "conversation"
+    with pytest.raises(RunRecordUnavailable, match="capture budget") as raised:
+        run.firing("confirm", env="calendar")
+    assert raised.value.source == "env:calendar"
+    with pytest.raises(RunRecordUnavailable):
+        run.firings()
+
+
+@pytest.mark.asyncio
+async def test_an_env_with_no_firing_log_raises_and_a_missing_log_reaches_the_turn_too():
+    context, prompt_response, _ = recorded_run()
+    context.metadata["env_trigger_state"]["mail"] = {"error": "TimeoutError: capture budget of 90s exceeded"}
+    run = await load_run_context(context, prompt_response)
+
+    with pytest.raises(RunRecordUnavailable, match="no firing log was captured"):
+        run.firings(env="drive")
+    with pytest.raises(RunRecordUnavailable, match="capture budget"):
+        run.turn(1).firings
+    assert [f.trigger_id for f in run.firings(env="calendar")] == ["confirm", "late"]
+
+
+def test_a_firing_log_that_cannot_be_parsed_is_named_not_left_empty():
+    run = _run([], {"env:calendar": [{"seq": 1, "kind": "fired", "trigger_id": "confirm"}]}, {})
+
+    assert run.unavailable["env:calendar"].startswith("unreadable firing log: KeyError")
+    with pytest.raises(RunRecordUnavailable):
+        run.firings(env="calendar")
 
 
 @pytest.mark.asyncio
@@ -139,9 +198,12 @@ async def test_a_user_agent_firing_log_that_was_not_read_back_is_named_not_left_
 
     run = await load_run_context(context, prompt_response)
 
-    assert run.agent_trigger_events == [] and "agent_trigger_events" in run.unavailable
-    text = render_run_context(run, ["trigger_log"])
-    assert f"(not available: agent_trigger_events: {run.unavailable['agent_trigger_events']})" in text
+    with pytest.raises(RunRecordUnavailable, match="wasn't read") as raised:
+        run.firing("reschedule")
+    assert raised.value.source == "user_agent"
+    assert [f.trigger_id for f in run.firings(env="calendar")] == ["confirm", "late"]
+    text = _render(run, ["trigger_log"])
+    assert f"(not available: user_agent: {run.unavailable['user_agent']})" in text
     assert "(no trigger firings were recorded)" not in text
 
 
@@ -154,35 +216,35 @@ async def test_a_user_agent_with_no_triggers_of_its_own_has_no_firing_log_to_mis
 
     run = await load_run_context(context, prompt_response)
 
-    assert run.agent_trigger_events == [] and run.unavailable == {}
+    assert run.firing("reschedule") is None and run.unavailable == {}
 
 
 @pytest.mark.asyncio
-async def test_without_the_conversation_a_turn_cut_withholds_the_firing_logs_it_cannot_cut():
-    context, prompt_response, recorded = recorded_run()
+async def test_without_the_conversation_the_firings_that_cannot_be_placed_in_turns_are_withheld():
+    context, prompt_response, _ = recorded_run()
     context.metadata["a2a_conversations"]["prompt"] = "conv-gone"
+
     run = await load_run_context(context, prompt_response)
 
-    first = run.as_of_turn(1)
-
-    assert run.env_trigger_events == {"calendar": recorded["env"]} and run.agent_trigger_events == recorded["agent"]
-    assert first.conversation == [] and first.env_trigger_events == {} and first.agent_trigger_events == []
-    assert first.unavailable["conversation"] == run.unavailable["conversation"]
-    assert first.unavailable["env_trigger_events.calendar"] == first.unavailable["agent_trigger_events"]
+    assert run.unavailable["env:calendar"] == run.unavailable["user_agent"]
+    assert run.unavailable["env:calendar"].startswith("withheld:") and run.as_of(1) is run
+    with pytest.raises(RunRecordUnavailable, match="withheld"):
+        run.firings(env="calendar")
 
 
 @pytest.mark.asyncio
-async def test_without_a_prompt_the_run_context_has_the_env_firing_logs_alone():
-    context, _, recorded = recorded_run()
+async def test_without_a_prompt_the_run_has_the_env_firings_alone():
+    context, _, _ = recorded_run()
 
     run = await load_run_context(context, None)
 
-    assert run.conversation == [] and run.agent_trigger_events == []
-    assert run.env_trigger_events == {"calendar": recorded["env"]}
+    assert run.turns == () and [(f.trigger_id, f.turn) for f in run.firings()] == [("confirm", 0), ("late", 0)]
 
 
-def test_an_empty_run_context_has_no_turns():
-    assert RunContext().turns == 0 and RunContext().as_of_turn(1) == RunContext()
+def test_an_empty_run_has_no_turns():
+    assert Run().turns == () and Run().as_of(1) == Run()
+    with pytest.raises(LookupError, match="no turn 1"):
+        Run().turn(1)
 
 
 # ---------------------------------------------------------------- the judge sees it
@@ -219,18 +281,18 @@ def _judge_prompt(monkeypatch, verifier) -> dict:
 async def test_the_judge_sees_the_conversation_and_the_firing_logs_it_asks_for(monkeypatch):
     v = _verifier(run_context_for_judge=["conversation", "trigger_log"])
     captured = _judge_prompt(monkeypatch, v)
-    context, recorded = _judged_run()
+    context, _ = _judged_run()
 
     await v.execute(context)
 
     prompt = captured["eval_prompt"]
     conversation = prompt[prompt.index("## Conversation"):prompt.index("## Trigger firings")]
     assert all(user in conversation and agent in conversation for user, agent in TURNS)
-    assert f"- user (dana_sim, written by triggers ['reschedule']): {TURNS[1][0]}" in conversation
+    assert f"- user (dana_sim, written by triggers reschedule): {TURNS[1][0]}" in conversation
     assert f"- agent (solver): {TURNS[2][1]}" in conversation and "### Turn 3" in conversation
     log = prompt[prompt.index("## Trigger firings"):]
-    assert "### env calendar" in log and "### user agent" in log
-    assert json.dumps({k: v for k, v in recorded["env"][2].items() if k != "seq"}) in log and '"seq"' not in log
+    assert '- env:calendar: confirm fired during turn 1, provoked by {"tool": "book", "role": "solver"}' in log
+    assert "- user_agent: reschedule fired during turn 1\n- env:calendar: late fired during turn 3" in log
 
 
 @pytest.mark.asyncio
@@ -243,7 +305,7 @@ async def test_graded_as_of_a_turn_the_judge_sees_neither_later_turns_nor_later_
 
     prompt = captured["eval_prompt"]
     assert TURNS[1][1] in prompt and "### Turn 3" not in prompt and TURNS[2][0] not in prompt
-    assert '"trigger_id": "confirm"' in prompt and '"trigger_id": "late"' not in prompt
+    assert "confirm fired during turn 1" in prompt and "late fired" not in prompt
 
 
 @pytest.mark.asyncio
@@ -256,9 +318,8 @@ async def test_graded_as_of_a_turn_without_the_conversation_the_judge_sees_no_fi
     await v.execute(context)
 
     prompt = captured["eval_prompt"]
-    assert '"trigger_id"' not in prompt
-    assert "(not available: env_trigger_events.calendar: withheld" in prompt
-    assert "(not available: agent_trigger_events: withheld" in prompt
+    assert " fired during " not in prompt
+    assert "(not available: env:calendar: withheld" in prompt and "(not available: user_agent: withheld" in prompt
 
 
 @pytest.mark.asyncio
@@ -275,18 +336,17 @@ async def test_the_judge_sees_only_the_parts_it_asks_for(monkeypatch):
 def test_a_long_message_and_a_long_firing_log_are_bounded_and_a_missing_log_is_named():
     max_chars = RubricsVerifierTaskStep.RUN_CONTEXT_MESSAGE_MAX_CHARS
     long = "x" * (max_chars + 50)
-    run = RunContext(
-        conversation=[{"turn": 1, "role": "user", "text": long, "parts": _text(long) + [{"kind": "file"}], "ts": None}],
-        env_trigger_events={"calendar": [{"seq": i, "kind": "fired", "trigger_id": f"t{i}"}
-                                         for i in range(RubricsVerifierTaskStep.RUN_CONTEXT_EVENTS_MAX + 3)]},
-        unavailable={"env_trigger_events.mail": "TimeoutError: capture budget of 90s exceeded"})
+    events = [{"seq": i, "ts": f"2026-10-20T10:{i // 60:02d}:{i % 60:02d}+00:00", "kind": "fired", "trigger_id": f"t{i}"}
+              for i in range(RubricsVerifierTaskStep.RUN_CONTEXT_FIRINGS_MAX + 3)]
+    run = _run([_message(1, "user", _text(long) + [{"kind": "file"}])], {"env:calendar": events},
+               {"env:mail": "TimeoutError: capture budget of 90s exceeded"})
 
-    text = render_run_context(run, ["conversation", "trigger_log"])
+    text = _render(run, ["conversation", "trigger_log"])
 
     assert "x" * max_chars + "… (+1 non-text part)" in text and long not in text
-    assert "(3 earlier events not shown)" in text and '"t2"' not in text and '"t3"' in text
-    assert "(not available: env_trigger_events.mail: TimeoutError: capture budget of 90s exceeded)" in text
-    assert "(no trigger firings were recorded)" in render_run_context(RunContext(), ["trigger_log"])
+    assert "(3 earlier firings not shown)" in text and " t2 fired" not in text and " t3 fired during turn 1" in text
+    assert "(not available: env:mail: TimeoutError: capture budget of 90s exceeded)" in text
+    assert "(no trigger firings were recorded)" in _render(Run(), ["trigger_log"])
 
 
 @pytest.mark.parametrize("bad", [[], ["conversation", "screens"], "conversation", ["Conversation"]])
@@ -305,11 +365,13 @@ def test_run_context_for_judge_round_trips_and_is_omitted_when_unset():
 # ---------------------------------------------------------------- a verify(mcp_url, run) script gets it
 
 RUN_SCRIPT = b"""
-async def verify(mcp_url, run):
-    rescheduled = [m for m in run.conversation if m.get("fired") == ["reschedule"]]
-    return [{"id": "reschedule-reached-the-agent", "score": 1.0, "result": bool(rescheduled),
-             "turns": run.turns, "env_fired": [e["trigger_id"] for e in run.env_trigger_events["calendar"]
-                                               if e["kind"] == "fired"]}]
+from agent_env.task_step.task_steps.verifiers import Run
+
+async def verify(mcp_url: str, run: Run | None = None):
+    late = run.firing("late", env="calendar")
+    reply = run.turn(late.turn).reply if late else None
+    return [{"id": "answered-after-late", "score": 1.0, "result": bool(reply and "help" in reply.text),
+             "turns": len(run.turns), "env_fired": [f.trigger_id for f in run.firings(env="calendar") if f.ok]}]
 """
 
 
@@ -412,5 +474,5 @@ async def test_an_earlier_prompt_sees_only_the_env_events_from_before_the_next_p
     graded_first = await load_run_context(context, context.prompt_responses[0])
     graded_last = await load_run_context(context, context.prompt_responses[1])
 
-    assert [e["trigger_id"] for e in graded_first.env_trigger_events["calendar"]] == ["lunch_confirm"]
-    assert [e["trigger_id"] for e in graded_last.env_trigger_events["calendar"]] == ["lunch_confirm", "dinner_confirm"]
+    assert [f.trigger_id for f in graded_first.firings(env="calendar")] == ["lunch_confirm"]
+    assert [f.trigger_id for f in graded_last.firings(env="calendar")] == ["lunch_confirm", "dinner_confirm"]

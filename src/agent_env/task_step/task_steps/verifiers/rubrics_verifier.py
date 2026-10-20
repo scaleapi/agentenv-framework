@@ -39,7 +39,7 @@ from agent_env.entity.scopes import FieldScope
 from agent_env.store.base import NotFoundError
 from agent_env.store.ids import is_local_id
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
-from agent_env.task_step.task_steps.verifiers.run_context import RunContext, load_run_context
+from agent_env.task_step.task_steps.verifiers.run_context import Run, load_run_context, render_run_context
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (
     agent_error_text,
@@ -186,47 +186,6 @@ def _validated_run_context_parts(parts: Optional[list[str]]) -> Optional[list[st
     return list(dict.fromkeys(parts))
 
 
-def _cut(text: str, limit: int) -> str:
-    return text if len(text) <= limit else text[:limit] + "…"
-
-
-def render_run_context(run: RunContext, parts: list[str]) -> str:
-    """The judge-prompt sections for ``parts`` of ``run``: the conversation by turn, each firing log one event a line."""
-    sections: list[str] = []
-    if "conversation" in parts:
-        lines = ["## Conversation", "The run's messages, turn by turn: the user side (the task's prompt, then each "
-                 "later message of a user simulator, a human or the triggers) and the agent's replies."]
-        if "conversation" in run.unavailable:
-            lines.append(f"(not available: {run.unavailable['conversation']})")
-        for turn in range(1, run.turns + 1):
-            lines.append(f"### Turn {turn}")
-            for m in (m for m in run.conversation if m["turn"] == turn):
-                who = ", ".join(filter(None, [m.get("author"),
-                                              f"written by triggers {m['fired']}" if m.get("fired") else None]))
-                files = sum(1 for p in m["parts"] if p.get("kind") != "text")
-                extra = f" (+{files} non-text part{'s' if files != 1 else ''})" if files else ""
-                lines.append(f"- {m['role']}{f' ({who})' if who else ''}: "
-                             f"{_cut(m['text'], RubricsVerifierTaskStep.RUN_CONTEXT_MESSAGE_MAX_CHARS)}{extra}")
-        sections.append("\n".join(lines))
-    if "trigger_log" in parts:
-        lines = ["## Trigger firings", "What the env's triggers and the user agent's triggers did during the run, "
-                 "oldest first, one firing-log event per line."]
-        logs = [(f"env {env_id}", events) for env_id, events in run.env_trigger_events.items()]
-        logs += [("user agent", run.agent_trigger_events)] if run.agent_trigger_events else []
-        events_max = RubricsVerifierTaskStep.RUN_CONTEXT_EVENTS_MAX
-        for name, events in logs:
-            lines.append(f"### {name}")
-            if len(events) > events_max:
-                lines.append(f"({len(events) - events_max} earlier events not shown)")
-            lines += [f"- {json.dumps({k: v for k, v in e.items() if k != 'seq'}, default=str)}"
-                      for e in events[-events_max:]]
-        lines += [f"(not available: {what}: {why})" for what, why in run.unavailable.items() if what != "conversation"]
-        if len(lines) == 2:
-            lines.append("(no trigger firings were recorded)")
-        sections.append("\n".join(lines))
-    return "\n\n".join(sections)
-
-
 # Only fall back from structured output when the error clearly says the response
 # format itself is unsupported. Image/provider/transient failures should retry as-is.
 _SCHEMA_TERMS = (
@@ -365,7 +324,7 @@ class RubricsVerifierTaskStep(TaskStep):
     DEFAULT_MAX_RETRIES: ClassVar[int] = 3
     DEFAULT_POLL_INTERVAL_SECONDS: ClassVar[int] = 10
     RUN_CONTEXT_MESSAGE_MAX_CHARS: ClassVar[int] = 4000  # a longer message is cut and ends in "…"
-    RUN_CONTEXT_EVENTS_MAX: ClassVar[int] = 200  # per firing log, the most recent; the rest are counted
+    RUN_CONTEXT_FIRINGS_MAX: ClassVar[int] = 200  # the most recent trigger firings; the rest are counted
     TRAJECTORY_CONTAINER_PATH: ClassVar[str] = "/tmp/prompt_trajectory.json"
     # Multi-turn agent judge: base for a per-run subdir holding turn_NN.json files.
     TRAJECTORY_CONTAINER_DIR: ClassVar[str] = "/tmp/prompt_trajectory_turns"
@@ -598,7 +557,7 @@ class RubricsVerifierTaskStep(TaskStep):
         if self.run_context_for_judge:
             run_context = await load_run_context(context, prompt_response)
             if grade_up_to_turn is not None:
-                run_context = run_context.as_of_turn(grade_up_to_turn)
+                run_context = run_context.as_of(grade_up_to_turn)
 
         per_turn_uris = [u for u in (prompt_response.target_agent_per_turn_trajectory_object_urls or []) if u]
         if self.use_trajectory and not (per_turn_uris or prompt_response.agent_trajectory_object_url):
@@ -1371,7 +1330,7 @@ class RubricsVerifierTaskStep(TaskStep):
         image_blocks: Optional[list[dict]] = None,
         per_criterion_frames: bool = False,
         context_facts: Optional[list[tuple[str, str]]] = None,
-        run_context: Optional[RunContext] = None,
+        run_context: Optional[Run] = None,
     ) -> str:
         """``context_facts`` are rendered ``(label, value)`` pairs (``resolve_context_facts``); ``image_blocks``
         are the blocks attached to the judge message, labels included when ``per_criterion_frames``."""
@@ -1404,7 +1363,9 @@ class RubricsVerifierTaskStep(TaskStep):
         if loaded_artifacts:
             base += "\n\n" + self._build_loaded_artifacts_block(loaded_artifacts)
         if run_context is not None and self.run_context_for_judge:
-            base += "\n\n" + render_run_context(run_context, self.run_context_for_judge)
+            base += "\n\n" + render_run_context(run_context, self.run_context_for_judge,
+                                                 message_max_chars=self.RUN_CONTEXT_MESSAGE_MAX_CHARS,
+                                                 firings_max=self.RUN_CONTEXT_FIRINGS_MAX)
         if context_facts:
             # Facts before the policy: they are inputs, the policy is how to read them.
             base += "\n\n## Context facts\n" + self._CONTEXT_FACTS_LEAD + "\n" + "\n".join(

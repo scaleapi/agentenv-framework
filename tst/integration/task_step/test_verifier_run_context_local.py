@@ -1,4 +1,4 @@
-"""A real two-turn conversation (echo agent as solver and user-sim) reads back whole through load_run_context."""
+"""A real two-turn conversation (echo agent as solver and user-sim) reads back whole as a ``Run``."""
 
 import uuid
 
@@ -28,9 +28,9 @@ async def test_the_run_context_reads_back_every_turn_of_a_real_conversation(loca
     assert not context.metadata.get("failed_steps"), context.metadata.get("failed_steps")
     run = await load_run_context(context, next(pr for pr in context.prompt_responses if pr.prompt_id == "ask"))
 
-    assert run.unavailable == {} and run.turns == 2
-    assert [(m["turn"], m["role"], m.get("author")) for m in run.conversation] == [
-        (1, "user", "user"), (1, "agent", "solver"), (2, "user", "user"), (2, "agent", "solver")]
-    assert run.conversation[0]["text"] == "Plan a lunch for Friday."
-    assert run.conversation[2]["text"] and run.conversation[2]["text"] != run.conversation[0]["text"]
-    assert run.as_of_turn(1).conversation == run.conversation[:2]
+    assert run.unavailable == {} and len(run.turns) == 2
+    assert [(t.number, t.message.author, t.reply.author) for t in run.turns] == [(1, "user", "solver"), (2, "user", "solver")]
+    assert run.turn(1).message.text == "Plan a lunch for Friday."
+    assert run.turn(2).message.text and run.turn(2).message.text != run.turn(1).message.text
+    assert run.turn(1).message.sent_at < run.turn(1).reply.sent_at < run.turn(2).message.sent_at
+    assert run.as_of(1).turns == run.turns[:1] and run.firings() == ()
