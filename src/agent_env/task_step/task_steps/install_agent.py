@@ -260,7 +260,8 @@ class InstallAgentTaskStep(TaskStep):
         # Stage the agent build context onto the VM. The install_commands docker-cp from this dir.
         work_dir = f"/tmp/install-agent-{sandbox.scoped_name(self.agent_name)}"
         agent_ctx_tar = f"{work_dir}/agent-ctx.tar.gz"
-        await sandbox.exec_script(f"rm -rf {shlex.quote(work_dir)} && mkdir -p {shlex.quote(work_dir)}")
+        # Private, and made afresh: /tmp is shared, and a folder another user made in its place would hold the install.
+        await sandbox.exec_script(f"rm -rf {shlex.quote(work_dir)} && mkdir -m 0700 {shlex.quote(work_dir)}")
         logger.info(f"Downloading agent build context {agent.docker_image_artifact.build_context_object_url} -> {agent_ctx_tar}")
         await sandbox.load_object_file(agent.docker_image_artifact.build_context_object_url, agent_ctx_tar)
 

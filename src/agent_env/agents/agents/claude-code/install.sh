@@ -45,6 +45,15 @@ case $mode in
   *) echo "usage: install.sh container NAME PORT | install.sh host NAME PORT WORKDIR" >&2; exit 2 ;;
 esac
 
+if [ "$mode" = host ]; then
+  # /tmp is shared, and the folder will hold the model key: it is this user's alone, and one another made is refused.
+  if ! mkdir -m 0700 "$root" 2> /dev/null; then
+    [ -d "$root" ] && [ ! -L "$root" ] && [ -O "$root" ] \
+      || { echo "$root is already there and isn't a folder of this user's own" >&2; exit 1; }
+    chmod 0700 "$root"
+  fi
+fi
+
 case $(on 'uname -m') in
   x86_64|amd64) cpu=x64 uv_cpu=x86_64 uv_sha256=$UV_SHA256_X86_64 ;;
   aarch64|arm64) cpu=arm64 uv_cpu=aarch64 uv_sha256=$UV_SHA256_AARCH64 ;;
