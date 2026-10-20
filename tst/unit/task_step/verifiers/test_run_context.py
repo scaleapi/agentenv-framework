@@ -376,3 +376,41 @@ def test_prompt_id_round_trips_and_is_omitted_when_unset(monkeypatch):
     step = _outcome(RUN_SCRIPT, monkeypatch, prompt_id="p1")
     assert EnvOutcomeVerifierTaskStep.from_dict(step.to_dict()).prompt_id == "p1"
     assert "prompt_id" not in _outcome(RUN_SCRIPT, monkeypatch).to_dict()
+
+
+def _stored_prompt(step_id: str, user: str, agent: str) -> tuple[str, list[dict]]:
+    conversation_id = f"conv-{uuid.uuid4().hex[:8]}"
+    conversation_store.create_conversation(conversation_id, task_instance_id="run-1", source_agent_name="dana_sim",
+                                           target_agent_name="solver")
+    conversation_store.add_a2a_task(conversation_id, parts=_text(user), a2a_task_id=uuid.uuid4().hex, role="user")
+    time.sleep(0.005)
+    conversation_store.complete_a2a_task(conversation_id, parts=_text(agent), role="agent")
+    time.sleep(0.005)
+    return conversation_id, conversation_store.get_conversation(conversation_id)["messages"]
+
+
+@pytest.mark.asyncio
+async def test_an_earlier_prompt_sees_only_the_env_events_from_before_the_next_prompt_began():
+    first_id, first = _stored_prompt("prompt-1", "Book lunch with Dana.", "Booked for noon.")
+    second_id, second = _stored_prompt("prompt-2", "Now book dinner.", "Booked for seven.")
+    env_events = [  # the env's whole log, as the second prompt's end-of-prompt capture stored it
+        {"seq": 1, "ts": _between(first[0]["ts"], first[1]["ts"]), "kind": "fired", "trigger_id": "lunch_confirm"},
+        {"seq": 2, "ts": _between(second[0]["ts"], second[1]["ts"]), "kind": "fired", "trigger_id": "dinner_confirm"},
+    ]
+    envelope = {"env_id": "calendar", "state": {"triggers": [], "events": env_events}}
+    object_url = get_config().get_object_store().put(f"env_trigger_state/{second_id}.json",
+                                                     json.dumps(envelope).encode(), content_type="application/json")
+    context = TaskStepContext(metadata={
+        "a2a_conversations": {"prompt-1": first_id, "prompt-2": second_id},
+        "env_trigger_state": {"calendar": {"object_url": object_url, "capture_step_id": "prompt-2"}},
+    })
+    for prompt_id, step_id, text, reply in (("p1", "prompt-1", "Book lunch with Dana.", "Booked for noon."),
+                                            ("p2", "prompt-2", "Now book dinner.", "Booked for seven.")):
+        context.prompt_responses.append(PromptResponse(prompt_id=prompt_id, response=reply, prompt_text=text,
+                                                       step_id=step_id))
+
+    graded_first = await load_run_context(context, context.prompt_responses[0])
+    graded_last = await load_run_context(context, context.prompt_responses[1])
+
+    assert [e["trigger_id"] for e in graded_first.env_trigger_events["calendar"]] == ["lunch_confirm"]
+    assert [e["trigger_id"] for e in graded_last.env_trigger_events["calendar"]] == ["lunch_confirm", "dinner_confirm"]

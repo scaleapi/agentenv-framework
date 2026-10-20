@@ -64,8 +64,9 @@ async def load_run_context(context: TaskStepContext, prompt_response: Optional[P
         conversation = await asyncio.to_thread(_conversation, context, prompt_response, unavailable)
         agent_events = _agent_trigger_events(context, prompt_response.step_id, conversation, unavailable)
     env_events = await asyncio.to_thread(_env_trigger_events, context, unavailable)
-    return RunContext(conversation=conversation, env_trigger_events=env_events, agent_trigger_events=agent_events,
-                      unavailable=unavailable)
+    run = RunContext(conversation=conversation, env_trigger_events=env_events, agent_trigger_events=agent_events,
+                     unavailable=unavailable)
+    return await asyncio.to_thread(_until_next_prompt, run, context, prompt_response) if prompt_response else run
 
 
 def _error(e: Exception) -> str:
@@ -142,6 +143,31 @@ def _env_trigger_events(context: TaskStepContext, unavailable: dict[str, str]) -
             continue
         events[env_id] = list((envelope.get("state") or {}).get("events") or [])
     return events
+
+
+def _until_next_prompt(run: RunContext, context: TaskStepContext, prompt_response: PromptResponse) -> RunContext:
+    """The env firing logs are the whole run's (the last prompt's capture), so an earlier prompt's stop where the
+    next prompt began; withheld when that start is unknown."""
+    index = next((i for i, pr in enumerate(context.prompt_responses) if pr is prompt_response), None)
+    if index is None or index + 1 >= len(context.prompt_responses) or not run.env_trigger_events:
+        return run
+    start = _first_message_ts(context, context.prompt_responses[index + 1])
+    if start is None:
+        why = "withheld: when the next prompt began is unknown, so its events can't be told apart"
+        withheld = dict.fromkeys((f"env_trigger_events.{env_id}" for env_id in run.env_trigger_events), why)
+        return replace(run, env_trigger_events={}, unavailable={**run.unavailable, **withheld})
+    return replace(run, env_trigger_events={env_id: [e for e in events if _before(e.get("ts"), start)]
+                                            for env_id, events in run.env_trigger_events.items()})
+
+
+def _first_message_ts(context: TaskStepContext, prompt_response: PromptResponse) -> Optional[str]:
+    conversation_id = (context.metadata.get("a2a_conversations") or {}).get(prompt_response.step_id)
+    try:
+        doc = conversation_store.get_conversation(conversation_id) if conversation_id else None
+    except Exception:
+        return None
+    messages = (doc or {}).get("messages") or []
+    return messages[0].get("ts") if messages else None
 
 
 def _before(ts: Optional[str], cutoff: Optional[str]) -> bool:
