@@ -10,7 +10,7 @@ import os
 import shutil
 import unicodedata
 import uuid
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -179,7 +179,6 @@ class _Importer:
         self.tomls: dict[str, tuple[str, dict]] = {}  # each entity folder's toml: its file's name, and its keys
         self.downloads: dict[str, str] = {}  # each file to write: its path in the bundle, and its object's url
         self.jobs: list[ImageJob] = []
-        self.pins: dict[str, set[int]] = {}  # the versions the task being added pins each env at
         self.origins: dict[tuple[str, str], str] | None = None
         self.installed: tuple[InstalledBundle, ...] | None = None
         _check_destination(self.dest)
@@ -202,10 +201,10 @@ class _Importer:
         for site in sites:  # each output, and each step that reads it, takes the output's name
             if outputs.get(_key(site), site.value) != site.value:
                 site.rewrite(outputs[_key(site)])
-        self.pins = {}
+        pins: dict[str, set[int]] = {}  # the versions the task pins each env at
         for site in sites:
             if site.ref.kind is EntityKind.ENV and site.version is not None:
-                self.pins.setdefault(_key(site)[1], set()).add(site.version)
+                pins.setdefault(_key(site)[1], set()).add(site.version)
         for step, cls, pruned, step_sites in found:
             where = f"{path}: step {step.get('id')!r}"
             self.dropped += [Dropped(f"{where}: {at}", why) for at, why in pruned + scrub(step)]
@@ -214,7 +213,7 @@ class _Importer:
                 self.undeclared.append(f"{where} ({cls.type})")
             for site in step_sites:
                 if _key(site) not in outputs:  # the run writes an output again, so it's no entity to write here
-                    self._ref(site, f"{where}: {site.path}")
+                    self._ref(site, f"{where}: {site.path}", pins)
             self._default_agents(step, cls.entity_refs or (), where)
         self.files[path] = json.dumps(steps, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
         self.tasks.append(ImportedTask(path, task.id, task.version, len(steps)))
@@ -368,31 +367,22 @@ class _Importer:
         self.pinned.append(Pinned(where, kind, entity_id, version, why))
         return None
 
-    def _ref(self, site: RefSite, where: str) -> None:
-        """Write what ``site`` references into the folder and name it there, or leave it in the store, pinned."""
+    def _ref(self, site: RefSite, where: str, pins: Mapping[str, set[int]]) -> None:
+        """Write what ``site`` references into the folder and name it there, or leave it in the store, pinned; ``pins``
+        are the versions its task pins each env at."""
         kind, entity_id = site.ref.kind, site.value
         if (bundle := self._installed_for(kind, entity_id)) is not None:
             self._from_installed(site, where, bundle)
             return
-        version = site.version
-        if kind is EntityKind.ENV and version is None and len(pinned := self.pins.get(_key(site)[1], ())) == 1:
-            # A step naming an env with no version means the one an earlier step deployed, which a folder holds once.
-            [version] = pinned
-            self.dropped.append(Dropped(where, f"pinned: it names no version, so it takes v{version}, the one the task "
-                                               "pins elsewhere"))
-        entity = self._entity(kind, entity_id, version)
+        entity = self._entity(kind, entity_id, self._version_for(site, where, pins))
         if isinstance(entity, str):
             self.problems.append(f"{where}: {entity}")
             return
-        expected = site.ref.artifact_type or site.ref.env_type
-        actual = canonical_type(entity.type) if kind is EntityKind.ARTIFACT else entity.type
-        if expected and actual != canonical_type(expected) and isinstance(site.key, str):
+        if isinstance(site.key, str) and (why := _not_taken(site, entity)) is not None:
             # The store holds the step as it is, though the step can't read what it names; a folder can't.
             site.rewrite(None)
-            if site.version_key is not None:
-                site.owner[site.version_key] = None
-            self.dropped.append(Dropped(where, f"dropped: {entity_id!r} is {actual}, and this field takes {expected}, "
-                                               "so the step can't read it"))
+            _unpin(site)
+            self.dropped.append(Dropped(where, why))
             return
         self._need_type(site, entity, where)
         try:
@@ -401,13 +391,22 @@ class _Importer:
             return
         if local is not None:
             site.rewrite(local)
-            if site.version_key is not None and site.version is not None:
-                site.owner[site.version_key] = None  # what the bundle holds has no fixed version
+            _unpin(site)  # what the bundle holds has no fixed version
         elif site.version_key is not None:
             site.rewrite(entity_id, entity.version)
         else:
             self.floating.append(Floating(where, kind, entity_id, "the field takes no version, so a run reads the "
                                                                   "latest"))
+
+    def _version_for(self, site: RefSite, where: str, pins: Mapping[str, set[int]]) -> int | None:
+        """The version ``site`` reads: its own; for an env it names with no version, the one its task pins elsewhere,
+        since such a step means the env an earlier step deployed, which a folder holds once."""
+        if site.version is not None or site.ref.kind is not EntityKind.ENV or len(pins.get(_key(site)[1], ())) != 1:
+            return site.version
+        [version] = pins[_key(site)[1]]
+        self.dropped.append(Dropped(where, f"pinned: it names no version, so it takes v{version}, the one the task pins "
+                                           "elsewhere"))
+        return version
 
     def _folder(self, kind: EntityKind, entity: Any) -> tuple[BundleKind, str]:
         """The kind folder ``entity`` goes in, and the name it takes there; a skill's is its skill's name."""
@@ -464,8 +463,8 @@ class _Importer:
         """An installed bundle's entity has no fixed version, so it isn't pinned, and a pin the store held is dropped."""
         why = f"it comes with the installed bundle {bundle.qualified}, which a run writes it from"
         if site.version is not None and site.version_key is not None:
-            site.owner[site.version_key] = None
             why += f"; the stored pin to v{site.version} is dropped, as such an entity has no fixed version"
+        _unpin(site)
         self.floating.append(Floating(where, site.ref.kind, site.value, why))
 
     def _need_type(self, site: RefSite, entity: Any, where: str) -> None:
@@ -602,6 +601,21 @@ def _valid_name(text: str) -> str:
     while len(name.encode("utf-8")) > _MAX_NAME_BYTES:
         name = name[:-1].rstrip(" ")
     return name if any(char.isalnum() for char in name) and segment_problem(name) is None else ""
+
+
+def _not_taken(site: RefSite, entity: Any) -> str | None:
+    """Why the field at ``site`` can't take ``entity``: it's of another type than the field takes."""
+    expected = site.ref.artifact_type or site.ref.env_type
+    actual = canonical_type(entity.type) if site.ref.kind is EntityKind.ARTIFACT else entity.type
+    if not expected or actual == canonical_type(expected):
+        return None
+    return f"dropped: {site.value!r} is {actual}, and this field takes {expected}, so the step can't read it"
+
+
+def _unpin(site: RefSite) -> None:
+    """Clear the version ``site`` pins, when it pins one."""
+    if site.version is not None and site.version_key is not None:
+        site.owner[site.version_key] = None
 
 
 def _key(site: RefSite) -> tuple[EntityKind, str]:

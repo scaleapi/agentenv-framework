@@ -33,6 +33,7 @@ from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts.docker_image import PUT_AGAIN, DockerImageArtifact, pull_problem
 from agent_env.config import get_config
 from agent_env.config.errors import ConfigError
+from agent_env.config.model import ENV_API_KEY, ENV_BASE_URL
 from agent_env.entity.refs import EntityKind, parse_toml_ref
 from agent_env.env.bootstrap import (
     GATEWAY,
@@ -80,7 +81,7 @@ from .plan import Plan
 from .resolve import BuiltImage, Reference, ReferencedImage, ResolvedEntry, build_step
 
 _SHOWN = 3
-_MODEL_VARS = frozenset({"LITELLM_BASE_URL", "LITELLM_API_KEY"})
+_MODEL_VARS = frozenset({ENV_BASE_URL, ENV_API_KEY})
 
 
 @dataclass(frozen=True)
@@ -309,7 +310,7 @@ class _Walk:
             accepts = functools.partial(A2AAgent.accepts, sandbox_mode=linked.sandbox_mode)  # the VM loads its image
         else:
             provider = _provider(self.sandbox or step.sandbox_type, get_agent_sandbox_provider)
-        given = frozenset({*step.env_vars, *(["LITELLM_BASE_URL"] if step.litellm_base_url else [])})
+        given = frozenset({*step.env_vars, *([ENV_BASE_URL] if step.litellm_base_url else [])})
         self._agent_deploy(where, provider, step.a2a_agent_id, step.a2a_agent_version, "names no agent", accepts,
                            given=given)
 
@@ -531,17 +532,17 @@ def _provider(spec: str | None, default: Callable[[], SandboxProvider]) -> Sandb
 def model_endpoint_missing(needed: frozenset[str]) -> tuple[str, str] | None:
     """The first of the ``needed`` model variables the config can't give, and why; None when it gives them all."""
     config = get_config()
-    if "LITELLM_BASE_URL" in needed:
+    if ENV_BASE_URL in needed:
         try:
             config.get_litellm_base_url()
         except ConfigError:
-            return "LITELLM_BASE_URL", ("no model endpoint is set: set LITELLM_BASE_URL, or [model] base_url in "
-                                        ".agentenv/config.toml")
-    if "LITELLM_API_KEY" in needed:
+            return ENV_BASE_URL, (f"no model endpoint is set: set {ENV_BASE_URL}, or [model] base_url in "
+                                  ".agentenv/config.toml")
+    if ENV_API_KEY in needed:
         try:
             config.get_litellm_api_key()
         except ConfigError as e:
-            return "LITELLM_API_KEY", f"its API key can't be read: {e}"
+            return ENV_API_KEY, f"its API key can't be read: {e}"
     return None
 
 

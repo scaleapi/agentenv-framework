@@ -139,8 +139,8 @@ class ResolvedKey:
 
 
 RESOLVED_KEYS: tuple[ResolvedKey, ...] = (
-    ResolvedKey(("model", "api_key"), env_var="LITELLM_API_KEY"),
-    ResolvedKey(("model", "base_url"), env_var="LITELLM_BASE_URL"),
+    ResolvedKey(("model", "api_key"), env_var=model_config.ENV_API_KEY),
+    ResolvedKey(("model", "base_url"), env_var=model_config.ENV_BASE_URL),
     ResolvedKey(("conversations", "default_human_a2a_url"),
                 env_var="AGENT_ENV_HUMAN_A2A_URL", field="default_human_a2a_url"),
     ResolvedKey(("agents", "default_a2a_agent_id"), field="default_a2a_agent_id",

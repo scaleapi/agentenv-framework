@@ -4,14 +4,17 @@ and its provenance."""
 from __future__ import annotations
 
 import json
+import posixpath
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib.metadata import version as package_version
 from pathlib import Path
 
+from agent_env.config.model import ENV_API_KEY, ENV_BASE_URL
 from agent_env.entity.refs import EntityKind
 from agent_env.store.image_store.oci_registry_credentials import registry_host_from_ref
-from agent_env.utils.docker.lock import Locked
+from agent_env.utils.docker.build import DOCKER_PLUGINS
+from agent_env.utils.docker.lock import IN_IMAGE, Locked
 from agent_env.utils.docker.prune import Pruned
 
 # The file an import records what it wrote in, and from where, for publishing the folder back.
@@ -207,6 +210,11 @@ def _locked_text(image: WrittenImage) -> str:
     return f"pinned to the stored image: {', '.join(pinned) or 'nothing it installs'}{left}"
 
 
+def _listed(items: list[str]) -> str:
+    return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+_PLUGINS = list(DOCKER_PLUGINS.values())
 _RUN_IT = [
     "## Run it",
     "",
@@ -215,17 +223,18 @@ _RUN_IT = [
     "A machine running it needs:",
     "",
     "- agent-env (`pip install agentenv-framework`).",
-    "- Docker with its Compose and Buildx plugins. On Linux, Docker Engine and the `docker-compose-plugin` and "
-    "`docker-buildx-plugin` packages (or a distribution's `docker.io`, `docker-compose-v2` and `docker-buildx`). On "
-    "macOS, a Docker VM such as Docker Desktop or colima, and the `docker`, `docker-compose` and `docker-buildx` CLIs; "
-    "Homebrew's plugins are found once `~/.docker/config.json` lists their folder in `cliPluginsExtraDirs`.",
-    "- A model endpoint for its agents and judges: `LITELLM_BASE_URL` and `LITELLM_API_KEY`, or `[model] base_url` and "
+    f"- Docker with its {_listed([plugin.name for plugin in _PLUGINS])} plugins. On Linux, Docker Engine and the "
+    f"{_listed([f'`{plugin.package}`' for plugin in _PLUGINS])} packages (or a distribution's "
+    f"{_listed(['`docker.io`', *(f'`{plugin.distribution_package}`' for plugin in _PLUGINS)])}). On macOS, a Docker "
+    f"VM such as Docker Desktop or colima, and the {_listed(['`docker`', *(f'`{plugin.formula}`' for plugin in _PLUGINS)])} "
+    "CLIs; Homebrew's plugins are found once `~/.docker/config.json` lists their folder in `cliPluginsExtraDirs`.",
+    f"- A model endpoint for its agents and judges: `{ENV_BASE_URL}` and `{ENV_API_KEY}`, or `[model] base_url` and "
     "`api_key` in `.agentenv/config.toml`.",
     "- An agent where a step names none: the configured default (`[agents] default_a2a_agent_id`).",
     "",
     "Its images are built from the build contexts in their folders on the machine that runs it, pinned to the "
     "Python and npm versions of the images the store held, as *Images* says. To build one unpinned, take out the "
-    "COPY and two ARG lines naming agent-env-constraints.txt after each FROM in its Dockerfile.",
+    f"COPY and two ARG lines naming {posixpath.basename(IN_IMAGE)} after each FROM in its Dockerfile.",
 ]
 _SHARE_IT = [
     "## Share it",

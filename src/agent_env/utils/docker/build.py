@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import subprocess
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_BUILD_PLATFORM = "linux/amd64"  # the remote sandbox VMs
@@ -49,9 +50,22 @@ def build_image(dockerfile: Path, context: Path, tag: str, *, platform: str | No
         raise DockerBuildError(f"docker build of {tag} failed (exit {result.returncode}):\n{result.stdout.rstrip()}")
 
 
-# Each plugin a run uses: its name, and its packages on Linux (Docker's, then a distribution's) and on Homebrew.
-_PLUGINS = {"compose": ("Compose", "docker-compose-plugin", "docker-compose-v2", "docker-compose"),
-            "buildx": ("Buildx", "docker-buildx-plugin", "docker-buildx", "docker-buildx")}
+@dataclass(frozen=True)
+class DockerPlugin:
+    """A Docker CLI plugin a run uses, and what installs it."""
+
+    command: str  # as ``docker <command>`` runs it
+    name: str
+    package: str  # Docker's own Linux package
+    distribution_package: str  # a Linux distribution's, such as Ubuntu's
+    formula: str  # Homebrew's
+
+
+DOCKER_PLUGINS = {plugin.command: plugin for plugin in (
+    DockerPlugin("compose", "Compose", "docker-compose-plugin", "docker-compose-v2", "docker-compose"),
+    DockerPlugin("buildx", "Buildx", "docker-buildx-plugin", "docker-buildx", "docker-buildx"))}
+# Where Homebrew puts Docker's CLI plugins, which the CLI finds only once ~/.docker/config.json lists the folder.
+HOMEBREW_PLUGINS = "/opt/homebrew/lib/docker/cli-plugins"
 
 
 def docker_plugin_missing(plugin: str) -> str | None:
@@ -66,10 +80,10 @@ def docker_plugin_missing(plugin: str) -> str | None:
         return f"`docker {plugin} version` didn't answer in {DOCKER_INFO_TIMEOUT_SECONDS}s"
     if result.returncode == 0:
         return None
-    name, docker_package, distribution_package, formula = _PLUGINS[plugin]
-    return (f"`docker {plugin}` isn't installed; install Docker's {name} plugin: on Linux `{docker_package}`, or "
-            f"`{distribution_package}`; on macOS `brew install {formula}`, with \"cliPluginsExtraDirs\": "
-            '["/opt/homebrew/lib/docker/cli-plugins"] in ~/.docker/config.json')
+    known = DOCKER_PLUGINS[plugin]
+    return (f"`docker {plugin}` isn't installed; install Docker's {known.name} plugin: on Linux `{known.package}`, or "
+            f"`{known.distribution_package}`; on macOS `brew install {known.formula}`, with \"cliPluginsExtraDirs\": "
+            f'["{HOMEBREW_PLUGINS}"] in ~/.docker/config.json')
 
 
 def docker_unreachable() -> str | None:

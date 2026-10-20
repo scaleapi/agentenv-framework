@@ -34,7 +34,7 @@ _REQUIREMENT_FILES = re.compile(r".*(?:requirements|constraints).*\.(?:txt|in)")
 # pip applies constraints inside isolated builds too, where a package can need a newer build tool than the image holds.
 _BUILD_TOOLS = frozenset({"pip", "setuptools", "wheel"})
 CONSTRAINTS = "constraints.txt"
-_IN_IMAGE = "/tmp/agent-env-constraints.txt"
+IN_IMAGE = "/tmp/agent-env-constraints.txt"
 # The first line of a constraints file agent-env writes, so pinning another image in the folder doesn't read it as asked.
 _HEADER = "# Pinned by agent-env to the versions of the image the store held.\n"
 
@@ -54,36 +54,43 @@ def lock(folder: Path, dockerfile: str, installed: Installed) -> Locked:
     """Pin the folder's Dockerfile at ``dockerfile`` to what ``installed`` holds: a constraints.txt beside it, passed to
     each stage that runs pip as PIP_CONSTRAINT and UV_CONSTRAINT build args, and exact versions in npm -g installs."""
     parts = instructions((folder / dockerfile).read_text(encoding="utf-8"))
-    not_covered: list[str] = []
-    npm: list[str] = []
-    unpinned: list[str] = []
-    texts = [_pin_npm(part.text, installed.npm, npm, unpinned) if part.keyword == "RUN" else part.text for part in parts]
-    if npm:
-        not_covered.append("npm packages' own dependencies, which a global install resolves afresh")
-    not_covered += [f"npm {name}, which an npm install -g names in a form agent-env doesn't rewrite"
-                    for name in dict.fromkeys(unpinned)]
-    lock_file = _lock_file(folder, parts)
-    stages = _stages_running_pip(parts)
-    constraints, pinned = None, 0
-    if stages:
-        pins, left = _pins(installed, _asked_for(folder, parts))
-        not_covered += left
-        constraints = _constraints_path(folder, dockerfile)
-        if _ignored(folder, dockerfile, constraints):
-            not_covered.append(f"Python packages, since the folder's ignore file leaves out {constraints}")
-            constraints = None
-        elif pins:
-            (folder / constraints).write_text(
-                _HEADER + "".join(f"{name}=={version}\n" for name, version in sorted(pins.items())), encoding="utf-8")
-            pinned = len(pins)
-            arguments = (f'COPY ["{constraints}", "{_IN_IMAGE}"]\nARG PIP_CONSTRAINT={_IN_IMAGE}\n'
-                         f"ARG UV_CONSTRAINT={_IN_IMAGE}\n")
-            texts = [text + ("" if text.endswith("\n") else "\n") + arguments if index in stages else text
-                     for index, text in enumerate(texts)]
-        else:
-            constraints = None
+    texts, npm, npm_left = _pin_npm_installs(parts, installed.npm)
+    texts, pinned, constraints, python_left = _pin_python(folder, dockerfile, parts, texts, installed)
     (folder / dockerfile).write_text("".join(texts), encoding="utf-8")
-    return Locked(pinned, constraints, tuple(npm), lock_file, tuple(not_covered))
+    return Locked(pinned, constraints, tuple(npm), _lock_file(folder, parts), (*npm_left, *python_left))
+
+
+def _pin_npm_installs(parts: list[Instruction], versions: dict[str, str]) -> tuple[list[str], list[str], list[str]]:
+    """Each instruction's text with its npm -g installs pinned to ``versions``, the package@version pins it wrote,
+    and what it left as the build resolves it."""
+    pinned: list[str] = []
+    unpinned: list[str] = []
+    texts = [_pin_npm(part.text, versions, pinned, unpinned) if part.keyword == "RUN" else part.text for part in parts]
+    left = ["npm packages' own dependencies, which a global install resolves afresh"] if pinned else []
+    left += [f"npm {name}, which an npm install -g names in a form agent-env doesn't rewrite"
+             for name in dict.fromkeys(unpinned)]
+    return texts, pinned, left
+
+
+def _pin_python(folder: Path, dockerfile: str, parts: list[Instruction], texts: list[str],
+                installed: Installed) -> tuple[list[str], int, str | None, list[str]]:
+    """``texts`` with each stage running pip given the constraints file it writes, how many packages that pins and
+    the file's path, and what it left as the build resolves it."""
+    stages = _stages_running_pip(parts)
+    if not stages:
+        return texts, 0, None, []
+    pins, left = _pins(installed, _asked_for(folder, parts))
+    constraints = _constraints_path(folder, dockerfile)
+    if _ignored(folder, dockerfile, constraints):
+        return texts, 0, None, [*left, f"Python packages, since the folder's ignore file leaves out {constraints}"]
+    if not pins:
+        return texts, 0, None, left
+    (folder / constraints).write_text(
+        _HEADER + "".join(f"{name}=={version}\n" for name, version in sorted(pins.items())), encoding="utf-8")
+    arguments = f'COPY ["{constraints}", "{IN_IMAGE}"]\nARG PIP_CONSTRAINT={IN_IMAGE}\nARG UV_CONSTRAINT={IN_IMAGE}\n'
+    texts = [text + ("" if text.endswith("\n") else "\n") + arguments if index in stages else text
+             for index, text in enumerate(texts)]
+    return texts, len(pins), constraints, left
 
 
 def _lock_file(folder: Path, parts: list[Instruction]) -> str | None:
