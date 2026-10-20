@@ -34,6 +34,7 @@ _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _HEALTHY_WITHIN_SECONDS = 120
 _HEALTH_POLL_SECONDS = 2
 _LOG_TAIL_LINES = 30  # of a container that never turned healthy, in the error
+_PRINTED_CHARS = 200  # of what docker printed in place of a manifest, in the error
 
 # Each image's check, beyond its build: the gateway imports its server, Postgres turns healthy, and the sidecars and the
 # browser answer their own commands.
@@ -96,7 +97,7 @@ def _served(ref: str) -> tuple[str | None, str]:
     try:
         return json.loads(result.stdout)["digest"], ""
     except (ValueError, KeyError, TypeError):
-        return None, f"docker printed no manifest: {result.stdout.strip()[:200]}"
+        return None, f"docker printed no manifest: {result.stdout.strip()[:_PRINTED_CHARS]}"
 
 
 def _exists(ref: str) -> int:
