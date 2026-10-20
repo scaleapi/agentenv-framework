@@ -121,3 +121,35 @@ def test_a_turn_cancelled_while_the_cli_starts_kills_it_once_it_has(monkeypatch,
     cli, tool = asyncio.run(cancel_while_starting())
 
     assert _gone(cli) and _gone(tool)
+
+
+def test_a_turn_cancelled_again_while_it_scrubs_its_transcript_ends_only_once_the_scrub_has(monkeypatch, tmp_path):
+    scrubbed = []
+    real_scrub = claude_bridge.scrub_session_transcript
+
+    def slow_scrub(session_id):
+        time.sleep(0.3)
+        real_scrub(session_id)
+        scrubbed.append(session_id)
+
+    spawn = asyncio.create_subprocess_exec
+
+    async def cli_that_hangs(*_cmd, **kwargs):
+        return await spawn("sleep", "600", **kwargs)
+
+    monkeypatch.setattr(claude_bridge, "SESSION_JSONL_DIR", tmp_path)
+    monkeypatch.setattr(claude_bridge, "scrub_session_transcript", slow_scrub)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", cli_that_hangs)
+
+    async def cancel_twice():
+        turn = asyncio.create_task(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False))
+        await asyncio.sleep(0.2)
+        turn.cancel()
+        await asyncio.sleep(0.1)
+        turn.cancel()  # mid-scrub, as a caller giving up on a turn that is slow to end does
+        with pytest.raises(asyncio.CancelledError):
+            await turn
+        # The turn is over, so its context can take another: no scrub may be left to replace that turn's transcript.
+        return list(scrubbed)
+
+    assert asyncio.run(cancel_twice()) == ["sess-1"]

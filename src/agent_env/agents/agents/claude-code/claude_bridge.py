@@ -405,13 +405,15 @@ async def run_claude(
         attempts += 1
         attempt_timeout_s = (timeout_s if attempts == 1
                              else max(int(deadline - time.monotonic()) - _DEADLINE_HEADROOM_S, 1))
+        # The scrubs run here, not in a thread: a cancelled wait would release the context while one could still
+        # replace the transcript a later turn appends to. A 50 MB transcript takes about 50 ms.
         try:
             result = await spawn(prompt=attempt_prompt, session_id=attempt_session, resume=attempt_resume,
                                  timeout_s=attempt_timeout_s)
         finally:
-            await asyncio.to_thread(scrub_session_transcript, attempt_session)
+            scrub_session_transcript(attempt_session)
         if result.session_id != attempt_session:
-            await asyncio.to_thread(scrub_session_transcript, result.session_id)
+            scrub_session_transcript(result.session_id)
         tool_calls += result.tool_call_count
 
         failure = _resumable_api_failure(result)
