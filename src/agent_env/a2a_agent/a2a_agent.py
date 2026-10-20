@@ -43,6 +43,7 @@ from agent_env.attribution import Attribution
 if TYPE_CHECKING:
     from agent_env.a2a_agent.store import A2AAgentQuery
     from agent_env.bundle.authoring import AuthoringContext
+    from agent_env.entity.export import ExportContext
     from agent_env.artifact import CliArtifact
     from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
     from agent_env.providers.sandbox_providers.sandbox import Sandbox
@@ -362,6 +363,18 @@ class A2AAgent:
         fields = cls.accept_toml(data, ctx)
         return cls.put(id=ctx.id, docker_image_artifact=ctx.artifact(fields["image"], DockerImageArtifact),
                        default_env_vars=fields.get("default_env_vars"), metadata=fields.get("metadata"))
+
+    def to_toml(self, out: ExportContext) -> dict[str, Any]:
+        """The agent.toml of a folder this agent is built from, which ``from_toml`` reads back as it."""
+        metadata = {key: value for key, value in self.metadata.items() if key in self.toml_metadata
+                    and isinstance(value, self.toml_metadata[key][0]) and not isinstance(value, bool)}
+        if dropped := sorted(set(self.metadata) - set(metadata)):
+            out.left_out("metadata", f"an agent.toml's [metadata] takes only {' and '.join(self.toml_metadata)}, not "
+                                     f"{', '.join(dropped)}")
+        toml: dict[str, Any] = {"image": out.image(self.docker_image_artifact)}
+        if self.default_env_vars:
+            toml["default_env_vars"] = dict(self.default_env_vars)
+        return {**toml, **({"metadata": metadata} if metadata else {})}
 
     @classmethod
     def accept_toml(cls, data: dict[str, Any], ctx: AuthoringContext) -> dict[str, Any]:

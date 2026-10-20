@@ -466,6 +466,11 @@ def agentenv_website_env() -> WebsiteEnv:
         id="tenki",
         marks=skip_without_remote_sandbox("tenki"),
     ),
+    pytest.param(
+        "boxd",
+        id="boxd",
+        marks=skip_without_remote_sandbox("boxd"),
+    ),
 ])
 def sandbox_provider(request):
     from agent_env.providers import (
@@ -493,6 +498,9 @@ def sandbox_provider(request):
     elif request.param == "tenki":
         set_sandbox_provider(build_sandbox_provider("tenki"))
         set_env_sandbox_provider(build_sandbox_provider("tenki"))
+    elif request.param == "boxd":
+        set_sandbox_provider(build_sandbox_provider("boxd"))
+        set_env_sandbox_provider(build_sandbox_provider("boxd"))
     try:
         yield request.param
     finally:
@@ -1766,6 +1774,71 @@ async def test_gateway_consistent_mode(multi_env, environment_universe_artifact)
 
     finally:
         await multi_env.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_gateway_changes_name_the_role_behind_each_write(mcp_server_envs, email_service_artifact):
+    """Every changelog row a tool call wrote names its role and tool, and the call's result carries the ids it spanned."""
+    email_ref = mcp_server_envs["email"]
+    email_env = Env.get(email_ref.id, version=email_ref.version)
+    try:
+        result = await email_env.deploy()
+        await email_env.load_environment_artifact(email_service_artifact)  # the changelog's triggers go in after a load
+        gw = result.gateway_url
+        async with httpx.AsyncClient() as client:
+            seen = (await client.get(f"{gw}/changes", params={"limit": 10000}, timeout=30)).json()["changes"]
+            after_id = seen[-1]["id"] if seen else 0
+            for role, subject in (("default", "first"), ("alice@example.com", "second")):
+                resp = await client.post(f"{gw}/step", headers={AGENT_ENV_ROLE_HEADER: role}, timeout=60, json={
+                    "action": "call_tool", "tool_name": "send_email",
+                    "arguments": {"recipients": ["dana@example.com"], "subject": subject, "content": "body"}})
+                assert resp.status_code == 200, resp.text
+
+            changes = (await client.get(f"{gw}/changes", params={"after_id": after_id}, timeout=30)).json()
+            assert changes["changes"] and changes["has_more"] is False, changes
+            actors = [c["actors"] for c in changes["changes"]]
+            assert all(len(who) == 1 and who[0]["kind"] == "tool_call" and who[0]["tool"] == "send_email"
+                       for who in actors), actors
+            roles = [who[0]["role"] for who in actors]
+            assert set(roles) == {"default", "alice@example.com"} and roles == sorted(roles, key=lambda r: r != "default")
+
+            events = await _trajectory_events(client, gw)
+            results = [e for e in events if e["event_type"] == "tool_call_result"][-2:]
+            assert all(e["changelog_id"] > (e["changelog_id_before"] or 0) for e in results), results
+    finally:
+        await email_env.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_gateway_changes_name_the_request_behind_a_write_through_the_rest_proxy(mcp_server_envs,
+                                                                                      email_service_artifact):
+    """An MCP client writing through /svc/mcp-email/mcp (an SSE answer) is a write window too, named by its role."""
+    email_ref = mcp_server_envs["email"]
+    email_env = Env.get(email_ref.id, version=email_ref.version)
+    try:
+        result = await email_env.deploy()
+        await email_env.load_environment_artifact(email_service_artifact)
+        gw = result.gateway_url
+        async with httpx.AsyncClient() as client:
+            seen = (await client.get(f"{gw}/changes", params={"limit": 10000}, timeout=30)).json()["changes"]
+            after_id = seen[-1]["id"] if seen else 0
+            async with httpx.AsyncClient(headers={AGENT_ENV_ROLE_HEADER: "carol@example.com"}, timeout=60) as as_carol:
+                async with streamable_http_client(f"{gw}/svc/mcp-email/mcp", http_client=as_carol) as (read, write, _):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        sent = await session.call_tool("send_email", {
+                            "recipients": ["dana@example.com"], "subject": "lunch?", "content": "noon"})
+                        assert not sent.isError, sent
+
+            changes = (await client.get(f"{gw}/changes", params={"after_id": after_id}, timeout=30)).json()["changes"]
+            assert changes, "the call wrote no changelog row"
+            assert all([(a["kind"], a["role"], a["request"]["route"], a["request"]["service"], a["request"]["path"])
+                        for a in c["actors"]] == [("request", "carol@example.com", "svc", "mcp-email", "/mcp")]
+                       for c in changes), changes
+    finally:
+        await email_env.close()
 
 
 @pytest.mark.asyncio

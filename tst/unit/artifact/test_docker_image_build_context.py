@@ -12,7 +12,7 @@ from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store
 from agent_env.store.image_store.local_registry_image_store import LocalRegistryImageStore
 from agent_env.store.image_store.oci_registry_credentials import names_registry
-from agent_env.utils.build_context import BuildContext
+from agent_env.utils.docker.context import BuildContext
 
 SERVER = {"Dockerfile": "FROM python:3.12\nCOPY . /app\n", "src/app.py": "print(1)\n", ".dockerignore": "*.log\n",
           "debug.log": "noise"}

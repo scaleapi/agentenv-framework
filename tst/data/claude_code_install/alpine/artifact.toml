@@ -1,0 +1,2 @@
+# A build context run_docker_container builds, so its files, not an image this bundle builds.
+type = "file_artifact_universe"

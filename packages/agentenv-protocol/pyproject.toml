@@ -1,6 +1,6 @@
 [project]
 name = "agentenv-framework-protocol"
-version = "0.1.350"
+version = "0.1.352"
 description = "Open data-plane protocol and server SDK for agent environments."
 readme = "README.md"
 license = "Apache-2.0"
@@ -30,6 +30,7 @@ dependencies = [
 [project.optional-dependencies]
 agent = [
     "a2a-sdk[http-server]>=0.3.26,<0.4",
+    "mcp>=1.25,<2",  # the peer-agents tools' MCP server; 2.0 removed the server API it serves them with
     "python-multipart>=0.0.13",  # the staging extension's upload forms
     "regex>=2023.12.25",
     "uvicorn>=0.30",

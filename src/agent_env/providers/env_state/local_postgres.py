@@ -120,9 +120,9 @@ class LocalPostgresStateProvider(DatabaseStateProvider):
         ``service_db_config`` off the same resolve unless one was injected at construction."""
         if self._service_db_env is None:
             from agent_env.env.env import Env
-            from agent_env.config import get_config
+            from agent_env.config import get_config, service_db_env_id
 
-            self._service_db_env = Env.get(get_config().default_service_db_env_id)
+            self._service_db_env = Env.get(service_db_env_id(get_config()))
             if self._service_db_config is None:
                 self._service_db_config = self._service_db_env.to_config()
         return self._service_db_env

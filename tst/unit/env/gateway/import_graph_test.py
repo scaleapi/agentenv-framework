@@ -12,6 +12,7 @@ from pathlib import Path
 import agent_env
 import agent_env.env.gateway as gateway_pkg
 from agent_env.env.gateway import (
+    AGENT_ENV_HIDDEN_BY_DEFAULT_META_KEY,
     AGENT_ENV_ROLE_HEADER,
     AGENT_ENV_ROLE_META_KEY,
     AGENT_ENV_SESSION_META_KEY,
@@ -56,6 +57,8 @@ def test_the_package_vocabulary_matches_the_server_module():
     assert GATEWAY_TRAJECTORY_FILE == server_module.GATEWAY_TRAJECTORY_FILE
     # the literals a child with no agent_env dependency mirrors by hand
     assert (AGENT_ENV_ROLE_META_KEY, AGENT_ENV_SESSION_META_KEY) == ("agentenv.io/role", "agentenv.io/session")
+    assert AGENT_ENV_HIDDEN_BY_DEFAULT_META_KEY == server_module.AGENT_ENV_HIDDEN_BY_DEFAULT_META_KEY
+    assert AGENT_ENV_HIDDEN_BY_DEFAULT_META_KEY == "agentenv.io/hiddenByDefault"
 
 
 def test_the_server_class_is_not_a_package_export():

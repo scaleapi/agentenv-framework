@@ -299,8 +299,7 @@ class TaskInstanceStore:
         completed_step_docs = [
             dataclasses.asdict(e) for e in completed_steps or []
         ]
-        suffix = "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(8))
-        instance_id = f"{task_id}-{suffix}"
+        instance_id = new_instance_id(task_id)
         created_at_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         doc = _new_instance_doc(
             instance_id, task_id, task_version, total_steps, created_at_utc,
@@ -343,7 +342,8 @@ class TaskInstanceStore:
             updated = store.update_one_and_get(
                 TASK_INSTANCES_COLLECTION,
                 Filter.of(instance_id=instance_id),
-                UpdateSpec(set=dict(run_state), inc={_REV: 1, _GENERATION: 1}),
+                UpdateSpec(set={k: v for k, v in run_state.items() if k != "attempt_epoch"},
+                           inc={_REV: 1, _GENERATION: 1, "attempt_epoch": 1}),
                 return_after=True,
             )
             if updated is None:
@@ -530,6 +530,7 @@ class TaskInstanceStore:
         *,
         extra_ops: "Callable[[dict, dict], ContextUpdateOps] | None" = None,
         bump_epoch: bool = False,
+        attempt_epoch: int | None = None,
     ) -> dict | None:
         """Roll the named steps out by replaying the surviving committed entries over the seed,
         in one CAS on ``rev``, then delete those entries at the seq it read. None if the
@@ -549,6 +550,8 @@ class TaskInstanceStore:
         store = self._doc_store
 
         def _mutate(doc: dict) -> UpdateSpec:
+            if attempt_epoch is not None and doc.get("attempt_epoch", 0) > attempt_epoch:
+                raise ValueError(f"a later attempt owns instance {instance_id!r}; refusing to undo {sorted(step_ids)}")
             entries = self._journal_entries(store, instance_id, doc.get(_GENERATION, 0))
             # The seq this attempt read, so the trim can't delete a row a re-completion wrote after the CAS.
             undone_seqs.clear()
@@ -623,7 +626,8 @@ class TaskInstanceStore:
             # Doc first, like the seed: the record is in the context already; a failed journal
             # write only means replay lacks it until the next undo rewrites this row.
             try:
-                self._journal_step(store, instance_id, _SCHEDULER_STEP_ID, applied_extra[0], "scheduler")
+                self._journal_step(store, instance_id, _SCHEDULER_STEP_ID, applied_extra[0], "scheduler",
+                                   attempt_epoch=result.get("attempt_epoch", 0))
             except Exception:
                 logger.warning("Failed to journal the scheduler record for instance_id=%s", instance_id, exc_info=True)
         return result
@@ -694,7 +698,7 @@ class TaskInstanceStore:
             if rerecorded:
                 rerecords.append(step_id)
             set_fields[_RERECORDED] = rerecords
-            if len(completed) >= total_steps and doc.get("status") != "failed":
+            if len(completed) >= total_steps and doc.get("status") not in ("failed", "cancelled"):
                 set_fields["status"] = "completed"
                 set_fields["completed_at_utc"] = completed_at_utc
             return UpdateSpec(set=set_fields, unset=set(ops.unsets))
@@ -721,9 +725,11 @@ class TaskInstanceStore:
         context: "TaskStepContext",
         error: BaseException,
         completed_at_utc: str,
+        attempt_epoch: int | None = None,
     ) -> None:
         """Terminal failure write — one atomic update guarded on ``status != completed``
-        (so a sibling step that finished mid-cancel isn't overwritten)."""
+        (so a sibling step that finished mid-cancel isn't overwritten) and, given ``attempt_epoch``,
+        on no later attempt owning the instance."""
         spec = UpdateSpec(
             set={
                 "status": "failed",
@@ -736,17 +742,22 @@ class TaskInstanceStore:
         if failing_step_id is not None:
             entry = dataclasses.asdict(TaskStepResult(step_id=failing_step_id, status=TaskStepStatus.FAILURE))
             spec.add_to_set = {"completed_steps": [entry]}
-        self._doc_store.update(
-            TASK_INSTANCES_COLLECTION,
-            Filter.of(instance_id=instance_id).where("status", Ne("completed")),
-            spec,
-        )
+        match = Filter.of(instance_id=instance_id).where("status", Ne("completed"))
+        if attempt_epoch is not None:
+            match = match.where("attempt_epoch", Lte(attempt_epoch))
+        self._doc_store.update(TASK_INSTANCES_COLLECTION, match, spec)
 
-    def record_task_cancelled_sync(self, instance_id: str, reason: str, completed_at_utc: str) -> None:
-        """Mark a run cancelled, over the ``failed`` its unwinding recorded, but never a completed one."""
+    def record_task_cancelled_sync(
+        self, instance_id: str, reason: str, completed_at_utc: str, attempt_epoch: int | None = None,
+    ) -> None:
+        """Mark a run cancelled, over the ``failed`` its unwinding recorded, but never a completed one, nor one a
+        later attempt than ``attempt_epoch`` owns."""
+        match = Filter.of(instance_id=instance_id).where("status", Ne("completed"))
+        if attempt_epoch is not None:
+            match = match.where("attempt_epoch", Lte(attempt_epoch))
         self._doc_store.update(
             TASK_INSTANCES_COLLECTION,
-            Filter.of(instance_id=instance_id).where("status", Ne("completed")),
+            match,
             UpdateSpec(
                 set={"status": "cancelled", "error": reason, "completed_at_utc": completed_at_utc},
                 inc={"rev": 1},
@@ -804,6 +815,11 @@ def find_task_instance(instance_id: str) -> TaskInstance | None:
         return None
 
 
+def new_instance_id(task_id: str) -> str:
+    """A fresh id for a run of ``task_id``, derived from it so the run keeps the task's namespace."""
+    return f"{task_id}-{''.join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(8))}"
+
+
 def register_task_instance(
     task_id: str,
     task_version: int,
@@ -814,7 +830,8 @@ def register_task_instance(
 ) -> TaskInstance | None:
     """Register a task_instance row.
 
-    With ``instance_id``: idempotent upsert. Without: random-id insert.
+    With ``instance_id``: idempotent upsert, and a failure raises, since the caller already handed that id out.
+    Without: random-id insert, and a failure is logged and the run goes unrecorded.
     """
     try:
         store = get_task_instance_store()
@@ -831,6 +848,8 @@ def register_task_instance(
             completed_steps,
         )
     except Exception:
+        if instance_id is not None:
+            raise
         logger.warning("Failed to create task instance record", exc_info=True)
         return None
 
@@ -886,6 +905,7 @@ async def undo_steps(
     *,
     extra_ops: "Callable[[dict, dict], ContextUpdateOps] | None" = None,
     bump_epoch: bool = False,
+    attempt_epoch: int | None = None,
 ) -> dict | None:
     """Async ``TaskInstanceStore.undo_steps_sync``; None if the instance is missing or the
     write failed (logged). A refusal propagates: the store is saying it cannot rebuild that
@@ -893,7 +913,7 @@ async def undo_steps(
     try:
         return await asyncio.to_thread(
             get_task_instance_store().undo_steps_sync, instance_id, set(step_ids),
-            extra_ops=extra_ops, bump_epoch=bump_epoch,
+            extra_ops=extra_ops, bump_epoch=bump_epoch, attempt_epoch=attempt_epoch,
         )
     except ValueError:
         raise
@@ -912,6 +932,7 @@ async def record_task_failure(
     context: "TaskStepContext",
     error: BaseException,
     completed_at_utc: str,
+    attempt_epoch: int | None = None,
 ) -> None:
     """Write terminal failure state.
 
@@ -928,7 +949,7 @@ async def record_task_failure(
         try:
             await asyncio.to_thread(
                 store.record_task_failure_sync,
-                instance_id, failing_step_id, context, error, completed_at_utc,
+                instance_id, failing_step_id, context, error, completed_at_utc, attempt_epoch,
             )
             return
         except Exception as exc:  # noqa: BLE001
@@ -944,14 +965,14 @@ async def record_task_failure(
 
 
 
-def record_task_cancelled(instance_id: str, reason: str, completed_at_utc: str) -> None:
+def record_task_cancelled(instance_id: str, reason: str, completed_at_utc: str, attempt_epoch: int | None = None) -> None:
     """Write a cancelled run's terminal state, retried like ``record_task_failure``. It logs a write that keeps
     failing rather than raising. Synchronous: ``run_bundle`` calls it once its event loop has closed."""
     store = get_task_instance_store()
     last_exc: BaseException | None = None
     for attempt in range(_FAILURE_WRITE_MAX_ATTEMPTS):
         try:
-            store.record_task_cancelled_sync(instance_id, reason, completed_at_utc)
+            store.record_task_cancelled_sync(instance_id, reason, completed_at_utc, attempt_epoch)
             return
         except Exception as exc:  # noqa: BLE001
             last_exc = exc

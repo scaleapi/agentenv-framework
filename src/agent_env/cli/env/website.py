@@ -16,7 +16,7 @@ from agent_env.cli.utils import (
     resolve_environment_name,
 )
 from agent_env.utils.card_naming import card_name_from_github, card_name_from_source
-from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM, build_image
+from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, build_image
 from agent_env.env.envs.website import WebsiteEnv
 from agent_env.store.ids import derive_id, image_repository
 

@@ -7,10 +7,17 @@ name: Publish to PyPI
 # environment per project. Once both are on PyPI, it creates the tag's GitHub release, whose notes list the pull
 # requests merged since the previous release. Files already on PyPI and a release that already exists are skipped, so a
 # rerun is safe.
+#
+# It also publishes the infra images agent-env ships (agent_env.env.published_images) whose tags the registry lacks,
+# and records their digests in the wheel and the release notes, once the repository variable PUBLISH_INFRA_IMAGES is
+# "true". Run by hand on main, it publishes them alone, with nothing sent to PyPI. Only the jobs that read run agent-env
+# and its dependencies; the jobs holding a token that pushes images or publishes to PyPI install nothing and check what
+# they're handed (.github/scripts/infra_build.py).
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -19,6 +26,8 @@ jobs:
   # The release automation tags a version bump seconds after it pushes the bump, so this waits for those runs
   # rather than failing on one still in progress. After a failed run passes on a re-run, re-run this workflow.
   main-ci:
+    # Only main's commits and release tags have the CI runs this waits for.
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -41,8 +50,176 @@ jobs:
             echo "${workflow} passed: ${url}"
           done
 
+  # The infra images whose tags the registry lacks, each tagged by its sources at this commit.
+  infra-plan:
+    if: >-
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+      && (github.event_name == 'workflow_dispatch' || vars.PUBLISH_INFRA_IMAGES == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      missing: ${{ steps.plan.outputs.missing }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - name: Install uv from public PyPI
+        run: python -m pip install --quiet --index-url https://pypi.org/simple -r .github/ci-requirements.txt
+      - name: Find the images the registry lacks
+        id: plan
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          uv sync --locked --no-dev
+          missing=$(uv run --no-sync python .github/scripts/infra_images.py plan --missing)
+          echo "missing=$missing" >> "$GITHUB_OUTPUT"
+
+  # Once main's CI has passed, so nothing is pushed for a commit that fails it: builds each missing image on a runner of
+  # each platform, checks that it runs, and pushes it under its tag and platform (src-<hex>-amd64), which nothing looks
+  # up until infra-publish tags the multi-platform image. An image another run published meanwhile isn't built again.
+  infra-build:
+    needs: [main-ci, infra-plan]
+    if: needs.infra-plan.outputs.missing != '[]'
+    strategy:
+      fail-fast: true
+      # A few at a time: each pulls its base images anonymously, and public.ecr.aws allows one such pull a second.
+      max-parallel: 4
+      matrix:
+        image: ${{ fromJSON(needs.infra-plan.outputs.missing) }}
+        arch: [amd64, arm64]
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    env:
+      ENTRY: ${{ toJSON(matrix.image) }}
+      NAME: ${{ matrix.image.name }}
+      DOCKERFILE: ${{ matrix.image.dockerfile }}
+      CONTEXT: ${{ matrix.image.context }}
+      TAG: ${{ matrix.image.tag }}
+      REF: ${{ matrix.image.repository }}:${{ matrix.image.tag }}
+      BUILT: ${{ matrix.image.repository }}:${{ matrix.image.tag }}-${{ matrix.arch }}
+      PLATFORM: linux/${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Check that it's an image agent-env ships, and that no run has published it
+        id: wanted
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          python3 .github/scripts/infra_build.py check "$ENTRY"
+          echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          code=0
+          python3 .github/scripts/infra_build.py exists "$REF" || code=$?
+          case "$code" in
+            0) echo "build=false" >> "$GITHUB_OUTPUT"; echo "$REF is published already, so it isn't built again" ;;
+            1) echo "build=true" >> "$GITHUB_OUTPUT" ;;
+            *) exit 1 ;;
+          esac
+      - name: Build
+        if: steps.wanted.outputs.build == 'true'
+        run: |
+          # No provenance attestation, which would show in the multi-platform image as an unknown platform.
+          python3 .github/scripts/infra_build.py retry \
+            docker build --platform "$PLATFORM" --provenance=false -f "$DOCKERFILE" -t "$BUILT" \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "io.agentenv.source-tag=${TAG}" "$CONTEXT"
+      - name: Check that it runs
+        if: steps.wanted.outputs.build == 'true'
+        run: python3 .github/scripts/infra_build.py smoke "$NAME" "$BUILT"
+      - name: Push it under its tag and platform
+        if: steps.wanted.outputs.build == 'true'
+        run: python3 .github/scripts/infra_build.py retry docker push "$BUILT"
+
+  # Tags each new image's two platform builds as one multi-platform image under its source tag, which installs look up.
+  # A tag that exists is never moved, so an image a wheel or an install pinned stays the one its tag names.
+  infra-publish:
+    needs: [main-ci, infra-plan, infra-build]
+    if: needs.infra-plan.outputs.missing != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Tag each image's platform builds as one multi-platform image under its source tag
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          MISSING: ${{ needs.infra-plan.outputs.missing }}
+        run: |
+          echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          jq -c '.[]' <<< "$MISSING" | while read -r entry; do
+            python3 .github/scripts/infra_build.py check "$entry"
+            ref=$(jq -r '"\(.repository):\(.tag)"' <<< "$entry")
+            code=0
+            python3 .github/scripts/infra_build.py exists "$ref" || code=$?
+            if [ "$code" = 0 ]; then
+              echo "$ref is published already, so it's left as it is"
+              continue
+            fi
+            [ "$code" = 1 ] || exit 1
+            python3 .github/scripts/infra_build.py retry docker buildx imagetools create -t "$ref" \
+              --annotation "index:org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+              --annotation "index:org.opencontainers.image.revision=${GITHUB_SHA}" \
+              "${ref}-amd64" "${ref}-arm64"
+          done
+
+  # The digest the registry serves under every image's tag, for the wheel and the release notes, which the framework
+  # job checks against the registry before the wheel carries it; and a warning for each image an anonymous pull, as an
+  # install makes, doesn't get: GHCR keeps a new package private until its admin makes it public.
+  infra-record:
+    needs: [infra-plan, infra-build, infra-publish]
+    if: >-
+      !cancelled() && needs.infra-plan.result == 'success'
+      && contains(fromJSON('["success", "skipped"]'), needs.infra-build.result)
+      && contains(fromJSON('["success", "skipped"]'), needs.infra-publish.result)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      record: ${{ steps.record.outputs.record }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - name: Install uv from public PyPI
+        run: python -m pip install --quiet --index-url https://pypi.org/simple -r .github/ci-requirements.txt
+      - name: Record the published images' digests
+        id: record
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          uv sync --locked --no-dev
+          uv run --no-sync python .github/scripts/infra_images.py write "$RUNNER_TEMP/published_images.json"
+          echo "record=$(jq -c . "$RUNNER_TEMP/published_images.json")" >> "$GITHUB_OUTPUT"
+      - name: Warn about images an anonymous pull doesn't get
+        run: uv run --no-sync python .github/scripts/infra_images.py public
+
+  # Both packages wait for the infra images when they're published, so a failed image job sends neither to PyPI.
   protocol:
-    needs: main-ci
+    needs: [main-ci, infra-plan, infra-record]
+    if: >-
+      !cancelled() && github.event_name == 'push' && needs.main-ci.result == 'success'
+      && (needs.infra-plan.result == 'skipped'
+          || (needs.infra-plan.result == 'success' && needs.infra-record.result == 'success'))
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: pypi-protocol
@@ -69,14 +246,22 @@ jobs:
       - name: Publish agentenv-framework-protocol
         run: uv publish --trusted-publishing always --check-url https://pypi.org/simple/ dist/*
 
+  # A release's wheel names only images the registry serves under their tags.
   framework:
-    needs: protocol
+    needs: [protocol, infra-plan, infra-record]
+    if: >-
+      !cancelled() && needs.protocol.result == 'success'
+      && (needs.infra-plan.result == 'skipped'
+          || (needs.infra-plan.result == 'success' && needs.infra-record.result == 'success'))
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: pypi
     permissions:
       contents: read
       id-token: write
+      packages: read
+    outputs:
+      record: ${{ steps.record.outputs.record }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -86,6 +271,17 @@ jobs:
           python-version: "3.12"
       - name: Install uv from public PyPI
         run: python -m pip install --quiet --index-url https://pypi.org/simple -r .github/ci-requirements.txt
+      - name: Put the infra images' record in the wheel, checked against the registry
+        id: record
+        if: needs.infra-plan.result == 'success'
+        env:
+          RECORD: ${{ needs.infra-record.outputs.record }}
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          printf '%s\n' "$RECORD" > src/agent_env/env/published_images.json
+          echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          python3 .github/scripts/infra_build.py verify-record src/agent_env/env/published_images.json
+          echo "record=$RECORD" >> "$GITHUB_OUTPUT"
       - name: Build agentenv-framework, pinned to this release's agentenv-framework-protocol
         run: |
           protocol=$(sed -n 's/^version = "\(.*\)"/\1/p' packages/agentenv-protocol/pyproject.toml)
@@ -93,10 +289,15 @@ jobs:
           # workspace members, and the bare name keys [tool.uv.sources]; none of those may be rewritten.
           sed -i "s/\"agentenv-framework-protocol[^\"]*\"/\"agentenv-framework-protocol==${protocol}\"/" pyproject.toml
           grep -q "\"agentenv-framework-protocol==${protocol}\"" pyproject.toml
-          # The echo-mcp example's server image installs the protocol this release ships with.
-          echo_requirements=src/agent_env/examples/echo-mcp/envs/echo/requirements.txt
-          sed -i "s/^agentenv-framework-protocol.*/agentenv-framework-protocol==${protocol}/" "$echo_requirements"
-          grep -qx "agentenv-framework-protocol==${protocol}" "$echo_requirements"
+          # Each shipped bundle's images install the protocol this release ships with, keeping its extras. The list is
+          # assigned first, so the step stops if the script fails or finds nothing.
+          requirements_files=$(python .github/scripts/shipped_bundles.py)
+          [ -n "$requirements_files" ]
+          for requirements in $requirements_files; do
+            grep -q "^agentenv-framework-protocol" "$requirements" || continue
+            sed -i -E "s/^agentenv-framework-protocol(\[[^]]*\])?.*/agentenv-framework-protocol\1==${protocol}/" "$requirements"
+            grep -qE "^agentenv-framework-protocol(\[[^]]*\])?==${protocol}$" "$requirements"
+          done
           uv build --no-sources --out-dir dist
       - name: Check its metadata renders
         run: uvx --index-url https://pypi.org/simple twine check --strict dist/*
@@ -118,6 +319,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          RECORD: ${{ needs.framework.outputs.record }}
         run: |
           tag="${GITHUB_REF_NAME}"
           if gh release view "$tag" >/dev/null 2>&1; then
@@ -127,6 +329,10 @@ jobs:
           framework="${tag#v}"
           protocol=$(sed -n 's/^version = "\(.*\)"/\1/p' packages/agentenv-protocol/pyproject.toml)
           header="On PyPI: [agentenv-framework ${framework}](https://pypi.org/project/agentenv-framework/${framework}/) · [agentenv-framework-protocol ${protocol}](https://pypi.org/project/agentenv-framework-protocol/${protocol}/)"
+          if [ -n "$RECORD" ]; then
+            header+=$'\n\n'"Infra images published for this release, by digest:"$'\n'
+            header+=$(jq -r '.images[] | "- `\(.repository):\(.tag)@\(.digest)`"' <<< "$RECORD")
+          fi
           args=(--verify-tag --title "$tag" --generate-notes --notes "$header")
           # From the newest earlier tag with a release, not the previous tag: a tag main's CI kept off PyPI has no
           # release, and its pull requests belong in these notes.

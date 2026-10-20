@@ -1,8 +1,7 @@
-"""``agent-env eval run`` tears down each run's sandboxes, however the run ends, and a first Ctrl-C lets a
-teardown already under way finish."""
+"""``agent-env eval run``'s runs, through the configured runner (here ``LocalRunner``): a first Ctrl-C cancels the
+running ones, which are torn down, and lets a teardown already under way finish."""
 
 import asyncio
-import importlib
 import logging
 import signal
 import types
@@ -10,43 +9,13 @@ import types
 import pytest
 from click.testing import CliRunner
 
-from agent_env.cli import cli
+from agent_env.cli import cli, submitted_runs
 from agent_env.eval import Eval
 from agent_env.task import Task, teardown
-from agent_env.task.teardown import TeardownReport
 from agent_env.task_step.context import DeployedSandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 
-eval_run = importlib.import_module("agent_env.cli.eval.run")  # the package's ``run`` is the click command
-pytestmark = pytest.mark.usefixtures("sigint_handled")
-
-
-class _Raising:
-    id = "t"
-
-    def __init__(self, ending):
-        self.ending, self.context = ending, None
-
-    async def run(self, context, **_):
-        self.context = context
-        raise self.ending
-
-
-@pytest.mark.parametrize("ending", [RuntimeError("boom"), asyncio.CancelledError()], ids=["raised", "cancelled"])
-def test_a_run_that_raises_or_is_cancelled_is_still_torn_down(monkeypatch, ending):
-    torn_down = []
-
-    async def teardown_run(context):
-        torn_down.append(context)
-        return TeardownReport()
-
-    monkeypatch.setattr(eval_run, "teardown_run", teardown_run)
-    task = _Raising(ending)
-
-    with pytest.raises(type(ending)):
-        asyncio.run(eval_run._run_single(task, "[t]", None))
-
-    assert torn_down == [task.context]
+pytestmark = pytest.mark.usefixtures("sigint_handled", "local_stores")
 
 
 class _Deploys:
@@ -87,6 +56,7 @@ def test_ctrl_c_cancels_the_running_runs_lets_a_finished_ones_teardown_finish_an
             return _Sandbox(sandbox_id)
 
     monkeypatch.setattr(teardown, "build_sandbox_provider", lambda name: _Provider())
+    monkeypatch.setattr(submitted_runs, "POLL_SECONDS", 0.02)
     logging.disable(logging.CRITICAL)
     try:
         result = CliRunner().invoke(cli, ["eval", "run", "--id", "e"])
@@ -95,6 +65,6 @@ def test_ctrl_c_cancels_the_running_runs_lets_a_finished_ones_teardown_finish_an
 
     assert result.exit_code == 130, result.output
     assert sorted(terminated) == ["sb-done", "sb-slow"]
-    assert "Cancelling the runs and tearing them down (Ctrl-C again to stop now)" in result.output
+    assert "Cancelling the runs (Ctrl-C again to stop waiting for them)" in result.output
     assert "  [done] PASSED" in result.output
-    assert "  [slow] CANCELLED" in result.output
+    assert "  [slow] CANCELED" in result.output

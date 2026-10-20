@@ -24,6 +24,7 @@ from agent_env.config.paths import state_root
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT
 from agent_env.providers.sandbox_providers import local_sandbox as local_sandbox_module
 from agent_env.env.envs.service_db import DB_MCP_PORT, DB_WEB_PORT
+from agent_env.providers.sandbox_providers.boxd.sandbox import BoxdSandbox
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
 from agent_env.providers.sandbox_providers.e2b import E2BSandbox
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandbox
@@ -53,7 +54,8 @@ def test_base_sandbox_host_port_is_identity():
     assert Sandbox.host_port(None, 18765) == 18765
 
 
-@pytest.mark.parametrize("sandbox_class", [ModalVmSandbox, ModalSandbox, E2BSandbox, TensorlakeSandbox, TenkiSandbox])
+@pytest.mark.parametrize("sandbox_class", [ModalVmSandbox, ModalSandbox, E2BSandbox, TensorlakeSandbox, TenkiSandbox,
+                                           BoxdSandbox])
 def test_remote_sandboxes_publish_on_every_interface(sandbox_class):
     """Their tunnels reach a published port from outside the VM, so it stays on every interface."""
     assert port_bindings(sandbox_class.host_ips, 18765, 18765) == ["18765:18765"]

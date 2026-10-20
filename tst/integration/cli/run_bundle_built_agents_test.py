@@ -191,7 +191,7 @@ def test_each_shape_of_agent_dockerfile_builds_runs_and_is_rebuilt_only_when_its
 
 def test_a_dockerfile_that_fails_to_build_is_one_problem_with_dockers_output_and_writes_no_agent(state):
     root = state / "broken-bundle"
-    _agent_folder(root, "broken", {"Dockerfile": f"{BASE}\nRUN echo about to fail && exit 3\n"})
+    _agent_folder(root, "broken", {"Dockerfile": f"{BASE}\nRUN echo about to fail && exit 3\n", "agent.toml": _toml()})
     (root / "tasks").mkdir()
     (root / "tasks/broken.json").write_text(_task("broken", "never"))
 

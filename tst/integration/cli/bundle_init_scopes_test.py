@@ -16,7 +16,7 @@ from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store, reset_artifact_store
 from agent_env.bundle.resolve import build_step
 from agent_env.cli import cli
-from agent_env.config import configure, get_config, reset_config
+from agent_env.config import configure, reset_config
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     reset_agent_sandbox_provider,
@@ -83,6 +83,8 @@ def machines(monkeypatch, tmp_path):
     monkeypatch.setenv("AGENT_ENV_DOCUMENT_STORE", "local")
     monkeypatch.setenv("AGENT_ENV_OBJECT_STORE", "local")
     monkeypatch.setenv("AGENT_ENV_LOCAL_SANDBOX_DIR", str(sandboxes))
+    monkeypatch.setenv("LITELLM_BASE_URL", "http://127.0.0.1:4000")  # each machine's model endpoint, which no run calls
+    monkeypatch.setenv("LITELLM_API_KEY", "sk-test")
     config = tmp_path / "source.toml"
     config.write_text(f'[sandbox.providers]\nacme_vm = "{_HERE}:_AcmeVm"\n\n[task_steps]\nimpls = ["{_HERE}:_AcmeNote"]\n')
 
@@ -167,14 +169,19 @@ def test_an_agent_task_imported_without_its_users_agents_takes_the_receivers_def
     assert "Would run:" in _ok("run", machines.root / "agents-user", "--dry-run")
 
     machines.on("receiver")
-    default = get_config().get_default_a2a_agent_id()
 
+    shipped = _ok("run", machines.root / "agents", "--dry-run")
+    assert "agentenv-framework/agents:agents/claude-code: v1 (new)" in shipped and "Would run:" in shipped
+    assert "registry.acme.example/solver:v1" in (machines.root / "agents-user" / "agents" / "acme-solver" /
+                                                 "agent.toml").read_text()
+    assert "Unknown sandbox backend: 'acme_vm'" in _refused("run", machines.root / "agents-user", "--dry-run")
+
+    configure(default_a2a_agent_id="receiver-default")
     bare = _refused("run", machines.root / "agents", "--dry-run")
-    assert f"names no agent, so it deploys the default, {default!r}, and there is no agent {default!r}" in bare
-    assert "there is no agent 'acme-solver'" in _refused("run", machines.root / "agents-user", "--dry-run")
-    _agent(default, "docker.io/library/python:3.12-slim")
+    assert "names no agent, so it deploys the default, 'receiver-default', and there is no agent 'receiver-default'" in bare
+    _agent("receiver-default", "docker.io/library/python:3.12-slim")
     assert "Would run:" in _ok("run", machines.root / "agents", "--dry-run")
-    assert "there is no agent 'acme-solver'" in _refused("run", machines.root / "agents-user", "--dry-run")
+    assert "Unknown sandbox backend: 'acme_vm'" in _refused("run", machines.root / "agents-user", "--dry-run")
 
 
 def test_a_task_needing_a_step_type_only_its_source_registers_is_refused_on_the_receiver_naming_it(machines):

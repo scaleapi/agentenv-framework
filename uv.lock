@@ -42,7 +42,7 @@ http-server = [
 
 [[package]]
 name = "agentenv-framework"
-version = "0.9.1335"
+version = "0.9.1337"
 source = { editable = "." }
 dependencies = [
     { name = "a2a-sdk" },
@@ -69,10 +69,14 @@ aws = [
     { name = "boto3" },
     { name = "botocore" },
 ]
+boxd = [
+    { name = "boxd" },
+]
 dev = [
     { name = "anyio" },
     { name = "boto3" },
     { name = "botocore" },
+    { name = "boxd" },
     { name = "fastapi" },
     { name = "fastmcp" },
     { name = "google-api-core" },
@@ -129,11 +133,12 @@ vercel = [
 [package.metadata]
 requires-dist = [
     { name = "a2a-sdk", specifier = "==0.3.26" },
-    { name = "agentenv-framework", extras = ["aws", "explorer", "gcp", "sail", "tensorlake", "tenki", "vercel"], marker = "extra == 'dev'" },
+    { name = "agentenv-framework", extras = ["aws", "boxd", "explorer", "gcp", "sail", "tensorlake", "tenki", "vercel"], marker = "extra == 'dev'" },
     { name = "agentenv-framework-protocol", editable = "packages/agentenv-protocol" },
     { name = "anyio", marker = "extra == 'vercel'", specifier = ">=4,<5" },
     { name = "boto3", marker = "extra == 'aws'", specifier = ">=1.35.0" },
     { name = "botocore", marker = "extra == 'aws'", specifier = ">=1.35.0" },
+    { name = "boxd", marker = "extra == 'boxd'", specifier = "~=0.2.17" },
     { name = "certifi", specifier = ">=2024.2.2" },
     { name = "click", specifier = ">=8.0.0" },
     { name = "cryptography", specifier = ">=42" },
@@ -174,11 +179,11 @@ requires-dist = [
     { name = "uvicorn", marker = "extra == 'explorer'", specifier = ">=0.29" },
     { name = "vercel-sandbox", marker = "extra == 'vercel'", specifier = ">=0.7.0,<0.8" },
 ]
-provides-extras = ["aws", "explorer", "gcp", "sail", "vercel", "tensorlake", "tenki", "dev", "smol"]
+provides-extras = ["aws", "explorer", "gcp", "sail", "vercel", "tensorlake", "tenki", "boxd", "dev", "smol"]
 
 [[package]]
 name = "agentenv-framework-protocol"
-version = "0.1.350"
+version = "0.1.352"
 source = { editable = "packages/agentenv-protocol" }
 dependencies = [
     { name = "httpx" },
@@ -189,6 +194,7 @@ dependencies = [
 [package.optional-dependencies]
 agent = [
     { name = "a2a-sdk", extra = ["http-server"] },
+    { name = "mcp" },
     { name = "python-multipart" },
     { name = "regex" },
     { name = "uvicorn" },
@@ -209,6 +215,7 @@ requires-dist = [
     { name = "a2a-sdk", extras = ["http-server"], marker = "extra == 'dev'", specifier = ">=0.3.26,<0.4" },
     { name = "fastmcp", marker = "extra == 'dev'", specifier = ">=3.4,<4" },
     { name = "httpx", specifier = ">=0.27" },
+    { name = "mcp", marker = "extra == 'agent'", specifier = ">=1.25,<2" },
     { name = "mcp", marker = "extra == 'dev'", specifier = ">=1.25,<2" },
     { name = "pydantic", specifier = ">=2.11" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0" },
@@ -471,6 +478,21 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/73/6c/815f49f0c582396b1a4c37df554ffab6bb420abd5a96d5329183a97022de/botocore-1.43.38.tar.gz", hash = "sha256:70fbd5c74f5742f5975ddcc61e6afb5174cb80577c2ccc17c6898ad3a49b51f3", size = 15628316, upload-time = "2026-06-30T19:55:19.2Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/22/b4/fdff7920b3776b37f8b42d4e6eabb141974fa88f9fb1aae5c2224bdaf635/botocore-1.43.38-py3-none-any.whl", hash = "sha256:54c1c41aff82422d2b88a8a7d782fde8ae1299a45f088d00011d85c4bc44b0cc", size = 15312254, upload-time = "2026-06-30T19:55:14.837Z" },
+]
+
+[[package]]
+name = "boxd"
+version = "0.2.17"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "grpcio" },
+    { name = "httpx" },
+    { name = "protobuf" },
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/66/d8/15e698f75c26ec97c0c397464350bfe2795cfe67018a61edd236598cbf6f/boxd-0.2.17.tar.gz", hash = "sha256:6a577b7e4d939d562da4dd8e65fb2ef7f434827c2468eb7c7cc12a200f5ff6ea", size = 154009, upload-time = "2026-10-16T18:03:46.114Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/14/82/a0285348c24e8763e160aace27158f81dc0e75178a27081c8b58abe30aec/boxd-0.2.17-py3-none-any.whl", hash = "sha256:6cf6cbc5db9bc0d2b619bc99f608ad9746a43db3e513ec2ca37d465e16832930", size = 109632, upload-time = "2026-10-16T18:03:44.579Z" },
 ]
 
 [[package]]

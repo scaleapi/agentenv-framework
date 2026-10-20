@@ -34,6 +34,7 @@ from .extensions import (
     AGENT_CONFIG_V1,
     MAX_TRAJECTORY_READ_EVENTS,
     MCP_CONFIG_V1,
+    PEER_AGENTS_V1,
     SKILL_CONFIG_V1,
     TRAJECTORY_V1,
     TRIGGERS_V1,
@@ -45,6 +46,7 @@ from .extensions import (
     ImplementationOwner,
     McpAddRequest,
     OperationReference,
+    PeerAgentsSetRequest,
     TaskEventsTrajectoryRequest,
     TaskObjectTrajectoryRequest,
     TaskTrajectoryRequest,
@@ -54,6 +56,7 @@ from .extensions import (
     TriggerRegisterRequest,
     enable,
 )
+from .peer_agents import PEER_MCP_PATH, PEER_MCP_SERVER_NAME, PeerAgents
 from .registry import RegisteredOperation, build_registry
 from .staging import STAGING_ENDPOINT, StagingStore, staging_routes
 from .tasks.v1 import (
@@ -545,6 +548,8 @@ class _SdkServices:
         self._skill_registration_lock = asyncio.Lock()
         self.card: Any = None
         self.trigger_engine = TriggerEngine()
+        # Set when the SDK serves peer-agents/v1 for this agent.
+        self.peers: PeerAgents | None = None
 
     def task_config(self) -> AgentConfig:
         return self.config_model.model_validate(
@@ -611,6 +616,8 @@ class _SdkServices:
             (AGENT_CONFIG_V1.uri, "get"): self.agent_config_get,
             (MCP_CONFIG_V1.uri, "add"): self.mcp_add,
             (MCP_CONFIG_V1.uri, "list"): self.mcp_list,
+            (PEER_AGENTS_V1.uri, "set"): self.peer_agents_set,
+            (PEER_AGENTS_V1.uri, "list"): self.peer_agents_list,
             (SKILL_CONFIG_V1.uri, "list"): self.skill_list,
             (TRAJECTORY_V1.uri, "get"): self.trajectory_get,
             (TRIGGERS_V1.uri, "register"): self.triggers_register,
@@ -695,6 +702,8 @@ class _SdkServices:
         name = request.name or f"mcp_{uuid.uuid4().hex[:8]}"
         if name in self.mcp_servers:
             raise HTTPException(status_code=409, detail=f"MCP name '{name}' is already registered")
+        if self.peers is not None and name == PEER_MCP_SERVER_NAME:
+            raise HTTPException(status_code=409, detail=f"MCP name '{name}' is the SDK's peer-agents server")
         self.mcp_servers[name] = {
             "url": url,
             "headers": dict(request.headers) if request.headers else None,
@@ -708,9 +717,29 @@ class _SdkServices:
                     "url": registration["url"],
                     "has_headers": bool(registration.get("headers")),
                 }
-                for name, registration in self.mcp_servers.items()
+                for name, registration in self.task_mcp_servers().items()
             }
         }
+
+    def task_mcp_servers(self) -> dict[str, dict[str, Any]]:
+        """The MCP servers a task gets: those registered, and the SDK's peer-agents server when it serves one."""
+        peer_tools = self.peers.registration() if self.peers is not None else None
+        return {**self.mcp_servers, **({PEER_MCP_SERVER_NAME: peer_tools} if peer_tools else {})}
+
+    async def peer_agents_set(self, request: PeerAgentsSetRequest) -> dict[str, Any]:
+        names = [peer.name for peer in request.peers]
+        if len(set(names)) != len(names):
+            raise HTTPException(status_code=400, detail="peer names must be unique")
+        self._served_peers().set(request.peers)
+        return {"status": "updated", "peers": len(names)}
+
+    async def peer_agents_list(self) -> dict[str, Any]:
+        return {"peers": self._served_peers().listing()}
+
+    def _served_peers(self) -> PeerAgents:
+        if self.peers is None:
+            raise HTTPException(status_code=500, detail="the SDK serves no peer-agents tools for this agent")
+        return self.peers
 
     async def skill_list(self) -> dict[str, Any]:
         skills = {
@@ -874,6 +903,24 @@ class DefaultExtensionHandlers:
         return await _invoke(handler, request)
 
 
+def _serving_peer_tools(
+    peers: PeerAgents,
+    inner: Callable[[Starlette], AbstractAsyncContextManager] | None,
+) -> Callable[[Starlette], AbstractAsyncContextManager]:
+    """The application's lifespan, ``inner``'s if it has one, with the peer-agents tools served throughout."""
+
+    @asynccontextmanager
+    async def lifespan(app: Starlette) -> AsyncIterator[Any]:
+        async with peers.serving():
+            if inner is None:
+                yield None
+            else:
+                async with inner(app) as state:
+                    yield state
+
+    return lifespan
+
+
 class A2AAgentApplication:
     """Resolved Agent Card, extension routes, and A2A task executor."""
 
@@ -930,6 +977,20 @@ class A2AAgentApplication:
                         f"extension operation {extension.definition.uri}.{operation.definition.name} "
                         f"conflicts with the staging routes below {STAGING_ENDPOINT}"
                     )
+        # The SDK serves peer-agents/v1's tools to an agent that enables it without handlers of its own.
+        peer_agents = next(
+            (extension for extension in self.registry.extensions if extension.definition.uri == PEER_AGENTS_V1.uri),
+            None,
+        )
+        if peer_agents is not None and not peer_agents.operations["set"].overridden:
+            for extension in self.registry.extensions:
+                for operation in extension.operations.values():
+                    if operation.definition.path == PEER_MCP_PATH:
+                        raise ValueError(
+                            f"extension operation {extension.definition.uri}.{operation.definition.name} "
+                            f"conflicts with the peer-agents tools at {PEER_MCP_PATH}"
+                        )
+            self.services.peers = PeerAgents()
         conformance = self.registry.conformance()
         for override in conformance["standard_operation_overrides"]:
             logger.warning(
@@ -965,9 +1026,13 @@ class A2AAgentApplication:
                 )
         if self.staging.max_bytes:
             routes.extend(staging_routes(self.staging))
+        lifespan = definition.lifespan
+        if self.services.peers is not None:
+            routes.append(Route(PEER_MCP_PATH, self.services.peers.app))
+            lifespan = _serving_peer_tools(self.services.peers, lifespan)
         kwargs = {"routes": routes, "middleware": [Middleware(_ServingOnItsPort)]}
-        if definition.lifespan is not None:
-            kwargs["lifespan"] = definition.lifespan
+        if lifespan is not None:
+            kwargs["lifespan"] = lifespan
         self.app = Starlette(**kwargs)
 
         try:
@@ -1171,7 +1236,7 @@ class _StandardExecutor:
                         _from_a2a_part(part) for part in (context.message.parts or [])
                     ),
                     config=task_config,
-                    mcp_servers=self._services.mcp_servers,
+                    mcp_servers=self._services.task_mcp_servers(),
                     skills=tuple(self._services.skills),
                     metadata=metadata,
                     session_ref=self._services.session_ref_for_context(task.context_id),

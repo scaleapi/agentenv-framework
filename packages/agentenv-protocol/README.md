@@ -81,6 +81,15 @@ environment-prefixed tools without knowing the name at class-definition time; an
 servers an env deploys behind one gateway: if two serve a name, the gateway serves none of their
 tools and the deploy fails naming it, so prefix with `{environment_name}` when servers may share one.
 
+`@tool(..., hidden_by_default=True)` makes being hidden a fixed property of the tool, for plumbing a
+task drives (a trigger's tool action, a simulated party) that the agent under test must not see. The
+tool is listed with `_meta` `{"agentenv.io/hiddenByDefault": true}` (`HIDDEN_BY_DEFAULT_META_KEY`),
+and the gateway hides it from every role, in its MCP `tools/list` and `/step`, until a tool-access
+step names it. Steps that name it show and hide it as they do any tool. Steps for every tool
+(`tools: "*"`) never show it, but as with any tool they replace earlier steps: one for a role clears
+that role's earlier named steps, and a full reset (`role: "*", tools: "*"`) clears all of them, so
+grant a hidden tool after such steps. Trigger tool actions call it as usual.
+
 `AgentEnvStarletteApplication` mounts the same handler onto a Starlette/FastAPI app instead of
 FastMCP; since those apps have no MCP tool registry, constructing one with `@tool` methods
 raises.
@@ -660,6 +669,21 @@ discovery, `name` so the caller can choose the server alias the harness prefixes
 tools with (agent-env relays the env card's name: the MultiEnv's declared name, else
 `env` + 4 random digits, giving e.g. `mcp__env4821__<tool>`); when absent the agent mints
 `mcp_<8 hex>`.
+
+`PEER_AGENTS_V1` lets an agent delegate to the other agents in its task. AgentEnv
+sets the routing table with `POST /ext/peer-agents` (`{"peers": [{"name", "url",
+"card", "description"}]}`; an empty list clears it, and names must be unique), and
+`GET /ext/peer-agents` returns it. An agent that enables the extension without
+handlers of its own gets the SDK's: the SDK serves six MCP tools, `peer_list`,
+`peer_get_card`, `peer_send_message` (send and wait, for at most 50 s, so a call
+answers within the 60 s MCP clients commonly give a request), `peer_start_task`,
+`peer_get_task` and `peer_cancel_task`, at `/ext/peer-agents/mcp` on the agent's
+own port, and adds them to every task's `request.mcp_servers` as `peer_agents`, so
+a harness that connects the task's MCP servers gives its model the tools with no
+code of its own. The tools wrap the peers' A2A `message/send`, `tasks/get` and
+`tasks/cancel`; they answer loopback callers only, while the application's lifespan
+runs, and the name `peer_agents` is reserved from `MCP_CONFIG_V1.add`. An agent that
+overrides both operations keeps the table itself and gets no tools.
 
 `ATTRIBUTION_PROBE_V1.probe` lets a caller check that an agent forwards attribution
 upstream. Attribution is an open map of string dimensions, like AgentEnv's cost
