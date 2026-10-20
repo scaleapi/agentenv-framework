@@ -24,7 +24,7 @@ from agent_env.env.env import (
     EnvNeedsSandbox, gateway_url_of, require_gateway_url, require_sandbox,
 )
 from agent_env.env.gateway.constants import (
-    EXT_CLOCK_URI, EXT_DISABLE_TOOL_URI, EXT_ENABLE_TOOL_URI, EXT_STATE_URI, EXT_STEP_URI, EXT_TRAJECTORY_URI, EXT_TRIGGERS_URI,
+    EXT_CHANGES_URI, EXT_CLOCK_URI, EXT_DISABLE_TOOL_URI, EXT_ENABLE_TOOL_URI, EXT_STATE_URI, EXT_STEP_URI, EXT_TRAJECTORY_URI, EXT_TRIGGERS_URI,
     WELL_KNOWN_PATH,
 )
 from agent_env.env.gateway.gateway import Gateway
@@ -137,8 +137,9 @@ def test_a_leaf_card_is_its_own_only_child_env():
     (EXT_CLOCK_URI, "state", None, "GET", "/clock/state"),
     (EXT_TRIGGERS_URI, "state", None, "GET", "/triggers/state"),
     (EXT_TRAJECTORY_URI, "get", None, "GET", "/trajectory"),
+    (EXT_CHANGES_URI, "get", {"after_id": "7", "limit": "100"}, "GET", "/changes"),
 ], ids=["clock-set_time", "triggers-register", "step", "state", "tools-disable", "tools-enable", "clock-state",
-        "triggers-state", "trajectory-get"])
+        "triggers-state", "trajectory-get", "changes-get"])
 async def test_invoke_calls_the_endpoint_and_verb_the_card_advertises(sent, composed, base, uri, method, params, verb, path):
     await _record(composed, base).invoke(uri, method, params)
     [request] = sent

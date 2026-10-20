@@ -1,0 +1,1 @@
+agentenv-framework-protocol[agent]==0.1.305

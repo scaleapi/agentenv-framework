@@ -1,6 +1,5 @@
 """Materializing a planned bundle: what gets written, what is reused, and what is refused before any write."""
 
-import contextlib
 import json
 import subprocess
 import sys
@@ -11,7 +10,7 @@ from typing import Literal
 import pytest
 
 from agent_env.a2a_agent import A2AAgent
-from agent_env.artifact import Artifact, EnvironmentArtifact, EnvironmentUniverseArtifact
+from agent_env.artifact import Artifact
 from agent_env.artifact.artifacts import docker_image as docker_image_module
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.file import FileArtifact
@@ -27,16 +26,17 @@ from agent_env.bundle.run import _written
 from agent_env.config import configure
 from agent_env.config.paths import state_root
 from agent_env.config.runtime import Config
-from agent_env.entity_refs import EntityRef, RefRole
+from agent_env.entity.refs import EntityRef, RefRole
 from agent_env.env.env import Env
 from agent_env.eval import Eval, EvalTask
 from agent_env.store import Filter
-from agent_env.store.ids import image_repository
+from agent_env.providers.sandbox_providers import host_images
+from agent_env.store.base import NotFoundError
 from agent_env.store.routing import disable_namespace_routing
 from agent_env.task import Task
 from agent_env.task_step.task_step import TaskStep
-from agent_env.utils.build_context import BuildContext
-from tst.unit.bundle._support import DIGEST, RefusingStore, layout, local_store, plan_of
+from agent_env.utils.docker.context import BuildContext
+from tst.unit.bundle._support import DIGEST, RefusingStore, layout, local_builds, local_store, plan_of
 
 ROOT = "@local/~/triage"
 LAYOUT = {
@@ -101,36 +101,6 @@ class _PluginFile(FileArtifact):
     type: Literal["plugin_file_materialize_test"] = "plugin_file_materialize_test"
 
 
-class _OwnFile(FileArtifact):
-    """A plugin's file type with a from_toml of its own."""
-
-    type: Literal["own_file_materialize_test"] = "own_file_materialize_test"
-
-    @classmethod
-    def from_toml(cls, data, ctx):
-        raise NotImplementedError
-
-
-class _OwnEnvironment(EnvironmentArtifact):
-    """A plugin's environment type with a from_toml of its own."""
-
-    type: Literal["own_environment_materialize_test"] = "own_environment_materialize_test"
-
-    @classmethod
-    def from_toml(cls, data, ctx):
-        raise NotImplementedError
-
-
-class _OwnUniverse(EnvironmentUniverseArtifact):
-    """A plugin's universe type with a from_toml of its own."""
-
-    type: Literal["own_universe_materialize_test"] = "own_universe_materialize_test"
-
-    @classmethod
-    def from_toml(cls, data, ctx):
-        raise NotImplementedError
-
-
 class _DocumentOnly(Artifact):
     """A plugin's artifact type that is only a document, which a bundle has no writer for yet."""
 
@@ -152,7 +122,7 @@ def registries(monkeypatch):
     steps = {**Config().task_step_registry(), **{cls.type: cls for cls in (_Checked, _Writes, _Consuming)}}
     envs = {**Config().env_registry(), _OwnEnv.type: _OwnEnv}
     plugins = {cls.model_fields["type"].default: cls
-               for cls in (_PluginFile, _OwnFile, _OwnEnvironment, _OwnUniverse, _DocumentOnly)}
+               for cls in (_PluginFile, _DocumentOnly)}
     artifacts = {**Config().artifact_registry(), **plugins}
     monkeypatch.setattr(Config, "task_step_registry", lambda self: steps)
     monkeypatch.setattr(Config, "env_registry", lambda self: envs)
@@ -174,7 +144,8 @@ def _steps(root, steps):
 
 
 def _run(root, dry_run=False):
-    return materialize(plan_of(root), dry_run=dry_run)
+    plan = plan_of(root)
+    return materialize(plan, dry_run=dry_run, build_here=local_builds(plan))
 
 
 def _summary(materialization):
@@ -474,19 +445,20 @@ def test_an_agent_folder_with_a_dockerfile_is_built_and_the_agent_written_over_i
     _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
     image = f"{ROOT}/solver__agent_image"
     announced = []
+    plan = plan_of(bundle_dir)
 
-    first = materialize(plan_of(bundle_dir), on_build=lambda write: announced.append(write.id))
+    first = materialize(plan, on_build=lambda write: announced.append(write.id), build_here=local_builds(plan))
 
-    tag = f"{image_repository(image)}:bundle"
-    assert builds == [{"build": ("Dockerfile", ["Dockerfile", "run.sh"], tag, None),
-                       "put": (image, tag, ["Dockerfile", "run.sh"], "Dockerfile")}]
+    written = DockerImageArtifact.get(image, 1)
+    assert written.context_only
+    assert builds == [{"build": ("Dockerfile", ["Dockerfile", "run.sh"], written.image_name, None)}]
     assert announced == [image]
     assert {id: summary[:2] for id, summary in _summary(first).items() if "solver" in id} == {
         image: (1, False), f"{ROOT}/solver": (1, False)}
     agent = A2AAgent.get(f"{ROOT}/solver")
     assert (agent.docker_image_artifact.id, agent.docker_image_artifact.version) == (image, 1)
 
-    again = materialize(plan_of(bundle_dir), on_build=lambda write: announced.append(write.id))
+    again = materialize(plan, on_build=lambda write: announced.append(write.id), build_here=local_builds(plan))
 
     assert len(builds) == 1 and announced == [image]
     assert _summary(again)[image] == (1, True, ()) and _summary(again)[f"{ROOT}/solver"] == (1, True, ())
@@ -511,7 +483,6 @@ def test_an_image_is_built_from_the_files_the_ledger_hashes_so_a_reused_one_matc
 
     context = [".dockerignore", "Dockerfile", "agent.toml", "lib/run.sh", "run.sh"]
     assert [call["build"][1] for call in builds] == [context]
-    assert builds[0]["put"][2] == context
     assert again[f"{ROOT}/solver__agent_image"] == (1, True, ())
 
 
@@ -537,32 +508,29 @@ def test_an_image_written_as_its_build_context_is_uploaded_with_no_build_and_no_
     image = f"{ROOT}/solver__agent_image"
     announced = []
 
-    first = materialize(plan_of(bundle_dir), contexts=frozenset({image}), on_build=lambda write: announced.append(write.id))
+    materialize(plan_of(bundle_dir), on_build=lambda write: announced.append(write.id))
 
     written = DockerImageArtifact.get(image, 1)
     folder = bundle_dir / "agents/solver"
-    assert builds == [] and announced == [] and first.contexts == {image}
-    assert written.context_only and (written.dockerfile_path, written.platform) == ("Dockerfile", "linux/amd64")
-    assert written.source_digest == BuildContext.of(folder, folder / "Dockerfile").source_digest("linux/amd64")
+    assert builds == [] and announced == []
+    assert written.context_only and (written.dockerfile_path, written.platform) == ("Dockerfile", None)
+    assert written.source_digest == BuildContext.of(folder, folder / "Dockerfile").source_digest(None)
     assert A2AAgent.get(f"{ROOT}/solver").docker_image_artifact.version == 1
-    assert _summary(materialize(plan_of(bundle_dir), contexts=frozenset({image})))[image] == (1, True, ())
+    assert _summary(materialize(plan_of(bundle_dir)))[image] == (1, True, ())
 
 
-def test_an_image_switched_between_built_here_and_a_build_context_is_rewritten_with_its_agent(bundle_dir, builds):
+def test_an_image_is_one_version_whether_its_deploys_run_here_or_elsewhere(bundle_dir, builds):
     layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\nCOPY run.sh /\n", "agents/solver/run.sh": "echo hi\n"})
     _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
     image = f"{ROOT}/solver__agent_image"
     _run(bundle_dir)
 
-    as_context = _summary(materialize(plan_of(bundle_dir), contexts=frozenset({image})))
-    built_again = _summary(_run(bundle_dir))
+    elsewhere = _summary(materialize(plan_of(bundle_dir)))
+    here_again = _summary(_run(bundle_dir))
 
-    assert as_context[image] == (2, False, ("now written as a build context, built where it runs, not an image built "
-                                            "on this machine",))
-    assert as_context[f"{ROOT}/solver"] == (2, False, (f"artifact {image} is written anew (v1 → v2)",))
-    assert built_again[image] == (3, False, ("now written as an image built on this machine, not a build context, "
-                                             "built where it runs",))
-    assert len(builds) == 2
+    assert elsewhere[image] == elsewhere[f"{ROOT}/solver"] == (1, True, ())
+    assert here_again[image] == here_again[f"{ROOT}/solver"] == (1, True, ())
+    assert len(builds) == 1
 
 
 def test_a_dry_run_predicts_a_rebuild_and_its_agents_rewrite_without_building(bundle_dir, builds):
@@ -594,12 +562,12 @@ def test_an_agent_toml_edit_rebuilds_the_image_too_since_a_dockerfile_can_copy_i
     assert edited[f"{ROOT}/solver"][:2] == (2, False)
 
 
-def test_a_failed_build_is_a_bundle_problem_naming_the_agent(bundle_dir, builds, monkeypatch):
-    def fail(dockerfile, context, tag, *, platform):
+def test_a_failed_build_is_a_bundle_problem_naming_the_agent_and_writes_no_image(bundle_dir, builds, monkeypatch):
+    def fail(dockerfile, context, tag, *, platform, labels=None):
         output = "\n".join(f"#{n} step" for n in range(60))
         raise materialize_module.DockerBuildError(f"docker build of {tag} failed (exit 1):\n{output}\nERROR: failed to solve")
 
-    monkeypatch.setattr(materialize_module, "build_image", fail)
+    monkeypatch.setattr(host_images, "build_image", fail)
     layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\n"})
     _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
 
@@ -607,54 +575,41 @@ def test_a_failed_build_is_a_bundle_problem_naming_the_agent(bundle_dir, builds,
     lines = problem.splitlines()
     assert lines[0].startswith("agents/solver: docker build of ") and lines[0].endswith(" failed (exit 1):")
     assert lines[1:] == [*(f"#{n} step" for n in range(21, 60)), "ERROR: failed to solve"]
+    with pytest.raises(NotFoundError):
+        DockerImageArtifact.get(f"{ROOT}/solver__agent_image")
 
 
-def test_a_failed_push_is_a_bundle_problem_naming_the_agent(bundle_dir, builds, monkeypatch):
-    def fail(id, **kwargs):
-        raise RuntimeError("could not start the local registry on port 5000: port is already allocated")
-
-    monkeypatch.setattr(materialize_module.DockerImageArtifact, "put", fail)
+def test_an_image_the_ledger_reuses_is_built_again_once_this_machines_docker_no_longer_holds_it(bundle_dir, builds):
     layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\n"})
     _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
-
-    assert _problems(lambda: _run(bundle_dir)) == (
-        "agents/solver: could not start the local registry on port 5000: port is already allocated",)
-
-
-@_RUN_OR_DRY_RUN
-def test_an_image_to_build_without_docker_on_path_is_refused_before_anything_is_written(
-    bundle_dir, monkeypatch, dry_run,
-):
-    monkeypatch.setattr(materialize_module.shutil, "which", lambda name: None)
-    layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\n"})
-    _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
-
-    assert _problems(lambda: _run(bundle_dir, dry_run)) == (
-        "agents/solver: building its image from Dockerfile needs docker, and it isn't on PATH",)
-    assert not local_store().path.exists()
-
-
-def test_whether_an_image_needs_docker_is_decided_once_another_run_writing_it_is_done(bundle_dir, builds, monkeypatch):
-    """Another run may be building the image; once its lock is released, the ledger can reuse what it built."""
-    events = []
-    locked = materialize_module.materializing
-
-    @contextlib.contextmanager
-    def materializing(bundle, on_wait=None):
-        with locked(bundle, on_wait):
-            events.append("locked")
-            yield
-
-    monkeypatch.setattr(materialize_module, "materializing", materializing)
-    check = materialize_module._refuse_builds_without_docker
-    monkeypatch.setattr(materialize_module, "_refuse_builds_without_docker",
-                        lambda plan, ledger, contexts: events.append("docker checked") or check(plan, ledger, contexts))
-    layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\n"})
-    _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
-
+    image = f"{ROOT}/solver__agent_image"
     _run(bundle_dir)
+    host_images._built_from.__self__.clear()  # the builds fixture's Docker, pruned
 
-    assert events == ["locked", "docker checked"]
+    assert _summary(_run(bundle_dir, dry_run=True))[image] == (1, True, ()) and len(builds) == 1
+    assert _summary(_run(bundle_dir))[image] == (1, True, ()) and len(builds) == 2
+
+
+def test_a_build_context_that_cant_be_written_is_a_bundle_problem_naming_the_agent(bundle_dir, builds, monkeypatch):
+    def fail(id, **kwargs):
+        raise RuntimeError("the object store is unreachable")
+
+    monkeypatch.setattr(materialize_module.DockerImageArtifact, "put_context", fail)
+    layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\n"})
+    _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
+
+    assert _problems(lambda: _run(bundle_dir)) == ("agents/solver: the object store is unreachable",)
+
+
+def test_an_image_built_here_without_docker_on_path_is_one_problem_and_writes_no_image(bundle_dir, monkeypatch):
+    monkeypatch.setenv("PATH", "")
+    layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\n"})
+    _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
+
+    (problem,) = _problems(lambda: _run(bundle_dir))
+    assert problem.startswith("agents/solver: docker build of ") and problem.endswith("docker is not on PATH")
+    with pytest.raises(NotFoundError):
+        DockerImageArtifact.get(f"{ROOT}/solver__agent_image")
 
 
 @_RUN_OR_DRY_RUN
@@ -679,17 +634,6 @@ def test_a_plugin_file_type_is_written_when_it_writes_as_file_artifact_does(bund
     assert _summary(_run(bundle_dir))[f"{ROOT}/greeting"] == (1, False, ("new",))
     assert Artifact.get(f"{ROOT}/greeting").type == "plugin_file_materialize_test"
     assert _summary(_run(bundle_dir))[f"{ROOT}/greeting"] == (1, True, ())
-
-
-@pytest.mark.parametrize("type_, written", [
-    ("own_file_materialize_test", "an own_file_materialize_test artifact"),
-    ("own_environment_materialize_test", "an own_environment_materialize_test artifact"),
-    ("own_universe_materialize_test", "an own_universe_materialize_test artifact"),
-])
-def test_a_plugin_type_with_a_from_toml_of_its_own_is_refused(bundle_dir, type_, written):
-    (bundle_dir / "artifacts/greeting/artifact.toml").write_text(f'type = "{type_}"\n')
-
-    assert _problems(lambda: _run(bundle_dir)) == (f"artifacts/greeting: writing {written} isn't supported yet",)
 
 
 def test_an_eval_is_rewritten_only_when_it_changes(bundle_dir):
@@ -957,7 +901,7 @@ def test_a_second_run_of_the_bundle_waits_for_the_first_to_finish_writing(bundle
         import pathlib, time
         from agent_env.bundle import parse_bundle
         from agent_env.bundle.ledger import materializing
-        with materializing(parse_bundle(pathlib.Path({str(bundle_dir)!r}))):
+        with materializing(entry.id for entry in parse_bundle(pathlib.Path({str(bundle_dir)!r})).entries):
             pathlib.Path({str(held)!r}).write_text("held")
             time.sleep(1.5)
             pathlib.Path({str(done)!r}).write_text("done")

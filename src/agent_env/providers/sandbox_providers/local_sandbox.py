@@ -38,6 +38,7 @@ except ImportError:  # Windows, which agent-env does not target.
 from agent_env import config
 from agent_env.attribution import Attribution
 from agent_env.config.paths import state_root
+from agent_env.providers.sandbox_providers.host_images import build_here, built_here
 from agent_env.providers.sandbox_providers.sandbox import SANDBOX_LABEL, NetworkPolicy, VmSandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_CONTAINER,
@@ -85,12 +86,19 @@ _SANDBOX_ENV = "AGENTENV_SANDBOX"
 
 # Where a container finds the local transfer CA's trust files, and the variables that point TLS clients at them:
 # SSL_CERT_FILE replaces a client's roots, so it gets the public roots plus the CA; NODE_EXTRA_CA_CERTS adds.
-_TRUST_DIR = "/etc/agentenv"
-LOCAL_TRUST_ENV = {
-    "SSL_CERT_FILE": f"{_TRUST_DIR}/ca-bundle.pem",
-    "REQUESTS_CA_BUNDLE": f"{_TRUST_DIR}/ca-bundle.pem",
-    "NODE_EXTRA_CA_CERTS": f"{_TRUST_DIR}/ca.pem",
-}
+LOCAL_TRUST_DIR = "/etc/agentenv"
+
+
+def trust_env(directory: str) -> dict[str, str]:
+    """The variables that point TLS clients at the local transfer CA's trust files in ``directory``."""
+    return {
+        "SSL_CERT_FILE": f"{directory}/ca-bundle.pem",
+        "REQUESTS_CA_BUNDLE": f"{directory}/ca-bundle.pem",
+        "NODE_EXTRA_CA_CERTS": f"{directory}/ca.pem",
+    }
+
+
+LOCAL_TRUST_ENV = trust_env(LOCAL_TRUST_DIR)
 
 # Marker dropped in the work dir when this sandbox runs a container, so a later get_sandbox()
 # (post-run teardown reconstructs the sandbox from disk) knows it owns that container.
@@ -204,6 +212,21 @@ class LocalSandbox(VmSandbox):
         self._work_dir = work_dir or Path(
             tempfile.mkdtemp(prefix=f"agent-env-{self.sandbox_id}-", dir=_local_sandbox_root())
         )
+
+    async def build_images(self, artifacts: list) -> None:
+        """Build each on this machine's Docker, which runs this sandbox's containers: natively, once per sources. One
+        given a platform of its own, as a remote VM records, builds as a VM does, for that platform."""
+        if self.platform is not None:
+            await super().build_images(artifacts)
+            return
+        for artifact in artifacts:
+            await build_here(artifact)
+
+    async def pull_images(self, image_names: list[str]) -> None:
+        """Pull each image but one this machine built from a build context, which no registry holds."""
+        built = await asyncio.gather(*(asyncio.to_thread(built_here, name) for name in image_names))
+        if pulled := [name for name, here in zip(image_names, built) if not here]:
+            await super().pull_images(pulled)
 
     def host_port(self, port: int) -> int:
         """The allocated host port for a published container port (identity if unmapped)."""
@@ -513,7 +536,7 @@ async def start_trusting(sandbox: VmSandbox, container: str, trust_dir: Path) ->
     reach it, then start it. A container that cannot be given the files or started is removed, so its name is free
     for the next attempt."""
     try:
-        await sandbox.copy_trust_dir_into_container(trust_dir, container, _TRUST_DIR)
+        await sandbox.copy_trust_dir_into_container(trust_dir, container, LOCAL_TRUST_DIR)
         await sandbox.exec_script(f"docker start {shlex.quote(container)} > /dev/null")
     except Exception:
         await sandbox.exec_script(f"docker rm -f {shlex.quote(container)} >/dev/null 2>&1 || true")
@@ -545,8 +568,10 @@ class LocalSandboxProvider(SandboxProvider):
 
     EXTRA_CONTAINER_RUN_ARGS = " ".join(f"--add-host {entry}" for entry in _EXTRA_HOSTS)
     ON_THIS_MACHINE = True
-    # An agent's sandbox is a container from its image's name, though a VM it creates (create_vm) loads images.
-    SANDBOX_ACCEPTS = Accepts.NAME
+    # Its containers start from an image's name, or one it builds first from the image's build context (prepare_image);
+    # a VM it creates (create_vm) loads images.
+    SANDBOX_ACCEPTS = Accepts.NAME_OR_CONTEXT
+    CONTAINER_ACCEPTS = Accepts.NAME_OR_CONTEXT
 
     def url_from_sandbox(self, url: str) -> str:
         return self.get_external_url(url)
@@ -637,6 +662,11 @@ class LocalSandboxProvider(SandboxProvider):
         args = self._container_args(sandbox, image_name=image_name, port=port, env={**LOCAL_TRUST_ENV, **env})
         await sandbox.exec_script(f"docker create {args} > /dev/null")
         await start_trusting(sandbox, sandbox.container_name, trust_dir)
+
+    async def prepare_image(self, image: Any, *, attribution: Optional[Attribution] = None) -> None:
+        """Build a context-only image on this machine, whose containers the local provider starts by name."""
+        if image.context_only:
+            await build_here(image)
 
     async def create_sandbox(
         self,

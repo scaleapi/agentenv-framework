@@ -22,10 +22,18 @@ from typing import Callable, ClassVar, Optional
 import httpx
 
 from agent_env.a2a_agent import A2AAgent
-from agent_env.providers.sandbox_providers.local_sandbox import host_url_for
+from agent_env.config import get_config
+from agent_env.entity.scopes import FieldScope
+from agent_env.providers.sandbox_providers.local_sandbox import (
+    LOCAL_TRUST_DIR,
+    LOCAL_TRUST_ENV,
+    host_url_for,
+    local_grant_trust,
+    trust_env,
+)
 from agent_env.store.base import NotFoundError
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)
@@ -57,6 +65,7 @@ def _build_param_resolvers(
     workspace_dir: Optional[str] = None,
     litellm_api_key_override: Optional[str] = None,
     sandbox_type: Optional[str] = None,
+    trust_lines: str = "",
 ) -> dict[str, Callable[[], str]]:
     """Per-install registry: required_params name -> zero-arg resolver returning the raw value.
 
@@ -94,16 +103,21 @@ def _build_param_resolvers(
         "agent_name":     lambda: agent_name,
         "workspace_dir":  _resolve_workspace_dir,
         # Config-sourced (from agent-env config)
-        "litellm_api_key":   lambda: litellm_api_key_override or config.get_litellm_api_key(),
+        "litellm_api_key":   lambda: (config.resolve_reference(litellm_api_key_override) if litellm_api_key_override
+                                      else config.get_litellm_api_key()),
         "litellm_base_url":  lambda: host_url_for(config.get_litellm_base_url(), sandbox_type),
         # A JSON object, {} when [model.headers] is unset.
         "litellm_extra_headers": lambda: json.dumps(config.get_model_headers(config.get_litellm_base_url())),
+        # KEY='VALUE' lines pointing TLS clients at the local transfer CA, which grants on a sandbox on this machine
+        # need; empty elsewhere. Asking for it puts the CA's files where the lines point.
+        "trust_env":         lambda: trust_lines,
     }
 
 
 class InstallAgentTaskStep(TaskStep):
     type: ClassVar[str] = "install_agent"
     entity_refs = (EntityRef.agent("a2a_agent_id", version_field="a2a_agent_version"),)
+    field_scopes = {**TaskStep.field_scopes, "a2a_agent_id": FieldScope.USER, "a2a_agent_version": FieldScope.USER}
 
     def __init__(
         self,
@@ -111,7 +125,7 @@ class InstallAgentTaskStep(TaskStep):
         version: Optional[int],
         sandbox_name: str,
         container_name: Optional[str] = None,
-        a2a_agent_id: str = "",
+        a2a_agent_id: Optional[str] = None,
         a2a_agent_version: Optional[int] = None,
         agent_name: str = TaskStep.DEFAULT_AGENT_NAME,
         a2a_port: Optional[int] = None,
@@ -120,8 +134,6 @@ class InstallAgentTaskStep(TaskStep):
         fail_task_on_error: bool = True,
     ):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
-        if not a2a_agent_id:
-            raise ValueError("a2a_agent_id is required")
         self.sandbox_name = sandbox_name
         self.container_name = container_name
         self.a2a_agent_id = a2a_agent_id
@@ -147,7 +159,7 @@ class InstallAgentTaskStep(TaskStep):
             **cls._base_from_dict(data),
             sandbox_name=data["sandbox_name"],
             container_name=data.get("container_name"),
-            a2a_agent_id=data["a2a_agent_id"],
+            a2a_agent_id=data.get("a2a_agent_id"),
             a2a_agent_version=data.get("a2a_agent_version"),
             agent_name=data.get("agent_name", TaskStep.DEFAULT_AGENT_NAME),
             a2a_port=data.get("a2a_port"),
@@ -156,9 +168,10 @@ class InstallAgentTaskStep(TaskStep):
 
     def preflight(self) -> list[str]:
         """An agent with no build context to install, reported at save instead. One the store can't give is left to the
-        run, whose ``a2a_agent_id`` override can name another, so a task saved naming a placeholder still saves."""
+        run, whose ``a2a_agent_id`` override can name another, so a task saved naming a placeholder still saves. A step
+        naming no agent installs the configured default."""
         try:
-            agent = A2AAgent.get(self.a2a_agent_id, self.a2a_agent_version)
+            agent = A2AAgent.get(self.a2a_agent_id or get_config().get_default_a2a_agent_id(), self.a2a_agent_version)
         except (NotFoundError, ValueError, KeyError, TypeError):
             return []
         problem = _install_problem(agent)
@@ -170,7 +183,7 @@ class InstallAgentTaskStep(TaskStep):
             build_sandbox_provider,
             get_sandbox_provider,
         )
-        from agent_env.config import ConfigError, get_config
+        from agent_env.config import ConfigError
 
         existing = next((a for a in context.deployed_agents if a.agent_name == self.agent_name), None)
         if existing is not None:
@@ -208,7 +221,7 @@ class InstallAgentTaskStep(TaskStep):
         # Honor `--a2a-agent-id` override (same pattern as DeployAgentTaskStep) — lets the
         # caller swap which agent gets installed without rewriting the task definition.
         user_overrides = context.metadata.get("user_overrides", {})
-        a2a_agent_id = user_overrides.get("a2a_agent_id") or self.a2a_agent_id
+        a2a_agent_id = user_overrides.get("a2a_agent_id") or self.a2a_agent_id or get_config().get_default_a2a_agent_id()
         agent = A2AAgent.get(a2a_agent_id, self.a2a_agent_version)
         if problem := _install_problem(agent):
             raise RuntimeError(problem)
@@ -247,14 +260,18 @@ class InstallAgentTaskStep(TaskStep):
         # Stage the agent build context onto the VM. The install_commands docker-cp from this dir.
         work_dir = f"/tmp/install-agent-{sandbox.scoped_name(self.agent_name)}"
         agent_ctx_tar = f"{work_dir}/agent-ctx.tar.gz"
-        await sandbox.exec_script(f"rm -rf {shlex.quote(work_dir)} && mkdir -p {shlex.quote(work_dir)}")
+        # Private, and made afresh: /tmp is shared, and a folder another user made in its place would hold the install.
+        await sandbox.exec_script(f"rm -rf {shlex.quote(work_dir)} && mkdir -m 0700 {shlex.quote(work_dir)}")
         logger.info(f"Downloading agent build context {agent.docker_image_artifact.build_context_object_url} -> {agent_ctx_tar}")
         await sandbox.load_object_file(agent.docker_image_artifact.build_context_object_url, agent_ctx_tar)
+
+        container = sandbox.scoped_name(self.container_name) if self.container_name else None
+        trust_lines = await self._trust_lines(sandbox, container, work_dir) if "trust_env" in required_params else ""
 
         # Resolve each required_param via the registry, shlex.quote so str.format
         # substitution produces shell-safe tokens.
         resolvers = _build_param_resolvers(
-            container_name=sandbox.scoped_name(self.container_name) if self.container_name else None,
+            container_name=container,
             work_dir=work_dir,
             agent_ctx_tar=agent_ctx_tar,
             # On the host, the agent listens where the sandbox publishes its port, which is where its URL points.
@@ -265,6 +282,7 @@ class InstallAgentTaskStep(TaskStep):
             litellm_api_key_override=user_overrides.get("litellm_api_key"),
             # A host install on a local sandbox runs on this machine itself, not in a container.
             sandbox_type=None if host_mode else sandbox.type,
+            trust_lines=trust_lines,
         )
         resolved: dict[str, str] = {}
         for name in required_params:
@@ -320,6 +338,23 @@ class InstallAgentTaskStep(TaskStep):
             logger.info(f"Set context.default_agent_model to '{default_model}'")
 
         return context
+
+    @staticmethod
+    async def _trust_lines(sandbox, container: Optional[str], work_dir: str) -> str:
+        """The ``trust_env`` lines for an agent installed on ``sandbox``: on a sandbox on this machine, whose agents use
+        the local transfer CA's grants, the CA's files are copied into ``container``, or onto the host under
+        ``work_dir``, and the lines point there. Nothing elsewhere."""
+        if not sandbox.ON_THIS_MACHINE or (trust_dir := await asyncio.to_thread(local_grant_trust)) is None:
+            return ""
+        if container is not None:
+            await sandbox.copy_trust_dir_into_container(trust_dir, container, LOCAL_TRUST_DIR)
+            env = LOCAL_TRUST_ENV
+        else:
+            directory = f"{work_dir}/trust"
+            for path in sorted(trust_dir.iterdir()):
+                await sandbox.write_host_file(await asyncio.to_thread(path.read_bytes), f"{directory}/{path.name}")
+            env = trust_env(directory)
+        return "".join(f"{name}={shlex.quote(value)}\n" for name, value in env.items())
 
     def _register_instance(self, agent, a2a_url: str, ds, agent_card: dict):
         """Register the installed agent in the instance store, same as A2AAgent.deploy(),

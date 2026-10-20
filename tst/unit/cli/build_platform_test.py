@@ -9,7 +9,7 @@ from click.testing import CliRunner
 
 from agent_env.cli import cli
 from agent_env.env.envs.website_browser import WEBSITE_BROWSER_IMAGE_TAG
-from agent_env.utils.docker_build import DockerBuildError
+from agent_env.utils.docker.build import DockerBuildError
 
 gateway = importlib.import_module("agent_env.cli.env.gateway")  # the packages export the click commands
 service_db = importlib.import_module("agent_env.cli.env.service_db")

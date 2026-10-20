@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, ClassVar, Optional
 
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
 
 if TYPE_CHECKING:
     from agent_env.eval.store import EvalQuery

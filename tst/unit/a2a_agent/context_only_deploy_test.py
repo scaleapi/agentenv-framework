@@ -1,13 +1,13 @@
-"""An agent whose image is only a build context deploys only where it's built, in a VM or by Modal: a provider that runs an
-agent in a container by its image's name refuses it before creating anything, and Modal is told of it first. An image a
-provider can't get otherwise, such as one a sandbox elsewhere would pull from this machine's registry, is refused before
-anything is created too."""
+"""An agent whose image is only a build context deploys only where it's built, in a VM, by Modal or with this machine's
+Docker: a provider that runs an agent in a container by its image's name refuses it before creating anything, and the
+local provider and Modal are told of it first. An image a provider can't get otherwise, such as one a sandbox elsewhere
+would pull from this machine's registry, is refused before anything is created too."""
 
 import pytest
 
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
-from agent_env.providers.sandbox_providers import sandbox_provider
+from agent_env.providers.sandbox_providers import local_sandbox, sandbox_provider
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
@@ -18,9 +18,21 @@ class _Created(Exception):
     """Raised by a fake provider once asked for a sandbox, which is as far as a test needs to go."""
 
 
-class _LocalProvider(LocalSandboxProvider):
+class _ByNameProvider(SandboxProvider):
+    """A plugin's provider that runs an agent's image by name, in a container of its own."""
+
     async def create_sandbox(self, **_):
         raise AssertionError("an image that is only a build context was run by name")
+
+
+class _LocalProvider(LocalSandboxProvider):
+    def __init__(self, steps):
+        super().__init__()
+        self.steps = steps
+
+    async def create_sandbox(self, **kwargs):
+        self.steps.append(("create", kwargs["image_name"]))
+        raise _Created
 
 
 class _VmProvider(SandboxProvider):
@@ -60,15 +72,15 @@ def litellm(monkeypatch):
     monkeypatch.setenv("LITELLM_BASE_URL", "http://litellm.example/v1")
 
 
-BY_NAME = ("with _LocalProvider, which runs an agent's image by name: 'solver-image' v2 is only a build context, which has "
-           "to be built, not pulled")
+BY_NAME = ("with _ByNameProvider, which runs an agent's image by name: 'solver-image' v2 is only a build context, which "
+           "has to be built, not pulled")
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("provider, refusal", [
-    (_LocalProvider(), BY_NAME),
-    (ChainedSandboxProvider([_LocalProvider(), _LocalProvider()]), f"{BY_NAME}; nor {BY_NAME}"),
-], ids=["local", "chain-of-locals"])
+    (_ByNameProvider(), BY_NAME),
+    (ChainedSandboxProvider([_ByNameProvider(), _ByNameProvider()]), f"{BY_NAME}; nor {BY_NAME}"),
+], ids=["by-name", "chain-of-by-name"])
 async def test_a_provider_that_runs_the_agent_by_name_refuses_it(monkeypatch, local_stores, litellm, provider, refusal):
     monkeypatch.setattr(sandbox_provider, "build_sandbox_provider", lambda name: provider)
 
@@ -80,12 +92,28 @@ async def test_a_provider_that_runs_the_agent_by_name_refuses_it(monkeypatch, lo
 async def test_a_chain_skips_a_provider_that_runs_the_agent_by_name_for_one_that_builds_it(monkeypatch, local_stores,
                                                                                            litellm, caplog):
     monkeypatch.setattr(sandbox_provider, "build_sandbox_provider",
-                        lambda name: ChainedSandboxProvider([_LocalProvider(), _VmProvider()]))
+                        lambda name: ChainedSandboxProvider([_ByNameProvider(), _VmProvider()]))
 
     with pytest.raises(RuntimeError, match=r"All 1 providers failed: _VmProvider: _Created\(\)"):
         await A2AAgent(id="solver", version=1, docker_image_artifact=IMAGE).deploy(sandbox_type="any")
-    assert ("sandbox_provider_skipped provider=_LocalProvider: which runs an agent's image by name: 'solver-image' v2 is "
-            "only a build context") in caplog.text
+    assert ("sandbox_provider_skipped provider=_ByNameProvider: which runs an agent's image by name: 'solver-image' v2 "
+            "is only a build context") in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_the_local_provider_builds_the_image_with_this_machines_docker_before_it_runs_it(monkeypatch, local_stores,
+                                                                                               litellm):
+    steps = []
+
+    async def build_here(image):
+        steps.append(("build", image.image_name))
+
+    monkeypatch.setattr(local_sandbox, "build_here", build_here)
+    monkeypatch.setattr(sandbox_provider, "build_sandbox_provider", lambda name: _LocalProvider(steps))
+
+    with pytest.raises(_Created):
+        await A2AAgent(id="solver", version=1, docker_image_artifact=IMAGE).deploy(sandbox_type="any")
+    assert steps == [("build", IMAGE.image_name), ("create", IMAGE.image_name)]
 
 
 @pytest.mark.asyncio

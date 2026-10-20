@@ -702,7 +702,7 @@ async def test_cancel_during_the_undo_leaves_a_consistent_record(store, monkeypa
         await run_task
 
     inst = store.get(ctx.instance_id)
-    assert inst.status == "failed"
+    assert inst.status == "cancelled"
     # Stored record and live context agree: the span is gone from both.
     assert inst.completed_steps == []
     assert inst.context["deployed_envs"] == [] and ctx.deployed_envs == []
@@ -742,6 +742,13 @@ async def test_recovered_failure_is_marked_retried(store):
     fs = result.metadata["failed_steps"]
     assert [f["step_id"] for f in fs] == ["s1"]
     assert all(f.get("retried") for f in fs)
+
+
+@pytest.mark.asyncio
+async def test_a_run_drops_the_recorded_failures_of_the_steps_it_runs_again(store):
+    context = TaskStepContext(metadata={"failed_steps": [{"step_id": "s0", "error": "earlier"}, {"step_id": "x"}]})
+    await Task(id="t", version=1, steps=[_FakeDeployEnv("s0")]).run(context=context)
+    assert context.metadata["failed_steps"] == [{"step_id": "x"}]
 
 
 def test_rolled_back_sandboxes_is_the_difference_between_stored_and_replayed():
@@ -920,6 +927,48 @@ def test_current_epoch_write_lands_after_an_undo(store):
     _record(store, iid, "s0", {}, {"s0": 2}, epoch=1)
     d = _doc(store, iid)
     assert d["context"]["metadata"] == {"s0": 2} and d["attempt_epoch"] == 1
+
+
+class _Gated:
+    type = "gated"
+
+    def __init__(self, id: str, gate: asyncio.Event, fails: bool = False):
+        self.id, self.depends_on, self.retry_config, self.fail_task_on_error = id, None, None, True
+        self._gate, self._fails = gate, fails
+
+    async def execute(self, context: TaskStepContext) -> TaskStepContext:
+        await self._gate.wait()
+        if self._fails:
+            raise RuntimeError("superseded boom")
+        context.metadata[self.id] = "superseded"
+        return context
+
+
+@pytest.mark.asyncio
+async def test_an_attempt_a_re_register_superseded_writes_nothing_to_the_run(store):
+    gate = asyncio.Event()
+    task = Task(id="t", version=1, steps=[_Gated("s0", gate), _Gated("s1", gate, fails=True)])
+    superseded = asyncio.create_task(task.run(instance_id="i"))
+    while _doc(store, "i") is None:
+        await asyncio.sleep(0)
+    store.upsert_instance("i", "t", 1, 2)
+    gate.set()
+    with pytest.raises(RuntimeError, match="superseded boom"):
+        await superseded
+    d = _doc(store, "i")
+    assert (d["status"], d["completed_steps"], d["context"]["metadata"]) == ("running", [], {})
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_run_is_recorded_cancelled(store):
+    run = asyncio.create_task(Task(id="t", version=1, steps=[_Gated("s0", asyncio.Event())]).run(instance_id="i"))
+    while _doc(store, "i") is None:
+        await asyncio.sleep(0)
+    run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run
+    d = _doc(store, "i")
+    assert (d["status"], d["error"]) == ("cancelled", "cancelled")
 
 
 # --------------------------------------------------------------------------- #

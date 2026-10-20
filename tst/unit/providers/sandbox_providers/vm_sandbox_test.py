@@ -718,7 +718,7 @@ async def test_a_context_only_image_is_built_in_the_vm_from_its_context(signing_
     assert sandbox.scripts == [
         f"rm -rf {work} && mkdir -p {work}/context",
         f"curl -fsSL {sandbox_module.CURL_RETRY_FLAGS} https://signed/build-context.tar.gz -o {work}/context.tar.gz",
-        f"tar -xzf {work}/context.tar.gz -C {work}/context",
+        f"tar -xzmf {work}/context.tar.gz -C {work}/context",
         f"cd {work}/context && docker build --platform linux/amd64 -f Dockerfile -t local/a-0123456789ab:v1 .",
         f"rm -rf {work}",
     ]
@@ -763,6 +763,20 @@ async def test_a_build_takes_the_recorded_dockerfile_and_platform_else_linux_amd
     builds = [script for script in sandbox.scripts if "docker build" in script]
     assert "docker build --platform linux/amd64 -f docker/app.Dockerfile -t local/a-0123456789ab:v1 ." in builds[0]
     assert "docker build --platform linux/arm64 -f Dockerfile -t local/b-0123456789ab:v1 ." in builds[1]
+
+
+@pytest.mark.asyncio
+async def test_a_context_recording_no_platform_is_built_for_the_vms_own(signing_store):
+    """As a bundle writes its images: a VM of any platform runs one, built for its own."""
+    image = _context_image("a", "sha256:" + "1" * 64, platform=None)
+    arm = _RecordingVmSandbox()
+    arm.platform = "linux/arm64"
+
+    assert arm.load_problems([image]) == []
+    await arm.load_docker_images([image])
+
+    assert any("docker build --platform linux/arm64 -f Dockerfile -t local/a-0123456789ab:v1 ." in script
+               for script in arm.scripts)
 
 
 class _BuildFailsVm(_RecordingVmSandbox):
@@ -824,7 +838,7 @@ async def test_a_build_that_fails_fetching_an_image_runs_once_more(signing_store
 
     builds = [script for script in sandbox.scripts if "docker build" in script]
     assert len(builds) == 2 and builds[0] == builds[1]
-    assert sum(script.startswith("tar -xzf") for script in sandbox.scripts) == 1
+    assert sum(script.startswith("tar -xzmf") for script in sandbox.scripts) == 1
 
 
 @pytest.mark.asyncio

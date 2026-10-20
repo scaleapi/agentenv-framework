@@ -14,7 +14,7 @@ marks, or contributor names to endorse or promote Scale AI, or related products.
 
 ## Python dependencies
 
-The runtime dependencies of `agentenv-framework` and its `aws`, `explorer`, `gcp`, `sail`, `tensorlake` and `tenki` extras, at the versions resolved in `uv.lock`. Development-only dependencies are not listed.
+The runtime dependencies of `agentenv-framework` and its `aws`, `explorer`, `gcp`, `sail`, `tensorlake`, `tenki` and `boxd` extras, at the versions resolved in `uv.lock`. Development-only dependencies are not listed.
 
 ### a2a-sdk 0.3.26
 
@@ -85,6 +85,13 @@ The runtime dependencies of `agentenv-framework` and its `aws`, `explorer`, `gcp
 - Copyright: Copyright 2012-2022 Amazon.com, Inc. or its affiliates. All Rights Reserved.; Copyright 2013 Kenneth Reitz; Copyright 2008-2011 Andrey Petrov and contributors (see CONTRIBUTORS.txt),
 - Source: <https://github.com/boto/botocore>
 - [License text 6](#license-text-6), [License text 8](#license-text-8)
+
+### boxd 0.2.17
+
+- License: MIT
+- Copyright: Copyright (c) 2026 Azin
+- Source: <https://pypi.org/project/boxd/0.2.17/>
+- [License text 72](#license-text-72)
 
 ### bracex 3.0.1
 
@@ -7771,4 +7778,29 @@ SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
 CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+### License text 72
+
+```text
+MIT License
+
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```

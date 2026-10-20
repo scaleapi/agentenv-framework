@@ -30,17 +30,17 @@ LAYOUT = {
     ]),
 }
 
-# Recorded by agentenv-framework 0.9.1278.
+# Recorded at SCHEME 2, which writes every image the bundle builds as its build context.
 RECORDED = {
-    "@local/~/triage/tickets__env_image": "sha256:b381bf1c841f024fe2dfeabb08e5a10cf2b3cc596563ba3e6ea5c6798af1c868",
-    "@local/~/triage/tickets": "sha256:724cfb95eed4f78c7f77dc1c94507277217860bcce6a773bc3156e77bc2f8521",
-    "@local/~/triage/solver__agent_image": "sha256:00fb2164bc6e1d8230ef6e2d437f640ba853acde7ab7c4f13485d3fb1b48d5d6",
-    "@local/~/triage/solver": "sha256:54bcabc92b285434ad23af91e2dcf1b04700d73a819016b1e62b66f7d0f3ec0e",
-    "@local/~/triage/greeting": "sha256:e0047a71d6e34c6f390f6b6bf416ff54765bbbc390b2bd7f34432ee79a691e66",
-    "@local/~/triage/note": "sha256:3e9de21964b7c4e78a240f8f7aaafb66a0f04a9a430b33b6e54b9869c9001a9d",
-    "@local/~/triage/shelf": "sha256:ab0dd7c0b9c41312caeb9e012a31e4b640d0c626ddf005a5d7607824f36aa674",
-    "@local/~/triage/t": "sha256:056ad6e1030f251c2a6f9e144270fd53d9053c5d4264e0654ba8e547b10abe7a",
-    "@local/~/triage/u": "sha256:f8d5445a95fed8bf4d03b713fa8f545b1a8da847db02c22a3806eec39e26db29",
+    "@local/~/triage/tickets__env_image": "sha256:c76d8bd3706e9785ff464cc56fd7cf0b2afd968003a1661568d36e2abefa70dd",
+    "@local/~/triage/tickets": "sha256:0732f87377c46dc5e0238adb4cadc705dc814fb89825536cdc83b28b086a9b33",
+    "@local/~/triage/solver__agent_image": "sha256:6d78d7ba2266a8144537f8493099b5b5b9440a20d4d5d806f9cddb39de443436",
+    "@local/~/triage/solver": "sha256:ef703cb708fba45b796f9413654cd0c8579ca4f6268cdedf177068619b1ad645",
+    "@local/~/triage/greeting": "sha256:386ee0e6beef93a08f3816336de4ae136ab76a6c2136159c430599728ca91c0e",
+    "@local/~/triage/note": "sha256:f427863a7d913875a1b87f10ea136e9bc50ec496bcaec277b11927f19ae3e6cd",
+    "@local/~/triage/shelf": "sha256:53359d8af25aec8090b42560071e31d8a15023be27148189f8376fedf3062955",
+    "@local/~/triage/t": "sha256:3477937456f6da7403b62c98f2e76d695349887aa8d17076542f21be277c141d",
+    "@local/~/triage/u": "sha256:b264dad989f8de065f0ea4026cab0dc67d8a51ad73621380bb9ed22ada0e51f2",
 }
 
 

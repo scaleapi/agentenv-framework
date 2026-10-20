@@ -4,6 +4,7 @@ from . import client
 from .preflight import intake_fit_check
 from .tool_client import ToolResult, ToolSession, ToolSessionError
 from .agent_env_environment import (
+    HIDDEN_BY_DEFAULT_META_KEY,
     AgentEnvApplication,
     AgentEnvEnvironment,
     AgentEnvFastMCPApplication,
@@ -97,6 +98,7 @@ __all__ = [
     "bound",
     "ROLE_META_KEY",
     "SESSION_META_KEY",
+    "HIDDEN_BY_DEFAULT_META_KEY",
     "ROLE_HEADER",
     "DEFAULT_ROLE",
     "EnvironmentCapabilities",

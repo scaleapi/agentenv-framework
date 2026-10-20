@@ -18,7 +18,7 @@ from agent_env.env import legacy_protocol
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.providers.sandbox_providers import sandbox
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox
-from agent_env.utils.docker_build import normalize_platform
+from agent_env.utils.docker.build import normalize_platform
 from tst.integration.env.envs.server_env_local_test import local_stack as local_stack
 from tst.integration.store.local_parallel_deploy_test import _docker, _seed_bootstrap_envs
 
@@ -47,6 +47,20 @@ async def test_an_image_that_is_only_a_build_context_is_built_on_the_vm(local_st
     image = DockerImageArtifact.put_context(f"ctx-items-{uid}", description="build context e2e",
                                             context_path=str(_items_context(tmp_path / "items")),
                                             dockerfile_path="Dockerfile", platform=vm_platform)
+
+    await _deploys_and_answers(image, uid)
+
+    assert f"Building {image.image_name} from its build context, for {vm_platform}..." in caplog.messages
+
+
+@pytest.mark.asyncio
+async def test_a_build_context_recording_no_platform_is_built_for_the_vms(local_stack, vm_platform, tmp_path, caplog):
+    """As a bundle writes its images: a VM of either platform, such as an arm64 SmolVM, builds one for its own."""
+    _seed_bootstrap_envs()
+    uid = uuid.uuid4().hex[:8]
+    image = DockerImageArtifact.put_context(f"ctx-items-{uid}", description="build context e2e",
+                                            context_path=str(_items_context(tmp_path / "items")),
+                                            dockerfile_path="Dockerfile", platform=None)
 
     await _deploys_and_answers(image, uid)
 

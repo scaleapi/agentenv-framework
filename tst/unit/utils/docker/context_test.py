@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_env.utils.build_context import BuildContext, extract, ignore_file
+from agent_env.utils.docker.context import BuildContext, extract, ignore_file
 
 
 def _tree(root: Path, files: dict[str, str], executable: tuple[str, ...] = ()) -> Path:
@@ -79,6 +79,16 @@ def test_a_dockerfiles_own_ignore_file_replaces_the_contexts(tmp_path):
 
     assert {entry.name for entry in context.entries} >= {"app/main.py", "Dockerfile.dockerignore"}
     assert not any(entry.name.startswith("data") for entry in context.entries)
+
+
+def test_the_ignore_file_is_read_as_docker_reads_it_its_bom_dropped_and_a_line_opening_with_a_hash_a_comment(tmp_path):
+    # docker build sends "# notes.txt" and leaves out a.log and "#raw.txt" for this ignore file.
+    root = _tree(tmp_path / "ctx", {**SERVER, ".dockerignore": "﻿*.log\n# notes.txt\n  #raw.txt\n", "a.log": "",
+                                    "# notes.txt": "", "#raw.txt": ""})
+
+    names = {entry.name for entry in BuildContext.of(root, root / "Dockerfile").entries}
+
+    assert "# notes.txt" in names and "a.log" not in names and "#raw.txt" not in names
 
 
 def test_what_the_os_and_python_leave_behind_is_dropped(tmp_path):
@@ -215,10 +225,10 @@ def _member(name: str, kind: bytes = tarfile.REGTYPE, linkname: str = "") -> tar
 
 
 @pytest.mark.parametrize("member, problem", [
-    (_member("hard", tarfile.LNKTYPE, "Dockerfile"), "is neither a file, a folder nor a link"),
     (_member("pipe", tarfile.FIFOTYPE), "is neither a file, a folder nor a link"),
     (_member("../outside"), "would be extracted to"),
-], ids=["hard link", "fifo", "name leading out"])
+    (_member("hard", tarfile.LNKTYPE, "../Dockerfile"), "is a hard link to '../Dockerfile', outside it"),
+], ids=["fifo", "name leading out", "hard link leading out"])
 def test_extract_refuses_what_no_build_context_holds(tmp_path, member, problem):
     archive = _archive(tmp_path, (_member("Dockerfile"), b"FROM scratch\n"), (member, b""))
 
@@ -269,3 +279,13 @@ def test_two_folders_one_name_once_normalized_are_refused(tmp_path):
 
     with pytest.raises(ValueError, match="café: two entries have this name once normalized to NFC"):
         BuildContext.of(root, root / "Dockerfile")
+
+
+def test_extract_writes_a_hard_link_as_the_file_it_links_to_and_one_to_itself_as_the_file(tmp_path):
+    archive = _archive(tmp_path, (_member("Dockerfile"), b"FROM scratch\n"), (_member("copy", tarfile.LNKTYPE,
+                                                                                      "Dockerfile"), b""),
+                       (_member("Dockerfile", tarfile.LNKTYPE, "Dockerfile"), b""))
+
+    extract(archive, tmp_path / "out")
+
+    assert (tmp_path / "out" / "Dockerfile").read_text() == (tmp_path / "out" / "copy").read_text() == "FROM scratch\n"

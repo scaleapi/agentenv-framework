@@ -1,15 +1,17 @@
-"""The wheel check in ``.github/scripts/clean_install.py``: every tracked example file and bundle entry point
-must be in the built wheel."""
+"""The wheel check in ``.github/scripts/clean_install.py``: every tracked file of each shipped bundle, and every bundle
+entry point, must be in the built wheel."""
 
 from __future__ import annotations
 
 import importlib.util
+import sys
 import zipfile
 from pathlib import Path
 
 import pytest
 
 SCRIPT = Path(__file__).resolve().parents[2] / ".github" / "scripts" / "clean_install.py"
+sys.path.insert(0, str(SCRIPT.parent))  # as running the script does, so it imports its sibling shipped_bundles
 _spec = importlib.util.spec_from_file_location("clean_install", SCRIPT)
 clean_install = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(clean_install)
@@ -55,3 +57,10 @@ def test_bundle_entry_points_that_differ_from_pyproject_are_named(tmp_path, entr
     assert problem.startswith("::error file=pyproject.toml::agentenv_framework-1.0-py3-none-any.whl registers the "
                               "agent_env.bundles entry points")
     assert problem.endswith("but pyproject.toml declares {'hello': 'agent_env.examples'}")
+
+
+def test_the_gate_checks_the_folder_of_every_shipped_bundle():
+    roots = {name: root.relative_to(SCRIPT.parents[2]).as_posix() for name, root in clean_install.bundle_roots().items()}
+
+    assert roots == {"agents": "src/agent_env/agents", "echo-mcp": "src/agent_env/examples/echo-mcp",
+                     "hello": "src/agent_env/examples/hello"}

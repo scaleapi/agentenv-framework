@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from typing import ClassVar, Optional
 
 from agent_env.task_step.context import TaskStepContext
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
+from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)
@@ -21,7 +22,7 @@ class Skill:
 
     See https://agentskills.io/specification for the full spec.
 
-    A skill can come from three mutually-exclusive sources:
+    A skill can come from three mutually-exclusive sources, and names none when an import left its object_url out:
     - **inline**: body + frontmatter fields, rendered into SKILL.md at send time
     - **object_url**: object-store prefix containing a skill directory with its own SKILL.md,
       sent as a bundle of read grants
@@ -41,8 +42,8 @@ class Skill:
 
     def __post_init__(self):
         modes = [bool(self.body), bool(self.object_url), bool(self.skill_artifact_id)]
-        if sum(modes) != 1:
-            raise ValueError("Skill must have exactly one of: body (inline), object_url, skill_artifact_id")
+        if sum(modes) > 1:
+            raise ValueError("Skill must have at most one of: body (inline), object_url, skill_artifact_id")
         if self.skill_artifact_id is not None:
             if any([self.body, self.object_url, self.license, self.compatibility, self.metadata, self.allowed_tools]):
                 raise ValueError(
@@ -65,7 +66,16 @@ class Skill:
         if self.object_url is not None:
             SkillArtifact.validate(object_url=self.object_url, expected_name=self.name)
             return
+        if not self.body:
+            raise ValueError(self.no_source())
         SkillArtifact.validate(skill_md=self.to_skill_md().encode("utf-8"), expected_name=self.name)
+
+    def names_a_source(self) -> bool:
+        return bool(self.body or self.object_url or self.skill_artifact_id)
+
+    def no_source(self) -> str:
+        return (f"skill {self.name!r} names no source; set body, object_url or skill_artifact_id (object_url is user "
+                "scope, so an import leaves it out)")
 
     def to_skill_md(self) -> str:
         """Render the full SKILL.md content with YAML frontmatter + body."""
@@ -172,6 +182,7 @@ class AddSkillsTaskStep(TaskStep):
         EntityRef.artifact("cli_artifact_ids[]", artifact_type="cli"),
         EntityRef.artifact("file_artifact_universe_ids[]"),
     )
+    field_scopes = {**TaskStep.field_scopes, "skills[].object_url": FieldScope.USER, "skills[].s3_url": FieldScope.USER}
 
     def __init__(
         self,
@@ -208,10 +219,16 @@ class AddSkillsTaskStep(TaskStep):
             agent_name=data.get("agent_name"),
         )
 
+    def config_problems(self) -> list[str]:
+        """Each skill naming no source."""
+        return [f"add_skills '{self.id}': {skill.no_source()}" for skill in self.skills if not skill.names_a_source()]
+
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         from agent_env.a2a_agent import A2AAgent
         from agent_env.a2a_agent.store import get_a2a_agent_instance_store
 
+        if problems := self.config_problems():
+            raise ValueError("; ".join(problems))
         agent = next((a for a in context.deployed_agents if a.agent_name == self.agent_name), None)
         if agent is None:
             raise RuntimeError(f"Agent '{self.agent_name}' not found in context.deployed_agents")

@@ -492,7 +492,8 @@ def test_a_step_journaling_across_a_reregister_belongs_to_one_run_only(store):
     seed_task_instance_context("i", TaskStepContext())
     store.upsert_instance(instance_id="i", task_id="t", task_version=1, total_steps=3)
     seed_task_instance_context("i", TaskStepContext())
-    _record(store, "i", "s0", _ops({}, {"a": 1}))                 # lands under the new generation
+    store.record_step_complete_sync("i", {"step_id": "s0", "status": "success"}, _ops({}, {"a": 1}), 9, "now",
+                                    attempt_epoch=1)  # lands under the new generation
     assert [e["step_id"] for e in store.journal_entries_sync("i")] == ["__seed__", "s0"]
     assert store.undo_steps_sync("i", {"s0"})["context"]["metadata"] == {}
 

@@ -20,6 +20,7 @@ from agent_env.env.env import Env
 from agent_env.env.envs import GatewayEnv, MCPServerEnv
 from agent_env.env.envs.service_db import ServiceDBEnv
 from agent_env.env.envs.website_browser import WEBSITE_BROWSER_ENVIRONMENT_NAME, WEBSITE_BROWSER_IMAGE_TAG
+from agent_env.env.published_images import PublishedImage
 from agent_env.store.base import NotFoundError
 from agent_env.store.document_store import LocalSqliteDocumentStore
 from agent_env.store.ids import derive_id
@@ -27,9 +28,9 @@ from agent_env.store.image_store import LocalRegistryImageStore
 from agent_env.store.local_state import holding_locks
 from agent_env.store.object_store import LocalFilesystemObjectStore
 from agent_env.store.routing import configured_store
-from agent_env.utils.build_context import BuildContext
-from agent_env.utils.build_metadata import detect_env_metadata
-from agent_env.utils.docker_build import build_image, docker_unreachable
+from agent_env.utils.docker.context import BuildContext
+from agent_env.utils.docker.metadata import detect_env_metadata
+from agent_env.utils.docker.build import build_image, docker_unreachable
 
 _ENV_PACKAGE = Path(__file__).parent
 GATEWAY_DOCKERFILE = _ENV_PACKAGE / "gateway" / "Dockerfile"
@@ -120,6 +121,14 @@ _DOCKERFILES = {
     SERVICE_DB: [SERVICE_DB_DOCKERFILE, DB_WEB_DOCKERFILE, DB_MCP_DOCKERFILE],
     WEBSITE_BROWSER: [WEBSITE_BROWSER_DOCKERFILE],
 }
+# The image each shipped Dockerfile is published as.
+PUBLISHED_IMAGES = (
+    PublishedImage("agentenv-gateway", GATEWAY_DOCKERFILE),
+    PublishedImage("agentenv-service-db", SERVICE_DB_DOCKERFILE),
+    PublishedImage("agentenv-db-web", DB_WEB_DOCKERFILE),
+    PublishedImage("agentenv-db-mcp", DB_MCP_DOCKERFILE),
+    PublishedImage("agentenv-website-browser", WEBSITE_BROWSER_DOCKERFILE),
+)
 
 
 def build_inputs_digest(kind: str) -> str:

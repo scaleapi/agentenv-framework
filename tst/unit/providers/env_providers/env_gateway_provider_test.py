@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import json
 import logging
 import re
 import socket
@@ -27,7 +28,7 @@ from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.service_db import SERVICE_DB_PORT
 from agent_env.env.envs.website import WebsiteEnv
 from agent_env.providers.env_providers import env_gateway_provider, env_provider
-from agent_env.providers.env_providers.constants import GATEWAY_SERVICE_NAME
+from agent_env.providers.env_providers.constants import GATEWAY_APP_DIR, GATEWAY_SERVICE_NAME
 from agent_env.providers.env_providers.env_gateway_provider import (
     DeployedGateway,
     MCPServerConfig,
@@ -2120,3 +2121,137 @@ async def test_a_docker_logs_call_that_exits_nonzero_is_reported_not_printed_as_
     assert await gp._log_service(sandbox, "gateway") is True
     assert "Skipping gateway logs: docker logs exited 1: Error: No such container: gw" in caplog.text
     assert "stdout:" not in caplog.text
+
+
+# --- a failed compose up names what went down -----------------------------------
+
+_TRACEBACK = ("Traceback (most recent call last):\n  File \"/app/server.py\", line 1, in <module>\n"
+              "ModuleNotFoundError: No module named 'psycopg'\n")
+_COMPOSE_ERROR = RuntimeError(
+    "Script failed (exit 1):\nstdout: \nstderr:  Container env-email-1 Waiting\n"
+    " Container env-email-1 Error dependency email failed to start\n"
+    "dependency failed to start: container env-email-1 exited (1)")
+
+
+def _ps(rows: list[dict], *, array: bool) -> str:
+    """``docker compose ps --format json``'s output, as one array or as an object a line."""
+    return json.dumps(rows) if array else "\n".join(json.dumps(row) for row in rows)
+
+
+def _stack(ps: str, logs: dict[str, str], *, up_error: Exception | None = _COMPOSE_ERROR) -> MagicMock:
+    """A VM whose compose up fails with ``up_error``, ``ps`` its services and ``logs`` their output by container id."""
+    sandbox = MagicMock()
+    sandbox.exec_script = AsyncMock(side_effect=up_error)
+
+    async def exec_with_output(*args):
+        if "ps" in args:
+            return 0, ps, ""
+        container = next((cid for cid in logs if f"docker logs --tail 30 {cid} 2>&1" in args[-1]), None)
+        return (0, logs[container], "") if container else (1, "", "Error: No such container")
+
+    sandbox.exec_with_output = AsyncMock(side_effect=exec_with_output)
+    return sandbox
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("array", [True, False], ids=["json-array", "json-lines"])
+async def test_a_failed_compose_up_names_each_service_that_went_down_and_ends_with_its_output(array):
+    rows = [
+        {"Service": "email", "ID": "c-email", "State": "exited", "Health": "", "ExitCode": 1},
+        {"Service": "crm", "ID": "c-crm", "State": "running", "Health": "unhealthy", "ExitCode": 0},
+        {"Service": "chat", "ID": "c-chat", "State": "restarting", "Health": "", "ExitCode": 2},
+        {"Service": "calendar", "ID": "c-calendar", "State": "running", "Health": "healthy", "ExitCode": 0},
+        {"Service": "gateway", "ID": "c-gateway", "State": "created", "Health": "", "ExitCode": 0},
+    ]
+    sandbox = _stack(_ps(rows, array=array), {"c-email": _TRACEBACK, "c-crm": "listening on 9000\n", "c-chat": ""})
+
+    with pytest.raises(RuntimeError) as raised:
+        await EnvironmentGatewayProvider()._compose_up(sandbox)
+
+    assert str(raised.value) == (
+        "The env's services didn't start:\n"
+        "email exited (1):\n"
+        "    Traceback (most recent call last):\n"
+        "      File \"/app/server.py\", line 1, in <module>\n"
+        "    ModuleNotFoundError: No module named 'psycopg'\n"
+        "crm failed its health check:\n"
+        "    listening on 9000\n"
+        "chat keeps restarting (last exit 2)"
+    )
+    assert raised.value.__cause__ is _COMPOSE_ERROR
+
+
+@pytest.mark.asyncio
+async def test_a_failed_compose_up_with_nothing_down_raises_composes_own_error():
+    rows = [{"Service": "email", "ID": "c-email", "State": "running", "Health": "healthy", "ExitCode": 0}]
+    up_error = RuntimeError("Script failed (exit 1): Bind for 0.0.0.0:18765 failed: port is already allocated")
+    sandbox = _stack(_ps(rows, array=False), {}, up_error=up_error)
+
+    with pytest.raises(RuntimeError) as raised:
+        await EnvironmentGatewayProvider()._compose_up(sandbox)
+
+    assert raised.value is up_error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ps_reply", [(1, "", "unknown flag: --format"), RuntimeError("host lost"), (0, "not json", "")],
+                         ids=["ps-fails", "exec-raises", "ps-unreadable"])
+async def test_a_service_listing_that_fails_never_hides_composes_own_error(ps_reply, caplog):
+    sandbox = MagicMock()
+    sandbox.exec_script = AsyncMock(side_effect=_COMPOSE_ERROR)
+    sandbox.exec_with_output = AsyncMock(side_effect=[ps_reply])
+
+    with pytest.raises(RuntimeError) as raised:
+        await EnvironmentGatewayProvider()._compose_up(sandbox)
+
+    assert raised.value is _COMPOSE_ERROR
+    assert "Can't list the stack's services" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_down_services_output_drops_blank_lines_and_cuts_long_ones():
+    rows = [{"Service": "email", "ID": "c-email", "State": "dead", "Health": "", "ExitCode": 137}]
+    sandbox = _stack(_ps(rows, array=False), {"c-email": "\n" + "x" * 1000 + "\n\n"})
+
+    down = await EnvironmentGatewayProvider()._down_services(sandbox)
+
+    assert down == "email exited (137):\n    " + "x" * 300
+
+
+@pytest.mark.asyncio
+async def test_compose_up_starts_the_stack_detached_with_its_arguments():
+    sandbox = MagicMock()
+    sandbox.exec_script = AsyncMock(return_value="")
+
+    await EnvironmentGatewayProvider()._compose_up(sandbox, "--force-recreate email gateway")
+
+    sandbox.exec_script.assert_awaited_once_with(
+        f"cd {GATEWAY_APP_DIR} && docker compose up -d --force-recreate email gateway", max_retries=2)
+
+
+@pytest.mark.asyncio
+async def test_a_service_whose_logs_cant_be_read_is_still_named(caplog):
+    rows = [{"Service": "email", "ID": "c-email", "State": "exited", "Health": "", "ExitCode": 1}]
+    sandbox = MagicMock()
+    sandbox.exec_with_output = AsyncMock(side_effect=[(0, _ps(rows, array=False), ""), RuntimeError("host lost")])
+
+    assert await EnvironmentGatewayProvider()._down_services(sandbox) == "email exited (1)"
+    assert "Can't read container c-email's logs: host lost" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_service_listing_that_stalls_gives_way_to_composes_own_error(monkeypatch, caplog):
+    monkeypatch.setattr(env_gateway_provider, "_DOWN_SERVICES_TIMEOUT_S", 0.05)
+    sandbox = MagicMock()
+    sandbox.exec_script = AsyncMock(side_effect=_COMPOSE_ERROR)
+
+    async def stalls(*args):
+        await asyncio.Event().wait()
+
+    sandbox.exec_with_output = AsyncMock(side_effect=stalls)
+
+    with pytest.raises(RuntimeError) as raised:
+        await EnvironmentGatewayProvider()._compose_up(sandbox)
+
+    assert raised.value is _COMPOSE_ERROR
+    assert "Can't list the stack's services: no answer in 0s" in caplog.text

@@ -1,0 +1,3 @@
+# A release pins agentenv-framework-protocol to the version it was released with. The floor is the first that
+# serves peer-agents/v1's tools, which the agent advertises without handlers of its own.
+agentenv-framework-protocol[agent]>=0.1.351

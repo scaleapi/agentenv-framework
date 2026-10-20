@@ -7,7 +7,7 @@ import click
 from agent_env.plugins._cli import load_cli_plugins, load_cli_root_options
 from agent_env.store.base import NotFoundError
 from agent_env.store.routing import namespace_routing
-from agent_env.utils.docker_build import DockerBuildError
+from agent_env.utils.docker.build import DockerBuildError
 
 from .a2a_agent import a2a_agent
 from .artifact import artifact

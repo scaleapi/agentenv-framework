@@ -6,7 +6,7 @@ from agent_env.artifact.artifacts.cli import CliArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
-from agent_env.artifact.artifacts.environment import EnvironmentArtifact
+from agent_env.artifact.artifacts.environment import EnvironmentArtifact, SeedsEnvironments
 from agent_env.artifact.artifacts.environment_universe import EnvironmentUniverseArtifact
 from agent_env.artifact.artifacts.skill import AGENT_SKILLS_SPEC_VERSION, SkillArtifact
 from agent_env.artifact.registry import (
@@ -28,6 +28,7 @@ __all__ = [
     "FileArtifactUniverse",
     "EnvironmentArtifact",
     "EnvironmentUniverseArtifact",
+    "SeedsEnvironments",
     "SkillArtifact",
     "AGENT_SKILLS_SPEC_VERSION",
     "Universe",

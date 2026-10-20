@@ -21,6 +21,7 @@ from agent_env.store.ids import derive_id
 if TYPE_CHECKING:
     from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
     from agent_env.bundle.authoring import AuthoringContext
+    from agent_env.entity.export import ExportContext
 
 # A command a bundle's CLI is installed as, at /opt/cli/<command_name>/.
 _COMMAND_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*")
@@ -101,7 +102,10 @@ class CliArtifact(Artifact):
     def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:
         """The keys of ``data``, an artifact.toml, a CLI takes, checked against the folder's files the way installing
         it reads them. Raises BundleError listing every problem."""
-        fields, problems = ctx.accepted(data, **cls.toml_keys)
+        files = ctx.try_files(empty_ok=True)  # None when the plan's walk reports why
+        problems = [ctx.no_files("files to write")] if files == {} else []
+        fields, more = ctx.accepted(data, **cls.toml_keys)
+        problems += more
         for key in cls.toml_keys:
             if key not in data:
                 problems.append(ctx.config_problem(f"{key} is required"))
@@ -110,8 +114,7 @@ class CliArtifact(Artifact):
             problems.append(ctx.config_problem(
                 f"command_name must be a plain name, of letters, digits, '.', '_' and '-' and not starting with '.' or "
                 f"'-', since the CLI is installed at /opt/cli/<command_name>; not {command_name!r}"))
-        files = ctx.try_files()
-        if entrypoint is not None and files is not None:
+        if entrypoint is not None and files:
             gateway_env = posixpath.join(posixpath.dirname(entrypoint), GATEWAY_ENV_FILE)
             if entrypoint not in files:
                 problems.append(ctx.config_problem(f"entrypoint {entrypoint!r} isn't one of this folder's files"))
@@ -128,6 +131,11 @@ class CliArtifact(Artifact):
         fields = cls.accept_toml(data, ctx)
         return cls.put(ctx.id, command_name=fields["command_name"], entrypoint=fields["entrypoint"],
                        files=ctx.files())
+
+    def to_toml(self, out: ExportContext) -> dict:
+        """The artifact.toml of a folder holding the CLI's tree, as this version wrote it under its own prefix."""
+        out.tree(self.cli_object_url)
+        return {"type": self.type, "command_name": self.command_name, "entrypoint": self.entrypoint}
 
     def get_cli_files(self) -> "FileArtifactUniverse":
         from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse

@@ -13,7 +13,7 @@ from agentenv_protocol import FilePart, client as protocol_v1
 from agent_env.artifact import Artifact, DockerImageArtifact
 from agent_env.artifact.artifacts.docker_image import ProgressCallback, refuse_local_github_build
 from agent_env.config import get_config
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
 from agent_env.env.env import Env, gateway_url_of
 from agent_env.store.ids import derive_id
 from agent_env.env import legacy_protocol
@@ -28,6 +28,7 @@ from agent_env.attribution import Attribution
 if TYPE_CHECKING:
     from agent_env.artifact import CliArtifact, EnvironmentArtifact, EnvironmentUniverseArtifact
     from agent_env.bundle.authoring import AuthoringContext
+    from agent_env.entity.export import ExportContext
     from agent_env.env.env import DeployedEnv, LoadFileArtifactUniverseResult
     from agent_env.providers.env_providers.env_provider import EnvironmentProvider
 
@@ -90,6 +91,11 @@ class MCPServerEnv(Env):
         fields = cls.accept_toml(data, ctx)
         return cls.put(id=ctx.id, docker_image_artifact=ctx.artifact(fields["image"], DockerImageArtifact),
                        environment_name=fields["environment_name"], env_provider_type=fields["env_provider_type"])
+
+    def to_toml(self, out: ExportContext) -> dict:
+        """The env.toml of a folder this env is built from, which ``from_toml`` reads back as it."""
+        return {"environment_name": self.environment_name, "image": out.image(self.docker_image_artifact),
+                **self.provider_toml(out, self.env_provider_type)}
 
     @classmethod
     def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:

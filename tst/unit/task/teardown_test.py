@@ -17,6 +17,7 @@ from agent_env.env.env import DeployedEnv, DeployedGatewayEnv
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, remove_local_work_dir
 from agent_env.task import teardown
+from agent_env.task.task import _rolled_back_sandboxes
 from agent_env.task.teardown import RecordedSandbox, TeardownReport, recorded_sandboxes, teardown_run
 from agent_env.task_step.context import DeployedAgent, DeployedSandbox, TaskStepContext
 from agent_env.task_step.task_steps import teardown_sandboxes
@@ -52,6 +53,9 @@ class _FakeProvider:
     async def terminate_sandbox(self, sandbox_id):
         await (await self.get_sandbox(sandbox_id)).terminate()
 
+    async def close(self):
+        pass
+
 
 class _Log(list):
     """The (provider, sandbox_id) terminate log, and how given sandboxes misbehave."""
@@ -59,6 +63,31 @@ class _Log(list):
     def __init__(self):
         super().__init__()
         self.behaviors: dict[str, str] = {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("step_entry", [False, True])
+@pytest.mark.parametrize("failure", [False, True])
+@pytest.mark.parametrize("close_failure", [False, True, "stall"])
+async def test_owned_teardown_provider_is_closed(monkeypatch, step_entry, failure, close_failure):
+    provider = MagicMock(ON_THIS_MACHINE=False)
+    provider.terminate_sandbox = AsyncMock(side_effect=RuntimeError("denied") if failure else None)
+    async def stalled_close():
+        await asyncio.Event().wait()
+
+    provider.close = AsyncMock(side_effect=(stalled_close if close_failure == "stall" else
+                               RuntimeError("client close failed") if close_failure else None))
+    module = teardown_sandboxes if step_entry else teardown
+    monkeypatch.setattr(module, "build_sandbox_provider", lambda _: provider)
+    monkeypatch.setattr(module, "PROVIDER_CLOSE_TIMEOUT_SECONDS", 0.01, raising=False)
+    operation = (module._terminate("box", "vercel", "env") if step_entry else
+                 module._terminate(RecordedSandbox("box", "vercel", "env")))
+    if failure:
+        with pytest.raises(RuntimeError, match="denied"):
+            await asyncio.wait_for(operation, 0.5)
+    else:
+        await asyncio.wait_for(operation, 0.5)
+    provider.close.assert_awaited_once()
 
 
 @pytest.fixture
@@ -108,6 +137,12 @@ def test_every_recorded_sandbox_is_found_once_and_attributed_to_what_made_it():
         RecordedSandbox("sb-vm", "modal_vm", "env"),
         RecordedSandbox("sb-solver", "modal", "agent"),
     )
+
+
+def test_the_sandboxes_a_retry_rolled_back_are_found_like_live_ones():
+    gone = _rolled_back_sandboxes(_context().to_dict(), TaskStepContext().to_dict())
+    rolled_back = TaskStepContext(metadata={"retry_resets": [{"rolled_back_sandboxes": gone}]})
+    assert recorded_sandboxes(rolled_back) == recorded_sandboxes(_context())
 
 
 def test_each_sandbox_is_terminated_through_its_backend_and_recorded_so_a_second_call_does_nothing(terminated):

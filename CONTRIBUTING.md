@@ -88,6 +88,14 @@ on PyPI, the same workflow creates the GitHub release, whose notes are the title
 the previous release, so a clear pull request title is also the release note. A tag whose commit does not pass
 `main`'s CI is not published and gets no release; its pull requests are in the next release's notes.
 
+A release also publishes the infra images agent-env ships, once the `PUBLISH_INFRA_IMAGES` repository variable is
+`true`: one per Dockerfile under `src/agent_env/env`, at `ghcr.io/scaleapi/agentenv-<name>:src-<hex>` for linux/amd64
+and linux/arm64, where the tag is the build context's source digest, so an unchanged Dockerfile is not built again.
+They're published so installs can pull them instead of building the infra images, and the wheel and the release
+notes record each image's digest. A failed image job keeps the release off PyPI. Maintainers can publish the images
+alone by running the workflow by hand on `main`. GHCR keeps a new package private until a package admin makes it
+public, and the workflow warns about each one until then.
+
 ## Getting help
 
 Ask questions in [Discussions Q&A](https://github.com/scaleapi/agentenv-framework/discussions/categories/q-a).

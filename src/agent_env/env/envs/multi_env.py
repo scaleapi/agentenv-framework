@@ -26,10 +26,11 @@ def _snapshot_after_load_default() -> bool:
 if TYPE_CHECKING:
     from agent_env.artifact import EnvironmentArtifact, EnvironmentUniverseArtifact
     from agent_env.bundle.authoring import AuthoringContext
+    from agent_env.entity.export import ExportContext
     from agent_env.env.env import DeployedEnv, LoadEnvironmentUniverseArtifactResult, LoadFileArtifactUniverseResult
     from agent_env.providers.env_state import DatabaseStateProvider
 
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
 from agent_env.env.env import Env, gateway_url_of
 from agent_env.env.gateway import GatewayMode
 from agent_env.env.envs._deployment import (
@@ -108,6 +109,15 @@ class MultiEnv(Env):
         if refusal := cls(id=ctx.id, version=None, **env).deploy_refusal():
             ctx.refuse([refusal])
         return cls.put(id=ctx.id, **env)
+
+    def to_toml(self, out: ExportContext) -> dict:
+        """The env.toml of a multi env naming its envs, which ``from_toml`` reads back as it."""
+        toml = {"type": self.type, "mcp_server_envs": [out.ref(env) for env in self.mcp_server_envs]}
+        if self.website_envs:
+            toml["website_envs"] = [out.ref(env) for env in self.website_envs]
+        if self.name:
+            toml["name"] = self.name
+        return {**toml, **self.provider_toml(out, self.env_provider_type)}
 
     @classmethod
     def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:
@@ -574,7 +584,7 @@ class MultiEnv(Env):
         from agent_env.env.envs.service_db import DATABASE_SERVICE_NAME, DB_MCP_SERVICE_NAME, PGWEB_SERVICE_NAME
         from agent_env.providers.env_providers.constants import DOCKER_COMPOSE_PATH, GATEWAY_APP_DIR, GATEWAY_SERVICE_NAME
         from agent_env.providers.env_state import LocalPostgresStateProvider
-        from agent_env.config import get_config
+        from agent_env.config import gateway_env_id, get_config, service_db_env_id
 
         if self._sandbox is None:
             raise RuntimeError("Environment not deployed - call deploy() first")
@@ -589,8 +599,8 @@ class MultiEnv(Env):
         # Regenerate docker-compose.yml with the snapshot image (no init-schemas volume needed)
         logger.info("Regenerating docker-compose.yml with snapshot image...")
         config = get_config()
-        gateway_env = Env.get(config.default_gateway_env_id)
-        service_db = Env.get(config.default_service_db_env_id)
+        gateway_env = Env.get(gateway_env_id(config))
+        service_db = Env.get(service_db_env_id(config))
         service_db_config = service_db.to_config()
         service_db_config.db_image = db_image.image_name
 
@@ -657,9 +667,7 @@ COMPOSE_EOF'''
         ))
         svc_list = " ".join(environment_names + [GATEWAY_SERVICE_NAME, PGWEB_SERVICE_NAME, DB_MCP_SERVICE_NAME])
         logger.info(f"Recreating services: {svc_list}")
-        await self._sandbox.exec_script(
-            f"cd {GATEWAY_APP_DIR} && docker compose up -d --force-recreate {svc_list}"
-        )
+        await gw._compose_up(self._sandbox, f"--force-recreate {svc_list}")
         await gw._wait_for_gateway(self._sandbox, self._sandbox.host_port(AGENT_ENV_GATEWAY_MCP_PORT))
 
         # Install changelog triggers for each service

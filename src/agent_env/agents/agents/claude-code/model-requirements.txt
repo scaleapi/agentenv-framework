@@ -1,0 +1,3 @@
+# What the image gives the Python the model runs, beside the agent's own requirements; an installed agent's model
+# uses the task container's Python instead.
+boto3==1.43.115
