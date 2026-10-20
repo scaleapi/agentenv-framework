@@ -17,7 +17,8 @@ import stat
 import tarfile
 import tempfile
 import uuid
-from collections.abc import Iterable
+from collections.abc import AsyncIterator, Iterable
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +61,7 @@ from claude_bridge import (
     CLAUDE_STATE_DIR,
     SESSION_JSONL_DIR,
     WORKSPACE_DIR,
+    kill_running_clis,
     read_partial_session_trajectory,
     redact_session_records,
     run_claude,
@@ -324,6 +326,17 @@ async def _fetch_granted_snapshot(objects: SnapshotReadObjects, archive_path: Pa
     return jsonl.decode(), objects.workspace is not None
 
 
+@asynccontextmanager
+async def _turns_stop_with_the_server(app: Starlette) -> AsyncIterator[None]:
+    """The server's lifespan: as it shuts down, the CLIs of turns still running are killed with their tools, which
+    would otherwise go on in the workspace after it."""
+    try:
+        yield
+    finally:
+        if stopped := kill_running_clis():
+            logger.info(f"Killed {stopped} claude CLI(s) still running a turn as the agent shut down")
+
+
 @a2a_agent(
     identity=AgentIdentity(
         name="Claude Code",
@@ -342,6 +355,7 @@ async def _fetch_granted_snapshot(objects: SnapshotReadObjects, archive_path: Pa
     ),
     config=ClaudeCodeConfig,
     config_description="Set or read agent configuration such as model, role, and allowed tools.",
+    lifespan=_turns_stop_with_the_server,
     extensions=(
         enable(TRAJECTORY_V1, live=True, description=(
             "Retrieve a task's Claude Code stream-json trajectory, also while it runs, "

@@ -491,6 +491,19 @@ def _descendants(pid: int) -> list[int]:
     return found
 
 
+# The CLIs running a turn now. Each runs in a session of its own, so the agent's shutdown kills them itself.
+_RUNNING: set = set()
+
+
+def kill_running_clis() -> int:
+    """Kill every CLI running a turn, and what each started; how many. The agent's shutdown does: the CLIs, in sessions
+    of their own, would outlive its server, as when a reinstall stops it mid-turn."""
+    running = list(_RUNNING)
+    for proc in running:
+        _kill_cli(proc)
+    return len(running)
+
+
 async def _started(spawn):
     """The CLI ``spawn`` starts. A turn cancelled while it starts lets it finish starting, then kills it and what it
     started: asyncio would kill the CLI alone, and leave its tools running."""
@@ -664,6 +677,7 @@ async def _spawn_claude(
         else:
             event_callback(event)
 
+    _RUNNING.add(proc)
     try:
         stderr = await asyncio.wait_for(_stream_cli(proc, prompt.encode(), on_line), timeout=timeout_s)
     except asyncio.CancelledError:
@@ -680,6 +694,8 @@ async def _spawn_claude(
         _kill_cli(proc)
         await _reap(proc)
         raise
+    finally:
+        _RUNNING.discard(proc)
 
     err: str | None = None
     detail: str | None = None

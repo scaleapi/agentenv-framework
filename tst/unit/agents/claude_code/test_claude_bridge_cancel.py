@@ -3,6 +3,9 @@
 """
 import asyncio
 import contextlib
+import sys
+import re
+import json
 import os
 import shutil
 import signal
@@ -10,7 +13,7 @@ import subprocess
 import time
 
 import pytest
-from tst.unit.agents.claude_code.agent import claude_bridge
+from tst.unit.agents.claude_code.agent import AGENT_DIR, claude_bridge
 
 
 
@@ -166,3 +169,48 @@ def test_a_turn_cancelled_again_while_it_scrubs_its_transcript_ends_only_once_th
     ((session, ticks_while_scrubbing),) = asyncio.run(cancel_twice())
 
     assert session == "sess-1" and ticks_while_scrubbing >= 5  # off the event loop, which ran meanwhile
+
+
+@pytest.mark.parametrize("tool", [
+    "sleep 600",
+    pytest.param("setsid sleep 600", marks=pytest.mark.skipif(
+        not (shutil.which("setsid") and os.path.isdir("/proc")), reason="needs setsid and /proc (Linux)")),
+], ids=["in-its-group", "in-a-session-of-its-own"])
+def test_stopping_the_agents_server_kills_the_clis_of_turns_still_running_and_their_tools(tmp_path, tool):
+    """A reinstall stops the agent's server mid-turn: its CLI, in a session of its own, mustn't go on after it. Its
+    server runs as an install runs it, under uvicorn, which an in-process client's shutdown doesn't stand for."""
+    pids, bin_dir, log = tmp_path / "pids", tmp_path / "bin", tmp_path / "server.log"
+    bin_dir.mkdir()
+    (bin_dir / "claude").write_text(f'#!/bin/sh\n{tool} > /dev/null 2>&1 < /dev/null & echo "$$ $!" > {pids}\nwait\n')
+    (bin_dir / "claude").chmod(0o755)
+    (tmp_path / "app").mkdir()
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "PYTHONPATH": str(AGENT_DIR),
+           "CLAUDE_CONFIG_DIR": str(tmp_path / "state"), "AGENT_WORKSPACE_DIR": str(tmp_path / "app")}
+    with log.open("w") as out:
+        server = subprocess.Popen([sys.executable, "-m", "uvicorn", "a2a_server:app", "--host", "127.0.0.1",
+                                   "--port", "0"], cwd=tmp_path / "app", env=env, stdout=out, stderr=subprocess.STDOUT)
+    started: list[int] = []
+    try:
+        deadline = time.monotonic() + 30
+        while not (port := re.search(r"running on http://127\.0\.0\.1:(\d+)", log.read_text())):
+            assert time.monotonic() < deadline and server.poll() is None, log.read_text()
+            time.sleep(0.05)
+        body = json.dumps({"jsonrpc": "2.0", "id": "1", "method": "message/send", "params": {
+            "configuration": {"blocking": False},
+            "message": {"messageId": "m-1", "role": "user", "parts": [{"kind": "text", "text": "go"}]}}})
+        subprocess.run(["curl", "-fsS", "-o", "/dev/null", "-H", "content-type: application/json", "-d", body,
+                        f"http://127.0.0.1:{port.group(1)}/a2a"], check=True, timeout=30)
+        while not (pids.exists() and len(pids.read_text().split()) == 2):
+            assert time.monotonic() < deadline, log.read_text()
+            time.sleep(0.05)
+        started = [int(pid) for pid in pids.read_text().split()]
+
+        server.send_signal(signal.SIGTERM)
+        server.wait(timeout=30)
+
+        assert all(_gone(pid) for pid in started), log.read_text()
+    finally:
+        server.kill()
+        for pid in started:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
