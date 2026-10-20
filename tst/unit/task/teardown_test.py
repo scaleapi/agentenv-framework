@@ -17,6 +17,7 @@ from agent_env.env.env import DeployedEnv, DeployedGatewayEnv
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, remove_local_work_dir
 from agent_env.task import teardown
+from agent_env.task.task import _rolled_back_sandboxes
 from agent_env.task.teardown import RecordedSandbox, TeardownReport, recorded_sandboxes, teardown_run
 from agent_env.task_step.context import DeployedAgent, DeployedSandbox, TaskStepContext
 from agent_env.task_step.task_steps import teardown_sandboxes
@@ -136,6 +137,12 @@ def test_every_recorded_sandbox_is_found_once_and_attributed_to_what_made_it():
         RecordedSandbox("sb-vm", "modal_vm", "env"),
         RecordedSandbox("sb-solver", "modal", "agent"),
     )
+
+
+def test_the_sandboxes_a_retry_rolled_back_are_found_like_live_ones():
+    gone = _rolled_back_sandboxes(_context().to_dict(), TaskStepContext().to_dict())
+    rolled_back = TaskStepContext(metadata={"retry_resets": [{"rolled_back_sandboxes": gone}]})
+    assert recorded_sandboxes(rolled_back) == recorded_sandboxes(_context())
 
 
 def test_each_sandbox_is_terminated_through_its_backend_and_recorded_so_a_second_call_does_nothing(terminated):

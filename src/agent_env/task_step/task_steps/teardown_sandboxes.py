@@ -144,9 +144,15 @@ def _env_sandbox_ids(env) -> list[tuple[str, Optional[str]]]:
     """
     if not isinstance(env, DeployedSandboxEnv):  # an env outside our sandboxes owns its own lifetime
         return []
-    ids = [(env.sandbox_id, env.sandbox_type)] if env.sandbox_id else []
-    for key, value in (env.sandbox_ids or {}).items():
-        entry_type = key if _is_backend(key) else env.sandbox_type
+    return _sandbox_ids_of(env.sandbox_id, env.sandbox_type, env.sandbox_ids)
+
+
+def _sandbox_ids_of(
+    sandbox_id: Optional[str], sandbox_type: Optional[str], sandbox_ids: Optional[dict],
+) -> list[tuple[str, Optional[str]]]:
+    ids = [(sandbox_id, sandbox_type)] if sandbox_id else []
+    for key, value in (sandbox_ids or {}).items():
+        entry_type = key if _is_backend(key) else sandbox_type
         values = [value] if isinstance(value, str) else [v for v in value.values() if isinstance(v, str)]
         ids.extend((v, entry_type) for v in values)
     return ids

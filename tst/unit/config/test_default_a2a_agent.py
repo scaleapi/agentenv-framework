@@ -1,4 +1,5 @@
-"""Default A2A agent resolution: configure() > [agents] default_a2a_agent_id > built-in a2a-default."""
+"""Default A2A agent resolution: configure() > [agents] default_a2a_agent_id > the built-in, the agents bundle's
+Claude Code."""
 
 import pytest
 
@@ -12,12 +13,15 @@ def _config(config_file=None, **kwargs):
     return config_with_document({} if config_file is None else config_file, **kwargs)
 
 
+BUILT_IN = "@local/agentenv-framework/agents/claude-code"
+
+
 def test_built_in_default_when_the_section_is_absent():
-    assert _config().get_default_a2a_agent_id() == "a2a-default"
+    assert _config().get_default_a2a_agent_id() == BUILT_IN
 
 
 def test_an_empty_agents_section_keeps_the_built_in_default():
-    assert _config(config_file={"agents": {}}).get_default_a2a_agent_id() == "a2a-default"
+    assert _config(config_file={"agents": {}}).get_default_a2a_agent_id() == BUILT_IN
 
 
 def test_config_key_resolves():

@@ -20,7 +20,9 @@ from agent_env.providers.sandbox_providers.local_sandbox import remove_local_wor
 from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider
 from agent_env.task.interrupts import tearing_down
 from agent_env.task_step.context import TaskStepContext
-from agent_env.task_step.task_steps.teardown_sandboxes import _DEFAULT_PROVIDERS, TORN_DOWN_KEY, _env_sandbox_ids
+from agent_env.task_step.task_steps.teardown_sandboxes import (
+    _DEFAULT_PROVIDERS, TORN_DOWN_KEY, _env_sandbox_ids, _sandbox_ids_of,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,8 +55,9 @@ class TeardownReport:
 
 
 def recorded_sandboxes(context: TaskStepContext) -> tuple[RecordedSandbox, ...]:
-    """Every sandbox ``context`` records, once each. An agent placed on another record's sandbox shares its
-    id, so the sandbox is attributed to whichever made it."""
+    """Every sandbox ``context`` records, once each, including those a retry rolled back, which only its
+    ``retry_resets`` marker still names. An agent placed on another record's sandbox shares its id, so the
+    sandbox is attributed to whichever made it."""
     found: dict[str, RecordedSandbox] = {}
     for sandbox in context.deployed_sandboxes:
         found.setdefault(sandbox.sandbox_id, RecordedSandbox(sandbox.sandbox_id, sandbox.sandbox_type, "sandbox"))
@@ -64,6 +67,15 @@ def recorded_sandboxes(context: TaskStepContext) -> tuple[RecordedSandbox, ...]:
     for agent in context.deployed_agents:
         if agent.sandbox_id:
             found.setdefault(agent.sandbox_id, RecordedSandbox(agent.sandbox_id, agent.sandbox_type, "agent"))
+    for reset in context.metadata.get("retry_resets") or []:
+        gone = reset.get("rolled_back_sandboxes") or {}
+        for sandbox in gone.get("deployed_sandboxes") or []:
+            found.setdefault(sandbox["sandbox_id"], RecordedSandbox(sandbox["sandbox_id"], sandbox["sandbox_type"], "sandbox"))
+        for env in gone.get("deployed_envs") or []:
+            for sandbox_id, sandbox_type in _sandbox_ids_of(env["sandbox_id"], env["sandbox_type"], env["sandbox_ids"]):
+                found.setdefault(sandbox_id, RecordedSandbox(sandbox_id, sandbox_type, "env"))
+        for agent in gone.get("deployed_agents") or []:
+            found.setdefault(agent["sandbox_id"], RecordedSandbox(agent["sandbox_id"], agent["sandbox_type"], "agent"))
     return tuple(found.values())
 
 

@@ -22,7 +22,7 @@ from agent_env.bundle.plan import plan_bundle
 from agent_env.bundle.resolve import resolve_bundle
 from agent_env.cli import cli
 from agent_env.config import get_config
-from agent_env.config.runtime import Config
+from agent_env.config.runtime import _DEFAULT_A2A_AGENT_ID as DEFAULT_AGENT, Config
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.eval import Eval
 from agent_env.eval.eval import EvalTask
@@ -106,13 +106,13 @@ def test_a_reference_that_takes_no_version_and_a_step_that_names_no_agent_are_re
     imported = import_task("triage", store / "triage")
 
     assert sorted((ref.where, ref.kind.value, ref.id) for ref in imported.floating) == [
-        ("tasks/triage.json: step 'agent': a2a_agent_id", "agent", "a2a-default"),
-        ("tasks/triage.json: step 'helper': a2a_agent_id", "agent", "a2a-default"),
-        ("tasks/triage.json: step 'judge': judge_a2a_agent_id", "agent", "a2a-default"),
+        ("tasks/triage.json: step 'agent': a2a_agent_id", "agent", DEFAULT_AGENT),
+        ("tasks/triage.json: step 'helper': a2a_agent_id", "agent", DEFAULT_AGENT),
+        ("tasks/triage.json: step 'judge': judge_a2a_agent_id", "agent", DEFAULT_AGENT),
     ]
     kept = import_task("triage", store / "kept", include_scopes=[FieldScope.USER])
     assert sorted((ref.where, ref.kind.value, ref.id) for ref in kept.floating) == [
-        ("tasks/triage.json: step 'helper': a2a_agent_id", "agent", "a2a-default"),
+        ("tasks/triage.json: step 'helper': a2a_agent_id", "agent", DEFAULT_AGENT),
     ]
 
 
@@ -244,7 +244,7 @@ def test_an_env_a_reference_names_with_no_version_is_written_at_its_latest(store
     assert [(entity.folder, entity.version) for entity in imported.written] == [("envs/crm-env", 2)]
     assert _steps(imported.root, "live")[0]["env_ids"] == ["crm-env"]
     assert [(ref.kind.value, ref.id, ref.where) for ref in imported.floating] == [
-        ("agent", "a2a-default", "tasks/live.json: step 'agent': a2a_agent_id")]
+        ("agent", DEFAULT_AGENT, "tasks/live.json: step 'agent': a2a_agent_id")]
 
 
 def test_a_pin_the_task_has_writes_that_version_and_is_dropped_and_one_the_store_doesnt_hold_is_refused(store):
@@ -593,8 +593,8 @@ def test_a_steps_user_scoped_fields_are_left_out_and_reported_and_the_rest_of_it
     assert steps["agent"]["agent_changelog_object_url"] == "s3://their-bucket/changelog/"  # the state it starts from
     assert steps["agent"]["agent_changelog_toolcall_position_exclusive"] == 0
     assert {(floating.where, floating.id) for floating in imported.floating} >= {
-        ("tasks/scoped.json: step 'agent': a2a_agent_id", "a2a-default"),
-        ("tasks/scoped.json: step 'install': a2a_agent_id", "a2a-default")}
+        ("tasks/scoped.json: step 'agent': a2a_agent_id", DEFAULT_AGENT),
+        ("tasks/scoped.json: step 'install': a2a_agent_id", DEFAULT_AGENT)}
 
 
 def test_including_the_user_scope_keeps_each_scoped_field_as_stored(store):

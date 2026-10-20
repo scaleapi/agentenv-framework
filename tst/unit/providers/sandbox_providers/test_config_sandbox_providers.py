@@ -9,6 +9,7 @@ import pytest
 from agent_env.config import ConfigError
 from agent_env.providers.sandbox_providers import sandbox_provider
 from agent_env.config import reset_config
+from agent_env.providers.sandbox_providers.boxd.provider import BoxdSandboxProvider
 from agent_env.providers.sandbox_providers.e2b.provider import E2BSandboxProvider
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
 from agent_env.providers.sandbox_providers.sail_vm.provider import SailVmSandboxProvider
@@ -313,6 +314,33 @@ def test_tenki_missing_api_key_is_a_config_error(monkeypatch, tmp_path):
 
     with pytest.raises(ConfigError, match="requires a non-empty 'api_key'"):
         build_sandbox_provider("tenki")
+
+
+def test_boxd_builtin_receives_interpolated_key_and_org(monkeypatch, tmp_path):
+    cfg = _write_config(tmp_path, """
+        [sandbox.providers.boxd.config]
+        api_key = "env:BOXD_TEST_API_KEY"
+        org = "research"
+    """)
+    monkeypatch.setenv("AGENT_ENV_CONFIG", str(cfg))
+    monkeypatch.setenv("BOXD_TEST_API_KEY", "resolved-test-key")
+
+    provider = build_sandbox_provider("boxd")
+
+    assert isinstance(provider, BoxdSandboxProvider)
+    assert provider._api_key == "resolved-test-key"
+    assert provider._org == "research"
+
+
+def test_boxd_missing_api_key_is_a_config_error(monkeypatch, tmp_path):
+    cfg = _write_config(tmp_path, """
+        [sandbox.providers.boxd.config]
+        org = "research"
+    """)
+    monkeypatch.setenv("AGENT_ENV_CONFIG", str(cfg))
+
+    with pytest.raises(ConfigError, match="requires a non-empty 'api_key'"):
+        build_sandbox_provider("boxd")
 
 
 def test_builtin_config_reaches_chain_members(monkeypatch, tmp_path):

@@ -13,6 +13,7 @@ from agent_env.config.model import ModelConfig
 from agent_env.providers.sandbox_providers import sandbox_provider
 from agent_env.store.secret_store.local_secret_store import LocalSecretStore
 from agent_env.task_step.context import DeployedSandbox, TaskStepContext
+from agent_env.task_step.task_steps import install_agent as install_agent_module
 from agent_env.task_step.task_steps.install_agent import (
     InstallAgentTaskStep,
     _build_param_resolvers,
@@ -251,3 +252,61 @@ async def test_a_step_naming_no_agent_installs_the_configured_default(monkeypatc
         await step.execute(context)
 
     assert asked == [local_stores.get_default_a2a_agent_id()]
+
+
+class _TrustingSandbox:
+    """A sandbox that records the CA files it's given."""
+
+    def __init__(self, on_this_machine):
+        self.ON_THIS_MACHINE = on_this_machine
+        self.copied, self.written = [], {}
+
+    async def copy_trust_dir_into_container(self, trust_dir, container, destination):
+        self.copied.append((trust_dir, container, destination))
+
+    async def write_host_file(self, data, vm_path):
+        self.written[vm_path] = data
+
+
+@pytest.fixture
+def ca(monkeypatch, tmp_path):
+    trust = tmp_path / "trust"
+    trust.mkdir()
+    (trust / "ca.pem").write_text("ca")
+    (trust / "ca-bundle.pem").write_text("bundle")
+    monkeypatch.setattr(install_agent_module, "local_grant_trust", lambda: trust)
+    return trust
+
+
+def test_an_install_in_a_container_on_this_machine_gets_the_ca_copied_in_and_the_lines_that_find_it(ca):
+    sandbox = _TrustingSandbox(on_this_machine=True)
+
+    lines = asyncio.run(InstallAgentTaskStep._trust_lines(sandbox, "box-task", "/tmp/work"))
+
+    assert sandbox.copied == [(ca, "box-task", "/etc/agentenv")]
+    assert lines.splitlines() == ["SSL_CERT_FILE=/etc/agentenv/ca-bundle.pem",
+                                  "REQUESTS_CA_BUNDLE=/etc/agentenv/ca-bundle.pem",
+                                  "NODE_EXTRA_CA_CERTS=/etc/agentenv/ca.pem"]
+
+
+def test_an_install_on_a_host_on_this_machine_gets_the_ca_beside_its_work_dir(ca):
+    sandbox = _TrustingSandbox(on_this_machine=True)
+
+    lines = asyncio.run(InstallAgentTaskStep._trust_lines(sandbox, None, "/tmp/work dir"))
+
+    assert sandbox.written == {"/tmp/work dir/trust/ca-bundle.pem": b"bundle", "/tmp/work dir/trust/ca.pem": b"ca"}
+    assert lines.splitlines()[-1] == "NODE_EXTRA_CA_CERTS='/tmp/work dir/trust/ca.pem'"
+
+
+def test_an_install_elsewhere_or_without_a_local_ca_gets_no_lines(ca, monkeypatch):
+    remote = _TrustingSandbox(on_this_machine=False)
+    assert asyncio.run(InstallAgentTaskStep._trust_lines(remote, "box-task", "/tmp/work")) == ""
+    monkeypatch.setattr(install_agent_module, "local_grant_trust", lambda: None)
+    assert asyncio.run(InstallAgentTaskStep._trust_lines(_TrustingSandbox(True), "box-task", "/tmp/work")) == ""
+    assert remote.copied == [] and remote.written == {}
+
+
+def test_the_trust_lines_resolve_as_the_trust_env_param():
+    resolvers = _build_param_resolvers(container_name="c", work_dir="/w", agent_ctx_tar="/w/a.tgz", a2a_port=8000,
+                                       config=None, agent_name="a", trust_lines="SSL_CERT_FILE=/x\n")
+    assert resolvers["trust_env"]() == "SSL_CERT_FILE=/x\n"
