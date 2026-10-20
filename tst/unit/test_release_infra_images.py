@@ -23,7 +23,7 @@ def _steps(job: str) -> list[dict]:
 def test_the_wheel_records_the_digests_where_an_install_reads_them():
     (step,) = [step for step in _steps("framework") if "infra_images.py write" in step.get("run", "")]
 
-    assert re.search(rf"infra_images\.py write {re.escape(RECORD)}$", step["run"].strip())
+    assert re.search(rf"infra_images\.py write {re.escape(RECORD)}$", step["run"], re.MULTILINE)
 
 
 def test_the_record_is_written_before_the_protocol_pin_edits_the_locked_pyproject():
@@ -62,3 +62,12 @@ def test_a_failed_image_job_sends_neither_package_to_pypi(job):
     for image_job in images:
         assert f"""contains(fromJSON('["success", "skipped"]'), needs.{image_job}.result)""" in spec["if"]
     assert spec["if"].startswith("!cancelled()")
+
+
+def test_the_release_notes_list_the_images_the_wheel_records():
+    framework, release = WORKFLOW["jobs"]["framework"], WORKFLOW["jobs"]["release"]
+    (record,) = [step for step in framework["steps"] if step.get("id") == "record"]
+    (create,) = [step for step in release["steps"] if "gh release create" in step.get("run", "")]
+
+    assert "infra_images.py notes" in record["run"] and framework["outputs"]["image_notes"] == "${{ steps.record.outputs.notes }}"
+    assert create["env"]["IMAGE_NOTES"] == "${{ needs.framework.outputs.image_notes }}" and "IMAGE_NOTES" in create["run"]

@@ -2,7 +2,8 @@
 
 ``plan`` prints each image's name, repository, tag, Dockerfile and context as JSON, ``--missing`` only those whose tag
 the registry doesn't have; ``smoke NAME IMAGE`` checks that IMAGE, a local build of NAME, runs; ``write PATH`` records
-the digest the registry serves under every image's tag as a release wheel carries them, and fails if any is missing.
+the digest the registry serves under every image's tag as a release wheel carries them, and fails if any is missing;
+``notes PATH`` prints that record as the release notes list it.
 The registry is read with ``GHCR_TOKEN`` (as ``GITHUB_ACTOR``) when it's set, anonymously otherwise.
 """
 
@@ -17,7 +18,7 @@ import time
 from pathlib import Path
 
 from agent_env.env.bootstrap import PUBLISHED_IMAGES
-from agent_env.env.published_images import REGISTRY, PublishedImage, write_release_digests
+from agent_env.env.published_images import REGISTRY, PublishedImage, release_digests, write_release_digests
 from agent_env.store.image_store.oci_registry_credentials import RegistryAuth
 from agent_env.store.image_store.registry_api import NoSuchImageError, pin_digest
 
@@ -33,6 +34,7 @@ def main() -> int:
     smoke.add_argument("name", choices=[image.name for image in PUBLISHED_IMAGES])
     smoke.add_argument("image")
     commands.add_parser("write").add_argument("path", type=Path)
+    commands.add_parser("notes").add_argument("path", type=Path)
     args = parser.parse_args()
     if args.command == "plan":
         print(json.dumps([_described(image) for image in PUBLISHED_IMAGES
@@ -40,6 +42,10 @@ def main() -> int:
         return 0
     if args.command == "smoke":
         return _smoke(args.name, args.image)
+    if args.command == "notes":
+        print("Infra images this release pulls, by digest:")
+        print("\n".join(f"- `{ref}@{digest}`" for ref, digest in release_digests(args.path).items()))
+        return 0
     digests = {image.ref(): _digest(image) for image in PUBLISHED_IMAGES}
     if missing := sorted(ref for ref, digest in digests.items() if digest is None):
         print(f"::error::the registry has no image under {', '.join(missing)}")

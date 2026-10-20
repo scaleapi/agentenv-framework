@@ -162,3 +162,16 @@ def test_a_service_db_that_never_turns_healthy_fails_with_its_logs(script, monke
     out = capsys.readouterr().out
     assert "::error::pg wasn't healthy within 0.01s" in out and "wrong ownership" in out
     assert calls[-1] == ["docker", "rm", "-f", "c123"]
+
+
+def test_notes_list_each_recorded_image_pinned_by_its_digest(script, monkeypatch, tmp_path, capsys):
+    _registry(script, monkeypatch, {image.ref() for image in bootstrap.PUBLISHED_IMAGES})
+    path = tmp_path / "published_images.json"
+    _run(script, monkeypatch, "write", str(path))
+    capsys.readouterr()
+
+    assert _run(script, monkeypatch, "notes", str(path)) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "Infra images this release pulls, by digest:"
+    assert sorted(lines[1:]) == sorted(f"- `{image.ref()}@{_DIGEST}`" for image in bootstrap.PUBLISHED_IMAGES)
