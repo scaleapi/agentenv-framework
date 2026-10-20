@@ -24,6 +24,8 @@ from agent_env.store.image_store.registry_api import NoSuchImageError, pin_diges
 
 REPO = Path(__file__).resolve().parents[2]
 _HEALTHY_WITHIN_SECONDS = 120
+_HEALTH_POLL_SECONDS = 2
+_LOG_TAIL_LINES = 30  # of a container that never turned healthy, in the error
 
 
 def main() -> int:
@@ -105,8 +107,9 @@ def _healthy(image: str) -> int:
                                     capture_output=True, text=True).stdout.strip()
             if status == "healthy":
                 return 0
-            time.sleep(2)
-        logs = subprocess.run(["docker", "logs", "--tail", "30", container], capture_output=True, text=True)
+            time.sleep(_HEALTH_POLL_SECONDS)
+        logs = subprocess.run(["docker", "logs", "--tail", str(_LOG_TAIL_LINES), container], capture_output=True,
+                              text=True)
         print(f"::error::{image} wasn't healthy within {_HEALTHY_WITHIN_SECONDS}s (last: {status}):\n"
               f"{logs.stdout}{logs.stderr}")
         return 1
