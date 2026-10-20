@@ -279,6 +279,41 @@ def test_a_cancelled_download_writes_nothing_after_it_is_cancelled(monkeypatch, 
     assert not any((tmp_path / "in").glob("*"))
 
 
+def test_an_attachment_is_written_off_the_event_loop_and_a_cancel_waits_for_the_write(monkeypatch, tmp_path):
+    ticks: list[int] = []
+    written: list[int] = []
+    write = kit._write_bytes
+
+    def slow_write(target, data):
+        before = len(ticks)
+        time.sleep(0.3)
+        write(target, data)
+        written.append(len(ticks) - before)
+
+    monkeypatch.setattr(kit, "_write_bytes", slow_write)
+
+    async def cancel_mid_write():
+        async def tick():
+            while True:
+                ticks.append(1)
+                await asyncio.sleep(0.01)
+
+        ticker = asyncio.create_task(tick())
+        part = FilePart(name="a.png", bytes=base64.b64encode(b"png").decode())
+        writing = asyncio.create_task(kit.materialize_file_part(part, tmp_path / "in"))
+        await asyncio.sleep(0.1)
+        writing.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await writing
+        ticker.cancel()
+        return list(written)  # as the cancel reached the caller
+
+    (ticks_while_writing,) = asyncio.run(cancel_mid_write())
+
+    assert ticks_while_writing >= 5  # health checks and other turns ran meanwhile
+    assert (tmp_path / "in" / "a.png").read_bytes() == b"png"
+
+
 def test_a_failed_download_fails_the_turn_without_the_urls_signature(monkeypatch, calls, client):
     url = "https://store.example.com/bucket/a.png?X-Amz-Signature=sig-123"
     _serving(monkeypatch, {url: (403, b"denied")})

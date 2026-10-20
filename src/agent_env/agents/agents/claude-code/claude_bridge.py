@@ -17,6 +17,8 @@ from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 
+from kit import in_thread_to_its_end
+
 logger = logging.getLogger(__name__)
 
 # The CLI's own state: settings, skills and session transcripts. The image fixes it, so it doesn't follow the uid.
@@ -405,15 +407,15 @@ async def run_claude(
         attempts += 1
         attempt_timeout_s = (timeout_s if attempts == 1
                              else max(int(deadline - time.monotonic()) - _DEADLINE_HEADROOM_S, 1))
-        # The scrubs run here, not in a thread: a cancelled wait would release the context while one could still
-        # replace the transcript a later turn appends to. A 50 MB transcript takes about 50 ms.
+        # Each scrub ends before the turn does, cancelled or not: a later turn on the context mustn't start while it
+        # can still replace the transcript that turn appends to.
         try:
             result = await spawn(prompt=attempt_prompt, session_id=attempt_session, resume=attempt_resume,
                                  timeout_s=attempt_timeout_s)
         finally:
-            scrub_session_transcript(attempt_session)
+            await in_thread_to_its_end(scrub_session_transcript, attempt_session)
         if result.session_id != attempt_session:
-            scrub_session_transcript(result.session_id)
+            await in_thread_to_its_end(scrub_session_transcript, result.session_id)
         tool_calls += result.tool_call_count
 
         failure = _resumable_api_failure(result)

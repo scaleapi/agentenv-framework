@@ -3,6 +3,7 @@ skill installs, FastAPI-style error bodies, grant reads and FileParts written to
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import logging
@@ -10,10 +11,11 @@ import re
 import shutil
 import tempfile
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
+from typing import TypeVar
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -131,6 +133,34 @@ def _redacting_logged_urls() -> Iterator[None]:
         _REDACT_LOGGED_URLS.reset(token)
 
 
+_T = TypeVar("_T")
+
+
+async def in_thread_to_its_end(func: Callable[..., _T], /, *args: object) -> _T:
+    """``func(*args)`` in a thread, off the event loop, and awaited to its end even when the caller is cancelled, so
+    nothing it does outlives a cancelled turn; the cancel is raised once it has ended."""
+    work = asyncio.ensure_future(asyncio.to_thread(func, *args))
+    cancelled = False
+    while not work.done():
+        try:
+            await asyncio.shield(work)
+        except asyncio.CancelledError:
+            cancelled = True
+        except Exception:
+            break
+    if cancelled:
+        raise asyncio.CancelledError from (None if work.cancelled() else work.exception())
+    return work.result()
+
+
+def _write_bytes(target: Path, data: bytes) -> None:
+    target.write_bytes(data)
+
+
+def _write_base64(target: Path, data: str) -> None:
+    _write_bytes(target, base64.b64decode(data, validate=True))
+
+
 class FilePartMaterializeError(Exception):
     """A FilePart that can't be written to disk, its message free of the URI's credentials."""
 
@@ -185,13 +215,13 @@ async def _download_uri_to(uri: str, target: Path) -> None:
             async with httpx.AsyncClient(timeout=_FILEPART_DOWNLOAD_TIMEOUT_S, follow_redirects=True) as client:
                 response = await client.get(uri)
                 response.raise_for_status()
-                target.write_bytes(response.content)
     except httpx.HTTPStatusError as e:  # not chained: httpx's messages can repeat the full URL
         raise FilePartMaterializeError(
             f"http(s) download failed for {_shown(uri)}: HTTP {e.response.status_code}") from None
     except httpx.HTTPError as e:
         raise FilePartMaterializeError(
             f"http(s) download failed for {_shown(uri)}: {_without_credentials(str(e), uri)}") from None
+    await in_thread_to_its_end(_write_bytes, target, response.content)
 
 
 async def _materialize(part: FilePart, target_dir: Path) -> str:
@@ -202,7 +232,7 @@ async def _materialize(part: FilePart, target_dir: Path) -> str:
         target = target_dir / f"{uuid.uuid4().hex[:_NAME_PREFIX_CHARS]}-{name}"
     if part.bytes is not None:
         try:
-            target.write_bytes(base64.b64decode(part.bytes, validate=True))
+            await in_thread_to_its_end(_write_base64, target, part.bytes)
         except (binascii.Error, ValueError) as e:
             raise FilePartMaterializeError(f"malformed base64 in FilePart '{name}': {e}") from e
         except OSError as e:
@@ -215,6 +245,6 @@ async def _materialize(part: FilePart, target_dir: Path) -> str:
 
 async def materialize_file_part(part: FilePart, target_dir: Path) -> str:
     """Write a FilePart's base64 bytes or http(s) contents to ``target_dir``; the path. Two parts of one message
-    sharing a name are kept apart. The download is awaited, not run in a thread, so a cancelled turn's ends with it
-    and writes nothing after. Raises FilePartMaterializeError."""
+    sharing a name are kept apart. The download is awaited and the decoding and writing done off the event loop, each
+    to its end, so a cancelled turn's ends before the turn does. Raises FilePartMaterializeError."""
     return await _materialize(part, target_dir)
