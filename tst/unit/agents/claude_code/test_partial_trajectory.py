@@ -8,9 +8,9 @@ from pathlib import Path
 import httpx
 import pytest
 
-from tst.unit.examples.claude_code.support import extension_methods, send
-from tst.unit.examples.claude_code.support import FakeCLI
-from tst.unit.examples.claude_code.agent import a2a_server, claude_bridge
+from tst.unit.agents.claude_code.support import extension_methods, send
+from tst.unit.agents.claude_code.support import FakeCLI
+from tst.unit.agents.claude_code.agent import a2a_server, claude_bridge
 
 TRAJECTORY_PATH = a2a_server.TRAJECTORY_V1.endpoint
 

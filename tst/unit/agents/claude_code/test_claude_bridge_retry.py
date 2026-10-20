@@ -10,8 +10,8 @@ import json
 
 import pytest
 
-from tst.unit.examples.claude_code.support import FakeCLI
-from tst.unit.examples.claude_code.agent import claude_bridge
+from tst.unit.agents.claude_code.support import FakeCLI
+from tst.unit.agents.claude_code.agent import claude_bridge
 
 
 def _event(**kw):

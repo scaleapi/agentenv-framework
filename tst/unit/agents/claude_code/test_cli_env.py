@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from tst.unit.examples.claude_code.agent import claude_bridge
-from tst.unit.examples.claude_code.support import FakeCLI
+from tst.unit.agents.claude_code.agent import claude_bridge
+from tst.unit.agents.claude_code.support import FakeCLI
 
 GATEWAY = {"LITELLM_API_KEY": "gateway-key", "LITELLM_BASE_URL": "https://gateway.example.com"}
 ALIASES = ("ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL",

@@ -8,8 +8,8 @@ import pytest
 from agentenv_protocol import transfers as protocol_transfers
 from starlette.testclient import TestClient
 
-from tst.unit.examples.claude_code.agent import a2a_server, claude_bridge
-from tst.unit.examples.claude_code.support import FakeStore
+from tst.unit.agents.claude_code.agent import a2a_server, claude_bridge
+from tst.unit.agents.claude_code.support import FakeStore
 
 
 @pytest.fixture(autouse=True)

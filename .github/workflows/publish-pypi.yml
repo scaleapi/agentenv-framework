@@ -93,8 +93,11 @@ jobs:
           # workspace members, and the bare name keys [tool.uv.sources]; none of those may be rewritten.
           sed -i "s/\"agentenv-framework-protocol[^\"]*\"/\"agentenv-framework-protocol==${protocol}\"/" pyproject.toml
           grep -q "\"agentenv-framework-protocol==${protocol}\"" pyproject.toml
-          # Each shipped example's image installs the protocol this release ships with, keeping its extras.
-          for requirements in src/agent_env/examples/*/*/*/requirements.txt; do
+          # Each shipped bundle's images install the protocol this release ships with, keeping its extras. The list is
+          # assigned first, so the step stops if the script fails or finds nothing.
+          requirements_files=$(python .github/scripts/shipped_bundles.py)
+          [ -n "$requirements_files" ]
+          for requirements in $requirements_files; do
             grep -q "^agentenv-framework-protocol" "$requirements" || continue
             sed -i -E "s/^agentenv-framework-protocol(\[[^]]*\])?.*/agentenv-framework-protocol\1==${protocol}/" "$requirements"
             grep -qE "^agentenv-framework-protocol(\[[^]]*\])?==${protocol}$" "$requirements"

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import agent_env
 
-AGENT_DIR = Path(agent_env.__file__).parent / "examples" / "agents" / "agents" / "claude-code"
+AGENT_DIR = Path(agent_env.__file__).parent / "agents" / "agents" / "claude-code"
 sys.path.insert(0, str(AGENT_DIR))
 a2a_server = importlib.import_module("a2a_server")
 claude_bridge = importlib.import_module("claude_bridge")

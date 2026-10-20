@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 from agentenv_protocol.a2a_agent import AGENT_CONFIG_V1
 
-from tst.unit.examples.claude_code.support import card
-from tst.unit.examples.claude_code.agent import a2a_server
+from tst.unit.agents.claude_code.support import card
+from tst.unit.agents.claude_code.agent import a2a_server
 
 AGENT_CONFIG_PATH = AGENT_CONFIG_V1.endpoint
 SKILL_CONFIG_PATH = a2a_server.SKILL_CONFIG_V1.endpoint

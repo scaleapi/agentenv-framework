@@ -11,8 +11,8 @@ import tarfile
 from pathlib import Path
 
 
-from tst.unit.examples.claude_code.support import card, extension_methods, read_grant, send, write_grant
-from tst.unit.examples.claude_code.agent import a2a_server, claude_bridge
+from tst.unit.agents.claude_code.support import card, extension_methods, read_grant, send, write_grant
+from tst.unit.agents.claude_code.agent import a2a_server, claude_bridge
 
 SKILL_CONFIG_PATH = a2a_server.SKILL_CONFIG_V1.endpoint
 TRAJECTORY_PATH = a2a_server.TRAJECTORY_V1.endpoint

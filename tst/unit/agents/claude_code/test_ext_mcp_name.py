@@ -1,7 +1,7 @@
 """mcp-config add keeps the name the caller sends, and mints mcp_<hex> when it sends none. The SDK's peer_agents
 server is listed beside them."""
 
-from tst.unit.examples.claude_code.agent import a2a_server
+from tst.unit.agents.claude_code.agent import a2a_server
 
 
 MCP_CONFIG_PATH = a2a_server.MCP_CONFIG_V1.endpoint

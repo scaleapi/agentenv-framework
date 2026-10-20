@@ -10,7 +10,7 @@ import subprocess
 import time
 
 import pytest
-from tst.unit.examples.claude_code.agent import claude_bridge
+from tst.unit.agents.claude_code.agent import claude_bridge
 
 
 

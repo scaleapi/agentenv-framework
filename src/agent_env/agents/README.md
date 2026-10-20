@@ -19,4 +19,5 @@ in a Python of its own, so the target's Python is left alone. The CLI runs its c
 neither, Alpine's for one, gets bash from its own package manager. The agent works in the container's working directory,
 or in `/app` on the host.
 
-Run its smoke task with `agent-env run agents`.
+`agent-env run agents` runs every agent's smoke task, building each image; `--task claude-code-smoke` runs Claude
+Code's alone.

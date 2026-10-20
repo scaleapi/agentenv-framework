@@ -10,8 +10,8 @@ import sys
 
 from agent_env.task_step.task_steps.install_agent import _build_param_resolvers
 
-from tst.unit.examples.claude_code.agent import AGENT_DIR
-from tst.unit.examples.claude_code.support import card
+from tst.unit.agents.claude_code.agent import AGENT_DIR
+from tst.unit.agents.claude_code.support import card
 
 _CLAUDE_SKILL = {
     "id": "claude-code",

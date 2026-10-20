@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import re
 
-from tst.unit.examples.claude_code.agent import AGENT_DIR
+from tst.unit.agents.claude_code.agent import AGENT_DIR
 
 DOCKERFILE = (AGENT_DIR / "Dockerfile").read_text()
 

@@ -7,8 +7,8 @@ import json
 
 import pytest
 
-from tst.unit.examples.claude_code.support import FakeCLI
-from tst.unit.examples.claude_code.agent import claude_bridge
+from tst.unit.agents.claude_code.support import FakeCLI
+from tst.unit.agents.claude_code.agent import claude_bridge
 
 _INIT = {"type": "system", "subtype": "init", "session_id": "sess-1"}
 _TOOL = {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash", "input": {}}]}}

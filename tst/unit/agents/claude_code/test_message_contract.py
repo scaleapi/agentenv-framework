@@ -10,8 +10,8 @@ import pytest
 from agentenv_protocol.a2a_agent import AGENT_CONFIG_V1
 from agentenv_protocol.a2a_agent.peer_agents import PEER_MCP_PATH
 
-from tst.unit.examples.claude_code.support import send, terminal
-from tst.unit.examples.claude_code.agent import a2a_server, claude_bridge, kit
+from tst.unit.agents.claude_code.support import send, terminal
+from tst.unit.agents.claude_code.agent import a2a_server, claude_bridge, kit
 
 AGENT_CONFIG_PATH = AGENT_CONFIG_V1.endpoint
 MCP_CONFIG_PATH = a2a_server.MCP_CONFIG_V1.endpoint

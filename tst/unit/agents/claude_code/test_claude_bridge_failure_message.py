@@ -12,8 +12,8 @@ import logging
 
 import pytest
 
-from tst.unit.examples.claude_code.support import FakeCLI
-from tst.unit.examples.claude_code.agent import claude_bridge
+from tst.unit.agents.claude_code.support import FakeCLI
+from tst.unit.agents.claude_code.agent import claude_bridge
 
 # What agent-env keeps of an agent's error_message, and a2a_server's own cap.
 _AGENT_ENV_KEEPS = 500

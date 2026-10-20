@@ -1,11 +1,11 @@
-"""The clean-install gate: build both distributions as the release does, check that the wheel ships every example
-and its entry point, install the two wheels into a fresh venv from public PyPI, run a shipped bundle twice by name,
+"""The clean-install gate: build both distributions as the release does, check that the wheel ships every shipped
+bundle's files and its entry point, install the two wheels into a fresh venv from public PyPI, run a shipped bundle twice by name,
 and check what the runs left in the local store.
 
 Every child process gets an environment built from an allowlist, so no config file, credential, package index or
 installed package of the calling shell can make the gate pass. It builds in place from the checkout: hatchling
 ignores ``.gitignore`` when the build root's own path matches one of its patterns, as a copy under ``/tmp`` does, so
-it also refuses a tracked example file that ``.gitignore`` matches, wherever the checkout is.
+it also refuses a tracked bundle file that ``.gitignore`` matches, wherever the checkout is.
 """
 
 from __future__ import annotations
@@ -21,9 +21,9 @@ import tomllib
 import zipfile
 from pathlib import Path
 
+from shipped_bundles import BUNDLES, bundle_roots
+
 REPO = Path(__file__).resolve().parents[2]
-EXAMPLES = "src/agent_env/examples"
-BUNDLES = "agent_env.bundles"
 PYPI = "https://pypi.org/simple"
 CHECK = Path(__file__).with_name("check_clean_install.py")
 
@@ -53,9 +53,10 @@ def main() -> int:
     protocol = _one(work / "dist", "agentenv_framework_protocol-*.whl")
     framework = _one(work / "dist", "agentenv_framework-*.whl")
 
-    _step(f"Check {framework.name} ships every tracked example and its entry points")
-    tracked = _listed([git, "ls-files", "-z", EXAMPLES], env)
-    ignored = _listed([git, "ls-files", "-z", "--cached", "--ignored", "--exclude-standard", EXAMPLES], env)
+    _step(f"Check {framework.name} ships every tracked file of each shipped bundle, and their entry points")
+    folders = [root.relative_to(REPO).as_posix() for root in bundle_roots().values()]
+    tracked = _listed([git, "ls-files", "-z", *folders], env)
+    ignored = _listed([git, "ls-files", "-z", "--cached", "--ignored", "--exclude-standard", *folders], env)
     declared = tomllib.loads((REPO / "pyproject.toml").read_text())["project"].get("entry-points", {}).get(BUNDLES, {})
     problems = [f"::error file={path}::{path} is tracked but .gitignore matches it, so hatch leaves it out of the wheel"
                 for path in ignored]
@@ -85,7 +86,7 @@ def main() -> int:
 
 
 def wheel_problems(wheel: Path, tracked: list[str], declared: dict[str, str]) -> list[str]:
-    """Why ``wheel`` doesn't ship the tracked example files under ``src/`` and the declared bundle entry points."""
+    """Why ``wheel`` doesn't ship the tracked bundle files under ``src/`` and the declared bundle entry points."""
     with zipfile.ZipFile(wheel) as archive:
         names = set(archive.namelist())
         entry_points = next((name for name in names if name.endswith(".dist-info/entry_points.txt")), None)

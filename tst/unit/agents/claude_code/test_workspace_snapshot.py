@@ -10,8 +10,8 @@ from pathlib import Path
 
 from agentenv_protocol.transfers import Uploaded
 
-from tst.unit.examples.claude_code.support import extension_methods, read_grant, write_grant
-from tst.unit.examples.claude_code.agent import a2a_server, claude_bridge
+from tst.unit.agents.claude_code.support import extension_methods, read_grant, write_grant
+from tst.unit.agents.claude_code.agent import a2a_server, claude_bridge
 
 SNAPSHOT_PATH = a2a_server.SNAPSHOT_V1.endpoint
 

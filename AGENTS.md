@@ -84,7 +84,7 @@ or one of them only where it is used.
   bridge address say: `host.docker.internal`, which grant URLs name by default, resolves only in containers.
 - `[agents] default_a2a_agent_id`: the agent a `deploy_agent` step without an id deploys; built-in
   `@local/agentenv-framework/agents/claude-code`, the `agents` bundle's Claude Code
-  (`src/agent_env/examples/agents/`), overridable by `configure(default_a2a_agent_id=...)`. Any step's
+  (`src/agent_env/agents/`), overridable by `configure(default_a2a_agent_id=...)`. Any step's
   agent field left unset falls back to it (`entity.refs.default_agent_refs`), so a bundle run plans the
   default for it, pulling the built-in one from the installed `agents` bundle. Claude Code needs a model
   endpoint serving Anthropic's Messages API, such as a LiteLLM gateway. It declares `install/v1` too: its
@@ -118,7 +118,8 @@ and deserialized through a registry.
 | `plugins/` | Entry-point plugins (see Extension points): the group names, `inventory()`, which `agent-env plugin list/show/check` report, `load_failures` and `settings`. The top level is public; the underscored modules are internal. |
 | `explorer/` | Optional local web UI: `agent-env up`, needs the `explorer` extra, binds loopback `:8234`. |
 | `cli/` | Click CLI with the groups `a2a-agent`, `artifact`, `bundle`, `config`, `env`, `eval`, `plugin`, `run`, `task`, `up`. |
-| `examples/` | The bundles agent-env ships (`hello`, and `echo-mcp`, which needs Docker), registered under `agent_env.bundles` in `pyproject.toml`. Tests run them, but they are examples for users, not fixtures. |
+| `agents/` | The `agents` bundle: the agents agent-env ships, one folder each under `agents/agents/`, with a smoke task each under `agents/tasks/`. Its Claude Code, `@local/agentenv-framework/agents/claude-code`, is the default agent. An agent's Python packages are its folder's `requirements.txt`, installed in its image, never in agent-env's own environment. A run that pulls one of its agents reads the whole bundle, so `tst/unit/bundle/shipped_bundles_test.py` parses and checks every shipped bundle. |
+| `examples/` | The example bundles agent-env ships (`hello`, and `echo-mcp`, which needs Docker). Tests run them, but they are examples for users, not fixtures. Every shipped bundle is registered under `agent_env.bundles` in `pyproject.toml`, `<name> = "<package>"` shipping `src/<package as a path>/<name>/`. |
 
 ## Extension points
 
@@ -259,14 +260,16 @@ request, title edits included, and on `main`: `.github/scripts/check_plugin_api.
 plugin surface (its `BASES` and `USED`) between `HEAD^1` and `HEAD` with griffe, pinned in the `dev` extra, and fails on a break the
 title does not mark with `!`. `.github/workflows/clean-install.yml` runs the `clean-install` job on
 every pull request and on `main`: `.github/scripts/clean_install.py` builds both distributions as the
-release does, fails if the wheel leaves out a file tracked under `src/agent_env/examples` or a
+release does, fails if the wheel leaves out a file tracked in a shipped bundle's folder or an
 `agent_env.bundles` entry point, installs the two wheels into a fresh venv from public PyPI with an
 allowlisted environment (no AWS, no config, no plugin), and runs `agent-env run hello`
 twice by name; `.github/scripts/check_clean_install.py`, run by that venv, checks the local store and
 that the runs left no sandbox work folder.
 `.github/workflows/publish-pypi.yml` runs on the `v*` tag the release automation pushes: it waits
 for `main`'s CI to pass on the tagged commit, publishes `agentenv-framework-protocol` and then
-`agentenv-framework` to PyPI, and creates the GitHub release, whose notes are the titles of the pull
+`agentenv-framework` to PyPI, pinning the protocol in `pyproject.toml` and in each shipped env's and agent's
+`requirements.txt` (`.github/scripts/shipped_bundles.py` lists them, so a new agent is pinned with no workflow change),
+and creates the GitHub release, whose notes are the titles of the pull
 requests merged since the previous release.
 Actions are pinned to commit SHAs; Dependabot updates them, the pinned uv, `uv.lock` and the UI's npm packages.
 

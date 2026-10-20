@@ -8,8 +8,8 @@ import json
 
 import pytest
 
-from tst.unit.examples.claude_code.support import FakeCLI
-from tst.unit.examples.claude_code.agent import claude_bridge
+from tst.unit.agents.claude_code.support import FakeCLI
+from tst.unit.agents.claude_code.agent import claude_bridge
 
 MAX_ARG_STRLEN = 131072  # Linux single-argument limit (PAGE_SIZE * 32)
 
