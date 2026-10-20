@@ -15,7 +15,7 @@ from pathlib import Path
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.config import get_config
 from agent_env.store.base import NotFoundError
-from agent_env.utils.docker.installed import installed_packages
+from agent_env.utils.docker.installed import Installed, installed_packages
 from agent_env.utils.docker.lock import Locked, lock
 from agent_env.utils.docker.prune import Pruned, write_pruned
 
@@ -87,47 +87,56 @@ def write_images(groups: list[list[ImageJob]], staging: Path, scratch: Path,
             if job.problem is None:
                 placed.append(job)
     # Pinning rewrites a Dockerfile, which another image placed in the same folder may hold too: so only once all are.
-    locked: dict[tuple[str, str], ImageJob] = {}
+    sharing: dict[tuple[str, str], list[ImageJob]] = {}
     for job in placed:
-        first = locked.setdefault((job.folder, job.pruned.dockerfile), job)
-        if first is job:
-            _lock(job, staging / job.folder)
-        else:  # two images built from one Dockerfile in one folder: it's pinned once
-            job.locked, job.unlocked = first.locked, first.unlocked
+        sharing.setdefault((job.folder, job.pruned.dockerfile), []).append(job)
+    for (folder, dockerfile), jobs in sharing.items():
+        _lock(jobs, staging / folder, dockerfile)
 
 
 # What reading a stored context raises when it isn't one a folder can be written from, or is damaged.
 _UNREADABLE = (ValueError, tarfile.TarError, EOFError)
 
 
-def _lock(job: ImageJob, folder: Path) -> None:
-    """Pin the folder's installs to the versions the stored image holds, or note on the job why it can't."""
+def _lock(jobs: list[ImageJob], folder: Path, dockerfile: str) -> None:
+    """Pin the Dockerfile ``jobs`` are built from to the versions their saved images hold, when they hold the same, or
+    note on each job why not: one Dockerfile can't be pinned to two images' versions."""
+    read = [_saved_packages(job) for job in jobs]
+    for job, packages in zip(jobs, read):
+        if isinstance(packages, str):
+            job.unlocked = f"{packages}, so a build resolves them afresh"
+    if any(isinstance(packages, str) or packages != read[0] for packages in read):
+        for job, packages in zip(jobs, read):
+            if job.unlocked is None:
+                others = ", ".join(other.key for other in jobs if other is not job)
+                job.unlocked = (f"its Dockerfile also builds {others}, whose saved image doesn't hold the same versions, "
+                                "so a build resolves them afresh")
+        return
+    locked = lock(folder, dockerfile, read[0])
+    for job in jobs:
+        job.locked = locked
+
+
+def _saved_packages(job: ImageJob) -> Installed | str:
+    """What ``job``'s saved image holds, or why it can't be read; a reason leaves the image's url out, as everything
+    the folder records does."""
     url = job.artifact.tar_gz_object_url
     if not url:
-        job.unlocked = "the store holds no image to read its versions from, so a build resolves them afresh"
-        return
-    # Each reason leaves the image's url out, as everything the folder records does.
+        return "the store holds no image to read its versions from"
     try:
         store = get_config().get_object_store_at(url)
     except ValueError:
-        job.unlocked = "the configured stores can't read its saved image, so a build resolves them afresh"
-        return
+        return "the configured stores can't read its saved image"
     try:
         with store.open(url) as saved:
             installed = installed_packages(saved)
     except NotFoundError:
-        job.unlocked = "the store no longer holds its saved image, so a build resolves them afresh"
-        return
+        return "the store no longer holds its saved image"
     except OSError as e:
-        job.unlocked = f"its saved image can't be read ({e.strerror or type(e).__name__}), so a build resolves them afresh"
-        return
+        return f"its saved image can't be read ({e.strerror or type(e).__name__})"
     except _UNREADABLE as e:
-        job.unlocked = f"its saved image can't be read ({e or type(e).__name__}), so a build resolves them afresh"
-        return
-    if installed is None:
-        job.unlocked = "its saved image's layers can't be read, so a build resolves them afresh"
-        return
-    job.locked = lock(folder, job.pruned.dockerfile, installed)
+        return f"its saved image can't be read ({e or type(e).__name__})"
+    return installed if installed is not None else "its saved image's layers can't be read"
 
 
 def _place(job: ImageJob, built: Path, dest: Path) -> None:

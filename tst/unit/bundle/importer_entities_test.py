@@ -482,3 +482,31 @@ def test_an_image_whose_saved_image_is_gone_is_written_unpinned_and_the_reason_n
     assert [written.unlocked for written in imported.images] == [
         "the store no longer holds its saved image, so a build resolves them afresh"]
     assert "file://" not in (imported.root / "README.md").read_text()
+
+
+@pytest.mark.parametrize("frontend_requests", ["2.31.0", "2.32.3"], ids=["same-versions", "other-versions"])
+def test_a_dockerfile_two_images_share_is_pinned_only_when_their_saved_images_hold_the_same_versions(
+        home, frontend_requests):
+    dockerfile = "FROM python:3.12-slim\nRUN pip install requests\nCOPY app.py /app.py\n"
+    context = context_image(home, "web-context", {"Dockerfile": dockerfile, "app.py": "app\n"})
+    site = "usr/local/lib/python3.12/site-packages"
+    images = [_stored_image(home, f"web-{side}", context, "Dockerfile",
+                            {f"{site}/requests-{version}.dist-info/METADATA": f"Name: requests\nVersion: {version}\n"})
+              for side, version in (("backend", "2.31.0"), ("frontend", frontend_requests))]
+    WebsiteEnv.put(id="web", backend_docker_image_artifact=images[0], frontend_docker_image_artifact=images[1],
+                   environment_name="web")
+    _task([{"id": "env", "type": "deploy_env", "env_id": "web"}])
+
+    imported = import_task("t", home / "t")
+
+    written = (imported.root / "envs/web/Dockerfile").read_text()
+    if frontend_requests == "2.31.0":
+        assert [image.locked.python for image in imported.images] == [1, 1]
+        assert written.count("ARG PIP_CONSTRAINT=") == 1
+        return
+    assert written == dockerfile
+    assert [(image.key, image.locked, image.unlocked) for image in imported.images] == [
+        ("backend_image", None, "its Dockerfile also builds frontend_image, whose saved image doesn't hold the same "
+                                "versions, so a build resolves them afresh"),
+        ("frontend_image", None, "its Dockerfile also builds backend_image, whose saved image doesn't hold the same "
+                                 "versions, so a build resolves them afresh")]
