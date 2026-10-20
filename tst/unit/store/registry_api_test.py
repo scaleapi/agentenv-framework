@@ -8,7 +8,7 @@ import pytest
 
 from agent_env.store import RegistryAuth
 from agent_env.store.image_store import registry_api
-from agent_env.store.image_store.registry_api import pin_digest, pinned_from
+from agent_env.store.image_store.registry_api import NoSuchImageError, pin_digest, pinned_from
 
 DIGEST = "sha256:" + "a" * 64
 OTHER = "sha256:" + "b" * 64
@@ -165,6 +165,16 @@ def test_what_the_registry_answers_is_named(fake_registry, status, message):
 
     with pytest.raises(ValueError, match=message):
         pin_digest("ghcr.io/org/tool:v9", None)
+
+
+@pytest.mark.parametrize("status, missing", [(404, True), (401, False), (500, False)])
+def test_only_a_404_says_the_image_is_missing(fake_registry, status, missing):
+    fake_registry(lambda request: httpx.Response(status))
+
+    with pytest.raises(ValueError) as raised:
+        pin_digest("ghcr.io/org/tool:v9", None)
+
+    assert isinstance(raised.value, NoSuchImageError) is missing
 
 
 def test_an_unreachable_registry_is_named(fake_registry):

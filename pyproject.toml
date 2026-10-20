@@ -123,9 +123,12 @@ packages = ["src/agent_env"]
 # Keep it out of the wheel — only its built output ships, copied to explorer/static/
 # by the UI build step. node_modules/out/.next are already .gitignore-excluded.
 exclude = ["src/agent_env/explorer/ui"]
+# The release workflow writes it and git ignores it; a build ships it when it's there.
+artifacts = ["src/agent_env/env/published_images.json"]
 
 [tool.hatch.build.targets.sdist]
 only-include = ["src", "tst", "packages/agentenv-protocol", ".github/scripts"]
+artifacts = ["src/agent_env/env/published_images.json"]
 
 [tool.uv.workspace]
 members = ["packages/agentenv-protocol"]

@@ -20,6 +20,7 @@ from agent_env.env.env import Env
 from agent_env.env.envs import GatewayEnv, MCPServerEnv
 from agent_env.env.envs.service_db import ServiceDBEnv
 from agent_env.env.envs.website_browser import WEBSITE_BROWSER_ENVIRONMENT_NAME, WEBSITE_BROWSER_IMAGE_TAG
+from agent_env.env.published_images import PublishedImage
 from agent_env.store.base import NotFoundError
 from agent_env.store.document_store import LocalSqliteDocumentStore
 from agent_env.store.ids import derive_id
@@ -120,6 +121,14 @@ _DOCKERFILES = {
     SERVICE_DB: [SERVICE_DB_DOCKERFILE, DB_WEB_DOCKERFILE, DB_MCP_DOCKERFILE],
     WEBSITE_BROWSER: [WEBSITE_BROWSER_DOCKERFILE],
 }
+# The image each shipped Dockerfile is published as.
+PUBLISHED_IMAGES = (
+    PublishedImage("agentenv-gateway", GATEWAY_DOCKERFILE),
+    PublishedImage("agentenv-service-db", SERVICE_DB_DOCKERFILE),
+    PublishedImage("agentenv-db-web", DB_WEB_DOCKERFILE),
+    PublishedImage("agentenv-db-mcp", DB_MCP_DOCKERFILE),
+    PublishedImage("agentenv-website-browser", WEBSITE_BROWSER_DOCKERFILE),
+)
 
 
 def build_inputs_digest(kind: str) -> str:

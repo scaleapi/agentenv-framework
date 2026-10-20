@@ -1,0 +1,51 @@
+"""What ``.github/workflows/publish-pypi.yml`` relies on to publish the infra images and record them in the wheel."""
+
+from __future__ import annotations
+
+import re
+import tomllib
+from pathlib import Path
+
+import yaml
+
+from agent_env.env.published_images import PLATFORMS, RELEASE_FILE
+
+REPO = Path(__file__).resolve().parents[2]
+WORKFLOW = yaml.safe_load((REPO / ".github" / "workflows" / "publish-pypi.yml").read_text())
+RECORD = str(RELEASE_FILE.relative_to(REPO))
+
+
+def _steps(job: str) -> list[dict]:
+    return WORKFLOW["jobs"][job]["steps"]
+
+
+def test_the_wheel_records_the_digests_where_an_install_reads_them():
+    (step,) = [step for step in _steps("framework") if "infra_images.py write" in step.get("run", "")]
+
+    assert re.search(rf"infra_images\.py write {re.escape(RECORD)}$", step["run"].strip())
+
+
+def test_the_record_is_written_before_the_protocol_pin_edits_the_locked_pyproject():
+    runs = [step.get("run", "") for step in _steps("framework")]
+    record = next(i for i, run in enumerate(runs) if "infra_images.py write" in run)
+    pin = next(i for i, run in enumerate(runs) if "agentenv-framework-protocol==" in run)
+
+    assert record < pin
+
+
+def test_the_record_ships_in_the_sdist_and_the_wheel_and_git_ignores_it():
+    targets = tomllib.loads((REPO / "pyproject.toml").read_text())["tool"]["hatch"]["build"]["targets"]
+
+    assert RECORD in targets["wheel"]["artifacts"] and RECORD in targets["sdist"]["artifacts"]
+    assert RECORD in (REPO / ".gitignore").read_text().splitlines()
+
+
+def test_each_image_is_built_for_every_platform_it_is_published_for():
+    arches = WORKFLOW["jobs"]["infra-build"]["strategy"]["matrix"]["arch"]
+
+    assert [f"linux/{arch}" for arch in arches] == list(PLATFORMS)
+
+
+def test_nothing_reaches_pypi_from_a_run_by_hand():
+    assert WORKFLOW["jobs"]["protocol"]["if"] == "github.event_name == 'push'"
+    assert "needs.protocol.result == 'success'" in WORKFLOW["jobs"]["framework"]["if"]
