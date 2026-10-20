@@ -13,7 +13,6 @@ from pathlib import Path
 from agent_env.utils.docker.context import BuildContext
 
 REGISTRY = "ghcr.io/scaleapi"
-PLATFORMS = ("linux/amd64", "linux/arm64")
 # The release workflow writes this into the wheels it publishes; a checkout, or a wheel built elsewhere, has none.
 RELEASE_FILE = Path(__file__).with_name("published_images.json")
 _DIGEST = re.compile(r"^sha256:[a-f0-9]{64}$")

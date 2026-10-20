@@ -255,12 +255,21 @@ every pull request and on `main`: `.github/scripts/clean_install.py` builds both
 release does, fails if the wheel leaves out a file tracked under `src/agent_env/examples` or a
 `agent_env.bundles` entry point, installs the two wheels into a fresh venv from public PyPI with an
 allowlisted environment (no AWS, no config, no plugin), and runs `agent-env run hello`
-twice by name; `.github/scripts/check_clean_install.py`, run by that venv, checks the local store and
-that the runs left no sandbox work folder.
+twice by name; `.github/scripts/check_clean_install.py`, run by that venv, checks the local store,
+that the runs left no sandbox work folder, and that each published infra image's tag is the same from the
+installed sources as from the checkout.
 `.github/workflows/publish-pypi.yml` runs on the `v*` tag the release automation pushes: it waits
 for `main`'s CI to pass on the tagged commit, publishes `agentenv-framework-protocol` and then
 `agentenv-framework` to PyPI, and creates the GitHub release, whose notes are the titles of the pull
 requests merged since the previous release.
+Once the repository variable `PUBLISH_INFRA_IMAGES` is `true`, it also publishes the infra images agent-env
+ships (`agent_env.env.published_images`) whose `src-<hex>` tags GHCR lacks: after `main`'s CI passes, each is
+built on a runner of each platform, checked, and tagged as one multi-platform image, and a tag that exists is
+never moved. The wheel and the release notes record each image's digest, and a failed image job sends neither
+package to PyPI. Run by hand on `main`, the workflow publishes the images alone.
+Its jobs that run agent-env (`.github/scripts/infra_images.py`) hold no token that writes; the jobs that push
+images or publish to PyPI install nothing and check what they're handed (`.github/scripts/infra_build.py`,
+standard library and the docker CLI only).
 Actions are pinned to commit SHAs; Dependabot updates them, the pinned uv, `uv.lock` and the UI's npm packages.
 
 ## Conventions
@@ -279,7 +288,9 @@ Actions are pinned to commit SHAs; Dependabot updates them, the pinned uv, `uv.l
   the commit message and the PR.
 - No defensive code for a case no caller produces; say so in the PR instead.
 - Keep core vendor-neutral: no vendor hostnames, account ids or deployment facts in `src/`, `tst/`
-  or this file. A deployment plugs in through the extension points above.
+  or this file. A deployment plugs in through the extension points above. Where the project itself
+  publishes isn't a deployment fact: its PyPI names, its GitHub repository, and the GHCR namespace its
+  release workflow publishes infra images to (`published_images.REGISTRY`).
 
 ## Docs
 

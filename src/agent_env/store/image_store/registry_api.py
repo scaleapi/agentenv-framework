@@ -27,6 +27,11 @@ class NoSuchImageError(ValueError):
     """The registry has no image under the reference: it answered 404."""
 
 
+class RegistryRefusedError(ValueError):
+    """The registry refused to serve the reference (401 or 403), as GHCR does for a private package, or one that doesn't
+    exist yet, asked without credentials that reach it."""
+
+
 @dataclass(frozen=True)
 class _ImageRef:
     name: str  # the reference without its tag or digest, spelled as given
@@ -112,7 +117,7 @@ def _check(image: _ImageRef, reference: str, auth: RegistryAuth | None) -> str:
     if response.status_code == 404:
         raise NoSuchImageError(f"{what}: {image.host} has no such image")
     if response.status_code in (401, 403):
-        raise ValueError(f"{what}: {image.host} refused to serve it (HTTP {response.status_code}); agent-env reaches a "
+        raise RegistryRefusedError(f"{what}: {image.host} refused to serve it (HTTP {response.status_code}); agent-env reaches a "
                          "private registry only with the configured image store's credentials, for its own registry")
     raise ValueError(f"{what}: {image.host} answered HTTP {response.status_code}")
 

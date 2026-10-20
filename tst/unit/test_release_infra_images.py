@@ -9,29 +9,79 @@ from pathlib import Path
 import pytest
 import yaml
 
-from agent_env.env.published_images import PLATFORMS, RELEASE_FILE
+from agent_env.env.published_images import RELEASE_FILE
 
 REPO = Path(__file__).resolve().parents[2]
 WORKFLOW = yaml.safe_load((REPO / ".github" / "workflows" / "publish-pypi.yml").read_text())
+JOBS = WORKFLOW["jobs"]
 RECORD = str(RELEASE_FILE.relative_to(REPO))
+# What installs or runs agent-env and its dependencies in a job.
+_RUNS_DEPENDENCIES = re.compile(r"\buv (sync|run)\b|infra_images\.py")
 
 
-def _steps(job: str) -> list[dict]:
-    return WORKFLOW["jobs"][job]["steps"]
+def _runs(job: str) -> list[str]:
+    return [step.get("run", "") for step in JOBS[job]["steps"]]
 
 
-def test_the_wheel_records_the_digests_where_an_install_reads_them():
-    (step,) = [step for step in _steps("framework") if "infra_images.py write" in step.get("run", "")]
+def _step(job: str, step_id: str) -> dict:
+    (step,) = [step for step in JOBS[job]["steps"] if step.get("id") == step_id]
+    return step
 
-    assert re.search(rf"infra_images\.py write {re.escape(RECORD)}$", step["run"], re.MULTILINE)
+
+def _writes(job: str) -> bool:
+    permissions = JOBS[job].get("permissions", {})
+    return any(access == "write" for access in permissions.values())
 
 
-def test_the_record_is_written_before_the_protocol_pin_edits_the_locked_pyproject():
-    runs = [step.get("run", "") for step in _steps("framework")]
-    record = next(i for i, run in enumerate(runs) if "infra_images.py write" in run)
-    pin = next(i for i, run in enumerate(runs) if "agentenv-framework-protocol==" in run)
+@pytest.mark.parametrize("job", sorted(JOBS))
+def test_a_job_that_installs_agent_env_holds_no_token_that_writes(job):
+    """Then a dependency's code never runs where a token can push an image, publish to PyPI or edit the repository."""
+    if any(_RUNS_DEPENDENCIES.search(run) for run in _runs(job)):
+        assert not _writes(job), f"{job} installs agent-env and holds {JOBS[job]['permissions']}"
 
-    assert record < pin
+
+def test_the_jobs_that_push_or_publish_check_what_they_are_handed():
+    build = "\n".join(_runs("infra-build"))
+    publish = "\n".join(_runs("infra-publish"))
+
+    assert 'infra_build.py check "$ENTRY"' in build and 'infra_build.py check "$entry"' in publish
+    assert build.index("infra_build.py check") < build.index("docker build")
+    assert publish.index("infra_build.py check") < publish.index("imagetools create")
+    assert "infra_build.py verify-record " + RECORD in _step("framework", "record")["run"]
+
+
+def test_a_published_tag_is_never_built_again_or_moved():
+    wanted = _step("infra-build", "wanted")["run"]
+    publish = "\n".join(_runs("infra-publish"))
+
+    assert 'infra_build.py exists "$REF"' in wanted
+    assert all(step.get("if") == "steps.wanted.outputs.build == 'true'"
+               for step in JOBS["infra-build"]["steps"] if step.get("name") in ("Build", "Check that it runs",
+                                                                               "Push it under its tag and platform"))
+    assert publish.index('infra_build.py exists "$ref"') < publish.index("imagetools create")
+
+
+def test_nothing_is_pushed_before_mains_ci_passes():
+    assert "main-ci" in JOBS["infra-build"]["needs"] and "main-ci" in JOBS["infra-publish"]["needs"]
+
+
+@pytest.mark.parametrize("job", ["protocol", "framework"])
+def test_a_failed_image_job_sends_neither_package_to_pypi(job):
+    """Each runs with publishing off, or once the record, which runs only after every image job did, is made."""
+    spec = JOBS[job]
+
+    assert {"infra-plan", "infra-record"} <= set(spec["needs"]) and spec["if"].startswith("!cancelled()")
+    assert ("(needs.infra-plan.result == 'skipped' || (needs.infra-plan.result == 'success' "
+            "&& needs.infra-record.result == 'success'))") in " ".join(spec["if"].split())
+    for image_job in ("infra-build", "infra-publish"):
+        assert f"""contains(fromJSON('["success", "skipped"]'), needs.{image_job}.result)""" in JOBS["infra-record"]["if"]
+
+
+def test_the_wheel_carries_the_checked_record_where_an_install_reads_it():
+    step = _step("framework", "record")
+
+    assert step["env"]["RECORD"] == "${{ needs.infra-record.outputs.record }}"
+    assert f"""printf '%s\\n' "$RECORD" > {RECORD}""" in step["run"]
 
 
 def test_the_record_ships_in_the_sdist_and_the_wheel_and_git_ignores_it():
@@ -41,44 +91,20 @@ def test_the_record_ships_in_the_sdist_and_the_wheel_and_git_ignores_it():
     assert RECORD in (REPO / ".gitignore").read_text().splitlines()
 
 
-def test_each_image_is_built_for_every_platform_it_is_published_for():
-    arches = WORKFLOW["jobs"]["infra-build"]["strategy"]["matrix"]["arch"]
+def test_the_release_notes_list_the_checked_record():
+    (create,) = [step for step in JOBS["release"]["steps"] if "gh release create" in step.get("run", "")]
 
-    assert [f"linux/{arch}" for arch in arches] == list(PLATFORMS)
+    assert JOBS["framework"]["outputs"]["record"] == "${{ steps.record.outputs.record }}"
+    assert create["env"]["RECORD"] == "${{ needs.framework.outputs.record }}"
+    assert "Infra images published for this release, by digest:" in create["run"]
 
 
 def test_nothing_reaches_pypi_from_a_run_by_hand():
-    assert "github.event_name == 'push'" in WORKFLOW["jobs"]["protocol"]["if"]
-    assert "needs.protocol.result == 'success'" in WORKFLOW["jobs"]["framework"]["if"]
+    assert "github.event_name == 'push'" in JOBS["protocol"]["if"]
+    assert "needs.protocol.result == 'success'" in JOBS["framework"]["if"]
 
 
-@pytest.mark.parametrize("job", ["protocol", "framework"])
-def test_a_failed_image_job_sends_neither_package_to_pypi(job):
-    """Each waits for every image job, and runs only when each succeeded or, nothing to publish, was skipped."""
-    spec = WORKFLOW["jobs"][job]
-    images = ["infra-plan", "infra-build", "infra-publish"]
-
-    assert set(images) <= set(spec["needs"])
-    for image_job in images:
-        assert f"""contains(fromJSON('["success", "skipped"]'), needs.{image_job}.result)""" in spec["if"]
-    assert spec["if"].startswith("!cancelled()")
-
-
-def test_the_release_notes_list_the_images_the_wheel_records():
-    framework, release = WORKFLOW["jobs"]["framework"], WORKFLOW["jobs"]["release"]
-    (record,) = [step for step in framework["steps"] if step.get("id") == "record"]
-    (create,) = [step for step in release["steps"] if "gh release create" in step.get("run", "")]
-
-    assert "infra_images.py notes" in record["run"] and framework["outputs"]["image_notes"] == "${{ steps.record.outputs.notes }}"
-    assert create["env"]["IMAGE_NOTES"] == "${{ needs.framework.outputs.image_notes }}" and "IMAGE_NOTES" in create["run"]
-
-
-def test_nothing_is_pushed_before_mains_ci_passes():
-    jobs = WORKFLOW["jobs"]
-
-    assert "main-ci" in jobs["infra-build"]["needs"] and "main-ci" in jobs["infra-publish"]["needs"]
-
-
-@pytest.mark.parametrize("job", ["infra-publish", "framework"])
-def test_a_job_that_publishes_or_records_images_warns_about_private_ones(job):
-    assert any("infra_images.py public" in step.get("run", "") for step in _steps(job))
+@pytest.mark.parametrize("job", ["main-ci", "infra-plan"])
+def test_a_run_by_hand_goes_ahead_only_on_main_or_a_release_tag(job):
+    """main-ci waits for CI runs on main, which a branch has none of: off main, every job is skipped instead."""
+    assert "github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')" in JOBS[job]["if"]
