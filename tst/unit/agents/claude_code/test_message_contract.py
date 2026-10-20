@@ -3,11 +3,13 @@ success and for each failure, and the session threading across turns."""
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import time
 
 import httpx
 import pytest
-from agentenv_protocol.a2a_agent import AGENT_CONFIG_V1
+from agentenv_protocol.a2a_agent import AGENT_CONFIG_V1, FilePart
 from agentenv_protocol.a2a_agent.peer_agents import PEER_MCP_PATH
 
 from tst.unit.agents.claude_code.support import send, terminal
@@ -223,13 +225,13 @@ def test_attachments_are_written_while_the_turn_holds_a_snapshot_load_off(monkey
 
 def _serving(monkeypatch, routes: dict[str, tuple[int, bytes]]) -> None:
     """The agent's file-part downloads answered from ``routes``, a URL's status and body, with no network."""
-    client_class = httpx.Client
+    client_class = httpx.AsyncClient
 
     def answer(request: httpx.Request) -> httpx.Response:
         status, body = routes[str(request.url)]
         return httpx.Response(status, content=body)
 
-    monkeypatch.setattr(kit.httpx, "Client",
+    monkeypatch.setattr(kit.httpx, "AsyncClient",
                         lambda **kwargs: client_class(transport=httpx.MockTransport(answer), **kwargs))
 
 
@@ -245,6 +247,36 @@ def test_a_file_part_naming_an_https_url_is_downloaded_where_the_cli_reads_it(mo
     (call,) = calls
     path = tmp_path / "inputs" / task["id"] / "report.pdf"
     assert call["prompt"] == f"summarize\n\n{path}" and path.read_bytes() == b"%PDF-1.7 report"
+
+
+def test_a_cancelled_download_writes_nothing_after_it_is_cancelled(monkeypatch, tmp_path):
+    # Cancelling ends the turn, and with it the context a snapshot load waits on: nothing may write after that.
+    url = "https://store.example.com/bucket/a.png"
+    sync_client, async_client = httpx.Client, httpx.AsyncClient
+
+    def slow(request: httpx.Request) -> httpx.Response:
+        time.sleep(0.5)
+        return httpx.Response(200, content=b"late")
+
+    async def slow_async(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0.5)
+        return httpx.Response(200, content=b"late")
+
+    monkeypatch.setattr(kit.httpx, "Client", lambda **kwargs: sync_client(transport=httpx.MockTransport(slow), **kwargs))
+    monkeypatch.setattr(kit.httpx, "AsyncClient",
+                        lambda **kwargs: async_client(transport=httpx.MockTransport(slow_async), **kwargs))
+
+    async def cancel_mid_download():
+        download = asyncio.create_task(kit.materialize_file_part(FilePart(name="a.png", uri=url), tmp_path / "in"))
+        await asyncio.sleep(0.1)
+        download.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await download
+        await asyncio.sleep(0.8)  # past when the download would have finished
+
+    asyncio.run(cancel_mid_download())
+
+    assert not any((tmp_path / "in").glob("*"))
 
 
 def test_a_failed_download_fails_the_turn_without_the_urls_signature(monkeypatch, calls, client):

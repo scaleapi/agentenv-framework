@@ -3,7 +3,6 @@ skill installs, FastAPI-style error bodies, grant reads and FileParts written to
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import binascii
 import logging
@@ -175,17 +174,18 @@ def _safe_name(candidate: str | None) -> str:
     return candidate or uuid.uuid4().hex
 
 
-def _download_uri_to(uri: str, target: Path) -> None:
+async def _download_uri_to(uri: str, target: Path) -> None:
     scheme = urlsplit(uri).scheme.lower()
     if scheme not in ("http", "https"):
         raise FilePartMaterializeError(
             f"unsupported URI scheme {scheme!r} in {_shown(uri)}: a file part reaches this agent as bytes or an "
             "http(s) URL, and agent-env sends an object its stores own as an https one")
     try:
-        with _redacting_logged_urls(), httpx.Client(timeout=_FILEPART_DOWNLOAD_TIMEOUT_S, follow_redirects=True) as client:
-            response = client.get(uri)
-            response.raise_for_status()
-            target.write_bytes(response.content)
+        with _redacting_logged_urls():
+            async with httpx.AsyncClient(timeout=_FILEPART_DOWNLOAD_TIMEOUT_S, follow_redirects=True) as client:
+                response = await client.get(uri)
+                response.raise_for_status()
+                target.write_bytes(response.content)
     except httpx.HTTPStatusError as e:  # not chained: httpx's messages can repeat the full URL
         raise FilePartMaterializeError(
             f"http(s) download failed for {_shown(uri)}: HTTP {e.response.status_code}") from None
@@ -194,7 +194,7 @@ def _download_uri_to(uri: str, target: Path) -> None:
             f"http(s) download failed for {_shown(uri)}: {_without_credentials(str(e), uri)}") from None
 
 
-def _materialize(part: FilePart, target_dir: Path) -> str:
+async def _materialize(part: FilePart, target_dir: Path) -> str:
     target_dir.mkdir(parents=True, exist_ok=True)
     name = _safe_name(part.name)
     target = target_dir / name
@@ -208,12 +208,13 @@ def _materialize(part: FilePart, target_dir: Path) -> str:
         except OSError as e:
             raise FilePartMaterializeError(f"failed to write FilePart '{name}': {e}") from e
     else:
-        _download_uri_to(part.uri, target)
+        await _download_uri_to(part.uri, target)
     logger.info(f"Materialized FilePart name='{name}' mime={part.mime_type} size={target.stat().st_size}B to {target}")
     return str(target)
 
 
 async def materialize_file_part(part: FilePart, target_dir: Path) -> str:
-    """Write a FilePart's base64 bytes or http(s) contents to ``target_dir``, off the event loop; the path. Two
-    parts of one message sharing a name are kept apart. Raises FilePartMaterializeError."""
-    return await asyncio.to_thread(_materialize, part, target_dir)
+    """Write a FilePart's base64 bytes or http(s) contents to ``target_dir``; the path. Two parts of one message
+    sharing a name are kept apart. The download is awaited, not run in a thread, so a cancelled turn's ends with it
+    and writes nothing after. Raises FilePartMaterializeError."""
+    return await _materialize(part, target_dir)
