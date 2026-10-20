@@ -12,13 +12,18 @@ from uuid import uuid4
 import click
 
 from agent_env.cli.banner import print_banner
+from agent_env.cli import submitted_runs
 from agent_env.cli.identity import get_agent_env_client_id
 from agent_env.cli.teardown_output import echo_teardown
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox
+from agent_env.runner.runner import KEEP_KEY, RunStatus
 from agent_env.store.ids import derive_id, fs_safe, is_local_id, validate_local_id
+from agent_env.store.routing import run_scope
 from agent_env.task.interrupts import Interrupts
+from agent_env.task.store import get_task_instance_store, new_instance_id
 from agent_env.task.teardown import TeardownReport, kind, teardown_run
-from agent_env.task_step.context import read_dual_keyed
+from agent_env.task_step.context import TaskStepContext, read_dual_keyed
+from agent_env.task_step.context_ops import build_context_update_ops
 from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTaskStep
 
 
@@ -248,30 +253,6 @@ def _format_verifier_output(vid: str, vdata: dict) -> list[str]:
     return lines
 
 
-# -- Single-run (k=1) callbacks: verbose output, no prefix --
-
-async def _log_step_start(i, total, step, context):
-    async with _print_lock:
-        if i == 0 and context.instance_id:
-            click.echo(click.style(f"Task instance: {context.instance_id}", fg="blue"))
-        if i > 0:
-            click.echo()
-        click.echo(click.style(
-            f"Running step [{i+1}/{total}]: {step.type} (id={step.id})...",
-            fg="yellow",
-        ))
-
-
-async def _log_step_complete(i, total, step, context, duration):
-    async with _print_lock:
-        click.echo(click.style(
-            f"Completed step [{i+1}/{total}]: {step.type} (id={step.id}) [{duration:.1f}s]",
-            fg="green",
-        ))
-        for line in _step_output_lines(step, context):
-            click.echo(click.style(line, fg="green"))
-
-
 # -- Parallel-run (k>1) callbacks: compact output with [run N] prefix --
 
 def _make_parallel_callbacks(run_index):
@@ -405,6 +386,24 @@ def _hold(tagged_contexts, interrupts: Interrupts) -> None:
     _tear_down_kept(kept)
 
 
+def _ended(runs) -> list:
+    """Each run that ended on its own, with its stored context: what ``--keep`` leaves this command to tear down. The
+    runner tears a cancelled one down itself."""
+    return [(run.tag, TaskStepContext.from_dict(run.instance.context)) for run in runs
+            if run.done and run.record.status is not RunStatus.CANCELED and run.instance and run.instance.context]
+
+
+def _stored(task, context: TaskStepContext) -> str:
+    """A new instance holding ``context``, for the runner to continue a run from, recorded where the task's run records
+    go. A write that fails raises: the run would otherwise continue from an empty context."""
+    instance_id = new_instance_id(task.id)
+    store = get_task_instance_store()
+    with run_scope(task.id):
+        store.upsert_instance(instance_id, task.id, task.version, len(task.steps), context.metadata["start_step"])
+        store.seed_context(instance_id, build_context_update_ops(None, context))
+    return instance_id
+
+
 @click.command()
 @click.option("--id", "task_id", required=True, help="Task id")
 @click.option("--version", "task_version", default=None, type=int, help="Task version (defaults to latest)")
@@ -437,16 +436,15 @@ def _hold(tagged_contexts, interrupts: Interrupts) -> None:
                    "another terminal can resume the run with --start-step and --context-json. Without it, each run "
                    "is torn down as it ends, as Ctrl-C mid-run always does.")
 def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, agent_model: str | None, user_model: str | None, judge_model: str | None, agent_artifact_id: str | None, start_step: int, context_json: str | None, litellm_api_key: str | None, judge_litellm_api_key: str | None, apply_trajectory_filter: bool | None, a2a_agent_id: str | None, agent_sandbox: str | None, env_sandbox: str | None, gateway_env_id: str | None, service_db_env_id: str | None, env_state_type: str | None, env_state_instance_id: str | None, keep: bool):
-    """Run a task by executing its steps sequentially.
+    """Run a task through the configured [runner] and follow it.
 
     Each run's sandboxes are torn down as it ends, passed or failed; its instance and context JSON stay.
-    --keep holds them up until Ctrl-C instead. Ctrl-C or SIGTERM mid-run cancels the runs, tears them down
-    and exits 130 (143 for SIGTERM); a second one stops the teardown."""
+    --keep holds them up until Ctrl-C instead. Ctrl-C or SIGTERM mid-run cancels the runs, which tears them down,
+    and exits 130 (143 for SIGTERM); a second one stops waiting."""
     if k < 1:
         raise click.BadParameter("must be at least 1", param_hint="'--k'")
 
     from agent_env.task import Task
-    from agent_env.task_step.context import TaskStepContext
 
     if output_dir is None:
         output_dir = f"/tmp/taskid={fs_safe(task_id)}-run{uuid4().hex[:6]}"
@@ -483,6 +481,8 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
         initial_context.metadata.setdefault("user_overrides", {})["gateway_env_id"] = gateway_env_id
     if service_db_env_id:
         initial_context.metadata.setdefault("user_overrides", {})["service_db_env_id"] = service_db_env_id
+    initial_context.metadata["start_step"] = start_step
+    initial_context.metadata[KEEP_KEY] = keep
     initial_context.metadata["task_id"] = task_id
 
     click.echo(f"Fetching task: id={task_id} version={task_version or 'latest'}...")
@@ -491,50 +491,43 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
 
     print_banner()
 
-    run_kwargs = dict(agent_model=agent_model, agent_artifact_id=agent_artifact_id, start_step=start_step)
-    if k > 1:
-        # Parallel runs: compact output with [run N] prefixes
-        click.echo(click.style(f"Running {k} task runs in parallel...", fg="blue"))
-        click.echo()
-        tagged = [(f"[run {i}]", copy.deepcopy(initial_context)) for i in range(1, k + 1)]
-        callbacks = [_make_parallel_callbacks(i) for i in range(1, k + 1)]
-    else:
-        tagged = [("", initial_context)]
-        callbacks = [(_log_step_start, _log_step_complete)]
-
-    async def _run_all(interrupts):
-        runs = [
-            _run_and_settle(task, tag, context, keep=keep, output_dir=output_dir, output_name=task_id,
-                            on_start=on_start, on_complete=on_complete, **run_kwargs)
-            for (tag, context), (on_start, on_complete) in zip(tagged, callbacks)
-        ]
-        return _outcomes(await interrupts.gather(runs, _on_signal))
-
+    tags = [f"[run {i}]" for i in range(1, k + 1)] if k > 1 else [""]
+    submissions = [(tag, task, copy.deepcopy(initial_context.metadata),
+                    _stored(task, initial_context) if context_json else None) for tag in tags]
+    runs: list[submitted_runs.SubmittedRun] = []
     with Interrupts() as interrupts:
-        results = interrupts.run(_run_all(interrupts))
+        try:
+            submitted_runs.follow(interrupts, submissions, runs, agent_model=agent_model,
+                                  agent_artifact_id=agent_artifact_id, step_lines=_step_output_lines if k == 1 else None)
+        except Exception:
+            if keep and (kept := _kept(_ended(runs))):
+                _tear_down_kept(kept)
+            raise
         interrupted = interrupts.signum if interrupts.count else None
         click.echo()
-        failures = [(tag, r) for (tag, _), r in zip(tagged, results) if isinstance(r, BaseException)]
-        if k > 1:
-            for tag, exc in failures:
-                outcome = "CANCELLED" if isinstance(exc, asyncio.CancelledError) else f"FAILED: {exc}"
-                click.echo(click.style(f"{tag} {outcome}", fg="red"))
-            if failures:
-                click.echo(click.style(
-                    f"{len(results) - len(failures)}/{k} runs completed, {len(failures)}/{k} failed.", fg="red"))
-            else:
-                click.echo(click.style(f"All {k} runs completed!", fg="blue"))
-        elif failures and interrupted is not None:
-            click.echo(click.style("Task cancelled.", fg="red"))
-        elif not failures:
-            click.echo(click.style("Task completed!", fg="blue"))
+        unexported = False
+        for run in runs:
+            if run.instance is None or run.instance.context is None:
+                continue
+            context = TaskStepContext.from_dict(run.instance.context)
+            prefix = f"{run.tag} " if run.tag else ""
+            try:
+                _write_context(context, task.id, output_dir, prefix=prefix)
+            except OSError as e:
+                unexported = True
+                click.echo(click.style(f"{prefix}Couldn't write the run's context: {e}", fg="red"))
+        completed = sum(run.completed for run in runs)
+        if interrupted is not None:
+            click.echo(click.style("Task cancelled." if k == 1 else f"{completed}/{k} runs completed.", fg="red"))
+        elif completed == k and not unexported:
+            click.echo(click.style("Task completed!" if k == 1 else f"All {k} runs completed!", fg="blue"))
+        elif k > 1:
+            click.echo(click.style(f"{completed}/{k} runs completed, {k - completed}/{k} failed.", fg="red"))
         if keep:
-            _settle_kept(tagged, interrupts, interrupted)
+            _settle_kept(_ended(runs), interrupts, interrupted)
     if interrupted is not None:
         raise SystemExit(128 + interrupted)
-    if failures and k == 1:
-        raise failures[0][1]  # torn down already; the CLI reports it as it always has
-    if failures:
+    if completed < k or unexported:
         raise SystemExit(1)
 
 
@@ -580,7 +573,6 @@ def run_batch(task_id: str, task_version: int | None, seeds: str, concurrency: i
     are rendered using the seed values before being sent to the agent.
     """
     from agent_env.task import Task
-    from agent_env.task_step.context import TaskStepContext
 
     if output_dir is None:
         output_dir = f"/tmp/taskid={fs_safe(task_id)}-batch{uuid4().hex[:6]}"

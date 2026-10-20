@@ -24,6 +24,11 @@ agent_default = "local"   # agents too
 # team_id = "your-team"
 # project_id = "your-project"
 
+# Optional boxd machines (install the 'boxd' extra):
+# [sandbox.providers.boxd.config]
+# api_key = "secret:boxd_api_key"     # or "env:BOXD_API_KEY"
+# snapshot = "agentenv-warm"          # boot every machine from this snapshot, see the provider README
+
 [agents]
 default_a2a_agent_id = "a2a-default"   # what a deploy_agent step that names no agent deploys
 

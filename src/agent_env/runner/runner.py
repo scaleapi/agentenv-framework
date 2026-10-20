@@ -55,6 +55,7 @@ class RunRecord:
     finished_at_utc: Optional[str] = None
     error: Optional[str] = None
     overrides: dict[str, Any] = field(default_factory=dict)
+    owner: Optional[dict[str, Any]] = None
 
     def to_dict(self) -> dict:
         return {
@@ -69,6 +70,7 @@ class RunRecord:
             "finished_at_utc": self.finished_at_utc,
             "error": self.error,
             "overrides": self.overrides,
+            "owner": self.owner,
         }
 
     @classmethod
@@ -85,6 +87,7 @@ class RunRecord:
             finished_at_utc=data.get("finished_at_utc"),
             error=data.get("error"),
             overrides=data.get("overrides") or {},
+            owner=data.get("owner"),
         )
 
 

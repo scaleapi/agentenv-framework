@@ -299,8 +299,7 @@ class TaskInstanceStore:
         completed_step_docs = [
             dataclasses.asdict(e) for e in completed_steps or []
         ]
-        suffix = "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(8))
-        instance_id = f"{task_id}-{suffix}"
+        instance_id = new_instance_id(task_id)
         created_at_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         doc = _new_instance_doc(
             instance_id, task_id, task_version, total_steps, created_at_utc,
@@ -814,6 +813,11 @@ def find_task_instance(instance_id: str) -> TaskInstance | None:
         return get_task_instance_store().get(instance_id)
     except NotFoundError:
         return None
+
+
+def new_instance_id(task_id: str) -> str:
+    """A fresh id for a run of ``task_id``, derived from it so the run keeps the task's namespace."""
+    return f"{task_id}-{''.join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(8))}"
 
 
 def register_task_instance(

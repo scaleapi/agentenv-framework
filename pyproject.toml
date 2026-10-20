@@ -85,8 +85,12 @@ tensorlake = [
 tenki = [
     "tenki[async]~=1.4.1",  # AsyncClient/AsyncSandbox exec, stdin, ports and egress APIs validated against the 1.4 line
 ]
+# The boxd machine provider, selected as the built-in `boxd` backend.
+boxd = [
+    "boxd~=0.2.17",  # AsyncBoxd machines, exec, proxies, egress allowlist and delete-after validated against 0.2.17
+]
 dev = [
-    "agentenv-framework[aws,explorer,gcp,sail,tensorlake,tenki,vercel]",  # exercise portable optional providers and stores in CI
+    "agentenv-framework[aws,boxd,explorer,gcp,sail,tensorlake,tenki,vercel]",  # exercise portable optional providers and stores in CI
     "fastmcp>=3.4,<4",  # the standalone-fastmcp mount path of the protocol; <4 keeps mcp 1.x
     "griffelib==2.3.0",  # the plugin API check; exact, since what it reports as a break changes between releases
     "moto>=5.0.0",

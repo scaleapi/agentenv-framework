@@ -466,6 +466,11 @@ def agentenv_website_env() -> WebsiteEnv:
         id="tenki",
         marks=skip_without_remote_sandbox("tenki"),
     ),
+    pytest.param(
+        "boxd",
+        id="boxd",
+        marks=skip_without_remote_sandbox("boxd"),
+    ),
 ])
 def sandbox_provider(request):
     from agent_env.providers import (
@@ -493,6 +498,9 @@ def sandbox_provider(request):
     elif request.param == "tenki":
         set_sandbox_provider(build_sandbox_provider("tenki"))
         set_env_sandbox_provider(build_sandbox_provider("tenki"))
+    elif request.param == "boxd":
+        set_sandbox_provider(build_sandbox_provider("boxd"))
+        set_env_sandbox_provider(build_sandbox_provider("boxd"))
     try:
         yield request.param
     finally:
