@@ -74,11 +74,11 @@ jobs:
           missing=$(uv run --no-sync python .github/scripts/infra_images.py plan --missing)
           echo "missing=$missing" >> "$GITHUB_OUTPUT"
 
-  # Builds each missing image on a runner of each platform, checks that it runs, and pushes it under its tag and
-  # platform (src-<digest>-amd64), which nothing looks up: infra-publish tags the multi-platform image once main's CI
-  # has passed.
+  # Once main's CI has passed, so nothing is pushed for a commit that fails it: builds each missing image on a runner of
+  # each platform, checks that it runs, and pushes it under its tag and platform (src-<digest>-amd64), which nothing
+  # looks up until infra-publish tags the multi-platform image.
   infra-build:
-    needs: infra-plan
+    needs: [main-ci, infra-plan]
     if: needs.infra-plan.outputs.missing != '[]'
     strategy:
       fail-fast: true

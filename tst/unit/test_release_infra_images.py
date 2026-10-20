@@ -71,3 +71,9 @@ def test_the_release_notes_list_the_images_the_wheel_records():
 
     assert "infra_images.py notes" in record["run"] and framework["outputs"]["image_notes"] == "${{ steps.record.outputs.notes }}"
     assert create["env"]["IMAGE_NOTES"] == "${{ needs.framework.outputs.image_notes }}" and "IMAGE_NOTES" in create["run"]
+
+
+def test_nothing_is_pushed_before_mains_ci_passes():
+    jobs = WORKFLOW["jobs"]
+
+    assert "main-ci" in jobs["infra-build"]["needs"] and "main-ci" in jobs["infra-publish"]["needs"]
