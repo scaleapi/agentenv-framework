@@ -66,6 +66,23 @@ def tool_then_answer(tool_suffix: str, arguments: dict, *, prefix: str = "") -> 
     return respond
 
 
+def delegate_then_answer(cue: str, peer: str, prompt: str, reply: str) -> Responder:
+    """For a lead agent and its peer, both calling this endpoint: a request whose messages hold ``cue``, the lead's,
+    calls ``peer_send_message`` to send ``peer`` the ``prompt``, then answers with the tool result's text; every other
+    request, the peer's, is answered with ``reply``."""
+
+    def respond(body: dict) -> Text | ToolUse:
+        result = _tool_result_text(body)
+        if result is not None:
+            return Text(result)
+        if cue not in json.dumps(body.get("messages") or []):
+            return Text(reply)
+        tool = next(t["name"] for t in body.get("tools") or [] if t.get("name", "").endswith("__peer_send_message"))
+        return ToolUse(tool, {"name": peer, "prompt": prompt})
+
+    return respond
+
+
 def _tool_result_text(body: dict) -> str | None:
     """The text of a tool result in the latest user turn, or None. The CLI may follow it with system messages."""
     user = next((m for m in reversed(body.get("messages") or []) if m.get("role") == "user"), None)

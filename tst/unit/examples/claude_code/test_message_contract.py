@@ -8,12 +8,15 @@ import base64
 import httpx
 import pytest
 from agentenv_protocol.a2a_agent import AGENT_CONFIG_V1
+from agentenv_protocol.a2a_agent.peer_agents import PEER_MCP_PATH
 
 from tst.unit.examples.claude_code.support import send, terminal
 from tst.unit.examples.claude_code.agent import a2a_server, claude_bridge, kit
 
 AGENT_CONFIG_PATH = AGENT_CONFIG_V1.endpoint
 MCP_CONFIG_PATH = a2a_server.MCP_CONFIG_V1.endpoint
+# The SDK's peer-agents tools, on the port the test client serves on.
+PEER_TOOLS = {"url": f"http://127.0.0.1:80{PEER_MCP_PATH}", "headers": None}
 
 
 class Calls(list):
@@ -172,13 +175,15 @@ def test_agent_config_and_mcp_servers_reach_the_cli(calls, client):
         key: value for key, value in config.items() if key != "timeout_seconds"
     }
     assert call["timeout_s"] == 42
-    assert call["mcp_servers"] == {"env": {"url": "https://gw/mcp", "headers": {"CF-Access-Client-Id": "id"}}}
+    assert call["mcp_servers"] == {"env": {"url": "https://gw/mcp", "headers": {"CF-Access-Client-Id": "id"}},
+                                   "peer_agents": PEER_TOOLS}
 
 
 def test_the_default_timeout_is_thirty_minutes(calls, client):
     send(client, "go")
 
-    assert calls[0]["timeout_s"] == 1800 and calls[0]["model"] is None and calls[0]["mcp_servers"] == {}
+    assert calls[0]["timeout_s"] == 1800 and calls[0]["model"] is None
+    assert calls[0]["mcp_servers"] == {"peer_agents": PEER_TOOLS}  # the SDK's, served whether or not peers are set
 
 
 def test_session_references_outlive_the_frameworks_bounded_record():

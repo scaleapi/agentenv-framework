@@ -53,6 +53,7 @@ def test_extensions_and_their_routes(app):
         "urn:agentenv:agent-config/v1": ("/ext/agent-config", {"set": ("POST", None), "get": ("GET", None)}),
         "urn:agentenv:trajectory/v1": ("/ext/trajectory", {"get": ("POST", None)}),
         "urn:agentenv:mcp-config/v1": ("/ext/mcp-config", {"add": ("POST", None), "list": ("GET", None)}),
+        "urn:agentenv:peer-agents/v1": ("/ext/peer-agents", {"set": ("POST", None), "list": ("GET", None)}),
         "urn:agentenv:skill-config/v1": ("/ext/skill-config", {"add": ("POST", None), "list": ("GET", None)}),
         "urn:agentenv:snapshot/v1": ("/ext/snapshot", {"save": ("POST", None), "load": ("PUT", None)}),
         "urn:agentenv:install/v1": (None, {}),

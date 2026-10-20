@@ -19,9 +19,10 @@ from agent_env.store.object_store.local.grant_server import grant_server
 from agent_env.store.routing import namespace_routing
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
-from tst.util.fake_anthropic import FakeAnthropic, answer, tool_then_answer
+from tst.util.fake_anthropic import FakeAnthropic, answer, delegate_then_answer, tool_then_answer
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
@@ -191,3 +192,36 @@ def test_a_file_part_naming_a_stored_object_reaches_the_cli_through_a_grant(stat
         asyncio.run(run())
 
     assert endpoint.tool_results() == [notes]
+
+
+def test_the_shipped_claude_code_delegates_to_its_peer_through_the_sdks_peer_tools(state, endpoint):
+    token = f"review-{uuid.uuid4().hex[:8]}"
+    endpoint.respond = delegate_then_answer("Delegate the review", "reviewer", "Send the review.", f"reviewed {token}")
+    lead = TaskStep.DEFAULT_AGENT_NAME
+    shipped = get_config().get_default_a2a_agent_id()
+    root = _bundle(state / "peers", "peers", [
+        {"id": "lead", "type": "deploy_agent", "env_ids": [], "sandbox_type": "local"},
+        {"id": "peer", "type": "deploy_agent", "env_ids": [], "sandbox_type": "local", "agent_name": "reviewer"},
+        {"id": "peers", "type": "peer_agents", "peerings": [{"source_agent_name": lead, "peer_agent_names": ["reviewer"]}],
+         "depends_on": ["lead", "peer"]},
+        {"id": "ask", "type": "prompt_agent", "prompt_id": "ask", "prompt": "Delegate the review to the reviewer.",
+         "depends_on": ["peers"]},
+        {"id": "check", "type": "agent_prompt_response_verifier", "prompt_id": "ask", "verifier_id": "answer",
+         "criteria": [{"type": "response_contains", "needles": [token]}], "depends_on": ["ask"]},
+        {"id": "verify", "type": "verify_a2a_peer_agents", "a2a_agent_id": shipped, "a2a_agent_version": None,
+         "peer_prompt_id": "ask", "expected_token": token, "depends_on": ["check"]},
+    ])
+
+    result = _run(root)
+
+    offered = sorted({tool["name"] for call in endpoint.messages() for tool in call.body.get("tools") or []
+                      if tool["name"].startswith("mcp__peer_agents__")})
+    seen = (result.output, offered, endpoint.tool_results())
+    assert result.exit_code == 0 and "tasks/peers.json v1: passed" in result.output, seen
+    assert "mcp__peer_agents__peer_send_message" in offered, seen
+    # Only the reviewer's CLI answers with the token, so it reached the lead through the tool.
+    (relayed,) = endpoint.tool_results()
+    assert json.loads(relayed)["response"] == f"reviewed {token}", seen
+    with namespace_routing():  # where a bundle run keeps the agents it pulled
+        validated = A2AAgent.get(shipped).metadata["validated_a2a_extensions"][A2AAgent.EXT_PEER_AGENTS]
+    assert validated["supported"], validated

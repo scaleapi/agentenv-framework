@@ -1,4 +1,5 @@
-"""mcp-config add keeps the name the caller sends, and mints mcp_<hex> when it sends none."""
+"""mcp-config add keeps the name the caller sends, and mints mcp_<hex> when it sends none. The SDK's peer_agents
+server is listed beside them."""
 
 from tst.unit.examples.claude_code.agent import a2a_server
 
@@ -11,7 +12,7 @@ def test_add_mcp_uses_the_callers_name_and_mints_one_otherwise(client):
     assert named["name"] == "env"
     minted = client.post(MCP_CONFIG_PATH, json={"url": "https://gw2/mcp"}).json()
     assert minted["name"].startswith("mcp_") and len(minted["name"]) == 12
-    assert set(client.get(MCP_CONFIG_PATH).json()["mcp_servers"]) == {"env", minted["name"]}
+    assert set(client.get(MCP_CONFIG_PATH).json()["mcp_servers"]) == {"env", minted["name"], "peer_agents"}
 
 
 def test_a_second_server_under_the_same_name_is_refused(client):

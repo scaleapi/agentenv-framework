@@ -25,6 +25,7 @@ from a2a.types import AgentSkill
 from agentenv_protocol.a2a_agent import (
     INSTALL_V1,
     MCP_CONFIG_V1,
+    PEER_AGENTS_V1,
     SKILL_CONFIG_V1,
     SNAPSHOT_V1,
     TRAJECTORY_V1,
@@ -346,6 +347,8 @@ async def _fetch_granted_snapshot(objects: SnapshotReadObjects, archive_path: Pa
             "Retrieve a task's Claude Code stream-json trajectory, also while it runs, "
             "or a context's cumulative trajectory including a live run.")),
         enable(MCP_CONFIG_V1, description="Register MCP servers the Claude Code CLI should connect to."),
+        enable(PEER_AGENTS_V1, description=(
+            "Delegate to the task's other agents: the CLI reaches them through the SDK's peer_agents MCP tools.")),
         enable(SKILL_CONFIG_V1, description="Register a skill the Claude Code CLI loads from its skills directory."),
         enable(SNAPSHOT_V1, description=(
             "Capture and restore the Claude Code conversation, its workspace and the CLI's state, "
