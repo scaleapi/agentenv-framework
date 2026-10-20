@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import Any
 
 import httpx
@@ -146,6 +147,8 @@ def test_the_server_lists_the_six_tools() -> None:
     send = next(tool for tool in tools if tool["name"] == "peer_send_message")
     assert send["inputSchema"]["required"] == ["name"]
     assert set(send["inputSchema"]["properties"]) == {"name", "prompt", "parts", "context_id", "timeout_seconds"}
+    wait = send["inputSchema"]["properties"]["timeout_seconds"]
+    assert wait["default"] == 45 and "capped at 50 seconds" in wait["description"]
 
 
 def test_peer_list_and_peer_get_card_describe_the_peers(card) -> None:
@@ -213,6 +216,54 @@ def test_a_peer_that_runs_past_the_wait_leaves_the_task_working(reviewer, card, 
     assert waited["state"] == "working" and set(waited) == {"task_id", "context_id", "state"}
     # A poll may outlast the wait by the last poll's budget, not by a whole request timeout.
     assert timeouts and max(timeouts) <= peer_agents_module._LAST_POLL_TIMEOUT_SECONDS
+
+
+def test_a_wait_past_the_maximum_is_capped_to_it(reviewer, card, monkeypatch) -> None:
+    monkeypatch.setattr(peer_agents_module, "_MAX_WAIT_SECONDS", 1)
+    with TestClient(Lead().create_app(), **LOOPBACK) as client:
+        _set(client, [{"name": "reviewer", "url": REVIEWER_URL, "card": card}])
+        started = time.monotonic()
+        failed, waited = _tool(client, "peer_send_message", name="reviewer", prompt="slow", timeout_seconds=600)
+        took = time.monotonic() - started
+        reviewer.release.set()
+
+    assert not failed and waited["state"] == "working" and took < 10
+
+
+def test_the_send_counts_toward_the_wait(reviewer, card, monkeypatch) -> None:
+    polls: list[str] = []
+    call, send = peer_agents_module._call, peer_agents_module._send
+
+    async def recording(rpc_url: str, method: str, params: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        polls.extend([method] if method == "tasks/get" else [])
+        return await call(rpc_url, method, params, **kwargs)
+
+    async def slow_send(rpc_url: str, message: dict[str, Any]) -> dict[str, Any]:
+        await asyncio.sleep(1.2)
+        return await send(rpc_url, message)
+
+    monkeypatch.setattr(peer_agents_module, "_call", recording)
+    monkeypatch.setattr(peer_agents_module, "_send", slow_send)
+    with TestClient(Lead().create_app(), **LOOPBACK) as client:
+        _set(client, [{"name": "reviewer", "url": REVIEWER_URL, "card": card}])
+        _, waited = _tool(client, "peer_send_message", name="reviewer", prompt="slow", timeout_seconds=1)
+        reviewer.release.set()
+
+    assert waited["state"] == "working" and polls == []
+
+
+def test_a_call_the_peer_doesnt_answer_in_time_is_a_tool_error(reviewer, card, monkeypatch) -> None:
+    async def stalled_send(rpc_url: str, message: dict[str, Any]) -> dict[str, Any]:
+        await asyncio.sleep(5)
+        raise AssertionError("the budget should have ended the call")
+
+    monkeypatch.setattr(peer_agents_module, "_CALL_BUDGET_SECONDS", 0.2)
+    monkeypatch.setattr(peer_agents_module, "_send", stalled_send)
+    with TestClient(Lead().create_app(), **LOOPBACK) as client:
+        _set(client, [{"name": "reviewer", "url": REVIEWER_URL, "card": card}])
+        failed, error = _tool(client, "peer_start_task", name="reviewer", prompt="hi")
+
+    assert failed and "peer_start_task got no answer from the peer within 0.2s" in error
 
 
 def test_a_reply_keeps_every_part_the_peer_answered_with(reviewer, card) -> None:

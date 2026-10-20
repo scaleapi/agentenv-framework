@@ -675,7 +675,8 @@ sets the routing table with `POST /ext/peer-agents` (`{"peers": [{"name", "url",
 "card", "description"}]}`; an empty list clears it, and names must be unique), and
 `GET /ext/peer-agents` returns it. An agent that enables the extension without
 handlers of its own gets the SDK's: the SDK serves six MCP tools, `peer_list`,
-`peer_get_card`, `peer_send_message` (send and wait), `peer_start_task`,
+`peer_get_card`, `peer_send_message` (send and wait, for at most 50 s, so a call
+answers within the 60 s MCP clients commonly give a request), `peer_start_task`,
 `peer_get_task` and `peer_cancel_task`, at `/ext/peer-agents/mcp` on the agent's
 own port, and adds them to every task's `request.mcp_servers` as `peer_agents`, so
 a harness that connects the task's MCP servers gives its model the tools with no

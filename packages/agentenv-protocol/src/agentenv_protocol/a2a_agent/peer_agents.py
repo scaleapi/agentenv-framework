@@ -39,7 +39,11 @@ _TERMINAL_STATES = frozenset({"completed", "failed", "canceled", "rejected"})
 # A2A states a task doesn't leave without its caller: finished, or waiting on the caller.
 _SETTLED_STATES = _TERMINAL_STATES | {"input-required", "auth-required"}
 _DEFAULT_RPC_PATH = "/a2a"
-_DEFAULT_WAIT_SECONDS = 120
+# Many MCP clients, Claude Code's among them, give an HTTP request 60 s: a tool call answers within the budget,
+# and a wait, counting its send, ends early enough for its last poll to fit too.
+_CALL_BUDGET_SECONDS = 58
+_DEFAULT_WAIT_SECONDS = 45
+_MAX_WAIT_SECONDS = 50
 _SEND_TIMEOUT_SECONDS = 60
 _REQUEST_TIMEOUT_SECONDS = 30
 # The most a wait's last poll may run past the wait's own limit.
@@ -79,7 +83,9 @@ class _Message(_PeerName):
 
 
 class _MessageAndWait(_Message):
-    timeout_seconds: int = Field(_DEFAULT_WAIT_SECONDS, ge=1, description="How long to wait for the peer's result.")
+    # No schema maximum, which the MCP server would refuse past: a longer wait is capped instead.
+    timeout_seconds: int = Field(_DEFAULT_WAIT_SECONDS, ge=1, description=(
+        f"How long to wait for the peer's result; a longer wait is capped at {_MAX_WAIT_SECONDS} seconds."))
 
 
 class _TaskId(_Arguments):
@@ -122,12 +128,13 @@ class PeerAgents:
                 "Return the full A2A AgentCard for a peer (skills with examples, extension parameters, etc.). Use "
                 "when peer_list's summary isn't enough."), self._peer_get_card),
             "peer_send_message": _Tool(_MessageAndWait, (
-                "Send a message to a peer A2A agent and wait for the result.\n"
-                "Returns {task_id, context_id, state, response?, parts?, artifacts?}. If state is 'working' after "
-                "timeout_seconds, the call returned without a result; switch to peer_get_task(task_id) to keep "
-                "polling. If state is 'input-required' or 'auth-required', the peer is waiting on you: answer it "
-                "with peer_send_message in the same context_id.\nFor tasks expected to take longer than a few minutes, prefer peer_start_task + "
-                "peer_get_task from the start so you stay responsive."), self._peer_send_message),
+                f"Send a message to a peer A2A agent and wait up to timeout_seconds ({_DEFAULT_WAIT_SECONDS} by "
+                f"default, {_MAX_WAIT_SECONDS} at most) for the result.\n"
+                "Returns {task_id, context_id, state, response?, parts?, artifacts?}. If state is 'working', the "
+                "peer is still on it: keep polling with peer_get_task(task_id). If state is 'input-required' or "
+                "'auth-required', the peer is waiting on you: answer it with peer_send_message in the same "
+                "context_id.\nFor work expected to take longer, prefer peer_start_task + peer_get_task from the "
+                "start so you stay responsive."), self._peer_send_message),
             "peer_start_task": _Tool(_Message, (
                 "Start a peer A2A task and return immediately without waiting for it to finish. Returns "
                 "{task_id, context_id, state}. You must then call peer_get_task(task_id) repeatedly until state is "
@@ -197,7 +204,11 @@ class PeerAgents:
             tool = self._tools.get(name)
             if tool is None:
                 raise ValueError(f"unknown tool '{name}'")
-            result = await tool.run(tool.arguments.model_validate(arguments or {}))
+            try:
+                result = await asyncio.wait_for(tool.run(tool.arguments.model_validate(arguments or {})),
+                                                _CALL_BUDGET_SECONDS)
+            except asyncio.TimeoutError:
+                raise TimeoutError(f"{name} got no answer from the peer within {_CALL_BUDGET_SECONDS}s") from None
             return [types.TextContent(type="text", text=json.dumps(result))]
 
         return server
@@ -216,12 +227,13 @@ class PeerAgents:
         return response.json()
 
     async def _peer_send_message(self, arguments: _MessageAndWait) -> dict[str, Any]:
+        deadline = time.monotonic() + min(arguments.timeout_seconds, _MAX_WAIT_SECONDS)
         task = await self._start(arguments)
         if task.state in _SETTLED_STATES:
             result = await _call(task.rpc_url, "tasks/get", {"id": task.task_id})
         else:
             try:
-                result = await _wait(task.rpc_url, task.task_id, arguments.timeout_seconds)
+                result = await _wait(task.rpc_url, task.task_id, deadline - time.monotonic())
             except TimeoutError:
                 return {"task_id": task.task_id, "context_id": task.context_id, "state": "working"}
         return _outcome(task, result)
