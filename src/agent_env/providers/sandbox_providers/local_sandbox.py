@@ -38,7 +38,7 @@ except ImportError:  # Windows, which agent-env does not target.
 from agent_env import config
 from agent_env.attribution import Attribution
 from agent_env.config.paths import state_root
-from agent_env.providers.sandbox_providers.host_images import build_here, built_here
+from agent_env.providers.sandbox_providers.host_images import build_here, built_here, present
 from agent_env.providers.sandbox_providers.sandbox import SANDBOX_LABEL, NetworkPolicy, VmSandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_CONTAINER,
@@ -227,6 +227,12 @@ class LocalSandbox(VmSandbox):
         built = await asyncio.gather(*(asyncio.to_thread(built_here, name) for name in image_names))
         if pulled := [name for name, here in zip(image_names, built) if not here]:
             await super().pull_images(pulled)
+
+    async def pull_published(self, artifacts: list) -> list:
+        """Pull each published image but one this machine's Docker already holds under its name, so a run after the
+        first needs no registry."""
+        held = await asyncio.gather(*(asyncio.to_thread(present, artifact.image_name) for artifact in artifacts))
+        return await super().pull_published([artifact for artifact, here in zip(artifacts, held) if not here])
 
     def host_port(self, port: int) -> int:
         """The allocated host port for a published container port (identity if unmapped)."""

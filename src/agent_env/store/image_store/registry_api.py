@@ -41,18 +41,19 @@ class _ImageRef:
     digest: str | None
 
 
-def pin_digest(ref: str, auth: RegistryAuth | None) -> str:
+def pin_digest(ref: str, auth: RegistryAuth | None, *, timeout: float = _TIMEOUT_SECONDS) -> str:
     """``ref`` pinned to the digest its registry serves for it now, as ``name:tag@sha256:...``.
 
     A tag (``latest`` when none is given) is resolved; a digest is checked to exist; a ref giving both must agree,
     since a pull goes by the digest and ignores the tag. ``auth`` is used where the registry asks for credentials;
-    without it, a registry's anonymous token is. Raises ValueError naming what the registry answered.
+    without it, a registry's anonymous token is. Each request waits ``timeout`` seconds at most. Raises ValueError naming
+    what the registry answered.
     """
     image = _parse(ref)
     if image.digest is None:
         tag = image.tag or "latest"
-        return f"{image.name}:{tag}@{_check(image, tag, auth)}"
-    served = _check(image, image.tag or image.digest, auth)
+        return f"{image.name}:{tag}@{_check(image, tag, auth, timeout)}"
+    served = _check(image, image.tag or image.digest, auth, timeout)
     if image.tag and served != image.digest:
         raise ValueError(f"{ref}: the tag {image.tag!r} names {served} now, not {image.digest}; give the tag or the "
                          "digest alone")
@@ -86,7 +87,7 @@ def _parse(ref: str) -> _ImageRef:
     return _ImageRef(name=name, host=host, repository=repository, tag=tag, digest=digest or None)
 
 
-def _check(image: _ImageRef, reference: str, auth: RegistryAuth | None) -> str:
+def _check(image: _ImageRef, reference: str, auth: RegistryAuth | None, timeout: float) -> str:
     """The digest the registry serves for ``reference`` (a tag or a digest) in ``image``'s repository."""
     # A registry on this machine serves plain HTTP, as Docker allows for a loopback one.
     scheme = "http" if is_loopback_host(image.host) else "https"
@@ -94,7 +95,7 @@ def _check(image: _ImageRef, reference: str, auth: RegistryAuth | None) -> str:
     what = f"{image.name}{'@' if _DIGEST.match(reference) else ':'}{reference}"
     basic = (auth.username, auth.password) if auth is not None else None
     try:
-        with httpx.Client(timeout=_TIMEOUT_SECONDS, follow_redirects=True) as client:
+        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
             headers = {"Accept": _MANIFEST_TYPES}
             # Basic credentials go with every request until a Bearer token replaces them.
             credentials = basic

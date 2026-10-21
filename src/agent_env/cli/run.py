@@ -211,9 +211,9 @@ def _report_dry_run(dry: DryRun) -> None:
     for line in images:
         click.echo(f"  {line}")
     if dry.infra:
-        click.echo("Would build first:")
+        click.echo("Would set up first:")
     for build in dry.infra:
-        click.echo(f"  {build}")
+        click.echo(f"  {build}: {build.planned()}")
     click.echo("Would run:")
     for entry in dry.runs:
         click.echo(f"  {dry.path(entry)} v{materialization.version_of('task', entry.id)}")

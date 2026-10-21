@@ -1,5 +1,6 @@
-"""The infra envs a run builds: the ones missing from the store, or built by another agent-env release, into local
-stores only, for this host's platform, once each however many runs ask."""
+"""The infra envs a run sets up: the ones missing from the store, or built by another agent-env release, into local
+stores only, once each however many runs ask; pulled from the images published for their sources when every one of a
+kind's is, else built for this host's platform. One built here switches to them once they're published."""
 
 import importlib
 import re
@@ -16,16 +17,21 @@ from agent_env.env import bootstrap
 from agent_env.env.bootstrap import GATEWAY, SERVICE_DB, WEBSITE_BROWSER, InfraError, ensure_default_envs
 
 
+_DIGEST = "sha256:" + "5" * 64
+
+
 @pytest.fixture
 def puts(local_stores, monkeypatch):
-    """Stands in for each put: records the kind, id and platform, and writes the env as this release's."""
+    """Stands in for each put: records the kind, id and platform, or that its images were pulled, and writes the env as
+    this release's."""
     calls = []
 
     def put(kind):
-        def write(env_id, *, platform):
-            calls.append((kind, env_id, platform))
+        def write(env_id, *, platform, published=None):
+            calls.append((kind, env_id, platform) if published is None else (kind, env_id, "pulled"))
             artifact = get_artifact_store().put_document(DockerImageArtifact(
-                id=f"{kind}-{env_id}", description=kind, image_name=f"{kind}:v1", tar_gz_s3_url="file:///x.tar.gz"))
+                id=f"{kind}-{env_id}", description=kind, image_name=f"{kind}:v1",
+                tar_gz_s3_url=None if published else "file:///x.tar.gz", digest=_DIGEST if published else None))
             shipped = bootstrap._DOCKERFILES[kind][0].relative_to(bootstrap._ENV_PACKAGE.parent.parent)
             GatewayEnv.put(id=env_id, docker_image_artifact=artifact, metadata={
                 "dockerfile_path": f"/another/install/site-packages/{shipped}",
@@ -60,6 +66,19 @@ def test_each_infra_image_keeps_the_build_context_it_is_built_from(local_stores,
 
     assert kept == contexts
     assert [folder / name for folder, name in kept] == bootstrap._DOCKERFILES[kind]
+
+
+@pytest.fixture
+def published(monkeypatch):
+    """The kinds whose images the registry serves, all under ``_DIGEST``: those added to the set returned."""
+    kinds: set[str] = set()
+
+    def served(ref):
+        refs = {bootstrap._PUBLISHED[dockerfile].ref() for kind in kinds for dockerfile in bootstrap._DOCKERFILES[kind]}
+        return _DIGEST if ref in refs else None
+
+    monkeypatch.setattr("agent_env.env.published_images._registry_digest", served)
+    return kinds
 
 
 def test_missing_infra_is_built_for_this_host_in_order_and_once(puts):
@@ -108,11 +127,12 @@ def test_infra_that_records_no_shipped_dockerfile_is_left_as_it_is(puts):
     assert puts == []
 
 
-def test_an_env_built_from_someone_elses_dockerfile_is_theirs_to_rebuild(puts, monkeypatch):
+def test_an_env_built_from_someone_elses_dockerfile_is_theirs_to_rebuild(puts, published):
     artifact = get_artifact_store().put_document(DockerImageArtifact(
         id="website-browser__env_image", description="b", image_name="b:v1", tar_gz_s3_url="file:///b.tar.gz"))
     GatewayEnv.put(id="website-browser", docker_image_artifact=artifact,
                    metadata={"dockerfile_path": "/home/me/my-browser/Dockerfile", bootstrap.BUILD_INPUTS_KEY: "theirs"})
+    published.add(WEBSITE_BROWSER)
 
     assert ensure_default_envs([WEBSITE_BROWSER]) == []
     assert puts == []
@@ -134,18 +154,93 @@ def test_nothing_is_built_without_docker(puts, monkeypatch):
     assert puts == []
 
 
-def test_stores_that_arent_local_are_never_built_into(puts, monkeypatch):
+def test_stores_that_arent_local_are_never_built_into(puts, published, monkeypatch):
     ensure_default_envs([GATEWAY])
     monkeypatch.setattr(bootstrap, "stores_are_local", lambda: False)
     monkeypatch.setattr(bootstrap, "build_inputs_digest", lambda kind: "this release's")
+    published.update({GATEWAY, SERVICE_DB})
 
     with pytest.raises(InfraError) as e:
         ensure_default_envs([GATEWAY, SERVICE_DB])
 
     assert e.value.problems == ["the service-db env 'default-db' isn't in the store, and agent-env builds infra envs "
                                 "only into local stores; put it with `agent-env env service-db put --id default-db`"]
-    assert ensure_default_envs([GATEWAY]) == []  # built from other inputs, in a store it doesn't build into
+    assert ensure_default_envs([GATEWAY]) == []  # built from other inputs, in a store it doesn't set up infra in
     assert len(puts) == 1
+
+
+def test_missing_infra_whose_images_are_all_published_is_registered_from_them_with_no_docker(puts, published,
+                                                                                            monkeypatch):
+    published.update({GATEWAY, SERVICE_DB})
+    monkeypatch.setattr(bootstrap, "docker_unreachable", lambda: "docker isn't on PATH")
+    said = []
+
+    builds = ensure_default_envs([GATEWAY, SERVICE_DB], say=said.append)
+
+    assert puts == [(SERVICE_DB, "default-db", "pulled"), (GATEWAY, "default", "pulled")]
+    assert [build.action for build in builds] == [bootstrap.PULL, bootstrap.PULL]
+    assert said == ["service-db env 'default-db' (missing): registering its published images, which each deploy pulls",
+                    "gateway env 'default' (missing): registering its published image, which each deploy pulls"]
+    assert ensure_default_envs([GATEWAY, SERVICE_DB]) == []
+
+
+def test_a_kinds_images_are_pulled_only_when_every_one_is_published(puts, monkeypatch):
+    db_web = bootstrap._PUBLISHED[bootstrap.DB_WEB_DOCKERFILE].ref()
+    monkeypatch.setattr("agent_env.env.published_images._registry_digest",
+                        lambda ref: _DIGEST if ref == db_web else None)
+
+    (build,) = ensure_default_envs([SERVICE_DB])
+
+    assert build.builds and puts == [(SERVICE_DB, "default-db", None)]
+
+
+def test_infra_built_here_is_kept_until_its_images_are_published_then_switched_to_them_once(puts, published):
+    ensure_default_envs([GATEWAY])
+    assert ensure_default_envs([GATEWAY]) == []
+    published.add(GATEWAY)
+    said = []
+
+    (build,) = ensure_default_envs([GATEWAY], say=said.append)
+
+    assert (build.action, build.reason) == (bootstrap.SWITCH, "built on this machine")
+    assert said == ["gateway env 'default' (built on this machine): switching to its published image, which each "
+                    "deploy pulls"]
+    assert ensure_default_envs([GATEWAY]) == []
+    assert puts == [(GATEWAY, "default", None), (GATEWAY, "default", "pulled")]
+
+
+def test_infra_built_from_other_inputs_is_pulled_when_its_images_are_published(puts, published, monkeypatch):
+    ensure_default_envs([GATEWAY])
+    monkeypatch.setattr(bootstrap, "build_inputs_digest", lambda kind: "this release's")
+    published.add(GATEWAY)
+
+    (build,) = ensure_default_envs([GATEWAY])
+
+    assert (build.action, build.reason) == (bootstrap.PULL, "its build inputs changed")
+    assert puts == [(GATEWAY, "default", None), (GATEWAY, "default", "pulled")]
+
+
+def test_only_the_infra_a_run_builds_needs_docker(puts, published, monkeypatch):
+    published.add(GATEWAY)
+    monkeypatch.setattr(bootstrap, "docker_unreachable", lambda: "docker isn't on PATH")
+
+    with pytest.raises(InfraError) as e:
+        ensure_default_envs([GATEWAY, SERVICE_DB])
+
+    assert e.value.problems == ["building the service-db env needs docker, and docker isn't on PATH"]
+    assert puts == []
+
+
+def test_a_published_image_is_registered_by_its_tag_and_digest_with_the_context_it_is_built_from(local_stores):
+    env = bootstrap.put_gateway_env("default", platform=None, published={bootstrap.GATEWAY_DOCKERFILE: _DIGEST})
+
+    image, published = env.docker_image_artifact, bootstrap._PUBLISHED[bootstrap.GATEWAY_DOCKERFILE]
+    assert (image.image_name, image.digest, image.tar_gz_object_url) == (published.ref(), _DIGEST, None)
+    assert image.pinned_name == f"{published.ref()}@{_DIGEST}"
+    assert (image.dockerfile_path, image.source_digest) == ("Dockerfile", f"sha256:{published.tag().removeprefix('src-')}")
+    assert get_artifact_store().get_object(image.build_context_object_url)
+    assert env.metadata[bootstrap.BUILD_INPUTS_KEY] == bootstrap.build_inputs_digest(GATEWAY)
+    assert bootstrap._built_from_stock(env, GATEWAY)
 
 
 def test_the_default_stores_are_local(local_stores):

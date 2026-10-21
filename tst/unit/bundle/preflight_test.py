@@ -796,6 +796,17 @@ def test_infra_built_for_deploys_elsewhere_needs_docker_here(bundle_dir, monkeyp
         "building the service-db, gateway env needs docker, and docker isn't on PATH"]
 
 
+def test_infra_pulled_for_deploys_elsewhere_needs_no_docker_here(bundle_dir, monkeypatch):
+    _env("crm", REMOTE)
+    _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
+    monkeypatch.setattr(preflight_module, "docker_unreachable", lambda: "docker isn't on PATH")
+    monkeypatch.setattr("agent_env.env.published_images._registry_digest", lambda ref: "sha256:" + "4" * 64)
+
+    assert [f"{build}: {build.planned()}" for build in dry_run_bundle(bundle_dir, sandbox="modal_vm").infra] == [
+        "service-db env 'default-db' (missing): would pull its published images",
+        "gateway env 'default' (missing): would pull its published image"]
+
+
 def test_a_gateway_deploy_on_another_provider_needs_infra_it_can_reach(bundle_dir):
     _env("crm", REMOTE)
     _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
@@ -930,15 +941,19 @@ def test_a_store_image_an_env_names_without_a_version_is_checked_at_the_version_
     assert dry_run_bundle(bundle_dir, sandbox="modal_vm").runs
 
 
-def test_the_cli_dry_run_lists_the_infra_it_would_build(bundle_dir, quiet_logs):
+def test_the_cli_dry_run_lists_the_infra_it_would_set_up_and_how(bundle_dir, quiet_logs, monkeypatch):
     _env("crm")
     _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
+    gateway = next(image.ref() for image in bootstrap.PUBLISHED_IMAGES if image.dockerfile == bootstrap.GATEWAY_DOCKERFILE)
+    monkeypatch.setattr("agent_env.env.published_images._registry_digest",
+                        lambda ref: "sha256:" + "4" * 64 if ref == gateway else None)
 
     result = CliRunner().invoke(cli, ["run", str(bundle_dir), "--dry-run"])
 
     assert result.exit_code == 0, result.output
-    assert ("Would build first:\n  service-db env 'default-db' (missing)\n  gateway env 'default' (missing)\n"
-            "Would run:\n  tasks/t.json v1\n") in result.output
+    assert ("Would set up first:\n  service-db env 'default-db' (missing): would build\n"
+            "  gateway env 'default' (missing): would pull its published image\nWould run:\n  tasks/t.json v1\n"
+            ) in result.output
 
 
 def test_a_run_builds_its_infra_after_its_writes_and_before_its_tasks(bundle_dir, monkeypatch):

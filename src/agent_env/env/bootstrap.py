@@ -2,9 +2,10 @@
 local Postgres state runs from, and the website browser it adds for websites. Each has the bare id config names
 (``default_gateway_env_id``, ``default_service_db_env_id``, ``default_website_browser_env_id``).
 
-The put commands build them one at a time; ``ensure_default_envs`` builds the ones a run needs, into local stores only.
-Each image keeps its build context beside its tar.gz, so a VM or Modal running another platform than the one it was
-built on builds it again from that.
+The put commands build them one at a time; ``ensure_default_envs`` sets up the ones a run needs, into local stores only:
+from the images agent-env publishes for the sources installed, which each deploy pulls, when all of a kind's are
+published, else built on this host. Each image keeps its build context, which a sandbox builds it from when it can't
+pull it, or when it runs another platform than the one it was built for.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from agent_env.env.env import Env
 from agent_env.env.envs import GatewayEnv, MCPServerEnv
 from agent_env.env.envs.service_db import ServiceDBEnv
 from agent_env.env.envs.website_browser import WEBSITE_BROWSER_ENVIRONMENT_NAME, WEBSITE_BROWSER_IMAGE_TAG
-from agent_env.env.published_images import PublishedImage
+from agent_env.env.published_images import PublishedImage, published_digest
 from agent_env.store.base import NotFoundError
 from agent_env.store.document_store import LocalSqliteDocumentStore
 from agent_env.store.ids import derive_id
@@ -53,10 +54,11 @@ def _quiet(line: str) -> None:
 
 
 def put_gateway_env(env_id: str, *, platform: str | None, metadata: Mapping[str, str] | None = None,
-                    say: Callable[[str], None] = _quiet) -> GatewayEnv:
-    """Build the gateway image for ``platform`` (this host's when None) and write it as the gateway env ``env_id``."""
-    artifact = _build_and_put("gateway", derive_id(env_id, "env_image"), "Created from agent-env CLI",
-                              GATEWAY_DOCKERFILE, GATEWAY_IMAGE_TAG, platform=platform, say=say)
+                    say: Callable[[str], None] = _quiet, published: Mapping[Path, str] | None = None) -> GatewayEnv:
+    """Write the gateway env ``env_id``, its image registered from ``published``, each Dockerfile's published digest,
+    when given, else built for ``platform`` (this host's when None)."""
+    artifact = _image("gateway", derive_id(env_id, "env_image"), "Created from agent-env CLI", GATEWAY_DOCKERFILE,
+                      GATEWAY_IMAGE_TAG, platform=platform, say=say, published=published)
     say("Creating GatewayEnv...")
     env = GatewayEnv.put(id=env_id, docker_image_artifact=artifact, metadata=_metadata(GATEWAY, metadata))
     say(f"Created GatewayEnv: id={env.id} version={env.version}")
@@ -64,17 +66,15 @@ def put_gateway_env(env_id: str, *, platform: str | None, metadata: Mapping[str,
 
 
 def put_service_db_env(env_id: str, *, platform: str | None, metadata: Mapping[str, str] | None = None,
-                       say: Callable[[str], None] = _quiet) -> ServiceDBEnv:
-    """Build the service-db, db-web and db-mcp images for ``platform`` (this host's when None) and write them as the
-    service-db env ``env_id``."""
-    db = _build_and_put("ServiceDB", derive_id(env_id, "db_image"), f"ServiceDB PostgreSQL image for {env_id}",
-                        SERVICE_DB_DOCKERFILE, SERVICE_DB_IMAGE_NAME, platform=platform, say=say)
-    db_web = _build_and_put("db-web", derive_id(env_id, "db_web_image"),
-                            "db-web lightweight web UI for database inspection", DB_WEB_DOCKERFILE, DB_WEB_IMAGE_NAME,
-                            platform=platform, say=say)
-    db_mcp = _build_and_put("db-mcp", derive_id(env_id, "db_mcp_image"),
-                            "db-mcp PostgreSQL MCP server for direct DB access", DB_MCP_DOCKERFILE, DB_MCP_IMAGE_NAME,
-                            platform=platform, say=say)
+                       say: Callable[[str], None] = _quiet, published: Mapping[Path, str] | None = None) -> ServiceDBEnv:
+    """Write the service-db env ``env_id``, its service-db, db-web and db-mcp images registered from ``published``, each
+    Dockerfile's published digest, when given, else built for ``platform`` (this host's when None)."""
+    db = _image("ServiceDB", derive_id(env_id, "db_image"), f"ServiceDB PostgreSQL image for {env_id}",
+                SERVICE_DB_DOCKERFILE, SERVICE_DB_IMAGE_NAME, platform=platform, say=say, published=published)
+    db_web = _image("db-web", derive_id(env_id, "db_web_image"), "db-web lightweight web UI for database inspection",
+                    DB_WEB_DOCKERFILE, DB_WEB_IMAGE_NAME, platform=platform, say=say, published=published)
+    db_mcp = _image("db-mcp", derive_id(env_id, "db_mcp_image"), "db-mcp PostgreSQL MCP server for direct DB access",
+                    DB_MCP_DOCKERFILE, DB_MCP_IMAGE_NAME, platform=platform, say=say, published=published)
     say("Creating ServiceDBEnv...")
     env = ServiceDBEnv.put(id=env_id, db_docker_image_artifact=db, db_web_docker_image_artifact=db_web,
                            db_mcp_docker_image_artifact=db_mcp, metadata=_metadata(SERVICE_DB, metadata))
@@ -83,16 +83,31 @@ def put_service_db_env(env_id: str, *, platform: str | None, metadata: Mapping[s
 
 
 def put_website_browser_env(env_id: str, *, platform: str | None, metadata: Mapping[str, str] | None = None,
-                            say: Callable[[str], None] = _quiet) -> MCPServerEnv:
-    """Build the website browser image for ``platform`` (this host's when None) and write it as the MCP server env
-    ``env_id``."""
-    artifact = _build_and_put("website browser", derive_id(env_id, "env_image"), "Website browser MCP server",
-                              WEBSITE_BROWSER_DOCKERFILE, WEBSITE_BROWSER_IMAGE_TAG, platform=platform, say=say)
+                            say: Callable[[str], None] = _quiet,
+                            published: Mapping[Path, str] | None = None) -> MCPServerEnv:
+    """Write the website browser as the MCP server env ``env_id``, its image registered from ``published``, each
+    Dockerfile's published digest, when given, else built for ``platform`` (this host's when None)."""
+    artifact = _image("website browser", derive_id(env_id, "env_image"), "Website browser MCP server",
+                      WEBSITE_BROWSER_DOCKERFILE, WEBSITE_BROWSER_IMAGE_TAG, platform=platform, say=say,
+                      published=published)
     say("Creating MCPServerEnv...")
     env = MCPServerEnv.put(id=env_id, docker_image_artifact=artifact, environment_name=WEBSITE_BROWSER_ENVIRONMENT_NAME,
                            metadata=_metadata(WEBSITE_BROWSER, metadata))
     say(f"Created MCPServerEnv: id={env.id} version={env.version} environment_name={env.environment_name}")
     return env
+
+
+def _image(label: str, artifact_id: str, description: str, dockerfile: Path, image_name: str, *, platform: str | None,
+           say: Callable[[str], None], published: Mapping[Path, str] | None) -> DockerImageArtifact:
+    """``dockerfile``'s image, written as ``artifact_id`` with the folder it's in as its build context: registered as
+    the image published under its digest in ``published`` when given, else built."""
+    if published is None:
+        return _build_and_put(label, artifact_id, description, dockerfile, image_name, platform=platform, say=say)
+    ref = _PUBLISHED[dockerfile].ref()
+    say(f"Registering the published {label} image {ref}...")
+    return DockerImageArtifact.put_published(id=artifact_id, description=description, image_name=ref,
+                                             digest=published[dockerfile], context_path=str(dockerfile.parent),
+                                             dockerfile_path=dockerfile.name)
 
 
 def _build_and_put(label: str, artifact_id: str, description: str, dockerfile: Path, image_name: str, *,
@@ -129,6 +144,25 @@ PUBLISHED_IMAGES = (
     PublishedImage("agentenv-db-mcp", DB_MCP_DOCKERFILE),
     PublishedImage("agentenv-website-browser", WEBSITE_BROWSER_DOCKERFILE),
 )
+_PUBLISHED = {image.dockerfile: image for image in PUBLISHED_IMAGES}
+
+
+def published_digests(kind: str) -> dict[Path, str] | None:
+    """The digest each of ``kind``'s images is published under for the sources installed, by its Dockerfile; None unless
+    every one is, since a kind's images are all pulled or all built."""
+    digests = {}
+    for dockerfile in _DOCKERFILES[kind]:
+        if (digest := published_digest(_PUBLISHED[dockerfile])) is None:
+            return None
+        digests[dockerfile] = digest
+    return digests
+
+
+def env_images(env: Env) -> list[DockerImageArtifact]:
+    """The images an infra env runs: a service-db's three, or a gateway's or the website browser's one."""
+    if isinstance(env, ServiceDBEnv):
+        return [env.db_docker_image_artifact, env.db_web_docker_image_artifact, env.db_mcp_docker_image_artifact]
+    return [env.docker_image_artifact]
 
 
 def build_inputs_digest(kind: str) -> str:
@@ -152,16 +186,41 @@ class InfraError(ValueError):
         self.problems = problems
 
 
+BUILD, PULL, SWITCH = "build", "pull", "switch"  # how a run sets up an infra env
+_BUILT_HERE = "built on this machine"
+
+
 @dataclass(frozen=True)
 class InfraBuild:
-    """An infra env a run builds, and why."""
+    """An infra env a run sets up, how, and why."""
 
     kind: str  # GATEWAY, SERVICE_DB or WEBSITE_BROWSER
     id: str
-    reason: str  # "missing", or which agent-env built the one in the store
+    reason: str  # "missing", which agent-env built the one in the store, or _BUILT_HERE
+    action: str = BUILD  # BUILD its images on this host, or PULL them, or SWITCH an env built here to pull them
+    published: tuple[tuple[Path, str], ...] = ()  # each image's Dockerfile and published digest, when they're pulled
 
     def __str__(self) -> str:
         return f"{self.kind} env {self.id!r} ({self.reason})"
+
+    @property
+    def builds(self) -> bool:
+        return self.action == BUILD
+
+    def doing(self) -> str:
+        """What the run does, as it says when it starts."""
+        return {BUILD: "building, which can take minutes",
+                PULL: f"registering its published {self._images}, which each deploy pulls",
+                SWITCH: f"switching to its published {self._images}, which each deploy pulls"}[self.action]
+
+    def planned(self) -> str:
+        """What the run would do, as a dry run says."""
+        return {BUILD: "would build", PULL: f"would pull its published {self._images}",
+                SWITCH: f"would switch to its published {self._images}"}[self.action]
+
+    @property
+    def _images(self) -> str:
+        return "images" if len(_DOCKERFILES[self.kind]) > 1 else "image"
 
 
 def default_env_id(kind: str) -> str:
@@ -175,9 +234,11 @@ def put_command(kind: str) -> str:
 
 
 def infra_to_build(kinds: Iterable[str]) -> list[InfraBuild]:
-    """The infra envs of ``kinds`` a run builds: each one missing from the store and, in local stores, each one agent-env
-    built from the Dockerfile it ships whose recorded build inputs aren't this release's. Raises InfraError naming the
-    put command for each one missing from stores that aren't all local, which agent-env never builds into."""
+    """The infra envs of ``kinds`` a run sets up, in local stores only: each one missing from the store, and each one
+    agent-env built from the Dockerfile it ships whose recorded build inputs aren't this release's, are pulled from the
+    images published for these sources or, when they aren't, built; one built on this machine from these sources
+    switches to them once they're published. Raises InfraError naming the put command for each one missing from stores
+    that aren't all local, which agent-env never sets up infra in."""
     kinds = _in_order(kinds)
     if not kinds:
         return []
@@ -189,18 +250,28 @@ def infra_to_build(kinds: Iterable[str]) -> list[InfraBuild]:
             env = Env.get(env_id)
         except NotFoundError:
             if local:
-                builds.append(InfraBuild(kind, env_id, "missing"))
+                builds.append(_pulled_or_built(kind, env_id, "missing"))
             else:
                 problems.append(f"the {kind} env {env_id!r} isn't in the store, and agent-env builds infra envs only into "
                                 f"local stores; put it with `{put_command(kind)}`")
             continue
+        if not (local and _built_from_stock(env, kind)):
+            continue
         recorded = (env.metadata or {}).get(BUILD_INPUTS_KEY)
-        if local and _built_from_stock(env, kind) and recorded != build_inputs_digest(kind):
+        if recorded != build_inputs_digest(kind):
             reason = "its build inputs changed" if recorded else "built before agent-env recorded its build inputs"
-            builds.append(InfraBuild(kind, env_id, reason))
+            builds.append(_pulled_or_built(kind, env_id, reason))
+        elif not all(image.digest for image in env_images(env)) and (published := published_digests(kind)) is not None:
+            builds.append(InfraBuild(kind, env_id, _BUILT_HERE, SWITCH, tuple(published.items())))
     if problems:
         raise InfraError(problems)
     return builds
+
+
+def _pulled_or_built(kind: str, env_id: str, reason: str) -> InfraBuild:
+    if (published := published_digests(kind)) is None:
+        return InfraBuild(kind, env_id, reason)
+    return InfraBuild(kind, env_id, reason, PULL, tuple(published.items()))
 
 
 def needs_docker(builds: Iterable[InfraBuild], reason: str) -> str:
@@ -209,20 +280,21 @@ def needs_docker(builds: Iterable[InfraBuild], reason: str) -> str:
 
 
 def ensure_default_envs(kinds: Iterable[str], *, say: Callable[[str], None] = _quiet) -> list[InfraBuild]:
-    """Build the infra envs of ``kinds`` that ``infra_to_build`` names, for this host's platform, and return them. Each
-    id is locked while it's checked and built, so concurrent runs build it once. Raises InfraError before building
-    anything when one can't be built: missing from stores that aren't local, or docker unreachable."""
+    """Set up the infra envs of ``kinds`` that ``infra_to_build`` names, and return them: each registered from its
+    published images, or built for this host's platform. Each id is locked while it's checked and set up, so concurrent
+    runs set it up once. Raises InfraError before setting any up when one can't be: missing from stores that aren't
+    local, or to be built with docker unreachable."""
     kinds = _in_order(kinds)
     if not kinds:
         return []
     ids = [default_env_id(kind) for kind in kinds]
-    with holding_locks(ids, on_wait=lambda: say("waiting for another agent-env run to finish building the infra envs")):
+    with holding_locks(ids, on_wait=lambda: say("waiting for another agent-env run to finish setting up the infra envs")):
         builds = infra_to_build(kinds)
-        if builds and (reason := docker_unreachable()):
-            raise InfraError([needs_docker(builds, reason)])
+        if (built := [build for build in builds if build.builds]) and (reason := docker_unreachable()):
+            raise InfraError([needs_docker(built, reason)])
         for build in builds:
-            say(f"{build}: building, which can take minutes")
-            _PUTS[build.kind](build.id, platform=None)
+            say(f"{build}: {build.doing()}")
+            _PUTS[build.kind](build.id, platform=None, published=dict(build.published) or None)
     return builds
 
 

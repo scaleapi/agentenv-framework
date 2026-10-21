@@ -46,6 +46,14 @@ def holds(image_name: str, image_sources: str) -> bool:
     return _built_from(image_name) == image_sources
 
 
+def present(image_name: str) -> bool:
+    """Whether this machine's Docker holds an image named ``image_name``."""
+    try:
+        return subprocess.run(["docker", "image", "inspect", image_name], capture_output=True).returncode == 0
+    except FileNotFoundError:  # no docker on PATH, so no image here
+        return False
+
+
 def built_here(image_name: str) -> bool:
     """Whether this machine's Docker holds ``image_name`` built here from a build context, which no registry has."""
     return _built_from(image_name) is not None

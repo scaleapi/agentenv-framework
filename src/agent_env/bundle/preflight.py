@@ -42,6 +42,7 @@ from agent_env.env.bootstrap import (
     InfraBuild,
     InfraError,
     default_env_id,
+    env_images,
     infra_to_build,
     needs_docker,
     put_command,
@@ -51,7 +52,6 @@ from agent_env.env.env import Env
 from agent_env.env.envs._deployment import provider_or_class
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
-from agent_env.env.envs.service_db import ServiceDBEnv
 from agent_env.env.envs.website import WebsiteEnv
 from agent_env.env.registry import get_env_registry
 from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider, _gateway_topology
@@ -89,7 +89,7 @@ class Preflight:
     """What a run needs before its tasks start, beyond its writes: the infra envs it builds."""
 
     infra_kinds: frozenset[str]  # the infra its deploys on the local provider run on
-    infra: tuple[InfraBuild, ...]  # those the store doesn't hold yet, or holds built from other inputs
+    infra: tuple[InfraBuild, ...]  # those it sets up first: missing, built from other inputs, or to switch to pulling
     built_here: frozenset[str] = frozenset()  # the ids of the images the bundle builds that a deploy here runs
 
 
@@ -168,14 +168,15 @@ class _Walk:
             self.run_problems.extend(e.problems)
         built_here = self._built_here()
         self._default_agent()
-        reason = docker_unreachable() if self.docker_users or infra else None
+        built = [build for build in infra if build.builds]
+        reason = docker_unreachable() if self.docker_users or built else None
         if reason and self.docker_users:
             self.run_problems.append(f"the local sandbox provider runs containers for {_listed(self.docker_users)}, "
                                      f"and {reason}")
         elif reason:  # infra the run builds for deploys elsewhere
-            self.run_problems.append(needs_docker(infra, reason))
+            self.run_problems.append(needs_docker(built, reason))
         else:
-            self._docker_plugins(built_here, infra)
+            self._docker_plugins(built_here, built)
         needed = frozenset().union(*(names for _, names in self.model_users))
         if needed and (missing := model_endpoint_missing(needed)):
             name, why = missing
@@ -434,8 +435,8 @@ class _Walk:
                 f"on a provider {builds}")
 
     def _remote_infra(self, link: SandboxProvider, kinds: set[str]) -> list[str]:
-        """Why ``link``, a provider not on this machine, can't run the infra envs of ``kinds``. One the run builds, in
-        local stores missing or built from other inputs, isn't checked: it's built anew, with its build context."""
+        """Why ``link``, a provider not on this machine, can't run the infra envs of ``kinds``. One the run sets up, in
+        local stores, isn't checked: it's written anew, pulled from its registry or built, with its build context."""
         built = {build.kind for build in infra_to_build(kinds)} if stores_are_local() else set()
         found = []
         for kind in sorted(kinds - built):
@@ -447,10 +448,8 @@ class _Walk:
                              f"and the store doesn't hold it; agent-env builds infra envs only into local stores, so put "
                              f"it with `{put_command(kind)}`")
                 continue
-            artifacts = ([env.db_docker_image_artifact, env.db_web_docker_image_artifact,
-                          env.db_mcp_docker_image_artifact] if isinstance(env, ServiceDBEnv) else [env.docker_image_artifact])
             accepts = EnvironmentGatewayProvider.accepts(link)
-            found += [refusal for image in artifacts
+            found += [refusal for image in env_images(env)
                       if (refusal := self._refusal(link, accepts, _Image(f"the {kind} env {env_id!r}'s image {image.id!r}",
                                                                          image), vms_load=True))]
         return found

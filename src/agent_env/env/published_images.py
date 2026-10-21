@@ -5,17 +5,24 @@ finds the image built from them; a release wheel also records the digest its rel
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from agent_env.store.image_store.registry_api import pin_digest
 from agent_env.utils.docker.context import BuildContext
+
+logger = logging.getLogger(__name__)
 
 REGISTRY = "ghcr.io/scaleapi"
 # The release workflow writes this into the wheels it publishes; a checkout, or a wheel built elsewhere, has none.
 RELEASE_FILE = Path(__file__).with_name("published_images.json")
 _DIGEST = re.compile(r"^sha256:[a-f0-9]{64}$")
+# Short, so a network that drops requests doesn't hold up a run's checks for long.
+_LOOKUP_TIMEOUT_SECONDS = 10
+_SERVED: dict[str, str] = {}  # the digest the registry served each ref under, which never changes: no tag is moved
 
 
 @dataclass(frozen=True)
@@ -38,6 +45,23 @@ class PublishedImage:
     def ref(self) -> str:
         """The repository and the tag of the image built from these sources."""
         return f"{self.repository}:{self.tag()}"
+
+
+def published_digest(image: PublishedImage) -> str | None:
+    """The digest ``image`` is published under for the sources installed: the one this install's release recorded, else
+    the one the registry serves under its tag now; None when it serves none or can't be asked."""
+    ref = image.ref()
+    return release_digests(RELEASE_FILE).get(ref) or _registry_digest(ref)
+
+
+def _registry_digest(ref: str) -> str | None:
+    if ref not in _SERVED:
+        try:
+            _SERVED[ref] = pin_digest(ref, None, timeout=_LOOKUP_TIMEOUT_SECONDS).rpartition("@")[2]
+        except ValueError as e:
+            logger.info(f"No published image for {ref}: {e}")
+            return None
+    return _SERVED[ref]
 
 
 def release_digests(path: Path = RELEASE_FILE) -> dict[str, str]:

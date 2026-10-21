@@ -2,6 +2,7 @@
   "build_context_object_url": null,
   "build_context_s3_url": null,
   "description": "slack-mcp:v5 image",
+  "digest": null,
   "dockerfile_path": null,
   "id": "slack-mcp-image",
   "image_name": "slack-mcp:v5",

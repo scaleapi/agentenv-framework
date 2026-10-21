@@ -69,7 +69,8 @@ _SOURCES_TAG_CHARS = 16
 
 class DockerImageArtifact(Artifact):
     """A Docker image artifact: a tar.gz of the image in the object store; without one, a registry reference a
-    sandbox pulls; or, with neither, only its build context."""
+    sandbox pulls, by its ``digest`` when it records one, or builds from the build context beside it when it can't; or,
+    with neither, only its build context."""
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -86,6 +87,9 @@ class DockerImageArtifact(Artifact):
     platform: str | None = Field(default=None, description="The platform the image is built for, as `docker build --platform` names it")
     source_digest: str | None = Field(
         default=None, description="sha256 over the build context's files and modes, the Dockerfile's path and the platform"
+    )
+    digest: str | None = Field(
+        default=None, description="The digest a sandbox pulls image_name's image by, running it as image_name"
     )
 
     # No return annotation: pydantic builds the serialization schema from one, and a dict drops the fields.
@@ -237,6 +241,30 @@ class DockerImageArtifact(Artifact):
         return store.put_document(cls(id=id, version=version, description=description, image_name=pinned))
 
     @classmethod
+    def put_published(cls, id: str, *, description: str, image_name: str, digest: str, context_path: str,
+                      dockerfile_path: str) -> "DockerImageArtifact":
+        """Register ``image_name``, a registry's tag for the image built from ``context_path``, which it serves under
+        ``digest``: a sandbox pulls the image by the digest and runs it under the tag, or builds it from the uploaded
+        context when it can't pull it. Nothing is built, pushed or saved, so no Docker is needed here."""
+        from agent_env.artifact.store import get_artifact_store
+        from agent_env.config import get_config
+
+        context = _context_of(Path(context_path), dockerfile_path)
+        store = get_artifact_store()
+        version = store.next_version(id)
+        prefix = store.attempt_prefix("docker_image", id)
+        return store.put_document(cls(
+            id=id,
+            version=version,
+            description=description,
+            image_name=image_name,
+            digest=digest,
+            build_context_object_url=_upload_context(get_config().get_object_store_to_write(prefix, id), prefix, context),
+            dockerfile_path=context.dockerfile,
+            source_digest=context.source_digest(None),
+        ))
+
+    @classmethod
     def put_context(cls, id: str, *, description: str, context_path: str, dockerfile_path: str,
                     platform: str | None = DEFAULT_BUILD_PLATFORM) -> "DockerImageArtifact":
         """Register an image by its build context alone, to be built where it runs, for ``platform``, or for each
@@ -280,6 +308,11 @@ class DockerImageArtifact(Artifact):
             how = "built from its build context" if self.context_only else f"pulled from {self.image_name}"
             raise ValueError(f"{self.id!r} v{self.version} has no tar.gz; its image is {how}")
         return get_artifact_store().get_object(self.tar_gz_object_url)
+
+    @property
+    def pinned_name(self) -> str:
+        """What a sandbox pulls: ``image_name`` pinned to the image's ``digest`` when it records one."""
+        return f"{self.image_name}@{self.digest}" if self.digest else self.image_name
 
     @property
     def context_only(self) -> bool:
