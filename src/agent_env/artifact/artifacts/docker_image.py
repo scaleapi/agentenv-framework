@@ -212,12 +212,18 @@ class DockerImageArtifact(Artifact):
         return store.put_document(instance)
 
     @classmethod
-    def put_ref(cls, id: str, *, description: str, image_name: str,
-                earlier_pin: str | None = None) -> "DockerImageArtifact":
-        """Register ``image_name``, an image already in a registry, writing this document only: nothing is pushed,
-        saved or uploaded, and a sandbox pulls the image. A tag is pinned to the digest the registry serves for it
-        now, recorded as ``name:tag@sha256:...``, so every run gets the same image; a digest is checked to exist.
-        ``earlier_pin``, the pin an earlier version recorded, is kept instead when it pins ``image_name``.
+    def put_ref(cls, id: str, *, description: str, image_name: str, earlier_pin: str | None = None,
+                image_digest: str | None = None, context_path: str | None = None,
+                dockerfile_path: str | None = None) -> "DockerImageArtifact":
+        """Register ``image_name``, an image already in a registry: nothing is built, pushed or saved, and a sandbox
+        pulls the image. A tag is pinned to the digest the registry serves for it now, recorded as
+        ``name:tag@sha256:...``, so every run gets the same image; a digest is checked to exist. ``earlier_pin``, the
+        pin an earlier version recorded, is kept instead when it pins ``image_name``.
+
+        Given the build context the image is built from (``context_path``, holding ``dockerfile_path``), which is
+        uploaded, and the digest the tag is published under (``image_digest``), the tag is recorded as ``image_name``
+        and the digest beside it, as given: a sandbox pulls the image by the digest and runs it under the tag, or
+        builds it from the context when it can't pull it.
 
         ``image_name`` must name its registry. The registry is read with the configured image store's credentials
         where it holds that registry, anonymously otherwise. One on this machine is refused unless ``id``'s image
@@ -233,6 +239,21 @@ class DockerImageArtifact(Artifact):
                 and not isinstance(config.get_image_store_for(id), LocalRegistryImageStore)):
             raise ValueError(f"{image_name} is in a registry on this machine, which only an image in the local "
                              "registry's store, such as an @local one, can name")
+        if context_path is not None:
+            context = _context_of(Path(context_path), dockerfile_path)
+            store = get_artifact_store()
+            version = store.next_version(id)
+            prefix = store.attempt_prefix("docker_image", id)
+            return store.put_document(cls(
+                id=id,
+                version=version,
+                description=description,
+                image_name=image_name,
+                image_digest=image_digest,
+                build_context_object_url=_upload_context(config.get_object_store_to_write(prefix, id), prefix, context),
+                dockerfile_path=context.dockerfile,
+                source_digest=context.source_digest(None),
+            ))
         if earlier_pin is not None and pinned_from(earlier_pin, image_name):
             pinned = earlier_pin
         else:
@@ -240,30 +261,6 @@ class DockerImageArtifact(Artifact):
         store = get_artifact_store()
         version = store.next_version(id)
         return store.put_document(cls(id=id, version=version, description=description, image_name=pinned))
-
-    @classmethod
-    def put_published(cls, id: str, *, description: str, image_name: str, image_digest: str, context_path: str,
-                      dockerfile_path: str) -> "DockerImageArtifact":
-        """Register ``image_name``, a registry's tag for the image built from ``context_path``, which it serves under
-        ``image_digest``: a sandbox pulls the image by the digest and runs it under the tag, or builds it from the uploaded
-        context when it can't pull it. Nothing is built, pushed or saved, so no Docker is needed here."""
-        from agent_env.artifact.store import get_artifact_store
-        from agent_env.config import get_config
-
-        context = _context_of(Path(context_path), dockerfile_path)
-        store = get_artifact_store()
-        version = store.next_version(id)
-        prefix = store.attempt_prefix("docker_image", id)
-        return store.put_document(cls(
-            id=id,
-            version=version,
-            description=description,
-            image_name=image_name,
-            image_digest=image_digest,
-            build_context_object_url=_upload_context(get_config().get_object_store_to_write(prefix, id), prefix, context),
-            dockerfile_path=context.dockerfile,
-            source_digest=context.source_digest(None),
-        ))
 
     @classmethod
     def put_context(cls, id: str, *, description: str, context_path: str, dockerfile_path: str,

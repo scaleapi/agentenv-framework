@@ -105,9 +105,9 @@ def _image(label: str, artifact_id: str, description: str, dockerfile: Path, ima
         return _build_and_put(label, artifact_id, description, dockerfile, image_name, platform=platform, say=say)
     ref = _PUBLISHED[dockerfile].ref()
     say(f"Registering the published {label} image {ref}...")
-    return DockerImageArtifact.put_published(id=artifact_id, description=description, image_name=ref,
-                                             image_digest=published[dockerfile], context_path=str(dockerfile.parent),
-                                             dockerfile_path=dockerfile.name)
+    return DockerImageArtifact.put_ref(artifact_id, description=description, image_name=ref,
+                                       image_digest=published[dockerfile], context_path=str(dockerfile.parent),
+                                       dockerfile_path=dockerfile.name)
 
 
 def _build_and_put(label: str, artifact_id: str, description: str, dockerfile: Path, image_name: str, *,
