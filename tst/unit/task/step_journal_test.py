@@ -14,7 +14,7 @@ import agent_env.task.store as store_mod
 from agent_env.store import Filter, LocalSqliteDocumentStore, Sort
 from agent_env.task.step_journal import _union, commit_ordered, replay_context
 from agent_env.task.store import (
-    TASK_STEP_JOURNAL_COLLECTION, TaskInstanceStore, TaskStepResult, TaskStepStatus,
+    TASK_STEP_JOURNAL_COLLECTION, SupersededAttemptError, TaskInstanceStore, TaskStepResult, TaskStepStatus,
     seed_task_instance_context, set_task_instance_store,
     undo_steps,
 )
@@ -50,8 +50,8 @@ def _ops(pre_md, post_md, **scalars):
                                     TaskStepContext(metadata=dict(post_md), **scalars))
 
 
-def _record(store, iid, step_id, ops, total=9, status="success"):
-    store.record_step_complete_sync(iid, {"step_id": step_id, "status": status}, ops, total, "now")
+def _record(store, iid, step_id, ops, total=9, status="success", epoch=0):
+    store.record_step_complete_sync(iid, {"step_id": step_id, "status": status}, ops, total, "now", epoch)
 
 
 def _journal(store, iid):
@@ -480,7 +480,8 @@ def test_a_retired_entry_is_never_replayed_into_the_new_run(store):
     with pytest.raises(ValueError, match="no journal seed"):
         store.undo_steps_sync("i", {"s0"})          # the retired seed is not a base
     seed_task_instance_context("i", TaskStepContext(metadata={"new": True}))
-    _record(store, "i", "s0", _ops({"new": True}, {"new": True, "a": 1}))
+    _record(store, "i", "s0", _ops({"new": True}, {"new": True, "a": 1}), epoch=1)   # under the new run's epoch
+    assert _doc(store, "i")["context"]["metadata"] == {"new": True, "a": 1}          # so s0 really landed
     after = store.undo_steps_sync("i", {"s0"})
     assert after["context"]["metadata"] == {"new": True}   # the new run's seed, not {"old": True}
 
@@ -511,7 +512,8 @@ def test_a_completion_journaled_before_a_reregister_never_joins_the_new_run(stor
         store.upsert_instance(instance_id="i", task_id="t", task_version=1, total_steps=3)
         return out
     monkeypatch.setattr(store, "_journal_step", journal_then_reregister)
-    _record(store, "i", "s0", _ops({"base": 1}, {"base": 1, "a": 1}), total=3)   # must be declined
+    with pytest.raises(SupersededAttemptError, match="re-registered"):            # declined, out loud
+        _record(store, "i", "s0", _ops({"base": 1}, {"base": 1, "a": 1}), total=3)
 
     d = _doc(store, "i")
     assert d["completed_steps"] == []                     # the superseded run's step did not land
