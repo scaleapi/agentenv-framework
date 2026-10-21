@@ -110,6 +110,17 @@ def test_a_run_by_hand_goes_ahead_only_on_main_or_a_release_tag(job):
     assert "github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')" in JOBS[job]["if"]
 
 
+def test_a_build_pulls_its_base_images_from_the_mirror_first():
+    """public.ecr.aws can rate-limit a hosted runner's anonymous pulls for hours; the build pulls from it only what the
+    mirror doesn't give."""
+    (step,) = [step for step in JOBS["infra-build"]["steps"] if "mirror_base_images.py" in step.get("run", "")]
+    build = "\n".join(_runs("infra-build"))
+
+    assert step["run"] == 'python3 .github/scripts/mirror_base_images.py "$DOCKERFILE"'
+    assert step["if"] == "steps.wanted.outputs.build == 'true'"
+    assert build.index("mirror_base_images.py") < build.index("docker build")
+
+
 def test_what_a_registry_can_rate_limit_is_tried_again():
     """A 429 on a base image's pull would fail the build, and with it the release's PyPI jobs."""
     build = "\n".join(_runs("infra-build"))

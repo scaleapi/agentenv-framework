@@ -98,7 +98,7 @@ def _check(entry: str) -> list[str]:
 
 def _until_not_rate_limited(attempt: Callable[[], subprocess.CompletedProcess]) -> subprocess.CompletedProcess:
     """``attempt()``, and again after each of ``_RATE_LIMIT_WAITS_SECONDS`` while what it printed says a registry
-    rate-limited it, as registries do anonymous pulls from builds starting together."""
+    rate-limited it: public.ecr.aws allows one anonymous pull a second, which builds starting together pass."""
     for wait in _RATE_LIMIT_WAITS_SECONDS:
         result = attempt()
         if result.returncode == 0 or not _RATE_LIMITED.search(f"{result.stdout}{result.stderr}"):

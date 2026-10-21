@@ -1,4 +1,4 @@
-FROM mirror.gcr.io/library/python:3.11-slim@sha256:c20888b6acdd1e63e1c433a185bf3ad162c0288fe484616ce062e0d28add2900
+FROM public.ecr.aws/docker/library/python:3.11-slim@sha256:c20888b6acdd1e63e1c433a185bf3ad162c0288fe484616ce062e0d28add2900
 
 RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 
