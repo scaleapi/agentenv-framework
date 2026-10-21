@@ -31,21 +31,27 @@ are further VM backends; `modal_sandbox.py` is a container backend; `local_sandb
 
 | Shape | The platform gives you | You implement | You inherit |
 |---|---|---|---|
-| VM backend (recommended) | a Linux machine you can `exec` into, with Docker | `create_vm`, `get_sandbox`, a `VmSandbox` | `create_container` (create a VM, log in, pull, run), image loading and building, file staging |
+| VM backend (recommended) | a Linux machine you can `exec` into, with Docker | `create_vm`, `create_sandbox` (a wrapper over `create_vm`), `get_sandbox`, a `VmSandbox` | `create_container` (create a VM, log in, pull, run), image loading and building, file staging |
 | Container backend | an image booted directly, with a port exposed | `create_sandbox`, `get_sandbox`, a `Sandbox` with `exec` and the `write_file_*` methods | nothing |
 
 Nothing on `SandboxProvider` is abstract, but registration still refuses a class that overrides neither `create_sandbox`
 (container) nor `create_vm` (vm) with `must implement create_sandbox or create_vm`, through an entry point and through
 config alike; a provider missing `get_sandbox` registers and fails on its first reconnect. `SUPPORTED_SANDBOX_MODES` is
-derived from which of the two you override. A container backend cannot run envs that deploy onto a VM or `deploy_sandbox` steps with `sandbox_mode: vm`. The rest of this
-file assumes a VM backend.
+derived from which of the two you override. A container backend cannot run envs that deploy onto a VM or
+`deploy_sandbox` steps with `sandbox_mode: vm`.
+
+A VM backend must override `create_sandbox` too, though registration does not ask for it: an agent's sandbox is made by
+`create_sandbox`, whose base raises `NotImplementedError`, so a provider with only `create_vm` fails the first time an agent
+is deployed on it. Every VM provider here does the same: `create_sandbox` ignores `image_name` and `env`, calls `create_vm`
+with `exposed_ports=[port]` and returns the VM, and the deploy then loads and starts the image on it. See
+`boxd/provider.py`. The rest of this file assumes a VM backend.
 
 ## Provider contract
 
 | Method | Required | Called by |
 |---|---|---|
-| `create_vm(*, image, boot_mode, cpu, memory, disk_size_gb, timeout, exposed_ports, setup_for_gateway, attribution, network_policy) -> VmSandbox` | VM backend | env deploys, `deploy_sandbox` in VM mode, an agent's sandbox |
-| `create_sandbox(*, image_name, port, env, cpu, memory, disk_size_gb, timeout, attribution, network_policy) -> Sandbox` | container backend | an agent's sandbox, `deploy_sandbox` in container mode |
+| `create_vm(*, image, boot_mode, cpu, memory, disk_size_gb, timeout, exposed_ports, setup_for_gateway, attribution, network_policy) -> VmSandbox` | VM backend | env deploys, `deploy_sandbox` in VM mode, `create_container`, and your `create_sandbox` |
+| `create_sandbox(*, image_name, port, env, cpu, memory, disk_size_gb, timeout, attribution, network_policy) -> Sandbox` | yes (a VM backend wraps `create_vm`) | an agent's sandbox (`provider.create_sandbox`), `deploy_sandbox` in container mode |
 | `get_sandbox(sandbox_id) -> Sandbox` | yes | every step after the one that created the sandbox, and teardown |
 | `terminate_sandbox(sandbox_id)` | no | teardown. The default calls `get_sandbox` then `terminate()`, and treats `SandboxNotFoundError` as done; override when you can terminate without a live handle |
 | `create_container(...)` | inherited | containers that run an env or agent image. Override only when the platform boots images natively |
@@ -131,7 +137,7 @@ checks `docker compose version` up front so a bad base image fails at create tim
 | `shares_network_with(sandbox_type)` | same provider only | sandboxes on another provider can reach yours directly |
 
 When asked for a policy it cannot enforce, a provider refuses rather than creating an unrestricted sandbox: call
-`refuse_unenforceable_policy(self, network_policy)` at the top of each `create_*`. A fallback chain skips a provider whose
+`refuse_unenforceable_policy(self, network_policy)` at the top of `create_vm`, and of `create_sandbox` when it does not delegate to `create_vm`. A fallback chain skips a provider whose
 `supports_network_policy` says no.
 
 ## Register and configure
@@ -168,7 +174,9 @@ region = "us-east-1"
 In this repository, a built-in also needs: its package under `providers/sandbox_providers/<name>/` (`provider.py`,
 `sandbox.py`); an entry in `_BUILTIN_SANDBOX_PROVIDERS` (`sandbox_provider.py`); an optional-dependency extra in
 `pyproject.toml` for the SDK, added to the `dev` extra so CI exercises it, with the SDK imported only where it is used; and
-a line for it in the root `AGENTS.md` provider lists. Say in the PR what the website docs should cover.
+a line for it in the root `AGENTS.md` provider lists. Tests that enumerate the built-ins fail until you cover the new one:
+add a factory to `FACTORIES` in `network_policy_stamping_test.py` and a row to `provider_capabilities_test.py`. Say in the PR
+what the website docs should cover.
 
 ## Tests
 
@@ -186,7 +194,7 @@ a line for it in the root `AGENTS.md` provider lists. Say in the PR what the web
 
 ## Checklist
 
-- [ ] `create_vm` (or `create_sandbox`) and `get_sandbox` are implemented and `Sandbox.type` equals the registry name.
+- [ ] `create_vm`, `create_sandbox` (wrapping `create_vm`) and `get_sandbox` are implemented and `Sandbox.type` equals the registry name.
 - [ ] A sandbox that fails setup is terminated before the error is re-raised.
 - [ ] `get_sandbox` on a freshly built provider restores exposed ports and applied network policy.
 - [ ] `terminate` is idempotent and a gone sandbox raises `SandboxNotFoundError` from `get_sandbox`.
