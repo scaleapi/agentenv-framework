@@ -547,3 +547,31 @@ async def test_a_shared_conversation_the_next_prompt_cannot_be_found_in_is_withh
         run.turns
     assert raised.value.source == "conversation"
 
+
+@pytest.mark.asyncio
+async def test_an_env_firing_log_the_gateway_dropped_events_from_raises_rather_than_reading_as_never_fired():
+    context, prompt_response, recorded = recorded_run()
+    envelope = {"env_id": "calendar", "state": {"triggers": [], "events": recorded["env"], "events_dropped": 4}}
+    context.metadata["env_trigger_state"]["calendar"]["object_url"] = get_config().get_object_store().put(
+        f"env_trigger_state/dropped-{uuid.uuid4().hex[:8]}.json", json.dumps(envelope).encode(),
+        content_type="application/json")
+
+    run = await load_run_context(context, prompt_response)
+
+    with pytest.raises(RunRecordUnavailable, match="dropped 4") as raised:
+        run.firing("never", env="calendar")
+    assert raised.value.source == "env:calendar"
+    assert f"(not available: env:calendar: {run.unavailable['env:calendar']})" in _render(run, ["trigger_log"])
+
+
+@pytest.mark.asyncio
+async def test_a_user_agent_firing_log_that_lost_its_oldest_entries_raises_rather_than_reading_as_never_fired():
+    context, prompt_response, recorded = recorded_run()
+    context.metadata["agent_trigger_state"]["prompt"] = [{**recorded["agent"][0], "seq": 5}]
+
+    run = await load_run_context(context, prompt_response)
+
+    with pytest.raises(RunRecordUnavailable, match="oldest") as raised:
+        run.firing("never")
+    assert raised.value.source == "user_agent"
+    assert [f.trigger_id for f in run.firings(env="calendar")] == ["confirm", "late"]

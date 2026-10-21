@@ -220,7 +220,12 @@ def _agent_trigger_events(context: TaskStepContext, step_id: Optional[str], conv
     """The user agent's firing log; unavailable, not empty, when it had triggers but ``prompt_agent`` read none back."""
     logs = context.metadata.get("agent_trigger_state") or {}
     if step_id in logs:
-        return list(logs[step_id] or [])
+        log = list(logs[step_id] or [])
+        first = log[0].get("seq") if log and isinstance(log[0], dict) else None
+        if isinstance(first, int) and first > 1:  # the user agent's capped log keeps its newest entries
+            unavailable["user_agent"] = f"incomplete: the user agent's log lost its oldest {first - 1} entries"
+            return []
+        return log
     armed = {r.get("agent_name") for r in context.metadata.get("agent_trigger_registrations") or []}
     user_agent = next((m.author for m in conversation if m.role == "user"), None)
     # Without the conversation the user agent is unknown, so any agent's registered triggers may be its.
@@ -322,7 +327,11 @@ def _env_trigger_events(context: TaskStepContext, unavailable: dict[str, str]) -
         except Exception as e:
             unavailable[f"env:{env_id}"] = _error(e)
             continue
-        events[env_id] = list((envelope.get("state") or {}).get("events") or [])
+        state = envelope.get("state") or {}
+        if state.get("events_dropped"):
+            unavailable[f"env:{env_id}"] = f"incomplete: the gateway dropped {state['events_dropped']} of its events"
+            continue
+        events[env_id] = list(state.get("events") or [])
     return events
 
 
