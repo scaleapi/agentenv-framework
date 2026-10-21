@@ -34,9 +34,10 @@ are further VM backends; `modal_sandbox.py` is a container backend; `local_sandb
 | VM backend (recommended) | a Linux machine you can `exec` into, with Docker | `create_vm`, `get_sandbox`, a `VmSandbox` | `create_container` (create a VM, log in, pull, run), image loading and building, file staging |
 | Container backend | an image booted directly, with a port exposed | `create_sandbox`, `get_sandbox`, a `Sandbox` with `exec` and the `write_file_*` methods | nothing |
 
-Nothing on `SandboxProvider` is abstract, so a provider that implements nothing registers cleanly and fails on its first
-use. `SUPPORTED_SANDBOX_MODES` is derived from which of `create_sandbox` (container) and `create_vm` (vm) you override. A
-container backend cannot run envs that deploy onto a VM or `deploy_sandbox` steps with `sandbox_mode: vm`. The rest of this
+Nothing on `SandboxProvider` is abstract, but registration still refuses a class that overrides neither `create_sandbox`
+(container) nor `create_vm` (vm) with `must implement create_sandbox or create_vm`, through an entry point and through
+config alike; a provider missing `get_sandbox` registers and fails on its first reconnect. `SUPPORTED_SANDBOX_MODES` is
+derived from which of the two you override. A container backend cannot run envs that deploy onto a VM or `deploy_sandbox` steps with `sandbox_mode: vm`. The rest of this
 file assumes a VM backend.
 
 ## Provider contract
@@ -177,8 +178,9 @@ a line for it in the root `AGENTS.md` provider lists. Say in the PR what the web
 2. The smallest live check: `agent-env run hello --sandbox <name>`.
 3. A live smoke test in `tst/integration/providers/sandbox_providers/`, modelled on `boxd_sandbox_smoke_test.py`: create a
    VM, run a container on an exposed port and reach it through `tunnel_urls`, reconnect with `get_sandbox` from a fresh
-   provider and check ports and policy survive, then terminate twice. Gate it with `skip_without_remote_sandbox("<name>")`
-   so it declares its skip instead of failing.
+   provider and check ports and policy survive, then terminate twice. In this repository, add `<name>` to `remote_sandbox_is_available`
+   in `tst/util/capabilities.py` first (it raises `ValueError` for an unknown name, which stops collection), then gate the
+   test with `skip_without_remote_sandbox("<name>")` so it declares its skip instead of failing.
 4. An env deploy, last: it exercises the gateway, image loading and `docker compose`, so it needs a gateway image and a
    registry your sandboxes can pull from.
 
