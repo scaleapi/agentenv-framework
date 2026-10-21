@@ -1,8 +1,7 @@
 # AGENTS.md: writing an A2A agent
 
-How to write an agent that agent-env can deploy, prompt, inspect and validate. The reference is the Claude Code agent,
-`agents/claude-code/`: agent-env's default agent and its most tested one. `agents/pi/` covers the few patterns Claude
-Code doesn't use. `README.md` here describes what each of them does.
+How to write an agent that agent-env can deploy, prompt, inspect and validate. `README.md` here describes the agents
+in this folder.
 
 ## Agent
 
