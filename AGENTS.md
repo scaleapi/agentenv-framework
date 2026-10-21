@@ -310,3 +310,6 @@ guide (configuration, environments, steps, artifacts, providers, the CLI) is
 www.agentenvframework.com/docs. A new feature, provider or option is documented there, not in the
 README: say in the pull request what the docs should cover, and a maintainer updates the site.
 `packages/agentenv-protocol/README.md` documents the protocol and the A2A agent framework.
+
+Guides for coding agents sit next to the code they cover: `src/agent_env/agents/AGENTS.md` for writing an A2A agent and
+`src/agent_env/providers/sandbox_providers/AGENTS.md` for writing a sandbox provider.
