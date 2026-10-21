@@ -4,12 +4,13 @@ How to write an agent that agent-env can deploy, prompt, inspect and validate. T
 `agents/claude-code/`: agent-env's default agent and its most tested one. `agents/pi/` covers the few patterns Claude
 Code doesn't use. `README.md` here describes what each of them does.
 
-## The shape of an agent
+## Agent
 
 An agent is a Docker image running an A2A server, built with the SDK, `agentenv_protocol.a2a_agent`
-(`pip install 'agentenv-framework-protocol[agent]'`). You write one class: a typed config, the extensions it supports,
-`run()` for one turn, and handlers for what only your runtime can do. The SDK serves the Agent Card, the JSON-RPC
-endpoint and every `/ext/*` route. The end of `agents/claude-code/a2a_server.py` is the whole entry point:
+(`pip install 'agentenv-framework-protocol[agent]'`). You write one `AgentEnvAgent` subclass, decorated with
+`@a2a_agent(...)`: its identity, a typed config, the extensions it supports, `run()` for one task, and handlers for
+what only your runtime can do. The SDK serves the Agent Card, the A2A JSON-RPC endpoint, `/health` and every `/ext/*`
+route. The end of `agents/claude-code/a2a_server.py` is the whole entry point:
 
 ```python
 def build_app(agent: ClaudeCodeAgent) -> Starlette:
@@ -20,30 +21,80 @@ app = build_app(ClaudeCodeAgent())
 AGENT_CARD = app.state.agentenv_a2a.card    # install/v1 imports this name
 ```
 
-and `agents/claude-code/entrypoint.sh` serves it with
-`exec uvicorn a2a_server:app --host 0.0.0.0 --port "${A2A_PORT:-8000}"`.
+`agents/claude-code/entrypoint.sh` serves it with `exec uvicorn a2a_server:app --host 0.0.0.0 --port
+"${A2A_PORT:-8000}"`, from the image's `CMD` (not `ENTRYPOINT`), as a non-root user that tolerates root, with
+everything installed at build time.
 
-## Where each pattern lives
-
-Paths are under `agents/claude-code/`. `kit.py` there holds the plumbing any CLI agent needs; copy it rather than
-rewriting it.
+Paths below are under `agents/claude-code/`. `kit.py` there holds the plumbing any CLI agent needs; copy it rather
+than rewriting it.
 
 | To | Read |
 |---|---|
-| declare the agent and its extensions | `a2a_server.py`, the `@a2a_agent` block |
-| run a CLI per turn | `ClaudeCodeAgent.run`, `claude_bridge.py` `run_claude` |
+| declare the agent | `a2a_server.py`, the `@a2a_agent` block on `ClaudeCodeAgent` |
 | map the model endpoint and `LITELLM_EXTRA_HEADERS` onto a CLI | `claude_bridge.py` `cli_env` |
-| read file parts | `kit.py` `materialize_file_part` |
-| keep session refs past the SDK's 1,024-context LRU | `kit.py` `DurableSessionRefs` |
 | answer errors as `{"detail": ...}` | `kit.py` `json_error_bodies`, applied in `build_app` |
+| stop running turns when the server stops | `_turns_stop_with_the_server`, passed as `lifespan=` |
 | build the image | `Dockerfile`, `entrypoint.sh` |
-| test the agent offline | `tst/unit/agents/claude_code/` (`conftest.py`, `test_card_contract.py`, `test_extensions.py`) |
+| test the agent offline | `tst/unit/agents/claude_code/` (`conftest.py` builds the app with `TestClient`) |
 
 `packages/agentenv-protocol/examples/` has smaller agents, one feature each.
 
+## Agent loop: handling tasks
+
+agent-env speaks A2A JSON-RPC to `/a2a`: `message/send` for each prompt, then `tasks/get` until the task ends, and
+`tasks/cancel` to stop one (`src/agent_env/a2a_agent/protocol.py`). The SDK owns the task: it creates it
+(`submitted`, then `working`), builds a `TaskRequest`, calls your `run()` and maps what it returns onto the task's
+terminal state, `completed`, `failed` or `canceled`. Your `run()` is one turn.
+
+- **In:** `TaskRequest` carries `task_id`, `context_id`, `parts` (`TextPart`, `FilePart` by `bytes` or `uri`,
+  `DataPart`), `config` (your typed config, as it stood when the task was created), `mcp_servers`, `skills`,
+  `metadata`, `session_ref`, `workspace` and `trajectory`.
+- **Out:** a `TaskResult` from `TaskResult.text(...)`, `TaskResult.failure(code, message)` or `TaskResult.builder()`.
+  Its parts become the task's status message, with `usage` as a data part; a failure adds
+  `{error_type, error_code, error_message}`. A success needs at least one part, and `builder().failed(...)` adds no
+  text part, so add one.
+- **Errors:** `agent_error`, the default, means the agent tried and failed; `infra_error` means the run couldn't
+  happen, and agent-env may retry it. An exception that escapes `run()` becomes an opaque `infra_error`, its text
+  never sent.
+- **Context and sessions:** turns of one `context_id` run one at a time; different contexts run concurrently, and the
+  validator relies on it, so don't serialize them. Return your runtime's conversation id as `session_ref` and the next
+  turn in that context gets it back; bind it before the runtime starts, so a live trajectory read or a mid-turn
+  snapshot finds it.
+- **Deadline and cancel:** bound the turn by `request.config.timeout_seconds`. On `tasks/cancel`, `run()` gets
+  `CancelledError`; kill the runtime and anything it started before re-raising.
+- **Streaming:** make `run()` an async generator that yields `TaskProgress` and ends with one `TaskResult`; the card
+  then advertises streaming.
+
+| To | Read |
+|---|---|
+| handle a turn: parts in, session bound, CLI run, result out | `ClaudeCodeAgent.run` and `_turn` |
+| turn file parts into files the runtime reads | `kit.py` `materialize_file_part` |
+| run the CLI within the deadline, streaming its events | `claude_bridge.py` `run_claude` |
+| kill the CLI and its tools on timeout or cancel | `claude_bridge.py` `_kill_cli`, `kill_running_clis` |
+| keep session refs past the SDK's 1,024-context LRU | `kit.py` `DurableSessionRefs` |
+| test the loop | `tst/unit/agents/claude_code/test_message_contract.py`, `test_claude_bridge_cancel.py` |
+| stream progress | `packages/agentenv-protocol/examples/streaming_agent.py` |
+
+## Agent Card
+
+The SDK builds the card from `@a2a_agent(...)` and serves it at `/.well-known/agent-card.json` and
+`/.well-known/agent.json`, the path agent-env reads. You never write it by hand.
+
+- **Identity:** `AgentIdentity(name, description, version, input_modes, output_modes, skills)`. List in
+  `input_modes` only the media types `run()` handles; the validator sends every modality probe and records your
+  declared modes beside the results. `skills` here describe the agent for discovery; they are not installed skills.
+- **Derived:** the RPC `url` (`/a2a`), `capabilities.streaming` from the shape of `run()`, and
+  `capabilities.extensions`, one entry per extension with `params.endpoint` and `params.methods`. For agent-config,
+  `methods.set.request.supported` lists your config fields: agent-env sends only those. `staging/v1` is appended.
+- **Live:** setting `name` or `description` through agent-config, or installing a skill, updates the served card.
+
+Reference: the `identity=AgentIdentity(...)` block on `ClaudeCodeAgent`, and
+`tst/unit/agents/claude_code/test_card_contract.py`, which pins the card.
+`curl localhost:8000/.well-known/agent-card.json` shows a running agent's card.
+
 ## Extensions
 
-Each extension is a `urn:agentenv:*` URI on the Agent Card with an `/ext/*` endpoint. An operation is implemented by
+Each extension is a `urn:agentenv:*` URI on the Agent Card, most with an `/ext/*` endpoint. An operation is implemented by
 the SDK or by your runtime. List an extension in `extensions=(...)`, with `enable(EXT, ...)` for options; binding a
 handler with `@extension(EXT.operation)` also turns it on. Overriding an SDK-owned operation means overriding its
 whole group, and `self.default_handlers.call(...)` reaches the SDK's own handler from yours. Shapes are in
@@ -151,15 +202,6 @@ Use your own URI, not `urn:agentenv:*`. Reference: `packages/agentenv-protocol/e
 - `packages/agentenv-protocol/README.md`, section "A2A agent framework", is the prose reference.
 - What agent-env sends you: `src/agent_env/task_step/task_steps/deploy_agent.py` (env vars, MCP registrations,
   identity) and `prompt_agent.py` (config fields, then `message/send`).
-
-## Rules that bite
-
-- Bind the session before the runtime starts, as `ClaudeCodeAgent.run` does, so a live trajectory read or a snapshot
-  taken mid-turn finds it.
-- Turns of different contexts run concurrently, and the validator relies on it; don't serialize them.
-- Start the server from `CMD`, not `ENTRYPOINT`, on `0.0.0.0:$A2A_PORT`, as a non-root user that tolerates root, with
-  everything installed at build time.
-- `TaskResult.builder().failed(...)` adds no text part; add one. Use `infra_error` only when a retry could help.
 
 ## Registering and validating
 
