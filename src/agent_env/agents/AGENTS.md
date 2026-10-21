@@ -94,11 +94,11 @@ Reference: the `identity=AgentIdentity(...)` block on `ClaudeCodeAgent`, and
 
 ## Extensions
 
-Each extension is a `urn:agentenv:*` URI on the Agent Card, most with an `/ext/*` endpoint. An operation is implemented by
-the SDK or by your runtime. List an extension in `extensions=(...)`, with `enable(EXT, ...)` for options; binding a
-handler with `@extension(EXT.operation)` also turns it on. Overriding an SDK-owned operation means overriding its
-whole group, and `self.default_handlers.call(...)` reaches the SDK's own handler from yours. Shapes are in
-`packages/agentenv-protocol/src/agentenv_protocol/a2a_agent/extensions.py`.
+Each extension is a `urn:agentenv:*` URI on the Agent Card, most with an `/ext/*` endpoint. An operation is
+implemented by the SDK or by your runtime. List an extension in `extensions=(...)`, with `enable(EXT, ...)` for
+options; binding a handler with `@extension(EXT.operation)` also turns it on. Overriding an SDK-owned operation
+means overriding its whole group, and `self.default_handlers.call(...)` reaches the SDK's own handler from yours.
+Shapes are in `packages/agentenv-protocol/src/agentenv_protocol/a2a_agent/extensions.py`.
 
 ### `agent-config/v1`, `/ext/agent-config`
 
