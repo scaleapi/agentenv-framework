@@ -414,6 +414,60 @@ async def test_a_mutating_request_that_wrote_nothing_is_not_logged(monkeypatch):
     assert [e for e in _trajectory()[before:] if e["event_type"] == "http_request"] == []
 
 
+MIRROR = {"id": "mirror", "barrier": {"at": "provoking_call"}, "actions": [{"type": "tool", "tool": TOOL.name, "args": {}}],
+          "when": {"type": "website", "app": "mail", "method": "POST", "path": {"equals": "/api/drafts"}}}
+
+
+@pytest.mark.asyncio
+async def test_a_website_write_held_by_its_trigger_s_barrier_does_not_claim_the_trigger_s_write(monkeypatch):
+    changelog = _Changelog()
+
+    async def body():
+        yield b'{"ok": true}'
+
+    def website(request: httpx.Request) -> httpx.Response:
+        changelog.write("drafts", "d1")
+        return httpx.Response(201, headers={"content-length": "12"}, content=body())
+
+    transport = httpx.MockTransport(website)
+    monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=transport, **kw))
+    gw = _gateway(changelog, website_urls={"mail": "http://mail-frontend"})
+    gw._trigger_engine.register({"triggers": [MIRROR]})
+    try:
+        status, body_bytes = await _http(gw, "POST", "/website/mail/api/drafts")
+    finally:
+        await gw._close_child_sessions()
+
+    assert status == 201 and json.loads(body_bytes) == {"ok": True} and len(changelog.rows) == 2
+    _, changes = await _http(gw, "GET", "/changes")
+    assert [[(a["kind"], a["role"]) for a in c["actors"]] for c in json.loads(changes)["changes"]] == [
+        [("request", "default")], [("trigger_action", None)]]
+
+
+@pytest.mark.asyncio
+async def test_a_website_write_still_streaming_under_a_barrier_keeps_its_window_to_the_last_byte(monkeypatch):
+    changelog = _Changelog()
+
+    async def body():
+        yield b"a"
+        changelog.write("drafts", "d1")
+        yield b"b"
+
+    transport = httpx.MockTransport(lambda request: httpx.Response(201, content=body()))
+    monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=transport, **kw))
+    gw = _gateway(changelog, website_urls={"mail": "http://mail-frontend"})
+    gw._trigger_engine.register({"triggers": [MIRROR]})
+    try:
+        status, body_bytes = await _http(gw, "POST", "/website/mail/api/drafts")
+    finally:
+        await gw._close_child_sessions()
+
+    assert (status, body_bytes) == (201, b"ab")
+    _, changes = await _http(gw, "GET", "/changes")
+    by_row = {c["row_id"]: [a["kind"] for a in c["actors"]] for c in json.loads(changes)["changes"]}
+    assert by_row["d1"] == ["request"] and "trigger_action" in by_row["m1"]
+
+
 @pytest.mark.asyncio
 async def test_changes_pages_by_after_id_and_limit():
     changelog = _Changelog()

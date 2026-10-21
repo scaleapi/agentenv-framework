@@ -70,7 +70,7 @@ from .changes import ChangeAttribution
 from .child_transport import child_http_client
 from .clock import Clock, ClockError, _iso
 from .get_time import GET_TIME_TOOL_NAME, build_get_time_tool
-from .rest_proxy import ROLE_HEADER_BYTES, fetch_child_card, forward, rewrite_child_card
+from .rest_proxy import ROLE_HEADER_BYTES, UpstreamResponse, fetch_child_card, forward, rewrite_child_card
 from .triggers import TriggerEngine, TriggerError
 
 logger = logging.getLogger(__name__)
@@ -554,6 +554,8 @@ class Gateway:
         engine = self._trigger_engine
         if app in self.website_urls and (engine.has_website_triggers or engine.has_state_triggers):
             barrier_tasks, barrier_timeout_s = await self._fire_website_triggers(request, app, response.status_code)
+            if barrier_tasks and isinstance(response, UpstreamResponse):
+                await response.done_if_sized()  # like a tool call's, the request's write window ends before its barrier
             await self._await_barriers(barrier_tasks, barrier_timeout_s)
         return response
 

@@ -190,6 +190,12 @@ class UpstreamResponse(StreamingResponse):
             logger.error(f"Proxy to {target_url} failed after {sent} bytes: {e!r}")
             raise
 
+    async def done_if_sized(self) -> None:
+        """Run `on_done` now rather than after the last byte when the upstream sized its body, i.e. had it all before its headers."""
+        if self._on_done is not None and "content-length" in self._upstream.headers:
+            on_done, self._on_done = self._on_done, None
+            await on_done(self.status_code)
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         try:
             await super().__call__(scope, receive, send)
