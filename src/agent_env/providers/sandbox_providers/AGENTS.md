@@ -42,7 +42,7 @@ derived from which of the two you override. A container backend cannot run envs 
 
 A VM backend must override `create_sandbox` too, though registration does not ask for it: an agent's sandbox is made by
 `create_sandbox`, whose base raises `NotImplementedError`, so a provider with only `create_vm` fails the first time an agent
-is deployed on it. Every VM provider here does the same: `create_sandbox` ignores `image_name` and `env`, calls `create_vm`
+is deployed on it. Most VM providers here do the same: `create_sandbox` ignores `image_name` and `env`, calls `create_vm`
 with `exposed_ports=[port]` and returns the VM, and the deploy then loads and starts the image on it. See
 `boxd/provider.py`. The rest of this file assumes a VM backend.
 
@@ -51,7 +51,7 @@ with `exposed_ports=[port]` and returns the VM, and the deploy then loads and st
 | Method | Required | Called by |
 |---|---|---|
 | `create_vm(*, image, boot_mode, cpu, memory, disk_size_gb, timeout, exposed_ports, setup_for_gateway, attribution, network_policy) -> VmSandbox` | VM backend | env deploys, `deploy_sandbox` in VM mode, `create_container`, and your `create_sandbox` |
-| `create_sandbox(*, image_name, port, env, cpu, memory, disk_size_gb, timeout, attribution, network_policy) -> Sandbox` | yes (a VM backend wraps `create_vm`) | an agent's sandbox (`provider.create_sandbox`), `deploy_sandbox` in container mode |
+| `create_sandbox(*, image_name, port, env, cpu, memory, disk_size_gb, timeout, attribution, network_policy) -> Sandbox` | yes (a VM backend wraps `create_vm`) | an agent's sandbox (`provider.create_sandbox`); `create_container` of a container-only backend |
 | `get_sandbox(sandbox_id) -> Sandbox` | yes | every step after the one that created the sandbox, and teardown |
 | `terminate_sandbox(sandbox_id)` | no | teardown. The default calls `get_sandbox` then `terminate()`, and treats `SandboxNotFoundError` as done; override when you can terminate without a live handle |
 | `create_container(...)` | inherited | containers that run an env or agent image. Override only when the platform boots images natively |
@@ -174,9 +174,9 @@ region = "us-east-1"
 In this repository, a built-in also needs: its package under `providers/sandbox_providers/<name>/` (`provider.py`,
 `sandbox.py`); an entry in `_BUILTIN_SANDBOX_PROVIDERS` (`sandbox_provider.py`); an optional-dependency extra in
 `pyproject.toml` for the SDK, added to the `dev` extra so CI exercises it, with the SDK imported only where it is used; and
-a line for it in the root `AGENTS.md` provider lists. Tests that enumerate the built-ins fail until you cover the new one:
-add a factory to `FACTORIES` in `network_policy_stamping_test.py` and a row to `provider_capabilities_test.py`. Say in the PR
-what the website docs should cover.
+a line for it in the root `AGENTS.md` provider lists. `network_policy_stamping_test.py` fails until you add a factory for
+the new one to its `FACTORIES`; also add a row to the table in `provider_capabilities_test.py`, which nothing forces. Say in
+the PR what the website docs should cover.
 
 ## Tests
 
