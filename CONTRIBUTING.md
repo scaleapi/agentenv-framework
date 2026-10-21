@@ -89,7 +89,8 @@ the previous release, so a clear pull request title is also the release note. A 
 `main`'s CI is not published and gets no release; its pull requests are in the next release's notes.
 
 A release also publishes the infra images agent-env ships, once the `PUBLISH_INFRA_IMAGES` repository variable is
-`true`: one per Dockerfile under `src/agent_env/env`, at `ghcr.io/scaleapi/agentenv-<name>:src-<hex>` for linux/amd64
+`true`: one per Dockerfile under `src/agent_env/env`, and the Claude Code agent's (`agentenv-claude-code`, its CLI
+included), at `ghcr.io/scaleapi/agentenv-<name>:src-<hex>` for linux/amd64
 and linux/arm64, where the tag is the build context's source digest, so an unchanged Dockerfile is not built again.
 Each of them pins its base images by digest, and Dependabot bumps those pins, so a base's fixes reach the published
 image: a bump changes the sources, and the next release builds it again.

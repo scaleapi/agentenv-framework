@@ -8,9 +8,10 @@ from another bundle as `@local/agentenv-framework/agents/claude-code`.
 It needs Docker, and a model endpoint serving Anthropic's Messages API, `<base>/v1/messages`, which a LiteLLM gateway
 does: the `[model]` base URL and key reach it as `ANTHROPIC_BASE_URL` and a bearer token, and `[model.headers]` are sent
 on every model call. The `LITELLM_*` variables stay in its environment too, so a script the model runs can call the
-endpoint. Building the image downloads Claude Code, which is Anthropic's software under its
-[Commercial Terms](https://www.anthropic.com/legal/commercial-terms); the image is built where it runs and never
-published. The CLI's version is the Dockerfile's `CLAUDE_CODE_VERSION`. The image gives the scripts the model runs
+endpoint. The image holds Claude Code, which is Anthropic's software under its
+[Commercial Terms](https://www.anthropic.com/legal/commercial-terms); a release also publishes the image, CLI included,
+at `ghcr.io/scaleapi/agentenv-claude-code:src-<hex>`, with the infra images. The CLI's version is the Dockerfile's
+`CLAUDE_CODE_VERSION`. The image gives the scripts the model runs
 `node`, without npm or npx, and the Python packages `model-requirements.txt` pins.
 
 `install_agent` installs it too, into a container a task already runs or onto a `vm` sandbox's Linux host, with

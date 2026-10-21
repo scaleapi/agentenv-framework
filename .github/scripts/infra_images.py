@@ -1,6 +1,6 @@
-"""The infra images agent-env publishes (``agent_env.env.published_images``), for the release workflow's jobs that only
-read: this imports agent-env, so it runs where agent-env and its dependencies are installed, and no job that holds a
-token to push images or publish to PyPI runs it (those run ``infra_build.py``).
+"""The images agent-env publishes, its infra images and the Claude Code agent's (``agent_env.env.published_images``), for
+the release workflow's jobs that only read: this imports agent-env, so it runs where agent-env and its dependencies are
+installed, and no job that holds a token to push images or publish to PyPI runs it (those run ``infra_build.py``).
 
 ``plan`` prints each image's name, repository, tag, Dockerfile and context as JSON, ``--missing`` only those the
 registry hasn't published: it has no image under the tag, or refuses to show one, as GHCR does for a package that

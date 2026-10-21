@@ -23,7 +23,9 @@ _DIGEST = "sha256:" + "b" * 64
 
 
 def test_every_shipped_dockerfile_is_published_once_under_a_name_of_its_own():
+    """The infra envs' and the default agent's, Claude Code."""
     shipped = [dockerfile for dockerfiles in bootstrap._DOCKERFILES.values() for dockerfile in dockerfiles]
+    shipped.append(published_images._AGENTS / "claude-code" / "Dockerfile")
 
     assert sorted(image.dockerfile for image in bootstrap.PUBLISHED_IMAGES) == sorted(shipped)
     assert len({image.name for image in bootstrap.PUBLISHED_IMAGES}) == len(bootstrap.PUBLISHED_IMAGES)

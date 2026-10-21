@@ -274,7 +274,7 @@ for `main`'s CI to pass on the tagged commit, publishes `agentenv-framework-prot
 and creates the GitHub release, whose notes are the titles of the pull
 requests merged since the previous release.
 Once the repository variable `PUBLISH_INFRA_IMAGES` is `true`, it also publishes the infra images agent-env
-ships (`agent_env.env.published_images`) whose `src-<hex>` tags GHCR lacks: after `main`'s CI passes, each is
+ships and the Claude Code agent's (`agent_env.env.published_images`) whose `src-<hex>` tags GHCR lacks: after `main`'s CI passes, each is
 built on a runner of each platform, checked, and tagged as one multi-platform image, and a tag that exists is
 never moved. The wheel and the release notes record each image's digest, and a failed image job sends neither
 package to PyPI. Run by hand on `main`, the workflow publishes the images alone.

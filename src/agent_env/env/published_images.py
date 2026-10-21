@@ -23,6 +23,8 @@ _DIGEST = re.compile(r"^sha256:[a-f0-9]{64}$")
 # Short, so a network that drops requests doesn't hold up a run's checks for long.
 _LOOKUP_TIMEOUT_SECONDS = 10
 _SERVED: dict[str, str] = {}  # the digest the registry served each ref under, which never changes: no tag is moved
+# The agents bundle agent-env ships, whose agents a run deploys like a bundle's own.
+_AGENTS = Path(__file__).parents[1] / "agents" / "agents"
 
 
 @dataclass(frozen=True)
@@ -45,6 +47,10 @@ class PublishedImage:
     def ref(self) -> str:
         """The repository and the tag of the image built from these sources."""
         return f"{self.repository}:{self.tag()}"
+
+
+# The images of the agents agent-env ships that its releases publish, Claude Code's CLI included: the default agent's.
+AGENT_IMAGES = (PublishedImage("agentenv-claude-code", _AGENTS / "claude-code" / "Dockerfile"),)
 
 
 def published_digest(image: PublishedImage) -> str | None:

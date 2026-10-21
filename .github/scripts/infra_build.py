@@ -1,6 +1,7 @@
-"""What the release workflow's jobs that hold a token to push images or publish to PyPI run for the infra images. It uses
-only the standard library and the docker CLI, so those jobs install nothing; what they're handed by the jobs that run
-agent-env (``infra_images.py``) is checked against the images agent-env ships before it's built, pushed or recorded.
+"""What the release workflow's jobs that hold a token to push images or publish to PyPI run for the images agent-env
+publishes, its infra images and the Claude Code agent's. It uses only the standard library and the docker CLI, so those
+jobs install nothing; what they're handed by the jobs that run agent-env (``infra_images.py``) is checked against the
+images agent-env ships before it's built, pushed or recorded.
 
 ``check ENTRY`` fails unless ENTRY, a JSON object as ``infra_images.py plan`` lists an image, names an image agent-env
 ships, with its Dockerfile, context, repository and a source tag. ``exists REF`` exits 0 when the registry has REF, 1
@@ -29,6 +30,7 @@ IMAGES = {
     "agentenv-db-web": "src/agent_env/env/envs/service_db/Dockerfile.db-web",
     "agentenv-db-mcp": "src/agent_env/env/envs/service_db/Dockerfile.db-mcp",
     "agentenv-website-browser": "src/agent_env/env/envs/website_browser/Dockerfile",
+    "agentenv-claude-code": "src/agent_env/agents/agents/claude-code/Dockerfile",
 }
 _TAG = re.compile(r"^src-[0-9a-f]{64}$")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -42,8 +44,8 @@ _RATE_LIMITED = re.compile(r"429 Too Many Requests|toomanyrequests", re.IGNORECA
 # How long to wait before each try again, so a burst of builds starting together spreads out.
 _RATE_LIMIT_WAITS_SECONDS = (30, 60, 120)
 
-# Each image's check, beyond its build: the gateway imports its server, Postgres turns healthy, and the sidecars and the
-# browser answer their own commands.
+# Each image's check, beyond its build: the gateway imports its server, Postgres turns healthy, the sidecars and the
+# browser answer their own commands, and Claude Code's agent runs its CLI and imports its server.
 _SMOKES = {
     "agentenv-gateway": ["docker", "run", "--rm", "--entrypoint", "python", "{image}", "-c", "import gateway.entrypoint"],
     "agentenv-db-web": ["docker", "run", "--rm", "--entrypoint", "/usr/bin/pgweb", "{image}", "--version"],
@@ -51,6 +53,8 @@ _SMOKES = {
     "agentenv-website-browser": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
                                  'npx --no-install @playwright/mcp@"$PLAYWRIGHT_MCP_VERSION" --help >/dev/null'
                                  " && ls -d /root/.cache/ms-playwright/chromium-*"],
+    "agentenv-claude-code": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
+                             'claude --version && python -c "import a2a_server"'],
 }
 
 

@@ -38,6 +38,7 @@ updates:
       - "/src/agent_env/env/gateway"
       - "/src/agent_env/env/envs/service_db"
       - "/src/agent_env/env/envs/website_browser"
+      - "/src/agent_env/agents/agents/claude-code"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
