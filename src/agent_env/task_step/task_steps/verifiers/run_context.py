@@ -253,7 +253,12 @@ def _conversation(context: TaskStepContext, prompt_response: PromptResponse,
     messages: list[Message] = []
     turn = 0
     try:
-        for stored in doc.get("messages") or []:
+        own = _own_messages(context, prompt_response, conversation_id, doc.get("messages") or [])
+        if own is None:
+            unavailable["conversation"] = ("withheld: it is shared with another prompt, and where this prompt's "
+                                           "messages begin or end wasn't found")
+            return []
+        for stored in own:
             role = stored.get("role")
             if role == "user":
                 turn += 1
@@ -267,6 +272,33 @@ def _conversation(context: TaskStepContext, prompt_response: PromptResponse,
         unavailable["conversation"] = f"unreadable conversation: {_error(e)}"
         return []
     return messages
+
+
+def _own_messages(context: TaskStepContext, prompt_response: PromptResponse, conversation_id: str,
+                  stored: list[dict]) -> Optional[list[dict]]:
+    """``stored`` from the prompt's first message to the next prompt's sharing it; None if either isn't found."""
+    prompts = context.prompt_responses
+    index = next((i for i, pr in enumerate(prompts) if pr is prompt_response), None)
+    if index is None:
+        return stored
+    conversations = context.metadata.get("a2a_conversations") or {}
+    sharing = [i for i, pr in enumerate(prompts)
+               if pr.step_id != prompt_response.step_id and conversations.get(pr.step_id) == conversation_id]
+    following = next((prompts[i] for i in sharing if i > index), None)
+    start = _first_message_index(prompt_response, stored) if any(i < index for i in sharing) else 0
+    end = len(stored) if following is None else _first_message_index(following, stored)
+    if start is None or end is None or end <= start:
+        return None
+    return stored[start:end]
+
+
+def _first_message_index(prompt_response: PromptResponse, stored: list[dict]) -> Optional[int]:
+    """Where in ``stored`` the prompt's first message is, when exactly one user message matches it."""
+    parts = (prompt_response.source_agent_per_turn_prompt_parts or [None])[0]
+    if parts is None and prompt_response.prompt_text is not None:
+        parts = [{"kind": "text", "text": prompt_response.prompt_text}]
+    found = [i for i, m in enumerate(stored) if parts and m.get("role") == "user" and m.get("parts") == parts]
+    return found[0] if len(found) == 1 else None
 
 
 def _message(turn: int, role: str, parts: list[dict], *, ts: Optional[str] = None, author: Optional[str] = None,

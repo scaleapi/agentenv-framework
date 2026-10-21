@@ -506,3 +506,44 @@ async def test_a_message_carries_each_envs_virtual_time_when_the_conversation_re
     first, reply = run.turn(1).message, run.turn(1).reply
     assert first.env_clock == {"calendar": datetime.fromisoformat("2026-10-17T09:00:00+00:00"), "mail": None}
     assert reply.env_clock is None  # a message stored without a clock has none
+
+
+def _shared_conversation(*prompts: list[tuple[str, str]]) -> str:
+    conversation_id = f"conv-{uuid.uuid4().hex[:8]}"
+    conversation_store.create_conversation(conversation_id, task_instance_id="run-1", source_agent_name="dana_sim",
+                                           target_agent_name="solver")
+    for user, agent in (turn for turns in prompts for turn in turns):
+        conversation_store.add_a2a_task(conversation_id, parts=_text(user), a2a_task_id=uuid.uuid4().hex, role="user")
+        conversation_store.complete_a2a_task(conversation_id, parts=_text(agent), role="agent")
+    return conversation_id
+
+
+@pytest.mark.asyncio
+async def test_prompts_sharing_one_conversation_each_see_only_their_own_turns():
+    lunch, dinner = TURNS[:2], [("Now book dinner.", "Booked for seven.")]
+    conversation_id = _shared_conversation(lunch, dinner)
+    context = TaskStepContext(metadata={"a2a_conversations": {"lunch": conversation_id, "dinner": conversation_id}})
+    context.prompt_responses += [
+        PromptResponse(prompt_id="p1", response=lunch[1][1], prompt_text=lunch[0][0], step_id="lunch",
+                       source_agent_per_turn_prompt_parts=[None, _text(lunch[1][0])]),
+        PromptResponse(prompt_id="p2", response=dinner[0][1], prompt_text=dinner[0][0], step_id="dinner")]
+
+    first = await load_run_context(context, context.prompt_responses[0])
+    last = await load_run_context(context, context.prompt_responses[1])
+
+    assert [(t.number, t.message.text, t.reply.text) for t in first.turns] == [(1, *lunch[0]), (2, *lunch[1])]
+    assert [(t.number, t.message.text, t.reply.text) for t in last.turns] == [(1, *dinner[0])]
+
+
+@pytest.mark.asyncio
+async def test_a_shared_conversation_the_next_prompt_cannot_be_found_in_is_withheld():
+    context, prompt_response, _ = recorded_run()
+    context.prompt_responses.append(PromptResponse(prompt_id="p2", response="ok", prompt_text="again", step_id="again"))
+    context.metadata["a2a_conversations"]["again"] = context.metadata["a2a_conversations"]["prompt"]
+
+    run = await load_run_context(context, prompt_response)
+
+    with pytest.raises(RunRecordUnavailable, match="withheld") as raised:
+        run.turns
+    assert raised.value.source == "conversation"
+
