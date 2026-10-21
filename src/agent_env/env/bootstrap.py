@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from agent_env.artifact import DockerImageArtifact
@@ -30,7 +30,7 @@ from agent_env.store.local_state import holding_locks
 from agent_env.store.object_store import LocalFilesystemObjectStore
 from agent_env.store.routing import configured_store
 from agent_env.utils.docker.context import BuildContext
-from agent_env.utils.docker.metadata import detect_env_metadata
+from agent_env.utils.docker.metadata import detect_env_metadata, detected
 from agent_env.utils.docker.build import build_image, docker_unreachable
 
 _ENV_PACKAGE = Path(__file__).parent
@@ -199,6 +199,7 @@ class InfraBuild:
     reason: str  # "missing", which agent-env built the one in the store, or _BUILT_HERE
     action: str = BUILD  # BUILD its images on this host, or PULL them, or SWITCH an env built here to pull them
     published: tuple[tuple[Path, str], ...] = ()  # each image's Dockerfile and published digest, when they're pulled
+    kept: tuple[tuple[str, str], ...] = ()  # the metadata of the env in the store its new version keeps
 
     def __str__(self) -> str:
         return f"{self.kind} env {self.id!r} ({self.reason})"
@@ -258,11 +259,13 @@ def infra_to_build(kinds: Iterable[str]) -> list[InfraBuild]:
         if not (local and _built_from_stock(env, kind)):
             continue
         recorded = (env.metadata or {}).get(BUILD_INPUTS_KEY)
+        kept = tuple((key, value) for key, value in (env.metadata or {}).items()
+                     if not detected(key) and key != BUILD_INPUTS_KEY)
         if recorded != build_inputs_digest(kind):
             reason = "its build inputs changed" if recorded else "built before agent-env recorded its build inputs"
-            builds.append(_pulled_or_built(kind, env_id, reason))
+            builds.append(replace(_pulled_or_built(kind, env_id, reason), kept=kept))
         elif not all(image.digest for image in env_images(env)) and (published := published_digests(kind)) is not None:
-            builds.append(InfraBuild(kind, env_id, _BUILT_HERE, SWITCH, tuple(published.items())))
+            builds.append(InfraBuild(kind, env_id, _BUILT_HERE, SWITCH, tuple(published.items()), kept))
     if problems:
         raise InfraError(problems)
     return builds
@@ -294,7 +297,8 @@ def ensure_default_envs(kinds: Iterable[str], *, say: Callable[[str], None] = _q
             raise InfraError([needs_docker(built, reason)])
         for build in builds:
             say(f"{build}: {build.doing()}")
-            _PUTS[build.kind](build.id, platform=None, published=dict(build.published) or None)
+            _PUTS[build.kind](build.id, platform=None, metadata=dict(build.kept) or None,
+                              published=dict(build.published) or None)
     return builds
 
 

@@ -27,7 +27,7 @@ def puts(local_stores, monkeypatch):
     calls = []
 
     def put(kind):
-        def write(env_id, *, platform, published=None):
+        def write(env_id, *, platform, metadata=None, published=None):
             calls.append((kind, env_id, platform) if published is None else (kind, env_id, "pulled"))
             artifact = get_artifact_store().put_document(DockerImageArtifact(
                 id=f"{kind}-{env_id}", description=kind, image_name=f"{kind}:v1",
@@ -229,6 +229,23 @@ def test_only_the_infra_a_run_builds_needs_docker(puts, published, monkeypatch):
 
     assert e.value.problems == ["building the service-db env needs docker, and docker isn't on PATH"]
     assert puts == []
+
+
+def test_an_env_set_up_again_keeps_its_own_metadata_and_records_how_it_was_set_up_afresh(local_stores, published):
+    artifact = get_artifact_store().put_document(DockerImageArtifact(
+        id="gateway-default", description="g", image_name="env-gateway:v1", tar_gz_s3_url="file:///g.tar.gz"))
+    GatewayEnv.put(id="default", docker_image_artifact=artifact, metadata={
+        "owner": "me", "git_commit": "0ld", "agent_env_version": "0.0.1",
+        "dockerfile_path": str(bootstrap.GATEWAY_DOCKERFILE),
+        bootstrap.BUILD_INPUTS_KEY: bootstrap.build_inputs_digest(GATEWAY)})
+    published.add(GATEWAY)
+
+    (build,) = ensure_default_envs([GATEWAY])
+
+    metadata = GatewayEnv.get("default").metadata
+    assert build.action == bootstrap.SWITCH and metadata["owner"] == "me"
+    assert metadata.get("git_commit") != "0ld" and metadata.get("agent_env_version") != "0.0.1"
+    assert metadata[bootstrap.BUILD_INPUTS_KEY] == bootstrap.build_inputs_digest(GATEWAY)
 
 
 def test_a_published_image_is_registered_by_its_tag_and_digest_with_the_context_it_is_built_from(local_stores):

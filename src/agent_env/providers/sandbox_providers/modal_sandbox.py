@@ -301,6 +301,8 @@ class ModalSandboxProvider(SandboxProvider):
             self._context_images.pop(image.image_name, None)
             if image.digest:
                 self._pinned[image.image_name] = image.pinned_name
+            else:
+                self._pinned.pop(image.image_name, None)
 
     async def _context_image(self, image: DockerImageArtifact, *,
                              stale: str | None = None) -> tuple[modal.Image, str]:

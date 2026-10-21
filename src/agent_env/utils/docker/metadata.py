@@ -18,6 +18,11 @@ def detect_base_metadata() -> dict[str, str]:
     return {k: v for k, v in metadata.items() if v}
 
 
+def detected(key: str) -> bool:
+    """Whether ``key`` is one ``detect_env_metadata`` records, which describes a build rather than the env."""
+    return key in ("created_by", "agent_env_version", "dockerfile_path") or key.startswith("git_")
+
+
 def detect_env_metadata(dockerfile: Path, context: Path) -> dict[str, str]:
     """Auto-detect metadata from a Dockerfile path and its git repo."""
     metadata = detect_base_metadata()
