@@ -727,10 +727,17 @@ class TaskInstanceStore:
         if result is None and journaled is not None:
             # The completion never landed, so the entry describes nothing in the document.
             # Delete at the exact seq, so a re-record that replaced the row keeps its own.
-            store.delete(
-                TASK_STEP_JOURNAL_COLLECTION,
-                Filter.of(instance_id=instance_id, step_id=step_id, seq=seq),
-            )
+            try:
+                store.delete(
+                    TASK_STEP_JOURNAL_COLLECTION,
+                    Filter.of(instance_id=instance_id, step_id=step_id, seq=seq),
+                )
+            except Exception:
+                if not declined:
+                    raise
+                # Replay drops a row with no completion, so the refusal, not the cleanup, is what the caller must hear.
+                logger.warning("Failed to delete step %s's journal row for instance_id=%s after its completion was "
+                               "refused", step_id, instance_id, exc_info=True)
         if result is None and declined:
             error = SupersededAttemptError(instance_id, step_id, declined[0])
             logger.warning("%s", error)

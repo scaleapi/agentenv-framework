@@ -521,6 +521,30 @@ def test_a_completion_journaled_before_a_reregister_never_joins_the_new_run(stor
     assert [e["step_id"] for e in _journal(store, "i")] == ["__seed__"]   # orphan row cleaned up
 
 
+def test_a_refused_completion_is_raised_even_when_its_journal_row_cannot_be_removed(store, monkeypatch):
+    # The orphan row is harmless (replay drops a step with no completion); losing the refusal is not.
+    store.upsert_instance(instance_id="i", task_id="t", task_version=1, total_steps=3)
+    seed_task_instance_context("i", TaskStepContext(metadata={"base": 1}))
+    real_journal, real_delete = store._journal_step, store._doc_store.delete
+
+    def journal_then_reregister(docs, instance_id, step_id, ops, status, **kw):
+        out = real_journal(docs, instance_id, step_id, ops, status, **kw)
+        monkeypatch.setattr(store, "_journal_step", real_journal)                       # fire once
+        store.upsert_instance(instance_id="i", task_id="t", task_version=1, total_steps=3)
+        return out
+
+    def journal_delete_fails(collection, *args, **kwargs):
+        if collection == TASK_STEP_JOURNAL_COLLECTION:
+            raise RuntimeError("store unavailable")
+        return real_delete(collection, *args, **kwargs)
+
+    monkeypatch.setattr(store, "_journal_step", journal_then_reregister)
+    monkeypatch.setattr(store._doc_store, "delete", journal_delete_fails)
+    with pytest.raises(SupersededAttemptError, match="re-registered"):
+        _record(store, "i", "s0", _ops({"base": 1}, {"base": 1, "a": 1}), total=3)
+    assert _doc(store, "i")["completed_steps"] == []
+
+
 def test_the_rerecord_flag_replay_uses_comes_from_the_winning_cas(store, monkeypatch):
     # Two writers both journal rerecorded=False, but the CAS landing second unions with
     # move_to_end=True — so the flag replay trusts lives on the instance, written in that CAS.

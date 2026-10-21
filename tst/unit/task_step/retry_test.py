@@ -992,6 +992,27 @@ async def test_an_attempt_a_re_register_superseded_writes_nothing_to_the_run(sto
     assert (d["status"], d["completed_steps"], d["context"]["metadata"]) == ("running", [], {})
 
 
+@pytest.mark.parametrize("leniency", ["tolerant", "retrying"])
+@pytest.mark.asyncio
+async def test_a_superseded_run_stops_even_at_a_step_that_tolerates_or_retries_failure(store, leniency):
+    # Neither tolerating the step nor rolling it back can make this run's writes land, so s1 must not run.
+    gate = asyncio.Event()
+    s0 = _Gated("s0", gate)
+    if leniency == "tolerant":
+        s0.fail_task_on_error = False
+    else:
+        s0.retry_config = RetryConfig(retry_from_step_id="s0")
+    superseded = asyncio.create_task(Task(id="t", version=1, steps=[s0, _Gated("s1", gate, fails=True)]).run(instance_id="i"))
+    while _doc(store, "i") is None:
+        await asyncio.sleep(0)
+    store.upsert_instance("i", "t", 1, 2)
+    gate.set()
+    with pytest.raises(SupersededAttemptError, match="'s0'"):   # not s1's "superseded boom": s1 never ran
+        await superseded
+    d = _doc(store, "i")
+    assert (d["status"], d["completed_steps"], d["context"]["metadata"]) == ("running", [], {})
+
+
 @pytest.mark.asyncio
 async def test_a_cancelled_run_is_recorded_cancelled(store):
     run = asyncio.create_task(Task(id="t", version=1, steps=[_Gated("s0", asyncio.Event())]).run(instance_id="i"))
