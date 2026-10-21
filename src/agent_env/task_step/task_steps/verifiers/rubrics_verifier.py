@@ -648,7 +648,7 @@ class RubricsVerifierTaskStep(TaskStep):
                 f"Verifier '{self.verifier_id}': grade_up_to_turn={grade_up_to_turn} needs "
                 "use_trajectory=True — turn k's reply is only in its trajectory."
             )
-        prompt_response = as_of
+        stored_response, prompt_response = prompt_response, as_of
 
         if prompt_response.error_type:
             logger.warning(f"Skipping verification '{self.verifier_id}': prompt had error_type={prompt_response.error_type}")
@@ -657,7 +657,8 @@ class RubricsVerifierTaskStep(TaskStep):
             return context
         run_context = None
         if self.run_context_for_judge:
-            run_context = await load_run_context(context, prompt_response)
+            # The stored response, not the cut copy: the loader finds the prompt's place among the run's by identity.
+            run_context = await load_run_context(context, stored_response)
             if grade_up_to_turn is not None:
                 run_context = run_context.as_of(grade_up_to_turn)
 

@@ -575,3 +575,26 @@ async def test_a_user_agent_firing_log_that_lost_its_oldest_entries_raises_rathe
         run.firing("never")
     assert raised.value.source == "user_agent"
     assert [f.trigger_id for f in run.firings(env="calendar")] == ["confirm", "late"]
+
+
+@pytest.mark.asyncio
+async def test_a_later_prompt_graded_as_of_a_turn_shows_the_judge_its_own_turn_not_the_shared_conversations_first(
+        monkeypatch):
+    lunch = [TURNS[0]]
+    dinner = [("Now book dinner.", "Booked for seven."), ("Make it eight.", "Moved to eight.")]
+    conversation_id = _shared_conversation(lunch, dinner)
+    context = TaskStepContext(metadata={"a2a_conversations": {"lunch": conversation_id, "dinner": conversation_id}})
+    context.prompt_responses += [
+        PromptResponse(prompt_id="p0", response=lunch[0][1], prompt_text=lunch[0][0], step_id="lunch"),
+        PromptResponse(prompt_id="p1", response=dinner[1][1], prompt_text=dinner[0][0], step_id="dinner",
+                       source_agent_per_turn_prompt_parts=[None, _text(dinner[1][0])],
+                       target_agent_per_turn_trajectory_object_urls=["s3://t/1.json", "s3://t/2.json"],
+                       agent_trajectory_object_url="s3://t/2.json")]
+    v = _verifier(run_context_for_judge=["conversation"], grade_up_to_turn=1)
+    captured = _judge_prompt(monkeypatch, v)
+
+    await v.execute(context)
+
+    conversation = captured["eval_prompt"][captured["eval_prompt"].index("## Conversation"):]
+    assert dinner[0][0] in conversation and dinner[0][1] in conversation
+    assert lunch[0][0] not in conversation and dinner[1][0] not in conversation
