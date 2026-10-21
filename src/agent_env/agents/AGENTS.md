@@ -25,62 +25,140 @@ and `agents/claude-code/entrypoint.sh` serves it with
 
 ## Where each pattern lives
 
-Paths are under `agents/claude-code/` unless they name `agents/pi/`.
+Paths are under `agents/claude-code/`. `kit.py` there holds the plumbing any CLI agent needs; copy it rather than
+rewriting it.
 
 | To | Read |
 |---|---|
-| declare the agent, its config and extensions | `a2a_server.py`: `ClaudeCodeConfig` and the `@a2a_agent` block |
-| run a CLI per turn and stream its events as the trajectory | `ClaudeCodeAgent.run`, `claude_bridge.run_claude` (`event_callback=request.trajectory.append`) |
-| map the model endpoint and `LITELLM_EXTRA_HEADERS` onto a CLI | `claude_bridge.cli_env` |
-| hand `request.mcp_servers` to the runtime | `claude_bridge.py`, where it builds `--mcp-config` |
-| read file parts | `kit.materialize_file_part` |
-| install skills, inline and bundle | `kit.install_skill`, bound in `ClaudeCodeAgent.add_inline_skill` / `add_bundle_skill` |
-| keep session refs past the SDK's 1,024-context LRU | `kit.DurableSessionRefs` |
-| answer errors as `{"detail": ...}` | `kit.json_error_bodies`, applied in `build_app` |
-| save and restore a conversation and workspace | `ClaudeCodeAgent.save_snapshot` / `load_snapshot` |
-| serve a whole context's trajectory | `ClaudeCodeAgent.get_context_trajectory` (`TRAJECTORY_V1.get.context`) |
-| delegate to peer agents | the `enable(PEER_AGENTS_V1, ...)` line: the SDK serves the peer tools |
-| install into a running container or onto a VM host | `_INSTALL_COMMANDS`, `_INSTALL_COMMANDS_HOST` and `install.sh` |
-| build the image | `Dockerfile` |
+| declare the agent and its extensions | `a2a_server.py`, the `@a2a_agent` block |
+| run a CLI per turn | `ClaudeCodeAgent.run`, `claude_bridge.py` `run_claude` |
+| map the model endpoint and `LITELLM_EXTRA_HEADERS` onto a CLI | `claude_bridge.py` `cli_env` |
+| read file parts | `kit.py` `materialize_file_part` |
+| keep session refs past the SDK's 1,024-context LRU | `kit.py` `DurableSessionRefs` |
+| answer errors as `{"detail": ...}` | `kit.py` `json_error_bodies`, applied in `build_app` |
+| build the image | `Dockerfile`, `entrypoint.sh` |
 | test the agent offline | `tst/unit/agents/claude_code/` (`conftest.py`, `test_card_contract.py`, `test_extensions.py`) |
-| return a trajectory once the run ends, not live | `agents/pi/pi_agent.py` `_result` (`native_trajectory`) |
-| capture and replay a snapshot changelog | `agents/pi/pi_agent.py` `enable_changelog` / `apply_changelog`, `agents/pi/changelog.py` |
-| replace the SDK's peer tools with your own | `agents/pi/pi_agent.py` `set_peers` / `list_peers`, `agents/pi/peers.py` |
 
-`packages/agentenv-protocol/examples/` has smaller agents, one feature each (`basic_agent.py`, `streaming_agent.py`,
-`multimodal_agent.py`, `custom_extensions_agent.py`, `advanced_agent.py`).
+`packages/agentenv-protocol/examples/` has smaller agents, one feature each.
+
+## Extensions
+
+Each extension is a `urn:agentenv:*` URI on the Agent Card with an `/ext/*` endpoint. An operation is implemented by
+the SDK or by your runtime. List an extension in `extensions=(...)`, with `enable(EXT, ...)` for options; binding a
+handler with `@extension(EXT.operation)` also turns it on. Overriding an SDK-owned operation means overriding its
+whole group, and `self.default_handlers.call(...)` reaches the SDK's own handler from yours. Shapes are in
+`packages/agentenv-protocol/src/agentenv_protocol/a2a_agent/extensions.py`.
+
+### `agent-config/v1`, `/ext/agent-config`
+
+agent-env configures the agent: identity at deploy, then `model`, `system_prompt`, `timeout_seconds` and the rest
+before each prompt. The SDK implements `set` and `get`; you declare an `AgentConfig` subclass with `config=` and read
+`request.config` in `run()`. Only the fields you declare are sent to you, every field needs a default, and secrets
+are `WriteOnly`. `prompt_agent` always sends `timeout_seconds` (600 unless the step sets one), and each `set` merges
+into the last, so a field one prompt sets stays set until another sets it.
+
+Reference: `ClaudeCodeConfig` and `config=ClaudeCodeConfig`. Overriding `set`/`get`:
+`packages/agentenv-protocol/examples/advanced_agent.py`.
+
+### `mcp-config/v1`, `/ext/mcp-config`
+
+agent-env registers each env's MCP server as `{url, name, headers}`. The SDK implements `add` and `list`; you hand
+`request.mcp_servers` to the runtime every turn, keeping the names and passing the headers through.
+
+Reference: `enable(MCP_CONFIG_V1, ...)`, and `claude_bridge.py` where it builds `--mcp-config`.
+
+### `trajectory/v1`, `/ext/trajectory`
+
+agent-env reads what the agent did, and verifiers grade it. Call `request.trajectory.set_format(...)`, then append
+each native event as it happens; with `enable(TRAJECTORY_V1, live=True)` it can be read while the turn runs. The SDK
+serves the reads; bind `get.context` and `get.context_objects` to serve a whole conversation from your own record.
+
+Reference: `enable(TRAJECTORY_V1, live=True, ...)`, `ClaudeCodeAgent.run` passing
+`event_callback=request.trajectory.append`, and `get_context_trajectory` / `upload_context_trajectory`. A runtime
+that only has a record at the end returns it with `native_trajectory(...)`: `agents/pi/pi_agent.py` `_result`.
+
+### `skill-config/v1`, `/ext/skill-config`
+
+agent-env installs skills, inline (`skill_md`) or as a bundle of files behind read grants. You implement both
+`add.inline` and `add.bundle`; the SDK implements `list`, rejects duplicate names and passes installed skills in
+`request.skills`.
+
+Reference: `ClaudeCodeAgent.add_inline_skill` / `add_bundle_skill`, both calling `kit.py` `install_skill`.
+
+### `snapshot/v1`, `/ext/snapshot`
+
+agent-env saves an agent's conversation and workspace and restores them into another agent. You implement `save`,
+uploading both the trajectory and the workspace object through the grants (an empty workspace if there is none),
+and `load`, restoring them into `target_context_id`. `load` runs on a fresh agent, so create state directories at
+startup. The optional changelog uploads one increment per tool call and replays them in order.
+
+Reference: `ClaudeCodeAgent.save_snapshot` / `load_snapshot`. Changelog: `agents/pi/pi_agent.py`
+`enable_changelog` / `apply_changelog`, and `agents/pi/changelog.py`.
+
+### `peer-agents/v1`, `/ext/peer-agents`
+
+agent-env tells the agent about the task's other agents. Enabled with no handlers, the SDK (protocol 0.1.350 or
+newer) serves six MCP peer tools and adds them to `request.mcp_servers` as `peer_agents`. To serve your own,
+override `set` and `list` and register your MCP server through `default_handlers.call(MCP_CONFIG_V1.add, ...)` on a
+`127.0.0.1` URL ending in `/mcp`.
+
+Reference: `enable(PEER_AGENTS_V1, ...)`. Your own tools: `agents/pi/pi_agent.py` `set_peers` / `list_peers`, and
+`agents/pi/peers.py`.
+
+### `triggers/v1`, `/ext/triggers`
+
+agent-env registers scripted triggers and asks, each turn, what an agent playing a user or stakeholder says next.
+The SDK implements `register`, `decide` and `state`; enable it and do nothing else.
+
+Reference: `enable(TRIGGERS_V1, ...)`. Overriding `decide` to change the decision:
+`packages/agentenv-protocol/examples/advanced_agent.py`.
+
+### `attribution-probe/v1`, `/ext/attribution-probe`
+
+The agent reports the attribution it last sent with a model request. You implement `probe`, which also declares the
+extension. Neither shipped agent does.
+
+Reference: `test_attribution_probe_reports_what_the_agent_last_sent` in
+`packages/agentenv-protocol/tests/test_a2a_agent.py`.
+
+### `install/v1` (no endpoint)
+
+A card declaration that lets a task install the agent into a container it already runs, or onto a VM sandbox's host.
+`install_agent` imports `AGENT_CARD` from the image's `a2a_server` module, with `/app` on `sys.path` and without your
+entrypoint, then fills each `{param}` of the commands in, quoted. Pass the endpoint as environment on the command
+that needs it, not as arguments; register the image with `--dockerfile`, since its build context is what gets
+installed.
+
+Reference: `enable(INSTALL_V1, ...)` with `_INSTALL_COMMANDS`, `_INSTALL_COMMANDS_HOST` and `_ENDPOINT`, and
+`install.sh`.
+
+### `staging/v1`, `/ext/staging`
+
+An object store on the agent's own server, which agent-env uses when the agent can't reach its object store. It is
+on by default and needs nothing from you; `AGENTENV_STAGING_MAX_BYTES=0` turns it off.
+
+Reference: `packages/agentenv-protocol/src/agentenv_protocol/a2a_agent/staging.py`.
+
+### Your own extensions
+
+Use your own URI, not `urn:agentenv:*`. Reference: `packages/agentenv-protocol/examples/custom_extensions_agent.py`.
 
 ## The protocol
 
-- `packages/agentenv-protocol/src/agentenv_protocol/a2a_agent/extensions.py` defines every `urn:agentenv:*`
-  extension: its endpoint, operations, request and response models, and whether the SDK or your runtime implements
-  each operation. It is the source of truth for the wire format.
-- `tasks/v1.py` there is `TaskRequest`, `TaskResult` and `TrajectoryLog`; `agentenv_protocol/transfers.py` is
-  `upload`, `download` and `NamespaceUploader` for object grants.
+- `extensions.py` (above) is the source of truth for the wire format. `tasks/v1.py` next to it is `TaskRequest`,
+  `TaskResult` and `TrajectoryLog`; `agentenv_protocol/transfers.py` is `upload`, `download` and
+  `NamespaceUploader` for object grants.
 - `packages/agentenv-protocol/README.md`, section "A2A agent framework", is the prose reference.
 - What agent-env sends you: `src/agent_env/task_step/task_steps/deploy_agent.py` (env vars, MCP registrations,
   identity) and `prompt_agent.py` (config fields, then `message/send`).
 
 ## Rules that bite
 
-- `prompt_agent` always sends `timeout_seconds` (600 unless the step sets one), and `agent-config` merges each post
-  into the last: a field one prompt sets stays set until another sets it.
-- Declare only the config fields the runtime honours, under the names `prompt_agent` sends (`model`, `system_prompt`,
-  `effort`, `max_turns`, `max_thinking_tokens`, `output_format`, `timeout_seconds`, `task_id`, ...). Secrets are
-  `WriteOnly`.
-- `skill-config` needs both `add.inline` and `add.bundle`. Overriding an SDK-owned operation means overriding its
-  whole group.
-- A snapshot `save` uploads both the trajectory and the workspace object, an empty workspace if there is none;
-  `load` runs on a fresh agent, so create state directories at startup.
 - Bind the session before the runtime starts, as `ClaudeCodeAgent.run` does, so a live trajectory read or a snapshot
   taken mid-turn finds it.
-- The SDK serves the peer tools from protocol 0.1.350. An agent that overrides `peer-agents` registers its own MCP
-  server through `default_handlers.call(MCP_CONFIG_V1.add, ...)` on a `127.0.0.1` URL ending in `/mcp`.
 - Turns of different contexts run concurrently, and the validator relies on it; don't serialize them.
-- `install_agent` imports `AGENT_CARD` with `/app` on `sys.path` and without your entrypoint. Pass the endpoint as
-  environment on the command that needs it, as `_ENDPOINT` does, not as arguments.
 - Start the server from `CMD`, not `ENTRYPOINT`, on `0.0.0.0:$A2A_PORT`, as a non-root user that tolerates root, with
-  everything installed at build time (`Dockerfile`, `entrypoint.sh`).
+  everything installed at build time.
 - `TaskResult.builder().failed(...)` adds no text part; add one. Use `infra_error` only when a retry could help.
 
 ## Registering and validating
