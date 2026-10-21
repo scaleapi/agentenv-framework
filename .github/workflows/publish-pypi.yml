@@ -309,6 +309,9 @@ jobs:
 
   release:
     needs: framework
+    # Explicit: the default skips it whenever a job upstream was skipped, as the image jobs are when no image is new.
+    if: >-
+      !cancelled() && needs.framework.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

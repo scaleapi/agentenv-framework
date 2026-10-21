@@ -77,6 +77,11 @@ def test_a_failed_image_job_sends_neither_package_to_pypi(job):
         assert f"""contains(fromJSON('["success", "skipped"]'), needs.{image_job}.result)""" in JOBS["infra-record"]["if"]
 
 
+def test_the_github_release_is_created_whenever_the_framework_is_published():
+    """With no new image the image jobs are skipped, and a job's default condition skips it after any skipped job."""
+    assert " ".join(JOBS["release"]["if"].split()) == "!cancelled() && needs.framework.result == 'success'"
+
+
 def test_the_wheel_carries_the_checked_record_where_an_install_reads_it():
     step = _step("framework", "record")
 
