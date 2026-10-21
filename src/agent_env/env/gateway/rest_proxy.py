@@ -190,11 +190,24 @@ class UpstreamResponse(StreamingResponse):
             logger.error(f"Proxy to {target_url} failed after {sent} bytes: {e!r}")
             raise
 
-    async def done_if_sized(self) -> None:
-        """Run `on_done` now rather than after the last byte when the upstream sized its body, i.e. had it all before its headers."""
-        if self._on_done is not None and "content-length" in self._upstream.headers:
-            on_done, self._on_done = self._on_done, None
-            await on_done(self.status_code)
+    async def read_ahead_if_sized(self) -> None:
+        """Read a sized (so finite) body to its end now and run `on_done` there, so the response then replays it."""
+        if self._on_done is None or "content-length" not in self._upstream.headers:
+            return
+        chunks: list[bytes] = []
+        failure: Exception | None = None
+        try:
+            async for chunk in self.body_iterator:
+                chunks.append(chunk)
+        except Exception as e:  # already logged by `_body`; the client still gets the cut body when it is sent
+            failure = e
+        except BaseException:  # cancelled before `__call__`, which would otherwise close them, ever runs
+            await self._upstream.aclose()
+            await self._client.aclose()
+            raise
+        self.body_iterator = _replay(chunks, failure)
+        on_done, self._on_done = self._on_done, None
+        await on_done(self.status_code)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         try:
@@ -204,6 +217,13 @@ class UpstreamResponse(StreamingResponse):
             await self._client.aclose()
             if self._on_done is not None:
                 await self._on_done(self.status_code)
+
+
+async def _replay(chunks: list[bytes], failure: Exception | None) -> AsyncIterator[bytes]:
+    for chunk in chunks:
+        yield chunk
+    if failure is not None:
+        raise failure
 
 
 async def fetch_child_card(client: httpx.AsyncClient, key: str, base_url: str) -> dict | None:

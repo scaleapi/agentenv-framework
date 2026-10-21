@@ -553,9 +553,9 @@ class Gateway:
         app = request.path_params["service_name"]
         engine = self._trigger_engine
         if app in self.website_urls and (engine.has_website_triggers or engine.has_state_triggers):
+            if isinstance(response, UpstreamResponse):
+                await response.read_ahead_if_sized()  # like a tool call's, its write window ends before its triggers run
             barrier_tasks, barrier_timeout_s = await self._fire_website_triggers(request, app, response.status_code)
-            if barrier_tasks and isinstance(response, UpstreamResponse):
-                await response.done_if_sized()  # like a tool call's, the request's write window ends before its barrier
             await self._await_barriers(barrier_tasks, barrier_timeout_s)
         return response
 

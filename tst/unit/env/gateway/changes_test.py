@@ -423,7 +423,9 @@ async def test_a_website_write_held_by_its_trigger_s_barrier_does_not_claim_the_
     changelog = _Changelog()
 
     async def body():
-        yield b'{"ok": true}'
+        yield b'{"ok": '
+        changelog.write("drafts", "d2")  # sized, yet still writing as its body goes out
+        yield b"true}"
 
     def website(request: httpx.Request) -> httpx.Response:
         changelog.write("drafts", "d1")
@@ -438,10 +440,10 @@ async def test_a_website_write_held_by_its_trigger_s_barrier_does_not_claim_the_
     finally:
         await gw._close_child_sessions()
 
-    assert status == 201 and json.loads(body_bytes) == {"ok": True} and len(changelog.rows) == 2
+    assert status == 201 and json.loads(body_bytes) == {"ok": True}
     _, changes = await _http(gw, "GET", "/changes")
-    assert [[(a["kind"], a["role"]) for a in c["actors"]] for c in json.loads(changes)["changes"]] == [
-        [("request", "default")], [("trigger_action", None)]]
+    assert [(c["row_id"], [(a["kind"], a["role"]) for a in c["actors"]]) for c in json.loads(changes)["changes"]] == [
+        ("d1", [("request", "default")]), ("d2", [("request", "default")]), ("m3", [("trigger_action", None)])]
 
 
 @pytest.mark.asyncio
