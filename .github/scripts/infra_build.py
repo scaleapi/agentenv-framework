@@ -103,17 +103,20 @@ def _until_not_rate_limited(attempt: Callable[[], subprocess.CompletedProcess]) 
         result = attempt()
         if result.returncode == 0 or not _RATE_LIMITED.search(f"{result.stdout}{result.stderr}"):
             return result
-        print(f"::warning::a registry rate-limited `{' '.join(result.args)[:_PRINTED_CHARS]}`; trying again in {wait}s")
+        print(f"::warning::a registry rate-limited `{' '.join(result.args)[:_PRINTED_CHARS]}`; trying again in {wait}s",
+              flush=True)
         time.sleep(wait)
     return attempt()
 
 
 def _streamed(argv: list[str]) -> subprocess.CompletedProcess:
-    """Run ``argv``, printing what it prints as it prints it, which is kept too, to look for a rate limit in."""
+    """Run ``argv``, printing what it prints as it prints it, which is kept too, to look for a rate limit in. Each line is
+    flushed, since the workflow's log is a pipe, which Python would otherwise fill before passing on."""
     process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     printed = []
     for line in process.stdout:
         sys.stdout.write(line)
+        sys.stdout.flush()
         printed.append(line)
     return subprocess.CompletedProcess(argv, process.wait(), "".join(printed), "")
 

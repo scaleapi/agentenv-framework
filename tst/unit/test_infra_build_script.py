@@ -290,3 +290,30 @@ def test_a_rate_limited_registry_lookup_is_tried_again(script, monkeypatch, caps
     monkeypatch.setattr(script.time, "sleep", lambda seconds: None)
 
     assert _run(script, monkeypatch, "exists", ref) == 0
+
+
+class _Log:
+    """A pipe standing in for the workflow's log: what was written, and what had been flushed each time."""
+
+    def __init__(self):
+        self.written, self.flushed = "", []
+
+    def write(self, text: str) -> int:
+        self.written += text
+        return len(text)
+
+    def flush(self) -> None:
+        self.flushed.append(self.written)
+
+
+def test_retry_passes_on_each_line_and_its_warning_as_it_goes(script, monkeypatch):
+    """Through a pipe, Python holds output until the buffer fills, so a build or a wait would look stuck."""
+    runs, waits = _attempts(script, monkeypatch, [(_LIMITED, 1), ("#1 DONE\n#2 DONE\n", 0)])
+    log = _Log()
+    monkeypatch.setattr(script.sys, "stdout", log)
+
+    assert _run(script, monkeypatch, "retry", "docker", "build", ".") == 0
+
+    assert log.flushed[0] == _LIMITED
+    assert log.flushed[1].endswith("trying again in 30s\n")
+    assert log.flushed[2:] == [log.flushed[1] + "#1 DONE\n", log.flushed[1] + "#1 DONE\n#2 DONE\n"]
