@@ -447,6 +447,49 @@ async def test_a_website_write_held_by_its_trigger_s_barrier_does_not_claim_the_
 
 
 @pytest.mark.asyncio
+async def test_a_sized_website_write_no_barrier_holds_still_streams(monkeypatch):
+    changelog = _Changelog()
+    gate = asyncio.Event()
+
+    async def body():
+        yield b"a" * 1024
+        await gate.wait()
+        changelog.write("drafts", "d1")
+        yield b"b" * 1024
+
+    transport = httpx.MockTransport(lambda request: httpx.Response(201, headers={"content-length": "2048"}, content=body()))
+    monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=transport, **kw))
+    gw = _gateway(changelog, website_urls={"mail": "http://mail-frontend"})
+    gw._trigger_engine.register({"triggers": [MIRROR]})
+    first_chunk = asyncio.Event()
+    received = False
+
+    async def receive():
+        nonlocal received
+        if not received:
+            received = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await asyncio.sleep(3600)
+
+    async def send(message):
+        if message["type"] == "http.response.body" and message.get("body"):
+            first_chunk.set()
+
+    scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"}, "http_version": "1.1", "method": "POST",
+             "scheme": "http", "path": "/website/mail/api/other", "raw_path": b"/website/mail/api/other",
+             "query_string": b"", "root_path": "", "server": ("g", 80), "client": ("c", 1), "headers": []}
+    task = asyncio.create_task(gw._mcp.streamable_http_app()(scope, receive, send))
+    try:
+        await asyncio.wait_for(first_chunk.wait(), 5)
+    finally:
+        gate.set()
+        await asyncio.wait_for(task, 5)
+        await gw._close_child_sessions()
+    _, changes = await _http(gw, "GET", "/changes")
+    assert [[a["kind"] for a in c["actors"]] for c in json.loads(changes)["changes"]] == [["request"]]
+
+
+@pytest.mark.asyncio
 async def test_a_website_write_still_streaming_under_a_barrier_keeps_its_window_to_the_last_byte(monkeypatch):
     changelog = _Changelog()
 

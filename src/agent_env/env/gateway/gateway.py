@@ -94,6 +94,7 @@ class Gateway:
     TOOL_CALL_TIMEOUT_S = 600.0
     STARTUP_DISCOVERY_TIMEOUT_S = 60.0  # startup discovery past it fails open, like a failed one; uvicorn must come up
     CHILD_CLOSE_TIMEOUT_S = 3.0  # wait for the owner task to exit a retired child-session generation; past it, cancel it
+    BARRIER_READ_AHEAD_MAX_BYTES = 8 * 1024 * 1024  # a larger sized body held by a barrier streams, its window to the last byte
     TRIGGER_BARRIER_TIMEOUT_S = 30.0  # a barrier may ask for less; past it the call is answered anyway
     # Must be >= the largest timeout any client can ask for, or the proxy severs a load the
     # client was still legitimately waiting on -- the ordering this module's constants file
@@ -553,8 +554,10 @@ class Gateway:
         app = request.path_params["service_name"]
         engine = self._trigger_engine
         if app in self.website_urls and (engine.has_website_triggers or engine.has_state_triggers):
-            if isinstance(response, UpstreamResponse):
-                await response.read_ahead_if_sized()  # like a tool call's, its write window ends before its triggers run
+            if isinstance(response, UpstreamResponse) and engine.may_hold_website_request(
+                    self._request_role(request), app, request.method, "/" + request.path_params.get("path", ""),
+                    response.status_code):
+                await response.read_ahead_if_sized(self.BARRIER_READ_AHEAD_MAX_BYTES)  # its window ends before its triggers run
             barrier_tasks, barrier_timeout_s = await self._fire_website_triggers(request, app, response.status_code)
             await self._await_barriers(barrier_tasks, barrier_timeout_s)
         return response

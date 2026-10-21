@@ -190,9 +190,10 @@ class UpstreamResponse(StreamingResponse):
             logger.error(f"Proxy to {target_url} failed after {sent} bytes: {e!r}")
             raise
 
-    async def read_ahead_if_sized(self) -> None:
-        """Read a sized (so finite) body to its end now and run `on_done` there, so the response then replays it."""
-        if self._on_done is None or "content-length" not in self._upstream.headers:
+    async def read_ahead_if_sized(self, max_bytes: int) -> None:
+        """Read a body sized at most `max_bytes` to its end now and run `on_done` there, so the response then replays it."""
+        size = self._upstream.headers.get("content-length", "")
+        if self._on_done is None or not size.isdigit() or int(size) > max_bytes:
             return
         chunks: list[bytes] = []
         failure: Exception | None = None

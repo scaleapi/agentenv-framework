@@ -939,6 +939,11 @@ class TriggerEngine:
                 trig["evaluating"] = True
                 self._schedule(self._eval_state(tid, trig, provoking))
 
+    def may_hold_website_request(self, role: str, app: str, method: str, path: str, status: int) -> bool:
+        """Whether a `provoking_call` barrier could hold this website request: a matcher check, `where` and status aside."""
+        return any((trig["spec"].get("barrier") or {}).get("at") == "provoking_call" and self._provoked_by(trig, role)
+                   and _website_matches(trig["spec"]["when"], app, method, path, status) for trig in self._triggers.values())
+
     @property
     def has_website_triggers(self) -> bool:
         return any(t["spec"]["when"]["type"] == "website" for t in self._triggers.values())
