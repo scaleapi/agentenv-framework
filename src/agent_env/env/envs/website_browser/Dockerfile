@@ -1,4 +1,4 @@
-FROM public.ecr.aws/docker/library/node:22-slim@sha256:813a7480f28fdadac1f7f5c824bcdad435b5bc1322a5968bbbdef8d058f9dff4
+FROM public.ecr.aws/docker/library/node:26-slim@sha256:36793bcbb160a6a16cede1e62b93f84e26b78a972a8a4c0b879c1c12f22761ec
 
 # Chromium runtime dependencies for headless mode, and python3 for the socket probe the gateway's compose
 # health-checks every MCP server with.

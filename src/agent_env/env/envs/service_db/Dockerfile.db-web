@@ -4,4 +4,4 @@
 # digest) with no anonymous rate limit and no auth required. The digest matches docker.io/sosedoff/pgweb:0.16.2. To bump: pick a
 # new tag from https://github.com/sosedoff/pgweb/pkgs/container/pgweb and update
 # the tag + digest here.
-FROM ghcr.io/sosedoff/pgweb:0.16.2@sha256:8f1ed22e10c9da0912169b98b62ddc54930dc39a5ae07b0f1354d2a93d44c6ed
+FROM ghcr.io/sosedoff/pgweb:0.17.0@sha256:a5256d416e2e8b92d69a4459058e3eca33a9f075d8325491644411d0bc3bd70b
