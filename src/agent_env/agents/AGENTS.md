@@ -194,24 +194,35 @@ Reference: `packages/agentenv-protocol/src/agentenv_protocol/a2a_agent/staging.p
 
 Use your own URI, not `urn:agentenv:*`. Reference: `packages/agentenv-protocol/examples/custom_extensions_agent.py`.
 
-## The protocol
+## Adding your own agent
 
-- `extensions.py` (above) is the source of truth for the wire format. `tasks/v1.py` next to it is `TaskRequest`,
-  `TaskResult` and `TrajectoryLog`; `agentenv_protocol/transfers.py` is `upload`, `download` and
-  `NamespaceUploader` for object grants.
-- `packages/agentenv-protocol/README.md`, section "A2A agent framework", is the prose reference.
-- What agent-env sends you: `src/agent_env/task_step/task_steps/deploy_agent.py` (env vars, MCP registrations,
-  identity) and `prompt_agent.py` (config fields, then `message/send`).
-
-## Registering and validating
-
-In a bundle, a folder `agents/<name>/` with a Dockerfile is an agent, with optional defaults in `agent.toml`
-(`[default_env_vars]`, `[metadata] default_model`, `min_disk_size_gb`). Give it a smoke task like
-`tasks/claude-code-smoke.json`.
+1. **Make a bundle with an agent folder.** A bundle is a folder; `agents/<name>/` in it, with a `Dockerfile`, is an
+   agent named `<name>`. Start from a copy of `agents/claude-code/`: `a2a_server.py`, `kit.py`, `Dockerfile`,
+   `entrypoint.sh`, and a `requirements.txt` with `agentenv-framework-protocol[agent]`.
+2. **Declare the agent** (Agent, Agent Card): an `AgentConfig` subclass with only the fields your runtime honours,
+   and `@a2a_agent(identity=AgentIdentity(...), config=..., extensions=(...))` with the `input_modes` `run()` handles.
+3. **Write the turn** (Agent loop): `run()` turns `request.parts` into a prompt, runs your runtime within
+   `request.config.timeout_seconds` with `request.mcp_servers` connected, records the trajectory, and returns a
+   `TaskResult` with a `session_ref`. Replace `claude_bridge.py` with your runtime's bridge.
+4. **Map the model endpoint**: read `LITELLM_BASE_URL`, `LITELLM_API_KEY` and `LITELLM_EXTRA_HEADERS` and hand them
+   to your runtime, as `claude_bridge.py` `cli_env` does.
+5. **Add extensions** (Extensions): `mcp-config` and `trajectory` first, then every other one your runtime can
+   honour. Keep `AGENT_CARD = app.state.agentenv_a2a.card` at the end of `a2a_server.py`.
+6. **Test it offline** with Starlette's `TestClient` and your runtime faked, as `tst/unit/agents/claude_code/` does:
+   the card, one turn, one failure, a cancel.
+7. **Add defaults and a smoke task.** An optional `agents/<name>/agent.toml` holds `[default_env_vars]` and
+   `[metadata]` (`default_model`, `min_disk_size_gb`). `tasks/<name>-smoke.json` deploys the agent by folder name,
+   prompts it once and checks the reply, as `tasks/claude-code-smoke.json` does.
+8. **Run it**: `agent-env run ./my-bundle` builds the image, registers the agent and runs the bundle's tasks. It needs
+   Docker and a `[model]` endpoint in `.agentenv/config.toml`.
+9. **Register and validate it**: `agent-env a2a-agent put` stores the image and registers the agent under an id any
+   task can name in `deploy_agent`'s `a2a_agent_id`, then runs the validator; fix what fails and validate again.
+10. **Use it**: name it in a task's `deploy_agent` step, or make it the agent every `deploy_agent` without an id gets
+    with `[agents] default_a2a_agent_id` in `.agentenv/config.toml`.
 
 ```bash
 agent-env run ./my-bundle                                    # build, register under @local, run its tasks
-agent-env a2a-agent put --id my-agent --dockerfile path/to/Dockerfile
+agent-env a2a-agent put --id my-agent --dockerfile my-bundle/agents/my-agent/Dockerfile
 agent-env a2a-agent validate --id my-agent                   # agent-env's built-in checks
 agent-env a2a-agent get --id my-agent                        # the validation results
 ```
@@ -221,3 +232,12 @@ store; the checks are in `src/agent_env/a2a_agent/validator.py` and
 `src/agent_env/task_step/task_steps/a2a_agent_validator/`, one step each. It doesn't cover everything an agent can
 advertise: `triggers/v1`, `attribution-probe/v1`, host-mode `install/v1` and custom extensions need tests of your
 own.
+
+## The protocol
+
+- `extensions.py` (above) is the source of truth for the wire format. `tasks/v1.py` next to it is `TaskRequest`,
+  `TaskResult` and `TrajectoryLog`; `agentenv_protocol/transfers.py` is `upload`, `download` and
+  `NamespaceUploader` for object grants.
+- `packages/agentenv-protocol/README.md`, section "A2A agent framework", is the prose reference.
+- What agent-env sends you: `src/agent_env/task_step/task_steps/deploy_agent.py` (env vars, MCP registrations,
+  identity) and `prompt_agent.py` (config fields, then `message/send`).
