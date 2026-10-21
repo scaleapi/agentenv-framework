@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from agent_env.env import bootstrap
 from agent_env.env.published_images import RELEASE_FILE
 
 REPO = Path(__file__).resolve().parents[2]
@@ -135,3 +136,18 @@ def test_what_a_registry_can_rate_limit_is_tried_again():
     assert 'infra_build.py retry docker push "$BUILT"' in build
     assert "infra_build.py retry docker buildx imagetools create" in publish
     assert JOBS["infra-build"]["strategy"]["max-parallel"] <= 4
+
+
+def test_every_infra_image_pins_its_bases_by_digest_and_dependabot_bumps_them():
+    """A release rebuilds an image only when its sources change, so a base behind a bare tag never picks up its
+    fixes; pinned, the pin is a source, and Dependabot bumping it is what rebuilds and republishes the image."""
+    dependabot = yaml.safe_load((REPO / ".github" / "dependabot.yml").read_text())
+    (docker,) = [update for update in dependabot["updates"] if update["package-ecosystem"] == "docker"]
+
+    for image in bootstrap.PUBLISHED_IMAGES:
+        text = image.dockerfile.read_text()
+        stages = set(re.findall(r"^FROM\s+\S+\s+AS\s+(\S+)", text, re.IGNORECASE | re.MULTILINE))
+        bases = [ref for ref in re.findall(r"^FROM\s+(?:--\S+\s+)*(\S+)", text, re.IGNORECASE | re.MULTILINE)
+                 if ref not in stages]
+        assert bases and all(re.search(r"@sha256:[0-9a-f]{64}$", ref) for ref in bases), (image.name, bases)
+        assert f"/{image.dockerfile.parent.relative_to(REPO)}" in docker["directories"], image.name

@@ -31,6 +31,19 @@ updates:
     groups:
       npm-minor-and-patch:
         update-types: ["minor", "patch"]
+  # The infra images the release publishes. Each base is pinned by digest, and a release rebuilds an image only when its
+  # sources change, so a bump here is what picks up a base's fixes: the next release builds and publishes the image.
+  - package-ecosystem: "docker"
+    directories:
+      - "/src/agent_env/env/gateway"
+      - "/src/agent_env/env/envs/service_db"
+      - "/src/agent_env/env/envs/website_browser"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      infra-base-images:
+        patterns: ["*"]
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

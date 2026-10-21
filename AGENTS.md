@@ -281,7 +281,8 @@ package to PyPI. Run by hand on `main`, the workflow publishes the images alone.
 Its jobs that run agent-env (`.github/scripts/infra_images.py`) hold no token that writes; the jobs that push
 images or publish to PyPI install nothing and check what they're handed (`.github/scripts/infra_build.py`,
 standard library and the docker CLI only).
-Actions are pinned to commit SHAs; Dependabot updates them, the pinned uv, `uv.lock` and the UI's npm packages.
+Actions are pinned to commit SHAs; Dependabot updates them, the pinned uv, `uv.lock`, the UI's npm packages and
+the infra images' base images, each pinned by digest so that a bump rebuilds and republishes the image.
 
 ## Conventions
 
