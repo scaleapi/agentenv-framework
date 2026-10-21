@@ -1,4 +1,4 @@
-FROM public.ecr.aws/docker/library/postgres:16-alpine
+FROM mirror.gcr.io/library/postgres:16-alpine
 
 # ServiceDBEnv - PostgreSQL database for MCP services
 #
