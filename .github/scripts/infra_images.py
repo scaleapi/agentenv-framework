@@ -4,7 +4,9 @@ installed, and no job that holds a token to push images or publish to PyPI runs 
 
 ``plan`` prints each image's name, repository, tag, Dockerfile and context as JSON, ``--missing`` only those the
 registry hasn't published: it has no image under the tag, or refuses to show one, as GHCR does for a package that
-doesn't exist yet, so the first publish can start. ``write PATH`` records the digest the registry serves under every
+doesn't exist yet, so the first publish can start. ``--only infra`` lists only the infra images, and ``--only agents``
+only the agents' images, which install the agentenv-framework-protocol a release ships with, so a release builds them
+after it publishes the protocol. ``write PATH`` records the digest the registry serves under every
 image's tag as a release wheel carries them, and fails if any is missing. ``public`` warns about each image a user, who
 pulls anonymously, can't. The registry is read with ``GHCR_TOKEN`` (as ``GITHUB_ACTOR``) when it's set, anonymously
 otherwise, and always anonymously by ``public``.
@@ -19,22 +21,26 @@ import sys
 from pathlib import Path
 
 from agent_env.env.bootstrap import PUBLISHED_IMAGES
-from agent_env.env.published_images import REGISTRY, PublishedImage, write_release_digests
+from agent_env.env.published_images import AGENT_IMAGES, REGISTRY, PublishedImage, write_release_digests
 from agent_env.store.image_store.oci_registry_credentials import RegistryAuth
 from agent_env.store.image_store.registry_api import NoSuchImageError, RegistryRefusedError, pin_digest
 
 REPO = Path(__file__).resolve().parents[2]
+_GROUPS = {"infra": tuple(image for image in PUBLISHED_IMAGES if image not in AGENT_IMAGES), "agents": AGENT_IMAGES}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("plan").add_argument("--missing", action="store_true")
+    plan = commands.add_parser("plan")
+    plan.add_argument("--missing", action="store_true")
+    plan.add_argument("--only", choices=sorted(_GROUPS))
     commands.add_parser("write").add_argument("path", type=Path)
     commands.add_parser("public")
     args = parser.parse_args()
     if args.command == "plan":
-        print(json.dumps([_described(image) for image in PUBLISHED_IMAGES
+        images = _GROUPS[args.only] if args.only else PUBLISHED_IMAGES
+        print(json.dumps([_described(image) for image in images
                           if not args.missing or _published_digest(image) is None]))
         return 0
     if args.command == "public":

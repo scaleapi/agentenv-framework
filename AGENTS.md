@@ -270,14 +270,17 @@ installed sources as from the checkout.
 `.github/workflows/publish-pypi.yml` runs on the `v*` tag the release automation pushes: it waits
 for `main`'s CI to pass on the tagged commit, publishes `agentenv-framework-protocol` and then
 `agentenv-framework` to PyPI, pinning the protocol in `pyproject.toml` and in each shipped env's and agent's
-`requirements.txt` (`.github/scripts/shipped_bundles.py` lists them, so a new agent is pinned with no workflow change),
+`requirements.txt` (`.github/scripts/shipped_bundles.py pin` finds them, so a new agent is pinned with no workflow change,
+and every job that reads those folders runs it first, so an image's tag, its build and the wheel see the same sources),
 and creates the GitHub release, whose notes are the titles of the pull
 requests merged since the previous release.
 Once the repository variable `PUBLISH_INFRA_IMAGES` is `true`, it also publishes the infra images agent-env
 ships and the Claude Code agent's (`agent_env.env.published_images`) whose `src-<hex>` tags GHCR lacks: after `main`'s CI passes, each is
 built on a runner of each platform, checked, and tagged as one multi-platform image, and a tag that exists is
-never moved. The wheel and the release notes record each image's digest, and a failed image job sends neither
-package to PyPI. Run by hand on `main`, the workflow publishes the images alone.
+never moved. The infra images are published before the protocol, and a failed infra image job sends neither package
+to PyPI. The agent's image installs the protocol the release pins, so each release builds it again once the protocol is
+on PyPI, and a failed agent image job keeps `agentenv-framework` off it. The wheel and the release notes record each
+image's digest. Run by hand on `main`, the workflow publishes the images alone.
 Its jobs that run agent-env (`.github/scripts/infra_images.py`) hold no token that writes; the jobs that push
 images or publish to PyPI install nothing and check what they're handed (`.github/scripts/infra_build.py`,
 standard library and the docker CLI only).

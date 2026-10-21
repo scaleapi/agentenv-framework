@@ -92,12 +92,14 @@ A release also publishes the infra images agent-env ships, once the `PUBLISH_INF
 `true`: one per Dockerfile under `src/agent_env/env`, and the Claude Code agent's (`agentenv-claude-code`, its CLI
 included), at `ghcr.io/scaleapi/agentenv-<name>:src-<hex>` for linux/amd64
 and linux/arm64, where the tag is the build context's source digest, so an unchanged Dockerfile is not built again.
+The Claude Code image installs the `agentenv-framework-protocol` its release pins, which is one of its sources, so each
+release builds it again, once the protocol is on PyPI and before `agentenv-framework` is published.
 Each of them pins its base images by digest, and Dependabot bumps those pins, so a base's fixes reach the published
 image: a bump changes the sources, and the next release builds it again.
 Installs pull them instead of building the infra images: a run on local stores registers a kind's images when GHCR has
 every one for the sources installed, by the digest the wheel records or, with no record, the one GHCR serves, and
 builds them otherwise; a sandbox that can't pull one builds it from its build context. The wheel and the release notes
-record each image's digest. A failed image job keeps the release off PyPI. Maintainers can publish the images
+record each image's digest. A failed image job keeps `agentenv-framework` off PyPI. Maintainers can publish the images
 alone by running the workflow by hand on `main`. GHCR keeps a new package private until a package admin makes it
 public, and the workflow warns about each one until then.
 

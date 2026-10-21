@@ -10,7 +10,8 @@ does: the `[model]` base URL and key reach it as `ANTHROPIC_BASE_URL` and a bear
 on every model call. The `LITELLM_*` variables stay in its environment too, so a script the model runs can call the
 endpoint. The image holds Claude Code, which is Anthropic's software under its
 [Commercial Terms](https://www.anthropic.com/legal/commercial-terms); a release also publishes the image, CLI included,
-at `ghcr.io/scaleapi/agentenv-claude-code:src-<hex>`, with the infra images. The CLI's version is the Dockerfile's
+at `ghcr.io/scaleapi/agentenv-claude-code:src-<hex>`, built from this folder with the protocol pinned as the wheel
+ships it. The CLI's version is the Dockerfile's
 `CLAUDE_CODE_VERSION`. The image gives the scripts the model runs
 `node`, without npm or npx, and the Python packages `model-requirements.txt` pins.
 
