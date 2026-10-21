@@ -39,11 +39,11 @@ from agent_env.env.bootstrap import (
     GATEWAY,
     SERVICE_DB,
     WEBSITE_BROWSER,
-    InfraBuild,
+    InfraSetup,
     InfraError,
     default_env_id,
     env_images,
-    infra_to_build,
+    infra_to_set_up,
     needs_docker,
     put_command,
     stores_are_local,
@@ -89,7 +89,7 @@ class Preflight:
     """What a run needs before its tasks start, beyond its writes: the infra envs it builds."""
 
     infra_kinds: frozenset[str]  # the infra its deploys on the local provider run on
-    infra: tuple[InfraBuild, ...]  # those it sets up first: missing, built from other inputs, or to switch to pulling
+    infra: tuple[InfraSetup, ...]  # those it sets up first: missing, built from other inputs, or to switch to pulling
     built_here: frozenset[str] = frozenset()  # the ids of the images the bundle builds that a deploy here runs
 
 
@@ -161,9 +161,9 @@ class _Walk:
                 self._problem(where, str(e))
 
     def finish(self) -> Preflight:
-        infra: list[InfraBuild] = []
+        infra: list[InfraSetup] = []
         try:
-            infra = infra_to_build(self.infra)
+            infra = infra_to_set_up(self.infra)
         except InfraError as e:
             self.run_problems.extend(e.problems)
         built_here = self._built_here()
@@ -437,9 +437,9 @@ class _Walk:
     def _remote_infra(self, link: SandboxProvider, kinds: set[str]) -> list[str]:
         """Why ``link``, a provider not on this machine, can't run the infra envs of ``kinds``. One the run sets up, in
         local stores, isn't checked: it's written anew, pulled from its registry or built, with its build context."""
-        built = {build.kind for build in infra_to_build(kinds)} if stores_are_local() else set()
+        set_up = {setup.kind for setup in infra_to_set_up(kinds)} if stores_are_local() else set()
         found = []
-        for kind in sorted(kinds - built):
+        for kind in sorted(kinds - set_up):
             env_id = default_env_id(kind)
             try:
                 env = Env.get(env_id)
@@ -474,7 +474,7 @@ class _Walk:
                                              "modal")
         return frozenset(here)
 
-    def _docker_plugins(self, built_here: frozenset[str], infra: list[InfraBuild]) -> None:
+    def _docker_plugins(self, built_here: frozenset[str], infra: list[InfraSetup]) -> None:
         """The Docker plugins the run uses on this machine: Compose for each gateway stack it runs, Buildx for each
         image it builds, as ``docker build`` does with BuildKit."""
         if self.compose_users and (missing := docker_plugin_missing("compose")):

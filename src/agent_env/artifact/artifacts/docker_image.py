@@ -215,19 +215,13 @@ class DockerImageArtifact(Artifact):
     def put_ref(cls, id: str, *, description: str, image_name: str, earlier_pin: str | None = None,
                 image_digest: str | None = None, context_path: str | None = None,
                 dockerfile_path: str | None = None) -> "DockerImageArtifact":
-        """Register ``image_name``, an image already in a registry: nothing is built, pushed or saved, and a sandbox
-        pulls the image. A tag is pinned to the digest the registry serves for it now, recorded as
-        ``name:tag@sha256:...``, so every run gets the same image; a digest is checked to exist. ``earlier_pin``, the
-        pin an earlier version recorded, is kept instead when it pins ``image_name``.
+        """Register ``image_name``, an image already in a registry, which a sandbox pulls; nothing is built, pushed or
+        saved. A tag is pinned to the digest the registry serves now, as ``name:tag@sha256:...`` (``earlier_pin`` kept
+        when it pins the same ref). Given the image's build context and ``image_digest``, the tag stays the name, the
+        digest is recorded beside it, and the context is uploaded for a sandbox that can't pull the image to build it.
 
-        Given the build context the image is built from (``context_path``, holding ``dockerfile_path``), which is
-        uploaded, and the digest the tag is published under (``image_digest``), the tag is recorded as ``image_name``
-        and the digest beside it, as given: a sandbox pulls the image by the digest and runs it under the tag, or
-        builds it from the context when it can't pull it.
-
-        ``image_name`` must name its registry. The registry is read with the configured image store's credentials
-        where it holds that registry, anonymously otherwise. One on this machine is refused unless ``id``'s image
-        store is the local registry, since nothing else could pull from it."""
+        ``image_name`` must name its registry, read with the configured image store's credentials where it holds them;
+        one on this machine is refused unless ``id``'s image store is the local registry."""
         from agent_env.artifact.store import get_artifact_store
         from agent_env.config import get_config
 

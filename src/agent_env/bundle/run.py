@@ -24,7 +24,7 @@ from enum import Enum
 from pathlib import Path
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
-from agent_env.env.bootstrap import InfraBuild, ensure_default_envs
+from agent_env.env.bootstrap import InfraSetup, ensure_default_envs
 from agent_env.providers import build_sandbox_provider
 from agent_env.store.base import NotFoundError
 from agent_env.store.routing import namespace_routing, run_scope
@@ -153,7 +153,7 @@ class DryRun:
     materialization: Materialization  # each write at the version it would leave, and why
     runs: tuple[BundleEntry, ...]  # the tasks that would run, each once, in the plan's order
     skipped: tuple[BundleEntry, ...]  # the tasks no eval names, which running every eval leaves out
-    infra: tuple[InfraBuild, ...] = ()  # the infra envs the run would set up first
+    infra: tuple[InfraSetup, ...] = ()  # the infra envs the run would set up first
     built_here: frozenset[str] = frozenset()  # the images the run would build on this machine, for its deploys here
 
     def path(self, entry: BundleEntry) -> str:

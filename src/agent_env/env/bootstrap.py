@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from enum import Enum
 from pathlib import Path
 
 from agent_env.artifact import DockerImageArtifact
@@ -160,9 +161,7 @@ def published_digests(kind: str) -> dict[Path, str] | None:
 
 def env_images(env: Env) -> list[DockerImageArtifact]:
     """The images an infra env runs: a service-db's three, or a gateway's or the website browser's one."""
-    if isinstance(env, ServiceDBEnv):
-        return [env.db_docker_image_artifact, env.db_web_docker_image_artifact, env.db_mcp_docker_image_artifact]
-    return [env.docker_image_artifact]
+    return env.images if isinstance(env, ServiceDBEnv) else [env.docker_image_artifact]
 
 
 def build_inputs_digest(kind: str) -> str:
@@ -186,38 +185,40 @@ class InfraError(ValueError):
         self.problems = problems
 
 
-BUILD, PULL, SWITCH = "build", "pull", "switch"  # how a run sets up an infra env
-_BUILT_HERE = "built on this machine"
+class Setup(Enum):
+    """How a run sets up an infra env: what it says as it starts, and what a dry run says it would do."""
+
+    BUILD = ("building, which can take minutes", "would build")
+    PULL = ("registering its published {images}, which each deploy pulls", "would pull its published {images}")
+    SWITCH = ("switching to its published {images}, which each deploy pulls", "would switch to its published {images}")
+
+    def __init__(self, doing: str, planned: str):
+        self.doing, self.planned = doing, planned
 
 
 @dataclass(frozen=True)
-class InfraBuild:
+class InfraSetup:
     """An infra env a run sets up, how, and why."""
 
     kind: str  # GATEWAY, SERVICE_DB or WEBSITE_BROWSER
     id: str
-    reason: str  # "missing", which agent-env built the one in the store, or _BUILT_HERE
-    action: str = BUILD  # BUILD its images on this host, or PULL them, or SWITCH an env built here to pull them
-    published: tuple[tuple[Path, str], ...] = ()  # each image's Dockerfile and published digest, when they're pulled
-    kept: tuple[tuple[str, str], ...] = ()  # the metadata of the env in the store its new version keeps
+    reason: str  # "missing", which agent-env built the one in the store, or "built on this machine"
+    action: Setup = Setup.BUILD
+    published: Mapping[Path, str] = field(default_factory=dict)  # each image's Dockerfile and digest, when pulled
+    kept: Mapping[str, str] = field(default_factory=dict)  # the metadata of the env in the store its new version keeps
 
     def __str__(self) -> str:
         return f"{self.kind} env {self.id!r} ({self.reason})"
 
     @property
     def builds(self) -> bool:
-        return self.action == BUILD
+        return self.action is Setup.BUILD
 
     def doing(self) -> str:
-        """What the run does, as it says when it starts."""
-        return {BUILD: "building, which can take minutes",
-                PULL: f"registering its published {self._images}, which each deploy pulls",
-                SWITCH: f"switching to its published {self._images}, which each deploy pulls"}[self.action]
+        return self.action.doing.format(images=self._images)
 
     def planned(self) -> str:
-        """What the run would do, as a dry run says."""
-        return {BUILD: "would build", PULL: f"would pull its published {self._images}",
-                SWITCH: f"would switch to its published {self._images}"}[self.action]
+        return self.action.planned.format(images=self._images)
 
     @property
     def _images(self) -> str:
@@ -234,16 +235,14 @@ def put_command(kind: str) -> str:
     return f"agent-env env {kind} put --id {default_env_id(kind)}"
 
 
-def infra_to_build(kinds: Iterable[str]) -> list[InfraBuild]:
-    """The infra envs of ``kinds`` a run sets up, in local stores only: each one missing from the store, and each one
-    agent-env built from the Dockerfile it ships whose recorded build inputs aren't this release's, are pulled from the
-    images published for these sources or, when they aren't, built; one built on this machine from these sources
-    switches to them once they're published. Raises InfraError naming the put command for each one missing from stores
-    that aren't all local, which agent-env never sets up infra in."""
+def infra_to_set_up(kinds: Iterable[str]) -> list[InfraSetup]:
+    """The infra envs of ``kinds`` a run sets up, in local stores only: stock ones missing or built from other inputs,
+    pulled when their images are published for these sources and built otherwise, and stock ones built here switched
+    once they're published. Raises InfraError naming the put command for each one missing from stores not all local."""
     kinds = _in_order(kinds)
     if not kinds:
         return []
-    builds, problems = [], []
+    setups, problems = [], []
     local = stores_are_local()
     for kind in kinds:
         env_id = default_env_id(kind)
@@ -251,7 +250,7 @@ def infra_to_build(kinds: Iterable[str]) -> list[InfraBuild]:
             env = Env.get(env_id)
         except NotFoundError:
             if local:
-                builds.append(_pulled_or_built(kind, env_id, "missing"))
+                setups.append(_pulled_or_built(kind, env_id, "missing"))
             else:
                 problems.append(f"the {kind} env {env_id!r} isn't in the store, and agent-env builds infra envs only into "
                                 f"local stores; put it with `{put_command(kind)}`")
@@ -259,47 +258,44 @@ def infra_to_build(kinds: Iterable[str]) -> list[InfraBuild]:
         if not (local and _built_from_stock(env, kind)):
             continue
         recorded = (env.metadata or {}).get(BUILD_INPUTS_KEY)
-        kept = tuple((key, value) for key, value in (env.metadata or {}).items()
-                     if not detected(key) and key != BUILD_INPUTS_KEY)
+        kept = {key: value for key, value in (env.metadata or {}).items() if not detected(key) and key != BUILD_INPUTS_KEY}
         if recorded != build_inputs_digest(kind):
             reason = "its build inputs changed" if recorded else "built before agent-env recorded its build inputs"
-            builds.append(replace(_pulled_or_built(kind, env_id, reason), kept=kept))
+            setups.append(replace(_pulled_or_built(kind, env_id, reason), kept=kept))
         elif not all(image.image_digest for image in env_images(env)) and (published := published_digests(kind)) is not None:
-            builds.append(InfraBuild(kind, env_id, _BUILT_HERE, SWITCH, tuple(published.items()), kept))
+            setups.append(InfraSetup(kind, env_id, "built on this machine", Setup.SWITCH, published, kept))
     if problems:
         raise InfraError(problems)
-    return builds
+    return setups
 
 
-def _pulled_or_built(kind: str, env_id: str, reason: str) -> InfraBuild:
+def _pulled_or_built(kind: str, env_id: str, reason: str) -> InfraSetup:
     if (published := published_digests(kind)) is None:
-        return InfraBuild(kind, env_id, reason)
-    return InfraBuild(kind, env_id, reason, PULL, tuple(published.items()))
+        return InfraSetup(kind, env_id, reason)
+    return InfraSetup(kind, env_id, reason, Setup.PULL, published)
 
 
-def needs_docker(builds: Iterable[InfraBuild], reason: str) -> str:
+def needs_docker(builds: Iterable[InfraSetup], reason: str) -> str:
     """Why ``builds`` can't be built here, given why docker can't be used (``docker_unreachable``)."""
     return f"building the {', '.join(build.kind for build in builds)} env needs docker, and {reason}"
 
 
-def ensure_default_envs(kinds: Iterable[str], *, say: Callable[[str], None] = _quiet) -> list[InfraBuild]:
-    """Set up the infra envs of ``kinds`` that ``infra_to_build`` names, and return them: each registered from its
-    published images, or built for this host's platform. Each id is locked while it's checked and set up, so concurrent
-    runs set it up once. Raises InfraError before setting any up when one can't be: missing from stores that aren't
+def ensure_default_envs(kinds: Iterable[str], *, say: Callable[[str], None] = _quiet) -> list[InfraSetup]:
+    """Set up the infra envs of ``kinds`` that ``infra_to_set_up`` names, each id locked so concurrent runs set it up
+    once, and return them. Raises InfraError before setting any up when one can't be: missing from stores that aren't
     local, or to be built with docker unreachable."""
     kinds = _in_order(kinds)
     if not kinds:
         return []
     ids = [default_env_id(kind) for kind in kinds]
     with holding_locks(ids, on_wait=lambda: say("waiting for another agent-env run to finish setting up the infra envs")):
-        builds = infra_to_build(kinds)
-        if (built := [build for build in builds if build.builds]) and (reason := docker_unreachable()):
+        setups = infra_to_set_up(kinds)
+        if (built := [setup for setup in setups if setup.builds]) and (reason := docker_unreachable()):
             raise InfraError([needs_docker(built, reason)])
-        for build in builds:
-            say(f"{build}: {build.doing()}")
-            _PUTS[build.kind](build.id, platform=None, metadata=dict(build.kept) or None,
-                              published=dict(build.published) or None)
-    return builds
+        for setup in setups:
+            say(f"{setup}: {setup.doing()}")
+            _PUTS[setup.kind](setup.id, platform=None, metadata=setup.kept or None, published=setup.published or None)
+    return setups
 
 
 def stores_are_local() -> bool:

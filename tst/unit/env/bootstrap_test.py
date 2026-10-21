@@ -141,7 +141,7 @@ def test_an_env_built_from_someone_elses_dockerfile_is_theirs_to_rebuild(puts, p
 def test_a_run_that_needs_no_infra_reads_no_store(monkeypatch):
     monkeypatch.setattr(bootstrap, "stores_are_local", lambda: pytest.fail("read the configured stores"))
 
-    assert bootstrap.infra_to_build([]) == []
+    assert bootstrap.infra_to_set_up([]) == []
 
 
 def test_nothing_is_built_without_docker(puts, monkeypatch):
@@ -178,7 +178,7 @@ def test_missing_infra_whose_images_are_all_published_is_registered_from_them_wi
     builds = ensure_default_envs([GATEWAY, SERVICE_DB], say=said.append)
 
     assert puts == [(SERVICE_DB, "default-db", "pulled"), (GATEWAY, "default", "pulled")]
-    assert [build.action for build in builds] == [bootstrap.PULL, bootstrap.PULL]
+    assert [build.action for build in builds] == [bootstrap.Setup.PULL, bootstrap.Setup.PULL]
     assert said == ["service-db env 'default-db' (missing): registering its published images, which each deploy pulls",
                     "gateway env 'default' (missing): registering its published image, which each deploy pulls"]
     assert ensure_default_envs([GATEWAY, SERVICE_DB]) == []
@@ -202,7 +202,7 @@ def test_infra_built_here_is_kept_until_its_images_are_published_then_switched_t
 
     (build,) = ensure_default_envs([GATEWAY], say=said.append)
 
-    assert (build.action, build.reason) == (bootstrap.SWITCH, "built on this machine")
+    assert (build.action, build.reason) == (bootstrap.Setup.SWITCH, "built on this machine")
     assert said == ["gateway env 'default' (built on this machine): switching to its published image, which each "
                     "deploy pulls"]
     assert ensure_default_envs([GATEWAY]) == []
@@ -216,7 +216,7 @@ def test_infra_built_from_other_inputs_is_pulled_when_its_images_are_published(p
 
     (build,) = ensure_default_envs([GATEWAY])
 
-    assert (build.action, build.reason) == (bootstrap.PULL, "its build inputs changed")
+    assert (build.action, build.reason) == (bootstrap.Setup.PULL, "its build inputs changed")
     assert puts == [(GATEWAY, "default", None), (GATEWAY, "default", "pulled")]
 
 
@@ -243,7 +243,7 @@ def test_an_env_set_up_again_keeps_its_own_metadata_and_records_how_it_was_set_u
     (build,) = ensure_default_envs([GATEWAY])
 
     metadata = GatewayEnv.get("default").metadata
-    assert build.action == bootstrap.SWITCH and metadata["owner"] == "me"
+    assert build.action is bootstrap.Setup.SWITCH and metadata["owner"] == "me"
     assert metadata.get("git_commit") != "0ld" and metadata.get("agent_env_version") != "0.0.1"
     assert metadata[bootstrap.BUILD_INPUTS_KEY] == bootstrap.build_inputs_digest(GATEWAY)
 

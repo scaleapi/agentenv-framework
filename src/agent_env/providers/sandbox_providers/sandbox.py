@@ -315,12 +315,9 @@ class VmSandbox(Sandbox):
         )
 
     async def load_docker_images(self, artifacts: list) -> None:
-        """Put each DockerImageArtifact's image on the VM: those with a tar.gz are loaded from it, in parallel, those
-        with only a build context are built from it, those with a digest are pulled by it (``pull_published``), and
-        the rest are pulled by image name; one whose tar.gz is built for another platform than the VM's is built from
-        the build context beside it, for the VM's. An image this VM can't get, such as one to pull from a registry on
-        this machine when the VM isn't on it, or can't run, being built for another platform with no build context, is
-        refused before anything is loaded."""
+        """Put each DockerImageArtifact's image on the VM: a tar.gz is loaded, a build context built, an image with a
+        digest pulled by it (``pull_published``), and the rest pulled by name; a tar.gz for another platform is built
+        from its context instead. One the VM can't get or run (``load_problems``) is refused before anything loads."""
         if not artifacts:
             return
         if problems := self.load_problems(artifacts):
