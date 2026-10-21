@@ -11,6 +11,9 @@ import re
 
 import pytest
 
+from types import SimpleNamespace
+
+from agent_env.a2a_agent import protocol
 from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import (
     RubricsVerifierTaskStep,
@@ -194,3 +197,75 @@ def test_batch_options_round_trip_and_validate():
     for bad in (0, -1, True, "30"):
         with pytest.raises(ValueError, match=re.escape("judge_batch_size must be a positive integer")):
             _verifier(judge_batch_size=bad)
+
+
+@pytest.mark.asyncio
+async def test_batch_concurrency_from_user_overrides():
+    v = _verifier(criteria=_criteria(6), judge_batch_size=1)
+    running = peak = 0
+
+    async def fake_prompt_llm_judge(prompt: str, *, model: str, context: TaskStepContext) -> dict:
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        await asyncio.sleep(0.01)
+        running -= 1
+        return {"response": _graded(_prompted_ids(prompt)), "trajectory_object_url": None}
+
+    v._prompt_llm_judge = fake_prompt_llm_judge
+    await v.execute(_context(judge_batch_concurrency=1))
+
+    assert peak == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [0, -2, "30", True])
+async def test_an_invalid_batch_override_is_reported_not_ignored(bad):
+    v = _verifier()
+    _fake_judge(v, [])
+
+    with pytest.raises(ValueError, match="judge_batch_size must be a positive integer"):
+        await v.execute(_context(judge_batch_size=bad))
+
+
+def test_formats_with_whole_run_rows_cannot_be_batched():
+    with pytest.raises(ValueError, match="judge_batch_size does not apply to output_format=trajectory_mistakes"):
+        _verifier(output_format="trajectory_mistakes", judge_batch_size=3)
+
+
+@pytest.mark.asyncio
+async def test_a_batch_override_on_an_unbatchable_format_fails():
+    v = _verifier(output_format="trajectory_mistakes")
+
+    with pytest.raises(RuntimeError, match="does not apply to output_format=trajectory_mistakes"):
+        await v.execute(_context(judge_batch_size=3))
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_batch_cancels_its_remote_judge_task(monkeypatch):
+    v = _verifier(use_agent_judge=True)
+    cancelled: list[tuple[str, str]] = []
+    polling = asyncio.Event()
+
+    async def fake_send(url, **kwargs):
+        return "a2a-task-1", None
+
+    async def fake_poll(url, task_id, **kwargs):
+        polling.set()
+        await asyncio.sleep(3600)
+
+    async def fake_cancel(url, task_id):
+        cancelled.append((url, task_id))
+
+    monkeypatch.setattr(protocol, "send_a2a_message", fake_send)
+    monkeypatch.setattr(protocol, "poll_a2a_task", fake_poll)
+    monkeypatch.setattr(protocol, "cancel_a2a_task", fake_cancel)
+    call = asyncio.create_task(v._invoke_judge_a2a(
+        eval_prompt="grade", judge_a2a_url="http://judge", judge_agent_card={},
+        judge_agent=SimpleNamespace(sandbox_id="sb-1")))
+    await polling.wait()
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+
+    assert cancelled == [("http://judge", "a2a-task-1")]

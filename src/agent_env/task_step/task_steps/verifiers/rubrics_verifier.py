@@ -157,7 +157,7 @@ def _bulk_verdicts(rows: list[dict]) -> Optional[dict]:
     return {
         "kind": "bulk_verdicts",
         "rows": len(rows),
-        "shared_justification": shared_text,
+        "shared_justification": shared_text[:200],
         "shared_count": shared,
         "short_count": short,
     }
@@ -328,6 +328,20 @@ def _validated_batch_option(name: str, value: Optional[int]) -> Optional[int]:
     return value
 
 
+# Formats whose rows are one per criterion, so batches merge by concatenation. The evidence formats carry one
+# reasoning / checks / mistakes block per call and trajectory_mistakes adds whole-run rows, which batches would repeat.
+_BATCHABLE_FORMATS = frozenset({JudgeOutputFormat.RUBRIC_BINARY, JudgeOutputFormat.RUBRIC_PARTIAL})
+
+
+def _unbatchable_format_message(output_format: JudgeOutputFormat) -> str:
+    return f"judge_batch_size does not apply to output_format={output_format.value}."
+
+
+def _override_or(overrides: dict, key: str, stored: Optional[int]) -> Optional[int]:
+    """The run's override when present (even an invalid one, so validation reports it), else the stored value."""
+    return overrides[key] if overrides.get(key) is not None else stored
+
+
 def _as_of_turn(prompt_response: PromptResponse, turn: Optional[int]) -> PromptResponse:
     """A copy of a multi-turn PromptResponse cut off after ``turn``, or the original when there is
     nothing to cut. The stored response is the conversation's last reply, so a cut copy points the
@@ -486,9 +500,8 @@ class RubricsVerifierTaskStep(TaskStep):
                 "with use_trajectory=True and a trajectory_filter with compaction_type=screenshot and "
                 "frame_strategy=per_criterion."
             )
-        if self.judge_batch_size is not None and self._spec().cites_evidence:
-            # Those rows carry one reasoning / checks / mistakes block per judge call, which batches would split.
-            raise ValueError(f"judge_batch_size does not apply to output_format={self.output_format.value}.")
+        if self.judge_batch_size is not None and self.output_format not in _BATCHABLE_FORMATS:
+            raise ValueError(_unbatchable_format_message(self.output_format))
 
     def _spec(self) -> JudgeOutputFormatSpec:
         return get_judge_output_format_spec(self.output_format)
@@ -757,13 +770,12 @@ class RubricsVerifierTaskStep(TaskStep):
             agent_prompt_text = prompt_response.prompt_text or ""
             judge_effort = overrides.get("judge_effort") or self.effort
             judge_max_thinking_tokens = overrides.get("judge_max_thinking_tokens") or self.max_thinking_tokens
-            batch_size = _validated_batch_option(
-                "judge_batch_size", overrides.get("judge_batch_size") or self.judge_batch_size)
-            if batch_size is not None and self._spec().cites_evidence:
-                raise RuntimeError(
-                    f"Verifier '{self.verifier_id}': judge_batch_size does not apply to "
-                    f"output_format={self.output_format.value}."
-                )
+            batch_size = _validated_batch_option("judge_batch_size", _override_or(
+                overrides, "judge_batch_size", self.judge_batch_size))
+            batch_concurrency = _validated_batch_option("judge_batch_concurrency", _override_or(
+                overrides, "judge_batch_concurrency", self.judge_batch_concurrency))
+            if batch_size is not None and self.output_format not in _BATCHABLE_FORMATS:
+                raise RuntimeError(f"Verifier '{self.verifier_id}': {_unbatchable_format_message(self.output_format)}")
             loaded_for_judge: list[dict] = []
             if use_agent_judge and self.agent_name is not None:
                 loaded_for_judge = [
@@ -833,7 +845,7 @@ class RubricsVerifierTaskStep(TaskStep):
 
             batches = (_criteria_batches(criteria_for_judge, batch_size) if batch_size is not None
                        else [criteria_for_judge])
-            concurrency = asyncio.Semaphore(self.judge_batch_concurrency or self.DEFAULT_JUDGE_BATCH_CONCURRENCY)
+            concurrency = asyncio.Semaphore(batch_concurrency or self.DEFAULT_JUDGE_BATCH_CONCURRENCY)
             position = {c["id"]: i for i, c in enumerate(criteria_for_judge, 1)}
 
             async def grade(batch: list[dict]) -> tuple[list[dict], int, list[dict], Optional[str]]:
@@ -1232,13 +1244,18 @@ class RubricsVerifierTaskStep(TaskStep):
             context_id=None,
             timeout_seconds=self.judge_timeout_seconds,
         )
-        result = await protocol.poll_a2a_task(
-            judge_a2a_url,
-            task_id,
-            timeout_seconds=self.judge_timeout_seconds,
-            poll_interval_seconds=self.DEFAULT_POLL_INTERVAL_SECONDS,
-            sandbox_id=getattr(judge_agent, "sandbox_id", None),
-        )
+        try:
+            result = await protocol.poll_a2a_task(
+                judge_a2a_url,
+                task_id,
+                timeout_seconds=self.judge_timeout_seconds,
+                poll_interval_seconds=self.DEFAULT_POLL_INTERVAL_SECONDS,
+                sandbox_id=getattr(judge_agent, "sandbox_id", None),
+            )
+        except asyncio.CancelledError:
+            # A sibling batch failed: stop this judge too, or it keeps working on a reused judge sandbox.
+            await asyncio.shield(protocol.cancel_a2a_task(judge_a2a_url, task_id))
+            raise
         state = result["status"]["state"]
         status_msg = (result.get("status") or {}).get("message") or {}
         tr = protocol.TerminalResponse.from_message(status_msg)
@@ -1408,8 +1425,9 @@ class RubricsVerifierTaskStep(TaskStep):
                         discrepancy_log.append({**bulk, "accepted": True})
                     return results, attempt - 1, discrepancy_log, judge_trajectory_url
                 logger.warning(
-                    "Judge returned bulk verdicts (attempt %d/%d, verifier_id=%s): %s",
-                    attempt, self.DEFAULT_MAX_RETRIES, self.verifier_id, bulk,
+                    "Judge returned bulk verdicts (attempt %d/%d, verifier_id=%s): %d/%d rows share %r, %d short",
+                    attempt, self.DEFAULT_MAX_RETRIES, self.verifier_id, bulk["shared_count"], bulk["rows"],
+                    bulk["shared_justification"][:80], bulk["short_count"],
                 )
                 discrepancy_log.append(bulk)
                 prompt = _bulk_verdicts_correction(eval_prompt, bulk)
