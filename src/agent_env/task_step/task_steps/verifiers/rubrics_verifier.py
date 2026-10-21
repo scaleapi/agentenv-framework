@@ -132,6 +132,9 @@ _BULK_SHARED_FRACTION = 0.25
 _BULK_MIN_SHARED = 5
 _BULK_SHORT_FRACTION = 0.5
 _BULK_SHORT_CHARS = 20
+# How much of a shared justification the stored discrepancy keeps, and how much the warning logs.
+_BULK_STORED_EXCERPT_CHARS = 200
+_BULK_LOGGED_EXCERPT_CHARS = 80
 
 
 def _criteria_batches(criteria: list[dict], size: int) -> list[list[dict]]:
@@ -157,7 +160,7 @@ def _bulk_verdicts(rows: list[dict]) -> Optional[dict]:
     return {
         "kind": "bulk_verdicts",
         "rows": len(rows),
-        "shared_justification": shared_text[:200],
+        "shared_justification": shared_text[:_BULK_STORED_EXCERPT_CHARS],
         "shared_count": shared,
         "short_count": short,
     }
@@ -1427,7 +1430,7 @@ class RubricsVerifierTaskStep(TaskStep):
                 logger.warning(
                     "Judge returned bulk verdicts (attempt %d/%d, verifier_id=%s): %d/%d rows share %r, %d short",
                     attempt, self.DEFAULT_MAX_RETRIES, self.verifier_id, bulk["shared_count"], bulk["rows"],
-                    bulk["shared_justification"][:80], bulk["short_count"],
+                    bulk["shared_justification"][:_BULK_LOGGED_EXCERPT_CHARS], bulk["short_count"],
                 )
                 discrepancy_log.append(bulk)
                 prompt = _bulk_verdicts_correction(eval_prompt, bulk)
