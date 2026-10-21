@@ -222,6 +222,16 @@ class StepAttemptFailure:
         return dataclasses.asdict(self)
 
 
+class SupersededAttemptError(RuntimeError):
+    """A step's completion was refused because a later attempt owns the instance (a rollback or a re-register moved
+    it on), so nothing the step produced was recorded and its caller must not carry on as if it had been."""
+
+    def __init__(self, instance_id: str, step_id: str, reason: str):
+        super().__init__(f"step {step_id!r} of instance {instance_id!r} was not recorded: {reason}")
+        self.instance_id = instance_id
+        self.step_id = step_id
+
+
 def _fresh_run_state(start_step: int, completed_step_docs: list[dict]) -> dict:
     """The fields a run owns. A re-register resets exactly these, so both registration paths
     have to agree on them; ``rev`` and the generation are bumped there instead and live in
@@ -656,6 +666,9 @@ class TaskInstanceStore:
         in-flight ``to_thread`` call, so this fence, not the cancel, stops the drained
         step's write.
 
+        Either refusal raises ``SupersededAttemptError``: the step's results were not recorded,
+        and a caller that went on would hand its dependents a context without them.
+
         Replaces the old aggregation-pipeline update: the dedupe and the
         ``$size``/``$cond`` derivations run in Python, so any backend can implement it
         with a plain conditional update.
@@ -673,16 +686,17 @@ class TaskInstanceStore:
             )
             journaled = None
         seq, journaled_generation = journaled if journaled is not None else (None, None)
+        declined: list[str] = []  # why the deciding _mutate refused, if it did
 
         def _mutate(doc: dict) -> UpdateSpec | None:
+            declined.clear()
             if journaled_generation is not None and doc.get(_GENERATION, 0) != journaled_generation:
-                logger.warning(
-                    "Declining completion of step %s for instance_id=%s: the run was "
-                    "re-registered (generation %s -> %s) after the step journaled",
-                    step_id, instance_id, journaled_generation, doc.get(_GENERATION, 0),
-                )
+                declined.append(f"the run was re-registered (generation {journaled_generation} -> "
+                                f"{doc.get(_GENERATION, 0)}) after the step journaled")
                 return None
             if doc.get("attempt_epoch", 0) > attempt_epoch:
+                declined.append(f"it was dispatched under attempt epoch {attempt_epoch}, but a later attempt owns the "
+                                f"instance at epoch {doc.get('attempt_epoch', 0)}")
                 return None
             # Position is the replay order, so a re-record moves to the end, items included.
             rerecorded = any(c.get("step_id") == step_id for c in doc.get("completed_steps", []))
@@ -713,10 +727,21 @@ class TaskInstanceStore:
         if result is None and journaled is not None:
             # The completion never landed, so the entry describes nothing in the document.
             # Delete at the exact seq, so a re-record that replaced the row keeps its own.
-            store.delete(
-                TASK_STEP_JOURNAL_COLLECTION,
-                Filter.of(instance_id=instance_id, step_id=step_id, seq=seq),
-            )
+            try:
+                store.delete(
+                    TASK_STEP_JOURNAL_COLLECTION,
+                    Filter.of(instance_id=instance_id, step_id=step_id, seq=seq),
+                )
+            except Exception:
+                if not declined:
+                    raise
+                # Replay drops a row with no completion, so the refusal, not the cleanup, is what the caller must hear.
+                logger.warning("Failed to delete step %s's journal row for instance_id=%s after its completion was "
+                               "refused", step_id, instance_id, exc_info=True)
+        if result is None and declined:
+            error = SupersededAttemptError(instance_id, step_id, declined[0])
+            logger.warning("%s", error)
+            raise error
 
     def record_task_failure_sync(
         self,
@@ -832,6 +857,9 @@ def register_task_instance(
 
     With ``instance_id``: idempotent upsert, and a failure raises, since the caller already handed that id out.
     Without: random-id insert, and a failure is logged and the run goes unrecorded.
+
+    Re-registering an existing instance advances its ``attempt_epoch``. A caller that dispatches the run's steps itself
+    must record them under the returned instance's ``attempt_epoch``; an older one raises ``SupersededAttemptError``.
     """
     try:
         store = get_task_instance_store()
@@ -885,6 +913,9 @@ async def record_step_complete(
     contention). Concurrent finishers converge without losing each other's
     entries; ``completed_steps`` keeps first-appearance order. ``attempt_epoch``
     fences a write from a rolled-back attempt (see ``record_step_complete_sync``).
+
+    A store error is logged, not raised. A completion a later attempt fenced off raises
+    ``SupersededAttemptError``: retrying it cannot land, so a dispatcher should end the step.
     """
     entry = dataclasses.asdict(TaskStepResult(step_id=step_id, status=status))
     try:
@@ -892,6 +923,8 @@ async def record_step_complete(
             get_task_instance_store().record_step_complete_sync,
             instance_id, entry, ops, total_steps, completed_at_utc, attempt_epoch,
         )
+    except SupersededAttemptError:
+        raise
     except Exception:
         logger.error(
             "Failed to record step complete for instance_id=%s step_id=%s",

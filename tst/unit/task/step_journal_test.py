@@ -14,7 +14,7 @@ import agent_env.task.store as store_mod
 from agent_env.store import Filter, LocalSqliteDocumentStore, Sort
 from agent_env.task.step_journal import _union, commit_ordered, replay_context
 from agent_env.task.store import (
-    TASK_STEP_JOURNAL_COLLECTION, TaskInstanceStore, TaskStepResult, TaskStepStatus,
+    TASK_STEP_JOURNAL_COLLECTION, SupersededAttemptError, TaskInstanceStore, TaskStepResult, TaskStepStatus,
     seed_task_instance_context, set_task_instance_store,
     undo_steps,
 )
@@ -50,8 +50,8 @@ def _ops(pre_md, post_md, **scalars):
                                     TaskStepContext(metadata=dict(post_md), **scalars))
 
 
-def _record(store, iid, step_id, ops, total=9, status="success"):
-    store.record_step_complete_sync(iid, {"step_id": step_id, "status": status}, ops, total, "now")
+def _record(store, iid, step_id, ops, total=9, status="success", epoch=0):
+    store.record_step_complete_sync(iid, {"step_id": step_id, "status": status}, ops, total, "now", epoch)
 
 
 def _journal(store, iid):
@@ -480,7 +480,8 @@ def test_a_retired_entry_is_never_replayed_into_the_new_run(store):
     with pytest.raises(ValueError, match="no journal seed"):
         store.undo_steps_sync("i", {"s0"})          # the retired seed is not a base
     seed_task_instance_context("i", TaskStepContext(metadata={"new": True}))
-    _record(store, "i", "s0", _ops({"new": True}, {"new": True, "a": 1}))
+    _record(store, "i", "s0", _ops({"new": True}, {"new": True, "a": 1}), epoch=1)   # under the new run's epoch
+    assert _doc(store, "i")["context"]["metadata"] == {"new": True, "a": 1}          # so s0 really landed
     after = store.undo_steps_sync("i", {"s0"})
     assert after["context"]["metadata"] == {"new": True}   # the new run's seed, not {"old": True}
 
@@ -511,12 +512,37 @@ def test_a_completion_journaled_before_a_reregister_never_joins_the_new_run(stor
         store.upsert_instance(instance_id="i", task_id="t", task_version=1, total_steps=3)
         return out
     monkeypatch.setattr(store, "_journal_step", journal_then_reregister)
-    _record(store, "i", "s0", _ops({"base": 1}, {"base": 1, "a": 1}), total=3)   # must be declined
+    with pytest.raises(SupersededAttemptError, match="re-registered"):            # declined, out loud
+        _record(store, "i", "s0", _ops({"base": 1}, {"base": 1, "a": 1}), total=3)
 
     d = _doc(store, "i")
     assert d["completed_steps"] == []                     # the superseded run's step did not land
     assert "a" not in d["context"]["metadata"]            # nor its context write
     assert [e["step_id"] for e in _journal(store, "i")] == ["__seed__"]   # orphan row cleaned up
+
+
+def test_a_refused_completion_is_raised_even_when_its_journal_row_cannot_be_removed(store, monkeypatch):
+    # The orphan row is harmless (replay drops a step with no completion); losing the refusal is not.
+    store.upsert_instance(instance_id="i", task_id="t", task_version=1, total_steps=3)
+    seed_task_instance_context("i", TaskStepContext(metadata={"base": 1}))
+    real_journal, real_delete = store._journal_step, store._doc_store.delete
+
+    def journal_then_reregister(docs, instance_id, step_id, ops, status, **kw):
+        out = real_journal(docs, instance_id, step_id, ops, status, **kw)
+        monkeypatch.setattr(store, "_journal_step", real_journal)                       # fire once
+        store.upsert_instance(instance_id="i", task_id="t", task_version=1, total_steps=3)
+        return out
+
+    def journal_delete_fails(collection, *args, **kwargs):
+        if collection == TASK_STEP_JOURNAL_COLLECTION:
+            raise RuntimeError("store unavailable")
+        return real_delete(collection, *args, **kwargs)
+
+    monkeypatch.setattr(store, "_journal_step", journal_then_reregister)
+    monkeypatch.setattr(store._doc_store, "delete", journal_delete_fails)
+    with pytest.raises(SupersededAttemptError, match="re-registered"):
+        _record(store, "i", "s0", _ops({"base": 1}, {"base": 1, "a": 1}), total=3)
+    assert _doc(store, "i")["completed_steps"] == []
 
 
 def test_the_rerecord_flag_replay_uses_comes_from_the_winning_cas(store, monkeypatch):

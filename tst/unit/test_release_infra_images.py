@@ -77,6 +77,11 @@ def test_a_failed_image_job_sends_neither_package_to_pypi(job):
         assert f"""contains(fromJSON('["success", "skipped"]'), needs.{image_job}.result)""" in JOBS["infra-record"]["if"]
 
 
+def test_the_github_release_is_created_whenever_the_framework_is_published():
+    """With no new image the image jobs are skipped, and a job's default condition skips it after any skipped job."""
+    assert " ".join(JOBS["release"]["if"].split()) == "!cancelled() && needs.framework.result == 'success'"
+
+
 def test_the_wheel_carries_the_checked_record_where_an_install_reads_it():
     step = _step("framework", "record")
 
@@ -108,6 +113,17 @@ def test_nothing_reaches_pypi_from_a_run_by_hand():
 def test_a_run_by_hand_goes_ahead_only_on_main_or_a_release_tag(job):
     """main-ci waits for CI runs on main, which a branch has none of: off main, every job is skipped instead."""
     assert "github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')" in JOBS[job]["if"]
+
+
+def test_a_build_pulls_its_base_images_from_the_mirror_first():
+    """public.ecr.aws can rate-limit a hosted runner's anonymous pulls for hours; the build pulls from it only what the
+    mirror doesn't give."""
+    (step,) = [step for step in JOBS["infra-build"]["steps"] if "mirror_base_images.py" in step.get("run", "")]
+    build = "\n".join(_runs("infra-build"))
+
+    assert step["run"] == 'python3 .github/scripts/mirror_base_images.py "$DOCKERFILE"'
+    assert step["if"] == "steps.wanted.outputs.build == 'true'"
+    assert build.index("mirror_base_images.py") < build.index("docker build")
 
 
 def test_what_a_registry_can_rate_limit_is_tried_again():

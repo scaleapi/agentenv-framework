@@ -13,10 +13,12 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from agent_env.config import configure, reset_config, set_document_store
+from agent_env.config.runtime import Config
 from agent_env.runner import store as run_store
 from agent_env.runner.local_runner import LocalRunner
 from agent_env.runner.runner import KEEP_KEY, RunRecord, RunStatus
 from agent_env.store.document_store.sqlite_document_store import LocalSqliteDocumentStore
+from tst.runner import conformance
 
 
 @pytest.fixture
@@ -680,3 +682,15 @@ async def test_a_shutdown_teardown_that_runs_out_of_time_is_reported(docs, monke
 
     assert f"Gave up tearing down {handle.run_id}" in caplog.text
     await asyncio.sleep(1.1)  # let the abandoned run end before the loop closes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", conformance.CASES, ids=lambda case: case.__name__)
+async def test_conformance(case, local_stores, monkeypatch):
+    steps = {**Config().task_step_registry(), conformance.Step.type: conformance.Step}
+    monkeypatch.setattr(Config, "task_step_registry", lambda self: steps)
+    runner = LocalRunner()
+    try:
+        await case(runner)
+    finally:
+        await runner.stop()

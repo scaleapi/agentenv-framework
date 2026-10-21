@@ -227,7 +227,8 @@ orchestrators call it the same way. What callers rely on:
   `default_a2a_agent`, `mcp_server_sources`, `gnu_stat`). CI rejects any other skip reason; a broken configuration must fail loudly, not skip.
 - The suite is backend-agnostic: a test about one particular backend lives with that backend, not
   here. A custom store must pass `tst/store/{conformance,object_conformance,image_conformance,secret_conformance}.py`,
-  the same kits the built-ins pass.
+  the same kits the built-ins pass, and a custom `[runner]` must pass `tst/runner/conformance.py`, which
+  `LocalRunner` passes.
 - Shared helpers live in `tst/util/` (`config.py` installs a config document, `a2a_test_agent.py` builds
   the echo A2A agent, `capabilities.py`, `image_cache.py`); fixtures and mock services in `tst/data/`.
   Nothing test-only ships under `src/`.

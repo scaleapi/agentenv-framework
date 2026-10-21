@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import parse_qsl
 from uuid import uuid4
 
 import anyio
@@ -69,7 +70,7 @@ from .changes import ChangeAttribution
 from .child_transport import child_http_client
 from .clock import Clock, ClockError, _iso
 from .get_time import GET_TIME_TOOL_NAME, build_get_time_tool
-from .rest_proxy import ROLE_HEADER_BYTES, fetch_child_card, forward, rewrite_child_card
+from .rest_proxy import ROLE_HEADER_BYTES, UpstreamResponse, fetch_child_card, forward, rewrite_child_card
 from .triggers import TriggerEngine, TriggerError
 
 logger = logging.getLogger(__name__)
@@ -93,6 +94,7 @@ class Gateway:
     TOOL_CALL_TIMEOUT_S = 600.0
     STARTUP_DISCOVERY_TIMEOUT_S = 60.0  # startup discovery past it fails open, like a failed one; uvicorn must come up
     CHILD_CLOSE_TIMEOUT_S = 3.0  # wait for the owner task to exit a retired child-session generation; past it, cancel it
+    BARRIER_READ_AHEAD_MAX_BYTES = 8 * 1024 * 1024  # a larger sized body held by a barrier streams, its window to the last byte
     TRIGGER_BARRIER_TIMEOUT_S = 30.0  # a barrier may ask for less; past it the call is answered anyway
     # Must be >= the largest timeout any client can ask for, or the proxy severs a load the
     # client was still legitimately waiting on -- the ordering this module's constants file
@@ -186,14 +188,14 @@ class Gateway:
                 methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
             )
             async def proxy_to_frontend(request: Request) -> Response:
-                return await self._proxy_rest_request(request, url_map=self.website_urls)
+                return await self._proxy_website_request(request)
 
             @self._mcp.custom_route(
                 "/website/{service_name}",
                 methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
             )
             async def proxy_to_frontend_root(request: Request) -> Response:
-                return await self._proxy_rest_request(request, url_map=self.website_urls)
+                return await self._proxy_website_request(request)
 
         @self._mcp.custom_route(f"/tools/{TOOL_DISABLE_ACTION}", methods=["POST"])
         async def tools_disable(request: Request) -> Response:
@@ -545,6 +547,34 @@ class Gateway:
 
         return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server,
                              on_done=log_write)
+
+    async def _proxy_website_request(self, request: Request) -> Response:
+        """Proxy a website request; with a website or state trigger registered, feed it to the engine and hold barriers."""
+        response = await self._proxy_rest_request(request, url_map=self.website_urls)
+        app = request.path_params["service_name"]
+        engine = self._trigger_engine
+        if app in self.website_urls and (engine.has_website_triggers or engine.has_state_triggers):
+            if isinstance(response, UpstreamResponse):
+                if not engine.may_hold_website_request(self._request_role(request), app, request.method,
+                                                       "/" + request.path_params.get("path", ""), response.status_code):
+                    response.after_body(lambda status: self._fire_website_triggers(request, app, status))  # answered at its last byte
+                    return response
+                await response.read_ahead_if_sized(self.BARRIER_READ_AHEAD_MAX_BYTES)  # its window ends before its triggers run
+            barrier_tasks, barrier_timeout_s = await self._fire_website_triggers(request, app, response.status_code)
+            await self._await_barriers(barrier_tasks, barrier_timeout_s)
+        return response
+
+    async def _fire_website_triggers(self, request: Request, app: str,
+                                     status: int) -> tuple[list[asyncio.Task], float | None]:
+        """Feed an answered website request to the trigger engine (fail-open)."""
+        try:
+            # Only a website trigger reads the request's args; a state re-check needs just the method and status.
+            args = _request_args(request, await request.body()) if self._trigger_engine.has_website_triggers else {}
+            return self._trigger_engine.on_website_request(self._request_role(request), app, request.method,
+                                                           "/" + request.path_params.get("path", ""), status, args)
+        except Exception:
+            logger.exception("Trigger evaluation failed (fail-open)")
+            return [], None
 
     @staticmethod
     def _request_role(request: Request) -> str:
@@ -1287,6 +1317,29 @@ class _ProxyArgModelBase(ArgModelBase):
             output_name = field_info.alias if field_info.alias else field_name
             kwargs[output_name] = value
         return kwargs
+
+
+def _request_args(request: Request, body: bytes) -> dict:
+    """A request's query parameters and form or JSON-object body fields (the body wins a clash; repeats become lists)."""
+    args = _fields(parse_qsl(request.url.query, keep_blank_values=True))
+    media_type = request.headers.get("content-type", "").partition(";")[0].strip().lower()
+    if media_type == "application/x-www-form-urlencoded":
+        args.update(_fields(parse_qsl(body.decode("utf-8", "replace"), keep_blank_values=True)))
+    elif media_type == "application/json" or media_type.endswith("+json"):
+        try:
+            parsed = json.loads(body)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict):
+            args.update(parsed)
+    return args
+
+
+def _fields(pairs: list[tuple[str, str]]) -> dict:
+    grouped: dict[str, list[str]] = {}
+    for key, value in pairs:
+        grouped.setdefault(key, []).append(value)
+    return {key: values[0] if len(values) == 1 else values for key, values in grouped.items()}
 
 
 def _is_dead_session(exc: BaseException) -> bool:

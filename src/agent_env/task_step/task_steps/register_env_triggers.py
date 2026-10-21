@@ -18,6 +18,7 @@ from agent_env.env.gateway.constants import (
     TRIGGER_NAMED_EXECUTORS,
     TRIGGER_PROVOKING_ROLES,
     TRIGGER_UNLESS,
+    TRIGGER_WEBSITE,
 )
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity.refs import EntityRef
@@ -42,6 +43,10 @@ class RegisterEnvTriggersStep(TaskStep):
     each other. Such a chain ends when a persona's turn makes no matching write, so give conversational nl actions no
     `verify` (its retry forces a write), give persona prompts a stop condition, and prefer a `where` off-ramp. An
     action's `delay` and `executor_hours` pace replies in virtual time, and a time trigger's `unless` makes it a deadline.
+    A `website` trigger fires on requests the gateway proxies to the env's websites, for agents with their own browser.
+    A browser sends no AgentEnv-Role header, so its requests count as the `default` role: when `watch_roles` names the
+    agent's role, give a website trigger `when.roles: ["default"]`, or have the agent's client send the header.
+    A front door that proxies the browser's site requests to the gateway can also set the header, dropping the client's.
     `await_fired` holds the step until the named one-shot triggers have fired (a recurrence re-arms after each fire), so
     a dependent step starts only once start-of-run time triggers have landed in the world."""
 
@@ -142,7 +147,9 @@ class RegisterEnvTriggersStep(TaskStep):
         # would fire even after its `unless` call.
         used = {TRIGGER_NAMED_EXECUTORS: bool(named), TRIGGER_PROVOKING_ROLES: _when_has(self.triggers, "roles"),
                 TRIGGER_ACTION_DELAY: _delays(self.triggers), TRIGGER_EXECUTOR_HOURS: bool(self.executor_hours),
-                TRIGGER_UNLESS: _when_has(self.triggers, "unless")}
+                TRIGGER_UNLESS: _when_has(self.triggers, "unless"),
+                TRIGGER_WEBSITE: any(isinstance(t.get("when"), dict) and t["when"].get("type") == "website"
+                                     for t in self.triggers)}
         missing = [feature for feature, needed in used.items() if needed and feature not in _trigger_features(deployed)]
         if missing:
             raise RuntimeError(

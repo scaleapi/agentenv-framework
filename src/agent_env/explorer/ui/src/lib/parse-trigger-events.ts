@@ -115,6 +115,16 @@ function actionSummary(raw: Record<string, unknown>): string {
   return 'action ran';
 }
 
+/** The website request a detection names as its cause, as `POST mail /api/messages → 201`; undefined for any other cause. */
+function websiteRequest(
+  provoking: Record<string, unknown>,
+): string | undefined {
+  if (provoking.source !== 'website') return undefined;
+  return `${str(provoking.method) ?? '?'} ${str(provoking.app) ?? '?'} ${
+    str(provoking.path) ?? '?'
+  } → ${num(provoking.status) ?? '?'}`;
+}
+
 function envSummary(kind: string, raw: Record<string, unknown>): string {
   const provoking = asRecord(raw.provoking);
   switch (kind) {
@@ -136,9 +146,9 @@ function envSummary(kind: string, raw: Record<string, unknown>): string {
           due === 1 ? '' : 's'
         } due${window}${capped}`;
       }
-      return `condition matched on ${str(provoking?.tool) ?? '?'} (${
-        str(provoking?.role) ?? '?'
-      })`;
+      return `condition matched on ${
+        (provoking && websiteRequest(provoking)) ?? str(provoking?.tool) ?? '?'
+      } (${str(provoking?.role) ?? '?'})`;
     case 'anchored':
       return `anchored to ${str(raw.anchor) ?? '?'} — due ${shortStamp(
         str(raw.mark),
@@ -464,7 +474,7 @@ function envFiringReason(
     return `the virtual clock reached ${shortStamp(mark)}${capped}`;
   }
   const provoking = detected && asRecord(detected.raw.provoking);
-  const tool = str(provoking?.tool);
+  const tool = (provoking && websiteRequest(provoking)) ?? str(provoking?.tool);
   if (!tool) return undefined;
   const role = str(provoking?.role);
   const call = role ? `${tool} (${role})` : tool;
@@ -474,6 +484,7 @@ function envFiringReason(
   if (spec?.type === 'state')
     return `its check matched, re-evaluated after ${call}`;
   if (spec?.type === 'action') return `the agent called ${call}`;
+  if (spec?.type === 'website') return `the agent requested ${call}`;
   return `it was detected after ${call}`;
 }
 

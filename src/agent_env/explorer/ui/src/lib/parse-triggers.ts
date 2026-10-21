@@ -181,6 +181,15 @@ export function summarizeWhen(when: unknown): WhenSummary {
     case 'action':
       label = String(w.tool ?? '?');
       break;
+    case 'website': {
+      // The path predicate's own text: an exact path, or a regex between slashes.
+      const path = asRecord(w.path);
+      let shown = '';
+      if (typeof path?.equals === 'string') shown = ` ${path.equals}`;
+      else if (typeof path?.regex === 'string') shown = ` /${path.regex}/`;
+      label = `${String(w.method ?? 'any')} ${String(w.app ?? '?')}${shown}`;
+      break;
+    }
     case 'state': {
       const steps = asRecord(w.check)?.steps;
       label = Array.isArray(steps) ? `${steps.length}-step check` : 'check';
