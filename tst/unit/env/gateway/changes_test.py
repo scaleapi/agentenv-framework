@@ -490,6 +490,33 @@ async def test_a_sized_website_write_no_barrier_holds_still_streams(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_a_website_write_no_barrier_holds_provokes_its_triggers_once_its_body_has_ended(monkeypatch):
+    changelog = _Changelog()
+
+    async def body():
+        yield b"a"
+        changelog.write("drafts", "d1")
+        yield b"b"
+
+    transport = httpx.MockTransport(lambda request: httpx.Response(201, content=body()))
+    monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=transport, **kw))
+    gw = _gateway(changelog, website_urls={"mail": "http://mail-frontend"})
+    gw._trigger_engine.register({"triggers": [{**MIRROR, "barrier": None}]})
+    seen: list = []
+    real = gw._trigger_engine.on_website_request
+    gw._trigger_engine.on_website_request = lambda *a: seen.append(changelog.max_id()) or real(*a)
+    try:
+        status, body_bytes = await _http(gw, "POST", "/website/mail/api/drafts")
+        await asyncio.sleep(0.1)
+    finally:
+        await gw._close_child_sessions()
+
+    assert (status, body_bytes, seen) == (201, b"ab", [1])
+    _, changes = await _http(gw, "GET", "/changes")
+    assert [[a["kind"] for a in c["actors"]] for c in json.loads(changes)["changes"]] == [["request"], ["trigger_action"]]
+
+
+@pytest.mark.asyncio
 async def test_a_website_write_still_streaming_under_a_barrier_keeps_its_window_to_the_last_byte(monkeypatch):
     changelog = _Changelog()
 

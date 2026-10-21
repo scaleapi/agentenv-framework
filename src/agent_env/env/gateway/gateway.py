@@ -554,9 +554,11 @@ class Gateway:
         app = request.path_params["service_name"]
         engine = self._trigger_engine
         if app in self.website_urls and (engine.has_website_triggers or engine.has_state_triggers):
-            if isinstance(response, UpstreamResponse) and engine.may_hold_website_request(
-                    self._request_role(request), app, request.method, "/" + request.path_params.get("path", ""),
-                    response.status_code):
+            if isinstance(response, UpstreamResponse):
+                if not engine.may_hold_website_request(self._request_role(request), app, request.method,
+                                                       "/" + request.path_params.get("path", ""), response.status_code):
+                    response.after_body(lambda status: self._fire_website_triggers(request, app, status))  # answered at its last byte
+                    return response
                 await response.read_ahead_if_sized(self.BARRIER_READ_AHEAD_MAX_BYTES)  # its window ends before its triggers run
             barrier_tasks, barrier_timeout_s = await self._fire_website_triggers(request, app, response.status_code)
             await self._await_barriers(barrier_tasks, barrier_timeout_s)

@@ -24,6 +24,7 @@ import json
 import logging
 import posixpath
 from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import Any
 from urllib.parse import unquote
 
 import httpx
@@ -189,6 +190,16 @@ class UpstreamResponse(StreamingResponse):
         except Exception as e:  # past the headers a failure can only reach the client as a cut body; name it here
             logger.error(f"Proxy to {target_url} failed after {sent} bytes: {e!r}")
             raise
+
+    def after_body(self, then: Callable[[int], Awaitable[Any]]) -> None:
+        """Await `then` with the status once the response has ended, after `on_done`."""
+        on_done = self._on_done
+
+        async def both(status: int) -> None:
+            if on_done is not None:
+                await on_done(status)
+            await then(status)
+        self._on_done = both
 
     async def read_ahead_if_sized(self, max_bytes: int) -> None:
         """Read a body sized at most `max_bytes` to its end now and run `on_done` there, so the response then replays it."""
