@@ -299,7 +299,7 @@ class ModalSandboxProvider(SandboxProvider):
             await self._context_image(image)
         else:
             self._context_images.pop(image.image_name, None)
-            if image.digest:
+            if image.image_digest:
                 self._pinned[image.image_name] = image.pinned_name
             else:
                 self._pinned.pop(image.image_name, None)

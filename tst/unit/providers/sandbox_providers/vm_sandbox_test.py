@@ -329,7 +329,7 @@ _PINNED = f"{_GATEWAY}@{_GATEWAY_DIGEST}"
 
 
 def _published() -> DockerImageArtifact:
-    return DockerImageArtifact(id="gw", version=1, description="d", image_name=_GATEWAY, digest=_GATEWAY_DIGEST,
+    return DockerImageArtifact(id="gw", version=1, description="d", image_name=_GATEWAY, image_digest=_GATEWAY_DIGEST,
                                build_context_object_url="s3://bucket/gw/build-context.tar.gz", dockerfile_path="Dockerfile",
                                source_digest="sha256:" + "6" * 64)
 

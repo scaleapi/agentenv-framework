@@ -1170,7 +1170,7 @@ _HOST_IPS = ls._host_ips
 async def test_the_local_provider_pulls_only_the_published_images_its_docker_doesnt_hold(monkeypatch, tmp_path):
     """So a run after the first needs no registry."""
     images = [DockerImageArtifact(id=name, description="d", image_name=f"ghcr.io/team/{name}:src-1",
-                                  digest="sha256:" + "9" * 64) for name in ("held", "new")]
+                                  image_digest="sha256:" + "9" * 64) for name in ("held", "new")]
     monkeypatch.setattr(ls, "present", lambda image_name: image_name.startswith("ghcr.io/team/held:"))
     asked = []
 

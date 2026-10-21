@@ -330,11 +330,11 @@ class VmSandbox(Sandbox):
                         if artifact.tar_gz_object_url and not artifact.rebuilt_for(self.platform)]:
             await self._load_tarballs(tarballs)
         if pulled := [artifact.image_name for artifact in artifacts
-                      if not artifact.tar_gz_object_url and not artifact.context_only and not artifact.digest]:
+                      if not artifact.tar_gz_object_url and not artifact.context_only and not artifact.image_digest]:
             await self.pull_images(pulled)
         if built:
             await self.build_images(built)
-        if published := [artifact for artifact in artifacts if artifact.digest]:
+        if published := [artifact for artifact in artifacts if artifact.image_digest]:
             await self._pull_or_build(published)
 
     async def _pull_or_build(self, artifacts: list) -> None:

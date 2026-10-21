@@ -106,7 +106,7 @@ def _image(label: str, artifact_id: str, description: str, dockerfile: Path, ima
     ref = _PUBLISHED[dockerfile].ref()
     say(f"Registering the published {label} image {ref}...")
     return DockerImageArtifact.put_published(id=artifact_id, description=description, image_name=ref,
-                                             digest=published[dockerfile], context_path=str(dockerfile.parent),
+                                             image_digest=published[dockerfile], context_path=str(dockerfile.parent),
                                              dockerfile_path=dockerfile.name)
 
 
@@ -264,7 +264,7 @@ def infra_to_build(kinds: Iterable[str]) -> list[InfraBuild]:
         if recorded != build_inputs_digest(kind):
             reason = "its build inputs changed" if recorded else "built before agent-env recorded its build inputs"
             builds.append(replace(_pulled_or_built(kind, env_id, reason), kept=kept))
-        elif not all(image.digest for image in env_images(env)) and (published := published_digests(kind)) is not None:
+        elif not all(image.image_digest for image in env_images(env)) and (published := published_digests(kind)) is not None:
             builds.append(InfraBuild(kind, env_id, _BUILT_HERE, SWITCH, tuple(published.items()), kept))
     if problems:
         raise InfraError(problems)

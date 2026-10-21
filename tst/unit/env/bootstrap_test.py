@@ -31,7 +31,7 @@ def puts(local_stores, monkeypatch):
             calls.append((kind, env_id, platform) if published is None else (kind, env_id, "pulled"))
             artifact = get_artifact_store().put_document(DockerImageArtifact(
                 id=f"{kind}-{env_id}", description=kind, image_name=f"{kind}:v1",
-                tar_gz_s3_url=None if published else "file:///x.tar.gz", digest=_DIGEST if published else None))
+                tar_gz_s3_url=None if published else "file:///x.tar.gz", image_digest=_DIGEST if published else None))
             shipped = bootstrap._DOCKERFILES[kind][0].relative_to(bootstrap._ENV_PACKAGE.parent.parent)
             GatewayEnv.put(id=env_id, docker_image_artifact=artifact, metadata={
                 "dockerfile_path": f"/another/install/site-packages/{shipped}",
@@ -252,7 +252,7 @@ def test_a_published_image_is_registered_by_its_tag_and_digest_with_the_context_
     env = bootstrap.put_gateway_env("default", platform=None, published={bootstrap.GATEWAY_DOCKERFILE: _DIGEST})
 
     image, published = env.docker_image_artifact, bootstrap._PUBLISHED[bootstrap.GATEWAY_DOCKERFILE]
-    assert (image.image_name, image.digest, image.tar_gz_object_url) == (published.ref(), _DIGEST, None)
+    assert (image.image_name, image.image_digest, image.tar_gz_object_url) == (published.ref(), _DIGEST, None)
     assert image.pinned_name == f"{published.ref()}@{_DIGEST}"
     assert (image.dockerfile_path, image.source_digest) == ("Dockerfile", f"sha256:{published.tag().removeprefix('src-')}")
     assert get_artifact_store().get_object(image.build_context_object_url)

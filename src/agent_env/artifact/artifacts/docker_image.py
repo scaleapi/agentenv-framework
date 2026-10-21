@@ -69,7 +69,7 @@ _SOURCES_TAG_CHARS = 16
 
 class DockerImageArtifact(Artifact):
     """A Docker image artifact: a tar.gz of the image in the object store; without one, a registry reference a
-    sandbox pulls, by its ``digest`` when it records one, or builds from the build context beside it when it can't; or,
+    sandbox pulls, by its ``image_digest`` when it records one, or builds from the build context beside it when it can't; or,
     with neither, only its build context."""
 
     model_config = ConfigDict(populate_by_name=True)
@@ -88,8 +88,9 @@ class DockerImageArtifact(Artifact):
     source_digest: str | None = Field(
         default=None, description="sha256 over the build context's files and modes, the Dockerfile's path and the platform"
     )
-    digest: str | None = Field(
-        default=None, description="The digest a sandbox pulls image_name's image by, running it as image_name"
+    image_digest: str | None = Field(
+        default=None, description="The registry's digest of the built image, not of its sources (source_digest): a "
+                                  "sandbox pulls the image by it and runs it as image_name"
     )
 
     # No return annotation: pydantic builds the serialization schema from one, and a dict drops the fields.
@@ -241,10 +242,10 @@ class DockerImageArtifact(Artifact):
         return store.put_document(cls(id=id, version=version, description=description, image_name=pinned))
 
     @classmethod
-    def put_published(cls, id: str, *, description: str, image_name: str, digest: str, context_path: str,
+    def put_published(cls, id: str, *, description: str, image_name: str, image_digest: str, context_path: str,
                       dockerfile_path: str) -> "DockerImageArtifact":
         """Register ``image_name``, a registry's tag for the image built from ``context_path``, which it serves under
-        ``digest``: a sandbox pulls the image by the digest and runs it under the tag, or builds it from the uploaded
+        ``image_digest``: a sandbox pulls the image by the digest and runs it under the tag, or builds it from the uploaded
         context when it can't pull it. Nothing is built, pushed or saved, so no Docker is needed here."""
         from agent_env.artifact.store import get_artifact_store
         from agent_env.config import get_config
@@ -258,7 +259,7 @@ class DockerImageArtifact(Artifact):
             version=version,
             description=description,
             image_name=image_name,
-            digest=digest,
+            image_digest=image_digest,
             build_context_object_url=_upload_context(get_config().get_object_store_to_write(prefix, id), prefix, context),
             dockerfile_path=context.dockerfile,
             source_digest=context.source_digest(None),
@@ -311,8 +312,8 @@ class DockerImageArtifact(Artifact):
 
     @property
     def pinned_name(self) -> str:
-        """What a sandbox pulls: ``image_name`` pinned to the image's ``digest`` when it records one."""
-        return f"{self.image_name}@{self.digest}" if self.digest else self.image_name
+        """What a sandbox pulls: ``image_name`` pinned to the ``image_digest`` when it records one."""
+        return f"{self.image_name}@{self.image_digest}" if self.image_digest else self.image_name
 
     @property
     def context_only(self) -> bool:

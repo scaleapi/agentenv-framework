@@ -307,7 +307,7 @@ async def test_a_published_image_is_pulled_by_its_digest_not_built(local_stores,
     pulled = MagicMock()
     monkeypatch.setattr(modal.Image, "from_registry", lambda name, **kwargs: (pulled, name))
     image = _context_image("gateway-image", context).model_copy(
-        update={"image_name": "ghcr.io/team/gateway:src-1", "digest": "sha256:" + "8" * 64})
+        update={"image_name": "ghcr.io/team/gateway:src-1", "image_digest": "sha256:" + "8" * 64})
     provider = _provider()
     await provider.prepare_image(image)
 
@@ -316,7 +316,7 @@ async def test_a_published_image_is_pulled_by_its_digest_not_built(local_stores,
 
     assert create.aio.call_args.kwargs["image"] == (pulled, image.pinned_name)
     assert builds.calls == []
-    await provider.prepare_image(image.model_copy(update={"digest": None}))
+    await provider.prepare_image(image.model_copy(update={"image_digest": None}))
     with _fake_create() as create, pytest.raises(RuntimeError, match="Modal sandbox create failed"):
         await provider.create_container(image_name=image.image_name, port=8000, env={})
     assert create.aio.call_args.kwargs["image"] == (pulled, image.image_name)
