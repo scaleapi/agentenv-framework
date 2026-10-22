@@ -171,7 +171,7 @@ class InstallAgentTaskStep(TaskStep):
         run, whose ``a2a_agent_id`` override can name another, so a task saved naming a placeholder still saves. A step
         naming no agent installs the configured default."""
         try:
-            agent = A2AAgent.resolve(self.a2a_agent_id or get_config().get_default_a2a_agent_id(), self.a2a_agent_version)
+            agent = A2AAgent.get(self.a2a_agent_id or get_config().get_default_a2a_agent_id(), self.a2a_agent_version)
         except (NotFoundError, ValueError, KeyError, TypeError):
             return []
         problem = _install_problem(agent)
@@ -222,7 +222,7 @@ class InstallAgentTaskStep(TaskStep):
         # caller swap which agent gets installed without rewriting the task definition.
         user_overrides = context.metadata.get("user_overrides", {})
         a2a_agent_id = user_overrides.get("a2a_agent_id") or self.a2a_agent_id or get_config().get_default_a2a_agent_id()
-        agent = A2AAgent.resolve(a2a_agent_id, self.a2a_agent_version)
+        agent = A2AAgent.get(a2a_agent_id, self.a2a_agent_version)
         if problem := _install_problem(agent):
             raise RuntimeError(problem)
 

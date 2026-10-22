@@ -357,7 +357,7 @@ class DeployAgentTaskStep(TaskStep):
         user_overrides = context.metadata.get("user_overrides", {})
         a2a_agent_id, a2a_agent_version = self._resolve_agent_ref(context)
         try:
-            agent = A2AAgent.resolve(a2a_agent_id, a2a_agent_version)
+            agent = A2AAgent.get(a2a_agent_id, a2a_agent_version)
         except NotFoundError:
             if not is_local_id(a2a_agent_id):
                 raise

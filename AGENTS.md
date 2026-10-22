@@ -147,13 +147,14 @@ Out-of-tree code plugs in either through `config.toml`, as a `module:Class` poin
   installed bundle's env, agent or artifact by its id, or as the configured default agent: the planner
   pulls it into the run as one of the bundle's own (`bundle/plan.py`), and its ledger row is keyed by the
   installed bundle, so every bundle shares one write of it. Such an id takes no version pin.
-- A bundle can give its agents aliases in an `aliases.toml` at its root (`[agents] <folder> = ["<alias>", ...]`,
-  read by `plugins/_bundles.py`): the shipped `agents` bundle names Claude Code `claude-code`. A reference to an alias
+- A bundle can give its agents aliases in an `aliases.toml` at its root (`[agents] <folder> = ["<alias>", ...]`, read
+  by `plugins/_bundles.py`): the shipped `agents` bundle names Claude Code `claude-code`. A reference to an alias
   names the agent its bundle gives it unless the run's bundle has an entity of that name or the store an agent of that
   id, which wins. The planner pulls the agent in and writes the task naming it by its id (`Plan.aliases`); a step run
-  outside a bundle run looks one up through `A2AAgent.resolve`, store first. agent-env's own bundles' aliases are
-  theirs, and an alias two other bundles give is refused, naming both. `agent-env a2a-agent list` lists the installed
-  agents with their aliases, then the store's; `a2a-agent get` resolves an alias as a step does.
+  outside a bundle run gets it from `A2AAgent.get`, which reads the store first and an alias after (the planner reads
+  the store itself, as `STORE_GETTERS` does). agent-env's own bundles' aliases are theirs, and an alias two other
+  bundles give is refused, naming both. `agent-env a2a-agent list` lists the installed agents with their aliases, then
+  the store's; `a2a-agent get` prints the agent an alias names.
 - Environment providers have no table: an installed package registers one as an `agent_env.env_providers`
   entry point named its `type`, which records carry as `env_provider_type`.
 - `[plugins.<distribution name>]` is reserved for an installed plugin's own settings, read with

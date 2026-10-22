@@ -1,12 +1,13 @@
 """A step deploying an @local agent the store doesn't hold says that a bundle run writes one, not only that it isn't
-found: outside a bundle run, nothing has written it. A step naming an agent by an installed bundle's alias deploys the
-agent the alias names."""
+found: outside a bundle run, nothing has written it. A step naming an agent by an installed bundle's alias deploys, or
+checks, the agent the alias names."""
 
 import pytest
 
-from agent_env.a2a_agent import A2AAgent
+from agent_env.a2a_agent.store import A2AAgentStore
 from agent_env.store.base import NotFoundError
-from agent_env.task_step.context import PromptResponse, TaskStepContext
+from agent_env.task_step.context import DeployedAgent, PromptResponse, TaskStepContext
+from agent_env.task_step.task_steps.a2a_agent_validator.verify_a2a_agent_card import VerifyA2AAgentCardStep
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.install_agent import InstallAgentTaskStep
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
@@ -18,10 +19,10 @@ WRITTEN_BY_A_RUN = r"there is no agent '@local/agentenv-framework/agents/claude-
 
 @pytest.fixture(autouse=True)
 def empty_store(monkeypatch):
-    def missing(cls, id, version=None):
+    def missing(self, id, version=None):
         raise NotFoundError(f"A2AAgent {id} not found")
 
-    monkeypatch.setattr(A2AAgent, "get", classmethod(missing))
+    monkeypatch.setattr(A2AAgentStore, "get", missing)
 
 
 @pytest.mark.asyncio
@@ -58,12 +59,12 @@ class _Looked(Exception):
 @pytest.fixture
 def aliased_store(monkeypatch):
     """A store without an agent of the alias's id, whose lookup of the agent the alias names is recorded."""
-    def get(cls, id, version=None):
+    def get(self, id, version=None):
         if id == AGENT:
             raise _Looked(id)
         raise NotFoundError(f"A2AAgent {id} not found")
 
-    monkeypatch.setattr(A2AAgent, "get", classmethod(get))
+    monkeypatch.setattr(A2AAgentStore, "get", get)
 
 
 @pytest.mark.asyncio
@@ -89,3 +90,11 @@ async def test_a_judge_named_by_the_shipped_alias_is_the_agent_it_names(aliased_
     with pytest.raises(_Looked):
         await step.execute(context)
 
+
+@pytest.mark.asyncio
+async def test_a_validator_step_naming_the_shipped_alias_checks_the_agent_it_names(aliased_store):
+    deployed = DeployedAgent(agent_name="agent", api_url="http://agent", a2a_card={"name": "claude-code"})
+
+    with pytest.raises(_Looked):
+        await VerifyA2AAgentCardStep(id="card", version=None, a2a_agent_id="claude-code").execute(
+            TaskStepContext(deployed_agents=[deployed]))

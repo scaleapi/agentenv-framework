@@ -13,7 +13,7 @@ def get(agent_id: str, agent_version: int | None):
     """Get an A2A agent and output its definition as JSON: the agent a step naming that id deploys, so an alias gets
     the agent it names."""
 
-    agent = A2AAgent.resolve(agent_id, agent_version)
+    agent = A2AAgent.get(agent_id, agent_version)
     if agent.id != agent_id and (named := installed_aliases().target(agent_id)) is not None:
         click.echo(f"{agent_id} → {agent.id} (the alias {named.declared_by} gives it)", err=True)
     click.echo(json.dumps(agent.to_dict(), indent=2))

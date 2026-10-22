@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agent_env.a2a_agent import A2AAgent
+from agent_env.a2a_agent.store import get_a2a_agent_store
 from agent_env.artifact import Artifact, CliArtifact, EnvironmentArtifact, SeedsEnvironments
 from agent_env.artifact.artifact import FolderChild
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
@@ -69,7 +70,13 @@ Installed = Callable[[], "tuple[InstalledBundle, ...]"]
 # The kinds a reference pulls in from an installed bundle.
 _PULLED = (EntityKind.ENV, EntityKind.AGENT, EntityKind.ARTIFACT)
 
-STORE_GETTERS = {EntityKind.ENV: Env.get, EntityKind.AGENT: A2AAgent.get, EntityKind.ARTIFACT: Artifact.get,
+
+def _stored_agent(id: str, version: int | None) -> A2AAgent:
+    """The store's agent of ``id`` itself: a plan weighs an installed alias against the store on its own."""
+    return get_a2a_agent_store().get(id, version)
+
+
+STORE_GETTERS = {EntityKind.ENV: Env.get, EntityKind.AGENT: _stored_agent, EntityKind.ARTIFACT: Artifact.get,
                  EntityKind.TASK: Task.get}
 
 # The type a field naming an environment artifact takes: what an artifact referencing one holds.
