@@ -1,5 +1,7 @@
 """Aliases installed bundles give their agents: the aliases.toml format, and the table of every installed bundle's."""
 
+import os
+
 import pytest
 
 from agent_env.bundle import BundleError, parse_bundle
@@ -51,14 +53,14 @@ def test_an_aliases_file_with_a_problem_gives_no_aliases_and_says_why(tmp_path, 
     assert aliases == {} and len(problems) == 1 and problem in problems[0]
 
 
-@pytest.mark.parametrize("make", [lambda path: path.mkdir(), lambda path: path.symlink_to(path.with_name("gone"))],
-                         ids=["folder", "broken-symlink"])
+@pytest.mark.parametrize("make", [lambda path: path.mkdir(), lambda path: path.symlink_to(path.with_name("gone")),
+                                  lambda path: os.mkfifo(path)], ids=["folder", "broken-symlink", "fifo"])
 def test_an_aliases_file_that_isnt_a_readable_file_gives_no_aliases_and_says_so(tmp_path, make):
     make(tmp_path / ALIASES_FILE)
 
     aliases, [problem] = read_aliases(tmp_path / ALIASES_FILE)
 
-    assert aliases == {} and problem.startswith("can't be read: ")
+    assert (aliases, problem) == ({}, "can't be read: it isn't a regular file")
 
 
 def test_an_installed_bundles_alias_names_its_agent_under_the_bundles_id_root(tmp_path):
@@ -157,7 +159,8 @@ def test_a_misspelled_aliases_file_is_refused_rather_than_ignored(tmp_path):
 @pytest.mark.parametrize("make, problem", [
     (lambda path: path.mkdir(), "aliases.toml: must be a file, not a folder"),
     (lambda path: path.symlink_to(path.with_name("gone")), "aliases.toml: a broken symlink"),
-], ids=["folder", "broken-symlink"])
+    (lambda path: os.mkfifo(path), "aliases.toml: neither a regular file nor a folder"),
+], ids=["folder", "broken-symlink", "fifo"])
 def test_an_aliases_file_that_isnt_a_file_is_refused_rather_than_ignored(tmp_path, make, problem):
     root = layout(tmp_path / "kit", _AGENTS)
     make(root / ALIASES_FILE)

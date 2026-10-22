@@ -176,6 +176,8 @@ def read_aliases(path: Path) -> tuple[dict[str, tuple[str, ...]], list[str]]:
     of either when there's no such file, and no aliases when it has a problem."""
     if not os.path.lexists(path):
         return {}, []
+    if not path.is_file():
+        return {}, ["can't be read: it isn't a regular file"]
     try:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
     except OSError as e:
