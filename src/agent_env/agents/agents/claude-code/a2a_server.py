@@ -640,22 +640,36 @@ class ClaudeCodeChangelogAgent(ClaudeCodeAgent):
         super().__init__()
         self._changelog = Changelog(default_roots=_changelog_roots(), install_hook=_install_changelog_hook,
                                     resume=self._resume_conversation, directory=changelog_dir(os.environ),
-                                    after_apply=_remove_restored_capture_hooks)
-        # A changelog is one sequence of tool calls, so while one is captured, turns take turns.
+                                    after_apply=_remove_restored_capture_hooks,
+                                    meta_path=CLAUDE_STATE_DIR / "changelog-capture.json")
+        # A changelog is one sequence of tool calls, so while one is captured, turns take turns. A turn reads whether
+        # it's captured, and an uncaptured one is counted, under the admission lock an enable holds throughout.
+        self._admission = asyncio.Lock()
         self._capture_turn = asyncio.Lock()
         self._capturing = False
+        self._uncaptured = 0
 
     async def run(self, request: TaskRequest[ClaudeCodeConfig]) -> TaskResult:
-        if not self._capturing:
-            return await super().run(request)
+        async with self._admission:
+            captured = self._capturing
+            if not captured:
+                self._uncaptured += 1
+        if not captured:
+            try:
+                return await super().run(request)
+            finally:
+                self._uncaptured -= 1
         async with self._capture_turn:
             return await super().run(request)
 
     @extension(SNAPSHOT_V1.changelog.enable)
     async def enable_changelog(self, request: NamespaceChangelogEnableRequest) -> NamespaceChangelogEnableResponse:
         """Capture each tool call's writes, uploaded as <root_path>/<position:06d>.tgz under the grant's limits."""
-        answer = await self._changelog.enable(request)
-        self._capturing = True
+        async with self._admission:
+            if self._uncaptured or self._active_contexts:
+                raise HTTPException(status_code=409, detail="cannot enable a changelog while an agent turn is running")
+            answer = await self._changelog.enable(request)
+            self._capturing = True
         return answer
 
     @extension(SNAPSHOT_V1.changelog.apply)
@@ -670,14 +684,19 @@ class ClaudeCodeChangelogAgent(ClaudeCodeAgent):
                 raise HTTPException(status_code=409, detail="cannot apply a changelog while an agent turn is running")
             return await self._changelog.apply(request)
 
-    async def _resume_conversation(self, target_context_id: str | None) -> str | None:
-        """Bind a context to the restored transcript under a fresh session id, so the next turn there resumes the
-        rewound conversation; None when no transcript was restored. The real transcript is the largest."""
-        candidates = list(SESSION_JSONL_DIR.glob("*.jsonl")) if SESSION_JSONL_DIR.is_dir() else []
-        if not candidates:
-            logger.info("agent-changelog resume: no restored transcript")
-            return None
-        source = max(candidates, key=lambda p: p.stat().st_size)
+    async def _resume_conversation(self, target_context_id: str | None, session: str | None) -> str | None:
+        """Bind a context to the restored transcript of ``session``, the last applied tool call's, under a fresh
+        session id, so the next turn there resumes the rewound conversation; None when no transcript was restored."""
+        recorded = SESSION_JSONL_DIR / f"{session}.jsonl" if session and Path(session).name == session else None
+        if recorded is not None and recorded.is_file():
+            source = recorded
+        else:
+            # Increments that recorded no session, or whose transcript wasn't restored: the largest is the likeliest.
+            candidates = list(SESSION_JSONL_DIR.glob("*.jsonl")) if SESSION_JSONL_DIR.is_dir() else []
+            if not candidates:
+                logger.info("agent-changelog resume: no restored transcript")
+                return None
+            source = max(candidates, key=lambda p: p.stat().st_size)
         new_session_id = str(uuid.uuid4())
         rewritten, _ = _rewrite_session_ids(source.read_text(), new_session_id)
         session_jsonl_path(new_session_id).write_text("\n".join(rewritten) + "\n")

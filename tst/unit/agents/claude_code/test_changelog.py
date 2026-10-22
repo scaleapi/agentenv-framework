@@ -95,10 +95,10 @@ def staging(socket_enabled):
 def _changelog(tmp_path, roots=None):
     installed: list[str] = []
     after: list[bool] = []
-    resumed: list[str | None] = []
+    resumed: list[tuple[str | None, str | None]] = []
 
-    async def resume(target_context_id):
-        resumed.append(target_context_id)
+    async def resume(target_context_id, session):
+        resumed.append((target_context_id, session))
         return target_context_id or "minted"
 
     log = tar_changelog.Changelog(
@@ -107,6 +107,7 @@ def _changelog(tmp_path, roots=None):
         resume=resume,
         directory=tmp_path / "changelog",
         after_apply=lambda: after.append(True),
+        meta_path=tmp_path / "state" / "changelog-capture.json",
     )
     return log, installed, after, resumed
 
@@ -116,11 +117,13 @@ def _enable(log, roots=None, **limits):
     return asyncio.run(log.enable(NamespaceChangelogEnableRequest.model_validate(body)))
 
 
-def _capture(log, port: int, tool: str = "Bash") -> subprocess.CompletedProcess:
+def _capture(log, port: int, tool: str = "Bash", session: str = "session-1", path: str | None = None
+             ) -> subprocess.CompletedProcess:
     """One run of the post-tool hook, as the CLI starts it: the agent's environment, the hook's JSON on stdin."""
+    env = {**os.environ, "A2A_PORT": str(port), **({"PATH": path} if path else {})}
     return subprocess.run(
-        [sys.executable, log.capture_path], input=json.dumps({"tool_name": tool}), capture_output=True, text=True,
-        env={**os.environ, "A2A_PORT": str(port)}, timeout=120,
+        [sys.executable, log.capture_path], input=json.dumps({"tool_name": tool, "session_id": session}),
+        capture_output=True, text=True, env=env, timeout=120,
     )
 
 
@@ -357,7 +360,7 @@ def test_apply_extracts_in_order_then_runs_after_apply_and_resumes_only_when_ask
     assert plain.model_dump(exclude_none=True) == {"count": 1}
     assert resumed_answer.model_dump(exclude_none=True) == {"count": 0, "context_id": "ctx"}
     assert target.read_text() == "final"
-    assert after == [True, True] and resumed == ["ctx"]
+    assert after == [True, True] and resumed == [("ctx", None)]
     assert not any((tmp_path / "changelog" / "apply").iterdir())
 
 
@@ -692,3 +695,251 @@ def test_enable_and_apply_refuse_a_changelog_directory_that_isnt_one_this_user_o
         assert raised.value.status_code == 500 and "must be a directory, not a link" in raised.value.detail
     assert installed == [] and after == []
     assert not (tmp_path / "elsewhere" / "config.json").exists()
+
+
+def _rig(tmp_path):
+    """A capture whose roots hold a workspace, a root a tool may remove, and the CLI's state, where its metadata goes."""
+    workspace, removable_root, state = tmp_path / "workspace", tmp_path / "data", tmp_path / "state"
+    for root in (workspace, removable_root, state):
+        root.mkdir()
+    (removable_root / "kept.txt").write_text("in the root")
+    log, _, _, _ = _changelog(tmp_path, roots=[str(workspace), str(removable_root), str(state)])
+    _enable(log)
+    return log, workspace, removable_root
+
+
+def _replay(log, store, staging, sequences) -> int:
+    increments = []
+    for sequence in sequences:
+        key = f"ns/{sequence:06d}.tgz"
+        store.objects[key] = staging.objects[f"{ROOT_PATH}/{sequence:06d}.tgz"]
+        increments.append({"sequence": sequence, "object": read_grant(key, len(store.objects[key]))})
+    return asyncio.run(log.apply(ObjectChangelogApplyRequest.model_validate({"increments": increments}))).count
+
+
+@needs_gnu_tar
+def test_each_capture_records_its_position_and_the_session_of_its_tool_call(tmp_path, staging):
+    log, workspace, _ = _rig(tmp_path)
+
+    (workspace / "a.txt").write_text("a")
+    _capture(log, staging.port, session="the-session")
+
+    assert json.loads(log.meta_path.read_text()) == {"position": 0, "session_id": "the-session", "removed": []}
+    assert str(log.meta_path).lstrip("/") in _members(staging.objects[f"{ROOT_PATH}/000000.tgz"])
+
+
+def test_the_metadata_goes_in_the_config_only_from_inside_a_captured_root(tmp_path):
+    inside, _, _, _ = _changelog(tmp_path, roots=[str(tmp_path / "state")])
+    outside, _, _, _ = _changelog(tmp_path, roots=[str(tmp_path / "elsewhere")])
+    for log in (inside, outside):
+        _enable(log)
+        config = json.loads((tmp_path / "changelog" / "config.json").read_text())
+        assert config.get("meta") == (str(log.meta_path) if log is inside else None)
+
+
+@needs_gnu_tar
+@pytest.mark.parametrize("removed_at", [0, 1])
+def test_a_root_removed_at_any_position_is_removed_on_replay(tmp_path, staging, store, removed_at):
+    log, workspace, removable_root = _rig(tmp_path)
+    for position in range(3):
+        (workspace / f"{position}.txt").write_text(str(position))
+        if position == removed_at:
+            shutil.rmtree(removable_root)
+        _capture(log, staging.port)
+
+    removable_root.mkdir()
+    (removable_root / "kept.txt").write_text("the target's copy")
+    applied = _replay(log, store, staging, [0, 1, 2])
+
+    assert applied == 3 and not removable_root.exists()
+    assert sorted(p.name for p in workspace.iterdir()) == ["0.txt", "1.txt", "2.txt"]
+
+
+@needs_gnu_tar
+def test_a_removal_a_capture_that_wasnt_stored_saw_goes_with_the_next_one(tmp_path, staging, store):
+    log, workspace, removable_root = _rig(tmp_path)
+    refusing = Staging(status=403)
+    shutil.rmtree(removable_root)
+    try:
+        _capture(log, refusing.port)
+    finally:
+        refusing.close()
+    (workspace / "after.txt").write_text("x")
+    _capture(log, staging.port)
+
+    removable_root.mkdir()
+    assert _replay(log, store, staging, [1]) == 1 and not removable_root.exists()
+
+
+@needs_gnu_tar
+@pytest.mark.parametrize("metadata", ["missing", "mismatched"])
+def test_an_increment_without_its_own_metadata_removes_nothing_and_resumes_the_largest(tmp_path, store, metadata):
+    log, _, _, resumed = _changelog(tmp_path)
+    target = tmp_path / "restored" / "file.txt"
+    target.parent.mkdir()
+    target.write_text("restored")
+    members = [target]
+    if metadata == "mismatched":
+        log.meta_path.parent.mkdir(parents=True)
+        log.meta_path.write_text(json.dumps({"position": 5, "session_id": "wrong", "removed": [str(target.parent)]}))
+        members.append(log.meta_path)
+    store.objects["ns/000000.tgz"] = _tgz(*members)
+    target.unlink()
+    increments = [{"sequence": 0, "object": read_grant("ns/000000.tgz", len(store.objects["ns/000000.tgz"]))}]
+
+    answer = asyncio.run(log.apply(ObjectChangelogApplyRequest.model_validate(
+        {"increments": increments, "resume_conversation": True, "target_context_id": "ctx"})))
+
+    assert answer.count == 1 and target.read_text() == "restored"
+    assert resumed == [("ctx", None)]
+
+
+@pytest.mark.parametrize(("path", "allowed"), [
+    ("/tmp/data", True), ("/app", True), ("/", False), ("/etc", False), ("/usr", False), ("relative/path", False),
+    ("/tmp/data/../etc", False), ("/tmp/data/", False), (None, False), ("/does/not/exist", False),
+])
+def test_only_an_absolute_normalized_existing_path_outside_the_system_dirs_is_removed(monkeypatch, path, allowed):
+    monkeypatch.setattr(tar_changelog.os.path, "lexists", lambda p: p != "/does/not/exist")
+
+    assert tar_changelog.removable(path) is allowed
+
+
+@needs_gnu_tar
+def test_apply_resumes_the_session_of_the_last_applied_tool_call_not_the_largest(monkeypatch, tmp_path, store):
+    client, agent = _changelog_client(monkeypatch, tmp_path)
+    sessions = a2a_server.SESSION_JSONL_DIR
+    sessions.mkdir(parents=True)
+    other = sessions / "other.jsonl"
+    other.write_text(json.dumps({"sessionId": "other", "message": "x" * 500}) + "\n")
+    mine = sessions / "mine.jsonl"
+    mine.write_text(json.dumps({"sessionId": "mine", "message": "the rewound one"}) + "\n")
+    meta = agent._changelog.meta_path
+    meta.write_text(json.dumps({"position": 0, "session_id": "mine", "removed": []}))
+    store.objects["ns/000000.tgz"] = _tgz(other, mine, meta)
+    for path in (other, mine, meta):
+        path.unlink()
+
+    response = client.put("/ext/snapshot/changelog", json={
+        "increments": [{"sequence": 0, "object": read_grant("ns/000000.tgz", len(store.objects["ns/000000.tgz"]))}],
+        "resume_conversation": True, "target_context_id": "rewound"})
+
+    assert response.status_code == 200, response.text
+    bound = sessions / f"{agent.session_ref_for_context('rewound')}.jsonl"
+    assert json.loads(bound.read_text().splitlines()[0])["message"] == "the rewound one"
+
+
+def _fake_tar(tmp_path, rc: int) -> str:
+    """A PATH whose tar exits ``rc``: 1 after making the archive (a file changed as tar read it), else before."""
+    fake = tmp_path / f"tar-{rc}"
+    fake.mkdir()
+    real = shutil.which("tar")
+    body = (f'"{real}" "$@"\necho "tar: a.txt: file changed as we read it" >&2\nexit 1\n' if rc == 1
+            else f'echo "tar: cannot open: Permission denied" >&2\nexit {rc}\n')
+    (fake / "tar").write_text("#!/bin/sh\n" + body)
+    (fake / "tar").chmod(0o755)
+    return f"{fake}:{os.environ['PATH']}"
+
+
+@needs_gnu_tar
+def test_a_tar_that_warns_a_file_changed_is_still_stored(tmp_path, staging):
+    log, workspace, _ = _rig(tmp_path)
+
+    (workspace / "a.txt").write_text("a")
+    captured = _capture(log, staging.port, path=_fake_tar(tmp_path, 1))
+
+    assert "tar warned seq=0:" in captured.stderr and "a.txt: file changed as we read it" in captured.stderr
+    assert sorted(staging.objects) == [f"{ROOT_PATH}/000000.tgz"]
+
+
+@needs_gnu_tar
+@pytest.mark.parametrize("rc", [2, 3])
+def test_a_tar_that_fails_stores_nothing_keeps_the_state_and_lets_the_next_position_carry_its_writes(
+        tmp_path, staging, rc):
+    log, workspace, _ = _rig(tmp_path)
+    snar, present = tmp_path / "changelog" / "state.snar", tmp_path / "changelog" / "present.json"
+    before = (snar.read_bytes(), present.read_text())
+
+    (workspace / "a.txt").write_text("a")
+    failed = _capture(log, staging.port, path=_fake_tar(tmp_path, rc))
+    after = (snar.read_bytes(), present.read_text())
+    (workspace / "b.txt").write_text("b")
+    next_one = _capture(log, staging.port)
+
+    assert f"tar failed seq=0 rc={rc}: tar: cannot open: Permission denied" in failed.stderr
+    assert after == before and not list((tmp_path / "changelog").glob("*.tgz"))
+    assert "captured seq=1" in next_one.stderr
+    assert {str(workspace / "a.txt").lstrip("/"), str(workspace / "b.txt").lstrip("/")} <= set(
+        _members(staging.objects[f"{ROOT_PATH}/000001.tgz"]))
+
+
+def _gated_turn(monkeypatch):
+    """A fake CLI that holds its turn open until released; the order turns started and ended in."""
+    events: list[str] = []
+    release = asyncio.Event()
+
+    async def _run_claude(**kwargs):
+        events.append(f"start {kwargs['session_id']}")
+        await release.wait()
+        events.append(f"end {kwargs['session_id']}")
+        return claude_bridge.ClaudeResult(response="ok", tool_call_count=0, session_id=kwargs["session_id"])
+
+    monkeypatch.setattr(a2a_server, "run_claude", _run_claude)
+    return events, release
+
+
+def _request(context: str):
+    return a2a_server.TaskRequest(task_id=f"t-{context}", context_id=context, parts=(a2a_server.TextPart(text="go"),),
+                                  config=a2a_server.ClaudeCodeConfig())
+
+
+def test_enable_refuses_while_a_turn_runs(monkeypatch, tmp_path):
+    _, agent = _changelog_client(monkeypatch, tmp_path)
+    events, release = _gated_turn(monkeypatch)
+    agent.set_session_ref_for_context("a", "a")
+
+    async def scenario():
+        turn = asyncio.create_task(agent.run(_request("a")))
+        while not events:
+            await asyncio.sleep(0.01)
+        with pytest.raises(HTTPException) as refused:
+            await agent.enable_changelog(NamespaceChangelogEnableRequest.model_validate(
+                {"write_namespace": namespace_grant()}))
+        release.set()
+        await turn
+        return refused.value
+
+    refused = asyncio.run(scenario())
+
+    assert (refused.status_code, refused.detail) == (409, "cannot enable a changelog while an agent turn is running")
+    assert not agent._capturing
+
+
+def test_a_turn_that_arrives_during_enable_is_captured_and_takes_its_turn(monkeypatch, tmp_path):
+    _, agent = _changelog_client(monkeypatch, tmp_path)
+    events, release = _gated_turn(monkeypatch)
+    for context in ("a", "b"):
+        agent.set_session_ref_for_context(context, context)
+    enabling = asyncio.Event()
+    real_enable = agent._changelog.enable
+
+    async def slow_enable(request):
+        enabling.set()
+        await asyncio.sleep(0.05)
+        events.append("enabled")
+        return await real_enable(request)
+
+    monkeypatch.setattr(agent._changelog, "enable", slow_enable)
+
+    async def scenario():
+        enable = asyncio.create_task(agent.enable_changelog(NamespaceChangelogEnableRequest.model_validate(
+            {"write_namespace": namespace_grant()})))
+        await enabling.wait()
+        turns = [asyncio.create_task(agent.run(_request(context))) for context in ("a", "b")]
+        await enable
+        await asyncio.sleep(0.05)
+        release.set()
+        await asyncio.gather(*turns)
+
+    asyncio.run(scenario())
+
+    assert events == ["enabled", "start a", "end a", "start b", "end b"]

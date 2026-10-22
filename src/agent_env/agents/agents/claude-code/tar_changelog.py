@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -134,14 +135,27 @@ def _store(changelog_dir, cfg, k, local):
     return True
 
 
+def _read_json(path, default):
+    try:
+        return json.load(open(path))
+    except Exception:
+        return default
+
+
+def _tail(stderr):
+    return stderr.decode(errors="replace").strip()[-500:]
+
+
 def main():
     cfg = json.load(open(CFG))
     changelog_dir, snar, roots, epoch = cfg["dir"], cfg["snar"], cfg["roots"], cfg.get("epoch")
+    meta, present_file = cfg.get("meta"), os.path.join(changelog_dir, "present.json")
     try:
         hook = json.load(sys.stdin)
     except Exception:
         hook = {}
     tool = str(hook.get("tool_name") or "tool").replace("/", "_")[:40]
+    session = hook.get("session_id") if isinstance(hook.get("session_id"), str) else None
     seqf = os.path.join(changelog_dir, "seq")
     turnf = os.path.join(changelog_dir, "turn")
     held = os.path.join(changelog_dir, "held.%d")
@@ -155,7 +169,6 @@ def main():
         _write_atomic(seqf, str(k + 1))
         _write_atomic(held % k, str(os.getpid()))
     local = os.path.join(changelog_dir, "%04d.tgz" % k)
-    present = [r for r in roots if os.path.exists(r)]
     # The archives are incremental, so they're made in position order: wait for this position's turn, passing over
     # positions whose hook died first. A killed hook leaves a gap at its own position instead of shifting later ones.
     archived = stored = False
@@ -168,24 +181,34 @@ def main():
             while turn < k and not _alive(changelog_dir, turn):
                 turn += 1
             if turn == k:
-                # tar works on a copy of the incremental state, promoted only once the archive is stored: a tar that
-                # outlives a killed hook, or an upload that fails, leaves the writes for the next archive to carry.
+                # tar works on a copy of the incremental state, promoted with the roots present only once the archive
+                # is stored: a capture that isn't stored leaves its writes, and its removals, for the next to carry.
                 work = "%s.%d" % (snar, k)
                 if os.path.exists(snar):
                     shutil.copyfile(snar, work)
-                subprocess.run(
+                present = [r for r in roots if os.path.exists(r)]
+                if meta:
+                    removed = [r for r in _read_json(present_file, []) if r not in present]
+                    _write_atomic(meta, json.dumps({"position": k, "session_id": session, "removed": removed}))
+                tar = subprocess.run(
                     ["tar", "--listed-incremental=" + work, "--exclude=" + changelog_dir, "-czf", local, *present],
-                    check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, pass_fds=(lock.fileno(),),
+                    check=False, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, pass_fds=(lock.fileno(),),
                 )
                 archived = True
                 try:
-                    stored = _store(changelog_dir, cfg, k, local)
+                    if tar.returncode >= 2:
+                        sys.stderr.write("[changelog] tar failed seq=%d rc=%d: %s\n" % (k, tar.returncode, _tail(tar.stderr)))
+                    else:
+                        if tar.returncode == 1:  # a file changed as tar read it; the archive is still whole
+                            sys.stderr.write("[changelog] tar warned seq=%d: %s\n" % (k, _tail(tar.stderr)))
+                        stored = _store(changelog_dir, cfg, k, local)
                 except Exception as e:
                     sys.stderr.write("[changelog] upload of seq=%d failed; the next capture carries its writes: %s\n"
                                      % (k, e))
                 finally:
                     if stored:
                         os.replace(work, snar)
+                        _write_atomic(present_file, json.dumps(present))
                     else:
                         _remove(work)
                     _remove(local)
@@ -308,24 +331,51 @@ def _own_directory(path: Path) -> Path:
     return path
 
 
+# Never removed on replay, whatever an increment's metadata says.
+_SYSTEM_DIRS = frozenset({"/", "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib32", "/lib64", "/libx32",
+                          "/media", "/mnt", "/opt", "/proc", "/root", "/run", "/sbin", "/srv", "/sys", "/tmp", "/usr",
+                          "/var"})
+
+
+def _under(path: str, roots: Iterable[str]) -> bool:
+    return any(path == root or path.startswith(root.rstrip("/") + "/") for root in roots)
+
+
+def removable(path: object) -> bool:
+    """Whether a removed root an increment names may be removed on replay: an absolute, normalized path that exists
+    and isn't / or a top-level system directory."""
+    return (isinstance(path, str) and os.path.isabs(path) and os.path.normpath(path) == path
+            and path not in _SYSTEM_DIRS and os.path.lexists(path))
+
+
+def _remove_tree(path: str) -> None:
+    if os.path.isdir(path) and not os.path.islink(path):
+        shutil.rmtree(path)
+    else:
+        os.unlink(path)
+
+
 class Changelog:
     """The ``enable-changelog`` / ``apply-changelog`` pair: ``install_hook`` registers the capture as the CLI's
-    post-tool hook, ``after_apply`` runs once increments are extracted, and ``resume`` binds a context to the restored
-    conversation, or returns None when there's none."""
+    post-tool hook, ``after_apply`` runs once increments are extracted, and ``resume(target, session)`` binds a context
+    to the restored conversation, or returns None. ``meta_path`` is where each capture records its position, session and
+    the roots it saw removed."""
 
     def __init__(
         self,
         default_roots: Iterable[str],
         install_hook: Callable[[str], None],
-        resume: Callable[[str | None], Awaitable[str | None]],
+        resume: Callable[[str | None, str | None], Awaitable[str | None]],
         directory: Path,
         after_apply: Callable[[], None],
+        meta_path: Path,
     ) -> None:
         self.default_roots = list(default_roots)
         self.install_hook = install_hook
         self.resume = resume
         self.after_apply = after_apply
         self.directory = directory
+        self.meta_path = meta_path
         self.snar = f"{directory}/state.snar"
         self.config_path = f"{directory}/config.json"
         self.capture_path = f"{directory}/capture.py"
@@ -349,8 +399,12 @@ class Changelog:
         return NamespaceChangelogEnableResponse(roots=roots)
 
     def _reset(self, roots: list[str], write_namespace: dict) -> None:
+        roots = [os.path.normpath(root) for root in roots]
         config = {"dir": str(self.directory), "snar": self.snar, "roots": roots, "epoch": uuid.uuid4().hex,
                   "write_namespace": write_namespace}
+        # The metadata only reaches the increments, and so the replay, from inside a captured root.
+        if _under(str(self.meta_path), roots):
+            config["meta"] = str(self.meta_path)
         _own_directory(self.directory)
         # Reset under both capture locks, so a hook still running for an earlier capture can't write into this one:
         # it finds the new epoch in the config and stops.
@@ -369,6 +423,7 @@ class Changelog:
             ):
                 stale.unlink(missing_ok=True)
             present = [r for r in roots if os.path.exists(r)]
+            (self.directory / "present.json").write_text(json.dumps(present))
             subprocess.run(
                 ["tar", f"--listed-incremental={self.snar}", f"--exclude={self.directory}", "-cf", "/dev/null",
                  *present],
@@ -378,17 +433,40 @@ class Changelog:
     async def apply(self, request: ObjectChangelogApplyRequest) -> ObjectChangelogApplyResponse:
         """Extract the granted increments in order at / onto a fresh agent of the same image, deletions included; an
         increment that isn't a readable archive fails the apply (422) before it's extracted."""
-        applied = await self._apply_increments(request.increments)
+        applied, session = await self._apply_increments(request.increments)
         logger.info(f"agent-changelog applied {len(applied)} granted increments: {applied}")
         self.after_apply()
-        context_id = await self.resume(request.target_context_id) if request.resume_conversation else None
+        context_id = await self.resume(request.target_context_id, session) if request.resume_conversation else None
         return ObjectChangelogApplyResponse(count=len(applied), context_id=context_id)
 
-    async def _apply_increments(self, increments: list[ChangelogIncrement]) -> list[dict]:
+    def _metadata(self, sequence: int) -> dict | None:
+        """The metadata the increment at ``sequence`` restored, or None when it carries none of its own: one captured
+        before captures wrote it, or with roots that leave out the CLI's state."""
+        try:
+            meta = json.loads(self.meta_path.read_text())
+        except (OSError, ValueError):
+            return None
+        if not isinstance(meta, dict) or meta.get("position") != sequence:
+            return None
+        return meta
+
+    def _replay_removals(self, sequence: int, removed: object) -> None:
+        for path in removed if isinstance(removed, list) else []:
+            if not removable(path):
+                logger.warning(f"agent-changelog increment {sequence:06d}: not removing {path!r}")
+                continue
+            _remove_tree(path)
+            logger.info(f"agent-changelog increment {sequence:06d}: removed root {path}")
+
+    async def _apply_increments(self, increments: list[ChangelogIncrement]) -> tuple[list[dict], str | None]:
+        """The increments applied, and the session of the last one's tool call, or None when it recorded none."""
         apply_dir = _own_directory(_own_directory(self.directory) / "apply")
         applied: list[dict] = []
+        session: str | None = None
         for increment in increments:
             local = apply_dir / f"{increment.sequence:06d}.tgz"
+            # A metadata file left from an earlier increment never passes for this one's.
+            self.meta_path.unlink(missing_ok=True)
             try:
                 await download(increment.object, local)
                 listing = await asyncio.to_thread(
@@ -412,5 +490,10 @@ class Changelog:
                 # still restore, so it counts.
                 logger.warning(f"agent-changelog increment {increment.sequence:06d}: tar exited {proc.returncode}: "
                                f"{_stderr_tail(proc.stderr)}")
+            meta = await asyncio.to_thread(self._metadata, increment.sequence)
+            if meta is not None:
+                await asyncio.to_thread(self._replay_removals, increment.sequence, meta.get("removed"))
+            recorded = meta.get("session_id") if meta is not None else None
+            session = recorded if isinstance(recorded, str) and recorded else None
             applied.append({"seq": increment.sequence, "tar_rc": proc.returncode})
-        return applied
+        return applied, session
