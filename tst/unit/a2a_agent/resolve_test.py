@@ -85,3 +85,13 @@ def test_the_stores_agent_of_a_refused_alias_id_is_the_one_it_names(aliases):
     _put("helper")
 
     assert A2AAgent.resolve("helper").id == "helper"
+
+
+def test_a_name_close_to_an_alias_is_pointed_at_it_unless_it_takes_a_version(aliases):
+    with pytest.raises(NotFoundError, match="there is no agent 'claude_code' in the store; did you mean the alias "
+                                            "'claude-code'"):
+        A2AAgent.resolve("claude_code")
+    with pytest.raises(NotFoundError) as pinned:
+        A2AAgent.resolve("claude_code", 2)
+
+    assert "did you mean" not in str(pinned.value)

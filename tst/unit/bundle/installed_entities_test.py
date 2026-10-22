@@ -440,6 +440,15 @@ def test_the_stores_agent_of_a_refused_alias_id_is_the_one_it_names(bundle_dir, 
     assert [ref.id for ref in plan.store_refs] == ["solver-x"] and plan.aliases == {}
 
 
+def test_an_agent_misspelling_an_alias_is_pointed_at_it(bundle_dir, tmp_path):
+    kit = _kit(tmp_path, ALIASED)
+    resolved = _task(bundle_dir, [{"id": "agent", "type": "deploy_agent", "a2a_agent_id": "solver_x"}])
+
+    assert _problems(resolved, kit) == (
+        "tasks/t.json: step 'agent': a2a_agent_id: there is no agent 'solver_x' in the store; did you mean the alias "
+        "'solver-x'? agent-env a2a-agent list lists the agents a task can name",)
+
+
 def test_an_alias_whose_agent_its_bundle_lacks_is_refused_naming_the_bundle(bundle_dir, tmp_path):
     kit = _kit(tmp_path, {ALIASES_FILE: '[agents]\nghost = ["ghost"]\n'})
     resolved = _task(bundle_dir, [{"id": "agent", "type": "deploy_agent", "a2a_agent_id": "ghost"}])

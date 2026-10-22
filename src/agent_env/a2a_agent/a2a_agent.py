@@ -414,7 +414,11 @@ class A2AAgent:
         except NotFoundError:
             aliases = installed_aliases()
             named, refusal = aliases.target(id), aliases.refusal(id)
-            if named is None and refusal is None or version is not None and cls._stored(id):
+            if named is None and refusal is None:
+                if version is None and (hint := aliases.hint(id)):
+                    raise NotFoundError(f"there is no agent {id!r} in the store{hint}") from None
+                raise
+            if version is not None and cls._stored(id):
                 raise
             if named is None:
                 raise NotFoundError(refusal) from None

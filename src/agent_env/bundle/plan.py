@@ -198,6 +198,7 @@ class _Planner:
         self.others: tuple[InstalledBundle, ...] | None = None  # the installed bundles but this one, once listed
         self.pullable: dict[str, _Pullable | str] = {}  # each installed bundle read, by id root, or why it can't be
         self.unpulled: dict[tuple[EntityKind, str, int | None], str] = {}  # why an installed bundle's id isn't pulled
+        self.alias_table: InstalledAliases | None = None  # the installed aliases, once a plan reads them
         self.pulling: set[_Key] = set()
         self.own = _by_id(resolved.bundle)  # what a pulled entity's id names in this bundle
         images: dict[BundleEntry, list[BundleImage]] = {}
@@ -258,6 +259,7 @@ class _Planner:
         if self.installed is None:
             return {}
         table, uses, stored, default = installed_aliases(self.installed()), {}, {}, _UNREAD
+        self.alias_table = table
         for index, entry in enumerate(self.entries):
             if entry.entry.kind is not BundleKind.TASK:
                 continue
@@ -604,7 +606,10 @@ class _Planner:
         if found is None:
             at = f" version {ref.version}" if ref.version is not None else ""
             other = self.named.get(fold(ref.id))
-            hint = f"; this bundle's {other.kind.store} {other.name!r} has that name" if other is not None else ""
+            if other is not None:
+                hint = f"; this bundle's {other.kind.store} {other.name!r} has that name"
+            else:
+                hint = self.alias_table.hint(ref.id) if ref.kind is EntityKind.AGENT and self.alias_table else ""
             return f"there is no {kind} {ref.id!r}{at} in the store{hint}"
         if isinstance(found, str):
             return f"{kind} {ref.id!r} {found}"

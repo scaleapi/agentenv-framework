@@ -86,6 +86,14 @@ def test_agent_envs_own_aliases_are_refused_to_any_other_bundle(tmp_path):
         "can't give it",)}
 
 
+def test_a_name_close_to_an_alias_is_pointed_at_it(tmp_path):
+    table = installed_aliases((_bundle(tmp_path, "agents", aliases='[agents]\nclaude-code = ["claude-code"]\n'),))
+
+    assert table.hint("claude_code") == ("; did you mean the alias 'claude-code'? agent-env a2a-agent list lists the "
+                                         "agents a task can name")
+    assert table.hint("my-own-agent") == ""
+
+
 def test_an_alias_two_other_bundles_give_names_neither_and_says_both(tmp_path):
     one = _bundle(tmp_path, "kit", package="acme-kit", aliases='[agents]\na = ["helper"]\n')
     two = _bundle(tmp_path, "tools", package="zeta-tools", aliases='[agents]\nb = ["helper"]\n')

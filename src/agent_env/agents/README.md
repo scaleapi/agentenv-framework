@@ -5,7 +5,8 @@ server: the prompt goes to `claude -p`, the task env's MCP servers to `--mcp-con
 turn's trajectory. It's the default agent, so a `deploy_agent` or an agent judge that names no agent deploys it. Name it
 from another bundle as `claude-code`, the alias `aliases.toml` gives it, or by its id,
 `@local/agentenv-framework/agents/claude-code`; an agent of your own with the id `claude-code`, in your bundle or your
-store, is the one `claude-code` names instead.
+store, is the one `claude-code` names instead. `agent-env a2a-agent list` lists the agents a task can name, with
+their aliases.
 
 It needs Docker, and a model endpoint serving Anthropic's Messages API, `<base>/v1/messages`, which a LiteLLM gateway
 does: the `[model]` base URL and key reach it as `ANTHROPIC_BASE_URL` and a bearer token, and `[model.headers]` are sent

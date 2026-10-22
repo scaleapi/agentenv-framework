@@ -13,6 +13,7 @@ machinery, whose run imports the task steps.
 
 from __future__ import annotations
 
+import difflib
 import importlib.util
 import os
 import re
@@ -169,6 +170,18 @@ class InstalledAliases:
     def of(self, bundle: InstalledBundle) -> tuple[str, ...]:
         """The aliases that name ``bundle``'s agents, in name order."""
         return tuple(sorted(alias for alias, named in self.aliases.items() if named.bundle == bundle))
+
+    def naming(self, agent_id: str) -> tuple[str, ...]:
+        """The aliases that name the agent ``agent_id``, in name order."""
+        return tuple(sorted(alias for alias, named in self.aliases.items() if named.agent_id == agent_id))
+
+    def hint(self, name: str) -> str:
+        """For ``name``, which names no agent: the aliases close to it, or ''."""
+        close = difflib.get_close_matches(name, sorted(self.aliases), n=3)
+        if not close:
+            return ""
+        return (f"; did you mean the alias {' or '.join(repr(alias) for alias in close)}? agent-env a2a-agent list "
+                "lists the agents a task can name")
 
 
 def read_aliases(path: Path) -> tuple[dict[str, tuple[str, ...]], list[str]]:
