@@ -13,8 +13,8 @@ does: the `[model]` base URL and key reach it as `ANTHROPIC_BASE_URL` and a bear
 on every model call. The `LITELLM_*` variables stay in its environment too, so a script the model runs can call the
 endpoint. The image holds Claude Code, which is Anthropic's software under its
 [Commercial Terms](https://www.anthropic.com/legal/commercial-terms); a release also publishes the image, CLI included,
-at `ghcr.io/scaleapi/agentenv-claude-code:src-<hex>`, built from this folder with the protocol pinned as the wheel
-ships it. A run that deploys the agent registers that image when it's published for the sources installed: each deploy
+at `ghcr.io/scaleapi/agentenv-claude-code:src-<hex>`, built from this folder, and again only when
+the folder changes. A run that deploys the agent registers that image when it's published for the sources installed: each deploy
 pulls it by its digest and builds it from this folder only when it can't, and a provider that runs images by name can
 run it. The CLI's version is the Dockerfile's
 `CLAUDE_CODE_VERSION`. The image gives the scripts the model runs
@@ -28,7 +28,8 @@ or in `/app` on the host.
 
 `agents/pi/` runs the [pi coding agent](https://github.com/earendil-works/pi/tree/main/packages/coding-agent) behind
 the protocol's A2A agent framework: each turn is one `pi --mode json` run, the task env's MCP servers go to its
-`mcp.json`, and its JSON events are the turn's trajectory. Name it as `@local/agentenv-framework/agents/pi`. It calls
+`mcp.json`, and its JSON events are the turn's trajectory. Name it as `pi`, its alias, or by its id,
+`@local/agentenv-framework/agents/pi`. It calls
 the `[model]` endpoint as an OpenAI-compatible one and takes its model from the prompt, so its smoke task needs
 `[model] default` (or the `agent` role) set. It declares `install/v1` too, for Debian or Ubuntu targets.
 Its folder's `README.md` covers the extensions it implements.
@@ -36,9 +37,15 @@ Its folder's `README.md` covers the extensions it implements.
 `agents/openhands/` runs the [OpenHands](https://github.com/OpenHands/software-agent-sdk) agent behind the
 protocol's A2A agent framework, driving the OpenHands SDK in process rather than a CLI: each turn is one run of a
 persisted SDK conversation, the task env's MCP servers go to its `mcp_config`, and its SDK events are the turn's
-trajectory. Name it as `@local/agentenv-framework/agents/openhands`. It calls the `[model]` endpoint through LiteLLM
-and takes its model from the prompt, so its smoke task needs `[model] default` (or the `agent` role) set. It declares
-`install/v1` too, for Debian or Ubuntu targets. Its folder's `README.md` covers the extensions it implements.
+trajectory. Name it as `openhands`, its alias, or by its id, `@local/agentenv-framework/agents/openhands`. It
+calls the `[model]` endpoint through LiteLLM and takes its model from the prompt, so its smoke task needs
+`[model] default` (or the `agent` role) set. It declares `install/v1` too, for Debian or Ubuntu targets. Its folder's
+`README.md` covers the extensions it implements.
 
-`agent-env run agents` runs every agent's smoke task, building each image; `--task claude-code-smoke` runs Claude
+A release publishes pi's and OpenHands' images too, at `ghcr.io/scaleapi/agentenv-pi:src-<hex>` and
+`ghcr.io/scaleapi/agentenv-openhands:src-<hex>`, each built again only when its folder changes, and a run deploys
+them as it does Claude Code's: it pulls the image
+published for the sources installed, by its digest, and builds it from the agent's folder only when it can't.
+
+`agent-env run agents` runs every agent's smoke task, pulling or building each image; `--task claude-code-smoke` runs Claude
 Code's alone, `--task pi-smoke` pi's, `--task openhands-smoke` OpenHands'.

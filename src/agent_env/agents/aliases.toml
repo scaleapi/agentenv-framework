@@ -2,3 +2,4 @@
 [agents]
 claude-code = ["claude-code"]
 pi = ["pi"]
+openhands = ["openhands"]

@@ -42,7 +42,8 @@ def test_the_shipped_aliases_are_agent_envs_alone_and_claude_code_names_the_defa
 
     assert table.refused == {} and table.refused_claims == {}
     assert {alias: named.agent_id for alias, named in table.aliases.items()} == {
-        "claude-code": "@local/agentenv-framework/agents/claude-code", "pi": "@local/agentenv-framework/agents/pi"}
+        "claude-code": "@local/agentenv-framework/agents/claude-code", "pi": "@local/agentenv-framework/agents/pi",
+        "openhands": "@local/agentenv-framework/agents/openhands"}
     assert table.target("claude-code").agent_id == get_config().get_default_a2a_agent_id()
 
 

@@ -50,8 +50,9 @@ class PublishedImage:
         return f"{self.repository}:{self.tag()}"
 
 
-# The images of the agents agent-env ships that its releases publish, Claude Code's CLI included: the default agent's.
-AGENT_IMAGES = (PublishedImage("agentenv-claude-code", _AGENTS / "claude-code" / "Dockerfile"),)
+# The images of the agents agent-env ships that its releases publish: one per agent folder, Claude Code's CLI included.
+AGENT_IMAGES = tuple(PublishedImage(f"agentenv-{folder.name}", folder / "Dockerfile")
+                     for folder in sorted(_AGENTS.iterdir()) if (folder / "Dockerfile").is_file())
 
 
 def published_digest(image: PublishedImage) -> str | None:
