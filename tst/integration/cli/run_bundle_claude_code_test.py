@@ -11,12 +11,16 @@ import pytest
 from click.testing import CliRunner
 
 from agent_env.a2a_agent import A2AAgent, protocol
+from agent_env.a2a_agent.store import get_a2a_agent_instance_store
 from agent_env.artifact.store import reset_artifact_store
+from agent_env.bundle import parse_bundle
+from agent_env.bundle.installed import find_bundle
 from agent_env.cli import cli
 from agent_env.config import configure, get_config, reset_config
 from agent_env.providers.sandbox_providers.local_sandbox import _host_ips
 from agent_env.store.object_store.local.grant_server import grant_server
 from agent_env.store.routing import namespace_routing
+from agent_env.task import Task
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_step import TaskStep
@@ -74,9 +78,10 @@ def _bundle(root, name, steps):
     return root
 
 
-def _ask(prompt, needle, env_ids=()):
+def _ask(prompt, needle, env_ids=(), agent_id=None):
+    named = {"a2a_agent_id": agent_id} if agent_id else {}
     return [
-        {"id": "agent", "type": "deploy_agent", "env_ids": list(env_ids), "sandbox_type": "local"},
+        {"id": "agent", "type": "deploy_agent", "env_ids": list(env_ids), "sandbox_type": "local", **named},
         {"id": "ask", "type": "prompt_agent", "prompt_id": "ask", "prompt": prompt, "depends_on": ["agent"]},
         {"id": "check", "type": "agent_prompt_response_verifier", "prompt_id": "ask", "verifier_id": "answer",
          "criteria": [{"type": "response_contains", "needles": [needle]}], "depends_on": ["ask"]},
@@ -106,6 +111,49 @@ def test_a_task_naming_no_agent_runs_the_shipped_claude_code_against_the_configu
     assert "building with docker" not in second.output, second.output
     assert f"{IMAGE}: v1, unchanged" in second.output and f"{AGENT}: v1, unchanged" in second.output, second.output
     assert "tasks/ask.json v1: passed" in second.output, second.output
+
+
+def _deployed(agent_id):
+    """The ids of the agents a deploy_agent step naming ``agent_id`` deploys, run outside a bundle."""
+    context = TaskStepContext()
+
+    async def run():
+        try:
+            await DeployAgentTaskStep(id="agent", version=None, a2a_agent_id=agent_id, sandbox_type="local").execute(
+                context)
+            return [get_a2a_agent_instance_store().get(agent.instance_id).agent_id for agent in context.deployed_agents]
+        finally:
+            await teardown_run(context)
+
+    with namespace_routing():
+        return asyncio.run(run())
+
+
+def test_the_alias_claude_code_names_the_shipped_agent_until_the_store_has_an_agent_of_that_id(state, endpoint):
+    endpoint.respond = answer("pong")
+    shipped = get_config().get_default_a2a_agent_id()
+    aliased = _bundle(state / "aliased", "ask", _ask("Say pong.", "pong", agent_id="claude-code"))
+
+    first = _run(aliased)
+
+    assert first.exit_code == 0 and "tasks/ask.json v1: passed" in first.output, first.output
+    assert f"claude-code → {shipped} (the alias agentenv-framework's agents bundle gives it)" in first.output
+    assert _deployed("claude-code") == [shipped]
+
+    put = CliRunner().invoke(cli, ["a2a-agent", "put", "--id", "claude-code", "--skip-validation", "--platform", "",
+                                   "--dockerfile", str(find_bundle("agents").root / "agents/claude-code/Dockerfile")])
+    assert put.exit_code == 0, put.output
+    own = _bundle(state / "own", "ask", _ask("Say pong.", "pong", agent_id="claude-code"))
+
+    second = _run(own)
+
+    assert second.exit_code == 0 and "tasks/ask.json v1: passed" in second.output, second.output
+    assert "claude-code → the store's agent 'claude-code' v1, which shadows the alias" in second.output, second.output
+    assert _deployed("claude-code") == ["claude-code"]
+    with namespace_routing():
+        named = [Task.get(f"{parse_bundle(root).id_root}/ask").to_dict()["steps"][0]["a2a_agent_id"]
+                 for root in (aliased, own)]
+    assert named == [shipped, "claude-code"]
 
 
 def test_the_shipped_claude_code_calls_the_tools_of_the_env_it_is_deployed_with(state, endpoint):
