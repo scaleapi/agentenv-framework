@@ -1,0 +1,4 @@
+# Ids a task can name these agents by; a task's own bundle, or the store, wins over an alias.
+[agents]
+claude-code = ["claude-code"]
+pi = ["pi"]

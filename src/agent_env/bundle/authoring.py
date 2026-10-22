@@ -23,7 +23,9 @@ from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGa
 from agent_env.providers.env_providers.env_provider import _env_provider_class
 from agent_env.utils.card_naming import card_names_in_files
 
-from ._fs import os_reason, relative, show, with_article
+from agent_env.utils.paths import os_reason
+
+from ._fs import relative, show, with_article
 from .parse import CONFIG_FILES, LEAVINGS, NAMED_BY, Bundle, BundleEntry, BundleError
 
 A = TypeVar("A", bound=Artifact)

@@ -331,7 +331,7 @@ class _Walk:
         """Check an agent deploy, ``given`` the model variables its step sets, or ``needs`` those the config must."""
         if agent_id is None:
             self.default_agent_users.append((where, unnamed))
-            agent_id = get_config().get_default_a2a_agent_id()
+            agent_id = self._default_agent_id()
         if needed := needs if needs is not None else _MODEL_VARS - given - self._agent_env_vars(agent_id, version):
             self.model_users.append((where, needed))
         image = self._agent_image(agent_id, version)
@@ -487,10 +487,15 @@ class _Walk:
         if builds and (missing := docker_plugin_missing("buildx")):
             self.run_problems.append(f"the run builds {_listed(builds)} with this machine's Docker, and {missing}")
 
+    def _default_agent_id(self) -> str:
+        """The agent a step naming none deploys: the configured default, or the agent it names when it's an alias."""
+        default = get_config().get_default_a2a_agent_id()
+        return self.plan.aliases[default].agent_id if default in self.plan.aliases else default
+
     def _default_agent(self) -> None:
         if not self.default_agent_users:
             return
-        agent_id = get_config().get_default_a2a_agent_id()
+        agent_id = self._default_agent_id()
         if agent_id in self.agents:
             return
         try:

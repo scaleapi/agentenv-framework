@@ -21,6 +21,7 @@ from agent_env.bundle.installed import BUNDLES, CORE, checked, find_bundle, inst
 from agent_env.cli import cli
 from agent_env.config.runtime import Config
 from agent_env.plugins import _discovery
+from agent_env.plugins._bundles import ALIASES_FILE
 from agent_env.plugins._report import INCOMPATIBLE_CORE, INVALID_PLUGIN, NAME_CONFLICT
 from agent_env.task_step.task_step import TaskStep
 from tst.unit.plugins_test import _Dist
@@ -230,6 +231,29 @@ def test_the_cli_lists_the_installed_bundles_by_the_name_each_runs_by(site, monk
     assert folders == {"demo-a/hello": str(site / "demo_bundles_a/hello"), "demo-b/hello": str(site / "demo_bundles_b/hello"),
                        "empty": str(site / "demo_bundles_a/empty"), "broken": str(site / "demo_bundles_a/broken")}
     assert lines[-1] == "Run one with agent-env run NAME. To change one, copy its folder and run the copy."
+
+
+def test_the_cli_lists_each_bundles_aliases_and_the_plugin_report_says_which_a_bundle_is_refused(site, monkeypatch):
+    """agent-env's own bundles' aliases are theirs: another bundle that gives one doesn't get it."""
+    folder = _package(site, "demo_bundles", ["ours", "theirs"])
+    for name, aliases in [("ours", '["helper"]'), ("theirs", '["helper", "fixer"]')]:
+        (folder / name / "agents/solver").mkdir(parents=True)
+        (folder / name / "agents/solver/Dockerfile").write_text("FROM scratch\n")
+        (folder / name / ALIASES_FILE).write_text(f"[agents]\nsolver = {aliases}\n")
+    _registered(monkeypatch, _ep("ours", "demo_bundles", dist=CORE), _ep("theirs", "demo_bundles", dist="demo-a"))
+
+    listing = CliRunner().invoke(cli, ["run"]).output.splitlines()
+    report = json.loads(CliRunner().invoke(cli, ["plugin", "list", "--json", "--no-load"]).output)
+
+    assert listing[listing.index(next(line for line in listing if line.startswith("ours"))) + 2].strip() == (
+        "aliases: helper")
+    assert listing[listing.index(next(line for line in listing if line.startswith("theirs"))) + 2].strip() == (
+        "aliases: fixer")
+    [theirs] = [c for plugin in report["plugins"] for c in plugin["contributions"]
+                if c["group"] == BUNDLES and c["name"] == "theirs"]
+    assert (theirs["status"], theirs["code"], theirs["reason"]) == (
+        "active", "alias-refused",
+        "'helper' is agent-env's own alias, of @local/agentenv-framework/ours/solver, so this bundle can't give it")
 
 
 def test_the_cli_says_so_when_no_bundles_are_installed_and_needs_a_bundle_for_its_options(monkeypatch):

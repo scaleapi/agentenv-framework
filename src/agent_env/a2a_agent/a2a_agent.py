@@ -15,6 +15,8 @@ from agentenv_protocol.a2a_agent import STANDARD_EXTENSIONS
 from agent_env.config import get_config
 from agent_env.config.model import MODEL_HEADERS_ENV
 from agent_env.entity.refs import EntityRef
+from agent_env.plugins._bundles import installed_aliases
+from agent_env.store.base import NotFoundError
 from agent_env.providers.sandbox_providers.sandbox import (
     SANDBOX_LABEL,
     NetworkPolicy,
@@ -400,6 +402,28 @@ class A2AAgent:
     def get(cls, id: str, version: Optional[int] = None) -> A2AAgent:
         from .store import get_a2a_agent_store
         return get_a2a_agent_store().get(id, version)
+
+    @classmethod
+    def resolve(cls, id: str, version: Optional[int] = None) -> A2AAgent:
+        """The agent ``id`` names: the store's of that id, else the one an installed bundle gives the alias ``id``,
+        which the store holds once a run of a bundle has used it. Raises NotFoundError, and ValueError for an alias with
+        a version: it means the agent its bundle ships."""
+        try:
+            return cls.get(id, version)
+        except NotFoundError:
+            aliases = installed_aliases()
+            if (named := aliases.target(id)) is None:
+                if (refusal := aliases.refusal(id)) is not None:
+                    raise NotFoundError(refusal) from None
+                raise
+        if version is not None:
+            raise ValueError(f"{id!r} is an alias of {named.agent_id}, which comes with {named.declared_by}, so it has "
+                             "no fixed version; drop the pin")
+        try:
+            return cls.get(named.agent_id)
+        except NotFoundError:
+            raise NotFoundError(f"{id!r} is an alias of {named.agent_id}, which comes with {named.declared_by} and isn't "
+                                "in the store yet: an `agent-env run` of a bundle that uses it writes it") from None
 
     @classmethod
     def put(cls, **kwargs) -> A2AAgent:

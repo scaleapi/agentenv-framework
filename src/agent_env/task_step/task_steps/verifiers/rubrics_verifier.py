@@ -766,7 +766,7 @@ class RubricsVerifierTaskStep(TaskStep):
                 env_vars = {"LITELLM_API_KEY": api_key, "LITELLM_BASE_URL": litellm_base_url}
                 resolved_judge_id = self.judge_a2a_agent_id or config.get_default_a2a_agent_id()
                 try:
-                    a2a_agent = A2AAgent.get(resolved_judge_id)
+                    a2a_agent = A2AAgent.resolve(resolved_judge_id)
                 except NotFoundError:
                     if not is_local_id(resolved_judge_id):
                         raise

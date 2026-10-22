@@ -37,7 +37,7 @@ from agent_env.task_step.context import TaskStepContext
 from .installed import installed_bundles
 from .materialize import Materialization, Materialized, materialize
 from .parse import BundleEntry, BundleError, BundleKind, parse_bundle
-from .plan import Plan, Write, plan_bundle
+from .plan import AliasUse, Plan, Write, plan_bundle
 from .preflight import Preflight, preflight_run
 from .resolve import BuiltImage, BundleImage, Reference, ReferencedImage, resolve_bundle
 
@@ -229,6 +229,8 @@ def run_bundle(
     say = _progress(on_progress)
     with namespace_routing():
         plan, preflight = _planned(root, tasks, evals, id_root, sandbox)
+        for use in plan.aliases.values():
+            say(_aliased(use))
         materialization = materialize(
             plan,
             on_wait=lambda: say("waiting for another agent-env run to finish writing this bundle's ids"),
@@ -277,6 +279,8 @@ def dry_run_bundle(
     say = _progress(on_progress)
     with namespace_routing():
         plan, preflight = _planned(root, tasks, evals, id_root, sandbox)
+        for use in plan.aliases.values():
+            say(_aliased(use))
         materialization = materialize(plan, dry_run=True, on_write=lambda done: say(_written(plan, done)))
         runs = _to_run(plan)
         return DryRun(materialization, runs, _skipped(plan, runs, every=not tasks and not evals), preflight.infra,
@@ -453,6 +457,14 @@ def _progress(on_progress: Callable[[str], None] | None) -> Callable[[str], None
 def _task_run_command(ref: Reference) -> str:
     version = "" if ref.version is None else f" --version {ref.version}"
     return f"agent-env task run --id {shlex.quote(ref.id)}{version}"
+
+
+def _aliased(use: AliasUse) -> str:
+    """Which agent an alias the run names is: the one an installed bundle gives it, or the store's of its id."""
+    if use.store_version is None:
+        return f"{use.alias} → {use.target_id} (the alias {use.declared_by} gives it)"
+    return (f"{use.alias} → the store's agent {use.alias!r} v{use.store_version}, which shadows the alias "
+            f"{use.declared_by} gives {use.target_id}")
 
 
 def _written(plan: Plan, done: Materialized) -> str:
