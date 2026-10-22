@@ -95,6 +95,8 @@ jobs:
             sed -i "s/\"agentenv-framework-protocol[^\"]*\"/\"agentenv-framework-protocol==${PV}\"/" pyproject.toml
             python -c "import tomllib; tomllib.load(open('pyproject.toml','rb'))"
             grep -q "\"agentenv-framework-protocol==${PV}\"" pyproject.toml
+            # The shipped bundles' requirements too, as the PyPI release does, or this wheel's agents install a floor.
+            python .github/scripts/shipped_bundles.py pin
             python -m build
 
       - run:

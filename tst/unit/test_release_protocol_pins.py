@@ -72,6 +72,13 @@ def test_the_release_pins_the_shipped_bundles_with_the_script():
     assert "requirements_files=$(" not in WORKFLOW
 
 
+def test_the_codeartifact_release_pins_the_shipped_bundles_before_it_builds_the_wheel():
+    publish = (REPO / ".circleci" / "config.yml").read_text().split("\n  publish:\n", 1)[1]
+    build = publish.index("            python -m build\n")
+
+    assert -1 < publish.find(".github/scripts/shipped_bundles.py pin") < build
+
+
 def test_each_shipped_requirements_file_the_release_pins_holds_one_protocol_line():
     pinned = {path.relative_to(REPO).as_posix(): [line for line in path.read_text().splitlines()
                                                    if line.startswith("agentenv-framework-protocol")]
