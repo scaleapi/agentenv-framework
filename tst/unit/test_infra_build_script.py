@@ -262,16 +262,37 @@ def test_retry_tries_again_while_a_registry_rate_limits_it(script, monkeypatch, 
 
     assert _run(script, monkeypatch, "retry", "docker", "push", "img") == 0
 
-    assert len(runs) == 3 and waits == list(script._RATE_LIMIT_WAITS_SECONDS[:2])
+    assert len(runs) == 3 and waits == list(script._RETRY_WAITS_SECONDS[:2])
     assert capsys.readouterr().out.count("::warning::a registry rate-limited `docker push img`; trying again in") == 2
 
 
-def test_retry_gives_up_after_its_waits(script, monkeypatch, capsys):
-    runs, waits = _attempts(script, monkeypatch, [(_LIMITED, 1)] * (len(script._RATE_LIMIT_WAITS_SECONDS) + 1))
+def test_retry_tries_again_while_pypi_doesnt_list_the_protocol_a_build_installs(script, monkeypatch, capsys):
+    """An agent image's build installs the agentenv-framework-protocol its release published moments earlier."""
+    missing = ("#13 1.522 ERROR: No matching distribution found for agentenv-framework-protocol[agent]==0.1.359\n"
+               "ERROR: failed to solve: process \"/bin/sh -c pip install\" did not complete successfully: exit code: 1\n")
+    runs, waits = _attempts(script, monkeypatch, [(missing, 1), ("#13 DONE 4.1s\n", 0)])
+
+    assert _run(script, monkeypatch, "retry", "docker", "build", ".") == 0
+
+    assert len(runs) == 2 and waits == [script._RETRY_WAITS_SECONDS[0]]
+    assert ("::warning::PyPI doesn't list yet the agentenv-framework-protocol `docker build .` installs; trying again in"
+            in capsys.readouterr().out)
+
+
+def test_retry_doesnt_try_again_a_build_missing_another_package(script, monkeypatch, capsys):
+    runs, waits = _attempts(script, monkeypatch, [("ERROR: No matching distribution found for nonexistent-pkg==1.0\n", 1)])
 
     assert _run(script, monkeypatch, "retry", "docker", "build", ".") == 1
 
-    assert len(runs) == len(script._RATE_LIMIT_WAITS_SECONDS) + 1 and waits == list(script._RATE_LIMIT_WAITS_SECONDS)
+    assert len(runs) == 1 and waits == []
+
+
+def test_retry_gives_up_after_its_waits(script, monkeypatch, capsys):
+    runs, waits = _attempts(script, monkeypatch, [(_LIMITED, 1)] * (len(script._RETRY_WAITS_SECONDS) + 1))
+
+    assert _run(script, monkeypatch, "retry", "docker", "build", ".") == 1
+
+    assert len(runs) == len(script._RETRY_WAITS_SECONDS) + 1 and waits == list(script._RETRY_WAITS_SECONDS)
 
 
 def test_retry_doesnt_try_again_a_command_that_fails_otherwise(script, monkeypatch, capsys):
