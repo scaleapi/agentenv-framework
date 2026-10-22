@@ -640,8 +640,7 @@ class ClaudeCodeChangelogAgent(ClaudeCodeAgent):
         super().__init__()
         self._changelog = Changelog(default_roots=_changelog_roots(), install_hook=_install_changelog_hook,
                                     resume=self._resume_conversation, directory=changelog_dir(os.environ),
-                                    after_apply=_remove_restored_capture_hooks,
-                                    meta_path=CLAUDE_STATE_DIR / "changelog-capture.json")
+                                    after_apply=_remove_restored_capture_hooks)
         # A changelog is one sequence of tool calls, so while one is captured, turns take turns. A turn reads whether
         # it's captured, and an uncaptured one is counted, under the admission lock an enable holds throughout.
         self._admission = asyncio.Lock()

@@ -39,7 +39,11 @@ logger = logging.getLogger(__name__)
 # that kills it past its timeout leaves that tool call's increment missing.
 HOOK_TIMEOUT_S = 600
 _DIR_PREFIX = "claude-code-changelog-"
-_TAR_STDERR_TAIL = 2000
+# Each capture's metadata, found in an increment by this basename wherever the capturing agent kept it.
+META_NAME = "claude-code-changelog-meta.json"
+_TAR_STDERR_TAIL_CHARS = 2000
+_TAR_VERSION_TIMEOUT_S = 30
+_FAILED_INCREMENTS_LOGGED = 5
 
 # The post-tool hook, run by the agent's own Python, as a child of the CLI after every tool call, so an increment
 # includes that tool's writes. It exits 0 on a capture error, so the error never reaches the model.
@@ -49,6 +53,12 @@ from pathlib import Path
 from agentenv_protocol.transfers import NamespaceUploader, WriteNamespaceGrant
 
 CFG = "/tmp/changelog/config.json"
+STDERR_TAIL_CHARS = 500
+TURN_POLL_S = 0.05
+TOOL_NAME_CHARS = 40
+# tar's exit status when a file changed as it read it: the archive is still whole.
+TAR_FILE_CHANGED_RC = 1
+SIGTERM_EXIT_CODE = 143
 
 
 def _read_int(path):
@@ -143,7 +153,17 @@ def _read_json(path, default):
 
 
 def _tail(stderr):
-    return stderr.decode(errors="replace").strip()[-500:]
+    return stderr.decode(errors="replace").strip()[-STDERR_TAIL_CHARS:]
+
+
+def _write_meta(meta, k, record):
+    """Write position k's metadata; False, logged, when it can't be, so the capture goes on without it."""
+    try:
+        _write_atomic(meta, json.dumps(record))
+        return True
+    except Exception as e:
+        sys.stderr.write("[changelog] metadata write failed seq=%d; capturing without it: %s\n" % (k, e))
+        return False
 
 
 def main():
@@ -154,7 +174,7 @@ def main():
         hook = json.load(sys.stdin)
     except Exception:
         hook = {}
-    tool = str(hook.get("tool_name") or "tool").replace("/", "_")[:40]
+    tool = str(hook.get("tool_name") or "tool").replace("/", "_")[:TOOL_NAME_CHARS]
     session = hook.get("session_id") if isinstance(hook.get("session_id"), str) else None
     seqf = os.path.join(changelog_dir, "seq")
     turnf = os.path.join(changelog_dir, "turn")
@@ -187,11 +207,13 @@ def main():
                 if os.path.exists(snar):
                     shutil.copyfile(snar, work)
                 present = [r for r in roots if os.path.exists(r)]
-                if meta:
-                    removed = [r for r in _read_json(present_file, []) if r not in present]
-                    _write_atomic(meta, json.dumps({"position": k, "session_id": session, "removed": removed}))
+                removed = [r for r in _read_json(present_file, []) if r not in present]
+                record = {"position": k, "session_id": session, "removed": removed}
+                # The metadata lives outside the roots, so tar takes it as one more member unless a root holds it.
+                written = bool(meta) and _write_meta(meta, k, record)
+                members = [*present, meta] if written and cfg.get("meta_explicit") else present
                 tar = subprocess.run(
-                    ["tar", "--listed-incremental=" + work, "--exclude=" + changelog_dir, "-czf", local, *present],
+                    ["tar", "--listed-incremental=" + work, "--exclude=" + changelog_dir, "-czf", local, *members],
                     check=False, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, pass_fds=(lock.fileno(),),
                 )
                 archived = True
@@ -199,7 +221,7 @@ def main():
                     if tar.returncode >= 2:
                         sys.stderr.write("[changelog] tar failed seq=%d rc=%d: %s\n" % (k, tar.returncode, _tail(tar.stderr)))
                     else:
-                        if tar.returncode == 1:  # a file changed as tar read it; the archive is still whole
+                        if tar.returncode == TAR_FILE_CHANGED_RC:
                             sys.stderr.write("[changelog] tar warned seq=%d: %s\n" % (k, _tail(tar.stderr)))
                         stored = _store(changelog_dir, cfg, k, local)
                 except Exception as e:
@@ -215,7 +237,7 @@ def main():
             if turn >= k:
                 _write_atomic(turnf, str(max(turn, k + 1)))
                 break
-        time.sleep(0.05)
+        time.sleep(TURN_POLL_S)
     _remove(held % k)
     if not archived:  # a later position went first, so this one would replay out of order
         sys.stderr.write("[changelog] skipped seq=%d: a later position was archived first\n" % k)
@@ -225,7 +247,7 @@ def main():
 
 if __name__ == "__main__":
     # The CLI stops a hook past its timeout with SIGTERM; exiting through SystemExit takes back its reservation.
-    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(143))
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(SIGTERM_EXIT_CODE))
     try:
         main()
     except Exception as e:
@@ -238,7 +260,8 @@ _DEFAULT_CONFIG_LINE = 'CFG = "/tmp/changelog/config.json"'
 def gnu_tar() -> bool:
     """Whether this host's tar is GNU tar, which the changelog's incremental archives need."""
     try:
-        version = subprocess.run(["tar", "--version"], capture_output=True, text=True, timeout=30).stdout
+        version = subprocess.run(["tar", "--version"], capture_output=True, text=True,
+                                 timeout=_TAR_VERSION_TIMEOUT_S).stdout
     except (OSError, subprocess.SubprocessError):
         return False
     return "GNU tar" in version
@@ -313,7 +336,7 @@ def is_missing_capture_command(command: str) -> bool:
 
 
 def _stderr_tail(stderr: bytes) -> str:
-    return stderr.decode(errors="replace").strip()[-_TAR_STDERR_TAIL:]
+    return stderr.decode(errors="replace").strip()[-_TAR_STDERR_TAIL_CHARS:]
 
 
 def _own_directory(path: Path) -> Path:
@@ -358,8 +381,7 @@ def _remove_tree(path: str) -> None:
 class Changelog:
     """The ``enable-changelog`` / ``apply-changelog`` pair: ``install_hook`` registers the capture as the CLI's
     post-tool hook, ``after_apply`` runs once increments are extracted, and ``resume(target, session)`` binds a context
-    to the restored conversation, or returns None. ``meta_path`` is where each capture records its position, session and
-    the roots it saw removed."""
+    to the restored conversation, or returns None."""
 
     def __init__(
         self,
@@ -368,14 +390,15 @@ class Changelog:
         resume: Callable[[str | None, str | None], Awaitable[str | None]],
         directory: Path,
         after_apply: Callable[[], None],
-        meta_path: Path,
     ) -> None:
         self.default_roots = list(default_roots)
         self.install_hook = install_hook
         self.resume = resume
         self.after_apply = after_apply
         self.directory = directory
-        self.meta_path = meta_path
+        # Each capture's position, session and the roots it saw removed: beside the changelog, outside its roots.
+        self.meta_dir = directory.parent / f"{directory.name}-meta"
+        self.meta_path = self.meta_dir / META_NAME
         self.snar = f"{directory}/state.snar"
         self.config_path = f"{directory}/config.json"
         self.capture_path = f"{directory}/capture.py"
@@ -401,11 +424,10 @@ class Changelog:
     def _reset(self, roots: list[str], write_namespace: dict) -> None:
         roots = [os.path.normpath(root) for root in roots]
         config = {"dir": str(self.directory), "snar": self.snar, "roots": roots, "epoch": uuid.uuid4().hex,
-                  "write_namespace": write_namespace}
-        # The metadata only reaches the increments, and so the replay, from inside a captured root.
-        if _under(str(self.meta_path), roots):
-            config["meta"] = str(self.meta_path)
+                  "write_namespace": write_namespace, "meta": str(self.meta_path),
+                  "meta_explicit": not _under(str(self.meta_path), roots)}
         _own_directory(self.directory)
+        _own_directory(self.meta_dir)
         # Reset under both capture locks, so a hook still running for an earlier capture can't write into this one:
         # it finds the new epoch in the config and stops.
         with open(self.directory / "lock", "a") as lock, open(self.directory / "seq.lock", "a") as seq_lock:
@@ -418,6 +440,7 @@ class Changelog:
                 self.directory / "turn",
                 self.directory / "namespace.json",
                 Path(self.snar),
+                self.meta_path,
                 *self.directory.glob("held.*"),
                 *self.directory.glob("state.snar.*"),
             ):
@@ -434,17 +457,26 @@ class Changelog:
         """Extract the granted increments in order at / onto a fresh agent of the same image, deletions included; an
         increment that isn't a readable archive fails the apply (422) before it's extracted."""
         applied, session = await self._apply_increments(request.increments)
-        logger.info(f"agent-changelog applied {len(applied)} granted increments: {applied}")
+        failed = [(sequence, rc) for sequence, rc in applied if rc]
+        shown = ", ".join(f"{sequence:06d} rc={rc}" for sequence, rc in failed[:_FAILED_INCREMENTS_LOGGED])
+        more = f" and {len(failed) - _FAILED_INCREMENTS_LOGGED} more" if len(failed) > _FAILED_INCREMENTS_LOGGED else ""
+        logger.info(f"agent-changelog applied {len(applied)} increments"
+                    + (f"; tar exited non-zero on {len(failed)}: {shown}{more}" if failed else ""))
         self.after_apply()
         context_id = await self.resume(request.target_context_id, session) if request.resume_conversation else None
         return ObjectChangelogApplyResponse(count=len(applied), context_id=context_id)
 
-    def _metadata(self, sequence: int) -> dict | None:
-        """The metadata the increment at ``sequence`` restored, or None when it carries none of its own: one captured
-        before captures wrote it, or with roots that leave out the CLI's state."""
+    @staticmethod
+    def _metadata(local: Path, members: list[str], sequence: int) -> dict | None:
+        """The increment's own metadata, read from the archive, or None when it carries none: one captured before
+        captures wrote it, or whose metadata couldn't be written."""
+        if not members:
+            return None
+        read = subprocess.run(["tar", "--incremental", "-xzOf", str(local), members[-1]],
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         try:
-            meta = json.loads(self.meta_path.read_text())
-        except (OSError, ValueError):
+            meta = json.loads(read.stdout) if read.returncode == 0 else None
+        except ValueError:
             return None
         if not isinstance(meta, dict) or meta.get("position") != sequence:
             return None
@@ -458,20 +490,19 @@ class Changelog:
             _remove_tree(path)
             logger.info(f"agent-changelog increment {sequence:06d}: removed root {path}")
 
-    async def _apply_increments(self, increments: list[ChangelogIncrement]) -> tuple[list[dict], str | None]:
-        """The increments applied, and the session of the last one's tool call, or None when it recorded none."""
+    async def _apply_increments(self, increments: list[ChangelogIncrement]) -> tuple[list[tuple[int, int]], str | None]:
+        """Each increment's sequence and tar's exit status, and the session of the last one's tool call, or None when
+        it recorded none."""
         apply_dir = _own_directory(_own_directory(self.directory) / "apply")
-        applied: list[dict] = []
+        applied: list[tuple[int, int]] = []
         session: str | None = None
         for increment in increments:
             local = apply_dir / f"{increment.sequence:06d}.tgz"
-            # A metadata file left from an earlier increment never passes for this one's.
-            self.meta_path.unlink(missing_ok=True)
             try:
                 await download(increment.object, local)
                 listing = await asyncio.to_thread(
                     subprocess.run, ["tar", "--incremental", "-tzf", str(local)],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 )
                 if listing.returncode != 0:
                     raise HTTPException(
@@ -479,8 +510,14 @@ class Changelog:
                         detail=f"changelog increment {increment.sequence:06d} is not a readable archive: "
                         f"{_stderr_tail(listing.stderr)}",
                     )
+                meta_members = [member for member in listing.stdout.decode(errors="replace").splitlines()
+                                if member.rsplit("/", 1)[-1] == META_NAME]
+                meta = await asyncio.to_thread(self._metadata, local, meta_members, increment.sequence)
+                # The metadata is the capture's record, not part of the layer it restores.
+                excluded = [f"--exclude={member}" for member in meta_members]
                 proc = await asyncio.to_thread(
-                    subprocess.run, ["tar", "--incremental", "-xzf", str(local), "-C", "/"],
+                    subprocess.run,
+                    ["tar", "--incremental", "--no-wildcards", *excluded, "-xzf", str(local), "-C", "/"],
                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                 )
             finally:
@@ -490,10 +527,9 @@ class Changelog:
                 # still restore, so it counts.
                 logger.warning(f"agent-changelog increment {increment.sequence:06d}: tar exited {proc.returncode}: "
                                f"{_stderr_tail(proc.stderr)}")
-            meta = await asyncio.to_thread(self._metadata, increment.sequence)
             if meta is not None:
                 await asyncio.to_thread(self._replay_removals, increment.sequence, meta.get("removed"))
             recorded = meta.get("session_id") if meta is not None else None
             session = recorded if isinstance(recorded, str) and recorded else None
-            applied.append({"seq": increment.sequence, "tar_rc": proc.returncode})
+            applied.append((increment.sequence, proc.returncode))
         return applied, session

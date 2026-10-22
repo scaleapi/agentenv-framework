@@ -107,7 +107,6 @@ def _changelog(tmp_path, roots=None):
         resume=resume,
         directory=tmp_path / "changelog",
         after_apply=lambda: after.append(True),
-        meta_path=tmp_path / "state" / "changelog-capture.json",
     )
     return log, installed, after, resumed
 
@@ -211,7 +210,7 @@ def test_enable_writes_the_script_and_config_baselines_and_installs_the_hook(tmp
     assert installed == [log.hook_command]
     assert (directory / "capture.py").read_text() == log.capture_script()
     config = json.loads((directory / "config.json").read_text())
-    assert set(config) == {"dir", "snar", "roots", "epoch", "write_namespace"}
+    assert set(config) == {"dir", "snar", "roots", "epoch", "write_namespace", "meta", "meta_explicit"}
     assert (config["dir"], config["snar"]) == (str(directory), str(directory / "state.snar"))
     assert config["write_namespace"]["root_path"] == ROOT_PATH
     assert (directory / "state.snar").is_file()
@@ -260,8 +259,9 @@ def test_each_tool_call_uploads_its_own_writes_and_the_increments_replay_them(tm
     assert first.returncode == second.returncode == 0, (first.stderr, second.stderr)
     assert "captured seq=0 tool=Bash" in first.stderr and "captured seq=1 tool=Write" in second.stderr
     assert sorted(staging.objects) == [f"{ROOT_PATH}/000000.tgz", f"{ROOT_PATH}/000001.tgz"]
-    assert _members(staging.objects[f"{ROOT_PATH}/000000.tgz"]) == [str(root / "first.txt").lstrip("/")]
-    assert _members(staging.objects[f"{ROOT_PATH}/000001.tgz"]) == [str(root / "second.txt").lstrip("/")]
+    meta = str(log.meta_path).lstrip("/")
+    assert sorted(_members(staging.objects[f"{ROOT_PATH}/000000.tgz"])) == sorted([str(root / "first.txt").lstrip("/"), meta])
+    assert sorted(_members(staging.objects[f"{ROOT_PATH}/000001.tgz"])) == sorted([str(root / "second.txt").lstrip("/"), meta])
     assert not list((tmp_path / "changelog").glob("*.tgz"))
 
     # Replayed onto the state before the capture, the increments reproduce the state after the last tool call.
@@ -272,11 +272,13 @@ def test_each_tool_call_uploads_its_own_writes_and_the_increments_replay_them(tm
         key = f"ns/{sequence:06d}.tgz"
         store.objects[key] = staging.objects[f"{ROOT_PATH}/{sequence:06d}.tgz"]
         increments.append({"sequence": sequence, "object": read_grant(key, len(store.objects[key]))})
+    log.meta_path.unlink()
     answer = asyncio.run(log.apply(ObjectChangelogApplyRequest.model_validate({"increments": increments})))
 
     assert answer.count == 2
     assert sorted(p.name for p in root.iterdir()) == ["before.txt", "second.txt"]
     assert (root / "second.txt").read_text() == "two"
+    assert not log.meta_path.exists()
 
 
 @needs_gnu_tar
@@ -339,7 +341,8 @@ def test_the_writes_of_a_capture_that_wasnt_stored_go_with_the_next_one(tmp_path
     assert unchanged == baseline
     assert stored.returncode == 0 and "captured seq=1" in stored.stderr
     assert sorted(staging.objects) == [f"{ROOT_PATH}/000001.tgz"]
-    assert sorted(_members(staging.objects[f"{ROOT_PATH}/000001.tgz"])) == [
+    assert sorted(m for m in _members(staging.objects[f"{ROOT_PATH}/000001.tgz"])
+                  if not m.endswith(tar_changelog.META_NAME)) == [
         str(root / "first.txt").lstrip("/"), str(root / "second.txt").lstrip("/")]
 
 
@@ -697,50 +700,54 @@ def test_enable_and_apply_refuse_a_changelog_directory_that_isnt_one_this_user_o
     assert not (tmp_path / "elsewhere" / "config.json").exists()
 
 
-def _rig(tmp_path):
-    """A capture whose roots hold a workspace, a root a tool may remove, and the CLI's state, where its metadata goes."""
-    workspace, removable_root, state = tmp_path / "workspace", tmp_path / "data", tmp_path / "state"
-    for root in (workspace, removable_root, state):
+def _rig(tmp_path, *more):
+    """A capture whose custom roots hold a workspace and a root a tool may remove, and leave out the CLI's state."""
+    workspace, removable_root = tmp_path / "workspace", tmp_path / "data"
+    for root in (workspace, removable_root, *more):
         root.mkdir()
     (removable_root / "kept.txt").write_text("in the root")
-    log, _, _, _ = _changelog(tmp_path, roots=[str(workspace), str(removable_root), str(state)])
+    log, _, _, resumed = _changelog(tmp_path, roots=[str(workspace), str(removable_root), *map(str, more)])
     _enable(log)
-    return log, workspace, removable_root
+    return log, workspace, removable_root, resumed
 
 
-def _replay(log, store, staging, sequences) -> int:
+def _replay(log, store, staging, sequences, **request) -> int:
     increments = []
     for sequence in sequences:
         key = f"ns/{sequence:06d}.tgz"
         store.objects[key] = staging.objects[f"{ROOT_PATH}/{sequence:06d}.tgz"]
         increments.append({"sequence": sequence, "object": read_grant(key, len(store.objects[key]))})
-    return asyncio.run(log.apply(ObjectChangelogApplyRequest.model_validate({"increments": increments}))).count
+    body = {"increments": increments, **request}
+    return asyncio.run(log.apply(ObjectChangelogApplyRequest.model_validate(body))).count
 
 
 @needs_gnu_tar
-def test_each_capture_records_its_position_and_the_session_of_its_tool_call(tmp_path, staging):
-    log, workspace, _ = _rig(tmp_path)
+def test_every_capture_archives_its_metadata_with_its_position_and_session(tmp_path, staging):
+    log, workspace, _, _ = _rig(tmp_path)
 
-    (workspace / "a.txt").write_text("a")
-    _capture(log, staging.port, session="the-session")
+    for position in range(3):
+        (workspace / f"{position}.txt").write_text(str(position))
+        _capture(log, staging.port, session=f"session-{position}")
 
-    assert json.loads(log.meta_path.read_text()) == {"position": 0, "session_id": "the-session", "removed": []}
-    assert str(log.meta_path).lstrip("/") in _members(staging.objects[f"{ROOT_PATH}/000000.tgz"])
+    assert json.loads(log.meta_path.read_text()) == {"position": 2, "session_id": "session-2", "removed": []}
+    for position in range(3):
+        assert str(log.meta_path).lstrip("/") in _members(staging.objects[f"{ROOT_PATH}/{position:06d}.tgz"])
 
 
-def test_the_metadata_goes_in_the_config_only_from_inside_a_captured_root(tmp_path):
-    inside, _, _, _ = _changelog(tmp_path, roots=[str(tmp_path / "state")])
-    outside, _, _, _ = _changelog(tmp_path, roots=[str(tmp_path / "elsewhere")])
-    for log in (inside, outside):
+def test_the_config_always_names_the_metadata_and_whether_a_root_already_holds_it(tmp_path):
+    for roots, explicit in (([str(tmp_path / "workspace")], True), ([str(tmp_path)], False)):
+        log, _, _, _ = _changelog(tmp_path, roots=roots)
         _enable(log)
         config = json.loads((tmp_path / "changelog" / "config.json").read_text())
-        assert config.get("meta") == (str(log.meta_path) if log is inside else None)
+        assert (config["meta"], config["meta_explicit"]) == (str(log.meta_path), explicit)
+        assert log.meta_path.parent.stat().st_mode & 0o777 == 0o700
+        assert not tar_changelog._under(str(log.meta_path), [str(tmp_path / "changelog")])
 
 
 @needs_gnu_tar
 @pytest.mark.parametrize("removed_at", [0, 1])
 def test_a_root_removed_at_any_position_is_removed_on_replay(tmp_path, staging, store, removed_at):
-    log, workspace, removable_root = _rig(tmp_path)
+    log, workspace, removable_root, _ = _rig(tmp_path)
     for position in range(3):
         (workspace / f"{position}.txt").write_text(str(position))
         if position == removed_at:
@@ -749,15 +756,60 @@ def test_a_root_removed_at_any_position_is_removed_on_replay(tmp_path, staging, 
 
     removable_root.mkdir()
     (removable_root / "kept.txt").write_text("the target's copy")
+    log.meta_path.unlink()
     applied = _replay(log, store, staging, [0, 1, 2])
 
     assert applied == 3 and not removable_root.exists()
     assert sorted(p.name for p in workspace.iterdir()) == ["0.txt", "1.txt", "2.txt"]
+    assert not log.meta_path.exists()
+
+
+@needs_gnu_tar
+def test_custom_roots_without_the_clis_state_still_replay_the_last_tool_calls_session(tmp_path, staging, store):
+    log, workspace, _, resumed = _rig(tmp_path)
+    for position, session in enumerate(("first", "second")):
+        (workspace / f"{position}.txt").write_text(str(position))
+        _capture(log, staging.port, session=session)
+
+    _replay(log, store, staging, [0, 1], resume_conversation=True, target_context_id="rewound")
+
+    assert resumed == [("rewound", "second")]
+
+
+@needs_gnu_tar
+def test_deleting_the_clis_state_doesnt_stop_the_capture_of_the_other_roots(tmp_path, staging, store):
+    state = tmp_path / "state"
+    log, workspace, _, _ = _rig(tmp_path, state)
+    (state / "settings.json").write_text("{}")
+
+    shutil.rmtree(state)
+    (workspace / "a.txt").write_text("a")
+    first = _capture(log, staging.port)
+    (workspace / "b.txt").write_text("b")
+    second = _capture(log, staging.port)
+
+    assert "captured seq=0" in first.stderr and "captured seq=1" in second.stderr
+    state.mkdir()
+    assert _replay(log, store, staging, [0, 1]) == 2 and not state.exists()
+
+
+@needs_gnu_tar
+def test_a_metadata_write_that_fails_still_captures(tmp_path, staging):
+    log, workspace, _, _ = _rig(tmp_path)
+    log.meta_path.mkdir()
+
+    (workspace / "a.txt").write_text("a")
+    captured = _capture(log, staging.port)
+
+    assert "metadata write failed seq=0; capturing without it" in captured.stderr and "captured seq=0" in captured.stderr
+    members = _members(staging.objects[f"{ROOT_PATH}/000000.tgz"])
+    assert str(workspace / "a.txt").lstrip("/") in members
+    assert not any(member.endswith(tar_changelog.META_NAME) for member in members)
 
 
 @needs_gnu_tar
 def test_a_removal_a_capture_that_wasnt_stored_saw_goes_with_the_next_one(tmp_path, staging, store):
-    log, workspace, removable_root = _rig(tmp_path)
+    log, workspace, removable_root, _ = _rig(tmp_path)
     refusing = Staging(status=403)
     shutil.rmtree(removable_root)
     try:
@@ -779,19 +831,21 @@ def test_an_increment_without_its_own_metadata_removes_nothing_and_resumes_the_l
     target.parent.mkdir()
     target.write_text("restored")
     members = [target]
+    elsewhere = tmp_path / "another-agent-meta" / tar_changelog.META_NAME
     if metadata == "mismatched":
-        log.meta_path.parent.mkdir(parents=True)
-        log.meta_path.write_text(json.dumps({"position": 5, "session_id": "wrong", "removed": [str(target.parent)]}))
-        members.append(log.meta_path)
+        elsewhere.parent.mkdir()
+        elsewhere.write_text(json.dumps({"position": 5, "session_id": "wrong", "removed": [str(target.parent)]}))
+        members.append(elsewhere)
     store.objects["ns/000000.tgz"] = _tgz(*members)
     target.unlink()
+    elsewhere.unlink(missing_ok=True)
     increments = [{"sequence": 0, "object": read_grant("ns/000000.tgz", len(store.objects["ns/000000.tgz"]))}]
 
     answer = asyncio.run(log.apply(ObjectChangelogApplyRequest.model_validate(
         {"increments": increments, "resume_conversation": True, "target_context_id": "ctx"})))
 
     assert answer.count == 1 and target.read_text() == "restored"
-    assert resumed == [("ctx", None)]
+    assert resumed == [("ctx", None)] and not elsewhere.exists()
 
 
 @pytest.mark.parametrize(("path", "allowed"), [
@@ -813,7 +867,9 @@ def test_apply_resumes_the_session_of_the_last_applied_tool_call_not_the_largest
     other.write_text(json.dumps({"sessionId": "other", "message": "x" * 500}) + "\n")
     mine = sessions / "mine.jsonl"
     mine.write_text(json.dumps({"sessionId": "mine", "message": "the rewound one"}) + "\n")
-    meta = agent._changelog.meta_path
+    # Where another agent kept it: a different temp directory and port than this agent's.
+    meta = tmp_path / "elsewhere" / "claude-code-changelog-8123-meta" / tar_changelog.META_NAME
+    meta.parent.mkdir(parents=True)
     meta.write_text(json.dumps({"position": 0, "session_id": "mine", "removed": []}))
     store.objects["ns/000000.tgz"] = _tgz(other, mine, meta)
     for path in (other, mine, meta):
@@ -826,6 +882,7 @@ def test_apply_resumes_the_session_of_the_last_applied_tool_call_not_the_largest
     assert response.status_code == 200, response.text
     bound = sessions / f"{agent.session_ref_for_context('rewound')}.jsonl"
     assert json.loads(bound.read_text().splitlines()[0])["message"] == "the rewound one"
+    assert not meta.exists() and not agent._changelog.meta_path.exists()
 
 
 def _fake_tar(tmp_path, rc: int) -> str:
@@ -842,7 +899,7 @@ def _fake_tar(tmp_path, rc: int) -> str:
 
 @needs_gnu_tar
 def test_a_tar_that_warns_a_file_changed_is_still_stored(tmp_path, staging):
-    log, workspace, _ = _rig(tmp_path)
+    log, workspace, _, _ = _rig(tmp_path)
 
     (workspace / "a.txt").write_text("a")
     captured = _capture(log, staging.port, path=_fake_tar(tmp_path, 1))
@@ -855,7 +912,7 @@ def test_a_tar_that_warns_a_file_changed_is_still_stored(tmp_path, staging):
 @pytest.mark.parametrize("rc", [2, 3])
 def test_a_tar_that_fails_stores_nothing_keeps_the_state_and_lets_the_next_position_carry_its_writes(
         tmp_path, staging, rc):
-    log, workspace, _ = _rig(tmp_path)
+    log, workspace, _, _ = _rig(tmp_path)
     snar, present = tmp_path / "changelog" / "state.snar", tmp_path / "changelog" / "present.json"
     before = (snar.read_bytes(), present.read_text())
 
