@@ -831,7 +831,7 @@ def test_an_increment_without_its_own_metadata_removes_nothing_and_resumes_the_l
     target.parent.mkdir()
     target.write_text("restored")
     members = [target]
-    elsewhere = tmp_path / "another-agent-meta" / tar_changelog.META_NAME
+    elsewhere = tmp_path / "another-agent.changelog-meta" / tar_changelog.META_NAME
     if metadata == "mismatched":
         elsewhere.parent.mkdir()
         elsewhere.write_text(json.dumps({"position": 5, "session_id": "wrong", "removed": [str(target.parent)]}))
@@ -846,6 +846,40 @@ def test_an_increment_without_its_own_metadata_removes_nothing_and_resumes_the_l
 
     assert answer.count == 1 and target.read_text() == "restored"
     assert resumed == [("ctx", None)] and not elsewhere.exists()
+
+
+@needs_gnu_tar
+def test_a_user_file_named_like_the_metadata_is_restored(tmp_path, store):
+    log, _, _, resumed = _changelog(tmp_path)
+    user = tmp_path / "app" / tar_changelog.META_NAME
+    user.parent.mkdir()
+    user.write_text("the user's own")
+    meta = tmp_path / "t" / "claude-code-changelog-8000.changelog-meta" / tar_changelog.META_NAME
+    meta.parent.mkdir(parents=True)
+    meta.write_text(json.dumps({"position": 0, "session_id": "the-session", "removed": []}))
+    store.objects["ns/000000.tgz"] = _tgz(user, meta)
+    user.unlink()
+    meta.unlink()
+    increments = [{"sequence": 0, "object": read_grant("ns/000000.tgz", len(store.objects["ns/000000.tgz"]))}]
+
+    answer = asyncio.run(log.apply(ObjectChangelogApplyRequest.model_validate(
+        {"increments": increments, "resume_conversation": True, "target_context_id": "ctx"})))
+
+    assert answer.count == 1 and user.read_text() == "the user's own" and not meta.exists()
+    assert resumed == [("ctx", "the-session")]
+
+
+@pytest.mark.parametrize(("member", "is_meta"), [
+    (f"tmp/claude-code-changelog-8000.changelog-meta/{tar_changelog.META_NAME}", True),
+    (f"var/tmp/x/changelog.changelog-meta/{tar_changelog.META_NAME}", True),
+    (f"app/{tar_changelog.META_NAME}", False),
+    (f"tmp/claude-code-changelog-8000/{tar_changelog.META_NAME}", False),
+    (f"tmp/claude-code-changelog-8000.changelog-meta/{tar_changelog.META_NAME}.bak", False),
+    (f"tmp/claude-code-changelog-8000.changelog-meta/nested/{tar_changelog.META_NAME}", False),
+    (f"tmp/changelog-meta/{tar_changelog.META_NAME}", False),
+])
+def test_only_the_reserved_metadata_path_is_the_captures_metadata(member, is_meta):
+    assert tar_changelog.is_meta_member(member) is is_meta
 
 
 @pytest.mark.parametrize(("path", "allowed"), [
@@ -868,7 +902,7 @@ def test_apply_resumes_the_session_of_the_last_applied_tool_call_not_the_largest
     mine = sessions / "mine.jsonl"
     mine.write_text(json.dumps({"sessionId": "mine", "message": "the rewound one"}) + "\n")
     # Where another agent kept it: a different temp directory and port than this agent's.
-    meta = tmp_path / "elsewhere" / "claude-code-changelog-8123-meta" / tar_changelog.META_NAME
+    meta = tmp_path / "elsewhere" / "claude-code-changelog-8123.changelog-meta" / tar_changelog.META_NAME
     meta.parent.mkdir(parents=True)
     meta.write_text(json.dumps({"position": 0, "session_id": "mine", "removed": []}))
     store.objects["ns/000000.tgz"] = _tgz(other, mine, meta)

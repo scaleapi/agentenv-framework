@@ -13,6 +13,7 @@ import fcntl
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import stat
@@ -39,8 +40,11 @@ logger = logging.getLogger(__name__)
 # that kills it past its timeout leaves that tool call's increment missing.
 HOOK_TIMEOUT_S = 600
 _DIR_PREFIX = "claude-code-changelog-"
-# Each capture's metadata, found in an increment by this basename wherever the capturing agent kept it.
 META_NAME = "claude-code-changelog-meta.json"
+META_DIR_SUFFIX = ".changelog-meta"
+# A capture's own metadata in an increment: META_NAME in a directory named with META_DIR_SUFFIX, wherever the
+# capturing agent kept it, so a user file of that name elsewhere is restored like any other.
+_META_MEMBER = re.compile(rf"(?:^|/)[^/]+{re.escape(META_DIR_SUFFIX)}/{re.escape(META_NAME)}\Z")
 _TAR_STDERR_TAIL_CHARS = 2000
 _TAR_VERSION_TIMEOUT_S = 30
 _FAILED_INCREMENTS_LOGGED = 5
@@ -364,6 +368,11 @@ def _under(path: str, roots: Iterable[str]) -> bool:
     return any(path == root or path.startswith(root.rstrip("/") + "/") for root in roots)
 
 
+def is_meta_member(member: str) -> bool:
+    """Whether an archive member is a capture's own metadata rather than a file in the layer it restores."""
+    return _META_MEMBER.search(member) is not None
+
+
 def removable(path: object) -> bool:
     """Whether a removed root an increment names may be removed on replay: an absolute, normalized path that exists
     and isn't / or a top-level system directory."""
@@ -397,7 +406,7 @@ class Changelog:
         self.after_apply = after_apply
         self.directory = directory
         # Each capture's position, session and the roots it saw removed: beside the changelog, outside its roots.
-        self.meta_dir = directory.parent / f"{directory.name}-meta"
+        self.meta_dir = directory.parent / f"{directory.name}{META_DIR_SUFFIX}"
         self.meta_path = self.meta_dir / META_NAME
         self.snar = f"{directory}/state.snar"
         self.config_path = f"{directory}/config.json"
@@ -511,7 +520,7 @@ class Changelog:
                         f"{_stderr_tail(listing.stderr)}",
                     )
                 meta_members = [member for member in listing.stdout.decode(errors="replace").splitlines()
-                                if member.rsplit("/", 1)[-1] == META_NAME]
+                                if is_meta_member(member)]
                 meta = await asyncio.to_thread(self._metadata, local, meta_members, increment.sequence)
                 # The metadata is the capture's record, not part of the layer it restores.
                 excluded = [f"--exclude={member}" for member in meta_members]
