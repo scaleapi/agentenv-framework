@@ -257,7 +257,7 @@ class _Planner:
         pointed at the alias's agent is left with the problem the store ref check reports."""
         if self.installed is None:
             return {}
-        table, uses, default = installed_aliases(self.installed()), {}, _UNREAD
+        table, uses, stored, default = installed_aliases(self.installed()), {}, {}, _UNREAD
         for index, entry in enumerate(self.entries):
             if entry.entry.kind is not BundleKind.TASK:
                 continue
@@ -265,7 +265,7 @@ class _Planner:
             for ref in entry.references:
                 use = None
                 if ref.kind is EntityKind.AGENT and ref.local is None:
-                    use = self._alias_use(table, ref.id, ref.version, uses)
+                    use = self._alias_use(table, ref.id, ref.version, uses, stored)
                 if isinstance(use, str):
                     self.unpulled[ref.kind, ref.id, ref.version] = use
                 elif use is not None and use.store_version is None:
@@ -274,7 +274,7 @@ class _Planner:
                 references.append(ref)
             if _leaves_an_agent_unset(entry):
                 if default is _UNREAD:
-                    default = self._alias_use(table, get_config().get_default_a2a_agent_id(), None, uses)
+                    default = self._alias_use(table, get_config().get_default_a2a_agent_id(), None, uses, stored)
                     if isinstance(default, str):
                         self.problems.append(f"[agents] default_a2a_agent_id: {default}")
                 if isinstance(default, AliasUse) and default.store_version is None:
@@ -283,28 +283,31 @@ class _Planner:
                 self._replace(index, replace(entry, config=_renamed(entry.config, aliased), references=tuple(references)))
         return uses
 
-    def _alias_use(self, table: InstalledAliases, agent_id: str, version: int | None,
-                   uses: dict[str, AliasUse]) -> AliasUse | str | None:
-        """What ``agent_id`` names when it's an installed alias, the store's agent of that id read first, recorded in
-        ``uses``; why it can't be named so; or None when it's no alias."""
+    def _alias_use(self, table: InstalledAliases, agent_id: str, version: int | None, uses: dict[str, AliasUse],
+                   stored: dict[str, int | None]) -> AliasUse | str | None:
+        """What ``agent_id`` names when it's an installed alias, the store's agent of that id read first (its latest
+        version, or None, cached in ``stored``), recorded in ``uses``; why it can't be named so; or None when it's no
+        alias, or names the store's agent as any store reference does: pinned, or with the alias refused."""
         if agent_id.startswith(LOCAL_PREFIX):
             return None
-        if (refusal := table.refusal(agent_id)) is not None:
-            return refusal
-        if (named := table.target(agent_id)) is None:
+        refusal, named = table.refusal(agent_id), table.target(agent_id)
+        if refusal is None and named is None:
             return None
+        if agent_id not in stored:
+            try:
+                stored[agent_id] = STORE_GETTERS[EntityKind.AGENT](agent_id, None).version
+            except NotFoundError:
+                stored[agent_id] = None
+            except (ValueError, KeyError, TypeError):  # one the store has but can't read, which the store ref check says
+                return None
+        if stored[agent_id] is not None and (refusal is not None or version is not None):
+            return None
+        if refusal is not None:
+            return refusal
         if version is not None:
             return (f"{agent_id!r} is an alias of {named.agent_id}, which comes with {named.declared_by}, so it has no "
                     "fixed version; drop the pin")
-        if agent_id not in uses:
-            try:
-                store_version = STORE_GETTERS[EntityKind.AGENT](agent_id, None).version
-            except NotFoundError:
-                store_version = None
-            except (ValueError, KeyError, TypeError):  # one the store has but can't read, which the store ref check says
-                return None
-            uses[agent_id] = AliasUse(agent_id, named.agent_id, named.declared_by, store_version)
-        return uses[agent_id]
+        return uses.setdefault(agent_id, AliasUse(agent_id, named.agent_id, named.declared_by, stored[agent_id]))
 
     def _replace(self, index: int, entry: ResolvedEntry) -> None:
         """Put ``entry`` in place of the bundle's own entry at ``index``, with what it now references."""

@@ -407,15 +407,17 @@ class A2AAgent:
     def resolve(cls, id: str, version: Optional[int] = None) -> A2AAgent:
         """The agent ``id`` names: the store's of that id, else the one an installed bundle gives the alias ``id``,
         which the store holds once a run of a bundle has used it. Raises NotFoundError, and ValueError for an alias with
-        a version: it means the agent its bundle ships."""
+        a version: it means the agent its bundle ships. A pinned version the store's agent of that id lacks is just
+        missing."""
         try:
             return cls.get(id, version)
         except NotFoundError:
             aliases = installed_aliases()
-            if (named := aliases.target(id)) is None:
-                if (refusal := aliases.refusal(id)) is not None:
-                    raise NotFoundError(refusal) from None
+            named, refusal = aliases.target(id), aliases.refusal(id)
+            if named is None and refusal is None or version is not None and cls._stored(id):
                 raise
+            if named is None:
+                raise NotFoundError(refusal) from None
         if version is not None:
             raise ValueError(f"{id!r} is an alias of {named.agent_id}, which comes with {named.declared_by}, so it has "
                              "no fixed version; drop the pin")
@@ -424,6 +426,14 @@ class A2AAgent:
         except NotFoundError:
             raise NotFoundError(f"{id!r} is an alias of {named.agent_id}, which comes with {named.declared_by} and isn't "
                                 "in the store yet: an `agent-env run` of a bundle that uses it writes it") from None
+
+    @classmethod
+    def _stored(cls, id: str) -> bool:
+        try:
+            cls.get(id)
+        except NotFoundError:
+            return False
+        return True
 
     @classmethod
     def put(cls, **kwargs) -> A2AAgent:

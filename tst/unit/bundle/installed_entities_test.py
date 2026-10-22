@@ -405,6 +405,16 @@ def test_an_alias_takes_no_pin(bundle_dir, tmp_path):
         "kit bundle, so it has no fixed version; drop the pin",)
 
 
+def test_a_pinned_reference_to_the_stores_agent_of_an_alias_id_names_that_agent(bundle_dir, tmp_path):
+    kit = _kit(tmp_path, ALIASED)
+    _store_agent("solver-x")
+
+    plan = _plan(_task(bundle_dir, [{"id": "agent", "type": "deploy_agent", "a2a_agent_id": "solver-x",
+                                     "a2a_agent_version": 1}]), kit)
+
+    assert [(ref.id, ref.version) for ref in plan.store_refs] == [("solver-x", 1)] and plan.aliases == {}
+
+
 def test_an_alias_two_installed_bundles_give_is_refused_naming_both(bundle_dir, tmp_path):
     kit = _kit(tmp_path, ALIASED)
     other = _installed(tmp_path / "site2" / "tools", {"agents/helper/Dockerfile": "FROM scratch\n",
@@ -416,6 +426,18 @@ def test_an_alias_two_installed_bundles_give_is_refused_naming_both(bundle_dir, 
 
     assert problem == ("tasks/t.json: step 'agent': a2a_agent_id: 'solver-x' is an alias demo-dist's kit bundle and "
                        "zeta-tools's tools bundle each give an agent, so it names none of them; name the agent by its id")
+
+
+def test_the_stores_agent_of_a_refused_alias_id_is_the_one_it_names(bundle_dir, tmp_path):
+    kit = _kit(tmp_path, ALIASED)
+    other = _installed(tmp_path / "site2" / "tools", {"agents/helper/Dockerfile": "FROM scratch\n",
+                                                      ALIASES_FILE: '[agents]\nhelper = ["solver-x"]\n'},
+                       dist="zeta-tools", name="tools")
+    _store_agent("solver-x")
+
+    plan = _plan(_task(bundle_dir, [{"id": "agent", "type": "deploy_agent", "a2a_agent_id": "solver-x"}]), kit, other)
+
+    assert [ref.id for ref in plan.store_refs] == ["solver-x"] and plan.aliases == {}
 
 
 def test_an_alias_whose_agent_its_bundle_lacks_is_refused_naming_the_bundle(bundle_dir, tmp_path):

@@ -176,11 +176,12 @@ def _bundle_contribution(bundle: InstalledBundle, bundles: tuple[InstalledBundle
     except BundleError as e:
         return Contribution(BUNDLES, bundle.name, bundle.value, "failed", code=INVALID_PLUGIN,
                             reason=f"it isn't a valid bundle: {e.summary}")
+    refused = aliases.refused_claims.get(bundle.qualified, ())
     if run_name(bundle, bundles) != bundle.name:
+        qualified = f"another package also installs {bundle.name!r}, so run this one as {bundle.qualified!r}"
         return Contribution(BUNDLES, bundle.name, bundle.value, "active", code=QUALIFIED_ONLY,
-                            reason=f"another package also installs {bundle.name!r}, so run this one as "
-                                   f"{bundle.qualified!r}", conflicts_with=namesakes)
-    if refused := aliases.refused_claims.get(bundle.qualified):
+                            reason="; ".join((qualified, *refused)), conflicts_with=namesakes)
+    if refused:
         return Contribution(BUNDLES, bundle.name, bundle.value, "active", code=ALIAS_REFUSED, reason="; ".join(refused))
     return Contribution(BUNDLES, bundle.name, bundle.value, "active")
 

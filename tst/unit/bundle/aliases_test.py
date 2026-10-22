@@ -35,6 +35,7 @@ def test_a_bundle_without_an_aliases_file_gives_none(tmp_path):
     ('[agents]\nx = ["a/b"]\n', "agents.x: 'a/b' isn't an alias"),
     ('[agents]\nx = ["-x"]\n', "agents.x: '-x' isn't an alias"),
     ('[agents]\nx = ["' + "a" * 65 + '"]\n', "isn't an alias"),
+    ('[agents]\nx = ["helper\\n"]\n', "agents.x: 'helper\\n' isn't an alias"),
     ('[agents]\nx = "x"\n', "agents.x must be a list of aliases, not 'x'"),
     ('[agents]\nx = []\n', "agents.x must be a list of aliases, not []"),
     ('[agents]\nx = ["a"]\ny = ["a"]\n', "agents.y: 'a' is listed for agents.x too; an alias names one agent"),
@@ -42,12 +43,22 @@ def test_a_bundle_without_an_aliases_file_gives_none(tmp_path):
     ('[envs]\nx = ["a"]\n', "[envs] isn't a table it takes; it takes [agents]"),
     ('agents = 3\n', "[agents] must be a table"),
     ('[agents\n', "isn't valid TOML"),
-], ids=["case", "namespaced", "slash", "edge", "long", "not-a-list", "empty", "two-agents", "twice", "other-table",
+], ids=["case", "namespaced", "slash", "edge", "long", "final-newline", "not-a-list", "empty", "two-agents", "twice", "other-table",
         "not-a-table", "toml"])
 def test_an_aliases_file_with_a_problem_gives_no_aliases_and_says_why(tmp_path, text, problem):
     aliases, problems = _read(tmp_path, text)
 
     assert aliases == {} and len(problems) == 1 and problem in problems[0]
+
+
+@pytest.mark.parametrize("make", [lambda path: path.mkdir(), lambda path: path.symlink_to(path.with_name("gone"))],
+                         ids=["folder", "broken-symlink"])
+def test_an_aliases_file_that_isnt_a_readable_file_gives_no_aliases_and_says_so(tmp_path, make):
+    make(tmp_path / ALIASES_FILE)
+
+    aliases, [problem] = read_aliases(tmp_path / ALIASES_FILE)
+
+    assert aliases == {} and problem.startswith("can't be read: ")
 
 
 def test_an_installed_bundles_alias_names_its_agent_under_the_bundles_id_root(tmp_path):
@@ -141,3 +152,14 @@ def test_a_misspelled_aliases_file_is_refused_rather_than_ignored(tmp_path):
     [found] = _problems(root)
 
     assert found == "Aliases.TOML: spell it aliases.toml, the file a bundle gives its agents' aliases in"
+
+
+@pytest.mark.parametrize("make, problem", [
+    (lambda path: path.mkdir(), "aliases.toml: must be a file, not a folder"),
+    (lambda path: path.symlink_to(path.with_name("gone")), "aliases.toml: a broken symlink"),
+], ids=["folder", "broken-symlink"])
+def test_an_aliases_file_that_isnt_a_file_is_refused_rather_than_ignored(tmp_path, make, problem):
+    root = layout(tmp_path / "kit", _AGENTS)
+    make(root / ALIASES_FILE)
+
+    assert _problems(root) == [problem]

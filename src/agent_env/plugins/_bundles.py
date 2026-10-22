@@ -35,7 +35,7 @@ BUNDLES = "agent_env.bundles"
 CORE = "agentenv-framework"
 ALIASES_FILE = "aliases.toml"
 # A plain id, never a bundle's namespaced one, which holds '@' and '/'.
-_ALIAS = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
+_ALIAS = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?")
 _ALIAS_RULE = "lowercase letters, digits and '-', at most 64 characters, starting and ending with a letter or digit"
 
 
@@ -174,7 +174,7 @@ class InstalledAliases:
 def read_aliases(path: Path) -> tuple[dict[str, tuple[str, ...]], list[str]]:
     """The aliases a bundle's ``aliases.toml`` at ``path`` gives its agents, by agent folder name, and its problems; none
     of either when there's no such file, and no aliases when it has a problem."""
-    if not path.is_file():
+    if not os.path.lexists(path):
         return {}, []
     try:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
@@ -193,7 +193,7 @@ def read_aliases(path: Path) -> tuple[dict[str, tuple[str, ...]], list[str]]:
             problems.append(f"agents.{name} must be a list of aliases, not {aliases!r}")
             continue
         for alias in aliases:
-            if not _ALIAS.match(alias):
+            if not _ALIAS.fullmatch(alias):
                 problems.append(f"agents.{name}: {alias!r} isn't an alias: {_ALIAS_RULE}")
             elif alias in named:
                 where = "twice" if named[alias] == name else f"for agents.{named[alias]} too"

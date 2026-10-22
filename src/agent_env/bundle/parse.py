@@ -211,7 +211,11 @@ class _Parser:
                 self._problem(entry.path, "reserved: a bundle takes its name from the folder and its "
                               "description from README.md")
             elif entry.name == ALIASES_FILE:
-                self.aliases_file = Path(entry.path)
+                node = self._node(Path(entry.path), entry)
+                if node == _FILE:
+                    self.aliases_file = Path(entry.path)
+                elif node == _DIR:
+                    self._problem(entry.path, "must be a file, not a folder")
             elif fold(entry.name) == fold(ALIASES_FILE):
                 self._problem(entry.path, f"spell it {ALIASES_FILE}, the file a bundle gives its agents' aliases in")
             elif entry.name in by_dir:

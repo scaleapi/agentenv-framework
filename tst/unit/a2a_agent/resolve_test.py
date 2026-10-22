@@ -70,3 +70,18 @@ def test_an_alias_two_bundles_give_is_refused_naming_both(aliases):
     with pytest.raises(NotFoundError, match="'helper' is an alias acme-kit's kit bundle and zeta-tools's tools bundle "
                                             "each give an agent"):
         A2AAgent.resolve("helper")
+
+
+def test_a_version_the_stores_agent_of_an_alias_id_lacks_is_not_found(aliases):
+    _put(SHIPPED)
+    _put("claude-code")
+
+    assert A2AAgent.resolve("claude-code", 1).id == "claude-code"
+    with pytest.raises(NotFoundError):
+        A2AAgent.resolve("claude-code", 2)
+
+
+def test_the_stores_agent_of_a_refused_alias_id_is_the_one_it_names(aliases):
+    _put("helper")
+
+    assert A2AAgent.resolve("helper").id == "helper"

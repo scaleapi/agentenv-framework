@@ -256,6 +256,23 @@ def test_the_cli_lists_each_bundles_aliases_and_the_plugin_report_says_which_a_b
         "'helper' is agent-env's own alias, of @local/agentenv-framework/ours/solver, so this bundle can't give it")
 
 
+def test_a_bundle_run_by_its_qualified_name_says_which_aliases_it_is_refused_too(site, monkeypatch):
+    for package in ("demo_bundles_core", "demo_bundles_a"):
+        folder = _package(site, package, ["agents"])
+        (folder / "agents/agents/solver").mkdir(parents=True)
+        (folder / "agents/agents/solver/Dockerfile").write_text("FROM scratch\n")
+        (folder / "agents" / ALIASES_FILE).write_text('[agents]\nsolver = ["helper"]\n')
+    _registered(monkeypatch, _ep("agents", "demo_bundles_core", dist=CORE), _ep("agents", "demo_bundles_a", dist="demo-a"))
+
+    report = json.loads(CliRunner().invoke(cli, ["plugin", "list", "--json", "--no-load"]).output)
+
+    [theirs] = [c for plugin in report["plugins"] if plugin["name"] == "demo-a" for c in plugin["contributions"]
+                if c["group"] == BUNDLES]
+    assert (theirs["code"], theirs["reason"]) == (
+        "qualified-only", "another package also installs 'agents', so run this one as 'demo-a/agents'; 'helper' is "
+        "agent-env's own alias, of @local/agentenv-framework/agents/solver, so this bundle can't give it")
+
+
 def test_the_cli_says_so_when_no_bundles_are_installed_and_needs_a_bundle_for_its_options(monkeypatch):
     _registered(monkeypatch)
 
