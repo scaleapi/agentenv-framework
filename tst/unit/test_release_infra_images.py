@@ -208,3 +208,13 @@ def test_every_infra_image_pins_its_bases_by_digest_and_dependabot_bumps_them():
                  if ref not in stages]
         assert bases and all(re.search(r"@sha256:[0-9a-f]{64}$", ref) for ref in bases), (image.name, bases)
         assert f"/{image.dockerfile.parent.relative_to(REPO)}" in docker["directories"], image.name
+
+
+def test_dependabot_proposes_a_bases_fixes_and_never_an_upgrade():
+    """A base's digest and patch updates are its fixes; its next major or minor version (postgres 16 to 18) changes what
+    the images run on, and is made by hand."""
+    dependabot = yaml.safe_load((REPO / ".github" / "dependabot.yml").read_text())
+    (docker,) = [update for update in dependabot["updates"] if update["package-ecosystem"] == "docker"]
+
+    assert {"dependency-name": "*", "update-types": ["version-update:semver-major", "version-update:semver-minor"]} in (
+        docker["ignore"])
