@@ -160,8 +160,10 @@ Out-of-tree code plugs in either through `config.toml`, as a `module:Class` poin
   `step_params` overrides, so the tasks stay as written.
 - `aliases.toml` gives envs aliases the same way (`[envs] <folder> = ["<alias>", ...]`; the `mail-mcp` example names
   its env `mail-mcp`), resolved by the planner (`Plan.env_aliases`) and by `Env.get`. The env `Env.get` gives for an
-  alias answers to the alias's id, so a deployment records, and steps look it up by, the id the task names; an alias
-  names its env only where namespace routing is on (the CLI), so a service needs an env of the alias's id in its store.
+  alias answers to the alias's id, so a deployment records, and steps look it up by, the id the task names; its record
+  also keeps the id the env is stored under (`STORED_ENV_ID_KEY`), which `Env.of_deployment` reloads it from. An alias
+  names its env only where namespace routing is on (the CLI), so a service needs an env of the alias's id in its store,
+  and only in a task's steps: an env definition (a MultiEnv's servers) naming one is refused.
   `agent-env a2a-agent validate` deploys `mail-mcp` (`A2AAgent.VALIDATION_ENV_ID`), writing the example's env with
   `bundle.write_bundle` (a bundle's writes and infra, no run) when the store has none of that id.
 - Environment providers have no table: an installed package registers one as an `agent_env.env_providers`

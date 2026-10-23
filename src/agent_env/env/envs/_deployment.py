@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Optional
 
 from agentenv_protocol import METHOD_ADD, METHOD_RESET, RPC_PATH, FilePart, client as protocol_v1
 from agent_env.env import legacy_protocol
-from agent_env.env.env import DeployedSandboxEnv, gateway_url_of
+from agent_env.env.env import STORED_ENV_ID_KEY, DeployedSandboxEnv, gateway_url_of
 from agent_env.env.store import register_env_instance
 from agent_env.store.base import ObjectNotFoundError
 
@@ -66,6 +66,8 @@ async def deploy_through_provider(env: Env, *, environment_name: str | None, ttl
         else:
             check_plugin_record(env, deployed)
         env._gateway_url = gateway_url_of(deployed)
+        if env.stored_id != env.id:  # got by an alias: the record keeps the env it was, for a reload
+            deployed.metadata = {**(deployed.metadata or {}), STORED_ENV_ID_KEY: env.stored_id}
         deployed = register_env_instance(deployed, ttl_seconds)
         env._instance_id = deployed.instance_id
         env._deployed, env._replaced = deployed, replaced

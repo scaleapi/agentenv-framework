@@ -396,6 +396,17 @@ def test_the_stores_env_of_an_alias_id_shadows_the_alias(bundle_dir, tmp_path):
     assert plan.env_aliases["crm-x"].store_version == 1 and [ref.id for ref in plan.store_refs] == ["crm-x"]
 
 
+
+def test_an_env_definition_naming_an_env_alias_is_refused_saying_to_name_the_env_by_its_id(bundle_dir, tmp_path):
+    """An env alias names an env in a task's steps; a MultiEnv's servers name theirs by id."""
+    kit = _kit(tmp_path, ENV_ALIASED)
+
+    problems = _problems(_task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "suite"}],
+                               {"envs/suite/env.toml": 'type = "multi"\nmcp_server_envs = ["crm-x"]\n'}), kit)
+
+    assert any(f"'crm-x' is an alias of {CRM}, which comes with demo-dist's kit bundle, and an env alias names an env only "
+               "in a task's steps; name the env by its id" in problem for problem in problems), problems
+
 def test_the_stores_agent_of_an_alias_id_shadows_the_alias(bundle_dir, tmp_path):
     """Someone's own agent of that id is the one they mean."""
     kit = _kit(tmp_path, ALIASED)

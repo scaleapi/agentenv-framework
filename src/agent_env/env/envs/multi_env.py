@@ -151,7 +151,7 @@ class MultiEnv(Env):
 
     @classmethod
     async def from_deployed_env(cls, deployed: DeployedEnv) -> MultiEnv:
-        env = Env.get(deployed.env_id, deployed.env_version)
+        env = Env.of_deployment(deployed)
         if not isinstance(env, MultiEnv):
             raise TypeError(f"Expected MultiEnv, got {type(env).__name__}")
         provider = builtin_provider_for(env.env_provider_type) or plugin_provider_like_a_builtin(env.env_provider_type)

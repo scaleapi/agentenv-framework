@@ -64,6 +64,17 @@ class EnvNeedsSandbox(RuntimeError):
         super().__init__(f"{what} needs a sandbox; env '{env_id}' runs outside agent-env's sandboxes")
 
 
+# The deployment record of an env got by an alias names the env it was here, as the alias names it now may differ.
+STORED_ENV_ID_KEY = "stored_env_id"
+
+
+def _aliased(env: "Env", alias: str) -> "Env":
+    """A copy of ``env`` answering to ``alias``, which names it, while it keeps the id the store holds it under."""
+    env = copy.copy(env)
+    env._stored_id, env.id = env.id, alias
+    return env
+
+
 def _holds(env_id: str) -> bool:
     """Whether the store has an env of ``env_id``, at any version."""
     try:
@@ -268,9 +279,16 @@ class Env(ABC):
         except NotFoundError:
             raise NotFoundError(f"{id!r} is an alias of {named.target_id}, which comes with {named.declared_by} and "
                                 "isn't in the store yet: an `agent-env run` of a bundle that uses it writes it") from None
-        env = copy.copy(env)
-        env._stored_id, env.id = env.id, id
-        return env
+        return _aliased(env, id)
+
+    @classmethod
+    def of_deployment(cls, deployed: "DeployedEnv") -> "Env":
+        """The env ``deployed`` deployed, at its version: the store's env of its id, or for an env got by an alias, the
+        env the alias named then (``STORED_ENV_ID_KEY``), still under the alias's id, whatever the store holds now."""
+        stored = (getattr(deployed, "metadata", None) or {}).get(STORED_ENV_ID_KEY)
+        if stored is None:
+            return cls.get(deployed.env_id, deployed.env_version)
+        return _aliased(get_env_store().get(stored, deployed.env_version), deployed.env_id)
 
     @property
     def stored_id(self) -> str:
@@ -281,7 +299,7 @@ class Env(ABC):
     async def from_instance_id(cls, instance_id: str) -> "Env":
         from .store import get_env_instance_store
         deployed = get_env_instance_store().get(instance_id)
-        env = cls.get(deployed.env_id, deployed.env_version)
+        env = cls.of_deployment(deployed)
         return await type(env).from_deployed_env(deployed)
 
     @classmethod

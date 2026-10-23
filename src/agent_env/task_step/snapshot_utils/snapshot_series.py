@@ -502,7 +502,7 @@ class SnapshotSeries:
         try:
             # Pin the env version the sandbox actually runs, so service
             # enumeration can't drift if the env was re-registered since deploy.
-            env = await asyncio.to_thread(Env.get, deployed.env_id, deployed.env_version)
+            env = await asyncio.to_thread(Env.of_deployment, deployed)
             result = await SnapshotEnvTaskStep.snapshot_env_state(
                 env=env,
                 gateway_url=deployed.gateway_url,

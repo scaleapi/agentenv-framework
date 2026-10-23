@@ -6,7 +6,7 @@ import pytest
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store
 from agent_env.env import env as env_module
-from agent_env.env.env import Env
+from agent_env.env.env import STORED_ENV_ID_KEY, DeployedEnv, Env
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.plugins._bundles import ALIASES_FILE, InstalledBundle, installed_aliases
 from agent_env.store.base import NotFoundError
@@ -61,6 +61,18 @@ def test_an_env_got_by_an_alias_writes_its_metadata_to_the_env_the_alias_names(a
 
     assert (env.id, env.stored_id) == ("mail-mcp", SHIPPED)
     assert {key: Env.get(SHIPPED).metadata[key] for key in ("checked", "merged")} == {"checked": "yes", "merged": "too"}
+
+
+def test_a_deployment_of_an_env_got_by_an_alias_reloads_that_env_whatever_the_store_holds_since(aliases):
+    """A record of the alias's env names the env it was, so one the store gains under the alias's id later isn't it."""
+    _put(SHIPPED)
+    deployed = DeployedEnv(env_id="mail-mcp", env_version=1, metadata={STORED_ENV_ID_KEY: SHIPPED})
+    _put("mail-mcp")
+
+    env = Env.of_deployment(deployed)
+
+    assert (env.id, env.stored_id, env.docker_image_artifact.id) == ("mail-mcp", SHIPPED, f"{SHIPPED}/env_image")
+    assert Env.of_deployment(DeployedEnv(env_id="mail-mcp", env_version=1)).stored_id == "mail-mcp"
 
 def test_the_stores_env_of_an_aliass_id_is_the_one_it_names(aliases):
     _put(SHIPPED)

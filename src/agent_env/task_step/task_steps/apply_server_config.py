@@ -143,7 +143,7 @@ class ApplyServerConfigStep(TaskStep):
 
         from agent_env.env.env import Env
 
-        env = Env.get(deployed.env_id, deployed.env_version)
+        env = Env.of_deployment(deployed)
         environment_names = [
             e.environment_name for e in (getattr(env, "mcp_server_envs", None) or [])
         ]

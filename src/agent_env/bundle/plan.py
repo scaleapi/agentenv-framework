@@ -700,8 +700,12 @@ class _Planner:
         if found is None:
             at = f" version {ref.version}" if ref.version is not None else ""
             other = self.named.get(fold(ref.id))
+            aliased = self.env_alias_table.target(ref.id) if ref.kind is EntityKind.ENV and self.env_alias_table else None
             if other is not None:
                 hint = f"; this bundle's {other.kind.store} {other.name!r} has that name"
+            elif aliased is not None:  # a task's reference to it is pulled in; another entry's isn't, as aliases go
+                return (f"{ref.id!r} is an alias of {aliased.target_id}, which comes with {aliased.declared_by}, and an "
+                        "env alias names an env only in a task's steps; name the env by its id")
             else:
                 table = {EntityKind.AGENT: self.alias_table, EntityKind.ENV: self.env_alias_table}.get(ref.kind)
                 hint = table.hint(ref.id) if table is not None else ""

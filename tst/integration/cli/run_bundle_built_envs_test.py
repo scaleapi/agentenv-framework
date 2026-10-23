@@ -581,6 +581,7 @@ def test_the_shipped_mail_mcp_example_runs_and_a_task_outside_a_bundle_deploys_i
     [written] = (state / "out").iterdir()
     [deployed] = json.loads(written.read_text())["deployed_envs"]
     assert deployed["env_id"] == "mail-mcp" and deployed["gateway_url"], deployed
+    assert deployed["metadata"]["stored_env_id"] == "@local/agentenv-framework/mail-mcp/mail", deployed
 
 ECHO = REPO / "src" / "agent_env" / "examples" / "echo-mcp"
 
