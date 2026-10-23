@@ -77,7 +77,7 @@ from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVer
 from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, docker_plugin_missing, docker_unreachable
 
 from .parse import BundleError, BundleKind
-from .plan import Plan
+from .plan import AgentOverride, Plan
 from .resolve import BuiltImage, Reference, ReferencedImage, ResolvedEntry, build_step
 
 _SHOWN = 3
@@ -150,7 +150,7 @@ class _Walk:
         solver = self.plan.agent.steps.get(task.entry.id, ()) if self.plan.agent else ()
         for step in steps:
             where = f"{self.plan.path(task.entry)}: step {step.id!r}"
-            override = self.plan.agent.agent_id if step.id in solver else None
+            override = self.plan.agent if step.id in solver else None
             try:
                 if isinstance(step, DeployEnvTaskStep):
                     self._env(where, step)
@@ -304,7 +304,7 @@ class _Walk:
         return version if version is not None else self.plan.store_latest.get((kind, entity_id))
 
     def _agent(self, where: str, step: DeployAgentTaskStep, sandboxes: dict[str, DeploySandboxTaskStep],
-               override: str | None = None) -> None:
+               override: AgentOverride | None = None) -> None:
         """Check a deploy of the step's agent, or of ``override``, the agent ``--agent`` names for the solver."""
         accepts: Callable[[SandboxProvider], Accepts] = A2AAgent.accepts
         if step.sandbox_name:
@@ -319,8 +319,9 @@ class _Walk:
         else:
             provider = _provider(self.sandbox or step.sandbox_type, get_agent_sandbox_provider)
         given = frozenset({*step.env_vars, *([ENV_BASE_URL] if step.litellm_base_url else [])})
-        self._agent_deploy(where, provider, override or step.a2a_agent_id, None if override else step.a2a_agent_version,
-                           "names no agent", accepts, given=given)
+        agent_id, version = ((override.agent_id, override.version) if override is not None
+                             else (step.a2a_agent_id, step.a2a_agent_version))
+        self._agent_deploy(where, provider, agent_id, version, "names no agent", accepts, given=given)
 
     def _judge(self, where: str, step: RubricsVerifierTaskStep) -> None:
         if not step.use_agent_judge or step.agent_name is not None:

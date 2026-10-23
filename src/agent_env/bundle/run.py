@@ -360,11 +360,11 @@ def _say_agents(plan: Plan, say: Callable[[str], None]) -> None:
 
 def _solver_params(plan: Plan, materialization: Materialization) -> dict[str, dict[str, dict]]:
     """Each task's ``step_params`` that deploy ``Plan.agent`` at its solver steps: at the version this run wrote, for
-    an agent it writes, or the store's latest."""
+    an agent it writes, or the store's version the plan read."""
     if plan.agent is None:
         return {}
     written = any(write.kind is BundleKind.AGENT and write.id == plan.agent.agent_id for write in plan.writes)
-    version = materialization.version_of(BundleKind.AGENT.store, plan.agent.agent_id) if written else None
+    version = materialization.version_of(BundleKind.AGENT.store, plan.agent.agent_id) if written else plan.agent.version
     choice = {"a2a_agent_id": plan.agent.agent_id, "a2a_agent_version": version}
     return {task_id: {step_id: dict(choice) for step_id in steps} for task_id, steps in plan.agent.steps.items()}
 

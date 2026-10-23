@@ -88,12 +88,14 @@ def test_this_bundles_own_agent_is_named_by_its_folder(bundle_dir):
     assert plan.agent.agent_id == f"{ROOT}/helper" and f"{ROOT}/helper" in {write.id for write in plan.writes}
 
 
-def test_the_stores_agent_is_named_by_its_id(bundle_dir):
+def test_the_stores_agent_is_named_by_its_id_at_the_version_the_plan_read(bundle_dir):
+    _store_agent("mine")
     _store_agent("mine")
 
     plan = _plan(_bundle(bundle_dir, [DEPLOY, PROMPT]), "mine")
 
-    assert plan.agent.agent_id == "mine" and "mine" not in {write.id for write in plan.writes}
+    assert (plan.agent.agent_id, plan.agent.version) == ("mine", 2)
+    assert "mine" not in {write.id for write in plan.writes}
 
 
 def test_a_name_that_names_no_agent_is_refused_pointing_at_a_close_alias(bundle_dir, kit):
@@ -134,8 +136,10 @@ def test_preflight_checks_the_agent_the_solver_deploys(bundle_dir, monkeypatch):
             {"agents/helper/Dockerfile": "FROM scratch\n"})
 
     dry_run_bundle(bundle_dir, agent="helper")
+    _store_agent("mine")
+    dry_run_bundle(bundle_dir, agent="mine")
 
-    assert checked == [(f"{ROOT}/helper", None)]
+    assert checked == [(f"{ROOT}/helper", None), ("mine", 1)]
 
 
 def test_an_install_is_checked_for_the_agent_the_solver_installs_not_the_one_the_task_names(bundle_dir):
@@ -174,6 +178,23 @@ def test_a_run_deploys_the_agent_at_the_solvers_steps_alone_at_the_version_it_wr
     run_bundle(bundle_dir, agent="helper", sandbox="local")
 
     assert seen[f"{ROOT}/t"]["step_params"] == {"agent": {"a2a_agent_id": f"{ROOT}/helper", "a2a_agent_version": 1}}
+
+
+def test_a_run_deploys_the_stores_agent_at_the_version_the_plan_read_not_one_put_since(bundle_dir, monkeypatch):
+    seen = {}
+
+    async def run(self, *, context, **kwargs):
+        _store_agent("mine")
+        seen[self.id] = context.metadata.get("user_overrides")
+        return context
+
+    monkeypatch.setattr(Task, "run", run)
+    _store_agent("mine")
+    _bundle(bundle_dir, [DEPLOY, PROMPT])
+
+    run_bundle(bundle_dir, agent="mine", sandbox="local")
+
+    assert seen[f"{ROOT}/t"]["step_params"] == {"agent": {"a2a_agent_id": "mine", "a2a_agent_version": 1}}
 
 
 def test_a_steps_override_wins_over_the_run_wide_one_and_the_stored_agent():

@@ -138,6 +138,7 @@ class AgentOverride:
     name: str  # as the run was given it
     agent_id: str
     steps: Mapping[str, tuple[str, ...]]
+    version: int | None = None  # the store's version the plan read; None for an agent the run writes
 
 
 @dataclass(frozen=True)
@@ -471,6 +472,8 @@ class _Planner:
         selected_tasks, selected_evals = self._selection(tasks, evals)
         closure = self._closure(selected_tasks + selected_evals)
         store_refs, store_latest = self._check_store_refs(closure)
+        if override is not None:
+            override = replace(override, version=store_latest.get((EntityKind.AGENT, override.agent_id)))
         self._build_tasks(closure)
         self._check_files(closure)
         self._check_cli_loads(closure)

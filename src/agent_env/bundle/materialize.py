@@ -336,7 +336,7 @@ def _preflight(plan: Plan, write: Write, task: Task,
     problems, unchecked = [], []
     for config, step in zip(write.source.config, task.steps):
         if step.id in solver:
-            config = {**config, "a2a_agent_id": plan.agent.agent_id, "a2a_agent_version": None}
+            config = {**config, "a2a_agent_id": plan.agent.agent_id, "a2a_agent_version": plan.agent.version}
             step = build_step(config)
         problems.extend(step.config_problems())
         reads = _reads(config)
