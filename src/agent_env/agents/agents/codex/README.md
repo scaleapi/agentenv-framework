@@ -31,7 +31,7 @@ Codex reads its settings from `$CODEX_HOME/config.toml`, which the agent writes:
 | `snapshot/v1` | `save` uploads the thread's rollout JSONL and the workspace as a gzipped tar, each held to a size limit, once no task of the context runs; `load` writes the rollout under a fresh thread id, replaces the workspace's contents (extracted aside first) and binds the thread to the target context |
 | `peer-agents/v1` | SDK default: the CLI reaches the task's other agents through the SDK's `peer_agents` MCP tools |
 | `attribution-probe/v1` | the `project_id` and `task_id` the last CLI run sent |
-| `install/v1` | `install.sh`, into a task container (as root, the CLI working in `/app`) or onto a `vm` sandbox's Linux host: Node and uv checked against their checksums, the CLIs from `package-lock.json` and the agent's requirements in a Python of its own. Node's builds need glibc |
+| `install/v1` | `install.sh`, into a task container (as root, the CLI working in `/app`) or onto a `vm` sandbox's Linux host: Node and uv checked against their checksums, the CLIs from `package-lock.json` and the agent's requirements in a Python of its own, which the target's own Node and Python are never replaced by; the model's commands get the agent's where the target has none. Node's builds need glibc |
 | `triggers/v1` | SDK default |
 
 The image is `python:3.11-slim` with Node, the CLIs and the agent, running as the `agent` user; Codex's state is in

@@ -6,7 +6,7 @@
 #
 # It brings Node and uv, each checked against its published checksum, the Codex CLI and mcp-remote as package-lock.json
 # pins them, and the agent's requirements in a private Python, so the target's own Node, Python and packages are never
-# touched; a target with no Node of its own gets this one at the end of its PATH. Node's builds need glibc, and a
+# touched; a target with no Node or Python of its own gets these at the end of its PATH. Node's builds need glibc, and a
 # target with no bash, which the model's commands run in, gets it from its own package manager. The model endpoint's
 # LITELLM_API_KEY, LITELLM_BASE_URL and LITELLM_EXTRA_HEADERS, and AGENT_TRUST_ENV, the KEY='VALUE' lines of the CA
 # variables the agent needs, come in the environment and are kept in a 0600 file the agent reads.

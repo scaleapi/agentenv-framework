@@ -86,7 +86,7 @@ def test_a_host_install_refuses_a_folder_it_did_not_make_in_its_place(tmp_path):
     assert not any(planted.iterdir())
 
 
-def test_an_installed_agent_runs_its_own_clis_and_a_node_only_where_the_target_has_none():
+def test_an_installed_agent_runs_its_own_clis_and_its_node_and_python_only_where_the_target_has_none():
     run_sh = (AGENT_DIR / "run.sh").read_text()
 
-    assert 'export PATH="$root/bin:$PATH:$root/node/bin"' in run_sh
+    assert 'export PATH="$root/bin:$PATH:$root/node/bin:$root/venv/bin"' in run_sh
