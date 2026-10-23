@@ -41,6 +41,7 @@ updates:
       - "/src/agent_env/env/envs/service_db"
       - "/src/agent_env/env/envs/website_browser"
       - "/src/agent_env/agents/agents/claude-code"
+      - "/src/agent_env/agents/agents/codex"
       - "/src/agent_env/agents/agents/openhands"
       - "/src/agent_env/agents/agents/pi"
     schedule:

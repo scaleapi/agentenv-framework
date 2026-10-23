@@ -168,10 +168,10 @@ Reference: `enable(TRIGGERS_V1, ...)`. Overriding `decide` to change the decisio
 ### `attribution-probe/v1`, `/ext/attribution-probe`
 
 The agent reports the attribution it last sent with a model request. You implement `probe`, which also declares the
-extension. Neither shipped agent does.
+extension.
 
-Reference: `test_attribution_probe_reports_what_the_agent_last_sent` in
-`packages/agentenv-protocol/tests/test_a2a_agent.py`.
+Reference: `agents/codex/a2a_server.py` `probe_attribution`, and
+`test_attribution_probe_reports_what_the_agent_last_sent` in `packages/agentenv-protocol/tests/test_a2a_agent.py`.
 
 ### `install/v1` (no endpoint)
 

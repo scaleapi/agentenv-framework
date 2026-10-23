@@ -34,6 +34,14 @@ the `[model]` endpoint as an OpenAI-compatible one and takes its model from the 
 `[model] default` (or the `agent` role) set. It declares `install/v1` too, for Debian or Ubuntu targets.
 Its folder's `README.md` covers the extensions it implements.
 
+`agents/codex/` runs OpenAI's [Codex CLI](https://github.com/openai/codex) behind the protocol's A2A agent framework:
+each turn is one `codex exec --json` run, resumed in the context's Codex thread, the task env's MCP servers go to its
+`config.toml` through `mcp-remote`, and its JSON events are the turn's trajectory. Name it as `codex`, its alias, or by
+its id, `@local/agentenv-framework/agents/codex`. It calls the `[model]` endpoint's OpenAI-compatible Responses API,
+`<base>/openai/v1/responses`, which a LiteLLM gateway serves, and takes its model from the prompt, so its smoke task
+needs `[model] default` (or the `agent` role) set. It declares `install/v1` too, into a container or onto a `vm`
+sandbox's Linux host, with glibc. Its folder's `README.md` covers the extensions it implements.
+
 `agents/openhands/` runs the [OpenHands](https://github.com/OpenHands/software-agent-sdk) agent behind the
 protocol's A2A agent framework, driving the OpenHands SDK in process rather than a CLI: each turn is one run of a
 persisted SDK conversation, the task env's MCP servers go to its `mcp_config`, and its SDK events are the turn's
@@ -42,10 +50,11 @@ calls the `[model]` endpoint through LiteLLM and takes its model from the prompt
 `[model] default` (or the `agent` role) set. It declares `install/v1` too, for Debian or Ubuntu targets. Its folder's
 `README.md` covers the extensions it implements.
 
-A release publishes pi's and OpenHands' images too, at `ghcr.io/scaleapi/agentenv-pi:src-<hex>` and
-`ghcr.io/scaleapi/agentenv-openhands:src-<hex>`, each built again only when its folder changes, and a run deploys
+A release publishes Codex's, pi's and OpenHands' images too, at `ghcr.io/scaleapi/agentenv-codex:src-<hex>`,
+`ghcr.io/scaleapi/agentenv-pi:src-<hex>` and `ghcr.io/scaleapi/agentenv-openhands:src-<hex>`, each built again only
+when its folder changes, and a run deploys
 them as it does Claude Code's: it pulls the image
 published for the sources installed, by its digest, and builds it from the agent's folder only when it can't.
 
 `agent-env run agents` runs every agent's smoke task, pulling or building each image; `--task claude-code-smoke` runs Claude
-Code's alone, `--task pi-smoke` pi's, `--task openhands-smoke` OpenHands'.
+Code's alone, `--task codex-smoke` Codex's, `--task pi-smoke` pi's, `--task openhands-smoke` OpenHands'.
