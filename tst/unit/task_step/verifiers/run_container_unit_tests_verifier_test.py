@@ -4,6 +4,7 @@ RunContainerUnitTestsVerifierTaskStep."""
 from __future__ import annotations
 
 import asyncio
+import shlex
 from types import SimpleNamespace
 
 import pytest
@@ -294,3 +295,98 @@ def test_runs_and_retries_in_one_second_keep_their_outputs_apart(local_stores, m
     asyncio.run(both())
 
     assert len({artifact_id for artifact_id, _ in uploads}) == len({url for _, url in uploads}) == 4
+
+
+class _ContainerSandbox(_Sandbox):
+    """The task container's files as a dict: `rm -f` and `docker cp` act on it, and the
+    verifier command runs `test_sh`, which may or may not write the reward file."""
+
+    def __init__(self, files, test_sh):
+        self.files = dict(files)
+        self.vm_files: dict[str, str] = {}
+        self.test_sh = test_sh
+
+    async def exec_script(self, script: str) -> str:
+        words = shlex.split(script)
+        if words[0] == "docker" and "rm" in words:
+            for path in words[words.index("--") + 1:]:
+                self.files.pop(path, None)
+        elif words[:2] == ["rm", "-f"]:
+            self.vm_files.pop(words[2], None)
+        return ""
+
+    async def exec_with_output(self, *args) -> tuple[int, str, str]:
+        if args[:2] == ("sudo", "cat"):
+            return 0, self.vm_files[args[2]], ""
+        return self.test_sh(self.files), "", ""
+
+    async def docker_cp(self, source: str, destination: str) -> None:
+        path = source.split(":", 1)[1]
+        if path not in self.files:
+            raise RuntimeError(f"no such file: {path}")
+        self.vm_files[destination] = self.files[path]
+
+
+def _test_sh_writing_reward_only_on_pass(answer):
+    """`pytest && echo 1 > reward.txt`: a failed run exits non-zero and writes nothing."""
+
+    def run(files):
+        if files.get("/app/answer.txt") == answer:
+            files["/logs/verifier/reward.txt"] = "1\n"
+            return 0
+        return 1
+
+    return run
+
+
+def _recorded(monkeypatch, sandbox, step):
+    """What ``step`` records after running against ``sandbox``."""
+    configure()
+    provider = SimpleNamespace(get_sandbox=lambda sandbox_id: asyncio.sleep(0, result=sandbox))
+    monkeypatch.setattr(sandbox_provider, "get_sandbox_provider", lambda: provider)
+    monkeypatch.setattr(
+        Step,
+        "_upload_text_artifact",
+        staticmethod(lambda text, artifact_id, description, object_url: SimpleNamespace(
+            id=artifact_id, version=1, object_url=object_url
+        )),
+    )
+    ctx = TaskStepContext()
+    ctx.metadata["deployed_docker_containers"] = [{"container_name": "c", "sandbox_name": "h"}]
+    ctx.deployed_sandboxes.append(DeployedSandbox(sandbox_name="h", sandbox_id="sb-1", sandbox_mode="vm"))
+    asyncio.run(step.execute(ctx))
+    [recorded] = ctx.metadata["verifications"].values()
+    return recorded
+
+
+@pytest.mark.parametrize(
+    ("agent_files", "expected_score"),
+    [
+        ({"/app/answer.txt": "42"}, 1.0),
+        ({"/app/answer.txt": "41"}, 0.0),
+        ({"/app/answer.txt": "41", "/logs/verifier/reward.txt": "1\n"}, 0.0),
+    ],
+    ids=["correct", "wrong", "wrong-with-planted-reward"],
+)
+def test_reward_comes_from_this_verifier_run(local_stores, monkeypatch, agent_files, expected_score):
+    """A reward file the agent left in the container must not be graded as the verifier's."""
+    sandbox = _ContainerSandbox(agent_files, _test_sh_writing_reward_only_on_pass("42"))
+
+    recorded = _recorded(monkeypatch, sandbox, _step(command="bash /tests/test.sh",
+                                                     reward_path="/logs/verifier/reward.txt"))
+
+    assert recorded["score"] == expected_score
+    assert recorded["results"][0]["result"] is (expected_score == 1.0)
+
+
+@pytest.mark.parametrize("reward_path", ["/logs/verifier/reward.txt", None], ids=["reward-mode", "exit-code-mode"])
+def test_only_the_reward_file_is_cleared(local_stores, monkeypatch, reward_path):
+    """A step can extract what an earlier step's job wrote, as a supervisor step adopting a running engine does."""
+    files = {"/work/events.tail.json": '{"seq": 7}', "/logs/verifier/reward.txt": "1\n"}
+    sandbox = _ContainerSandbox(files, lambda files: 0)
+
+    recorded = _recorded(monkeypatch, sandbox, _step(command="true", reward_path=reward_path,
+                                                     result_paths=["/work/events.tail.json"]))
+
+    assert recorded["extracted_files"]["/work/events.tail.json"] == {"seq": 7}
+    assert ("/logs/verifier/reward.txt" in sandbox.files) is (reward_path is None)
