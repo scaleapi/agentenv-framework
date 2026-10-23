@@ -19,7 +19,7 @@ from agent_env.plugins._bundles import ALIASES_FILE
 from agent_env.store.routing import namespace_routing
 from agent_env.task.task import Task
 from agent_env.task_step.context import TaskStepContext
-from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep, agent_for_run
+from agent_env.task_step.task_steps.install_agent import InstallAgentTaskStep
 from tst.unit.bundle._support import layout
 
 ROOT = "@local/~/triage"
@@ -202,13 +202,14 @@ def test_a_run_deploys_the_stores_agent_at_the_version_the_plan_read_not_one_put
     assert seen[f"{ROOT}/t"]["step_params"] == {"agent": {"a2a_agent_id": "mine", "a2a_agent_version": 1}}
 
 
-def test_a_steps_override_wins_over_the_run_wide_one_and_the_stored_agent():
-    step = DeployAgentTaskStep(id="agent", version=None, a2a_agent_id="stored", a2a_agent_version=3)
-    context = TaskStepContext(metadata={"user_overrides": {
-        "a2a_agent_id": "run-wide", "step_params": {"agent": {"a2a_agent_id": "solver", "a2a_agent_version": None}}}})
+def test_an_install_takes_its_steps_override_over_the_run_wide_one_and_the_stored_agent():
+    step = InstallAgentTaskStep(id="agent", version=None, sandbox_name="box", a2a_agent_id="stored", a2a_agent_version=3)
+    solver = {"step_params": {"agent": {"a2a_agent_id": "solver", "a2a_agent_version": None}}}
 
-    assert agent_for_run(step, context, step.a2a_agent_id, step.a2a_agent_version) == ("solver", None)
-    assert agent_for_run(step, TaskStepContext(), step.a2a_agent_id, step.a2a_agent_version) == ("stored", 3)
+    assert step._agent_ref(TaskStepContext(metadata={"user_overrides": {"a2a_agent_id": "run-wide", **solver}})) == (
+        "solver", None)
+    assert step._agent_ref(TaskStepContext(metadata={"user_overrides": {"a2a_agent_id": "run-wide"}})) == ("run-wide", 3)
+    assert step._agent_ref(TaskStepContext()) == ("stored", 3)
 
 
 def test_the_cli_takes_the_agent_for_a_run_and_a_dry_run(bundle_dir, monkeypatch):
