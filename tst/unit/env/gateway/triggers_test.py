@@ -5,6 +5,7 @@ import asyncio
 import json
 import random
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -589,20 +590,23 @@ def test_next_opening(now, hours, opens):
     ("2026-03-07T22:00:00Z", {"start": "09:00", "end": "17:00"}, "2026-03-08T13:00:00Z"),
     ("2026-03-08T09:30:00Z", {"start": "22:00", "end": "06:00"}, None),
     ("2026-03-08T10:00:00Z", {"start": "22:00", "end": "06:00"}, "2026-03-09T02:00:00Z"),
-    ("2026-03-08T07:00:00Z", {"start": "02:30", "end": "10:00"}, "2026-03-08T07:30:00Z"),
+    ("2026-03-08T06:00:00Z", {"start": "02:30", "end": "10:00"}, "2026-03-08T07:00:00Z"),
     ("2026-10-31T21:00:00Z", {"start": "09:00", "end": "17:00"}, "2026-11-01T14:00:00Z"),
     ("2026-11-01T13:00:00Z", {"start": "09:00", "end": "17:00"}, "2026-11-01T14:00:00Z"),
     ("2026-11-01T06:15:00Z", {"start": "01:30", "end": "09:00"}, None),
     ("2026-11-01T06:15:00Z", {"start": "22:00", "end": "01:30"}, "2026-11-02T03:00:00Z"),
-    ("2026-03-08T06:00:00Z", {"start": "02:30", "end": "03:15"}, "2026-03-09T06:30:00Z"),
+    ("2026-03-08T06:00:00Z", {"start": "02:30", "end": "03:15"}, "2026-03-08T07:00:00Z"),
     ("2026-03-08T06:00:00Z", {"start": "02:00", "end": "03:00"}, "2026-03-09T06:00:00Z"),
+    ("2026-03-08T06:00:00Z", {"start": "02:00", "end": "02:30"}, "2026-03-09T06:00:00Z"),
+    ("2026-03-08T07:15:00Z", {"start": "01:30", "end": "02:30"}, "2026-03-09T05:30:00Z"),
     ("2026-03-07T08:00:00Z", {"start": "02:00", "end": "03:00", "days": ["sun"]}, "2026-03-15T06:00:00Z"),
     ("2026-03-01T09:00:00Z", {"start": "02:00", "end": "03:00", "days": ["sun"]}, "2026-03-15T06:00:00Z"),
 ], ids=["july-weekday", "july-closed-at-17-local", "december-weekday", "december-closed-at-17-local",
         "into-spring-forward-sunday", "overnight-across-spring-forward", "overnight-closes-at-06-edt",
         "start-in-the-skipped-hour", "into-fall-back-sunday", "fall-back-sunday-at-08-est",
         "opened-in-the-repeated-hour-stays-open", "closed-in-the-repeated-hour-stays-closed",
-        "window-the-skipped-hour-empties", "window-inside-the-skipped-hour",
+        "window-the-skipped-hour-shortens", "window-of-the-skipped-hour", "window-inside-the-skipped-hour",
+        "window-ending-in-the-skipped-hour-closes-at-the-jump",
         "only-window-of-the-week-the-skipped-hour-empties", "a-week-before-an-only-window-the-skipped-hour-empties"])
 def test_next_opening_in_a_named_time_zone(now, hours, opens):
     hours = _normalize_hours({"time_zone": "America/New_York", **hours}, "executor")
@@ -612,10 +616,10 @@ def test_next_opening_in_a_named_time_zone(now, hours, opens):
 
 @pytest.mark.parametrize("start, end, days", [
     ("09:00", "17:00", None), ("22:00", "06:00", None), ("02:30", "10:00", None), ("02:30", "03:15", None),
-    ("02:00", "03:00", None), ("01:30", "02:30", None), ("01:15", "01:45", None), ("22:00", "01:30", None),
+    ("02:00", "03:00", None), ("02:00", "02:30", None), ("01:30", "02:30", None), ("01:15", "01:45", None), ("22:00", "01:30", None),
     ("02:00", "03:00", ["sun"]), ("02:30", "03:15", ["sun"]), ("01:30", "02:30", ["sun"]), ("22:00", "02:30", ["sat"]),
-], ids=["day", "overnight", "starts-in-the-skipped-hour", "the-skipped-hour-empties", "inside-the-skipped-hour",
-        "across-the-repeated-hour", "inside-the-repeated-hour", "overnight-into-the-repeated-hour",
+], ids=["day", "overnight", "starts-in-the-skipped-hour", "the-skipped-hour-shortens", "the-skipped-hour",
+        "inside-the-skipped-hour", "across-the-repeated-hour", "inside-the-repeated-hour", "overnight-into-the-repeated-hour",
         "sundays-inside-the-skipped-hour", "sundays-the-skipped-hour-empties", "sundays-across-the-repeated-hour",
         "saturday-nights-into-the-change"])
 def test_hours_in_a_time_zone_are_open_when_they_say_they_open(start, end, days):
@@ -629,8 +633,15 @@ def test_hours_in_a_time_zone_are_open_when_they_say_they_open(start, end, days)
             now = datetime.fromisoformat(first) + timedelta(minutes=15 * quarter)
             opens = _next_opening(now, hours)
             assert opens is None or _next_opening(opens.astimezone(timezone.utc), hours) is None, (now, opens)
+            local = now.astimezone(ZoneInfo("America/New_York"))
+            assert opens is not None or local.fold or _reads_within(local, start, end), now
             open_since = (open_since or now) if opens is None else None
             assert open_since is None or now - open_since < longest, (now, open_since)
+
+
+def _reads_within(local: datetime, start: str, end: str) -> bool:
+    reading = local.strftime("%H:%M")
+    return start <= reading < end if start < end else reading >= start or reading < end
 
 
 def test_hours_without_a_time_zone_normalize_as_before():

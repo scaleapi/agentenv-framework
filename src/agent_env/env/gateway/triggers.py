@@ -3,6 +3,7 @@ post-call detection on watched-role traffic, async fail-open firing, additive fa
 from __future__ import annotations
 
 import asyncio
+import bisect
 import contextlib
 import copy
 import hashlib
@@ -1569,7 +1570,7 @@ def _next_opening(now: datetime, hours: dict) -> datetime | None:
     """None if ``now`` is within the working hours, else when they next open. A window starts on each listed day and
     runs to `end`, past midnight when `end` is earlier than `start`. Its local bounds are compared with the UTC ``now``
     as instants, so it keeps its local hours across a daylight-saving change; a day whose skipped hour leaves its window
-    no time has none."""
+    no time has none, and a bound in the skipped hour falls at the moment the clocks jump."""
     zone = _hours_zone(hours)
     start_h, start_m = map(int, hours["start"].split(":"))
     end_h, end_m = map(int, hours["end"].split(":"))
@@ -1579,14 +1580,28 @@ def _next_opening(now: datetime, hours: dict) -> datetime | None:
         day = today + timedelta(days=days_ahead)
         if _DAYS[day.weekday()] not in hours["days"]:
             continue
-        opens = datetime.combine(day, time(start_h, start_m), zone)
-        closes = opens + length
-        if closes.astimezone(timezone.utc) <= opens.astimezone(timezone.utc):
+        local_opens = datetime.combine(day, time(start_h, start_m), zone)
+        opens, closes = _instant(local_opens), _instant(local_opens + length)
+        if closes <= opens:
             continue
         if opens <= now < closes:
             return None
         if opens > now:
             return opens
+
+
+def _instant(local: datetime) -> datetime:
+    """The UTC instant of an aware ``local`` time, the first if its hour repeats, and the moment the clocks jump past it
+    if they skip it."""
+    utc = local.astimezone(timezone.utc)
+    wall = local.replace(tzinfo=None)
+    if utc.astimezone(local.tzinfo).replace(tzinfo=None) == wall:
+        return utc
+    before = local.replace(fold=1).astimezone(timezone.utc)
+    jump = bisect.bisect_left(range(int((utc - before).total_seconds())), True,
+                              key=lambda s: (before + timedelta(seconds=s)).astimezone(local.tzinfo).replace(tzinfo=None)
+                              >= wall)
+    return before + timedelta(seconds=jump)
 
 
 def _hours_zone(hours: dict) -> tzinfo:
