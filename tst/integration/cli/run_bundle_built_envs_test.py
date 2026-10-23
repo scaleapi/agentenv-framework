@@ -564,6 +564,24 @@ def test_the_shipped_echo_mcp_example_runs_by_name_and_a_rerun_writes_nothing(st
     assert "tasks/smoke.json v1: passed (echoes: 1)" in second.output, second.output
 
 
+
+def test_the_shipped_mail_mcp_example_runs_and_a_task_outside_a_bundle_deploys_its_env_by_its_alias(state):
+    """The alias is how the A2A agent validator's task, which no bundle holds, names the env it deploys."""
+    first = _run("mail-mcp")
+
+    assert first.exit_code == 0, first.output
+    assert "tasks/smoke.json v1: passed (finds-the-invoice: 1)" in first.output, first.output
+
+    (state / "by-alias.json").write_text(json.dumps([{"id": "env", "type": "deploy_env", "env_id": "mail-mcp"}]))
+    created = CliRunner().invoke(cli, ["task", "create", "--id", "by-alias", str(state / "by-alias.json")])
+    ran = CliRunner().invoke(cli, ["task", "run", "--id", "by-alias", "--output-dir", str(state / "out")])
+
+    assert created.exit_code == 0, created.output
+    assert ran.exit_code == 0, ran.output
+    [written] = (state / "out").iterdir()
+    [deployed] = json.loads(written.read_text())["deployed_envs"]
+    assert deployed["env_id"] == "mail-mcp" and deployed["gateway_url"], deployed
+
 ECHO = REPO / "src" / "agent_env" / "examples" / "echo-mcp"
 
 

@@ -21,9 +21,9 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, NoReturn
 
-from agent_env.bundle._fs import Unreadable, fold, home, on_disk, read_regular, show
+from agent_env.bundle._fs import Unreadable, fold, home, on_disk, read_regular, show, with_article
 from agent_env.entity.refs import EntityKind
-from agent_env.plugins._bundles import ALIASES_FILE, read_aliases
+from agent_env.plugins._bundles import AGENT_ALIASES, ALIASES_FILE, ENV_ALIASES, read_aliases
 from agent_env.store.ids import LOCAL_PREFIX, MAX_AUTHORED_LOCAL_ID_BYTES, validate_local_id
 from agent_env.utils.paths import LEAVINGS, os_reason
 
@@ -84,9 +84,9 @@ class Bundle:
     description: str | None  # README.md's first line of text
     entries: tuple[BundleEntry, ...]
     ignored: tuple[Path, ...]  # root-relative, as on disk: entries that are neither kinds nor entities
-    # The aliases its aliases.toml gives its agents, by agent name, which a reference names an agent by once the bundle
-    # is installed.
-    aliases: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    # The aliases its aliases.toml gives its agents and envs, by table and then folder name, which a reference names
+    # one by once the bundle is installed.
+    aliases: Mapping[str, Mapping[str, tuple[str, ...]]] = field(default_factory=dict)
 
 
 class BundleError(ValueError):
@@ -158,28 +158,31 @@ class _Parser:
             aliases=aliases,
         )
 
-    def _aliases(self, entries: list[BundleEntry]) -> dict[str, tuple[str, ...]]:
-        """The aliases the bundle's aliases.toml gives its agents. Each names an agent the bundle has, by its folder
-        name, so that agent keeps the id its folder gives it, and none is another of its agents' name or id."""
+    def _aliases(self, entries: list[BundleEntry]) -> dict[str, dict[str, tuple[str, ...]]]:
+        """The aliases the bundle's aliases.toml gives its agents and envs. Each names one the bundle has, of its
+        table's kind, by its folder name, so it keeps the id its folder gives it, and none is another one's name or id."""
         if self.aliases_file is None:
             return {}
         declared, problems = read_aliases(self.aliases_file)
         for problem in problems:
             self._problem(self.aliases_file, problem)
-        agents = {entry.name: entry for entry in entries if entry.kind is BundleKind.AGENT}
-        taken = {key: entry for entry in agents.values() for key in (entry.name, entry.id)}
-        for name, aliases in declared.items():
-            agent = agents.get(name)
-            if agent is None:
-                self._problem(self.aliases_file, f"agents.{name}: this bundle has no agent {name!r}")
-                continue
-            if agent.id != f"{self.id_root}/{name}":
-                self._problem(self.aliases_file, f"agents.{name}: the agent declares the id {agent.id!r}, and an alias "
-                              f"names an agent by its folder, so it must keep the id {self.id_root}/{name}")
-            for alias in aliases:
-                if (other := taken.get(alias)) is not None and other is not agent:
-                    what = "name" if alias == other.name else "id"
-                    self._problem(self.aliases_file, f"agents.{name}: {alias!r} is the agent {other.name!r}'s {what}")
+        for table, kind, noun in ((AGENT_ALIASES, BundleKind.AGENT, "agent"), (ENV_ALIASES, BundleKind.ENV, "env")):
+            own = {entry.name: entry for entry in entries if entry.kind is kind}
+            taken = {key: entry for entry in own.values() for key in (entry.name, entry.id)}
+            for name, aliases in declared.get(table, {}).items():
+                entry = own.get(name)
+                if entry is None:
+                    self._problem(self.aliases_file, f"{table}.{name}: this bundle has no {noun} {name!r}")
+                    continue
+                if entry.id != f"{self.id_root}/{name}":
+                    self._problem(self.aliases_file, f"{table}.{name}: the {noun} declares the id {entry.id!r}, and an "
+                                  f"alias names {with_article(noun)} by its folder, so it must keep the id "
+                                  f"{self.id_root}/{name}")
+                for alias in aliases:
+                    if (other := taken.get(alias)) is not None and other is not entry:
+                        what = "name" if alias == other.name else "id"
+                        self._problem(self.aliases_file,
+                                      f"{table}.{name}: {alias!r} is the {noun} {other.name!r}'s {what}")
         return declared
 
     def _derive_id_root(self) -> str:

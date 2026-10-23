@@ -4,8 +4,8 @@ A distribution registers ``<name> = "<package>"`` and ships the bundle folder at
 found without importing any package code: only the top-level package is located, and the rest of the path is walked
 as folders. An installed bundle's ids are rooted at its distribution, ``@local/<dist>/<name>``.
 
-A bundle can give its agents short aliases in an ``aliases.toml`` at its root, which a reference names an agent by
-when no agent of that id is in the store (``installed_aliases``).
+A bundle can give its agents and envs short aliases in an ``aliases.toml`` at its root, which a reference names one by
+when no agent or env of that id is in the store (``installed_aliases``).
 
 It imports nothing from ``agent_env.bundle``, so a task step can read what's installed without importing the bundle
 machinery, whose run imports the task steps.
@@ -35,6 +35,9 @@ from agent_env.utils.paths import os_reason
 BUNDLES = "agent_env.bundles"
 CORE = "agentenv-framework"
 ALIASES_FILE = "aliases.toml"
+# The tables an aliases.toml takes, each giving aliases to one kind of the bundle's entities, by folder name.
+AGENT_ALIASES, ENV_ALIASES = "agents", "envs"
+_NOUNS = {AGENT_ALIASES: "agent", ENV_ALIASES: "env"}
 # A plain id, never a bundle's namespaced one, which holds '@' and '/'.
 _ALIAS = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?")
 _ALIAS_RULE = "lowercase letters, digits and '-', at most 64 characters, starting and ending with a letter or digit"
@@ -141,10 +144,10 @@ def _spelled(location: Path, parts: tuple[str, ...]) -> Path | None:
 
 @dataclass(frozen=True)
 class BundleAlias:
-    """An alias an installed bundle gives one of its agents."""
+    """An alias an installed bundle gives one of its agents or envs."""
 
     alias: str
-    agent_id: str  # ``<the bundle's id root>/<the agent's folder name>``
+    target_id: str  # ``<the bundle's id root>/<the agent's or env's folder name>``
     bundle: InstalledBundle
 
     @property
@@ -154,12 +157,13 @@ class BundleAlias:
 
 @dataclass(frozen=True)
 class InstalledAliases:
-    """The aliases installed bundles give their agents: each alias that names an agent, each refused to every bundle
-    that declares it, with why, and each bundle's refused claims, with why."""
+    """The aliases installed bundles give their entities of one kind, an ``aliases.toml`` table: each alias that names
+    one, each refused to every bundle that declares it, with why, and each bundle's refused claims, with why."""
 
     aliases: Mapping[str, BundleAlias]
     refused: Mapping[str, str]
     refused_claims: Mapping[str, tuple[str, ...]]  # by the bundle's qualified name
+    table: str = AGENT_ALIASES
 
     def target(self, alias: str) -> BundleAlias | None:
         return self.aliases.get(alias)
@@ -168,25 +172,25 @@ class InstalledAliases:
         return self.refused.get(alias)
 
     def of(self, bundle: InstalledBundle) -> tuple[str, ...]:
-        """The aliases that name ``bundle``'s agents, in name order."""
+        """The aliases that name ``bundle``'s entities, in name order."""
         return tuple(sorted(alias for alias, named in self.aliases.items() if named.bundle == bundle))
 
-    def naming(self, agent_id: str) -> tuple[str, ...]:
-        """The aliases that name the agent ``agent_id``, in name order."""
-        return tuple(sorted(alias for alias, named in self.aliases.items() if named.agent_id == agent_id))
+    def naming(self, target_id: str) -> tuple[str, ...]:
+        """The aliases that name the entity ``target_id``, in name order."""
+        return tuple(sorted(alias for alias, named in self.aliases.items() if named.target_id == target_id))
 
     def hint(self, name: str) -> str:
-        """For ``name``, which names no agent: the aliases close to it, or ''."""
+        """For ``name``, which names nothing of this kind: the aliases close to it, or ''."""
         close = difflib.get_close_matches(name, sorted(self.aliases), n=3)
         if not close:
             return ""
-        return (f"; did you mean the alias {' or '.join(repr(alias) for alias in close)}? agent-env a2a-agent list "
-                "lists the agents a task can name")
+        listed = " agent-env a2a-agent list lists the agents a task can name" if self.table == AGENT_ALIASES else ""
+        return f"; did you mean the alias {' or '.join(repr(alias) for alias in close)}?{listed}"
 
 
-def read_aliases(path: Path) -> tuple[dict[str, tuple[str, ...]], list[str]]:
-    """The aliases a bundle's ``aliases.toml`` at ``path`` gives its agents, by agent folder name, and its problems; none
-    of either when there's no such file, and no aliases when it has a problem."""
+def read_aliases(path: Path) -> tuple[dict[str, dict[str, tuple[str, ...]]], list[str]]:
+    """The aliases a bundle's ``aliases.toml`` at ``path`` gives its agents and envs, by table and then folder name, and
+    its problems; none of either when there's no such file, and no aliases when it has a problem."""
     if not os.path.lexists(path):
         return {}, []
     if not path.is_file():
@@ -197,40 +201,43 @@ def read_aliases(path: Path) -> tuple[dict[str, tuple[str, ...]], list[str]]:
         return {}, [f"can't be read: {os_reason(e)}"]
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
         return {}, [f"isn't valid TOML: {e}"]
-    problems = [f"[{key}] isn't a table it takes; it takes [agents]" for key in data if key != "agents"]
-    agents = data.get("agents", {})
-    if not isinstance(agents, dict):
-        return {}, [*problems, "[agents] must be a table of agent folder names to lists of aliases"]
-    found: dict[str, tuple[str, ...]] = {}
-    named: dict[str, str] = {}
-    for name, aliases in agents.items():
-        if not (isinstance(aliases, list) and aliases and all(isinstance(alias, str) for alias in aliases)):
-            problems.append(f"agents.{name} must be a list of aliases, not {aliases!r}")
+    problems = [f"[{key}] isn't a table it takes; it takes [agents] and [envs]" for key in data if key not in _NOUNS]
+    found: dict[str, dict[str, tuple[str, ...]]] = {}
+    for table, noun in _NOUNS.items():
+        entries = data.get(table, {})
+        if not isinstance(entries, dict):
+            problems.append(f"[{table}] must be a table of {noun} folder names to lists of aliases")
             continue
-        for alias in aliases:
-            if not _ALIAS.fullmatch(alias):
-                problems.append(f"agents.{name}: {alias!r} isn't an alias: {_ALIAS_RULE}")
-            elif alias in named:
-                where = "twice" if named[alias] == name else f"for agents.{named[alias]} too"
-                problems.append(f"agents.{name}: {alias!r} is listed {where}; an alias names one agent")
-            else:
-                named[alias] = name
-        found[name] = tuple(aliases)
+        named: dict[str, str] = {}
+        for name, aliases in entries.items():
+            if not (isinstance(aliases, list) and aliases and all(isinstance(alias, str) for alias in aliases)):
+                problems.append(f"{table}.{name} must be a list of aliases, not {aliases!r}")
+                continue
+            for alias in aliases:
+                if not _ALIAS.fullmatch(alias):
+                    problems.append(f"{table}.{name}: {alias!r} isn't an alias: {_ALIAS_RULE}")
+                elif alias in named:
+                    where = "twice" if named[alias] == name else f"for {table}.{named[alias]} too"
+                    problems.append(f"{table}.{name}: {alias!r} is listed {where}; an alias names one {noun}")
+                else:
+                    named[alias] = name
+            found.setdefault(table, {})[name] = tuple(aliases)
     return ({}, problems) if problems else (found, [])
 
 
-def installed_aliases(bundles: Sequence[InstalledBundle] | None = None) -> InstalledAliases:
-    """The aliases the installed bundles give their agents. agent-env's own bundles' aliases are theirs: another bundle
-    that declares one is refused it. An alias two other bundles both declare names neither, so a reference to it is
-    refused rather than given one of them. A bundle whose ``aliases.toml`` has a problem gives none, which checking the
-    bundle reports."""
+def installed_aliases(bundles: Sequence[InstalledBundle] | None = None, table: str = AGENT_ALIASES) -> InstalledAliases:
+    """The aliases the installed bundles give their entities of ``table``'s kind. agent-env's own bundles' aliases are
+    theirs: another bundle that declares one is refused it. An alias two other bundles both declare names neither, so a
+    reference to it is refused rather than given one of them. A bundle whose ``aliases.toml`` has a problem gives none,
+    which checking the bundle reports."""
     bundles = installed_bundles() if bundles is None else bundles
+    noun = _NOUNS[table]
     claims_by_alias: dict[str, list[BundleAlias]] = {}
     for bundle in bundles:
         if bundle.root is None or bundle.problem:
             continue
         declared, _ = read_aliases(bundle.root / ALIASES_FILE)
-        for name, aliases in declared.items():
+        for name, aliases in declared.get(table, {}).items():
             for alias in aliases:
                 claims_by_alias.setdefault(alias, []).append(BundleAlias(alias, f"{bundle.id_root}/{name}", bundle))
     aliases: dict[str, BundleAlias] = {}
@@ -243,15 +250,15 @@ def installed_aliases(bundles: Sequence[InstalledBundle] | None = None) -> Insta
             for claim in claimants:
                 if claim.bundle.dist != core[0].bundle.dist:
                     refused_claims.setdefault(claim.bundle.qualified, []).append(
-                        f"{alias!r} is agent-env's own alias, of {core[0].agent_id}, so this bundle can't give it")
+                        f"{alias!r} is agent-env's own alias, of {core[0].target_id}, so this bundle can't give it")
         elif len(claimants) == 1:
             aliases[alias] = claimants[0]
         else:
             declared_by = " and ".join(claim.declared_by for claim in claimants)
-            refused[alias] = (f"{alias!r} is an alias {declared_by} each give an agent, so it names none of them; "
-                              "name the agent by its id")
+            refused[alias] = (f"{alias!r} is an alias {declared_by} each give an {noun}, so it names none of "
+                              f"them; name the {noun} by its id")
             for claim in claimants:
                 refused_claims.setdefault(claim.bundle.qualified, []).append(
                     f"{alias!r} is another installed bundle's alias too, so neither gets it")
-    return InstalledAliases(aliases, refused, {name: tuple(why) for name, why in refused_claims.items()})
+    return InstalledAliases(aliases, refused, {name: tuple(why) for name, why in refused_claims.items()}, table)
 
