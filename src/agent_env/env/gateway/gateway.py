@@ -278,6 +278,20 @@ class Gateway:
             self._register_get_time_tool()
             return self._json_response(state, 200)
 
+        @self._mcp.custom_route("/clock/advance", methods=["PUT"])
+        async def clock_advance(request: Request) -> Response:
+            try:
+                body = await request.json()
+            except Exception:
+                return self._json_response({"ok": False, "error": "Invalid JSON body"}, 400)
+            if not isinstance(body, dict):
+                return self._json_response({"ok": False, "error": "body must be a JSON object"}, 400)
+            try:
+                state = self._clock.advance(body.get("virtual_time"))
+            except ClockError as e:
+                return self._json_response({"ok": False, "error": str(e)}, 400)
+            return self._json_response(state, 200)
+
         @self._mcp.custom_route("/clock/clear", methods=["POST"])
         async def clock_clear(request: Request) -> Response:
             self._unregister_get_time_tool()

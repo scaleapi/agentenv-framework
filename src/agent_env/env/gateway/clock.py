@@ -123,6 +123,7 @@ class Clock:
         self._rate = 1.0
         self._generation = 0
         self._lived = 0.0  # virtual seconds run before the current arm/clear
+        self._ahead = 0.0  # virtual seconds the current arm was advanced by
 
     @property
     def armed(self) -> bool:
@@ -153,8 +154,25 @@ class Clock:
             self._bank(t0)
             self._t0 = t0
             self._rate = r
+            self._ahead = 0.0
             self._armed = True
             self._generation += 1
+        return self.state()
+
+    def advance(self, virtual_time: str) -> dict:
+        """Jump forward to virtual_time on the current arm: t0, rate and generation stay, so time triggers keep their marks."""
+        target = _parse_rfc3339(virtual_time)
+        with self._lock:
+            if not self._armed or self._t0 is None:
+                raise ClockError("clock is not armed")
+            if target > _MAX_T0 - timedelta(seconds=_OVERFLOW_HORIZON_S * self._rate):
+                raise ClockError(f"virtual_time {virtual_time!r} at rate {self._rate:g} would overflow datetime near the max")
+            current = _advance(self._t0, (self._now() - self._anchor) * self._rate + self._ahead)
+            jump = (target - current).total_seconds()
+            if jump < 0:
+                raise ClockError(f"advance only moves forward: {virtual_time!r} is before the current {_iso(current)}")
+            self._ahead += jump
+            self._lived += jump
         return self.state()
 
     def clear(self) -> dict:
@@ -164,12 +182,13 @@ class Clock:
             self._armed = False
             self._t0 = None
             self._rate = 1.0
+            self._ahead = 0.0
             self._generation += 1
         return {"ok": True, "armed": False}
 
     def elapsed(self) -> float:
         """Virtual seconds run so far: real time at each arm's rate (1 while unarmed), plus the jump of each re-arm
-        forward; one back counts nothing."""
+        or advance forward; one back counts nothing."""
         with self._lock:
             return self._lived + (self._now() - self._anchor) * self._rate
 
@@ -178,7 +197,7 @@ class Clock:
             if not self._armed or self._t0 is None:
                 return None
             elapsed = self._now() - self._anchor
-            return _advance(self._t0, elapsed * self._rate)
+            return _advance(self._t0, elapsed * self._rate + self._ahead)
 
     def read(self) -> dict:
         """The frozen consumer contract: {"virtual_time": "<RFC3339>"} — pure read, never advances."""
@@ -193,7 +212,7 @@ class Clock:
                 return {"armed": False}
             elapsed = self._now() - self._anchor
             return {"armed": True, "t0": _iso(self._t0), "virtual_seconds_per_real_second": self._rate,
-                    "virtual_time": _iso(_advance(self._t0, elapsed * self._rate))}
+                    "virtual_time": _iso(_advance(self._t0, elapsed * self._rate + self._ahead))}
 
     def _bank(self, t0: datetime | None = None) -> None:
         """Fold the stretch since the last arm/clear into `_lived` at its rate, and start the next one now."""
@@ -201,5 +220,5 @@ class Clock:
         ran = (now - self._anchor) * self._rate
         self._lived += ran
         if t0 is not None and self._armed:  # a re-arm forward is time the world lived through; one back adds nothing
-            self._lived += max(0.0, (t0 - _advance(self._t0, ran)).total_seconds())
+            self._lived += max(0.0, (t0 - _advance(self._t0, ran + self._ahead)).total_seconds())
         self._anchor = now
