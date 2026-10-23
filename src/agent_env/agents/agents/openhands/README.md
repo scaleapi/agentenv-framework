@@ -8,7 +8,7 @@ them in a Python of uv's own, with tmux and git for the agent's terminal, both f
 
 Instead of wrapping a CLI, the agent drives the OpenHands SDK in process. `openhands_agent.py` is the
 A2A side and imports no SDK; `openhands_runtime.py` runs the conversation. Each task is one `arun()`
-of an SDK conversation in `/workspace`, with the SDK's default tools (terminal, file editor, task
+of an SDK conversation in its workspace, with the SDK's default tools (terminal, file editor, task
 tracker; no browser) and its default condenser, which summarizes a conversation that outgrows the model's window.
 The model is called through the `[model]` LiteLLM endpoint as `litellm_proxy/<model>`, with `LITELLM_EXTRA_HEADERS`
 sent on every call but kept out of the persisted conversation, which a snapshot uploads. Each turn runs on a thread
@@ -32,7 +32,8 @@ carry it.
 | `triggers/v1` | SDK default |
 
 `OPENHANDS_A2A_MODEL` sets the model when agent-config sets none, as for a peer that other agents
-message directly, and `OPENHANDS_A2A_WORKSPACE` the workspace (default `/workspace`). `a2a_server.py` reads
+message directly, and `OPENHANDS_A2A_WORKSPACE` the workspace (default `/workspace`, and the task container's working directory
+when it's installed there). `a2a_server.py` reads
 these and the `LITELLM_*` variables once, at startup: a `LITELLM_EXTRA_HEADERS` that is not a JSON object stops
 the agent there, while a missing `LITELLM_BASE_URL` fails each task as `openhands.no_endpoint`.
 
