@@ -1,7 +1,9 @@
 """Skills, trajectories, snapshots and the changelog through agent-env's object-transfer grants."""
 import asyncio
 import json
+import os
 import tarfile
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -571,6 +573,10 @@ async def test_a_changelog_replays_each_turns_changes_deletions_included(monkeyp
         enabled = await client.post("/ext/snapshot/changelog", json={"write_namespace": namespace,
                                                                      "roots": [str(folders)]})
         (folders / "kept.txt").write_text("after")
+        # A file's mtime comes from a coarser clock than the baseline's time, so a rewrite this soon after it can read
+        # as no later; a turn's writes come well after.
+        later = time.time() + 2
+        os.utime(folders / "kept.txt", (later, later))
         (folders / "removed.txt").unlink()
         (folders / "added.txt").write_text("new")
         await oc.agent._capture_changelog()
