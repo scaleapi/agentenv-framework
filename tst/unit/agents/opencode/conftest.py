@@ -59,7 +59,7 @@ def folders(monkeypatch, tmp_path):
     monkeypatch.setattr(a2a_server, "SKILLS_DIR", tmp_path / "skills")
     monkeypatch.setattr(a2a_server, "_CHANGELOG_DIR", tmp_path / "changelog")
     monkeypatch.setattr(a2a_server, "_CHANGELOG_SNAR", tmp_path / "changelog" / "state.snar")
-    monkeypatch.setattr(a2a_server, "_CHANGELOG_META", tmp_path / "changelog-meta" / "opencode-changelog-meta.json")
+    monkeypatch.setattr(a2a_server, "_CHANGELOG_META_DIR", tmp_path / f"changelog{a2a_server._META_DIR_SUFFIX}")
     monkeypatch.setattr(opencode_bridge, "SESSIONS_ROOT", str(tmp_path / "sessions"))
     return workspace
 

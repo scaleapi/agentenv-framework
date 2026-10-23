@@ -86,10 +86,15 @@ INPUTS_DIR = WORKSPACE_DIR / "inputs"
 # One per port, since agents installed on one host listen on their own.
 _CHANGELOG_DIR = Path(tempfile.gettempdir()) / f"opencode-changelog-{os.environ.get('A2A_PORT') or 'default'}"
 _CHANGELOG_SNAR = _CHANGELOG_DIR / "state.snar"
-# Each increment's record of the roots it saw removed: beside the changelog, which captures exclude, and outside its
-# roots, so it goes in as one more member.
-_CHANGELOG_META = _CHANGELOG_DIR.parent / f"{_CHANGELOG_DIR.name}-meta" / "opencode-changelog-meta.json"
-_META_MEMBER_NAME = "opencode-changelog-meta.json"
+# Each increment's record of the roots it saw removed, in a directory of its own beside the changelog, which captures
+# exclude, and outside its roots: tar dumps a directory it hasn't seen whole, so the record goes in however soon after
+# the last capture it is written.
+_META_DIR_SUFFIX = ".changelog-meta"
+_META_NAME = "opencode-changelog-meta.json"
+_CHANGELOG_META_DIR = _CHANGELOG_DIR.parent / f"{_CHANGELOG_DIR.name}{_META_DIR_SUFFIX}"
+# A record in an increment: _META_NAME in a sequence's directory under a directory named with _META_DIR_SUFFIX,
+# wherever the capturing agent kept it; a file of that name anywhere else is a file of the layer.
+_META_MEMBER = re.compile(rf"(?:^|/)[^/]+{re.escape(_META_DIR_SUFFIX)}/\d+/{re.escape(_META_NAME)}\Z")
 # Never removed on replay, whatever an increment's record says.
 _SYSTEM_DIRS = frozenset({"/", "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib32", "/lib64", "/libx32",
                           "/media", "/mnt", "/opt", "/proc", "/root", "/run", "/sbin", "/srv", "/sys", "/tmp", "/usr",
@@ -463,15 +468,17 @@ class OpenCodeAgent(DurableSessionRefs, AgentEnvAgent):
             _CHANGELOG_DIR.mkdir(parents=True, exist_ok=True)
             archive = _CHANGELOG_DIR / f"{sequence:06d}.tgz"
             pending_snar = _CHANGELOG_DIR / "pending.snar"
+            record = _CHANGELOG_META_DIR / f"{sequence:06d}"
             try:
-                _CHANGELOG_META.parent.mkdir(parents=True, exist_ok=True)
-                _CHANGELOG_META.write_text(json.dumps({"sequence": sequence, "removed": removed}))
+                await asyncio.to_thread(shutil.rmtree, record, True)
+                record.mkdir(parents=True)
+                (record / _META_NAME).write_text(json.dumps({"sequence": sequence, "removed": removed}))
                 await asyncio.to_thread(shutil.copyfile, _CHANGELOG_SNAR, pending_snar)
                 await asyncio.to_thread(
                     subprocess.run,
                     ["tar", f"--listed-incremental={pending_snar}",
                      *_changelog_backup_exclusions(),
-                     f"--exclude={_CHANGELOG_DIR}", "-czf", str(archive), *roots, str(_CHANGELOG_META)],
+                     f"--exclude={_CHANGELOG_DIR}", "-czf", str(archive), *roots, str(record)],
                     check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                 )
                 await config["uploader"].upload(f"{sequence:06d}.tgz", archive)
@@ -483,6 +490,7 @@ class OpenCodeAgent(DurableSessionRefs, AgentEnvAgent):
             finally:
                 archive.unlink(missing_ok=True)
                 pending_snar.unlink(missing_ok=True)
+                await asyncio.to_thread(shutil.rmtree, record, True)
 
 
 class OpenCodeChangelogAgent(OpenCodeAgent):
@@ -555,9 +563,11 @@ def _apply_increment(archive: Path, sequence: int) -> None:
     """Extract an increment over /, all but its record, then remove the roots its record names."""
     listing = subprocess.run(["tar", "--incremental", "-tzf", str(archive)], check=True, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE).stdout.decode(errors="replace").splitlines()
-    records = [member for member in listing if member.rsplit("/", 1)[-1] == _META_MEMBER_NAME]
+    records = [member for member in listing if _META_MEMBER.search(member)]
+    # The record's directory is the capture's, not part of the layer it restores.
+    excluded = {member.rsplit("/", 1)[0] for member in records}
     subprocess.run(
-        ["tar", "--incremental", "--no-wildcards", *(f"--exclude={member}" for member in records),
+        ["tar", "--incremental", "--no-wildcards", *(f"--exclude={member}" for member in sorted(excluded)),
          "-xzf", str(archive), "-C", "/"],
         check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
     )

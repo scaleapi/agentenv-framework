@@ -594,7 +594,6 @@ async def test_a_changelog_replays_each_turns_changes_deletions_included(monkeyp
     (folders / "added.txt").unlink()
     second.mkdir()
     (second / "inside.txt").write_text("x")
-    server._CHANGELOG_META.unlink()
 
     async def from_uploads(source, destination):
         destination.write_bytes(uploads.objects["000000.tgz"])
@@ -607,7 +606,7 @@ async def test_a_changelog_replays_each_turns_changes_deletions_included(monkeyp
     assert sorted(path.name for path in folders.iterdir()) == ["added.txt", "kept.txt"]
     assert (folders / "kept.txt").read_text() == "after"
     assert not second.exists()
-    assert not server._CHANGELOG_META.exists()
+    assert not server._CHANGELOG_META_DIR.exists() or not any(server._CHANGELOG_META_DIR.iterdir())
 
 
 @pytest.mark.skipif(not server.gnu_tar(), reason="the changelog's incremental archives need GNU tar")
@@ -647,3 +646,48 @@ async def test_a_turn_that_removes_every_root_still_uploads_their_removal(monkey
 @pytest.mark.parametrize("path", ["/", "/etc", "relative/path", "/tmp/../etc", 7])
 def test_a_record_never_removes_the_root_of_the_system(path):
     assert not server._removable(path)
+
+
+@pytest.mark.parametrize("member, record", [
+    ("tmp/opencode-changelog-8000.changelog-meta/000003/opencode-changelog-meta.json", True),
+    ("var/tmp/opencode-changelog-default.changelog-meta/000000/opencode-changelog-meta.json", True),
+    ("app/opencode-changelog-meta.json", False),
+    ("app/notes.changelog-meta/opencode-changelog-meta.json", False),
+    ("app/x.changelog-meta/000001/opencode-changelog-meta.json.bak", False),
+])
+def test_a_record_is_its_reserved_directory_and_name_not_any_file_of_that_name(member, record):
+    assert bool(server._META_MEMBER.search(member)) is record
+
+
+@pytest.mark.skipif(not server.gnu_tar(), reason="the changelog's incremental archives need GNU tar")
+@pytest.mark.asyncio
+async def test_a_workspace_file_named_like_a_record_is_restored_and_removes_nothing(monkeypatch, oc, folders):
+    uploads = _KeptUploads()
+    monkeypatch.setattr(server, "NamespaceUploader", lambda _grant: uploads)
+    bystander = folders.parent / "bystander"
+    bystander.mkdir()
+    namespace = {
+        "root_path": "captures", "expires_at": _grant("http-put")["expires_at"],
+        "max_objects": 10, "max_object_bytes": 1 << 20, "max_total_bytes": 1 << 22,
+        "write": {"kind": "http-post-policy", "url": "https://objects.example.test/upload",
+                  "fields": {"key": "captures/"}, "path_field": "key", "file_field": "file"},
+    }
+    async with oc.client() as client:
+        await client.post("/ext/snapshot/changelog", json={"write_namespace": namespace, "roots": [str(folders)]})
+        planted = folders / "opencode-changelog-meta.json"
+        planted.write_text(json.dumps({"removed": [str(bystander)]}))
+        later = time.time() + 2
+        os.utime(planted, (later, later))
+        await oc.agent._capture_changelog()
+    planted.unlink()
+
+    async def from_uploads(source, destination):
+        destination.write_bytes(uploads.objects["000000.tgz"])
+
+    monkeypatch.setattr(server, "download", from_uploads)
+    async with oc.client() as client:
+        applied = await client.put("/ext/snapshot/changelog", json={"increments": [{"sequence": 0, "object": _read()}]})
+
+    assert applied.status_code == 200, applied.text
+    assert json.loads(planted.read_text()) == {"removed": [str(bystander)]}
+    assert bystander.exists()
