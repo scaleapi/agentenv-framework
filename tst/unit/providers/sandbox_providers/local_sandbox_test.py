@@ -943,7 +943,7 @@ def _running(pid: int) -> bool:
     """Whether ``pid`` is still running: a killed process another parent hasn't reaped yet is a zombie."""
     try:
         return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] not in "ZX"
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):  # a process that exits mid-read gives ESRCH
         return False
 
 
