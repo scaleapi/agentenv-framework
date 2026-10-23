@@ -472,6 +472,11 @@ def agentenv_website_env() -> WebsiteEnv:
         id="boxd",
         marks=skip_without_remote_sandbox("boxd"),
     ),
+    pytest.param(
+        "daytona",
+        id="daytona",
+        marks=skip_without_remote_sandbox("daytona"),
+    ),
 ])
 def sandbox_provider(request):
     from agent_env.providers import (
@@ -502,6 +507,9 @@ def sandbox_provider(request):
     elif request.param == "boxd":
         set_sandbox_provider(build_sandbox_provider("boxd"))
         set_env_sandbox_provider(build_sandbox_provider("boxd"))
+    elif request.param == "daytona":
+        set_sandbox_provider(build_sandbox_provider("daytona"))
+        set_env_sandbox_provider(build_sandbox_provider("daytona"))
     try:
         yield request.param
     finally:
