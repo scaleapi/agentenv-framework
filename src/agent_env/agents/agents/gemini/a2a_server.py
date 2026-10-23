@@ -304,13 +304,13 @@ def _restored_transcripts() -> list[Path]:
 
 
 def _upstream_headers(headers: dict[str, str], project_id: str | None, task_id: str | None) -> dict[str, str]:
-    """``headers`` with the endpoint's [model.headers], then the run's attribution, which wins over both."""
-    merged = {**headers, **model_headers(os.environ.get(MODEL_HEADERS_ENV))}
+    """``headers``, then the endpoint's [model.headers], then the run's attribution, each replacing a header of the
+    same name in any case."""
     attribution = build_attribution_headers(project_id, task_id)
     if attribution:
-        merged.update(attribution)
         record_attribution(project_id, task_id)
-    return merged
+    layers = (headers, model_headers(os.environ.get(MODEL_HEADERS_ENV)), attribution)
+    return {name.lower(): value for layer in layers for name, value in layer.items()}
 
 
 def _answer(uploaded: Uploaded) -> dict[str, Any]:

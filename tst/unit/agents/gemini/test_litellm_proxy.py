@@ -86,13 +86,14 @@ def test_the_passthrough_forwards_verbatim_with_attribution(upstream, agent, cli
 
 
 def test_the_endpoints_model_headers_are_forwarded_under_the_runs_attribution(monkeypatch, upstream, agent, client):
-    monkeypatch.setenv("LITELLM_EXTRA_HEADERS", json.dumps({"x-route": "eu", "x-litellm-tags": "spoofed"}))
+    monkeypatch.setenv("LITELLM_EXTRA_HEADERS", json.dumps({"X-Route": "eu", "X-LiteLLM-Tags": "spoofed"}))
     _route(agent, project_id="p-1")
 
     client.post(GENERATE, content=b"{}", headers={"x-route": "cli"})
 
     (request,) = upstream.requests
-    assert (request.headers["x-route"], request.headers["x-litellm-tags"]) == ("eu", "projectId:p-1")
+    assert request.headers.get_list("x-route") == ["eu"]
+    assert request.headers.get_list("x-litellm-tags") == ["projectId:p-1"]
 
 
 @pytest.mark.parametrize("raw", ["not json", '["x-route", "eu"]'])
@@ -208,12 +209,15 @@ def test_a_generate_call_is_bridged_to_chat_completions(vertex, client):
 
 
 def test_the_bridge_forwards_the_endpoints_model_headers_under_the_runs_attribution(monkeypatch, vertex, client):
-    monkeypatch.setenv("LITELLM_EXTRA_HEADERS", json.dumps({"x-route": "eu", "x-litellm-customer-id": "spoofed"}))
+    monkeypatch.setenv("LITELLM_EXTRA_HEADERS", json.dumps(
+        {"x-route": "eu", "authorization": "Bearer gateway", "X-LiteLLM-Customer-Id": "spoofed"}))
 
     client.post(GENERATE, json=_GREQ)
 
     (request,) = vertex.requests
-    assert (request.headers["x-route"], request.headers["x-litellm-customer-id"]) == ("eu", "p-1")
+    assert request.headers.get_list("x-route") == ["eu"]
+    assert request.headers.get_list("authorization") == ["Bearer gateway"]
+    assert request.headers.get_list("x-litellm-customer-id") == ["p-1"]
 
 
 def test_a_stream_call_is_answered_as_one_sse_event(vertex, client):
