@@ -1,5 +1,5 @@
 # docker build -t openhands-a2a src/agent_env/agents/agents/openhands
-FROM mirror.gcr.io/library/ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+FROM mirror.gcr.io/library/ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac
 WORKDIR /app
 # Named sources: agent-env packs the build context install/v1 copies from the COPY sources.
 COPY a2a_server.py conversation_run.py install.sh openhands_agent.py openhands_runtime.py requirements.txt start.sh ./
