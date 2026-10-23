@@ -249,6 +249,15 @@ async def test_a_configured_snapshot_is_booted_instead_of_the_image():
 
 
 @pytest.mark.asyncio
+async def test_a_snapshot_sandbox_is_logged_at_the_snapshot_size_not_the_request(caplog):
+    provider, fake = _provider(snapshot="my-dind")
+    fake.snapshot.add(FakeSnapshot("my-dind", cpu=8, mem=32, disk=50))
+    with caplog.at_level(logging.INFO, logger="agent_env.providers.sandbox_providers.daytona.provider"):
+        await provider.create_vm(cpu=1, memory=2048, disk_size_gb=10, setup_for_gateway=False)
+    assert "cpu=8 memory=32GiB disk=50GiB" in caplog.text
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(("cpu", "memory", "disk"), [(3, 8192, 10), (2, 8193, 10), (2, 8192, 10.5)])
 async def test_a_request_bigger_than_the_snapshot_is_refused_before_creating(cpu, memory, disk):
     provider, fake = _provider(snapshot="my-dind")
@@ -447,7 +456,7 @@ async def test_a_setup_cancelled_again_during_its_cleanup_is_not_held_up_and_the
 
 
 @pytest.mark.asyncio
-async def test_a_create_cancelled_in_flight_deletes_the_sandbox_once_it_exists():
+async def test_a_create_cancelled_in_flight_is_raised_once_its_sandbox_is_deleted():
     started, release = asyncio.Event(), asyncio.Event()
 
     async def slow(params, raw):
@@ -458,10 +467,11 @@ async def test_a_create_cancelled_in_flight_deletes_the_sandbox_once_it_exists()
     task = asyncio.ensure_future(provider.create_vm(setup_for_gateway=False))
     await started.wait()
     task.cancel()
+    await _drain()
+    assert not task.done()  # held until the create answers and its sandbox is deleted
+    release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
-    release.set()
-    await _drain()
     assert [raw.deletes for raw in fake.sandboxes.values()] == [1]
 
 
@@ -478,10 +488,9 @@ async def test_a_cancelled_create_retries_a_delete_that_fails_once():
     task = asyncio.ensure_future(provider.create_vm(setup_for_gateway=False))
     await started.wait()
     task.cancel()
+    release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
-    release.set()
-    await _drain(100)
     (raw,) = fake.sandboxes.values()
     assert (raw.deletes, raw.state) == (2, "destroyed")
 
@@ -534,7 +543,7 @@ async def test_cleanup_by_name_waits_out_a_409_too():
 
 
 @pytest.mark.asyncio
-async def test_a_caller_cancelled_as_the_create_finishes_is_not_held_up_by_the_cleanup():
+async def test_a_caller_cancelled_as_the_create_finishes_waits_for_a_stuck_cleanup_only_so_long():
     gate = asyncio.Event()
     caller: list[asyncio.Task] = []
 
@@ -543,6 +552,7 @@ async def test_a_caller_cancelled_as_the_create_finishes_is_not_held_up_by_the_c
         caller[0].cancel()
 
     provider, fake = _provider(FakeDaytona(create_hook=cancel_the_caller))
+    provider._CANCEL_WAIT = 0.1
     caller.append(asyncio.ensure_future(provider.create_vm(setup_for_gateway=False)))
     done, _ = await asyncio.wait(caller, timeout=1)
     assert done and caller[0].cancelled()

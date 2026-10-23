@@ -13,7 +13,14 @@ import weakref
 from collections.abc import Callable
 from typing import Any, ClassVar, Self
 
-from daytona import AsyncDaytona, DaytonaBadRequestError, DaytonaConfig, DaytonaForbiddenError, DaytonaNotFoundError
+from daytona import (
+    AsyncDaytona,
+    DaytonaBadRequestError,
+    DaytonaConfig,
+    DaytonaForbiddenError,
+    DaytonaNotFoundError,
+    Resources,
+)
 
 from agent_env.attribution import PIPELINE_STEP_KEY, RUN_ID_KEY, Attribution
 from agent_env.providers.sandbox_providers.daytona import lifecycle
@@ -59,6 +66,8 @@ class DaytonaSandboxProvider(SandboxProvider):
     _RATE_LIMIT_BASE_DELAY = 2.0
     _RECLAIM_ATTEMPTS = 3
     _RECLAIM_DELAY = 1.0
+    _RATE_LIMIT_MAX_DELAY = 60.0
+    _CANCEL_WAIT = 120.0
 
     def __init__(self, settings: Settings, *, client_factory: Callable[[Settings], Any] = _client):
         self._settings = settings
@@ -123,11 +132,12 @@ class DaytonaSandboxProvider(SandboxProvider):
             raise NetworkPolicyUnsupportedError(reason)
         client = self._client()
         if self._settings.snapshot:
-            await self._check_snapshot_size(client, cpu=cpu, memory_mb=memory, disk_gb=disk_size_gb)
+            resources = await self._snapshot_resources(client, cpu=cpu, memory_mb=memory, disk_gb=disk_size_gb)
+        else:
+            resources = sandbox_resources(cpu=cpu, memory_mb=memory, disk_gb=disk_size_gb)
         ports = list(dict.fromkeys(exposed_ports or []))
         defaults = apply_default_attribution(dict(attribution or {}))
         resolved = {key: str(value) for key, value in defaults.items() if value is not None}
-        resources = sandbox_resources(cpu=cpu, memory_mb=memory, disk_gb=disk_size_gb)
         common = {
             "name": sandbox_name(resolved),
             "labels": sandbox_labels(resolved, ports, host_image=self._settings.snapshot is None),
@@ -139,7 +149,12 @@ class DaytonaSandboxProvider(SandboxProvider):
         }
         params, wait = create_params(self._settings, common, resources)
         retry = lifecycle.Retry(
-            self._RATE_LIMIT_ATTEMPTS, self._RATE_LIMIT_BASE_DELAY, self._RECLAIM_ATTEMPTS, self._RECLAIM_DELAY
+            self._RATE_LIMIT_ATTEMPTS,
+            self._RATE_LIMIT_BASE_DELAY,
+            self._RECLAIM_ATTEMPTS,
+            self._RECLAIM_DELAY,
+            max_delay=self._RATE_LIMIT_MAX_DELAY,
+            cancel_wait=self._CANCEL_WAIT,
         )
         try:
             raw = await lifecycle.create(client, params, timeout=wait, retry=retry)
@@ -173,8 +188,8 @@ class DaytonaSandboxProvider(SandboxProvider):
             await lifecycle.settle(lifecycle.delete_sandbox(raw, params.name or raw.id, retry))
             raise
 
-    async def _check_snapshot_size(self, client: Any, *, cpu: float, memory_mb: int, disk_gb: float) -> None:
-        """Refuse a request bigger than the configured snapshot, which fixes the size of what it boots."""
+    async def _snapshot_resources(self, client: Any, *, cpu: float, memory_mb: int, disk_gb: float) -> Resources:
+        """The size the configured snapshot boots, which it fixes; a request bigger than that is refused."""
         snapshot = await client.snapshot.get(self._settings.snapshot)
         if cpu > snapshot.cpu or memory_mb > snapshot.mem * 1024 or disk_gb > snapshot.disk:
             raise ValueError(
@@ -182,6 +197,7 @@ class DaytonaSandboxProvider(SandboxProvider):
                 f"GiB memory and {snapshot.disk} GiB disk, less than the cpu={cpu}, memory={memory_mb}MB, "
                 f"disk={disk_gb}GB requested; create it with at least that size"
             )
+        return Resources(cpu=snapshot.cpu, memory=snapshot.mem, disk=snapshot.disk)
 
     async def create_sandbox(
         self,

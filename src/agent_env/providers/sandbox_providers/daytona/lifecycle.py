@@ -48,6 +48,8 @@ class Retry:
     base_delay: float
     reclaim_attempts: int
     reclaim_delay: float
+    max_delay: float  # the longest a rate-limited create waits before retrying
+    cancel_wait: float  # how long a cancelled create waits for its sandbox to be deleted before it is raised
 
 
 def _retry_after(headers: Mapping[str, Any] | None) -> float | None:
@@ -137,24 +139,24 @@ def _spawn(cleanup: Coroutine[Any, Any, object]) -> asyncio.Future[Any]:
     return reaper
 
 
-async def settle(cleanup: Coroutine[Any, Any, object]) -> None:
-    """Run ``cleanup`` to its end, also while the caller is being cancelled; a second cancellation leaves it running on
-    its own."""
-    await asyncio.shield(_spawn(cleanup))
+async def settle(cleanup: Coroutine[Any, Any, object], *, within: float | None = None) -> None:
+    """Run ``cleanup`` to its end, also while the caller is being cancelled. A second cancellation, or ``within``
+    seconds passing, leaves it running on its own."""
+    try:
+        await asyncio.wait_for(asyncio.shield(_spawn(cleanup)), within)
+    except TimeoutError:
+        logger.warning("Daytona sandbox cleanup is still running after %ss; it continues on its own", within)
 
 
-def _reap_when_done(client: Any, task: asyncio.Future[Any], name: str, retry: Retry) -> None:
-    """Once ``task``, a create nothing awaits anymore, settles, delete the sandbox it made."""
-
-    def reap(done: asyncio.Future[Any]) -> None:
-        cleanup: Coroutine[Any, Any, object]
-        if done.cancelled() or done.exception() is not None:
-            cleanup = delete_named(client, name, retry)
-        else:
-            cleanup = delete_sandbox(done.result(), name, retry)
-        _spawn(cleanup)
-
-    task.add_done_callback(reap)
+async def _delete_outcome(client: Any, task: asyncio.Future[Any], name: str, retry: Retry) -> None:
+    """Delete what a create its caller gave up on made, once it answers: the sandbox it returns, or the one it may
+    have made though it failed or was cancelled, found by its unique name."""
+    try:
+        raw = await task
+    except (Exception, asyncio.CancelledError):
+        await delete_named(client, name, retry)
+        return
+    await delete_sandbox(raw, name, retry)
 
 
 async def create(client: Any, params: Any, *, timeout: float, retry: Retry) -> Any:
@@ -165,14 +167,15 @@ async def create(client: Any, params: Any, *, timeout: float, retry: Retry) -> A
         try:
             return await asyncio.shield(task)
         except asyncio.CancelledError:
-            _reap_when_done(client, task, name, retry)
+            # Raised once what the create made is deleted, so an interrupted run doesn't leave it running and billed.
+            await settle(_delete_outcome(client, task, name, retry), within=retry.cancel_wait)
             raise
         except DaytonaRateLimitError as exc:
             if attempt + 1 == retry.attempts:
                 raise
             delay = _retry_after(exc.headers) or retry.base_delay * 2**attempt
             logger.warning("Daytona rate-limited a sandbox create; retrying in %ss", delay)
-            await asyncio.sleep(min(delay, 60))
+            await asyncio.sleep(min(delay, retry.max_delay))
         except _REJECTED:
             raise
         except BaseException:
