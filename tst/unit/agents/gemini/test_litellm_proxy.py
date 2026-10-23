@@ -85,6 +85,25 @@ def test_the_passthrough_forwards_verbatim_with_attribution(upstream, agent, cli
     assert client.post(PROBE_PATH).json()["last_seen_attribution"] == {"project_id": "p-1", "task_id": "t-1"}
 
 
+def test_the_endpoints_model_headers_are_forwarded_under_the_runs_attribution(monkeypatch, upstream, agent, client):
+    monkeypatch.setenv("LITELLM_EXTRA_HEADERS", json.dumps({"x-route": "eu", "x-litellm-tags": "spoofed"}))
+    _route(agent, project_id="p-1")
+
+    client.post(GENERATE, content=b"{}", headers={"x-route": "cli"})
+
+    (request,) = upstream.requests
+    assert (request.headers["x-route"], request.headers["x-litellm-tags"]) == ("eu", "projectId:p-1")
+
+
+@pytest.mark.parametrize("raw", ["not json", '["x-route", "eu"]'])
+def test_model_headers_that_are_not_a_json_object_are_ignored(monkeypatch, upstream, agent, client, raw):
+    monkeypatch.setenv("LITELLM_EXTRA_HEADERS", raw)
+    _route(agent)
+
+    assert client.post(GENERATE, content=b"{}").status_code == 200
+    assert "x-route" not in upstream.requests[0].headers
+
+
 @pytest.mark.parametrize("method", ["GET", "PUT", "DELETE", "PATCH"])
 def test_every_method_is_forwarded(upstream, agent, client, method):
     _route(agent)
@@ -186,6 +205,15 @@ def test_a_generate_call_is_bridged_to_chat_completions(vertex, client):
     assert json.loads(request.content) == gemini_bridge.gemini_request_to_openai(_GREQ, "vertex_ai/global/gemini-3.1-pro-preview")
     assert response.headers["content-type"] == "application/json"
     assert response.json() == gemini_bridge.openai_response_to_gemini(json.loads(vertex.response.content))
+
+
+def test_the_bridge_forwards_the_endpoints_model_headers_under_the_runs_attribution(monkeypatch, vertex, client):
+    monkeypatch.setenv("LITELLM_EXTRA_HEADERS", json.dumps({"x-route": "eu", "x-litellm-customer-id": "spoofed"}))
+
+    client.post(GENERATE, json=_GREQ)
+
+    (request,) = vertex.requests
+    assert (request.headers["x-route"], request.headers["x-litellm-customer-id"]) == ("eu", "p-1")
 
 
 def test_a_stream_call_is_answered_as_one_sse_event(vertex, client):

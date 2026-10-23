@@ -61,6 +61,7 @@ from gemini_bridge import (
     GEMINI_HOME,
     GEMINI_PROJECTS_JSON,
     GEMINI_TMP,
+    MODEL_HEADERS_ENV,
     build_attribution_headers,
     chats_dir_for_cwd,
     cli_env,
@@ -72,6 +73,7 @@ from gemini_bridge import (
     get_project_slug,
     is_generate_path,
     kill_running_clis,
+    model_headers,
     needs_openai_route,
     openai_response_to_gemini,
     record_attribution,
@@ -240,6 +242,9 @@ def _remove_restored_capture_hooks() -> None:
     remove_settings_hooks(user_settings_path(), event="AfterTool", matches=is_missing_capture_command)
 
 
+_DIAGNOSTIC_LISTING_LIMIT = 20
+
+
 def _session_diagnostics(session_id: str) -> dict[str, Any]:
     """What the snapshot save saw when it found no transcript, so the failure is
     debuggable without re-deploying the agent: the chats dir contents, the gemini
@@ -263,12 +268,12 @@ def _session_diagnostics(session_id: str) -> dict[str, Any]:
             diag["projects_json_error"] = str(e)
     if chats and chats.exists():
         try:
-            diag["chats_listing"] = sorted(p.name for p in chats.iterdir())[:20]
+            diag["chats_listing"] = sorted(p.name for p in chats.iterdir())[:_DIAGNOSTIC_LISTING_LIMIT]
         except OSError as e:
             diag["chats_listing_error"] = str(e)
     if GEMINI_TMP.exists():
         try:
-            diag["gemini_tmp_listing"] = sorted(p.name for p in GEMINI_TMP.iterdir())[:20]
+            diag["gemini_tmp_listing"] = sorted(p.name for p in GEMINI_TMP.iterdir())[:_DIAGNOSTIC_LISTING_LIMIT]
         except OSError as e:
             diag["gemini_tmp_listing_error"] = str(e)
     # If we resolved a slug, list its dir to see where sessions live
@@ -276,7 +281,7 @@ def _session_diagnostics(session_id: str) -> dict[str, Any]:
         slug_dir = GEMINI_TMP / slug
         if slug_dir.exists():
             try:
-                diag["slug_dir_listing"] = sorted(p.name for p in slug_dir.iterdir())[:20]
+                diag["slug_dir_listing"] = sorted(p.name for p in slug_dir.iterdir())[:_DIAGNOSTIC_LISTING_LIMIT]
             except OSError as e:
                 diag["slug_dir_listing_error"] = str(e)
     return diag
@@ -296,6 +301,16 @@ def _plant_transcript(chats: Path, session_id: str, source_format: str, data: by
 
 def _restored_transcripts() -> list[Path]:
     return [*GEMINI_TMP.glob("*/chats/session-*.json"), *GEMINI_TMP.glob("*/chats/session-*.jsonl")]
+
+
+def _upstream_headers(headers: dict[str, str], project_id: str | None, task_id: str | None) -> dict[str, str]:
+    """``headers`` with the endpoint's [model.headers], then the run's attribution, which wins over both."""
+    merged = {**headers, **model_headers(os.environ.get(MODEL_HEADERS_ENV))}
+    attribution = build_attribution_headers(project_id, task_id)
+    if attribution:
+        merged.update(attribution)
+        record_attribution(project_id, task_id)
+    return merged
 
 
 def _answer(uploaded: Uploaded) -> dict[str, Any]:
@@ -319,14 +334,10 @@ async def _vertex_openai_bridge(
     except json.JSONDecodeError:
         greq = {}
     oai_req = gemini_request_to_openai(greq, route_model)
-    headers = {
+    headers = _upstream_headers({
         "Authorization": f"Bearer {os.environ.get('LITELLM_API_KEY', '')}",
         "Content-Type": "application/json",
-    }
-    attribution = build_attribution_headers(project_id, task_id)
-    if attribution:
-        headers.update(attribution)
-        record_attribution(project_id, task_id)
+    }, project_id, task_id)
     try:
         async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT_S) as client:
             upstream = await client.post(
@@ -441,6 +452,9 @@ class GeminiAgent(DurableSessionRefs, AgentEnvAgent):
         self._active_contexts: set[str] = set()
         # Each running turn's route, by the token its CLI's model calls name.
         self._routes: dict[str, _Route] = {}
+        # Every session a turn's init event named, bound or not: a first turn that saw no init of its own never takes
+        # one of these for its session.
+        self._claimed_sessions: set[str] = set()
 
     async def _context_lock(self, context_id: str) -> asyncio.Lock:
         async with self._context_locks_guard:
@@ -503,9 +517,10 @@ class GeminiAgent(DurableSessionRefs, AgentEnvAgent):
                         model=cli_model(cfg.model),
                         attachment_paths=attachment_paths or None,
                         timeout_s=cfg.timeout_seconds,
-                        event_callback=request.trajectory.append,
+                        event_callback=lambda event: self._on_event(event, request),
                         env=cli_env(os.environ, system_settings=settings, base_url=base_url),
-                        other_sessions={ref for ref in self.bound_session_refs() if ref != own},
+                        cwd=GEMINI_CWD,
+                        other_sessions=lambda: {*self.bound_session_refs(), *self._claimed_sessions} - {own},
                     )
             except Exception as e:
                 logger.error(f"gemini CLI invocation raised: {e}", exc_info=True)
@@ -536,6 +551,11 @@ class GeminiAgent(DurableSessionRefs, AgentEnvAgent):
             .usage(Usage(tool_call_count=result.tool_call_count))
             .build()
         )
+
+    def _on_event(self, event: dict, request: TaskRequest[GeminiConfig]) -> None:
+        if event.get("type") == "init" and event.get("session_id"):
+            self._claimed_sessions.add(event["session_id"])
+        request.trajectory.append(event)
 
     @extension(MCP_CONFIG_V1.add)
     async def add_mcp_server(self, request: McpAddRequest) -> dict[str, Any]:
@@ -698,11 +718,10 @@ class GeminiAgent(DurableSessionRefs, AgentEnvAgent):
         route_model = (route.model or "").strip()
         if needs_openai_route(route_model) and is_generate_path(rest):
             return await _vertex_openai_bridge(rest, request, base, route_model, route.project_id, route.task_id)
-        fwd_headers = {k: v for k, v in request.headers.items() if k.lower() not in _PROXY_DROP_REQ_HEADERS}
-        attribution = build_attribution_headers(route.project_id, route.task_id)
-        if attribution:
-            fwd_headers.update(attribution)
-            record_attribution(route.project_id, route.task_id)
+        fwd_headers = _upstream_headers(
+            {k: v for k, v in request.headers.items() if k.lower() not in _PROXY_DROP_REQ_HEADERS},
+            route.project_id, route.task_id,
+        )
         body = await request.body()
         try:
             async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT_S) as client:

@@ -258,8 +258,11 @@ def test_redaction_leaves_masked_keys_and_ids_alone():
     )
 
 
-def test_a_timeout_is_reported_as_before(run):
-    assert run(returncode=None, timeout_s=0.01).error == "gemini CLI timed out after 0.01s"
+def test_a_timeout_is_reported_as_before_and_keeps_the_session_the_cli_started(run):
+    result = run(_stdout(), returncode=None, timeout_s=0.05)
+
+    assert (result.error, result.session_id) == (
+        "gemini CLI timed out after 0.05s", "69dfa81e-475e-47af-848c-c1d7bec3c71e")
 
 
 # --- what agent-env reads off the wire --------------------------------------------

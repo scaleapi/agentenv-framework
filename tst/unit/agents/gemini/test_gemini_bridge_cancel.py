@@ -95,3 +95,32 @@ def test_a_process_that_left_the_clis_tree_does_not_hold_up_the_cancel(monkeypat
                 os.kill(tool, signal.SIGKILL)
 
     asyncio.run(cancel_while_it_holds_the_pipes())
+
+
+def test_a_turn_cancelled_while_the_cli_starts_kills_it_once_it_has(monkeypatch, tmp_path):
+    """A cancel can arrive before the CLI's pipes are set up, when the bridge has no process to kill yet."""
+    pids = tmp_path / "pids"
+    spawn = asyncio.create_subprocess_exec
+    starting = asyncio.Event()
+
+    async def slow_to_start(*_cmd, **kwargs):
+        proc = await spawn("sh", "-c", f'sleep 600 & echo "$$ $!" > {pids}; wait', **kwargs)
+        while not (pids.exists() and len(pids.read_text().split()) == 2):  # under load the shell is slow to write
+            await asyncio.sleep(0.01)
+        starting.set()
+        await asyncio.sleep(0.5)  # still starting when the cancel arrives
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", slow_to_start)
+
+    async def cancel_while_starting():
+        turn = asyncio.create_task(gemini_bridge.run_gemini(prompt="p", session_id=None, cwd=str(tmp_path)))
+        await asyncio.wait_for(starting.wait(), 10)
+        turn.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(turn, 10)
+        return [int(pid) for pid in pids.read_text().split()]
+
+    cli, tool = asyncio.run(cancel_while_starting())
+
+    assert _gone(cli) and _gone(tool)

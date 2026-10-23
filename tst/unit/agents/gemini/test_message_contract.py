@@ -140,6 +140,18 @@ def test_a_context_resumes_its_session_and_a_new_context_starts_one(calls, clien
     assert [call["session_id"] for call in calls] == [None, "s-1", None]
 
 
+def test_a_session_a_turn_started_stays_claimed_once_its_context_moves_on(calls, agent, client):
+    calls.result_for = lambda kwargs: gemini_bridge.GeminiResult(
+        response="ok", tool_call_count=0, session_id="s-other", trajectory=[{"type": "init", "session_id": "s-other"}],
+    )
+    send(client, "one", context_id="ctx-other")
+    agent.set_session_ref_for_context("ctx-other", "s-loaded")
+
+    send(client, "two")
+
+    assert calls[1]["other_sessions"]() == {"s-other", "s-loaded"}
+
+
 def test_a_turn_that_reports_no_session_binds_none(calls, agent, client):
     calls.result_for = lambda kwargs: gemini_bridge.GeminiResult(response="ok", tool_call_count=0, session_id=None)
 
@@ -165,13 +177,14 @@ def test_agent_config_reaches_the_cli(calls, client):
     send(client, "go")
 
     (call,) = calls
+    assert callable(call.pop("other_sessions"))
     assert call == {
         "prompt": "go",
         "session_id": None,
         "model": "gemini-3.1-pro-preview",
         "attachment_paths": None,
         "timeout_s": 42,
-        "other_sessions": set(),
+        "cwd": a2a_server.GEMINI_CWD,
     }
 
 
@@ -198,19 +211,19 @@ def test_a_turn_keeps_its_trajectory_failed_or_not(calls, client):
 @pytest.fixture
 def spawned(monkeypatch, home):
     """The real bridge against a scripted `gemini`: the argv of every spawn, answered with
-    ``spawned.stdout``; the CLI's cwd is the workspace."""
-    workspace = a2a_server.GEMINI_CWD
-    os.makedirs(workspace, exist_ok=True)
-    monkeypatch.chdir(workspace)
+    ``spawned.stdout``, and the cwd it ran in."""
+    os.makedirs(a2a_server.GEMINI_CWD, exist_ok=True)
 
     class _Argvs(list):
         stdout = b""
+        cwds: list = []
         on_spawn = staticmethod(lambda: None)
 
     argvs = _Argvs()
 
-    async def _exec(*cmd, **_kwargs):
+    async def _exec(*cmd, **kwargs):
         argvs.append(list(cmd))
+        argvs.cwds.append(kwargs.get("cwd"))
         argvs.on_spawn()
         return FakeCLI(argvs.stdout)
 
@@ -243,28 +256,43 @@ def test_the_prompt_and_attachments_go_on_argv(spawned, client):
         "--model", "gemini-2.5-flash",
     ]
     assert spawned[1][:3] == ["gemini", "-p", "again"] and spawned[1][7:9] == ["-r", "s-init"]
+    assert spawned.cwds == [a2a_server.GEMINI_CWD] * 2
     assert terminal(task)[:2] == ("completed", "seen")
 
 
-def test_without_an_init_event_the_session_is_the_newest_written_by_the_run_and_not_another_contexts(
+def test_without_an_init_event_the_session_is_the_one_the_run_wrote_and_no_other_contexts(
         spawned, home, agent, client):
-    """A CLI that died before its init event still wrote its transcript: the run takes the newest one written since
-    it started, never an older one or one another context is bound to."""
+    """A CLI that died before its init event still wrote its transcript: the run takes the one written since it
+    started, never an older one or one another context is bound to by the time the run ends."""
     older = chats(home) / "session-2026-09-27T10-00-aaaaaaaa.json"
     older.write_bytes(transcript("json", "aaaaaaaa-old"))
     os.utime(older, (1, 1))
-    agent.set_session_ref_for_context("ctx-other", "bbbbbbbb-other")
 
-    def writes_transcripts():
+    def another_context_starts_a_session_meanwhile():
         (chats(home) / f"session-2026-09-27T10-01-{SESSION_ID[:8]}.jsonl").write_bytes(transcript("jsonl"))
         (chats(home) / "session-2026-09-27T10-02-bbbbbbbb.jsonl").write_bytes(transcript("jsonl", "bbbbbbbb-other"))
+        agent.set_session_ref_for_context("ctx-other", "bbbbbbbb-other")
 
-    spawned.on_spawn = writes_transcripts
+    spawned.on_spawn = another_context_starts_a_session_meanwhile
     spawned.stdout = _stream({"type": "result", "status": "success", "stats": {"tool_calls": 0}})
 
     send(client, "hello")
 
     assert agent.session_ref_for_context("ctx-1") == SESSION_ID
+
+
+def test_without_an_init_event_no_session_is_taken_when_the_run_could_have_written_either_of_two(
+        spawned, home, agent, client):
+    def two_unclaimed_transcripts():
+        (chats(home) / f"session-2026-09-27T10-01-{SESSION_ID[:8]}.jsonl").write_bytes(transcript("jsonl"))
+        (chats(home) / "session-2026-09-27T10-02-bbbbbbbb.jsonl").write_bytes(transcript("jsonl", "bbbbbbbb-other"))
+
+    spawned.on_spawn = two_unclaimed_transcripts
+    spawned.stdout = _stream({"type": "result", "status": "success", "stats": {"tool_calls": 0}})
+
+    send(client, "hello")
+
+    assert agent.session_ref_for_context("ctx-1") is None
 
 
 def test_an_init_event_behind_a_notice_the_cli_printed_binds_its_session(spawned, agent, client):

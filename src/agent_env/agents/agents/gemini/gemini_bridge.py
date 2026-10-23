@@ -134,24 +134,32 @@ def _peek_session_id(raw: str) -> str | None:
     return None
 
 
-def _newest_session_id(since: float, exclude: Collection[str], cwd: str | None = None) -> str | None:
-    """The sessionId of the newest transcript written since ``since`` that isn't one of ``exclude``, the sessions
-    other contexts are bound to: a run whose stream carried no ``init`` event (a CLI that died early) still wrote its
-    transcript to ``<GEMINI_HOME>/tmp/<slug>/chats/session-*.json{,l}``."""
-    cwd = cwd or os.environ.get("GEMINI_CWD", "/workspace")
+# A file's modification time comes from a coarser clock than time.time(), so one written just after a run started can
+# read as a little before it.
+_MTIME_SLACK_S = 1.0
+
+
+def _unclaimed_session_id(since: float, claimed: Collection[str], cwd: str) -> str | None:
+    """The sessionId of the one transcript written since ``since`` that isn't ``claimed`` by another turn or
+    context: a run whose stream carried no ``init`` event (a CLI that died early) still wrote its transcript to
+    ``<GEMINI_HOME>/tmp/<slug>/chats/session-*.json{,l}``. None when several are, since any could be another
+    turn's."""
+    since -= _MTIME_SLACK_S
     chats = chats_dir_for_cwd(cwd)
     if chats is None or not chats.exists():
         return None
-    found: list[tuple[float, str]] = []
+    found: set[str] = set()
     for path in [*chats.glob("session-*.json"), *chats.glob("session-*.jsonl")]:
         try:
-            modified = path.stat().st_mtime
-            session = _peek_session_id(path.read_text()) if modified >= since else None
+            session = _peek_session_id(path.read_text()) if path.stat().st_mtime >= since else None
         except OSError:
             continue
-        if session and session not in exclude:
-            found.append((modified, session))
-    return max(found)[1] if found else None
+        if session and session not in claimed:
+            found.add(session)
+    if len(found) > 1:
+        logger.warning(f"not recovering a session: {len(found)} unclaimed transcripts were written during the run")
+        return None
+    return next(iter(found), None)
 
 
 def detect_format(raw: bytes) -> str:
@@ -246,6 +254,24 @@ def build_attribution_headers(project_id: str | None, task_id: str | None) -> di
     elif task_id:
         headers["x-litellm-tags"] = f"taskId:{task_id}"
     return headers
+
+
+# What agent-env gives an agent for [model.headers]: a JSON object of header names to values.
+MODEL_HEADERS_ENV = "LITELLM_EXTRA_HEADERS"
+
+
+def model_headers(raw: str | None) -> dict[str, str]:
+    if not raw:
+        return {}
+    try:
+        headers = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning(f"ignoring {MODEL_HEADERS_ENV}, which isn't JSON")
+        return {}
+    if not isinstance(headers, dict):
+        logger.warning(f"ignoring {MODEL_HEADERS_ENV}, which isn't a JSON object")
+        return {}
+    return {str(name): str(value) for name, value in headers.items()}
 
 
 def cli_env(environ: Mapping[str, str], *, system_settings: Path, base_url: str | None) -> dict[str, str]:
@@ -384,6 +410,20 @@ def _kill_cli(proc) -> None:
             os.kill(member, signal.SIGKILL)
 
 
+async def _started(spawn):
+    """The CLI ``spawn`` starts. A turn cancelled while it starts lets it finish starting, then kills it and what it
+    started: asyncio would kill the CLI alone, and leave its tools running."""
+    start = asyncio.ensure_future(spawn)
+    try:
+        return await asyncio.shield(start)
+    except asyncio.CancelledError:
+        with contextlib.suppress(Exception):
+            proc = await start
+            _kill_cli(proc)
+            await _reap(proc)
+        raise
+
+
 async def _reap(proc) -> None:
     """Wait for the killed CLI, but not for a process that left its tree and still holds its pipes open."""
     with contextlib.suppress(asyncio.TimeoutError):
@@ -463,11 +503,13 @@ async def run_gemini(
     timeout_s: int = 600,
     event_callback: Callable[[dict], None] | None = None,
     env: Mapping[str, str] | None = None,
-    other_sessions: Collection[str] = (),
+    cwd: str | None = None,
+    other_sessions: Callable[[], Collection[str]] = tuple,
 ) -> GeminiResult:
-    """Run one `gemini -p` turn in ``env``. ``event_callback`` gets each stream-json event as the CLI prints it:
-    exactly the events of the returned trajectory, in order. ``other_sessions`` are the sessions other contexts are
-    bound to, which a first turn's own is never taken for."""
+    """Run one `gemini -p` turn in ``env``, with ``cwd`` (else this process's) the CLI's workspace. ``event_callback``
+    gets each stream-json event as the CLI prints it: exactly the events of the returned trajectory, in order.
+    ``other_sessions`` answers, when it is asked, the sessions other turns and contexts claim, which a first turn's own
+    is never taken for."""
     # Multimodal attachments are injected as `@<absolute_path>` references in
     # the prompt — that's the Gemini CLI's documented mechanism for headless
     # mode (there's no `--image` flag). The CLI's `read_many_files` tool
@@ -491,13 +533,14 @@ async def run_gemini(
         f"attachments={len(attachment_paths or [])})"
     )
     started = time.time()
-    proc = await asyncio.create_subprocess_exec(
+    proc = await _started(asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=dict(env) if env is not None else None,
+        cwd=cwd,
         start_new_session=True,
-    )
+    ))
     _RUNNING.add(proc)
     trajectory: list[dict] = []
     response_parts: list[str] = []
@@ -550,7 +593,7 @@ async def run_gemini(
         _kill_cli(proc)
         await _reap(proc)
         return GeminiResult(
-            response="", tool_call_count=0, session_id=session_id,
+            response="", tool_call_count=0, session_id=captured_session_id,
             error=f"gemini CLI timed out after {timeout_s}s",
         )
     except Exception:
@@ -578,7 +621,7 @@ async def run_gemini(
     # it from the on-disk transcript so the session is threadable (multi-turn
     # resume + /ext/snapshot). Only on a fresh turn; a resume keeps its id.
     if not captured_session_id:
-        recovered = _newest_session_id(started, other_sessions)
+        recovered = _unclaimed_session_id(started, other_sessions(), cwd or os.getcwd())
         if recovered:
             logger.info(f"Recovered session id from transcript (no stream init event): {recovered}")
             captured_session_id = recovered
