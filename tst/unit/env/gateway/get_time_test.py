@@ -289,10 +289,12 @@ async def test_a_time_the_zone_cannot_show_is_a_tool_error_naming_it(gw, now, zo
         200, {"content": [{"type": "text", "text": message}], "isError": True, "changelog_id": None})
 
 
-def test_the_description_asks_for_a_zone_only_from_an_agent_told_one():
-    assert ("If you have been told your user's IANA time zone, pass it as time_zone and take dates such as "
-            '"today" from the local_time it adds') in GET_TIME_TOOL_DESCRIPTION
-    assert "otherwise use current_time" in GET_TIME_TOOL_DESCRIPTION
+def test_the_description_keeps_tool_dates_in_utc_and_offers_a_zone_only_to_an_agent_told_one():
+    assert ("current_time is in UTC, as are the dates and times the other tools here take, so derive those from "
+            "current_time.") in GET_TIME_TOOL_DESCRIPTION
+    assert ("If you have been told your user's IANA time zone, you can pass it as time_zone to also get "
+            "local_time") in GET_TIME_TOOL_DESCRIPTION
+    assert "it does not change the dates you pass to tools" in GET_TIME_TOOL_DESCRIPTION
     assert not re.search(r"[A-Z][a-z]+/[A-Z]", GET_TIME_TOOL_DESCRIPTION)
 
 

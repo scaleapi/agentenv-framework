@@ -21,10 +21,11 @@ GET_TIME_TOOL_DESCRIPTION = (
     "running on is not synchronized with this environment, so do not use it and do not rely on "
     "your own assumption about today's date. Call this tool and derive from its value every "
     "absolute date, time or timestamp you pass to another tool, and every relative phrase you "
-    'resolve ("today", "this week", "overdue", "the last 30 days"). current_time is in UTC. If '
-    "you have been told your user's IANA time zone, pass it as time_zone and take dates such as "
-    '"today" from the local_time it adds, the same instant in that zone; otherwise use '
-    "current_time. A date taken from any other "
+    'resolve ("today", "this week", "overdue", "the last 30 days"). current_time is in UTC, as '
+    "are the dates and times the other tools here take, so derive those from current_time. If you "
+    "have been told your user's IANA time zone, you can pass it as time_zone to also get "
+    "local_time, the same instant in that zone, for telling your user the time in their own "
+    "terms; it does not change the dates you pass to tools. A date taken from any other "
     "source can silently match no records on a read, or file a record at the wrong time on a "
     "write. Time advances while you work, so re-read this before each write rather than reusing "
     "an earlier value. Inside a raw SQL or free-form query string, prefer the literal date this "
