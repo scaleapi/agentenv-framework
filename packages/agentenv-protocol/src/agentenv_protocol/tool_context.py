@@ -158,10 +158,11 @@ def caller_from_request(meta_extra: Optional[Mapping[str, Any]], headers: Any) -
 
     A ``_meta`` role entry, whatever its value, marks a call a gateway proxied from its own
     view of the caller: the headers then describe the gateway's connection, not the caller,
-    and are not consulted, so a blank or ``default`` role stays "not forwarded" and the
-    session is the ``_meta`` session or none. Without that entry the caller reached the
-    server itself, and the role header and ``mcp-session-id`` are trusted exactly as the
-    caller's other requests are.
+    and the role header is not consulted, so a blank or ``default`` role stays "not
+    forwarded". Without that entry the caller reached the server itself and the role header
+    is trusted exactly as the caller's other requests are. The session is the ``_meta``
+    session whenever one is present; otherwise it is the connection's ``mcp-session-id``
+    for a direct caller and none for a proxied one, whose connection is the gateway's.
     """
     meta = meta_extra or {}
     forwarded = ROLE_META_KEY in meta
