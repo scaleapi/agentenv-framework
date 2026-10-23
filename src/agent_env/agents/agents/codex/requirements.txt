@@ -3,3 +3,6 @@
 # the agent advertises without handlers of its own; raise it when the agent needs a newer protocol.
 agentenv-framework-protocol[agent]>=0.1.351
 tomli-w==1.2.0
+# The CA certificates an installed agent's CLI trusts on a target that has none of its own; unpinned, so each build
+# takes the newest.
+certifi

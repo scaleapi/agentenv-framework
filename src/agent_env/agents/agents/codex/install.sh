@@ -108,12 +108,21 @@ for cli in codex mcp-remote; do
   chmod 0755 "$stage/$cli"
 done
 
+# Codex reads the system's CA certificates, which a bare image has none of: such a target's agent trusts certifi's, from
+# its own Python, unless the trust lines name a bundle.
+certifi=$root/venv/lib/python$PYTHON_VERSION/site-packages/certifi/cacert.pem
+needs_cas=
+on 'for f in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/ca-bundle.pem /etc/ssl/cert.pem
+  do [ -s "$f" ] && exit 0; done; exit 1' || needs_cas=1
+case ${AGENT_TRUST_ENV:-} in *SSL_CERT_FILE=*) needs_cas= ;; esac
+
 # The model endpoint and CA, as the agent's environment, readable by its user only.
 {
   for name in LITELLM_API_KEY LITELLM_BASE_URL LITELLM_EXTRA_HEADERS; do
     printf '%s=%s\n' "$name" "$(quoted "${!name:-}")"
   done
   [ -z "${AGENT_TRUST_ENV:-}" ] || printf '%s\n' "$AGENT_TRUST_ENV"
+  [ -z "$needs_cas" ] || printf 'SSL_CERT_FILE=%s\n' "$(quoted "$certifi")"
   printf 'A2A_PORT=%s\nCODEX_HOME=%s\nCODEX_WORKSPACE_DIR=%s\n' \
     "$(quoted "$port")" "$(quoted "$root/codex")" "$(quoted "$workspace")"
 } > "$stage/agent.env"
@@ -139,12 +148,12 @@ on "chmod 0600 $r/agent.env && chmod 0755 $r/bin/uv $r/bin/codex $r/bin/mcp-remo
 
 # The CLIs as package-lock.json pins them, and a private Python, uv's own build of it and never the target's, with the
 # agent's requirements; no cache is left behind.
-on "cd $r/npm && PATH=$r/node/bin:\$PATH npm_config_cache=$r/cache/npm \
+on "cd $r/npm && PATH=$r/node/bin:\$PATH npm_config_cache=$r/cache/npm npm_config_update_notifier=false \
   npm ci --ignore-scripts --omit=dev --no-audit --no-fund --loglevel=error > /dev/null \
   && cd $r && export UV_PYTHON_PREFERENCE=only-managed UV_PYTHON_INSTALL_DIR=$r/python \
   UV_CACHE_DIR=$r/cache/uv && bin/uv venv --quiet --clear --python $PYTHON_VERSION venv \
   && bin/uv pip install --quiet --python venv/bin/python -r app/requirements.txt \
-  && rm -rf $r/cache"
+  && rm -rf $r/cache && [ -s $(quoted "$certifi") ]"
 
 if [ "$mode" = container ]; then
   docker exec -d -u 0 "$target" sh -c "exec $r/app/run.sh $r > $r/agent.log 2>&1"
