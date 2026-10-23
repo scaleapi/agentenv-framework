@@ -56,7 +56,7 @@ def validate(agent_id: str, agent_version: int | None, litellm_api_key: str | No
         sys.exit(1)
 
     try:
-        _write_validation_env(sandbox)
+        _write_validation_env()
     except (BundleError, InfraError, DockerBuildError) as e:
         click.echo(click.style(f"Error: {e}", fg="red"), err=True)
         sys.exit(1)
@@ -66,9 +66,10 @@ def validate(agent_id: str, agent_version: int | None, litellm_api_key: str | No
         sys.exit(1)
 
 
-def _write_validation_env(sandbox: str | None) -> None:
+def _write_validation_env() -> None:
     """Write the env the validator deploys, ``A2AAgent.VALIDATION_ENV_ID``, when the store has none of that id: the env
-    an installed bundle gives that alias, with the infra it deploys on, into local stores. Stores that aren't local
+    an installed bundle gives that alias, with the infra it deploys on, into local stores, checked on the env backend
+    the validation deploys it on, the configured one (``--sandbox`` picks the agents'). Stores that aren't local
     need an env of that id of their own, and BundleError says how to put one."""
     env_id = A2AAgent.VALIDATION_ENV_ID
     try:
@@ -85,4 +86,4 @@ def _write_validation_env(sandbox: str | None) -> None:
                            f"{named.declared_by}'s only into local stores; put it with `agent-env env mcp-server put "
                            f"--id {env_id} --dockerfile {dockerfile}`"])
     click.echo(f"{env_id} → {named.target_id} (the alias {named.declared_by} gives it): writing it")
-    write_bundle(named.bundle.root, id_root=named.bundle.id_root, sandbox=sandbox, on_progress=click.echo)
+    write_bundle(named.bundle.root, id_root=named.bundle.id_root, on_progress=click.echo)
