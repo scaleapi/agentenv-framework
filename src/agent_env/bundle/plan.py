@@ -316,8 +316,13 @@ class _Planner:
         written and checked with what the task needs, and its config is left as written. Records a problem and gives
         None when ``name`` names no agent, or no task has a step for the solver."""
         where = f"--agent {name!r}"
-        own = self.named.get(fold(name)) or self.identified.get(name)
-        if own is not None and own.kind is BundleKind.AGENT:
+        agents = [entry.entry for entry in self.resolved.entries if entry.entry.kind is BundleKind.AGENT]
+        own = next((agent for agent in agents if _nfc(name) in (agent.name, agent.id)), None)
+        near = next((agent for agent in agents if fold(name) in (fold(agent.name), fold(agent.id))), None)
+        if own is None and near is not None:
+            self.problems.append(f"{where}: isn't in this bundle, but {near.name!r} is; names are case-sensitive")
+            return None
+        if own is not None:
             ref = Reference(EntityKind.AGENT, own.id, None, own, where, None)
         else:
             ref = Reference(EntityKind.AGENT, name, None, None, where, None)

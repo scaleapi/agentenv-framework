@@ -104,6 +104,11 @@ def test_a_name_that_names_no_agent_is_refused_pointing_at_a_close_alias(bundle_
         "mean the alias 'solver-x'? agent-env a2a-agent list lists the agents a task can name",)
 
 
+def test_this_bundles_agent_is_named_with_its_folders_case_as_a_task_names_it(bundle_dir):
+    assert _problems(_bundle(bundle_dir, [DEPLOY, PROMPT], {"agents/Helper/Dockerfile": "FROM scratch\n"}), "helper") == (
+        "--agent 'helper': isn't in this bundle, but 'Helper' is; names are case-sensitive",)
+
+
 def test_a_bundle_whose_tasks_prompt_no_agent_is_refused(bundle_dir):
     assert _problems(_bundle(bundle_dir, [DEPLOY]), "theirs") == (
         "--agent 'theirs': no step in this bundle's tasks prompts an agent, so none deploys a solver",)
