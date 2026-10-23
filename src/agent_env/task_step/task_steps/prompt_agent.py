@@ -117,6 +117,7 @@ _DEFAULT_USER_SIM_OUTPUT_FORMAT: dict[str, Any] = {
 
 class PromptAgentTaskStep(TaskStep):
     type: ClassVar[str] = "prompt_agent"
+    DEFAULT_USER_AGENT_NAME: ClassVar[str] = "human_agent"
     entity_refs = (EntityRef.env("snapshot_config.env_id"),)
     # user_a2a_url stays the task's: setting it is also what tells a human counterpart from a simulator.
     field_scopes = {**TaskStep.field_scopes, **dict.fromkeys(
@@ -147,7 +148,7 @@ class PromptAgentTaskStep(TaskStep):
         poll_interval_seconds: int = DEFAULT_POLL_INTERVAL_SECONDS,
         context_id: Optional[str] = None,
         max_conversation_turns: int = 1,
-        user_agent_name: str = "human_agent",
+        user_agent_name: str = DEFAULT_USER_AGENT_NAME,
         user_a2a_url: Optional[str] = None,
         user_agent_timeout_seconds: int = 600,
         user_output_format: Optional[dict[str, Any]] = None,
@@ -301,7 +302,7 @@ class PromptAgentTaskStep(TaskStep):
             poll_interval_seconds=data.get("poll_interval_seconds", cls.DEFAULT_POLL_INTERVAL_SECONDS),
             context_id=data.get("context_id"),
             max_conversation_turns=data.get("max_conversation_turns", 1),
-            user_agent_name=data.get("user_agent_name", "human_agent"),
+            user_agent_name=data.get("user_agent_name", cls.DEFAULT_USER_AGENT_NAME),
             user_a2a_url=data.get("user_a2a_url"),
             user_agent_timeout_seconds=data.get("user_agent_timeout_seconds", 600),
             user_output_format=data.get("user_output_format"),

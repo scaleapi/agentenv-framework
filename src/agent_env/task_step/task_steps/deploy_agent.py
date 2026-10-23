@@ -146,6 +146,23 @@ def _skill_fields(skill: dict) -> dict:
     }
 
 
+
+def agent_for_run(step: TaskStep, context: TaskStepContext, agent_id: Optional[str],
+                  version: Optional[int]) -> tuple[str, Optional[int]]:
+    """The agent id and version ``step``, which names ``agent_id`` at ``version``, deploys in this run: its
+    ``step_overrides`` win over the run-wide override and the stored values, and an overridden id takes the override's
+    version (latest when unset), never the stored agent's pin."""
+    step_overrides = step.step_param_overrides(context)
+    user_overrides = context.metadata.get("user_overrides", {})
+    if "a2a_agent_id" in step_overrides:
+        return step_overrides["a2a_agent_id"], step_overrides.get("a2a_agent_version")
+    chosen = user_overrides.get("a2a_agent_id") or agent_id or get_config().get_default_a2a_agent_id()
+    if "a2a_agent_version" in step_overrides:
+        return chosen, step_overrides["a2a_agent_version"]
+    if "a2a_agent_version" in user_overrides:
+        return chosen, user_overrides["a2a_agent_version"]
+    return chosen, version
+
 class DeployAgentTaskStep(TaskStep):
     type: ClassVar[str] = "deploy_agent"
     entity_refs = (
@@ -294,17 +311,7 @@ class DeployAgentTaskStep(TaskStep):
         )
 
     def _resolve_agent_ref(self, context: TaskStepContext) -> tuple[str, Optional[int]]:
-        """Agent id and version for this run: this step's ``step_overrides`` win over the run-wide override and the stored values; an overridden id takes the override's version (latest when unset), never the stored agent's pin."""
-        step_overrides = self.step_param_overrides(context)
-        user_overrides = context.metadata.get("user_overrides", {})
-        if "a2a_agent_id" in step_overrides:
-            return step_overrides["a2a_agent_id"], step_overrides.get("a2a_agent_version")
-        agent_id = user_overrides.get("a2a_agent_id") or self.a2a_agent_id or get_config().get_default_a2a_agent_id()
-        if "a2a_agent_version" in step_overrides:
-            return agent_id, step_overrides["a2a_agent_version"]
-        if "a2a_agent_version" in user_overrides:
-            return agent_id, user_overrides["a2a_agent_version"]
-        return agent_id, self.a2a_agent_version
+        return agent_for_run(self, context, self.a2a_agent_id, self.a2a_agent_version)
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         # An agent is recorded in the context only once it is configured, so one that fails on the way there

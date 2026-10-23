@@ -54,7 +54,10 @@ from agent_env.store.routing import namespace_routing_enabled
 from agent_env.task import Task
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_step import TaskStep
+from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
+from agent_env.task_step.task_steps.install_agent import InstallAgentTaskStep
 from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
+from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 
 from ._fs import fold, relative, with_article
 from .authoring import AuthoringContext, entry_files, staged_build_context
@@ -128,6 +131,16 @@ class AliasUse:
 
 
 @dataclass(frozen=True)
+class AgentOverride:
+    """The agent a run deploys for the solver in place of the one each task names: at each step that deploys or
+    installs an agent a step prompts, not as its user simulator (``solver_steps``), by task id."""
+
+    name: str  # as the run was given it
+    agent_id: str
+    steps: Mapping[str, tuple[str, ...]]
+
+
+@dataclass(frozen=True)
 class Write:
     """An entity or built image a run writes."""
 
@@ -150,6 +163,7 @@ class Plan:
     # run registers in place of its build context alone.
     published: Mapping[str, Publication] = field(default_factory=dict)
     aliases: Mapping[str, AliasUse] = field(default_factory=dict)  # each agent alias the run names, by alias
+    agent: AgentOverride | None = None  # the agent --agent names for the solver
 
     def bundle_of(self, entry: BundleEntry) -> Bundle:
         """The bundle ``entry`` comes from: the installed one for an entry pulled in from one, else the run's."""
@@ -162,12 +176,13 @@ class Plan:
 
 
 def plan_bundle(resolved: ResolvedBundle, *, tasks: Sequence[str] = (), evals: Sequence[str] = (),
-                installed: Installed | None = None) -> Plan:
+                installed: Installed | None = None, agent: str | None = None) -> Plan:
     """Plan a run of ``tasks`` and ``evals``, each a name or id in this bundle. With neither, the
     run is every eval or, in a bundle without evals, every task. ``installed`` lists the installed bundles whose
-    entities a reference pulls in (``installed_bundles``); without it, an id under one is a store id. Raises
+    entities a reference pulls in (``installed_bundles``); without it, an id under one is a store id. ``agent`` names
+    the agent the solver runs as, as a task's reference would, leaving the tasks as written (``Plan.agent``). Raises
     BundleError listing every problem found."""
-    return _Planner(resolved, installed).plan(tasks, evals)
+    return _Planner(resolved, installed).plan(tasks, evals, agent)
 
 
 def check_bundle(resolved: ResolvedBundle, *, installed: Installed | None = None) -> None:
@@ -206,6 +221,8 @@ class _Planner:
         self.pullable: dict[str, _Pullable | str] = {}  # each installed bundle read, by id root, or why it can't be
         self.unpulled: dict[tuple[EntityKind, str, int | None], str] = {}  # why an installed bundle's id isn't pulled
         self.alias_table: InstalledAliases | None = None  # the installed aliases, once a plan reads them
+        self.alias_uses: dict[str, AliasUse] = {}  # each alias the plan names, by alias
+        self.alias_stored: dict[str, int | None] = {}  # the store's latest version of each alias's id, as read
         self.pulling: set[_Key] = set()
         self.own = _by_id(resolved.bundle)  # what a pulled entity's id names in this bundle
         images: dict[BundleEntry, list[BundleImage]] = {}
@@ -265,7 +282,7 @@ class _Planner:
         pointed at the alias's agent is left with the problem the store ref check reports."""
         if self.installed is None:
             return {}
-        table, uses, stored, default = installed_aliases(self.installed()), {}, {}, _UNREAD
+        table, uses, stored, default = installed_aliases(self.installed()), self.alias_uses, self.alias_stored, _UNREAD
         self.alias_table = table
         for index, entry in enumerate(self.entries):
             if entry.entry.kind is not BundleKind.TASK:
@@ -291,6 +308,49 @@ class _Planner:
             if references != list(entry.references):
                 self._replace(index, replace(entry, config=_renamed(entry.config, aliased), references=tuple(references)))
         return uses
+
+    def _agent_override(self, name: str) -> AgentOverride | None:
+        """The agent ``name`` names, as a task's reference to it would: this bundle's agent, an installed bundle's
+        pulled in, an alias's, or the store's, read once. Each task with solver steps gets a reference to it, so it's
+        written and checked with what the task needs, and its config is left as written. Records a problem and gives
+        None when ``name`` names no agent, or no task has a step for the solver."""
+        where = f"--agent {name!r}"
+        own = self.named.get(fold(name)) or self.identified.get(name)
+        if own is not None and own.kind is BundleKind.AGENT:
+            ref = Reference(EntityKind.AGENT, own.id, None, own, where, None)
+        else:
+            ref = Reference(EntityKind.AGENT, name, None, None, where, None)
+            use = None if self.alias_table is None else self._alias_use(
+                self.alias_table, name, None, self.alias_uses, self.alias_stored)
+            if isinstance(use, str):
+                self.problems.append(f"{where}: {use}")
+                return None
+            ref = self._pulled(replace(ref, id=use.target_id) if use is not None and use.store_version is None else ref)
+            if (problem := self.unpulled.get((ref.kind, ref.id, None)) or self._unstored(ref)) is not None:
+                self.problems.append(f"{where}: {problem}")
+                return None
+        steps = {}
+        for index, entry in enumerate(self.entries):
+            if entry.entry.kind is BundleKind.TASK and (solver := solver_steps(entry.config)):
+                steps[entry.entry.id] = solver
+                self._replace(index, replace(entry, references=(*entry.references, ref)))
+        if not steps:
+            self.problems.append(f"{where}: no step in this bundle's tasks prompts an agent, so none deploys a solver")
+            return None
+        return AgentOverride(name, ref.local.id if ref.local is not None else ref.id, steps)
+
+    def _unstored(self, ref: Reference) -> str | None:
+        """Why the store has no agent ``ref`` names, a store ref, or None when it has one or ``ref`` is local."""
+        if ref.local is not None:
+            return None
+        try:
+            STORE_GETTERS[EntityKind.AGENT](ref.id, None)
+        except NotFoundError:
+            hint = self.alias_table.hint(ref.id) if self.alias_table is not None else ""
+            return f"there is no agent {ref.id!r} in this bundle, an installed bundle or the store{hint}"
+        except (ValueError, KeyError, TypeError) as e:
+            return f"agent {ref.id!r} can't be read ({type(e).__name__}: {e})"
+        return None
 
     def _alias_use(self, table: InstalledAliases, agent_id: str, version: int | None, uses: dict[str, AliasUse],
                    stored: dict[str, int | None]) -> AliasUse | str | None:
@@ -403,8 +463,9 @@ class _Planner:
         self.pulling.discard(key)
         self._add(key, source, _needs(source))
 
-    def plan(self, tasks: Sequence[str], evals: Sequence[str]) -> Plan:
+    def plan(self, tasks: Sequence[str], evals: Sequence[str], agent: str | None = None) -> Plan:
         aliases = self._resolve_aliases()
+        override = self._agent_override(agent) if agent is not None else None
         self._check_writers()
         self._check_loops()
         selected_tasks, selected_evals = self._selection(tasks, evals)
@@ -421,7 +482,7 @@ class _Planner:
             raise BundleError(self.problems)
         writes = self._ordered(closure)
         return Plan(self.resolved, writes, tuple(selected_tasks), tuple(selected_evals), store_refs, store_latest,
-                    dict(self.origins), self._published(writes), aliases)
+                    dict(self.origins), self._published(writes), aliases, override)
 
     def check(self) -> None:
         self._check_writers()
@@ -984,6 +1045,17 @@ def folder_files(bundle: Bundle, entry: BundleEntry) -> Mapping[str, Path]:
 
 
 _UNREAD: Any = object()  # the configured default agent, before a task needs it
+
+
+def solver_steps(steps: Any) -> tuple[str, ...]:
+    """The ids of the steps in ``steps``, a task's config, that deploy or install an agent a ``prompt_agent`` step
+    prompts, and not as its user simulator: the solver's."""
+    prompts = [step for step in steps if isinstance(step, dict) and step.get("type") == PromptAgentTaskStep.type]
+    prompted = {step.get("agent_name") or TaskStep.DEFAULT_AGENT_NAME for step in prompts}
+    prompted -= {step.get("user_agent_name") or PromptAgentTaskStep.DEFAULT_USER_AGENT_NAME for step in prompts}
+    return tuple(step["id"] for step in steps if isinstance(step, dict) and isinstance(step.get("id"), str)
+                 and step.get("type") in (DeployAgentTaskStep.type, InstallAgentTaskStep.type)
+                 and (step.get("agent_name") or TaskStep.DEFAULT_AGENT_NAME) in prompted)
 
 
 def _leaves_an_agent_unset(task: ResolvedEntry) -> bool:

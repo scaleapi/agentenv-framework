@@ -18,7 +18,7 @@ import logging
 import shlex
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
@@ -196,6 +196,7 @@ def run_bundle(
     model: str | None = None,
     user_model: str | None = None,
     judge_model: str | None = None,
+    agent: str | None = None,
     sandbox: str | None = None,
     on_progress: Callable[[str], None] | None = None,
     id_root: str | None = None,
@@ -203,7 +204,8 @@ def run_bundle(
 ) -> BundleRun:
     """Write what the tasks and evals selected in ``root`` need, as ``plan_bundle`` selects them, then run
     each of their tasks once. ``model``, ``user_model`` and ``judge_model`` replace the models the solver, the
-    user simulator and the judges run on, leaving the tasks as written; ``sandbox`` is the provider that envs,
+    user simulator and the judges run on, and ``agent`` the agent the solver runs as (``Plan.agent``), leaving the
+    tasks as written; ``sandbox`` is the provider that envs,
     agents, sandboxes and the judge deploy on. ``on_progress`` is given a line of text
     at each write and step. ``id_root`` roots the ids of a bundle an installed package provides
     (``InstalledBundle.id_root``); a folder's ids otherwise come from its path.
@@ -228,9 +230,8 @@ def run_bundle(
         build_sandbox_provider(sandbox)
     say = _progress(on_progress)
     with namespace_routing():
-        plan, preflight = _planned(root, tasks, evals, id_root, sandbox)
-        for use in plan.aliases.values():
-            say(_aliased(use))
+        plan, preflight = _planned(root, tasks, evals, id_root, sandbox, agent)
+        _say_agents(plan, say)
         materialization = materialize(
             plan,
             on_wait=lambda: say("waiting for another agent-env run to finish writing this bundle's ids"),
@@ -244,7 +245,8 @@ def run_bundle(
             ensure_default_envs(preflight.infra_kinds, say=say)
         with Interrupts() as interrupts:
             overrides = _overrides(sandbox, user_model, judge_model)
-            runs = interrupts.run(_run_all(plan, to_run, model, overrides, keep, say, interrupts))
+            runs = interrupts.run(_run_all(plan, to_run, model, overrides, _solver_params(plan, materialization), keep,
+                                           say, interrupts))
             _mark_cancelled(runs, interrupts.reason)
             result = _bundle_run(plan, materialization, runs, _skipped(plan, entries, every=not tasks and not evals))
             if not interrupts.count:
@@ -263,6 +265,7 @@ def dry_run_bundle(
     tasks: Sequence[str] = (),
     evals: Sequence[str] = (),
     sandbox: str | None = None,
+    agent: str | None = None,
     on_progress: Callable[[str], None] | None = None,
     id_root: str | None = None,
 ) -> DryRun:
@@ -278,9 +281,8 @@ def dry_run_bundle(
         build_sandbox_provider(sandbox)
     say = _progress(on_progress)
     with namespace_routing():
-        plan, preflight = _planned(root, tasks, evals, id_root, sandbox)
-        for use in plan.aliases.values():
-            say(_aliased(use))
+        plan, preflight = _planned(root, tasks, evals, id_root, sandbox, agent)
+        _say_agents(plan, say)
         materialization = materialize(plan, dry_run=True, on_write=lambda done: say(_written(plan, done)))
         runs = _to_run(plan)
         return DryRun(materialization, runs, _skipped(plan, runs, every=not tasks and not evals), preflight.infra,
@@ -309,9 +311,9 @@ def _bundle_run(plan: Plan, materialization: Materialization, runs: tuple[TaskRu
 
 
 def _planned(root: Path | str, tasks: Sequence[str], evals: Sequence[str], id_root: str | None,
-             sandbox: str | None) -> tuple[Plan, Preflight]:
+             sandbox: str | None, agent: str | None = None) -> tuple[Plan, Preflight]:
     plan = plan_bundle(resolve_bundle(parse_bundle(Path(root), id_root=id_root)), tasks=tasks, evals=evals,
-                       installed=installed_bundles)
+                       installed=installed_bundles, agent=agent)
     refuse_store_tasks(plan)
     to_run = set(_to_run(plan))
     return plan, preflight_run(plan, [write.source for write in plan.writes
@@ -345,6 +347,28 @@ def refuse_store_tasks(plan: Plan) -> None:
         raise BundleError(problems)
 
 
+def _say_agents(plan: Plan, say: Callable[[str], None]) -> None:
+    """Say what each agent alias names, and what the solver deploys in place of the tasks' agents."""
+    for use in plan.aliases.values():
+        say(_aliased(use))
+    if plan.agent is not None:
+        runs = _to_run(plan)
+        solved = sum(entry.id in plan.agent.steps for entry in runs)
+        say(f"--agent {plan.agent.name}: the solver deploys {plan.agent.agent_id}, in {solved} of {len(runs)} "
+            f"task{'s' if len(runs) != 1 else ''}")
+
+
+def _solver_params(plan: Plan, materialization: Materialization) -> dict[str, dict[str, dict]]:
+    """Each task's ``step_params`` that deploy ``Plan.agent`` at its solver steps: at the version this run wrote, for
+    an agent it writes, or the store's latest."""
+    if plan.agent is None:
+        return {}
+    written = any(write.kind is BundleKind.AGENT and write.id == plan.agent.agent_id for write in plan.writes)
+    version = materialization.version_of(BundleKind.AGENT.store, plan.agent.agent_id) if written else None
+    choice = {"a2a_agent_id": plan.agent.agent_id, "a2a_agent_version": version}
+    return {task_id: {step_id: dict(choice) for step_id in steps} for task_id, steps in plan.agent.steps.items()}
+
+
 def _overrides(sandbox: str | None, user_model: str | None, judge_model: str | None) -> dict[str, str]:
     """The run's ``user_overrides``: where everything deploys, and the models the user simulator and judges run on."""
     overrides = {"env_sandbox": sandbox, "agent_sandbox": sandbox, "sandbox": sandbox} if sandbox else {}
@@ -353,8 +377,8 @@ def _overrides(sandbox: str | None, user_model: str | None, judge_model: str | N
 
 
 async def _run_all(
-    plan: Plan, to_run: list[tuple[BundleEntry, Task]], model: str | None, overrides: dict[str, str], keep: bool,
-    say: Callable[[str], None], interrupts: Interrupts,
+    plan: Plan, to_run: list[tuple[BundleEntry, Task]], model: str | None, overrides: dict[str, str],
+    step_params: Mapping[str, dict], keep: bool, say: Callable[[str], None], interrupts: Interrupts,
 ) -> tuple[TaskRun, ...]:
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_RUNS)
     run_group_id = uuid.uuid4().hex
@@ -374,8 +398,9 @@ async def _run_all(
     async def run_one(entry: BundleEntry, task: Task) -> TaskRun:
         tag = f"[{plan.path(entry)}]"
         metadata = {"run_group_id": run_group_id, "task_id": task.id}
-        if overrides:
-            metadata["user_overrides"] = dict(overrides)
+        user_overrides = {**overrides, **({"step_params": step_params[entry.id]} if entry.id in step_params else {})}
+        if user_overrides:
+            metadata["user_overrides"] = user_overrides
         context = TaskStepContext(metadata=metadata)
         try:
             await semaphore.acquire()

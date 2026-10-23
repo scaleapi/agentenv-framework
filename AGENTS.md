@@ -154,7 +154,10 @@ Out-of-tree code plugs in either through `config.toml`, as a `module:Class` poin
   outside a bundle run gets it from `A2AAgent.get`, which reads the store first and an alias after (the planner reads
   the store itself, as `STORE_GETTERS` does). agent-env's own bundles' aliases are theirs, and an alias two other
   bundles give is refused, naming both. `agent-env a2a-agent list` lists the installed agents with their aliases, then
-  the store's; `a2a-agent get` prints the agent an alias names.
+  the store's; `a2a-agent get` prints the agent an alias names. `agent-env run --agent <name>` deploys that agent for
+  the solver for one run (each step deploying or installing an agent a `prompt_agent` step prompts, not its user
+  simulator: `plan.solver_steps`), pulled in and checked as a task's reference to it would be, through per-step
+  `step_params` overrides, so the tasks stay as written.
 - Environment providers have no table: an installed package registers one as an `agent_env.env_providers`
   entry point named its `type`, which records carry as `env_provider_type`.
 - `[plugins.<distribution name>]` is reserved for an installed plugin's own settings, read with
