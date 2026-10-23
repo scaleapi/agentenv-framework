@@ -26,6 +26,10 @@ ROOT = "@local/~/triage"
 SOLVER = "@local/demo-dist/kit/solver"
 DEPLOY = {"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "theirs"}
 PROMPT = {"id": "ask", "type": "prompt_agent", "prompt_id": "ask", "prompt": "hi", "depends_on": ["agent"]}
+INSTALL = [{"id": "box", "type": "deploy_sandbox", "sandbox_name": "box", "sandbox_mode": "vm", "sandbox_type": "local"},
+           {"id": "agent", "type": "install_agent", "sandbox_name": "box", "agent_name": "coder", "a2a_agent_id": "theirs",
+            "depends_on": ["box"]},
+           {**PROMPT, "agent_name": "coder"}]
 
 
 @pytest.fixture
@@ -132,6 +136,17 @@ def test_preflight_checks_the_agent_the_solver_deploys(bundle_dir, monkeypatch):
     dry_run_bundle(bundle_dir, agent="helper")
 
     assert checked == [(f"{ROOT}/helper", None)]
+
+
+def test_an_install_is_checked_for_the_agent_the_solver_installs_not_the_one_the_task_names(bundle_dir):
+    _store_agent("mine")
+    _bundle(bundle_dir, INSTALL, {"agents/helper/Dockerfile": "FROM scratch\n"})
+
+    with pytest.raises(BundleError, match="install_agent 'agent': Agent theirs v1 has no build_context_object_url"):
+        dry_run_bundle(bundle_dir)
+    dry_run_bundle(bundle_dir, agent="helper")
+    with pytest.raises(BundleError, match="install_agent 'agent': Agent mine v1 has no build_context_object_url"):
+        dry_run_bundle(bundle_dir, agent="mine")
 
 
 def test_a_dry_run_says_what_the_solver_deploys(bundle_dir, monkeypatch):

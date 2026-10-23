@@ -127,7 +127,7 @@ def materialize(
         for write in tasks:
             with _noted(plan, write, "preflighting"):
                 built[write.id] = _build(write)
-                found, skipped = _preflight(write, built[write.id], unwritten)
+                found, skipped = _preflight(plan, write, built[write.id], unwritten)
             problems.extend(f"{_path(plan, write)}: {problem}" for problem in found)
             unchecked.extend((write, step) for step in skipped)
         if problems:
@@ -325,14 +325,19 @@ def _build(write: Write) -> Task:
     return Task(id=write.id, version=None, steps=[build_step(step) for step in write.source.config])
 
 
-def _preflight(write: Write, task: Task, unwritten: set[tuple[str, str]]) -> tuple[list[str], list[TaskStep]]:
+def _preflight(plan: Plan, write: Write, task: Task,
+               unwritten: set[tuple[str, str]]) -> tuple[list[str], list[TaskStep]]:
     """``task``'s preflight problems, and the steps with a preflight left unchecked because they read a
     (store, id) in ``unwritten``, which a dry run would write first; an artifact and an agent can share an id.
     A step reading one of the task's own outputs is skipped too, and not listed: the output only exists once the
-    task runs."""
+    task runs. A step the solver deploys or installs at is checked for the agent the run gives it (``Plan.agent``)."""
     outputs = {output.id for output in write.source.outputs}
+    solver = plan.agent.steps.get(write.id, ()) if plan.agent is not None else ()
     problems, unchecked = [], []
     for config, step in zip(write.source.config, task.steps):
+        if step.id in solver:
+            config = {**config, "a2a_agent_id": plan.agent.agent_id, "a2a_agent_version": None}
+            step = build_step(config)
         problems.extend(step.config_problems())
         reads = _reads(config)
         if any(id in outputs for _, id in reads):
