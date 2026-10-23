@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, ClassVar, Optional
 
 from agent_env.artifact.artifacts.docker_image import pull_problem
@@ -166,6 +167,8 @@ class DeploySandboxTaskStep(TaskStep):
                 network_policy=policy,
             )
 
+        # When it was made and when its TTL runs out, which what is installed on it lives as long as (install_agent).
+        now = datetime.now(timezone.utc)
         context.deployed_sandboxes.append(DeployedSandbox(
             sandbox_name=self.sandbox_name,
             sandbox_id=sandbox.sandbox_id,
@@ -173,6 +176,8 @@ class DeploySandboxTaskStep(TaskStep):
             sandbox_type=sandbox.type,
             tunnel_urls={str(p): u for p, u in sandbox.tunnel_urls.items()} if sandbox.tunnel_urls else None,
             vnc_url=sandbox.vnc_url,
+            created_at_utc=now.strftime("%Y-%m-%d %H:%M UTC"),
+            expires_at_utc=(now + timedelta(seconds=resolved_ttl)).strftime("%Y-%m-%d %H:%M UTC"),
             network_policy=sandbox.network_policy.to_dict() if sandbox.network_policy else None,
         ))
         return context

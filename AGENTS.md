@@ -75,6 +75,18 @@ or one of them only where it is used.
 - `[model.headers]` go with every call to the configured endpoint and nowhere else: `extra_headers` on
   agent-env's own calls, `LITELLM_EXTRA_HEADERS` (JSON, written by core, never read) for agents and the
   unit-test verifier. On `sail_vm` with `inject_model_key`, Sail sets them at egress like the key.
+- `model_budget_usd` on a `deploy_agent` or `install_agent` step holds its agent to a budget, in US dollars
+  (`agent_env.model_budget`). Before the agent is deployed, core makes it a LiteLLM key of its own on the
+  configured endpoint, with that budget and `[model] admin_api_key` (the proxy's master key or a proxy
+  admin's; it goes nowhere else), and gives the agent that key as `LITELLM_API_KEY` in place of the shared
+  one; the proxy refuses the agent's calls once the key has spent its budget. The agent has to call the
+  configured endpoint, whichever of `litellm_base_url`, `env_vars` or its own defaults names it. The key
+  belongs to no user, so the agent can't make keys with it, and it expires an hour after the agent's TTL. The
+  context records each budget in `metadata["model_budgets"]` by agent name, with the key's alias and LiteLLM's
+  id for it, never the key itself; a retry that rolls a deployment back moves its budget into the
+  `retry_resets` marker. `teardown_run` blocks every key the run made; LiteLLM keeps it and what it spent,
+  which its database takes in 10 to 15 seconds after each call. The endpoint must be a LiteLLM proxy with a
+  database, which virtual keys need.
 - A host-mode `install_agent` (no `container_name`) on a `local` sandbox runs the agent's
   `install_commands_host` on this machine, with your privileges. Every command a local sandbox runs
   carries `AGENTENV_SANDBOX=<sandbox id>`, and teardown stops the processes that carry it, then removes

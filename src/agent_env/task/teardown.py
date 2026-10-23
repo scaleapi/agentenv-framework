@@ -2,9 +2,10 @@
 
 ``teardown_run`` terminates every sandbox a run's context records: its bare sandboxes', its envs' and its
 agents'. It removes compute only; the instance, its outputs and the artifacts it collected stay. A local
-sandbox's work folder goes too, once the sandbox is down. ``agent-env run`` and ``agent-env eval run`` call
-it after each run. ``Task.run`` never does, so a caller that keeps a run's environment up, as the hub and
-the worker do, owns its teardown.
+sandbox's work folder goes too, once the sandbox is down, and the model budget keys made for the run's agents are
+blocked (``agent_env.model_budget``). ``agent-env run`` and ``agent-env eval run`` call it after each run.
+``Task.run`` never does, so a caller that keeps a run's environment up, as the hub and the worker do, owns its
+teardown.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import logging
 from dataclasses import dataclass
 from typing import NamedTuple, Optional
 
+from agent_env import model_budget
 from agent_env.a2a_agent.staging import drain_all, staged_changelogs
 from agent_env.env.env import DeployedEnv
 from agent_env.providers.sandbox_providers.local_sandbox import remove_local_work_dir
@@ -126,6 +128,10 @@ async def teardown_run(context: TaskStepContext, *, timeout: float = TERMINATE_T
 
     try:
         await asyncio.gather(*(take_down(sandbox) for sandbox in recorded_sandboxes(context)))
+        async with asyncio.timeout(timeout):
+            await model_budget.revoke(context)
+    except TimeoutError:
+        logger.warning("teardown: model budget keys were not all blocked within %gs; they expire on their own", timeout)
     except asyncio.CancelledError:
         pass
     reached = {sandbox.sandbox_id for sandbox in terminated} | {sandbox.sandbox_id for sandbox, _ in failed}

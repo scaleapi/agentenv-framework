@@ -21,7 +21,9 @@ from typing import Callable, ClassVar, Optional
 
 import httpx
 
+from agent_env import model_budget
 from agent_env.a2a_agent import A2AAgent
+from agent_env.attribution import deploy_attribution
 from agent_env.config import get_config
 from agent_env.entity.scopes import FieldScope
 from agent_env.providers.sandbox_providers.local_sandbox import (
@@ -66,6 +68,7 @@ def _build_param_resolvers(
     litellm_api_key_override: Optional[str] = None,
     sandbox_type: Optional[str] = None,
     trust_lines: str = "",
+    budget_key: Optional[str] = None,
 ) -> dict[str, Callable[[], str]]:
     """Per-install registry: required_params name -> zero-arg resolver returning the raw value.
 
@@ -102,9 +105,9 @@ def _build_param_resolvers(
         "a2a_port":       lambda: str(a2a_port),
         "agent_name":     lambda: agent_name,
         "workspace_dir":  _resolve_workspace_dir,
-        # Config-sourced (from agent-env config)
-        "litellm_api_key":   lambda: (config.resolve_reference(litellm_api_key_override) if litellm_api_key_override
-                                      else config.get_litellm_api_key()),
+        # Config-sourced (from agent-env config); an agent with a model budget gets the key made for it
+        "litellm_api_key":   lambda: budget_key or (config.resolve_reference(litellm_api_key_override)
+                                                    if litellm_api_key_override else config.get_litellm_api_key()),
         "litellm_base_url":  lambda: host_url_for(config.get_litellm_base_url(), sandbox_type),
         # A JSON object, {} when [model.headers] is unset.
         "litellm_extra_headers": lambda: json.dumps(config.get_model_headers(config.get_litellm_base_url())),
@@ -132,6 +135,7 @@ class InstallAgentTaskStep(TaskStep):
         workspace_dir: Optional[str] = None,
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
+        model_budget_usd: Optional[float] = None,
     ):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
         self.sandbox_name = sandbox_name
@@ -141,6 +145,8 @@ class InstallAgentTaskStep(TaskStep):
         self.agent_name = agent_name
         self.a2a_port = a2a_port
         self.workspace_dir = workspace_dir
+        # As on deploy_agent: the agent gets a key of its own with this budget, in US dollars (agent_env.model_budget).
+        self.model_budget_usd = model_budget.check_budget(model_budget_usd, step_id=id)
 
     def to_dict(self) -> dict:
         base = super().to_dict()
@@ -151,6 +157,7 @@ class InstallAgentTaskStep(TaskStep):
         base["agent_name"] = self.agent_name
         base["a2a_port"] = self.a2a_port
         base["workspace_dir"] = self.workspace_dir
+        base["model_budget_usd"] = self.model_budget_usd
         return base
 
     @classmethod
@@ -164,6 +171,7 @@ class InstallAgentTaskStep(TaskStep):
             agent_name=data.get("agent_name", TaskStep.DEFAULT_AGENT_NAME),
             a2a_port=data.get("a2a_port"),
             workspace_dir=data.get("workspace_dir"),
+            model_budget_usd=data.get("model_budget_usd"),
         )
 
     def preflight(self) -> list[str]:
@@ -178,6 +186,17 @@ class InstallAgentTaskStep(TaskStep):
         return [f"install_agent '{self.id}': {problem}"] if problem else []
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
+        # The model budget key made for the agent is recorded in the context only once the agent answers, so one made
+        # for an install that fails is deleted here, or no teardown would find it.
+        made: list = []
+        try:
+            return await self._execute(context, made)
+        except BaseException:
+            for key in made:
+                await key.close()
+            raise
+
+    async def _execute(self, context: TaskStepContext, made: list) -> TaskStepContext:
         from agent_env.providers.sandbox_providers.sandbox_provider import (
             SANDBOX_MODE_VM,
             build_sandbox_provider,
@@ -247,6 +266,11 @@ class InstallAgentTaskStep(TaskStep):
             raise RuntimeError(f"Agent {agent.id} v{agent.version} install/v1 params missing '{A2A_PORT_KEY}' (int) and the step has no a2a_port override")
         if not isinstance(required_params, list):
             raise RuntimeError(f"Agent {agent.id} v{agent.version} install/v1 params 'required_params' must be a list")
+        if self.model_budget_usd is not None and "litellm_api_key" not in required_params:
+            raise RuntimeError(
+                f"Agent {agent.id} v{agent.version} takes no litellm_api_key in its install/v1 params, so the key its "
+                f"model budget needs can't reach it; install_agent '{self.id}' can't give it model_budget_usd"
+            )
 
         if not ds.tunnel_urls or str(a2a_port) not in ds.tunnel_urls:
             raise RuntimeError(
@@ -267,6 +291,16 @@ class InstallAgentTaskStep(TaskStep):
 
         container = sandbox.scoped_name(self.container_name) if self.container_name else None
         trust_lines = await self._trust_lines(sandbox, container, work_dir) if "trust_env" in required_params else ""
+        budget_key = None
+        if self.model_budget_usd is not None:
+            if user_overrides.get("litellm_api_key"):
+                logger.warning(f"Agent '{self.agent_name}' has a model budget, so it gets a key of its own, not the "
+                               "run's litellm_api_key")
+            budget_key = await model_budget.make_key(
+                agent_name=self.agent_name, max_usd=self.model_budget_usd, ttl_seconds=self._instance_ttl_seconds(ds),
+                attribution=deploy_attribution(self, context),
+            )
+            made.append(budget_key)
 
         # Resolve each required_param via the registry, shlex.quote so str.format
         # substitution produces shell-safe tokens.
@@ -283,6 +317,7 @@ class InstallAgentTaskStep(TaskStep):
             # A host install on a local sandbox runs on this machine itself, not in a container.
             sandbox_type=None if host_mode else sandbox.type,
             trust_lines=trust_lines,
+            budget_key=budget_key.key if budget_key else None,
         )
         resolved: dict[str, str] = {}
         for name in required_params:
@@ -331,6 +366,8 @@ class InstallAgentTaskStep(TaskStep):
             instance_id=deployed.instance_id,
             on_host=host_mode,
         ))
+        if budget_key is not None:
+            model_budget.record(context, self.agent_name, budget_key)
 
         default_model = agent.metadata.get("default_model") or get_config().get_model_for_role("agent")
         if default_model and not context.default_agent_model:

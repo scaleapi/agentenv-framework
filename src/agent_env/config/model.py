@@ -68,12 +68,15 @@ class ModelConfig:
     roles: dict = field(default_factory=dict)
     params: dict = field(default_factory=dict)
     headers: dict = field(default_factory=dict)  # values may hold unresolved env:/secret: references
+    # A key the endpoint, a LiteLLM proxy, lets make keys: needed only for a step's ``model_budget_usd``. May hold an
+    # unresolved env:/secret: reference.
+    admin_api_key: Optional[str] = None
 
     @classmethod
     def from_section(cls, section: dict, *, secret_resolver: SecretResolver) -> ModelConfig:
         """Build from the raw ``[model]`` section: reject unknown keys and reserved
         ``[model.params]`` keys, then resolve ``env:``/``secret:`` refs — except
-        ``api_key`` and ``[model.headers]``, which keep their raw references and resolve
+        ``api_key``, ``admin_api_key`` and ``[model.headers]``, which keep their raw references and resolve
         lazily per call (an eager secret fetch would make every ``[model]`` read need credentials)."""
         allowed = {f.name for f in fields(cls)}
         unknown = set(section) - allowed
@@ -91,7 +94,7 @@ class ModelConfig:
         for name, value in headers.items():
             _check_header(name, None if value.startswith((ENV_REF_PREFIX, SECRET_REF_PREFIX)) else value)
         cfg = interpolate(
-            {k: v for k, v in section.items() if k not in ("api_key", "headers")},
+            {k: v for k, v in section.items() if k not in ("api_key", "admin_api_key", "headers")},
             secret_resolver=secret_resolver,
         )
         return cls(
@@ -101,6 +104,7 @@ class ModelConfig:
             roles=cfg.get("roles", {}),
             params=cfg.get("params", {}),
             headers=dict(headers),
+            admin_api_key=section.get("admin_api_key"),
         )
 
     def model_for_role(self, role: str, *, or_default: bool = True) -> Optional[str]:
@@ -122,6 +126,18 @@ class ModelConfig:
         if self.api_key is None:
             return None
         return interpolate(self.api_key, secret_resolver=secret_resolver)
+
+    def resolve_admin_api_key(self, *, secret_resolver: SecretResolver) -> str:
+        """``admin_api_key``, resolving a reference lazily; actionable failure when it is unset. No env var
+        stands in for it: an agent gets the endpoint's env vars, and must never get this key."""
+        key = None if self.admin_api_key is None else interpolate(self.admin_api_key, secret_resolver=secret_resolver)
+        if not key:
+            raise ConfigError(
+                "A model budget needs [model] admin_api_key in .agentenv/config.toml: a key the LiteLLM proxy at "
+                "[model] base_url lets make keys, its master key or a proxy admin's "
+                "(an env:/secret: reference is fine)."
+            )
+        return key
 
     def headers_for(self, base_url: Optional[str], *, secret_resolver: SecretResolver) -> dict[str, str]:
         """``[model.headers]``, resolved, for a call or an agent pointed at ``base_url``: none unless

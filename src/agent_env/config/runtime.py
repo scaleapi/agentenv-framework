@@ -326,6 +326,9 @@ class Config:
     def get_litellm_api_key(self) -> str:
         return self._model_config().resolve_api_key(secret_resolver=self._resolve_secret)
 
+    def get_model_admin_api_key(self) -> str:
+        return self._model_config().resolve_admin_api_key(secret_resolver=self._resolve_secret)
+
     def get_modal_credentials(self) -> tuple[str, str]:
         token_id = os.getenv("MODAL_TOKEN_ID")
         token_secret = os.getenv("MODAL_TOKEN_SECRET")
