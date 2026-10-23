@@ -8,4 +8,5 @@ set -a
 set +a
 echo $$ > "$root/agent.pid"
 export PATH="$root/bin:$PATH:$root/node/bin:$root/venv/bin" PYTHONPATH="$root/app"
-exec "$root/venv/bin/uvicorn" a2a_server:app --host 0.0.0.0 --port "$A2A_PORT"
+# Within install.sh's stop timeout, so a reinstall's stop reaches the shutdown that kills running turns' CLIs.
+exec "$root/venv/bin/uvicorn" a2a_server:app --host 0.0.0.0 --port "$A2A_PORT" --timeout-graceful-shutdown 5

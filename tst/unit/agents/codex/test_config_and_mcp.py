@@ -4,6 +4,8 @@ attribution probe."""
 import asyncio
 import json
 import os
+import signal
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -112,46 +114,54 @@ def test_without_an_endpoint_only_the_features_are_written(codex, monkeypatch):
     assert config == {"features": {"multi_agent_v2": True}}
 
 
-def test_each_turn_writes_every_server_with_the_role_header(codex, monkeypatch):
+def test_turns_of_different_roles_share_one_config_and_each_cli_gets_its_own_role(codex, monkeypatch):
+    """config.toml holds each server's registered role; a turn's own role reaches its CLI alone, as -c overrides."""
     codex_home = Path(os.environ["CODEX_HOME"])
-    for name in ("NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSL_CERT_FILE"):
-        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("A2A_PORT", "8000")
-    snapshots = []
+    turns = []
 
     async def fake_run_codex(**kwargs):
-        snapshots.append(_servers(codex_home))
+        turns.append((_servers(codex_home), set(kwargs["config_overrides"])))
         return codex_bridge.CodexResult(response="ok", tool_call_count=0, session_id="t")
 
     monkeypatch.setattr(a2a_server, "run_codex", fake_run_codex)
 
     async def exercise():
         async with codex.app.router.lifespan_context(codex.app), codex.client() as client:
-            await client.post("/ext/agent-config", json={"role": "solver"})
             added = await client.post("/ext/mcp-config", json={
                 "url": "https://gw/mcp", "name": "env4821", "headers": {"X-Tenant": "t"}})
+            await client.post("/ext/mcp-config", json={
+                "url": "https://gw2/mcp", "name": "audited", "headers": {"agentenv-role": "auditor"}})
+            await client.post("/ext/agent-config", json={"role": "solver"})
             await codex.send(client, "one")
             await client.post("/ext/agent-config", json={"role": "judge"})
             await codex.send(client, "two")
+            await client.post("/ext/agent-config", json={"role": None})
+            await codex.send(client, "three")
             return added.json()
 
     assert asyncio.run(exercise()) == {"status": "added", "name": "env4821", "url": "https://gw/mcp"}
 
-    first, second = snapshots
+    (first, solver), (second, judge), (third, none) = turns
+    assert first == second == third
     assert first["env4821"] == {
         "command": "mcp-remote",
-        "args": ["https://gw/mcp", "--allow-http", "--header", "X-Tenant: t", "--header", "AgentEnv-Role: solver"],
-        "env": {},
+        "args": ["https://gw/mcp", "--allow-http", "--header", "X-Tenant: t", "--header", "AgentEnv-Role: ${AGENTENV_ROLE}"],
+        "env": {"AGENTENV_ROLE": ""},
+        "env_vars": ["NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSL_CERT_FILE"],
         "startup_timeout_sec": 60,
         "required": True,
     }
-    assert first["peer_agents"]["args"] == [
-        "http://127.0.0.1:8000/ext/peer-agents/mcp", "--allow-http", "--header", "AgentEnv-Role: solver"]
-    assert second["env4821"]["args"][-1] == "AgentEnv-Role: judge"
-    assert {name: entry["required"] for name, entry in second.items()} == {"peer_agents": True, "env4821": True}
+    assert (first["audited"]["args"][2:], first["audited"]["env"]) == (
+        ["--header", "AgentEnv-Role: ${AGENTENV_ROLE}"], {"AGENTENV_ROLE": "auditor"})
+    assert first["peer_agents"]["args"][0] == "http://127.0.0.1:8000/ext/peer-agents/mcp"
+    servers = ("env4821", "audited", "peer_agents")
+    assert solver == {f'mcp_servers.{name}.env.AGENTENV_ROLE="solver"' for name in servers}
+    assert judge == {f'mcp_servers.{name}.env.AGENTENV_ROLE="judge"' for name in servers}
+    assert none == set()
 
 
-def test_a_turn_rewrites_config_toml_only_when_it_changes_and_never_in_place(codex, monkeypatch):
+def test_config_toml_is_rewritten_for_a_new_server_alone_and_never_in_place(codex, monkeypatch):
     config = Path(os.environ["CODEX_HOME"]) / "config.toml"
     inodes = []
 
@@ -169,12 +179,29 @@ def test_a_turn_rewrites_config_toml_only_when_it_changes_and_never_in_place(cod
             await codex.send(client, "two")
             await client.post("/ext/agent-config", json={"role": "judge"})
             await codex.send(client, "three")
+            await client.post("/ext/mcp-config", json={"url": "https://gw2/mcp", "name": "env2"})
+            await codex.send(client, "four")
 
     asyncio.run(exercise())
 
-    first, second, third = inodes
-    assert first == second and third != second
+    first, second, third, fourth = inodes
+    assert first == second == third != fourth
     assert [p.name for p in config.parent.iterdir() if p.name.endswith(".tmp")] == []
+
+
+def test_the_server_stopping_kills_the_clis_of_turns_still_running(codex, monkeypatch):
+    cli = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    monkeypatch.setattr(codex_bridge, "_RUNNING", {cli})
+
+    async def exercise():
+        async with codex.app.router.lifespan_context(codex.app):
+            pass
+
+    try:
+        asyncio.run(exercise())
+        assert cli.wait(timeout=5) == -signal.SIGKILL
+    finally:
+        cli.kill()
 
 
 def test_config_toml_is_owner_only_when_new_and_keeps_its_mode_when_rewritten(codex, monkeypatch):

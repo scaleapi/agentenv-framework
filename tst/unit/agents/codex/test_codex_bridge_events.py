@@ -374,6 +374,23 @@ def test_attribution_env_is_set_only_when_ids_are_given(spawn, monkeypatch):
         "proj-1", "projectId:proj-1,taskId:task-2", "proj-1", "task-2")
 
 
+def test_each_override_reaches_the_cli_as_its_own_c_flag(spawn):
+    cap = spawn(ndjson(THREAD_STARTED, TURN_COMPLETED))
+    asyncio.run(codex_bridge.run_codex(prompt="p", thread_id=None, config_overrides=['a.b="x"', "c=1"]))
+
+    at = cap["cmd"].index('a.b="x"')
+    assert cap["cmd"][at - 1:at + 3] == ["-c", 'a.b="x"', "-c", "c=1"]
+
+
+def test_a_cli_is_tracked_while_it_runs_a_turn(spawn):
+    running = []
+    spawn(ndjson(THREAD_STARTED, TURN_COMPLETED))
+    asyncio.run(codex_bridge.run_codex(prompt="p", thread_id=None,
+                                       event_callback=lambda event: running.append(len(codex_bridge._RUNNING))))
+
+    assert running == [1, 1] and codex_bridge._RUNNING == set()
+
+
 def test_the_cli_gets_the_endpoint_key_under_the_name_codex_prechecks():
     assert codex_bridge.cli_env({"LITELLM_API_KEY": "k"})["OPENAI_API_KEY"] == "k"
     assert codex_bridge.cli_env({"LITELLM_API_KEY": "k", "OPENAI_API_KEY": "own"})["OPENAI_API_KEY"] == "own"

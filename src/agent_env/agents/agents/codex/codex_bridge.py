@@ -17,7 +17,7 @@ import signal
 import threading
 import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -215,6 +215,18 @@ _USAGE_KEYS = (
     "output_tokens",
     "reasoning_output_tokens",
 )
+
+
+_RUNNING: set = set()
+
+
+def kill_running_clis() -> int:
+    """Kill every CLI still running a turn, with its process group; how many. The agent's shutdown does: the CLIs, in
+    sessions of their own, would outlive its server, as when a reinstall stops it mid-turn."""
+    running = [proc for proc in _RUNNING if proc.returncode is None]
+    for proc in running:
+        _kill_process_group(proc)
+    return len(running)
 
 
 def _kill_process_group(proc) -> None:
@@ -665,6 +677,7 @@ async def _run_codex_once(
     project_id: str | None = None,
     task_id: str | None = None,
     event_callback: Callable[[dict], None] | None = None,
+    config_overrides: Sequence[str] = (),
 ) -> CodexResult:
     # JSON Schema: codex's `--output-schema` flag takes a FILE PATH (unlike
     # claude-code's inline-JSON `--json-schema`). Write the inner schema to a
@@ -704,6 +717,8 @@ async def _run_codex_once(
         ]
     if schema_file is not None:
         cmd += ["--output-schema", str(schema_file)]
+    for override in config_overrides:
+        cmd += ["-c", override]
 
     inactivity_s = inactivity_timeout_s(effort)
     logger.info(
@@ -720,6 +735,7 @@ async def _run_codex_once(
             subprocess_env.get("LITELLM_TAGS", "(unset)"),
         )
 
+    proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -729,6 +745,7 @@ async def _run_codex_once(
             env=subprocess_env,
             start_new_session=True,
         )
+        _RUNNING.add(proc)
         trajectory, stderr, timed_out, stalled = await _read_with_watchdog(
             proc, timeout_s, prompt.encode(), event_callback, inactivity_s
         )
@@ -808,6 +825,7 @@ async def _run_codex_once(
             usage=usage,
         )
     finally:
+        _RUNNING.discard(proc)
         if schema_file is not None and schema_file.exists():
             try:
                 schema_file.unlink()
@@ -826,6 +844,7 @@ async def run_codex(
     project_id: str | None = None,
     task_id: str | None = None,
     event_callback: Callable[[dict], None] | None = None,
+    config_overrides: Sequence[str] = (),
 ) -> CodexResult:
     """Run one logical turn with bounded transient recovery."""
     deadline = time.monotonic() + timeout_s
@@ -858,6 +877,7 @@ async def run_codex(
             project_id=project_id,
             task_id=task_id,
             event_callback=event_callback,
+            config_overrides=config_overrides,
         )
         failure = _resumable_api_failure(result)
         budget_left = deadline - time.monotonic()

@@ -134,7 +134,7 @@ def test_agent_config_reaches_the_cli(codex, calls):
     assert call == {
         "prompt": "line one", "thread_id": None, "model": "gpt-x", "effort": "high",
         "system_prompt": "be brief", "output_format": schema, "timeout_s": 42,
-        "project_id": "p-1", "task_id": "t-1",
+        "project_id": "p-1", "task_id": "t-1", "config_overrides": [],
     }
 
 

@@ -1,12 +1,16 @@
 """The pieces of agent plumbing this agent shares in shape with other CLI agents, copied from the Claude Code agent's
-``kit.py``: durable session references, skill installs, FastAPI-style error bodies and grant reads."""
+``kit.py``: durable session references, skill installs, FastAPI-style error bodies, grant reads and threads awaited to
+their end."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
+from typing import TypeVar
 
 from agentenv_protocol.a2a_agent import BundleSkillRequest, InlineSkillRequest, SkillAddResponse
 from agentenv_protocol.transfers import ReadObject, download
@@ -82,3 +86,23 @@ async def install_skill(request: InlineSkillRequest | BundleSkillRequest, skills
         raise
     logger.info(f"Registered skill '{request.name}' at {skill_dir}")
     return SkillAddResponse(name=request.name)
+
+
+_T = TypeVar("_T")
+
+
+async def in_thread_to_its_end(func: Callable[..., _T], /, *args: object) -> _T:
+    """``func(*args)`` in a thread, off the event loop, and awaited to its end even when the caller is cancelled, so
+    nothing it does outlives a cancelled turn; the cancel is raised once it has ended."""
+    work = asyncio.ensure_future(asyncio.to_thread(func, *args))
+    cancelled = False
+    while not work.done():
+        try:
+            await asyncio.shield(work)
+        except asyncio.CancelledError:
+            cancelled = True
+        except Exception:
+            break
+    if cancelled:
+        raise asyncio.CancelledError from (None if work.cancelled() else work.exception())
+    return work.result()

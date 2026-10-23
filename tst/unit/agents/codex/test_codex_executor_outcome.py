@@ -183,19 +183,16 @@ def test_concurrent_same_context_turns_share_one_session(codex, monkeypatch):
     assert seen_thread_ids == [None, "shared-thread"]
 
 
-def test_every_server_is_required_and_reaches_mcp_remote_with_the_trust_env(monkeypatch, tmp_path):
+def test_every_server_is_required_and_mcp_remote_gets_the_ca_variables(monkeypatch, tmp_path):
     """Codex drops an optional server that misses its 1s grace, which mcp-remote always does; and codex hands a stdio
-    server only a few of its variables, so the CA ones are written in."""
+    server only a few of its variables, so the CA ones are named for it to pass on."""
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
-    monkeypatch.setenv("NODE_EXTRA_CA_CERTS", "/etc/agentenv/ca.pem")
-    monkeypatch.delenv("NODE_TLS_REJECT_UNAUTHORIZED", raising=False)
-    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
-    asyncio.run(codex_config.rewrite_mcp_servers_role(
+    asyncio.run(codex_config.write_mcp_servers(
         {"envmcp": {"url": "https://gw/mcp", "headers": None},
-         "peer_agents": {"url": "http://127.0.0.1:8000/ext/peer-agents/mcp", "headers": None}}, "viewer"))
+         "peer_agents": {"url": "http://127.0.0.1:8000/ext/peer-agents/mcp", "headers": None}}))
 
     servers = tomllib.loads((tmp_path / "config.toml").read_text())["mcp_servers"]
-    assert {name: (server["required"], server["env"]) for name, server in servers.items()} == {
-        "envmcp": (True, {"NODE_EXTRA_CA_CERTS": "/etc/agentenv/ca.pem"}),
-        "peer_agents": (True, {"NODE_EXTRA_CA_CERTS": "/etc/agentenv/ca.pem"}),
+    assert {name: (server["required"], server["env_vars"]) for name, server in servers.items()} == {
+        name: (True, ["NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSL_CERT_FILE"])
+        for name in ("envmcp", "peer_agents")
     }

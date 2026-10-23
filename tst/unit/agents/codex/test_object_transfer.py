@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import tarfile
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -589,6 +590,41 @@ def test_a_snapshot_cancelled_as_its_gate_opens_stays_cancelled(codex, monkeypat
     assert agent.session_ref_for_context("cancelled") is None
     assert "cancelled" not in a2a_server._context_locks
     assert (workspace / "artifact.txt").read_text() == "mutated"
+
+
+def test_a_save_cancelled_while_it_archives_waits_for_the_archive_then_removes_it(codex, monkeypatch, tmp_path, store):
+    """A cancel doesn't stop the thread that builds the archive: the save holds its gates until that thread ends, then
+    removes the archive, so none is left being written."""
+    _codex_home(codex, monkeypatch, tmp_path)
+    started, release = threading.Event(), threading.Event()
+    archives: list[Path] = []
+    build = a2a_server._build_workspace_archive
+
+    def slow_build(path: Path) -> None:
+        archives.append(path)
+        started.set()
+        release.wait(10)
+        build(path)
+
+    monkeypatch.setattr(a2a_server, "_build_workspace_archive", slow_build)
+
+    async def exercise():
+        task = asyncio.create_task(codex.agent.save_snapshot(ObjectSnapshotSaveRequest.model_validate(_save_body())))
+        await asyncio.to_thread(started.wait, 10)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        held_while_archiving = a2a_server._workspace_barrier._writer
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return held_while_archiving
+
+    assert asyncio.run(exercise()) is True
+    (archive,) = archives
+    assert not archive.exists()
+    assert store.requests == []
+    barrier = a2a_server._workspace_barrier
+    assert (barrier._readers, barrier._writer, barrier._waiting_writers) == (0, False, 0)
 
 
 def test_a_snapshot_of_an_unbound_context_is_404(codex, store):

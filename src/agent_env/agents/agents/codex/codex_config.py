@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 _write_lock = asyncio.Lock()
 
 MODEL_HEADERS_ENV = "LITELLM_EXTRA_HEADERS"
+ROLE_HEADER = "AgentEnv-Role"
+_ROLE_VARIABLE = "AGENTENV_ROLE"
 # Codex hands a stdio MCP server only a few of its own variables; these tell mcp-remote, a Node client, which
 # certificates to trust.
 _TRUST_ENV = ("NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSL_CERT_FILE")
@@ -109,24 +111,30 @@ def write_base_config(environ: Mapping[str, str]) -> None:
     _write(cfg)
 
 
-def _server_entry(url: str, role: str | None, headers: dict[str, str] | None = None) -> dict[str, Any]:
+def _server_entry(url: str, headers: dict[str, str] | None = None) -> dict[str, Any]:
     """Build a codex `mcp_servers.<name>` config table.
 
     Wraps the URL in `mcp-remote` (stdio shim), a Node client that trusts the
-    certificates the agent's environment names in `_TRUST_ENV`. Each header is passed as a `--header "Name: Value"` arg; `AgentEnv-Role: <role>`
-    is merged in (role wins on collision) so the env gateway can apply per-role tool
-    filtering.
+    certificates `_TRUST_ENV` names in the agent's environment. Each header is passed
+    as a `--header "Name: Value"` arg. The `AgentEnv-Role` header, which the env
+    gateway filters tools by, is mcp-remote's `${AGENTENV_ROLE}`: the role the
+    registration's own headers name, from the entry's env, unless a CLI run passes
+    its turn's role with `role_overrides`. So the file holds no turn's role, and
+    concurrent turns of different roles share it.
     """
+    registered = ""
     args: list[str] = [url, "--allow-http"]
-    merged = dict(headers or {})
-    if role:
-        merged["AgentEnv-Role"] = role
-    for k, v in merged.items():
-        args += ["--header", f"{k}: {v}"]
+    for k, v in (headers or {}).items():
+        if k.lower() == ROLE_HEADER.lower():
+            registered = v
+        else:
+            args += ["--header", f"{k}: {v}"]
+    args += ["--header", f"{ROLE_HEADER}: ${{{_ROLE_VARIABLE}}}"]
     return {
         "command": "mcp-remote",
         "args": args,
-        "env": {name: os.environ[name] for name in _TRUST_ENV if os.environ.get(name)},
+        "env": {_ROLE_VARIABLE: registered},
+        "env_vars": list(_TRUST_ENV),
         "startup_timeout_sec": 60,
         # Codex silently drops non-`required` servers that miss its hard-coded
         # 1s startup grace, which mcp-remote always does — but a `required`
@@ -135,18 +143,20 @@ def _server_entry(url: str, role: str | None, headers: dict[str, str] | None = N
     }
 
 
-async def rewrite_mcp_servers_role(servers: dict[str, dict], role: str | None) -> None:
-    """Write every registered MCP server entry with `role` headers.
-
-    Called before each turn, so config.toml carries the current role even though
-    the role is set after individual MCP servers were registered.
-    """
+async def write_mcp_servers(servers: Mapping[str, Mapping[str, Any]]) -> None:
+    """Write every registered MCP server's entry, before each turn."""
     async with _write_lock:
         cfg = _read()
         target = cfg.setdefault("mcp_servers", {})
         for name, info in servers.items():
-            target[name] = _server_entry(info["url"], role, info.get("headers"))
+            target[name] = _server_entry(info["url"], info.get("headers"))
         if _write(cfg):
-            logger.info(
-                f"Re-wrote {len(servers)} mcp_servers entries with role={role!r}"
-            )
+            logger.info(f"Wrote {len(servers)} mcp_servers entries")
+
+
+def role_overrides(servers: Mapping[str, Any], role: str | None) -> list[str]:
+    """The `-c` overrides that give one CLI run's MCP servers its turn's role; none without one. Codex accepts only
+    server names a dotted key path can name."""
+    if not role:
+        return []
+    return [f"mcp_servers.{name}.env.{_ROLE_VARIABLE}={json.dumps(role, ensure_ascii=False)}" for name in servers]

@@ -20,7 +20,7 @@ import shutil
 import tarfile
 import tempfile
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
@@ -67,9 +67,10 @@ from codex_bridge import (
     SESSIONS_DIR,
     find_rollout_path,
     get_last_attribution_snapshot,
+    kill_running_clis,
     run_codex,
 )
-from codex_kit import DurableSessionRefs, install_skill, json_error_bodies, read_object_bytes
+from codex_kit import DurableSessionRefs, in_thread_to_its_end, install_skill, json_error_bodies, read_object_bytes
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -98,6 +99,9 @@ _MAX_TRANSCRIPT_BYTES = int(
 )
 # What agent-env keeps of a failed task's error_message.
 _ERROR_MESSAGE_LIMIT = 4000
+# How many of a turn's warnings the result carries, and how much of each.
+_WARNINGS_KEPT = 10
+_WARNING_CHARS = 500
 
 # Codex discovers skills (Agent Skills spec) under ~/.agents/skills/<name>/SKILL.md.
 SKILLS_DIR = Path.home() / ".agents" / "skills"
@@ -233,17 +237,16 @@ class CodexConfig(AgentConfig):
     timeout_seconds: int = 1800
 
 
-async def _write_mcp_config(servers: Mapping[str, Mapping[str, Any]], role: str | None) -> None:
-    """Every registered MCP server into ~/.codex/config.toml with this turn's role header."""
-    await codex_config.rewrite_mcp_servers_role(
-        {name: dict(entry) for name, entry in servers.items()}, role
-    )
-
-
 @asynccontextmanager
 async def lifespan(app: Starlette):
+    """The model endpoint into config.toml as the server starts; as it stops, the CLIs of turns still running are
+    killed, which would otherwise go on in the workspace after it."""
     codex_config.write_base_config(os.environ)
-    yield
+    try:
+        yield
+    finally:
+        if stopped := kill_running_clis():
+            logger.info(f"Killed {stopped} codex CLI(s) still running a turn as the agent shut down")
 
 
 def _read_complete_jsonl(path: Path) -> bytes:
@@ -659,7 +662,7 @@ class CodexAgent(DurableSessionRefs, AgentEnvAgent):
                         self.set_session_ref_for_context(context_id, event["thread_id"])
 
                 try:
-                    await _write_mcp_config(request.mcp_servers, cfg.role)
+                    await codex_config.write_mcp_servers(request.mcp_servers)
                     async with _workspace_barrier.shared():
                         result = await run_codex(
                             prompt=prompt,
@@ -673,6 +676,7 @@ class CodexAgent(DurableSessionRefs, AgentEnvAgent):
                             project_id=cfg.project_id,
                             task_id=cfg.task_id,
                             event_callback=_record_event,
+                            config_overrides=codex_config.role_overrides(request.mcp_servers, cfg.role),
                         )
                 except Exception as e:
                     logger.error(f"codex CLI invocation raised: {e}", exc_info=True)
@@ -696,7 +700,7 @@ class CodexAgent(DurableSessionRefs, AgentEnvAgent):
             data["token_usage"] = result.token_usage
         # Reported for debuggability only; must not flip the task to `failed`.
         if result.warnings:
-            data["warnings"] = [w[:500] for w in result.warnings[:10]]
+            data["warnings"] = [w[:_WARNING_CHARS] for w in result.warnings[:_WARNINGS_KEPT]]
 
         builder = TaskResult.builder()
         if result.error:
@@ -845,8 +849,8 @@ class CodexAgent(DurableSessionRefs, AgentEnvAgent):
             # Without a workspace directory this uploads the empty file: agent-env
             # requires both objects, and a load reads an empty workspace as "conversation only".
             if workspace_target is not None and WORKSPACE_DIR.is_dir():
-                await asyncio.to_thread(_build_workspace_archive, archive_path)
-        except Exception:
+                await in_thread_to_its_end(_build_workspace_archive, archive_path)
+        except BaseException:
             if archive_path is not None:
                 archive_path.unlink(missing_ok=True)
             raise

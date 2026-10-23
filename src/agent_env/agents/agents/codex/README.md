@@ -18,9 +18,10 @@ Codex reads its settings from `$CODEX_HOME/config.toml`, which the agent writes:
   from `LITELLM_API_KEY`, `[model.headers]` (`LITELLM_EXTRA_HEADERS`) on every model call, and a run's `project_id`
   and `task_id` as `x-litellm-customer-id` and `x-litellm-tags`.
 - Before each task, every registered MCP server, the task's `peer_agents` tools included, as an `mcp-remote` stdio
-  server with the role's `AgentEnv-Role` header. Codex hands such a server only a few of its own variables, so the
-  agent writes in `NODE_EXTRA_CA_CERTS`, `NODE_TLS_REJECT_UNAUTHORIZED` and `SSL_CERT_FILE` when its environment has
-  them.
+  server. Its `AgentEnv-Role` header is the role its registration names, unless the task has a role of its own, which
+  reaches that task's CLI alone as `-c` overrides, so tasks of different roles running at once share the file. Codex
+  hands such a server only a few of its own variables, so the entry names `NODE_EXTRA_CA_CERTS`,
+  `NODE_TLS_REJECT_UNAUTHORIZED` and `SSL_CERT_FILE` for it to pass on.
 
 | Extension | Implementation |
 |---|---|
