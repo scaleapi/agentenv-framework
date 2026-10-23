@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import json
 import logging
 import os
 import re
@@ -65,6 +66,7 @@ from starlette.exceptions import HTTPException
 
 from opencode_bridge import (
     ERROR_MESSAGE_LIMIT,
+    event_session_id,
     export_session,
     get_last_attribution_snapshot,
     import_session,
@@ -84,7 +86,18 @@ INPUTS_DIR = WORKSPACE_DIR / "inputs"
 # One per port, since agents installed on one host listen on their own.
 _CHANGELOG_DIR = Path(tempfile.gettempdir()) / f"opencode-changelog-{os.environ.get('A2A_PORT') or 'default'}"
 _CHANGELOG_SNAR = _CHANGELOG_DIR / "state.snar"
+# Each increment's record of the roots it saw removed: beside the changelog, which captures exclude, and outside its
+# roots, so it goes in as one more member.
+_CHANGELOG_META = _CHANGELOG_DIR.parent / f"{_CHANGELOG_DIR.name}-meta" / "opencode-changelog-meta.json"
+_META_MEMBER_NAME = "opencode-changelog-meta.json"
+# Never removed on replay, whatever an increment's record says.
+_SYSTEM_DIRS = frozenset({"/", "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib32", "/lib64", "/libx32",
+                          "/media", "/mnt", "/opt", "/proc", "/root", "/run", "/sbin", "/srv", "/sys", "/tmp", "/usr",
+                          "/var"})
 _TAR_VERSION_TIMEOUT_S = 10
+_FILE_DOWNLOAD_TIMEOUT_S = 60
+_PDF_RENDER_TIMEOUT_S = 60
+_PDF_RENDER_DPI = 150
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]")
 # The versioned format of the `opencode run --format json` events this agent appends to its trajectory.
 TRAJECTORY_FORMAT = "opencode-events/1"
@@ -142,7 +155,7 @@ def _download_uri_to(uri: str, target: Path) -> None:
     parsed = urlparse(uri)
     if parsed.scheme in ("http", "https"):
         try:
-            with httpx.Client(timeout=60, follow_redirects=True) as client:
+            with httpx.Client(timeout=_FILE_DOWNLOAD_TIMEOUT_S, follow_redirects=True) as client:
                 response = client.get(uri)
                 response.raise_for_status()
                 target.write_bytes(response.content)
@@ -172,8 +185,8 @@ def _materialize_and_render(part: FilePart, task_id: str) -> list[str]:
     prefix = str(target.with_suffix("")) + "_page"
     try:
         subprocess.run(
-            ["pdftoppm", "-png", "-r", "150", str(target), prefix],
-            check=True, capture_output=True, timeout=60,
+            ["pdftoppm", "-png", "-r", str(_PDF_RENDER_DPI), str(target), prefix],
+            check=True, capture_output=True, timeout=_PDF_RENDER_TIMEOUT_S,
         )
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         logger.warning("PDF rendering failed for %s; passing the PDF directly", target)
@@ -302,6 +315,12 @@ class OpenCodeAgent(DurableSessionRefs, AgentEnvAgent):
             # Read under the lock rather than from the request: a snapshot load that held it may have just bound this
             # context to an imported session.
             session_id = self.session_ref_for_context(context_id)
+
+            def record(event: dict) -> None:
+                request.trajectory.append(event)
+                # A first turn's session is bound as soon as the CLI names it, so a cancel can't lose it.
+                if self.session_ref_for_context(context_id) is None and (started := event_session_id(event)):
+                    self.set_session_ref_for_context(context_id, started)
             try:
                 attachments = []
                 for part in request.parts:
@@ -324,7 +343,7 @@ class OpenCodeAgent(DurableSessionRefs, AgentEnvAgent):
                     task_id=request.config.task_id,
                     role=request.config.role,
                     attachment_paths=attachments,
-                    event_callback=request.trajectory.append,
+                    event_callback=record,
                     workspace=str(WORKSPACE_DIR),
                 )
             except Exception:
@@ -383,12 +402,13 @@ class OpenCodeAgent(DurableSessionRefs, AgentEnvAgent):
 
     @extension(SNAPSHOT_V1.save)
     async def save_snapshot(self, request: ObjectSnapshotSaveRequest) -> dict[str, Any]:
-        session_id = self.session_ref_for_context(request.context_id)
-        if not session_id:
-            raise HTTPException(status_code=404, detail="No active session for context_id")
         with tempfile.TemporaryDirectory(prefix="opencode-snapshot-") as directory:
             workspace = Path(directory) / "workspace.tgz"
             async with self._workspace.exclusive(), self._turn_lock(request.context_id):
+                # Read once no turn runs: a context's first turn, or a load into it, may be about to bind it.
+                session_id = self.session_ref_for_context(request.context_id)
+                if not session_id:
+                    raise HTTPException(status_code=404, detail="No active session for context_id")
                 session_json = await export_session(request.context_id, session_id)
                 if request.objects.workspace is not None:
                     await asyncio.to_thread(
@@ -428,30 +448,35 @@ class OpenCodeAgent(DurableSessionRefs, AgentEnvAgent):
         return {"context_id": target_context_id}
 
     async def _capture_changelog(self) -> None:
-        """One incremental tar of the changelog's roots, uploaded after each turn; the baseline advances only once
-        the upload succeeds, so a failed capture's changes go with the next."""
+        """One incremental tar of the changelog's roots, uploaded after each turn, with the roots removed since the
+        last; the baseline advances only once the upload succeeds, so a failed capture's changes, and its removals, go
+        with the next."""
         async with self._changelog_lock:
             config = self._changelog
             if config is None:
                 return
             roots = [root for root in config["roots"] if Path(root).exists()]
-            if not roots:
+            removed = [root for root in config["present"] if root not in roots]
+            if not roots and not removed:
                 return
             sequence = config["sequence"]
             _CHANGELOG_DIR.mkdir(parents=True, exist_ok=True)
             archive = _CHANGELOG_DIR / f"{sequence:06d}.tgz"
             pending_snar = _CHANGELOG_DIR / "pending.snar"
             try:
+                _CHANGELOG_META.parent.mkdir(parents=True, exist_ok=True)
+                _CHANGELOG_META.write_text(json.dumps({"sequence": sequence, "removed": removed}))
                 await asyncio.to_thread(shutil.copyfile, _CHANGELOG_SNAR, pending_snar)
                 await asyncio.to_thread(
                     subprocess.run,
                     ["tar", f"--listed-incremental={pending_snar}",
                      *_changelog_backup_exclusions(),
-                     f"--exclude={_CHANGELOG_DIR}", "-czf", str(archive), *roots],
+                     f"--exclude={_CHANGELOG_DIR}", "-czf", str(archive), *roots, str(_CHANGELOG_META)],
                     check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                 )
                 await config["uploader"].upload(f"{sequence:06d}.tgz", archive)
                 pending_snar.replace(_CHANGELOG_SNAR)
+                config["present"] = roots
                 config["sequence"] += 1
             except Exception:
                 logger.exception("OpenCode changelog capture failed")
@@ -470,7 +495,7 @@ class OpenCodeChangelogAgent(OpenCodeAgent):
         roots = request.roots or [str(WORKSPACE_DIR)]
         async with self._workspace.exclusive(), self._changelog_lock:
             await asyncio.to_thread(_baseline_changelog, roots)
-            self._changelog = {"roots": roots, "sequence": 0,
+            self._changelog = {"roots": roots, "sequence": 0, "present": [root for root in roots if Path(root).exists()],
                                "uploader": NamespaceUploader(request.write_namespace)}
         return {"roots": roots}
 
@@ -481,11 +506,7 @@ class OpenCodeChangelogAgent(OpenCodeAgent):
                 for increment in request.increments:
                     archive = Path(directory) / f"{increment.sequence:06d}.tgz"
                     await download(increment.object, archive)
-                    await asyncio.to_thread(
-                        subprocess.run,
-                        ["tar", "--incremental", "-xzf", str(archive), "-C", "/"],
-                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                    )
+                    await asyncio.to_thread(_apply_increment, archive, increment.sequence)
         return {"count": len(request.increments), "context_id": request.target_context_id}
 
 
@@ -528,6 +549,42 @@ def _replace_workspace(staged: Path) -> None:
         elif not any(saved.iterdir()):
             saved.rmdir()
             backup.rmdir()
+
+
+def _apply_increment(archive: Path, sequence: int) -> None:
+    """Extract an increment over /, all but its record, then remove the roots its record names."""
+    listing = subprocess.run(["tar", "--incremental", "-tzf", str(archive)], check=True, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE).stdout.decode(errors="replace").splitlines()
+    records = [member for member in listing if member.rsplit("/", 1)[-1] == _META_MEMBER_NAME]
+    subprocess.run(
+        ["tar", "--incremental", "--no-wildcards", *(f"--exclude={member}" for member in records),
+         "-xzf", str(archive), "-C", "/"],
+        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+    )
+    for member in records:
+        record = subprocess.run(["tar", "-xzOf", str(archive), member], check=True, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE).stdout
+        try:
+            removed = json.loads(record).get("removed")
+        except (ValueError, AttributeError):
+            logger.warning(f"changelog increment {sequence:06d}: unreadable record {member}")
+            continue
+        for path in removed if isinstance(removed, list) else []:
+            if not _removable(path):
+                logger.warning(f"changelog increment {sequence:06d}: not removing {path!r}")
+                continue
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path)
+            else:
+                os.unlink(path)
+            logger.info(f"changelog increment {sequence:06d}: removed root {path}")
+
+
+def _removable(path: object) -> bool:
+    """Whether a removed root a record names may be removed on replay: an absolute, normalized path that exists and
+    isn't / or a top-level system directory."""
+    return (isinstance(path, str) and os.path.isabs(path) and os.path.normpath(path) == path
+            and path not in _SYSTEM_DIRS and os.path.lexists(path))
 
 
 def _baseline_changelog(roots: list[str]) -> None:

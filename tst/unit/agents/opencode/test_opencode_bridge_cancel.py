@@ -134,7 +134,8 @@ def test_the_agents_shutdown_kills_the_clis_of_running_turns(monkeypatch, tmp_pa
 
     async def stop_mid_turn():
         turn = asyncio.create_task(opencode_bridge.run_opencode(prompt="p", context_id="shutdown-test"))
-        while not (pids.exists() and len(pids.read_text().split()) == 2):
+        # The shell can write its pids before the spawn returns, while the turn has no CLI of its own yet.
+        while not (pids.exists() and len(pids.read_text().split()) == 2 and opencode_bridge._RUNNING):
             await asyncio.sleep(0.01)
         stopped = opencode_bridge.kill_running_clis()
         await asyncio.wait_for(turn, 10)

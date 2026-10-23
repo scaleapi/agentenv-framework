@@ -476,6 +476,12 @@ async def _stream_cli(proc, on_line: Callable[[str], None]) -> bytes:
         stderr_task.cancel()
 
 
+def event_session_id(event: dict) -> str | None:
+    """The session an event names, on the event or its part."""
+    part = event.get("part") if isinstance(event.get("part"), dict) else {}
+    return event.get("sessionID") or event.get("session_id") or part.get("sessionID") or part.get("session_id")
+
+
 def _parse_events(stdout: bytes, stderr: bytes, returncode: int | None) -> OpencodeResult:
     """Parse a whole `--format json` JSONL event stream."""
     parser = _EventParser()
@@ -517,10 +523,8 @@ class _EventParser:
             return
         self.trajectory.append(event)
 
-        self.session_id = event.get("sessionID") or event.get("session_id") or self.session_id
+        self.session_id = event_session_id(event) or self.session_id
         part = event.get("part") if isinstance(event.get("part"), dict) else None
-        if part:
-            self.session_id = part.get("sessionID") or part.get("session_id") or self.session_id
 
         etype = event.get("type")
         ptype = part.get("type") if part else None

@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+import shutil
 import tarfile
 import time
 from datetime import datetime, timedelta, timezone
@@ -431,7 +432,8 @@ async def test_changelog_uses_portable_namespace_and_ordered_increments(monkeypa
             Path(args[1].partition("=")[2]).write_text("advanced")
             Path(args[args.index("-czf") + 1]).write_bytes(b"tar")
         if "-xzf" in args:
-            captures.append(("applied", Path(args[3]).read_bytes()))
+            captures.append(("applied", Path(args[args.index("-xzf") + 1]).read_bytes()))
+        return SimpleNamespace(stdout=b"")
 
     async def fake_download(_source, destination):
         destination.write_bytes(b"tar")
@@ -493,7 +495,7 @@ async def test_failed_changelog_upload_preserves_incremental_baseline(monkeypatc
             return Uploaded(size_bytes=3)
 
     monkeypatch.setattr(server.subprocess, "run", fake_run)
-    config = {"roots": [str(tmp_path)], "sequence": 0, "uploader": FlakyUploader()}
+    config = {"roots": [str(tmp_path)], "present": [str(tmp_path)], "sequence": 0, "uploader": FlakyUploader()}
     monkeypatch.setattr(oc.agent, "_changelog", config)
     await oc.agent._capture_changelog()
     assert baseline.read_text() == "baseline"
@@ -563,6 +565,9 @@ async def test_a_changelog_replays_each_turns_changes_deletions_included(monkeyp
     monkeypatch.setattr(server, "NamespaceUploader", lambda _grant: uploads)
     (folders / "kept.txt").write_text("before")
     (folders / "removed.txt").write_text("going")
+    second = folders.parent / "second-root"
+    second.mkdir()
+    (second / "inside.txt").write_text("x")
     namespace = {
         "root_path": "captures", "expires_at": _grant("http-put")["expires_at"],
         "max_objects": 10, "max_object_bytes": 1 << 20, "max_total_bytes": 1 << 22,
@@ -571,7 +576,7 @@ async def test_a_changelog_replays_each_turns_changes_deletions_included(monkeyp
     }
     async with oc.client() as client:
         enabled = await client.post("/ext/snapshot/changelog", json={"write_namespace": namespace,
-                                                                     "roots": [str(folders)]})
+                                                                     "roots": [str(folders), str(second)]})
         (folders / "kept.txt").write_text("after")
         # A file's mtime comes from a coarser clock than the baseline's time, so a rewrite this soon after it can read
         # as no later; a turn's writes come well after.
@@ -579,6 +584,7 @@ async def test_a_changelog_replays_each_turns_changes_deletions_included(monkeyp
         os.utime(folders / "kept.txt", (later, later))
         (folders / "removed.txt").unlink()
         (folders / "added.txt").write_text("new")
+        shutil.rmtree(second)
         await oc.agent._capture_changelog()
 
     assert enabled.status_code == 200, enabled.text
@@ -586,6 +592,9 @@ async def test_a_changelog_replays_each_turns_changes_deletions_included(monkeyp
     (folders / "kept.txt").write_text("before")
     (folders / "removed.txt").write_text("going")
     (folders / "added.txt").unlink()
+    second.mkdir()
+    (second / "inside.txt").write_text("x")
+    server._CHANGELOG_META.unlink()
 
     async def from_uploads(source, destination):
         destination.write_bytes(uploads.objects["000000.tgz"])
@@ -597,3 +606,44 @@ async def test_a_changelog_replays_each_turns_changes_deletions_included(monkeyp
     assert applied.status_code == 200, applied.text
     assert sorted(path.name for path in folders.iterdir()) == ["added.txt", "kept.txt"]
     assert (folders / "kept.txt").read_text() == "after"
+    assert not second.exists()
+    assert not server._CHANGELOG_META.exists()
+
+
+@pytest.mark.skipif(not server.gnu_tar(), reason="the changelog's incremental archives need GNU tar")
+@pytest.mark.asyncio
+async def test_a_turn_that_removes_every_root_still_uploads_their_removal(monkeypatch, oc, folders):
+    uploads = _KeptUploads()
+    monkeypatch.setattr(server, "NamespaceUploader", lambda _grant: uploads)
+    root = folders / "only-root"
+    root.mkdir()
+    (root / "a.txt").write_text("a")
+    namespace = {
+        "root_path": "captures", "expires_at": _grant("http-put")["expires_at"],
+        "max_objects": 10, "max_object_bytes": 1 << 20, "max_total_bytes": 1 << 22,
+        "write": {"kind": "http-post-policy", "url": "https://objects.example.test/upload",
+                  "fields": {"key": "captures/"}, "path_field": "key", "file_field": "file"},
+    }
+    async with oc.client() as client:
+        await client.post("/ext/snapshot/changelog", json={"write_namespace": namespace, "roots": [str(root)]})
+        shutil.rmtree(root)
+        await oc.agent._capture_changelog()
+        await oc.agent._capture_changelog()
+
+    assert list(uploads.objects) == ["000000.tgz"]
+    root.mkdir()
+
+    async def from_uploads(source, destination):
+        destination.write_bytes(uploads.objects["000000.tgz"])
+
+    monkeypatch.setattr(server, "download", from_uploads)
+    async with oc.client() as client:
+        applied = await client.put("/ext/snapshot/changelog", json={"increments": [{"sequence": 0, "object": _read()}]})
+
+    assert applied.status_code == 200, applied.text
+    assert not root.exists()
+
+
+@pytest.mark.parametrize("path", ["/", "/etc", "relative/path", "/tmp/../etc", 7])
+def test_a_record_never_removes_the_root_of_the_system(path):
+    assert not server._removable(path)

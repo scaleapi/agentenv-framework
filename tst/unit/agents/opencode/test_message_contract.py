@@ -205,3 +205,52 @@ async def test_an_unreadable_file_part_fails_the_turn_before_the_cli_runs(oc, tu
         task = await oc.send(client, parts)
 
     assert task["status"]["state"] == "failed" and turns.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_asked_for_during_a_contexts_first_turn_waits_for_its_session(monkeypatch, oc, turns):
+    exported = []
+
+    async def export(_context, session):
+        exported.append(session)
+        return b"{}"
+
+    monkeypatch.setattr(a2a_server, "export_session", export)
+    monkeypatch.setattr(a2a_server, "upload", _upload)
+    turns.release = asyncio.Event()
+    async with oc.client() as client:
+        first = asyncio.create_task(oc.send(client, "go", "ctx-new"))
+        await _until(lambda: len(turns.calls) == 1)
+        save = asyncio.create_task(client.post("/ext/snapshot", json={"context_id": "ctx-new", "objects": {
+            "trajectory": _WRITE}}))
+        await asyncio.sleep(0.1)
+        turns.release.set()
+        saved = await save
+        await first
+
+    assert saved.status_code == 200, saved.text
+    assert exported == ["ses_ctx-new"]
+
+
+@pytest.mark.asyncio
+async def test_a_first_turn_cancelled_after_the_cli_named_its_session_keeps_it_for_the_next(monkeypatch, oc):
+    calls: list[dict] = []
+    started = asyncio.Event()
+
+    async def run(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            kwargs["event_callback"]({"type": "step_start", "sessionID": "ses_started", "part": {"type": "step-start"}})
+            started.set()
+            await asyncio.Event().wait()
+        return result(session_id=kwargs["session_id"])
+
+    monkeypatch.setattr(a2a_server, "run_opencode", run)
+    async with oc.client() as client:
+        task = await oc.send(client, "one", blocking=False)
+        await asyncio.wait_for(started.wait(), 5)
+        await client.post("/a2a", json={"jsonrpc": "2.0", "id": 2, "method": "tasks/cancel", "params": {"id": task["id"]}})
+        await _until(lambda: oc.agent.session_ref_for_context("ctx-1") == "ses_started")
+        await oc.send(client, "two")
+
+    assert [call["session_id"] for call in calls] == [None, "ses_started"]
