@@ -65,7 +65,7 @@ jobs:
           command: |
             set -euo pipefail
             version() { python -c "import sys, tomllib; print(tomllib.load(open(sys.argv[1], 'rb'))['project']['version'])" "$1"; }
-            python .github/scripts/pypi_release.py download dist --wait-minutes 120 \
+            python .github/scripts/pypi_release.py download dist --wait-minutes 240 \
               "agentenv-framework-protocol==$(version packages/agentenv-protocol/pyproject.toml)" \
               "agentenv-framework==$(version pyproject.toml)"
       - persist_to_workspace:

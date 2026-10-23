@@ -67,7 +67,7 @@ def main(argv: list[str] | None = None) -> None:
     command = commands.add_parser("download")
     command.add_argument("directory", type=Path)
     command.add_argument("requirements", nargs="+", metavar="NAME==VERSION")
-    command.add_argument("--wait-minutes", type=float, default=120)
+    command.add_argument("--wait-minutes", type=float, default=240)
     args = parser.parse_args(argv)
     for requirement in args.requirements:
         if requirement.count("==") != 1 or requirement.startswith("=") or requirement.endswith("="):
