@@ -51,6 +51,17 @@ def test_an_alias_names_the_env_its_bundle_gives_it_under_the_aliass_id(aliases)
     assert Env.get(SHIPPED).id == SHIPPED
 
 
+
+def test_an_env_got_by_an_alias_writes_its_metadata_to_the_env_the_alias_names(aliases):
+    _put(SHIPPED)
+    env = Env.get("mail-mcp")
+
+    env.update_metadata({**env.metadata, "checked": "yes"})
+    env.merge_metadata({"merged": "too"})
+
+    assert (env.id, env.stored_id) == ("mail-mcp", SHIPPED)
+    assert {key: Env.get(SHIPPED).metadata[key] for key in ("checked", "merged")} == {"checked": "yes", "merged": "too"}
+
 def test_the_stores_env_of_an_aliass_id_is_the_one_it_names(aliases):
     _put(SHIPPED)
     _put("mail-mcp")

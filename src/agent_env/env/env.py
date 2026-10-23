@@ -269,8 +269,13 @@ class Env(ABC):
             raise NotFoundError(f"{id!r} is an alias of {named.target_id}, which comes with {named.declared_by} and "
                                 "isn't in the store yet: an `agent-env run` of a bundle that uses it writes it") from None
         env = copy.copy(env)
-        env.id = id
+        env._stored_id, env.id = env.id, id
         return env
+
+    @property
+    def stored_id(self) -> str:
+        """The id the store holds this env under: its own, or for an env ``get`` gave by an alias, the aliased env's."""
+        return getattr(self, "_stored_id", None) or self.id
 
     @classmethod
     async def from_instance_id(cls, instance_id: str) -> "Env":
@@ -304,7 +309,7 @@ class Env(ABC):
         from .store import get_env_store
         if self.version is None:
             raise ValueError("Cannot update metadata on an unsaved env (version is None)")
-        self.metadata = get_env_store().update_metadata(self.id, self.version, self.metadata, new_metadata)
+        self.metadata = get_env_store().update_metadata(self.stored_id, self.version, self.metadata, new_metadata)
 
     def merge_metadata(self, updates: dict[str, Any], retries: int = 3) -> None:
         """Merge ``updates`` into this env's metadata, re-reading and retrying on a
@@ -319,13 +324,13 @@ class Env(ABC):
         for attempt in range(retries + 1):
             try:
                 self.metadata = get_env_store().update_metadata(
-                    self.id, self.version, metadata, {**metadata, **updates}
+                    self.stored_id, self.version, metadata, {**metadata, **updates}
                 )
                 return
             except ConcurrentModificationError:
                 if attempt == retries:
                     raise
-                metadata = Env.get(self.id, self.version).metadata
+                metadata = Env.get(self.stored_id, self.version).metadata
 
     def to_dict(self) -> dict[str, Any]:
         return {"id": self.id, "type": self.type, "version": self.version, "metadata": self.metadata}
