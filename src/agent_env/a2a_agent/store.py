@@ -83,8 +83,8 @@ class A2AAgentStore:
     def next_version(self, id: str) -> int:
         return self._versioned.next_version(id)
 
-    def put_document(self, agent: A2AAgent) -> A2AAgent:
-        agent.version = self._versioned.put(agent)
+    def put_document(self, agent: A2AAgent, expected_version: Optional[int] = None) -> A2AAgent:
+        agent.version = self._versioned.put(agent, expected_version=expected_version)
         return agent
 
     def update_metadata(self, id: str, version: int, old_metadata: dict[str, Any], new_metadata: dict[str, Any]) -> dict[str, Any]:

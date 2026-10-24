@@ -55,12 +55,17 @@ def _ids(store, collection, field="id"):
     return {doc[field] for doc in store.query(collection, Filter())}
 
 
-# The suite's versioned-entity case writes bare entity ids, which an @local run refuses by design.
+# The suite's versioned-entity cases write bare entity ids, which an @local run refuses by design.
+_BARE_ENTITY_IDS = {
+    conformance.versioned_entity_store_roundtrip,
+    conformance.versioned_entity_store_conditional_put,
+    conformance.racing_conditional_puts_have_exactly_one_winner,
+}
 _CONFORMANCE = [
     pytest.param(case, mode, id=f"{mode}-{case.__name__}")
     for mode in ("configured", "merged", "local run")
     for case in conformance.CASES
-    if not (mode == "local run" and case is conformance.versioned_entity_store_roundtrip)
+    if not (mode == "local run" and case in _BARE_ENTITY_IDS)
 ]
 
 

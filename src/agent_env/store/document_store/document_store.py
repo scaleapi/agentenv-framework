@@ -8,6 +8,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable, Generic, Optional, TypeVar, Union
 
+from agent_env.store.base import ConcurrentModificationError
 from agent_env.store.ids import is_local_id
 
 logger = logging.getLogger(__name__)
@@ -455,14 +456,28 @@ class VersionedEntityStore(Generic[T]):
         doc = self._doc_store.latest_version(self._collection, id)
         return (doc["version"] + 1) if doc is not None else 1
 
-    def put(self, entity: T, max_retries: int = 5) -> int:
-        """Serialize and insert the entity under the next free version; return that version."""
+    def put(self, entity: T, max_retries: int = 5, expected_version: Optional[int] = None) -> int:
+        """Serialize and insert the entity under the next free version; return that version.
+
+        With ``expected_version`` (0 for an id with no versions) the put lands on ``expected_version + 1`` or not at
+        all: ConcurrentModificationError if another write took that version first, so a caller can't overwrite what it
+        didn't read."""
         if self._serialize is None:
             raise RuntimeError("VersionedEntityStore was built without a serializer; put() is unsupported")
         doc = self._serialize(entity)
         if not isinstance(doc.get("id"), str):
             raise ValueError(f"an entity in {self._collection!r} needs a string id, got {doc.get('id')!r}")
         self._doc_store.check_id(doc["id"])
+        if expected_version is not None:
+            version = expected_version + 1
+            try:
+                self._doc_store.insert(self._collection, {**doc, "version": version})
+            except DuplicateKeyError as e:
+                raise ConcurrentModificationError(
+                    f"{doc['id']!r} in {self._collection!r} already has a version {version}, "
+                    f"so {expected_version} is no longer its latest"
+                ) from e
+            return version
         last_error: Optional[DuplicateKeyError] = None
         for _ in range(max_retries):
             version = self.next_version(doc["id"])

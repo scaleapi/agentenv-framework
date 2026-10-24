@@ -439,11 +439,13 @@ class A2AAgent:
                                 "in the store yet: an `agent-env run` of a bundle that uses it writes it") from None
 
     @classmethod
-    def put(cls, **kwargs) -> A2AAgent:
+    def put(cls, expected_version: int | None = None, **kwargs) -> A2AAgent:
+        """Store a new version. With ``expected_version`` (0 for a new id) it lands only while that is still the
+        latest version, and raises ConcurrentModificationError otherwise."""
         from .store import get_a2a_agent_store
         kwargs.setdefault("version", None)
         instance = cls(**kwargs)
-        return get_a2a_agent_store().put_document(instance)
+        return get_a2a_agent_store().put_document(instance, expected_version=expected_version)
 
     @classmethod
     def query(cls) -> A2AAgentQuery:
