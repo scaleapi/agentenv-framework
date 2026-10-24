@@ -947,6 +947,15 @@ def _running(pid: int) -> bool:
         return False
 
 
+async def _stopped(pid: int, within: float = 5.0) -> bool:
+    """Whether ``pid`` stops running within ``within`` seconds: a kill lands a moment after it's sent, longer on a
+    loaded machine."""
+    async with asyncio.timeout(within):
+        while _running(pid):
+            await asyncio.sleep(0.05)
+    return True
+
+
 async def _detached(sandbox: LocalSandbox, command: str = "sleep 300") -> int:
     """Start ``command`` the way a host install starts its agent, outliving the exec that started it, and wait until
     it reads as marked: while a process execs, /proc shows it no environment, which on a loaded machine can last."""
@@ -988,7 +997,7 @@ async def test_teardown_stops_what_a_command_left_running_and_only_that(tmp_path
 
         await _RecordingLocalSandbox(work_dir=ours.work_dir, sandbox_id=ours.sandbox_id).terminate()
 
-        assert not _running(left)
+        assert await _stopped(left)
         assert _running(other)
     finally:
         await ls._stop_marked(theirs.sandbox_id)
@@ -1003,7 +1012,7 @@ async def test_teardown_kills_a_process_that_ignores_sigterm(tmp_path: Path, mon
 
     await ls._stop_marked(sandbox.sandbox_id)
 
-    assert not _running(stubborn)
+    assert await _stopped(stubborn)
     assert not ls._marked_pids(sandbox.sandbox_id)
 
 
