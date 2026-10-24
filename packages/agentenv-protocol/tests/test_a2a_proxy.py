@@ -13,7 +13,7 @@ import uvicorn
 from starlette.testclient import TestClient
 
 from agentenv_protocol import EnvironmentCard, ToolContext, ToolSession, create_fastmcp_app, tool
-from agentenv_protocol.a2a_agent import proxy
+from agentenv_protocol.a2a_agent import ProxyActionState, proxy
 from agentenv_protocol.a2a_agent.proxy import ProxyAgent
 
 TOKEN = "t" * 32
@@ -35,16 +35,37 @@ class _Items:
         raise RuntimeError("the tool blew up")
 
     @tool()
+    def count(self, n: int) -> str:
+        """Echo a number."""
+        return str(n)
+
+    @tool()
     def whoami(self, ctx: ToolContext) -> str:
         """Who is calling."""
         return json.dumps({"role": ctx.caller.role})
 
 
+class _Terminal:
+    @tool()
+    def bash(self, command: str, cwd: str = "/") -> str:
+        """Run a command in the env's own terminal."""
+        return f"{cwd}$ {command}"
+
+
 @pytest.fixture(scope="module")
 def env():
     """An items env's MCP server on loopback, as a task's env serves one."""
-    handler = _Items()
-    app = create_fastmcp_app(handler, card=EnvironmentCard(name="items")).streamable_http_app()
+    yield from _served(_Items(), "items")
+
+
+@pytest.fixture(scope="module")
+def terminal():
+    """An env whose own tool is named ``bash``."""
+    yield from _served(_Terminal(), "terminal")
+
+
+def _served(handler: Any, name: str):
+    app = create_fastmcp_app(handler, card=EnvironmentCard(name=name)).streamable_http_app()
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     server = uvicorn.Server(uvicorn.Config(app, log_level="warning"))
@@ -198,6 +219,7 @@ def test_an_error_reply_fails_the_turn(client):
     task = _settled(client, task_id)
     assert task["status"]["state"] == "failed"
     assert "the driver gave up" in task["status"]["message"]["parts"][0]["text"]
+    assert _trajectory(client, task_id)[-1]["status"] == {"status_code": "ERROR"}
 
 
 def test_a_reply_names_exactly_one_open_turn_and_carries_parts_or_an_error(client):
@@ -237,7 +259,7 @@ def test_a_turn_offers_its_env_servers_tools_and_bash(client, env):
 
     tools = {item["name"]: item for item in _proxy(client, "tools", task_id=task_id).json()["tools"]}
 
-    assert set(tools) == {"add_item", "explode", "whoami", "bash"}
+    assert set(tools) == {"add_item", "count", "explode", "whoami", "bash"}
     assert (tools["add_item"]["server"], "server" in tools["bash"]) == ("items", False)
     assert tools["add_item"]["input_schema"]["properties"]["item"]["type"] == "string"
 
@@ -281,6 +303,20 @@ def test_a_tool_actions_deadline_covers_connecting_to_its_server(client):
 
     assert result["is_error"] and "timed out after 0.5s" in result["content"][0]["text"]
     assert time.monotonic() - started < 5
+
+
+def test_a_server_that_never_lists_its_tools_is_a_bad_gateway(client, monkeypatch):
+    monkeypatch.setattr(proxy, "TOOL_TIMEOUT_SECONDS", 0.5)
+    with socket.socket() as silent:
+        silent.bind(("127.0.0.1", 0))
+        silent.listen()
+        _register(client, f"http://127.0.0.1:{silent.getsockname()[1]}/mcp")
+        task_id = _send(client, "go")
+
+        response = _proxy(client, "tools", task_id=task_id)
+
+    assert response.status_code == 502
+    assert "didn't list its tools within 0.5s" in response.text
 
 
 def test_a_turns_actions_share_one_connection_to_each_env_server_which_closes_with_the_turn(client, env, monkeypatch):
@@ -352,8 +388,42 @@ def test_a_command_that_outlives_its_timeout_is_stopped_with_what_it_started(cli
     left = _done(client, task_id, "l", _bash("sleep 60 & echo $! > left", timeout_seconds=0.5))
 
     assert waited == left == {"kind": "bash", "stdout": "", "stderr": "", "timed_out": True}
+    assert ProxyActionState.model_validate({"done": True, "result": waited}).result.exit_code is None
     _stopped(int((tmp_path / "waited").read_text()))
     _stopped(int((tmp_path / "left").read_text()))
+
+
+def test_a_command_too_long_to_start_fails_as_a_shell_reports_it(client):
+    task_id = _send(client, "go")
+
+    result = _done(client, task_id, "huge", _bash("true " + "x" * 3_000_000))
+
+    assert (result["exit_code"], result["timed_out"], result["stdout"]) == (126, False, "")
+    assert "couldn't start" in result["stderr"]
+    _proxy(client, "reply", task_id=task_id, parts=[{"kind": "text", "text": "done"}])
+    _settled(client, task_id)
+    [action, _] = _trajectory(client, task_id)
+    assert (action["name"], action["status"]) == ("bash", {"status_code": "ERROR"})
+
+
+def test_an_action_polled_while_its_turn_closes_is_answered_404(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    agent = ProxyAgent(long_poll_seconds=10)
+    with TestClient(agent.create_app()) as client:
+        client.post("/ext/proxy/claim", json={"token": TOKEN})
+        task_id = _send(client, "go")
+        polled = {}
+        poll = threading.Thread(target=lambda: polled.update(response=_proxy(
+            client, "act", task_id=task_id, action_id="long", action=_bash("sleep 30"))))
+        poll.start()
+        while "long" not in agent._actions:
+            time.sleep(0.01)
+
+        _proxy(client, "reply", task_id=task_id, parts=[{"kind": "text", "text": "done"}])
+        poll.join(10)
+
+    assert polled["response"].status_code == 404
+    assert "'long' was stopped: its turn is over" in polled["response"].text
 
 
 def test_a_turn_that_closes_stops_its_running_actions_and_forgets_them(client, tmp_path):
@@ -386,8 +456,10 @@ def test_recorded_model_calls_are_checked_against_the_actions_that_run(client, e
     message = {"role": "assistant", "content": "Adding it.", "reasoning_content": "The user wants a crate.",
                "tool_calls": [
                    {"id": "c1", "type": "function", "function": {"name": "add_item", "arguments": '{"item": "crate"}'}},
-                   {"id": "c2", "type": "function", "function": {"name": "bash", "arguments": '{"command": "true"}'}},
-                   {"id": "c3", "type": "function", "function": {"name": "my_own_tool", "arguments": "{}"}}]}
+                   {"id": "c2", "type": "function", "function": {"name": "bash",
+                                                                 "arguments": '{"command": "true", "timeout": 30}'}},
+                   {"id": "c3", "type": "function", "function": {"name": "my_own_tool", "arguments": "{}"}},
+                   {"id": "c4", "type": "function", "function": {"name": "count", "arguments": '{"n": 2.0}'}}]}
 
     assert _proxy(client, "record", task_id=task_id, message=message, model="qwen",
                   usage={"prompt_tokens": 12, "completion_tokens": 7}).status_code == 200
@@ -398,22 +470,45 @@ def test_recorded_model_calls_are_checked_against_the_actions_that_run(client, e
     assert _proxy(client, "reply", task_id=task_id, parts=[{"kind": "text", "text": "x"}]).status_code == 409
     _done(client, task_id, "b", _bash("true"))
     _done(client, task_id, "a", {"kind": "tool", "server": "items", "name": "add_item", "arguments": {"item": "crate"}})
+    _done(client, task_id, "n", {"kind": "tool", "server": "items", "name": "count", "arguments": {"n": 2}})
     assert _proxy(client, "record", task_id=task_id, message="Done.").status_code == 200
     _proxy(client, "reply", task_id=task_id, parts=[{"kind": "text", "text": "Done."}])
 
     task = _settled(client, task_id)
     spans = _trajectory(client, task_id)
     assert [(span["name"], span["attributes"]["gen_ai.operation.name"]) for span in spans] == [
-        ("chat", "chat"), ("bash", "execute_tool"), ("add_item", "execute_tool"), ("chat", "chat"), ("turn", "chain")]
+        ("chat", "chat"), ("bash", "execute_tool"), ("add_item", "execute_tool"), ("count", "execute_tool"),
+        ("chat", "chat"), ("turn", "chain")]
+    assert {span["status"]["status_code"] for span in spans} == {"OK"}
     assert _attrs(spans[0], "gen_ai.completion")["content"] == [
         {"type": "thinking", "thinking": "The user wants a crate."}, {"type": "text", "text": "Adding it."},
         {"type": "tool_use", "id": "c1", "name": "add_item", "input": {"item": "crate"}},
-        {"type": "tool_use", "id": "c2", "name": "bash", "input": {"command": "true"}},
-        {"type": "tool_use", "id": "c3", "name": "my_own_tool", "input": {}}]
+        {"type": "tool_use", "id": "c2", "name": "bash", "input": {"command": "true", "timeout": 30}},
+        {"type": "tool_use", "id": "c3", "name": "my_own_tool", "input": {}},
+        {"type": "tool_use", "id": "c4", "name": "count", "input": {"n": 2.0}}]
     assert (spans[0]["attributes"]["gen_ai.request.model"], spans[0]["attributes"]["gen_ai.usage.input_tokens"],
             spans[0]["attributes"]["gen_ai.usage.output_tokens"]) == ("qwen", 12, 7)
     assert _attrs(spans[2], "gen_ai.prompt") == {"input": {"item": "crate"}}
-    assert task["status"]["message"]["parts"][1]["data"]["usage"]["tool_call_count"] == 2
+    assert task["status"]["message"]["parts"][1]["data"]["usage"]["tool_call_count"] == 3
+
+
+def test_an_env_tool_named_bash_is_held_to_all_its_recorded_arguments(terminal, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    with TestClient(ProxyAgent(shell=False, long_poll_seconds=0.2).create_app()) as client:
+        client.post("/ext/proxy/claim", json={"token": TOKEN})
+        _register(client, terminal[1], name="terminal")
+        task_id = _send(client, "go")
+        message = {"role": "assistant", "content": None, "tool_calls": [{"id": "c1", "type": "function", "function": {
+            "name": "bash", "arguments": '{"command": "ls", "cwd": "/a"}'}}]}
+
+        assert _proxy(client, "record", task_id=task_id, message=message).status_code == 200
+        moved = _proxy(client, "act", task_id=task_id, action_id="b", action={
+            "kind": "tool", "server": "terminal", "name": "bash", "arguments": {"command": "ls", "cwd": "/b"}})
+        ran = _done(client, task_id, "a", {"kind": "tool", "server": "terminal", "name": "bash",
+                                          "arguments": {"command": "ls", "cwd": "/a"}})
+
+    assert moved.status_code == 409
+    assert ran["content"][0]["text"] == "/a$ ls"
 
 
 def test_two_model_calls_recorded_at_once_are_held_one_after_the_other(client, monkeypatch):

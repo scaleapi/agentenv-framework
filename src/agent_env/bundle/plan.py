@@ -186,6 +186,13 @@ def plan_bundle(resolved: ResolvedBundle, *, tasks: Sequence[str] = (), evals: S
     return _Planner(resolved, installed).plan(tasks, evals, agent)
 
 
+def plan_entities(resolved: ResolvedBundle, ids: Sequence[str], *, installed: Installed | None = None) -> Plan:
+    """Plan writing the envs, agents and artifacts ``ids`` names in this bundle, with what they reference, and
+    running nothing: what a run writes for one a task of another bundle names. Raises BundleError listing every
+    problem found."""
+    return _Planner(resolved, installed).plan_entities(ids)
+
+
 def check_bundle(resolved: ResolvedBundle, *, installed: Installed | None = None) -> None:
     """The checks ``plan_bundle`` makes without reading a store, over every task and eval in the bundle. Raises
     BundleError listing every problem found."""
@@ -475,7 +482,17 @@ class _Planner:
         self._check_writers()
         self._check_loops()
         selected_tasks, selected_evals = self._selection(tasks, evals)
-        closure = self._closure(selected_tasks + selected_evals)
+        return self._planned(selected_tasks + selected_evals, selected_tasks, selected_evals, aliases, override)
+
+    def plan_entities(self, ids: Sequence[str]) -> Plan:
+        self._check_writers()
+        self._check_loops()
+        return self._planned(self._select_entities(ids), [], [], {}, None)
+
+    def _planned(self, roots: list[ResolvedEntry], selected_tasks: list[ResolvedEntry],
+                 selected_evals: list[ResolvedEntry], aliases: dict[str, AliasUse],
+                 override: AgentOverride | None) -> Plan:
+        closure = self._closure(roots)
         store_refs, store_latest = self._check_store_refs(closure)
         if override is not None:
             override = replace(override, version=store_latest.get((EntityKind.AGENT, override.agent_id)))
@@ -608,6 +625,14 @@ class _Planner:
                 listed = f"; its {kind.value} are {names}" if names else f"; it has no {kind.value}"
                 self.problems.append(f"{flag}: this bundle has no {kind.store} with that name or id{listed}")
         return list(selected.values())
+
+    def _select_entities(self, ids: Sequence[str]) -> list[ResolvedEntry]:
+        entities = {_nfc(entry.entry.id): entry for entry in self.entries
+                    if entry.entry.kind not in (BundleKind.TASK, BundleKind.EVAL)}
+        for entity_id in ids:
+            if _nfc(entity_id) not in entities:
+                self.problems.append(f"this bundle has no env, agent or artifact {entity_id!r}")
+        return [entities[key] for key in dict.fromkeys(map(_nfc, ids)) if key in entities]
 
     def _closure(self, roots: list[ResolvedEntry]) -> set[_Key]:
         closure: set[_Key] = set()

@@ -76,6 +76,16 @@ A release publishes Codex's, Gemini's, OpenCode's, pi's and OpenHands' images to
 them as it does Claude Code's: it pulls the image
 published for the sources installed, by its digest, and builds it from the agent's folder only when it can't.
 
+`agents/proxy/` is the Episode API's, not an agent to pick for a task. It serves the protocol's `ProxyAgent`,
+which has no model: an episode deploys it in the place of the agent its caller plays, and the caller's model acts
+through it over `urn:agentenv:proxy/v1`. Env tool calls and `bash` run in it, where the agent would work, and it
+records the turn. Its image works in `/app` as user `agent`. On a `vm` sandbox's host, `install.sh` installs it
+where the agent it replaces declares it works (`workdir_host` and `user_host` in that agent's `install/v1`), with
+the host's own Python in a venv; into a task's container, it installs as root in the container's working directory,
+as an agent installed there works, with a private Python of uv's. Its `agent.toml` sets `takes_credentials = false`, so it's given no model key or
+store credentials. A release publishes its image at `ghcr.io/scaleapi/agentenv-proxy:src-<hex>`, as it does the
+others'. It has no alias and no smoke task: with nobody driving it, a prompt only waits out its deadline.
+
 `agent-env run agents` runs every agent's smoke task, pulling or building each image; `--task claude-code-smoke` runs
 Claude Code's alone, `--task codex-smoke` Codex's, `--task gemini-smoke` Gemini's, `--task opencode-smoke` OpenCode's,
 `--task pi-smoke` pi's, `--task openhands-smoke` OpenHands'. 

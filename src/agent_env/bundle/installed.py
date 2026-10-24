@@ -11,11 +11,13 @@ from packaging.utils import canonicalize_name
 
 from agent_env.plugins._bundles import BUNDLES, CORE, InstalledBundle, installed_bundles
 
-from .parse import Bundle, BundleError, parse_bundle
-from .plan import check_bundle
+from .materialize import materialize
+from .parse import Bundle, BundleError, BundleKind, parse_bundle
+from .plan import check_bundle, plan_entities
 from .resolve import resolve_bundle
 
-__all__ = ["BUNDLES", "CORE", "InstalledBundle", "checked", "find_bundle", "installed_bundles", "run_name"]
+__all__ = ["BUNDLES", "CORE", "InstalledBundle", "checked", "find_bundle", "installed_bundles", "run_name",
+           "write_installed"]
 
 
 def find_bundle(text: str, bundles: tuple[InstalledBundle, ...] | None = None) -> InstalledBundle:
@@ -50,6 +52,23 @@ def checked(bundle: InstalledBundle, *, load: bool = True) -> Bundle:
     if load:
         check_bundle(resolve_bundle(parsed), installed=installed_bundles)
     return parsed
+
+
+def write_installed(entity_id: str) -> int:
+    """Write ``entity_id``, an env, agent or artifact an installed bundle defines, with what it references, as a run of
+    a bundle naming it does, and return its version: the one already written when nothing it's made from changed.
+    Needs namespace routing. Raises BundleError."""
+    bundles = installed_bundles()
+    bundle = next((bundle for bundle in bundles if entity_id.startswith(f"{bundle.id_root}/")), None)
+    if bundle is None:
+        raise BundleError([f"{entity_id!r} isn't an entity of an installed bundle"])
+    if bundle.problem:
+        raise BundleError([f"{bundle.qualified}: {bundle.problem}"])
+    plan = plan_entities(resolve_bundle(parse_bundle(bundle.root, id_root=bundle.id_root)), [entity_id],
+                         installed=lambda: bundles)
+    [write] = [write for write in plan.writes
+               if write.id == entity_id and write.kind not in (BundleKind.TASK, BundleKind.EVAL)]
+    return materialize(plan).version_of(write.kind.store, entity_id)
 
 
 def _unknown(text: str, bundles: tuple[InstalledBundle, ...]) -> str:

@@ -141,6 +141,7 @@ def test_install_agent_reads_the_card_and_its_install_commands_from_the_image():
     (install,) = [ext for ext in json.loads(out.stdout)["capabilities"]["extensions"]
                   if ext["uri"] == "urn:agentenv:install/v1"]
     assert install["params"]["install_commands"] and install["params"]["install_commands_host"]
+    assert (install["params"]["workdir_host"], install["params"]["user_host"]) == ("/app", "root")
 
 
 def test_each_install_mode_asks_only_for_params_install_agent_supplies(app):

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import math
 import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from agent_env.task.episode.rules import problems
+from agent_env.task.episode.rules import DEPLOYS, problems, works_in_sandbox
 from agent_env.task.episode.run import Episode, EpisodeError
-from agent_env.task.episode.steps import _EpisodeAgentStep, _EpisodeTurnStep
+from agent_env.task.episode.steps import _EpisodeAgentStep
 from agent_env.task.task import Task, substitute_seed_in_steps
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_step import TaskStep
@@ -28,18 +29,15 @@ class EpisodeSpec:
         turn_timeout: float | None = None,
     ) -> EpisodeSpec:
         """``trainer_agents`` are the agents the loop plays, by default the task's only prompted agent.
-        ``turn_timeout`` is every turn's deadline in seconds, in place of its prompt's own ``timeout_seconds``,
-        which budgets an agent's run rather than the loop playing it."""
+        ``turn_timeout`` is every turn's deadline in seconds, rounded up to a whole one, in place of its prompt's own
+        ``timeout_seconds``, which budgets an agent's run rather than the loop playing it."""
         seed = dict(seed) if seed else None
         seeded = substitute_seed_in_steps(task.steps, seed or {})
         outside = _trainer_agents(task, seeded, trainer_agents)
         if found := problems(seeded, outside):
             raise EpisodeError(f"task {task.id!r} can't run as an episode: " + "; ".join(found))
-        deploys = {
-            as_run.agent_name: step for step, as_run in zip(task.steps, seeded)
-            if step.type == "deploy_agent" and as_run.agent_name in outside
-        }
-        steps = [_stand_in(step, as_run, deploys, turn_timeout) for step, as_run in zip(task.steps, seeded)]
+        sandboxed = {name: works_in_sandbox(seeded, name) for name in outside}
+        steps = [_in_episode(step, as_run, sandboxed, turn_timeout) for step, as_run in zip(task.steps, seeded)]
         return cls(copy=Task(id=task.id, version=task.version, steps=steps), trainer_agents=tuple(outside), seed=seed)
 
     async def start(self) -> Episode:
@@ -71,21 +69,15 @@ def _trainer_agents(task: Task, steps: list[TaskStep], named: Sequence[str] | No
     return outside
 
 
-def _stand_in(step: TaskStep, as_run: TaskStep, deploys: dict[str, TaskStep], turn_timeout: float | None) -> TaskStep:
+def _in_episode(step: TaskStep, as_run: TaskStep, sandboxed: dict[str, bool], turn_timeout: float | None) -> TaskStep:
     """The step the episode's copy of the task runs in place of ``step``, judged by ``as_run``, the step as the
-    seed makes it; ``deploys`` are the outside agents', by name. A stand-in keeps the step's own fields, which the
-    run seeds."""
-    if as_run.type == "deploy_agent" and as_run.agent_name in deploys:
+    seed makes it; ``sandboxed`` says, for each outside agent by name, whether its proxy is deployed in its
+    sandbox. The copy keeps every step's own fields, which the run seeds."""
+    if as_run.type in DEPLOYS and as_run.agent_name in sandboxed:
         return _EpisodeAgentStep(
-            id=step.id, version=step.version, depends_on=step.depends_on, fail_task_on_error=step.fail_task_on_error,
-            agent_name=step.agent_name, env_ids=step.env_ids, env_step_id=step.env_step_id, role=step.role,
+            id=step.id, version=step.version, step=step, sandboxed=sandboxed[as_run.agent_name],
+            depends_on=step.depends_on, fail_task_on_error=step.fail_task_on_error,
         )
-    if as_run.type == "prompt_agent" and as_run.agent_name in deploys:
-        timeout = step.timeout_seconds if turn_timeout is None else turn_timeout
-        return _EpisodeTurnStep(
-            id=step.id, version=step.version, depends_on=step.depends_on, fail_task_on_error=step.fail_task_on_error,
-            agent_name=step.agent_name, prompt_id=step.prompt_id, prompt=step.prompt,
-            system_prompt=step.system_prompt or deploys[as_run.agent_name].system_prompt,
-            timeout_seconds=PromptAgentTaskStep.DEFAULT_PROMPT_TIMEOUT_SECONDS if timeout is None else timeout,
-        )
+    if as_run.type == "prompt_agent" and as_run.agent_name in sandboxed and turn_timeout is not None:
+        return PromptAgentTaskStep.from_dict({**step.to_dict(), "timeout_seconds": math.ceil(turn_timeout)})
     return step

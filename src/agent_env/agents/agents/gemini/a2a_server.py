@@ -403,6 +403,9 @@ async def _vertex_openai_bridge(
             install_commands_host=_INSTALL_COMMANDS_HOST,
             a2a_port=8000,
             required_params_host=["work_dir", "agent_ctx_tar", "a2a_port", "agent_name", *_ENDPOINT_PARAMS],
+            # Where an install on the host works, and as whom, for a proxy installed in this agent's place.
+            workdir_host="/workspace",
+            user_host="root",
         ),
         enable(
             ATTRIBUTION_PROBE_V1,

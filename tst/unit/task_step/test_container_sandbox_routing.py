@@ -2,7 +2,8 @@
 
 A container sandbox on a container provider (Modal) is the runtime itself; one on a VM-backed provider (local, modal_vm,
 e2b) runs beside its host, so its files are only reachable through `docker exec <container>`. A VM-backed provider
-reattaches every sandbox as a VM, so a deploy_sandbox sandbox's mode is the one deploy_sandbox recorded.
+reattaches every sandbox as a VM, so a deploy_sandbox sandbox's mode is the one deploy_sandbox recorded. An agent
+install_agent put on a VM's host has no container, so both work on the host.
 """
 
 from __future__ import annotations
@@ -39,9 +40,9 @@ def _provide(monkeypatch, sandbox):
         monkeypatch.setattr(module, "get_sandbox_provider", lambda: provider)
 
 
-def _agent_context():
+def _agent_context(on_host: bool = False):
     ctx = TaskStepContext()
-    ctx.deployed_agents = [DeployedAgent(agent_name="solver", api_url="http://x", sandbox_id="sb-1")]
+    ctx.deployed_agents = [DeployedAgent(agent_name="solver", api_url="http://x", sandbox_id="sb-1", on_host=on_host)]
     return ctx
 
 
@@ -81,11 +82,11 @@ _CRITERIA = [{"type": "probe_file_exists", "criterion": "c", "paths": ["out.txt"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind,expected", [("vm", CONTAINER), ("container", None)])
-async def test_collect_reaches_an_agents_container(monkeypatch, kind, expected):
+@pytest.mark.parametrize("kind,on_host,expected", [("vm", False, CONTAINER), ("vm", True, None), ("container", False, None)])
+async def test_collect_reaches_an_agents_container(monkeypatch, kind, on_host, expected):
     _provide(monkeypatch, _sandbox(kind))
     step = CollectArtifactsTaskStep(id="c", version=None, agent_name="solver", artifact_paths=["out.txt"])
-    assert await _collect_container(monkeypatch, step, _agent_context()) == expected
+    assert await _collect_container(monkeypatch, step, _agent_context(on_host)) == expected
 
 
 @pytest.mark.asyncio
@@ -102,11 +103,11 @@ async def test_collect_reaches_a_named_sandboxs_container(monkeypatch, kind, rec
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind,expected", [("vm", CONTAINER), ("container", None)])
-async def test_verify_sandbox_probes_an_agents_container(monkeypatch, kind, expected):
+@pytest.mark.parametrize("kind,on_host,expected", [("vm", False, CONTAINER), ("vm", True, None), ("container", False, None)])
+async def test_verify_sandbox_probes_an_agents_container(monkeypatch, kind, on_host, expected):
     _provide(monkeypatch, _sandbox(kind))
     step = VerifySandboxTaskStep(id="v", version=None, agent_name="solver", criteria=_CRITERIA)
-    assert await _verify_container(monkeypatch, step, _agent_context()) == expected
+    assert await _verify_container(monkeypatch, step, _agent_context(on_host)) == expected
 
 
 @pytest.mark.asyncio

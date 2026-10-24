@@ -100,6 +100,7 @@ def test_install_mode_reads_the_card_by_importing_agent_card():
     install = extensions["urn:agentenv:install/v1"]["params"]
     assert install["install_commands"] == a2a_server._INSTALL_COMMANDS
     assert install["install_commands_host"] == a2a_server._INSTALL_COMMANDS_HOST
+    assert (install["workdir_host"], install["user_host"]) == ("/app", "root")
     assert extensions["urn:agentenv:staging/v1"]["params"]["endpoint"] == "/ext/staging"
 
 

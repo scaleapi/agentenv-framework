@@ -349,6 +349,7 @@ default_env_vars = { LOG_LEVEL = "debug" }
 [metadata]
 default_model = "claude-sonnet-4-6"
 min_disk_size_gb = 20
+takes_credentials = false
 """
 
 
@@ -361,7 +362,7 @@ def test_an_agent_is_written_from_its_agent_toml_over_a_store_image(bundle_dir):
     agent = A2AAgent.get(f"{ROOT}/solver")
     assert (agent.docker_image_artifact.id, agent.docker_image_artifact.version) == ("claude-image", 1)
     assert (agent.default_env_vars, agent.metadata) == (
-        {"LOG_LEVEL": "debug"}, {"default_model": "claude-sonnet-4-6", "min_disk_size_gb": 20})
+        {"LOG_LEVEL": "debug"}, {"default_model": "claude-sonnet-4-6", "min_disk_size_gb": 20, "takes_credentials": False})
     assert Task.get(f"{ROOT}/t").steps[0].a2a_agent_id == f"{ROOT}/solver"
     assert _summary(_run(bundle_dir))[f"{ROOT}/solver"] == (1, True, ())
 
@@ -374,11 +375,16 @@ def test_an_agent_is_written_from_its_agent_toml_over_a_store_image(bundle_dir):
     ('image = "claude-image"\ndefault_env_vars = { PORT = 8080 }\n',
      "agent.toml: default_env_vars.PORT must be a string, not 8080"),
     ('image = "claude-image"\n[metadata]\nowner = "me"\n',
-     "agent.toml: unknown [metadata] key 'owner'; an agent's [metadata] takes default_model and min_disk_size_gb"),
+     "agent.toml: unknown [metadata] key 'owner'; an agent's [metadata] takes default_model, min_disk_size_gb and "
+     "takes_credentials"),
     ('image = "claude-image"\n[metadata]\nmin_disk_size_gb = "20"\n',
      "agent.toml: metadata.min_disk_size_gb must be a number, not '20'"),
     ('image = "claude-image"\n[metadata]\nmin_disk_size_gb = true\n',
      "agent.toml: metadata.min_disk_size_gb must be a number, not True"),
+    ('image = "claude-image"\n[metadata]\ntakes_credentials = "no"\n',
+     "agent.toml: metadata.takes_credentials must be true or false, not 'no'"),
+    ('image = "claude-image"\n[metadata]\ntakes_credentials = 0\n',
+     "agent.toml: metadata.takes_credentials must be true or false, not 0"),
     ('image = "no-such-image"\n', "image: there is no artifact 'no-such-image' in the store"),
     ('image = "greeting"\n', "image: 'greeting' is this bundle's file, but this field takes docker_image"),
 ])
@@ -399,8 +405,8 @@ def test_every_problem_in_an_agent_toml_is_refused_together(bundle_dir):
 
     assert sorted(_problems(lambda: _run(bundle_dir))) == [
         "agents/solver: agent.toml: default_env_vars.PORT must be a string, not 8080",
-        "agents/solver: agent.toml: unknown [metadata] key 'color'; an agent's [metadata] takes default_model and "
-        "min_disk_size_gb",
+        "agents/solver: agent.toml: unknown [metadata] key 'color'; an agent's [metadata] takes default_model, "
+        "min_disk_size_gb and takes_credentials",
         "agents/solver: agent.toml: unknown key 'owner'; an a2a_agent agent takes image, default_env_vars, "
         "metadata, type and id",
     ]

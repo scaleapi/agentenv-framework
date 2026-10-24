@@ -413,6 +413,9 @@ async def _turns_stop_with_the_server(app: Starlette) -> AsyncIterator[None]:
             required_params=["container", "work_dir", "agent_ctx_tar", "a2a_port", *_ENDPOINT_PARAMS],
             install_commands_host=_INSTALL_COMMANDS_HOST,
             required_params_host=["work_dir", "agent_ctx_tar", "a2a_port", "agent_name", *_ENDPOINT_PARAMS],
+            # Where an install on the host works, and as whom, for a proxy installed in this agent's place.
+            workdir_host="/app",
+            user_host="root",
         ),
         enable(TRIGGERS_V1, description=(
             "Register a typed trigger script and decide the stakeholder reply per turn "

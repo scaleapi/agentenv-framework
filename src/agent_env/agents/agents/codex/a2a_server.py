@@ -609,6 +609,9 @@ _INSTALL_COMMANDS_HOST = [_UNPACK, _ENDPOINT + "bash {work_dir}/agent/install.sh
             required_params=["container", "work_dir", "agent_ctx_tar", "a2a_port", *_ENDPOINT_PARAMS],
             install_commands_host=_INSTALL_COMMANDS_HOST,
             required_params_host=["work_dir", "agent_ctx_tar", "a2a_port", "agent_name", *_ENDPOINT_PARAMS],
+            # Where an install on the host works, and as whom, for a proxy installed in this agent's place.
+            workdir_host="/app",
+            user_host="root",
         ),
         enable(
             PEER_AGENTS_V1,

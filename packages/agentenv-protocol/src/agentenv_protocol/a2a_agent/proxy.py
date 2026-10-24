@@ -164,7 +164,7 @@ class ProxyAgent(AgentEnvAgent):
         prompt = {"prompt": "\n".join(part.text for part in turn.parts), "system_prompt": turn.system_prompt}
         if reply.error is not None:
             turn.trajectory.append(_span("turn", "chain", turn.started, turn.model, prompt=prompt,
-                                         completion={"error": reply.error}))
+                                         completion={"error": reply.error}, failed=True))
             return TaskResult.failure("proxy.driver_error", reply.error)
         turn.trajectory.append(_span("turn", "chain", turn.started, turn.model, prompt=prompt, completion={
             "content": [{"type": "text", "text": part.text} for part in reply.parts]}))
@@ -202,14 +202,14 @@ class ProxyAgent(AgentEnvAgent):
         if (known := self._actions.get(request.action_id)) is not None:
             if known[0].task_id != request.task_id:
                 raise HTTPException(status_code=409, detail=f"action {request.action_id!r} is another turn's")
-            return await self._state(known[1])
+            return await self._state(request.action_id, known[1])
         turn = self._open_turn(request.token, request.task_id)
         action = request.action
         if isinstance(action, ProxyBashAction) and not self._shell:
             raise HTTPException(status_code=409, detail="this proxy works in no sandbox, so it runs no commands")
         if turn.recorded:
-            call = (action.name, _canonical(action.arguments)) if isinstance(action, ProxyToolAction) else (
-                BASH, _canonical({"command": action.command}))
+            call = (_call(action.name, action.arguments) if isinstance(action, ProxyToolAction)
+                    else _call(BASH, {"command": action.command}, own_shell=True))
             if call not in turn.pending:
                 raise HTTPException(status_code=409, detail=f"the last recorded model call didn't make this call to "
                                                             f"{call[0]!r}")
@@ -217,14 +217,14 @@ class ProxyAgent(AgentEnvAgent):
         task = asyncio.create_task(self._perform(turn, action))
         turn.actions[request.action_id] = task
         self._actions[request.action_id] = (turn, task)
-        return await self._state(task)
+        return await self._state(request.action_id, task)
 
     @extension(PROXY_V1.result)
     async def result(self, request: ProxyResultRequest) -> ProxyActionState:
         self._check(request.token)
         if (known := self._actions.get(request.action_id)) is None:
             raise HTTPException(status_code=404, detail=f"no action {request.action_id!r}")
-        return await self._state(known[1])
+        return await self._state(request.action_id, known[1])
 
     @extension(PROXY_V1.record)
     async def record(self, request: ProxyRecordRequest) -> None:
@@ -233,7 +233,8 @@ class ProxyAgent(AgentEnvAgent):
         turn = self._open_turn(request.token, request.task_id)
         if turn.pending:
             raise HTTPException(status_code=409, detail=_unrun(turn))
-        turn.pending = [(name, _canonical(arguments)) for name, arguments in calls if name in offered]
+        turn.pending = [_call(name, arguments, own_shell=offered[name].server is None)
+                        for name, arguments in calls if name in offered]
         turn.recorded = True
         turn.model = request.model or turn.model
         span = _span("chat", "chat", turn.last_event, turn.model, completion={"content": content})
@@ -285,7 +286,7 @@ class ProxyAgent(AgentEnvAgent):
                 for server in turn.servers:
                     try:
                         listed = await asyncio.wait_for(self._listed(turn, server), TOOL_TIMEOUT_SECONDS)
-                    except TimeoutError:
+                    except asyncio.TimeoutError:
                         raise HTTPException(status_code=502, detail=(
                             f"env server {server!r} didn't list its tools within {TOOL_TIMEOUT_SECONDS}s")) from None
                     except (ToolSessionError, httpx.HTTPError) as e:
@@ -328,32 +329,42 @@ class ProxyAgent(AgentEnvAgent):
         started = _now()
         if isinstance(action, ProxyBashAction):
             timeout = action.timeout_seconds or BASH_TIMEOUT_SECONDS
-            result = await _run(action.command, timeout)
+            try:
+                result = await _run(action.command, timeout)
+            except OSError as e:
+                # As a shell reports a command it can't execute: an argument list too long, say.
+                result = ProxyBashResult(exit_code=126, stdout="", stderr=f"error: the command couldn't start: {e}\n",
+                                         timed_out=False)
             name, arguments = BASH, {"command": action.command}
             output = (f"error: the command timed out after {timeout:g}s" if result.timed_out
                       else result.stdout + result.stderr)
             completion = {"output": output, "exit_code": result.exit_code}
+            failed = result.timed_out or result.exit_code != 0
         else:
             timeout = action.timeout_seconds or TOOL_TIMEOUT_SECONDS
             name, arguments = action.name, action.arguments
             try:
                 called = await asyncio.wait_for(self._called(turn, action), timeout)
                 result = ProxyToolResult(content=called.content, is_error=called.isError)
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 result = _tool_error(f"the tool call timed out after {timeout:g}s")
             except (ToolSessionError, httpx.HTTPError) as e:
                 result = _tool_error(f"{type(e).__name__}: {e}")
             text = "\n".join(block["text"] for block in result.content if block.get("type") == "text")
             completion = {"error": text} if result.is_error else {"output": text}
-        span = _span(name, "execute_tool", started, None, prompt={"input": arguments}, completion=completion)
+            failed = result.is_error
+        span = _span(name, "execute_tool", started, None, prompt={"input": arguments}, completion=completion,
+                     failed=failed)
         turn.trajectory.append(span)
         turn.last_event = span["end_time"]
         return result
 
-    async def _state(self, task: asyncio.Task[ProxyBashResult | ProxyToolResult]) -> ProxyActionState:
+    async def _state(self, action_id: str, task: asyncio.Task[ProxyBashResult | ProxyToolResult]) -> ProxyActionState:
         await asyncio.wait((task,), timeout=self._long_poll_seconds)
         if not task.done():
             return ProxyActionState(done=False)
+        if task.cancelled():
+            raise HTTPException(status_code=404, detail=f"action {action_id!r} was stopped: its turn is over")
         return ProxyActionState(done=True, result=task.result())
 
     async def _close(self, turn: _Turn) -> None:
@@ -471,8 +482,22 @@ def _unrun(turn: _Turn) -> str:
     return f"the last recorded model call's calls to {sorted({name for name, _ in turn.pending})} haven't run"
 
 
-def _canonical(arguments: dict[str, Any]) -> str:
-    return json.dumps(arguments, sort_keys=True, separators=(",", ":"), default=str)
+def _call(name: str, arguments: dict[str, Any], *, own_shell: bool = False) -> tuple[str, str]:
+    """A call as recorded calls and actions are compared: the proxy's own ``bash`` by its command alone, since its
+    action carries nothing else, and a whole float equal to the int a driver may have written for it."""
+    if own_shell:
+        arguments = {"command": arguments.get("command")}
+    return name, json.dumps(_whole(arguments), sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _whole(value: Any) -> Any:
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, dict):
+        return {key: _whole(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_whole(item) for item in value]
+    return value
 
 
 def _tool_error(message: str) -> ProxyToolResult:
@@ -480,7 +505,7 @@ def _tool_error(message: str) -> ProxyToolResult:
 
 
 def _span(name: str, operation: str, started: str, model: str | None, *, prompt: Any = None,
-          completion: Any = None) -> dict[str, Any]:
+          completion: Any = None, failed: bool = False) -> dict[str, Any]:
     """An OTel GenAI span, the trajectory format rubrics and the explorer read."""
     attributes: dict[str, Any] = {"gen_ai.operation.name": operation}
     if model:
@@ -489,7 +514,8 @@ def _span(name: str, operation: str, started: str, model: str | None, *, prompt:
         attributes["gen_ai.prompt"] = json.dumps(prompt, default=str)
     if completion is not None:
         attributes["gen_ai.completion"] = json.dumps(completion, default=str)
-    return {"name": name, "start_time": started, "end_time": _now(), "attributes": attributes}
+    return {"name": name, "start_time": started, "end_time": _now(),
+            "status": {"status_code": "ERROR" if failed else "OK"}, "attributes": attributes}
 
 
 def _now() -> str:

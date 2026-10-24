@@ -201,6 +201,7 @@ def test_install_params(app):
     params = _extensions(app)["urn:agentenv:install/v1"]["params"]
     assert list(params) == [
         "install_commands", "required_params", "install_commands_host", "a2a_port", "required_params_host",
+        "workdir_host", "user_host",
     ]
     assert params["a2a_port"] == 8000
     endpoint = ["litellm_api_key", "litellm_base_url", "litellm_extra_headers", "trust_env"]
@@ -208,6 +209,7 @@ def test_install_params(app):
     assert params["required_params_host"] == ["work_dir", "agent_ctx_tar", "a2a_port", "agent_name", *endpoint]
     assert params["install_commands"] == a2a_server._INSTALL_COMMANDS
     assert params["install_commands_host"] == a2a_server._INSTALL_COMMANDS_HOST
+    assert (params["workdir_host"], params["user_host"]) == ("/workspace", "root")
 
 
 def test_the_card_and_health_are_served(client):

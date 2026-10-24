@@ -367,7 +367,7 @@ class ProxyResultRequest(ExtensionRequest):
 
 class ProxyBashResult(ExtensionResponse):
     kind: Literal["bash"] = "bash"
-    exit_code: int | None  # none when the command was stopped
+    exit_code: int | None = None  # none when the command was stopped
     stdout: str
     stderr: str
     timed_out: bool
