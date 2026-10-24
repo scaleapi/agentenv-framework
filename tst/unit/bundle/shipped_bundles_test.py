@@ -55,8 +55,8 @@ def test_the_shipped_env_alias_names_the_mail_mcp_examples_env_which_the_validat
 
     assert table.refused == {} and table.refused_claims == {}
     assert {alias: named.target_id for alias, named in table.aliases.items()} == {
-        "mail-mcp": "@local/agentenv-framework/mail-mcp/mail"}
-    assert A2AAgent.VALIDATION_ENV_ID == "mail-mcp"
+        "mail": "@local/agentenv-framework/mail-mcp/mail"}
+    assert A2AAgent.VALIDATION_ENV_ID == "mail"
 
 def test_a_task_naming_no_agent_plans_with_the_shipped_default(tmp_path, monkeypatch, local_stores, cli_routing):
     monkeypatch.setenv("HOME", str(tmp_path))

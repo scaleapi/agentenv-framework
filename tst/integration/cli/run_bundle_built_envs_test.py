@@ -572,7 +572,7 @@ def test_the_shipped_mail_mcp_example_runs_and_a_task_outside_a_bundle_deploys_i
     assert first.exit_code == 0, first.output
     assert "tasks/smoke.json v1: passed (finds-the-invoice: 1)" in first.output, first.output
 
-    (state / "by-alias.json").write_text(json.dumps([{"id": "env", "type": "deploy_env", "env_id": "mail-mcp"}]))
+    (state / "by-alias.json").write_text(json.dumps([{"id": "env", "type": "deploy_env", "env_id": "mail"}]))
     created = CliRunner().invoke(cli, ["task", "create", "--id", "by-alias", str(state / "by-alias.json")])
     ran = CliRunner().invoke(cli, ["task", "run", "--id", "by-alias", "--output-dir", str(state / "out")])
 
@@ -580,8 +580,7 @@ def test_the_shipped_mail_mcp_example_runs_and_a_task_outside_a_bundle_deploys_i
     assert ran.exit_code == 0, ran.output
     [written] = (state / "out").iterdir()
     [deployed] = json.loads(written.read_text())["deployed_envs"]
-    assert deployed["env_id"] == "mail-mcp" and deployed["gateway_url"], deployed
-    assert deployed["metadata"]["stored_env_id"] == "@local/agentenv-framework/mail-mcp/mail", deployed
+    assert deployed["env_id"] == "mail" and deployed["gateway_url"], deployed
 
 ECHO = REPO / "src" / "agent_env" / "examples" / "echo-mcp"
 

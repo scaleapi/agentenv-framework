@@ -118,7 +118,7 @@ class MCPServerEnv(Env):
 
     @classmethod
     async def from_deployed_env(cls, deployed: DeployedEnv) -> MCPServerEnv:
-        env = Env.of_deployment(deployed)
+        env = Env.get(deployed.env_id, deployed.env_version)
         if not isinstance(env, MCPServerEnv):
             raise TypeError(f"Expected MCPServerEnv, got {type(env).__name__}")
         if env._env_provider is None:

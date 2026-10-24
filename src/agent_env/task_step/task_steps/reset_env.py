@@ -58,7 +58,7 @@ class ResetEnvTaskStep(TaskStep):
             logger.warning("reset_env: no deployed env '%s' in context; skipping", self.env_id)
             return context
         try:
-            env = Env.of_deployment(deployed)
+            env = Env.get(deployed.env_id, deployed.env_version)
             await env.reset(deployed)
             logger.info("reset_env: reset env '%s'", self.env_id)
         except NotImplementedError:

@@ -72,7 +72,7 @@ class SyncEnvClockTaskStep(TaskStep):
     def _service_names(self, deployed) -> list[str]:
         """Backing MCP server names for the env (mirrors apply_server_config's enumeration)."""
         from agent_env.env.env import Env
-        env = Env.of_deployment(deployed)
+        env = Env.get(deployed.env_id, deployed.env_version)
         names = [e.environment_name for e in (getattr(env, "mcp_server_envs", None) or [])]
         if not names and getattr(env, "environment_name", None):
             names = [env.environment_name]

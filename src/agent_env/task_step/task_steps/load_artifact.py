@@ -499,7 +499,7 @@ class LoadArtifactTaskStep(TaskStep):
                     # Only a FileArtifactUniverse or a FileArtifact reaches here — `stage_as_files`
                     # excludes a service universe whenever an env is targeted.
                     if env is None:
-                        env_obj = Env.of_deployment(deployed)
+                        env_obj = Env.get(deployed.env_id, deployed.env_version)
                         env = await type(env_obj).from_deployed_env(deployed)
                     result = await env.load_file_artifact_universe(artifact, destination_path=destination_path)
                     context.metadata.setdefault("loaded_file_artifact_universes", []).append({
@@ -583,7 +583,7 @@ class LoadArtifactTaskStep(TaskStep):
                 if deployed is None:
                     raise RuntimeError(f"`env_id` is required when loading a {artifact.type}")
                 if env is None:
-                    env_obj = Env.of_deployment(deployed)
+                    env_obj = Env.get(deployed.env_id, deployed.env_version)
                     env = await type(env_obj).from_deployed_env(deployed)
                 if isinstance(artifact, EnvironmentArtifact):
                     await env.load_environment_artifact(artifact)

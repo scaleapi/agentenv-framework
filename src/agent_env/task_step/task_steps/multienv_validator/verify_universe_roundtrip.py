@@ -102,7 +102,7 @@ class VerifyUniverseLoadExportRoundtripStep(TaskStep):
         deployed = next((d for d in context.deployed_envs if d.env_id == self.env_id), None)
         if deployed is None:
             raise RuntimeError(f"Env '{self.env_id}' not found in context.deployed_envs")
-        env = Env.of_deployment(deployed)
+        env = Env.get(deployed.env_id, deployed.env_version)
         env = await type(env).from_deployed_env(deployed)
         universe = EnvironmentUniverseArtifact.get(self.universe_artifact_id, self.universe_artifact_version)
         environment_artifacts = universe.get_environment_artifacts()

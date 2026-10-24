@@ -450,9 +450,9 @@ class A2AAgent:
         from .store import A2AAgentQuery, get_a2a_agent_store
         return A2AAgentQuery(get_a2a_agent_store())
 
-    # The env validate gives the agent it checks: the alias of the mail-mcp example's env, which a store's env of that
-    # id shadows.
-    VALIDATION_ENV_ID: ClassVar[str] = "mail-mcp"
+    # The env validate gives the agent it checks: the alias of the mail-mcp example's env, which validate writes when
+    # the store has no env of that id.
+    VALIDATION_ENV_ID: ClassVar[str] = "mail"
 
     def update_metadata(self, new_metadata: dict[str, Any]) -> None:
         """Replace this agent's metadata in the database using compare-and-swap."""

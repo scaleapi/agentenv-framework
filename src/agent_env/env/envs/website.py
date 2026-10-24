@@ -138,7 +138,7 @@ class WebsiteEnv(Env):
 
     @classmethod
     async def from_deployed_env(cls, deployed: DeployedEnv) -> WebsiteEnv:
-        env = Env.of_deployment(deployed)
+        env = Env.get(deployed.env_id, deployed.env_version)
         if not isinstance(env, WebsiteEnv):
             raise TypeError(f"Expected WebsiteEnv, got {type(env).__name__}")
         if env._env_provider is None:
