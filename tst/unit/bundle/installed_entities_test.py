@@ -21,6 +21,8 @@ from agent_env.artifact.store import get_artifact_store
 from agent_env.bundle.plan import AliasUse, check_bundle, plan_bundle
 from agent_env.bundle.resolve import resolve_bundle
 from agent_env.plugins._bundles import ALIASES_FILE
+from agent_env.entity.refs import EntityKind
+from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.store.routing import namespace_routing
 from tst.unit.bundle._support import RefusingStore, layout, local_builds
 
@@ -361,6 +363,49 @@ def test_an_agent_named_by_an_installed_alias_is_pulled_in_and_the_task_names_it
     assert plan.aliases == {"solver-x": AliasUse("solver-x", SOLVER, "demo-dist's kit bundle")}
     assert plan.aliases["solver-x"].agent_id == SOLVER and plan.store_refs == ()
 
+
+ENV_ALIASED = {"envs/crm/Dockerfile": "FROM scratch\n", "envs/crm/env.toml": 'environment_name = "crm"\n',
+               ALIASES_FILE: '[envs]\ncrm = ["crm-x"]\n'}
+CRM = f"{KIT}/crm"
+CRM_STEPS = [{"id": "env", "type": "deploy_env", "env_id": "crm-x"},
+             {"id": "agent", "type": "deploy_agent", "a2a_agent_id": SOLVER, "env_ids": ["crm-x"],
+              "depends_on": ["env"]}]
+
+
+def test_an_env_named_by_an_installed_alias_is_pulled_in_and_the_task_names_it_by_id(bundle_dir, tmp_path):
+    kit = _kit(tmp_path, ENV_ALIASED)
+
+    plan = _plan(_task(bundle_dir, CRM_STEPS), kit)
+
+    assert (BundleKind.ENV, CRM) in _writes(plan)
+    assert _step(plan, "env")["env_id"] == CRM and _step(plan, "agent")["env_ids"] == [CRM]
+    assert plan.env_aliases == {"crm-x": AliasUse("crm-x", CRM, "demo-dist's kit bundle", kind=EntityKind.ENV)}
+    assert plan.aliases == {} and plan.store_refs == ()
+
+
+def test_the_stores_env_of_an_alias_id_shadows_the_alias(bundle_dir, tmp_path):
+    kit = _kit(tmp_path, ENV_ALIASED)
+    with namespace_routing():
+        image = get_artifact_store().put_document(DockerImageArtifact(
+            id="crm-x-image", description="d", image_name="ghcr.io/acme/crm:1", tar_gz_s3_url="s3://b/x.tar.gz"))
+        MCPServerEnv.put(id="crm-x", docker_image_artifact=image, environment_name="crm")
+
+    plan = _plan(_task(bundle_dir, CRM_STEPS), kit)
+
+    assert (BundleKind.ENV, CRM) not in _writes(plan) and _step(plan, "env")["env_id"] == "crm-x"
+    assert plan.env_aliases["crm-x"].store_version == 1 and [ref.id for ref in plan.store_refs] == ["crm-x"]
+
+
+
+def test_an_env_definition_naming_an_env_alias_is_refused_saying_to_name_the_env_by_its_id(bundle_dir, tmp_path):
+    """An env alias names an env in a task's steps; a MultiEnv's servers name theirs by id."""
+    kit = _kit(tmp_path, ENV_ALIASED)
+
+    problems = _problems(_task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "suite"}],
+                               {"envs/suite/env.toml": 'type = "multi"\nmcp_server_envs = ["crm-x"]\n'}), kit)
+
+    assert any(f"'crm-x' is an alias of {CRM}, which comes with demo-dist's kit bundle, and an env alias names an env only "
+               "in a task's steps; name the env by its id" in problem for problem in problems), problems
 
 def test_the_stores_agent_of_an_alias_id_shadows_the_alias(bundle_dir, tmp_path):
     """Someone's own agent of that id is the one they mean."""

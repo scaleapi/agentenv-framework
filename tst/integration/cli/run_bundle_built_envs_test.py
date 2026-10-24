@@ -215,7 +215,7 @@ def _gateway_bundle(root):
     """An env of each kind a bundle writes, all deployed through the gateway: items and stock are the items server,
     built from its folder and named by its card, and built from docker/Dockerfile under a name of its own; depot is
     the items server built from an image folder, artifacts/depot-image; relay is an MCP server over the store image
-    the CLI put for mail; shop is a website; suite is a multi of items, mail and shop."""
+    the CLI put for inbox; shop is a website; suite is a multi of items, inbox and shop."""
     envs = root / "envs"
     _items(envs / "items", "v1")
     _items(envs / "stock", "v1", dockerfile="docker/Dockerfile")
@@ -224,11 +224,11 @@ def _gateway_bundle(root):
     (envs / "depot").mkdir()
     (envs / "depot/env.toml").write_text('image = "depot-image"\nenvironment_name = "depot"\n')
     (envs / "relay").mkdir()
-    (envs / "relay/env.toml").write_text('image = "mail__env_image"\nenvironment_name = "relay"\n')
+    (envs / "relay/env.toml").write_text('image = "inbox__env_image"\nenvironment_name = "relay"\n')
     _shop(envs / "shop")
     (envs / "suite").mkdir()
     (envs / "suite/env.toml").write_text(
-        'type = "multi"\nmcp_server_envs = ["items", "mail"]\nwebsite_envs = ["shop"]\nname = "suite"\n')
+        'type = "multi"\nmcp_server_envs = ["items", "inbox"]\nwebsite_envs = ["shop"]\nname = "suite"\n')
     _check(root, "items", items=["items"])
     _check(root, "stock", items=["stock"])
     _check(root, "depot", items=["depot"])
@@ -238,9 +238,9 @@ def _gateway_bundle(root):
     return root
 
 
-def _put_mail():
-    """The slack server as a store env, mail, put by the CLI as a user would before a bundle names it."""
-    put = CliRunner().invoke(cli, ["env", "mcp-server", "put", "--id", "mail", "--environment-name", "mail",
+def _put_inbox():
+    """The slack server as a store env, inbox, put by the CLI as a user would before a bundle names it."""
+    put = CliRunner().invoke(cli, ["env", "mcp-server", "put", "--id", "inbox", "--environment-name", "mail",
                                    "--dockerfile", str(DATA / "slack_mcp/Dockerfile"), "--context", str(DATA),
                                    "--platform", ""])
     assert put.exit_code == 0, put.output
@@ -253,7 +253,7 @@ GATEWAY_ENVS = ("items", "stock", "depot", "relay", "shop", "suite")
 
 
 def test_each_kind_of_bundle_env_deploys_through_the_gateway_and_a_child_edit_rewrites_its_multi(state):
-    _put_mail()
+    _put_inbox()
     root = _gateway_bundle(state / "gateway-bundle")
 
     first = _run(root)
@@ -267,12 +267,12 @@ def test_each_kind_of_bundle_env_deploys_through_the_gateway_and_a_child_edit_re
     with namespace_routing():
         ids = {entry.name: entry.id for entry in parse_bundle(root).entries}
         written = {name: Env.get(ids[name]) for name in GATEWAY_ENVS}
-        mail = Env.get("mail")
+        inbox = Env.get("inbox")
     assert {name: env.environment_name for name, env in written.items() if name != "suite"} == {
         "items": "items", "stock": "stock", "depot": "depot", "relay": "relay", "shop": "shop"}
     assert written["depot"].docker_image_artifact.id == ids["depot-image"]
-    assert written["relay"].docker_image_artifact.id == mail.docker_image_artifact.id == "mail__env_image"
-    assert [child.id for child in written["suite"].mcp_server_envs] == [ids["items"], "mail"]
+    assert written["relay"].docker_image_artifact.id == inbox.docker_image_artifact.id == "inbox__env_image"
+    assert [child.id for child in written["suite"].mcp_server_envs] == [ids["items"], "inbox"]
     assert [child.id for child in written["suite"].website_envs] == [ids["shop"]]
     assert written["suite"].name == "suite"
 
@@ -563,6 +563,24 @@ def test_the_shipped_echo_mcp_example_runs_by_name_and_a_rerun_writes_nothing(st
         assert f"{entry}: v1, unchanged" in second.output, second.output
     assert "tasks/smoke.json v1: passed (echoes: 1)" in second.output, second.output
 
+
+
+def test_the_shipped_mail_mcp_example_runs_and_a_task_outside_a_bundle_deploys_its_env_by_its_alias(state):
+    """The alias is how the A2A agent validator's task, which no bundle holds, names the env it deploys."""
+    first = _run("mail-mcp")
+
+    assert first.exit_code == 0, first.output
+    assert "tasks/smoke.json v1: passed (finds-the-invoice: 1)" in first.output, first.output
+
+    (state / "by-alias.json").write_text(json.dumps([{"id": "env", "type": "deploy_env", "env_id": "mail"}]))
+    created = CliRunner().invoke(cli, ["task", "create", "--id", "by-alias", str(state / "by-alias.json")])
+    ran = CliRunner().invoke(cli, ["task", "run", "--id", "by-alias", "--output-dir", str(state / "out")])
+
+    assert created.exit_code == 0, created.output
+    assert ran.exit_code == 0, ran.output
+    [written] = (state / "out").iterdir()
+    [deployed] = json.loads(written.read_text())["deployed_envs"]
+    assert deployed["env_id"] == "mail" and deployed["gateway_url"], deployed
 
 ECHO = REPO / "src" / "agent_env" / "examples" / "echo-mcp"
 

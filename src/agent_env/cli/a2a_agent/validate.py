@@ -5,6 +5,10 @@ import sys
 import click
 
 from agent_env.a2a_agent import A2AAgent
+from agent_env.bundle import BundleError
+from agent_env.env.bootstrap import InfraError
+from agent_env.store.base import NotFoundError
+from agent_env.utils.docker.build import DockerBuildError
 
 
 def run_validation(agent: A2AAgent, litellm_api_key: str | None = None) -> dict:
@@ -34,7 +38,6 @@ def run_validation(agent: A2AAgent, litellm_api_key: str | None = None) -> dict:
 def validate(agent_id: str, agent_version: int | None, litellm_api_key: str | None, sandbox: str):
     """Deploy an A2A agent, validate its agent card and MCP extension."""
     from agent_env.providers import build_sandbox_provider, set_agent_sandbox_provider
-    from agent_env.store.base import NotFoundError
 
     if sandbox:
         try:
@@ -50,7 +53,11 @@ def validate(agent_id: str, agent_version: int | None, litellm_api_key: str | No
         click.echo(click.style(f"Error: {e}", fg="red"), err=True)
         sys.exit(1)
 
-    verifications = run_validation(agent, litellm_api_key=litellm_api_key)
+    try:
+        verifications = run_validation(agent, litellm_api_key=litellm_api_key)
+    except (BundleError, InfraError, DockerBuildError) as e:  # writing the env it deploys
+        click.echo(click.style(f"Error: {e}", fg="red"), err=True)
+        sys.exit(1)
 
     if not verifications.get("a2a_agent_mcp", {}).get("passed", False):
         sys.exit(1)
