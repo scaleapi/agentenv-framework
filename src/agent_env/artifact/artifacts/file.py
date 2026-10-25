@@ -199,11 +199,10 @@ class FileArtifact(Artifact):
             content_type = "application/octet-stream"
 
         artifact_store = get_artifact_store()
-        version = artifact_store.next_version(id)
+        artifact_store.check_writable(id)
         stored_url = store.put_file_at(object_url, file_path, content_type)
         instance = cls(
             id=id,
-            version=version,
             description=description,
             filename=filename,
             content_type=content_type,
@@ -240,10 +239,8 @@ class FileArtifact(Artifact):
         content_type = metadata.content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
 
         artifact_store = get_artifact_store()
-        version = artifact_store.next_version(id)
         instance = cls(
             id=id,
-            version=version,
             description=description,
             filename=filename,
             content_type=content_type,

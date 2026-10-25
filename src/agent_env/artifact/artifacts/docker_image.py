@@ -197,10 +197,8 @@ class DockerImageArtifact(Artifact):
             if url:
                 get_config().check_object_url(id, url)
         store = get_artifact_store()
-        version = store.next_version(id)
         instance = cls(
             id=id,
-            version=version,
             description=description,
             image_name=image_name,
             tar_gz_object_url=tar_gz_object_url,
@@ -236,11 +234,9 @@ class DockerImageArtifact(Artifact):
         if context_path is not None:
             context = _context_of(Path(context_path), dockerfile_path)
             store = get_artifact_store()
-            version = store.next_version(id)
             prefix = store.attempt_prefix("docker_image", id)
             return store.put_document(cls(
                 id=id,
-                version=version,
                 description=description,
                 image_name=image_name,
                 image_digest=image_digest,
@@ -253,8 +249,7 @@ class DockerImageArtifact(Artifact):
         else:
             pinned = pin_digest(image_name, config.get_image_store().auth(image_name))
         store = get_artifact_store()
-        version = store.next_version(id)
-        return store.put_document(cls(id=id, version=version, description=description, image_name=pinned))
+        return store.put_document(cls(id=id, description=description, image_name=pinned))
 
     @classmethod
     def put_context(cls, id: str, *, description: str, context_path: str, dockerfile_path: str,
@@ -270,13 +265,11 @@ class DockerImageArtifact(Artifact):
         platform = normalize_platform(platform) if platform else None
         context = _context_of(Path(context_path), dockerfile_path)
         store = get_artifact_store()
-        version = store.next_version(id)
         prefix = store.attempt_prefix("docker_image", id)
         build_context_object_url = _upload_context(get_config().get_object_store_to_write(prefix, id), prefix, context)
         source_digest = context.source_digest(platform)
         return store.put_document(cls(
             id=id,
-            version=version,
             description=description,
             image_name=_context_image_name(id, source_digest),
             build_context_object_url=build_context_object_url,

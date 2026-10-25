@@ -91,10 +91,8 @@ class FileArtifactUniverse(Universe):
             get_config().check_object_url(id, bundle_object_url)
 
         store = get_artifact_store()
-        version = store.next_version(id)
         instance = cls(
             id=id,
-            version=version,
             file_artifact_refs={
                 fname: fa.as_ref() for fname, fa in file_artifacts.items()
             },

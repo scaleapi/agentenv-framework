@@ -1,4 +1,4 @@
-"""A2AAgent.put with expected_version: it lands only while that version is still the agent's latest."""
+"""A2AAgent.put with a version: it lands on exactly that version, which must be the agent's next."""
 
 import pytest
 
@@ -14,17 +14,18 @@ def image(local_stores):
         id="agent__agent_image", description="d", image_name="ghcr.io/acme/agent:1", tar_gz_s3_url="s3://b/x"))
 
 
-def test_a_put_naming_the_latest_version_lands_on_the_next(image):
-    assert A2AAgent.put(id="agent", docker_image_artifact=image, expected_version=0).version == 1
-    assert A2AAgent.put(id="agent", docker_image_artifact=image, expected_version=1).version == 2
+def test_a_put_naming_the_next_version_lands_on_it(image):
+    assert A2AAgent.put(id="agent", docker_image_artifact=image, version=1).version == 1
+    assert A2AAgent.put(id="agent", docker_image_artifact=image, version=2).version == 2
 
 
-def test_a_put_naming_an_older_version_writes_nothing(image):
+@pytest.mark.parametrize("version", [2, 5])
+def test_a_put_naming_another_version_writes_nothing(image, version):
     A2AAgent.put(id="agent", docker_image_artifact=image)
     A2AAgent.put(id="agent", docker_image_artifact=image, metadata={"by": "other"})
 
-    with pytest.raises(ConcurrentModificationError, match="already has a version 2"):
-        A2AAgent.put(id="agent", docker_image_artifact=image, expected_version=1, metadata={"by": "stale"})
+    with pytest.raises(ConcurrentModificationError, match=f"at version 2, so its next version is 3, not {version}"):
+        A2AAgent.put(id="agent", docker_image_artifact=image, version=version, metadata={"by": "stale"})
 
     latest = A2AAgent.get("agent")
     assert latest.version == 2 and latest.metadata["by"] == "other"

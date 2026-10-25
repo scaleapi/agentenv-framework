@@ -34,7 +34,7 @@ class Artifact(BaseModel):
     """Base class for all environment artifacts. Immutable - each modification creates a new version."""
 
     id: str = Field(description="Unique artifact identifier")
-    version: int = Field(default=0, description="Artifact version (auto-calculated on put)")
+    version: int = Field(default=0, description="Artifact version: 0 takes the next free one on put; another must be the next")
     type: str = Field(description="The type of Artifact")
 
     toml_refs: ClassVar[tuple[EntityRef, ...]] = ()

@@ -267,17 +267,18 @@ def versioned_entity_store_roundtrip(store, coll):
     assert ves.count(Filter.of(id="e")) == 2
 
 
-def versioned_entity_store_conditional_put(store, coll):
-    """A put naming the version it read lands on the next one; once another write took that, it writes nothing."""
+def versioned_entity_store_put_at_a_version(store, coll):
+    """A put naming a version lands on exactly it, which must be the id's next; any other writes nothing."""
     ves: VersionedEntityStore[dict] = VersionedEntityStore(
         store, coll, serialize=dict, deserialize=lambda d: d
     )
-    assert ves.put({"id": "e", "n": 1}, expected_version=0) == 1
-    assert ves.put({"id": "e", "n": 2}, expected_version=1) == 2
-    for stale in (0, 1):
+    assert ves.put({"id": "e", "version": 1, "n": 1}) == 1
+    assert ves.put({"id": "e", "version": 2, "n": 2}) == 2
+    for taken_latest_or_past_next in (1, 2, 4):
         with pytest.raises(ConcurrentModificationError):
-            ves.put({"id": "e", "n": 3}, expected_version=stale)
-    assert ves.get("e")["n"] == 2 and ves.count(Filter.of(id="e")) == 2
+            ves.put({"id": "e", "version": taken_latest_or_past_next, "n": 0})
+    assert ves.put({"id": "e", "n": 3}) == 3
+    assert ves.get("e")["n"] == 3 and ves.count(Filter.of(id="e")) == 3
 
 
 def latest_per_id_reduces_to_newest_version(store, coll):
@@ -454,8 +455,8 @@ def racing_pre_image_updates_have_exactly_one_winner(store, coll):
     assert store.find_one(coll, Filter.of(id="x")) == {"id": "x", "owner": winners[0]}
 
 
-def racing_conditional_puts_have_exactly_one_winner(store, coll):
-    """Writers that read the same latest version race to write the next; one lands and the rest are refused."""
+def racing_puts_at_one_version_have_exactly_one_winner(store, coll):
+    """Writers that all name the id's next version race for it; one lands and the rest are refused."""
     ves: VersionedEntityStore[dict] = VersionedEntityStore(
         store, coll, serialize=dict, deserialize=lambda d: d
     )
@@ -463,7 +464,7 @@ def racing_conditional_puts_have_exactly_one_winner(store, coll):
 
     def put(racer):
         try:
-            return ves.put({"id": "e", "owner": racer}, expected_version=1)
+            return ves.put({"id": "e", "version": 2, "owner": racer})
         except ConcurrentModificationError:
             return None
 
@@ -515,7 +516,7 @@ CASES = [
     dotted_array_traversal,
     positional_array_index_filter_and_set,
     versioned_entity_store_roundtrip,
-    versioned_entity_store_conditional_put,
+    versioned_entity_store_put_at_a_version,
     latest_per_id_reduces_to_newest_version,
     latest_per_id_sort_offset_limit_apply_after_grouping,
     latest_per_id_page_returns_entity_total_and_window,
@@ -529,6 +530,6 @@ CASES = [
     racing_guarded_replaces_have_exactly_one_winner,
     racing_update_one_and_get_returns_only_its_own_write,
     racing_pre_image_updates_have_exactly_one_winner,
-    racing_conditional_puts_have_exactly_one_winner,
+    racing_puts_at_one_version_have_exactly_one_winner,
     concurrent_compare_and_swap_loses_no_update,
 ]

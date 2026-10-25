@@ -652,7 +652,6 @@ class SnapshotEnvTaskStep(TaskStep):
                             get_config().check_object_url(fa_id, object_url)
                             fa = FileArtifact(
                                 id=fa_id,
-                                version=store.next_version(fa_id),
                                 description=f"State snapshot of {environment_name} from env {env.id}",
                                 filename=filename,
                                 content_type=content_type,

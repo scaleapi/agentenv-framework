@@ -58,8 +58,8 @@ def _ids(store, collection, field="id"):
 # The suite's versioned-entity cases write bare entity ids, which an @local run refuses by design.
 _BARE_ENTITY_IDS = {
     conformance.versioned_entity_store_roundtrip,
-    conformance.versioned_entity_store_conditional_put,
-    conformance.racing_conditional_puts_have_exactly_one_winner,
+    conformance.versioned_entity_store_put_at_a_version,
+    conformance.racing_puts_at_one_version_have_exactly_one_winner,
 }
 _CONFORMANCE = [
     pytest.param(case, mode, id=f"{mode}-{case.__name__}")

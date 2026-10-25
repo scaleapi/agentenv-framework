@@ -1,4 +1,5 @@
-"""Unit tests for put_document's version-allocation race retry (in-memory fake)."""
+"""put_document: a named version must be the id's next, and version 0 is allocated, retrying the allocation race
+(in-memory fake)."""
 
 import logging
 
@@ -7,7 +8,13 @@ import pytest
 from agent_env.artifact.artifact import Artifact
 from agent_env.artifact.store import _MAX_VERSION_RETRIES, ArtifactStore
 from agent_env.artifact.artifacts.file import FileArtifact
-from agent_env.store import DuplicateKeyError, reset_config, set_document_store, set_object_store
+from agent_env.store import (
+    ConcurrentModificationError,
+    DuplicateKeyError,
+    reset_config,
+    set_document_store,
+    set_object_store,
+)
 from tst.unit.store.fakes import FakeDocumentStore, FakeObjectStore
 
 
@@ -58,38 +65,55 @@ def test_version_zero_is_allocated_from_max():
     assert coll.insert_calls == 1
 
 
-def test_retries_and_reallocates_on_duplicate(caplog):
-    """A concurrent writer already took v1; put_document must climb to v2."""
-    coll = _UniqueIndexStore(seed=[{"id": "x", "version": 1, "type": "toy"}])
-    store = _store_with(coll)
+class _RacerTakesIt(_UniqueIndexStore):
+    """A concurrent writer inserts the version this one allocated just before it does, ``races`` times."""
+
+    def __init__(self, seed=None, races=1):
+        super().__init__(seed)
+        self.races = races
+
+    def insert(self, collection, doc):
+        if self.races:
+            self.races -= 1
+            self.docs.append({"id": doc["id"], "version": doc["version"], "type": "toy"})
+        return super().insert(collection, doc)
+
+
+@pytest.mark.parametrize("version", [3, 2, 5])
+def test_a_named_version_other_than_the_next_writes_nothing(version):
+    coll = _UniqueIndexStore(seed=[{"id": "x", "version": v, "type": "toy"} for v in (1, 2, 3)])
+
+    with pytest.raises(ConcurrentModificationError, match=f"at version 3, so its next version is 4, not {version}"):
+        _store_with(coll).put_document(_ToyArtifact(id="x", version=version))
+
+    assert coll.insert_calls == 0
+
+
+def test_a_named_version_another_write_takes_first_is_refused():
+    coll = _RacerTakesIt(seed=[{"id": "x", "version": 1, "type": "toy"}])
+
+    with pytest.raises(ConcurrentModificationError, match="another write took version 2"):
+        _store_with(coll).put_document(_ToyArtifact(id="x", version=2))
+
+    assert coll.insert_calls == 1
+
+
+def test_an_allocated_version_another_write_takes_first_is_reallocated(caplog):
+    coll = _RacerTakesIt(seed=[{"id": "x", "version": 1, "type": "toy"}])
 
     with caplog.at_level(logging.WARNING, logger="agent_env.artifact.store"):
-        result = store.put_document(_ToyArtifact(id="x", version=1))
+        result = _store_with(coll).put_document(_ToyArtifact(id="x", version=0))
 
-    assert result.version == 2
-    assert coll.insert_calls == 2
-    assert {d["version"] for d in coll.docs} == {1, 2}
+    assert result.version == 3 and coll.insert_calls == 2
     assert any("concurrent write" in r.message for r in caplog.records)
 
 
-def test_reallocation_climbs_past_multiple_concurrent_writes(caplog):
-    """If several versions land between retries, next_version keeps climbing."""
+def test_reallocation_climbs_past_multiple_concurrent_writes():
+    coll = _RacerTakesIt(seed=[{"id": "x", "version": 1, "type": "toy"}], races=2)
 
-    class _Racing(_UniqueIndexStore):
-        def insert(self, collection, doc):
-            # On collision, a racer grabs the next slot too, so +1 isn't enough.
-            if any(d["id"] == doc["id"] and d["version"] == doc["version"] for d in self.docs):
-                nxt = max(d["version"] for d in self.docs if d["id"] == doc["id"]) + 1
-                self.docs.append({"id": doc["id"], "version": nxt, "type": "toy"})
-            return super().insert(collection, doc)
+    result = _store_with(coll).put_document(_ToyArtifact(id="x", version=0))
 
-    coll = _Racing(seed=[{"id": "x", "version": 1, "type": "toy"}])
-    store = _store_with(coll)
-
-    with caplog.at_level(logging.WARNING, logger="agent_env.artifact.store"):
-        result = store.put_document(_ToyArtifact(id="x", version=1))
-
-    assert result.version == 3
+    assert result.version == 4
 
 
 def test_exhausts_retries_then_raises():
@@ -102,7 +126,7 @@ def test_exhausts_retries_then_raises():
     store = _store_with(coll)
 
     with pytest.raises(DuplicateKeyError):
-        store.put_document(_ToyArtifact(id="x", version=1))
+        store.put_document(_ToyArtifact(id="x", version=0))
 
     assert coll.insert_calls == _MAX_VERSION_RETRIES
 

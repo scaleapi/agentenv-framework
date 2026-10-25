@@ -118,12 +118,15 @@ class ArtifactStore:
             raise NotFoundError(f"Artifact {id}{version_str} not found")
         return artifact
 
-    def next_version(self, id: str) -> int:
-        # Every put asks for its version before writing an object or pushing an image, so an id
-        # the store refuses, or a bare one while an @local task runs, is refused here rather than
-        # after those side effects, in put_document.
+    def check_writable(self, id: str) -> None:
+        """Refuse an id the store won't take, or a bare one while an @local task runs. A put calls this, or
+        ``next_version`` or ``attempt_prefix``, which do, before it writes an object or pushes an image, so the
+        refusal comes before those side effects rather than after them in put_document."""
         self._doc_store.check_id(id)
         get_config().check_local_run_write(id)
+
+    def next_version(self, id: str) -> int:
+        self.check_writable(id)
         return self._versioned.next_version(id)
 
     def attempt_prefix(self, artifact_type: str, id: str) -> str:
@@ -173,11 +176,10 @@ class ArtifactStore:
         return get_config().get_object_store_at(object_url).get(object_url)
 
     def put_document(self, artifact: _A) -> _A:
-        """Insert an artifact document, retrying the version-allocation race.
-
-        Concurrent writers to one id can allocate the same next_version; the
-        unique index rejects the losers, so we re-allocate and retry rather
-        than fail the caller (which drops a pass@k rollout).
+        """Insert an artifact document. One that names a version is stored as exactly that one, which must be the
+        id's next (ConcurrentModificationError otherwise). One at version 0 takes the next free version, and
+        re-allocates when a concurrent writer takes it first rather than fail the caller (which drops a pass@k
+        rollout).
         """
 
         self._doc_store.check_id(artifact.id)
@@ -186,9 +188,12 @@ class ArtifactStore:
 
         store = self._doc_store
         versioned = self._versioned_cache.for_store(store)
-        version = artifact.version if artifact.version > 0 else versioned.next_version(artifact.id)
         doc = artifact.model_dump(by_alias=True)
         doc["created_at_utc"] = datetime.now(timezone.utc)
+        if artifact.version > 0:
+            versioned.insert_next(doc, artifact.version)
+            return artifact.model_copy()
+        version = versioned.next_version(artifact.id)
         last_exc: Optional[DuplicateKeyError] = None
         for attempt in range(_MAX_VERSION_RETRIES):
             doc["version"] = version

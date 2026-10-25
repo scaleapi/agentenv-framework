@@ -96,7 +96,6 @@ class SkillArtifact(Artifact):
         frontmatter, _body = parse_skill_md(skill_md_bytes)
 
         store = get_artifact_store()
-        version = store.next_version(id)
         skill_object_url = store.attempt_prefix(cls.model_fields["type"].default, id)
 
         universe = FileArtifactUniverse.put_bundled(
@@ -107,7 +106,6 @@ class SkillArtifact(Artifact):
 
         instance = cls(
             id=id,
-            version=version,
             skill_files_id=universe.id,
             skill_object_url=skill_object_url,
             agent_skills_spec_version=AGENT_SKILLS_SPEC_VERSION,

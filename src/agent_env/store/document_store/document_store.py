@@ -447,8 +447,8 @@ class VersionedEntityStore(Generic[T]):
     def next_version(self, id: str) -> int:
         """Allocate the version a write to ``id`` would land on.
 
-        The id is checked here and not only at ``put`` because every artifact
-        helper calls this first and then writes remote data — an object to the object store, an image to a
+        The id is checked here and not only at ``put`` because an artifact helper that reserves its version
+        calls this first and then writes remote data — an object to the object store, an image to a
         registry — before it has a document to store. Refusing the id at the end would leave
         that data orphaned with no artifact record pointing at it.
         """
@@ -456,28 +456,18 @@ class VersionedEntityStore(Generic[T]):
         doc = self._doc_store.latest_version(self._collection, id)
         return (doc["version"] + 1) if doc is not None else 1
 
-    def put(self, entity: T, max_retries: int = 5, expected_version: Optional[int] = None) -> int:
-        """Serialize and insert the entity under the next free version; return that version.
-
-        With ``expected_version`` (0 for an id with no versions) the put lands on ``expected_version + 1`` or not at
-        all: ConcurrentModificationError if another write took that version first, so a caller can't overwrite what it
-        didn't read."""
+    def put(self, entity: T, max_retries: int = 5) -> int:
+        """Serialize and insert the entity; return its version. An entity that names a version is stored as exactly
+        that one, which ``insert_next`` requires to be the id's next; one that doesn't takes the next free version."""
         if self._serialize is None:
             raise RuntimeError("VersionedEntityStore was built without a serializer; put() is unsupported")
         doc = self._serialize(entity)
         if not isinstance(doc.get("id"), str):
             raise ValueError(f"an entity in {self._collection!r} needs a string id, got {doc.get('id')!r}")
         self._doc_store.check_id(doc["id"])
-        if expected_version is not None:
-            version = expected_version + 1
-            try:
-                self._doc_store.insert(self._collection, {**doc, "version": version})
-            except DuplicateKeyError as e:
-                raise ConcurrentModificationError(
-                    f"{doc['id']!r} in {self._collection!r} already has a version {version}, "
-                    f"so {expected_version} is no longer its latest"
-                ) from e
-            return version
+        if doc.get("version"):
+            self.insert_next(doc, doc["version"])
+            return doc["version"]
         last_error: Optional[DuplicateKeyError] = None
         for _ in range(max_retries):
             version = self.next_version(doc["id"])
@@ -490,6 +480,23 @@ class VersionedEntityStore(Generic[T]):
         raise DuplicateKeyError(
             f"Could not assign a version for id={doc.get('id')!r} after {max_retries} retries"
         ) from last_error
+
+    def insert_next(self, doc: dict, version: int) -> None:
+        """Insert ``doc`` as ``version``, which must be its id's next version: ConcurrentModificationError when it
+        isn't, or when another write takes it first, so a write never lands on or skips past one it didn't see."""
+        latest = self._doc_store.latest_version(self._collection, doc["id"])
+        current = latest["version"] if latest is not None else 0
+        if version != current + 1:
+            raise ConcurrentModificationError(
+                f"{doc['id']!r} in {self._collection!r} is at version {current}, so its next version is "
+                f"{current + 1}, not {version}"
+            )
+        try:
+            self._doc_store.insert(self._collection, {**doc, "version": version})
+        except DuplicateKeyError as e:
+            raise ConcurrentModificationError(
+                f"another write took version {version} of {doc['id']!r} in {self._collection!r} first"
+            ) from e
 
     def query(
         self,
