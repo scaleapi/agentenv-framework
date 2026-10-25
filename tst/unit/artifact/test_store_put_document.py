@@ -146,8 +146,8 @@ def test_put_document_refuses_a_reserved_at_prefixed_id():
 def test_a_reserved_id_is_refused_before_anything_is_uploaded():
     """Artifact helpers write remote data — an object to S3, an image to a registry — before
     they have a document to store. Refusing the id at `put_document` would leave that data
-    orphaned with nothing pointing at it, so the reservation is enforced at version
-    allocation, which every helper does first."""
+    orphaned with nothing pointing at it, so the reservation is enforced before the upload, at
+    version allocation or ``check_writable``."""
     objects = FakeObjectStore()
     uploads = []
     real_put = objects.put
@@ -165,6 +165,29 @@ def test_a_reserved_id_is_refused_before_anything_is_uploaded():
         assert len(uploads) == 1  # and an unreserved id is untouched by the guard
     finally:
         reset_config()
+
+
+def test_a_file_whose_version_another_writer_publishes_during_its_upload_is_still_published():
+    """put_bytes keys its object by a version it reserves, then writes the document after the upload; a writer that
+    publishes that version meanwhile moves the document to the next one rather than failing it."""
+    objects = FakeObjectStore()
+    docs = _UniqueIndexStore()
+    real_put = objects.put
+
+    def put_while_another_publishes(*args, **kwargs):
+        url = real_put(*args, **kwargs)
+        docs.docs.append({"id": "f", "version": 1, "type": "file"})
+        return url
+
+    objects.put = put_while_another_publishes
+    set_document_store(docs)
+    set_object_store(objects)
+    try:
+        published = FileArtifact.put_bytes(id="f", description="d", filename="f.txt", content=b"x")
+    finally:
+        reset_config()
+
+    assert published.version == 2 and {d["version"] for d in docs.docs} == {1, 2}
 
 
 def test_set_field_cannot_rename_a_stored_artifact():

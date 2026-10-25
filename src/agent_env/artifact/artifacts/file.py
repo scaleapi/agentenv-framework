@@ -83,10 +83,10 @@ class FileArtifact(Artifact):
             content_type=content_type,
         )
 
-        # Store artifact document in MongoDB
+        # The object is keyed by the reserved version; the document takes the next free one, the same unless a
+        # concurrent write took it first.
         instance = cls(
             id=id,
-            version=version,
             description=description,
             filename=filename,
             content_type=content_type,
@@ -119,9 +119,10 @@ class FileArtifact(Artifact):
             content_type=content_type,
         )
 
+        # The object is keyed by the reserved version; the document takes the next free one, the same unless a
+        # concurrent write took it first.
         instance = cls(
             id=id,
-            version=version,
             description=description,
             filename=filename,
             content_type=content_type,
