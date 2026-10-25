@@ -30,7 +30,7 @@ from agent_env.a2a_agent.object_transfer import (
 )
 from agent_env.a2a_agent.staging import transfer_store
 from agent_env.a2a_agent.a2a_agent import A2AAgent
-from agent_env.bundle import write_bundle
+from agent_env.bundle.run import _write_bundle
 from agent_env.config import get_config
 from agent_env.env.store import get_env_store
 from agent_env.plugins._bundles import ENV_ALIASES, installed_aliases
@@ -129,7 +129,7 @@ MODALITY_PROBES: list[ModalityProbe] = [
 
 def write_validation_env(on_progress: Callable[[str], None]) -> None:
     """Write the env the validator deploys, ``A2AAgent.VALIDATION_ENV_ID``, when the store has none of that id: the env
-    an installed bundle gives that alias, with the infra it deploys on (``bundle.write_bundle``)."""
+    an installed bundle gives that alias, with the infra it deploys on."""
     env_id = A2AAgent.VALIDATION_ENV_ID
     try:
         get_env_store().get(env_id)
@@ -140,7 +140,7 @@ def write_validation_env(on_progress: Callable[[str], None]) -> None:
     if named is None:  # deploying it says why it can't be found
         return
     on_progress(f"{env_id} → {named.target_id} (the alias {named.declared_by} gives it): writing it")
-    write_bundle(named.bundle.root, id_root=named.bundle.id_root, on_progress=on_progress)
+    _write_bundle(named.bundle.root, id_root=named.bundle.id_root, on_progress=on_progress)
 
 
 class A2AAgentValidator:

@@ -165,9 +165,9 @@ Out-of-tree code plugs in either through `config.toml`, as a `module:Class` poin
   alias names (`Env.stored_id`). An alias names its env only where namespace routing is on. An env store refuses to
   create an env under an installed env alias's id (`EnvStore.put_document`), so a deployment recorded under an alias
   always reloads the alias's env; an env stored under such an id before keeps taking versions.
-  `A2AAgent.validate()` deploys `mail` (`A2AAgent.VALIDATION_ENV_ID`) with namespace routing on, writing the example
-  with `bundle.write_bundle` (a bundle's writes and infra, no run) first when the store has no env of that id: on a
-  remote sandbox its image is context-only and built in the VM, so a service like the hub's worker needs no Docker.
+  `A2AAgent.validate()` deploys `mail` (`A2AAgent.VALIDATION_ENV_ID`) with namespace routing on, first writing the
+  example (its writes and infra, no run) when the store has no env of that id: on a remote sandbox its image is
+  context-only and built in the VM, so a service like the hub's worker needs no Docker.
 - Environment providers have no table: an installed package registers one as an `agent_env.env_providers`
   entry point named its `type`, which records carry as `env_provider_type`.
 - `[plugins.<distribution name>]` is reserved for an installed plugin's own settings, read with

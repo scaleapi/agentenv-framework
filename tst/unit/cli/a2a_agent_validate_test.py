@@ -25,7 +25,7 @@ validate_module = importlib.import_module("agent_env.cli.a2a_agent.validate")
 def written(monkeypatch, local_stores):
     """The bundles the validator writes, as (folder, id_root)."""
     calls = []
-    monkeypatch.setattr(validator_module, "write_bundle",
+    monkeypatch.setattr(validator_module, "_write_bundle",
                         lambda root, **kwargs: calls.append((root.name, kwargs["id_root"])))
     return calls
 

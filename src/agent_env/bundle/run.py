@@ -251,22 +251,14 @@ def run_bundle(
             raise RunInterrupted(result, interrupts.signum)
 
 
-def write_bundle(
-    root: Path | str,
-    *,
-    tasks: Sequence[str] = (),
-    evals: Sequence[str] = (),
-    sandbox: str | None = None,
-    on_progress: Callable[[str], None] | None = None,
-    id_root: str | None = None,
+def _write_bundle(
+    root: Path | str, *, id_root: str | None = None, on_progress: Callable[[str], None] | None = None,
 ) -> Materialization:
-    """Write what the tasks and evals selected in ``root`` need and set up the infra envs they deploy on, as
-    ``run_bundle`` does before it runs them, and run nothing. Raises what ``run_bundle`` raises before a task runs."""
-    if sandbox:
-        build_sandbox_provider(sandbox)
+    """Write what the bundle in ``root`` needs and set up the infra envs its tasks deploy on, as ``run_bundle`` does
+    before it runs them, and run nothing. Raises what ``run_bundle`` raises before a task runs."""
     say = _progress(on_progress)
     with namespace_routing():
-        plan, preflight = _planned(root, tasks, evals, id_root, sandbox, None)
+        plan, preflight = _planned(root, (), (), id_root, None, None)
         _say_agents(plan, say)
         return _written_with_infra(plan, preflight, say)
 
