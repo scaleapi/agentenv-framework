@@ -166,6 +166,7 @@ def test_an_unresolvable_section_is_reported_instead_of_aborting_the_report(tmp_
     ("password", "hunter2", MASK),
     ("aws_secret_access_key", "AKIA...", MASK),
     ("api_key", "sk-live-1", MASK),
+    ("admin_api_key", "sk-master-1", MASK),
     ("uri", _FAKE_MONGO_URI, f"mongodb://{MASK}@cluster0/db"),
     ("port", 27017, 27017),
     ("api_key", None, None),      # absence is not a secret; masking it invents one

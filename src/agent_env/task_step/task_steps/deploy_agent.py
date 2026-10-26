@@ -41,6 +41,7 @@ from agent_env.entity.refs import EntityRef
 from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.mcp_cli_builder.codegen import ROLE_ENV_VAR
+from agent_env import model_budget
 from agent_env.attribution import deploy_attribution
 from agent_env.store.base import NotFoundError
 from agent_env.store.ids import is_local_id
@@ -194,6 +195,7 @@ class DeployAgentTaskStep(TaskStep):
         fail_task_on_error: bool = True,
         metadata: Optional[dict] = None,
         agent_changelog_object_url: Optional[str] = None,
+        model_budget_usd: Optional[float] = None,
     ):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
         self.env_ids = env_ids or []
@@ -230,6 +232,12 @@ class DeployAgentTaskStep(TaskStep):
         self.sandbox_name = sandbox_name
         # Rootless Docker-in-Docker for the agent (not the VM socket); VM mode only.
         self.enable_docker = enable_docker
+        # What the agent's model calls may cost, in US dollars: it gets a key of its own with this budget
+        # (agent_env.model_budget). None gives it the shared [model] key, as before.
+        self.model_budget_usd = model_budget.check_budget(model_budget_usd, step_id=id)
+        if self.model_budget_usd is not None and "LITELLM_API_KEY" in self.env_vars:
+            raise ValueError(f"Step '{id}': model_budget_usd gives the agent a key of its own, so env_vars may not "
+                             "set LITELLM_API_KEY")
 
     def to_dict(self) -> dict:
         base = super().to_dict()
@@ -259,6 +267,7 @@ class DeployAgentTaskStep(TaskStep):
         base["agent_changelog_toolcall_position_exclusive"] = self.agent_changelog_toolcall_position_exclusive
         base["sandbox_name"] = self.sandbox_name
         base["enable_docker"] = self.enable_docker
+        base["model_budget_usd"] = self.model_budget_usd
         return base
 
     @classmethod
@@ -291,6 +300,7 @@ class DeployAgentTaskStep(TaskStep):
             agent_changelog_toolcall_position_exclusive=data.get("agent_changelog_toolcall_position_exclusive"),
             sandbox_name=data.get("sandbox_name"),
             enable_docker=data.get("enable_docker", False),
+            model_budget_usd=data.get("model_budget_usd"),
         )
 
     def _resolve_agent_ref(self, context: TaskStepContext) -> tuple[str, Optional[int]]:
@@ -307,8 +317,9 @@ class DeployAgentTaskStep(TaskStep):
         return agent_id, self.a2a_agent_version
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
-        # An agent is recorded in the context only once it is configured, so one that fails on the way there
-        # (a snapshot or changelog that can't be loaded, say) is closed here, or no teardown would find it.
+        # An agent, and the model budget key made for it, are recorded in the context only once the agent is configured,
+        # so an agent that fails on the way there (a snapshot or changelog that can't be loaded, say) is closed here,
+        # and its key deleted, or no teardown would find them.
         deployed: list = []
         try:
             return await self._execute(context, deployed)
@@ -372,6 +383,20 @@ class DeployAgentTaskStep(TaskStep):
         resolved_litellm_base_url = user_overrides.get("litellm_base_url") or self.litellm_base_url
         if resolved_litellm_base_url:
             env_vars["LITELLM_BASE_URL"] = resolved_litellm_base_url
+        budget_key = None
+        if self.model_budget_usd is not None:
+            if override_litellm_key:
+                logger.warning(f"Agent '{self.agent_name}' has a model budget, so it gets a key of its own, not the "
+                               "run's litellm_api_key")
+            budget_key = await model_budget.make_key(
+                agent_name=self.agent_name, max_usd=self.model_budget_usd,
+                ttl_seconds=self._resolved_ttl_seconds(context), attribution=deploy_attribution(self, context),
+                # The endpoint the agent will call: as A2AAgent.deploy picks it, this step's env first, then the
+                # agent's own defaults, then the configured one.
+                base_url=env_vars.get("LITELLM_BASE_URL") or agent.default_env_vars.get("LITELLM_BASE_URL"),
+            )
+            deployed_agents.append(budget_key)
+            env_vars["LITELLM_API_KEY"] = budget_key.key
         if self.role is not None:
             env_vars.setdefault(ROLE_ENV_VAR, self.role)  # the generated MCP CLI sends its role from here
 
@@ -506,6 +531,8 @@ class DeployAgentTaskStep(TaskStep):
             role=self.role,
             network_policy=deployed.network_policy,
         ))
+        if budget_key is not None:
+            model_budget.record(context, self.agent_name, budget_key)
         return context
 
     def _resolved_ttl_seconds(self, context: TaskStepContext) -> int:

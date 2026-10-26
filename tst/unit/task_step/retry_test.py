@@ -23,6 +23,7 @@ import pytest
 
 import agent_env.task.task as task_module
 import agent_env.task.store as store_mod
+from agent_env import model_budget
 from agent_env.env.env import DeployedGatewayEnv
 from agent_env.store import LocalSqliteDocumentStore
 from agent_env.store.document_store import Filter
@@ -75,6 +76,25 @@ class _FakeDeployEnv:
                 sandbox_id=f"sb-{self.id}-{len(self.deploy_calls)}", sandbox_type="fake",
             )
         )
+        return context
+
+
+class _FakeDeployBudgetedAgent:
+    """Deploys an agent with a model budget: each run records a budget whose key is new."""
+
+    type = "deploy_agent"
+
+    def __init__(self, id: str):
+        self.id = id
+        self.depends_on = None
+        self.retry_config = None
+        self.fail_task_on_error = True
+        self.calls = 0
+
+    async def execute(self, context: TaskStepContext) -> TaskStepContext:
+        self.calls += 1
+        model_budget.record(context, "solver", model_budget.BudgetKey(
+            key="sk-never-stored", key_id=f"key-{self.calls}", alias=f"agentenv/solver/{self.calls}", max_usd=1.0))
         return context
 
 
@@ -1088,3 +1108,18 @@ def test_validate_dag_accepts_ancestor_resume_point():
     c = _FlakyPrompt("c", retry_config=RetryConfig(retry_from_step_id="a"), depends_on=["a"])
     # Should not raise.
     Task(id="t", version=1, steps=[a, c])
+
+
+@pytest.mark.asyncio
+async def test_a_retry_moves_a_rolled_back_deployments_model_budget_into_its_marker(store):
+    """The undo strips the first deployment's budget, as it does its sandbox, so the marker names its key for the
+    teardown to block."""
+    deploy = _FakeDeployBudgetedAgent("s0")
+    flaky = _FlakyPrompt("s1", retry_config=RetryConfig(retry_from_step_id="s0"), fail_times=1, depends_on=["s0"])
+
+    result = await Task(id="t", version=1, steps=[deploy, flaky]).run(context=TaskStepContext())
+
+    assert result.metadata["model_budgets"]["solver"]["key_id"] == "key-2"
+    [reset] = result.metadata["retry_resets"]
+    assert reset[model_budget.ROLLED_BACK_KEY] == {"solver": {
+        "max_usd": 1.0, "key_alias": "agentenv/solver/1", "key_id": "key-1", "key_blocked": False}}

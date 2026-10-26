@@ -123,6 +123,25 @@ def test_api_key_unconfigured_raises_actionable():
         ModelConfig().resolve_api_key(secret_resolver=_secrets({}))
 
 
+# --- resolve_admin_api_key ----------------------------------------------------
+
+def test_admin_api_key_stays_a_reference_until_a_budget_asks_for_it():
+    calls = []
+    cfg = ModelConfig.from_section(
+        {"admin_api_key": "secret:master"}, secret_resolver=lambda ref: calls.append(ref) or "sk-master"
+    )
+    assert cfg.admin_api_key == "secret:master" and calls == []
+    assert cfg.resolve_admin_api_key(secret_resolver=lambda ref: calls.append(ref) or "sk-master") == "sk-master"
+    assert calls == ["master"]
+
+
+def test_admin_api_key_has_no_env_var_stand_in(monkeypatch):
+    """An agent gets the endpoint's env vars; the key that makes its budget key must not be one of them."""
+    monkeypatch.setenv("LITELLM_API_KEY", "sk-env")
+    with pytest.raises(ConfigError, match=r"\[model\] admin_api_key"):
+        ModelConfig(api_key="sk-cfg").resolve_admin_api_key(secret_resolver=_secrets({}))
+
+
 # --- resolve_call -------------------------------------------------------------
 
 def test_resolve_call_inline_override_wins():

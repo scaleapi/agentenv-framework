@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Callable, ClassVar, Optional
 
+from agent_env import model_budget
 from agent_env.config import run_env_ids
 from agent_env.plugins import _registration
 from agent_env.store.document_store import UnknownDocumentTypeError
@@ -255,6 +256,8 @@ async def _roll_back_span(
     def _audit(before: dict, after: dict) -> ContextUpdateOps:
         # Runs inside the store's CAS with the context as stored and as replayed.
         entry = {**marker, "rolled_back_sandboxes": _rolled_back_sandboxes(before, after)}
+        if budgets := model_budget.rolled_back(before, after):  # their keys, for the teardown to block
+            entry[model_budget.ROLLED_BACK_KEY] = budgets
         return ContextUpdateOps(sets={
             "context.metadata.failed_steps": failed_steps,
             "context.metadata.retry_resets": resets + [entry],
