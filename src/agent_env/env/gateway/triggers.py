@@ -462,7 +462,7 @@ class TriggerEngine:
                                    "failure_count": 0, "last_failure_at": None,
                                    "rng": _make_rng(spec), "mark_gen": None,
                                    "pending": deque(), "task": None, "delay_rngs": _delay_rngs(spec),
-                                   "attempts": 0, "waiting": False, "resumes": None}
+                                   "attempts": 0, "waiting": False, "resumes": None, "hours": None}
             self._emit("added", tid)
         self._recompute_time_flag()
         return {"ok": True, "added": batch_order, "all": list(self._triggers)}
@@ -1034,7 +1034,8 @@ class TriggerEngine:
         due = self._eval_time_triggers()
         now = self._gw._clock.now()
         ended = [tid for tid, t in self._triggers.items()
-                 if now is not None and (at := self._resumes_at(t)) is not None and at <= now]
+                 if now is not None and (at := self._resumes_at(t)) is not None and at <= now
+                 and (t["hours"] is None or _next_opening(now, t["hours"]) is None)]
         self._clock_moved.set()
         self._clock_moved = asyncio.Event()
         return list(dict.fromkeys(due + ended))
@@ -1437,27 +1438,27 @@ class TriggerEngine:
             trig["resumes"] = None
 
     async def _await_hours(self, tid: str, trig: dict, index: int, hours: dict, named: dict) -> None:
-        """Wait until the executor's working hours are open, reckoned again after a re-arm; they don't apply while the
-        clock is unarmed."""
+        """Wait until the executor's working hours are open now, reckoned each pass; not while the clock is unarmed."""
         clock = self._gw._clock
         gen = opens = None
         trig["waiting"] = True
+        trig["hours"] = hours
         try:
             while True:
                 current = clock.generation  # read before now(), so a re-arm in between is caught on the next pass
                 if (now := clock.now()) is None:
                     return
-                if current != gen:
-                    gen, opens = current, _next_opening(now, hours)
-                    trig["resumes"] = opens
-                    if opens is not None:
-                        self._emit("deferred", tid, action_index=index, until=_iso(opens), **named)
-                if opens is None or now >= opens:
+                if (opening := _next_opening(now, hours)) is None:
                     return
+                if current != gen or opening != opens:
+                    gen, opens = current, opening
+                    trig["resumes"] = opens
+                    self._emit("deferred", tid, action_index=index, until=_iso(opens), **named)
                 await self._sleep_virtual((opens - now).total_seconds(), generation=gen)
         finally:
             trig["waiting"] = False
             trig["resumes"] = None
+            trig["hours"] = None
 
     async def _sleep_virtual(self, seconds: float, generation: int | None = None) -> None:
         """Wait out ``seconds`` of virtual time as the clock runs (real time at its rate, 1 while unarmed, none while

@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from agent_env.env.gateway import gateway as gw_mod
-from agent_env.env.gateway.clock import Clock
+from agent_env.env.gateway.clock import Clock, _iso
 from agent_env.env.gateway.constants import (
     EXT_STEP_URI, EXT_TRIGGERS_URI, GATEWAY_EXTENSIONS, STEP_SOURCE, TRIGGER_NEXT_EVENT_AT,
 )
@@ -194,6 +194,38 @@ async def test_an_action_waiting_for_its_executor_s_hours_resumes_when_they_open
 
     assert _row(engine, "ask-bob")["resumes_at"] == _next(engine) == "2026-03-02T09:00:00Z"
     await engine.cancel_scheduled()
+
+
+@pytest.mark.asyncio
+async def test_an_advance_past_the_close_of_an_executors_hours_waits_for_the_next_opening(monkeypatch):
+    calls = []
+
+    async def reply(self, executor, instruction, context_id):
+        calls.append(_iso(self._gw._clock.now()))
+        return "done"
+
+    monkeypatch.setattr(TriggerEngine, "_call_executor", reply)
+    engine, clock, _ = _engine()
+    clock.advance("2026-03-02T08:00:00Z")
+    engine.register({"watch_roles": ["default"],
+                     "executors": {"bob": {"a2a_url": "http://bob", "role": "bob",
+                                           "hours": {"start": "09:00", "end": "17:00"}}},
+                     "triggers": [{"id": "ask-bob", "when": {"type": "action", "tool": "send_email"},
+                                   "actions": [{"type": "nl", "executor": "bob", "instruction": "reply"}]}]})
+    engine.on_tool_call("default", "send_email", {}, _result())
+    await _until(lambda: _row(engine, "ask-bob")["waiting"])
+
+    clock.advance("2026-03-02T18:00:00Z")
+    assert engine.clock_advanced() == []
+    await _until(lambda: _row(engine, "ask-bob")["resumes_at"] == "2026-03-03T09:00:00Z")
+    assert calls == [] and _next(engine) == "2026-03-03T09:00:00Z"
+
+    clock.advance("2026-03-03T09:00:00Z")
+    assert engine.clock_advanced() == ["ask-bob"]
+    await _until(lambda: _row(engine, "ask-bob")["status"] == "fired" and calls)
+    assert calls == ["2026-03-03T09:00:00Z"]
+    assert [e["until"] for e in engine.state()["events"] if e["kind"] == "deferred"] == [
+        "2026-03-02T09:00:00Z", "2026-03-03T09:00:00Z"]
 
 
 # ---- what an advance makes due --------------------------------------------------------------------------------------
