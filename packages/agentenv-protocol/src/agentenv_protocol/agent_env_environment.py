@@ -15,7 +15,7 @@ import uuid
 from abc import ABC, abstractmethod
 from typing import Annotated, Any, Callable, ClassVar, Literal, NamedTuple, Union, get_args, get_origin, get_type_hints
 
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 from pydantic.fields import FieldInfo
 from starlette.requests import Request
 from starlette.responses import Response
@@ -34,6 +34,7 @@ _EXT_ROUTE_ATTR = "_aee_ext_route"
 _EXT_OP_ATTR = "_aee_ext_op"
 _TOOL_ATTR = "_aee_tool"
 _HIDDEN_BY_DEFAULT_ATTR = "_aee_hidden_by_default"
+_TOOL_OPTIONS_ATTR = "_aee_tool_options"
 _CARD_CONFIG_ATTR = "_aee_card_config"
 #: Set on the tool dispatch installed by ``_bind_tool_calls``; a guard downstream checks it at boot.
 _TOOL_CONTEXT_BOUND_ATTR = "__agentenv_tool_context__"
@@ -132,7 +133,8 @@ def _extension_slug(uri: str) -> str:
     return name.replace(":", "/")
 
 
-def tool(name: str | None = None, *, description: str | None = None, hidden_by_default: bool = False) -> Callable:
+def tool(name: str | None = None, *, description: str | None = None, hidden_by_default: bool = False,
+         annotations: dict | None = None, structured_output: bool | None = None, meta: dict | None = None) -> Callable:
     """Mark a handler method as an MCP tool.
 
     At mount the bound method is registered as a real MCP tool on the server app and advertised
@@ -155,6 +157,12 @@ def tool(name: str | None = None, *, description: str | None = None, hidden_by_d
     ``{HIDDEN_BY_DEFAULT_META_KEY: true}``, and a gateway hides it from every role until a tool-access
     step names it. Steps for every tool (``tools="*"``) never show it, though they still clear earlier
     named steps as they do for any tool.
+
+    ``annotations`` (MCP ``ToolAnnotations`` fields, such as ``{"readOnlyHint": True}``) and ``meta`` are listed with
+    the tool. ``structured_output`` follows mcp's FastMCP: None derives an output schema from the return annotation
+    where it can, True requires one, False lists none; on a fastmcp app it is fastmcp's own inference, off with
+    False. A tool returning ``Annotated[CallToolResult, Model]`` sends its result as is on either, listed with
+    ``Model``'s schema.
     """
     if callable(name):
         raise TypeError("use @tool(...) with parentheses, not bare @tool")
@@ -167,9 +175,16 @@ def tool(name: str | None = None, *, description: str | None = None, hidden_by_d
         ))
         if hidden_by_default:
             setattr(fn, _HIDDEN_BY_DEFAULT_ATTR, True)
+        setattr(fn, _TOOL_OPTIONS_ATTR, _ToolOptions(annotations, structured_output, meta))
         return fn
 
     return deco
+
+
+class _ToolOptions(NamedTuple):
+    annotations: dict | None
+    structured_output: bool | None
+    meta: dict | None
 
 
 def environment_card(_cls: type | None = None, **config: Any) -> Callable:
@@ -202,7 +217,7 @@ class AgentEnvApplication(ABC):
         self.handler = handler
         ext_handlers = _discover_extensions(handler)
         environment_card = _merge_extensions(environment_card, ext_handlers + _declared_extensions(handler, ext_handlers))
-        tool_handlers = _discover_tools(handler, environment_card.name)
+        tool_handlers = _served_tools(handler, _discover_tools(handler, environment_card.name))
         if tool_handlers and not self.supports_tools:
             raise ValueError(f"@tool methods require a FastMCP-backed application; {type(self).__name__} cannot serve MCP tools")
         environment_card = _merge_tools(environment_card, tool_handlers)
@@ -262,9 +277,23 @@ class AgentEnvFastMCPApplication(AgentEnvApplication):
         app.custom_route(path, methods=methods)(handler)
 
     def _register_tool(self, app: Any, descriptor: EnvironmentTool, fn: Callable) -> None:
-        # passed only when set, so a FastMCP-shaped target without the parameter still mounts unflagged tools
-        extra = {"meta": {HIDDEN_BY_DEFAULT_META_KEY: True}} if getattr(fn, _HIDDEN_BY_DEFAULT_ATTR, False) else {}
-        app.tool(name=descriptor.name, description=descriptor.description, **extra)(injecting(fn))
+        # passed only when set, so a FastMCP-shaped target without the parameters still mounts plain tools
+        options = getattr(fn, _TOOL_OPTIONS_ATTR, None) or _ToolOptions(None, None, None)
+        fastmcp = self._binding == "middleware"
+        extra: dict = {}
+        meta = {**(options.meta or {}), **({HIDDEN_BY_DEFAULT_META_KEY: True} if getattr(fn, _HIDDEN_BY_DEFAULT_ATTR, False) else {})}
+        if meta:
+            extra["meta"] = meta
+        if options.annotations is not None:
+            extra["annotations"] = options.annotations if fastmcp else _mcp_tool_annotations(options.annotations)
+        if options.structured_output is not None and not fastmcp:
+            extra["structured_output"] = options.structured_output
+        elif options.structured_output is False:
+            extra["output_schema"] = None
+        registered = injecting(fn)
+        if fastmcp and _returns_call_tool_result(fn):
+            registered, extra["output_schema"] = _fastmcp_returning(registered)
+        app.tool(name=descriptor.name, description=descriptor.description, **extra)(registered)
 
     def _check_tool_binding(self, app: Any) -> None:
         """Decide, before any route or tool is added, how every tools/call on ``app`` gets its ToolContext, and
@@ -418,6 +447,10 @@ class AgentEnvEnvironment:
     def declared_extensions(self) -> list[EnvironmentExtension]:
         """Declaration-only extensions to advertise, like ``intake/v1``: a promise with params and no handler."""
         return []
+
+    def served_tools(self, tools: list[EnvironmentTool]) -> list[EnvironmentTool]:
+        """The ``@tool`` methods to serve, chosen at mount; a returned descriptor's description replaces the marked one."""
+        return tools
 
     def on_tool_call(self, context: ToolContext) -> Any:
         """Runs before every tools/call on this environment's app, under the bound ``context``.
@@ -690,6 +723,39 @@ def _fastmcp_tool_result(answer: Any) -> Any:
     return ToolResult(content=list(answer.content), structured_content=structured, is_error=bool(is_error))
 
 
+def _mcp_tool_annotations(annotations: Any) -> Any:
+    from mcp.types import ToolAnnotations
+    return ToolAnnotations.model_validate(annotations)
+
+
+def _returns_call_tool_result(fn: Callable) -> bool:
+    returns = _resolved_hints(fn).get("return")
+    if get_origin(returns) is Annotated:
+        returns = get_args(returns)[0]
+    result_type = getattr(sys.modules.get("mcp.types"), "CallToolResult", None)
+    return result_type is not None and isinstance(returns, type) and issubclass(returns, result_type)
+
+
+def _fastmcp_returning(fn: Callable) -> tuple:
+    """A tool returning ``CallToolResult`` as fastmcp sends it as is: a twin returning fastmcp's ``ToolResult``, and the
+    output schema of ``Annotated[CallToolResult, Model]``'s model (None for a bare ``CallToolResult``)."""
+    from fastmcp.tools import ToolResult
+    signature, annotations = _reduced_signature(fn, "")
+    returns = annotations.get("return")
+    schema = TypeAdapter(get_args(returns)[1]).json_schema() if get_origin(returns) is Annotated else None
+
+    if inspect.iscoroutinefunction(fn):
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            return _fastmcp_tool_result(await fn(*args, **kwargs))
+    else:
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            return _fastmcp_tool_result(fn(*args, **kwargs))
+    functools.update_wrapper(wrapper, fn)
+    wrapper.__signature__ = signature.replace(return_annotation=ToolResult)
+    wrapper.__annotations__ = {**annotations, "return": ToolResult}
+    return wrapper, schema
+
+
 def _agentenv_error(exc: BaseException) -> AgentEnvError | None:
     """The AgentEnvError a tool raised, found under the ToolError both FastMCPs wrap it in."""
     while exc is not None:
@@ -850,6 +916,22 @@ def _discover_tools(handler: Any, environment_name: str) -> list:
         seen.add(descriptor.name)
         ordered.append((descriptor, attr))
     return ordered
+
+
+def _served_tools(handler: Any, tool_handlers: list) -> list:
+    """The tools the handler's ``served_tools`` keeps, in its order and with its descriptors; all of them without one."""
+    hook = getattr(handler, "served_tools", None)
+    if hook is None:
+        return tool_handlers
+    chosen = list(hook([descriptor for descriptor, _fn in tool_handlers]))
+    by_name = {descriptor.name: fn for descriptor, fn in tool_handlers}
+    names = [descriptor.name for descriptor in chosen]
+    unknown = sorted(set(names) - set(by_name))
+    if unknown:
+        raise ValueError(f"served_tools returned tools with no @tool method: {unknown}")
+    if len(set(names)) != len(names):
+        raise ValueError(f"served_tools returned a tool twice: {sorted({n for n in names if names.count(n) > 1})}")
+    return [(descriptor, by_name[descriptor.name]) for descriptor in chosen]
 
 
 def _merge_tools(card: EnvironmentCard, tool_handlers: list) -> EnvironmentCard:
