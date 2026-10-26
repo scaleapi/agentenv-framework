@@ -11,10 +11,11 @@ from agentenv_protocol import EnvironmentTool, ToolResult, ToolSessionError
 from agentenv_protocol.a2a_agent import proxy as proxy_module
 from openenv.core.env_server.mcp_types import CallToolAction, ListToolsAction, ToolErrorType
 
+import agent_env.task.episode.run as episode_run
 from agent_env.openenv.app import _score_at
 from agent_env.openenv.environment import ENDED, AgentEnvEnvironment, Served, ServedTask
 from agent_env.task import EpisodeSpec, Task
-from tst.unit.task.episode.run_test import ALICE, ITEMS, REPLIES, TURN, _gate
+from tst.unit.task.episode.run_test import ALICE, ITEMS, REPLIES, TURN, _gate, _until
 
 AGAIN = {**TURN, "id": "again", "prompt_id": "again", "prompt": "Add another.", "depends_on": ["turn"]}
 
@@ -246,6 +247,29 @@ async def test_a_reset_on_a_live_session_cancels_and_tears_down_its_episode_firs
 
     assert (Task.get_instance(first).status, Task.get_instance(first).error) == ("cancelled", "reset")
     assert teardowns.finished == [first]
+    assert (await _call(env, "end_turn", response="Added.")).reward == 1.0
+
+
+@pytest.mark.asyncio
+async def test_a_reset_cancelled_while_the_last_episode_tears_down_leaves_that_teardown_tracked_and_waited_for(
+        teardowns, tools):
+    env = _env(ITEMS, ALICE, TURN, REPLIES)
+    await env.reset_async()
+    first = env.state.episode_id
+    teardowns.hold = asyncio.Event()
+    resetting = asyncio.create_task(env.reset_async())
+    await _until(lambda: first in teardowns.started)
+    resetting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await resetting
+
+    again = asyncio.create_task(env.reset_async())
+    await asyncio.sleep(0.2)
+    assert (len(env._served.ending), list(episode_run._live), again.done()) == (1, [first], False)
+    teardowns.hold.set()
+    await again
+
+    assert teardowns.finished == [first] and env.state.episode_id != first
     assert (await _call(env, "end_turn", response="Added.")).reward == 1.0
 
 

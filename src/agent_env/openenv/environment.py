@@ -82,6 +82,7 @@ class AgentEnvEnvironment(Environment):
         self._turn: Turn | None = None
         self._tools: TurnTools | None = None
         self._stack: AsyncExitStack | None = None
+        self._ending: asyncio.Task | None = None
         self._state = State(episode_id=None, step_count=0, done=False)
 
     # The Task API
@@ -261,14 +262,20 @@ class AgentEnvEnvironment(Environment):
 
     async def _abandon(self, reason: str) -> None:
         """Abandon the episode and close the turn's tools, waiting for the teardown; the caller holds the lock. The
-        abandon is tracked before anything is awaited, so a server shutting down meanwhile waits for it too."""
+        abandon is tracked before anything is awaited, so a server shutting down meanwhile waits for it too, and a
+        caller cancelled while it waits leaves it running for the next reset to wait for."""
         episode, self._episode = self._episode, None
-        abandoning = self._served.end_later(episode.abandon(reason)) if episode is not None else None
+        if episode is not None:
+            self._ending = self._served.end_later(episode.abandon(reason))
         self._served.live.discard(self)
         await self._close_tools()
         self._turn = None
-        if abandoning is not None:
-            await abandoning
+        if (ending := self._ending) is not None:
+            try:
+                await asyncio.shield(ending)
+            finally:
+                if ending.done():
+                    self._ending = None
 
     async def _close_tools(self) -> None:
         stack, self._stack, self._tools = self._stack, None, None
