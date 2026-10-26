@@ -241,7 +241,8 @@ class X11Driver(ComputerDriverEnvironment):
 
 class _Connection:
     """One connection to the X server, with XTEST input on it. A character the keymap lacks is typed through a spare
-    keycode mapped to it, kept for that character and reused, or the least recently used one once all are taken."""
+    keycode mapped to it, kept for that character and reused; once all are taken, the least recently used one that
+    no key holds down is mapped again."""
 
     def __init__(self) -> None:
         self.d = xdisplay.Display()
@@ -260,15 +261,18 @@ class _Connection:
 
     def hold(self, keysyms: list[int]) -> list[int]:
         """Press what the keysyms need that isn't down already, Shift first where a character needs it; the keycodes
-        this pressed, in order, so the caller releases only those."""
+        this pressed, in order, so the caller releases only those. Every keycode is found before the first press, so
+        keysyms that can't all be held at once are refused with nothing sent."""
         down = self._down()
-        pressed = []
+        planned: list[int] = []
         for keysym in keysyms:
-            for code in self.codes(keysym):
-                if code not in down:
-                    xtest.fake_input(self.d, X.KeyPress, code)
-                    down.add(code)
-                    pressed.append(code)
+            planned += self.codes(keysym, busy=down | set(planned))
+        pressed = []
+        for code in planned:
+            if code not in down:
+                xtest.fake_input(self.d, X.KeyPress, code)
+                down.add(code)
+                pressed.append(code)
         return pressed
 
     def release(self, codes) -> None:
@@ -278,8 +282,8 @@ class _Connection:
     def tap(self, keysym: int, hold_s: float) -> None:
         """Type one character: its key pressed and released, with Shift around it when it needs Shift and nothing
         holds Shift already."""
-        *modifiers, code = self.codes(keysym)
         down = self._down()
+        *modifiers, code = self.codes(keysym, busy=down)
         pressed = [m for m in modifiers if m not in down]
         for m in pressed:
             xtest.fake_input(self.d, X.KeyPress, m)
@@ -289,22 +293,34 @@ class _Connection:
         xtest.fake_input(self.d, X.KeyRelease, code)
         self.release(reversed(pressed))
 
-    def codes(self, keysym: int) -> list[int]:
-        """The keycodes that make ``keysym``: Shift and the key when it is the key's second level, else one key."""
+    def codes(self, keysym: int, busy: set[int] = frozenset()) -> list[int]:
+        """The keycodes that make ``keysym``: Shift and the key when it is the key's second level, else one key; a
+        keysym off the keymap is mapped to a spare keycode not in ``busy``."""
         codes = self._on_keymap(keysym)
         if codes is not None:
             return codes
-        self.check([keysym])
-        code = self.spare.pop() if self.spare else self.mapped.popitem(last=False)[1]
+        code = self._free(busy)
         self.d.change_keyboard_mapping(code, [(keysym,) * self.width])
         self.d.sync()
         self.mapped[keysym] = code
         return [code]
 
     def check(self, keysyms: list[int]) -> None:
-        """Refuse, before anything is sent, keysyms that can't be typed: one off the keymap with no spare keycode."""
-        if not (self.spare or self.mapped) and any(self._on_keymap(k) is None for k in keysyms):
-            raise Unsupported("this X server has no spare keycode for the characters its keymap lacks")
+        """Refuse, before anything is sent, text with a character off the keymap when no spare keycode is free."""
+        if any(self._on_keymap(k) is None for k in keysyms):
+            self._free(self._down(), take=False)
+
+    def _free(self, busy: set[int], take: bool = True) -> int:
+        """A spare keycode not in ``busy``, the least recently used mapped one when none is unmapped."""
+        if self.spare:
+            return self.spare.pop() if take else self.spare[-1]
+        for keysym, code in self.mapped.items():
+            if code not in busy:
+                if take:
+                    del self.mapped[keysym]
+                return code
+        raise Unsupported("no spare keycode is free for a character off the X keymap: the server has none, or keys "
+                          "hold them all down")
 
     def _on_keymap(self, keysym: int) -> list[int] | None:
         if keysym in self.mapped:

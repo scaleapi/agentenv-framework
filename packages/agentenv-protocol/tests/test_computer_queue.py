@@ -16,6 +16,7 @@ from computer_fake import COLOURS, FakeDriver, FakeScreen, MinimalDriver, http_c
 from agentenv_protocol import ROLE_META_KEY  # noqa: E402
 from agentenv_protocol.computer import ComputerSettings, pointer_position  # noqa: E402
 from agentenv_protocol.computer.queue import InputQueue  # noqa: E402
+from agentenv_protocol.tool_context import EMPTY  # noqa: E402
 
 
 class ByRole(FakeDriver):
@@ -430,3 +431,47 @@ async def test_a_point_queued_while_the_display_changes_is_refused_stale():
         await resize
     assert queued.structuredContent["code"] == "stale_frame" and queued.structuredContent["applied"] == "no"
     assert [e[1:3] for e in driver.screen.log] == [(1, 1)]
+
+
+@pytest.mark.asyncio
+async def test_a_click_at_the_pointer_reads_the_pointer_when_its_turn_comes():
+    driver = FakeDriver()
+    driver.slow["drag"] = 0.3
+    async with mcp_session(driver) as session:
+        await session.call_tool("computer_screenshot", {})
+        await session.call_tool("computer_pointer_move", {"x": 5, "y": 5})
+        dragging = asyncio.ensure_future(session.call_tool("computer_drag", {"path": [[10, 10], [100, 100]]}))
+        await asyncio.sleep(0.1)
+        clicked = await session.call_tool("computer_click", {})
+        await dragging
+    assert clicked.structuredContent["summary"] == "Clicked left at the pointer, screen (100, 100)"
+    assert driver.screen.log[-1][:3] == ("click", 100, 100)
+
+
+@pytest.mark.asyncio
+async def test_input_that_lands_while_a_screenshot_is_taken_counts_as_after_it():
+    driver = ByRole()
+    async with mcp_session(driver) as session:
+        await _shot(session, **{ROLE_META_KEY: "bob"})
+        driver.slow["capture"] = 0.3
+        shot = asyncio.ensure_future(_shot(session, **{ROLE_META_KEY: "alice"}))
+        await asyncio.sleep(0.1)
+        await session.call_tool("computer_click", {"x": 1, "y": 1}, meta={ROLE_META_KEY: "bob"})
+        frame = await shot
+        del driver.slow["capture"]
+        clicked = await session.call_tool("computer_click", {"x": 2, "y": 2, "frame_id": frame["frame_id"]},
+                                          meta={ROLE_META_KEY: "alice"})
+    assert clicked.structuredContent["others_since_frame"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_timed_hold_that_is_cancelled_still_lets_go_of_its_keys():
+    driver = FakeDriver()
+    async with mcp_session(driver) as session:
+        await session.call_tool("computer_screenshot", {})
+    holding = asyncio.ensure_future(driver.computer_keyboard_down(EMPTY, keys=["Shift"], hold_ms=5000))
+    await asyncio.sleep(0.1)
+    holding.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await holding
+    assert driver.screen.log[-2:] == [("key_down", ("Shift",)), ("key_up", ("Shift",))]

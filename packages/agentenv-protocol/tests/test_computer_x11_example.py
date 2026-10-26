@@ -213,6 +213,23 @@ async def test_characters_off_the_keymap_share_the_spare_keycodes(x11):
 
 
 @pytest.mark.asyncio
+async def test_a_held_characters_keycode_is_not_taken_by_another(x11):
+    driver, fake, _code = x11
+    fake.spare = {8, 9}
+    async with mcp_session(driver) as session:
+        await session.call_tool("computer_screenshot", {})
+        held = await _events(fake, session, "computer_keyboard_down", {"keys": ["東"]})
+        fake.events.clear()
+        chord = await session.call_tool("computer_key", {"keys": ["京", "日"]})
+        refused = list(fake.events)
+        typed = await _events(fake, session, "computer_type", {"text": "京"})
+        released = await _events(fake, session, "computer_keyboard_up", {})
+    assert held == [("key-down", 9)] and typed == [("key-down", 8), ("key-up", 8)]
+    assert chord.structuredContent["code"] == "unsupported" and chord.structuredContent["applied"] == "no"
+    assert refused == [] and released == [("key-up", 9)] and not fake.down
+
+
+@pytest.mark.asyncio
 async def test_text_that_cant_be_typed_whole_is_refused_before_any_of_it(x11):
     driver, fake, _code = x11
     fake.spare = set()

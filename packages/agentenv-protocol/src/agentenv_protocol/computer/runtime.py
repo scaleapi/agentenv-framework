@@ -4,6 +4,7 @@ driver's operations, frames, the input queue, readiness, held keys and command r
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections import OrderedDict
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -62,9 +63,12 @@ class ComputerRuntime:
         return display
 
     async def capture(self, identity: str) -> Frame:
+        """A new frame of the screen. The input count is taken before the capture, so input that lands while it runs
+        counts as after the frame, which the frame may not show."""
+        inputs = self.queue.snapshot()
         display = await self.display_now()
         image = to_pil(await self.call("capture"), display)
-        return self.frames.add(image, display, self.queue.snapshot(), identity=identity)
+        return self.frames.add(image, display, inputs, identity=identity)
 
     async def pointer(self) -> tuple[int, int]:
         where = await self.call("pointer_position")
@@ -75,17 +79,21 @@ class ComputerRuntime:
             raise Internal(f"@pointer_position returned {where!r}, not (x, y)") from None
 
     async def act(self, ctx: ToolContext, operation: str, args: tuple, *, frame: Frame | None, screenshot: bool,
-                  summary: str, mapped: bool = False, repeat: int = 1, hold: tuple | None = None,
-                  move_to: tuple | None = None, then: Callable | None = None) -> CallToolResult:
+                  summary: str, mapped: bool = False, at_pointer: bool = False, repeat: int = 1,
+                  hold: tuple | None = None, move_to: tuple | None = None, then: Callable | None = None) -> CallToolResult:
         """One input call: its turn in the queue, the operation (after a move, repeated or held), then the result
-        with others' input since ``frame`` and, when asked, a fresh frame. A point ``mapped`` from ``frame`` is
-        checked again once the call has its turn, since the display may have changed while it waited; ``then``
-        runs as soon as the input is delivered."""
+        with others' input since ``frame`` and, when asked, a fresh frame. Whatever the call's turn can change is read
+        once it has the turn: a point ``mapped`` from ``frame`` is checked again, since the display may have changed
+        while it waited, and ``at_pointer`` reads the pointer and puts it before ``args``. ``then`` runs as soon as
+        the input is delivered."""
         identity = self.driver.caller_identity(ctx)
         sent = False
         async with self.queue.turn(self.driver.settings.queue_wait_s):
             if mapped and frame is not None:
                 self.frames.check_current(frame, await self.display_now())
+            if at_pointer:
+                sx, sy = await self.pointer()
+                args, summary = (sx, sy, *args), f"{summary} at the pointer, screen ({sx}, {sy})"
             others = self.queue.others_since(frame.inputs, identity) if frame is not None else 0
             effect = None
             try:
@@ -96,8 +104,7 @@ class ComputerRuntime:
                     effect = await self.call(operation, *args)
                     sent = True
                 if hold is not None:
-                    await asyncio.sleep(hold[0] / 1000)
-                    await self.call("key_up", list(reversed(hold[1])))
+                    await self._hold_for(*hold)
             except AgentEnvError as e:
                 if sent:
                     e.applied = "unknown"
@@ -118,6 +125,17 @@ class ComputerRuntime:
             return send(result)
         result.summary, result.frame = f"{summary}, then captured {new.id}", new.result()
         return send(result, new.encode())
+
+    async def _hold_for(self, ms: int, keys: list[str]) -> None:
+        """Keep ``keys`` down for ``ms``, then release them, also when the call is cancelled meanwhile."""
+        release = ("key_up", list(reversed(keys)))
+        try:
+            await asyncio.sleep(ms / 1000)
+        except asyncio.CancelledError:
+            with contextlib.suppress(Exception):
+                await asyncio.shield(self.call(*release))
+            raise
+        await self.call(*release)
 
     async def ensure_ready(self) -> None:
         """Refuse with device_unavailable until the ready checks have passed once; run them if none has yet."""

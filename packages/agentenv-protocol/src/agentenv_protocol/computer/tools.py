@@ -117,10 +117,11 @@ class Tools:
         button = _button(self, button)
         _check_range("count", count, 1, self.max_click_count)
         held = _modifiers(self, modifiers)
-        frame, (sx, sy), where, mapped = await _point(self, ctx, x, y, frame_id, space, norm_scale)
+        frame, screen, where, mapped = await _point(self, ctx, x, y, frame_id, space, norm_scale)
         times = f" ×{count}" if count > 1 else ""
-        return await self._computer.act(ctx, "click", (sx, sy, button, count, held), frame=frame, mapped=mapped,
-                                        screenshot=screenshot, summary=f"Clicked {button}{times} {where}")
+        return await self._computer.act(ctx, "click", (*screen, button, count, held), frame=frame, mapped=mapped,
+                                        at_pointer=not screen, screenshot=screenshot,
+                                        summary=f"Clicked {button}{times}{where}")
 
     @tool(annotations=_INPUT)
     async def computer_drag(
@@ -175,9 +176,10 @@ class Tools:
         await self._computer.ensure_ready()
         _check_range("amount", amount, 1, self.max_scroll_amount)
         held = _modifiers(self, modifiers)
-        frame, (sx, sy), where, mapped = await _point(self, ctx, x, y, frame_id, space, norm_scale)
-        return await self._computer.act(ctx, "scroll", (sx, sy, direction, amount, held), frame=frame, mapped=mapped,
-                                        screenshot=screenshot, summary=f"Scrolled {direction} {amount} {where}")
+        frame, screen, where, mapped = await _point(self, ctx, x, y, frame_id, space, norm_scale)
+        return await self._computer.act(ctx, "scroll", (*screen, direction, amount, held), frame=frame, mapped=mapped,
+                                        at_pointer=not screen, screenshot=screenshot,
+                                        summary=f"Scrolled {direction} {amount}{where}")
 
     @tool(annotations=_INPUT)
     async def computer_type(
@@ -250,9 +252,9 @@ class Tools:
     ) -> Annotated[CallToolResult, InputResult]:
         """Move the pointer to a point; hover effects happen."""
         await self._computer.ensure_ready()
-        frame, (sx, sy), where, mapped = await _point(self, ctx, x, y, frame_id, space, norm_scale)
-        return await self._computer.act(ctx, "pointer_move", (sx, sy), frame=frame, mapped=mapped,
-                                        screenshot=screenshot, summary=f"Moved the pointer {where}")
+        frame, screen, where, mapped = await _point(self, ctx, x, y, frame_id, space, norm_scale)
+        return await self._computer.act(ctx, "pointer_move", screen, frame=frame, mapped=mapped,
+                                        screenshot=screenshot, summary=f"Moved the pointer{where}")
 
     @tool(annotations=_INPUT)
     async def computer_pointer_down(
@@ -369,20 +371,19 @@ async def _button_action(driver: Tools, ctx: ToolContext, op: str, verb: str, bu
     if x is None:
         return await computer.act(ctx, op, (button,), frame=computer.frames.latest(driver.caller_identity(ctx)),
                                   screenshot=screenshot, summary=f"{verb} {button}")
-    frame, (sx, sy), where, mapped = await _point(driver, ctx, x, y, frame_id, space, norm_scale)
+    frame, screen, where, mapped = await _point(driver, ctx, x, y, frame_id, space, norm_scale)
     return await computer.act(ctx, op, (button,), frame=frame, mapped=mapped, screenshot=screenshot,
-                              move_to=(sx, sy), summary=f"{verb} {button} {where}")
+                              move_to=screen, summary=f"{verb} {button}{where}")
 
 
 async def _point(driver: Tools, ctx: ToolContext, x: float | None, y: float | None, frame_id: str | None,
-                 space: str | None, norm_scale: int | None) -> tuple[Frame | None, tuple[int, int], str, bool]:
-    """The frame, the screen pixel, a phrase for a point and whether it was mapped from the frame; with no point
-    and the pointer group, the pointer."""
+                 space: str | None, norm_scale: int | None) -> tuple[Frame | None, tuple[int, ...], str, bool]:
+    """The frame, the screen pixel, a phrase for the point and whether it was mapped from the frame. With no point
+    and the pointer group, no pixel and no phrase: the call acts at the pointer, read once it has its input turn."""
     computer = driver._computer
     identity = driver.caller_identity(ctx)
     if x is None and y is None and driver.has("pointer") and frame_id is None:
-        sx, sy = await computer.pointer()
-        return computer.frames.latest(identity), (sx, sy), f"at the pointer, screen ({sx}, {sy})", False
+        return computer.frames.latest(identity), (), "", False
     if x is None or y is None:
         raise InvalidArgument("give x and y" + (", or neither to act at the pointer" if driver.has("pointer") else ""))
     frame = computer.frames.get(frame_id, identity)
@@ -390,7 +391,7 @@ async def _point(driver: Tools, ctx: ToolContext, x: float | None, y: float | No
     space, scale = _space(driver, space, norm_scale)
     fx, fy = frame_point(frame, x, y, space, scale)
     in_space = f" ({space} {scale})" if space == "norm" else ""
-    return frame, frame.to_screen(fx, fy), f"at ({x:g}, {y:g}){in_space} in {frame.id}", True
+    return frame, frame.to_screen(fx, fy), f" at ({x:g}, {y:g}){in_space} in {frame.id}", True
 
 
 def _space(driver: Tools, space: str | None, norm_scale: int | None) -> tuple[str, int]:
