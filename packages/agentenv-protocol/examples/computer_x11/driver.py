@@ -1,12 +1,14 @@
 """An X11 computer driver: mss captures the screen and XTEST, through python-xlib, sends the input. X calls run off the
-event loop, one at a time, and a dropped X connection is reopened on the next call, so the driver outlives a
-restarted X server."""
+event loop, one at a time, on a connection checked before each call and reopened when it drops, so the driver outlives
+a restarted X server."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import math
 import threading
 import time
+from collections import OrderedDict
 from typing import Any, Callable
 
 import mss
@@ -17,6 +19,7 @@ from Xlib.ext import xtest
 
 from agentenv_protocol.computer import (
     ComputerDriverEnvironment,
+    DeliveryFailed,
     DeviceUnavailable,
     Display,
     Image,
@@ -49,6 +52,10 @@ KEYSYMS = {
     "PrintScreen": "Print", "Pause": "Pause", " ": "space", **{f"F{n}": f"F{n}" for n in range(1, 25)},
 }
 TYPED = {"\n": "Return", "\t": "Tab"}
+#: The pause between the presses of a double or triple click, in seconds.
+CLICK_GAP_S = 0.04
+#: How far apart a drag's pointer moves are, in pixels.
+DRAG_STEP_PX = 20
 DROPPED = (ConnectionClosedError, DisplayConnectionError, OSError)
 
 
@@ -61,15 +68,17 @@ class X11Driver(ComputerDriverEnvironment):
 
     def __init__(self) -> None:
         super().__init__()
-        self._x = None
+        self._x: _Connection | None = None
         self._x_lock = threading.Lock()
+        #: The keycodes each key held by @key_down pressed, which @key_up releases.
+        self._held: dict[str, list[int]] = {}
 
     @display
     async def screen(self) -> Display:
-        def read(d):
-            s = d.screen()
+        def read(c):
+            s = c.d.screen()
             return Display(s.width_in_pixels, s.height_in_pixels, 1.0)
-        return await self._on_x(read)
+        return await self._read(read)
 
     @capture
     async def grab(self) -> Image:
@@ -77,120 +86,239 @@ class X11Driver(ComputerDriverEnvironment):
 
     async def ready_checks(self) -> list[ReadyCheck]:
         try:
-            has = await self._on_x(lambda d: d.has_extension("XTEST"))
+            has = await self._read(lambda c: c.d.has_extension("XTEST"))
         except DeviceUnavailable as e:
             return [ReadyCheck("xtest", False, e.message)]
         return [ReadyCheck("xtest", bool(has), "XTEST available" if has else "XTEST missing")]
 
     @click
     async def click_at(self, x, y, button, count, modifiers) -> None:
-        def act(d):
-            held = _press(d, modifiers)
-            _move(d, x, y)
+        syms = [_keysym(k) for k in modifiers]
+
+        def act(c):
+            held = c.hold(syms)
+            c.move(x, y)
             for i in range(count):
-                _button(d, button, True)
-                _button(d, button, False)
+                c.button(button, True)
+                c.button(button, False)
                 if i + 1 < count:
-                    d.sync()
-                    time.sleep(0.04)
-            _release(d, reversed(held))
-        await self._on_x(act)
+                    c.d.sync()
+                    time.sleep(CLICK_GAP_S)
+            c.release(reversed(held))
+        await self._send(act)
 
     @drag
     async def drag_along(self, path, button, duration_ms, modifiers) -> None:
+        syms = [_keysym(k) for k in modifiers]
         steps = _steps(path)
         pause = duration_ms / 1000 / len(steps)
+        held: list[int] = []
 
-        def start(d):
-            held = _press(d, modifiers)
-            _move(d, *path[0])
-            _button(d, button, True)
-            return held
+        def start(c):
+            held.extend(c.hold(syms))
+            c.move(*path[0])
+            c.button(button, True)
 
-        def finish(d):
-            _button(d, button, False)
-            _release(d, reversed(held))
+        def finish(c):
+            c.button(button, False)
+            c.release(reversed(held))
 
-        held = await self._on_x(start)
-        for x, y in steps:
-            await self._on_x(lambda d, x=x, y=y: _move(d, x, y))
-            await asyncio.sleep(pause)
-        await self._on_x(finish)
+        try:
+            await self._send(start)
+            for px, py in steps:
+                await self._send(lambda c, px=px, py=py: c.move(px, py))
+                await asyncio.sleep(pause)
+        except BaseException:
+            with contextlib.suppress(Exception):
+                await self._send(finish)
+            raise
+        await self._send(finish)
 
     @scroll
     async def scroll_at(self, x, y, direction, amount, modifiers) -> None:
-        def act(d):
-            held = _press(d, modifiers)
-            _move(d, x, y)
+        syms = [_keysym(k) for k in modifiers]
+
+        def act(c):
+            held = c.hold(syms)
+            c.move(x, y)
             for _ in range(amount):
-                xtest.fake_input(d, X.ButtonPress, SCROLL[direction])
-                xtest.fake_input(d, X.ButtonRelease, SCROLL[direction])
-            _release(d, reversed(held))
-        await self._on_x(act)
+                xtest.fake_input(c.d, X.ButtonPress, SCROLL[direction])
+                xtest.fake_input(c.d, X.ButtonRelease, SCROLL[direction])
+            c.release(reversed(held))
+        await self._send(act)
 
     @pointer_move
     async def move(self, x, y) -> None:
-        await self._on_x(lambda d: _move(d, x, y))
+        await self._send(lambda c: c.move(x, y))
 
     @pointer_down
     async def down(self, button) -> None:
-        await self._on_x(lambda d: _button(d, button, True))
+        await self._send(lambda c: c.button(button, True))
 
     @pointer_up
     async def up(self, button) -> None:
-        await self._on_x(lambda d: _button(d, button, False))
+        await self._send(lambda c: c.button(button, False))
 
     @pointer_position
     async def where(self) -> tuple[int, int]:
-        def read(d):
-            p = d.screen().root.query_pointer()
+        def read(c):
+            p = c.d.screen().root.query_pointer()
             return p.root_x, p.root_y
-        return await self._on_x(read)
+        return await self._read(read)
 
     @type_text
     async def type_in(self, text) -> None:
-        for ch in text:
-            sym = XK.string_to_keysym(TYPED[ch]) if ch in TYPED else _keysym(ch)
+        syms = [XK.string_to_keysym(TYPED[ch]) if ch in TYPED else _keysym(ch) for ch in text]
+        await self._read(lambda c: c.check(syms))
+        for sym in syms:
             hold = self.settings.tap_hold_ms / 1000
-            await self._on_x(lambda d, sym=sym: _tap(d, sym, hold))
+            await self._send(lambda c, sym=sym: c.tap(sym, hold))
             await asyncio.sleep(self.settings.type_delay_ms / 1000)
 
     @press
     async def press_keys(self, keys) -> None:
+        syms = [_keysym(k) for k in keys]
         hold = self.settings.tap_hold_ms / 1000
 
-        def act(d):
-            codes = _press(d, keys)
-            d.sync()
+        def act(c):
+            pressed = c.hold(syms)
+            c.d.sync()
             time.sleep(hold)
-            _release(d, reversed(codes))
-        await self._on_x(act)
+            c.release(reversed(pressed))
+        await self._send(act)
 
     @key_down
     async def keys_down(self, keys) -> None:
-        await self._on_x(lambda d: _press(d, keys))
+        def act(c):
+            for key in keys:
+                self._held.setdefault(key, []).extend(c.hold([_keysym(key)]))
+        await self._send(act)
 
     @key_up
     async def keys_up(self, keys) -> None:
-        await self._on_x(lambda d: _release(d, _keycodes(d, keys)))
+        def act(c):
+            for key in keys:
+                c.release(reversed(self._held.pop(key, None) or c.codes(_keysym(key))[-1:]))
+        await self._send(act)
 
-    async def _on_x(self, fn: Callable[[Any], Any]) -> Any:
-        return await asyncio.to_thread(self._x_call, fn)
+    async def _read(self, fn: Callable[[_Connection], Any]) -> Any:
+        return await asyncio.to_thread(self._x_call, fn, False)
 
-    def _x_call(self, fn: Callable[[Any], Any]) -> Any:
-        """``fn(display)`` on a live connection, reconnecting once if it dropped."""
+    async def _send(self, fn: Callable[[_Connection], Any]) -> Any:
+        return await asyncio.to_thread(self._x_call, fn, True)
+
+    def _x_call(self, fn: Callable[[_Connection], Any], sends_input: bool) -> Any:
+        """``fn`` on a live connection. When the connection drops, a read is retried once on a new one; input is not
+        sent again, since some of it may have arrived."""
         with self._x_lock:
             for attempt in (1, 2):
+                c = self._connected()
                 try:
-                    if self._x is None:
-                        self._x = xdisplay.Display()
-                    result = fn(self._x)
-                    self._x.sync()
+                    result = fn(c)
+                    c.d.sync()
                     return result
                 except DROPPED as e:
                     self._x = None
+                    if sends_input:
+                        raise DeliveryFailed(f"the X connection dropped while sending input: {type(e).__name__}") from None
                     if attempt == 2:
                         raise DeviceUnavailable(f"the X server is unavailable: {type(e).__name__}") from None
+
+    def _connected(self) -> _Connection:
+        """The connection, opened or reopened as needed and checked with a round trip before anything is sent."""
+        for attempt in (1, 2):
+            try:
+                if self._x is None:
+                    self._x = _Connection()
+                    self._held.clear()
+                self._x.d.sync()
+                return self._x
+            except DROPPED as e:
+                self._x = None
+                if attempt == 2:
+                    raise DeviceUnavailable(f"the X server is unavailable: {type(e).__name__}") from None
+
+
+class _Connection:
+    """One connection to the X server, with XTEST input on it. A character the keymap lacks is typed through a spare
+    keycode mapped to it, kept for that character and reused, or the least recently used one once all are taken."""
+
+    def __init__(self) -> None:
+        self.d = xdisplay.Display()
+        first = self.d.display.info.min_keycode
+        mapping = self.d.get_keyboard_mapping(first, self.d.display.info.max_keycode - first + 1)
+        self.width = len(mapping[0])
+        self.spare = [first + i for i, syms in enumerate(mapping) if not any(syms)]
+        self.mapped: OrderedDict[int, int] = OrderedDict()
+        self.shift = self.d.keysym_to_keycode(XK.string_to_keysym("Shift_L"))
+
+    def move(self, x, y) -> None:
+        xtest.fake_input(self.d, X.MotionNotify, x=int(x), y=int(y))
+
+    def button(self, button: str, down: bool) -> None:
+        xtest.fake_input(self.d, X.ButtonPress if down else X.ButtonRelease, BUTTONS[button])
+
+    def hold(self, keysyms: list[int]) -> list[int]:
+        """Press what the keysyms need that isn't down already, Shift first where a character needs it; the keycodes
+        this pressed, in order, so the caller releases only those."""
+        down = self._down()
+        pressed = []
+        for keysym in keysyms:
+            for code in self.codes(keysym):
+                if code not in down:
+                    xtest.fake_input(self.d, X.KeyPress, code)
+                    down.add(code)
+                    pressed.append(code)
+        return pressed
+
+    def release(self, codes) -> None:
+        for code in codes:
+            xtest.fake_input(self.d, X.KeyRelease, code)
+
+    def tap(self, keysym: int, hold_s: float) -> None:
+        """Type one character: its key pressed and released, with Shift around it when it needs Shift and nothing
+        holds Shift already."""
+        *modifiers, code = self.codes(keysym)
+        down = self._down()
+        pressed = [m for m in modifiers if m not in down]
+        for m in pressed:
+            xtest.fake_input(self.d, X.KeyPress, m)
+        xtest.fake_input(self.d, X.KeyPress, code)
+        self.d.sync()
+        time.sleep(hold_s)
+        xtest.fake_input(self.d, X.KeyRelease, code)
+        self.release(reversed(pressed))
+
+    def codes(self, keysym: int) -> list[int]:
+        """The keycodes that make ``keysym``: Shift and the key when it is the key's second level, else one key."""
+        codes = self._on_keymap(keysym)
+        if codes is not None:
+            return codes
+        self.check([keysym])
+        code = self.spare.pop() if self.spare else self.mapped.popitem(last=False)[1]
+        self.d.change_keyboard_mapping(code, [(keysym,) * self.width])
+        self.d.sync()
+        self.mapped[keysym] = code
+        return [code]
+
+    def check(self, keysyms: list[int]) -> None:
+        """Refuse, before anything is sent, keysyms that can't be typed: one off the keymap with no spare keycode."""
+        if not (self.spare or self.mapped) and any(self._on_keymap(k) is None for k in keysyms):
+            raise Unsupported("this X server has no spare keycode for the characters its keymap lacks")
+
+    def _on_keymap(self, keysym: int) -> list[int] | None:
+        if keysym in self.mapped:
+            self.mapped.move_to_end(keysym)
+            return [self.mapped[keysym]]
+        code = self.d.keysym_to_keycode(keysym)
+        if code and self.d.keycode_to_keysym(code, 0) == keysym:
+            return [code]
+        if code and self.d.keycode_to_keysym(code, 1) == keysym:
+            return [self.shift, code]
+        return None
+
+    def _down(self) -> set[int]:
+        return {8 * i + bit for i, byte in enumerate(self.d.query_keymap()) for bit in range(8) if byte >> bit & 1}
 
 
 def _grab() -> Image:
@@ -203,49 +331,12 @@ def _grab() -> Image:
 
 
 def _steps(path: list) -> list[tuple[float, float]]:
-    """The points a drag moves through after its start, about every 20 pixels."""
+    """The points a drag moves through after its start, about every DRAG_STEP_PX pixels."""
     steps = []
     for (x0, y0), (x1, y1) in zip(path, path[1:]):
-        n = max(2, int(math.hypot(x1 - x0, y1 - y0) / 20))
+        n = max(2, int(math.hypot(x1 - x0, y1 - y0) / DRAG_STEP_PX))
         steps += [(x0 + (x1 - x0) * k / n, y0 + (y1 - y0) * k / n) for k in range(1, n + 1)]
     return steps
-
-
-def _move(d, x, y) -> None:
-    xtest.fake_input(d, X.MotionNotify, x=int(x), y=int(y))
-
-
-def _button(d, button: str, down: bool) -> None:
-    xtest.fake_input(d, X.ButtonPress if down else X.ButtonRelease, BUTTONS[button])
-
-
-def _press(d, keys: list[str]) -> list[int]:
-    codes = _keycodes(d, keys)
-    for code in codes:
-        xtest.fake_input(d, X.KeyPress, code)
-    return codes
-
-
-def _release(d, codes) -> None:
-    for code in codes:
-        xtest.fake_input(d, X.KeyRelease, code)
-
-
-def _tap(d, keysym: int, hold_s: float) -> None:
-    code, shifted = _keycode(d, keysym)
-    shift = d.keysym_to_keycode(XK.string_to_keysym("Shift_L"))
-    if shifted:
-        xtest.fake_input(d, X.KeyPress, shift)
-    xtest.fake_input(d, X.KeyPress, code)
-    d.sync()
-    time.sleep(hold_s)
-    xtest.fake_input(d, X.KeyRelease, code)
-    if shifted:
-        xtest.fake_input(d, X.KeyRelease, shift)
-
-
-def _keycodes(d, keys: list[str]) -> list[int]:
-    return [_keycode(d, _keysym(k))[0] for k in keys]
 
 
 def _keysym(key: str) -> int:
@@ -255,21 +346,6 @@ def _keysym(key: str) -> int:
         code = ord(key)
         return code if code < 0x100 else 0x01000000 | code
     raise Unsupported(f"this driver has no X keysym for {key!r}")
-
-
-def _keycode(d, keysym: int) -> tuple[int, bool]:
-    """The keycode for ``keysym`` and whether it needs Shift; with no keycode for it, a spare one is mapped to it."""
-    code = d.keysym_to_keycode(keysym)
-    if code:
-        return code, d.keycode_to_keysym(code, 0) != keysym and d.keycode_to_keysym(code, 1) == keysym
-    first = d.display.info.min_keycode
-    mapping = d.get_keyboard_mapping(first, d.display.info.max_keycode - first + 1)
-    spare = next((first + i for i, syms in enumerate(mapping) if not any(syms)), None)
-    if spare is None:
-        raise Unsupported(f"no spare keycode to map keysym {keysym:#x} to")
-    d.change_keyboard_mapping(spare, [(keysym,) * len(mapping[0])])
-    d.sync()
-    return spare, False
 
 
 if __name__ == "__main__":
