@@ -12,7 +12,7 @@ from agent_env.a2a_agent import conversation_store
 from agent_env.env.env import DeployedGatewayEnv
 from agent_env.env.gateway.constants import EXT_TRIGGERS_URI, GATEWAY_EXTENSIONS, WELL_KNOWN_PATH
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
-from agent_env.task_step.task_steps.prompt_agent import _DEFAULT_USER_SIM_OUTPUT_FORMAT, PromptAgentTaskStep
+from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 
 AGENT = "http://agent.test"
 USER = "http://user.test"
@@ -122,7 +122,11 @@ def exchange(origin: str, parts: list[dict], message_id: str, context_id: str, t
     return [send(origin, parts, message_id, context_id, timeout), poll(origin, task_id)]
 
 
-USER_SIM_CONFIG = ("POST", f"{USER}/ext/agent-config", {"output_format": _DEFAULT_USER_SIM_OUTPUT_FORMAT}, 60)
+USER_SIM_OUTPUT_FORMAT = {"type": "json_schema", "schema": {"type": "object", "properties": {
+    "message": {"type": "string", "description": "Your next reply"},
+    "done": {"type": "boolean", "description": "Set true when you're satisfied and the conversation should end."},
+}, "required": ["message", "done"]}}
+USER_SIM_CONFIG = ("POST", f"{USER}/ext/agent-config", {"output_format": USER_SIM_OUTPUT_FORMAT}, 60)
 ENV_STATE = ("GET", f"{ENV}/triggers/state", None, 15)
 FIRING_LOG = ("GET", f"{USER}/ext/triggers", None, 15)
 
