@@ -8,12 +8,13 @@ import json
 
 import pytest
 
+from agent_env.a2a_agent import A2AAgent
 from agent_env.bundle import BundleKind, parse_bundle
 from agent_env.bundle.installed import CORE, installed_bundles
 from agent_env.bundle.plan import check_bundle, plan_bundle
 from agent_env.bundle.resolve import resolve_bundle
 from agent_env.config import get_config
-from agent_env.plugins._bundles import installed_aliases
+from agent_env.plugins._bundles import ENV_ALIASES, installed_aliases
 from tst.unit.bundle._support import layout
 
 
@@ -25,7 +26,7 @@ SHIPPED = sorted(_shipped())
 
 
 def test_agentenv_framework_ships_its_bundles():
-    assert SHIPPED == ["agents", "echo-mcp", "hello"]
+    assert SHIPPED == ["agents", "echo-mcp", "hello", "mail-mcp"]
 
 
 @pytest.mark.parametrize("name", SHIPPED)
@@ -41,12 +42,21 @@ def test_the_shipped_aliases_are_agent_envs_alone_and_claude_code_names_the_defa
     table = installed_aliases(tuple(_shipped().values()))
 
     assert table.refused == {} and table.refused_claims == {}
-    assert {alias: named.agent_id for alias, named in table.aliases.items()} == {
+    assert {alias: named.target_id for alias, named in table.aliases.items()} == {
         "claude-code": "@local/agentenv-framework/agents/claude-code", "pi": "@local/agentenv-framework/agents/pi",
         "openhands": "@local/agentenv-framework/agents/openhands", "codex": "@local/agentenv-framework/agents/codex",
         "gemini": "@local/agentenv-framework/agents/gemini", "opencode": "@local/agentenv-framework/agents/opencode"}
-    assert table.target("claude-code").agent_id == get_config().get_default_a2a_agent_id()
+    assert table.target("claude-code").target_id == get_config().get_default_a2a_agent_id()
 
+
+
+def test_the_shipped_env_alias_names_the_mail_mcp_examples_env_which_the_validator_deploys():
+    table = installed_aliases(tuple(_shipped().values()), ENV_ALIASES)
+
+    assert table.refused == {} and table.refused_claims == {}
+    assert {alias: named.target_id for alias, named in table.aliases.items()} == {
+        "mail": "@local/agentenv-framework/mail-mcp/mail"}
+    assert A2AAgent.VALIDATION_ENV_ID == "mail"
 
 def test_a_task_naming_no_agent_plans_with_the_shipped_default(tmp_path, monkeypatch, local_stores, cli_routing):
     monkeypatch.setenv("HOME", str(tmp_path))

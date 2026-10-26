@@ -5,7 +5,7 @@ import os
 import pytest
 
 from agent_env.bundle import BundleError, parse_bundle
-from agent_env.plugins._bundles import ALIASES_FILE, InstalledBundle, installed_aliases, read_aliases
+from agent_env.plugins._bundles import ALIASES_FILE, ENV_ALIASES, InstalledBundle, installed_aliases, read_aliases
 from tst.unit.bundle._support import layout
 
 
@@ -22,9 +22,11 @@ def _read(tmp_path, text):
     return read_aliases(tmp_path / ALIASES_FILE)
 
 
-def test_an_aliases_file_gives_each_agent_its_aliases(tmp_path):
-    assert _read(tmp_path, '[agents]\nclaude-code = ["claude-code", "claude"]\npi = ["pi"]\n') == (
-        {"claude-code": ("claude-code", "claude"), "pi": ("pi",)}, [])
+def test_an_aliases_file_gives_each_agent_and_env_its_aliases(tmp_path):
+    text = '[agents]\nclaude-code = ["claude-code", "claude"]\npi = ["pi"]\n[envs]\nmail = ["mail-mcp"]\n'
+
+    assert _read(tmp_path, text) == (
+        {"agents": {"claude-code": ("claude-code", "claude"), "pi": ("pi",)}, "envs": {"mail": ("mail-mcp",)}}, [])
 
 
 def test_a_bundle_without_an_aliases_file_gives_none(tmp_path):
@@ -42,11 +44,12 @@ def test_a_bundle_without_an_aliases_file_gives_none(tmp_path):
     ('[agents]\nx = []\n', "agents.x must be a list of aliases, not []"),
     ('[agents]\nx = ["a"]\ny = ["a"]\n', "agents.y: 'a' is listed for agents.x too; an alias names one agent"),
     ('[agents]\nx = ["a", "a"]\n', "agents.x: 'a' is listed twice"),
-    ('[envs]\nx = ["a"]\n', "[envs] isn't a table it takes; it takes [agents]"),
+    ('[skills]\nx = ["a"]\n', "[skills] isn't a table it takes; it takes [agents] and [envs]"),
+    ('[envs]\nx = ["a", "a"]\n', "envs.x: 'a' is listed twice; an alias names one env"),
     ('agents = 3\n', "[agents] must be a table"),
     ('[agents\n', "isn't valid TOML"),
 ], ids=["case", "namespaced", "slash", "edge", "long", "final-newline", "not-a-list", "empty", "two-agents", "twice", "other-table",
-        "not-a-table", "toml"])
+        "env-twice", "not-a-table", "toml"])
 def test_an_aliases_file_with_a_problem_gives_no_aliases_and_says_why(tmp_path, text, problem):
     aliases, problems = _read(tmp_path, text)
 
@@ -69,7 +72,7 @@ def test_an_installed_bundles_alias_names_its_agent_under_the_bundles_id_root(tm
     table = installed_aliases((agents,))
 
     named = table.target("claude-code")
-    assert (named.agent_id, named.bundle, named.declared_by) == (
+    assert (named.target_id, named.bundle, named.declared_by) == (
         "@local/agentenv-framework/agents/claude-code", agents, "agentenv-framework's agents bundle")
     assert table.of(agents) == ("claude-code",) and table.target("pi") is None and table.refusal("claude-code") is None
 
@@ -84,6 +87,17 @@ def test_agent_envs_own_aliases_are_refused_to_any_other_bundle(tmp_path):
     assert table.refused_claims == {"acme-kit/kit": (
         "'claude-code' is agent-env's own alias, of @local/agentenv-framework/agents/claude-code, so this bundle "
         "can't give it",)}
+
+
+def test_an_installed_bundle_gives_its_envs_aliases_of_their_own(tmp_path):
+    """An env alias and an agent alias are kept apart, each where a reference to its kind looks."""
+    mail = _bundle(tmp_path, "mail-mcp", aliases='[envs]\nmail = ["mail-mcp"]\n[agents]\nhelper = ["mail-mcp"]\n')
+
+    envs, agents = installed_aliases((mail,), ENV_ALIASES), installed_aliases((mail,))
+
+    assert envs.target("mail-mcp").target_id == "@local/agentenv-framework/mail-mcp/mail"
+    assert agents.target("mail-mcp").target_id == "@local/agentenv-framework/mail-mcp/helper"
+    assert envs.hint("mail_mcp") == "; did you mean the alias 'mail-mcp'?"
 
 
 def test_a_name_close_to_an_alias_is_pointed_at_it(tmp_path):
@@ -130,20 +144,29 @@ def test_a_bundle_gives_its_agents_the_aliases_its_aliases_file_lists(tmp_path):
 
     bundle = parse_bundle(root, id_root="@local/acme-kit/kit")
 
-    assert bundle.aliases == {"solver": ("solver", "fixer")} and ALIASES_FILE not in map(str, bundle.ignored)
+    assert bundle.aliases == {"agents": {"solver": ("solver", "fixer")}}
+    assert ALIASES_FILE not in map(str, bundle.ignored)
 
 
 @pytest.mark.parametrize("aliases, problem", [
     ('[agents]\nnobody = ["x"]\n', "aliases.toml: agents.nobody: this bundle has no agent 'nobody'"),
     ('[agents]\nsolver = ["helper"]\n', "aliases.toml: agents.solver: 'helper' is the agent 'helper''s name"),
     ('[agents]\nsolver = ["Solver"]\n', "aliases.toml: agents.solver: 'Solver' isn't an alias"),
-], ids=["no-such-agent", "another-agents-name", "syntax"])
+    ('[envs]\nsolver = ["x"]\n', "aliases.toml: envs.solver: this bundle has no env 'solver'"),
+], ids=["no-such-agent", "another-agents-name", "syntax", "an-agent-as-an-env"])
 def test_an_aliases_file_that_doesnt_fit_the_bundles_agents_is_refused(tmp_path, aliases, problem):
     root = layout(tmp_path / "kit", {**_AGENTS, ALIASES_FILE: aliases})
 
     [found] = _problems(root)
 
     assert found.startswith(problem)
+
+
+def test_a_bundle_gives_its_envs_the_aliases_its_aliases_file_lists(tmp_path):
+    root = layout(tmp_path / "kit", {**_AGENTS, "envs/mail/Dockerfile": "FROM scratch\n",
+                                     ALIASES_FILE: '[envs]\nmail = ["mail-mcp"]\n'})
+
+    assert parse_bundle(root, id_root="@local/acme-kit/kit").aliases == {"envs": {"mail": ("mail-mcp",)}}
 
 
 def test_an_alias_names_an_agent_by_its_folder_so_the_agent_keeps_its_folders_id(tmp_path):

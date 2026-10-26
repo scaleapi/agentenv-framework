@@ -13,7 +13,7 @@ import click
 from agent_env.bundle import (BundleError, BundleKind, BundleRun, DryRun, Outcome, RunInterrupted, TaskRun,
                               dry_run_bundle, run_bundle)
 from agent_env.bundle.installed import InstalledBundle, checked, find_bundle, installed_bundles, run_name
-from agent_env.plugins._bundles import installed_aliases
+from agent_env.plugins._bundles import ENV_ALIASES, installed_aliases
 from agent_env.plugins._discovery import discovery_error
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox
 from agent_env.task.interrupts import Interrupts
@@ -157,12 +157,12 @@ def _list_installed() -> None:
         click.echo(f"{name:<{widths[0]}}  {package:<{widths[1]}}  {contents:<{widths[2]}}  {description}".rstrip())
 
     echo(*header)
-    aliases = installed_aliases(bundles)
+    aliases = (installed_aliases(bundles), installed_aliases(bundles, ENV_ALIASES))
     for bundle, row in zip(bundles, rows):
         echo(*row)
         if bundle.root is not None:
             click.echo(f"{'':<{widths[0]}}  {bundle.root}")
-        if named := aliases.of(bundle):
+        if named := [alias for table in aliases for alias in table.of(bundle)]:
             click.echo(f"{'':<{widths[0]}}  aliases: {', '.join(named)}")
     click.echo("\nRun one with agent-env run NAME. To change one, copy its folder and run the copy.")
 

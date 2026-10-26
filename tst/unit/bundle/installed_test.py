@@ -127,7 +127,8 @@ def test_the_plugin_report_counts_the_bundles_agent_env_ships(monkeypatch, quiet
     assert result.exit_code == 0, result.output
     (core,) = json.loads(result.stdout)["plugins"]
     assert [(c["group"], c["name"], c["status"]) for c in core["contributions"]] == [
-        (BUNDLES, "agents", "active"), (BUNDLES, "echo-mcp", "active"), (BUNDLES, "hello", "active")]
+        (BUNDLES, "agents", "active"), (BUNDLES, "echo-mcp", "active"), (BUNDLES, "hello", "active"),
+        (BUNDLES, "mail-mcp", "active")]
     assert "\n  agent-env itself\n" in shown and "requires:" not in shown
 
 

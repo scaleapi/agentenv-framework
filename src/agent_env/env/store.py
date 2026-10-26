@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Optional, Self, TypeVar
 
 from agent_env.plugins import _registration
+from agent_env.plugins._bundles import ENV_ALIASES, installed_aliases
 from agent_env.store.base import ConcurrentModificationError, NotFoundError
 from agent_env.config import get_config
 from agent_env.store.document_store import (
@@ -100,6 +101,10 @@ class EnvStore:
         )
         if existing and existing.get("type") != env.type:
             raise ValueError(f"Env id '{env.id}' already exists as type '{existing.get('type')}'; cannot put as type '{env.type}'.")
+        # A deployment recorded under an alias reloads the alias's env, so no env of the store's own starts on its id.
+        if not existing and (named := installed_aliases(table=ENV_ALIASES).target(env.id)) is not None:
+            raise ValueError(f"env id {env.id!r} is an alias of {named.target_id}, which comes with "
+                             f"{named.declared_by}, and a task naming it deploys that env; give this env another id")
         env.version = self._versioned_cache.for_store(store).put(env)
         return env
 

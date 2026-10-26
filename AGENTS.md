@@ -158,6 +158,16 @@ Out-of-tree code plugs in either through `config.toml`, as a `module:Class` poin
   the solver for one run (each step deploying or installing an agent a `prompt_agent` step prompts, not its user
   simulator: `plan.solver_steps`), pulled in and checked as a task's reference to it would be, through per-step
   `step_params` overrides, so the tasks stay as written.
+- `aliases.toml` gives envs aliases the same way (`[envs] <folder> = ["<alias>", ...]`; the `mail-mcp` example names
+  its env `mail`), resolved by the planner (`Plan.env_aliases`) and by `Env.get`, only in a task's steps: an env
+  definition (a MultiEnv's servers) naming one is refused. The env `Env.get` gives for an alias answers to the alias's
+  id, so a deployment records, and steps look it up by, the id the task names; its metadata writes go to the env the
+  alias names (`Env.stored_id`). An alias names its env only where namespace routing is on. An env store refuses to
+  create an env under an installed env alias's id (`EnvStore.put_document`), so a deployment recorded under an alias
+  always reloads the alias's env; an env stored under such an id before keeps taking versions.
+  `A2AAgent.validate()` deploys `mail` (`A2AAgent.VALIDATION_ENV_ID`) with namespace routing on, first writing the
+  example (its writes and infra, no run) when the store has no env of that id: on a remote sandbox its image is
+  context-only and built in the VM, so a service like the hub's worker needs no Docker.
 - Environment providers have no table: an installed package registers one as an `agent_env.env_providers`
   entry point named its `type`, which records carry as `env_provider_type`.
 - `[plugins.<distribution name>]` is reserved for an installed plugin's own settings, read with

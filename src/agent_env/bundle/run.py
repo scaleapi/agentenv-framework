@@ -232,17 +232,9 @@ def run_bundle(
     with namespace_routing():
         plan, preflight = _planned(root, tasks, evals, id_root, sandbox, agent)
         _say_agents(plan, say)
-        materialization = materialize(
-            plan,
-            on_wait=lambda: say("waiting for another agent-env run to finish writing this bundle's ids"),
-            on_build=lambda write: say(f"{_label(plan, write)}: building with docker, which can take minutes"),
-            on_write=lambda done: say(_written(plan, done)),
-            build_here=preflight.built_here,
-        )
+        materialization = _written_with_infra(plan, preflight, say)
         entries = _to_run(plan)
         to_run = [(entry, Task.get(entry.id, materialization.version_of("task", entry.id))) for entry in entries]
-        if preflight.infra:
-            ensure_default_envs(preflight.infra_kinds, say=say)
         with Interrupts() as interrupts:
             overrides = _overrides(sandbox, user_model, judge_model)
             runs = interrupts.run(_run_all(plan, to_run, model, overrides, _solver_params(plan, materialization), keep,
@@ -257,6 +249,32 @@ def run_bundle(
                 except RunInterrupted as stopped:
                     result = stopped.result
             raise RunInterrupted(result, interrupts.signum)
+
+
+def _write_bundle(
+    root: Path | str, *, id_root: str | None = None, on_progress: Callable[[str], None] | None = None,
+) -> Materialization:
+    """Write what the bundle in ``root`` needs and set up the infra envs its tasks deploy on, as ``run_bundle`` does
+    before it runs them, and run nothing. Raises what ``run_bundle`` raises before a task runs."""
+    say = _progress(on_progress)
+    with namespace_routing():
+        plan, preflight = _planned(root, (), (), id_root, None, None)
+        _say_agents(plan, say)
+        return _written_with_infra(plan, preflight, say)
+
+
+def _written_with_infra(plan: Plan, preflight: Preflight, say: Callable[[str], None]) -> Materialization:
+    """Write ``plan``, then set up the infra envs its runs deploy on."""
+    materialization = materialize(
+        plan,
+        on_wait=lambda: say("waiting for another agent-env run to finish writing this bundle's ids"),
+        on_build=lambda write: say(f"{_label(plan, write)}: building with docker, which can take minutes"),
+        on_write=lambda done: say(_written(plan, done)),
+        build_here=preflight.built_here,
+    )
+    if preflight.infra:
+        ensure_default_envs(preflight.infra_kinds, say=say)
+    return materialization
 
 
 def dry_run_bundle(
@@ -348,8 +366,8 @@ def refuse_store_tasks(plan: Plan) -> None:
 
 
 def _say_agents(plan: Plan, say: Callable[[str], None]) -> None:
-    """Say what each agent alias names, and what the solver deploys in place of the tasks' agents."""
-    for use in plan.aliases.values():
+    """Say what each agent and env alias names, and what the solver deploys in place of the tasks' agents."""
+    for use in (*plan.aliases.values(), *plan.env_aliases.values()):
         say(_aliased(use))
     if plan.agent is not None:
         runs = _to_run(plan)
@@ -485,10 +503,10 @@ def _task_run_command(ref: Reference) -> str:
 
 
 def _aliased(use: AliasUse) -> str:
-    """Which agent an alias the run names is: the one an installed bundle gives it, or the store's of its id."""
+    """Which agent or env an alias the run names is: the one an installed bundle gives it, or the store's of its id."""
     if use.store_version is None:
         return f"{use.alias} → {use.target_id} (the alias {use.declared_by} gives it)"
-    return (f"{use.alias} → the store's agent {use.alias!r} v{use.store_version}, which shadows the alias "
+    return (f"{use.alias} → the store's {use.kind.value} {use.alias!r} v{use.store_version}, which shadows the alias "
             f"{use.declared_by} gives {use.target_id}")
 
 

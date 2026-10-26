@@ -511,20 +511,39 @@ def _marked_pids(sandbox_id: str) -> list[int]:
 async def _stop_marked(sandbox_id: str) -> bool:
     """Stop the processes ``sandbox_id``'s commands left running, which a real VM would take down with it: SIGTERM,
     then SIGKILL for any still there a few seconds later. False if some are still running."""
-    if not (pids := await asyncio.to_thread(_marked_pids, sandbox_id)):
+    if not (found := await asyncio.to_thread(_running_marked, sandbox_id, {})):
         return True
-    logger.info("Stopping %d process(es) sandbox %s left running on this machine", len(pids), sandbox_id)
+    logger.info("Stopping %d process(es) sandbox %s left running on this machine", len(found), sandbox_id)
     for sig in (signal.SIGTERM, signal.SIGKILL):
-        for pid in pids:
+        for pid in found:
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.kill(pid, sig)
         for _ in range(_REAP_SECONDS * 10):
             await asyncio.sleep(0.1)
-            if not (pids := await asyncio.to_thread(_marked_pids, sandbox_id)):
+            if not (found := await asyncio.to_thread(_running_marked, sandbox_id, found)):
                 return True
     logger.warning("Processes %s that sandbox %s started are still running; keeping what it staged in /tmp",
-                   pids, sandbox_id)
+                   sorted(found), sandbox_id)
     return False
+
+
+def _running_marked(sandbox_id: str, found: dict[int, int]) -> dict[int, int]:
+    """The running processes carrying ``sandbox_id``'s marker, and those of ``found`` that haven't exited, each with its
+    start time. One found before counts until it exits: its environment reads empty while it execs or is exiting."""
+    running = {pid: start for pid, start in found.items() if _started(pid) == start}
+    for pid in _marked_pids(sandbox_id):
+        if pid not in running and (start := _started(pid)) is not None:
+            running[pid] = start
+    return running
+
+
+def _started(pid: int) -> int | None:
+    """When ``pid`` started, in clock ticks since boot, or None once it has exited (a zombie, or reaped)."""
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+    except (FileNotFoundError, ProcessLookupError):  # a process that exits mid-read gives ESRCH
+        return None
+    return None if fields[0] in "ZX" else int(fields[19])
 
 
 def _remove_staged(sandbox_id: str) -> None:
