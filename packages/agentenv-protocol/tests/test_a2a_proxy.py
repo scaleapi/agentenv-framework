@@ -329,6 +329,24 @@ def test_a_server_that_never_lists_its_tools_is_a_bad_gateway(client, monkeypatc
     assert "didn't list its tools within 0.5s" in response.text
 
 
+def test_a_turns_servers_list_their_tools_within_one_deadline_for_them_all(client, monkeypatch):
+    monkeypatch.setattr(proxy, "TOOL_TIMEOUT_SECONDS", 1.0)
+
+    async def slowly(self, turn, server):
+        await asyncio.sleep(0.6)
+        return []
+
+    monkeypatch.setattr(proxy.ProxyAgent, "_listed", slowly)
+    _register(client, "http://127.0.0.1:9/mcp", name="items")
+    _register(client, "http://localhost:9/mcp", name="pantry")
+    task_id = _send(client, "go")
+
+    response = _proxy(client, "tools", task_id=task_id)
+
+    assert response.status_code == 502
+    assert "'pantry' didn't list its tools within 1.0s" in response.text
+
+
 def test_a_turns_actions_share_one_connection_to_each_env_server_which_closes_with_the_turn(client, env, monkeypatch):
     opened, closed, results = [], [], []
     open_session, close_session = ToolSession.open, ToolSession.close

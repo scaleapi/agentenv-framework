@@ -28,7 +28,7 @@ from agentenv_protocol.a2a_agent.proxy import TOOL_TIMEOUT_SECONDS, ProxyAgent
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 
 _CALL_TIMEOUT = httpx.Timeout(60.0, connect=10.0)
-# The calls that wait for a turn's tools to be listed, which the proxy allows TOOL_TIMEOUT_SECONDS an env server.
+# The calls that wait for a turn's tools to be listed, which the proxy allows TOOL_TIMEOUT_SECONDS in all.
 _LISTING_CALLS = frozenset({"tools", "record"})
 _LISTING_TIMEOUT = httpx.Timeout(TOOL_TIMEOUT_SECONDS + 60.0, connect=10.0)
 _SERVE_TIMEOUT_SECONDS = 30.0

@@ -288,14 +288,16 @@ class ProxyAgent(AgentEnvAgent):
         return turn
 
     async def _tools(self, turn: _Turn) -> dict[str, ProxyTool]:
-        """What the turn can call, listed once: each registered env server's tools, and ``bash``. Two offering one
-        name are refused."""
+        """What the turn can call, listed once and all within ``TOOL_TIMEOUT_SECONDS``: each registered env server's
+        tools, and ``bash``. Two offering one name are refused."""
         async with turn.listing:
             if turn.tools is None:
                 offered = {BASH: self._bash_tool} if self._shell else {}
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + TOOL_TIMEOUT_SECONDS
                 for server in turn.servers:
                     try:
-                        listed = await asyncio.wait_for(self._listed(turn, server), TOOL_TIMEOUT_SECONDS)
+                        listed = await asyncio.wait_for(self._listed(turn, server), deadline - loop.time())
                     except asyncio.TimeoutError:
                         raise HTTPException(status_code=502, detail=(
                             f"env server {server!r} didn't list its tools within {TOOL_TIMEOUT_SECONDS}s")) from None

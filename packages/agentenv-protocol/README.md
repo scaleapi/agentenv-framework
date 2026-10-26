@@ -713,7 +713,8 @@ operations:
   "skills"}]}`. A turn its sender cancels drops out of the list.
 - `tools` (`{"token", "task_id"}`) lists what the turn can call, with input schemas: the
   tools of each env server registered through mcp-config, and `bash`. Two servers offering
-  one name are refused with 409.
+  one name are refused with 409, and servers that haven't all listed their tools within
+  600 s get 502. `record` waits for the same listing.
 - `act` (`{"token", "task_id", "action_id", "action"}`) runs one action: `{"kind": "tool",
   "server", "name", "arguments"}` calls an env server through `ToolSession`, with the URL
   and headers registered for it, and `{"kind": "bash", "command"}` runs `bash -c` in the
