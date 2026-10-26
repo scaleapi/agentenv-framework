@@ -96,8 +96,9 @@ with MCP `ToolAnnotations`, an output schema and `_meta`, on mcp's FastMCP and o
 where it can, False lists none); a tool returning `Annotated[CallToolResult, Model]` sends its
 result as is, image blocks included, and is listed with `Model`'s schema. An environment chooses
 at mount which of its `@tool` methods it serves, and with which descriptions, by overriding
-`served_tools(tools)`. After the mount, `await env.update_tool(name, description=...)` changes a
-served tool's description on the card and in `tools/list` alike, on both FastMCPs.
+`served_tools(tools)`. After the mount, `env.mounted_card()` is the card the application serves, and
+`await env.update_tool(name, description=...)` changes a served tool's description on it and in
+`tools/list` alike, on both FastMCPs.
 
 `AgentEnvStarletteApplication` mounts the same handler onto a Starlette/FastAPI app instead of
 FastMCP; since those apps have no MCP tool registry, constructing one with `@tool` methods

@@ -179,6 +179,7 @@ async def test_update_tool_rewrites_a_description_on_the_card_and_in_tools_list_
     card = await _card_tools(app.streamable_http_app())
     assert tools["look"].description == card["look"]["description"] == "Look again."
     assert set(card) == set(tools) == {"look", "plain", "secret", "shot"}
+    assert {t.name: t.description for t in env.mounted_card().capabilities.tools}["look"] == "Look again."
     assert look.structuredContent == {"frame_id": "f1", "width": 1280}
 
 
@@ -202,6 +203,8 @@ async def test_update_tool_rewrites_a_description_on_the_card_and_in_tools_list_
 async def test_update_tool_needs_a_mounted_env_and_a_served_tool():
     with pytest.raises(RuntimeError, match="_Env is not mounted"):
         await _Env().update_tool("look", description="x")
+    with pytest.raises(RuntimeError, match="_Env is not mounted"):
+        _Env().mounted_card()
     env = _Chooser()
     env.create_app()
     with pytest.raises(ValueError, match="no served tool is named 'secret'"):

@@ -36,9 +36,9 @@ _METHOD_NEEDS = {(COMPUTER_DISPLAY, "set"): "set_display"}
 
 
 def served_tools(driver: ComputerDriverEnvironment, tools: list[EnvironmentTool]) -> list[EnvironmentTool]:
-    points = point_tools(driver)
-    return [t.model_copy(update={"description": point_description(driver, t.name)}) if t.name in points else t
-            for t in tools if t.name not in _unserved_tools(driver)]
+    unserved = {name for group, names in GROUP_TOOLS.items() if not driver.has(group) for name in names}
+    return [t.model_copy(update={"description": point_description(driver, t.name)}) if t.name in POINT_TOOLS else t
+            for t in tools if t.name not in unserved]
 
 
 def served_extensions(driver: ComputerDriverEnvironment,
@@ -97,18 +97,9 @@ def declared_extensions(driver: ComputerDriverEnvironment) -> list[EnvironmentEx
     return declared
 
 
-def point_tools(driver: ComputerDriverEnvironment) -> list[str]:
-    unserved = _unserved_tools(driver)
-    return [name for name in POINT_TOOLS if name not in unserved]
-
-
 def point_description(driver: ComputerDriverEnvironment, name: str) -> str:
     """A point tool's docstring, then the default coordinate space."""
     space, scale = driver.settings.default_space, driver.settings.default_norm_scale
     note = (" Points are in frame space by default: pixels of the frame's image." if space == "frame" else
             f" Points are in norm space by default: 0 to {scale} over the frame, so send x and y on that grid.")
     return " ".join((getattr(type(driver), name).__doc__ or "").split()) + note
-
-
-def _unserved_tools(driver: ComputerDriverEnvironment) -> set[str]:
-    return {name for group, names in GROUP_TOOLS.items() if not driver.has(group) for name in names}

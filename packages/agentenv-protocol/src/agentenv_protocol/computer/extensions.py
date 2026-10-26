@@ -2,7 +2,7 @@
 and commands in the session."""
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from ..agent_env_environment import extension
 from . import card
@@ -20,6 +20,7 @@ from .operations import Display, ExecResult
 from .spaces import check_space
 
 if TYPE_CHECKING:
+    from ..types import EnvironmentCard
     from .runtime import ComputerRuntime
     from .settings import ComputerSettings
 
@@ -32,6 +33,7 @@ class Extensions:
     settings: ComputerSettings
     display_modes: tuple
     layouts: tuple[str, ...]
+    mounted_card: Callable[[], EnvironmentCard]
 
     @extension(COMPUTER_READY, op="status", method="GET",
                description="Whether the computer is usable now, by real checks; never sends input.")
@@ -66,8 +68,9 @@ class Extensions:
         space, scale = check_space(default_space, default_norm_scale, self.settings.default_space,
                                    self.settings.default_norm_scale)
         self.settings = self.settings.model_copy(update={"default_space": space, "default_norm_scale": scale})
-        for name in card.point_tools(self):
-            await self.update_tool(name, description=card.point_description(self, name))
+        for tool in self.mounted_card().capabilities.tools or []:
+            if tool.name in card.POINT_TOOLS:
+                await self.update_tool(tool.name, description=card.point_description(self, tool.name))
         return await self._computer_spaces_get()
 
     @extension(COMPUTER_KEYBOARD, op="get", method="GET",

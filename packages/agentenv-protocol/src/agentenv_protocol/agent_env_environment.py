@@ -504,11 +504,18 @@ class AgentEnvEnvironment:
         self._mounted = True
         return app
 
+    def mounted_card(self) -> EnvironmentCard:
+        """The card the mounted application serves: what ``served_*`` kept, as ``update_tool`` left it."""
+        return self._mounted_application().environment_card
+
     async def update_tool(self, name: str, *, description: str) -> None:
         """Change a served tool's description after the mount: on the card and in tools/list alike."""
+        await self._mounted_application().update_tool(name, description=description)
+
+    def _mounted_application(self) -> Any:
         if self._application is None:
             raise RuntimeError(f"{type(self).__name__} is not mounted")
-        await self._application.update_tool(name, description=description)
+        return self._application
 
     def serve(self, transport: str = "streamable-http") -> None:
         if self.mcp is None:

@@ -12,6 +12,7 @@ fastmcp = pytest.importorskip("fastmcp")
 from computer_fake import FakeDriver, FakeScreen, http_client, mcp_session  # noqa: E402
 from PIL import Image as PILImage  # noqa: E402
 
+from agentenv_protocol import EnvironmentTool  # noqa: E402
 from agentenv_protocol.computer import ComputerSettings, InvalidArgument, OutOfBounds  # noqa: E402
 from agentenv_protocol.computer.frames import FrameStore  # noqa: E402
 from agentenv_protocol.computer.operations import Display  # noqa: E402
@@ -102,3 +103,17 @@ async def test_setting_the_default_space_rewrites_the_descriptions_on_fastmcp():
     assert "norm space by default: 0 to 1000" in listed["computer_click"].description
     assert card_click["description"] == listed["computer_click"].description
     assert clicked.structured_content["summary"].startswith("Clicked left at (500, 500) (norm 1000) in f1")
+
+
+@pytest.mark.asyncio
+async def test_setting_the_default_space_rewrites_only_the_point_tools_the_driver_serves():
+    class NoScroll(FakeDriver):
+        def served_tools(self, tools: list[EnvironmentTool]) -> list[EnvironmentTool]:
+            return [t for t in super().served_tools(tools) if t.name != "computer_scroll"]
+
+    driver = NoScroll()
+    async with http_client(driver) as http, mcp_session(driver) as session:
+        applied = await http.post("/agentenv/ext/computer-spaces/set", json={"default_space": "norm"})
+        listed = {t.name: t.description for t in (await session.list_tools()).tools}
+    assert applied.status_code == 200 and "computer_scroll" not in listed
+    assert "norm space by default" in listed["computer_click"] and "norm space by default" in listed["computer_drag"]
