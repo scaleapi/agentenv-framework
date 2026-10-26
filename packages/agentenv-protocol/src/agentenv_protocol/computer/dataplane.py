@@ -7,7 +7,7 @@ import binascii
 import mimetypes
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import httpx
 from pydantic import ValidationError
@@ -16,12 +16,19 @@ from ..agent_env_environment import add_data, get_data
 from ..transfers import NamespaceUploader, ReadObject, WriteNamespaceGrant, download
 from ..types import DATA_OBJECTS_EXTENSION_URI, FilePart, FileWithBytes, FileWithUri, uploaded_file_part, uploaded_object_path
 
+if TYPE_CHECKING:
+    from .runtime import ComputerRuntime
+    from .settings import ComputerSettings
+
 #: The most an https URL part may fetch; a read grant carries its own limit.
 MAX_URL_BYTES = 1 << 30
 
 
 class DataPlane:
     """The data plane handlers, mixed into ComputerDriverEnvironment."""
+
+    _computer: ComputerRuntime
+    settings: ComputerSettings
 
     @add_data
     async def _computer_data_add(self, parts: list) -> None:
@@ -37,7 +44,7 @@ class DataPlane:
                 raise ValueError(f"data/add on a computer takes file parts naming their path under "
                                  f"{DATA_OBJECTS_EXTENSION_URI}, got a {part.kind} part")
             files[path] = await _fetch(part)
-        await self._computer_call("write_files", files)
+        await self._computer.call("write_files", files)
 
     @get_data
     async def _computer_data_get(self, write_namespace: Optional[WriteNamespaceGrant] = None) -> list:

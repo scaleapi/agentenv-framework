@@ -371,9 +371,11 @@ decorators raise `TypeError`. Predicates (`os`, `distribution`, `version`, `arch
 choose a method per platform, read from `/etc/os-release`, the machine and `XDG_SESSION_TYPE` or
 `DISPLAY`: `@capture(display="x11")` and `@capture(display="wayland")` can sit side by side. A
 driver's own `@run_in_session` or `@write_files` replaces the base class's Linux default, which runs
-as the driver's user inside the desktop session. The base class's own members are named `_computer_*`
-and `computer_*`; a driver that redefines one of them, or another private member of the base class,
-is refused when it is defined, so a helper of the driver's can't silently replace one.
+as the driver's user inside the desktop session. The base class keeps its state in `self._computer`
+and names its own members `_computer_*` and `computer_*`; a driver that redefines one of them, or
+another private member of the base class, is refused when it is defined, so a helper of the
+driver's can't silently replace one. What the optional operations give is served only when the
+driver has them, through the `served_tools`, `served_extensions` and `served_operations` hooks.
 
 **What the base class serves:**
 
@@ -382,7 +384,8 @@ is refused when it is defined, so a helper of the driver's can't silently replac
   `computer_scroll`, `computer_type`, `computer_key` (W3C key names) and `computer_wait`, plus the
   group tools. Every result is structured, with a one-line summary as its text block; input results
   carry `applied`, `delivery` and `others_since_frame`, and `screenshot: true` returns a fresh frame
-  after acting.
+  after acting. Click and scroll leave out `x` and `y` to act at the pointer on a computer with
+  `computer-pointer/v1`; elsewhere a call without them is refused `invalid_argument`.
 - **Frames and spaces.** Points are pixels of a named frame (your latest by default), or a
   0..`norm_scale` grid over it with `space: "norm"`. A point outside the frame or the range is
   refused (`out_of_bounds`), never clamped. The last 64 frames are kept, and a frame goes stale

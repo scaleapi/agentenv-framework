@@ -310,7 +310,7 @@ async def test_keys_held_down_stay_down_until_released():
         nothing = await session.call_tool("computer_keyboard_up", {})
     assert held == ["Shift", "Control"] and driver.screen.held == []
     assert partly.structuredContent["summary"] == "Released Shift" and rest.structuredContent["summary"] == "Released Control"
-    assert nothing.structuredContent["code"] == "invalid_argument" and driver._computer_held == {}
+    assert nothing.structuredContent["code"] == "invalid_argument" and driver._computer.held == {}
 
 
 @pytest.mark.asyncio
@@ -332,7 +332,7 @@ async def test_keys_held_past_max_hold_ms_are_released():
         with anyio.fail_after(5):
             while driver.screen.held:
                 await asyncio.sleep(0.01)
-    assert driver.screen.log[-1] == ("key_up", ("Alt",)) and driver._computer_held == {}
+    assert driver.screen.log[-1] == ("key_up", ("Alt",)) and driver._computer.held == {}
 
 
 @pytest.mark.asyncio
@@ -397,7 +397,7 @@ async def test_a_screenshot_that_fails_after_the_input_reports_the_input_as_done
     assert not clicked.isError and clicked.structuredContent["applied"] == "yes" and "frame" not in clicked.structuredContent
     assert "the screenshot after it failed (internal: @capture failed: RuntimeError: mss died)" in clicked.content[0].text
     assert [e[0] for e in driver.screen.log] == ["click", "key_down"]
-    assert not held.isError and driver._computer_held == {"default": ["Shift"]}
+    assert not held.isError and driver._computer.held == {"default": ["Shift"]}
 
 
 @pytest.mark.asyncio
@@ -412,7 +412,7 @@ async def test_the_automatic_release_waits_out_a_busy_queue():
             while driver.screen.held:
                 await asyncio.sleep(0.01)
     kinds = [e[0] for e in driver.screen.log]
-    assert kinds == ["key_down", "drag", "key_up"] and driver._computer_held == {}
+    assert kinds == ["key_down", "drag", "key_up"] and driver._computer.held == {}
 
 
 @pytest.mark.asyncio

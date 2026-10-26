@@ -18,7 +18,7 @@ from .errors import (
     Timeout,
     Unsupported,
 )
-from .extensions import (
+from .card import (
     COMPUTER,
     COMPUTER_DISPLAY,
     COMPUTER_EXEC,

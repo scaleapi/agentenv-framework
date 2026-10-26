@@ -28,7 +28,7 @@ async def test_a_screenshot_is_a_native_frame_with_its_geometry():
         second = await session.call_tool("computer_screenshot", {"format": "jpeg", "quality": 40})
     data = first.structuredContent
     assert data["frame_id"] == "f1" and (data["width"], data["height"]) == (1280, 800)
-    assert data["display"] == {"width": 1280, "height": 800, "scale": 1.0} and data["parent_frame_id"] is None
+    assert data["display"] == {"width": 1280, "height": 800, "scale": 1.0} and "parent_frame_id" not in data
     assert data["captured_at"].endswith("Z") and data["summary"] == "Captured f1: 1280×800 of the 1280×800 display"
     assert first.content[0].text == data["summary"] and first.content[1].mimeType == "image/png"
     assert _image(first).size == (1280, 800)
@@ -63,7 +63,7 @@ async def test_a_region_is_a_native_crop_whose_points_map_back_exactly():
 
 
 async def _captured_at(driver: FakeDriver, frame_id: str) -> str:
-    return driver._computer_frames.get(frame_id, "default").data()["captured_at"]
+    return driver._computer.frames.get(frame_id, "default").result().captured_at
 
 
 @pytest.mark.asyncio

@@ -2,10 +2,12 @@
 clamped outside the frame or the range, with the default space set per deploy."""
 from __future__ import annotations
 
+import httpx
 import pytest
 
 pytest.importorskip("mcp.server.fastmcp")
 pytest.importorskip("PIL")
+fastmcp = pytest.importorskip("fastmcp")
 
 from computer_fake import FakeDriver, FakeScreen, http_client, mcp_session  # noqa: E402
 from PIL import Image as PILImage  # noqa: E402
@@ -83,3 +85,20 @@ async def test_setting_the_default_space_rewrites_the_descriptions():
     card_click = next(t for t in card["capabilities"]["tools"] if t["name"] == "computer_click")
     assert card_click["description"] == after["computer_click"]
     assert refused.status_code == 400 and refused.json()["error"]["code"] == "invalid_argument"
+
+
+@pytest.mark.asyncio
+async def test_setting_the_default_space_rewrites_the_descriptions_on_fastmcp():
+    app = fastmcp.FastMCP("desktop")
+    FakeDriver().mount(app)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app.http_app()), base_url="http://t") as http:
+        await http.post("/agentenv/ext/computer-spaces/set", json={"default_space": "norm", "default_norm_scale": 1000})
+        card = (await http.get("/.well-known/agent-env.json")).json()
+    async with fastmcp.Client(app) as client:
+        listed = {t.name: t for t in await client.list_tools()}
+        await client.call_tool("computer_screenshot", {})
+        clicked = await client.call_tool("computer_click", {"x": 500, "y": 500})
+    card_click = next(t for t in card["capabilities"]["tools"] if t["name"] == "computer_click")
+    assert "norm space by default: 0 to 1000" in listed["computer_click"].description
+    assert card_click["description"] == listed["computer_click"].description
+    assert clicked.structured_content["summary"].startswith("Clicked left at (500, 500) (norm 1000) in f1")

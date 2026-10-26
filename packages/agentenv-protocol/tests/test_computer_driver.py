@@ -42,6 +42,7 @@ from agentenv_protocol.computer.keys import canonical  # noqa: E402
 from agentenv_protocol.computer.operations import declared, resolve  # noqa: E402
 from agentenv_protocol.computer.platform import detect, normalize  # noqa: E402
 from agentenv_protocol.computer.settings import load_settings  # noqa: E402
+from agentenv_protocol.computer.tools import _modifiers  # noqa: E402
 
 MACOS = Platform(os="macos", arch="arm64")
 
@@ -96,7 +97,7 @@ def test_a_group_with_a_member_that_doesnt_match_the_platform_is_dropped():
     assert FakeDriver(platform=LINUX).has("pointer")
     Driver = type("Driver", (FakeDriver,), {"move": pointer_move(os="windows")(lambda self, x, y: None)})
     driver = Driver()
-    assert not driver.has("pointer") and "pointer_down" not in driver._computer_operations
+    assert not driver.has("pointer") and "pointer_down" not in driver._computer.operations
 
 
 def test_unknown_predicates_are_refused():
@@ -230,7 +231,7 @@ async def test_tools_refuse_until_the_ready_checks_pass_once():
     assert refused.isError and refused.structuredContent["code"] == "device_unavailable"
     assert refused.structuredContent["retryable"] is True
     assert "display: @display failed: RuntimeError: no X server" in refused.structuredContent["message"]
-    assert not served.isError and driver._computer_ready
+    assert not served.isError and driver._computer.ready
 
 
 @pytest.mark.asyncio
@@ -349,8 +350,11 @@ async def test_a_driver_mounted_on_an_app_serves_the_same_tools():
     app = driver.mount(FastMCP("mounted"))
     async with create_connected_server_and_client_session(app) as session:
         tools = {t.name: t for t in (await session.list_tools()).tools}
-    assert tools["computer_click"].inputSchema["required"] == ["x", "y"]
+        refused = await session.call_tool("computer_click", {})
+    assert "required" not in tools["computer_click"].inputSchema and "computer_pointer_move" not in tools
     assert "frame space by default" in tools["computer_scroll"].description
+    assert refused.structuredContent["code"] == "invalid_argument"
+    assert refused.structuredContent["message"] == "give x and y"
 
 
 @pytest.mark.asyncio
@@ -359,7 +363,7 @@ async def test_concurrent_first_calls_run_the_ready_checks_once():
     driver.slow["display"] = 0.05
     async with mcp_session(driver) as session:
         results = await asyncio.gather(*(session.call_tool("computer_wait", {"ms": 0}) for _ in range(3)))
-    assert all(not r.isError for r in results) and driver._computer_ready
+    assert all(not r.isError for r in results) and driver._computer.ready
 
 
 def test_keys_and_modifiers_that_arent_lists_of_names_are_refused():
@@ -367,10 +371,10 @@ def test_keys_and_modifiers_that_arent_lists_of_names_are_refused():
         with pytest.raises(InvalidArgument, match="a key is a W3C key value"):
             canonical(key)
     with pytest.raises(InvalidArgument, match="modifiers is a list"):
-        FakeDriver()._computer_modifiers("Shift")
+        _modifiers(FakeDriver(), "Shift")
 
 
-@pytest.mark.parametrize("name", ["_computer_act", "_computer_frames", "computer_click", "_mounted", "_computer_new"])
+@pytest.mark.parametrize("name", ["_computer", "_computer_ready_status", "_computer_new", "computer_click", "_application", "_mounted"])
 def test_a_driver_member_that_would_replace_the_base_classs_own_is_refused(name):
     with pytest.raises(TypeError, match=rf"Driver redefines {name}, which ComputerDriverEnvironment uses itself"):
         _define({name: lambda self: None})

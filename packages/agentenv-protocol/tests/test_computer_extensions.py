@@ -171,7 +171,7 @@ async def test_a_background_apps_output_is_drained_after_the_call_returns(monkey
 @pytest.mark.asyncio
 async def test_only_the_latest_command_results_are_kept(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr("agentenv_protocol.computer.extensions.KEEP_EXEC_RESULTS", 1)
+    monkeypatch.setattr("agentenv_protocol.computer.runtime.KEEP_EXEC_RESULTS", 1)
     count = ["sh", "-c", "echo x >> runs; wc -l < runs"]
     async with http_client(FakeDriver()) as http:
         for request_id in ("a", "b", "a"):
@@ -182,7 +182,7 @@ async def test_only_the_latest_command_results_are_kept(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_a_running_command_is_joined_however_many_others_finish_meanwhile(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr("agentenv_protocol.computer.extensions.KEEP_EXEC_RESULTS", 1)
+    monkeypatch.setattr("agentenv_protocol.computer.runtime.KEEP_EXEC_RESULTS", 1)
     slow = _run(argv=["sh", "-c", "sleep 0.6; echo a >> runs"], request_id="a")
     async with http_client(FakeDriver()) as http:
         async def others_then_retry():

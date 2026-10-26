@@ -12,6 +12,7 @@ from PIL import Image as PILImage
 
 from .errors import Internal, StaleFrame
 from .operations import Display, Image
+from .results import DisplayData, FrameData
 
 KEEP = 64
 #: The JPEG quality a screenshot answers with when it names none.
@@ -62,15 +63,15 @@ class Frame:
     def contains(self, fx: float, fy: float) -> bool:
         return 0 <= fx < self.width and 0 <= fy < self.height
 
-    def data(self) -> dict:
-        return {
-            "frame_id": self.id,
-            "width": self.width,
-            "height": self.height,
-            "display": {"width": self.display.width, "height": self.display.height, "scale": self.display.scale},
-            "parent_frame_id": self.parent_id,
-            "captured_at": self.captured_at.isoformat().replace("+00:00", "Z"),
-        }
+    def result(self) -> FrameData:
+        return FrameData(
+            frame_id=self.id,
+            width=self.width,
+            height=self.height,
+            display=DisplayData(width=self.display.width, height=self.display.height, scale=self.display.scale),
+            parent_frame_id=self.parent_id,
+            captured_at=self.captured_at.isoformat().replace("+00:00", "Z"),
+        )
 
     def encode(self, fmt: str = "png", quality: int | None = None) -> tuple[str, str]:
         """The frame as base64 and its MIME type."""
