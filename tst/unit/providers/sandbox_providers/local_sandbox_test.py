@@ -912,6 +912,7 @@ async def test_teardown_sends_sigterm_then_sigkill_to_what_outlives_it(monkeypat
     sent, running = [], {11: signal.SIGTERM, 12: signal.SIGKILL}  # pid -> the signal that stops it
     monkeypatch.setattr(ls, "_REAP_SECONDS", 1)
     monkeypatch.setattr(ls, "_marked_pids", lambda sandbox_id: sorted(running) if sandbox_id == "local-a" else [])
+    monkeypatch.setattr(ls, "_started", lambda pid: 1 if pid in running else None)
 
     def kill(pid, sig):
         sent.append((pid, sig))
@@ -928,6 +929,7 @@ async def test_teardown_sends_sigterm_then_sigkill_to_what_outlives_it(monkeypat
 async def test_teardown_keeps_the_staging_a_surviving_process_runs_from(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(ls, "_REAP_SECONDS", 1)
     monkeypatch.setattr(ls, "_marked_pids", lambda sandbox_id: [13])  # never stops
+    monkeypatch.setattr(ls, "_started", lambda pid: 1)
     monkeypatch.setattr(ls.os, "kill", lambda pid, sig: None)
     sandbox = _RecordingLocalSandbox(work_dir=tmp_path)
     staged = Path(tempfile.mkdtemp(prefix="install-agent-solver-", suffix=f"-{sandbox.sandbox_id}", dir="/tmp"))
@@ -945,15 +947,6 @@ def _running(pid: int) -> bool:
         return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] not in "ZX"
     except (FileNotFoundError, ProcessLookupError):  # a process that exits mid-read gives ESRCH
         return False
-
-
-async def _stopped(pid: int, within: float = 5.0) -> bool:
-    """Whether ``pid`` stops running within ``within`` seconds: a kill lands a moment after it's sent, longer on a
-    loaded machine."""
-    async with asyncio.timeout(within):
-        while _running(pid):
-            await asyncio.sleep(0.05)
-    return True
 
 
 async def _detached(sandbox: LocalSandbox, command: str = "sleep 300") -> int:
@@ -997,7 +990,7 @@ async def test_teardown_stops_what_a_command_left_running_and_only_that(tmp_path
 
         await _RecordingLocalSandbox(work_dir=ours.work_dir, sandbox_id=ours.sandbox_id).terminate()
 
-        assert await _stopped(left)
+        assert not _running(left)
         assert _running(other)
     finally:
         await ls._stop_marked(theirs.sandbox_id)
@@ -1012,8 +1005,31 @@ async def test_teardown_kills_a_process_that_ignores_sigterm(tmp_path: Path, mon
 
     await ls._stop_marked(sandbox.sandbox_id)
 
-    assert await _stopped(stubborn)
+    assert not _running(stubborn)
     assert not ls._marked_pids(sandbox.sandbox_id)
+
+
+@linux_only
+@pytest.mark.asyncio
+async def test_teardown_follows_a_process_it_found_until_it_exits_though_its_environment_reads_empty(monkeypatch):
+    """A process's environment reads empty while it execs or is exiting, so the next scan missing it doesn't mean it
+    stopped."""
+    monkeypatch.setattr(ls, "_REAP_SECONDS", 1)
+    stubborn = subprocess.Popen(["bash", "-c", "trap '' TERM; exec sleep 300"])
+    try:
+        for _ in range(500):
+            if Path(f"/proc/{stubborn.pid}/cmdline").read_text().split("\0")[0] == "sleep":  # exec'd, still ignoring SIGTERM
+                break
+            await asyncio.sleep(0.01)
+        scans = iter([[stubborn.pid]])
+        monkeypatch.setattr(ls, "_marked_pids", lambda sandbox_id: next(scans, []))
+
+        assert await ls._stop_marked("local-a")
+
+        assert not _running(stubborn.pid)
+    finally:
+        stubborn.kill()
+        stubborn.wait()
 
 
 @pytest.mark.asyncio
