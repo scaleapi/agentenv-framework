@@ -12,7 +12,7 @@ from ..tool_context import ToolContext
 from ..types import EnvironmentExtension, EnvironmentTool, IntakeDeclaration, IntakeFormat, intake_extension
 from . import linux
 from .dataplane import DataPlane
-from .errors import DeliveryFailed, DeviceUnavailable, Internal
+from .errors import DeliveryFailed, DeviceUnavailable, InputBusy, Internal
 from .extensions import (
     COMPUTER,
     COMPUTER_DISPLAY,
@@ -80,7 +80,8 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         self._computer_queue = InputQueue()
         self._computer_ready = False
         self._computer_ready_lock = asyncio.Lock()
-        self._computer_exec_runs: OrderedDict = OrderedDict()
+        self._computer_exec_running: dict = {}
+        self._computer_exec_finished: OrderedDict = OrderedDict()
         self._computer_held: dict[str, list[str]] = {}
         self._computer_releases: dict[str, asyncio.Task] = {}
         self._computer_served: dict[str, EnvironmentTool] = {}
@@ -214,13 +215,18 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         except (TypeError, ValueError):
             raise Internal(f"@pointer_position returned {where!r}, not (x, y)") from None
 
-    async def _computer_act(self, ctx: ToolContext, operation: str, args: tuple, *, frame: Frame | None, screenshot: bool,
-                   summary: str, repeat: int = 1, hold: tuple | None = None, move_to: tuple | None = None):
+    async def _computer_act(self, ctx: ToolContext, operation: str, args: tuple, *, frame: Frame | None,
+                            screenshot: bool, summary: str, mapped: bool = False, repeat: int = 1,
+                            hold: tuple | None = None, move_to: tuple | None = None, then: Callable | None = None):
         """One input call: its turn in the queue, the operation (after a move, repeated or held), then the result
-        with others' input since ``frame`` and, when asked, a fresh frame."""
+        with others' input since ``frame`` and, when asked, a fresh frame. A point ``mapped`` from ``frame`` is
+        checked again once the call has its turn, since the display may have changed while it waited; ``then``
+        runs as soon as the input is delivered."""
         identity = self.caller_identity(ctx)
         sent = False
         async with self._computer_queue.turn(self.settings.queue_wait_s):
+            if mapped and frame is not None:
+                self._computer_frames.check_current(frame, await self._computer_display_now())
             others = self._computer_queue.others_since(frame.inputs, identity) if frame is not None else 0
             effect = None
             try:
@@ -240,10 +246,15 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
             finally:
                 if sent:
                     self._computer_queue.delivered(identity)
+            if then is not None:
+                then()
         data = {"applied": "yes", "delivery": "foreground", "others_since_frame": others, "effect": effect_data(effect)}
         if not screenshot:
             return _result(summary, data)
-        new = await self._computer_capture(identity)
+        try:
+            new = await self._computer_capture(identity)
+        except AgentEnvError as e:
+            return _result(f"{summary}; the screenshot after it failed ({e.code}: {e.message})", data)
         return _result(f"{summary}, then captured {new.id}", {**data, "frame": new.data()}, new.encode())
 
     async def _computer_ensure_ready(self) -> None:
@@ -287,7 +298,8 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         previous = self._computer_releases.pop(identity, None)
         if previous is not None:
             previous.cancel()
-        self._computer_releases[identity] = asyncio.ensure_future(self._computer_release_after(identity, self.settings.max_hold_ms))
+        self._computer_releases[identity] = asyncio.ensure_future(
+            self._computer_release_after(identity, self.settings.max_hold_ms))
 
     def _computer_release(self, identity: str, keys: list[str]) -> None:
         held = [k for k in self._computer_held.get(identity, []) if k not in keys]
@@ -300,12 +312,15 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
             release.cancel()
 
     async def _computer_release_after(self, identity: str, ms: int) -> None:
-        """Release what ``identity`` still holds once ``max_hold_ms`` has passed."""
+        """Release what ``identity`` still holds once ``max_hold_ms`` has passed, waiting as long as other input
+        keeps the queue busy."""
         await asyncio.sleep(ms / 1000)
-        keys = list(reversed(self._computer_held.get(identity, [])))
-        if keys:
-            async with self._computer_queue.turn(self.settings.queue_wait_s):
-                await self._computer_call("key_up", keys)
+        while keys := list(reversed(self._computer_held.get(identity, []))):
+            try:
+                async with self._computer_queue.turn(self.settings.queue_wait_s):
+                    await self._computer_call("key_up", keys)
+            except InputBusy:
+                continue
             self._computer_release(identity, keys)
 
     def _computer_require_init(self) -> None:

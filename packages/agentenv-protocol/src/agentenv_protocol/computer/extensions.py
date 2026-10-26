@@ -20,7 +20,7 @@ COMPUTER_KEYBOARD = "urn:agentenv:computer-keyboard/v1"
 COMPUTER_EXEC = "urn:agentenv:computer-exec/v1"
 
 MAX_EXEC_TIMEOUT_S = 3600
-#: How many command results are kept for a repeated request_id.
+#: How many finished command results are kept for a repeated request_id; a running command is always joined.
 KEEP_EXEC_RESULTS = 256
 KEYBOARD_RANGES = {"tap_hold_ms": (0, 1000), "type_delay_ms": (0, 1000), "max_hold_ms": (0, 600_000)}
 
@@ -45,8 +45,9 @@ class Extensions:
         if [width, height] not in [list(m) for m in self.display_modes]:
             modes = ", ".join(f"{w}×{h}" for w, h in self.display_modes)
             raise InvalidArgument(f"{width}×{height} is not one of this computer's display modes: {modes}")
-        now = await self._computer_display_now()
-        changed = await self._computer_call("set_display", width, height, now.scale if scale is None else scale)
+        async with self._computer_queue.turn(self.settings.queue_wait_s):
+            now = await self._computer_display_now()
+            changed = await self._computer_call("set_display", width, height, now.scale if scale is None else scale)
         if not isinstance(changed, Display):
             changed = await self._computer_display_now()
         return self._computer_display_data(changed)
@@ -99,19 +100,24 @@ class Extensions:
         timeout = self.settings.exec_timeout_s if timeout_s is None else timeout_s
         if not 0 < timeout <= MAX_EXEC_TIMEOUT_S:
             raise InvalidArgument(f"timeout_s is above 0 and at most {MAX_EXEC_TIMEOUT_S}, got {timeout}")
-        runs: OrderedDict = self._computer_exec_runs
-        task = runs.get(request_id)
+        finished: OrderedDict = self._computer_exec_finished
+        if request_id in finished:
+            return finished[request_id]
+        running: dict = self._computer_exec_running
+        task = running.get(request_id)
         if task is None:
             task = asyncio.ensure_future(self._computer_run_command(argv, cwd, env, timeout))
-            runs[request_id] = task
+            running[request_id] = task
 
-            def forget_a_failure(done: asyncio.Task) -> None:
-                if done.cancelled() or done.exception() is not None:
-                    runs.pop(request_id, None)
+            def done(ran: asyncio.Task) -> None:
+                if running.get(request_id) is ran:
+                    del running[request_id]
+                if not ran.cancelled() and ran.exception() is None:
+                    finished[request_id] = ran.result()
+                    while len(finished) > KEEP_EXEC_RESULTS:
+                        finished.popitem(last=False)
 
-            task.add_done_callback(forget_a_failure)
-            while len(runs) > KEEP_EXEC_RESULTS:
-                runs.popitem(last=False)
+            task.add_done_callback(done)
         return await asyncio.shield(task)
 
     async def _computer_run_command(self, argv: list, cwd: Optional[str], env: Optional[dict], timeout: float) -> dict:

@@ -11,10 +11,11 @@ import pytest
 pytest.importorskip("mcp.server.fastmcp")
 pytest.importorskip("PIL")
 
-from computer_fake import COLOURS, FakeDriver, FakeScreen, MinimalDriver, mcp_session  # noqa: E402
+from computer_fake import COLOURS, FakeDriver, FakeScreen, MinimalDriver, http_client, mcp_session  # noqa: E402
 
 from agentenv_protocol import ROLE_META_KEY  # noqa: E402
 from agentenv_protocol.computer import ComputerSettings, pointer_position  # noqa: E402
+from agentenv_protocol.computer.queue import InputQueue  # noqa: E402
 
 
 class ByRole(FakeDriver):
@@ -358,3 +359,74 @@ async def test_the_minimal_driver_serves_no_group_tools():
         missing = await session.call_tool("computer_pointer_move", {"x": 1, "y": 1})
     assert not clicked.isError and driver.screen.log == [("click", 3, 4, "left", 1, ())]
     assert missing.isError and "Unknown tool" in missing.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_a_caller_cancelled_while_waiting_never_leaves_the_queue_held():
+    queue = InputQueue()
+
+    async def hold():
+        async with queue.turn(5):
+            await asyncio.sleep(0.2)
+
+    async def wait():
+        async with queue.turn(5):
+            pass
+
+    holder = asyncio.ensure_future(hold())
+    await asyncio.sleep(0.01)
+    waiter = asyncio.ensure_future(wait())
+    await asyncio.sleep(0.01)
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    await holder
+    async with queue.turn(0.5):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_a_screenshot_that_fails_after_the_input_reports_the_input_as_done():
+    driver = FakeDriver()
+    async with mcp_session(driver) as session:
+        await _shot(session)
+        driver.fail["capture"] = RuntimeError("mss died")
+        clicked = await session.call_tool("computer_click", {"x": 4, "y": 4, "screenshot": True})
+        driver.fail["capture"] = RuntimeError("mss died")
+        held = await session.call_tool("computer_keyboard_down", {"keys": ["Shift"], "screenshot": True})
+    assert not clicked.isError and clicked.structuredContent["applied"] == "yes" and "frame" not in clicked.structuredContent
+    assert "the screenshot after it failed (internal: @capture failed: RuntimeError: mss died)" in clicked.content[0].text
+    assert [e[0] for e in driver.screen.log] == ["click", "key_down"]
+    assert not held.isError and driver._computer_held == {"default": ["Shift"]}
+
+
+@pytest.mark.asyncio
+async def test_the_automatic_release_waits_out_a_busy_queue():
+    driver = FakeDriver(settings=ComputerSettings(max_hold_ms=50, queue_wait_s=0.05))
+    async with mcp_session(driver) as session:
+        await _shot(session)
+        await session.call_tool("computer_keyboard_down", {"keys": ["Alt"]})
+        driver.slow["drag"] = 0.4
+        await session.call_tool("computer_drag", {"path": [[1, 1], [9, 9]]})
+        with anyio.fail_after(5):
+            while driver.screen.held:
+                await asyncio.sleep(0.01)
+    kinds = [e[0] for e in driver.screen.log]
+    assert kinds == ["key_down", "drag", "key_up"] and driver._computer_held == {}
+
+
+@pytest.mark.asyncio
+async def test_a_point_queued_while_the_display_changes_is_refused_stale():
+    driver = FakeDriver()
+    async with mcp_session(driver) as session, http_client(driver) as http:
+        await _shot(session)
+        driver.slow["click"] = 0.3
+        first = asyncio.ensure_future(session.call_tool("computer_click", {"x": 1, "y": 1}))
+        await asyncio.sleep(0.05)
+        resize = asyncio.ensure_future(http.post("/agentenv/ext/computer-display/set", json={"width": 640, "height": 400}))
+        await asyncio.sleep(0.05)
+        queued = await session.call_tool("computer_click", {"x": 1270, "y": 10})
+        await first
+        await resize
+    assert queued.structuredContent["code"] == "stale_frame" and queued.structuredContent["applied"] == "no"
+    assert [e[1:3] for e in driver.screen.log] == [(1, 1)]

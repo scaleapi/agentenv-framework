@@ -303,7 +303,8 @@ class AgentEnvFastMCPApplication(AgentEnvApplication):
             extra["output_schema"] = None
         registered = injecting(fn)
         if fastmcp and _returns_call_tool_result(fn):
-            registered, extra["output_schema"] = _fastmcp_returning(registered)
+            registered, schema = _fastmcp_returning(registered)
+            extra["output_schema"] = None if options.structured_output is False else schema
         app.tool(name=descriptor.name, description=descriptor.description, **extra)(registered)
 
     def _check_tool_binding(self, app: Any) -> None:

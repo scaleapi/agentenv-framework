@@ -177,3 +177,20 @@ async def test_only_the_latest_command_results_are_kept(monkeypatch, tmp_path):
         for request_id in ("a", "b", "a"):
             last = (await http.post("/agentenv/ext/computer-exec/run", json=_run(argv=count, request_id=request_id))).json()
     assert last["stdout"].strip() == "3", "a's first result was dropped, so a ran again"
+
+
+@pytest.mark.asyncio
+async def test_a_running_command_is_joined_however_many_others_finish_meanwhile(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("agentenv_protocol.computer.extensions.KEEP_EXEC_RESULTS", 1)
+    slow = _run(argv=["sh", "-c", "sleep 0.6; echo a >> runs"], request_id="a")
+    async with http_client(FakeDriver()) as http:
+        async def others_then_retry():
+            await asyncio.sleep(0.1)
+            for request_id in ("b", "c"):
+                await http.post("/agentenv/ext/computer-exec/run", json=_run(argv=["true"], request_id=request_id))
+            return await http.post("/agentenv/ext/computer-exec/run", json=slow)
+
+        first, retried = await asyncio.gather(http.post("/agentenv/ext/computer-exec/run", json=slow),
+                                              others_then_retry())
+    assert first.json() == retried.json() and (tmp_path / "runs").read_text() == "a\n"

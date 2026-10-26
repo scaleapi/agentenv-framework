@@ -141,3 +141,20 @@ def test_served_tools_naming_an_unmarked_tool_or_one_twice_is_refused(chosen, er
 
     with pytest.raises(ValueError, match=error):
         AgentEnvFastMCPApplication(EnvironmentCard(name="t"), _Bad())
+
+
+@pytest.mark.asyncio
+async def test_structured_output_false_lists_no_schema_for_a_call_tool_result_on_fastmcp():
+    @environment_card(name="opted-out")
+    class _OptedOut(AgentEnvEnvironment):
+        @tool(structured_output=False)
+        def shot(self) -> Annotated[CallToolResult, _Frame]:
+            return CallToolResult(content=[TextContent(type="text", text="ok")], structuredContent={"frame_id": "f1", "width": 1})
+
+    app = fastmcp.FastMCP("opted-out")
+    _OptedOut().mount(app)
+    with anyio.fail_after(30):
+        async with fastmcp.Client(app) as client:
+            listed = (await client.list_tools())[0]
+            result = await client.call_tool("shot", {})
+    assert listed.outputSchema is None and result.content[0].text == "ok"

@@ -18,20 +18,26 @@ class InputQueue:
 
     @contextlib.asynccontextmanager
     async def turn(self, wait_s: float) -> AsyncIterator[None]:
-        """Hold the queue for one call, or refuse with input_busy after ``wait_s``. Waiting is first come, first
-        served; a waiter woken as its time runs out still takes its turn."""
+        """Hold the queue for one call, or refuse with input_busy after ``wait_s``; waiting is first come, first
+        served. A wait given up, by the timeout or by the caller's cancellation, never leaves the queue held."""
         waiter = asyncio.ensure_future(self._lock.acquire())
-        done, _ = await asyncio.wait({waiter}, timeout=wait_s)
+        try:
+            done, _ = await asyncio.wait({waiter}, timeout=wait_s)
+        except BaseException:
+            self._abandon(waiter)
+            raise
         if not done:
-            waiter.cancel()
-            try:
-                await waiter
-            except asyncio.CancelledError:
-                raise InputBusy(f"waited {wait_s:g} s for earlier input to finish") from None
+            self._abandon(waiter)
+            raise InputBusy(f"waited {wait_s:g} s for earlier input to finish")
         try:
             yield
         finally:
             self._lock.release()
+
+    def _abandon(self, waiter: asyncio.Future) -> None:
+        """Give up a wait for the lock; if it was granted anyway, give the lock back."""
+        waiter.cancel()
+        waiter.add_done_callback(lambda w: None if w.cancelled() or w.exception() is not None else self._lock.release())
 
     def delivered(self, caller: str) -> None:
         self._total += 1
