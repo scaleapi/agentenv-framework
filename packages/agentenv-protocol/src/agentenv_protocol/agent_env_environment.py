@@ -21,6 +21,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.routing import Route
 
+from .errors import AgentEnvError
 from .tool_context import EMPTY, ToolContext, bound, context_from_http, context_from_mcp
 from .transfers import WriteNamespaceGrant
 from .types import DATA_OBJECTS_EXTENSION_URI, MCP_TRANSPORT, METHOD_ADD, METHOD_GET, METHOD_RESET, RPC_PATH, WELL_KNOWN_PATH, AddDataRequest, AddDataResponse, EnvironmentCapabilities, EnvironmentCard, EnvironmentExtension, EnvironmentInterface, EnvironmentTool, GetDataResponse, ResetDataResponse, error_body
@@ -308,12 +309,18 @@ class AgentEnvFastMCPApplication(AgentEnvApplication):
                 return await inner(name, arguments, *args, **kwargs)
             context = kwargs.get("context", args[0] if args else None)
             with bound(context_from_mcp(context, name, arguments)) as tool_context:
-                if hook is not None:
-                    answer = await _maybe_await(hook(tool_context))
-                    if answer is not None:
-                        _check_call_tool_result(answer)
-                        return answer
-                return await inner(name, arguments, *args, **kwargs)
+                try:
+                    if hook is not None:
+                        answer = await _maybe_await(hook(tool_context))
+                        if answer is not None:
+                            _check_call_tool_result(answer)
+                            return answer
+                    return await inner(name, arguments, *args, **kwargs)
+                except Exception as e:
+                    error = _agentenv_error(e)
+                    if error is None:
+                        raise
+                    return _error_result(error)
 
         functools.update_wrapper(call_tool, inner)
         setattr(call_tool, _TOOL_CONTEXT_BOUND_ATTR, True)
@@ -620,12 +627,18 @@ def _tool_context_middleware(hook: Callable | None) -> Any:
             message = context.message
             arguments = dict(getattr(message, "arguments", None) or {})
             with bound(context_from_mcp(context.fastmcp_context, message.name, arguments)) as tool_context:
-                if hook is not None:
-                    answer = await _maybe_await(hook(tool_context))
-                    if answer is not None:
-                        _check_call_tool_result(answer)
-                        return _fastmcp_tool_result(answer)
-                return await call_next(context)
+                try:
+                    if hook is not None:
+                        answer = await _maybe_await(hook(tool_context))
+                        if answer is not None:
+                            _check_call_tool_result(answer)
+                            return _fastmcp_tool_result(answer)
+                    return await call_next(context)
+                except Exception as e:
+                    error = _agentenv_error(e)
+                    if error is None:
+                        raise
+                    return _fastmcp_tool_result(_error_result(error))
 
     middleware = ToolContextMiddleware()
     setattr(middleware, _TOOL_CONTEXT_BOUND_ATTR, True)
@@ -644,6 +657,24 @@ def _fastmcp_tool_result(answer: Any) -> Any:
     if is_error is None:
         is_error = getattr(answer, "isError", False)
     return ToolResult(content=list(answer.content), structured_content=structured, is_error=bool(is_error))
+
+
+def _agentenv_error(exc: BaseException) -> AgentEnvError | None:
+    """The AgentEnvError a tool raised, found under the ToolError both FastMCPs wrap it in."""
+    while exc is not None:
+        if isinstance(exc, AgentEnvError):
+            return exc
+        exc = exc.__cause__
+    return None
+
+
+def _error_result(error: AgentEnvError) -> Any:
+    from mcp.types import CallToolResult, TextContent
+    return CallToolResult(
+        isError=True,
+        content=[TextContent(type="text", text=f"{error.code}: {error.message}")],
+        structuredContent=error.fields(),
+    )
 
 
 def _schema_from_signature(fn: Callable) -> dict:
@@ -961,20 +992,26 @@ def _extension_handler(fn: Callable, http_method: str) -> Callable:
                     raise ValueError("request body must be a JSON object")
                 params = _coerce_params(fn, params)
         except Exception as e:
-            return _json_response(error_body("invalid_params", str(e)), 400)
+            return _error_response(AgentEnvError("invalid_params", str(e)))
         try:
             signature.bind(**params)
         except TypeError as e:
-            return _json_response(error_body("invalid_params", str(e)), 400)
+            return _error_response(AgentEnvError("invalid_params", str(e)))
         with bound(context_from_http(request, op, params)) as tool_context:
             call_kwargs = {**params, slot: tool_context} if slot else params
             try:
                 result = await _maybe_await(fn(**call_kwargs))
+            except AgentEnvError as e:
+                return _error_response(e)
             except Exception as e:
                 logger.exception("extension invocation failed")
-                return _json_response(error_body("extension_failed", str(e)), 500)
+                return _error_response(AgentEnvError("extension_failed", str(e), applied="unknown", status=500))
         return _json_response(result if result is not None else {})
     return handler
+
+
+def _error_response(error: AgentEnvError) -> Response:
+    return _json_response(error_body(**error.fields()), error.status)
 
 
 class _Op(NamedTuple):
