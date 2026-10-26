@@ -90,9 +90,31 @@ step names it. Steps that name it show and hide it as they do any tool. Steps fo
 that role's earlier named steps, and a full reset (`role: "*", tools: "*"`) clears all of them, so
 grant a hidden tool after such steps. Trigger tool actions call it as usual.
 
+`@tool(..., annotations={"readOnlyHint": True}, structured_output=True, meta={...})` lists the tool
+with MCP `ToolAnnotations`, an output schema and `_meta`, on mcp's FastMCP and on fastmcp alike.
+`structured_output` follows mcp's FastMCP (None derives an output schema from the return annotation
+where it can, False lists none); a tool returning `Annotated[CallToolResult, Model]` sends its
+result as is, image blocks included, and is listed with `Model`'s schema. An environment chooses
+at mount which of its `@tool` methods it serves, and with which descriptions, by overriding
+`served_tools(tools)`.
+
 `AgentEnvStarletteApplication` mounts the same handler onto a Starlette/FastAPI app instead of
 FastMCP; since those apps have no MCP tool registry, constructing one with `@tool` methods
 raises.
+
+### Errors
+
+Raise `AgentEnvError(code, message, *, retryable=False, applied="no", hint=None, status=400)` to
+answer a caller with a code rather than a crash. From an `@extension` method it answers with
+`status` and the body `{"ok": false, "error": {code, message, retryable, applied, hint?}}`; from a
+`@tool` it answers `isError` with `"<code>: <message>"` as the text and the same fields as the
+structured content. `applied` says whether the call's effect happened (`yes`, `no`, or `unknown`
+when it may have been delivered before something failed), and callers retry on their own only when
+`retryable` is true and `applied` is `no`. Any other exception in an extension still answers
+`extension_failed` with status 500, now with `applied: "unknown"`. On the client side,
+`invoke_extension` raises `ExtensionCallError`, an `httpx.HTTPStatusError` carrying `code`,
+`detail`, `retryable`, `applied` and `hint`; a body without those fields, such as a proxy's error
+page, leaves `code` None and `applied` `unknown`.
 
 ### Who is calling
 
@@ -180,6 +202,34 @@ extension's, and `client.invoke_extension(base_url, card, uri, params, method=..
 its HTTP verb. Without `method`, `invoke_extension` calls the first method listed; an extension
 with several methods, such as a gateway's `urn:agentenv:clock/v1`, should always be called by name.
 
+An extension with several methods is served by giving each handler an `op`. Handlers sharing a URI
+merge into one card entry, each method under `params.methods.<op>` with its own verb and endpoint,
+by default `/agentenv/ext/<extension>/<op>`, where `<extension>` is the URN's name without
+`urn:agentenv:` and the version. Extension-level params, such as features and limits, come from the
+environment's `extension_params(uri)`, merged beside `methods`. A declaration-only extension, a
+promise with params and no handler like `intake/v1`, is returned from `declared_extensions()`.
+Two handlers for one method, or a handler without `op` on a URI another handler also serves, are
+refused at mount.
+
+```python
+@extension("urn:agentenv:computer-display/v1", op="get", method="GET")
+async def display_get(self) -> dict: ...
+
+@extension("urn:agentenv:computer-display/v1", op="set")
+async def display_set(self, width: int, height: int) -> dict: ...
+```
+
+### Tool access without a gateway
+
+An environment agents reach directly, with no gateway in front, can enforce per-role tool access
+itself: set `tool_access = True` on the class. It then filters `tools/list` and refuses `tools/call`
+(`permission_denied`) by the caller's role, read from `AgentEnv-Role` or a gateway-stamped `_meta`
+role, and serves `urn:agentenv:disable-tool/v1` and `urn:agentenv:enable-tool/v1` at the gateway's
+paths (`POST /tools/disable`, `POST /tools/enable`) with its bodies (`{role, tools: [...] | "*"}` to
+`{role, disabled, allowed}`) and its rules, hidden-by-default tools included. So agent-env's
+`modify_env_tool_access` step works on such an env unchanged. A call with no role is `default`, as
+at the gateway.
+
 Where the binding lives depends on the app. On mcp's own FastMCP it wraps the tool manager's dispatch; on the standalone `fastmcp` package it joins the app's middleware chain as the outermost layer, so a handler's own middleware runs under it too. An app with neither seam mounts unbound, with a warning, unless a tool declares a `ToolContext` parameter or the handler defines `on_tool_call`: then the mount is refused rather than serving an empty caller.
 
 ### Uploading an export through a grant
@@ -253,6 +303,109 @@ async with ToolSession(mcp_url=mcp_url, role="alice@example.com") as session:
     unknown; read it back (`data/get`) or end the episode.
 - **Tools:** `list_tools()` returns the tools the role may use as `EnvironmentTool`, the type a card's
   `capabilities.tools` holds. Each `inputSchema` is the JSON Schema a model API takes as the tool's parameters.
+
+## Computer drivers
+
+A computer driver is what runs inside a computer an agent uses through screenshots and input. Write
+one as a `ComputerDriverEnvironment` subclass from `agentenv_protocol.computer`, which needs the
+`computer` extra (`pip install 'agentenv-framework-protocol[computer]'`: mcp, uvicorn and Pillow).
+The driver marks the methods that capture the screen and send input; the base class serves the
+computer contract from them, so the tools, results and errors can't drift from it.
+
+```python
+from agentenv_protocol.computer import (
+    ComputerDriverEnvironment, Display, computer_driver,
+    capture, click, display, drag, press, scroll, type_text,
+)
+
+
+@computer_driver(name="my-driver", supports=[{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64"]}])
+class MyDriver(ComputerDriverEnvironment):
+    buttons = ("left", "right")       # features, on the card
+    max_click_count = 2
+
+    @display
+    async def size(self) -> Display: ...                    # width, height, scale
+    @capture(display="x11")
+    async def grab(self): ...                               # the whole display, native resolution
+    @click
+    async def click_at(self, x, y, button, count, modifiers): ...
+    @drag
+    async def drag_along(self, path, button, duration_ms, modifiers): ...
+    @scroll
+    async def scroll_at(self, x, y, direction, amount, modifiers): ...
+    @type_text
+    async def type_in(self, text): ...
+    @press
+    async def press_keys(self, keys): ...
+
+
+if __name__ == "__main__":
+    MyDriver().serve()
+```
+
+**Operations.** Operations get points in screen pixels, after the base class has mapped, checked
+and queued the call, and may be sync or async. `@capture` returns a Pillow image or an
+`Image(width, height, data, mode)` (PNG or JPEG bytes, or raw `RGB`, `RGBA`, `BGRA` or `BGRX`
+pixels), at the display's size times its scale. Input operations may return an `Effect`.
+
+| Decorator | Required | Gives |
+|---|---|---|
+| `@display`, `@capture`, `@click`, `@drag`, `@scroll`, `@type_text`, `@press` | yes | the seven `computer_*` tools and `computer/v1` |
+| `@set_display` | no, with `display_modes` | `computer-display/v1` `set` (`get` is always served) |
+| `@pointer_move`, `@pointer_down`, `@pointer_up`, `@pointer_position` | all or none | `computer-pointer/v1` and its five tools; click and scroll at the pointer |
+| `@key_down`, `@key_up` | both or none | `computer-keyboard/v1` and its two tools |
+| `@run_in_session` | no; a Linux default | `computer-exec/v1` |
+| `@write_files` | no; a Linux default | `data/add` |
+
+The class is checked when it is defined: a missing required operation, half a group, two methods
+for one operation that some platform could both match, or features that don't match the
+decorators raise `TypeError`. Predicates (`os`, `distribution`, `version`, `arch`, `display`)
+choose a method per platform, read from `/etc/os-release`, the machine and `XDG_SESSION_TYPE` or
+`DISPLAY`: `@capture(display="x11")` and `@capture(display="wayland")` can sit side by side. A
+driver's own `@run_in_session` or `@write_files` replaces the base class's Linux default, which runs
+as the driver's user inside the desktop session.
+
+**What the base class serves:**
+
+- **Tools.** `computer_screenshot` (a frame: `frame_id`, image size, display resolution and scale;
+  `region` crops a frame at native resolution), `computer_click`, `computer_drag`,
+  `computer_scroll`, `computer_type`, `computer_key` (W3C key names) and `computer_wait`, plus the
+  group tools. Every result is structured, with a one-line summary as its text block; input results
+  carry `applied`, `delivery` and `others_since_frame`, and `screenshot: true` returns a fresh frame
+  after acting.
+- **Frames and spaces.** Points are pixels of a named frame (your latest by default), or a
+  0..`norm_scale` grid over it with `space: "norm"`. A point outside the frame or the range is
+  refused (`out_of_bounds`), never clamped. The last 64 frames are kept, and a frame goes stale
+  (`stale_frame`) when the display geometry it was captured at changes.
+- **The input queue.** Input calls run one at a time in arrival order; one that waits past
+  `queue_wait_s` is refused `input_busy`. Screenshots and waits never queue.
+- **Framework extensions.** `computer-ready/v1` (`status`: real checks of the display and a
+  capture, plus the driver's own `ready_checks()`; tools refuse `device_unavailable` until they
+  pass once), `computer-display/v1`, `computer-spaces/v1` (the default space, written into the tool
+  descriptions), `computer-keyboard/v1` and `computer-exec/v1` (`run {argv, cwd?, env?, timeout_s?,
+  request_id}`: output capped per stream, a repeated `request_id` answered with the first result).
+- **The data plane.** `data/add` takes file parts that name their path, relative to the session
+  user's home, under the `data-objects/v1` marker (`{"path": ...}`), as inline bytes, an https URL,
+  or a `transfers.ReadObject` read grant under the marker's `read`, and writes them atomically.
+  `data/get` returns the files under the settings' `data_paths`, inline or uploaded under a
+  `write_namespace` grant.
+- **The card** (the name from `ENVIRONMENT_NAME`, then `@computer_driver`'s), and per-role tool
+  access (`tool_access` is on).
+
+**Errors.** A driver raises the errors table's exceptions, all `AgentEnvError`s:
+`InvalidArgument`, `OutOfBounds`, `StaleFrame`, `InputBusy`, `PermissionDenied`, `Unsupported`,
+`BackgroundUnavailable`, `TargetUnavailable`, `DeviceUnavailable` and `LimitExceeded` mean nothing
+was sent (`applied: "no"`); `Timeout`, `DeliveryFailed` and `Internal` mean it may have been. Any
+other exception from an input operation is reported `delivery_failed` with `applied: "unknown"`.
+
+**Settings** reach the driver as one JSON value in `AGENTENV_COMPUTER_SETTINGS`
+(`ComputerSettings`): `data_paths`, `default_space`, `default_norm_scale`, `queue_wait_s`,
+`tap_hold_ms`, `type_delay_ms`, `max_hold_ms`, `layout`, `drag_duration_ms`, `exec_output_bytes`
+and `exec_timeout_s`. A driver reads them as `self.settings`, for example its tap hold in `@press`.
+
+Every caller is `default` until agents carry an identity of their own; `caller_identity(context)`
+names the caller whose latest frame and others' input a call uses.
 
 ## A2A agent framework
 
