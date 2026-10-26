@@ -157,10 +157,13 @@ class A2AAgentValidator:
 
         Namespace routing is on throughout, so the env it deploys, ``A2AAgent.VALIDATION_ENV_ID``, can be the
         ``@local`` env an installed bundle's alias names, written first (``write_validation_env``) in a thread so a
-        service's event loop isn't held up. Returns the merged `verifications` dict from the run's task context.
+        service's event loop isn't held up. ``on_progress`` is called on this event loop throughout, the writer's lines
+        included. Returns the merged `verifications` dict from the run's task context.
         """
+        loop = asyncio.get_running_loop()
+        report = on_progress or (lambda line: None)
         with namespace_routing():
-            await asyncio.to_thread(write_validation_env, on_progress or (lambda line: None))
+            await asyncio.to_thread(write_validation_env, lambda line: loop.call_soon_threadsafe(report, line))
             return await A2AAgentValidator._run(agent, on_progress, litellm_api_key)
 
     @staticmethod
