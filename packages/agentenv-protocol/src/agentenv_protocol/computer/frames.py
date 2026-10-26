@@ -19,10 +19,12 @@ KEEP = 64
 @dataclass(frozen=True)
 class Frame:
     """A capture, or a crop of one: ``origin`` is where this frame's pixels start in the root capture, and the root
-    capture's ``root_size`` image covers the whole ``display``."""
+    capture's ``root_size`` image covers the whole ``display``. The pixels are kept as the PNG every screenshot
+    answers with, a tenth or less of them raw, and decoded only to crop or to answer in JPEG."""
 
     id: str
-    image: PILImage.Image = field(repr=False)
+    png: bytes = field(repr=False)
+    size: tuple[int, int]
     display: Display
     origin: tuple[int, int]
     root_size: tuple[int, int]
@@ -32,11 +34,17 @@ class Frame:
 
     @property
     def width(self) -> int:
-        return self.image.size[0]
+        return self.size[0]
 
     @property
     def height(self) -> int:
-        return self.image.size[1]
+        return self.size[1]
+
+    @property
+    def image(self) -> PILImage.Image:
+        image = PILImage.open(io.BytesIO(self.png))
+        image.load()
+        return image
 
     def to_screen(self, fx: float, fy: float) -> tuple[int, int]:
         """The screen pixel under frame pixel (fx, fy); exact at identity scale."""
@@ -64,14 +72,11 @@ class Frame:
 
     def encode(self, fmt: str = "png", quality: int | None = None) -> tuple[str, str]:
         """The frame as base64 and its MIME type."""
+        if fmt != "jpeg":
+            return base64.b64encode(self.png).decode("ascii"), "image/png"
         buffer = io.BytesIO()
-        if fmt == "jpeg":
-            self.image.convert("RGB").save(buffer, format="JPEG", quality=quality or 85)
-            mime = "image/jpeg"
-        else:
-            self.image.save(buffer, format="PNG")
-            mime = "image/png"
-        return base64.b64encode(buffer.getvalue()).decode("ascii"), mime
+        self.image.convert("RGB").save(buffer, format="JPEG", quality=quality or 85)
+        return base64.b64encode(buffer.getvalue()).decode("ascii"), "image/jpeg"
 
 
 class FrameStore:
@@ -87,7 +92,8 @@ class FrameStore:
             parent: Frame | None = None, origin: tuple[int, int] = (0, 0)) -> Frame:
         frame = Frame(
             id=f"f{self._next}",
-            image=image,
+            png=_png(image),
+            size=image.size,
             display=parent.display if parent is not None else display,
             origin=(parent.origin[0] + origin[0], parent.origin[1] + origin[1]) if parent is not None else (0, 0),
             root_size=parent.root_size if parent is not None else image.size,
@@ -142,6 +148,12 @@ def to_pil(capture: object, display: Display) -> PILImage.Image:
         raise Internal(f"@capture returned {image.size[0]}×{image.size[1]}, but the display at scale "
                        f"{display.scale:g} is {expected[0]}×{expected[1]}")
     return image
+
+
+def _png(image: PILImage.Image) -> bytes:
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
 def _size(display: Display) -> str:
