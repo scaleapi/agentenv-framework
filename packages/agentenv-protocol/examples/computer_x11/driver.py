@@ -189,9 +189,11 @@ class X11Driver(ComputerDriverEnvironment):
 
     @key_down
     async def keys_down(self, keys) -> None:
+        syms = [_keysym(k) for k in keys]
+
         def act(c):
-            for key in keys:
-                self._held.setdefault(key, []).extend(c.hold([_keysym(key)]))
+            for key, pressed in zip(keys, c.hold_each(syms)):
+                self._held.setdefault(key, []).extend(pressed)
         await self._send(act)
 
     @key_up
@@ -260,19 +262,23 @@ class _Connection:
         xtest.fake_input(self.d, X.ButtonPress if down else X.ButtonRelease, BUTTONS[button])
 
     def hold(self, keysyms: list[int]) -> list[int]:
-        """Press what the keysyms need that isn't down already, Shift first where a character needs it; the keycodes
-        this pressed, in order, so the caller releases only those. Every keycode is found before the first press, so
-        keysyms that can't all be held at once are refused with nothing sent."""
+        """``hold_each``'s keycodes, in the order they were pressed."""
+        return [code for pressed in self.hold_each(keysyms) for code in pressed]
+
+    def hold_each(self, keysyms: list[int]) -> list[list[int]]:
+        """Press what the keysyms need that isn't down already, Shift first where a character needs it; for each
+        keysym, the keycodes this pressed, so the caller releases only those. Every keycode is found before the first
+        press, so keysyms that can't all be held at once are refused with nothing sent."""
         down = self._down()
-        planned: list[int] = []
+        planned: list[list[int]] = []
         for keysym in keysyms:
-            planned += self.codes(keysym, busy=down | set(planned))
+            planned.append(self.codes(keysym, busy=down | {code for codes in planned for code in codes}))
         pressed = []
-        for code in planned:
-            if code not in down:
+        for codes in planned:
+            pressed.append([code for code in codes if code not in down])
+            for code in pressed[-1]:
                 xtest.fake_input(self.d, X.KeyPress, code)
                 down.add(code)
-                pressed.append(code)
         return pressed
 
     def release(self, codes) -> None:

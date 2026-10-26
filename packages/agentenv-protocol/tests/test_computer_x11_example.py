@@ -221,11 +221,13 @@ async def test_a_held_characters_keycode_is_not_taken_by_another(x11):
         held = await _events(fake, session, "computer_keyboard_down", {"keys": ["東"]})
         fake.events.clear()
         chord = await session.call_tool("computer_key", {"keys": ["京", "日"]})
+        held_too = await session.call_tool("computer_keyboard_down", {"keys": ["京", "日"]})
         refused = list(fake.events)
         typed = await _events(fake, session, "computer_type", {"text": "京"})
         released = await _events(fake, session, "computer_keyboard_up", {})
     assert held == [("key-down", 9)] and typed == [("key-down", 8), ("key-up", 8)]
-    assert chord.structuredContent["code"] == "unsupported" and chord.structuredContent["applied"] == "no"
+    for call in (chord, held_too):
+        assert call.structuredContent["code"] == "unsupported" and call.structuredContent["applied"] == "no"
     assert refused == [] and released == [("key-up", 9)] and not fake.down
 
 
