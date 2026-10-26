@@ -6,8 +6,9 @@ and the others go on. Each run's sandboxes are torn down as it ends, unless ``ke
 SIGTERM cancels the runs: each one that started is marked cancelled and torn down, and a second one stops the
 teardown. A bundle's evals run only the bundle's own tasks for now, so one naming a store task is refused
 before anything is written, and so is a deploy its sandbox provider can't serve (``preflight``). The infra envs a
-gateway deploy on the local provider needs are built once the writes are done, before any task starts. A dry run
-makes every check the run makes before its first task, and writes, builds and runs nothing.
+gateway deploy on the local provider needs are set up once the writes are done, before any task starts: pulled from
+their published images, or built. A dry run makes every check the run makes before its first task, and writes, builds
+and runs nothing.
 """
 
 from __future__ import annotations
@@ -17,27 +18,26 @@ import logging
 import shlex
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
-from agent_env.env.bootstrap import InfraBuild, ensure_default_envs
+from agent_env.env.bootstrap import InfraSetup, ensure_default_envs
 from agent_env.providers import build_sandbox_provider
 from agent_env.store.base import NotFoundError
 from agent_env.store.routing import namespace_routing, run_scope
-from agent_env.task import Task, record_task_cancelled
+from agent_env.task.store import record_task_cancelled
 from agent_env.task.interrupts import Interrupts
-from agent_env.task.task import recorded_scores
+from agent_env.task.task import Task, recorded_scores
 from agent_env.task.teardown import TeardownReport, teardown_run
 from agent_env.task_step.context import TaskStepContext, sandbox_overrides
-from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM
 
-from ._fs import relative
+from .installed import installed_bundles
 from .materialize import Materialization, Materialized, materialize
 from .parse import BundleEntry, BundleError, BundleKind, parse_bundle
-from .plan import Plan, Write, plan_bundle
+from .plan import AliasUse, Plan, Write, plan_bundle
 from .preflight import Preflight, preflight_run
 from .resolve import BuiltImage, BundleImage, Reference, ReferencedImage, resolve_bundle, without_played_agents
 
@@ -84,6 +84,11 @@ class TaskRun:
         return recorded_scores(self.task.steps, self.context)
 
     @property
+    def models(self) -> dict[str, dict[str, str | None]]:
+        """The model each step asked for, by role then step id; None leaves it to the agent."""
+        return self.context.metadata.get("models") or {}
+
+    @property
     def outcome(self) -> Outcome:
         if self.cancelled:
             return Outcome.CANCELLED
@@ -114,7 +119,7 @@ class BundleRun:
 
     def path(self, entry: BundleEntry) -> str:
         """``entry``'s path in the bundle, as the summary names it (``tasks/hello.json``)."""
-        return relative(self.materialization.plan.bundle.bundle.root, entry.path)
+        return self.materialization.plan.path(entry)
 
     def teardown(self) -> BundleRun:
         """Tear down the runs whose sandboxes were kept up, as ``run_bundle(keep=True)`` leaves them, and
@@ -148,22 +153,27 @@ class DryRun:
     materialization: Materialization  # each write at the version it would leave, and why
     runs: tuple[BundleEntry, ...]  # the tasks that would run, each once, in the plan's order
     skipped: tuple[BundleEntry, ...]  # the tasks no eval names, which running every eval leaves out
-    infra: tuple[InfraBuild, ...] = ()  # the infra envs the run would build first
+    infra: tuple[InfraSetup, ...] = ()  # the infra envs the run would set up first
+    built_here: frozenset[str] = frozenset()  # the images the run would build on this machine, for its deploys here
 
     def path(self, entry: BundleEntry) -> str:
         """``entry``'s path in the bundle (``tasks/hello.json``)."""
-        return relative(self.materialization.plan.bundle.bundle.root, entry.path)
+        return self.materialization.plan.path(entry)
 
     def images(self) -> tuple[str, ...]:
         """A line per image the bundle writes, an image key's or an image folder's: which, the version it would leave,
         and how it would be written."""
-        plan, contexts = self.materialization.plan, self.materialization.contexts
+        plan = self.materialization.plan
         return tuple(
             f"{_label(plan, done.write)} v{done.version}: "
             + ("pulled from its registry, its tag pinned to a digest when it's written"
                if isinstance(done.write.source, ReferencedImage)
-               else f"a build context, which each deploy builds where it runs, for {DEFAULT_BUILD_PLATFORM}"
-               if done.write.id in contexts else "built on this machine")
+               else f"{plan.published[done.write.id].ref}, published for its sources, which each deploy pulls by its "
+                    "digest, or builds from its build context when it can't"
+               if done.write.id in plan.published
+               else "a build context, built with docker on this machine"
+               if done.write.id in self.built_here
+               else "a build context, which each deploy builds where it runs, for its sandbox's platform")
             for done in self.materialization.writes if isinstance(done.write.source, BundleImage)
         )
 
@@ -194,14 +204,19 @@ def run_bundle(
     tasks: Sequence[str] = (),
     evals: Sequence[str] = (),
     model: str | None = None,
+    user_model: str | None = None,
+    judge_model: str | None = None,
+    agent: str | None = None,
     sandbox: str | None = None,
     on_progress: Callable[[str], None] | None = None,
     id_root: str | None = None,
     keep: bool = False,
 ) -> BundleRun:
     """Write what the tasks and evals selected in ``root`` need, as ``plan_bundle`` selects them, then run
-    each of their tasks once. ``model`` replaces the agent's model but not the judge's; ``sandbox`` is the
-    provider that envs, agents, sandboxes and the judge deploy on. ``on_progress`` is given a line of text
+    each of their tasks once. ``model``, ``user_model`` and ``judge_model`` replace the models the solver, the
+    user simulator and the judges run on, and ``agent`` the agent the solver runs as (``Plan.agent``), leaving the
+    tasks as written; ``sandbox`` is the provider that envs,
+    agents, sandboxes and the judge deploy on. ``on_progress`` is given a line of text
     at each write and step. ``id_root`` roots the ids of a bundle an installed package provides
     (``InstalledBundle.id_root``); a folder's ids otherwise come from its path.
 
@@ -225,10 +240,12 @@ def run_bundle(
         build_sandbox_provider(sandbox)
     say = _progress(on_progress)
     with namespace_routing():
-        prepared = _prepare(root, tasks, evals, sandbox, id_root, False, say)
+        prepared = _prepare(root, tasks, evals, sandbox, id_root, agent, False, say)
         plan, entries = prepared.plan, [entry for entry, _ in prepared.tasks]
         with Interrupts() as interrupts:
-            runs = interrupts.run(_run_all(plan, list(prepared.tasks), model, sandbox, keep, say, interrupts))
+            overrides = _overrides(sandbox, user_model, judge_model)
+            runs = interrupts.run(_run_all(plan, list(prepared.tasks), model, overrides,
+                                           _solver_params(plan, prepared.materialization), keep, say, interrupts))
             _mark_cancelled(runs, interrupts.reason)
             result = _bundle_run(plan, prepared.materialization, runs,
                                  _skipped(plan, entries, every=not tasks and not evals))
@@ -261,7 +278,33 @@ def prepare_bundle(
     ``run_bundle`` raises before its first task runs, except for a running event loop, which it doesn't need."""
     if sandbox:
         build_sandbox_provider(sandbox)
-    return _prepare(root, tasks, evals, sandbox, id_root, played, _progress(on_progress))
+    return _prepare(root, tasks, evals, sandbox, id_root, None, played, _progress(on_progress))
+
+
+def _write_bundle(
+    root: Path | str, *, id_root: str | None = None, on_progress: Callable[[str], None] | None = None,
+) -> Materialization:
+    """Write what the bundle in ``root`` needs and set up the infra envs its tasks deploy on, as ``run_bundle`` does
+    before it runs them, and run nothing. Raises what ``run_bundle`` raises before a task runs."""
+    say = _progress(on_progress)
+    with namespace_routing():
+        plan, preflight = _planned(root, (), (), id_root, None, None)
+        _say_agents(plan, say)
+        return _written_with_infra(plan, preflight, say)
+
+
+def _written_with_infra(plan: Plan, preflight: Preflight, say: Callable[[str], None]) -> Materialization:
+    """Write ``plan``, then set up the infra envs its runs deploy on."""
+    materialization = materialize(
+        plan,
+        on_wait=lambda: say("waiting for another agent-env run to finish writing this bundle's ids"),
+        on_build=lambda write: say(f"{_label(plan, write)}: building with docker, which can take minutes"),
+        on_write=lambda done: say(_written(plan, done)),
+        build_here=preflight.built_here,
+    )
+    if preflight.infra:
+        ensure_default_envs(preflight.infra_kinds, say=say)
+    return materialization
 
 
 def dry_run_bundle(
@@ -270,6 +313,7 @@ def dry_run_bundle(
     tasks: Sequence[str] = (),
     evals: Sequence[str] = (),
     sandbox: str | None = None,
+    agent: str | None = None,
     on_progress: Callable[[str], None] | None = None,
     id_root: str | None = None,
 ) -> DryRun:
@@ -285,11 +329,12 @@ def dry_run_bundle(
         build_sandbox_provider(sandbox)
     say = _progress(on_progress)
     with namespace_routing():
-        plan, preflight = _planned(root, tasks, evals, id_root, sandbox)
-        materialization = materialize(plan, dry_run=True, on_write=lambda done: say(_written(plan, done)),
-                                      contexts=preflight.contexts)
+        plan, preflight = _planned(root, tasks, evals, id_root, sandbox, agent)
+        _say_agents(plan, say)
+        materialization = materialize(plan, dry_run=True, on_write=lambda done: say(_written(plan, done)))
         runs = _to_run(plan)
-        return DryRun(materialization, runs, _skipped(plan, runs, every=not tasks and not evals), preflight.infra)
+        return DryRun(materialization, runs, _skipped(plan, runs, every=not tasks and not evals), preflight.infra,
+                      preflight.built_here)
 
 
 def _mark_cancelled(runs: tuple[TaskRun, ...], reason: str) -> None:
@@ -314,25 +359,19 @@ def _bundle_run(plan: Plan, materialization: Materialization, runs: tuple[TaskRu
 
 
 def _prepare(root: Path | str, tasks: Sequence[str], evals: Sequence[str], sandbox: str | None, id_root: str | None,
-             played: bool, say: Callable[[str], None]) -> PreparedBundle:
-    plan, preflight = _planned(root, tasks, evals, id_root, sandbox, played=played)
-    materialization = materialize(
-        plan,
-        on_wait=lambda: say("waiting for another agent-env run to finish writing this bundle's ids"),
-        on_build=lambda write: say(f"{_label(plan, write)}: building with docker, which can take minutes"),
-        on_write=lambda done: say(_written(plan, done)),
-        contexts=preflight.contexts,
-    )
+             agent: str | None, played: bool, say: Callable[[str], None]) -> PreparedBundle:
+    plan, preflight = _planned(root, tasks, evals, id_root, sandbox, agent, played=played)
+    _say_agents(plan, say)
+    materialization = _written_with_infra(plan, preflight, say)
     to_run = tuple((entry, Task.get(entry.id, materialization.version_of("task", entry.id))) for entry in _to_run(plan))
-    if preflight.infra:
-        ensure_default_envs(preflight.infra_kinds, say=say)
     return PreparedBundle(plan, materialization, to_run)
 
 
 def _planned(root: Path | str, tasks: Sequence[str], evals: Sequence[str], id_root: str | None,
-             sandbox: str | None, *, played: bool = False) -> tuple[Plan, Preflight]:
+             sandbox: str | None, agent: str | None = None, *, played: bool = False) -> tuple[Plan, Preflight]:
     resolved = resolve_bundle(parse_bundle(Path(root), id_root=id_root))
-    plan = plan_bundle(without_played_agents(resolved) if played else resolved, tasks=tasks, evals=evals)
+    plan = plan_bundle(without_played_agents(resolved) if played else resolved, tasks=tasks, evals=evals,
+                       installed=installed_bundles, agent=agent)
     refuse_store_tasks(plan)
     to_run = set(_to_run(plan))
     return plan, preflight_run(plan, [write.source for write in plan.writes
@@ -359,7 +398,7 @@ def _skipped(plan: Plan, runs: Sequence[BundleEntry], every: bool) -> tuple[Bund
 def refuse_store_tasks(plan: Plan) -> None:
     """Refuse a selected eval that names a store task: a bundle's evals run only the bundle's own tasks."""
     problems = [
-        f"{_path(plan, entry.entry)}: {ref.where.partition('.')[0]}: {ref.id!r} is a store task, and a bundle's "
+        f"{plan.path(entry.entry)}: {ref.where.partition('.')[0]}: {ref.id!r} is a store task, and a bundle's "
         f"evals run only the bundle's own tasks for now; run it on its own with {_task_run_command(ref)}"
         for entry in plan.evals for ref in entry.references if ref.local is None
     ]
@@ -367,9 +406,38 @@ def refuse_store_tasks(plan: Plan) -> None:
         raise BundleError(problems)
 
 
+def _say_agents(plan: Plan, say: Callable[[str], None]) -> None:
+    """Say what each agent and env alias names, and what the solver deploys in place of the tasks' agents."""
+    for use in (*plan.aliases.values(), *plan.env_aliases.values()):
+        say(_aliased(use))
+    if plan.agent is not None:
+        runs = _to_run(plan)
+        solved = sum(entry.id in plan.agent.steps for entry in runs)
+        say(f"--agent {plan.agent.name}: the solver deploys {plan.agent.agent_id}, in {solved} of {len(runs)} "
+            f"task{'s' if len(runs) != 1 else ''}")
+
+
+def _solver_params(plan: Plan, materialization: Materialization) -> dict[str, dict[str, dict]]:
+    """Each task's ``step_params`` that deploy ``Plan.agent`` at its solver steps: at the version this run wrote, for
+    an agent it writes, or the store's version the plan read."""
+    if plan.agent is None:
+        return {}
+    written = any(write.kind is BundleKind.AGENT and write.id == plan.agent.agent_id for write in plan.writes)
+    version = materialization.version_of(BundleKind.AGENT.store, plan.agent.agent_id) if written else plan.agent.version
+    choice = {"a2a_agent_id": plan.agent.agent_id, "a2a_agent_version": version}
+    return {task_id: {step_id: dict(choice) for step_id in steps} for task_id, steps in plan.agent.steps.items()}
+
+
+def _overrides(sandbox: str | None, user_model: str | None, judge_model: str | None) -> dict[str, str]:
+    """The run's ``user_overrides``: where everything deploys, and the models the user simulator and judges run on."""
+    overrides = sandbox_overrides(sandbox) if sandbox else {}
+    return {**overrides, **{key: value for key, value in (("user_model", user_model), ("judge_model", judge_model))
+                            if value}}
+
+
 async def _run_all(
-    plan: Plan, to_run: list[tuple[BundleEntry, Task]], model: str | None, sandbox: str | None, keep: bool,
-    say: Callable[[str], None], interrupts: Interrupts,
+    plan: Plan, to_run: list[tuple[BundleEntry, Task]], model: str | None, overrides: dict[str, str],
+    step_params: Mapping[str, dict], keep: bool, say: Callable[[str], None], interrupts: Interrupts,
 ) -> tuple[TaskRun, ...]:
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_RUNS)
     run_group_id = uuid.uuid4().hex
@@ -387,10 +455,11 @@ async def _run_all(
             return TeardownReport.skipped(context)
 
     async def run_one(entry: BundleEntry, task: Task) -> TaskRun:
-        tag = f"[{_path(plan, entry)}]"
+        tag = f"[{plan.path(entry)}]"
         metadata = {"run_group_id": run_group_id, "task_id": task.id}
-        if sandbox:
-            metadata["user_overrides"] = sandbox_overrides(sandbox)
+        user_overrides = {**overrides, **({"step_params": step_params[entry.id]} if entry.id in step_params else {})}
+        if user_overrides:
+            metadata["user_overrides"] = user_overrides
         context = TaskStepContext(metadata=metadata)
         try:
             await semaphore.acquire()
@@ -474,6 +543,14 @@ def _task_run_command(ref: Reference) -> str:
     return f"agent-env task run --id {shlex.quote(ref.id)}{version}"
 
 
+def _aliased(use: AliasUse) -> str:
+    """Which agent or env an alias the run names is: the one an installed bundle gives it, or the store's of its id."""
+    if use.store_version is None:
+        return f"{use.alias} → {use.target_id} (the alias {use.declared_by} gives it)"
+    return (f"{use.alias} → the store's {use.kind.value} {use.alias!r} v{use.store_version}, which shadows the alias "
+            f"{use.declared_by} gives {use.target_id}")
+
+
 def _written(plan: Plan, done: Materialized) -> str:
     what = f"{_label(plan, done.write)}: v{done.version}"
     if done.reused:
@@ -499,11 +576,7 @@ def _pinned(done: Materialized) -> str:
 
 def _label(plan: Plan, write: Write) -> str:
     """How a write is named: its entry's folder, and for an image built from it, which image."""
-    path = _path(plan, write.source.entry)
+    path = plan.path(write.source.entry)
     if isinstance(write.source, BuiltImage):
         return f"{path} ({write.source.dockerfile} image)"
     return f"{path} ({write.source.ref} image)" if isinstance(write.source, ReferencedImage) else path
-
-
-def _path(plan: Plan, entry: BundleEntry) -> str:
-    return relative(plan.bundle.bundle.root, entry.path)

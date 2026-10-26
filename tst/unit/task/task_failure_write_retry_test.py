@@ -19,6 +19,7 @@ from agent_env.task.store import (
     append_step_attempt_failure,
     record_task_cancelled,
     record_task_failure,
+    register_task_instance,
     set_task_instance_store,
 )
 from agent_env.task_step.context import TaskStepContext
@@ -202,3 +203,12 @@ def test_record_task_cancelled_retries_until_write_succeeds(monkeypatch):
     finally:
         set_task_instance_store(None)
     assert flaky.calls == 3
+
+
+def test_registering_a_given_instance_id_raises_when_the_store_fails(monkeypatch):
+    def unreachable(*args, **kwargs):
+        raise ConnectionError("store unreachable")
+
+    monkeypatch.setattr(TaskInstanceStore, "upsert_instance", unreachable)
+    with pytest.raises(ConnectionError):
+        register_task_instance("t", 1, 1, instance_id="i")

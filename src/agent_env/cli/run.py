@@ -14,6 +14,7 @@ from agent_env.bundle import (BundleError, BundleKind, BundleRun, DryRun, Outcom
                               dry_run_bundle, run_bundle)
 from agent_env.bundle.installed import (InstalledBundle, checked, find_bundle, installed_bundles, locate_bundle,
                                         path_like, run_name)
+from agent_env.plugins._bundles import ENV_ALIASES, installed_aliases
 from agent_env.plugins._discovery import discovery_error
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox
 from agent_env.task.interrupts import Interrupts
@@ -32,7 +33,12 @@ _DRY_RUN = "Dry run: nothing is written or run."
 @click.argument("bundle", required=False)
 @click.option("--task", "tasks", multiple=True, help="Run this task, by name or id. Repeatable.")
 @click.option("--eval", "evals", multiple=True, help="Run this eval's tasks, by name or id. Repeatable.")
-@click.option("--model", default=None, help="The model the agent runs on. The judge keeps its own.")
+@click.option("--model", default=None, help="The model the solver agent runs on, whatever the tasks name.")
+@click.option("--user-model", default=None, help="The model the user simulator runs on, whatever the tasks name.")
+@click.option("--judge-model", default=None, help="The model the judges grade with, whatever the tasks name.")
+@click.option("--agent", default=None,
+              help="The agent the solver runs as, whatever the tasks name: an alias such as pi, an agent of this "
+                   "bundle or an installed one, or the store's.")
 @click.option("--sandbox", default=None,
               help="The sandbox provider envs, agents, sandboxes and the judge deploy on; comma-separated for a "
                    "fallback chain.")
@@ -42,7 +48,8 @@ _DRY_RUN = "Dry run: nothing is written or run."
               help="Check the bundle as the run does and show what it would write and run; write and run nothing.")
 @click.pass_context
 def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: tuple[str, ...], model: str | None,
-        sandbox: str | None, keep: bool, dry_run: bool):
+        user_model: str | None, judge_model: str | None, agent: str | None, sandbox: str | None, keep: bool,
+        dry_run: bool):
     """Run a bundle's tasks and evals, or list the installed bundles.
 
     BUNDLE is a folder, or the name of a bundle an installed package provides (PACKAGE/NAME when several
@@ -50,11 +57,15 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
 
     With no --task or --eval, it runs every eval or, in a bundle without evals, every task. Each task runs
     once, at most four at a time, and the run exits 1 if any of them failed. With --verbose, a run that
-    raised prints its traceback.
+    raised prints its traceback. --model, --user-model and --judge-model choose the models for this run only,
+    leaving the tasks as written, and the summary names the model each role ran on. --agent likewise chooses the
+    agent the solver runs as: each step that deploys or installs the agent a task prompts deploys it instead,
+    while its user simulator and judges keep theirs.
 
     --dry-run makes the checks the run makes before its first task, reading the stores as the run does, and
     prints what it would write and run, writing and running nothing. It exits 1 on a problem the run would
-    stop at, and 0 otherwise; --model and --keep change nothing it shows. It takes no lock, so another run
+    stop at, and 0 otherwise; the models and --keep change nothing it shows, and --agent what it writes and checks
+    for the solver. It takes no lock, so another run
     can write first and change what it shows.
 
     Each run's sandboxes are torn down as it ends; its instance and outputs stay. --keep holds them up
@@ -62,8 +73,9 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
     exits 130 (143 for SIGTERM); a second one stops the teardown and prints what is still up.
     """
     if bundle is None:
-        if tasks or evals or model or sandbox or keep or dry_run:
-            raise click.UsageError("--task, --eval, --model, --sandbox, --keep and --dry-run need a BUNDLE to run")
+        if tasks or evals or model or user_model or judge_model or agent or sandbox or keep or dry_run:
+            raise click.UsageError("--task, --eval, --model, --user-model, --judge-model, --agent, --sandbox, --keep "
+                                   "and --dry-run need a BUNDLE to run")
         _list_installed()
         return
     root, id_root = locate_bundle(bundle, _installed)
@@ -71,10 +83,11 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
     try:
         if dry_run:
             click.echo(_DRY_RUN)
-            _report_dry_run(dry_run_bundle(root, tasks=tasks, evals=evals, sandbox=sandbox, on_progress=click.echo,
-                                           id_root=id_root))
+            _report_dry_run(dry_run_bundle(root, tasks=tasks, evals=evals, sandbox=sandbox, agent=agent,
+                                           on_progress=click.echo, id_root=id_root))
             return
-        result = run_bundle(root, tasks=tasks, evals=evals, model=model, sandbox=sandbox, on_progress=click.echo,
+        result = run_bundle(root, tasks=tasks, evals=evals, model=model, user_model=user_model,
+                            judge_model=judge_model, agent=agent, sandbox=sandbox, on_progress=click.echo,
                             id_root=id_root, keep=keep)
     except BundleError as e:
         _note_an_installed_namesake(e, bundle, root, id_root)
@@ -131,10 +144,13 @@ def _list_installed() -> None:
         click.echo(f"{name:<{widths[0]}}  {package:<{widths[1]}}  {contents:<{widths[2]}}  {description}".rstrip())
 
     echo(*header)
+    aliases = (installed_aliases(bundles), installed_aliases(bundles, ENV_ALIASES))
     for bundle, row in zip(bundles, rows):
         echo(*row)
         if bundle.root is not None:
             click.echo(f"{'':<{widths[0]}}  {bundle.root}")
+        if named := [alias for table in aliases for alias in table.of(bundle)]:
+            click.echo(f"{'':<{widths[0]}}  aliases: {', '.join(named)}")
     click.echo("\nRun one with agent-env run NAME. To change one, copy its folder and run the copy.")
 
 
@@ -160,6 +176,8 @@ def _summarize(result: BundleRun, verbose: bool) -> None:
     click.echo("Tasks:")
     for run in result.runs:
         click.echo(click.style(f"  {_described(result, run)}", fg=_COLORS[run.outcome]))
+        if models := _models(run):
+            click.echo(f"    models: {models}")
     if result.evals:
         click.echo("Evals:")
     for eval_run in result.evals:
@@ -191,9 +209,9 @@ def _report_dry_run(dry: DryRun) -> None:
     for line in images:
         click.echo(f"  {line}")
     if dry.infra:
-        click.echo("Would build first:")
+        click.echo("Would set up first:")
     for build in dry.infra:
-        click.echo(f"  {build}")
+        click.echo(f"  {build}: {build.planned()}")
     click.echo("Would run:")
     for entry in dry.runs:
         click.echo(f"  {dry.path(entry)} v{materialization.version_of('task', entry.id)}")
@@ -224,6 +242,15 @@ def _described(result: BundleRun, run: TaskRun) -> str:
         return f"{result.path(run.entry)} v{run.task.version}: didn't start"
     return (f"{result.path(run.entry)} v{run.task.version}: {_outcome(run)}, {run.duration:.1f}s, "
             f"{f'instance {run.instance_id}' if run.instance_id else 'no instance recorded'}")
+
+
+def _models(run: TaskRun) -> str:
+    """Each role's models in ``run``, distinct ones joined, as ``solver M; user simulator M; judge M``."""
+    roles = []
+    for role, by_step in run.models.items():
+        names = sorted({model or "the agent's default" for model in by_step.values()})
+        roles.append(f"{role} {', '.join(names)}")
+    return "; ".join(roles)
 
 
 def _outcome(run: TaskRun) -> str:

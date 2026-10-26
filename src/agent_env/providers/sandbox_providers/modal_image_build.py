@@ -5,9 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import glob
-import json
 import logging
-import re
 import tarfile
 import tempfile
 import weakref
@@ -17,7 +15,8 @@ from typing import TYPE_CHECKING
 import modal
 
 from agent_env.config import get_config
-from agent_env.utils.build_context import extract, ignore_file
+from agent_env.utils.docker.context import extract, ignore_file
+from agent_env.utils.docker.dockerfile import Instruction, copy_arguments, instructions, opens_heredoc
 
 if TYPE_CHECKING:
     from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
@@ -76,7 +75,6 @@ def fmt_exc(e: BaseException) -> str:
     return f"{type_name}: {msg}" if msg else type_name
 
 
-_COPY_OR_ADD = re.compile(r"\s*(COPY|ADD)\s+(.*)", re.IGNORECASE | re.DOTALL)
 # The flags COPY takes as ADD does; ADD's own (--checksum, --keep-git-dir, --unpack) keep an ADD as it is.
 _COPY_FLAGS = ("--chown=", "--chmod=", "--link")
 
@@ -86,43 +84,29 @@ def modal_dockerfile(text: str, context: Path) -> str:
     a JSON-form COPY or ADD whose paths hold no whitespace in shell form, which Modal's context parser reads, and an
     ADD of files and folders in ``context``, none of them a tar archive, as the COPY it is, since Modal's ADD only
     fetches a URL. Every other line is left as written."""
-    lines, instruction = [], []
-    for line in text.splitlines(keepends=True):
-        instruction.append(line)
-        if not line.rstrip("\r\n").endswith("\\"):
-            lines.append(_for_modal("".join(instruction), context))
-            instruction = []
-    return "".join(lines + instruction)
+    return "".join(_for_modal(instruction, context) for instruction in instructions(text))
 
 
-def _for_modal(instruction: str, context: Path) -> str:
-    match = _COPY_OR_ADD.fullmatch(re.sub(r"\\\r?\n", " ", instruction).strip())
-    if match is None:
-        return instruction
-    keyword, rest = match.group(1).upper(), match.group(2).strip()
-    flags = []
-    while rest.startswith("--"):
-        flag, _, rest = rest.partition(" ")
-        flags.append(flag)
-        rest = rest.strip()
-    if rest.startswith("["):
-        try:
-            args = json.loads(rest)
-        except ValueError:
-            return instruction
-        if not (isinstance(args, list) and len(args) >= 2
-                and all(isinstance(arg, str) and arg and not any(c.isspace() for c in arg) for arg in args)):
-            return instruction
-    elif keyword == "ADD" and not rest.startswith("<<") and not any(c in rest for c in "\"'"):
-        args = rest.split()
-    else:
-        return instruction
+def _for_modal(instruction: Instruction, context: Path) -> str:
+    args = copy_arguments(instruction)
+    if args is None or args.heredoc:
+        return instruction.text
+    paths = (*args.sources, args.destination)
+    if args.json_form:
+        # Written in shell form, a path with whitespace would split, and one like <<EOF would open a heredoc.
+        if not all(path and not any(c.isspace() for c in path) and not opens_heredoc(path) for path in paths):
+            return instruction.text
+    elif args.keyword != "ADD":
+        return instruction.text
+    keyword = args.keyword
     if keyword == "ADD":
-        if len(args) < 2 or not all(flag.startswith(_COPY_FLAGS) for flag in flags) \
-                or not all(_local_and_not_an_archive(source, context) for source in args[:-1]):
-            return instruction
+        if not all(flag.startswith(_COPY_FLAGS) for flag in args.flags) \
+                or not all(_local_and_not_an_archive(source, context) for source in args.sources):
+            return instruction.text
         keyword = "COPY"
-    return " ".join([keyword, *flags, *args]) + "\n"
+    # The rewrite is one line, so comment lines among the continued ones go above it rather than be lost.
+    comments = [line for line in instruction.text.splitlines(keepends=True)[1:] if line.lstrip().startswith("#")]
+    return "".join(comments) + " ".join([keyword, *args.flags, *paths]) + "\n"
 
 
 def _local_and_not_an_archive(source: str, context: Path) -> bool:

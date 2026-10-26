@@ -11,6 +11,7 @@ from agent_env.env.env import DeployedEnv, DeployedGatewayEnv
 from agent_env.store.document_store import Filter
 from agent_env.task.store import (
     TASK_INSTANCES_COLLECTION,
+    SupersededAttemptError,
     get_task_instance_store,
     record_step_complete,
     seed_task_instance_context,
@@ -127,6 +128,26 @@ async def test_concurrent_nested_sibling_leaves_coexist():
     verifications = (inst.context or {}).get("metadata", {}).get("verifications", {})
     assert verifications == {"A": {"score": 1.0}, "B": {"score": 0.5}}
     journal.assert_journal_replays(instance_id, expect_steps={"sA", "sB"}, seeded=False)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_completion_under_an_epoch_a_re_register_left_behind_raises():
+    """A re-register advances the instance's attempt epoch. A completion still dispatched under the old one raises and
+    lands nothing on the configured store; one under the epoch the re-register returned lands."""
+    store = get_task_instance_store()
+    created = store.create_instance(task_id=f"concurrency-test-{uuid.uuid4().hex[:6]}", task_version=1, total_steps=2)
+    reregistered = store.upsert_instance(created.instance_id, created.task_id, 1, 2)
+    ops = build_context_update_ops(TaskStepContext(), TaskStepContext(metadata={"s0": "deployed"}))
+
+    with pytest.raises(SupersededAttemptError, match="dispatched under attempt epoch 0"):
+        await record_step_complete(created.instance_id, "s0", ops, 2, "now")
+    await record_step_complete(created.instance_id, "s0", ops, 2, "now", attempt_epoch=reregistered.attempt_epoch)
+
+    doc = store._doc_store.find_one(TASK_INSTANCES_COLLECTION, Filter.of(instance_id=created.instance_id))
+    assert reregistered.attempt_epoch == 1
+    assert [c["step_id"] for c in doc["completed_steps"]] == ["s0"]
+    assert doc["context"]["metadata"]["s0"] == "deployed"
 
 
 @pytest.mark.integration

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentenv-framework"
-version = "0.9.1332"
+version = "0.9.1358"
 description = "SDK and CLI for building, deploying and running agent environments and the tasks that grade agents in them."
 readme = "README.md"
 license = "Apache-2.0"
@@ -80,10 +80,19 @@ tensorlake = [
 tenki = [
     "tenki[async]~=1.4.1",  # AsyncClient/AsyncSandbox exec, stdin, ports and egress APIs validated against the 1.4 line
 ]
+# The boxd machine provider, selected as the built-in `boxd` backend.
+boxd = [
+    "boxd~=0.2.17",  # AsyncBoxd machines, exec, proxies, egress allowlist and delete-after validated against 0.2.17
+]
+# The Daytona sandbox provider, selected as the built-in `daytona` backend.
+daytona = [
+    "daytona~=0.224.0",  # AsyncDaytona sandboxes, sessions, file API, preview links and egress lists validated against 0.224
+]
 dev = [
-    "agentenv-framework[aws,gcp,sail,tensorlake,tenki,vercel]",  # exercise portable optional providers and stores in CI
+    "agentenv-framework[aws,boxd,daytona,gcp,sail,tensorlake,tenki,vercel]",  # exercise portable optional providers and stores in CI
     "fastmcp>=3.4,<4",  # the standalone-fastmcp mount path of the protocol; <4 keeps mcp 1.x
     "griffelib==2.3.0",  # the plugin API check; exact, since what it reports as a break changes between releases
+    "tomli-w==1.2.0",  # the Codex agent's config writer, which only its image installs; its tests import it
     "moto>=5.0.0",
     "psycopg2-binary>=2.9.0",  # the gateway server module's driver; outside its container only the tests import it
     "pytest>=9.0",
@@ -102,8 +111,10 @@ smol = [
 agent-env = "agent_env.cli:cli"
 
 [project.entry-points."agent_env.bundles"]
+agents = "agent_env"
 hello = "agent_env.examples"
 echo-mcp = "agent_env.examples"
+mail-mcp = "agent_env.examples"
 
 [project.urls]
 Homepage = "https://www.agentenvframework.com"
@@ -118,9 +129,12 @@ packages = ["src/agent_env"]
 # Keep it out of the wheel — only its built output ships, copied to explorer/static/
 # by the UI build step. node_modules/out/.next are already .gitignore-excluded.
 exclude = ["src/agent_env/explorer/ui"]
+# The release workflow writes it and git ignores it; a build ships it when it's there.
+artifacts = ["src/agent_env/env/published_images.json"]
 
 [tool.hatch.build.targets.sdist]
 only-include = ["src", "tst", "packages/agentenv-protocol", ".github/scripts"]
+artifacts = ["src/agent_env/env/published_images.json"]
 
 [tool.uv.workspace]
 members = ["packages/agentenv-protocol"]

@@ -15,7 +15,7 @@ import logging
 from typing import Optional
 
 from agent_env.a2a_agent.staging import LAST_DRAIN_SECONDS, drain_all, staged_changelogs
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
 from agent_env.env.env import DeployedSandboxEnv
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SandboxProvider,
@@ -28,6 +28,8 @@ from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)
+
+PROVIDER_CLOSE_TIMEOUT_SECONDS = 5
 
 TORN_DOWN_KEY = "torn_down_sandbox_ids"
 
@@ -142,9 +144,15 @@ def _env_sandbox_ids(env) -> list[tuple[str, Optional[str]]]:
     """
     if not isinstance(env, DeployedSandboxEnv):  # an env outside our sandboxes owns its own lifetime
         return []
-    ids = [(env.sandbox_id, env.sandbox_type)] if env.sandbox_id else []
-    for key, value in (env.sandbox_ids or {}).items():
-        entry_type = key if _is_backend(key) else env.sandbox_type
+    return _sandbox_ids_of(env.sandbox_id, env.sandbox_type, env.sandbox_ids)
+
+
+def _sandbox_ids_of(
+    sandbox_id: Optional[str], sandbox_type: Optional[str], sandbox_ids: Optional[dict],
+) -> list[tuple[str, Optional[str]]]:
+    ids = [(sandbox_id, sandbox_type)] if sandbox_id else []
+    for key, value in (sandbox_ids or {}).items():
+        entry_type = key if _is_backend(key) else sandbox_type
         values = [value] if isinstance(value, str) else [v for v in value.values() if isinstance(v, str)]
         ids.extend((v, entry_type) for v in values)
     return ids
@@ -169,7 +177,15 @@ async def _terminate(sandbox_id: str, sandbox_type: Optional[str], default_slot:
     """By id through the backend that made it; a record that doesn't name one goes through a live handle, since
     "not found" from a provider that didn't make the sandbox doesn't mean it's gone."""
     if sandbox_type:
-        await build_sandbox_provider(sandbox_type).terminate_sandbox(sandbox_id)
+        provider = build_sandbox_provider(sandbox_type)
+        try:
+            await provider.terminate_sandbox(sandbox_id)
+        finally:
+            try:
+                async with asyncio.timeout(PROVIDER_CLOSE_TIMEOUT_SECONDS):
+                    await provider.close()
+            except Exception as error:
+                logger.warning("Closing teardown provider %s failed: %s: %s", sandbox_type, type(error).__name__, error)
         return
     provider: SandboxProvider = _DEFAULT_PROVIDERS[default_slot]()
     await (await provider.get_sandbox(sandbox_id)).terminate()

@@ -3,26 +3,29 @@
 from __future__ import annotations
 
 import os
+import shutil
 import stat
+import tempfile
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn, TypeVar, overload
 
 from agent_env.artifact.artifact import Artifact
-from agent_env.artifact.artifacts.environment import EnvironmentArtifact
-from agent_env.artifact.artifacts.environment_universe import EnvironmentUniverseArtifact
-from agent_env.entity_refs import EntityKind, parse_toml_ref
+from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
+from agent_env.entity.refs import EntityKind, parse_toml_ref
 from agent_env.env.env import Env
 from agent_env.env.envs._deployment import provider_refusal
 from agent_env.providers.env_providers.constants import GATEWAY_SERVICE_NAMES
 from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider
 from agent_env.providers.env_providers.env_provider import _env_provider_class
-from agent_env.store.ids import validate_local_id
 from agent_env.utils.card_naming import card_names_in_files
 
-from ._fs import fold, os_reason, relative, show, with_article
+from agent_env.utils.paths import os_reason
+
+from ._fs import relative, show, with_article
 from .parse import CONFIG_FILES, LEAVINGS, NAMED_BY, Bundle, BundleEntry, BundleError
 
 A = TypeVar("A", bound=Artifact)
@@ -59,21 +62,39 @@ class AuthoringContext:
     def dir(self) -> Path:
         return self.entry.path
 
-    def files(self) -> dict[str, Path]:
-        return entry_files(self.bundle, self.entry)
+    def files(self, *, empty_ok: bool = False) -> dict[str, Path]:
+        return entry_files(self.bundle, self.entry, empty_ok=empty_ok)
 
-    def try_files(self) -> dict[str, Path] | None:
+    def try_files(self, *, empty_ok: bool = False) -> dict[str, Path] | None:
         """``files``, or None when the folder can't be listed, which the plan's walk reports."""
         try:
-            return self.files()
+            return self.files(empty_ok=empty_ok)
         except BundleError:
             return None
 
     def file(self) -> tuple[str, Path]:
         return entry_file(self.bundle, self.entry)
 
-    def universe(self) -> UniverseLayout:
-        return universe_layout(self.bundle, self.entry)
+    def not_one_file(self, files: dict[str, Path], remedy: str) -> str | None:
+        """Why ``files`` isn't one file, suggesting ``remedy``, ready for ``refuse``; None when it is."""
+        return _not_one_file(self.entry, files, remedy)
+
+    def no_files(self, what: str, remedy: str | None = None) -> str:
+        """The problem with a folder holding no ``what``, suggesting ``remedy``, ready for ``refuse``."""
+        return f"has no {what} ({', '.join(sorted(LEAVINGS))} don't count)" + (f"; {remedy}" if remedy else "")
+
+    def listing(self) -> tuple[dict[str, Path], set[tuple[str, ...]]]:
+        """The folder's ``files``, none at all included, and every folder under it, by every path to it, as the names
+        on that path in NFC."""
+        walk = _Walk(self.bundle, self.entry, empty_ok=True)
+        return walk.files(), walk.folders
+
+    def try_listing(self) -> tuple[dict[str, Path], set[tuple[str, ...]]] | None:
+        """``listing``, or None when the folder can't be listed, which the plan's walk reports."""
+        try:
+            return self.listing()
+        except BundleError:
+            return None
 
     def renamed(self, data: dict, names: Mapping[str, str]) -> tuple[dict, list[str]]:
         """``data`` less each key ``names`` maps to the key an author writes instead, and a problem for each:
@@ -179,10 +200,12 @@ class AuthoringContext:
         """``message`` as a problem with the entry's toml, ready for ``refuse``."""
         return f"{CONFIG_FILES[self.entry.kind]}: {message}"
 
-    def refuse(self, problems: list[str]) -> NoReturn:
-        """Raise BundleError with ``problems``, each named by the entry's folder."""
+    def refuse(self, problems: list[str], *, within: Sequence[str] = ()) -> NoReturn:
+        """Raise BundleError with ``problems``, each named by the entry's folder, after ``within``, each ``<path in the
+        folder>: <why>`` and named by its path in the bundle."""
         where = relative(self.bundle.root, self.entry.path)
-        raise BundleError([f"{where}: {problem}" for problem in problems])
+        raise BundleError([*(f"{where}/{problem}" for problem in within),
+                           *(f"{where}: {problem}" for problem in problems)])
 
     @overload
     def env(self, ref: str | dict[str, Any]) -> Env: ...
@@ -238,6 +261,31 @@ def build_context_files(bundle: Bundle, entry: BundleEntry) -> dict[str, Path]:
     return dict(sorted(files.items()))
 
 
+@dataclass(frozen=True)
+class StagedContext:
+    """A copy of ``build_context_files`` for the image an entry's Dockerfile builds, so an image written from it was
+    made from what the ledger hashed."""
+
+    path: Path
+    dockerfile: str  # its whole path in the copy: a bare name is looked up from the current folder first
+
+    def identity(self, image_id: str) -> tuple[str, str]:
+        """The ``source_digest`` and ``image_name`` ``put_context`` gives ``image_id`` from this copy, built for each
+        sandbox's own platform, as a bundle writes its images."""
+        return DockerImageArtifact.context_identity(image_id, str(self.path), self.dockerfile, platform=None)
+
+
+@contextmanager
+def staged_build_context(bundle: Bundle, entry: BundleEntry, dockerfile: str) -> Iterator[StagedContext]:
+    """``entry``'s ``StagedContext`` for its ``dockerfile``, a path in its folder, removed on leaving."""
+    with tempfile.TemporaryDirectory(prefix="agent-env-build-") as staged:
+        context = Path(staged)
+        for key, path in build_context_files(bundle, entry).items():
+            (context / key).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, context / key)
+        yield StagedContext(context, str(context / dockerfile))
+
+
 def entry_file(bundle: Bundle, entry: BundleEntry) -> tuple[str, Path]:
     """The one file in an entry's folder, as ``(name, path)``. Raises BundleError otherwise."""
     key, path = next(iter(one_file(bundle, entry).items()))
@@ -253,152 +301,22 @@ def one_file(bundle: Bundle, entry: BundleEntry, remedy: str = _AS_UNIVERSE) -> 
 
 
 def _only(bundle: Bundle, entry: BundleEntry, files: dict[str, Path], remedy: str) -> dict[str, Path]:
-    if len(files) != 1:
-        listed = ", ".join(repr(name) for name in files)
-        raise BundleError([f"{relative(bundle.root, entry.path)}: {with_article(f'{entry.type} {entry.kind.store}')} "
-                           f"holds one file, and this folder has {len(files)} ({listed}); {remedy}"])
+    if (problem := _not_one_file(entry, files, remedy)) is not None:
+        raise BundleError([f"{relative(bundle.root, entry.path)}: {problem}"])
     return files
 
 
-# The keys that name the file an environment artifact wraps: ``file``, and the stored document's names for it, which
-# its toml check refuses with a pointer to ``file``.
-_NAMES_ITS_FILE = ("file", *(stored for stored, key in EnvironmentArtifact.toml_stored_names.items() if key == "file"))
-
-
-def environment_files(bundle: Bundle, entry: BundleEntry) -> dict[str, Path]:
-    """What an environment artifact's write reads from its folder: its one file, or none when its artifact.toml's
-    ``file`` names the artifact to wrap instead. Raises BundleError otherwise."""
-    files = entry_files(bundle, entry, empty_ok=True)
-    if not (isinstance(entry.config, dict) and any(name in entry.config for name in _NAMES_ITS_FILE)):
-        if not files:
-            raise BundleError([f"{relative(bundle.root, entry.path)}: has no file for the environment to wrap "
-                               f"({', '.join(sorted(LEAVINGS))} don't count); put its one file here, or name the "
-                               "artifact to wrap with file"])
-        return _only(bundle, entry, files, "name the artifact to wrap with file, or give each other file an artifact "
-                                           "folder of its own")
-    if files:
-        listed = ", ".join(repr(name) for name in files)
-        raise BundleError([f"{relative(bundle.root, entry.path)}: its file is the artifact file names, so the folder "
-                           f"holds only artifact.toml, and it also has {listed}; give the file an artifact folder of "
-                           "its own, or leave out file to wrap the folder's one file"])
-    return {}
-
-
-# The folder of a universe's metadata files, as `environment-universe get --output-dir` writes them.
-UNIVERSE_METADATA = EnvironmentUniverseArtifact.metadata_name
-
-
-@dataclass(frozen=True)
-class LaidOut:
-    """One file of a universe folder, and the ids it's written under."""
-
-    name: str  # its environment's name, or its metadata key
-    filename: str
-    path: Path
-    file_id: str
-    environment_id: str | None  # None for a metadata file
-
-
-@dataclass(frozen=True)
-class UniverseLayout:
-    """An environment_universe folder, laid out as ``environment-universe get --output-dir`` writes one: each
-    ``<environment_name>/`` folder holds one environment's file, and each ``metadata/<key>/`` folder one metadata
-    file. ``files`` lists them all, as ``entry_files`` does."""
-
-    environments: tuple[LaidOut, ...]
-    metadata: tuple[LaidOut, ...]
-    files: dict[str, Path]
-
-
-def universe_layout(bundle: Bundle, entry: BundleEntry) -> UniverseLayout:
-    """The environments and metadata files an environment_universe's folder holds, each with the ids it's
-    written under: ``<universe>__<name>`` over ``<universe>__<name>__file`` for an environment, and
-    ``<universe>__metadata__<key>`` for a metadata file. Raises BundleError listing every problem."""
-    files = entry_files(bundle, entry, empty_ok=True)
-    where = relative(bundle.root, entry.path)
-    top = _folders(entry.path)
-    # A metadata/ folder spelled in another case is a typo, as for every reserved name in a bundle.
-    near = sorted(name for name in top if name != UNIVERSE_METADATA and fold(name) == fold(UNIVERSE_METADATA))
-    problems = [f"{where}/{name}: rename to {UNIVERSE_METADATA}; names are case-sensitive, and an environment named "
-                f"{name} goes in an artifact folder of its own, named in environment_artifacts" for name in near]
-    # Every folder counts, so one left without its file is refused rather than dropped.
-    folders: dict[tuple[bool, str], list[str]] = {(False, name): [] for name in top
-                                                  if name != UNIVERSE_METADATA and name not in near}
-    folders.update({(True, name): [] for name in _folders(entry.path / UNIVERSE_METADATA)})
-    for key in files:
-        parts = key.split("/")
-        if parts[0] in near:
-            continue
-        metadata = parts[0] == UNIVERSE_METADATA
-        if len(parts) == (3 if metadata else 2):
-            folders.setdefault((metadata, parts[-2]), []).append(key)
-        elif len(parts) == 1:
-            problems.append(f"{where}/{key}: a universe folder holds only artifact.toml and a folder for each "
-                            "environment; move it into <environment_name>/, or give it an artifact folder of its own")
-        elif metadata and len(parts) == 2:
-            problems.append(f"{where}/{key}: {UNIVERSE_METADATA}/ holds a folder for each key, with that key's one "
-                            f"file in it ({UNIVERSE_METADATA}/<key>/<file>); an environment named "
-                            f"{UNIVERSE_METADATA} goes in an artifact folder of its own, named in "
-                            "environment_artifacts")
-        else:
-            folder = "/".join(parts[:2]) if metadata else parts[0]
-            what = "a metadata key's" if metadata else "an environment's"
-            problems.append(f"{where}/{key}: {what} folder holds its one file directly, {folder}/<file>, with no "
-                            "folders inside")
-    environments, metadata_files = [], []
-    for (metadata, name), keys in sorted(folders.items()):
-        folder = f"{where}/{UNIVERSE_METADATA}/{name}" if metadata else f"{where}/{name}"
-        if len(keys) != 1:
-            listed = f" ({', '.join(repr(key.rsplit('/', 1)[-1]) for key in keys)})" if keys else ""
-            problems.append(f"{folder}: holds one file, and has {len(keys)}{listed}")
-            continue
-        # Renaming an environment's folder renames the environment, so say how to keep its name.
-        rename = "rename the folder" if metadata else (
-            f"rename the folder, which renames the environment, or keep the name by giving the environment an "
-            f'artifact folder of its own, with environment_name = "{name}", named in environment_artifacts')
-        if name != name.strip():
-            problems.append(f"{folder}: a name that opens or closes with a space can't name the artifacts written "
-                            "from it; rename the folder")
-            continue
-        if "__" in name:
-            problems.append(f"{folder}: a name holding __ could clash with the ids derived from it; {rename}")
-            continue
-        if metadata:
-            environment_id, file_id = None, EnvironmentUniverseArtifact.derived_metadata_id(entry.id, name)
-        else:
-            environment_id = EnvironmentUniverseArtifact.derived_environment_id(entry.id, name)
-            file_id = EnvironmentArtifact.derived_file_id(environment_id)
-        try:
-            for id in (environment_id, file_id):
-                if id is not None:
-                    validate_local_id(id)
-        except ValueError as e:
-            problems.append(f"{folder}: can't name the artifacts written from it ({e}); {rename}")
-            continue
-        laid = LaidOut(name, keys[0].rsplit("/", 1)[-1], files[keys[0]], file_id, environment_id)
-        (metadata_files if metadata else environments).append(laid)
-    if problems:
-        raise BundleError(problems)
-    return UniverseLayout(tuple(environments), tuple(metadata_files), files)
-
-
-def _folders(path: Path) -> list[str]:
-    """The names of the folders directly in ``path``, as the walk spells them, or none when it isn't one."""
-    try:
-        with os.scandir(path) as listing:
-            return [unicodedata.normalize("NFC", child.name) for child in listing
-                    if child.name not in LEAVINGS and child.is_dir()]
-    except OSError:
-        return []  # the walk reports why it can't be listed
-
-
-def universe_files(bundle: Bundle, entry: BundleEntry) -> dict[str, Path]:
-    """What an environment_universe's write reads from its folder: every file ``universe_layout`` lays out."""
-    return universe_layout(bundle, entry).files
+def _not_one_file(entry: BundleEntry, files: dict[str, Path], remedy: str) -> str | None:
+    if len(files) == 1:
+        return None
+    listed = ", ".join(repr(name) for name in files)
+    return (f"{with_article(f'{entry.type} {entry.kind.store}')} holds one file, and this folder has {len(files)} "
+            f"({listed}); {remedy}")
 
 
 class _Walk:
-    """Lists an entry's folder, following a link only when its target is inside the bundle."""
+    """Lists an entry's folder, following a link only when its target is inside the bundle. ``folders`` then holds
+    every folder under it, by every path to it, as the names on that path in NFC."""
 
     def __init__(self, bundle: Bundle, entry: BundleEntry, empty_ok: bool = False):
         self.bundle = bundle
@@ -407,6 +325,7 @@ class _Walk:
         self.root = _identity(bundle.root)
         self.problems: list[str] = []
         self.found: dict[str, Path] = {}
+        self.folders: set[tuple[str, ...]] = set()
 
     def files(self) -> dict[str, Path]:
         top = self.entry.path
@@ -452,6 +371,7 @@ class _Walk:
                     if identity in holders:
                         self._problem(path, "links back to a folder that holds it")
                     else:
+                        self.folders.add(tuple(unicodedata.normalize("NFC", part) for part in (*parts, child.name)))
                         pending.append((path, (*parts, child.name), holders | {identity}))
                 elif kind == stat.S_IFREG:
                     if os.access(path, os.R_OK):

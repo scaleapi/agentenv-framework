@@ -12,7 +12,7 @@ const AGENTS_PAGE_SIZE = 20;
 // GET /api/v1/agents/{id}; one that doesn't resolve renders a dimmed
 // "Unavailable" tile rather than vanishing. Add entries as agent artifacts register.
 export const FEATURED_AGENTS: Array<{ id: string; logo?: string }> = [
-  { id: 'claude-code-cli', logo: '/logos/claude.svg' },
+  { id: '@local/agentenv-framework/agents/claude-code', logo: '/logos/claude.svg' },
 ];
 const FEATURED_AGENT_IDS = FEATURED_AGENTS.map(f => f.id);
 export const FEATURED_LOGO_BY_ID: Record<string, string | undefined> =

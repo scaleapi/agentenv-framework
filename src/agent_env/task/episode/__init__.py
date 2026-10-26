@@ -3,7 +3,7 @@
 AgentEnv runs everything else exactly as ``Task.run`` does, so its scores are the ones ``agent-env run`` would report.
 """
 
-from .run import Episode, EpisodeError, Turn
+from .run import Episode, EpisodeError, Skill, Turn
 from .spec import EpisodeSpec
 
-__all__ = ["Episode", "EpisodeError", "EpisodeSpec", "Turn"]
+__all__ = ["Episode", "EpisodeError", "EpisodeSpec", "Skill", "Turn"]

@@ -35,7 +35,9 @@ from agent_env.plugins import (
 )
 from agent_env.plugins._cli import CLI_PLUGINS_GROUP, CLI_ROOT_OPTIONS_GROUP, cli_contributions, cli_discovery_errors
 from agent_env.plugins._discovery import discovery_error
+from agent_env.plugins._bundles import ENV_ALIASES, InstalledAliases, installed_aliases
 from agent_env.plugins._report import (
+    ALIAS_REFUSED,
     ENTRY_POINTS_UNREADABLE,
     FORMAT_VERSION,
     INVALID_PLUGIN,
@@ -152,14 +154,17 @@ def _bundle_contributions(*, load: bool) -> tuple[dict[tuple[str, str], list[Con
     except Exception as e:
         return {}, {BUNDLES: Diagnostic(ENTRY_POINTS_UNREADABLE, discovery_error(e))}
     found: dict[tuple[str, str], list[Contribution]] = {}
+    aliases = (installed_aliases(bundles), installed_aliases(bundles, ENV_ALIASES))
     for bundle in bundles:
-        found.setdefault((bundle.package, bundle.version), []).append(_bundle_contribution(bundle, bundles, load=load))
+        found.setdefault((bundle.package, bundle.version), []).append(
+            _bundle_contribution(bundle, bundles, aliases, load=load))
     return found, {}
 
 
-def _bundle_contribution(bundle: InstalledBundle, bundles: tuple[InstalledBundle, ...], *, load: bool) -> Contribution:
-    """Whether ``bundle`` runs, by the checks ``agent-env run`` makes before it reads a store. Without loading
-    plugins, only that the folder parses."""
+def _bundle_contribution(bundle: InstalledBundle, bundles: tuple[InstalledBundle, ...],
+                         aliases: tuple[InstalledAliases, ...], *, load: bool) -> Contribution:
+    """Whether ``bundle`` runs, by the checks ``agent-env run`` makes before it reads a store, and whether it gets each
+    alias it gives an agent or env. Without loading plugins, only that the folder parses."""
     namesakes = tuple(Claimant(other.package, other.version, other.value)
                       for other in bundles if other.name == bundle.name and other is not bundle)
     if bundle.problem:
@@ -171,10 +176,13 @@ def _bundle_contribution(bundle: InstalledBundle, bundles: tuple[InstalledBundle
     except BundleError as e:
         return Contribution(BUNDLES, bundle.name, bundle.value, "failed", code=INVALID_PLUGIN,
                             reason=f"it isn't a valid bundle: {e.summary}")
+    refused = tuple(why for table in aliases for why in table.refused_claims.get(bundle.qualified, ()))
     if run_name(bundle, bundles) != bundle.name:
+        qualified = f"another package also installs {bundle.name!r}, so run this one as {bundle.qualified!r}"
         return Contribution(BUNDLES, bundle.name, bundle.value, "active", code=QUALIFIED_ONLY,
-                            reason=f"another package also installs {bundle.name!r}, so run this one as "
-                                   f"{bundle.qualified!r}", conflicts_with=namesakes)
+                            reason="; ".join((qualified, *refused)), conflicts_with=namesakes)
+    if refused:
+        return Contribution(BUNDLES, bundle.name, bundle.value, "active", code=ALIAS_REFUSED, reason="; ".join(refused))
     return Contribution(BUNDLES, bundle.name, bundle.value, "active")
 
 

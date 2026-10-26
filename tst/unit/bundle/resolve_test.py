@@ -8,7 +8,7 @@ import pytest
 from agent_env.bundle import BundleError, BundleKind, parse_bundle
 from agent_env.bundle import resolve as resolve_module
 from agent_env.bundle.resolve import BuiltImage, Output, Reference, ReferencedImage, resolve_bundle
-from agent_env.entity_refs import EntityKind, EntityRef
+from agent_env.entity.refs import EntityKind, EntityRef
 from agent_env.env.env import Env
 from agent_env.task import Task
 from agent_env.task_step.task_step import TaskStep

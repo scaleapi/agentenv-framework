@@ -31,9 +31,13 @@ _OP_ATTR = "_aee_op"
 _EXT_ATTR = "_aee_ext"
 _EXT_ROUTE_ATTR = "_aee_ext_route"
 _TOOL_ATTR = "_aee_tool"
+_HIDDEN_BY_DEFAULT_ATTR = "_aee_hidden_by_default"
 _CARD_CONFIG_ATTR = "_aee_card_config"
 #: Set on the tool dispatch installed by ``_bind_tool_calls``; a guard downstream checks it at boot.
 _TOOL_CONTEXT_BOUND_ATTR = "__agentenv_tool_context__"
+
+#: MCP tools/list ``_meta`` key marking a tool a gateway hides from every role until a tool-access step names it.
+HIDDEN_BY_DEFAULT_META_KEY = "agentenv.io/hiddenByDefault"
 
 OP_RESET_DATA = "reset_data"
 OP_ADD_DATA = "add_data"
@@ -104,7 +108,7 @@ def extension(uri: str, *, description: str | None = None, params: dict | None =
     return deco
 
 
-def tool(name: str | None = None, *, description: str | None = None) -> Callable:
+def tool(name: str | None = None, *, description: str | None = None, hidden_by_default: bool = False) -> Callable:
     """Mark a handler method as an MCP tool.
 
     At mount the bound method is registered as a real MCP tool on the server app and advertised
@@ -121,6 +125,12 @@ def tool(name: str | None = None, *, description: str | None = None) -> Callable
     SDK with the caller of the current call and is omitted from the advertised ``inputSchema`` and
     from tools/list; a FastMCP ``Context`` parameter is likewise omitted from the card while FastMCP
     keeps injecting it.
+
+    ``hidden_by_default=True`` makes being hidden a fixed property of the tool, for plumbing a task
+    drives but the agent under test must not see: it is listed with ``_meta``
+    ``{HIDDEN_BY_DEFAULT_META_KEY: true}``, and a gateway hides it from every role until a tool-access
+    step names it. Steps for every tool (``tools="*"``) never show it, though they still clear earlier
+    named steps as they do for any tool.
     """
     if callable(name):
         raise TypeError("use @tool(...) with parentheses, not bare @tool")
@@ -131,6 +141,8 @@ def tool(name: str | None = None, *, description: str | None = None) -> Callable
             description=description or inspect.getdoc(fn),
             inputSchema=_schema_from_signature(fn),
         ))
+        if hidden_by_default:
+            setattr(fn, _HIDDEN_BY_DEFAULT_ATTR, True)
         return fn
 
     return deco
@@ -226,7 +238,9 @@ class AgentEnvFastMCPApplication(AgentEnvApplication):
         app.custom_route(path, methods=methods)(handler)
 
     def _register_tool(self, app: Any, descriptor: EnvironmentTool, fn: Callable) -> None:
-        app.tool(name=descriptor.name, description=descriptor.description)(injecting(fn))
+        # passed only when set, so a FastMCP-shaped target without the parameter still mounts unflagged tools
+        extra = {"meta": {HIDDEN_BY_DEFAULT_META_KEY: True}} if getattr(fn, _HIDDEN_BY_DEFAULT_ATTR, False) else {}
+        app.tool(name=descriptor.name, description=descriptor.description, **extra)(injecting(fn))
 
     def _check_tool_binding(self, app: Any) -> None:
         """Decide, before any route or tool is added, how every tools/call on ``app`` gets its ToolContext, and

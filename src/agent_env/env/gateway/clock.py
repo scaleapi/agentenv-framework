@@ -10,6 +10,7 @@ import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 class ClockError(ValueError):
@@ -72,6 +73,16 @@ def _parse_rfc3339(text: str) -> datetime:
 
 def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _zone(name) -> ZoneInfo | None:
+    """The IANA time zone `name` names, or None if it names none."""
+    if not isinstance(name, str):
+        return None
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return None
 
 
 # Calendar Y/M are absent on purpose: a month is not a fixed span. Empty ("P"/"PT") is caught by the

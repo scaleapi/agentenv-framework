@@ -12,10 +12,11 @@ from smol import ConnectOptions, Machine
 
 from agent_env.config import get_config
 from agent_env.providers.sandbox_providers.sandbox import CURL_RETRY_FLAGS, VmSandbox
+from agent_env.providers.sandbox_providers.host_images import host_platform, saved_here
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
 from agent_env.store.object_store.local.store import LocalFilesystemObjectStore
 from agent_env.store.object_store.local.tls import local_ca
-from agent_env.utils.docker_build import normalize_platform
+from agent_env.utils.docker.build import normalize_platform
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_VM
 
 _PORTS_FILE = "/storage/agentenv-ports.json"
@@ -44,6 +45,15 @@ class SmolVmSandbox(VmSandbox):
         if code or not stdout.strip():
             raise RuntimeError(f"Cannot determine SmolVM guest architecture: {stderr[-500:]}")
         self.platform = normalize_platform(f"linux/{stdout.strip()}")
+
+    async def build_images(self, artifacts: list) -> None:
+        """Load each image this machine builds natively, from the copy it saves, since a VM here starts with no build
+        cache; one for a VM of another platform is built in the VM."""
+        if self.platform != host_platform():
+            await super().build_images(artifacts)
+            return
+        saved = [artifact.model_copy(update={"tar_gz_object_url": await saved_here(artifact)}) for artifact in artifacts]
+        await self._load_tarballs(saved)
 
     async def terminate(self) -> None:
         await asyncio.to_thread(self._machine.delete)
@@ -74,7 +84,7 @@ class SmolVmSandbox(VmSandbox):
         ca = "SSL_CERT_FILE=/etc/agentenv-ca-bundle.pem " if local_https else ""
         await self.exec_script(f"{ca}curl -fsSL {CURL_RETRY_FLAGS} {shlex.quote(rewritten)} -o {shlex.quote(vm_path)}")
 
-    async def write_file_from_url(self, url: str, destination_path: str) -> None:
+    async def write_file_from_url(self, url: str, destination_path: str, container: str | None = None) -> None:
         vm_path = self._staging_path("url", destination_path)
         rewritten = LocalSandboxProvider.get_external_url(url)
         local_https = urlsplit(rewritten).hostname == "host.docker.internal" and urlsplit(rewritten).scheme == "https"
@@ -83,7 +93,7 @@ class SmolVmSandbox(VmSandbox):
                 await self.write_host_file(local_ca().bundle_path.read_bytes(), "/etc/agentenv-ca-bundle.pem")
             ca = "SSL_CERT_FILE=/etc/agentenv-ca-bundle.pem " if local_https else ""
             await self.exec_script(f"{ca}curl -fsSL {CURL_RETRY_FLAGS} {shlex.quote(rewritten)} -o {shlex.quote(vm_path)}")
-            await self._copy_into_container(vm_path, destination_path)
+            await self._copy_into_container(vm_path, destination_path, container)
         finally:
             await self._remove_vm_temp_file(vm_path)
 

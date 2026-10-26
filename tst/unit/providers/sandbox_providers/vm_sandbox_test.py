@@ -323,6 +323,84 @@ async def test_the_first_pull_to_fail_cancels_the_rest_so_a_stalled_one_cant_hol
     assert sorted(sandbox.cancelled) == sorted([f"docker pull {PUBLIC}", f"docker pull {PRIVATE}"])
 
 
+_GATEWAY = "ghcr.io/team/gateway:src-" + "6" * 64
+_GATEWAY_DIGEST = "sha256:" + "7" * 64
+_PINNED = f"{_GATEWAY}@{_GATEWAY_DIGEST}"
+
+
+def _published() -> DockerImageArtifact:
+    return DockerImageArtifact(id="gw", version=1, description="d", image_name=_GATEWAY, image_digest=_GATEWAY_DIGEST,
+                               build_context_object_url="s3://bucket/gw/build-context.tar.gz", dockerfile_path="Dockerfile",
+                               source_digest="sha256:" + "6" * 64)
+
+
+class _PinnedPullFailsVm(_RecordingVmSandbox):
+    """Fails the first ``fails`` pulls by digest with ``error``, and every build when ``build_fails``."""
+
+    def __init__(self, error: str, fails: int = 1_000, build_fails: bool = False):
+        super().__init__()
+        self.error, self.fails, self.build_fails = error, fails, build_fails
+
+    async def exec_script(self, script, *, max_retries=0):
+        self.scripts.append(script)
+        if script == f"docker pull {_PINNED}" and self.fails:
+            self.fails -= 1
+            raise RuntimeError(f"Script failed (exit 1):\nstderr: {self.error}")
+        if "docker build" in script and self.build_fails:
+            raise RuntimeError("Script failed (exit 1):\nstderr: The command '/bin/sh -c pip install' returned a non-zero code: 1")
+        return ""
+
+
+@pytest.fixture
+def no_waits(monkeypatch, no_pause):
+    monkeypatch.setattr(sandbox_module, "_RATE_LIMIT_WAITS_SECONDS", (0, 0))
+
+
+@pytest.mark.asyncio
+async def test_a_published_image_is_pulled_by_its_digest_and_tagged_with_the_name_its_containers_start_from(registry):
+    sandbox = _RecordingVmSandbox()
+
+    await sandbox.load_docker_images([_published(), _image(None, PUBLIC)])
+
+    assert sandbox.scripts == [f"docker pull {PUBLIC}", f"docker pull {_PINNED}", f"docker tag {_PINNED} {_GATEWAY}"]
+
+
+@pytest.mark.asyncio
+async def test_a_published_image_the_vm_cant_pull_is_built_from_its_build_context_under_its_name(signing_store,
+                                                                                                no_waits):
+    sandbox = _PinnedPullFailsVm("manifest unknown")
+
+    await sandbox.load_docker_images([_published()])
+
+    assert sandbox.scripts.count(f"docker pull {_PINNED}") == 2  # tried once more, then built
+    assert not any(script.startswith("docker tag") for script in sandbox.scripts)
+    assert any(f"docker build --platform linux/amd64 -f Dockerfile -t {_GATEWAY} ." in script
+               for script in sandbox.scripts)
+
+
+@pytest.mark.asyncio
+async def test_a_registry_that_rate_limits_the_pull_is_asked_again_before_the_image_is_built(signing_store, no_waits):
+    passes = _PinnedPullFailsVm("toomanyrequests: retry-after: 30", fails=4)
+    await passes.load_docker_images([_published()])
+    assert passes.scripts.count(f"docker pull {_PINNED}") == 5 and passes.scripts[-1] == f"docker tag {_PINNED} {_GATEWAY}"
+
+    limited = _PinnedPullFailsVm("429 Too Many Requests")
+    await limited.load_docker_images([_published()])
+    assert limited.scripts.count(f"docker pull {_PINNED}") == 6
+    assert any("docker build" in script for script in limited.scripts)
+
+
+@pytest.mark.asyncio
+async def test_a_published_image_neither_pulled_nor_built_says_why_each_failed(signing_store, no_waits):
+    sandbox = _PinnedPullFailsVm("manifest unknown", build_fails=True)
+
+    with pytest.raises(RuntimeError) as e:
+        await sandbox.load_docker_images([_published()])
+
+    assert str(e.value).startswith(f"Couldn't pull {_PINNED}: manifest unknown. Building {_GATEWAY} from its build "
+                                   "context failed: ")
+
+
 class _ScriptRecorder(VmSandbox):
     """Records exec_script invocations, running the real write_file_from_text."""
 
@@ -516,10 +594,34 @@ async def test_the_store_is_called_off_the_event_loop(signs):
 
 
 _WRITES = {
-    "text": lambda sandbox, dest: sandbox.write_file_from_text("body", dest),
-    "object": lambda sandbox, dest: sandbox.write_file_from_object("s3://bucket/body.json", dest),
-    "url": lambda sandbox, dest: sandbox.write_file_from_url("https://example.com/body.json", dest),
+    "text": lambda sandbox, dest, **into: sandbox.write_file_from_text("body", dest, **into),
+    "object": lambda sandbox, dest, **into: sandbox.write_file_from_object("s3://bucket/body.json", dest, **into),
+    "url": lambda sandbox, dest, **into: sandbox.write_file_from_url("https://example.com/body.json", dest, **into),
 }
+
+
+def _unstaged(scripts: list[str]) -> list[str]:
+    """``scripts`` with each write's staging path, unique per call, as one name."""
+    return [re.sub(r"/tmp/_(\w+?)_[0-9a-f]{12}_", r"/tmp/_\1_", script) for script in scripts]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("write", _WRITES.values(), ids=_WRITES.keys())
+async def test_a_write_into_an_agent_installed_in_the_sandboxs_own_container_runs_what_it_always_has(
+        signing_store, write):
+    unnamed, named = _ScriptRecorder(), _ScriptRecorder()
+    await write(unnamed, "/work/out.json")
+    await write(named, "/work/out.json", container="agent-api")
+    assert _unstaged(named.scripts) == _unstaged(unnamed.scripts)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("write", _WRITES.values(), ids=_WRITES.keys())
+async def test_a_write_into_an_agent_installed_in_a_container_of_its_own_reaches_that_one(signing_store, write):
+    sandbox = _ScriptRecorder()
+    await write(sandbox, "/work/out.json", container="task")
+    assert "docker exec -u 0 task mkdir -p /work" in sandbox.scripts
+    assert [s.split(" ")[3] for s in sandbox.scripts if s.startswith("docker cp ")] == ["task:/work/out.json"]
 
 
 @pytest.mark.asyncio
@@ -718,7 +820,7 @@ async def test_a_context_only_image_is_built_in_the_vm_from_its_context(signing_
     assert sandbox.scripts == [
         f"rm -rf {work} && mkdir -p {work}/context",
         f"curl -fsSL {sandbox_module.CURL_RETRY_FLAGS} https://signed/build-context.tar.gz -o {work}/context.tar.gz",
-        f"tar -xzf {work}/context.tar.gz -C {work}/context",
+        f"tar -xzmf {work}/context.tar.gz -C {work}/context",
         f"cd {work}/context && docker build --platform linux/amd64 -f Dockerfile -t local/a-0123456789ab:v1 .",
         f"rm -rf {work}",
     ]
@@ -763,6 +865,20 @@ async def test_a_build_takes_the_recorded_dockerfile_and_platform_else_linux_amd
     builds = [script for script in sandbox.scripts if "docker build" in script]
     assert "docker build --platform linux/amd64 -f docker/app.Dockerfile -t local/a-0123456789ab:v1 ." in builds[0]
     assert "docker build --platform linux/arm64 -f Dockerfile -t local/b-0123456789ab:v1 ." in builds[1]
+
+
+@pytest.mark.asyncio
+async def test_a_context_recording_no_platform_is_built_for_the_vms_own(signing_store):
+    """As a bundle writes its images: a VM of any platform runs one, built for its own."""
+    image = _context_image("a", "sha256:" + "1" * 64, platform=None)
+    arm = _RecordingVmSandbox()
+    arm.platform = "linux/arm64"
+
+    assert arm.load_problems([image]) == []
+    await arm.load_docker_images([image])
+
+    assert any("docker build --platform linux/arm64 -f Dockerfile -t local/a-0123456789ab:v1 ." in script
+               for script in arm.scripts)
 
 
 class _BuildFailsVm(_RecordingVmSandbox):
@@ -824,7 +940,7 @@ async def test_a_build_that_fails_fetching_an_image_runs_once_more(signing_store
 
     builds = [script for script in sandbox.scripts if "docker build" in script]
     assert len(builds) == 2 and builds[0] == builds[1]
-    assert sum(script.startswith("tar -xzf") for script in sandbox.scripts) == 1
+    assert sum(script.startswith("tar -xzmf") for script in sandbox.scripts) == 1
 
 
 @pytest.mark.asyncio

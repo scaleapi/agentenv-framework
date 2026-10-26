@@ -6,10 +6,13 @@ import json
 import logging
 from typing import ClassVar, Optional
 
+from agent_env.a2a_agent import A2AAgent
+from agent_env.store.ids import derive_id, is_local_id, validate_local_id
 from agent_env.task_step.context import TaskStepContext
-from agent_env.entity_refs import EntityRef, RefRole
+from agent_env.entity.refs import EntityRef, RefRole
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.task_step.snapshot_utils import agent_state_capture
+from agent_env.task_step.snapshot_utils.snapshot_series import rollout_base
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +26,16 @@ class SnapshotAgentStateTaskStep(TaskStep):
     agent's ``/ext/snapshot`` extension to write the conversation transcript to
     the object store, then wraps that prefix as a ``FileArtifactUniverse`` via
     ``put_existing`` (no download/re-upload). Appends an entry recording
-    ``{id, version, bundle_object_url, source_agent_name, source_context_id}`` to
+    ``{id, version, bundle_object_url, source_agent_name, source_context_id, capture_step_id}`` to
     ``context.metadata['agent_snapshots']`` (a list of such entries).
+
+    Without an ``artifact_id`` the artifact is per run, derived from the instance id
+    (``<instance_id>__<step id>-agent-state``), so concurrent runs of one task never version each
+    other's snapshot and a retry of one instance reuses its id. In that mode an agent
+    whose card does not advertise the snapshot extension is skipped, recording no entry,
+    rather than failing the step. With an explicit ``artifact_id``, an agent recorded
+    without a card, or a per-service state dump configured (it is written beside the
+    workspace capture, so it cannot run without one), it still raises.
 
     When ``env_id`` is set, the step ALSO reads each MCP service's current
     state from the deployed env (its ``data/get`` JSON, else its
@@ -49,7 +60,7 @@ class SnapshotAgentStateTaskStep(TaskStep):
         self,
         id: str,
         version: Optional[int],
-        artifact_id: str,
+        artifact_id: Optional[str],
         prompt_id: str,
         agent_name: Optional[str] = None,
         env_id: Optional[str] = None,
@@ -72,6 +83,8 @@ class SnapshotAgentStateTaskStep(TaskStep):
 
     def to_dict(self) -> dict:
         base = super().to_dict()
+        # Written even when None: an older release then loads the step and fails only it at
+        # run time, where a missing key would make it refuse the whole task.
         base["artifact_id"] = self.artifact_id
         base["prompt_id"] = self.prompt_id
         base["agent_name"] = self.agent_name
@@ -84,13 +97,25 @@ class SnapshotAgentStateTaskStep(TaskStep):
     def from_dict(cls, data: dict) -> SnapshotAgentStateTaskStep:
         return cls(
             **cls._base_from_dict(data),
-            artifact_id=data["artifact_id"],
+            artifact_id=data.get("artifact_id"),
             prompt_id=data["prompt_id"],
             agent_name=data.get("agent_name"),
             env_id=data.get("env_id"),
             universe_artifact_id=data.get("universe_artifact_id"),
             timeout_seconds=data.get("timeout_seconds", cls.DEFAULT_TIMEOUT_SECONDS),
         )
+
+    @property
+    def _dumps_service_state(self) -> bool:
+        return bool(self.env_id and self.universe_artifact_id)
+
+    def _resolve_artifact_id(self, context: TaskStepContext) -> str:
+        if self.artifact_id:
+            return self.artifact_id
+        artifact_id = derive_id(rollout_base(self.id, context.instance_id), f"{self.id}-agent-state")
+        if is_local_id(artifact_id):
+            validate_local_id(artifact_id)
+        return artifact_id
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         deployed = next((a for a in context.deployed_agents if a.agent_name == self.agent_name), None)
@@ -99,6 +124,17 @@ class SnapshotAgentStateTaskStep(TaskStep):
         a2a_url = deployed.a2a_url or deployed.api_url
         if not a2a_url:
             raise RuntimeError(f"Deployed agent '{self.agent_name}' has no a2a_url")
+        if (
+            not self.artifact_id
+            and not self._dumps_service_state
+            and deployed.a2a_card is not None
+            and not A2AAgent.find_extension(deployed.a2a_card, A2AAgent.EXT_SNAPSHOT)
+        ):
+            logger.warning(
+                "snapshot_agent_state %s: agent '%s' does not advertise the snapshot extension; "
+                "skipping the per-run capture", self.id, self.agent_name,
+            )
+            return context
 
         prompt = next((p for p in context.prompt_responses if p.prompt_id == self.prompt_id), None)
         if prompt is None:
@@ -115,7 +151,7 @@ class SnapshotAgentStateTaskStep(TaskStep):
             a2a_card=deployed.a2a_card or {},
             agent_name=self.agent_name,
             a2a_context_id=a2a_context_id,
-            artifact_id=self.artifact_id,
+            artifact_id=self._resolve_artifact_id(context),
             timeout_seconds=self.timeout_seconds,
             sandbox_type=deployed.sandbox_type,
         )
@@ -127,6 +163,7 @@ class SnapshotAgentStateTaskStep(TaskStep):
             "bundle_object_url": workspace.bundle_object_url,
             "source_agent_name": self.agent_name,
             "source_context_id": a2a_context_id,
+            "capture_step_id": self.id,
         })
 
         # Per-MCP-service state dump. Only runs when env_id +
@@ -136,7 +173,7 @@ class SnapshotAgentStateTaskStep(TaskStep):
         # JSON-stringified `{service: object_url}` (unsigned object-store references).
         # A downstream verifier re-signs each value and hands the map to its test
         # script, which accepts either a single URL or this map.
-        if self.env_id and self.universe_artifact_id:
+        if self._dumps_service_state:
             await self._capture_universe_state(context, workspace.capture_prefix)
 
         return context

@@ -26,6 +26,7 @@ from fastapi import APIRouter
 
 from agent_env import plugins
 from agent_env.artifact.artifact import Artifact
+from agent_env.artifact.artifacts.environment import SeedsEnvironments
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.store import ArtifactStore
 from agent_env.config import ConfigError, get_config, load_impl, reset_config
@@ -215,6 +216,16 @@ class _BareArtifact(Artifact):
 
     @abstractmethod
     def render(self) -> str: ...
+
+
+class _MisspeltSeeds(Artifact, SeedsEnvironments):
+    """Declares SeedsEnvironments and misspells its method."""
+
+    type: Literal["misspelt"] = "misspelt"
+
+    @classmethod
+    def seeded_environment(cls, ctx):
+        return ()
 
 
 class _BareProvider(SandboxProvider):
@@ -478,6 +489,7 @@ def test_one_distribution_found_twice_on_the_path_is_not_a_conflict(monkeypatch)
     ("envs", "_BareEnv", "from_dict", "_SiblingEnv", lambda c: c.env_registry()),
     ("task_steps", "_BareStep", "execute and from_dict", "_SiblingStep", lambda c: c.task_step_registry()),
     ("artifacts", "_BareArtifact", "render", "_SiblingArtifact", lambda c: c.artifact_registry()),
+    ("artifacts", "_MisspeltSeeds", "seeded_environments", "_SiblingArtifact", lambda c: c.artifact_registry()),
     ("sandbox_providers", "_BareProvider", "create_sandbox", "_RecordingProvider", lambda c: c.sandbox_registry()),
     ("state_providers", "_BareState", "_teardown and acquire", "_SiblingState", lambda c: c.state_registry()),
     ("env_providers", "_BareEnvProvider", "close and deploy", "_SiblingEnvProvider", lambda c: c.env_provider_registry()),

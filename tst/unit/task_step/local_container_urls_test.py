@@ -315,20 +315,22 @@ async def test_a_remote_agent_gets_peer_urls_from_beyond_this_machine_as_they_ar
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("sandbox_type, gateway_url, expected", [
-    ("local", "http://127.0.0.1:41500", "http://host.docker.internal:41500"),
-    ("modal_vm", "https://gw.modal.host", "https://gw.modal.host"),
+@pytest.mark.parametrize("sandbox_type, on_host, gateway_url, expected", [
+    ("local", False, "http://127.0.0.1:41500", "http://host.docker.internal:41500"),
+    ("local", True, "http://127.0.0.1:41500", "http://127.0.0.1:41500"),
+    ("modal_vm", False, "https://gw.modal.host", "https://gw.modal.host"),
+    ("modal_vm", True, "https://gw.modal.host", "https://gw.modal.host"),
 ])
 async def test_a_cli_gets_the_gateway_url_its_agent_reaches(
-    monkeypatch, local_stores, tmp_path, sandbox_type, gateway_url, expected,
+    monkeypatch, local_stores, tmp_path, sandbox_type, on_host, gateway_url, expected,
 ):
     (tmp_path / "cli").mkdir()
     (tmp_path / "cli" / "run.sh").write_text("#!/bin/sh\n")
     cli = CliArtifact.put("slack-cli", command_name="slack", entrypoint="run.sh", cli_dir=tmp_path / "cli")
     installed = []
 
-    async def install_cli(deployed, cli_artifact, gateway_url):
-        installed.append(gateway_url)
+    async def install_cli(deployed, cli_artifact, gateway_url, **placed):
+        installed.append((gateway_url, placed))
         return "/opt/cli/slack/run.sh"
 
     monkeypatch.setattr(A2AAgent, "install_cli", staticmethod(install_cli))
@@ -338,10 +340,10 @@ async def test_a_cli_gets_the_gateway_url_its_agent_reaches(
         deployed_envs=[DeployedGatewayEnv(env_id="env-x", env_version=1, gateway_url=gateway_url, mcp_url="",
                                           sandbox_id="sb-env", sandbox_type=sandbox_type)],
         deployed_agents=[DeployedAgent(agent_name="solver", api_url="http://agent", sandbox_id="sb-agent",
-                                       sandbox_type=sandbox_type, instance_id="inst-1")],
+                                       sandbox_type=sandbox_type, instance_id="inst-1", on_host=on_host)],
     )
 
     await LoadArtifactTaskStep(id="cli", version=None, env_id="env-x", artifact_id=cli.id,
                                artifact_version=cli.version, agent_name="solver").execute(context)
 
-    assert installed == [expected]
+    assert installed == [(expected, {"on_host": True} if on_host else {})]

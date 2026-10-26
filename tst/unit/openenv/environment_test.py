@@ -3,13 +3,14 @@ its tool errors, every way it ends in an error observation, calls that overlap, 
 down."""
 
 import asyncio
+import threading
 
 import httpx
 import pytest
 from agentenv_protocol import EnvironmentTool, ToolResult, ToolSessionError
+from agentenv_protocol.a2a_agent import proxy as proxy_module
 from openenv.core.env_server.mcp_types import CallToolAction, ListToolsAction, ToolErrorType
 
-import agent_env.task.episode.run as episode_run
 from agent_env.openenv.app import _score_at
 from agent_env.openenv.environment import ENDED, AgentEnvEnvironment, Served, ServedTask
 from agent_env.task import EpisodeSpec, Task
@@ -19,19 +20,20 @@ AGAIN = {**TURN, "id": "again", "prompt_id": "again", "prompt": "Add another.", 
 
 
 class _Tools:
-    """Stands in for ``ToolSession``: every env offers ``offered``, and a call answers with what ``answers`` maps
-    its tool to, raising it when it's an exception. A session opens once ``release`` is set, when there is one."""
+    """Stands in for the proxy's ``ToolSession``: every env offers ``offered``, and a call answers with what ``answers`` maps
+    its tool to, raising it when it's an exception. A session opens once ``release``, a ``threading.Event`` since the
+    in-process proxy runs on a loop of its own, is set, when there is one."""
 
     def __init__(self, offered, answers):
         self.offered, self.answers, self.closed, self.release = offered, answers, 0, None
 
-    def __call__(self, *, mcp_url, role, headers, timeout):
+    def __call__(self, *, mcp_url, headers=None, timeout):
         tools = self
 
         class _Session:
             async def open(self):
                 if tools.release is not None:
-                    await tools.release.wait()
+                    await asyncio.to_thread(tools.release.wait)
                 return self
 
             async def list_tools(self):
@@ -54,7 +56,7 @@ class _Tools:
 def tools(monkeypatch):
     def offer(*offered, **answers):
         sessions = _Tools(offered or ("add_item",), answers)
-        monkeypatch.setattr(episode_run, "ToolSession", sessions)
+        monkeypatch.setattr(proxy_module, "ToolSession", sessions)
         return sessions
 
     offer()
@@ -167,10 +169,10 @@ async def test_a_failed_tool_call_is_a_tool_error_and_the_episode_goes_on(teardo
 
     assert errors == [
         (ToolErrorType.EXECUTION_ERROR, "no room", False),
-        (ToolErrorType.TIMEOUT, "TimeoutError: tools/call did not finish within 600s", False),
-        (ToolErrorType.TRANSPORT_ERROR, "ConnectError: refused", False),
-        (ToolErrorType.EXECUTION_ERROR, "ToolSessionError: tools/call failed: boom (code -32603)", False),
-        (ToolErrorType.TOOL_NOT_FOUND, "EpisodeError: no env of turn 'turn' offers tool 'missing'; they offer "
+        (ToolErrorType.EXECUTION_ERROR, "error: the tool call timed out after 600s", False),
+        (ToolErrorType.EXECUTION_ERROR, "error: ConnectError: refused", False),
+        (ToolErrorType.EXECUTION_ERROR, "error: ToolSessionError: tools/call failed: boom (code -32603)", False),
+        (ToolErrorType.TOOL_NOT_FOUND, "EpisodeError: turn 'turn' offers no tool 'missing'; it offers "
                                        "['add_item', 'broken', 'flaky', 'slow']", False)]
     assert (await _call(env, "end_turn", response="Done.")).reward == 1.0
 
@@ -190,7 +192,7 @@ async def test_a_deploy_that_fails_ends_the_episode_at_reset_in_an_error_observa
 
 @pytest.mark.asyncio
 async def test_a_run_that_fails_mid_turn_ends_the_episode_at_the_next_step(teardowns, tools):
-    env = _env(ITEMS, ALICE, {**TURN, "timeout_seconds": 0.05}, REPLIES)
+    env = _env(ITEMS, ALICE, {**TURN, "timeout_seconds": 1}, REPLIES)
     await env.reset_async()
     async with asyncio.timeout(5):
         while not env._episode.finished:
@@ -199,7 +201,8 @@ async def test_a_run_that_fails_mid_turn_ends_the_episode_at_the_next_step(teard
     step = await _call(env, "add_item")
 
     assert (step.done, step.reward, step.metadata["status"]) == (True, None, "error")
-    assert step.metadata["error"] == "TimeoutError: turn 'turn' of agent 'alice' wasn't ended within 0.05s"
+    assert step.metadata["error"].startswith("TimeoutError: A2A task ")
+    assert step.metadata["error"].endswith(" did not complete within 1s")
     assert (await _call(env, "add_item")).metadata["error"] == ENDED
 
 
@@ -290,7 +293,7 @@ async def test_an_end_turn_cancelled_before_the_next_turn_opens_ends_the_episode
 async def test_a_session_closed_while_its_turn_opens_is_torn_down_with_the_turns_tools_once_it_has_opened(
         teardowns, tools):
     sessions = tools()
-    sessions.release = asyncio.Event()
+    sessions.release = threading.Event()
     env = _env(ITEMS, ALICE, TURN, REPLIES)
     resetting = asyncio.create_task(env.reset_async())
     async with asyncio.timeout(5):
@@ -302,8 +305,10 @@ async def test_a_session_closed_while_its_turn_opens_is_torn_down_with_the_turns
     sessions.release.set()
     await resetting
     await closing
+    async with asyncio.timeout(5):  # the proxy closes the session the turn opened as it stops, after the teardown
+        while not sessions.closed:
+            await asyncio.sleep(0.01)
 
-    assert sessions.closed == 1
     assert (Task.get_instance(env.state.episode_id).status, teardowns.finished) == ("cancelled", [env.state.episode_id])
     assert (await env.step_async(ListToolsAction())).metadata["error"] == ENDED
 

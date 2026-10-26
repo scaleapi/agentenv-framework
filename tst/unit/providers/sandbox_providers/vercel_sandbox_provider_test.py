@@ -324,6 +324,7 @@ def test_excess_tags_keep_run_and_step_then_sorted_keys_and_warn_without_values(
 @pytest.mark.parametrize("entry", ["run", "step"])
 async def test_cleanup_records_an_already_deleted_sandbox_as_torn_down(monkeypatch, entry):
     provider = _provider()
+    client = provider._client
     provider._client.get_sandbox.side_effect = type("Missing", (Exception,), {"status_code": 404})("gone")
     monkeypatch.setattr(teardown, "build_sandbox_provider", lambda _: provider)
     monkeypatch.setattr(teardown_sandboxes, "build_sandbox_provider", lambda _: provider)
@@ -339,7 +340,8 @@ async def test_cleanup_records_an_already_deleted_sandbox_as_torn_down(monkeypat
             id="cleanup", version=1, sandbox_names=["box"],
         ).execute(context)
     assert context.metadata[teardown_sandboxes.TORN_DOWN_KEY] == ["gone"]
-    provider._client.get_sandbox.assert_awaited_once_with(name="gone")
+    client.get_sandbox.assert_awaited_once_with(name="gone")
+    client.aclose.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -395,3 +397,37 @@ def test_supported_tags_are_preserved_without_warning(tags, caplog):
 def test_invalid_tag_is_not_hidden_by_overflow():
     with pytest.raises(ValueError, match="non-empty"):
         VercelSandboxProvider._tags({**{str(i): "v" for i in range(6)}, "z": ""})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [404, 409])
+async def test_terminate_by_id_cancels_streams_only_when_remote_is_gone(status):
+    raw = _raw()
+    started = asyncio.Event()
+
+    async def stalled(*args, **kwargs):
+        kwargs["stdout"].write("partial")
+        started.set()
+        await asyncio.Event().wait()
+
+    raw.run_process = AsyncMock(side_effect=stalled)
+    original = await _provider(raw).get_sandbox(raw.name)
+    process = await original.exec("command")
+    await started.wait()
+    fresh = _provider(raw)
+    error = type("LookupError", (Exception,), {"status_code": status})()
+    fresh._client.get_sandbox.side_effect = error
+    try:
+        if status == 404:
+            await fresh.terminate_sandbox(raw.name)
+            assert not original._processes
+            with pytest.raises(asyncio.CancelledError):
+                await process.wait()
+            assert await process.stdout.read() == b"partial"
+        else:
+            with pytest.raises(type(error)):
+                await fresh.terminate_sandbox(raw.name)
+            assert not process._task.done()
+    finally:
+        process._task.cancel()
+        await asyncio.gather(process._task, return_exceptions=True)

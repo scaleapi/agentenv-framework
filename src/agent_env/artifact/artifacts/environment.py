@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional
 
 from pydantic import ConfigDict, Field, model_serializer
@@ -10,16 +11,28 @@ from pydantic import ConfigDict, Field, model_serializer
 from agent_env.artifact.artifact import Artifact
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.ref import ArtifactRef
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
 from agent_env.store.ids import derive_id
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
+    from agent_env.entity.export import ExportContext
 
 
-class EnvironmentArtifact(Artifact):
+class SeedsEnvironments(ABC):
+    """An artifact type whose write seeds environments: a bundle checks each against the servers of the env a task
+    loads it into, and that one artifact's environments have names of their own."""
+
+    @classmethod
+    @abstractmethod
+    def seeded_environments(cls, ctx: AuthoringContext) -> tuple[tuple[str, str], ...]:
+        """``(path in the folder, environment_name)`` of each environment writing it from ``ctx``'s folder seeds, the
+        path ``""`` for the folder itself. Raises BundleError when the folder can't be read."""
+
+
+class EnvironmentArtifact(Artifact, SeedsEnvironments):
     """A FileArtifact wrapped with the name of the environment it seeds."""
 
     model_config = ConfigDict(populate_by_name=True)
@@ -100,10 +113,32 @@ class EnvironmentArtifact(Artifact):
                                             description=fields.get("description", filename))
         return cls.put(ctx.id, environment_name=fields["environment_name"], file_artifact=file)
 
+    def to_toml(self, out: ExportContext) -> dict:
+        """The artifact.toml of a folder holding the environment's file, which ``from_toml`` reads back as this."""
+        file = self.get_file_artifact()
+        out.file(file.filename, file.object_url)
+        described = {} if file.description == file.filename else {"description": file.description}
+        return {"type": self.type, "environment_name": self.environment_name, **described}
+
     @classmethod
     def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:
-        """The keys of ``data``, an artifact.toml, an environment takes. Raises BundleError listing every problem."""
-        data, problems = ctx.renamed(data, cls.toml_stored_names)
+        """The keys of ``data``, an artifact.toml, an environment takes, and its folder: its one file, or only
+        artifact.toml when ``file`` names the artifact to wrap. Raises BundleError listing every problem."""
+        problems = []
+        if (files := ctx.try_files(empty_ok=True)) is not None:  # None when the plan's walk reports why
+            if any(key == "file" or cls.toml_stored_names.get(key) == "file" for key in data):
+                if files:
+                    problems.append(f"its file is the artifact file names, so the folder holds only artifact.toml, and "
+                                    f"it also has {', '.join(repr(name) for name in files)}; give the file an artifact "
+                                    "folder of its own, or leave out file to wrap the folder's one file")
+            elif not files:
+                problems.append(ctx.no_files("file for the environment to wrap",
+                                             "put its one file here, or name the artifact to wrap with file"))
+            elif problem := ctx.not_one_file(files, "name the artifact to wrap with file, or give each other file an "
+                                                    "artifact folder of its own"):
+                problems.append(problem)
+        data, renamed = ctx.renamed(data, cls.toml_stored_names)
+        problems += renamed
         fields, more = ctx.accepted(data, **cls.toml_keys)
         problems += more
         if "environment_name" not in data:
@@ -116,6 +151,12 @@ class EnvironmentArtifact(Artifact):
         if problems:
             ctx.refuse(problems)
         return fields
+
+    @classmethod
+    def seeded_environments(cls, ctx: AuthoringContext) -> tuple[tuple[str, str], ...]:
+        """Its own environment, seeded from the folder itself."""
+        name = ctx.entry.config.get("environment_name") if isinstance(ctx.entry.config, dict) else None
+        return (("", name),) if isinstance(name, str) and name else ()
 
     def get_file_artifact(self) -> FileArtifact:
         if self.file_artifact_ref is not None:

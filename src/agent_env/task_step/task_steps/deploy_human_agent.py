@@ -11,6 +11,7 @@ from typing import ClassVar, Optional
 import httpx
 
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
+from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,7 @@ _CARD_FETCH_TIMEOUT_SECONDS = 5
 class DeployHumanAgentTaskStep(TaskStep):
     type: ClassVar[str] = "deploy_human_agent"
     entity_refs = ()
+    field_scopes = {**TaskStep.field_scopes, "a2a_url": FieldScope.USER}
 
     def __init__(
         self,

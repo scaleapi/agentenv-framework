@@ -38,6 +38,7 @@ except ImportError:  # Windows, which agent-env does not target.
 from agent_env import config
 from agent_env.attribution import Attribution
 from agent_env.config.paths import state_root
+from agent_env.providers.sandbox_providers.host_images import build_here, built_here, present, pull_here
 from agent_env.providers.sandbox_providers.sandbox import SANDBOX_LABEL, NetworkPolicy, VmSandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_CONTAINER,
@@ -85,12 +86,19 @@ _SANDBOX_ENV = "AGENTENV_SANDBOX"
 
 # Where a container finds the local transfer CA's trust files, and the variables that point TLS clients at them:
 # SSL_CERT_FILE replaces a client's roots, so it gets the public roots plus the CA; NODE_EXTRA_CA_CERTS adds.
-_TRUST_DIR = "/etc/agentenv"
-LOCAL_TRUST_ENV = {
-    "SSL_CERT_FILE": f"{_TRUST_DIR}/ca-bundle.pem",
-    "REQUESTS_CA_BUNDLE": f"{_TRUST_DIR}/ca-bundle.pem",
-    "NODE_EXTRA_CA_CERTS": f"{_TRUST_DIR}/ca.pem",
-}
+LOCAL_TRUST_DIR = "/etc/agentenv"
+
+
+def trust_env(directory: str) -> dict[str, str]:
+    """The variables that point TLS clients at the local transfer CA's trust files in ``directory``."""
+    return {
+        "SSL_CERT_FILE": f"{directory}/ca-bundle.pem",
+        "REQUESTS_CA_BUNDLE": f"{directory}/ca-bundle.pem",
+        "NODE_EXTRA_CA_CERTS": f"{directory}/ca.pem",
+    }
+
+
+LOCAL_TRUST_ENV = trust_env(LOCAL_TRUST_DIR)
 
 # Marker dropped in the work dir when this sandbox runs a container, so a later get_sandbox()
 # (post-run teardown reconstructs the sandbox from disk) knows it owns that container.
@@ -178,6 +186,8 @@ class LocalSandbox(VmSandbox):
 
     ON_THIS_MACHINE = True
     platform = None  # this machine's Docker runs its own platform, and emulates others where it's set up
+    # The images its provider's prepare_image had this machine's Docker hold, which its containers start from as they are.
+    prepared: frozenset[str] = frozenset()
 
     def url_from_sandbox(self, url: str) -> str:
         return LocalSandboxProvider.get_external_url(url)
@@ -204,6 +214,33 @@ class LocalSandbox(VmSandbox):
         self._work_dir = work_dir or Path(
             tempfile.mkdtemp(prefix=f"agent-env-{self.sandbox_id}-", dir=_local_sandbox_root())
         )
+
+    async def build_images(self, artifacts: list) -> None:
+        """Build each on this machine's Docker, which runs this sandbox's containers: natively, once per sources. One
+        given a platform of its own, as a remote VM records, builds as a VM does, for that platform."""
+        if self.platform is not None:
+            await super().build_images(artifacts)
+            return
+        for artifact in artifacts:
+            await build_here(artifact)
+
+    async def pull_images(self, image_names: list[str]) -> None:
+        """Pull each image but one this machine built from a build context, which no registry holds, and one its Docker
+        holds that its provider prepared (``prepared``) or under a name pinned to a digest, so a tag isn't pulled again
+        over the image a digest names."""
+        held = await asyncio.gather(*(asyncio.to_thread(self._held, name) for name in image_names))
+        if pulled := [name for name, here in zip(image_names, held) if not here]:
+            await super().pull_images(pulled)
+
+    def _held(self, image_name: str) -> bool:
+        return built_here(image_name) or ((image_name in self.prepared or "@sha256:" in image_name)
+                                          and present(image_name))
+
+    async def pull_published(self, artifacts: list) -> list:
+        """Pull each published image but one this machine's Docker already holds under its name, so a run after the
+        first needs no registry."""
+        held = await asyncio.gather(*(asyncio.to_thread(present, artifact.image_name) for artifact in artifacts))
+        return await super().pull_published([artifact for artifact, here in zip(artifacts, held) if not here])
 
     def host_port(self, port: int) -> int:
         """The allocated host port for a published container port (identity if unmapped)."""
@@ -474,20 +511,39 @@ def _marked_pids(sandbox_id: str) -> list[int]:
 async def _stop_marked(sandbox_id: str) -> bool:
     """Stop the processes ``sandbox_id``'s commands left running, which a real VM would take down with it: SIGTERM,
     then SIGKILL for any still there a few seconds later. False if some are still running."""
-    if not (pids := await asyncio.to_thread(_marked_pids, sandbox_id)):
+    if not (found := await asyncio.to_thread(_running_marked, sandbox_id, {})):
         return True
-    logger.info("Stopping %d process(es) sandbox %s left running on this machine", len(pids), sandbox_id)
+    logger.info("Stopping %d process(es) sandbox %s left running on this machine", len(found), sandbox_id)
     for sig in (signal.SIGTERM, signal.SIGKILL):
-        for pid in pids:
+        for pid in found:
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.kill(pid, sig)
         for _ in range(_REAP_SECONDS * 10):
             await asyncio.sleep(0.1)
-            if not (pids := await asyncio.to_thread(_marked_pids, sandbox_id)):
+            if not (found := await asyncio.to_thread(_running_marked, sandbox_id, found)):
                 return True
     logger.warning("Processes %s that sandbox %s started are still running; keeping what it staged in /tmp",
-                   pids, sandbox_id)
+                   sorted(found), sandbox_id)
     return False
+
+
+def _running_marked(sandbox_id: str, found: dict[int, int]) -> dict[int, int]:
+    """The running processes carrying ``sandbox_id``'s marker, and those of ``found`` that haven't exited, each with its
+    start time. One found before counts until it exits: its environment reads empty while it execs or is exiting."""
+    running = {pid: start for pid, start in found.items() if _started(pid) == start}
+    for pid in _marked_pids(sandbox_id):
+        if pid not in running and (start := _started(pid)) is not None:
+            running[pid] = start
+    return running
+
+
+def _started(pid: int) -> int | None:
+    """When ``pid`` started, in clock ticks since boot, or None once it has exited (a zombie, or reaped)."""
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+    except (FileNotFoundError, ProcessLookupError):  # a process that exits mid-read gives ESRCH
+        return None
+    return None if fields[0] in "ZX" else int(fields[19])
 
 
 def _remove_staged(sandbox_id: str) -> None:
@@ -513,7 +569,7 @@ async def start_trusting(sandbox: VmSandbox, container: str, trust_dir: Path) ->
     reach it, then start it. A container that cannot be given the files or started is removed, so its name is free
     for the next attempt."""
     try:
-        await sandbox.copy_trust_dir_into_container(trust_dir, container, _TRUST_DIR)
+        await sandbox.copy_trust_dir_into_container(trust_dir, container, LOCAL_TRUST_DIR)
         await sandbox.exec_script(f"docker start {shlex.quote(container)} > /dev/null")
     except Exception:
         await sandbox.exec_script(f"docker rm -f {shlex.quote(container)} >/dev/null 2>&1 || true")
@@ -545,8 +601,16 @@ class LocalSandboxProvider(SandboxProvider):
 
     EXTRA_CONTAINER_RUN_ARGS = " ".join(f"--add-host {entry}" for entry in _EXTRA_HOSTS)
     ON_THIS_MACHINE = True
-    # An agent's sandbox is a container from its image's name, though a VM it creates (create_vm) loads images.
-    SANDBOX_ACCEPTS = Accepts.NAME
+    # Its containers start from an image's name, or one it builds first from the image's build context (prepare_image);
+    # a VM it creates (create_vm) loads images.
+    SANDBOX_ACCEPTS = Accepts.NAME_OR_CONTEXT
+    CONTAINER_ACCEPTS = Accepts.NAME_OR_CONTEXT
+
+    @property
+    def _prepared(self) -> set[str]:
+        """The images prepare_image had this machine's Docker hold, by name; made on first use, so a subclass with an
+        ``__init__`` of its own needn't call this one's."""
+        return self.__dict__.setdefault("_prepared_images", set())
 
     def url_from_sandbox(self, url: str) -> str:
         return self.get_external_url(url)
@@ -573,6 +637,7 @@ class LocalSandboxProvider(SandboxProvider):
         sandbox = LocalSandbox(port_map=port_map)
         (sandbox.work_dir / _PORT_MAP_FILE).write_text(json.dumps(sandbox._port_map))
         sandbox.network_policy = self.effective_network_policy(network_policy)
+        sandbox.prepared = frozenset(self._prepared)
         return sandbox
 
     async def create_container(
@@ -637,6 +702,16 @@ class LocalSandboxProvider(SandboxProvider):
         args = self._container_args(sandbox, image_name=image_name, port=port, env={**LOCAL_TRUST_ENV, **env})
         await sandbox.exec_script(f"docker create {args} > /dev/null")
         await start_trusting(sandbox, sandbox.container_name, trust_dir)
+
+    async def prepare_image(self, image: Any, *, attribution: Optional[Attribution] = None) -> None:
+        """Have this machine's Docker hold the image the local provider starts containers from by name: one that is only
+        a build context built here, and one with a digest pulled by it, or built from its build context when it can't
+        be."""
+        if image.context_only:
+            await build_here(image)
+        elif image.image_digest:
+            await pull_here(image)
+            self._prepared.add(image.image_name)
 
     async def create_sandbox(
         self,

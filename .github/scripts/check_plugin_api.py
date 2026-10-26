@@ -32,13 +32,25 @@ BASES = (
     "agent_env.providers.env_state.env_state_provider.EnvStateProvider",
     "agent_env.providers.env_providers.env_provider.EnvironmentProvider",
     "agent_env.explorer.plugin.ExplorerPlugin",
+    "agent_env.runner.runner.Runner",
 )
 USED = (
-    "agent_env.task_step.context.TaskStepContext", "agent_env.plugins",
+    "agent_env.task_step.context.TaskStepContext", "agent_env.task_step.context.HEARTBEAT_KEY", "agent_env.plugins",
     "agent_env.providers.env_providers.env_provider.build_env_provider", "agent_env.env.store.register_env_instance",
     # What a plugin reads of recorded runs.
     "agent_env.task.store.task_instances", "agent_env.task.store.count_task_instances",
     "agent_env.task.store.find_task_instance", "agent_env.task.store.TaskInstance",
+    # What a runner calls and returns, and the run index it records each run in.
+    "agent_env.task.task.Task.get", "agent_env.task.task.Task.run", "agent_env.task.teardown.teardown_run",
+    "agent_env.runner.runner.run_outcome",
+    "agent_env.runner.runner.RunStatus", "agent_env.runner.runner.RunHandle", "agent_env.runner.runner.RunRecord",
+    "agent_env.runner.store.ensure_indexes", "agent_env.runner.store.insert_run", "agent_env.runner.store.get_run",
+    "agent_env.runner.store.list_runs", "agent_env.runner.store.count_runs", "agent_env.runner.store.active_runs",
+    "agent_env.runner.store.set_running", "agent_env.runner.store.mark_terminal",
+    # What a verify script is handed of the run it grades.
+    "agent_env.task_step.task_steps.verifiers.Run", "agent_env.task_step.task_steps.verifiers.Turn",
+    "agent_env.task_step.task_steps.verifiers.Message", "agent_env.task_step.task_steps.verifiers.Firing",
+    "agent_env.task_step.task_steps.verifiers.RunRecordUnavailable",
     # What an environment provider reads to deploy a built-in env.
     "agent_env.env.envs.mcp_server.MCPServerEnv.docker_image_artifact", "agent_env.env.envs.mcp_server.MCPServerEnv.environment_name",
     "agent_env.env.envs.website.WebsiteEnv.backend_docker_image_artifact",
@@ -413,8 +425,10 @@ def caller_breaks(path: str, old: griffe.Object, new: griffe.Object, reshaped: s
         else:
             found += [f"{path}.{name}: no longer in __all__"
                       for name in sorted(set(before or ()) - set(after or ())) if name in new.members]
-    for breakage in griffe.find_breaking_changes(old, new):
-        if _benign(breakage, old, new) or breakage.obj.path in reshaped:
+    scope = (old.parent, new.parent) if old.is_function else (old, new)
+    for breakage in griffe.find_breaking_changes(*scope):
+        if (old.is_function and breakage.obj.path != old.path) or _benign(breakage, old, new) \
+                or breakage.obj.path in reshaped:
             continue
         found.append(_describe(breakage, public))
     return found

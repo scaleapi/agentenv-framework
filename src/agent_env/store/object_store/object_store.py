@@ -47,11 +47,13 @@ class UploadPolicy:
 @dataclass(frozen=True)
 class ObjectMetadata:
     """Metadata of a stored object. ``content_encoding`` is how the stored bytes are encoded (such
-    as ``gzip``); reads return the bytes as stored, so ``size`` counts the encoded bytes."""
+    as ``gzip``); reads return the bytes as stored, so ``size`` counts the encoded bytes. ``etag`` is
+    equal for objects of equal content, when the store can tell, else None."""
     content_type: str | None = None
     size: int | None = None
     last_modified: datetime | None = None
     content_encoding: str | None = None
+    etag: str | None = None
 
 
 class ObjectStore(ABC):

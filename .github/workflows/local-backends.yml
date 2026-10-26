@@ -131,39 +131,14 @@ jobs:
           python -m pip install --quiet -r .github/ci-requirements.txt
           uv sync --locked --extra dev --python "$(command -v python)"
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
-      # Public ECR caps anonymous pulls by data per source IP, and hosted runners share IPs, so its pulls
-      # fail here for hours at a time. mirror.gcr.io serves the same Docker official images under the same
-      # digests: each base image is pulled from there and tagged with the name its Dockerfile uses. Docker
-      # 28 resolves a digest-pinned FROM only from an image under that exact name, which `docker tag`
-      # refuses, so those are also named in containerd, whose images Docker reads only on the containerd
-      # image store. Switching stores restarts dockerd, which would stop a service container, so the
-      # registry starts afterwards.
-      - name: Use the containerd image store
-        run: |
-          [ -s /etc/docker/daemon.json ] || echo '{}' | sudo tee /etc/docker/daemon.json >/dev/null
-          jq '.features["containerd-snapshotter"] = true' /etc/docker/daemon.json > "$RUNNER_TEMP/daemon.json"
-          sudo mv "$RUNNER_TEMP/daemon.json" /etc/docker/daemon.json
-          sudo systemctl restart docker
-          docker info --format '{{json .DriverStatus}}' | grep -q io.containerd.snapshotter
+      # ECR Public's anonymous pulls fail here for hours at a time. This can restart dockerd, so the registry
+      # starts afterwards.
+      - name: Pull the base images from mirror.gcr.io
+        run: python3 .github/scripts/mirror_base_images.py src tst
       - name: Start the local registry
         run: |
           docker run --detach --name registry --publish 5000:5000 mirror.gcr.io/library/registry:2
           timeout 30 sh -c 'until curl -sf http://localhost:5000/v2/ >/dev/null; do sleep 1; done'
-      - name: Pull the base images from mirror.gcr.io
-        run: |
-          grep -rhoE '^FROM +public\.ecr\.aws/docker/library/[^ ]+' --include='Dockerfile*' src tst | awk '{print $2}' | sort -u |
-            while read -r image; do
-              name=${image#public.ecr.aws/docker/library/}
-              source=mirror.gcr.io/library/$name
-              case $name in *@*) source=mirror.gcr.io/library/${name%%[:@]*}@${name#*@} ;; esac
-              for attempt in 1 2 3; do
-                docker pull --quiet "$source" && break
-                if [ "$attempt" = 3 ]; then echo "::warning::couldn't pull $source; $image's build will pull it"; continue 2; fi
-                sleep $((attempt * 10))
-              done
-              case ${name%@*} in *:*) docker tag "$source" "${image%@*}" ;; esac
-              case $image in *@*) sudo ctr --namespace moby images tag "$source" "$image" >/dev/null ;; esac
-            done
       - name: Slow integration tier on the local defaults
         run: |
           .venv/bin/python -m pytest -m int_test_slow -rA --timeout=1200 --junitxml=junit-integration-slow.xml \

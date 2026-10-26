@@ -276,7 +276,18 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
                 f"{shlex.quote(sandbox.scoped_name(self.container_name))} bash -c {shlex.quote(setup_cmd)}"
             )
 
-        # 4. Run main command, bounded by in-container timeout(1)
+        # 4. Clear the reward file the score is read from, so one the agent left in this container
+        # isn't graded; a process the agent left running can still write it. Other result files
+        # stay: a step can extract what an earlier step's job wrote. `-w /` resolves a relative
+        # path as `docker cp` does, and uid 0 needs no passwd entry.
+        if self.reward_path:
+            await sandbox.exec_script(
+                f"docker exec -u 0 -w / "
+                f"{shlex.quote(sandbox.scoped_name(self.container_name))} "
+                f"rm -f -- {shlex.quote(self.reward_path)}"
+            )
+
+        # 5. Run main command, bounded by in-container timeout(1)
         logger.info(
             f"[{self.verifier_id}] running verifier (timeout={self.timeout_sec}s) "
             f"in container '{self.container_name}': {command[:160]}"
@@ -297,7 +308,7 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
         if stderr:
             logger.info(f"[{self.verifier_id}] stderr:\n{stderr}")
 
-        # 5. Extract result files (docker cp + cat + try JSON parse)
+        # 6. Extract result files (docker cp + cat + try JSON parse)
         extracted_files: dict[str, Any] = {}
         for result_path in self.result_paths:
             try:
@@ -385,8 +396,9 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
         }
 
         # 9. Raise on timeout / non-zero exit AFTER recording. In reward mode a
-        # non-zero exit is a graded failure (already recorded as score 0), not a
-        # step error — only an unfinished (timed-out) run is unreliable.
+        # non-zero exit is graded by the reward file this run wrote (score 0 when
+        # it wrote none), not a step error — only an unfinished (timed-out) run is
+        # unreliable.
         if timed_out:
             raise RuntimeError(
                 f"Verifier '{self.verifier_id}' timed out after {self.timeout_sec}s"

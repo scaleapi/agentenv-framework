@@ -11,7 +11,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
-from agentenv_protocol import ToolSessionError
 from openenv.core.env_server.interfaces import Environment
 from openenv.core.env_server.mcp_types import (
     RESERVED_TOOL_NAMES,
@@ -193,8 +192,6 @@ class AgentEnvEnvironment(Environment):
             return _tool_error(name, ToolErrorType.TIMEOUT, e)
         except httpx.HTTPError as e:
             return _tool_error(name, ToolErrorType.TRANSPORT_ERROR, e)
-        except ToolSessionError as e:
-            return _tool_error(name, ToolErrorType.EXECUTION_ERROR, e)
         if result.isError:
             return _tool_error(name, ToolErrorType.EXECUTION_ERROR, result.text)
         return CallToolObservation(tool_name=name, result={

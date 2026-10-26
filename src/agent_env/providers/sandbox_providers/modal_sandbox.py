@@ -260,6 +260,8 @@ class ModalSandboxProvider(SandboxProvider):
         # The images prepare_image builds from their build contexts, by name, so create_container builds them rather
         # than pull.
         self._context_images: dict[str, DockerImageArtifact] = {}
+        # What create_container pulls for each image prepare_image found recording a digest: its name pinned to it.
+        self._pinned: dict[str, str] = {}
 
     async def _get_client(self) -> modal.Client:
         if self._client is None:
@@ -289,13 +291,17 @@ class ModalSandboxProvider(SandboxProvider):
     async def prepare_image(self, image: DockerImageArtifact, *, attribution: Optional[Attribution] = None) -> None:
         """Build ``image`` from its build context when Modal can't run it by name: it's only a build context, its name
         is in a registry Modal can't reach, or it's built for another platform than Modal's; unless this process has
-        already built its sources. One it pulls drops an image prepared earlier under its name."""
+        already built its sources. One it pulls, by its digest when it has one, drops an image prepared under its name."""
         if image.buildable and (image.by_name_problem(on_this_machine=self.ON_THIS_MACHINE)
                                 or image.platform_problem(self._sandbox_cls.platform)):
             self._context_images[image.image_name] = image
             await self._context_image(image)
         else:
             self._context_images.pop(image.image_name, None)
+            if image.image_digest:
+                self._pinned[image.image_name] = image.pinned_name
+            else:
+                self._pinned.pop(image.image_name, None)
 
     async def _context_image(self, image: DockerImageArtifact, *,
                              stale: str | None = None) -> tuple[modal.Image, str]:
@@ -351,7 +357,7 @@ class ModalSandboxProvider(SandboxProvider):
         if (prepared := self._context_images.get(image_name)) is not None:
             image, built_id = await self._context_image(prepared)
         else:
-            image = await self._registry_image(image_name)
+            image = await self._registry_image(self._pinned.get(image_name, image_name))
 
         logger.info(
             f"Creating Modal sandbox from image {image_name} "

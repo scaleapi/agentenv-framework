@@ -8,7 +8,7 @@ from typing import ClassVar, Optional
 from agent_env.env.gateway import TOOL_DISABLE_ACTION, TOOL_ENABLE_ACTION
 from agent_env.env.gateway.constants import EXT_DISABLE_TOOL_URI, EXT_ENABLE_TOOL_URI
 from agent_env.task_step.context import TaskStepContext
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)

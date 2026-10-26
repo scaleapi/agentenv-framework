@@ -2,17 +2,20 @@
 
 The script defines ``run(input) -> JSON``, where ``input = {"args", "results"}``.
 The result is stored at ``context.metadata["script_results"][result_id]``.
+A script on an env's host also gets ``input["env"] = {"id", "url", "mcp_url"}``: the env's
+address, where its card is at ``/.well-known/agent-env.json``, and its MCP endpoint, as that
+host reaches them (``Sandbox.url_on_host``), since a host can't always call its own public URL.
 
 ``script_artifact_id`` is either a single-file ``FileArtifact`` or a
 ``FileArtifactUniverse`` whose ``.py`` members are staged side by side so the entry
 file can import its siblings; non-``.py`` members are skipped. ``script_file`` names
 the entry, defaulting to the sole ``.py`` member or to ``run.py``.
 
-Target: with ``env_id`` set, the script runs on that env's VM host (no agent, no
-LLM key); with ``sandbox_name`` set, on a ``deploy_sandbox`` sandbox (its VM host, or its
-container for a container-mode sandbox);
-otherwise it runs inside the agent container (``agent_name``), where it can see the
-agent's workspace.
+Target: with ``env_id`` set, the script runs on that env's VM host, or in its container for an
+env in a container sandbox, whose image needs python3 (no agent, no LLM key); with
+``sandbox_name`` set, on a ``deploy_sandbox`` sandbox (its VM host, or its container for a
+container-mode sandbox); otherwise it runs inside the agent container (``agent_name``), where
+it can see the agent's workspace.
 """
 
 from __future__ import annotations
@@ -28,9 +31,10 @@ from typing import Any, ClassVar, Optional, Protocol
 
 from agent_env.artifact import Artifact, FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
-from agent_env.env.env import require_sandbox
+from agent_env.env.env import DeployedSandboxEnv, require_sandbox
+from agent_env.providers.sandbox_providers.sandbox import into_container
 from agent_env.task_step.context import TaskStepContext
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)
@@ -164,9 +168,9 @@ class RunCodeTaskStep(TaskStep):
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         script_file, files = await asyncio.to_thread(self._load_script)
         target = await self._resolve_target(context)
-        run_dir = f"{_RUN_DIR}/{self.id}"
+        run_dir = target.run_dir(self.id)
 
-        await self._stage(target, run_dir, files, self._build_input(context))
+        await self._stage(target, run_dir, files, self._build_input(context, target))
         await self._run(target, run_dir, script_file)
         result = await self._read_output(target, run_dir)
 
@@ -289,12 +293,15 @@ class RunCodeTaskStep(TaskStep):
             )
         return (script_file, files)
 
-    def _build_input(self, context: TaskStepContext) -> dict:
-        """Build the {args, results} input passed to the script."""
-        return {
+    def _build_input(self, context: TaskStepContext, target: _ExecTarget) -> dict:
+        """Build the {args, results} input passed to the script, and its env's endpoints on an env's host."""
+        script_input = {
             "args": self.args,
             "results": context.metadata.get("script_results", {}),
         }
+        if self.env_id is not None:
+            script_input["env"] = _env_on_host(self._deployed_env(context), target.sandbox)
+        return script_input
 
     def _target_kind(self) -> str:
         if self.env_id is not None:
@@ -304,7 +311,7 @@ class RunCodeTaskStep(TaskStep):
         return "agent"
 
     async def _resolve_target(self, context: TaskStepContext) -> _ExecTarget:
-        """Pick where the script runs: the env's VM host, a deployed sandbox's host, or the agent container."""
+        """Pick where the script runs: the env's host, a deployed sandbox's host, or the agent container."""
         if self.env_id is not None:
             return await self._host_target(context)
         if self.sandbox_name is not None:
@@ -363,12 +370,8 @@ class RunCodeTaskStep(TaskStep):
 
     # --- run targets ---
 
-    async def _host_target(self, context: TaskStepContext) -> _ExecTarget:
-        from agent_env.providers.sandbox_providers.sandbox_provider import (
-            build_sandbox_provider,
-            get_env_sandbox_provider,
-        )
-
+    def _deployed_env(self, context: TaskStepContext) -> DeployedSandboxEnv:
+        """The record of ``env_id``'s deploy, which must be in one of agent-env's sandboxes."""
         deployed = next(
             (d for d in context.deployed_envs if d.env_id == self.env_id), None
         )
@@ -379,6 +382,16 @@ class RunCodeTaskStep(TaskStep):
                 f"Env '{self.env_id}' not found in context.deployed_envs "
                 "(or missing sandbox_id)"
             )
+        return deployed
+
+    async def _host_target(self, context: TaskStepContext) -> _ExecTarget:
+        from agent_env.providers.sandbox_providers.sandbox import VmSandbox
+        from agent_env.providers.sandbox_providers.sandbox_provider import (
+            build_sandbox_provider,
+            get_env_sandbox_provider,
+        )
+
+        deployed = self._deployed_env(context)
         # env sandbox provider, honoring a custom sandbox_type
         provider = (
             build_sandbox_provider(deployed.sandbox_type)
@@ -386,7 +399,8 @@ class RunCodeTaskStep(TaskStep):
             else get_env_sandbox_provider()
         )
         sandbox = await provider.get_sandbox(deployed.sandbox_id)
-        return _HostTarget(sandbox)
+        # An env in a container sandbox has no host to run on: the script runs in the container, beside its server.
+        return _HostTarget(sandbox) if isinstance(sandbox, VmSandbox) else _AgentTarget(sandbox, prefix=())
 
     async def _sandbox_target(self, context: TaskStepContext) -> _ExecTarget:
         from agent_env.providers.sandbox_providers.sandbox import VmSandbox
@@ -440,11 +454,11 @@ class RunCodeTaskStep(TaskStep):
             # A host-installed agent has no container: stage and run on the VM host, as root.
             return _HostTarget(sandbox)
         prefix = (
-            ("sudo", "docker", "exec", "-u", "0", sandbox.container_name)
+            ("sudo", "docker", "exec", "-u", "0", agent.installed_container or sandbox.container_name)
             if sandbox.mode == SANDBOX_MODE_VM
             else ()
         )
-        return _AgentTarget(sandbox, prefix)
+        return _AgentTarget(sandbox, prefix, agent.installed_container)
 
     # --- errors ---
 
@@ -480,7 +494,20 @@ def _is_safe_member(name: str) -> bool:
     return ".." not in PurePosixPath(name).parts
 
 
+def _env_on_host(deployed: DeployedSandboxEnv, sandbox: Any) -> dict:
+    """The env's id, address and MCP endpoint as a script on its host reaches them."""
+    url, mcp_url = deployed.environment_url, deployed.mcp_url
+    return {
+        "id": deployed.env_id,
+        "url": url and sandbox.url_on_host(url),
+        "mcp_url": mcp_url and sandbox.url_on_host(mcp_url),
+    }
+
+
 class _ExecTarget(Protocol):
+    sandbox: Any
+
+    def run_dir(self, step_id: str) -> str: ...
     async def reset_dir(self, path: str) -> None: ...
     async def write_file(self, path: str, content: str) -> None: ...
     async def run(self, *command: str) -> tuple[int, str, str]: ...
@@ -491,6 +518,10 @@ class _HostTarget:
     """Runs the script on a VM host (an env's or a deployed sandbox's; no agent)."""
 
     sandbox: Any
+
+    def run_dir(self, step_id: str) -> str:
+        # The sandbox's own: runs on the local provider share this machine's /tmp, and teardown removes it there.
+        return f"{self.sandbox.scoped_name(_RUN_DIR)}/{step_id}"
 
     async def reset_dir(self, path: str) -> None:
         await self.sandbox.exec_script(
@@ -507,10 +538,15 @@ class _HostTarget:
 
 @dataclass
 class _AgentTarget:
-    """Runs the script inside the agent container."""
+    """Runs the script inside a container: an agent's, a container sandbox's, or an env's in one. ``container`` is
+    the one install_agent put the agent in, which its files are written into too."""
 
     sandbox: Any
     prefix: tuple[str, ...]
+    container: str | None = None
+
+    def run_dir(self, step_id: str) -> str:
+        return f"{_RUN_DIR}/{step_id}"
 
     async def reset_dir(self, path: str) -> None:
         await self.run("rm", "-rf", path)
@@ -518,7 +554,7 @@ class _AgentTarget:
 
     async def write_file(self, path: str, content: str) -> None:
         # write_file_from_text takes (content, path); we expose (path, content).
-        await self.sandbox.write_file_from_text(content, path)
+        await self.sandbox.write_file_from_text(content, path, **into_container(self.container))
 
     async def run(self, *command: str) -> tuple[int, str, str]:
         return await self.sandbox.exec_with_output(*self.prefix, *command)

@@ -25,6 +25,7 @@ from agent_env.store.ids import derive_id
 if TYPE_CHECKING:
     from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
     from agent_env.bundle.authoring import AuthoringContext
+    from agent_env.entity.export import ExportContext
 
 
 AGENT_SKILLS_SPEC_VERSION = "0.1"
@@ -95,7 +96,6 @@ class SkillArtifact(Artifact):
         frontmatter, _body = parse_skill_md(skill_md_bytes)
 
         store = get_artifact_store()
-        version = store.next_version(id)
         skill_object_url = store.attempt_prefix(cls.model_fields["type"].default, id)
 
         universe = FileArtifactUniverse.put_bundled(
@@ -106,7 +106,6 @@ class SkillArtifact(Artifact):
 
         instance = cls(
             id=id,
-            version=version,
             skill_files_id=universe.id,
             skill_object_url=skill_object_url,
             agent_skills_spec_version=AGENT_SKILLS_SPEC_VERSION,
@@ -131,6 +130,11 @@ class SkillArtifact(Artifact):
     def from_toml(cls, data: Any, ctx: AuthoringContext) -> "SkillArtifact":
         """Write the skill in the bundle folder: every file its folder walk lists."""
         return cls.put(ctx.id, files=ctx.files())
+
+    def to_toml(self, out: ExportContext) -> dict:
+        """A skill's folder holds its tree, as this version wrote it under its own prefix; it has no toml."""
+        out.tree(self.skill_object_url)
+        return {}
 
     def get_skill_files(self) -> "FileArtifactUniverse":
         from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse

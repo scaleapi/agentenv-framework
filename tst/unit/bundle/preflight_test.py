@@ -17,7 +17,8 @@ from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts import docker_image as docker_image_module
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store
-from agent_env.bundle import BundleError, dry_run_bundle, run_bundle
+from agent_env.bundle import BundleError, BundleKind, dry_run_bundle, run_bundle
+from agent_env.bundle.run import _write_bundle
 from agent_env.cli import cli
 from agent_env.config import get_config
 from agent_env.config.runtime import Config
@@ -37,7 +38,7 @@ from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.deploy_sandbox import DeploySandboxTaskStep
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
-from tst.unit.bundle._support import layout, local_store
+from tst.unit.bundle._support import layout, local_store, shipped_agent
 
 LOCAL = ("localhost:5000/local/img:v1", "file:///state/img-v1.tar.gz")
 REMOTE = ("123456789012.dkr.ecr.us-west-2.amazonaws.com/img:v1", "s3://bucket/img-v1.tar.gz")
@@ -103,6 +104,7 @@ def _problems(fn):
 
 
 AGENT = {"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}
+MODEL_ENDPOINT_MISSING = preflight_module.model_endpoint_missing  # the probe, which the unit tier's conftest stubs
 
 
 # Images only this machine has
@@ -218,40 +220,40 @@ def test_a_remote_image_runs_anywhere_and_a_local_one_on_the_local_provider(bund
     assert problem.startswith("tasks/t.json: step 'helper': deploys agent 'helper''s image")
 
 
-# Images the bundle builds, written in the form their deploys run
+# Images the bundle builds, each written as its build context, built where each deploy runs
 
 BUILT = "@local/~/triage/solver__agent_image"
 
 
-CONTEXT = "a build context, which each deploy builds where it runs, for linux/amd64"
+CONTEXT = "a build context, which each deploy builds where it runs, for its sandbox's platform"
+BUILT_HERE = "a build context, built with docker on this machine"
 
 
 @pytest.mark.parametrize("sandbox, form", [
-    ("local", "built on this machine"), ("modal_vm", CONTEXT), ("modal", CONTEXT), ("modal_vm,modal", CONTEXT),
+    ("local", BUILT_HERE), ("modal_vm", CONTEXT), ("modal", CONTEXT), ("modal_vm,modal", CONTEXT),
+    ("modal_vm,local", BUILT_HERE),
 ])
-def test_an_agent_the_bundle_builds_is_built_here_for_the_local_provider_and_a_build_context_for_those_that_build_it(
+def test_an_agent_the_bundle_builds_is_its_build_context_wherever_it_deploys_and_built_here_for_a_deploy_here(
         bundle_dir, docker_on_path, sandbox, form):
-    """A VM builds it, and Modal builds it before creating the container that runs it."""
+    """A VM builds it, Modal builds it before creating the container that runs it, and a run builds it with this
+    machine's Docker for a deploy on this machine, which a chain may fall back to."""
     layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\n"})
     _task(bundle_dir, [AGENT])
 
     dry = dry_run_bundle(bundle_dir, sandbox=sandbox)
 
-    assert dry.materialization.contexts == (set() if sandbox == "local" else {BUILT})
+    assert dry.built_here == ({BUILT} if form == BUILT_HERE else set())
     assert dry.images() == (f"agents/solver (Dockerfile image) v1: {form}",)
 
 
-@pytest.mark.parametrize("sandbox, form", [
-    ("local", "built on this machine"), ("modal_vm", CONTEXT), ("modal", CONTEXT),
-])
-def test_an_image_folder_an_agent_names_is_written_in_the_form_its_deploys_run(
-        bundle_dir, docker_on_path, sandbox, form):
+@pytest.mark.parametrize("sandbox, form", [("local", BUILT_HERE), ("modal_vm", CONTEXT), ("modal", CONTEXT)])
+def test_an_image_folder_an_agent_names_is_built_where_its_deploys_run(bundle_dir, docker_on_path, sandbox, form):
     layout(bundle_dir, {"artifacts/base/Dockerfile": "FROM scratch\n", "agents/solver/agent.toml": 'image = "base"\n'})
     _task(bundle_dir, [AGENT])
 
     dry = dry_run_bundle(bundle_dir, sandbox=sandbox)
 
-    assert dry.materialization.contexts == (set() if sandbox == "local" else {"@local/~/triage/base"})
+    assert dry.built_here == ({"@local/~/triage/base"} if form == BUILT_HERE else set())
     assert dry.images() == (f"artifacts/base (Dockerfile image) v1: {form}",)
 
 
@@ -290,6 +292,22 @@ def test_an_agent_the_bundle_builds_is_refused_on_a_provider_that_creates_no_vm_
     ]
 
 
+@pytest.mark.parametrize("sandbox", ["containers", "local"])
+def test_an_agent_built_from_a_shipped_agents_published_sources_is_pulled_wherever_it_deploys(bundle_dir, monkeypatch,
+                                                                                            agents_published, sandbox):
+    """Even on a provider that runs it by name, and on this machine, where it isn't built first."""
+    registry = Config.sandbox_registry
+    monkeypatch.setattr(Config, "sandbox_registry", lambda self: {**registry(self), "containers": {"impl": _ContainersOnly}})
+    shipped_agent(bundle_dir)
+    _task(bundle_dir, [AGENT])
+
+    dry = dry_run_bundle(bundle_dir, sandbox=sandbox)
+
+    assert dry.built_here == frozenset()
+    assert dry.images() == (f"agents/solver (Dockerfile image) v1: {agents_published}, published for its sources, which each deploy "
+                            "pulls by its digest, or builds from its build context when it can't",)
+
+
 def test_a_gateway_is_refused_on_a_provider_that_creates_no_vm_and_has_no_private_network(bundle_dir, monkeypatch):
     registry = Config.sandbox_registry
     monkeypatch.setattr(Config, "sandbox_registry", lambda self: {**registry(self), "containers": {"impl": _ContainersOnly}})
@@ -303,30 +321,27 @@ def test_a_gateway_is_refused_on_a_provider_that_creates_no_vm_and_has_no_privat
     ]
 
 
-MIXED = ("the bundle builds it from agents/solver/Dockerfile on this machine for the local provider, and as a build "
-         "context for one that builds it, and a run writes it one way; run its deploys on one kind, such as "
-         "--sandbox local or --sandbox modal_vm")
+def test_an_image_only_a_step_the_walk_doesnt_model_uses_is_built_where_it_runs_and_needs_no_docker_here(bundle_dir,
+                                                                                                       monkeypatch):
+    monkeypatch.setattr(preflight_module, "docker_unreachable", lambda: "docker isn't on PATH")
+    layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\n"})
+    _task(bundle_dir, [
+        {"id": "box", "type": "deploy_sandbox", "sandbox_name": "box", "sandbox_mode": "vm", "sandbox_type": "modal_vm"},
+        {"id": "install", "type": "install_agent", "sandbox_name": "box", "a2a_agent_id": "solver"}])
+
+    dry = dry_run_bundle(bundle_dir)
+
+    assert dry.built_here == set() and dry.images() == (f"agents/solver (Dockerfile image) v1: {CONTEXT}",)
 
 
-def test_an_image_the_bundle_builds_is_refused_when_a_run_deploys_it_both_here_and_on_vms(bundle_dir):
+def test_one_version_of_an_image_the_bundle_builds_deploys_both_here_and_on_vms(bundle_dir, docker_on_path):
     layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\n"})
     _task(bundle_dir, [{**AGENT, "sandbox_type": "local"},
                        {**AGENT, "id": "again", "agent_name": "again", "sandbox_type": "modal_vm"}])
 
-    assert _problems(lambda: dry_run_bundle(bundle_dir)) == [
-        "tasks/t.json: step 'agent': deploys agent '@local/~/triage/solver''s image on the 'local' sandbox provider, "
-        f"and tasks/t.json: step 'again' on the 'modal_vm' one: {MIXED}",
-    ]
+    dry = dry_run_bundle(bundle_dir)
 
-
-def test_an_image_the_bundle_builds_is_refused_on_a_chain_that_falls_back_from_vms_to_the_local_provider(bundle_dir):
-    layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\n"})
-    _task(bundle_dir, [AGENT])
-
-    assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox="modal_vm,local")) == [
-        "tasks/t.json: step 'agent': deploys agent '@local/~/triage/solver''s image on the 'modal_vm,local' sandbox "
-        f"provider: {MIXED}",
-    ]
+    assert dry.built_here == {BUILT} and dry.images() == (f"agents/solver (Dockerfile image) v1: {BUILT_HERE}",)
 
 
 def test_a_sandbox_image_in_this_machines_registry_is_refused_on_another_provider(bundle_dir):
@@ -399,19 +414,14 @@ BY_NAME = ("on the {sandbox!r} sandbox provider, which runs it by name: '{id}' v
            "be built, not pulled; run it on a provider that builds it, such as --sandbox modal")
 
 
-@pytest.mark.parametrize("sandbox, refused", [("modal_vm", False), ("modal", False), ("modal_vm,modal", False),
-                                              ("local", True), ("modal_vm,local", False)])
-def test_an_agent_image_that_is_only_a_build_context_runs_where_a_vm_or_modal_builds_it(bundle_dir, sandbox, refused):
-    """A chain skips the local provider, which runs an image by name, so one that builds it is enough."""
+@pytest.mark.parametrize("sandbox", ["modal_vm", "modal", "modal_vm,modal", "local", "modal_vm,local"])
+def test_an_agent_image_that_is_only_a_build_context_runs_where_a_vm_modal_or_this_machine_builds_it(bundle_dir,
+                                                                                                    sandbox):
     with namespace_routing():
         A2AAgent.put(id="solver", docker_image_artifact=_context_image("solver-image"))
     _task(bundle_dir, [AGENT])
 
-    if refused:
-        assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox=sandbox)) == [
-            "tasks/t.json: step 'agent': deploys agent 'solver''s image " + BY_NAME.format(sandbox=sandbox, id="solver-image")]
-    else:
-        assert [entry.name for entry in dry_run_bundle(bundle_dir, sandbox=sandbox).runs] == ["t"]
+    assert [entry.name for entry in dry_run_bundle(bundle_dir, sandbox=sandbox).runs] == ["t"]
 
 
 @pytest.mark.parametrize("ref, problem", [
@@ -443,16 +453,17 @@ def test_an_env_image_that_is_only_a_build_context_runs_on_a_gateway_vm_and_on_m
     assert [entry.name for entry in dry_run_bundle(bundle_dir, sandbox="modal").runs] == ["t"]
 
 
-@pytest.mark.parametrize("sandbox", ["local", "modal_vm"])
-def test_a_lone_server_whose_image_is_only_a_build_context_is_refused_on_any_provider_but_modal(bundle_dir, sandbox):
+def test_a_lone_server_whose_image_is_only_a_build_context_runs_where_modal_or_this_machine_builds_it(bundle_dir):
     with namespace_routing():
         MCPServerEnv.put(id="crm", docker_image_artifact=_context_image("crm-image"), environment_name="crm",
                          env_provider_type="server")
     _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
 
-    assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox=sandbox)) == [
-        "tasks/t.json: step 'env': deploys env 'crm''s image 'crm-image' " + BY_NAME.format(sandbox=sandbox, id="crm-image")]
-    assert [entry.name for entry in dry_run_bundle(bundle_dir, sandbox="modal").runs] == ["t"]
+    assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox="modal_vm")) == [
+        "tasks/t.json: step 'env': deploys env 'crm''s image 'crm-image' " + BY_NAME.format(sandbox="modal_vm",
+                                                                                         id="crm-image")]
+    for sandbox in ("modal", "local"):
+        assert [entry.name for entry in dry_run_bundle(bundle_dir, sandbox=sandbox).runs] == ["t"]
 
 
 def _built_here(id):
@@ -600,16 +611,16 @@ def test_containers_on_the_local_provider_need_docker_and_a_vm_sandbox_doesnt(bu
     ]
 
 
-def test_a_chain_that_skips_the_local_provider_doesnt_need_docker(bundle_dir, monkeypatch):
-    """The local provider runs an image by name, so a deploy of one that is only a build context skips it for a VM."""
-    probes = []
-    monkeypatch.setattr(preflight_module, "docker_unreachable", lambda: probes.append(1) or "docker isn't on PATH")
+def test_a_chain_that_falls_back_to_the_local_provider_needs_docker_to_build_an_image_that_is_only_its_context(
+        bundle_dir, monkeypatch):
+    """The local provider builds an image that is only a build context with this machine's Docker."""
+    monkeypatch.setattr(preflight_module, "docker_unreachable", lambda: "docker isn't on PATH")
     with namespace_routing():
         A2AAgent.put(id="solver", docker_image_artifact=_context_image("solver-image"))
     _task(bundle_dir, [AGENT])
 
-    assert [entry.name for entry in dry_run_bundle(bundle_dir, sandbox="modal_vm,local").runs] == ["t"]
-    assert probes == []
+    assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox="modal_vm,local")) == [
+        "the local sandbox provider runs containers for tasks/t.json: step 'agent', and docker isn't on PATH"]
 
 
 class _DeploysItself(Env):
@@ -802,6 +813,17 @@ def test_infra_built_for_deploys_elsewhere_needs_docker_here(bundle_dir, monkeyp
         "building the service-db, gateway env needs docker, and docker isn't on PATH"]
 
 
+def test_infra_pulled_for_deploys_elsewhere_needs_no_docker_here(bundle_dir, monkeypatch):
+    _env("crm", REMOTE)
+    _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
+    monkeypatch.setattr(preflight_module, "docker_unreachable", lambda: "docker isn't on PATH")
+    monkeypatch.setattr("agent_env.env.published_images._registry_digest", lambda ref: "sha256:" + "4" * 64)
+
+    assert [f"{build}: {build.planned()}" for build in dry_run_bundle(bundle_dir, sandbox="modal_vm").infra] == [
+        "service-db env 'default-db' (missing): would pull its published images",
+        "gateway env 'default' (missing): would pull its published image"]
+
+
 def test_a_gateway_deploy_on_another_provider_needs_infra_it_can_reach(bundle_dir):
     _env("crm", REMOTE)
     _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
@@ -862,7 +884,7 @@ def _env_folder(root, name, toml="", kind="mcp_server"):
 
 
 @pytest.mark.parametrize("sandbox, toml", [("modal_vm", ""), ("modal", ""), ("modal", 'env_provider_type = "server"\n')])
-def test_an_image_the_bundle_builds_for_an_env_is_a_build_context_where_its_server_is_built(bundle_dir, sandbox, toml):
+def test_an_image_the_bundle_builds_for_an_env_is_built_where_its_server_is(bundle_dir, sandbox, toml):
     """A gateway VM builds it, and Modal builds it for its gateway's container or a lone server's."""
     _env_folder(bundle_dir, "crm", toml)
     _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
@@ -870,7 +892,7 @@ def test_an_image_the_bundle_builds_for_an_env_is_a_build_context_where_its_serv
 
     dry = dry_run_bundle(bundle_dir, sandbox=sandbox)
 
-    assert dry.materialization.contexts == {f"{BUNDLE}/crm__env_image"}
+    assert dry.built_here == set() and dry.images() == (f"envs/crm (Dockerfile image) v1: {CONTEXT}",)
 
 
 def test_an_image_the_bundle_builds_for_a_lone_server_is_refused_where_the_server_runs_by_name(bundle_dir):
@@ -936,15 +958,19 @@ def test_a_store_image_an_env_names_without_a_version_is_checked_at_the_version_
     assert dry_run_bundle(bundle_dir, sandbox="modal_vm").runs
 
 
-def test_the_cli_dry_run_lists_the_infra_it_would_build(bundle_dir, quiet_logs):
+def test_the_cli_dry_run_lists_the_infra_it_would_set_up_and_how(bundle_dir, quiet_logs, monkeypatch):
     _env("crm")
     _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
+    gateway = next(image.ref() for image in bootstrap.PUBLISHED_IMAGES if image.dockerfile == bootstrap.GATEWAY_DOCKERFILE)
+    monkeypatch.setattr("agent_env.env.published_images._registry_digest",
+                        lambda ref: "sha256:" + "4" * 64 if ref == gateway else None)
 
     result = CliRunner().invoke(cli, ["run", str(bundle_dir), "--dry-run"])
 
     assert result.exit_code == 0, result.output
-    assert ("Would build first:\n  service-db env 'default-db' (missing)\n  gateway env 'default' (missing)\n"
-            "Would run:\n  tasks/t.json v1\n") in result.output
+    assert ("Would set up first:\n  service-db env 'default-db' (missing): would build\n"
+            "  gateway env 'default' (missing): would pull its published image\nWould run:\n  tasks/t.json v1\n"
+            ) in result.output
 
 
 def test_a_run_builds_its_infra_after_its_writes_and_before_its_tasks(bundle_dir, monkeypatch):
@@ -966,6 +992,25 @@ def test_a_run_builds_its_infra_after_its_writes_and_before_its_tasks(bundle_dir
                           ("say", "[tasks/t.json] step 1/1 env (deploy_env)")]
     assert ("deploy", "crm") in events
 
+
+
+def test_write_bundle_writes_and_sets_up_the_infra_its_tasks_deploy_on_and_runs_nothing(bundle_dir, monkeypatch):
+    _env("crm")
+    _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
+    events = []
+    monkeypatch.setattr("agent_env.bundle.run.ensure_default_envs",
+                        lambda kinds, say: events.append(("bootstrap", sorted(kinds))))
+
+    async def deploy(self, context):
+        events.append(("deploy", self.env_id))
+        return context
+
+    monkeypatch.setattr(DeployEnvTaskStep, "execute", deploy)
+
+    materialization = _write_bundle(bundle_dir, on_progress=lambda line: events.append(("say", line)))
+
+    assert events == [("say", "tasks/t.json: v1 (new)"), ("bootstrap", ["gateway", "service-db"])]
+    assert [done.write.kind for done in materialization.writes] == [BundleKind.TASK]
 
 # The walk resolves each deploy's provider as its step does
 
@@ -1046,3 +1091,89 @@ def test_the_walk_resolves_each_deploys_provider_as_its_step_does(bundle_dir, mo
     assert executed == (sandbox or field or "default")
     assert walked == (sandbox or field or _DEFAULT_GETTERS[kind])
     assert _OVERRIDE_KEYS[kind]  # run_bundle sets every override key to --sandbox
+
+
+# Docker's plugins and the model endpoint
+
+
+def _missing(*plugins):
+    return lambda plugin: f"`docker {plugin}` isn't installed" if plugin in plugins else None
+
+
+def test_a_gateway_deploy_on_this_machine_needs_docker_compose(bundle_dir, monkeypatch):
+    _env("crm")
+    _infra()
+    _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
+    monkeypatch.setattr(preflight_module, "docker_plugin_missing", _missing("compose"))
+
+    assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox="local")) == [
+        "the local sandbox provider runs a gateway's containers with docker compose for tasks/t.json: step 'env', and "
+        "`docker compose` isn't installed"]
+    assert [entry.name for entry in dry_run_bundle(bundle_dir, sandbox="modal_vm").runs] == ["t"]
+
+
+def test_an_image_built_on_this_machine_needs_docker_buildx(bundle_dir, docker_on_path, monkeypatch):
+    layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\n"})
+    _task(bundle_dir, [AGENT])
+    monkeypatch.setattr(preflight_module, "docker_plugin_missing", _missing("compose", "buildx"))
+
+    assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox="local")) == [
+        f"the run builds image {BUILT!r} with this machine's Docker, and `docker buildx` isn't installed"]
+    assert [entry.name for entry in dry_run_bundle(bundle_dir, sandbox="modal").runs] == ["t"]
+
+
+def test_plugins_are_not_asked_after_when_docker_itself_cant_be_used(bundle_dir, docker_on_path, monkeypatch):
+    layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\n"})
+    _task(bundle_dir, [AGENT])
+    monkeypatch.setattr(preflight_module, "docker_unreachable", lambda: "docker isn't on PATH")
+    monkeypatch.setattr(preflight_module, "docker_plugin_missing", lambda plugin: pytest.fail("asked after a plugin"))
+
+    assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox="local")) == [
+        "the local sandbox provider runs containers for tasks/t.json: step 'agent', and docker isn't on PATH"]
+
+
+@pytest.fixture
+def no_model(monkeypatch):
+    monkeypatch.setattr(preflight_module, "model_endpoint_missing", MODEL_ENDPOINT_MISSING)
+    monkeypatch.delenv("LITELLM_BASE_URL", raising=False)
+    monkeypatch.delenv("LITELLM_API_KEY", raising=False)
+
+
+def test_an_agent_or_agent_judge_needs_a_model_endpoint_unless_its_step_gives_one(bundle_dir, no_model, monkeypatch):
+    _agent("solver")
+    judge = {"id": "judge", "type": "rubrics_verifier", "verifier_id": "judge", "prompt_id": "agent",
+             "judge_a2a_agent_id": "solver", "criteria": [{"id": "c1", "description": "done"}]}
+    direct = {**judge, "id": "direct", "use_agent_judge": False}
+    given = {**AGENT, "env_vars": {"LITELLM_API_KEY": "sk-1"}, "litellm_base_url": "http://models:4000"}
+    _task(bundle_dir, [AGENT, judge], name="judged")
+    _task(bundle_dir, [given, direct], name="given")
+
+    assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox="local")) == [
+        "tasks/judged.json: step 'agent', tasks/judged.json: step 'judge' deploy an agent that calls the model endpoint, "
+        "and no model endpoint is set: set LITELLM_BASE_URL, or [model] base_url in .agentenv/config.toml"]
+    assert [entry.name for entry in dry_run_bundle(bundle_dir, tasks=["given"], sandbox="local").runs] == ["given"]
+    monkeypatch.setenv("LITELLM_BASE_URL", "http://models:4000")
+    [problem] = _problems(lambda: dry_run_bundle(bundle_dir, sandbox="local"))
+    assert problem.startswith("tasks/judged.json: step 'agent', tasks/judged.json: step 'judge' deploy an agent that "
+                              "calls the model endpoint, and its API key can't be read: No model API key configured")
+    monkeypatch.setenv("LITELLM_API_KEY", "sk-1")
+    assert len(dry_run_bundle(bundle_dir, sandbox="local").runs) == 2
+
+
+def test_an_agent_declaring_the_model_variables_itself_needs_no_endpoint_but_its_judge_does(bundle_dir, no_model):
+    with namespace_routing():
+        A2AAgent.put(id="echo", docker_image_artifact=_image("echo-image"),
+                     default_env_vars={"LITELLM_API_KEY": "unused", "LITELLM_BASE_URL": "http://unused.invalid"})
+    layout(bundle_dir, {"agents/folder-echo/agent.toml": 'image = { ref = "docker.io/library/python:3.12-slim" }\n\n'
+                                                         '[default_env_vars]\nLITELLM_API_KEY = "unused"\n'
+                                                         'LITELLM_BASE_URL = "http://unused.invalid"\n'})
+    judge = {"id": "judge", "type": "rubrics_verifier", "verifier_id": "judge", "prompt_id": "agent",
+             "judge_a2a_agent_id": "echo", "criteria": [{"id": "c1", "description": "done"}]}
+    _task(bundle_dir, [{**AGENT, "a2a_agent_id": "echo"}, {**AGENT, "id": "local", "a2a_agent_id": "folder-echo"}],
+          name="echo")
+    _task(bundle_dir, [{**AGENT, "a2a_agent_id": "echo"}, judge], name="judged")
+
+    assert [entry.name for entry in dry_run_bundle(bundle_dir, tasks=["echo"], sandbox="local").runs] == ["echo"]
+    assert _problems(lambda: dry_run_bundle(bundle_dir, tasks=["judged"], sandbox="local")) == [
+        "tasks/judged.json: step 'judge' deploys an agent that calls the model endpoint, and no model endpoint is set: "
+        "set LITELLM_BASE_URL, or [model] base_url in .agentenv/config.toml"]

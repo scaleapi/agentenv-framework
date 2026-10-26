@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import parse_qsl
 from uuid import uuid4
 
 import anyio
@@ -37,10 +38,13 @@ if TYPE_CHECKING:
 
 # Relative import — gateway runs as a standalone container with no agent_env.*
 from .constants import (
+    AGENT_ENV_HIDDEN_BY_DEFAULT_META_KEY,
     AGENT_ENV_ROLE_HEADER,
     AGENT_ENV_ROLE_META_KEY,  # noqa: F401  (the server module serves the whole vocabulary, used in this file or not)
     AGENT_ENV_SESSION_META_KEY,  # noqa: F401
     CARD_FETCH_TIMEOUT_S,
+    CHANGES_PAGE_DEFAULT,
+    CHANGES_PAGE_MAX,
     CHILD_DISCOVERY_TIMEOUT_S,
     DATA_PLANE_LOAD_TIMEOUT_MAX_S,
     DEFAULT_ROLE,
@@ -62,13 +66,17 @@ from .constants import (
     tool_name_clashes_text,
 )
 from .caller import Caller
+from .changes import ChangeAttribution
 from .child_transport import child_http_client
 from .clock import Clock, ClockError, _iso
 from .get_time import GET_TIME_TOOL_NAME, build_get_time_tool
-from .rest_proxy import ROLE_HEADER_BYTES, fetch_child_card, forward, rewrite_child_card
+from .rest_proxy import ROLE_HEADER_BYTES, UpstreamResponse, fetch_child_card, forward, rewrite_child_card
 from .triggers import TriggerEngine, TriggerError
 
 logger = logging.getLogger(__name__)
+
+# RFC 9110's safe methods: a request using one asks for no change, so the proxy measures no write window for it.
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 
 
 class ToolNameClash(ValueError):
@@ -86,6 +94,7 @@ class Gateway:
     TOOL_CALL_TIMEOUT_S = 600.0
     STARTUP_DISCOVERY_TIMEOUT_S = 60.0  # startup discovery past it fails open, like a failed one; uvicorn must come up
     CHILD_CLOSE_TIMEOUT_S = 3.0  # wait for the owner task to exit a retired child-session generation; past it, cancel it
+    BARRIER_READ_AHEAD_MAX_BYTES = 8 * 1024 * 1024  # a larger sized body held by a barrier streams, its window to the last byte
     TRIGGER_BARRIER_TIMEOUT_S = 30.0  # a barrier may ask for less; past it the call is answered anyway
     # Must be >= the largest timeout any client can ask for, or the proxy severs a load the
     # client was still legitimately waiting on -- the ordering this module's constants file
@@ -135,10 +144,12 @@ class Gateway:
         self._tool_server_urls: dict[str, str] = {}
         self._tool_call_lock: asyncio.Lock | None = asyncio.Lock() if self.gateway_mode == GatewayMode.CONSISTENT else None
         self._role_rules: dict[str, dict[str, bool]] = {}
+        self._hidden_by_default: set[str] = set()  # tools a server listed hidden: only rules naming them apply
         self._role_rules_lock = asyncio.Lock()
 
         self._event_counter = 0
         self._event_lock = asyncio.Lock()
+        self._changes = ChangeAttribution()
         Path(GATEWAY_TRAJECTORY_FILE).parent.mkdir(parents=True, exist_ok=True)
         self._trajectory_file = open(GATEWAY_TRAJECTORY_FILE, "a")
         atexit.register(self._close_trajectory_file)
@@ -177,14 +188,14 @@ class Gateway:
                 methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
             )
             async def proxy_to_frontend(request: Request) -> Response:
-                return await self._proxy_rest_request(request, url_map=self.website_urls)
+                return await self._proxy_website_request(request)
 
             @self._mcp.custom_route(
                 "/website/{service_name}",
                 methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
             )
             async def proxy_to_frontend_root(request: Request) -> Response:
-                return await self._proxy_rest_request(request, url_map=self.website_urls)
+                return await self._proxy_website_request(request)
 
         @self._mcp.custom_route(f"/tools/{TOOL_DISABLE_ACTION}", methods=["POST"])
         async def tools_disable(request: Request) -> Response:
@@ -291,6 +302,10 @@ class Gateway:
         async def env_trajectory(request: Request) -> Response:
             return self._serve_trajectory()
 
+        @self._mcp.custom_route("/changes", methods=["GET"])
+        async def env_changes(request: Request) -> Response:
+            return await self._serve_changes(request)
+
         @self._mcp.custom_route(WELL_KNOWN_PATH, methods=["GET"])
         async def get_env_card(request: Request) -> Response:
             return await self._serve_env_card()
@@ -393,14 +408,16 @@ class Gateway:
         return sock
 
     def _is_disabled(self, role: str, name: str) -> bool:
-        """Walk the rule chain (role first, then WILDCARD) returning the first concrete True/False; default False."""
+        """Walk the rule chain (role first, then WILDCARD) returning the first concrete True/False; default False.
+        A tool listed hidden by default skips "*"-tool rules: only rules naming it apply, and with none it is hidden."""
+        hidden = name in self._hidden_by_default
         for r in (role, WILDCARD):
             rules = self._role_rules.get(r, {})
             if name in rules:
                 return rules[name]
-            if WILDCARD in rules:
+            if WILDCARD in rules and not hidden:
                 return rules[WILDCARD]
-        return False
+        return hidden
 
     def _install_role_filters(self) -> None:
         """Wrap the FastMCP tool manager so MCP tools/list and tools/call honor the current caller's role."""
@@ -505,8 +522,59 @@ class Gateway:
         base_url = url_map.get(service_name)
         if base_url is None:
             return self._json_response({"error": f"Unknown service: {service_name}"}, 404)
-        return await forward(request, base_url, role=self._request_role(request), timeout=self.REST_PROXY_TIMEOUT,
-                             mcp_server=url_map is self.rest_proxy_urls and service_name.startswith("mcp-"))
+        role = self._request_role(request)
+        mcp_server = url_map is self.rest_proxy_urls and service_name.startswith("mcp-")
+        if request.method in _SAFE_METHODS:
+            return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server)
+        changelog_before = self._query_changelog_id()
+        attribution = self._attribution(role)  # at the start: a fire may be gone by the time the response ends
+
+        async def log_write(status: int) -> None:
+            changelog_after = self._query_changelog_id()
+            if changelog_after is None or changelog_after <= (changelog_before or 0):
+                return  # only a request that wrote changelog rows is a write window
+            await self._log_event({
+                "event_type": "http_request",
+                "route": "website" if url_map is self.website_urls else "svc",
+                "service": service_name,
+                "method": request.method,
+                "path": "/" + request.path_params.get("path", ""),
+                "status": status,
+                **attribution,
+                "changelog_id_before": changelog_before,
+                "changelog_id_after": changelog_after,
+            })
+
+        return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server,
+                             on_done=log_write)
+
+    async def _proxy_website_request(self, request: Request) -> Response:
+        """Proxy a website request; with a website or state trigger registered, feed it to the engine and hold barriers."""
+        response = await self._proxy_rest_request(request, url_map=self.website_urls)
+        app = request.path_params["service_name"]
+        engine = self._trigger_engine
+        if app in self.website_urls and (engine.has_website_triggers or engine.has_state_triggers):
+            if isinstance(response, UpstreamResponse):
+                if not engine.may_hold_website_request(self._request_role(request), app, request.method,
+                                                       "/" + request.path_params.get("path", ""), response.status_code):
+                    response.after_body(lambda status: self._fire_website_triggers(request, app, status))  # answered at its last byte
+                    return response
+                await response.read_ahead_if_sized(self.BARRIER_READ_AHEAD_MAX_BYTES)  # its window ends before its triggers run
+            barrier_tasks, barrier_timeout_s = await self._fire_website_triggers(request, app, response.status_code)
+            await self._await_barriers(barrier_tasks, barrier_timeout_s)
+        return response
+
+    async def _fire_website_triggers(self, request: Request, app: str,
+                                     status: int) -> tuple[list[asyncio.Task], float | None]:
+        """Feed an answered website request to the trigger engine (fail-open)."""
+        try:
+            # Only a website trigger reads the request's args; a state re-check needs just the method and status.
+            args = _request_args(request, await request.body()) if self._trigger_engine.has_website_triggers else {}
+            return self._trigger_engine.on_website_request(self._request_role(request), app, request.method,
+                                                           "/" + request.path_params.get("path", ""), status, args)
+        except Exception:
+            logger.exception("Trigger evaluation failed (fail-open)")
+            return [], None
 
     @staticmethod
     def _request_role(request: Request) -> str:
@@ -833,6 +901,9 @@ class Gateway:
             logger.debug(f"Registered proxy tool: {tool.name}")
         for server, tools in listed:
             self._server_tools[server.name] = tools
+        self._hidden_by_default = {
+            tool.name for _, tools in listed for tool in tools
+            if (tool.meta or {}).get(AGENT_ENV_HIDDEN_BY_DEFAULT_META_KEY) is True}
         self._tools_discovered = True
         if self._mirror_get_time_descriptor():
             logger.info(f"Re-mirrored '{GET_TIME_TOOL_NAME}' descriptor after tool discovery")
@@ -950,7 +1021,12 @@ class Gateway:
         })
         try:
             async with self._tool_call_guard():
-                result = await self._call_child_tool(server_url, tool_name, arguments, caller=Caller(role=role))
+                changelog_before = self._query_changelog_id()
+                try:
+                    result = await self._call_child_tool(server_url, tool_name, arguments, caller=Caller(role=role))
+                except Exception as e:
+                    await self._log_failed_call(tool_call_event_id, changelog_before, e, source="step_api")
+                    raise
                 changelog_id = self._query_changelog_id()
 
             await self._log_event({
@@ -958,6 +1034,7 @@ class Gateway:
                 "source": "step_api",
                 "tool_call_event_id": tool_call_event_id,
                 "tool_call_result": result.model_dump(mode="json"),
+                "changelog_id_before": changelog_before,
                 "changelog_id": changelog_id,
             })
             barrier_tasks, barrier_timeout_s = self._fire_triggers(role, tool_name, arguments, result)
@@ -1073,13 +1150,19 @@ class Gateway:
             })
 
             async with self._tool_call_guard():
-                result = await self._call_child_tool(server_url, tool_name, kwargs, caller=caller)
+                changelog_before = self._query_changelog_id()
+                try:
+                    result = await self._call_child_tool(server_url, tool_name, kwargs, caller=caller)
+                except Exception as e:
+                    await self._log_failed_call(tool_call_event_id, changelog_before, e)
+                    raise
                 changelog_id = self._query_changelog_id()
 
             await self._log_event({
                 "event_type": "tool_call_result",
                 "tool_call_event_id": tool_call_event_id,
                 "tool_call_result": result.model_dump(mode="json"),
+                "changelog_id_before": changelog_before,
                 "changelog_id": changelog_id,
             })
             return result
@@ -1136,6 +1219,16 @@ class Gateway:
         except Exception:
             logger.exception("Failed to log tool_call_result for a gateway tool")
 
+    async def _log_failed_call(self, tool_call_event_id: str, changelog_before: int | None, error: Exception,
+                               **source: str) -> None:
+        """Close a failed call's write window, which may hold a write it committed first (fail-open)."""
+        try:
+            await self._log_event({"event_type": "tool_call_failed", **source, "tool_call_event_id": tool_call_event_id,
+                                   "error": f"{type(error).__name__}: {str(error)[:300]}",
+                                   "changelog_id_before": changelog_before, "changelog_id": self._query_changelog_id()})
+        except Exception:
+            logger.exception("Failed to log a failed tool call")
+
     def _attribution(self, role: str) -> dict:
         """Who made a tool call, for its trajectory event: the caller's role, and the trigger fires it was made for
         when that role is an executor realizing them."""
@@ -1156,7 +1249,40 @@ class Gateway:
                 event, default=lambda o: o.model_dump(mode="json") if hasattr(o, "model_dump") else str(o),
             ) + "\n")
             self._trajectory_file.flush()
+            self._changes.observe(event)
         return event_id
+
+    async def _serve_changes(self, request: Request) -> Response:
+        """The changelog rows after ``after_id`` (at most ``limit``, oldest first), each with its actors (see ``changes``)."""
+        try:
+            after_id = int(request.query_params.get("after_id", 0))
+            limit = int(request.query_params.get("limit", CHANGES_PAGE_DEFAULT))
+        except ValueError:
+            return self._json_response({"ok": False, "error": "after_id and limit must be integers"}, 400)
+        if after_id < 0 or not 1 <= limit <= CHANGES_PAGE_MAX:
+            return self._json_response(
+                {"ok": False, "error": f"after_id must be >= 0 and limit between 1 and {CHANGES_PAGE_MAX}"}, 400)
+        if self._db_conn is None:
+            return self._json_response({"ok": False, "error": "this env keeps no changelog"}, 404)
+        try:
+            rows = await asyncio.to_thread(self._read_changelog, after_id, limit + 1)
+        except Exception as e:
+            logger.exception("Reading the changelog failed")
+            return self._json_response({"ok": False, "error": f"changelog unavailable: {e}"}, 503)
+        rows, has_more = rows[:limit], len(rows) > limit
+        actors = self._changes.actors([row["id"] for row in rows])
+        return self._json_response(
+            {"changes": [{**row, "actors": who} for row, who in zip(rows, actors)], "has_more": has_more}, 200)
+
+    def _read_changelog(self, after_id: int, count: int) -> list[dict]:
+        with self._db_conn.cursor() as cur:
+            cur.execute('SELECT id, "timestamp", schema_name, table_name, operation, row_id, summary, changed_fields '
+                        "FROM public._changelog WHERE id > %s ORDER BY id LIMIT %s", (after_id, count))
+            names = [column[0] for column in cur.description]
+            rows = [dict(zip(names, values)) for values in cur.fetchall()]
+        for row in rows:
+            row["timestamp"] = row["timestamp"].isoformat()
+        return rows
 
     def _serve_trajectory(self) -> Response:
         """Stream the whole env trajectory as JSONL; only a mid-write tail line can arrive torn."""
@@ -1191,6 +1317,29 @@ class _ProxyArgModelBase(ArgModelBase):
             output_name = field_info.alias if field_info.alias else field_name
             kwargs[output_name] = value
         return kwargs
+
+
+def _request_args(request: Request, body: bytes) -> dict:
+    """A request's query parameters and form or JSON-object body fields (the body wins a clash; repeats become lists)."""
+    args = _fields(parse_qsl(request.url.query, keep_blank_values=True))
+    media_type = request.headers.get("content-type", "").partition(";")[0].strip().lower()
+    if media_type == "application/x-www-form-urlencoded":
+        args.update(_fields(parse_qsl(body.decode("utf-8", "replace"), keep_blank_values=True)))
+    elif media_type == "application/json" or media_type.endswith("+json"):
+        try:
+            parsed = json.loads(body)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict):
+            args.update(parsed)
+    return args
+
+
+def _fields(pairs: list[tuple[str, str]]) -> dict:
+    grouped: dict[str, list[str]] = {}
+    for key, value in pairs:
+        grouped.setdefault(key, []).append(value)
+    return {key: values[0] if len(values) == 1 else values for key, values in grouped.items()}
 
 
 def _is_dead_session(exc: BaseException) -> bool:

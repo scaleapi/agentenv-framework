@@ -20,7 +20,7 @@ from agent_env.env import Env
 from agent_env.env.env import require_gateway_url
 from agent_env.store.ids import derive_id
 from agent_env.task_step.context import TaskStepContext
-from agent_env.entity_refs import EntityRef, RefRole
+from agent_env.entity.refs import EntityRef, RefRole
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.task_step.thread_work import finish_on_thread
 from agent_env.task_step.task_steps.mcp_cli_builder.codegen import generate_cli_script

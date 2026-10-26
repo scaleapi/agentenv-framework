@@ -31,6 +31,31 @@ updates:
     groups:
       npm-minor-and-patch:
         update-types: ["minor", "patch"]
+  # The images the release publishes. Each base is pinned by digest, and a release rebuilds an image only when its
+  # sources change, so a bump here is what picks up a base's fixes: the next release builds and publishes the image.
+  # Only its fixes: a new digest or patch release of the version it's on. A major or minor version (postgres 16 to 18,
+  # python 3.12 to 3.15) is an upgrade, made by hand with whatever the images run on it.
+  - package-ecosystem: "docker"
+    directories:
+      - "/src/agent_env/env/gateway"
+      - "/src/agent_env/env/envs/service_db"
+      - "/src/agent_env/env/envs/website_browser"
+      - "/src/agent_env/agents/agents/claude-code"
+      - "/src/agent_env/agents/agents/codex"
+      - "/src/agent_env/agents/agents/gemini"
+      - "/src/agent_env/agents/agents/opencode"
+      - "/src/agent_env/agents/agents/openhands"
+      - "/src/agent_env/agents/agents/pi"
+      - "/src/agent_env/agents/agents/proxy"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+    groups:
+      infra-base-images:
+        patterns: ["*"]
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

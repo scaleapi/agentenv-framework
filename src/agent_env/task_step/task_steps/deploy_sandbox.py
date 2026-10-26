@@ -9,6 +9,7 @@ from agent_env.artifact.artifacts.docker_image import pull_problem
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import skip_refusing
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
 from agent_env.task_step.context import DeployedSandbox, TaskStepContext
+from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.attribution import deploy_attribution
 
@@ -23,6 +24,7 @@ _SUPPORTED_MODES = {"vm", "container"}
 class DeploySandboxTaskStep(TaskStep):
     type: ClassVar[str] = "deploy_sandbox"
     entity_refs = ()
+    field_scopes = {**TaskStep.field_scopes, "sandbox_type": FieldScope.USER}
 
     def __init__(
         self,
@@ -31,7 +33,7 @@ class DeploySandboxTaskStep(TaskStep):
         sandbox_name: str,
         sandbox_mode: str,
         image: Optional[str] = None,
-        cpu: float = 2.0,
+        cpu: float = 1.0,
         memory_mb: int = 8192,
         disk_size_gb: float = 10,
         ttl_seconds: int = TaskStep.DEFAULT_TTL_SECONDS,
@@ -88,7 +90,7 @@ class DeploySandboxTaskStep(TaskStep):
             sandbox_name=data["sandbox_name"],
             sandbox_mode=data["sandbox_mode"],
             image=data.get("image"),
-            cpu=data.get("cpu", 2.0),
+            cpu=data.get("cpu", 1.0),
             memory_mb=data.get("memory_mb", 8192),
             disk_size_gb=data.get("disk_size_gb", 10),
             ttl_seconds=data.get("ttl_seconds", TaskStep.DEFAULT_TTL_SECONDS),

@@ -11,8 +11,12 @@ import pytest
 from agent_env.a2a_agent import A2AAgent
 from agent_env.config.model import ModelConfig
 from agent_env.providers.sandbox_providers import sandbox_provider
+from agent_env.store.secret_store.local_secret_store import LocalSecretStore
 from agent_env.task_step.context import DeployedSandbox, TaskStepContext
+from agent_env.task_step.task_steps import install_agent as install_agent_module
 from agent_env.task_step.task_steps.install_agent import (
+    PROXY_PARAM,
+    HostPlace,
     InstallAgentTaskStep,
     _build_param_resolvers,
 )
@@ -79,9 +83,11 @@ def test_host_mode_roundtrips_without_container_name():
     assert restored.a2a_agent_id == "agent"
 
 
-def test_a2a_agent_id_required():
-    with pytest.raises(ValueError, match="a2a_agent_id"):
-        InstallAgentTaskStep(id="s", version=None, sandbox_name="vm")
+def test_a_step_naming_no_agent_builds_and_round_trips_without_one():
+    step = InstallAgentTaskStep.from_dict({"id": "s", "type": "install_agent", "sandbox_name": "vm"})
+
+    assert step.a2a_agent_id is None
+    assert InstallAgentTaskStep.from_dict(step.to_dict()).a2a_agent_id is None
 
 
 def test_agent_name_resolver_supplies_step_name():
@@ -95,6 +101,9 @@ def test_agent_name_resolver_supplies_step_name():
 class _FakeConfig:
     def get_litellm_api_key(self):
         return "config-key"
+
+    def resolve_reference(self, value):
+        return value
 
 
 def test_litellm_key_resolver_prefers_per_run_override():
@@ -122,6 +131,9 @@ def test_a2a_port_roundtrip():
 
 
 class _InstallSandbox:
+    ON_THIS_MACHINE = False
+    type = "modal_vm"
+
     def __init__(self):
         self.scripts: list[str] = []
 
@@ -174,3 +186,218 @@ async def test_install_logs_show_the_command_template_not_the_model_key_or_heade
     assert "sk-never-logged" in command and "org-never-logged" in command
     assert "start --key {litellm_api_key} --headers {litellm_extra_headers}" in caplog.text
     assert "never-logged" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_per_run_key_given_by_reference_is_resolved_through_the_secret_store(monkeypatch, local_stores):
+    monkeypatch.setenv("LITELLM_BASE_URL", "http://localhost:4000/v1")
+    local_stores.set_secret_store(LocalSecretStore(values={"team_key": "sk-from-the-store"}, use_env=False))
+    sandbox = _InstallSandbox()
+    monkeypatch.setattr(sandbox_provider, "build_sandbox_provider",
+                        lambda name: SimpleNamespace(get_sandbox=_resolved(sandbox)))
+    image = SimpleNamespace(image_name="img", build_context_object_url="s3://bucket/ctx.tar.gz")
+    monkeypatch.setattr(A2AAgent, "get", staticmethod(lambda *args: SimpleNamespace(
+        id="agent-x", version=1, metadata={}, docker_image_artifact=image)))
+    step = InstallAgentTaskStep(id="i", version=None, sandbox_name="vm", a2a_agent_id="agent-x", agent_name="solver")
+    monkeypatch.setattr(step, "_extract_install_extension", _resolved({"params": {
+        "install_commands_host": ["start --key {litellm_api_key}"],
+        "required_params_host": ["litellm_api_key"], "a2a_port": 8000}}))
+    monkeypatch.setattr(step, "_wait_for_agent_card", _resolved({}))
+    monkeypatch.setattr(step, "_register_instance", lambda *args: SimpleNamespace(instance_id="solver-1"))
+    context = TaskStepContext(
+        deployed_sandboxes=[DeployedSandbox(
+            sandbox_name="vm", sandbox_id="sb-1", sandbox_mode="vm", sandbox_type="local",
+            tunnel_urls={"8000": "http://127.0.0.1:8000"})],
+        metadata={"user_overrides": {"litellm_api_key": "secret:team_key"}},
+    )
+
+    await step.execute(context)
+
+    assert [s for s in sandbox.scripts if s.startswith("start ")] == ["start --key sk-from-the-store"]
+
+
+def test_a_per_run_reference_is_resolved_only_when_the_install_asks_for_the_key():
+    resolved = []
+
+    class _Config(_FakeConfig):
+        def resolve_reference(self, value):
+            resolved.append(value)
+            return "sk-resolved"
+
+    r = _build_param_resolvers(
+        container_name="c", work_dir="/tmp/stage", agent_ctx_tar="/tmp/stage/ctx.tar.gz",
+        a2a_port=8000, config=_Config(), agent_name="default-agent", workspace_dir=None,
+        litellm_api_key_override="secret:team_key",
+    )
+    assert resolved == []
+    assert r["litellm_api_key"]() == "sk-resolved"
+    assert resolved == ["secret:team_key"]
+
+
+@pytest.mark.asyncio
+async def test_a_step_naming_no_agent_installs_the_configured_default(monkeypatch, local_stores):
+    asked = []
+
+    class _Stop(Exception):
+        pass
+
+    def get(agent_id, version=None):
+        asked.append(agent_id)
+        raise _Stop
+
+    monkeypatch.setattr(sandbox_provider, "build_sandbox_provider",
+                        lambda name: SimpleNamespace(get_sandbox=_resolved(_InstallSandbox())))
+    monkeypatch.setattr(A2AAgent, "get", staticmethod(get))
+    step = InstallAgentTaskStep(id="i", version=None, sandbox_name="vm")
+    context = TaskStepContext(deployed_sandboxes=[DeployedSandbox(
+        sandbox_name="vm", sandbox_id="sb-1", sandbox_mode="vm", sandbox_type="local",
+        tunnel_urls={"8000": "http://127.0.0.1:8000"})])
+
+    with pytest.raises(_Stop):
+        await step.execute(context)
+
+    assert asked == [local_stores.get_default_a2a_agent_id()]
+
+
+class _TrustingSandbox:
+    """A sandbox that records the CA files it's given."""
+
+    def __init__(self, on_this_machine):
+        self.ON_THIS_MACHINE = on_this_machine
+        self.copied, self.written = [], {}
+
+    async def copy_trust_dir_into_container(self, trust_dir, container, destination):
+        self.copied.append((trust_dir, container, destination))
+
+    async def write_host_file(self, data, vm_path):
+        self.written[vm_path] = data
+
+
+@pytest.fixture
+def ca(monkeypatch, tmp_path):
+    trust = tmp_path / "trust"
+    trust.mkdir()
+    (trust / "ca.pem").write_text("ca")
+    (trust / "ca-bundle.pem").write_text("bundle")
+    monkeypatch.setattr(install_agent_module, "local_grant_trust", lambda: trust)
+    return trust
+
+
+def test_an_install_in_a_container_on_this_machine_gets_the_ca_copied_in_and_the_lines_that_find_it(ca):
+    sandbox = _TrustingSandbox(on_this_machine=True)
+
+    lines = asyncio.run(InstallAgentTaskStep._trust_lines(sandbox, "box-task", "/tmp/work"))
+
+    assert sandbox.copied == [(ca, "box-task", "/etc/agentenv")]
+    assert lines.splitlines() == ["SSL_CERT_FILE=/etc/agentenv/ca-bundle.pem",
+                                  "REQUESTS_CA_BUNDLE=/etc/agentenv/ca-bundle.pem",
+                                  "NODE_EXTRA_CA_CERTS=/etc/agentenv/ca.pem"]
+
+
+def test_an_install_on_a_host_on_this_machine_gets_the_ca_beside_its_work_dir(ca):
+    sandbox = _TrustingSandbox(on_this_machine=True)
+
+    lines = asyncio.run(InstallAgentTaskStep._trust_lines(sandbox, None, "/tmp/work dir"))
+
+    assert sandbox.written == {"/tmp/work dir/trust/ca-bundle.pem": b"bundle", "/tmp/work dir/trust/ca.pem": b"ca"}
+    assert lines.splitlines()[-1] == "NODE_EXTRA_CA_CERTS='/tmp/work dir/trust/ca.pem'"
+
+
+def test_an_install_elsewhere_or_without_a_local_ca_gets_no_lines(ca, monkeypatch):
+    remote = _TrustingSandbox(on_this_machine=False)
+    assert asyncio.run(InstallAgentTaskStep._trust_lines(remote, "box-task", "/tmp/work")) == ""
+    monkeypatch.setattr(install_agent_module, "local_grant_trust", lambda: None)
+    assert asyncio.run(InstallAgentTaskStep._trust_lines(_TrustingSandbox(True), "box-task", "/tmp/work")) == ""
+    assert remote.copied == [] and remote.written == {}
+
+
+def test_the_trust_lines_resolve_as_the_trust_env_param():
+    resolvers = _build_param_resolvers(container_name="c", work_dir="/w", agent_ctx_tar="/w/a.tgz", a2a_port=8000,
+                                       config=None, agent_name="a", trust_lines="SSL_CERT_FILE=/x\n")
+    assert resolvers["trust_env"]() == "SSL_CERT_FILE=/x\n"
+PROXY = "@local/agentenv-framework/agents/proxy"
+CODEX_INSTALL = {"params": {"workdir_host": "/opt/agent-{agent_name}/workspace", "user_host": "agent-{agent_name}",
+                            "install_commands_host": ["install codex"], "a2a_port": 8000}}
+PROXY_INSTALL = {"params": {"install_commands_host": ["serve as {host_user} in {host_workdir} on {a2a_port}"],
+                               "required_params_host": ["host_user", "host_workdir", "a2a_port"],
+                               "install_commands": ["serve in {container} on {a2a_port}"],
+                               "required_params": ["container", "a2a_port"], "a2a_port": 8000}}
+
+
+def _installing_in_place(monkeypatch, *, codex=CODEX_INSTALL, sandbox=None, container_name=None):
+    """An install of ``agent-x`` that the step's ``proxy`` param replaces with the proxy."""
+    sandbox = sandbox or _InstallSandbox()
+    monkeypatch.setattr(sandbox_provider, "build_sandbox_provider",
+                        lambda name: SimpleNamespace(get_sandbox=_resolved(sandbox)))
+    agents = {agent_id: SimpleNamespace(id=agent_id, version=1, metadata={}, docker_image_artifact=SimpleNamespace(
+        image_name=f"{agent_id}-image", build_context_object_url=f"s3://bucket/{agent_id}.tar.gz"))
+        for agent_id in ("agent-x", PROXY)}
+    monkeypatch.setattr(A2AAgent, "get", staticmethod(lambda agent_id, version=None: agents[agent_id]))
+    step = InstallAgentTaskStep(id="i", version=None, sandbox_name="vm", a2a_agent_id="agent-x", agent_name="solver",
+                                container_name=container_name)
+    cards = {"agent-x-image": codex, f"{PROXY}-image": PROXY_INSTALL}
+    monkeypatch.setattr(step, "_extract_install_extension", lambda sandbox, image: _resolved(cards[image])())
+    monkeypatch.setattr(step, "_wait_for_agent_card", _resolved({}))
+    monkeypatch.setattr(step, "_register_instance", lambda *args: SimpleNamespace(instance_id="solver-1"))
+    context = TaskStepContext(
+        deployed_sandboxes=[DeployedSandbox(
+            sandbox_name="vm", sandbox_id="sb-1", sandbox_mode="vm", sandbox_type="modal_vm",
+            tunnel_urls={"8000": "https://vm-8000.example"})],
+        metadata={"user_overrides": {"step_params": {"i": {PROXY_PARAM: PROXY}}},
+                  "deployed_docker_containers": [{"container_name": "task", "sandbox_name": "vm"}]},
+    )
+    return step, context, sandbox
+
+
+@pytest.mark.asyncio
+async def test_a_proxy_is_installed_where_the_agent_it_replaces_says_it_works(monkeypatch, local_stores):
+    step, context, sandbox = _installing_in_place(monkeypatch)
+
+    await step.execute(context)
+
+    assert [s for s in sandbox.scripts if s.startswith(("serve", "install"))] == [
+        "serve as agent-solver in /opt/agent-solver/workspace on 8000"]
+    assert [(agent.agent_name, agent.on_host, agent.installed_container) for agent in context.deployed_agents] == [
+        ("solver", True, None)]
+
+
+@pytest.mark.asyncio
+async def test_a_proxy_needs_the_replaced_agent_to_say_where_it_works(monkeypatch, local_stores):
+    step, context, _ = _installing_in_place(monkeypatch, codex={"params": {"install_commands_host": ["install codex"],
+                                                                         "workdir_host": "/opt/agent"}})
+
+    with pytest.raises(RuntimeError, match="needs 'workdir_host' and 'user_host'"):
+        await step.execute(context)
+
+
+@pytest.mark.asyncio
+async def test_a_proxy_is_installed_into_the_container_the_agent_it_replaces_would_be(monkeypatch, local_stores):
+    step, context, sandbox = _installing_in_place(monkeypatch, container_name="task",
+                                                  codex={"params": {"install_commands": ["install codex"]}})
+
+    await step.execute(context)
+
+    assert [s for s in sandbox.scripts if s.startswith(("serve", "install"))] == [
+        f"serve in {sandbox.scoped_name('task')} on 8000"]
+    assert [(agent.agent_name, agent.on_host, agent.installed_container) for agent in context.deployed_agents] == [
+        ("solver", False, sandbox.scoped_name("task"))]
+
+
+@pytest.mark.asyncio
+async def test_a_proxy_isnt_installed_on_a_sandbox_that_runs_on_this_machine(monkeypatch, local_stores):
+    here = _InstallSandbox()
+    here.ON_THIS_MACHINE = True
+    step, context, _ = _installing_in_place(monkeypatch, sandbox=here)
+
+    with pytest.raises(RuntimeError, match="runs on this machine"):
+        await step.execute(context)
+
+
+def test_only_an_install_in_another_agents_place_gives_its_workdir_and_user():
+    with pytest.raises(KeyError, match="proxy"):
+        _resolvers(None)["host_workdir"]()
+    placed = _build_param_resolvers(
+        container_name=None, work_dir="/tmp/w", agent_ctx_tar="/tmp/w/c.tgz", a2a_port=8000, config=object(),
+        agent_name="solver", replaced=HostPlace(workdir="/opt/agent-solver/workspace", user="agent-solver"),
+    )
+    assert (placed["host_workdir"](), placed["host_user"]()) == ("/opt/agent-solver/workspace", "agent-solver")

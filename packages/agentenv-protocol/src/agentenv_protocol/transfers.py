@@ -306,18 +306,25 @@ def serving_on(port: int) -> Iterator[None]:
         _SERVER_PORT.reset(token)
 
 
+def serving_port() -> int | None:
+    """The port the holder's own server listens on: the request being served's (``serving_on``), else
+    ``A2A_PORT``; None when neither names a port."""
+    port = str(_SERVER_PORT.get() or os.environ.get(_SERVER_PORT_ENV, ""))
+    return int(port) if port.isdigit() and 0 < int(port) < 65536 else None
+
+
 def loopback_url(url: str, headers: Mapping[str, str] | None) -> str | None:
     """Where the holder's own server answers a grant's ``url`` over loopback: when the grant names a path
     on the holder's staging (an ``AgentEnv-Staging-Path`` header ending the URL's path) and the server's
-    port is known, from the request being served (``serving_on``) or else ``A2A_PORT``. None otherwise."""
+    port is known (``serving_port``). None otherwise."""
     path = httpx.Headers(headers or {}).get(STAGING_PATH_HEADER)
-    port = str(_SERVER_PORT.get() or os.environ.get(_SERVER_PORT_ENV, ""))
-    if not path or not path.startswith("/") or not port.isdigit() or not 0 < int(port) < 65536:
+    port = serving_port()
+    if not path or not path.startswith("/") or port is None:
         return None
     parsed = urlsplit(url)
     if not parsed.path.endswith(path):
         return None
-    return urlunsplit(("http", f"127.0.0.1:{int(port)}", path, parsed.query, ""))
+    return urlunsplit(("http", f"127.0.0.1:{port}", path, parsed.query, ""))
 
 
 def _destinations(url: str, headers: Mapping[str, str] | None) -> tuple[str, ...]:

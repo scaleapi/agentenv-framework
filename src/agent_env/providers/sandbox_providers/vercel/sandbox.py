@@ -8,6 +8,7 @@ import hashlib
 import io
 import shlex
 import ssl
+import tempfile
 import uuid
 import logging
 import weakref
@@ -37,10 +38,20 @@ _SETUP_ERROR_TAIL_CHARS = 1000
 _policy_locks: weakref.WeakValueDictionary[
     tuple[asyncio.AbstractEventLoop, str], asyncio.Lock
 ] = weakref.WeakValueDictionary()
+_process_tasks: weakref.WeakValueDictionary[
+    tuple[asyncio.AbstractEventLoop, str], set[asyncio.Task]
+] = weakref.WeakValueDictionary()
 _MISSING_FINAL_METADATA = "Sandbox process response is missing final metadata"
 _MISSING_RETURN_CODE = (
     "Sandbox process response final metadata is missing a return code"
 )
+
+
+async def _cancel_processes(sandbox_id: str) -> None:
+    tasks = tuple(_process_tasks.get((asyncio.get_running_loop(), sandbox_id), ()))
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def network_policy_from_vercel(policy: Any) -> NetworkPolicy | None:
@@ -132,8 +143,105 @@ def _returncode(result: Any) -> int:
     return returncode
 
 
+class _OutputReader:
+    """Spool unread output to disk because the SDK's synchronous sink cannot apply backpressure."""
+
+    def __init__(self):
+        self._file = tempfile.TemporaryFile()
+        self._read_at = 0
+        self._written = 0
+        self._eof = False
+        self._error: BaseException | None = None
+        self._changed = asyncio.Event()
+
+    def feed_data(self, data: bytes) -> None:
+        self._file.seek(self._written)
+        self._file.write(data)
+        self._written += len(data)
+        self._changed.set()
+
+    def feed_eof(self) -> None:
+        self._eof = True
+        self._changed.set()
+        if self.at_eof():
+            self._file.close()
+
+    def set_exception(self, error: BaseException) -> None:
+        self._error = error
+        self._file.close()
+        self._changed.set()
+
+    def at_eof(self) -> bool:
+        return self._eof and self._read_at == self._written
+
+    async def _ready(self) -> None:
+        while self._read_at == self._written and not self._eof and self._error is None:
+            self._changed.clear()
+            await self._changed.wait()
+        if self._error is not None:
+            raise self._error
+
+    def _take(self, size: int = -1, *, line: bool = False) -> bytes:
+        if self.at_eof():
+            return b""
+        self._file.seek(self._read_at)
+        data = self._file.readline() if line else self._file.read(size)
+        self._read_at += len(data)
+        if self.at_eof():
+            self._file.close()
+        elif self._read_at == self._written:
+            self._file.seek(0)
+            self._file.truncate()
+            self._read_at = self._written = 0
+        return data
+
+    async def read(self, size: int = -1) -> bytes:
+        if self._error is not None:
+            raise self._error
+        if size == 0:
+            return b""
+        if size > 0:
+            await self._ready()
+            return self._take(size)
+        chunks = []
+        while True:
+            await self._ready()
+            if not (chunk := self._take()):
+                return b"".join(chunks)
+            chunks.append(chunk)
+
+    async def readexactly(self, size: int) -> bytes:
+        if size < 0:
+            raise ValueError("size must not be negative")
+        chunks, remaining = [], size
+        while remaining:
+            chunk = await self.read(remaining)
+            if not chunk:
+                raise asyncio.IncompleteReadError(b"".join(chunks), size)
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
+    async def readline(self) -> bytes:
+        chunks = []
+        while True:
+            await self._ready()
+            chunk = self._take(line=True)
+            chunks.append(chunk)
+            if not chunk or chunk.endswith(b"\n"):
+                return b"".join(chunks)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> bytes:
+        if line := await self.readline():
+            return line
+        raise StopAsyncIteration
+
+
 class _OutputSink:
-    def __init__(self, reader: asyncio.StreamReader):
+    def __init__(self, reader: _OutputReader):
         self.reader = reader
 
     def write(self, text: str) -> int:
@@ -150,13 +258,14 @@ class _OutputSink:
 class _VercelProcess:
     """Route one native command log stream into AgentEnv's two byte readers."""
 
-    def __init__(self, operation: Any, tasks: set[asyncio.Task]):
-        self.stdout = asyncio.StreamReader()
-        self.stderr = asyncio.StreamReader()
+    def __init__(self, operation: Any, tasks: set[asyncio.Task], timeout: float | None = None):
+        self.stdout = _OutputReader()
+        self.stderr = _OutputReader()
 
         async def run() -> int:
             try:
-                result = await operation(stdout=_OutputSink(self.stdout), stderr=_OutputSink(self.stderr))
+                async with asyncio.timeout(timeout):
+                    result = await operation(stdout=_OutputSink(self.stdout), stderr=_OutputSink(self.stderr))
                 return _returncode(result)
             except asyncio.CancelledError:
                 raise
@@ -211,6 +320,7 @@ class VercelSandbox(VmSandbox):
             if not _is_missing_resource(error):
                 raise
             logger.info("Vercel sandbox %s was already gone at terminate", self.sandbox_id)
+        await _cancel_processes(self.sandbox_id)
 
     async def exec(self, *command: str) -> _VercelProcess:
         return await self._run(*command)
@@ -227,7 +337,9 @@ class VercelSandbox(VmSandbox):
                 argv[0], argv[1:], sudo=sudo, kill_after=timeout, **output
             )
 
-        return _VercelProcess(run, self._processes)
+        key = (asyncio.get_running_loop(), self.sandbox_id)
+        self._processes = _process_tasks.setdefault(key, self._processes)
+        return _VercelProcess(run, self._processes, timeout)
 
     async def _exec_with_output(
         self, *command: str, timeout: float | None = None

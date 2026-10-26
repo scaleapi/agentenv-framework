@@ -23,7 +23,8 @@ import copy
 import json
 import logging
 import posixpath
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import Any
 from urllib.parse import unquote
 
 import httpx
@@ -52,14 +53,16 @@ HOP_BY_HOP = frozenset({
 ROLE_HEADER_BYTES = AGENT_ENV_ROLE_HEADER.lower().encode()
 
 
-async def forward(request: Request, base_url: str, *, role: str, timeout: httpx.Timeout, mcp_server: bool) -> Response:
+async def forward(request: Request, base_url: str, *, role: str, timeout: httpx.Timeout, mcp_server: bool,
+                  on_done: Callable[[int], Awaitable[None]] | None = None) -> Response:
     """Forward `request` to the service at `base_url` as `role` and stream the response through. `mcp_server` says
     the service is a backing MCP server, whose own endpoint takes the role in its JSON-RPC `_meta` as well as in the
-    header. A 400 names a request-target the proxy cannot route; a 502 names an upstream that never answered."""
+    header. A 400 names a request-target the proxy cannot route; a 502 names an upstream that never answered.
+    `on_done` is awaited with the status once the response has ended, after its last byte when streamed."""
     try:
         target_url = upstream_url(base_url, request)
     except ValueError as e:  # an escaped slash inside the route prefix; refuse rather than forward a wrong path
-        return _json_response({"error": str(e)}, 400)
+        return await _done(_json_response({"error": str(e)}, 400), on_done)
     content = await request.body()  # /svc and /website request bodies are small (JSON-RPC, forms)
     headers = upstream_headers(request, role)
     if mcp_server and request.method == "POST" and is_child_mcp_path(request.path_params.get("path", "")):
@@ -74,8 +77,14 @@ async def forward(request: Request, base_url: str, *, role: str, timeout: httpx.
     except Exception as e:
         await client.aclose()
         logger.error(f"Proxy to {target_url} failed: {e!r}")
-        return _json_response({"error": f"Proxy request failed: {e!r}"}, 502)
-    return UpstreamResponse(upstream, client, target_url)
+        return await _done(_json_response({"error": f"Proxy request failed: {e!r}"}, 502), on_done)
+    return UpstreamResponse(upstream, client, target_url, on_done)
+
+
+async def _done(response: Response, on_done: Callable[[int], Awaitable[None]] | None) -> Response:
+    if on_done is not None:
+        await on_done(response.status_code)
+    return response
 
 
 def upstream_url(base_url: str, request: Request) -> str:
@@ -161,13 +170,15 @@ class UpstreamResponse(StreamingResponse):
 
     _DROP = HOP_BY_HOP | {b"date", b"server"}  # uvicorn adds the gateway's own; forwarding upstream's duplicates them
 
-    def __init__(self, upstream: httpx.Response, client: httpx.AsyncClient, target_url: str) -> None:
+    def __init__(self, upstream: httpx.Response, client: httpx.AsyncClient, target_url: str,
+                 on_done: Callable[[int], Awaitable[None]] | None = None) -> None:
         super().__init__(self._body(upstream, target_url), status_code=upstream.status_code)
         # Header block forwarded byte for byte: repeated names (Set-Cookie) stay separate, non-latin-1 values
         # never hit a str round-trip, and Content-Length/Content-Encoding stay valid for the undecoded body.
         self.raw_headers = [(k.lower(), v) for k, v in upstream.headers.raw if k.lower() not in self._DROP]
         self._upstream = upstream
         self._client = client
+        self._on_done = on_done
 
     @staticmethod
     async def _body(upstream: httpx.Response, target_url: str) -> AsyncIterator[bytes]:
@@ -180,12 +191,51 @@ class UpstreamResponse(StreamingResponse):
             logger.error(f"Proxy to {target_url} failed after {sent} bytes: {e!r}")
             raise
 
+    def after_body(self, then: Callable[[int], Awaitable[Any]]) -> None:
+        """Await `then` with the status once the response has ended, after `on_done`."""
+        on_done = self._on_done
+
+        async def both(status: int) -> None:
+            if on_done is not None:
+                await on_done(status)
+            await then(status)
+        self._on_done = both
+
+    async def read_ahead_if_sized(self, max_bytes: int) -> None:
+        """Read a body sized at most `max_bytes` to its end now and run `on_done` there, so the response then replays it."""
+        size = self._upstream.headers.get("content-length", "")
+        if self._on_done is None or not size.isdigit() or int(size) > max_bytes:
+            return
+        chunks: list[bytes] = []
+        failure: Exception | None = None
+        try:
+            async for chunk in self.body_iterator:
+                chunks.append(chunk)
+        except Exception as e:  # already logged by `_body`; the client still gets the cut body when it is sent
+            failure = e
+        except BaseException:  # cancelled before `__call__`, which would otherwise close them, ever runs
+            await self._upstream.aclose()
+            await self._client.aclose()
+            raise
+        self.body_iterator = _replay(chunks, failure)
+        on_done, self._on_done = self._on_done, None
+        await on_done(self.status_code)
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         try:
             await super().__call__(scope, receive, send)
         finally:  # normal end, upstream error, or the downstream client going away
             await self._upstream.aclose()
             await self._client.aclose()
+            if self._on_done is not None:
+                await self._on_done(self.status_code)
+
+
+async def _replay(chunks: list[bytes], failure: Exception | None) -> AsyncIterator[bytes]:
+    for chunk in chunks:
+        yield chunk
+    if failure is not None:
+        raise failure
 
 
 async def fetch_child_card(client: httpx.AsyncClient, key: str, base_url: str) -> dict | None:

@@ -9,6 +9,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -25,9 +26,11 @@ from agent_env.env import Env, GatewayEnv, MCPServerEnv, MultiEnv
 from agentenv_protocol import DataPart, FilePart, ToolSession, client as protocol_v1
 from agent_env.env.envs import WebsiteEnv
 from agent_env.env.gateway import AGENT_ENV_ROLE_HEADER, GatewayMode, TOOL_DISABLE_ACTION, TOOL_ENABLE_ACTION
+from agent_env.env.gateway.constants import EXT_TRIGGERS_URI, TRIGGER_WEBSITE
 from agent_env.env.gateway.get_time import (
     GET_TIME_TOOL_DESCRIPTION as GET_TIME_DESC,
     GET_TIME_TOOL_NAME as GET_TIME,
+    _SCHEMA as GET_TIME_SCHEMA,
 )
 from agent_env.env.envs.service_db import ServiceDBEnv
 from agent_env.env.envs.website_browser import (
@@ -466,6 +469,16 @@ def agentenv_website_env() -> WebsiteEnv:
         id="tenki",
         marks=skip_without_remote_sandbox("tenki"),
     ),
+    pytest.param(
+        "boxd",
+        id="boxd",
+        marks=skip_without_remote_sandbox("boxd"),
+    ),
+    pytest.param(
+        "daytona",
+        id="daytona",
+        marks=skip_without_remote_sandbox("daytona"),
+    ),
 ])
 def sandbox_provider(request):
     from agent_env.providers import (
@@ -493,6 +506,12 @@ def sandbox_provider(request):
     elif request.param == "tenki":
         set_sandbox_provider(build_sandbox_provider("tenki"))
         set_env_sandbox_provider(build_sandbox_provider("tenki"))
+    elif request.param == "boxd":
+        set_sandbox_provider(build_sandbox_provider("boxd"))
+        set_env_sandbox_provider(build_sandbox_provider("boxd"))
+    elif request.param == "daytona":
+        set_sandbox_provider(build_sandbox_provider("daytona"))
+        set_env_sandbox_provider(build_sandbox_provider("daytona"))
     try:
         yield request.param
     finally:
@@ -1770,6 +1789,71 @@ async def test_gateway_consistent_mode(multi_env, environment_universe_artifact)
 
 @pytest.mark.asyncio
 @pytest.mark.integration
+async def test_gateway_changes_name_the_role_behind_each_write(mcp_server_envs, email_service_artifact):
+    """Every changelog row a tool call wrote names its role and tool, and the call's result carries the ids it spanned."""
+    email_ref = mcp_server_envs["email"]
+    email_env = Env.get(email_ref.id, version=email_ref.version)
+    try:
+        result = await email_env.deploy()
+        await email_env.load_environment_artifact(email_service_artifact)  # the changelog's triggers go in after a load
+        gw = result.gateway_url
+        async with httpx.AsyncClient() as client:
+            seen = (await client.get(f"{gw}/changes", params={"limit": 10000}, timeout=30)).json()["changes"]
+            after_id = seen[-1]["id"] if seen else 0
+            for role, subject in (("default", "first"), ("alice@example.com", "second")):
+                resp = await client.post(f"{gw}/step", headers={AGENT_ENV_ROLE_HEADER: role}, timeout=60, json={
+                    "action": "call_tool", "tool_name": "send_email",
+                    "arguments": {"recipients": ["dana@example.com"], "subject": subject, "content": "body"}})
+                assert resp.status_code == 200, resp.text
+
+            changes = (await client.get(f"{gw}/changes", params={"after_id": after_id}, timeout=30)).json()
+            assert changes["changes"] and changes["has_more"] is False, changes
+            actors = [c["actors"] for c in changes["changes"]]
+            assert all(len(who) == 1 and who[0]["kind"] == "tool_call" and who[0]["tool"] == "send_email"
+                       for who in actors), actors
+            roles = [who[0]["role"] for who in actors]
+            assert set(roles) == {"default", "alice@example.com"} and roles == sorted(roles, key=lambda r: r != "default")
+
+            events = await _trajectory_events(client, gw)
+            results = [e for e in events if e["event_type"] == "tool_call_result"][-2:]
+            assert all(e["changelog_id"] > (e["changelog_id_before"] or 0) for e in results), results
+    finally:
+        await email_env.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_gateway_changes_name_the_request_behind_a_write_through_the_rest_proxy(mcp_server_envs,
+                                                                                      email_service_artifact):
+    """An MCP client writing through /svc/mcp-email/mcp (an SSE answer) is a write window too, named by its role."""
+    email_ref = mcp_server_envs["email"]
+    email_env = Env.get(email_ref.id, version=email_ref.version)
+    try:
+        result = await email_env.deploy()
+        await email_env.load_environment_artifact(email_service_artifact)
+        gw = result.gateway_url
+        async with httpx.AsyncClient() as client:
+            seen = (await client.get(f"{gw}/changes", params={"limit": 10000}, timeout=30)).json()["changes"]
+            after_id = seen[-1]["id"] if seen else 0
+            async with httpx.AsyncClient(headers={AGENT_ENV_ROLE_HEADER: "carol@example.com"}, timeout=60) as as_carol:
+                async with streamable_http_client(f"{gw}/svc/mcp-email/mcp", http_client=as_carol) as (read, write, _):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        sent = await session.call_tool("send_email", {
+                            "recipients": ["dana@example.com"], "subject": "lunch?", "content": "noon"})
+                        assert not sent.isError, sent
+
+            changes = (await client.get(f"{gw}/changes", params={"after_id": after_id}, timeout=30)).json()["changes"]
+            assert changes, "the call wrote no changelog row"
+            assert all([(a["kind"], a["role"], a["request"]["route"], a["request"]["service"], a["request"]["path"])
+                        for a in c["actors"]] == [("request", "carol@example.com", "svc", "mcp-email", "/mcp")]
+                       for c in changes), changes
+    finally:
+        await email_env.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
 @skip_without_model_endpoint()
 @skip_without_default_a2a_agent()
 async def test_env_validator_task(mcp_server_envs):
@@ -2749,6 +2833,42 @@ async def test_gateway_trigger_registration_is_fail_loud(sandbox_provider, mcp_s
         await email_env.close()
 
 
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_gateway_website_trigger_fires_on_a_request_through_the_website_proxy(slack_website_env):
+    """A request through the /website proxy fires the website trigger that names it, held by its barrier and attributed."""
+    visit = {"id": "visit", "when": {"type": "website", "app": "slack", "method": "GET", "path": {"equals": "/"}},
+             "barrier": {"at": "provoking_call"},
+             "actions": [{"type": "permission", "action": "disable", "role": "default", "tools": ["list_website_urls"]}]}
+    try:
+        result = await slack_website_env.deploy()
+        gw = result.gateway_url
+        card = await protocol_v1.get_card(gw)
+        assert TRIGGER_WEBSITE in protocol_v1.extension_params(card, EXT_TRIGGERS_URI)["features"], card
+
+        async with httpx.AsyncClient() as client:
+            unknown = await client.post(f"{gw}/triggers/register", timeout=30, json={
+                "triggers": [{**visit, "when": {**visit["when"], "app": "calendar"}}]})
+            assert unknown.status_code == 400 and "unknown website 'calendar'" in unknown.text, unknown.text
+            registered = await client.post(f"{gw}/triggers/register", json={"triggers": [visit]}, timeout=30)
+            assert registered.status_code == 200, registered.text
+
+            missing = await client.get(f"{gw}/website/slack/missing.css", timeout=30)
+            assert missing.status_code == 404
+            page = await client.get(f"{gw}/website/slack/", timeout=30)
+            assert page.status_code == 200 and "Slack Workspace" in page.text
+            roles = (await client.get(f"{gw}/state", timeout=30)).json()["roles"]
+            assert roles.get("default", {}).get("disabled") == ["list_website_urls"], roles
+
+            state = await _triggers_state(client, gw)
+            [row] = state["triggers"]
+            assert (row["type"], row["status"], row["fire_count"]) == ("website", "fired", 1), row
+            assert [e["provoking"] for e in state["events"] if e["kind"] == "detected"] == [
+                {"source": "website", "app": "slack", "method": "GET", "path": "/", "status": 200, "role": "default"}]
+    finally:
+        await slack_website_env.close()
+
+
 # One internal MCP round trip each, measured at ~8ms. A `queued` trigger exists only while a fire
 # is still running, so the chain is what holds that window open long enough to sample from outside
 # the deployment -- there is no slow tool to lean on, and a fire cannot be paused from the client.
@@ -2986,6 +3106,15 @@ async def _get_time_values(client, gw: str, mcp_url: str) -> tuple[str, str]:
     return payload["current_time"], json.loads(_step_content_text(r.json()))["current_time"]
 
 
+async def _get_time_in_zone(client, gw: str, mcp_url: str, zone: str) -> list[dict]:
+    """get_time with a `time_zone` over both call paths."""
+    arguments = {"time_zone": zone}
+    r = await client.post(f"{gw}/step", json={"action": "call_tool", "tool_name": GET_TIME, "arguments": arguments},
+                          timeout=30)
+    assert r.status_code == 200 and not r.json().get("isError"), f"/step get_time in {zone} failed: {r.text}"
+    return [json.loads(_step_content_text(r.json())), json.loads(await _clock_call_tool(mcp_url, GET_TIME, arguments))]
+
+
 @pytest.mark.asyncio
 @pytest.mark.integration
 async def test_gateway_clock_extension(sandbox_provider, mcp_server_envs):
@@ -3069,13 +3198,21 @@ async def test_gateway_clock_extension(sandbox_provider, mcp_server_envs):
             assert armed.servers - {"gateway"} == unarmed.servers, armed.servers
             tool = armed.mcp[GET_TIME]
             assert tool.description == GET_TIME_DESC
-            assert tool.inputSchema == {"type": "object", "properties": {}, "additionalProperties": False}
+            assert tool.inputSchema == GET_TIME_SCHEMA
             assert tool.annotations.readOnlyHint is True, tool.annotations
             # Bound to the LIVE armed clock, not a stale t0 captured at registration. Both call
             # paths, generous window because the clock is running at 3600x.
             for v in await _get_time_values(client, gw, result.mcp_url):
                 drift = (_dt(v) - _dt(t0a)).total_seconds()
                 assert 0 <= drift <= 3600 * (time.monotonic() - armed_at + 2), (v, t0a, drift)
+            # The gateway image resolves IANA names, link names such as US/Eastern too, on both call paths.
+            for payload in await _get_time_in_zone(client, gw, result.mcp_url, "Asia/Tokyo"):
+                assert payload["time_zone"] == "Asia/Tokyo" and payload["local_time"].endswith("+09:00"), payload
+                assert datetime.fromisoformat(payload["local_time"]) == _dt(payload["current_time"]), payload
+            for payload in await _get_time_in_zone(client, gw, result.mcp_url, "US/Eastern"):
+                local = datetime.fromisoformat(payload["local_time"])
+                assert local == _dt(payload["current_time"]), payload
+                assert local.utcoffset() == local.astimezone(ZoneInfo("America/New_York")).utcoffset(), payload
 
             # rate cap: 1 real s = 1 virtual day is the ceiling.
             assert (await client.put(f"{gw}/clock/set-time",

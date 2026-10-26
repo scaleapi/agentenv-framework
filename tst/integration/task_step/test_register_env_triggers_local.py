@@ -195,6 +195,39 @@ async def test_a_deadline_fires_on_silence_and_a_reply_cancels_it(local_stack):
     assert (cancelled["trigger_id"], cancelled["provoking"]["role"]) == ("deadline-2", "default")
 
 
+@pytest.mark.asyncio
+async def test_the_step_can_wait_for_start_of_run_time_triggers(local_stack):
+    _seed_bootstrap_envs()
+    env, deployed, host = await _deploy_items("await")
+    triggers = [{"id": "wf-1", "when": {"type": "time", "at": "2026-10-14T10:02:00Z"},
+                 "actions": [{"type": "tool", "tool": "items_add_item", "args": {"item": "WORLD-1"}}]},
+                {"id": "wf-2", "when": {"type": "time", "at": "2026-10-14T10:03:00Z"},
+                 "actions": [{"type": "tool", "tool": "items_add_item", "args": {"item": "WORLD-2"}}]},
+                {"id": "later", "when": {"type": "time", "at": "2026-10-14T18:00:00Z"},
+                 "actions": [{"type": "tool", "tool": "items_add_item", "args": {"item": "LATER"}}]}]
+    context = TaskStepContext(deployed_envs=[deployed], deployed_agents=[], metadata={})
+    try:
+        async with httpx.AsyncClient(base_url=deployed.gateway_url, timeout=60) as client:
+            await _arm_clock(client, "2026-10-14T10:00:00Z", 60)
+            started = time.monotonic()
+            await RegisterEnvTriggersStep(id="reg", version=None, env_id=env.id, triggers=triggers, watch_roles=["default"],
+                                          await_fired=["wf-1", "wf-2"], await_timeout_seconds=60).execute(context)
+            waited = time.monotonic() - started
+            state = (await client.get("/triggers/state")).raise_for_status().json()
+            with pytest.raises(RuntimeError, match=r"did not all fire within 3s; statuses \{'later': 'armed'\}"):
+                await RegisterEnvTriggersStep(id="reg-later", version=None, env_id=env.id, triggers=triggers[2:],
+                                              watch_roles=["default"], await_fired=["later"],
+                                              await_timeout_seconds=3).execute(context)
+    finally:
+        await env.close()
+
+    awaited_first, awaited_later = (e["awaited"] for e in context.metadata["env_trigger_registrations"])
+    assert awaited_first == {"wf-1": "fired", "wf-2": "fired"}
+    assert awaited_later == {"later": "armed"}  # the failed wait still records its registration and last statuses
+    assert waited >= 2.0, waited  # three virtual minutes at sixty-to-one
+    assert {t["id"]: t["fire_count"] for t in state["triggers"]} == {"wf-1": 1, "wf-2": 1, "later": 0}, state["events"][-6:]
+
+
 class _Executor:
     """An A2A executor on this machine that acts on each instruction through the gateway, under its own role; with
     ``replies``, it stops acting after that many."""

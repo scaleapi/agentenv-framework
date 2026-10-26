@@ -3,9 +3,11 @@ post-call detection on watched-role traffic, async fail-open firing, additive fa
 from __future__ import annotations
 
 import asyncio
+import bisect
 import contextlib
 import copy
 import hashlib
+import itertools
 import json
 import logging
 import math
@@ -13,19 +15,25 @@ import random
 import re
 import uuid
 from collections import deque
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone, tzinfo
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 from mcp.types import CallToolResult, TextContent
 
-from .clock import ClockError, _advance, _iso, _parse_duration, _parse_rfc3339
+from .clock import ClockError, _advance, _iso, _parse_duration, _parse_rfc3339, _zone
 from .caller import Caller
 from .constants import DEFAULT_ROLE, TRIGGER_IN_FLIGHT_STATUSES, TRIGGER_STATUSES
 
 logger = logging.getLogger(__name__)
 
 _PREDICATE_KEYS = ("regex", "equals", "exists")
+_WHEN_TYPES = ("action", "state", "time", "website")
+# The provoking-call roots each when.type's templates and `where` read; a website response streams through unread.
+_CTX_ROOTS = {"action": ("args", "result"), "website": ("args",)}
+# RFC 9110's safe methods: a request using one asks for no change, so it prompts no state re-evaluation.
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 _ACTION_TYPES = ("nl", "tool", "permission")
 _TERMINAL_A2A_STATES = ("completed", "failed", "canceled", "rejected")
 # Bounds the per-evaluation catch-up burst; the backlog drains on later evaluations.
@@ -34,7 +42,8 @@ _MAX_CATCHUP = 1000
 _EVENTS_HEAD = 1000
 _EVENTS_TAIL = 9000
 # Schedule keys state() echoes; excludes the unbounded `check`/`where`.
-_WHEN_SUMMARY_KEYS = ("type", "tool", "roles", "repeat", "at", "after", "offset", "every", "count", "until", "seed")
+_WHEN_SUMMARY_KEYS = ("type", "tool", "app", "method", "path", "status", "roles", "repeat", "at", "after", "offset",
+                      "every", "count", "until", "seed")
 # Placeholder roots reading the provoking call; a bare name is a check-pipeline binding.
 _CTX_PREFIXES = ("args", "result")
 # Where a barrier waits; a further wait point is a new value here, not a new top-level field.
@@ -322,9 +331,9 @@ def _validate_path(path: str, where: str) -> None:
             raise TriggerError(f"{where}: invalid path segment {segment!r} in {path!r}")
 
 
-def _validate_placeholders(value: Any, where: str, allow_ctx: bool) -> None:
-    """Fail-loud at registration: `${args.*}` / `${result.*}` only on action triggers (they alone carry a
-    provoking call), any other placeholder must be a bare check-binding name. A shape the templater
+def _validate_placeholders(value: Any, where: str, roots: tuple[str, ...]) -> None:
+    """Fail-loud at registration: `${args.*}` / `${result.*}` only on triggers that carry a provoking call
+    (`roots`), any other placeholder must be a bare check-binding name. A shape the templater
     cannot parse is rejected first, or it would reach the tool as literal text."""
     inert = _inert_placeholders(value)
     if inert:
@@ -336,8 +345,11 @@ def _validate_placeholders(value: Any, where: str, allow_ctx: bool) -> None:
         if root_name is None:
             if re.fullmatch(r"\w+", name) is None:
                 raise TriggerError(f"{where}: placeholder ${{{name}}} must be a check binding name or an args./result. path")
-        elif not allow_ctx:
-            raise TriggerError(f"{where}: ${{{name}}} needs a provoking tool call; only action triggers carry args/result")
+        elif not roots:
+            raise TriggerError(f"{where}: ${{{name}}} needs a provoking tool call; only action triggers carry args/result "
+                               "(website triggers carry args)")
+        elif root_name not in roots:
+            raise TriggerError(f"{where}: ${{{name}}} reads a result; a website request carries args, not a result")
         elif path:
             _validate_path(path, where)
         elif "." in name:
@@ -630,8 +642,8 @@ class TriggerEngine:
         if at not in _BARRIER_AT:
             raise TriggerError(f"{w}.at must be one of {list(_BARRIER_AT)} (got {at!r})")
         if at == "provoking_call" and not has_ctx:
-            raise TriggerError(f"{w}.at 'provoking_call' is only valid on action triggers — they alone have a "
-                               "provoking call to hold")
+            raise TriggerError(f"{w}.at 'provoking_call' is only valid on action triggers and website triggers — they "
+                               "alone have a provoking call to hold")
         timeout = barrier.get("timeout_seconds")
         if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
                                     or not math.isfinite(timeout) or timeout <= 0):
@@ -641,32 +653,35 @@ class TriggerEngine:
         """Validate + normalize a trigger spec in place (fail-loud); returns it, so pass a copy."""
         tid = spec["id"]
         when = spec.get("when")
-        if not isinstance(when, dict) or when.get("type") not in ("action", "state", "time"):
-            raise TriggerError(f"trigger '{tid}': when.type must be 'action', 'state', or 'time'")
+        if not isinstance(when, dict) or when.get("type") not in _WHEN_TYPES:
+            raise TriggerError(f"trigger '{tid}': when.type must be 'action', 'state', 'time', or 'website'")
         self._normalize_roles(when, tid)
         if when.get("unless") is None:
             when.pop("unless", None)
         if "unless" in when and when["type"] != "time":
             raise TriggerError(f"trigger '{tid}': when.unless is only valid on time triggers")
+        roots = _CTX_ROOTS.get(when["type"], ())
         if when["type"] == "action":
             self._normalize_action_when(when, tid)
+        elif when["type"] == "website":
+            self._normalize_website_when(when, tid)
         elif when["type"] == "state":
             if "repeat" in when:
-                raise TriggerError(f"trigger '{tid}': when.repeat is only valid on action triggers")
+                raise TriggerError(f"trigger '{tid}': when.repeat is only valid on action triggers and website triggers")
             when["check"] = _validate_check(when.get("check"), f"trigger '{tid}': when.check")
             for j, step in enumerate(when["check"]["steps"]):
-                _validate_placeholders(step.get("args", {}), f"trigger '{tid}': when.check.steps[{j}].args", allow_ctx=False)
+                _validate_placeholders(step.get("args", {}), f"trigger '{tid}': when.check.steps[{j}].args", roots)
         else:
             if "repeat" in when:
-                raise TriggerError(f"trigger '{tid}': when.repeat is only valid on action triggers (time triggers recur via 'every')")
+                raise TriggerError(f"trigger '{tid}': when.repeat is only valid on action triggers and website triggers "
+                                   "(time triggers recur via 'every')")
             self._normalize_time_when(when, tid)
-        has_ctx = when["type"] == "action"
-        self._normalize_barrier(spec, tid, has_ctx)
+        self._normalize_barrier(spec, tid, bool(roots))
         actions = spec.get("actions")
         if not isinstance(actions, list):
             raise TriggerError(f"trigger '{tid}': actions must be a list")
         for i, action in enumerate(actions):
-            self._normalize_action(action, f"trigger '{tid}': actions[{i}]", has_ctx, executors)
+            self._normalize_action(action, f"trigger '{tid}': actions[{i}]", roots, executors)
             target = executors.get(action.get("executor"))
             if action["type"] == "nl" and target is not None and target["role"] in when.get("roles", ()):
                 raise TriggerError(f"trigger '{tid}': when.roles includes {target['role']!r}, the role of the executor "
@@ -683,7 +698,7 @@ class TriggerEngine:
             when.pop("roles", None)
             return
         if when["type"] == "time":
-            raise TriggerError(f"trigger '{tid}': when.roles is only valid on action and state triggers")
+            raise TriggerError(f"trigger '{tid}': when.roles is only valid on action and state triggers, and website triggers")
         roles = when["roles"]
         if not isinstance(roles, list) or not roles or not all(isinstance(r, str) and r for r in roles):
             raise TriggerError(f"trigger '{tid}': when.roles must be a non-empty list of non-empty AgentEnv-Roles")
@@ -693,19 +708,31 @@ class TriggerEngine:
         """Validate a when.type=='action' spec: the provoking tool, its `where` predicates, `repeat`."""
         if not isinstance(when.get("tool"), str) or not when["tool"]:
             raise TriggerError(f"trigger '{tid}': when.tool must be a non-empty string")
-        where = when.get("where", {})
-        if not isinstance(where, dict):
-            raise TriggerError(f"trigger '{tid}': when.where must be an object")
-        for field, pred in where.items():
-            _validate_predicate(pred, f"trigger '{tid}': where.{field}")
-            _, path = _ctx_path(field)
-            if path:
-                _validate_path(path, f"trigger '{tid}': where.{field}")
-        if "repeat" in when and not isinstance(when["repeat"], bool):
-            raise TriggerError(f"trigger '{tid}': when.repeat must be a boolean")
+        _normalize_provoked_when(when, tid)
+
+    def _normalize_website_when(self, when: dict, tid: str) -> None:
+        """Validate a website `when`: a known app, upper-cased method, `path`/`status` predicates, `where`, `repeat`."""
+        w = f"trigger '{tid}'"
+        app = when.get("app")
+        if not isinstance(app, str) or not app:
+            raise TriggerError(f"{w}: when.app must be a non-empty string naming one of the env's websites")
+        if app not in self._gw.website_urls:
+            raise TriggerError(f"{w}: when.app names unknown website {app!r} (websites: {sorted(self._gw.website_urls)})")
+        if when.get("method") is None:
+            when.pop("method", None)
+        elif not isinstance(when["method"], str) or not when["method"].strip():
+            raise TriggerError(f"{w}: when.method must be a non-empty HTTP method, e.g. 'POST'")
+        else:
+            when["method"] = when["method"].strip().upper()
+        for key in ("path", "status"):
+            if when.get(key) is None:
+                when.pop(key, None)
+            else:
+                _validate_predicate(when[key], f"{w}: when.{key}")
+        _normalize_provoked_when(when, tid)
 
     @staticmethod
-    def _normalize_action(action: Any, w: str, has_ctx: bool, executors: dict[str | None, dict]) -> None:
+    def _normalize_action(action: Any, w: str, roots: tuple[str, ...], executors: dict[str | None, dict]) -> None:
         """Validate one fire-action in place, plus its optional `verify` check, `as` role and nl `executor` name."""
         atype = action.get("type") if isinstance(action, dict) else None
         if atype not in _ACTION_TYPES:
@@ -738,7 +765,7 @@ class TriggerEngine:
                 raise TriggerError(f"{w}: tool must be a non-empty string")
             if not isinstance(action.get("args", {}), dict):
                 raise TriggerError(f"{w}: args must be an object")
-            _validate_placeholders(action.get("args", {}), f"{w}.args", allow_ctx=has_ctx)
+            _validate_placeholders(action.get("args", {}), f"{w}.args", roots)
             if action.get("as") is not None:
                 if not isinstance(action["as"], str):
                     raise TriggerError(f"{w}: 'as' must be a non-empty AgentEnv-Role other than {DEFAULT_ROLE!r}")
@@ -760,7 +787,7 @@ class TriggerEngine:
         if "verify" in action:
             action["verify"] = _validate_check(action["verify"], f"{w}.verify")
             for j, step in enumerate(action["verify"]["steps"]):
-                _validate_placeholders(step.get("args", {}), f"{w}.verify.steps[{j}].args", allow_ctx=has_ctx)
+                _validate_placeholders(step.get("args", {}), f"{w}.verify.steps[{j}].args", roots)
 
     def _normalize_time_when(self, when: dict, tid: str) -> None:
         """Validate a when.type=='time' spec fail-loud, leaving it JSON-clean."""
@@ -840,17 +867,15 @@ class TriggerEngine:
         hold the call for: the widest of their timeouts, counting an omitted one as the gateway
         default so a neighbour's tighter ask cannot cut it short.
         """
-        pending: list[asyncio.Task] = []
-        timeout_s: float | None = None
         provokable = [(tid, trig) for tid, trig in self._triggers.items() if self._provoked_by(trig, role)]
         if not provokable:
-            return pending, timeout_s
+            return [], None
         # Before the isError guard: an errored call is still a clock tick.
         if self._has_time_triggers:
             self._eval_time_triggers()
         # Handled refusals arrive flagged too: BaseService.flag_handled_errors sets isError at the wire.
         if getattr(result, "isError", False):
-            return pending, timeout_s
+            return [], None
         data = _result_data(result)
         ctx = {"args": arguments, "result": data}
         provoking = {"tool": name, "role": role}
@@ -867,10 +892,37 @@ class TriggerEngine:
             if all(_eval_predicate(pred, _where_value(ctx, field)) for field, pred in unless.get("where", {}).items()):
                 self._cancel(tid, trig, provoking=provoking)
                 self._recompute_time_flag()
-        for tid, trig in provokable:
+        matched = [(tid, trig) for tid, trig in provokable
+                   if trig["spec"]["when"]["type"] == "action" and trig["spec"]["when"]["tool"] == name]
+        pending, timeout_s = self._detect(matched, provoking, ctx)
+        if not self._is_readonly(name):
+            self._reevaluate_states(provokable, provoking)
+        return pending, timeout_s
+
+    def on_website_request(self, role: str, app: str, method: str, path: str, status: int,
+                           args: dict) -> tuple[list[asyncio.Task], float | None]:
+        """Detection hook for an answered website request, before its response goes out; returns what on_tool_call does."""
+        provokable = [(tid, trig) for tid, trig in self._triggers.items() if self._provoked_by(trig, role)]
+        if not provokable:
+            return [], None
+        if self._has_time_triggers:
+            self._eval_time_triggers()
+        request = {"app": app, "method": method, "path": path, "status": status}
+        provoking = {"source": "website", **request, "role": role}
+        matched = [(tid, trig) for tid, trig in provokable
+                   if _website_matches(trig["spec"]["when"], app, method, path, status)]
+        pending, timeout_s = self._detect(matched, provoking, {"args": args, "request": request})
+        if method not in _SAFE_METHODS and status < 400:
+            self._reevaluate_states(provokable, provoking)
+        return pending, timeout_s
+
+    def _detect(self, matched: list[tuple[str, dict]], provoking: dict,
+                ctx: dict) -> tuple[list[asyncio.Task], float | None]:
+        """Detect the matched triggers whose `where` holds and that can take the call; returns what on_tool_call does."""
+        pending: list[asyncio.Task] = []
+        timeout_s: float | None = None
+        for tid, trig in matched:
             when = trig["spec"]["when"]
-            if when["type"] != "action" or when["tool"] != name:
-                continue
             if trig["status"] != "armed" and not (when.get("repeat") and trig["status"] in TRIGGER_IN_FLIGHT_STATUSES):
                 continue
             if not all(_eval_predicate(pred, _where_value(ctx, field))
@@ -882,12 +934,26 @@ class TriggerEngine:
                 pending.append(task)
                 asked = barrier.get("timeout_seconds") or self._gw.TRIGGER_BARRIER_TIMEOUT_S
                 timeout_s = asked if timeout_s is None else max(timeout_s, asked)
-        if not self._is_readonly(name):
-            for tid, trig in provokable:
-                if trig["status"] == "armed" and trig["spec"]["when"]["type"] == "state" and not trig["evaluating"]:
-                    trig["evaluating"] = True
-                    self._schedule(self._eval_state(tid, trig, provoking))
         return pending, timeout_s
+
+    def _reevaluate_states(self, provokable: list[tuple[str, dict]], provoking: dict) -> None:
+        for tid, trig in provokable:
+            if trig["status"] == "armed" and trig["spec"]["when"]["type"] == "state" and not trig["evaluating"]:
+                trig["evaluating"] = True
+                self._schedule(self._eval_state(tid, trig, provoking))
+
+    def may_hold_website_request(self, role: str, app: str, method: str, path: str, status: int) -> bool:
+        """Whether a `provoking_call` barrier could hold this website request: a matcher check, `where` and status aside."""
+        return any((trig["spec"].get("barrier") or {}).get("at") == "provoking_call" and self._provoked_by(trig, role)
+                   and _website_matches(trig["spec"]["when"], app, method, path, status) for trig in self._triggers.values())
+
+    @property
+    def has_website_triggers(self) -> bool:
+        return any(t["spec"]["when"]["type"] == "website" for t in self._triggers.values())
+
+    @property
+    def has_state_triggers(self) -> bool:
+        return any(t["spec"]["when"]["type"] == "state" for t in self._triggers.values())
 
     def _provoked_by(self, trig: dict, role: str) -> bool:
         """Whether a call by ``role`` can provoke ``trig``: the roles its `when` (or a deadline's `unless`) lists, else the
@@ -1183,7 +1249,8 @@ class TriggerEngine:
                 trig["attempts"] += 1
                 try:
                     await self._gw._log_event({"event_type": "trigger_fired", "source": "trigger_engine", "trigger_id": tid,
-                                               "provoking_tool": (ctx.get("args") is not None and spec["when"].get("tool")) or None})
+                                               "provoking_tool": (ctx.get("args") is not None and spec["when"].get("tool")) or None,
+                                               **({"provoking_request": ctx["request"]} if "request" in ctx else {})})
                     for index, action in enumerate(spec["actions"]):
                         if not await self._run_action(tid, trig, index, action, ctx, since):
                             ok = False
@@ -1426,6 +1493,33 @@ def _delay_rngs(spec: dict) -> dict[int, random.Random]:
             if isinstance(action.get("delay"), dict)}
 
 
+def _normalize_provoked_when(when: dict, tid: str) -> None:
+    """Validate what action and website triggers share: `where` over their provoking call's roots, and `repeat`."""
+    roots = _CTX_ROOTS[when["type"]]
+    where = when.get("where", {})
+    if not isinstance(where, dict):
+        raise TriggerError(f"trigger '{tid}': when.where must be an object")
+    for field, pred in where.items():
+        _validate_predicate(pred, f"trigger '{tid}': where.{field}")
+        root_name, path = _ctx_path(field)
+        if path and root_name not in roots:
+            raise TriggerError(f"trigger '{tid}': where.{field} reads a result; a website request carries args, "
+                               "not a result")
+        if path:
+            _validate_path(path, f"trigger '{tid}': where.{field}")
+    if "repeat" in when and not isinstance(when["repeat"], bool):
+        raise TriggerError(f"trigger '{tid}': when.repeat must be a boolean")
+
+
+def _website_matches(when: dict, app: str, method: str, path: str, status: int) -> bool:
+    """Whether a request matches a website `when` (`where` aside); without `status`, only a response below 400 does."""
+    if when["type"] != "website" or when["app"] != app or when.get("method", method) != method:
+        return False
+    if "path" in when and not _eval_predicate(when["path"], path):
+        return False
+    return _eval_predicate(when["status"], status) if "status" in when else status < 400
+
+
 def _normalize_unless(unless: Any, w: str) -> None:
     """Validate a deadline's `unless`: the call that cancels it, matched like an action trigger's."""
     if not isinstance(unless, dict) or not isinstance(unless.get("tool"), str) or not unless["tool"]:
@@ -1445,39 +1539,73 @@ def _normalize_unless(unless: Any, w: str) -> None:
 
 
 def _normalize_hours(raw: Any, where: str) -> dict:
-    """Validate an executor's working hours, returning them with `utc_offset` and `days` filled in."""
+    """Validate an executor's working hours, returning them with `days`, and `utc_offset` unless they name an IANA
+    `time_zone`, filled in."""
     if not isinstance(raw, dict):
-        raise TriggerError(f"{where}.hours must be an object {{start, end, utc_offset?, days?}}")
+        raise TriggerError(f"{where}.hours must be an object {{start, end, utc_offset? or time_zone?, days?}}")
     for key in ("start", "end"):
         if not isinstance(raw.get(key), str) or not _HHMM_RE.fullmatch(raw[key]):
             raise TriggerError(f"{where}.hours.{key} must be a 24-hour 'HH:MM'")
     if raw["start"] == raw["end"]:
         raise TriggerError(f"{where}.hours: start equals end, so the executor would never be available")
-    offset = raw.get("utc_offset", "+00:00")
-    if not isinstance(offset, str) or not _UTC_OFFSET_RE.fullmatch(offset):
-        raise TriggerError(f"{where}.hours.utc_offset must look like '-07:00' or '+05:30'")
+    if "time_zone" in raw:
+        if "utc_offset" in raw:
+            raise TriggerError(f"{where}.hours take utc_offset or time_zone, not both")
+        if _zone(raw["time_zone"]) is None:
+            raise TriggerError(f"{where}.hours.time_zone must be an IANA time zone name such as 'America/New_York', "
+                               f"got {raw['time_zone']!r}")
+        zone = {"time_zone": raw["time_zone"]}
+    else:
+        offset = raw.get("utc_offset", "+00:00")
+        if not isinstance(offset, str) or not _UTC_OFFSET_RE.fullmatch(offset):
+            raise TriggerError(f"{where}.hours.utc_offset must look like '-07:00' or '+05:30'")
+        zone = {"utc_offset": offset}
     days = raw.get("days", list(_DAYS))
     if not isinstance(days, list) or not days or not all(day in _DAYS for day in days):
         raise TriggerError(f"{where}.hours.days must be a non-empty list of {list(_DAYS)}")
-    return {"start": raw["start"], "end": raw["end"], "utc_offset": offset, "days": [d for d in _DAYS if d in days]}
+    return {"start": raw["start"], "end": raw["end"], **zone, "days": [d for d in _DAYS if d in days]}
 
 
 def _next_opening(now: datetime, hours: dict) -> datetime | None:
     """None if ``now`` is within the working hours, else when they next open. A window starts on each listed day and
-    runs to `end`, past midnight when `end` is earlier than `start`."""
-    sign, hh, mm = _UTC_OFFSET_RE.fullmatch(hours["utc_offset"]).groups()
-    local = now.astimezone(timezone((1 if sign == "+" else -1) * timedelta(hours=int(hh), minutes=int(mm))))
+    runs to `end`, past midnight when `end` is earlier than `start`. Its local bounds are compared with the UTC ``now``
+    as instants, so it keeps its local hours across a daylight-saving change; a day whose skipped hour leaves its window
+    no time has none, and a bound in the skipped hour falls at the moment the clocks jump."""
+    zone = _hours_zone(hours)
     start_h, start_m = map(int, hours["start"].split(":"))
     end_h, end_m = map(int, hours["end"].split(":"))
     length = (timedelta(hours=end_h, minutes=end_m) - timedelta(hours=start_h, minutes=start_m)) % timedelta(days=1)
-    midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
-    for days_ahead in range(-1, 8):
-        day = midnight + timedelta(days=days_ahead)
+    today = now.astimezone(zone).date()
+    for days_ahead in itertools.count(-1):
+        day = today + timedelta(days=days_ahead)
         if _DAYS[day.weekday()] not in hours["days"]:
             continue
-        opens = day.replace(hour=start_h, minute=start_m)
-        if opens <= local < opens + length:
+        local_opens = datetime.combine(day, time(start_h, start_m), zone)
+        opens, closes = _instant(local_opens), _instant(local_opens + length)
+        if closes <= opens:
+            continue
+        if opens <= now < closes:
             return None
-        if opens > local:
+        if opens > now:
             return opens
-    return None
+
+
+def _instant(local: datetime) -> datetime:
+    """The UTC instant of an aware ``local`` time, the first if its hour repeats, and the moment the clocks jump past it
+    if they skip it."""
+    utc = local.astimezone(timezone.utc)
+    wall = local.replace(tzinfo=None)
+    if utc.astimezone(local.tzinfo).replace(tzinfo=None) == wall:
+        return utc
+    before = local.replace(fold=1).astimezone(timezone.utc)
+    jump = bisect.bisect_left(range(int((utc - before).total_seconds())), True,
+                              key=lambda s: (before + timedelta(seconds=s)).astimezone(local.tzinfo).replace(tzinfo=None)
+                              >= wall)
+    return before + timedelta(seconds=jump)
+
+
+def _hours_zone(hours: dict) -> tzinfo:
+    if "time_zone" in hours:
+        return ZoneInfo(hours["time_zone"])
+    sign, hh, mm = _UTC_OFFSET_RE.fullmatch(hours["utc_offset"]).groups()
+    return timezone((1 if sign == "+" else -1) * timedelta(hours=int(hh), minutes=int(mm)))

@@ -407,6 +407,27 @@ function main(): void {
   }
 
   {
+    assert(
+      summarizeWhen({
+        type: 'website',
+        app: 'mail',
+        method: 'POST',
+        path: { regex: '^/api/messages' },
+      }).label === 'POST mail /^/api/messages/',
+      'website: method, site and path regex',
+    );
+    assert(
+      summarizeWhen({ type: 'website', app: 'mail', path: { equals: '/' } })
+        .label === 'any mail /',
+      'website: no method is any, an exact path as is',
+    );
+    assert(
+      summarizeWhen({ type: 'website', app: 'mail' }).label === 'any mail',
+      'website: no path predicate, just the site',
+    );
+  }
+
+  {
     // Dangling env_trigger reference: node kept, edge dropped.
     const graph = parseTriggerGraph([
       {

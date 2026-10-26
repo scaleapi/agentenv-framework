@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 
 from pydantic import BaseModel, Field, field_validator
 
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
 
 if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
@@ -21,14 +22,23 @@ def _write_twin(data: dict[str, Any], legacy: str, neutral: str, value: Any) -> 
         data[legacy] = data[neutral] = value
 
 
+@dataclass(frozen=True)
+class FolderChild:
+    """An artifact written from a bundle folder besides the one the folder is for."""
+
+    id: str
+    path: str  # where in the folder it's written from
+
+
 class Artifact(BaseModel):
     """Base class for all environment artifacts. Immutable - each modification creates a new version."""
 
     id: str = Field(description="Unique artifact identifier")
-    version: int = Field(default=0, description="Artifact version (auto-calculated on put)")
+    version: int = Field(default=0, description="Artifact version: 0 takes the next free one on put; another must be the next")
     type: str = Field(description="The type of Artifact")
 
     toml_refs: ClassVar[tuple[EntityRef, ...]] = ()
+    toml_keys: ClassVar[dict[str, type]] = {}  # what an artifact.toml may set, for a type without an accept_toml
 
     @field_validator("type", mode="before")
     @classmethod
@@ -73,6 +83,13 @@ class Artifact(BaseModel):
         document; one whose ``put`` uploads files or images overrides this."""
         fields = {key: value for key, value in data.items() if key not in ("id", "type", "version")}
         return cls.put(id=ctx.id, **fields)
+
+    @classmethod
+    def written_besides(cls, ctx: AuthoringContext) -> tuple[FolderChild, ...]:
+        """The artifacts ``from_toml`` writes from the entry's folder besides ``ctx.id``, which a bundle checks
+        before anything is written: none, unless a type writing others too overrides this to name them. Raises
+        BundleError when the folder can't be read."""
+        return ()
 
     @classmethod
     def query(cls) -> "ArtifactQuery":

@@ -319,6 +319,8 @@ _BUILTIN_SANDBOX_PROVIDERS: dict[str, str] = {
     "tensorlake": "agent_env.providers.sandbox_providers.tensorlake.provider:TensorlakeSandboxProvider",
     "vercel": "agent_env.providers.sandbox_providers.vercel.provider:VercelSandboxProvider",
     "tenki": "agent_env.providers.sandbox_providers.tenki.provider:TenkiSandboxProvider",
+    "boxd": "agent_env.providers.sandbox_providers.boxd.provider:BoxdSandboxProvider",
+    "daytona": "agent_env.providers.sandbox_providers.daytona.provider:DaytonaSandboxProvider",
     "local": "agent_env.providers.sandbox_providers.local_sandbox:LocalSandboxProvider",
 }
 

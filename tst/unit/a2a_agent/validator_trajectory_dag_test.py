@@ -18,6 +18,7 @@ import pytest
 from agentenv_protocol.transfers import HttpPutGrant
 
 from agent_env.a2a_agent import A2AAgent, object_transfer
+from agent_env.a2a_agent import validator as validator_module
 from agent_env.a2a_agent.validator import A2AAgentValidator
 from agent_env.config import Config, configure
 from agent_env.task import Task
@@ -30,6 +31,12 @@ from agent_env.task_step.task_steps.a2a_agent_validator.verify_a2a_agent_mcp imp
 from agent_env.task_step.task_steps.a2a_agent_validator.verify_a2a_trajectory import (
     VerifyA2ATrajectoryStep,
 )
+
+
+@pytest.fixture(autouse=True)
+def no_validation_env_write(monkeypatch):
+    """The env the validator writes first is a2a_agent_validate_test's; these runs write none."""
+    monkeypatch.setattr(validator_module, "write_validation_env", lambda on_progress: None)
 
 
 def _context_with_trajectory_agent(

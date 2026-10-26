@@ -88,6 +88,24 @@ on PyPI, the same workflow creates the GitHub release, whose notes are the title
 the previous release, so a clear pull request title is also the release note. A tag whose commit does not pass
 `main`'s CI is not published and gets no release; its pull requests are in the next release's notes.
 
+A release also publishes the infra images agent-env ships, once the `PUBLISH_INFRA_IMAGES` repository variable is
+`true`: one per Dockerfile under `src/agent_env/env`, and one per shipped agent (`agentenv-claude-code`, its CLI
+included, `agentenv-codex`, `agentenv-gemini`, `agentenv-opencode`, `agentenv-pi` and `agentenv-openhands`), at `ghcr.io/scaleapi/agentenv-<name>:src-<hex>` for linux/amd64
+and linux/arm64, where the tag is the build context's source digest, so an unchanged Dockerfile is not built again.
+The agents' images install the newest `agentenv-framework-protocol` at or above the floor in their
+`requirements.txt`, which a release doesn't pin, so each is built again only when its folder changes: once the protocol
+is on PyPI, as a raised floor may name it, and before `agentenv-framework` is published.
+Each of them pins its base images by digest, and Dependabot bumps those pins within each base's major and minor
+version (an upgrade, such as postgres 16 to 18, is made by hand), so a base's fixes reach the published
+image: a bump changes the sources, and the next release builds it again.
+Installs pull them instead of building the infra images: a run on local stores registers a kind's images when GHCR has
+every one for the sources installed, by the digest the wheel records or, with no record, the one GHCR serves, and
+builds them otherwise; a sandbox that can't pull one builds it from its build context. A run that deploys the Claude
+Code agent registers its published image the same way, in place of its folder's build context. The wheel and the release notes
+record each image's digest. A failed image job keeps `agentenv-framework` off PyPI. Maintainers can publish the images
+alone by running the workflow by hand on `main`. GHCR keeps a new package private until a package admin makes it
+public, and the workflow warns about each one until then.
+
 ## Getting help
 
 Ask questions in [Discussions Q&A](https://github.com/scaleapi/agentenv-framework/discussions/categories/q-a).

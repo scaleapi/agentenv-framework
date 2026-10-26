@@ -912,6 +912,7 @@ async def test_teardown_sends_sigterm_then_sigkill_to_what_outlives_it(monkeypat
     sent, running = [], {11: signal.SIGTERM, 12: signal.SIGKILL}  # pid -> the signal that stops it
     monkeypatch.setattr(ls, "_REAP_SECONDS", 1)
     monkeypatch.setattr(ls, "_marked_pids", lambda sandbox_id: sorted(running) if sandbox_id == "local-a" else [])
+    monkeypatch.setattr(ls, "_started", lambda pid: 1 if pid in running else None)
 
     def kill(pid, sig):
         sent.append((pid, sig))
@@ -928,6 +929,7 @@ async def test_teardown_sends_sigterm_then_sigkill_to_what_outlives_it(monkeypat
 async def test_teardown_keeps_the_staging_a_surviving_process_runs_from(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(ls, "_REAP_SECONDS", 1)
     monkeypatch.setattr(ls, "_marked_pids", lambda sandbox_id: [13])  # never stops
+    monkeypatch.setattr(ls, "_started", lambda pid: 1)
     monkeypatch.setattr(ls.os, "kill", lambda pid, sig: None)
     sandbox = _RecordingLocalSandbox(work_dir=tmp_path)
     staged = Path(tempfile.mkdtemp(prefix="install-agent-solver-", suffix=f"-{sandbox.sandbox_id}", dir="/tmp"))
@@ -943,7 +945,7 @@ def _running(pid: int) -> bool:
     """Whether ``pid`` is still running: a killed process another parent hasn't reaped yet is a zombie."""
     try:
         return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] not in "ZX"
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):  # a process that exits mid-read gives ESRCH
         return False
 
 
@@ -1005,6 +1007,29 @@ async def test_teardown_kills_a_process_that_ignores_sigterm(tmp_path: Path, mon
 
     assert not _running(stubborn)
     assert not ls._marked_pids(sandbox.sandbox_id)
+
+
+@linux_only
+@pytest.mark.asyncio
+async def test_teardown_follows_a_process_it_found_until_it_exits_though_its_environment_reads_empty(monkeypatch):
+    """A process's environment reads empty while it execs or is exiting, so the next scan missing it doesn't mean it
+    stopped."""
+    monkeypatch.setattr(ls, "_REAP_SECONDS", 1)
+    stubborn = subprocess.Popen(["bash", "-c", "trap '' TERM; exec sleep 300"])
+    try:
+        for _ in range(500):
+            if Path(f"/proc/{stubborn.pid}/cmdline").read_text().split("\0")[0] == "sleep":  # exec'd, still ignoring SIGTERM
+                break
+            await asyncio.sleep(0.01)
+        scans = iter([[stubborn.pid]])
+        monkeypatch.setattr(ls, "_marked_pids", lambda sandbox_id: next(scans, []))
+
+        assert await ls._stop_marked("local-a")
+
+        assert not _running(stubborn.pid)
+    finally:
+        stubborn.kill()
+        stubborn.wait()
 
 
 @pytest.mark.asyncio
@@ -1164,3 +1189,21 @@ async def test_a_linked_agent_whose_copy_fails_leaves_no_container(tmp_path, mon
 
 
 _HOST_IPS = ls._host_ips
+
+
+@pytest.mark.asyncio
+async def test_the_local_provider_pulls_only_the_published_images_its_docker_doesnt_hold(monkeypatch, tmp_path):
+    """So a run after the first needs no registry."""
+    images = [DockerImageArtifact(id=name, description="d", image_name=f"ghcr.io/team/{name}:src-1",
+                                  image_digest="sha256:" + "9" * 64) for name in ("held", "new")]
+    monkeypatch.setattr(ls, "present", lambda image_name: image_name.startswith("ghcr.io/team/held:"))
+    asked = []
+
+    async def pull_published(self, artifacts):
+        asked.extend(artifact.id for artifact in artifacts)
+        return []
+
+    monkeypatch.setattr(ls.VmSandbox, "pull_published", pull_published)
+
+    assert await LocalSandbox(work_dir=tmp_path).pull_published(images) == []
+    assert asked == ["new"]

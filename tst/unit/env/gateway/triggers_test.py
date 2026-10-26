@@ -4,7 +4,8 @@ from __future__ import annotations
 import asyncio
 import json
 import random
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -12,7 +13,7 @@ from mcp.types import CallToolResult, TextContent
 
 from agent_env.env.gateway.clock import Clock
 from agent_env.env.gateway import triggers as triggers_module
-from agent_env.env.gateway.triggers import TriggerEngine, TriggerError, _next_opening
+from agent_env.env.gateway.triggers import TriggerEngine, TriggerError, _next_opening, _normalize_hours
 
 
 class _FakeGateway:
@@ -579,6 +580,151 @@ def test_next_opening(now, hours, opens):
     hours = {"utc_offset": "+00:00", "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"], **hours}
     got = _next_opening(datetime.fromisoformat(now.replace("Z", "+00:00")), hours)
     assert (got.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if got else None) == opens
+
+
+@pytest.mark.parametrize("now, hours, opens", [
+    ("2026-07-15T12:00:00Z", {"start": "09:00", "end": "17:00"}, "2026-07-15T13:00:00Z"),
+    ("2026-07-15T21:00:00Z", {"start": "09:00", "end": "17:00"}, "2026-07-16T13:00:00Z"),
+    ("2026-12-16T13:00:00Z", {"start": "09:00", "end": "17:00"}, "2026-12-16T14:00:00Z"),
+    ("2026-12-16T22:00:00Z", {"start": "09:00", "end": "17:00"}, "2026-12-17T14:00:00Z"),
+    ("2026-03-07T22:00:00Z", {"start": "09:00", "end": "17:00"}, "2026-03-08T13:00:00Z"),
+    ("2026-03-08T09:30:00Z", {"start": "22:00", "end": "06:00"}, None),
+    ("2026-03-08T10:00:00Z", {"start": "22:00", "end": "06:00"}, "2026-03-09T02:00:00Z"),
+    ("2026-03-08T06:00:00Z", {"start": "02:30", "end": "10:00"}, "2026-03-08T07:00:00Z"),
+    ("2026-10-31T21:00:00Z", {"start": "09:00", "end": "17:00"}, "2026-11-01T14:00:00Z"),
+    ("2026-11-01T13:00:00Z", {"start": "09:00", "end": "17:00"}, "2026-11-01T14:00:00Z"),
+    ("2026-11-01T06:15:00Z", {"start": "01:30", "end": "09:00"}, None),
+    ("2026-11-01T06:15:00Z", {"start": "22:00", "end": "01:30"}, "2026-11-02T03:00:00Z"),
+    ("2026-03-08T06:00:00Z", {"start": "02:30", "end": "03:15"}, "2026-03-08T07:00:00Z"),
+    ("2026-03-08T06:00:00Z", {"start": "02:00", "end": "03:00"}, "2026-03-09T06:00:00Z"),
+    ("2026-03-08T06:00:00Z", {"start": "02:00", "end": "02:30"}, "2026-03-09T06:00:00Z"),
+    ("2026-03-08T07:15:00Z", {"start": "01:30", "end": "02:30"}, "2026-03-09T05:30:00Z"),
+    ("2026-03-07T08:00:00Z", {"start": "02:00", "end": "03:00", "days": ["sun"]}, "2026-03-15T06:00:00Z"),
+    ("2026-03-01T09:00:00Z", {"start": "02:00", "end": "03:00", "days": ["sun"]}, "2026-03-15T06:00:00Z"),
+], ids=["july-weekday", "july-closed-at-17-local", "december-weekday", "december-closed-at-17-local",
+        "into-spring-forward-sunday", "overnight-across-spring-forward", "overnight-closes-at-06-edt",
+        "start-in-the-skipped-hour", "into-fall-back-sunday", "fall-back-sunday-at-08-est",
+        "opened-in-the-repeated-hour-stays-open", "closed-in-the-repeated-hour-stays-closed",
+        "window-the-skipped-hour-shortens", "window-of-the-skipped-hour", "window-inside-the-skipped-hour",
+        "window-ending-in-the-skipped-hour-closes-at-the-jump",
+        "only-window-of-the-week-the-skipped-hour-empties", "a-week-before-an-only-window-the-skipped-hour-empties"])
+def test_next_opening_in_a_named_time_zone(now, hours, opens):
+    hours = _normalize_hours({"time_zone": "America/New_York", **hours}, "executor")
+    got = _next_opening(datetime.fromisoformat(now.replace("Z", "+00:00")), hours)
+    assert (got.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if got else None) == opens
+
+
+@pytest.mark.parametrize("start, end, days", [
+    ("09:00", "17:00", None), ("22:00", "06:00", None), ("02:30", "10:00", None), ("02:30", "03:15", None),
+    ("02:00", "03:00", None), ("02:00", "02:30", None), ("01:30", "02:30", None), ("01:15", "01:45", None), ("22:00", "01:30", None),
+    ("02:00", "03:00", ["sun"]), ("02:30", "03:15", ["sun"]), ("01:30", "02:30", ["sun"]), ("22:00", "02:30", ["sat"]),
+], ids=["day", "overnight", "starts-in-the-skipped-hour", "the-skipped-hour-shortens", "the-skipped-hour",
+        "inside-the-skipped-hour", "across-the-repeated-hour", "inside-the-repeated-hour", "overnight-into-the-repeated-hour",
+        "sundays-inside-the-skipped-hour", "sundays-the-skipped-hour-empties", "sundays-across-the-repeated-hour",
+        "saturday-nights-into-the-change"])
+def test_hours_in_a_time_zone_are_open_when_they_say_they_open(start, end, days):
+    hours = _normalize_hours({"start": start, "end": end, "time_zone": "America/New_York",
+                              **({"days": days} if days else {})}, "executor")
+    longest = ((datetime.strptime(end, "%H:%M") - datetime.strptime(start, "%H:%M")) % timedelta(days=1)
+               + timedelta(hours=1))
+    for first in ("2026-03-07T00:00:00+00:00", "2026-10-31T00:00:00+00:00"):
+        open_since = None
+        for quarter in range(3 * 24 * 4):
+            now = datetime.fromisoformat(first) + timedelta(minutes=15 * quarter)
+            opens = _next_opening(now, hours)
+            assert opens is None or _next_opening(opens.astimezone(timezone.utc), hours) is None, (now, opens)
+            local = now.astimezone(ZoneInfo("America/New_York"))
+            assert opens is not None or local.fold or _reads_within(local, start, end), now
+            open_since = (open_since or now) if opens is None else None
+            assert open_since is None or now - open_since < longest, (now, open_since)
+
+
+def _reads_within(local: datetime, start: str, end: str) -> bool:
+    reading = local.strftime("%H:%M")
+    return start <= reading < end if start < end else reading >= start or reading < end
+
+
+def test_hours_without_a_time_zone_normalize_as_before():
+    assert list(_normalize_hours({"start": "09:00", "end": "17:00"}, "executor").items()) == [
+        ("start", "09:00"), ("end", "17:00"), ("utc_offset", "+00:00"),
+        ("days", ["mon", "tue", "wed", "thu", "fri", "sat", "sun"])]
+    assert list(_normalize_hours({"start": "09:00", "end": "17:00", "utc_offset": "-07:00", "label": "pacific"},
+                                 "executor").items()) == [
+        ("start", "09:00"), ("end", "17:00"), ("utc_offset", "-07:00"),
+        ("days", ["mon", "tue", "wed", "thu", "fri", "sat", "sun"])]
+    assert list(_normalize_hours({"start": "09:00", "end": "17:00", "time_zone": "Asia/Tokyo", "days": ["fri", "mon"]},
+                                 "executor").items()) == [
+        ("start", "09:00"), ("end", "17:00"), ("time_zone", "Asia/Tokyo"), ("days", ["mon", "fri"])]
+
+
+@pytest.mark.parametrize("hours, message", [
+    ({"utc_offset": "-05:00", "time_zone": "America/New_York"}, "executors['bob'].hours take utc_offset or time_zone, "
+                                                                "not both"),
+    ({"time_zone": "America/Gotham"}, "executors['bob'].hours.time_zone must be an IANA time zone name such as "
+                                      "'America/New_York', got 'America/Gotham'"),
+    ({"time_zone": -5}, "executors['bob'].hours.time_zone must be an IANA time zone name such as 'America/New_York', "
+                        "got -5"),
+    ({"time_zone": None}, "executors['bob'].hours.time_zone must be an IANA time zone name such as 'America/New_York', "
+                          "got None"),
+], ids=["both", "unknown", "not-a-string", "null"])
+def test_executor_hours_in_a_time_zone_refuse_bad_input(engine, hours, message):
+    with pytest.raises(TriggerError) as excinfo:
+        engine.register({"executors": {"bob": {"a2a_url": "http://b", "role": "bob",
+                                               "hours": {"start": "09:00", "end": "17:00", **hours}}},
+                         "triggers": []})
+    assert str(excinfo.value) == message
+    assert engine._executors == {}
+
+
+def test_hours_in_a_time_zone_re_register_idempotently_and_conflict_on_another_zone(engine):
+    def register(zone):
+        engine.register({"executors": {"bob": {"a2a_url": "http://b", "role": "bob",
+                                               "hours": {"start": "09:00", "end": "17:00", "time_zone": zone}}},
+                         "triggers": []})
+
+    register("America/New_York")
+    register("America/New_York")
+    with pytest.raises(TriggerError, match="executor 'bob' conflicts with the already-registered executor"):
+        register("Asia/Tokyo")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("armed_at, opens, waited", [
+    ("2026-07-15T08:00:00Z", "2026-07-15T13:00:00Z", 5 * 3600.0),
+    ("2026-12-16T08:00:00Z", "2026-12-16T14:00:00Z", 6 * 3600.0),
+], ids=["july-weekday", "december-weekday"])
+async def test_working_hours_in_a_named_time_zone_defer_until_they_open_there(engine, executor_calls, monkeypatch,
+                                                                              armed_at, opens, waited):
+    waits = _fake_waits(engine, monkeypatch, armed_at=armed_at)
+    engine.register({"executors": {"bob": {"a2a_url": "http://bob", "role": "bob", "hours": {
+                         "start": "09:00", "end": "17:00", "time_zone": "America/New_York",
+                         "days": ["mon", "tue", "wed", "thu", "fri"]}}},
+                     "triggers": [{"id": "x", "when": {"type": "action", "tool": "t"},
+                                   "actions": [{"type": "nl", "executor": "bob", "instruction": "reply"}]}]})
+    engine.on_tool_call("default", "t", {}, _result())
+    await asyncio.sleep(0.2)
+
+    [deferred] = [e for e in engine._events if e["kind"] == "deferred"]
+    [acted] = [e for e in engine._events if e["kind"] == "action_ok"]
+    assert (deferred["until"], acted["virtual_time"]) == (opens, opens)
+    assert waits == [waited] and len(executor_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_executor_whose_only_window_the_skipped_hour_empties_waits_for_the_next_week(engine, executor_calls,
+                                                                                              monkeypatch):
+    waits = _fake_waits(engine, monkeypatch, armed_at="2026-03-07T08:00:00Z")
+    engine.register({"executors": {"bob": {"a2a_url": "http://bob", "role": "bob", "hours": {
+                         "start": "02:00", "end": "03:00", "time_zone": "America/New_York", "days": ["sun"]}}},
+                     "triggers": [{"id": "x", "when": {"type": "action", "tool": "t"},
+                                   "actions": [{"type": "nl", "executor": "bob", "instruction": "reply"}]}]})
+    engine.on_tool_call("default", "t", {}, _result())
+    await asyncio.sleep(0.2)
+
+    [deferred] = [e for e in engine._events if e["kind"] == "deferred"]
+    [acted] = [e for e in engine._events if e["kind"] == "action_ok"]
+    assert (deferred["until"], acted["virtual_time"]) == ("2026-03-15T06:00:00Z", "2026-03-15T06:00:00Z")
+    assert waits == [190 * 3600.0] and len(executor_calls) == 1
 
 
 def _deadline(**unless) -> dict:

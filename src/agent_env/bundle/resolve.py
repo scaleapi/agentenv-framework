@@ -19,7 +19,7 @@ from typing import Any
 from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.registry import canonical_type, get_artifact_registry
-from agent_env.entity_refs import EntityKind, EntityRef, RefRole, RefSite, parse_toml_ref, ref_sites
+from agent_env.entity.refs import EntityKind, EntityRef, RefRole, RefSite, parse_toml_ref, ref_sites
 from agent_env.env.envs.gateway_server import GatewayEnv
 from agent_env.env.envs.service_db import ServiceDBEnv
 from agent_env.env.registry import get_env_registry

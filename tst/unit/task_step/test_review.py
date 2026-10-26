@@ -10,6 +10,7 @@ import pytest
 
 from agent_env.task_step.review_store import ABORT, AWAITING, CONTINUE, ReviewStore
 from agent_env.config import set_document_store
+from agent_env.task_step.context import HEARTBEAT_KEY, TaskStepContext
 from agent_env.task_step.task_steps.review import (
     ReviewAbortedError,
     ReviewTaskStep,
@@ -33,10 +34,10 @@ class FakeStore:
         return {"state": state, "decided_by": "op@example.com"}
 
 
-def _ctx(prompt_responses=None):
-    return SimpleNamespace(
+def _ctx(prompt_responses=None, heartbeat=lambda: None):
+    return TaskStepContext(
         instance_id="inst-1",
-        metadata={"_heartbeat_fn": lambda: None},
+        metadata={HEARTBEAT_KEY: heartbeat},
         prompt_responses=prompt_responses or [],
     )
 
@@ -73,6 +74,23 @@ async def test_abort_raises_and_never_returns_context():
     ):
         with pytest.raises(ReviewAbortedError):
             await _step().execute(_ctx())
+
+
+@pytest.mark.asyncio
+async def test_the_wait_beats_the_runner_heartbeat_and_survives_one_that_raises():
+    beats = []
+
+    def beat():
+        beats.append(1)
+        raise ConnectionError("runner unreachable")
+
+    store = FakeStore([AWAITING, AWAITING, CONTINUE])
+    with patch(
+        "agent_env.task_step.review_store.get_review_store", return_value=store
+    ):
+        await _step().execute(_ctx(heartbeat=beat))
+
+    assert len(beats) == 3
 
 
 @pytest.mark.asyncio

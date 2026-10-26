@@ -14,6 +14,7 @@ import pytest
 
 from agent_env.store import (
     AbsentOrNull,
+    ConcurrentModificationError,
     DuplicateKeyError,
     Eq,
     Filter,
@@ -266,6 +267,20 @@ def versioned_entity_store_roundtrip(store, coll):
     assert ves.count(Filter.of(id="e")) == 2
 
 
+def versioned_entity_store_put_at_a_version(store, coll):
+    """A put naming a version lands on exactly it, which must be the id's next; any other writes nothing."""
+    ves: VersionedEntityStore[dict] = VersionedEntityStore(
+        store, coll, serialize=dict, deserialize=lambda d: d
+    )
+    assert ves.put({"id": "e", "version": 1, "n": 1}) == 1
+    assert ves.put({"id": "e", "version": 2, "n": 2}) == 2
+    for taken_latest_or_past_next in (1, 2, 4):
+        with pytest.raises(ConcurrentModificationError):
+            ves.put({"id": "e", "version": taken_latest_or_past_next, "n": 0})
+    assert ves.put({"id": "e", "n": 3}) == 3
+    assert ves.get("e")["n"] == 3 and ves.count(Filter.of(id="e")) == 3
+
+
 def latest_per_id_reduces_to_newest_version(store, coll):
     """One row per id, the highest-version one; filter applies before grouping."""
     for doc in [
@@ -440,6 +455,24 @@ def racing_pre_image_updates_have_exactly_one_winner(store, coll):
     assert store.find_one(coll, Filter.of(id="x")) == {"id": "x", "owner": winners[0]}
 
 
+def racing_puts_at_one_version_have_exactly_one_winner(store, coll):
+    """Writers that all name the id's next version race for it; one lands and the rest are refused."""
+    ves: VersionedEntityStore[dict] = VersionedEntityStore(
+        store, coll, serialize=dict, deserialize=lambda d: d
+    )
+    ves.put({"id": "e"})
+
+    def put(racer):
+        try:
+            return ves.put({"id": "e", "version": 2, "owner": racer})
+        except ConcurrentModificationError:
+            return None
+
+    landed = _race(put)
+    assert landed.count(2) == 1 and landed.count(None) == _RACERS - 1
+    assert ves.get("e")["owner"] == landed.index(2) and ves.count(Filter.of(id="e")) == 2
+
+
 def concurrent_compare_and_swap_loses_no_update(store, coll):
     """Each writer's mutation depends on what it read, so a write applied under a stale guard
     drops another writer's step."""
@@ -483,6 +516,7 @@ CASES = [
     dotted_array_traversal,
     positional_array_index_filter_and_set,
     versioned_entity_store_roundtrip,
+    versioned_entity_store_put_at_a_version,
     latest_per_id_reduces_to_newest_version,
     latest_per_id_sort_offset_limit_apply_after_grouping,
     latest_per_id_page_returns_entity_total_and_window,
@@ -496,5 +530,6 @@ CASES = [
     racing_guarded_replaces_have_exactly_one_winner,
     racing_update_one_and_get_returns_only_its_own_write,
     racing_pre_image_updates_have_exactly_one_winner,
+    racing_puts_at_one_version_have_exactly_one_winner,
     concurrent_compare_and_swap_loses_no_update,
 ]
