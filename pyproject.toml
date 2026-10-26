@@ -46,7 +46,7 @@ dependencies = [
     "uvicorn>=0.47",  # 0.47 adds ssl_context_factory, how the local grant server gets its TLS context
     "modal>=1.5.2.dev22",  # dev22 adds _experimental_create(tags=); dev2 added VM-mode V2 (vm_runtime)
     "e2b~=2.46.4",  # AsyncSandbox/AsyncTemplate APIs validated against the 2.46 line
-    "openenv>=0.8,<0.10",  # serves bundle tasks as OpenEnv envs; the range spans OpenEnv's two-minor deprecation window
+    "openenv>=0.9,<0.11",  # serves bundle tasks as OpenEnv envs; the range spans OpenEnv's two-minor deprecation window
 ]
 
 [project.optional-dependencies]

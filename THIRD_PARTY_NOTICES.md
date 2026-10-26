@@ -780,11 +780,11 @@ The runtime dependencies of `agentenv-framework` and its `aws`, `gcp`, `sail`, `
 - Source: <https://github.com/mike-oakley/openapi-pydantic>
 - [License text 106](#license-text-106)
 
-### openenv 0.9.0
+### openenv 0.10.0
 
 - License: BSD-3-Clause
 - Copyright: Copyright (c) 2026, Hugging Face, Inc.
-- Source: <https://pypi.org/project/openenv/0.9.0/>
+- Source: <https://pypi.org/project/openenv/0.10.0/>
 - [License text 90](#license-text-90)
 
 ### opentelemetry-api 1.44.0

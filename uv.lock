@@ -158,7 +158,7 @@ requires-dist = [
     { name = "mcp", specifier = ">=1.25,<2" },
     { name = "modal", specifier = ">=1.5.2.dev22" },
     { name = "moto", marker = "extra == 'dev'", specifier = ">=5.0.0" },
-    { name = "openenv", specifier = ">=0.8,<0.10" },
+    { name = "openenv", specifier = ">=0.9,<0.11" },
     { name = "packaging", specifier = ">=22" },
     { name = "psycopg2-binary", marker = "extra == 'dev'", specifier = ">=2.9.0" },
     { name = "pydantic", specifier = ">=2.12" },
@@ -2951,7 +2951,7 @@ wheels = [
 
 [[package]]
 name = "openenv"
-version = "0.9.0"
+version = "0.10.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "fastapi" },
@@ -2973,9 +2973,9 @@ dependencies = [
     { name = "uvicorn" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/11/b3/aec319abadaa67ba22ac28ce422b29a10e0b1d3307e127e9e28bd6bc31e9/openenv-0.9.0.tar.gz", hash = "sha256:dad69535ce5d2c4b48197ec111941f8660bd383e28e6f028bd6ccc21d535e6d3", size = 616193, upload-time = "2026-10-15T06:24:18.121Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/0e/8c/1d704592f8316c53b0b3eba2e6bde43dfc2d7cc3b8093c7459ab3cc2eb47/openenv-0.10.0.tar.gz", hash = "sha256:cd8eb54ad0a5af748591fd3d9a2eb0b046013ffb2a1342b6697e33af45e6cce8", size = 624073, upload-time = "2026-10-22T06:11:18.398Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/14/6a/36378e67feb598697530c46a1c8d5620b24f3a907cac213449f76812461a/openenv-0.9.0-py3-none-any.whl", hash = "sha256:63cdc977c0dab9a799c9a03e7616dcf09dc8811ede97904895a665d722e708b6", size = 722047, upload-time = "2026-10-15T06:24:16.258Z" },
+    { url = "https://files.pythonhosted.org/packages/67/8e/46153b0f6f2127a42508cf6734650531d25e889a4cbd1916f35a9afb85e7/openenv-0.10.0-py3-none-any.whl", hash = "sha256:5e0a1019253802551de7890f7638c977c4a36540a4b19f01e5a6fcdb5f5fd135", size = 731246, upload-time = "2026-10-22T06:11:16.836Z" },
 ]
 
 [[package]]
