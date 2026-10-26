@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Callable, ClassVar
 
-from ..agent_env_environment import AgentEnvEnvironment, environment_card
+from ..agent_env_environment import _CARD_CONFIG_ATTR, AgentEnvEnvironment, AgentEnvFastMCPApplication, environment_card
 from ..tool_context import ToolContext
-from ..types import EnvironmentExtension, EnvironmentTool
+from ..types import EnvironmentCard, EnvironmentExtension, EnvironmentTool
 from . import card, linux
 from .checks import check_features, check_names
 from .dataplane import DataPlane
@@ -56,6 +56,17 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         self.settings = settings if settings is not None else load_settings()
         self.platform = platform if platform is not None else detect()
         self._computer = ComputerRuntime(self)
+
+    @classmethod
+    def declaration(cls, platform: Platform) -> EnvironmentCard:
+        """The card this driver class serves on ``platform`` with default settings, under its own name, built without
+        running its ``__init__``: what a ``computer_driver`` env records for each platform it supports. The card
+        hooks may read the class and the base class's state, not what a subclass's ``__init__`` sets."""
+        driver = cls.__new__(cls)
+        ComputerDriverEnvironment.__init__(driver, settings=ComputerSettings(), platform=platform)
+        config = dict(getattr(cls, _CARD_CONFIG_ATTR, None) or {})
+        card = EnvironmentCard(**{**config, "name": config.get("name") or cls.__name__})
+        return AgentEnvFastMCPApplication(card, driver).environment_card
 
     def has(self, capability: str) -> bool:
         """Whether an operation, or a whole group (``pointer``, ``keyboard``), works on this platform."""
