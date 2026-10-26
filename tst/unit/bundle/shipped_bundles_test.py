@@ -25,7 +25,7 @@ SHIPPED = sorted(_shipped())
 
 
 def test_agentenv_framework_ships_its_bundles():
-    assert SHIPPED == ["agents", "echo-mcp", "hello"]
+    assert SHIPPED == ["agents", "echo-mcp", "hello", "next-env-event"]
 
 
 @pytest.mark.parametrize("name", SHIPPED)
