@@ -14,6 +14,8 @@ from .errors import Internal, StaleFrame
 from .operations import Display, Image
 
 KEEP = 64
+#: The JPEG quality a screenshot answers with when it names none.
+JPEG_QUALITY = 85
 
 
 @dataclass(frozen=True)
@@ -75,7 +77,7 @@ class Frame:
         if fmt != "jpeg":
             return base64.b64encode(self.png).decode("ascii"), "image/png"
         buffer = io.BytesIO()
-        self.image.convert("RGB").save(buffer, format="JPEG", quality=quality or 85)
+        self.image.convert("RGB").save(buffer, format="JPEG", quality=quality or JPEG_QUALITY)
         return base64.b64encode(buffer.getvalue()).decode("ascii"), "image/jpeg"
 
 

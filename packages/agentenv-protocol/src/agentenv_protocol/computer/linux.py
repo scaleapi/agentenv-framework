@@ -16,6 +16,10 @@ from .operations import ExecResult
 #: or stderr open; that stream is then drained, and discarded, until the app closes it, so the app never blocks on
 #: a full pipe or dies writing to a closed one.
 DRAIN_S = 1.0
+#: How often a command is checked for having exited.
+POLL_S = 0.02
+#: How much of a stream is read at a time.
+READ_BYTES = 65536
 _draining: set = set()
 
 
@@ -56,7 +60,7 @@ async def _exited(process: asyncio.subprocess.Process, timeout_s: float) -> bool
     while process.returncode is None:
         if asyncio.get_running_loop().time() >= deadline:
             return False
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(POLL_S)
     return True
 
 
@@ -68,7 +72,7 @@ class _Capped:
         self.returned = False
 
     async def read(self, stream: asyncio.StreamReader) -> None:
-        while chunk := await stream.read(65536):
+        while chunk := await stream.read(READ_BYTES):
             if self.returned:
                 continue
             room = self.limit - len(self.kept)
