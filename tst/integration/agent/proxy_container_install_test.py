@@ -26,8 +26,9 @@ TOKEN = "t" * 32
 def container(request):
     image, shell = request.param
     name = f"proxy-{shell}-{uuid.uuid4().hex[:8]}"
-    subprocess.run(["docker", "run", "-d", "--name", name, "-p", f"127.0.0.1::{PORT}",
-                    f"public.ecr.aws/docker/library/{image}", "sleep", "infinity"], check=True, capture_output=True)
+    started = subprocess.run(["docker", "run", "-d", "--name", name, "-p", f"127.0.0.1::{PORT}",
+                              f"mirror.gcr.io/library/{image}", "sleep", "infinity"], capture_output=True, text=True)
+    assert started.returncode == 0, started.stderr
     try:
         yield name, shell
     finally:
