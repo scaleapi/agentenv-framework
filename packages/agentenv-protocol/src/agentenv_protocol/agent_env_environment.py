@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 _OP_ATTR = "_aee_op"
 _EXT_ATTR = "_aee_ext"
 _EXT_ROUTE_ATTR = "_aee_ext_route"
+_EXT_OP_ATTR = "_aee_ext_op"
 _TOOL_ATTR = "_aee_tool"
 _HIDDEN_BY_DEFAULT_ATTR = "_aee_hidden_by_default"
 _CARD_CONFIG_ATTR = "_aee_card_config"
@@ -69,7 +70,7 @@ def get_data(fn: Callable) -> Callable:
     return fn
 
 
-def extension(uri: str, *, description: str | None = None, params: dict | None = None,
+def extension(uri: str, *, op: str | None = None, description: str | None = None, params: dict | None = None,
               required: bool | None = None, method: str = "POST", path: str | None = None) -> Callable:
     """Mark a handler method as the invocation handler for a card extension.
 
@@ -87,7 +88,15 @@ def extension(uri: str, *, description: str | None = None, params: dict | None =
 
     where the request JSON-Schema is derived from the signature. Pass an explicit ``params`` to
     override the advertisement. A handler that wants the raw params dict can declare ``**params``.
+
+    With ``op``, the handler is one method of an extension that has several: handlers sharing the URI
+    merge into one card entry, each method under ``methods.<op>`` with its own verb and ``endpoint``,
+    by default ``<RPC_PATH>/ext/<extension>/<op>`` where ``<extension>`` is the URN's name without
+    ``urn:agentenv:`` and the version. Extension-level params come from the environment's
+    ``extension_params(uri)``, merged beside ``methods``, so ``params`` is refused with ``op``.
     """
+    if op is not None and params is not None:
+        raise TypeError("an extension method's advertisement comes from extension_params(uri), not params=")
     # Normalize the HTTP verb once, here, so the advertised card method, the
     # route registration, and the handler's request-binding (which checks for
     # the exact string "GET") all agree. Without this, ``@extension(method="get")``
@@ -96,17 +105,31 @@ def extension(uri: str, *, description: str | None = None, params: dict | None =
     http_method = method.upper()
 
     def deco(fn: Callable) -> Callable:
-        op = fn.__name__ or "invoke"
-        route_path = path or f"{RPC_PATH}/ext/{op}"
-        advertised = params if params is not None else {
-            "endpoint": route_path,
-            "methods": {op: {"method": http_method, "request": _schema_from_signature(fn)}},
-        }
+        if op is None:
+            name = fn.__name__ or "invoke"
+            route_path = path or f"{RPC_PATH}/ext/{name}"
+            advertised = params if params is not None else {
+                "endpoint": route_path,
+                "methods": {name: {"method": http_method, "request": _schema_from_signature(fn)}},
+            }
+        else:
+            route_path = path or f"{RPC_PATH}/ext/{_extension_slug(uri)}/{op}"
+            advertised = {"methods": {op: {"method": http_method, "endpoint": route_path, "request": _schema_from_signature(fn)}}}
         setattr(fn, _EXT_ATTR, EnvironmentExtension(uri=uri, description=description, params=advertised, required=required))
         setattr(fn, _EXT_ROUTE_ATTR, (route_path, http_method))
+        setattr(fn, _EXT_OP_ATTR, op)
         return fn
 
     return deco
+
+
+def _extension_slug(uri: str) -> str:
+    """``urn:agentenv:computer-display/v1`` -> ``computer-display``; another namespace keeps its name as a path."""
+    name = uri.removeprefix("urn:").removeprefix("agentenv:")
+    head, _, version = name.rpartition("/")
+    if head and version[:1] == "v" and version[1:].isdigit():
+        name = head
+    return name.replace(":", "/")
 
 
 def tool(name: str | None = None, *, description: str | None = None, hidden_by_default: bool = False) -> Callable:
@@ -178,7 +201,7 @@ class AgentEnvApplication(ABC):
     def __init__(self, environment_card: EnvironmentCard, handler: Any) -> None:
         self.handler = handler
         ext_handlers = _discover_extensions(handler)
-        environment_card = _merge_extensions(environment_card, ext_handlers)
+        environment_card = _merge_extensions(environment_card, ext_handlers + _declared_extensions(handler, ext_handlers))
         tool_handlers = _discover_tools(handler, environment_card.name)
         if tool_handlers and not self.supports_tools:
             raise ValueError(f"@tool methods require a FastMCP-backed application; {type(self).__name__} cannot serve MCP tools")
@@ -387,6 +410,14 @@ class AgentEnvEnvironment:
         elif not self._mounted:
             self.mount(self.mcp)
         self.mcp.run(transport=transport)
+
+    def extension_params(self, uri: str) -> dict:
+        """Extension-level params (features, limits) advertised beside the methods of an extension served with ``op``."""
+        return {}
+
+    def declared_extensions(self) -> list[EnvironmentExtension]:
+        """Declaration-only extensions to advertise, like ``intake/v1``: a promise with params and no handler."""
+        return []
 
     def on_tool_call(self, context: ToolContext) -> Any:
         """Runs before every tools/call on this environment's app, under the bound ``context``.
@@ -728,20 +759,59 @@ def _discover_methods(handler: Any) -> dict:
 
 
 def _discover_extensions(handler: Any) -> list:
-    """Collect (descriptor, bound_method, route_path, http_method) for every @extension method."""
-    seen_uris: set = set()
+    """Collect (descriptor, bound_method, route_path, http_method) for every @extension method. The methods of an
+    extension served with ``op`` share one descriptor: their ``methods`` merged beside ``extension_params(uri)``."""
+    ops_by_uri: dict = {}
     seen_paths: set = set()
     ordered: list = []
     for attr, descriptor in _marked_members(handler, _EXT_ATTR):
         route_path, http_method = getattr(attr, _EXT_ROUTE_ATTR)
-        if descriptor.uri in seen_uris:
+        op = getattr(attr, _EXT_OP_ATTR, None)
+        ops = ops_by_uri.setdefault(descriptor.uri, set())
+        if None in ops or (op is None and ops):
             raise ValueError(f"Multiple handlers for extension {descriptor.uri}")
+        if op in ops:
+            raise ValueError(f"Multiple handlers for extension {descriptor.uri} method {op}")
         if route_path in seen_paths:
             raise ValueError(f"Multiple handlers for extension path {route_path}")
-        seen_uris.add(descriptor.uri)
+        ops.add(op)
         seen_paths.add(route_path)
         ordered.append((descriptor, attr, route_path, http_method))
-    return ordered
+    merged = {
+        uri: _merged_extension(handler, [d for d, *_ in ordered if d.uri == uri])
+        for uri, ops in ops_by_uri.items() if None not in ops
+    }
+    return [(merged.get(d.uri, d), attr, path, method) for d, attr, path, method in ordered]
+
+
+def _merged_extension(handler: Any, descriptors: list) -> EnvironmentExtension:
+    uri = descriptors[0].uri
+    methods = {name: entry for d in descriptors for name, entry in d.params["methods"].items()}
+    hook = getattr(handler, "extension_params", None)
+    params = {**(hook(uri) if hook is not None else {}), "methods": methods}
+    return EnvironmentExtension(
+        uri=uri,
+        description=_one_value(uri, "description", [d.description for d in descriptors]),
+        params=params,
+        required=_one_value(uri, "required", [d.required for d in descriptors]),
+    )
+
+
+def _one_value(uri: str, field: str, values: list) -> Any:
+    given = {v for v in values if v is not None}
+    if len(given) > 1:
+        raise ValueError(f"the methods of extension {uri} declare different {field} values: {sorted(map(str, given))}")
+    return given.pop() if given else None
+
+
+def _declared_extensions(handler: Any, ext_handlers: list) -> list:
+    hook = getattr(handler, "declared_extensions", None)
+    declared = list(hook()) if hook is not None else []
+    served = {descriptor.uri for descriptor, *_ in ext_handlers}
+    clash = sorted(d.uri for d in declared if d.uri in served)
+    if clash:
+        raise ValueError(f"extensions both declared and served by a handler: {clash}")
+    return [(d,) for d in declared]
 
 
 def _merge_extensions(card: EnvironmentCard, ext_handlers: list) -> EnvironmentCard:
