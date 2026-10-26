@@ -17,7 +17,8 @@ from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts import docker_image as docker_image_module
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store
-from agent_env.bundle import BundleError, dry_run_bundle, run_bundle
+from agent_env.bundle import BundleError, BundleKind, dry_run_bundle, run_bundle
+from agent_env.bundle.run import _write_bundle
 from agent_env.cli import cli
 from agent_env.config import get_config
 from agent_env.config.runtime import Config
@@ -991,6 +992,25 @@ def test_a_run_builds_its_infra_after_its_writes_and_before_its_tasks(bundle_dir
                           ("say", "[tasks/t.json] step 1/1 env (deploy_env)")]
     assert ("deploy", "crm") in events
 
+
+
+def test_write_bundle_writes_and_sets_up_the_infra_its_tasks_deploy_on_and_runs_nothing(bundle_dir, monkeypatch):
+    _env("crm")
+    _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}])
+    events = []
+    monkeypatch.setattr("agent_env.bundle.run.ensure_default_envs",
+                        lambda kinds, say: events.append(("bootstrap", sorted(kinds))))
+
+    async def deploy(self, context):
+        events.append(("deploy", self.env_id))
+        return context
+
+    monkeypatch.setattr(DeployEnvTaskStep, "execute", deploy)
+
+    materialization = _write_bundle(bundle_dir, on_progress=lambda line: events.append(("say", line)))
+
+    assert events == [("say", "tasks/t.json: v1 (new)"), ("bootstrap", ["gateway", "service-db"])]
+    assert [done.write.kind for done in materialization.writes] == [BundleKind.TASK]
 
 # The walk resolves each deploy's provider as its step does
 

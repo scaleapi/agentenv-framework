@@ -18,7 +18,7 @@ import base64
 import logging
 import uuid
 from dataclasses import dataclass
-from typing import Callable, Optional, TYPE_CHECKING, Union
+from typing import Callable, Optional, Union
 
 from agentenv_protocol.a2a_agent import ObjectChangelogApplyResponse
 
@@ -29,7 +29,13 @@ from agent_env.a2a_agent.object_transfer import (
     invoke_transfer,
 )
 from agent_env.a2a_agent.staging import transfer_store
+from agent_env.a2a_agent.a2a_agent import A2AAgent
+from agent_env.bundle.run import _write_bundle
 from agent_env.config import get_config
+from agent_env.env.store import get_env_store
+from agent_env.plugins._bundles import ENV_ALIASES, installed_aliases
+from agent_env.store.base import NotFoundError
+from agent_env.store.routing import namespace_routing
 from agent_env.store.ids import derive_id, key_segment
 from agent_env.task_step.task_steps.a2a_agent_validator.verify_a2a_modalities import (
     AUDIO_M4A_EXPECTED,
@@ -56,8 +62,6 @@ from agent_env.task_step.task_steps.a2a_agent_validator.verify_a2a_modalities im
 )
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import find_agent_container
 
-if TYPE_CHECKING:
-    from agent_env.a2a_agent.a2a_agent import A2AAgent
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +127,22 @@ MODALITY_PROBES: list[ModalityProbe] = [
 ]
 
 
+def write_validation_env(on_progress: Callable[[str], None]) -> None:
+    """Write the env the validator deploys, ``A2AAgent.VALIDATION_ENV_ID``, when the store has none of that id: the env
+    an installed bundle gives that alias, with the infra it deploys on."""
+    env_id = A2AAgent.VALIDATION_ENV_ID
+    try:
+        get_env_store().get(env_id)
+        return
+    except NotFoundError:
+        pass
+    named = installed_aliases(table=ENV_ALIASES).target(env_id)
+    if named is None:  # deploying it says why it can't be found
+        return
+    on_progress(f"{env_id} → {named.target_id} (the alias {named.declared_by} gives it): writing it")
+    _write_bundle(named.bundle.root, id_root=named.bundle.id_root, on_progress=on_progress)
+
+
 class A2AAgentValidator:
     """Static namespace for running the full A2A agent validation flow."""
 
@@ -135,8 +155,20 @@ class A2AAgentValidator:
         """Run the A2A agent validator task: deploy env + agent, verify card,
         modality probes, MCP tools, skills, snapshot extension, etc.
 
-        Returns the merged `verifications` dict from the run's task context.
+        Namespace routing is on throughout, so the env it deploys, ``A2AAgent.VALIDATION_ENV_ID``, can be the
+        ``@local`` env an installed bundle's alias names, written first (``write_validation_env``) in a thread so a
+        service's event loop isn't held up. Returns the merged `verifications` dict from the run's task context.
         """
+        with namespace_routing():
+            await asyncio.to_thread(write_validation_env, on_progress or (lambda line: None))
+            return await A2AAgentValidator._run(agent, on_progress, litellm_api_key)
+
+    @staticmethod
+    async def _run(
+        agent: "A2AAgent",
+        on_progress: Optional[Callable[[str], None]] = None,
+        litellm_api_key: Optional[str] = None,
+    ) -> dict:
         from agent_env.task import Task
         from agent_env.task_step import (
             AddSkillsTaskStep,

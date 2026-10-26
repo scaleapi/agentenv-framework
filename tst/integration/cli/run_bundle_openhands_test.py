@@ -305,7 +305,6 @@ def test_a_run_past_its_timeout_mid_command_leaves_no_process_behind(state, endp
     _with_agent(state, steps)
 
     assert outcomes["timed_out"]["data"]["error_code"] == "openhands.timeout", outcomes
-    # The terminal tool notices its killed session only at its no-change timeout, 30 s.
-    assert outcomes["seconds"] < 60, outcomes
+    assert outcomes["seconds"] < 15, outcomes
     assert outcomes["after"]["state"] == "completed", outcomes
     assert "ps -eo args" in outcomes["after"]["text"] and "sleep 120" not in outcomes["after"]["text"], outcomes

@@ -430,13 +430,13 @@ class A2AAgent:
             if named is None:
                 raise NotFoundError(refusal) from None
             if version is not None:
-                raise NotFoundError(f"{id!r} is an alias of {named.agent_id}, which comes with {named.declared_by}, so "
-                                    "it has no fixed version; drop the pin") from None
+                raise NotFoundError(f"{id!r} is an alias of {named.target_id}, which comes with "
+                                    f"{named.declared_by}, so it has no fixed version; drop the pin") from None
         try:
-            return store.get(named.agent_id)
+            return store.get(named.target_id)
         except NotFoundError:
-            raise NotFoundError(f"{id!r} is an alias of {named.agent_id}, which comes with {named.declared_by} and isn't "
-                                "in the store yet: an `agent-env run` of a bundle that uses it writes it") from None
+            raise NotFoundError(f"{id!r} is an alias of {named.target_id}, which comes with {named.declared_by} and "
+                                "isn't in the store yet: an `agent-env run` of a bundle that uses it writes it") from None
 
     @classmethod
     def put(cls, **kwargs) -> A2AAgent:
@@ -450,7 +450,9 @@ class A2AAgent:
         from .store import A2AAgentQuery, get_a2a_agent_store
         return A2AAgentQuery(get_a2a_agent_store())
 
-    VALIDATION_ENV_ID: ClassVar[str] = "multi-caf64d"
+    # The env validate gives the agent it checks: the alias of the mail-mcp example's env, which validate writes when
+    # the store has no env of that id.
+    VALIDATION_ENV_ID: ClassVar[str] = "mail"
 
     def update_metadata(self, new_metadata: dict[str, Any]) -> None:
         """Replace this agent's metadata in the database using compare-and-swap."""

@@ -80,7 +80,6 @@ class CliArtifact(Artifact):
             raise ValueError(f"entrypoint {entrypoint!r} isn't among the CLI's files")
 
         store = get_artifact_store()
-        version = store.next_version(id)
         cli_object_url = store.attempt_prefix(cls.model_fields["type"].default, id)
 
         universe = FileArtifactUniverse.put_bundled(id=derive_id(id, "files"), files=dict(files),
@@ -88,7 +87,6 @@ class CliArtifact(Artifact):
 
         instance = cls(
             id=id,
-            version=version,
             cli_files_id=universe.id,
             cli_object_url=cli_object_url,
             entrypoint=entrypoint,

@@ -569,6 +569,7 @@ async def test_cancelling_the_caller_of_abandon_still_abandons_the_run(teardowns
     with pytest.raises(asyncio.CancelledError):
         await abandoning
     await _until(lambda: Task.get_instance(episode.id).status == "cancelled")
+    await _until(lambda: teardowns.finished)  # the teardown ends a moment after the run is marked cancelled
 
     assert (Task.get_instance(episode.id).status,Task.get_instance(episode.id).error) == ("cancelled", "stop")
     assert teardowns.finished == [episode.id]

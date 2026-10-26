@@ -966,18 +966,15 @@ class CollectArtifactsTaskStep(TaskStep):
         from agent_env.artifact import FileArtifact
 
         fa_id = derive_id(artifact_id, hashlib.sha256(object_name.encode("utf-8")).hexdigest()[:16])
-        fa_version = store.next_version(fa_id)
         fa = FileArtifact(
             id=fa_id,
-            version=fa_version,
             description=f"Collected artifact '{object_name}' from task instance {context.instance_id or artifact_id}",
             filename=object_name.split("/")[-1],
             content_type=content_type,
             object_url=object_url,
         )
         try:
-            store.put_document(fa)
-            file_artifacts[key] = fa
+            file_artifacts[key] = store.put_document(fa)
         except Exception as doc_err:
             # Don't fail the whole collection if the document write fails.
             logger.warning(f"Failed to register FileArtifact for {key}: {doc_err}")

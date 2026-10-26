@@ -228,9 +228,10 @@ agent-env a2a-agent validate --id my-agent                   # agent-env's built
 agent-env a2a-agent get --id my-agent                        # the validation results
 ```
 
-`validate` runs a fixed set of checks against the reference env `multi-caf64d`, which must exist in the document
-store; the checks are in `src/agent_env/a2a_agent/validator.py` and
-`src/agent_env/task_step/task_steps/a2a_agent_validator/`, one step each. It doesn't cover everything an agent can
+`validate` runs a fixed set of checks against the reference env `mail`, an inbox with a `search_emails` tool: the alias
+of the `mail-mcp` example's env (`src/agent_env/examples/mail-mcp/`), which `validate` writes before it runs, with its
+image context-only on a remote sandbox, when the store has no env of that id. The checks are in
+`src/agent_env/a2a_agent/validator.py` and `src/agent_env/task_step/task_steps/a2a_agent_validator/`, one step each. It doesn't cover everything an agent can
 advertise: `triggers/v1`, `attribution-probe/v1`, host-mode `install/v1` and custom extensions need tests of your
 own.
 

@@ -2,5 +2,5 @@
 # image is built again only when this folder changes. The floor is the first that serves peer-agents/v1, which the
 # agent leaves to the SDK; raise it when the agent needs a newer protocol.
 agentenv-framework-protocol[agent]>=0.1.351
-openhands-sdk==1.57.0
-openhands-tools==1.57.0
+openhands-sdk==1.58.2
+openhands-tools==1.58.2

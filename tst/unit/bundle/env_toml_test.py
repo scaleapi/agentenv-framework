@@ -145,18 +145,19 @@ def test_a_website_builds_dockerfile_backend_and_dockerfile_frontend_and_takes_i
 
 def test_a_multi_names_bundle_and_store_envs_and_is_rewritten_when_a_child_is(bundle_dir, builds):
     with namespace_routing():
-        MCPServerEnv.put(id="mail", docker_image_artifact=_store_image("mail-image"), environment_name="mail")
+        MCPServerEnv.put(id="inbox", docker_image_artifact=_store_image("inbox-image"), environment_name="inbox")
     _bundle(bundle_dir, {
         **_mcp("crm"), "envs/shop/Dockerfile.backend": DOCKERFILE, "envs/shop/Dockerfile.frontend": DOCKERFILE,
         "envs/shop/env.toml": 'type = "website"\nenvironment_name = "shop"\n',
-        "envs/suite/env.toml": 'type = "multi"\nmcp_server_envs = ["crm", "mail"]\nwebsite_envs = ["shop"]\nname = "suite"\n',
+        "envs/suite/env.toml": ('type = "multi"\nmcp_server_envs = ["crm", "inbox"]\nwebsite_envs = ["shop"]\n'
+                                'name = "suite"\n'),
     }, "suite")
 
     _run(bundle_dir)
     suite = Env.get(f"{ROOT}/suite")
     assert isinstance(suite, MultiEnv) and suite.name == "suite"
     assert [(env.id, env.version) for env in [*suite.mcp_server_envs, *suite.website_envs]] == [
-        (f"{ROOT}/crm", 1), ("mail", 1), (f"{ROOT}/shop", 1)]
+        (f"{ROOT}/crm", 1), ("inbox", 1), (f"{ROOT}/shop", 1)]
 
     (bundle_dir / "envs/crm/server.py").write_text(CARD.format("crm") + "# edited\n")
     rewritten = _summary(_run(bundle_dir))

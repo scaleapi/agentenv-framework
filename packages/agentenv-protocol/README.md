@@ -697,6 +697,51 @@ The answer is agent-wide rather than per caller, and like every extension route 
 probe carries no access check of its own, so expose an agent only to the control plane
 that drives it.
 
+`PROXY_V1` hands an agent's turns to a driver outside its sandbox, and `ProxyAgent`
+(`agentenv_protocol.a2a_agent.proxy`) serves it. The proxy has no model: each message it
+gets stays an open turn, its task working, until the driver replies, and every action the
+driver's model takes runs in the proxy, where the agent would work. The driver's first
+`POST /ext/proxy/claim` (`{"token"}`, at least 22 characters) sets the token every later
+call carries in its body. A claim with another token gets 409, and any other call with a
+wrong one 401. The token is held in memory only, never in the environment a command
+inherits. Content travels as parts, `{"kind": "text", "text": ...}`; a message with any
+other part fails as `proxy.unsupported_part` before the driver sees it. The other
+operations:
+
+- `next` (`{"token", "after"}`) waits up to 25 s for the turns' version to pass `after`,
+  then returns `{"version", "turns": [{"task_id", "context_id", "parts", "system_prompt",
+  "skills"}]}`. A turn its sender cancels drops out of the list.
+- `tools` (`{"token", "task_id"}`) lists what the turn can call, with input schemas: the
+  tools of each env server registered through mcp-config, and `bash`. Two servers offering
+  one name are refused with 409.
+- `act` (`{"token", "task_id", "action_id", "action"}`) runs one action: `{"kind": "tool",
+  "server", "name", "arguments"}` calls an env server through `ToolSession`, with the URL
+  and headers registered for it, and `{"kind": "bash", "command"}` runs `bash -c` in the
+  proxy's folder, as its user, in a process group of its own; either takes
+  `"timeout_seconds"` (3600 for `bash`, 600 for a tool by default). The driver picks
+  `action_id`, so a retried `act` returns the action it already started. It answers
+  `{"done", "result"}` at once when the action ends within the long-poll; `result`
+  (`{"token", "action_id"}`) long-polls one that doesn't. A `bash` result is
+  `{"exit_code", "stdout", "stderr", "timed_out"}`, a tool's `{"content", "is_error"}`.
+- `record` (`{"token", "task_id", "message", "model", "usage"}`) records one model call: an
+  OpenAI chat message, an Anthropic message or a string; anything else gets 400. Once a turn
+  records a call, each action must be one the last recorded call made, by name and
+  arguments, and all of them must run before the next `record` or the `reply`, else 409.
+  Calls to tools the turn doesn't offer aren't checked.
+- `reply` (`{"token", "task_id", "parts"}`, or `"error"` in place of `"parts"`) ends the
+  turn: parts complete the task, and an error fails it as `proxy.driver_error`.
+
+A turn's actions belong to it: when it closes, by reply or withdrawal, those still running
+are stopped, their whole process groups killed, and its results forgotten; the app's
+lifespan stops what runs when it shuts down. The proxy writes the turn's trajectory as it
+goes, readable live, as OTel GenAI spans in format `agentenv-proxy/v1`: `chat` for each
+recorded call, `execute_tool` for each action, and `chain` for the turn. Skills it is given
+are written to `~/skills/<name>/`, once each, and a turn names each one's folder.
+`ProxyAgent(shell=False)` is a proxy for an agent that works in no sandbox: it offers no
+`bash` and keeps no skills. It holds the env servers' headers as any agent does, so run it
+with no credentials in its environment and expose it only to the control plane that drives
+it.
+
 Runnable, self-contained reference agents live in [`examples/`](https://github.com/scaleapi/agentenv-framework/tree/main/packages/agentenv-protocol/examples):
 the normal, streaming, and multimodal `run(request)` paths, single- and
 multi-operation custom extensions, and advanced ASGI-lifespan plus

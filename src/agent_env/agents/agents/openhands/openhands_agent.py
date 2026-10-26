@@ -56,7 +56,7 @@ from starlette.exceptions import HTTPException
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
-OPENHANDS_VERSION: Final[str] = "1.57.0"
+OPENHANDS_VERSION: Final[str] = "1.58.2"
 TRAJECTORY_FORMAT: Final[str] = "openhands-events/v1"
 # The model when agent-config sets none, as for a peer that other agents message directly.
 DEFAULT_MODEL_ENV: Final[str] = "OPENHANDS_A2A_MODEL"

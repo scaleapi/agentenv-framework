@@ -51,9 +51,7 @@ otherwise a run that raised is an `infra_error`, and one a run limit ended, or t
 conversation, which the context's next task resumes.
 
 A timeout, a `tasks/cancel` and the server shutting down each interrupt the run and close its tools, which kills
-the shell commands it started. The SDK's terminal tool does not notice its closed session, though: it keeps waiting
-on a command that was running until the command's own timeout, or its 30 s no-change timeout when the command has
-none, and holds the run, and the agent's exit, until then.
+the shell commands it started and releases a tool call still waiting on one.
 Errors are answered as `{"detail": ...}`.
 
 `tst/integration/cli/run_bundle_openhands_test.py` runs the built image against a fake OpenAI endpoint.

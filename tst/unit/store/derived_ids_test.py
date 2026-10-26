@@ -15,6 +15,7 @@ from click.testing import CliRunner
 
 import agent_env.providers.sandbox_providers.sandbox_provider as sandbox_provider
 from agent_env.a2a_agent.a2a_agent import A2AAgent
+from agent_env.a2a_agent import validator as validator_module
 from agent_env.a2a_agent.validator import A2AAgentValidator
 from agent_env.artifact import DockerImageArtifact, FileArtifactUniverse
 from agent_env.cli import cli
@@ -33,6 +34,13 @@ from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTas
 from agent_env.task_step.task_steps.snapshot_env import SnapshotEnvTaskStep
 from agent_env.task_step.task_steps.verifiers import run_container_unit_tests_verifier as verifier_module
 from tst.unit.store.fakes import CollectingVm, SigningObjectStore, reattach_for_snapshot
+
+
+@pytest.fixture(autouse=True)
+def no_validation_env_write(monkeypatch):
+    """The env the validator writes first is a2a_agent_validate_test's; these runs write none."""
+    monkeypatch.setattr(validator_module, "write_validation_env", lambda on_progress: None)
+
 
 LOCAL = "@local/~/work/triage"
 LOCAL_ENV = f"{LOCAL}/envs/tickets"
