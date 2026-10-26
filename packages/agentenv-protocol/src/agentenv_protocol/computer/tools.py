@@ -136,21 +136,21 @@ class Tools:
     ) -> Annotated[CallToolResult, ScreenshotResult]:
         """Capture the screen as a frame: an image plus a frame_id you can point into later, the image size, and the
         display resolution and scale. With region, crop an existing frame at native resolution (zoom)."""
-        await self._ensure_ready()
+        await self._computer_ensure_ready()
         identity = self.caller_identity(ctx)
         if quality is not None and not (format == "jpeg" and 1 <= quality <= 95):
             raise InvalidArgument("quality is for format=jpeg, from 1 to 95")
         if region is None:
             if frame_id is not None:
                 raise InvalidArgument("frame_id names the frame a region crops; give a region too")
-            frame = await self._capture(identity)
+            frame = await self._computer_capture(identity)
             summary = f"Captured {frame.id}: {frame.width}×{frame.height} of the {_display(frame)} display"
         else:
-            parent = self._frames.get(frame_id, identity)
-            self._frames.check_current(parent, await self._display_now())
+            parent = self._computer_frames.get(frame_id, identity)
+            self._computer_frames.check_current(parent, await self._computer_display_now())
             space, scale = check_space(space, norm_scale, self.settings.default_space, self.settings.default_norm_scale)
             box = frame_region(parent, region, space, scale)
-            frame = self._frames.add(parent.image.crop(box), parent.display, parent.inputs, identity=identity,
+            frame = self._computer_frames.add(parent.image.crop(box), parent.display, parent.inputs, identity=identity,
                                      parent=parent, origin=(box[0], box[1]))
             summary = f"Cropped {frame.id}: {frame.width}×{frame.height} of {parent.id} at ({box[0]}, {box[1]})"
         return _result(summary, frame.data(), frame.encode(format, quality))
@@ -170,14 +170,14 @@ class Tools:
         norm_scale: NormScale = None,
     ) -> Annotated[CallToolResult, InputResult]:
         """Click at a point of a frame."""
-        await self._ensure_ready()
-        button = self._button(button)
+        await self._computer_ensure_ready()
+        button = self._computer_button(button)
         if not 1 <= count <= self.max_click_count:
             raise InvalidArgument(f"count is from 1 to {self.max_click_count} on this computer, got {count}")
-        held = self._modifiers(modifiers)
-        frame, (sx, sy), where = await self._point(ctx, x, y, frame_id, space, norm_scale)
+        held = self._computer_modifiers(modifiers)
+        frame, (sx, sy), where = await self._computer_point(ctx, x, y, frame_id, space, norm_scale)
         times = f" ×{count}" if count > 1 else ""
-        return await self._act(ctx, "click", (sx, sy, button, count, held), frame=frame, screenshot=screenshot,
+        return await self._computer_act(ctx, "click", (sx, sy, button, count, held), frame=frame, screenshot=screenshot,
                                summary=f"Clicked {button}{times} {where}")
 
     @tool(annotations=_INPUT)
@@ -194,24 +194,24 @@ class Tools:
         norm_scale: NormScale = None,
     ) -> Annotated[CallToolResult, InputResult]:
         """Press at the first point, move through the path, and release at the last."""
-        await self._ensure_ready()
-        button = self._button(button)
+        await self._computer_ensure_ready()
+        button = self._computer_button(button)
         if not isinstance(path, list) or not 2 <= len(path) <= self.max_drag_points:
             raise InvalidArgument(f"path has from 2 to {self.max_drag_points} points on this computer")
         duration = self.settings.drag_duration_ms if duration_ms is None else duration_ms
         if not 0 <= duration <= self.max_duration_ms:
             raise InvalidArgument(f"duration_ms is from 0 to {self.max_duration_ms} on this computer, got {duration}")
-        held = self._modifiers(modifiers)
+        held = self._computer_modifiers(modifiers)
         identity = self.caller_identity(ctx)
-        frame = self._frames.get(frame_id, identity)
-        self._frames.check_current(frame, await self._display_now())
+        frame = self._computer_frames.get(frame_id, identity)
+        self._computer_frames.check_current(frame, await self._computer_display_now())
         space, scale = check_space(space, norm_scale, self.settings.default_space, self.settings.default_norm_scale)
         screen = []
         for point in path:
             if not (isinstance(point, list) and len(point) == 2):
                 raise InvalidArgument("each path point is [x, y]")
             screen.append(frame.to_screen(*frame_point(frame, point[0], point[1], space, scale)))
-        return await self._act(ctx, "drag", (screen, button, duration, held), frame=frame, screenshot=screenshot,
+        return await self._computer_act(ctx, "drag", (screen, button, duration, held), frame=frame, screenshot=screenshot,
                                summary=f"Dragged {button} through {len(path)} points of {frame.id} in {duration} ms")
 
     @tool(annotations=_INPUT)
@@ -230,12 +230,12 @@ class Tools:
         norm_scale: NormScale = None,
     ) -> Annotated[CallToolResult, InputResult]:
         """Scroll the content under a point."""
-        await self._ensure_ready()
+        await self._computer_ensure_ready()
         if not 1 <= amount <= self.max_scroll_amount:
             raise InvalidArgument(f"amount is from 1 to {self.max_scroll_amount} on this computer, got {amount}")
-        held = self._modifiers(modifiers)
-        frame, (sx, sy), where = await self._point(ctx, x, y, frame_id, space, norm_scale)
-        return await self._act(ctx, "scroll", (sx, sy, direction, amount, held), frame=frame, screenshot=screenshot,
+        held = self._computer_modifiers(modifiers)
+        frame, (sx, sy), where = await self._computer_point(ctx, x, y, frame_id, space, norm_scale)
+        return await self._computer_act(ctx, "scroll", (sx, sy, direction, amount, held), frame=frame, screenshot=screenshot,
                                summary=f"Scrolled {direction} {amount} {where}")
 
     @tool(annotations=_INPUT)
@@ -247,7 +247,7 @@ class Tools:
     ) -> Annotated[CallToolResult, InputResult]:
         """Type text into whatever has keyboard focus. Text that can't be typed whole is refused before anything is
         typed; the clipboard is left as it was."""
-        await self._ensure_ready()
+        await self._computer_ensure_ready()
         if not text:
             raise InvalidArgument("text is empty")
         if len(text) > self.max_text_length:
@@ -256,7 +256,7 @@ class Tools:
         if control:
             raise InvalidArgument(f"text has control characters {control}; press keys with computer_key")
         identity = self.caller_identity(ctx)
-        return await self._act(ctx, "type_text", (text,), frame=self._frames.latest(identity), screenshot=screenshot,
+        return await self._computer_act(ctx, "type_text", (text,), frame=self._computer_frames.latest(identity), screenshot=screenshot,
                                summary=f"Typed {len(text)} characters")
 
     @tool(annotations=_INPUT)
@@ -270,13 +270,13 @@ class Tools:
         screenshot: Screenshot = False,
     ) -> Annotated[CallToolResult, InputResult]:
         """Press one key chord."""
-        await self._ensure_ready()
+        await self._computer_ensure_ready()
         names = chord(keys, self.keys)
         if not 1 <= repeat <= self.max_key_repeat:
             raise InvalidArgument(f"repeat is from 1 to {self.max_key_repeat} on this computer, got {repeat}")
         identity = self.caller_identity(ctx)
         times = f" ×{repeat}" if repeat > 1 else ""
-        return await self._act(ctx, "press", (names,), frame=self._frames.latest(identity), screenshot=screenshot,
+        return await self._computer_act(ctx, "press", (names,), frame=self._computer_frames.latest(identity), screenshot=screenshot,
                                repeat=repeat, summary=f"Pressed {'+'.join(names)}{times}")
 
     @tool(annotations=_READ)
@@ -287,14 +287,14 @@ class Tools:
         screenshot: Screenshot = False,
     ) -> Annotated[CallToolResult, WaitResult]:
         """Wait, then optionally return a fresh frame."""
-        await self._ensure_ready()
+        await self._computer_ensure_ready()
         if not 0 <= ms <= self.max_wait_ms:
             raise InvalidArgument(f"ms is from 0 to {self.max_wait_ms} on this computer, got {ms}")
         await asyncio.sleep(ms / 1000)
         summary = f"Waited {ms} ms"
         if not screenshot:
             return _result(summary, {"waited_ms": ms})
-        frame = await self._capture(self.caller_identity(ctx))
+        frame = await self._computer_capture(self.caller_identity(ctx))
         return _result(f"{summary}, then captured {frame.id}", {"waited_ms": ms, "frame": frame.data()}, frame.encode())
 
     @tool(annotations=_INPUT)
@@ -309,9 +309,9 @@ class Tools:
         norm_scale: NormScale = None,
     ) -> Annotated[CallToolResult, InputResult]:
         """Move the pointer to a point; hover effects happen."""
-        await self._ensure_ready()
-        frame, (sx, sy), where = await self._point(ctx, x, y, frame_id, space, norm_scale)
-        return await self._act(ctx, "pointer_move", (sx, sy), frame=frame, screenshot=screenshot,
+        await self._computer_ensure_ready()
+        frame, (sx, sy), where = await self._computer_point(ctx, x, y, frame_id, space, norm_scale)
+        return await self._computer_act(ctx, "pointer_move", (sx, sy), frame=frame, screenshot=screenshot,
                                summary=f"Moved the pointer {where}")
 
     @tool(annotations=_INPUT)
@@ -327,7 +327,7 @@ class Tools:
         norm_scale: NormScale = None,
     ) -> Annotated[CallToolResult, InputResult]:
         """Press a button, optionally after moving to a point."""
-        return await self._button_action(ctx, "pointer_down", "Pressed", button, x, y, frame_id, screenshot, space,
+        return await self._computer_button_action(ctx, "pointer_down", "Pressed", button, x, y, frame_id, screenshot, space,
                                          norm_scale)
 
     @tool(annotations=_INPUT)
@@ -343,7 +343,7 @@ class Tools:
         norm_scale: NormScale = None,
     ) -> Annotated[CallToolResult, InputResult]:
         """Release a button, optionally after moving to a point."""
-        return await self._button_action(ctx, "pointer_up", "Released", button, x, y, frame_id, screenshot, space,
+        return await self._computer_button_action(ctx, "pointer_up", "Released", button, x, y, frame_id, screenshot, space,
                                          norm_scale)
 
     @tool(annotations=_READ)
@@ -353,10 +353,10 @@ class Tools:
         frame_id: Annotated[Optional[str], Field(description="The frame to report in; defaults to your latest")] = None,
     ) -> Annotated[CallToolResult, PointerPositionResult]:
         """Where the pointer is, in a frame's pixels and in screen units, and whether it is inside that frame."""
-        await self._ensure_ready()
-        sx, sy = await self._pointer_screen()
+        await self._computer_ensure_ready()
+        sx, sy = await self._computer_pointer()
         identity = self.caller_identity(ctx)
-        frame = self._frames.get(frame_id, identity) if frame_id is not None else self._frames.latest(identity)
+        frame = self._computer_frames.get(frame_id, identity) if frame_id is not None else self._computer_frames.latest(identity)
         data: dict = {"screen": {"x": sx, "y": sy}}
         if frame is None:
             return _result(f"The pointer is at screen ({sx}, {sy})", data)
@@ -383,17 +383,17 @@ class Tools:
         screenshot: Screenshot = False,
     ) -> Annotated[CallToolResult, InputResult]:
         """Press keys and keep them down."""
-        await self._ensure_ready()
+        await self._computer_ensure_ready()
         names = chord(keys, self.keys)
         if hold_ms is not None and not 0 <= hold_ms <= self.settings.max_hold_ms:
             raise InvalidArgument(f"hold_ms is from 0 to {self.settings.max_hold_ms}, got {hold_ms}")
         identity = self.caller_identity(ctx)
         if hold_ms is not None:
-            return await self._act(ctx, "key_down", (names,), frame=self._frames.latest(identity), screenshot=screenshot,
+            return await self._computer_act(ctx, "key_down", (names,), frame=self._computer_frames.latest(identity), screenshot=screenshot,
                                    hold=(hold_ms, names), summary=f"Held {'+'.join(names)} for {hold_ms} ms")
-        result = await self._act(ctx, "key_down", (names,), frame=self._frames.latest(identity), screenshot=screenshot,
+        result = await self._computer_act(ctx, "key_down", (names,), frame=self._computer_frames.latest(identity), screenshot=screenshot,
                                  summary=f"Pressed and held {'+'.join(names)}")
-        self._hold(identity, names)
+        self._computer_hold(identity, names)
         return result
 
     @tool(annotations=_INPUT)
@@ -405,50 +405,50 @@ class Tools:
         screenshot: Screenshot = False,
     ) -> Annotated[CallToolResult, InputResult]:
         """Release held keys."""
-        await self._ensure_ready()
+        await self._computer_ensure_ready()
         identity = self.caller_identity(ctx)
-        names = chord(keys, self.keys) if keys is not None else list(self._held.get(identity, []))
+        names = chord(keys, self.keys) if keys is not None else list(self._computer_held.get(identity, []))
         if not names:
             raise InvalidArgument("you are holding no keys")
-        result = await self._act(ctx, "key_up", (names,), frame=self._frames.latest(identity), screenshot=screenshot,
+        result = await self._computer_act(ctx, "key_up", (names,), frame=self._computer_frames.latest(identity), screenshot=screenshot,
                                  summary=f"Released {'+'.join(names)}")
-        self._release(identity, names)
+        self._computer_release(identity, names)
         return result
 
-    async def _button_action(self, ctx, op, verb, button, x, y, frame_id, screenshot, space, norm_scale):
-        await self._ensure_ready()
-        button = self._button(button)
+    async def _computer_button_action(self, ctx, op, verb, button, x, y, frame_id, screenshot, space, norm_scale):
+        await self._computer_ensure_ready()
+        button = self._computer_button(button)
         if (x is None) != (y is None):
             raise InvalidArgument("give both x and y, or neither")
         if x is None:
-            return await self._act(ctx, op, (button,), frame=self._frames.latest(self.caller_identity(ctx)),
+            return await self._computer_act(ctx, op, (button,), frame=self._computer_frames.latest(self.caller_identity(ctx)),
                                    screenshot=screenshot, summary=f"{verb} {button}")
-        frame, (sx, sy), where = await self._point(ctx, x, y, frame_id, space, norm_scale)
-        return await self._act(ctx, op, (button,), frame=frame, screenshot=screenshot, move_to=(sx, sy),
+        frame, (sx, sy), where = await self._computer_point(ctx, x, y, frame_id, space, norm_scale)
+        return await self._computer_act(ctx, op, (button,), frame=frame, screenshot=screenshot, move_to=(sx, sy),
                                summary=f"{verb} {button} {where}")
 
-    async def _point(self, ctx, x, y, frame_id, space, norm_scale) -> tuple:
+    async def _computer_point(self, ctx, x, y, frame_id, space, norm_scale) -> tuple:
         """The frame, the screen pixel and a phrase for a point; with no point and the pointer group, the pointer."""
         identity = self.caller_identity(ctx)
         if x is None and y is None and self.has("pointer") and frame_id is None:
-            sx, sy = await self._pointer_screen()
-            return self._frames.latest(identity), (sx, sy), f"at the pointer, screen ({sx}, {sy})"
+            sx, sy = await self._computer_pointer()
+            return self._computer_frames.latest(identity), (sx, sy), f"at the pointer, screen ({sx}, {sy})"
         if x is None or y is None:
             raise InvalidArgument("give x and y" + (", or neither to act at the pointer" if self.has("pointer") else ""))
-        frame = self._frames.get(frame_id, identity)
-        self._frames.check_current(frame, await self._display_now())
+        frame = self._computer_frames.get(frame_id, identity)
+        self._computer_frames.check_current(frame, await self._computer_display_now())
         space, scale = check_space(space, norm_scale, self.settings.default_space, self.settings.default_norm_scale)
         fx, fy = frame_point(frame, x, y, space, scale)
         in_space = f" ({space} {scale})" if space == "norm" else ""
         return frame, frame.to_screen(fx, fy), f"at {_fmt(x, y)}{in_space} in {frame.id}"
 
-    def _button(self, button: str | None) -> str:
+    def _computer_button(self, button: str | None) -> str:
         button = button or "left"
         if button not in self.buttons:
             raise Unsupported(f"this computer has no {button} button; it has {', '.join(self.buttons)}")
         return button
 
-    def _modifiers(self, modifiers: list | None) -> list[str]:
+    def _computer_modifiers(self, modifiers: list | None) -> list[str]:
         if not modifiers:
             return []
         if not isinstance(modifiers, list):

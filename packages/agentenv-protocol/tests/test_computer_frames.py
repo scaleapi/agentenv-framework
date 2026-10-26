@@ -63,7 +63,7 @@ async def test_a_region_is_a_native_crop_whose_points_map_back_exactly():
 
 
 async def _captured_at(driver: FakeDriver, frame_id: str) -> str:
-    return driver._frames.get(frame_id, "default").data()["captured_at"]
+    return driver._computer_frames.get(frame_id, "default").data()["captured_at"]
 
 
 @pytest.mark.asyncio

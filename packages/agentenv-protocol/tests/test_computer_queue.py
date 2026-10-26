@@ -309,7 +309,7 @@ async def test_keys_held_down_stay_down_until_released():
         nothing = await session.call_tool("computer_keyboard_up", {})
     assert held == ["Shift", "Control"] and driver.screen.held == []
     assert partly.structuredContent["summary"] == "Released Shift" and rest.structuredContent["summary"] == "Released Control"
-    assert nothing.structuredContent["code"] == "invalid_argument" and driver._held == {}
+    assert nothing.structuredContent["code"] == "invalid_argument" and driver._computer_held == {}
 
 
 @pytest.mark.asyncio
@@ -331,7 +331,7 @@ async def test_keys_held_past_max_hold_ms_are_released():
         with anyio.fail_after(5):
             while driver.screen.held:
                 await asyncio.sleep(0.01)
-    assert driver.screen.log[-1] == ("key_up", ("Alt",)) and driver._held == {}
+    assert driver.screen.log[-1] == ("key_up", ("Alt",)) and driver._computer_held == {}
 
 
 @pytest.mark.asyncio

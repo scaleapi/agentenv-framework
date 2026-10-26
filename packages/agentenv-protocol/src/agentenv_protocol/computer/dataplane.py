@@ -24,7 +24,7 @@ class DataPlane:
     """The data plane handlers, mixed into ComputerDriverEnvironment."""
 
     @add_data
-    async def _data_add(self, parts: list) -> None:
+    async def _computer_data_add(self, parts: list) -> None:
         files = {}
         for part in parts:
             try:
@@ -37,10 +37,10 @@ class DataPlane:
                 raise ValueError(f"data/add on a computer takes file parts naming their path under "
                                  f"{DATA_OBJECTS_EXTENSION_URI}, got a {part.kind} part")
             files[path] = await _fetch(part)
-        await self._call("write_files", files)
+        await self._computer_call("write_files", files)
 
     @get_data
-    async def _data_get(self, write_namespace: Optional[WriteNamespaceGrant] = None) -> list:
+    async def _computer_data_get(self, write_namespace: Optional[WriteNamespaceGrant] = None) -> list:
         files = _data_files(Path.home(), self.settings.data_paths)
         if write_namespace is not None:
             uploader = NamespaceUploader(write_namespace)

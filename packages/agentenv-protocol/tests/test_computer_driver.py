@@ -96,7 +96,7 @@ def test_a_group_with_a_member_that_doesnt_match_the_platform_is_dropped():
     assert FakeDriver(platform=LINUX).has("pointer")
     Driver = type("Driver", (FakeDriver,), {"move": pointer_move(os="windows")(lambda self, x, y: None)})
     driver = Driver()
-    assert not driver.has("pointer") and "pointer_down" not in driver._operations
+    assert not driver.has("pointer") and "pointer_down" not in driver._computer_operations
 
 
 def test_unknown_predicates_are_refused():
@@ -128,7 +128,7 @@ def test_set_display_without_modes_is_refused():
 def test_a_driver_method_replaces_the_linux_default():
     Driver = _define({"run": run_in_session(lambda self, *a: None)})
     assert declared(Driver)["run_in_session"] == [("run", {})]
-    assert declared(MinimalDriver)["run_in_session"] == [("_linux_run_in_session", {"os": frozenset({"linux"})})]
+    assert declared(MinimalDriver)["run_in_session"] == [("_computer_linux_run_in_session", {"os": frozenset({"linux"})})]
 
 
 def test_the_platform_is_detected(tmp_path, monkeypatch):
@@ -230,7 +230,7 @@ async def test_tools_refuse_until_the_ready_checks_pass_once():
     assert refused.isError and refused.structuredContent["code"] == "device_unavailable"
     assert refused.structuredContent["retryable"] is True
     assert "display: @display failed: RuntimeError: no X server" in refused.structuredContent["message"]
-    assert not served.isError and driver._ready
+    assert not served.isError and driver._computer_ready
 
 
 @pytest.mark.asyncio
@@ -359,7 +359,7 @@ async def test_concurrent_first_calls_run_the_ready_checks_once():
     driver.slow["display"] = 0.05
     async with mcp_session(driver) as session:
         results = await asyncio.gather(*(session.call_tool("computer_wait", {"ms": 0}) for _ in range(3)))
-    assert all(not r.isError for r in results) and driver._ready
+    assert all(not r.isError for r in results) and driver._computer_ready
 
 
 def test_keys_and_modifiers_that_arent_lists_of_names_are_refused():
@@ -367,4 +367,16 @@ def test_keys_and_modifiers_that_arent_lists_of_names_are_refused():
         with pytest.raises(InvalidArgument, match="a key is a W3C key value"):
             canonical(key)
     with pytest.raises(InvalidArgument, match="modifiers is a list"):
-        FakeDriver()._modifiers("Shift")
+        FakeDriver()._computer_modifiers("Shift")
+
+
+@pytest.mark.parametrize("name", ["_computer_act", "_computer_frames", "computer_click", "_mounted", "_computer_new"])
+def test_a_driver_member_that_would_replace_the_base_classs_own_is_refused(name):
+    with pytest.raises(TypeError, match=rf"Driver redefines {name}, which ComputerDriverEnvironment uses itself"):
+        _define({name: lambda self: None})
+
+
+def test_a_drivers_own_private_helpers_and_the_hooks_are_its_own():
+    Driver = _define({"_button": lambda self, d, b, down: None, "_move": lambda self: None,
+                      "caller_identity": lambda self, context: "x", "buttons": ("left", "right")})
+    assert Driver().caller_identity(None) == "x"
