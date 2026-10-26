@@ -111,7 +111,7 @@ jobs:
               local out
               if out=$(twine upload --repository codeartifact "$1" 2>&1); then
                 echo "$out"
-              elif grep -q "HTTPError: 409" <<<"$out"; then
+              elif [[ $out == *"HTTPError: 409"* ]]; then
                 echo "already in CodeArtifact: $(basename "$1")"
               else
                 echo "$out" >&2
