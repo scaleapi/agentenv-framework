@@ -2,7 +2,8 @@
 
 A load is timed by the size of the payload it staged, measured in the server's container through the deploy's own
 handle and a restored one; and the server's state reads as JSON whether ``data/get`` answers with data or with a file
-bundle. Needs the resolved config to reach Modal and an image store Modal can pull from; skipped otherwise.
+bundle. Needs the resolved config to reach Modal; skipped otherwise. The server's image is a build context, which
+Modal builds where it runs.
 """
 
 import asyncio
@@ -25,7 +26,6 @@ from agent_env.task import EpisodeSpec, Task
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.teardown_sandboxes import TeardownSandboxesTaskStep
 from tst.util.capabilities import skip_without_remote_sandbox
-from tst.util.image_cache import build_or_reuse
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow, skip_without_remote_sandbox("modal")]
 
@@ -37,7 +37,7 @@ async def test_a_modal_load_is_timed_by_its_payload_and_the_servers_state_reads_
     staged_sizes, timeout_for = [], constants.data_plane_load_timeout_s
     monkeypatch.setattr(constants, "data_plane_load_timeout_s", lambda size: staged_sizes.append(size) or timeout_for(size))
     uid = uuid.uuid4().hex[:8]
-    env = MCPServerEnv.put(id=f"server-items-modal-{uid}", docker_image_artifact=_items_image(),
+    env = MCPServerEnv.put(id=f"server-items-modal-{uid}", docker_image_artifact=_items_context(uid),
                            environment_name="items", env_provider_type="server")
     deployed = await env.deploy(sandbox_type="modal", ttl_seconds=900)
     try:
@@ -98,7 +98,6 @@ async def test_an_episodes_env_on_modal_is_played_from_this_machine_and_no_endin
     try:
         played = await start(spec)
         turn = await played.next_turn()
-        assert turn.mcp_urls[env.id].startswith("https://")
         async with turn.tools() as tools:
             await tools.call("items_add_item", {"item": "crate"})
             assert json.loads((await tools.call("items_whoami")).text)["role"] == "alice@example.com"
@@ -112,7 +111,7 @@ async def test_an_episodes_env_on_modal_is_played_from_this_machine_and_no_endin
 
         forgotten = await start(EpisodeSpec.from_task(task, turn_timeout=3))
         await forgotten.next_turn()
-        with pytest.raises(TimeoutError, match="wasn't ended within 3s"):
+        with pytest.raises(TimeoutError, match="did not complete within 3s"):
             await forgotten.next_turn()
 
         for episode in (played, abandoned, forgotten):
@@ -139,21 +138,8 @@ def _items_context(uid: str) -> DockerImageArtifact:
                         ignore=shutil.ignore_patterns("__pycache__"))
         for name in ("server.py", "Dockerfile", "seed.json"):
             shutil.copy(data / name, context / name)
-        return DockerImageArtifact.put_context(f"server-items-episode-image-{uid}", description="episode on Modal",
+        return DockerImageArtifact.put_context(f"server-items-modal-image-{uid}", description="server env on Modal",
                                                context_path=str(context), dockerfile_path="Dockerfile")
-
-
-def _items_image() -> DockerImageArtifact:
-    """The in-memory items server (card 'items'), built for linux/amd64 with the vendored agentenv_protocol."""
-    data = _REPO / "tst" / "data" / "agentenv_mcp"
-    with tempfile.TemporaryDirectory() as build_dir:
-        context = Path(build_dir)
-        shutil.copytree(_REPO / "packages" / "agentenv-protocol" / "src" / "agentenv_protocol", context / "agentenv_protocol",
-                        ignore=shutil.ignore_patterns("__pycache__"))
-        for name in ("server.py", "Dockerfile", "seed.json"):
-            shutil.copy(data / name, context / name)
-        return build_or_reuse(artifact_id="server-items-modal", description="server env on Modal",
-                              dockerfile=context / "Dockerfile", context=context, tag="server-items-modal")
 
 
 def _items_artifact(uid: str) -> EnvironmentArtifact:

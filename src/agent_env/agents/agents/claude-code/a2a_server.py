@@ -117,7 +117,8 @@ _ENDPOINT = ("LITELLM_API_KEY={litellm_api_key} LITELLM_BASE_URL={litellm_base_u
 _ENDPOINT_PARAMS = ["litellm_api_key", "litellm_base_url", "litellm_extra_headers", "trust_env"]
 _INSTALL_COMMANDS = [_UNPACK, _ENDPOINT + "bash {work_dir}/agent/install.sh container {container} {a2a_port}"]
 # On a host there's no container working directory: the agent works in /app, as in its image.
-_INSTALL_COMMANDS_HOST = [_UNPACK, _ENDPOINT + "bash {work_dir}/agent/install.sh host {agent_name} {a2a_port} /app"]
+_HOST_WORKDIR = "/app"
+_INSTALL_COMMANDS_HOST = [_UNPACK, _ENDPOINT + f"bash {{work_dir}}/agent/install.sh host {{agent_name}} {{a2a_port}} {_HOST_WORKDIR}"]
 
 
 class ClaudeCodeConfig(AgentConfig):
@@ -413,6 +414,8 @@ async def _turns_stop_with_the_server(app: Starlette) -> AsyncIterator[None]:
             required_params=["container", "work_dir", "agent_ctx_tar", "a2a_port", *_ENDPOINT_PARAMS],
             install_commands_host=_INSTALL_COMMANDS_HOST,
             required_params_host=["work_dir", "agent_ctx_tar", "a2a_port", "agent_name", *_ENDPOINT_PARAMS],
+            workdir_host=_HOST_WORKDIR,
+            user_host="root",
         ),
         enable(TRIGGERS_V1, description=(
             "Register a typed trigger script and decide the stakeholder reply per turn "

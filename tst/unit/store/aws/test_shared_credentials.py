@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 from agentenv_protocol import client as protocol_v1
 
-from agent_env.a2a_agent.a2a_agent import A2AAgent
+from agent_env.a2a_agent.a2a_agent import TAKES_CREDENTIALS, A2AAgent
 from agent_env.config import set_object_store
 from agent_env.store import routing
 from agent_env.store.object_store import s3_object_store
@@ -33,8 +33,9 @@ def host_credentials(monkeypatch):
     monkeypatch.setattr(s3_object_store.boto3, "Session", lambda: SimpleNamespace(get_credentials=lambda: creds))
 
 
-def _merged_env(caller_env: dict[str, str] | None = None) -> dict[str, str]:
-    return A2AAgent._build_merged_env(SimpleNamespace(default_env_vars={}), caller_env or {}, 8000)
+def _merged_env(caller_env: dict[str, str] | None = None, metadata: dict | None = None) -> dict[str, str]:
+    return A2AAgent._build_merged_env(SimpleNamespace(default_env_vars={}, metadata=metadata or {}), caller_env or {},
+                                      8000)
 
 
 @pytest.mark.asyncio
@@ -80,3 +81,8 @@ def test_a_caller_supplied_key_suppresses_the_whole_shared_set(host_credentials)
     merged = _merged_env({"AWS_ACCESS_KEY_ID": "AKIA-CALLER", "AWS_SECRET_ACCESS_KEY": "caller-secret"})
     assert merged["AWS_ACCESS_KEY_ID"] == "AKIA-CALLER"
     assert "AWS_SESSION_TOKEN" not in merged
+
+
+def test_an_agent_that_opts_out_gets_none_of_the_shared_set(host_credentials):
+    set_object_store(S3ObjectStore(object(), "bucket", region="us-west-2", share_credentials=True))
+    assert not any(key.startswith("AWS_") for key in _merged_env(metadata={TAKES_CREDENTIALS: False}))

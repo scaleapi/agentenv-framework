@@ -79,6 +79,8 @@ class DeployedAgent:
     network_policy: dict | None = None
     # Installed straight onto the sandbox host (install_agent host mode), not into a container.
     on_host: bool = False
+    # The container install_agent put it in, as the sandbox's host names it; none for a host install or a deploy.
+    installed_container: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict) -> DeployedAgent:
@@ -93,6 +95,7 @@ class DeployedAgent:
             role=data.get("role"),
             network_policy=data.get("network_policy"),
             on_host=bool(data.get("on_host", False)),
+            installed_container=data.get("installed_container"),
         )
 
     def url_for(self, sandbox_type: str | None, *, on_host: bool = False) -> str:

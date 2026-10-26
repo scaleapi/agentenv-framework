@@ -778,7 +778,13 @@ class CollectArtifactsTaskStep(TaskStep):
         sandbox = await self._resolve_live_sandbox(provider, agent.sandbox_id)
         logger.info(f"Connected to sandbox {agent.sandbox_id} (mode={sandbox.mode})")
 
-        container = await find_agent_container(sandbox) if sandbox.mode == SANDBOX_MODE_VM else None
+        # An agent installed on a VM's host has no container: its files are on the host. One installed into a
+        # container works in that one.
+        container = (
+            agent.installed_container or await find_agent_container(sandbox)
+            if sandbox.mode == SANDBOX_MODE_VM and not agent.on_host
+            else None
+        )
         if container:
             logger.info(f"Using agent container: {container}")
 

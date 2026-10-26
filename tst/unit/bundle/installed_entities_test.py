@@ -12,13 +12,14 @@ import pytest
 from agent_env.bundle import BundleError, BundleKind, dry_run_bundle, parse_bundle
 from agent_env.bundle import preflight as preflight_module
 from agent_env.bundle import run as run_module
-from agent_env.bundle.installed import InstalledBundle
+from agent_env.bundle import installed as installed_module
+from agent_env.bundle.installed import InstalledBundle, write_installed
 from agent_env.bundle.ledger import locked_ids
 from agent_env.bundle.materialize import materialize
 from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store
-from agent_env.bundle.plan import AliasUse, check_bundle, plan_bundle
+from agent_env.bundle.plan import AliasUse, check_bundle, plan_bundle, plan_entities
 from agent_env.bundle.resolve import resolve_bundle
 from agent_env.plugins._bundles import ALIASES_FILE
 from agent_env.entity.refs import EntityKind
@@ -190,6 +191,48 @@ def test_a_pulled_entity_naming_an_image_folder_of_its_bundle_pulls_the_image(bu
     assert _writes(plan) == [(BundleKind.ARTIFACT, f"{KIT}/base"), (BundleKind.AGENT, f"{KIT}/coder"),
                              (BundleKind.TASK, f"{ROOT}/t")]
 
+
+
+def test_an_entity_planned_alone_is_written_with_what_it_references_and_nothing_runs(tmp_path):
+    kit = _kit(tmp_path, {"artifacts/base/Dockerfile": "FROM scratch\n", "agents/coder/agent.toml": 'image = "base"\n'})
+    plan = plan_entities(resolve_bundle(parse_bundle(kit.root, id_root=KIT)), [f"{KIT}/coder"], installed=lambda: (kit,))
+
+    assert _writes(plan) == [(BundleKind.ARTIFACT, f"{KIT}/base"), (BundleKind.AGENT, f"{KIT}/coder")]
+    assert (plan.tasks, plan.evals) == ((), ())
+
+
+def test_planning_an_entity_the_bundle_doesnt_define_is_refused(tmp_path):
+    kit = _kit(tmp_path, {"tasks/t.json": json.dumps([{"id": "agent", "type": "deploy_agent", "a2a_agent_id": SOLVER}])})
+
+    with pytest.raises(BundleError) as caught:
+        plan_entities(resolve_bundle(parse_bundle(kit.root, id_root=KIT)), [f"{KIT}/coder", f"{KIT}/t"])
+    assert caught.value.problems == (f"this bundle has no env, agent or artifact '{KIT}/coder'",
+                                     f"this bundle has no env, agent or artifact '{KIT}/t'")
+
+
+def test_an_installed_bundles_agent_is_written_by_its_id_and_anew_only_once_it_changes(
+        tmp_path, monkeypatch, local_stores, cli_routing):
+    kit = _kit(tmp_path)
+    monkeypatch.setattr(installed_module, "installed_bundles", lambda: (kit,))
+
+    version = write_installed(SOLVER)
+    assert A2AAgent.get(SOLVER).docker_image_artifact.id == f"{SOLVER}__agent_image"
+    assert write_installed(SOLVER) == version
+    (kit.root / "agents/solver/Dockerfile").write_text("FROM scratch\nENV CHANGED=1\n")
+    assert write_installed(SOLVER) == version + 1
+
+
+@pytest.mark.parametrize(("installed", "problem"), [
+    ((), "'@local/demo-dist/kit/solver' isn't an entity of an installed bundle"),
+    (("broken",), "demo-dist/kit: its folder is gone"),
+])
+def test_an_entity_no_installed_bundle_can_write_is_refused(tmp_path, monkeypatch, installed, problem):
+    bundles = tuple(_kit(tmp_path, problem="its folder is gone") for _ in installed)
+    monkeypatch.setattr(installed_module, "installed_bundles", lambda: bundles)
+
+    with pytest.raises(BundleError) as caught:
+        write_installed(SOLVER)
+    assert caught.value.problems == (problem,)
 
 def test_a_pulled_entity_naming_the_running_bundles_own_entity_uses_it(tmp_path, local_stores, cli_routing):
     base = _installed(tmp_path / "site" / "base", {

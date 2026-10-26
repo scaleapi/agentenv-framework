@@ -1,80 +1,65 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any, ClassVar, Optional
 
-from agent_env.entity.refs import EntityRef
+from agent_env.a2a_agent import protocol
+from agent_env.a2a_agent.a2a_agent import A2AAgent
+from agent_env.bundle.installed import write_installed
 from agent_env.task.episode.run import _episode_of
-from agent_env.task_step.context import PromptResponse, TaskStepContext
+from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.deploy_agent import bound_deployment, live_mcp_url
+from agent_env.task_step.task_steps.install_agent import PROXY_PARAM
+
+# The agents bundle's proxy, deployed in the place of an agent an episode plays.
+PROXY_AGENT_ID = "@local/agentenv-framework/agents/proxy"
 
 
 class _EpisodeAgentStep(TaskStep):
-    """An outside agent's ``deploy_agent``: deploys nothing, and binds the agent to its envs where it stood."""
+    """An outside agent's ``deploy_agent`` or ``install_agent``. In a task that uses the agent's sandbox it runs that
+    step with the proxy agent in the agent's place; otherwise it serves a proxy in this process. Either way the episode
+    then plays the proxy, which the agent's ``prompt_agent`` steps message as they would the agent."""
 
     type: ClassVar[str] = "episode_agent"
-    entity_refs = (EntityRef.env("env_ids[]"),)
-
-    def __init__(
-        self, id: str, version: Optional[int], *, agent_name: str, env_ids: list[str], env_step_id: str | None,
-        role: str | None, depends_on: Optional[list] = None, fail_task_on_error: bool = True,
-    ):
-        super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
-        self.agent_name = agent_name
-        self.env_ids = list(env_ids)
-        self.env_step_id = env_step_id
-        self.role = role
-
-    def to_dict(self) -> dict[str, Any]:
-        return {**super().to_dict(), "agent_name": self.agent_name, "env_ids": self.env_ids,
-                "env_step_id": self.env_step_id, "role": self.role}
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> _EpisodeAgentStep:
-        return cls(**cls._base_from_dict(data), agent_name=data["agent_name"], env_ids=data["env_ids"],
-                   env_step_id=data["env_step_id"], role=data["role"])
-
-    async def execute(self, context: TaskStepContext) -> TaskStepContext:
-        mcp_urls = {}
-        for env_id in self.env_ids:
-            deployed = bound_deployment(context, env_id, env_step_id=self.env_step_id, step_id=self.id)
-            mcp_urls[env_id] = deployed.mcp_url if deployed is not None else live_mcp_url(env_id)
-        _episode_of(context)._bind(self.agent_name, self.role, mcp_urls)
-        return context
-
-
-class _EpisodeTurnStep(TaskStep):
-    """An outside agent's ``prompt_agent``: hands the turn to the caller and records the reply it gets back."""
-
-    type: ClassVar[str] = "episode_turn"
     entity_refs = ()
 
     def __init__(
-        self, id: str, version: Optional[int], *, agent_name: str, prompt_id: str, prompt: str,
-        system_prompt: str | None, timeout_seconds: float, depends_on: Optional[list] = None,
-        fail_task_on_error: bool = True,
+        self, id: str, version: Optional[int], *, step: TaskStep, sandboxed: bool,
+        depends_on: Optional[list] = None, fail_task_on_error: bool = True,
     ):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
-        self.agent_name = agent_name
-        self.prompt_id = prompt_id
-        self.prompt = prompt
-        self.system_prompt = system_prompt
-        self.timeout_seconds = timeout_seconds
+        self.step = step
+        self.sandboxed = sandboxed
 
     def to_dict(self) -> dict[str, Any]:
-        return {**super().to_dict(), "agent_name": self.agent_name, "prompt_id": self.prompt_id,
-                "prompt": self.prompt, "system_prompt": self.system_prompt, "timeout_seconds": self.timeout_seconds}
+        return {**super().to_dict(), "step": self.step.to_dict(), "sandboxed": self.sandboxed}
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> _EpisodeTurnStep:
-        return cls(**cls._base_from_dict(data), agent_name=data["agent_name"], prompt_id=data["prompt_id"],
-                   prompt=data["prompt"], system_prompt=data["system_prompt"],
-                   timeout_seconds=data["timeout_seconds"])
+    def from_dict(cls, data: dict[str, Any]) -> _EpisodeAgentStep:
+        step = get_task_step_registry()[data["step"]["type"]].from_dict(data["step"])
+        return cls(**cls._base_from_dict(data), step=step, sandboxed=data["sandboxed"])
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
-        reply = await _episode_of(context)._play(self)
-        context.prompt_responses.append(PromptResponse(
-            prompt_id=self.prompt_id, response=reply, prompt_text=self.prompt, agent_name=self.agent_name,
-            step_id=self.id,
-        ))
+        episode = _episode_of(context)
+        agent = self.step.agent_name
+        if not self.sandboxed:
+            mcp_urls = {}
+            for env_id in getattr(self.step, "env_ids", None) or []:
+                deployed = bound_deployment(context, env_id, env_step_id=self.step.env_step_id, step_id=self.id)
+                mcp_urls[env_id] = deployed.mcp_url if deployed is not None else live_mcp_url(env_id)
+            deployed = await episode._serve_in_process(agent, getattr(self.step, "role", None), mcp_urls)
+            context.deployed_agents.append(deployed)
+            if system_prompt := getattr(self.step, "system_prompt", None):
+                config = A2AAgent.negotiate_agent_config(deployed.a2a_card, {"system_prompt": system_prompt})
+                await protocol.post_agent_config(deployed.a2a_url + config.endpoint, config.fields)
+            return context
+        await asyncio.to_thread(write_installed, PROXY_AGENT_ID)
+        override = {"a2a_agent_id": PROXY_AGENT_ID} if self.step.type == "deploy_agent" else {PROXY_PARAM: PROXY_AGENT_ID}
+        step_params = context.metadata.setdefault("user_overrides", {}).setdefault("step_params", {})
+        step_params[self.step.id] = {**step_params.get(self.step.id, {}), **override}
+        context = await self.step.execute(context)
+        deployed = next(deployed for deployed in context.deployed_agents if deployed.agent_name == agent)
+        await episode._attach(agent, deployed)
         return context

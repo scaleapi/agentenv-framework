@@ -32,7 +32,7 @@ from agent_env.eval import Eval, EvalTask
 from agent_env.providers.sandbox_providers.host_images import build, build_staged
 from agent_env.store.base import NotFoundError
 from agent_env.store.routing import namespace_routing_enabled
-from agent_env.task import Task
+from agent_env.task.task import Task
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_step import TaskStep
 from agent_env.utils.docker.build import DockerBuildError

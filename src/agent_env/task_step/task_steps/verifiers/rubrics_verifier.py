@@ -19,6 +19,7 @@ from agent_env.a2a_agent.a2a_agent import unwritten_local_agent
 from agent_env.a2a_agent.staging import transfer_store
 from agent_env.config import get_config
 from agent_env.config.model import ModelParam
+from agent_env.providers.sandbox_providers.sandbox import into_container
 from agent_env.task_step.context import PromptResponse, TaskStepContext, dual_keyed
 from agent_env.task_step.task_steps.verifiers.judge_utils.judge_output_format import (
     SCREENSHOT_GROUNDING,
@@ -738,6 +739,7 @@ class RubricsVerifierTaskStep(TaskStep):
         judge_a2a_url: Optional[str] = None
         judge_sandbox_id: Optional[str] = None
         judge_agent_card: dict = {}
+        judge_container: Optional[str] = None
         if use_agent_judge:
             if self.agent_name is not None:
                 agent = next((a for a in context.deployed_agents if a.agent_name == self.agent_name), None)
@@ -749,6 +751,7 @@ class RubricsVerifierTaskStep(TaskStep):
                 judge_sandbox_id = agent.sandbox_id
                 judge_agent_card = agent.a2a_card or {}
                 judge_agent = agent
+                judge_container = agent.installed_container
             else:
                 from agent_env.a2a_agent import A2AAgent
                 from agent_env.config import get_config
@@ -787,11 +790,13 @@ class RubricsVerifierTaskStep(TaskStep):
                 provider = build_sandbox_provider(judge_sandbox_type) if judge_sandbox_type else get_agent_sandbox_provider()
                 sandbox = await provider.get_sandbox(judge_sandbox_id)
                 if multiturn:
-                    await self._load_per_turn_trajectories(sandbox, per_turn_uris, multiturn_dir, filter_to_apply)
+                    await self._load_per_turn_trajectories(
+                        sandbox, per_turn_uris, multiturn_dir, filter_to_apply, judge_container)
                 else:
-                    await sandbox.write_file_from_object(compacted.container_object_url, self.TRAJECTORY_CONTAINER_PATH)
+                    await sandbox.write_file_from_object(compacted.container_object_url, self.TRAJECTORY_CONTAINER_PATH,
+                                                         **into_container(judge_container))
                     if compacted.tool_result_files:
-                        await self._load_tool_result_files(sandbox, compacted.tool_result_files)
+                        await self._load_tool_result_files(sandbox, compacted.tool_result_files, judge_container)
                         compacted.tool_result_files = []
 
         try:
@@ -1077,10 +1082,13 @@ class RubricsVerifierTaskStep(TaskStep):
         compact_url = config.get_object_store().put(compact_key, json.dumps(filtered).encode(), content_type="application/json")
         return compact_url, tool_result_files
 
-    async def _load_tool_result_files(self, sandbox, tool_result_files: list[tuple[str, str]]) -> None:
-        """Write externalized tool result files into the agent container."""
+    async def _load_tool_result_files(
+        self, sandbox, tool_result_files: list[tuple[str, str]], container: Optional[str] = None,
+    ) -> None:
+        """Write externalized tool result files into the agent container: ``container``, when install_agent put the
+        agent in one."""
         for container_path, content in tool_result_files:
-            await sandbox.write_file_from_text(content, container_path)
+            await sandbox.write_file_from_text(content, container_path, **into_container(container))
         logger.info(f"Loaded {len(tool_result_files)} tool result files into container")
 
     async def _load_trajectory_into_container(self, sandbox_id: str, object_url: str) -> None:
@@ -1095,7 +1103,7 @@ class RubricsVerifierTaskStep(TaskStep):
 
     async def _load_per_turn_trajectories(
         self, sandbox, per_turn_uris: list[str], container_dir: str,
-        trajectory_filter: Optional[TrajectoryFilter] = None,
+        trajectory_filter: Optional[TrajectoryFilter] = None, container: Optional[str] = None,
     ) -> None:
         """Load each turn into the judge container as turn_NN.json under ``container_dir``.
 
@@ -1111,12 +1119,12 @@ class RubricsVerifierTaskStep(TaskStep):
                 content, turn_files = await asyncio.to_thread(
                     self._filter_trajectory_content, uri, trajectory_filter, f"turn_{i:02d}_"
                 )
-                await sandbox.write_file_from_text(content, dest)
+                await sandbox.write_file_from_text(content, dest, **into_container(container))
                 tool_result_files.extend(turn_files)
             else:
-                await sandbox.write_file_from_object(uri, dest)
+                await sandbox.write_file_from_object(uri, dest, **into_container(container))
         if tool_result_files:
-            await self._load_tool_result_files(sandbox, tool_result_files)
+            await self._load_tool_result_files(sandbox, tool_result_files, container)
         logger.info(
             f"Loaded {len(per_turn_uris)} per-turn trajectories into {container_dir}"
             f"{' (filtered)' if trajectory_filter else ''}, {len(tool_result_files)} tool-result files"

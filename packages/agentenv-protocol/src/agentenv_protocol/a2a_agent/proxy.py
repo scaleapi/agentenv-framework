@@ -64,6 +64,8 @@ from ..types import EnvironmentTool
 
 LONG_POLL_SECONDS = 25.0
 BASH_TIMEOUT_SECONDS = 3600
+OUTPUT_GRACE_SECONDS = 1.0  # how long a done command's output may still arrive, from what it left running
+EXIT_POLL_SECONDS = 0.05
 TOOL_TIMEOUT_SECONDS = 600
 SKILLS_DIR = Path.home() / "skills"
 TRAJECTORY_FORMAT = "agentenv-proxy/v1"
@@ -75,6 +77,11 @@ BASH_TOOL = ProxyTool(
     input_schema={"type": "object", "properties": {"command": {"type": "string", "description": "The command."}},
                   "required": ["command"]},
 )
+BASH_TOOL_ON_SH = BASH_TOOL.model_copy(update={
+    "description": "Run a command where the agent works, as its user, in its folder, with POSIX sh: this place has "
+                   "no bash, so bash-only syntax such as [[ ]], arrays or <(...) fails. Returns its stdout, then its "
+                   "stderr.",
+})
 
 
 class ProxyConfig(AgentConfig):
@@ -127,16 +134,19 @@ EXTENSIONS = (MCP_CONFIG_V1, enable(TRAJECTORY_V1, live=True), PROXY_V1)
 @a2a_agent(identity=IDENTITY, config=ProxyConfig, extensions=EXTENSIONS, lifespan=stopping_actions)
 class ProxyAgent(AgentEnvAgent):
     """``shell=False`` is a proxy for an agent that works in no sandbox: it offers no ``bash`` and keeps no skills.
+    Where there is no ``bash``, its ``bash`` runs commands with ``sh``, as the tool's description says.
     ``long_poll_seconds`` bounds how long ``next``, ``act`` and ``result`` wait for something to report."""
 
     def __init__(self, *, shell: bool = True, long_poll_seconds: float = LONG_POLL_SECONDS):
         self._shell = shell
+        self._program, self._bash_tool = ("bash", BASH_TOOL) if shutil.which("bash") else ("sh", BASH_TOOL_ON_SH)
         self._long_poll_seconds = long_poll_seconds
         self._token: bytes | None = None
         self._turns: dict[str, _Turn] = {}
         self._version = 0
         self._changed: asyncio.Future[None] | None = None
         self._actions: dict[str, tuple[_Turn, asyncio.Task[ProxyBashResult | ProxyToolResult]]] = {}
+        self._draining: set[asyncio.Task[None]] = set()
 
     async def run(self, request: TaskRequest[ProxyConfig]) -> TaskResult:
         if any(not isinstance(part, TextPart) for part in request.parts):
@@ -164,7 +174,7 @@ class ProxyAgent(AgentEnvAgent):
         prompt = {"prompt": "\n".join(part.text for part in turn.parts), "system_prompt": turn.system_prompt}
         if reply.error is not None:
             turn.trajectory.append(_span("turn", "chain", turn.started, turn.model, prompt=prompt,
-                                         completion={"error": reply.error}))
+                                         completion={"error": reply.error}, failed=True))
             return TaskResult.failure("proxy.driver_error", reply.error)
         turn.trajectory.append(_span("turn", "chain", turn.started, turn.model, prompt=prompt, completion={
             "content": [{"type": "text", "text": part.text} for part in reply.parts]}))
@@ -202,14 +212,14 @@ class ProxyAgent(AgentEnvAgent):
         if (known := self._actions.get(request.action_id)) is not None:
             if known[0].task_id != request.task_id:
                 raise HTTPException(status_code=409, detail=f"action {request.action_id!r} is another turn's")
-            return await self._state(known[1])
+            return await self._state(request.action_id, known[1])
         turn = self._open_turn(request.token, request.task_id)
         action = request.action
         if isinstance(action, ProxyBashAction) and not self._shell:
             raise HTTPException(status_code=409, detail="this proxy works in no sandbox, so it runs no commands")
         if turn.recorded:
-            call = (action.name, _canonical(action.arguments)) if isinstance(action, ProxyToolAction) else (
-                BASH, _canonical({"command": action.command}))
+            call = (_call(action.name, action.arguments) if isinstance(action, ProxyToolAction)
+                    else _call(BASH, {"command": action.command}, own_shell=True))
             if call not in turn.pending:
                 raise HTTPException(status_code=409, detail=f"the last recorded model call didn't make this call to "
                                                             f"{call[0]!r}")
@@ -217,14 +227,14 @@ class ProxyAgent(AgentEnvAgent):
         task = asyncio.create_task(self._perform(turn, action))
         turn.actions[request.action_id] = task
         self._actions[request.action_id] = (turn, task)
-        return await self._state(task)
+        return await self._state(request.action_id, task)
 
     @extension(PROXY_V1.result)
     async def result(self, request: ProxyResultRequest) -> ProxyActionState:
         self._check(request.token)
         if (known := self._actions.get(request.action_id)) is None:
             raise HTTPException(status_code=404, detail=f"no action {request.action_id!r}")
-        return await self._state(known[1])
+        return await self._state(request.action_id, known[1])
 
     @extension(PROXY_V1.record)
     async def record(self, request: ProxyRecordRequest) -> None:
@@ -233,7 +243,8 @@ class ProxyAgent(AgentEnvAgent):
         turn = self._open_turn(request.token, request.task_id)
         if turn.pending:
             raise HTTPException(status_code=409, detail=_unrun(turn))
-        turn.pending = [(name, _canonical(arguments)) for name, arguments in calls if name in offered]
+        turn.pending = [_call(name, arguments, own_shell=offered[name].server is None)
+                        for name, arguments in calls if name in offered]
         turn.recorded = True
         turn.model = request.model or turn.model
         span = _span("chat", "chat", turn.last_event, turn.model, completion={"content": content})
@@ -277,15 +288,17 @@ class ProxyAgent(AgentEnvAgent):
         return turn
 
     async def _tools(self, turn: _Turn) -> dict[str, ProxyTool]:
-        """What the turn can call, listed once: each registered env server's tools, and ``bash``. Two offering one
-        name are refused."""
+        """What the turn can call, listed once and all within ``TOOL_TIMEOUT_SECONDS``: each registered env server's
+        tools, and ``bash``. Two offering one name are refused."""
         async with turn.listing:
             if turn.tools is None:
-                offered = {BASH: BASH_TOOL} if self._shell else {}
+                offered = {BASH: self._bash_tool} if self._shell else {}
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + TOOL_TIMEOUT_SECONDS
                 for server in turn.servers:
                     try:
-                        listed = await asyncio.wait_for(self._listed(turn, server), TOOL_TIMEOUT_SECONDS)
-                    except TimeoutError:
+                        listed = await asyncio.wait_for(self._listed(turn, server), deadline - loop.time())
+                    except asyncio.TimeoutError:
                         raise HTTPException(status_code=502, detail=(
                             f"env server {server!r} didn't list its tools within {TOOL_TIMEOUT_SECONDS}s")) from None
                     except (ToolSessionError, httpx.HTTPError) as e:
@@ -327,33 +340,45 @@ class ProxyAgent(AgentEnvAgent):
     async def _perform(self, turn: _Turn, action: ProxyToolAction | ProxyBashAction) -> ProxyBashResult | ProxyToolResult:
         started = _now()
         if isinstance(action, ProxyBashAction):
-            timeout = action.timeout_seconds or BASH_TIMEOUT_SECONDS
-            result = await _run(action.command, timeout)
             name, arguments = BASH, {"command": action.command}
-            output = (f"error: the command timed out after {timeout:g}s" if result.timed_out
-                      else result.stdout + result.stderr)
-            completion = {"output": output, "exit_code": result.exit_code}
+            result, completion, failed = await self._bash(action)
         else:
-            timeout = action.timeout_seconds or TOOL_TIMEOUT_SECONDS
             name, arguments = action.name, action.arguments
-            try:
-                called = await asyncio.wait_for(self._called(turn, action), timeout)
-                result = ProxyToolResult(content=called.content, is_error=called.isError)
-            except TimeoutError:
-                result = _tool_error(f"the tool call timed out after {timeout:g}s")
-            except (ToolSessionError, httpx.HTTPError) as e:
-                result = _tool_error(f"{type(e).__name__}: {e}")
-            text = "\n".join(block["text"] for block in result.content if block.get("type") == "text")
-            completion = {"error": text} if result.is_error else {"output": text}
-        span = _span(name, "execute_tool", started, None, prompt={"input": arguments}, completion=completion)
+            result, completion, failed = await self._tool(turn, action)
+        span = _span(name, "execute_tool", started, None, prompt={"input": arguments}, completion=completion,
+                     failed=failed)
         turn.trajectory.append(span)
         turn.last_event = span["end_time"]
         return result
 
-    async def _state(self, task: asyncio.Task[ProxyBashResult | ProxyToolResult]) -> ProxyActionState:
+    async def _bash(self, action: ProxyBashAction) -> tuple[ProxyBashResult, dict[str, Any], bool]:
+        """Run a command; what it left reading output is drained until the proxy stops."""
+        timeout = action.timeout_seconds or BASH_TIMEOUT_SECONDS
+        result, draining = await _run(self._program, action.command, timeout)
+        for drain in draining:
+            self._draining.add(drain)
+            drain.add_done_callback(self._draining.discard)
+        output = f"error: the command timed out after {timeout:g}s" if result.timed_out else result.stdout + result.stderr
+        return result, {"output": output, "exit_code": result.exit_code}, result.timed_out or result.exit_code != 0
+
+    async def _tool(self, turn: _Turn, action: ProxyToolAction) -> tuple[ProxyToolResult, dict[str, Any], bool]:
+        timeout = action.timeout_seconds or TOOL_TIMEOUT_SECONDS
+        try:
+            called = await asyncio.wait_for(self._called(turn, action), timeout)
+            result = ProxyToolResult(content=called.content, is_error=called.isError)
+        except asyncio.TimeoutError:
+            result = _tool_error(f"the tool call timed out after {timeout:g}s")
+        except (ToolSessionError, httpx.HTTPError) as e:
+            result = _tool_error(f"{type(e).__name__}: {e}")
+        text = "\n".join(block["text"] for block in result.content if block.get("type") == "text")
+        return result, ({"error": text} if result.is_error else {"output": text}), result.is_error
+
+    async def _state(self, action_id: str, task: asyncio.Task[ProxyBashResult | ProxyToolResult]) -> ProxyActionState:
         await asyncio.wait((task,), timeout=self._long_poll_seconds)
         if not task.done():
             return ProxyActionState(done=False)
+        if task.cancelled():
+            raise HTTPException(status_code=404, detail=f"action {action_id!r} was stopped: its turn is over")
         return ProxyActionState(done=True, result=task.result())
 
     async def _close(self, turn: _Turn) -> None:
@@ -367,6 +392,8 @@ class ProxyAgent(AgentEnvAgent):
 
     async def _stop(self) -> None:
         await asyncio.gather(*(self._close(turn) for turn in list(self._turns.values())), return_exceptions=True)
+        for drain in list(self._draining):
+            drain.cancel()
 
     @contextlib.asynccontextmanager
     async def _skill_folder(self, name: str) -> AsyncIterator[Path]:
@@ -471,8 +498,22 @@ def _unrun(turn: _Turn) -> str:
     return f"the last recorded model call's calls to {sorted({name for name, _ in turn.pending})} haven't run"
 
 
-def _canonical(arguments: dict[str, Any]) -> str:
-    return json.dumps(arguments, sort_keys=True, separators=(",", ":"), default=str)
+def _call(name: str, arguments: dict[str, Any], *, own_shell: bool = False) -> tuple[str, str]:
+    """A call as recorded calls and actions are compared: the proxy's own ``bash`` by its command alone, since its
+    action carries nothing else, and a whole float equal to the int a driver may have written for it."""
+    if own_shell:
+        arguments = {"command": arguments.get("command")}
+    return name, json.dumps(_whole(arguments), sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _whole(value: Any) -> Any:
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, dict):
+        return {key: _whole(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_whole(item) for item in value]
+    return value
 
 
 def _tool_error(message: str) -> ProxyToolResult:
@@ -480,7 +521,7 @@ def _tool_error(message: str) -> ProxyToolResult:
 
 
 def _span(name: str, operation: str, started: str, model: str | None, *, prompt: Any = None,
-          completion: Any = None) -> dict[str, Any]:
+          completion: Any = None, failed: bool = False) -> dict[str, Any]:
     """An OTel GenAI span, the trajectory format rubrics and the explorer read."""
     attributes: dict[str, Any] = {"gen_ai.operation.name": operation}
     if model:
@@ -489,28 +530,67 @@ def _span(name: str, operation: str, started: str, model: str | None, *, prompt:
         attributes["gen_ai.prompt"] = json.dumps(prompt, default=str)
     if completion is not None:
         attributes["gen_ai.completion"] = json.dumps(completion, default=str)
-    return {"name": name, "start_time": started, "end_time": _now(), "attributes": attributes}
+    return {"name": name, "start_time": started, "end_time": _now(),
+            "status": {"status_code": "ERROR" if failed else "OK"}, "attributes": attributes}
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-async def _run(command: str, timeout: float) -> ProxyBashResult:
-    """Run ``command`` in a process group of its own, stopped with whatever it started if it isn't done within
-    ``timeout``, or if the call is cancelled, even when ``bash`` has exited and a child it left holds the output open."""
-    process = await asyncio.create_subprocess_exec(
-        "bash", "-c", command, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE, start_new_session=True,
-    )
+async def _run(program: str, command: str, timeout: float) -> tuple[ProxyBashResult, list[asyncio.Task[None]]]:
+    """Run ``command`` in a process group of its own. It's done when its shell exits: what it started in the background
+    keeps running, and output that arrives after ``OUTPUT_GRACE_SECONDS`` is read and dropped by the readers returned
+    with the result, so a server it started never blocks on a full pipe. A command not done within ``timeout``, or
+    whose call is cancelled, is stopped with whatever it started."""
     try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout)
+        process = await asyncio.create_subprocess_exec(
+            program, "-c", command, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE, start_new_session=True,
+        )
+    except OSError as e:
+        # As a shell reports a command it can't execute: an argument list too long, say.
+        return ProxyBashResult(exit_code=126, stdout="", stderr=f"error: the command couldn't start: {e}\n",
+                               timed_out=False), []
+    stdout, stderr = _Output(), _Output()
+    readers = [asyncio.create_task(_read(process.stdout, stdout)), asyncio.create_task(_read(process.stderr, stderr))]
+    try:
+        await asyncio.wait_for(_exited(process), timeout)
+        await asyncio.wait(readers, timeout=OUTPUT_GRACE_SECONDS)
     except BaseException as e:
         with contextlib.suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)
-        await process.wait()
+        await _exited(process)
+        for reader in readers:
+            reader.cancel()
         if isinstance(e, asyncio.TimeoutError):
-            return ProxyBashResult(exit_code=None, stdout="", stderr="", timed_out=True)
+            return ProxyBashResult(exit_code=None, stdout="", stderr="", timed_out=True), []
         raise
-    return ProxyBashResult(exit_code=process.returncode, stdout=stdout.decode(errors="replace"),
-                           stderr=stderr.decode(errors="replace"), timed_out=False)
+    result = ProxyBashResult(exit_code=process.returncode, stdout=stdout.take(), stderr=stderr.take(), timed_out=False)
+    return result, [reader for reader in readers if not reader.done()]
+
+
+async def _exited(process: asyncio.subprocess.Process) -> None:
+    """Until the shell exits: ``Process.wait()`` also waits for everything still holding its output."""
+    while process.returncode is None:
+        await asyncio.sleep(EXIT_POLL_SECONDS)
+
+
+class _Output:
+    """What a command writes to one stream, kept until it's taken and dropped after."""
+
+    def __init__(self) -> None:
+        self._data: bytearray | None = bytearray()
+
+    def add(self, chunk: bytes) -> None:
+        if self._data is not None:
+            self._data.extend(chunk)
+
+    def take(self) -> str:
+        data, self._data = self._data or bytearray(), None
+        return data.decode(errors="replace")
+
+
+async def _read(stream: asyncio.StreamReader, output: _Output) -> None:
+    while chunk := await stream.read(65536):
+        output.add(chunk)

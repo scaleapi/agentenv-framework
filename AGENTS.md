@@ -223,9 +223,15 @@ orchestrators call it the same way. What callers rely on:
 - A runner that must hear from a long step puts a zero-argument callable at
   `context.metadata[HEARTBEAT_KEY]` (`task_step/context.py`); a step that blocks for long calls
   `context.heartbeat()`, a no-op without one. The key is in `_REDACTED_KEYS`, so it is never persisted.
-- An episode (`EpisodeSpec`, `task/episode/`) is one `Task.run()` of a copy of the task in which
-  the `deploy_agent` and `prompt_agent` steps of each of its `trainer_agents` are the plain-data
-  `episode_agent` and `episode_turn`, which wait for the caller instead of deploying or prompting. Its
+- An episode (`EpisodeSpec`, `task/episode/`) is one `Task.run()` of a copy of the task, with
+  namespace routing on, in which each of its `trainer_agents` is played through a proxy agent
+  (the `agents` bundle's `proxy`, `@local/agentenv-framework/agents/proxy`, which the episode writes
+  from its folder as a bundle run would).
+  The agent's `deploy_agent` or `install_agent`, wrapped as `episode_agent`, deploys the proxy in the
+  agent's place when the task uses the agent's sandbox and serves it in this process when it doesn't;
+  the agent's `prompt_agent` steps message it as they would the agent, and the caller plays each
+  message as a `Turn` through its `urn:agentenv:proxy/v1`: every env tool call and `bash` command runs
+  in the proxy, which records the turn and checks it against the model calls the caller records. Its
   record is tagged `context.metadata["episode"]` and names the original task, so it isn't resumable
   with `start_step`. The episode tears down what its run deployed, and an abandoned one is recorded
   `cancelled`.

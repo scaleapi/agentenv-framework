@@ -13,8 +13,10 @@ from dataclasses import dataclass
 from typing import Callable, ClassVar, Optional
 from urllib.parse import unquote, urlparse
 
+from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox
+from agent_env.providers.sandbox_providers.sandbox import into_container
 from agent_env.providers.sandbox_providers.sandbox_provider import reachable_url
-from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.context import DeployedAgent, TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
@@ -517,7 +519,8 @@ class LoadArtifactTaskStep(TaskStep):
                         raise RuntimeError(f"Agent '{self.agent_name}' not found in context.deployed_agents (or missing instance_id)")
                     deployed_agent = get_a2a_agent_instance_store().get(agent.instance_id)
                     destination = (destination_path or "/tmp/file_artifacts").rstrip("/") or "/"
-                    files = await A2AAgent.load_file_artifact_universe(deployed_agent, artifact, destination)
+                    files = await A2AAgent.load_file_artifact_universe(
+                        deployed_agent, artifact, destination, **_agent_files(agent))
                     context.metadata.setdefault("loaded_file_artifact_universes", []).append({
                         "id": artifact.id,
                         "version": artifact.version,
@@ -559,7 +562,8 @@ class LoadArtifactTaskStep(TaskStep):
                             else get_agent_sandbox_provider()
                         )
                         sandbox = await provider.get_sandbox(agent.sandbox_id)
-                        container = sandbox.container_name if isinstance(sandbox, VmSandbox) else None
+                        container = None if agent.on_host else (agent.installed_container or (
+                            sandbox.container_name if isinstance(sandbox, VmSandbox) else None))
                     destination = (destination_path or "/app/files").rstrip("/") or "/"
                     files = await _stage_environment_payload_into_container(
                         sandbox, container, artifact, destination,
@@ -608,9 +612,12 @@ class LoadArtifactTaskStep(TaskStep):
                 if agent is None or not agent.instance_id:
                     raise RuntimeError(f"Agent '{self.agent_name}' not found in context.deployed_agents (or missing instance_id)")
                 deployed_agent = get_a2a_agent_instance_store().get(agent.instance_id)
-                gateway_url = reachable_url(require_gateway_url(deployed, "Installing a CliArtifact"),
-                                            from_sandbox_type=deployed.sandbox_type, to_sandbox_type=agent.sandbox_type)
-                install_path = await A2AAgent.install_cli(deployed_agent, artifact, gateway_url)
+                gateway_url = require_gateway_url(deployed, "Installing a CliArtifact")
+                # A local sandbox's host is this machine, which reaches the gateway as it was issued.
+                if not (agent.on_host and agent.sandbox_type == LocalSandbox.type):
+                    gateway_url = reachable_url(gateway_url, from_sandbox_type=deployed.sandbox_type,
+                                                to_sandbox_type=agent.sandbox_type)
+                install_path = await A2AAgent.install_cli(deployed_agent, artifact, gateway_url, **_agent_files(agent))
                 agent_clis = context.metadata.setdefault("installed_clis", {}).setdefault(self.agent_name, {})
                 agent_clis[artifact.id] = {
                     "install_path": install_path,
@@ -620,6 +627,7 @@ class LoadArtifactTaskStep(TaskStep):
                 raise ValueError(f"Unsupported artifact type for loading: '{artifact.type}'")
 
         if downloads:
+            agent_container, agent_on_host = None, False
             if self.sandbox_name is not None:
                 sandbox = target_sandbox
             else:
@@ -632,6 +640,7 @@ class LoadArtifactTaskStep(TaskStep):
                     else get_agent_sandbox_provider()
                 )
                 sandbox = await provider.get_sandbox(agent.sandbox_id)
+                agent_container, agent_on_host = agent.installed_container, agent.on_host
             destination = (destination_path or "/tmp/file_artifacts").rstrip("/") or "/"
             semaphore = asyncio.Semaphore(8)
 
@@ -645,12 +654,12 @@ class LoadArtifactTaskStep(TaskStep):
             async def _load_one(url: str, filename: str) -> None:
                 async with semaphore:
                     dest = f"{destination}/{filename}"
-                    if onto_vm_host:
+                    if onto_vm_host or agent_on_host:
                         await self._load_url_onto_vm(sandbox, url, dest)
                     elif self.container_name is not None:
                         await self._load_url_into_container(sandbox, sandbox.scoped_name(self.container_name), url, dest)
                     else:
-                        await sandbox.write_file_from_url(url, dest)
+                        await sandbox.write_file_from_url(url, dest, **into_container(agent_container))
                     logger.info(f"Loaded URL into {target_desc}: {url} -> {dest}")
 
             await asyncio.gather(*(_load_one(u, f) for u, f in downloads))
@@ -663,6 +672,12 @@ class LoadArtifactTaskStep(TaskStep):
             })
 
         return context
+
+
+def _agent_files(agent: DeployedAgent) -> dict:
+    """How an A2AAgent write reaches ``agent``'s files: on the VM host for an agent install_agent put there, else as
+    ``into_container`` says."""
+    return {"on_host": True} if agent.on_host else into_container(agent.installed_container)
 
 
 # Cap on how many staged paths get recorded in TaskStepContext metadata

@@ -245,7 +245,7 @@ def test_a2a_merged_env_carries_contributions_and_they_win_over_caller_env(cf_cr
 
     from agent_env.a2a_agent.a2a_agent import A2AAgent
 
-    record = SimpleNamespace(default_env_vars={"AWS_ACCESS_KEY_ID": "preset"})
+    record = SimpleNamespace(default_env_vars={"AWS_ACCESS_KEY_ID": "preset"}, metadata={})
     merged = A2AAgent._build_merged_env(record, {_CF_ID: "caller-supplied"}, 8000)
     assert merged[_CF_ID] == "cf-id"
     assert merged[_CF_SECRET] == "cf-secret"

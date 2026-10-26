@@ -713,20 +713,27 @@ operations:
   "skills"}]}`. A turn its sender cancels drops out of the list.
 - `tools` (`{"token", "task_id"}`) lists what the turn can call, with input schemas: the
   tools of each env server registered through mcp-config, and `bash`. Two servers offering
-  one name are refused with 409.
+  one name are refused with 409, and servers that haven't all listed their tools within
+  600 s get 502. `record` waits for the same listing.
 - `act` (`{"token", "task_id", "action_id", "action"}`) runs one action: `{"kind": "tool",
   "server", "name", "arguments"}` calls an env server through `ToolSession`, with the URL
   and headers registered for it, and `{"kind": "bash", "command"}` runs `bash -c` in the
-  proxy's folder, as its user, in a process group of its own; either takes
+  proxy's folder, as its user, in a process group of its own. Where there is no `bash`, as
+  in a minimal image, it runs `sh -c`, and the `bash` tool's description says so. A command
+  is done when its shell exits: what it started in the background keeps running, and output
+  that arrives more than a second later is read and dropped. Either takes
   `"timeout_seconds"` (3600 for `bash`, 600 for a tool by default). The driver picks
-  `action_id`, so a retried `act` returns the action it already started. It answers
-  `{"done", "result"}` at once when the action ends within the long-poll; `result`
-  (`{"token", "action_id"}`) long-polls one that doesn't. A `bash` result is
-  `{"exit_code", "stdout", "stderr", "timed_out"}`, a tool's `{"content", "is_error"}`.
+  `action_id`, unique for the proxy, so a retried `act` returns the action it already
+  started. It answers `{"done", "result"}` at once when the action ends within the long-poll;
+  `result` (`{"token", "action_id"}`) long-polls one that doesn't, and gets 404 once the
+  action's turn has closed. A `bash` result is `{"exit_code", "stdout", "stderr",
+  "timed_out"}`, with no `exit_code` when the command was stopped and 126 when it couldn't
+  start; a tool's is `{"content", "is_error"}`.
 - `record` (`{"token", "task_id", "message", "model", "usage"}`) records one model call: an
   OpenAI chat message, an Anthropic message or a string; anything else gets 400. Once a turn
   records a call, each action must be one the last recorded call made, by name and
-  arguments, and all of them must run before the next `record` or the `reply`, else 409.
+  arguments (a `bash` call by its command alone, a whole float equal to its int), and all of
+  them must run before the next `record` or the `reply`, else 409.
   Calls to tools the turn doesn't offer aren't checked.
 - `reply` (`{"token", "task_id", "parts"}`, or `"error"` in place of `"parts"`) ends the
   turn: parts complete the task, and an error fails it as `proxy.driver_error`.
@@ -735,7 +742,9 @@ A turn's actions belong to it: when it closes, by reply or withdrawal, those sti
 are stopped, their whole process groups killed, and its results forgotten; the app's
 lifespan stops what runs when it shuts down. The proxy writes the turn's trajectory as it
 goes, readable live, as OTel GenAI spans in format `agentenv-proxy/v1`: `chat` for each
-recorded call, `execute_tool` for each action, and `chain` for the turn. Skills it is given
+recorded call, `execute_tool` for each action, and `chain` for the turn, each with an
+OTel status: `ERROR` for an action that failed, a command that exited nonzero or timed out,
+and a turn that ended in an error. Skills it is given
 are written to `~/skills/<name>/`, once each, and a turn names each one's folder.
 `ProxyAgent(shell=False)` is a proxy for an agent that works in no sandbox: it offers no
 `bash` and keeps no skills. It holds the env servers' headers as any agent does, so run it

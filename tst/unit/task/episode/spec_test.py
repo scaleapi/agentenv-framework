@@ -5,7 +5,7 @@ import pytest
 
 from agent_env.task import EpisodeError, EpisodeSpec, Task
 from agent_env.task.episode.rules import CHECKS, UNAFFECTED
-from agent_env.task.episode.steps import _EpisodeAgentStep, _EpisodeTurnStep
+from agent_env.task.episode.steps import _EpisodeAgentStep
 from agent_env.task.task import substitute_seed_in_steps
 from agent_env.task_step.registry import _builtin_registry
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
@@ -53,20 +53,7 @@ def test_an_agent_named_by_the_seed_is_the_one_played_from_outside():
 
     assert spec.trainer_agents == ("planner",)
     assert [step.type for step in spec._copy.steps] == [
-        "deploy_env", "load_artifact", "episode_agent", "episode_turn", "env_outcome_verifier"]
-
-
-def test_a_prompts_own_system_prompt_wins_over_the_agents():
-    spec = EpisodeSpec.from_task(_portsim(play={**PLAY, "system_prompt": "Plan only the berths."}))
-
-    assert spec._copy.steps[3].system_prompt == "Plan only the berths."
-
-
-def test_each_prompt_of_a_trainer_agent_becomes_a_turn():
-    again = {**PLAY, "id": "replan", "prompt_id": "replan", "prompt": "Replan.", "depends_on": ["play"]}
-    spec = EpisodeSpec.from_task(_portsim(again))
-
-    assert [step.id for step in spec._copy.steps if step.type == "episode_turn"] == ["play", "replan"]
+        "deploy_env", "load_artifact", "episode_agent", "prompt_agent", "env_outcome_verifier"]
 
 
 def test_a_task_prompting_several_agents_needs_the_ones_to_play_named():
@@ -97,93 +84,112 @@ def test_the_copy_stands_in_for_the_outside_agents_steps_and_keeps_everything_el
 
     assert (copy.id, copy.version) == ("dock", 4)
     assert [step.type for step in copy.steps] == [
-        "deploy_env", "load_artifact", "episode_agent", "episode_turn", "env_outcome_verifier", "deploy_agent",
+        "deploy_env", "load_artifact", "episode_agent", "prompt_agent", "env_outcome_verifier", "deploy_agent",
         "prompt_agent",
     ]
     assert [copy.steps[i] is task.steps[i] for i in range(len(task.steps))] == [
-        True, True, False, False, True, True, True]
-    for original, stand_in in zip(task.steps, copy.steps):
-        assert (stand_in.id, stand_in.version, stand_in.depends_on, stand_in.fail_task_on_error) == (
+        True, True, False, True, True, True, True]
+    for original, played in zip(task.steps, copy.steps):
+        assert (played.id, played.version, played.depends_on, played.fail_task_on_error) == (
             original.id, original.version, original.depends_on, original.fail_task_on_error)
 
 
-def test_the_stand_ins_carry_what_the_run_needs_unseeded_and_round_trip():
-    agent, turn = EpisodeSpec.from_task(_portsim(), seed=SEED)._copy.steps[2:4]
+def test_the_outside_agents_deploy_runs_with_a_proxy_unseeded_and_round_trips():
+    task = _portsim()
+    agent = EpisodeSpec.from_task(task, seed=SEED)._copy.steps[2]
 
-    assert isinstance(agent, _EpisodeAgentStep) and isinstance(turn, _EpisodeTurnStep)
-    assert (agent.agent_name, agent.env_ids, agent.env_step_id, agent.role) == (
-        "default-agent", ["portsim"], None, "planner@<port>")
-    assert (turn.agent_name, turn.prompt_id, turn.prompt, turn.system_prompt, turn.timeout_seconds) == (
-        "default-agent", "play", "Plan week <week>.", "You plan <port>.", 600)
-    for step in (agent, turn):
-        assert type(step).from_dict(step.to_dict()).to_dict() == step.to_dict()
+    assert isinstance(agent, _EpisodeAgentStep)
+    assert (agent.step, agent.sandboxed) == (task.steps[2], False)
+    assert agent.step.role == "planner@<port>"
+    assert _EpisodeAgentStep.from_dict(agent.to_dict()).to_dict() == agent.to_dict()
 
 
-@pytest.mark.parametrize(
-    ("timeout", "deadline"), [(30, 30), (None, PromptAgentTaskStep.DEFAULT_PROMPT_TIMEOUT_SECONDS)])
-def test_a_turns_deadline_is_its_prompts_timeout(timeout, deadline):
-    turn = EpisodeSpec.from_task(_portsim(play={**PLAY, "timeout_seconds": timeout}))._copy.steps[3]
+def test_without_a_turn_timeout_a_turns_deadline_is_its_prompts_own():
+    task = _portsim(play={**PLAY, "timeout_seconds": 30})
 
-    assert turn.timeout_seconds == deadline
+    assert EpisodeSpec.from_task(task)._copy.steps[3] is task.steps[3]
 
 
-def test_a_turn_timeout_replaces_every_outside_prompts_own():
+@pytest.mark.parametrize(("turn_timeout", "deadline"), [(90, 90), (0.5, 1)])
+def test_a_turn_timeout_replaces_every_outside_prompts_own_in_whole_seconds(turn_timeout, deadline):
     again = {**PLAY, "id": "replan", "prompt_id": "replan", "timeout_seconds": 60}
-    copy = EpisodeSpec.from_task(_portsim(again, play={**PLAY, "timeout_seconds": 7200}), turn_timeout=90)._copy
+    task = _portsim(again, play={**PLAY, "timeout_seconds": 7200})
+    copy = EpisodeSpec.from_task(task, turn_timeout=turn_timeout)._copy
 
-    assert [step.timeout_seconds for step in copy.steps if step.type == "episode_turn"] == [90, 90]
+    assert [step.timeout_seconds for step in copy.steps if step.type == "prompt_agent"] == [deadline, deadline]
+    assert copy.steps[3].to_dict() == {**task.steps[3].to_dict(), "timeout_seconds": deadline}
 
 
 def test_an_inside_agent_keeps_its_own_steps():
     copy = EpisodeSpec.from_task(_portsim(BOB, ASK_BOB), trainer_agents=["bob"])._copy
 
     assert type(copy.steps[2]) is DeployAgentTaskStep and type(copy.steps[3]) is PromptAgentTaskStep
-    assert [step.type for step in copy.steps[5:]] == ["episode_agent", "episode_turn"]
+    assert [step.type for step in copy.steps[5:]] == ["episode_agent", "prompt_agent"]
+
+
+INSTALL = {"id": "agent", "type": "install_agent", "sandbox_name": "box", "a2a_agent_id": "codex"}
+IN_THE_SANDBOX = {
+    "an install": ({}, {"agent": INSTALL}),
+    "skills on the deploy": ({}, {"agent": {**AGENT, "skills": [{"name": "s", "skill_md": "Plan berths first."}]}}),
+    "add_skills": (({"id": "s", "type": "add_skills", "skills": [{"name": "s", "description": "d", "body": "x"}]},),
+                   {}),
+    "a load into the agent": (({"id": "s", "type": "load_artifact", "artifact_id": "a",
+                                "agent_name": "default-agent"},), {}),
+    "a collect from the agent": (({"id": "s", "type": "collect_artifacts", "artifact_paths": ["/out"]},), {}),
+    "run_code in the agent": (({"id": "s", "type": "run_code", "script_artifact_id": "s", "entrypoint": "main.py"},),
+                              {}),
+    "verify_sandbox": (({"id": "s", "type": "verify_sandbox", "criteria": []},), {}),
+}
+OUTSIDE_THE_SANDBOX = {
+    "env tools alone": ((), {}),
+    "a load into the env": (({**LOAD, "id": "load-2"},), {}),
+    "a collect from the env": (({"id": "s", "type": "collect_artifacts", "env_id": "portsim",
+                                 "artifact_paths": ["/out"]},), {}),
+    "run_code in the env": (({"id": "s", "type": "run_code", "script_artifact_id": "s", "entrypoint": "main.py",
+                              "env_id": "portsim"},), {}),
+    "verify_sandbox on a sandbox": (({"id": "s", "type": "verify_sandbox", "sandbox_name": "box", "criteria": []},),
+                                    {}),
+}
+
+
+@pytest.mark.parametrize(("extra", "replace"), IN_THE_SANDBOX.values(), ids=IN_THE_SANDBOX.keys())
+def test_a_task_using_the_outside_agents_sandbox_deploys_its_proxy_there(extra, replace):
+    assert EpisodeSpec.from_task(_portsim(*extra, **replace))._copy.steps[2].sandboxed
+
+
+@pytest.mark.parametrize(("extra", "replace"), OUTSIDE_THE_SANDBOX.values(), ids=OUTSIDE_THE_SANDBOX.keys())
+def test_a_task_using_only_the_outside_agents_envs_serves_its_proxy_here(extra, replace):
+    assert not EpisodeSpec.from_task(_portsim(*extra, **replace))._copy.steps[2].sandboxed
 
 
 AT_THE_AGENT = {"agent_name": "default-agent"}
 REFUSED = {
     "no deploy_agent": ({}, {"agent": None}, "agent 'default-agent' is played from outside, so it needs exactly one "
-                                             "deploy_agent step, not 0"),
-    "two deploy_agents": (({**AGENT, "id": "agent-2"},), {}, "needs exactly one deploy_agent step, not 2"),
+                                             "deploy_agent or install_agent step, not 0"),
+    "two deploy_agents": (({**AGENT, "id": "agent-2"},), {},
+                          "needs exactly one deploy_agent or install_agent step, not 2"),
+    "a deploy and an install": (({**INSTALL, "id": "install"},), {},
+                                "needs exactly one deploy_agent or install_agent step, not 2"),
     "deploy_human_agent": (({"id": "human", "type": "deploy_human_agent", **AT_THE_AGENT},), {"agent": None},
                            "step 'human': deploy_human_agent deploys 'default-agent', which is played from outside"),
-    "install_agent": (({"id": "install", "type": "install_agent", "sandbox_name": "box", "a2a_agent_id": "x",
-                       **AT_THE_AGENT},), {},
-                      "step 'install': install_agent deploys 'default-agent'"),
     "parts": ({}, {"play": {**PLAY, "prompt": None, "parts": [{"kind": "text", "text": "Plan."}]}},
               "step 'play': an outside agent's prompt can't have parts, only a text prompt"),
-    "user simulator": ({}, {"play": {**PLAY, "max_conversation_turns": 2}},
-                       "step 'play': an outside agent's prompt can't have a user simulator "
-                       "(max_conversation_turns > 1)"),
     "output_format": ({}, {"play": {**PLAY, "output_format": {"type": "json_schema", "schema": {}}}},
                       "step 'play': an outside agent's prompt can't have output_format"),
     "agentenv_tools": ({}, {"play": {**PLAY, "agentenv_tools": ["complete_step"]}},
                        "step 'play': an outside agent's prompt can't have agentenv_tools"),
     "snapshot_config": ({}, {"play": {**PLAY, "snapshot_config": {"env_id": "portsim"}}},
                         "step 'play': an outside agent's prompt can't have snapshot_config"),
-    "skills": ({}, {"agent": {**AGENT, "skills": [{"name": "s", "skill_md": "Plan berths first."}]}},
-               "step 'agent': an outside agent can't have skills, instructions its player wouldn't get"),
     "snapshot files": ({}, {"agent": {**AGENT, "agent_snapshot_files_artifact_id": "files"}},
                        "step 'agent': an outside agent can't have agent_snapshot_files_artifact_id"),
     "changelog url": ({}, {"agent": {**AGENT, "agent_changelog_object_url": "file:///changelog"}},
                       "step 'agent': an outside agent can't have agent_changelog_object_url"),
     "changelog": ({}, {"agent": {**AGENT, "enable_agent_changelog": True}},
                   "step 'agent': an outside agent can't have enable_agent_changelog"),
-    "add_skills": (({"id": "s", "type": "add_skills", "skills": [{"name": "s", "description": "d", "body": "x"}]},), {},
-                   "step 's': add_skills needs 'default-agent' as a real agent, and it is played from outside"),
     "register_agent_triggers": (({"id": "s", "type": "register_agent_triggers", "triggers": [], **AT_THE_AGENT},), {},
                                 "step 's': register_agent_triggers needs 'default-agent' as a real agent"),
     "snapshot_agent_state": (({"id": "s", "type": "snapshot_agent_state", "artifact_id": "a", "prompt_id": "play"},),
                              {}, "step 's': snapshot_agent_state needs 'default-agent' as a real agent"),
-    "load_artifact": (({"id": "s", "type": "load_artifact", "artifact_id": "a", **AT_THE_AGENT},), {},
-                      "step 's': load_artifact needs 'default-agent' as a real agent"),
-    "verify_sandbox": (({"id": "s", "type": "verify_sandbox", "criteria": []},), {},
-                       "step 's': verify_sandbox needs 'default-agent' as a real agent"),
-    "run_code": (({"id": "s", "type": "run_code", "script_artifact_id": "s", "entrypoint": "main.py"},), {},
-                 "step 's': run_code needs 'default-agent' as a real agent"),
-    "collect from the agent": (({"id": "s", "type": "collect_artifacts", "artifact_paths": ["/out"]},), {},
-                               "step 's': collects from 'default-agent''s sandbox, and it is played from outside"),
     "collect a manifest": (({"id": "s", "type": "collect_artifacts", "env_id": "portsim", "manifest_step_id": "play"},),
                            {}, "step 's': its manifest is outside prompt 'play'"),
     "trigger executor": (({"id": "s", "type": "register_env_triggers", "env_id": "portsim", "triggers": [],
@@ -192,10 +198,6 @@ REFUSED = {
     "peered": ((BOB, {"id": "s", "type": "peer_agents", "peerings": [
                    {"source_agent_name": "bob", "peer_agent_names": ["default-agent"]}]}), {},
                "step 's': peers 'default-agent', which is played from outside"),
-    "rubric on the trajectory": (({"id": "s", "type": "rubrics_verifier", "prompt_id": "play", "criteria": [],
-                                   "use_agent_judge": False},), {},
-                                 "step 's': grades an outside prompt's trajectory, which an outside player doesn't "
-                                 "hand back"),
     "rubric judged in the agent": (({"id": "s", "type": "rubrics_verifier", "prompt_id": "other", "criteria": [],
                                      "use_trajectory": False, **AT_THE_AGENT},), {},
                                    "step 's': judges in 'default-agent''s sandbox, and it is played from outside"),
@@ -238,6 +240,13 @@ ALLOWED = {
                     "use_trajectory": False, "use_agent_judge": False}},),
     "collecting from an env": ({"collect": {"id": "collect", "type": "collect_artifacts", "env_id": "portsim",
                                             "artifact_paths": ["/out"]}},),
+    "a rubric of the trajectory": (
+        {"verify": {"id": "rubric", "type": "rubrics_verifier", "prompt_id": "play", "criteria": [],
+                    "use_agent_judge": False}},),
+    "installing the outside agent on a VM host": ({"agent": INSTALL},),
+    "installing the outside agent into a container": ({"agent": {**INSTALL, "container_name": "task"}},),
+    **{name: ({"agent": replace["agent"]} if replace else {"extra": extra[0]},)
+       for name, (extra, replace) in IN_THE_SANDBOX.items() if name != "an install"},
     "tearing down an outside agent": ({"down": {"id": "down", "type": "teardown_sandboxes",
                                                 "agent_names": ["default-agent"]}},),
 }

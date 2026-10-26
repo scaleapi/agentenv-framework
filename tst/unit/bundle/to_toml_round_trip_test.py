@@ -112,17 +112,20 @@ def test_a_website_env_reads_back_with_both_images_built_from_its_one_folder(hom
 def test_an_agent_reads_back_with_its_env_vars_and_the_metadata_its_toml_carries(home):
     A2AAgent.put(id="solver", docker_image_artifact=context_image(home, "solver-image"),
                  default_env_vars={"MODE": "fast", "OPENAI_API_KEY": "sk-not-real"},
-                 metadata={"default_model": "claude", "min_disk_size_gb": 20, "agent_card": {"name": "x"}})
+                 metadata={"default_model": "claude", "min_disk_size_gb": 20, "takes_credentials": False,
+                           "agent_card": {"name": "x"}})
     _env(home, "crm")
     steps = [{"id": "env", "type": "deploy_env", "env_id": "crm"},
              {"id": "agent", "type": "deploy_agent", "env_ids": ["crm"], "a2a_agent_id": "solver"}]
 
     with _read_back(home, steps, "agent", "solver", user=True) as (read, imported):
         assert read.default_env_vars == {"MODE": "fast"}
-        assert read.metadata == {"default_model": "claude", "min_disk_size_gb": 20}
-        assert {(drop.where, drop.why.split(",")[0]) for drop in imported.dropped} >= {
-            ("agents/solver: metadata", "an agent.toml's [metadata] takes only default_model and min_disk_size_gb"),
-            ("agents/solver/agent.toml: default_env_vars.OPENAI_API_KEY", "dropped: its name looks like a secret")}
+        assert read.metadata == {"default_model": "claude", "min_disk_size_gb": 20, "takes_credentials": False}
+        whys = {drop.where: drop.why for drop in imported.dropped}
+        assert whys["agents/solver: metadata"] == (
+            "an agent.toml's [metadata] takes only default_model, min_disk_size_gb and takes_credentials, not agent_card")
+        assert whys["agents/solver/agent.toml: default_env_vars.OPENAI_API_KEY"].startswith(
+            "dropped: its name looks like a secret")
 
 
 @pytest.mark.parametrize("description", ["rows.csv", "the crm's rows"])

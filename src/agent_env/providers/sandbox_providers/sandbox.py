@@ -544,11 +544,13 @@ class VmSandbox(Sandbox):
         finally:
             await self.exec_script(f"rm -rf {shlex.quote(vm_dir)}")
 
-    async def _copy_into_container(self, vm_path: str, destination_path: str) -> None:
+    async def _copy_into_container(self, vm_path: str, destination_path: str, container: str | None = None) -> None:
+        """Into ``container``, an agent's that install_agent put in one of its own, else the sandbox's agent container."""
+        container = container or self.container_name
         parent = os.path.dirname(destination_path)
         if parent:
-            await self.exec_script(f"docker exec -u 0 {shlex.quote(self.container_name)} mkdir -p {shlex.quote(parent)}")
-        await self.docker_cp(vm_path, f"{self.container_name}:{destination_path}")
+            await self.exec_script(f"docker exec -u 0 {shlex.quote(container)} mkdir -p {shlex.quote(parent)}")
+        await self.docker_cp(vm_path, f"{container}:{destination_path}")
 
     @staticmethod
     def _staging_path(kind: str, destination_path: str) -> str:
@@ -556,19 +558,19 @@ class VmSandbox(Sandbox):
         host's /tmp, as local ones do."""
         return f"/tmp/_{kind}_{uuid.uuid4().hex[:12]}_{destination_path.replace('/', '_').lstrip('_')}"
 
-    async def write_file_from_object(self, object_url: str, destination_path: str) -> None:
+    async def write_file_from_object(self, object_url: str, destination_path: str, container: str | None = None) -> None:
         vm_path = self._staging_path("obj", destination_path)
         try:
             await self.load_object_file(object_url, vm_path)
-            await self._copy_into_container(vm_path, destination_path)
+            await self._copy_into_container(vm_path, destination_path, container)
         finally:
             await self._remove_vm_temp_file(vm_path)
 
-    async def write_file_from_url(self, url: str, destination_path: str) -> None:
+    async def write_file_from_url(self, url: str, destination_path: str, container: str | None = None) -> None:
         vm_path = self._staging_path("url", destination_path)
         try:
             await self.exec_script(f"curl -fsSL {CURL_RETRY_FLAGS} {shlex.quote(url)} -o {shlex.quote(vm_path)}")
-            await self._copy_into_container(vm_path, destination_path)
+            await self._copy_into_container(vm_path, destination_path, container)
         finally:
             await self._remove_vm_temp_file(vm_path)
 
@@ -599,11 +601,11 @@ class VmSandbox(Sandbox):
             await self.exec_script(f"mkdir -p {shlex.quote(parent)}")
         await self._write_bytes_to_vm_path(data, vm_path)
 
-    async def write_file_from_text(self, content: str, destination_path: str) -> None:
+    async def write_file_from_text(self, content: str, destination_path: str, container: str | None = None) -> None:
         vm_path = self._staging_path("wft", destination_path)
         try:
             await self._write_bytes_to_vm_path(content.encode(), vm_path)
-            await self._copy_into_container(vm_path, destination_path)
+            await self._copy_into_container(vm_path, destination_path, container)
         finally:
             await self._remove_vm_temp_file(vm_path, f"{vm_path}.b64")
 
@@ -666,9 +668,19 @@ async def _pull(sandbox: VmSandbox, image_name: str) -> None:
                          f"Pulling {image_name} for linux/amd64")
 
 
-async def stage_files_into_container(sandbox: Sandbox, file_artifacts: dict[str, Any], destination: str) -> dict[str, str]:
+def into_container(container: str | None) -> dict[str, str]:
+    """A write's ``container=``: given only for an agent install_agent put in a container of its own, which only a VM
+    sandbox hosts, so every other write reaches its sandbox as it always has."""
+    return {"container": container} if container else {}
+
+
+async def stage_files_into_container(
+    sandbox: Sandbox, file_artifacts: dict[str, Any], destination: str, container: str | None = None,
+    on_host: bool = False,
+) -> dict[str, str]:
     """Write each object-store file into the sandbox's container under ``destination``; returns ``{name: path}``.
-    A VM-backed sandbox stages through its host into ``container_name``; a container sandbox is written directly."""
+    A VM-backed sandbox stages through its host into ``container``, by default its ``container_name``, or, ``on_host``,
+    onto the host itself, for an agent install_agent put there; a container sandbox is written directly."""
     loaded: dict[str, str] = {}
     dirs_to_make: set[str] = {destination}
     for filename in file_artifacts:
@@ -678,8 +690,11 @@ async def stage_files_into_container(sandbox: Sandbox, file_artifacts: dict[str,
         loaded[filename] = dest_path
 
     for d in sorted(dirs_to_make):
-        if isinstance(sandbox, VmSandbox):
-            await sandbox.exec_script(f"docker exec -u 0 {shlex.quote(sandbox.container_name)} mkdir -p {shlex.quote(d)}")
+        if on_host:
+            await sandbox.exec_script(f"mkdir -p {shlex.quote(d)}")
+        elif isinstance(sandbox, VmSandbox):
+            await sandbox.exec_script(
+                f"docker exec -u 0 {shlex.quote(container or sandbox.container_name)} mkdir -p {shlex.quote(d)}")
         else:
             await sandbox.exec("mkdir", "-p", d)
 
@@ -689,7 +704,11 @@ async def stage_files_into_container(sandbox: Sandbox, file_artifacts: dict[str,
     async def _stage(filename: str, file_artifact: Any) -> None:
         async with sem:
             logger.info(f"  {file_artifact.object_url} -> {loaded[filename]}")
-            await sandbox.write_file_from_object(file_artifact.object_url, loaded[filename])
+            if on_host:
+                await sandbox.load_object_file(file_artifact.object_url, loaded[filename])
+            else:
+                await sandbox.write_file_from_object(
+                    file_artifact.object_url, loaded[filename], **into_container(container))
 
     await asyncio.gather(*(_stage(fn, fa) for fn, fa in file_artifacts.items()))
     return loaded

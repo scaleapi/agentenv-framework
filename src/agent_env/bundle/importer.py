@@ -64,7 +64,7 @@ from agent_env.plugins import ARTIFACTS, ENVS, TASK_STEPS, inventory, load_failu
 from agent_env.store.base import NotFoundError
 from agent_env.store.ids import LOCAL_PREFIX
 from agent_env.store.image_store.oci_registry_credentials import names_registry
-from agent_env.task import Task
+from agent_env.task.task import Task
 from agent_env.task_step import registry as task_step_registry
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.utils.paths import os_reason

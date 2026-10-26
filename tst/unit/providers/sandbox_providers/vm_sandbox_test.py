@@ -594,10 +594,34 @@ async def test_the_store_is_called_off_the_event_loop(signs):
 
 
 _WRITES = {
-    "text": lambda sandbox, dest: sandbox.write_file_from_text("body", dest),
-    "object": lambda sandbox, dest: sandbox.write_file_from_object("s3://bucket/body.json", dest),
-    "url": lambda sandbox, dest: sandbox.write_file_from_url("https://example.com/body.json", dest),
+    "text": lambda sandbox, dest, **into: sandbox.write_file_from_text("body", dest, **into),
+    "object": lambda sandbox, dest, **into: sandbox.write_file_from_object("s3://bucket/body.json", dest, **into),
+    "url": lambda sandbox, dest, **into: sandbox.write_file_from_url("https://example.com/body.json", dest, **into),
 }
+
+
+def _unstaged(scripts: list[str]) -> list[str]:
+    """``scripts`` with each write's staging path, unique per call, as one name."""
+    return [re.sub(r"/tmp/_(\w+?)_[0-9a-f]{12}_", r"/tmp/_\1_", script) for script in scripts]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("write", _WRITES.values(), ids=_WRITES.keys())
+async def test_a_write_into_an_agent_installed_in_the_sandboxs_own_container_runs_what_it_always_has(
+        signing_store, write):
+    unnamed, named = _ScriptRecorder(), _ScriptRecorder()
+    await write(unnamed, "/work/out.json")
+    await write(named, "/work/out.json", container="agent-api")
+    assert _unstaged(named.scripts) == _unstaged(unnamed.scripts)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("write", _WRITES.values(), ids=_WRITES.keys())
+async def test_a_write_into_an_agent_installed_in_a_container_of_its_own_reaches_that_one(signing_store, write):
+    sandbox = _ScriptRecorder()
+    await write(sandbox, "/work/out.json", container="task")
+    assert "docker exec -u 0 task mkdir -p /work" in sandbox.scripts
+    assert [s.split(" ")[3] for s in sandbox.scripts if s.startswith("docker cp ")] == ["task:/work/out.json"]
 
 
 @pytest.mark.asyncio

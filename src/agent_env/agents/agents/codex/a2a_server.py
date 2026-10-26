@@ -560,7 +560,8 @@ _ENDPOINT = ("LITELLM_API_KEY={litellm_api_key} LITELLM_BASE_URL={litellm_base_u
              "LITELLM_EXTRA_HEADERS={litellm_extra_headers} AGENT_TRUST_ENV={trust_env} ")
 _ENDPOINT_PARAMS = ["litellm_api_key", "litellm_base_url", "litellm_extra_headers", "trust_env"]
 _INSTALL_COMMANDS = [_UNPACK, _ENDPOINT + "bash {work_dir}/agent/install.sh container {container} {a2a_port}"]
-_INSTALL_COMMANDS_HOST = [_UNPACK, _ENDPOINT + "bash {work_dir}/agent/install.sh host {agent_name} {a2a_port} /app"]
+_HOST_WORKDIR = "/app"
+_INSTALL_COMMANDS_HOST = [_UNPACK, _ENDPOINT + f"bash {{work_dir}}/agent/install.sh host {{agent_name}} {{a2a_port}} {_HOST_WORKDIR}"]
 
 
 @a2a_agent(
@@ -609,6 +610,8 @@ _INSTALL_COMMANDS_HOST = [_UNPACK, _ENDPOINT + "bash {work_dir}/agent/install.sh
             required_params=["container", "work_dir", "agent_ctx_tar", "a2a_port", *_ENDPOINT_PARAMS],
             install_commands_host=_INSTALL_COMMANDS_HOST,
             required_params_host=["work_dir", "agent_ctx_tar", "a2a_port", "agent_name", *_ENDPOINT_PARAMS],
+            workdir_host=_HOST_WORKDIR,
+            user_host="root",
         ),
         enable(
             PEER_AGENTS_V1,

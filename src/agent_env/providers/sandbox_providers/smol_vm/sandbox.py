@@ -84,7 +84,7 @@ class SmolVmSandbox(VmSandbox):
         ca = "SSL_CERT_FILE=/etc/agentenv-ca-bundle.pem " if local_https else ""
         await self.exec_script(f"{ca}curl -fsSL {CURL_RETRY_FLAGS} {shlex.quote(rewritten)} -o {shlex.quote(vm_path)}")
 
-    async def write_file_from_url(self, url: str, destination_path: str) -> None:
+    async def write_file_from_url(self, url: str, destination_path: str, container: str | None = None) -> None:
         vm_path = self._staging_path("url", destination_path)
         rewritten = LocalSandboxProvider.get_external_url(url)
         local_https = urlsplit(rewritten).hostname == "host.docker.internal" and urlsplit(rewritten).scheme == "https"
@@ -93,7 +93,7 @@ class SmolVmSandbox(VmSandbox):
                 await self.write_host_file(local_ca().bundle_path.read_bytes(), "/etc/agentenv-ca-bundle.pem")
             ca = "SSL_CERT_FILE=/etc/agentenv-ca-bundle.pem " if local_https else ""
             await self.exec_script(f"{ca}curl -fsSL {CURL_RETRY_FLAGS} {shlex.quote(rewritten)} -o {shlex.quote(vm_path)}")
-            await self._copy_into_container(vm_path, destination_path)
+            await self._copy_into_container(vm_path, destination_path, container)
         finally:
             await self._remove_vm_temp_file(vm_path)
 
