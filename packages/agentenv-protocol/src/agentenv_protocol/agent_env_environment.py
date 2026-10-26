@@ -22,6 +22,8 @@ from starlette.responses import Response
 from starlette.routing import Route
 
 from .errors import AgentEnvError
+from .tool_access import DISABLE as TOOL_DISABLE, ENABLE as TOOL_ENABLE, PATHS as TOOL_ACCESS_PATHS, ToolAccess, caller_role
+from .tool_access import extensions as tool_access_extensions
 from .tool_context import EMPTY, ToolContext, bound, context_from_http, context_from_mcp
 from .transfers import WriteNamespaceGrant
 from .types import DATA_OBJECTS_EXTENSION_URI, MCP_TRANSPORT, METHOD_ADD, METHOD_GET, METHOD_RESET, RPC_PATH, WELL_KNOWN_PATH, AddDataRequest, AddDataResponse, EnvironmentCapabilities, EnvironmentCard, EnvironmentExtension, EnvironmentInterface, EnvironmentTool, GetDataResponse, ResetDataResponse, error_body
@@ -221,12 +223,21 @@ class AgentEnvApplication(ABC):
         if tool_handlers and not self.supports_tools:
             raise ValueError(f"@tool methods require a FastMCP-backed application; {type(self).__name__} cannot serve MCP tools")
         environment_card = _merge_tools(environment_card, tool_handlers)
+        self._tool_access = (
+            ToolAccess(descriptor.name for descriptor, fn in tool_handlers if getattr(fn, _HIDDEN_BY_DEFAULT_ATTR, False))
+            if self.supports_tools and getattr(handler, "tool_access", False) else None
+        )
+        if self._tool_access is not None:
+            environment_card = _merge_extensions(environment_card, [(e,) for e in tool_access_extensions()])
         methods = _discover_methods(handler)
         environment_card = _merge_operations(environment_card, methods)
         environment_card = _merge_data_objects(environment_card, methods)
         self.environment_card = environment_card
         self._dispatch = _jsonrpc_handler(methods)
         self._ext_routes = [(path, method, _extension_handler(fn, method)) for _descriptor, fn, path, method in ext_handlers]
+        if self._tool_access is not None:
+            self._ext_routes += [(TOOL_ACCESS_PATHS[action], "POST", _tool_access_handler(self._tool_access, action))
+                                 for action in (TOOL_DISABLE, TOOL_ENABLE)]
         # Register with the advertised descriptor (card-declared wins in _merge_tools) so
         # tools/list cannot drift from the card; falls back to the discovered descriptor.
         caps_tools = (environment_card.capabilities.tools if environment_card.capabilities else None) or []
@@ -311,7 +322,7 @@ class AgentEnvFastMCPApplication(AgentEnvApplication):
         if isinstance(middleware, list) and callable(getattr(app, "add_middleware", None)):
             if any(getattr(entry, _TOOL_CONTEXT_BOUND_ATTR, False) for entry in middleware):
                 raise RuntimeError("this fastmcp app already carries an AgentEnv tool-context middleware; mount one handler per app")
-            self._middleware = _tool_context_middleware(self._hook)
+            self._middleware = _tool_context_middleware(self._hook, self._tool_access)
             self._binding = "middleware"
             return
         manager = getattr(app, "_tool_manager", None)
@@ -321,10 +332,12 @@ class AgentEnvFastMCPApplication(AgentEnvApplication):
             self._binding = "dispatch"
             return
         readers = [descriptor.name for descriptor, fn in self._tools if _tool_context_slot(fn)]
-        if readers or self._hook is not None:
+        readers += ["on_tool_call"] if self._hook is not None else []
+        readers += ["tool_access"] if self._tool_access is not None else []
+        if readers:
             raise RuntimeError(
                 "this app has no tool dispatch to bind a ToolContext around (mcp>=1.25,<2 keeps one at "
-                f"FastMCP._tool_manager; fastmcp exposes a middleware list), and {', '.join(readers) or 'on_tool_call'} "
+                f"FastMCP._tool_manager; fastmcp exposes a middleware list), and {', '.join(readers)} "
                 "would read an empty caller"
             )
         self._binding = None
@@ -355,6 +368,7 @@ class AgentEnvFastMCPApplication(AgentEnvApplication):
         manager = app._tool_manager
         inner = manager.call_tool
         hook = self._hook
+        access = self._tool_access
 
         async def call_tool(name: str, arguments: dict, *args: Any, **kwargs: Any) -> Any:
             if manager.get_tool(name) is None:
@@ -362,6 +376,8 @@ class AgentEnvFastMCPApplication(AgentEnvApplication):
             context = kwargs.get("context", args[0] if args else None)
             with bound(context_from_mcp(context, name, arguments)) as tool_context:
                 try:
+                    if access is not None:
+                        access.check_call(tool_context)
                     if hook is not None:
                         answer = await _maybe_await(hook(tool_context))
                         if answer is not None:
@@ -377,6 +393,20 @@ class AgentEnvFastMCPApplication(AgentEnvApplication):
         functools.update_wrapper(call_tool, inner)
         setattr(call_tool, _TOOL_CONTEXT_BOUND_ATTR, True)
         manager.call_tool = call_tool
+        if access is not None:
+            self._filter_tool_list(app, manager, access)
+
+    @staticmethod
+    def _filter_tool_list(app: Any, manager: Any, access: ToolAccess) -> None:
+        """tools/list under the live request's caller, read through ``FastMCP.get_context``, as tools/call reads it."""
+        inner = manager.list_tools
+
+        def list_tools(*args: Any, **kwargs: Any) -> Any:
+            role = caller_role(context_from_mcp(app.get_context(), "", {}))
+            return [t for t in inner(*args, **kwargs) if not access.is_disabled(role, t.name)]
+
+        functools.update_wrapper(list_tools, inner)
+        manager.list_tools = list_tools
 
     def _card_for(self, app: Any) -> EnvironmentCard:
         """Declare the MCP endpoint only when the app says where it serves it; FastMCP-shaped targets may not."""
@@ -411,6 +441,9 @@ class AgentEnvEnvironment:
     """
 
     mcp: Any = None
+    #: Filter tools/list and refuse tools/call per caller role, and serve disable-tool/v1 and enable-tool/v1 at the
+    #: gateway's paths and with its rules, for an env agents reach with no gateway in front.
+    tool_access: ClassVar[bool] = False
     _mounted: bool = False
 
     def _build_card(self) -> EnvironmentCard:
@@ -676,22 +709,32 @@ def _check_call_tool_result(value: Any) -> None:
         raise TypeError(f"on_tool_call must return None or mcp.types.CallToolResult, got {type(value).__name__}")
 
 
-def _tool_context_middleware(hook: Callable | None) -> Any:
+def _tool_context_middleware(hook: Callable | None, access: ToolAccess | None = None) -> Any:
     """A fastmcp ``Middleware`` that runs every tools/call under its ToolContext, the handler's ``on_tool_call``
-    first. A ``Middleware`` subclass rather than a bare ``(context, call_next)`` callable because fastmcp runs the
-    typed ``on_call_tool`` exactly once per call, where a bare callable runs once per dispatch phase. fastmcp is
-    not a dependency of this package: it is imported here, where an app built with it has just been handed over."""
+    first, and with ``access`` filters tools/list and refuses tools/call per caller role. A ``Middleware`` subclass
+    rather than a bare ``(context, call_next)`` callable because fastmcp runs the typed hooks exactly once per call,
+    where a bare callable runs once per dispatch phase. fastmcp is not a dependency of this package: it is imported
+    here, where an app built with it has just been handed over."""
     try:
         from fastmcp.server.middleware import Middleware
     except ImportError as e:
         raise RuntimeError("this app carries a fastmcp middleware list but fastmcp cannot be imported") from e
 
     class ToolContextMiddleware(Middleware):
+        async def on_list_tools(self, context: Any, call_next: Callable) -> Any:
+            tools = await call_next(context)
+            if access is None:
+                return tools
+            role = caller_role(context_from_mcp(context.fastmcp_context, "", {}))
+            return [t for t in tools if not access.is_disabled(role, t.name)]
+
         async def on_call_tool(self, context: Any, call_next: Callable) -> Any:
             message = context.message
             arguments = dict(getattr(message, "arguments", None) or {})
             with bound(context_from_mcp(context.fastmcp_context, message.name, arguments)) as tool_context:
                 try:
+                    if access is not None:
+                        access.check_call(tool_context)
                     if hook is not None:
                         answer = await _maybe_await(hook(tool_context))
                         if answer is not None:
@@ -1164,6 +1207,20 @@ def _extension_handler(fn: Callable, http_method: str) -> Callable:
 
 def _error_response(error: AgentEnvError) -> Response:
     return _json_response(error_body(**error.fields()), error.status)
+
+
+def _tool_access_handler(access: ToolAccess, action: str) -> Callable:
+    async def handler(request: Request) -> Response:
+        raw = await request.body()
+        try:
+            body = json.loads(raw) if raw else None
+        except ValueError:
+            return _error_response(AgentEnvError("invalid_params", "request body must be JSON"))
+        try:
+            return _json_response(access.change(action, body))
+        except AgentEnvError as e:
+            return _error_response(e)
+    return handler
 
 
 class _Op(NamedTuple):
