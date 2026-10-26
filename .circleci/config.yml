@@ -105,8 +105,22 @@ jobs:
           name: Publish to CodeArtifact, the protocol first
           command: |
             set -euo pipefail
-            twine upload --skip-existing --repository codeartifact dist/agentenv-framework-protocol/*
-            twine upload --skip-existing --repository codeartifact dist/agentenv-framework/*
+            # twine's --skip-existing works only against PyPI. A file CodeArtifact already has, from a rerun after
+            # a partial publish, comes back as a 409 instead, which counts as uploaded.
+            upload() {
+              local out
+              if out=$(twine upload --repository codeartifact "$1" 2>&1); then
+                echo "$out"
+              elif grep -q "HTTPError: 409" <<<"$out"; then
+                echo "already in CodeArtifact: $(basename "$1")"
+              else
+                echo "$out" >&2
+                return 1
+              fi
+            }
+            for file in dist/agentenv-framework-protocol/* dist/agentenv-framework/*; do
+              upload "$file"
+            done
 
 workflows:
   # Auto-bump pyproject version when a PR labeled `bump-version` (or `bump`)
