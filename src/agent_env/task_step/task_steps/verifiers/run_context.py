@@ -28,6 +28,13 @@ def _need(unavailable: Mapping[str, str], sources) -> None:
 
 
 @dataclass(frozen=True)
+class EnvClock:
+    env_id: str
+    env_step_id: Optional[str]  # the deploy_env step, which tells two deployments of one env apart
+    virtual_time: datetime
+
+
+@dataclass(frozen=True)
 class Message:
     turn: int
     role: Literal["user", "agent"]
@@ -37,7 +44,7 @@ class Message:
     written_by_triggers: tuple[str, ...] = ()  # the user agent's triggers that wrote this user message
     user_sim: Optional[Mapping[str, Any]] = None  # the user sim's extra fields for this turn
     parts: tuple[Mapping[str, Any], ...] = ()
-    env_clock: Optional[Mapping[str, Optional[datetime]]] = None  # each env's virtual time when it was recorded
+    env_clock: Optional[tuple[EnvClock, ...]] = None  # each armed env clock when it was recorded; None if none was
 
 
 @dataclass(frozen=True)
@@ -308,9 +315,10 @@ def _first_message_index(prompt_response: PromptResponse, stored: list[dict]) ->
 
 def _message(turn: int, role: str, parts: list[dict], *, ts: Optional[str] = None, author: Optional[str] = None,
              fired: Optional[list[str]] = None, user_sim: Optional[Mapping[str, Any]] = None,
-             env_clock: Optional[Mapping[str, Optional[str]]] = None) -> Message:
+             env_clock: Optional[list[Mapping[str, Any]]] = None) -> Message:
     text = "\n".join(p.get("text", "") for p in parts if p.get("kind") == "text")
-    clock = None if env_clock is None else {env_id: _time(t) for env_id, t in env_clock.items()}
+    clock = (tuple(EnvClock(c["env_id"], c.get("env_step_id"), _time(c["virtual_time"])) for c in env_clock)
+             if env_clock else None)
     return Message(turn=turn, role=role, text=text, sent_at=_time(ts), author=author or None,
                    written_by_triggers=tuple(fired or ()), user_sim=user_sim, parts=tuple(parts), env_clock=clock)
 

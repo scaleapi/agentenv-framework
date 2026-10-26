@@ -109,8 +109,8 @@ def find_by_a2a_task_id(a2a_task_id: str) -> Optional[dict]:
     )
 
 
-def _message(role: str, parts: list[dict], now: datetime, env_clock: Optional[dict]) -> dict:
-    """A conversation message; ``env_clock`` maps each env to its virtual time when the message was recorded."""
+def _message(role: str, parts: list[dict], now: datetime, env_clock: Optional[list[dict]]) -> dict:
+    """A conversation message; ``env_clock`` holds each armed env clock's virtual time when it was recorded."""
     message = {"role": role, "parts": parts, "ts": now.isoformat()}
     if env_clock is not None:
         message["env_clock"] = env_clock
@@ -122,7 +122,7 @@ def add_a2a_task(
     parts: list[dict],
     a2a_task_id: str,
     role: str,
-    env_clock: Optional[dict] = None,
+    env_clock: Optional[list[dict]] = None,
 ) -> Optional[dict]:
     """Append a caller-side message and create a new working a2a_task.
 
@@ -170,7 +170,7 @@ def complete_a2a_task(
     conversation_id: str,
     parts: list[dict],
     role: str,
-    env_clock: Optional[dict] = None,
+    env_clock: Optional[list[dict]] = None,
 ) -> Optional[dict]:
     """Append a responder-side message and complete the oldest working a2a_task.
 

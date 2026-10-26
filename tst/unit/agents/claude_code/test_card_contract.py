@@ -110,7 +110,8 @@ def test_request_and_response_contracts(app):
     assert triggers["decide"] == {
         "method": "POST",
         "endpoint": "/ext/triggers/decide",
-        "request": {"required": ["turn"], "optional": ["solver_message", "context_id", "env_triggers"]},
+        "request": {"required": ["turn"],
+                    "optional": ["solver_message", "context_id", "env_triggers", "record_unfired"]},
         "response": {"required": ["parts", "done", "fired"]},
     }
     assert triggers["state"] == {"method": "GET", "response": {"required": ["firing_log"]}}
