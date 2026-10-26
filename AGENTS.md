@@ -62,9 +62,9 @@ or one of them only where it is used.
 - Defaults are local and carry no external coordinates: SQLite document store, filesystem object
   store, an OCI registry at `localhost:5000`, env-var secret store, `LocalRunner`, `local` Docker
   sandboxes for envs and agents. MongoDB, DynamoDB, Firestore, S3, Cloud Storage, ECR, AWS Secrets
-  Manager, Google Cloud Secret Manager, and the Modal, E2B, Sail, SmolVM, Tensorlake, Tenki, Vercel and boxd
-  sandboxes exist as implementations and are selected by config (the last six through their extras:
-  `sail`, `smol`, `tensorlake`, `tenki`, `vercel`, `boxd`; every extra but `smol` is in `dev`).
+  Manager, Google Cloud Secret Manager, and the Modal, E2B, Sail, SmolVM, Tensorlake, Tenki, Vercel, boxd and
+  Daytona sandboxes exist as implementations and are selected by config (the last seven through their extras:
+  `sail`, `smol`, `tensorlake`, `tenki`, `vercel`, `boxd`, `daytona`; every extra but `smol` is in `dev`).
 - The model endpoint is unset until `[model] base_url` / `api_key` (or `LITELLM_BASE_URL` /
   `LITELLM_API_KEY`) is configured. A loopback URL handed into a `local` container (the model
   endpoint, an agent, peer or gateway on this machine) becomes `host.docker.internal`. On Linux that
@@ -105,12 +105,12 @@ and deserialized through a registry.
 
 | Package | Contents |
 |---|---|
-| `env/` | `Env` base class: a subclass declares `type`, implements `from_dict` and `async deploy(...) -> DeployedEnv`, and may override `reset` and `load_file_artifact_universe`. Built-ins in `env/envs/`: `MCPServerEnv` (`mcp_server`), `MultiEnv` (`multi`, MCP servers plus websites), `ServiceDBEnv` (`service_db`, PostgreSQL), `WebsiteEnv` (`website`), `GatewayEnv` (`gateway_server`). `env/gateway/gateway.py` is the env-side gateway server, container-only code. |
-| `artifact/` | Immutable versioned artifacts; every `put()` creates a new version. The document goes to the document store, binary payloads to the object store. Built-ins: `CliArtifact` (`cli`), `FileArtifact` (`file`), `FileArtifactUniverse` (`file_artifact_universe`), `DockerImageArtifact` (`docker_image`), `EnvironmentArtifact` (`environment`), `EnvironmentUniverseArtifact` (`environment_universe`), `SkillArtifact` (`skill`); `[artifacts] type_aliases` maps another stored spelling of a type onto one of them. A `DockerImageArtifact` holds a tar.gz of its image, or, written by `put_ref` (`--image-ref` on `env mcp-server put` and `a2a-agent put`), only a registry reference with its tag pinned to a digest, which sandboxes pull, or, written by `put_context`, only its build context, which a VM sandbox builds before running it (`VmSandbox.load_docker_images`) and Modal builds before creating its container (`ModalSandboxProvider.prepare_image`, outside a fallback chain's deadline); anything else that runs images by name (a container on the local provider, a lone server on any provider but Modal) refuses such an image. A build context (`utils/docker/context.py`) is what `docker build` would send, `.dockerignore` applied, written so equal files give equal bytes and an equal `source_digest`. |
+| `env/` | `Env` base class: a subclass declares `type`, implements `from_dict` and `async deploy(...) -> DeployedEnv`, and may override `reset` and `load_file_artifact_universe`. Built-ins in `env/envs/`: `MCPServerEnv` (`mcp_server`), `MultiEnv` (`multi`, MCP servers plus websites), `ServiceDBEnv` (`service_db`, PostgreSQL), `WebsiteEnv` (`website`), `GatewayEnv` (`gateway_server`). `env/gateway/gateway.py` is the env-side gateway server, container-only code. While its clock is armed it serves agents `get_time` (`env/gateway/get_time.py`), which answers in UTC and, given an IANA `time_zone`, also in that zone; executors' working `hours` (`env/gateway/triggers.py`) take a fixed `utc_offset` or an IANA `time_zone`. |
+| `artifact/` | Immutable versioned artifacts; every `put()` creates a new version. The document goes to the document store, binary payloads to the object store. Built-ins: `CliArtifact` (`cli`), `FileArtifact` (`file`), `FileArtifactUniverse` (`file_artifact_universe`), `DockerImageArtifact` (`docker_image`), `EnvironmentArtifact` (`environment`), `EnvironmentUniverseArtifact` (`environment_universe`), `SkillArtifact` (`skill`); `[artifacts] type_aliases` maps another stored spelling of a type onto one of them. A `DockerImageArtifact` holds a tar.gz of its image, or, written by `put_ref` (`--image-ref` on `env mcp-server put` and `a2a-agent put`), only a registry reference with its tag pinned to a digest, which sandboxes pull, or a published image's tag with its `image_digest` and its build context, which sandboxes pull by the digest and build from the context when they can't (the infra images, and a bundle agent built from a shipped agent's sources, `Plan.published`), or, written by `put_context`, only its build context, which a VM sandbox builds before running it (`VmSandbox.load_docker_images`) and Modal builds before creating its container (`ModalSandboxProvider.prepare_image`, outside a fallback chain's deadline); anything else that runs images by name (a container on the local provider, a lone server on any provider but Modal) refuses such an image. A build context (`utils/docker/context.py`) is what `docker build` would send, `.dockerignore` applied, written so equal files give equal bytes and an equal `source_digest`. |
 | `task/`, `task_step/` | A `Task` holds its `TaskStep`s inline; `Task.run()` executes them as a DAG. `depends_on` (None means all prior steps) gates a step, independent steps run concurrently, `fail_task_on_error` makes a failure fatal or tolerated, `retry_config` rolls a failed span back through the step journal and re-dispatches it. Built-in steps live in `task_step/task_steps/` (`deploy_env`, `deploy_agent`, `prompt_agent`, the verifiers under `verifiers/`, and more). `task/episode/` runs a task with some of its agents played from outside, as a training loop does (`EpisodeSpec`). |
 | `store/` | Four store ABCs with local and cloud implementations: `DocumentStore` (SQLite, MongoDB, DynamoDB, Firestore with MongoDB compatibility), `ObjectStore` (filesystem, S3, Cloud Storage), `ImageStore` (local OCI registry, ECR), `SecretStore` (env vars or file, AWS Secrets Manager, Google Cloud Secret Manager). `VersionedEntityStore` implements the shared versioned get/put logic, `QueryBuilder` is the immutable chained query API, `store/base.py` holds the error types. `store/routing.py` is the `@local` namespace: while the CLI runs, an `@local/…` id and what an `@local` task's run records go to local stores beside the configured ones, and that run's writes to the configured stores are refused. A new backend must pass the conformance kits in `tst/store/`. |
 | `config/` | The `Config` singleton (`get_config`, `configure`, `reset_config`) in `config/runtime.py`, file discovery in `config/loader.py`, and `load_impl`, which resolves `module:Class` pointers. `agent_env.store` re-exports the config names for compatibility. |
-| `providers/` | `providers/sandbox_providers/` holds the sandbox providers `local`, `modal`, `modal_vm`, `e2b`, `sail_vm` (the `sail` extra), `smol_vm` (the `smol` extra), `tensorlake` (the `tensorlake` extra), `tenki` (the `tenki` extra), `vercel` (the `vercel` extra), `boxd` (the `boxd` extra); `[sandbox] default` and `agent_default` accept a comma-separated fallback chain, whose deploys skip a provider that can't run them. A sandbox provider declares what it runs (`ON_THIS_MACHINE`, and for VMs on this machine the address their requests to it arrive at, `REACHES_HOST_AT`; `CONTAINER_ACCEPTS`, `PRIVATE_NETWORK`; `SUPPORTED_SANDBOX_MODES`, derived from whether it implements `create_sandbox` and `create_vm`; and `SANDBOX_ACCEPTS`, the images an agent's sandbox runs, which defaults to those a VM loads when it implements `create_vm` and to `CONTAINER_ACCEPTS` otherwise, so only a provider that implements `create_vm` yet gives an agent a container, like the local one, declares it), each sandbox carries the `platform` of the images it runs (linux/amd64 unless its provider sets another when it creates it; None, any, unchecked, for a local sandbox), and code outside `providers/sandbox_providers/` reads those, never which provider it has. `providers/env_providers/` holds the environment providers: `EnvironmentProvider` (an env's containers and state store), `EnvironmentGatewayProvider` (`gateway`, an env's default), which renders a docker-compose for the gateway and its MCP servers inside the sandbox, and `EnvironmentServerProvider` (`server`), one MCP server in its own container with no gateway in front and no state store; `providers/env_state/` holds env-state providers (`local_postgres` built in). |
+| `providers/` | `providers/sandbox_providers/` holds the sandbox providers `local`, `modal`, `modal_vm`, `e2b`, `sail_vm` (the `sail` extra), `smol_vm` (the `smol` extra), `tensorlake` (the `tensorlake` extra), `tenki` (the `tenki` extra), `vercel` (the `vercel` extra), `boxd` (the `boxd` extra), `daytona` (the `daytona` extra); `[sandbox] default` and `agent_default` accept a comma-separated fallback chain, whose deploys skip a provider that can't run them. A sandbox provider declares what it runs (`ON_THIS_MACHINE`, and for VMs on this machine the address their requests to it arrive at, `REACHES_HOST_AT`; `CONTAINER_ACCEPTS`, `PRIVATE_NETWORK`; `SUPPORTED_SANDBOX_MODES`, derived from whether it implements `create_sandbox` and `create_vm`; and `SANDBOX_ACCEPTS`, the images an agent's sandbox runs, which defaults to those a VM loads when it implements `create_vm` and to `CONTAINER_ACCEPTS` otherwise, so only a provider that implements `create_vm` yet gives an agent a container, like the local one, declares it), each sandbox carries the `platform` of the images it runs (linux/amd64 unless its provider sets another when it creates it; None, any, unchecked, for a local sandbox), and code outside `providers/sandbox_providers/` reads those, never which provider it has. `providers/env_providers/` holds the environment providers: `EnvironmentProvider` (an env's containers and state store), `EnvironmentGatewayProvider` (`gateway`, an env's default), which renders a docker-compose for the gateway and its MCP servers inside the sandbox, and `EnvironmentServerProvider` (`server`), one MCP server in its own container with no gateway in front and no state store; `providers/env_state/` holds env-state providers (`local_postgres` built in). |
 | `a2a_agent/` | The `A2AAgent` entity (`a2a_agent`), its stores and the validator steps. The protocol package provides the agent-side framework. |
 | `runner/` | The `[runner]` seam: `Runner.submit()` returns a `RunHandle` (`run_id`, `instance_id`) before the run starts; `LocalRunner` is built in. `runner/store.py` is the run index every runner writes and the explorer reads. |
 | `bundle/` | A bundle is a folder of entities (`envs/`, `agents/`, `artifacts/`, `skills/`, `tasks/<name>.json`, `evals/<name>.toml`) that runs without a registry: `agent-env run` plans it, writes it into the `@local` namespace (reusing each version whose inputs haven't changed) and runs its evals or tasks; `agent-env bundle init` writes a stored task or eval as one, with every env, agent and artifact it uses in its own folder (each image as its build context, pruned to what its Dockerfile reads and pinned to the Python and npm versions of the stored image) so it runs with no store. |
@@ -147,6 +147,17 @@ Out-of-tree code plugs in either through `config.toml`, as a `module:Class` poin
   installed bundle's env, agent or artifact by its id, or as the configured default agent: the planner
   pulls it into the run as one of the bundle's own (`bundle/plan.py`), and its ledger row is keyed by the
   installed bundle, so every bundle shares one write of it. Such an id takes no version pin.
+- A bundle can give its agents aliases in an `aliases.toml` at its root (`[agents] <folder> = ["<alias>", ...]`, read
+  by `plugins/_bundles.py`): the shipped `agents` bundle names Claude Code `claude-code`. A reference to an alias
+  names the agent its bundle gives it unless the run's bundle has an entity of that name or the store an agent of that
+  id, which wins. The planner pulls the agent in and writes the task naming it by its id (`Plan.aliases`); a step run
+  outside a bundle run gets it from `A2AAgent.get`, which reads the store first and an alias after (the planner reads
+  the store itself, as `STORE_GETTERS` does). agent-env's own bundles' aliases are theirs, and an alias two other
+  bundles give is refused, naming both. `agent-env a2a-agent list` lists the installed agents with their aliases, then
+  the store's; `a2a-agent get` prints the agent an alias names. `agent-env run --agent <name>` deploys that agent for
+  the solver for one run (each step deploying or installing an agent a `prompt_agent` step prompts, not its user
+  simulator: `plan.solver_steps`), pulled in and checked as a task's reference to it would be, through per-step
+  `step_params` overrides, so the tasks stay as written.
 - Environment providers have no table: an installed package registers one as an `agent_env.env_providers`
   entry point named its `type`, which records carry as `env_provider_type`.
 - `[plugins.<distribution name>]` is reserved for an installed plugin's own settings, read with
@@ -227,7 +238,8 @@ orchestrators call it the same way. What callers rely on:
   `default_a2a_agent`, `mcp_server_sources`, `gnu_stat`). CI rejects any other skip reason; a broken configuration must fail loudly, not skip.
 - The suite is backend-agnostic: a test about one particular backend lives with that backend, not
   here. A custom store must pass `tst/store/{conformance,object_conformance,image_conformance,secret_conformance}.py`,
-  the same kits the built-ins pass.
+  the same kits the built-ins pass, and a custom `[runner]` must pass `tst/runner/conformance.py`, which
+  `LocalRunner` passes.
 - Shared helpers live in `tst/util/` (`config.py` installs a config document, `a2a_test_agent.py` builds
   the echo A2A agent, `capabilities.py`, `image_cache.py`); fixtures and mock services in `tst/data/`.
   Nothing test-only ships under `src/`.
@@ -268,19 +280,25 @@ that the runs left no sandbox work folder, and that each published infra image's
 installed sources as from the checkout.
 `.github/workflows/publish-pypi.yml` runs on the `v*` tag the release automation pushes: it waits
 for `main`'s CI to pass on the tagged commit, publishes `agentenv-framework-protocol` and then
-`agentenv-framework` to PyPI, pinning the protocol in `pyproject.toml` and in each shipped env's and agent's
-`requirements.txt` (`.github/scripts/shipped_bundles.py` lists them, so a new agent is pinned with no workflow change),
+`agentenv-framework` to PyPI, pinning the protocol in `pyproject.toml` and in each shipped env's and artifact's
+`requirements.txt` (`.github/scripts/shipped_bundles.py pin` finds them, so a new env is pinned with no workflow change,
+and every job that reads those folders runs it first, so an image's tag, its build and the wheel see the same sources),
 and creates the GitHub release, whose notes are the titles of the pull
 requests merged since the previous release.
 Once the repository variable `PUBLISH_INFRA_IMAGES` is `true`, it also publishes the infra images agent-env
-ships (`agent_env.env.published_images`) whose `src-<hex>` tags GHCR lacks: after `main`'s CI passes, each is
+ships and the shipped agents', one per agent folder (`agent_env.env.published_images`), whose `src-<hex>` tags GHCR lacks: after `main`'s CI passes, each is
 built on a runner of each platform, checked, and tagged as one multi-platform image, and a tag that exists is
-never moved. The wheel and the release notes record each image's digest, and a failed image job sends neither
-package to PyPI. Run by hand on `main`, the workflow publishes the images alone.
+never moved. The infra images are published before the protocol, and a failed infra image job sends neither package
+to PyPI. An agent's `requirements.txt` keeps its protocol floor, unpinned, so its image is built again only when its
+folder changes (raise the floor when the agent needs a newer protocol), once the protocol is on PyPI, and a failed agent
+image job keeps `agentenv-framework` off it. The wheel and the release notes record each
+image's digest. Run by hand on `main`, the workflow publishes the images alone.
 Its jobs that run agent-env (`.github/scripts/infra_images.py`) hold no token that writes; the jobs that push
 images or publish to PyPI install nothing and check what they're handed (`.github/scripts/infra_build.py`,
 standard library and the docker CLI only).
-Actions are pinned to commit SHAs; Dependabot updates them, the pinned uv, `uv.lock` and the UI's npm packages.
+Actions are pinned to commit SHAs; Dependabot updates them, the pinned uv, `uv.lock`, the UI's npm packages and
+the infra images' base images, each pinned by digest so that a bump rebuilds and republishes the image; Dependabot
+proposes only a base's digest and patch updates, and a major or minor upgrade is made by hand.
 
 ## Conventions
 
@@ -309,3 +327,6 @@ guide (configuration, environments, steps, artifacts, providers, the CLI) is
 www.agentenvframework.com/docs. A new feature, provider or option is documented there, not in the
 README: say in the pull request what the docs should cover, and a maintainer updates the site.
 `packages/agentenv-protocol/README.md` documents the protocol and the A2A agent framework.
+
+Guides for coding agents sit next to the code they cover: `src/agent_env/agents/AGENTS.md` for writing an A2A agent and
+`src/agent_env/providers/sandbox_providers/AGENTS.md` for writing a sandbox provider.

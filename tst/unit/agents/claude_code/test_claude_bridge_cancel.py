@@ -23,7 +23,7 @@ def _state(pid: int) -> str:
         try:
             with open(f"/proc/{pid}/stat") as stat:
                 return stat.read().rsplit(")", 1)[1].split()[0]
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):  # a process that exits mid-read gives ESRCH
             return ""
     return subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()[:1]
 

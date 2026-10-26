@@ -48,6 +48,10 @@ source .venv/bin/activate
 
 A package of your own can add env types, providers, task steps and stores to agent-env, and `agent-env plugin` lists, checks, adds and removes installed plugins. The [plugin docs](https://www.agentenvframework.com/docs/plugins) show how.
 
+## Time zones
+
+Servers and the env clock work in UTC. To run an agent in a user's time zone, the task sets it on the agent's `deploy_agent` step as `env_vars: {"TZ": "America/New_York"}`, which reaches the agent's sandbox, and names the zone in the agent's prompt. While the env clock is armed, the gateway's `get_time` tool takes that IANA name as `time_zone` and adds the `local_time` in that zone, and a trigger executor's working `hours` can take a `time_zone` instead of a fixed `utc_offset`, so they keep their local hours across daylight-saving changes.
+
 ## Contribute, release, license
 
 [CONTRIBUTING.md](https://github.com/scaleapi/agentenv-framework/blob/main/CONTRIBUTING.md) is the contributor guide: open an issue before anything larger than a bug fix, one logical change per pull request with tests, pull request titles in the form `type(scope): summary`, an approving review from a code owner (`CODEOWNERS`) and green CI. [AGENTS.md](https://github.com/scaleapi/agentenv-framework/blob/main/AGENTS.md) is the repository map and conventions file for contributors and coding agents.

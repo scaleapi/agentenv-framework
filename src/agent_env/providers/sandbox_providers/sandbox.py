@@ -62,6 +62,10 @@ _sign_slots: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaph
 _REGISTRY_RETRY_SECONDS = 5.0
 # How Docker's legacy builder and BuildKit report a failed RUN command, the one build failure not tried again.
 _RUN_FAILED = ("returned a non-zero code", "did not complete successfully")
+# How a registry that rate-limits a pull answers, and the seconds a VM waits before each pull it tries again: short,
+# since a published image it can't pull it builds from its build context instead, which takes about a minute.
+_RATE_LIMITED = ("toomanyrequests", "429 too many requests")
+_RATE_LIMIT_WAITS_SECONDS = (10, 30)
 
 # A VM file is read off its host one range per exec, whose base64 every provider's exec returns in one response. A
 # provider serves each exec a fraction of its bandwidth, so many ranges are in flight.
@@ -311,11 +315,9 @@ class VmSandbox(Sandbox):
         )
 
     async def load_docker_images(self, artifacts: list) -> None:
-        """Put each DockerImageArtifact's image on the VM: those with a tar.gz are loaded from it, in parallel, those
-        with only a build context are built from it, and the rest are pulled by image name; one whose tar.gz is built
-        for another platform than the VM's is built from the build context beside it, for the VM's. An image this VM
-        can't get, such as one to pull from a registry on this machine when the VM isn't on it, or can't run, being
-        built for another platform with no build context, is refused before anything is loaded."""
+        """Put each DockerImageArtifact's image on the VM: a tar.gz is loaded, a build context built, an image with a
+        digest pulled by it (``pull_published``), and the rest pulled by name; a tar.gz for another platform is built
+        from its context instead. One the VM can't get or run (``load_problems``) is refused before anything loads."""
         if not artifacts:
             return
         if problems := self.load_problems(artifacts):
@@ -325,10 +327,38 @@ class VmSandbox(Sandbox):
                         if artifact.tar_gz_object_url and not artifact.rebuilt_for(self.platform)]:
             await self._load_tarballs(tarballs)
         if pulled := [artifact.image_name for artifact in artifacts
-                      if not artifact.tar_gz_object_url and not artifact.context_only]:
+                      if not artifact.tar_gz_object_url and not artifact.context_only and not artifact.image_digest]:
             await self.pull_images(pulled)
         if built:
             await self.build_images(built)
+        if published := [artifact for artifact in artifacts if artifact.image_digest]:
+            await self._pull_or_build(published)
+
+    async def _pull_or_build(self, artifacts: list) -> None:
+        """``pull_published`` each image, and build each it couldn't pull from its build context."""
+        if not (unpulled := await self.pull_published(artifacts)):
+            return
+        try:
+            await self.build_images([artifact for artifact, _ in unpulled])
+        except RuntimeError as e:
+            why = "; ".join(f"{artifact.pinned_name}: {reason}" for artifact, reason in unpulled)
+            raise RuntimeError(f"Couldn't pull {why}. {e}") from e
+
+    async def pull_published(self, artifacts: list) -> list[tuple[Any, str]]:
+        """Pull each image by its digest, concurrently, and tag it with its ``image_name``, which its containers start
+        from; return each the VM couldn't pull, with why, for it to build from its build context instead."""
+        results = await asyncio.gather(*(_pull_published(self, artifact) for artifact in artifacts),
+                                       return_exceptions=True)
+        unpulled = []
+        for artifact, result in zip(artifacts, results, strict=True):
+            if isinstance(result, RuntimeError):
+                reason = _last_output_line(str(result))
+                logger.warning("Couldn't pull %s on %s, so it's built from its build context: %s", artifact.pinned_name,
+                               self.sandbox_id, reason)
+                unpulled.append((artifact, reason))
+            elif isinstance(result, BaseException):
+                raise result
+        return unpulled
 
     def load_problems(self, artifacts: list) -> list[str]:
         """Why this VM can't get or run each DockerImageArtifact it can't, as ``load_docker_images`` refuses them: one
@@ -601,6 +631,24 @@ def _last_output_line(error: str) -> str:
     """The last line of an ``exec_script`` error that says something, past its empty ``stdout:``/``stderr:`` labels."""
     lines = (line.removeprefix("stdout: ").removeprefix("stderr: ").strip() for line in reversed(error.splitlines()))
     return next((line for line in lines if line), "")
+
+
+async def _pull_published(sandbox: VmSandbox, artifact) -> None:
+    """``docker pull`` ``artifact``'s image by its digest and tag it with its ``image_name``. A registry that
+    rate-limits the VM is asked again after each of ``_RATE_LIMIT_WAITS_SECONDS``."""
+    pinned = artifact.pinned_name
+    for wait in (*_RATE_LIMIT_WAITS_SECONDS, None):
+        try:
+            await _once_more(sandbox, f"docker pull {shlex.quote(pinned)}", f"Pulling {pinned}",
+                             unless=("no matching manifest",))
+            break
+        except RuntimeError as e:
+            if wait is None or not any(marker in str(e).lower() for marker in _RATE_LIMITED):
+                raise
+            logger.warning("%s rate-limited the pull of %s on %s; trying again in %ss", registry_host_from_ref(pinned),
+                           pinned, sandbox.sandbox_id, wait)
+            await asyncio.sleep(wait)
+    await sandbox.exec_script(f"docker tag {shlex.quote(pinned)} {shlex.quote(artifact.image_name)}")
 
 
 async def _pull(sandbox: VmSandbox, image_name: str) -> None:

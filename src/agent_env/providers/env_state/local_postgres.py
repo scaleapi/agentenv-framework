@@ -135,15 +135,10 @@ class LocalPostgresStateProvider(DatabaseStateProvider):
         return self._service_db_config
 
     def store_images_to_load(self) -> list["DockerImageArtifact"]:
-        """The servicedb image set (servicedb + pgweb + db-mcp) the VM preloads from stored tars — the
-        artifacts (with ``tar_gz_object_url``), which the image-name config can't provide. Reuses the
-        cached default env, so no extra ``Env.get`` beyond ``service_db_config``'s."""
-        env = self._default_service_db_env()
-        return [
-            env.db_docker_image_artifact,
-            env.db_web_docker_image_artifact,
-            env.db_mcp_docker_image_artifact,
-        ]
+        """The servicedb image set (servicedb + pgweb + db-mcp) the VM preloads, as their artifacts, which the
+        image-name config can't provide: each a tar.gz to load, a published image to pull, or a build context. Reuses
+        the cached default env, so no extra ``Env.get`` beyond ``service_db_config``'s."""
+        return self._default_service_db_env().images
 
     @classmethod
     def default_instance(cls) -> EnvStateInstance:

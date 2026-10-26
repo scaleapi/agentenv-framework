@@ -69,7 +69,8 @@ _SOURCES_TAG_CHARS = 16
 
 class DockerImageArtifact(Artifact):
     """A Docker image artifact: a tar.gz of the image in the object store; without one, a registry reference a
-    sandbox pulls; or, with neither, only its build context."""
+    sandbox pulls, by its ``image_digest`` when it records one, or builds from the build context beside it when it can't; or,
+    with neither, only its build context."""
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -86,6 +87,10 @@ class DockerImageArtifact(Artifact):
     platform: str | None = Field(default=None, description="The platform the image is built for, as `docker build --platform` names it")
     source_digest: str | None = Field(
         default=None, description="sha256 over the build context's files and modes, the Dockerfile's path and the platform"
+    )
+    image_digest: str | None = Field(
+        default=None, description="The registry's digest of the built image, not of its sources (source_digest): a "
+                                  "sandbox pulls the image by it and runs it as image_name"
     )
 
     # No return annotation: pydantic builds the serialization schema from one, and a dict drops the fields.
@@ -207,16 +212,16 @@ class DockerImageArtifact(Artifact):
         return store.put_document(instance)
 
     @classmethod
-    def put_ref(cls, id: str, *, description: str, image_name: str,
-                earlier_pin: str | None = None) -> "DockerImageArtifact":
-        """Register ``image_name``, an image already in a registry, writing this document only: nothing is pushed,
-        saved or uploaded, and a sandbox pulls the image. A tag is pinned to the digest the registry serves for it
-        now, recorded as ``name:tag@sha256:...``, so every run gets the same image; a digest is checked to exist.
-        ``earlier_pin``, the pin an earlier version recorded, is kept instead when it pins ``image_name``.
+    def put_ref(cls, id: str, *, description: str, image_name: str, earlier_pin: str | None = None,
+                image_digest: str | None = None, context_path: str | None = None,
+                dockerfile_path: str | None = None) -> "DockerImageArtifact":
+        """Register ``image_name``, an image already in a registry, which a sandbox pulls; nothing is built, pushed or
+        saved. A tag is pinned to the digest the registry serves now, as ``name:tag@sha256:...`` (``earlier_pin`` kept
+        when it pins the same ref). Given the image's build context and ``image_digest``, the tag stays the name, the
+        digest is recorded beside it, and the context is uploaded for a sandbox that can't pull the image to build it.
 
-        ``image_name`` must name its registry. The registry is read with the configured image store's credentials
-        where it holds that registry, anonymously otherwise. One on this machine is refused unless ``id``'s image
-        store is the local registry, since nothing else could pull from it."""
+        ``image_name`` must name its registry, read with the configured image store's credentials where it holds them;
+        one on this machine is refused unless ``id``'s image store is the local registry."""
         from agent_env.artifact.store import get_artifact_store
         from agent_env.config import get_config
 
@@ -228,6 +233,21 @@ class DockerImageArtifact(Artifact):
                 and not isinstance(config.get_image_store_for(id), LocalRegistryImageStore)):
             raise ValueError(f"{image_name} is in a registry on this machine, which only an image in the local "
                              "registry's store, such as an @local one, can name")
+        if context_path is not None:
+            context = _context_of(Path(context_path), dockerfile_path)
+            store = get_artifact_store()
+            version = store.next_version(id)
+            prefix = store.attempt_prefix("docker_image", id)
+            return store.put_document(cls(
+                id=id,
+                version=version,
+                description=description,
+                image_name=image_name,
+                image_digest=image_digest,
+                build_context_object_url=_upload_context(config.get_object_store_to_write(prefix, id), prefix, context),
+                dockerfile_path=context.dockerfile,
+                source_digest=context.source_digest(None),
+            ))
         if earlier_pin is not None and pinned_from(earlier_pin, image_name):
             pinned = earlier_pin
         else:
@@ -280,6 +300,11 @@ class DockerImageArtifact(Artifact):
             how = "built from its build context" if self.context_only else f"pulled from {self.image_name}"
             raise ValueError(f"{self.id!r} v{self.version} has no tar.gz; its image is {how}")
         return get_artifact_store().get_object(self.tar_gz_object_url)
+
+    @property
+    def pinned_name(self) -> str:
+        """What a sandbox pulls: ``image_name`` pinned to the ``image_digest`` when it records one."""
+        return f"{self.image_name}@{self.image_digest}" if self.image_digest else self.image_name
 
     @property
     def context_only(self) -> bool:

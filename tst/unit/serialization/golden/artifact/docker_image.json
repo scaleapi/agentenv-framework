@@ -4,6 +4,7 @@
   "description": "slack-mcp:v5 image",
   "dockerfile_path": null,
   "id": "slack-mcp-image",
+  "image_digest": null,
   "image_name": "slack-mcp:v5",
   "platform": null,
   "source_digest": null,

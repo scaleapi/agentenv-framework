@@ -23,8 +23,8 @@ from agent_env.store import set_object_store
 
 def _artifact(url: str | None = "s3://bucket/image.tar.gz", *, context_only: bool = False) -> SimpleNamespace:
     return SimpleNamespace(
-        tar_gz_object_url=url, context_only=context_only, image_name="img:latest", load_problem=lambda **_: None,
-        rebuilt_for=lambda *_, **__: False,
+        tar_gz_object_url=url, context_only=context_only, image_name="img:latest", image_digest=None,
+        load_problem=lambda **_: None, rebuilt_for=lambda *_, **__: False,
     )
 
 

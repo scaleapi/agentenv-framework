@@ -4,6 +4,7 @@ from .add_skill import add_skill
 from .deploy import deploy
 from .get import get
 from .get_instance import get_instance
+from .list_agents import list_agents
 from .put import put
 from .validate import validate
 
@@ -16,6 +17,7 @@ def a2a_agent():
 
 a2a_agent.add_command(put)
 a2a_agent.add_command(get)
+a2a_agent.add_command(list_agents)
 a2a_agent.add_command(deploy)
 a2a_agent.add_command(get_instance)
 a2a_agent.add_command(validate)

@@ -49,7 +49,9 @@ _LISTED = 5
 @dataclass(frozen=True)
 class Digest:
     value: str
-    inputs: dict[str, Any]  # type, config, files {key: sha256}, needs and store_refs {"<kind> <id>": version}
+    # type, config, files {key: sha256}, needs and store_refs {"<kind> <id>": version}, and for an image published for
+    # its sources, published: "<ref>@<digest>"
+    inputs: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -124,6 +126,8 @@ class Ledger:
             listing = build_context_files if built else folder_files
             for key, path in listing(self._plan.bundle_of(write.source.entry), write.source.entry).items():
                 inputs["files"][key] = _file_sha256(path) + (_mode(path) if built else "")
+        if (published := self._plan.published.get(write.id)) is not None:
+            inputs["published"] = published.pinned
         if write.kind not in (BundleKind.TASK, BundleKind.EVAL):
             # A document records the versions of what it references (an env its images, a universe its
             # environments), so one written anew means it must be written again. A task or eval names its
@@ -210,8 +214,9 @@ def _tracked(write: Write) -> bool:
     """Whether the ledger can list everything ``write`` is made from. Not yet for an env type with a ``from_toml`` of
     its own, which may read its folder in ways it can't see. An artifact, a skill included, is made from its toml,
     every file in its folder (``folder_files``) and what it references; an agent or env from its
-    toml and what it references. A built image is made from its build context, ``build_context_files``; what the
-    build fetches (its base image, packages) isn't an input. A referenced image is made from its ref's text, so a tag
+    toml and what it references. A built image is made from its build context, ``build_context_files``, and the
+    image published for it when there is one (``Plan.published``); what the build fetches (its base image, packages)
+    isn't an input. A referenced image is made from its ref's text, so a tag
     that moves in its registry isn't a change. An image folder's image is also made from its description."""
     if isinstance(write.source, BundleImage):
         return True
@@ -253,6 +258,9 @@ def _changes(row: Mapping[str, Any], digest: Digest) -> list[str]:
         reasons.append(f"type changed: {before['type']} → {after['type']}")
     if before.get("config") != after["config"]:
         reasons.append("config changed")
+    if before.get("published") != after.get("published"):
+        reasons.append(f"published as {after['published'].partition('@')[0]}" if after.get("published")
+                       else "not found published")
     for label, names in zip(("files added", "files removed", "files changed"), _diff(before["files"], after["files"])):
         if names:
             shown = ", ".join(names[:_LISTED]) + (f" and {len(names) - _LISTED} more" if len(names) > _LISTED else "")

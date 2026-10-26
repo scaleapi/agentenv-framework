@@ -1,6 +1,7 @@
 """Materializing a planned bundle: what gets written, what is reused, and what is refused before any write."""
 
 import json
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -36,7 +37,8 @@ from agent_env.store.routing import disable_namespace_routing
 from agent_env.task import Task
 from agent_env.task_step.task_step import TaskStep
 from agent_env.utils.docker.context import BuildContext
-from tst.unit.bundle._support import DIGEST, RefusingStore, layout, local_builds, local_store, plan_of
+from agent_env.env.published_images import AGENT_IMAGES
+from tst.unit.bundle._support import DIGEST, RefusingStore, layout, local_builds, local_store, plan_of, shipped_agent
 
 ROOT = "@local/~/triage"
 LAYOUT = {
@@ -464,6 +466,69 @@ def test_an_agent_folder_with_a_dockerfile_is_built_and_the_agent_written_over_i
     assert _summary(again)[image] == (1, True, ()) and _summary(again)[f"{ROOT}/solver"] == (1, True, ())
 
 
+def test_an_agent_image_from_a_shipped_agents_sources_is_registered_as_its_published_image_and_not_built(
+        bundle_dir, builds, agents_published):
+    shipped_agent(bundle_dir)
+    _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
+    image = f"{ROOT}/solver__agent_image"
+    plan = plan_of(bundle_dir)
+
+    materialize(plan, build_here=local_builds(plan))
+
+    written = DockerImageArtifact.get(image, 1)
+    assert [(found.ref, found.digest) for found in plan.published.values()] == [(agents_published, DIGEST)]
+    assert (written.image_name, written.image_digest, written.pinned_name) == (
+        agents_published, DIGEST, f"{agents_published}@{DIGEST}")
+    assert written.source_digest == f"sha256:{AGENT_IMAGES[0].tag().removeprefix('src-')}"
+    assert written.buildable and not written.context_only and written.tar_gz_object_url is None
+    assert builds == []
+    assert A2AAgent.get(f"{ROOT}/solver").docker_image_artifact.image_digest == DIGEST
+
+
+def test_an_agent_image_whose_sources_change_after_planning_isnt_registered_as_the_published_one(
+        bundle_dir, builds, agents_published):
+    """Its image and its build context would be of different sources."""
+    folder = shipped_agent(bundle_dir)
+    _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
+    plan = plan_of(bundle_dir)
+    (folder / "kit.py").write_text("# changed after the run planned it\n")
+
+    with pytest.raises(BundleError) as e:
+        materialize(plan, build_here=local_builds(plan))
+
+    assert list(e.value.problems) == [f"agents/solver: its files changed after the run found {agents_published} "
+                                      "published for them; run it again"]
+    with pytest.raises(NotFoundError):
+        DockerImageArtifact.get(f"{ROOT}/solver__agent_image")
+
+
+def test_an_agent_image_from_sources_no_shipped_agent_has_is_its_build_context(bundle_dir, builds, agents_published):
+    (shipped_agent(bundle_dir) / "notes.md").write_text("mine\n")
+    _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
+    plan = plan_of(bundle_dir)
+
+    _run(bundle_dir)
+
+    assert plan.published == {}
+    assert DockerImageArtifact.get(f"{ROOT}/solver__agent_image", 1).context_only
+
+
+def test_an_agent_image_written_before_its_image_was_published_is_written_again_as_the_published_one(
+        bundle_dir, builds, monkeypatch):
+    shipped_agent(bundle_dir)
+    _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
+    image, agent, ref = f"{ROOT}/solver__agent_image", f"{ROOT}/solver", AGENT_IMAGES[0].ref()
+    _run(bundle_dir)
+    monkeypatch.setattr("agent_env.env.published_images._registry_digest", lambda asked: DIGEST if asked == ref else None)
+
+    published, again = _summary(_run(bundle_dir)), _summary(_run(bundle_dir))
+
+    assert published[image] == (2, False, (f"published as {ref}",)) and published[agent][:2] == (2, False)
+    assert again[image] == (2, True, ()) and again[agent] == (2, True, ())
+    assert DockerImageArtifact.get(image, 2).image_digest == DIGEST
+    assert len(builds) == 1  # only the first run's, of its build context
+
+
 def test_an_image_is_built_from_the_files_the_ledger_hashes_so_a_reused_one_matches_them(bundle_dir, builds):
     layout(bundle_dir, {
         "agents/solver/Dockerfile": "FROM scratch\nCOPY . /agent\n",
@@ -502,7 +567,7 @@ def test_a_changed_build_context_rebuilds_the_image_and_rewrites_its_agent(bundl
 
 def test_an_image_written_as_its_build_context_is_uploaded_with_no_build_and_no_docker(bundle_dir, builds,
                                                                                        monkeypatch):
-    monkeypatch.setattr(materialize_module.shutil, "which", lambda name: None)
+    monkeypatch.setattr(shutil, "which", lambda name: None)
     layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\nCOPY run.sh /\n", "agents/solver/run.sh": "echo hi\n"})
     _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
     image = f"{ROOT}/solver__agent_image"
@@ -617,7 +682,7 @@ def test_an_image_the_ledger_reuses_needs_no_docker(bundle_dir, builds, monkeypa
     layout(bundle_dir, {"agents/solver/Dockerfile": "FROM scratch\n"})
     _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
     _run(bundle_dir)
-    monkeypatch.setattr(materialize_module.shutil, "which", lambda name: None)
+    monkeypatch.setattr(shutil, "which", lambda name: None)
 
     assert _summary(_run(bundle_dir, dry_run))[f"{ROOT}/solver__agent_image"] == (1, True, ())
     assert len(builds) == 1

@@ -21,7 +21,7 @@ from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.skill import SkillArtifact
 from agent_env.artifact.registry import ARTIFACT_REGISTRY, canonical_type, get_artifact_registry
 from agent_env.bundle import _toml
-from agent_env.bundle._fs import fold, os_reason, show
+from agent_env.bundle._fs import fold, show
 from agent_env.bundle._images import ImageJob, context_groups, write_images
 from agent_env.bundle._import_report import (
     PROVENANCE,
@@ -67,6 +67,7 @@ from agent_env.store.image_store.oci_registry_credentials import names_registry
 from agent_env.task import Task
 from agent_env.task_step import registry as task_step_registry
 from agent_env.task_step.registry import get_task_step_registry
+from agent_env.utils.paths import os_reason
 
 # How long a name taken from an id may be, in bytes; ids are capped far above it, and a longer name helps nobody.
 _MAX_NAME_BYTES = 200

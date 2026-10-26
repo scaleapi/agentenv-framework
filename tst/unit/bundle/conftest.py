@@ -1,17 +1,19 @@
 """Fixtures the bundle tests share."""
 
 
+import shutil
+
 import pytest
 
 from agent_env.artifact.artifacts import docker_image as docker_image_module
-from agent_env.bundle import materialize as materialize_module
+from agent_env.env.published_images import AGENT_IMAGES
 from agent_env.providers.sandbox_providers import host_images
 from tst.unit.bundle._support import DIGEST, listing
 
 
 @pytest.fixture
 def docker_on_path(monkeypatch):
-    monkeypatch.setattr(materialize_module.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
 
 
 @pytest.fixture
@@ -41,3 +43,11 @@ def registry(monkeypatch):
 
     monkeypatch.setattr(docker_image_module, "pin_digest", pin)
     return asked
+
+
+@pytest.fixture
+def agents_published(monkeypatch):
+    """The registry serves each shipped agent's image, under DIGEST, and nothing else."""
+    refs = {image.ref() for image in AGENT_IMAGES}
+    monkeypatch.setattr("agent_env.env.published_images._registry_digest", lambda ref: DIGEST if ref in refs else None)
+    return AGENT_IMAGES[0].ref()

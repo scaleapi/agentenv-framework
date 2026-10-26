@@ -46,8 +46,8 @@ def validate(agent_id: str, agent_version: int | None, litellm_api_key: str | No
 
     try:
         agent = A2AAgent.get(agent_id, agent_version)
-    except NotFoundError:
-        click.echo(click.style(f"Error: A2AAgent '{agent_id}' not found", fg="red"), err=True)
+    except NotFoundError as e:
+        click.echo(click.style(f"Error: {e}", fg="red"), err=True)
         sys.exit(1)
 
     verifications = run_validation(agent, litellm_api_key=litellm_api_key)

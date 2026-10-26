@@ -172,8 +172,9 @@ def _step_output_lines(step, context) -> list[str]:
         return [_format_prompt_response(context.prompt_responses[-1])]
     if step.type == "snapshot_agent_state":
         snapshots = context.metadata.get("agent_snapshots") or []
-        if snapshots:
-            return [_format_snapshot_capture(snapshots[-1])]
+        match = next((s for s in reversed(snapshots) if s.get("capture_step_id") == step.id), None)
+        if match:
+            return [_format_snapshot_capture(match)]
     if step.type == "modify_env_tool_access":
         changes = context.metadata.get("tool_access_changes") or []
         match = next((c for c in reversed(changes) if c.get("step_id") == step.id), None)

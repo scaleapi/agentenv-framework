@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import inspect
 import logging
 import os
 import tempfile
 import uuid
 from typing import ClassVar, Optional
 
-from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_steps.verifiers.run_context import load_run_context
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
 
 __all__ = ["EnvOutcomeVerifierTaskStep", "ScoreAggregator", "aggregate_score"]
@@ -22,6 +24,8 @@ logger = logging.getLogger(__name__)
 
 
 class EnvOutcomeVerifierTaskStep(TaskStep):
+    """Runs the artifact's ``verify(mcp_url)``; a ``run`` parameter also gets the ``Run`` of ``prompt_id``."""
+
     type: ClassVar[str] = "env_outcome_verifier"
     entity_refs = (
         EntityRef.env("env_id"),
@@ -37,11 +41,13 @@ class EnvOutcomeVerifierTaskStep(TaskStep):
         file_artifact_version: Optional[int] = None,
         score_aggregator: Optional[ScoreAggregator] = None,
         verifier_id: Optional[str] = None,
+        prompt_id: Optional[str] = None,
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
     ):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
         self.verifier_id = verifier_id or uuid.uuid4().hex
+        self.prompt_id = prompt_id
         self.env_id = env_id
         self.file_artifact_id = file_artifact_id
         self.file_artifact_version = file_artifact_version
@@ -56,6 +62,8 @@ class EnvOutcomeVerifierTaskStep(TaskStep):
         base["file_artifact_id"] = self.file_artifact_id
         base["file_artifact_version"] = self.file_artifact_version
         base["score_aggregator"] = self.score_aggregator.value
+        if self.prompt_id is not None:
+            base["prompt_id"] = self.prompt_id
         return base
 
     @classmethod
@@ -87,6 +95,7 @@ class EnvOutcomeVerifierTaskStep(TaskStep):
             file_artifact_version=data.get("file_artifact_version"),
             score_aggregator=ScoreAggregator(raw) if raw else None,
             verifier_id=data.get("verifier_id"),
+            prompt_id=data.get("prompt_id"),
         )
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
@@ -110,7 +119,11 @@ class EnvOutcomeVerifierTaskStep(TaskStep):
             spec.loader.exec_module(module)
 
             logger.info(f"Running verify() from artifact '{self.file_artifact_id}' against {deployed.mcp_url}")
-            results = await module.verify(deployed.mcp_url)
+            if "run" in inspect.signature(module.verify).parameters:
+                run = await load_run_context(context, self._graded_prompt(context))
+                results = await module.verify(deployed.mcp_url, run=run)
+            else:
+                results = await module.verify(deployed.mcp_url)
 
             score = aggregate_score(results, self.score_aggregator)
             if "verifications" not in context.metadata:
@@ -125,3 +138,11 @@ class EnvOutcomeVerifierTaskStep(TaskStep):
                 os.unlink(tmp_path)
 
         return context
+
+    def _graded_prompt(self, context: TaskStepContext) -> Optional[PromptResponse]:
+        if self.prompt_id is None:
+            return context.prompt_responses[-1] if context.prompt_responses else None
+        prompt_response = next((pr for pr in context.prompt_responses if pr.prompt_id == self.prompt_id), None)
+        if prompt_response is None:
+            raise RuntimeError(f"PromptResponse with prompt_id='{self.prompt_id}' not found in context")
+        return prompt_response

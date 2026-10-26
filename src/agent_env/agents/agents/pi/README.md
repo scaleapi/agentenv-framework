@@ -6,7 +6,8 @@ with the `agentenv_protocol.a2a_agent` framework, shipped in the `agents` bundle
 protocol package comes from PyPI (`requirements.txt`), and `install.sh` installs Node, pi and the
 agent's environment both for the image and for `install/v1`.
 
-Each task runs `pi --mode json` once in `/workspace`. The prompt goes in on stdin. Images and text
+Each task runs `pi --mode json` once in its workspace: `PI_A2A_WORKSPACE`, default `/workspace`, and the task
+container's working directory when it's installed there. The prompt goes in on stdin. Images and text
 files are attached as `@path`; any other file is saved to disk and its path is added to the prompt,
 for pi's tools to use. A file fetched from a URL may be at most 256 MiB. The pi config dir is built fresh for each task:
 
@@ -36,7 +37,7 @@ reserves some request fields, such as `user` and `metadata`, and does not forwar
 attribution, sets it at registration through `PI_A2A_MODEL_PARAMS`, a JSON object that config
 values override. Two more registration variables: `PI_A2A_MODEL`, the model when agent-config sets
 none (as for a peer that other agents message directly), and `PI_A2A_CHANGELOG_ROOTS`, the
-colon-separated changelog roots (default `/workspace:/app`). Roots an enable request names must lie
+colon-separated changelog roots (default the workspace and `/app`). Roots an enable request names must lie
 within them, replay writes only under them, and a replaying agent must share them with the capturing
 one. While a changelog is enabled, tasks run one at a time:
 

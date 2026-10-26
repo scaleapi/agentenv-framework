@@ -1,18 +1,23 @@
-"""``_capture_universe_state`` publishes unsigned object URLs to
-``context.metadata['snapshot_json_url']``, and reads each child env's route from the stored env card."""
+"""``snapshot_agent_state``: the artifact it snapshots into, and ``_capture_universe_state``, which publishes
+unsigned object URLs to ``context.metadata['snapshot_json_url']`` and reads each child env's route from the
+stored env card."""
 from __future__ import annotations
 
 import json
+import logging
+import re
 
 import pytest
 
 import agent_env.artifact as artifact_mod
 import agent_env.config as config_mod
+from agent_env.a2a_agent import A2AAgent
 from agent_env.env import legacy_protocol
 from agent_env.env.env import DeployedGatewayEnv
 from agent_env.store import set_object_store
 from agent_env.store.object_store import DEFAULT_CONTENT_TYPE
-from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.context import DeployedAgent, PromptResponse, TaskStepContext
+from agent_env.task_step.snapshot_utils import agent_state_capture
 from agent_env.task_step.task_steps import snapshot_agent_state as mod
 from agentenv_protocol import client as protocol_v1
 from tst.unit.event_loop_probe import on_event_loop
@@ -261,3 +266,115 @@ async def test_services_land_beside_a_capture_the_local_store_holds(monkeypatch,
         name: local.object_url(f"agent_snapshots/oc/3-deadbeef/services/{name}.json") for name in ("calendar", "contacts")
     }
     assert json.loads(local.get(published["calendar"])) == {"service": "calendar"}
+
+
+def _per_run_step(artifact_id=None):
+    return mod.SnapshotAgentStateTaskStep(
+        id="t-agent-snapshot", version=None, artifact_id=artifact_id, prompt_id="main", agent_name="agent",
+    )
+
+
+_SNAPSHOT_CARD = {"capabilities": {"extensions": [{"uri": A2AAgent.EXT_SNAPSHOT}]}}
+
+
+def _run_ctx(instance_id, a2a_card=_SNAPSHOT_CARD):
+    ctx = TaskStepContext(instance_id=instance_id)
+    ctx.deployed_agents = [DeployedAgent(agent_name="agent", api_url="https://agent", a2a_card=a2a_card)]
+    ctx.prompt_responses = [PromptResponse(prompt_id="main", response="ok", a2a_context_id="ctx-1")]
+    return ctx
+
+
+@pytest.fixture
+def captured_into(monkeypatch):
+    artifact_ids: list[str] = []
+
+    async def _capture(*, artifact_id, **_):
+        artifact_ids.append(artifact_id)
+        return agent_state_capture.WorkspaceCapture(
+            universe_id=artifact_id, universe_version=1,
+            bundle_object_url=f"fake://b/{artifact_id}/workspace.tar.gz", capture_prefix=f"fake://b/{artifact_id}/",
+        )
+
+    monkeypatch.setattr(agent_state_capture, "capture_workspace", _capture)
+    return artifact_ids
+
+
+@pytest.mark.asyncio
+async def test_without_an_artifact_id_each_run_snapshots_into_its_own_artifact(captured_into):
+    step = _per_run_step()
+    first, retry, other = _run_ctx("inst-a"), _run_ctx("inst-a"), _run_ctx("inst-b")
+    for ctx in (first, retry, other):
+        await step.execute(ctx)
+
+    assert captured_into == ["inst-a__t-agent-snapshot-agent-state", "inst-a__t-agent-snapshot-agent-state", "inst-b__t-agent-snapshot-agent-state"]
+    assert first.metadata["agent_snapshots"][0]["id"] == "inst-a__t-agent-snapshot-agent-state"
+    assert first.metadata["agent_snapshots"][0]["capture_step_id"] == "t-agent-snapshot"
+    assert other.metadata["agent_snapshots"][0]["id"] == "inst-b__t-agent-snapshot-agent-state"
+    assert step.artifact_id is None
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_artifact_id_is_used_for_every_run(captured_into):
+    step = _per_run_step("shared-snapshot")
+    for instance_id in ("inst-a", "inst-b"):
+        await step.execute(_run_ctx(instance_id))
+
+    assert captured_into == ["shared-snapshot", "shared-snapshot"]
+
+
+@pytest.mark.asyncio
+async def test_a_per_run_capture_skips_an_agent_without_the_snapshot_extension(captured_into, caplog):
+    ctx = _run_ctx("inst-a", a2a_card={"capabilities": {"extensions": []}})
+    with caplog.at_level(logging.WARNING, logger=mod.__name__):
+        assert await _per_run_step().execute(ctx) is ctx
+
+    assert captured_into == []
+    assert "agent_snapshots" not in ctx.metadata
+    assert "does not advertise the snapshot extension" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_per_run_capture_with_a_service_state_dump_still_fails_on_an_agent_without_the_extension():
+    step = mod.SnapshotAgentStateTaskStep(
+        id="t-agent-snapshot", version=None, artifact_id=None, prompt_id="main", agent_name="agent",
+        env_id="env-1", universe_artifact_id="uni-1",
+    )
+    with pytest.raises(RuntimeError, match="does not advertise the snapshot extension"):
+        await step.execute(_run_ctx("inst-a", a2a_card={"capabilities": {"extensions": []}}))
+
+
+@pytest.mark.asyncio
+async def test_a_per_run_capture_still_fails_on_an_agent_recorded_without_a_card():
+    with pytest.raises(RuntimeError, match="does not advertise the snapshot extension"):
+        await _per_run_step().execute(_run_ctx("inst-a", a2a_card=None))
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_artifact_id_still_fails_on_an_agent_without_the_snapshot_extension():
+    ctx = _run_ctx("inst-a", a2a_card=None)
+    with pytest.raises(RuntimeError, match="does not advertise the snapshot extension"):
+        await _per_run_step("shared-snapshot").execute(ctx)
+
+
+def test_a_local_instance_derives_a_local_artifact_id():
+    assert _per_run_step()._resolve_artifact_id(_run_ctx("@local/runs/r1")) == "@local/runs/r1__t-agent-snapshot-agent-state"
+
+
+def test_without_an_instance_id_the_artifact_id_is_adhoc():
+    assert re.fullmatch(r"adhoc-[0-9a-f]{12}__t-agent-snapshot-agent-state", _per_run_step()._resolve_artifact_id(_run_ctx(None)))
+
+
+@pytest.mark.parametrize("artifact_id", [None, "shared-snapshot"])
+def test_round_trips_with_and_without_an_artifact_id(artifact_id):
+    data = _per_run_step(artifact_id).to_dict()
+    restored = mod.SnapshotAgentStateTaskStep.from_dict(data)
+
+    assert restored.artifact_id == artifact_id
+    assert restored.to_dict() == data
+
+
+def test_a_stored_step_without_the_artifact_id_key_loads():
+    data = _per_run_step().to_dict()
+    del data["artifact_id"]
+
+    assert mod.SnapshotAgentStateTaskStep.from_dict(data).artifact_id is None

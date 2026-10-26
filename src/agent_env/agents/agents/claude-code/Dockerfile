@@ -23,7 +23,7 @@ WORKDIR /opt/agent
 COPY requirements.txt model-requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt -r model-requirements.txt
 # install.sh and run.sh are install/v1's: in the image, so they stay in its build context.
-COPY a2a_server.py claude_bridge.py kit.py entrypoint.sh install.sh run.sh ./
+COPY a2a_server.py claude_bridge.py kit.py tar_changelog.py entrypoint.sh install.sh run.sh ./
 # The CLI's cwd, /app, and its state, fixed so neither follows the uid: Modal runs the image as root.
 RUN useradd --create-home --uid 10001 agent && mkdir -p /app /home/agent/.claude \
     && chown agent:agent /app /home/agent/.claude && chmod 0755 entrypoint.sh

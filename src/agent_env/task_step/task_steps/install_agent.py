@@ -177,6 +177,18 @@ class InstallAgentTaskStep(TaskStep):
         problem = _install_problem(agent)
         return [f"install_agent '{self.id}': {problem}"] if problem else []
 
+    def _agent_ref(self, context: TaskStepContext) -> tuple[str, Optional[int]]:
+        """The agent id and version this run installs: this step's ``step_params`` override names both, else the
+        run-wide ``a2a_agent_id`` override or the step's agent, at the step's version."""
+        step_overrides = self.step_param_overrides(context)
+        if "a2a_agent_id" in step_overrides:
+            return step_overrides["a2a_agent_id"], step_overrides.get("a2a_agent_version")
+        # Honor `--a2a-agent-id` override (same pattern as DeployAgentTaskStep) — lets the
+        # caller swap which agent gets installed without rewriting the task definition.
+        user_overrides = context.metadata.get("user_overrides", {})
+        a2a_agent_id = user_overrides.get("a2a_agent_id") or self.a2a_agent_id or get_config().get_default_a2a_agent_id()
+        return a2a_agent_id, self.a2a_agent_version
+
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         from agent_env.providers.sandbox_providers.sandbox_provider import (
             SANDBOX_MODE_VM,
@@ -218,11 +230,8 @@ class InstallAgentTaskStep(TaskStep):
         )
         sandbox = await provider.get_sandbox(ds.sandbox_id)
 
-        # Honor `--a2a-agent-id` override (same pattern as DeployAgentTaskStep) — lets the
-        # caller swap which agent gets installed without rewriting the task definition.
         user_overrides = context.metadata.get("user_overrides", {})
-        a2a_agent_id = user_overrides.get("a2a_agent_id") or self.a2a_agent_id or get_config().get_default_a2a_agent_id()
-        agent = A2AAgent.get(a2a_agent_id, self.a2a_agent_version)
+        agent = A2AAgent.get(*self._agent_ref(context))
         if problem := _install_problem(agent):
             raise RuntimeError(problem)
 

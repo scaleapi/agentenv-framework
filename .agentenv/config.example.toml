@@ -29,6 +29,12 @@ agent_default = "local"   # agents too
 # api_key = "secret:boxd_api_key"     # or "env:BOXD_API_KEY"
 # snapshot = "agentenv-warm"          # boot every machine from this snapshot, see the provider README
 
+# Optional Daytona sandboxes (install the 'daytona' extra):
+# [sandbox.providers.daytona.config]
+# api_key = "secret:daytona_api_key"  # or "env:DAYTONA_API_KEY"
+# snapshot = "agentenv-docker"        # boot every sandbox from this Docker-capable snapshot instead of building
+#                                     # the host image; a request bigger than the snapshot is refused
+
 # [agents]
 # default_a2a_agent_id = "my-agent"   # what a deploy_agent step that names no agent deploys; by default the
 #                                     # agents bundle's Claude Code, @local/agentenv-framework/agents/claude-code

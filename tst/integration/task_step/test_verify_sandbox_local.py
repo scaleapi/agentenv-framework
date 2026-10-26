@@ -242,6 +242,57 @@ async def test_the_unit_tests_verifier_runs_in_a_local_container(local_agent):
     assert (entry["exit_code"], entry["extracted_files"]) == (0, {"/logs/reward.json": {"reward": 1}})
 
 
+def _reward_step(**options):
+    return RunContainerUnitTestsVerifierTaskStep(
+        id="verify", version=None, sandbox_name="box", container_name="agent", reward_path="/logs/verifier/reward.txt",
+        **options,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_reward_the_agent_left_in_the_container_is_not_graded(local_agent):
+    sandbox, context = local_agent
+    _as_deployed_container(sandbox, context)
+    _write_in_container(sandbox, "/logs/verifier/reward.txt", "1")
+    step = _reward_step(command="test -f /app/answer.txt && echo 1 > /logs/verifier/reward.txt")
+
+    entry = (await step.execute(context)).metadata["verifications"]["verify"]
+
+    assert (entry["exit_code"], entry["score"]) == (1, 0.0)
+    assert entry["extracted_files"] == {"/logs/verifier/reward.txt": None}
+
+
+@pytest.mark.asyncio
+async def test_a_result_file_an_earlier_steps_job_wrote_is_extracted_as_it_is(local_agent):
+    """As a supervisor step that adopts an engine an earlier step started: the engine wrote the file, not this step."""
+    sandbox, context = local_agent
+    _as_deployed_container(sandbox, context)
+    _write_in_container(sandbox, "/work/events.tail.json", "engine-tail")
+    step = RunContainerUnitTestsVerifierTaskStep(
+        id="verify", version=None, sandbox_name="box", container_name="agent", command="true",
+        result_paths=["/work/events.tail.json"],
+    )
+
+    entry = (await step.execute(context)).metadata["verifications"]["verify"]
+
+    assert entry["extracted_files"] == {"/work/events.tail.json": "engine-tail\n"}
+
+
+@pytest.mark.asyncio
+async def test_the_reward_is_cleared_in_a_container_with_no_root_user_name(local_agent):
+    """A minimal image may have no passwd entry for root; its verifier runs as uid 0."""
+    sandbox, context = local_agent
+    _as_deployed_container(sandbox, context)
+    _write_in_container(sandbox, "/logs/verifier/reward.txt", "1")
+    subprocess.run(["docker", "exec", sandbox.container_name, "sed", "-i", "/^root:/d", "/etc/passwd"],
+                   check=True, capture_output=True)
+    step = _reward_step(command="exit 1", user="0")
+
+    entry = (await step.execute(context)).metadata["verifications"]["verify"]
+
+    assert (entry["score"], entry["extracted_files"]) == (0.0, {"/logs/verifier/reward.txt": None})
+
+
 def _as_deployed_container(sandbox, context):
     """Record the agent's container as a ``run_docker_container`` container on the deployed sandbox ``box``: it is
     the sandbox's own ``agent``, as a step container is its own name."""

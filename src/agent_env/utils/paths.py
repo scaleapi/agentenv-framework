@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 
 # What the OS or Python writes into a folder on its own. In an artifact or skill folder, everything
@@ -22,3 +23,12 @@ def validate_relative_filename(filename: str) -> None:
     parts = filename.replace("\\", "/").split("/")
     if any(p == ".." for p in parts):
         raise ValueError(f"Filename {filename!r} must not contain '..' segments")
+
+
+def os_reason(e: OSError) -> str:
+    """What an OSError says went wrong, as a problem message names it."""
+    if e.errno == errno.ELOOP:
+        return "a symlink loop, or too many links"
+    if isinstance(e, PermissionError):
+        return "permission denied"
+    return e.strerror or str(e)

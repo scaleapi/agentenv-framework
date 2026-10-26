@@ -22,7 +22,7 @@ PYTHON_VERSION=3.12
 START_TIMEOUT_S=120
 STOP_TIMEOUT_S=10
 CLAUDE_CODE_VERSION=$(sed -n 's/^ARG CLAUDE_CODE_VERSION=//p' "$here/Dockerfile")
-AGENT_FILES="a2a_server.py claude_bridge.py kit.py requirements.txt run.sh"
+AGENT_FILES="a2a_server.py claude_bridge.py kit.py requirements.txt run.sh tar_changelog.py"
 
 # put SRC DEST replaces DEST by a rename, so a binary an earlier install's agent still runs can be replaced.
 case $mode in

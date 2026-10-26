@@ -678,6 +678,12 @@ class Task:
                         _unblock_dependents(step_id)
                         continue
                     step_obj = state.step_by_id[step_id]
+                    if isinstance(exc, _store.SupersededAttemptError):
+                        # A later attempt owns the instance: no retry or tolerance makes this run's writes land.
+                        logger.error("%sStep %s failed (superseded): %s", log_prefix, step_id, exc)
+                        if first_error is None:
+                            first_error, first_error_step_id = exc, step_id
+                        continue
                     retry_cfg = getattr(step_obj, "retry_config", None)
                     if retry_cfg is not None and retry_counts.get(step_id, 0) < retry_cfg.max_retries:
                         retryable.append((step_obj, retry_cfg, exc))

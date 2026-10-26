@@ -1,1 +1,2 @@
-agentenv-framework-protocol[agent]==0.1.305
+# The image installs the newest agentenv-framework-protocol at or above this floor; a release doesn't pin it.
+agentenv-framework-protocol[agent]>=0.1.305

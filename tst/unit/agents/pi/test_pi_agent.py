@@ -1,4 +1,5 @@
 import base64
+import importlib.util
 import io
 import json
 import os
@@ -12,7 +13,7 @@ import httpx
 import pytest
 from starlette.testclient import TestClient
 
-from tst.unit.agents.pi.agent import a2a_server, changelog, peers, pi_agent
+from tst.unit.agents.pi.agent import AGENT_DIR, a2a_server, changelog, peers, pi_agent
 
 PiAgent = pi_agent.PiAgent
 
@@ -330,6 +331,20 @@ def test_a_workspace_archive_that_fails_to_extract_changes_nothing(tmp_path: Pat
         pi_agent._unpack(archive, workspace)
 
     assert [path.name for path in workspace.iterdir()] == ["keep.txt"]
+
+
+def test_an_empty_workspace_archive_restores_an_empty_workspace(tmp_path: Path) -> None:
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    archive = tmp_path / "workspace.tar.gz"
+    pi_agent._pack(empty, archive)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "later.txt").write_text("written after the snapshot")
+
+    pi_agent._unpack(archive, workspace)
+
+    assert list(workspace.iterdir()) == []
 
 
 def test_restoring_the_workspace_waits_for_no_running_task(
@@ -737,6 +752,16 @@ def test_unattachable_files_are_left_on_disk_for_tools(client: TestClient, recor
     invocation = json.loads(record.read_text())
     assert invocation["attachments"] == {}
     assert "[Attached file (audio/mpeg) saved at " in invocation["stdin"]
+
+
+def test_a2a_server_serves_the_workspace_its_environment_names(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("PI_A2A_WORKSPACE", str(tmp_path))
+    spec = importlib.util.spec_from_file_location("pi_a2a_server_workspace", AGENT_DIR / "a2a_server.py")
+    server = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(server)
+
+    assert server.agent.workspace == tmp_path
+    assert a2a_server.agent.workspace == Path("/workspace")
 
 
 def test_a2a_server_exposes_the_card_install_reads() -> None:

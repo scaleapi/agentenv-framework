@@ -47,6 +47,10 @@ USED = (
     "agent_env.runner.store.ensure_indexes", "agent_env.runner.store.insert_run", "agent_env.runner.store.get_run",
     "agent_env.runner.store.list_runs", "agent_env.runner.store.count_runs", "agent_env.runner.store.active_runs",
     "agent_env.runner.store.set_running", "agent_env.runner.store.mark_terminal",
+    # What a verify script is handed of the run it grades.
+    "agent_env.task_step.task_steps.verifiers.Run", "agent_env.task_step.task_steps.verifiers.Turn",
+    "agent_env.task_step.task_steps.verifiers.Message", "agent_env.task_step.task_steps.verifiers.Firing",
+    "agent_env.task_step.task_steps.verifiers.RunRecordUnavailable",
     # What an environment provider reads to deploy a built-in env.
     "agent_env.env.envs.mcp_server.MCPServerEnv.docker_image_artifact", "agent_env.env.envs.mcp_server.MCPServerEnv.environment_name",
     "agent_env.env.envs.website.WebsiteEnv.backend_docker_image_artifact",

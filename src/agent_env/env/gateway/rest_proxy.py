@@ -24,6 +24,7 @@ import json
 import logging
 import posixpath
 from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import Any
 from urllib.parse import unquote
 
 import httpx
@@ -190,6 +191,36 @@ class UpstreamResponse(StreamingResponse):
             logger.error(f"Proxy to {target_url} failed after {sent} bytes: {e!r}")
             raise
 
+    def after_body(self, then: Callable[[int], Awaitable[Any]]) -> None:
+        """Await `then` with the status once the response has ended, after `on_done`."""
+        on_done = self._on_done
+
+        async def both(status: int) -> None:
+            if on_done is not None:
+                await on_done(status)
+            await then(status)
+        self._on_done = both
+
+    async def read_ahead_if_sized(self, max_bytes: int) -> None:
+        """Read a body sized at most `max_bytes` to its end now and run `on_done` there, so the response then replays it."""
+        size = self._upstream.headers.get("content-length", "")
+        if self._on_done is None or not size.isdigit() or int(size) > max_bytes:
+            return
+        chunks: list[bytes] = []
+        failure: Exception | None = None
+        try:
+            async for chunk in self.body_iterator:
+                chunks.append(chunk)
+        except Exception as e:  # already logged by `_body`; the client still gets the cut body when it is sent
+            failure = e
+        except BaseException:  # cancelled before `__call__`, which would otherwise close them, ever runs
+            await self._upstream.aclose()
+            await self._client.aclose()
+            raise
+        self.body_iterator = _replay(chunks, failure)
+        on_done, self._on_done = self._on_done, None
+        await on_done(self.status_code)
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         try:
             await super().__call__(scope, receive, send)
@@ -198,6 +229,13 @@ class UpstreamResponse(StreamingResponse):
             await self._client.aclose()
             if self._on_done is not None:
                 await self._on_done(self.status_code)
+
+
+async def _replay(chunks: list[bytes], failure: Exception | None) -> AsyncIterator[bytes]:
+    for chunk in chunks:
+        yield chunk
+    if failure is not None:
+        raise failure
 
 
 async def fetch_child_card(client: httpx.AsyncClient, key: str, base_url: str) -> dict | None:

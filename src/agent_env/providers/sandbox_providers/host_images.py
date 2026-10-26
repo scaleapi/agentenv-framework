@@ -3,7 +3,8 @@
 An image that is only its build context is built where it runs. Here that is this machine's Docker: built natively,
 under the image's name, labeled with the sources it was built from, and built again only when those change, so a later
 deploy, a parallel one or another run finds it. A VM on this machine starts with no build cache, so it loads a saved
-copy of that build, kept once per sources. Neither is a store version: the image is its build context.
+copy of that build, kept once per sources. Neither is a store version: the image is its build context. An image a
+registry publishes is pulled here by its digest, and built from its build context only when it can't be.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import asyncio
 import gzip
 import hashlib
 import io
+import json
 import logging
 import platform as host
 import subprocess
@@ -41,9 +43,25 @@ def held(image: DockerImageArtifact) -> bool:
     return holds(image.image_name, sources(image))
 
 
-def holds(image_name: str, image_sources: str) -> bool:
-    """Whether this machine's Docker holds ``image_name`` built from ``image_sources``."""
-    return _built_from(image_name) == image_sources
+def holds(image_name: str, image_sources: str | None) -> bool:
+    """Whether this machine's Docker holds ``image_name`` built from ``image_sources``; never when there are none, as
+    for an image with no build context, which nothing here built."""
+    return image_sources is not None and _built_from(image_name) == image_sources
+
+
+def holds_digest(image: DockerImageArtifact) -> bool:
+    """Whether this machine's Docker holds ``image``, one with an ``image_digest``, under its name as the image that
+    digest names: pulled by it, or built here from the image's sources. A tag can name another image than the one a
+    version records, so holding its name isn't enough."""
+    return image.image_digest in _repo_digests(image.image_name) or held(image)
+
+
+def present(image_name: str) -> bool:
+    """Whether this machine's Docker holds an image named ``image_name``."""
+    try:
+        return subprocess.run(["docker", "image", "inspect", image_name], capture_output=True).returncode == 0
+    except FileNotFoundError:  # no docker on PATH, so no image here
+        return False
 
 
 def built_here(image_name: str) -> bool:
@@ -94,6 +112,29 @@ async def build_here(image: DockerImageArtifact) -> None:
     await asyncio.to_thread(build, image)
 
 
+def pull(image: DockerImageArtifact) -> None:
+    """Have this machine's Docker hold ``image``, one with an ``image_digest``, under its name, unless it already holds
+    it (``holds_digest``): pulled by its digest, or, when that fails, built from its build context. Raises RuntimeError
+    when it can't be pulled or built."""
+    with holding_locks([f"image-pull:{image.pinned_name}"]):
+        if holds_digest(image):
+            return
+        pulled = subprocess.run(["docker", "pull", image.pinned_name], capture_output=True, text=True, errors="replace")
+        if pulled.returncode == 0:
+            subprocess.run(["docker", "tag", image.pinned_name, image.image_name], capture_output=True, check=True)
+            return
+    why = (pulled.stderr.strip().splitlines() or [f"docker pull exited {pulled.returncode}"])[-1]
+    if not image.buildable:
+        raise RuntimeError(f"Couldn't pull {image.pinned_name}: {why}")
+    logger.warning("Couldn't pull %s, so it's built from its build context: %s", image.pinned_name, why)
+    build(image)
+
+
+async def pull_here(image: DockerImageArtifact) -> None:
+    """``pull`` off the event loop."""
+    await asyncio.to_thread(pull, image)
+
+
 async def saved_here(image: DockerImageArtifact) -> str:
     """The object url of ``image`` built here and saved as a tar.gz, which a VM on this machine loads; saved once per
     sources."""
@@ -109,6 +150,19 @@ def _built_from(image_name: str) -> str | None:
     except FileNotFoundError:  # no docker on PATH, so no image here; a build says so
         return None
     return (result.stdout.strip() or None) if result.returncode == 0 else None
+
+
+def _repo_digests(image_name: str) -> set[str]:
+    """The digests this machine's image ``image_name`` was pulled by, none when it has none or there's no such image."""
+    try:
+        result = subprocess.run(["docker", "image", "inspect", "--format", "{{json .RepoDigests}}", image_name],
+                                capture_output=True, text=True, errors="replace")
+    except FileNotFoundError:  # no docker on PATH, so no image here
+        return set()
+    try:
+        return {ref.rpartition("@")[2] for ref in json.loads(result.stdout) or []} if result.returncode == 0 else set()
+    except ValueError:
+        return set()
 
 
 def _saved_here(image: DockerImageArtifact) -> str:

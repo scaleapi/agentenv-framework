@@ -15,16 +15,17 @@ import stat
 import tomllib
 import unicodedata
 from collections import Counter, defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, NoReturn
 
-from agent_env.bundle._fs import Unreadable, fold, home, on_disk, os_reason, read_regular, show
+from agent_env.bundle._fs import Unreadable, fold, home, on_disk, read_regular, show
 from agent_env.entity.refs import EntityKind
+from agent_env.plugins._bundles import ALIASES_FILE, read_aliases
 from agent_env.store.ids import LOCAL_PREFIX, MAX_AUTHORED_LOCAL_ID_BYTES, validate_local_id
-from agent_env.utils.paths import LEAVINGS
+from agent_env.utils.paths import LEAVINGS, os_reason
 
 BUNDLE_TOML = "bundle.toml"
 DOCKERFILE = "Dockerfile"
@@ -83,6 +84,9 @@ class Bundle:
     description: str | None  # README.md's first line of text
     entries: tuple[BundleEntry, ...]
     ignored: tuple[Path, ...]  # root-relative, as on disk: entries that are neither kinds nor entities
+    # The aliases its aliases.toml gives its agents, by agent name, which a reference names an agent by once the bundle
+    # is installed.
+    aliases: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 class BundleError(ValueError):
@@ -122,6 +126,7 @@ class _Parser:
         self.name = name or unicodedata.normalize("NFC", root.name)
         self.problems: list[str] = []
         self.ignored: list[Path] = []
+        self.aliases_file: Path | None = None
         self.entry_point = id_root is not None
         self.root_ok = True
         if id_root is None:
@@ -139,6 +144,7 @@ class _Parser:
         kinds, description = self._scan_root()
         entries = [entry for kind, path in kinds.items() for entry in self._scan_kind(kind, path)]
         self._check_unique(entries)
+        aliases = self._aliases(entries)
         if self.problems:
             raise BundleError(self.problems)
         entries.sort(key=lambda entry: (_ORDER[entry.kind], entry.name))
@@ -149,7 +155,32 @@ class _Parser:
             description=description,
             entries=tuple(entries),
             ignored=tuple(sorted(self.ignored)),
+            aliases=aliases,
         )
+
+    def _aliases(self, entries: list[BundleEntry]) -> dict[str, tuple[str, ...]]:
+        """The aliases the bundle's aliases.toml gives its agents. Each names an agent the bundle has, by its folder
+        name, so that agent keeps the id its folder gives it, and none is another of its agents' name or id."""
+        if self.aliases_file is None:
+            return {}
+        declared, problems = read_aliases(self.aliases_file)
+        for problem in problems:
+            self._problem(self.aliases_file, problem)
+        agents = {entry.name: entry for entry in entries if entry.kind is BundleKind.AGENT}
+        taken = {key: entry for entry in agents.values() for key in (entry.name, entry.id)}
+        for name, aliases in declared.items():
+            agent = agents.get(name)
+            if agent is None:
+                self._problem(self.aliases_file, f"agents.{name}: this bundle has no agent {name!r}")
+                continue
+            if agent.id != f"{self.id_root}/{name}":
+                self._problem(self.aliases_file, f"agents.{name}: the agent declares the id {agent.id!r}, and an alias "
+                              f"names an agent by its folder, so it must keep the id {self.id_root}/{name}")
+            for alias in aliases:
+                if (other := taken.get(alias)) is not None and other is not agent:
+                    what = "name" if alias == other.name else "id"
+                    self._problem(self.aliases_file, f"agents.{name}: {alias!r} is the agent {other.name!r}'s {what}")
+        return declared
 
     def _derive_id_root(self) -> str:
         id_root, problems = _id_root(self.root)
@@ -179,6 +210,14 @@ class _Parser:
             if fold(entry.name) == fold(BUNDLE_TOML):
                 self._problem(entry.path, "reserved: a bundle takes its name from the folder and its "
                               "description from README.md")
+            elif entry.name == ALIASES_FILE:
+                node = self._node(Path(entry.path), entry)
+                if node == _FILE:
+                    self.aliases_file = Path(entry.path)
+                elif node == _DIR:
+                    self._problem(entry.path, "must be a file, not a folder")
+            elif fold(entry.name) == fold(ALIASES_FILE):
+                self._problem(entry.path, f"spell it {ALIASES_FILE}, the file a bundle gives its agents' aliases in")
             elif entry.name in by_dir:
                 node = self._node(Path(entry.path), entry)
                 if node == _DIR:

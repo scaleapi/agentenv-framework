@@ -1,6 +1,7 @@
 """What the bundle tests share: laying out and planning a folder, the @local namespace's store, and a
 configured store that fails any test reaching it."""
 
+import shutil
 from pathlib import Path
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
@@ -8,6 +9,7 @@ from agent_env.bundle import parse_bundle
 from agent_env.bundle.plan import plan_bundle
 from agent_env.bundle.resolve import BuiltImage, resolve_bundle
 from agent_env.config import get_config
+from agent_env.env.published_images import AGENT_IMAGES
 from agent_env.store.document_store import DocumentStore
 
 # The digest the registry fixture pins every tag to.
@@ -28,6 +30,14 @@ def context_image(root, id, files=None, dockerfile="Dockerfile", folder=None):
                       "unread.md": "never copied\n"}
     context = layout(root / "contexts" / (folder or id), files)
     return DockerImageArtifact.put_context(id, description=id, context_path=str(context), dockerfile_path=dockerfile)
+
+
+def shipped_agent(root, name="solver"):
+    """A copy of the Claude Code agent agent-env ships, as ``root``'s agent ``name``: the sources its image is published
+    for."""
+    shutil.copytree(AGENT_IMAGES[0].dockerfile.parent, root / "agents" / name,
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    return root / "agents" / name
 
 
 def listing(folder):

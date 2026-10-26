@@ -13,6 +13,7 @@ from agent_env.bundle.installed import CORE, installed_bundles
 from agent_env.bundle.plan import check_bundle, plan_bundle
 from agent_env.bundle.resolve import resolve_bundle
 from agent_env.config import get_config
+from agent_env.plugins._bundles import installed_aliases
 from tst.unit.bundle._support import layout
 
 
@@ -33,6 +34,18 @@ def test_a_shipped_bundle_parses_resolves_and_passes_the_checks_a_run_makes(name
     assert bundle.problem is None and bundle.root is not None, bundle.problem
 
     check_bundle(resolve_bundle(parse_bundle(bundle.root, id_root=bundle.id_root)), installed=installed_bundles)
+
+
+def test_the_shipped_aliases_are_agent_envs_alone_and_claude_code_names_the_default_agent():
+    """Two shipped bundles giving one alias would leave it naming neither."""
+    table = installed_aliases(tuple(_shipped().values()))
+
+    assert table.refused == {} and table.refused_claims == {}
+    assert {alias: named.agent_id for alias, named in table.aliases.items()} == {
+        "claude-code": "@local/agentenv-framework/agents/claude-code", "pi": "@local/agentenv-framework/agents/pi",
+        "openhands": "@local/agentenv-framework/agents/openhands", "codex": "@local/agentenv-framework/agents/codex",
+        "gemini": "@local/agentenv-framework/agents/gemini", "opencode": "@local/agentenv-framework/agents/opencode"}
+    assert table.target("claude-code").agent_id == get_config().get_default_a2a_agent_id()
 
 
 def test_a_task_naming_no_agent_plans_with_the_shipped_default(tmp_path, monkeypatch, local_stores, cli_routing):

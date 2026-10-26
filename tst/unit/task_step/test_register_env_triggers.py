@@ -228,6 +228,14 @@ async def test_a_gateway_without_provoking_roles_refuses_a_trigger_that_lists_ro
     assert sent == []
 
 
+@pytest.mark.asyncio
+async def test_a_gateway_that_declares_website_triggers_takes_them(monkeypatch):
+    sent = _mock_gateway(monkeypatch, {"ok": True, "added": ["visit"], "all": ["visit"]})
+    triggers = [{"id": "visit", "when": {"type": "website", "app": "mail", "method": "GET"}, "actions": []}]
+    await _step(triggers=triggers).execute(_context())
+    assert json.loads(sent[0].content)["triggers"] == triggers
+
+
 _HOURS = {"start": "09:00", "end": "17:00", "utc_offset": "-07:00"}
 
 
@@ -264,7 +272,8 @@ async def test_executor_hours_for_an_agent_no_trigger_uses_raise(monkeypatch):
      None, "unless"),
     ([{"id": "x", "when": {"type": "action", "tool": "t"}, "actions": [{"type": "nl", "instruction": "x"}]}],
      {"exec-1": _HOURS}, "executor_hours"),
-], ids=["delay", "unless", "hours"])
+    ([{"id": "x", "when": {"type": "website", "app": "mail", "method": "POST"}, "actions": []}], None, "website"),
+], ids=["delay", "unless", "hours", "website"])
 async def test_a_gateway_without_a_feature_refuses_the_triggers_that_use_it(monkeypatch, triggers, hours, missing):
     sent = _mock_gateway(monkeypatch, {})
     context = _context(with_executor=True)
@@ -272,6 +281,52 @@ async def test_a_gateway_without_a_feature_refuses_the_triggers_that_use_it(monk
     with pytest.raises(RuntimeError, match=rf"does not declare \['{missing}'\]"):
         await _step(triggers=triggers, executor_agent_name="exec-1", executor_hours=hours).execute(context)
     assert sent == []
+
+
+_ZONE_HOURS = {"start": "09:00", "end": "17:00", "time_zone": "America/New_York"}
+_NL_TRIGGERS = [{"id": "x", "when": {"type": "action", "tool": "t"}, "actions": [{"type": "nl", "instruction": "x"}]}]
+
+
+@pytest.mark.asyncio
+async def test_a_gateway_without_time_zone_hours_refuses_them(monkeypatch):
+    sent = _mock_gateway(monkeypatch, {"ok": True, "added": ["x"], "all": ["x"]})
+    context = _context(with_executor=True)
+    context.deployed_envs = [_record(_with_features(
+        "named_executors", "provoking_roles", "action_delay", "executor_hours", "unless"))]
+
+    with pytest.raises(RuntimeError, match=r"does not declare \['executor_hours_time_zone'\]"):
+        await _step(triggers=_NL_TRIGGERS, executor_agent_name="exec-1",
+                    executor_hours={"exec-1": _ZONE_HOURS}).execute(context)
+    assert sent == []
+
+    await _step(triggers=_NL_TRIGGERS, executor_agent_name="exec-1", executor_hours={"exec-1": _HOURS}).execute(context)
+    assert json.loads(sent[0].content)["executor"]["hours"] == _HOURS
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("executor_hours", [{"bob": _ZONE_HOURS}, {"exec-1": _HOURS, "bob": _ZONE_HOURS}],
+                         ids=["named-executor", "beside-the-default-executor"])
+async def test_a_gateway_without_time_zone_hours_refuses_them_on_a_named_executor(monkeypatch, executor_hours):
+    sent = _mock_gateway(monkeypatch, {})
+    context = TaskStepContext(deployed_envs=[_record(_with_features(
+        "named_executors", "provoking_roles", "action_delay", "executor_hours", "unless"))], deployed_agents=[
+        DeployedAgent(agent_name="exec-1", api_url="http://exec:9000", role="executor"),
+        DeployedAgent(agent_name="alice", api_url="http://alice:9000", role="alice@example.com"),
+        DeployedAgent(agent_name="bob", api_url="http://bob:9000", role="bob@example.com"),
+    ], metadata={})
+
+    with pytest.raises(RuntimeError, match=r"does not declare \['executor_hours_time_zone'\]"):
+        await _step(triggers=_NAMED_TRIGGERS, executor_agent_name="exec-1",
+                    executor_hours=executor_hours).execute(context)
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_executor_hours_in_a_time_zone_reach_a_gateway_that_takes_them_as_given(monkeypatch):
+    sent = _mock_gateway(monkeypatch, {"ok": True, "added": ["x"], "all": ["x"]})
+    await _step(triggers=_NL_TRIGGERS, executor_agent_name="exec-1",
+                executor_hours={"exec-1": _ZONE_HOURS}).execute(_context(with_executor=True))
+    assert json.loads(sent[0].content)["executor"]["hours"] == _ZONE_HOURS
 
 
 _NAMED_TRIGGERS = [

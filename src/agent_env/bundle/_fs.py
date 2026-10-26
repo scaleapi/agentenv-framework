@@ -4,12 +4,13 @@ messages."""
 
 from __future__ import annotations
 
-import errno
 import os
 import stat
 import sys
 import unicodedata
 from pathlib import Path
+
+from agent_env.utils.paths import os_reason
 
 try:
     import fcntl
@@ -98,14 +99,6 @@ def read_regular(path: Path) -> bytes:
 def fold(name: str) -> str:
     """The canonical caseless form: casefold output isn't always NFC, so normalize both sides."""
     return unicodedata.normalize("NFC", unicodedata.normalize("NFC", name).casefold())
-
-
-def os_reason(e: OSError) -> str:
-    if e.errno == errno.ELOOP:
-        return "a symlink loop, or too many links"
-    if isinstance(e, PermissionError):
-        return "permission denied"
-    return e.strerror or str(e)
 
 
 def with_article(noun: str) -> str:

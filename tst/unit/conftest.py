@@ -40,6 +40,13 @@ def _docker_answers(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _nothing_published(monkeypatch):
+    """Unit tests reach no registry, so no infra image is published for them and a run builds its infra. Tests of
+    pulling patch the lookup."""
+    monkeypatch.setattr("agent_env.env.published_images._registry_digest", lambda ref: None)
+
+
+@pytest.fixture(autouse=True)
 def deprecations_fire_again():
     """``warn_deprecated`` warns once per process; each test sees its own first use."""
     reset_deprecation_state()

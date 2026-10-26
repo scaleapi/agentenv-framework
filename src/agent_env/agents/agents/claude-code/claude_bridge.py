@@ -560,6 +560,16 @@ async def _stream_cli(proc, stdin_data: bytes, on_line: Callable[[str], None]) -
         stderr_task.cancel()
 
 
+# Behind a gateway the CLI gives a bare id of these a 200K window, and envs whose tool definitions alone pass that
+# make it exit with "Autocompact is thrashing". Add a model only once the pinned CLI maps its [1m] form.
+_NATIVE_1M_MODELS = frozenset({"claude-opus-5", "claude-opus-5-5", "claude-fable-5-1", "claude-opus-4-8",
+                               "claude-opus-4-7"})
+
+
+def _with_1m_window(model: str) -> str:
+    return f"{model}[1m]" if model in _NATIVE_1M_MODELS else model
+
+
 def _command(session_id: str, resume: bool, *, model: str | None, allowed_tools: list[str] | None,
              mcp_servers: dict[str, dict] | None, system_prompt: str | None, output_format: dict | None,
              role: str | None, effort: str | None, max_turns: int | None) -> list[str]:
@@ -568,7 +578,7 @@ def _command(session_id: str, resume: bool, *, model: str | None, allowed_tools:
            "--setting-sources", "user"]
     cmd += ["--resume", session_id] if resume else ["--session-id", session_id]
     if model:
-        cmd += ["--model", model]
+        cmd += ["--model", _with_1m_window(model)]
     if system_prompt:
         cmd += ["--system-prompt", system_prompt]
     if effort:

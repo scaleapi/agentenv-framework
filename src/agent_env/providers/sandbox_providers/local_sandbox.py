@@ -38,7 +38,7 @@ except ImportError:  # Windows, which agent-env does not target.
 from agent_env import config
 from agent_env.attribution import Attribution
 from agent_env.config.paths import state_root
-from agent_env.providers.sandbox_providers.host_images import build_here, built_here
+from agent_env.providers.sandbox_providers.host_images import build_here, built_here, present, pull_here
 from agent_env.providers.sandbox_providers.sandbox import SANDBOX_LABEL, NetworkPolicy, VmSandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_CONTAINER,
@@ -186,6 +186,8 @@ class LocalSandbox(VmSandbox):
 
     ON_THIS_MACHINE = True
     platform = None  # this machine's Docker runs its own platform, and emulates others where it's set up
+    # The images its provider's prepare_image had this machine's Docker hold, which its containers start from as they are.
+    prepared: frozenset[str] = frozenset()
 
     def url_from_sandbox(self, url: str) -> str:
         return LocalSandboxProvider.get_external_url(url)
@@ -223,10 +225,22 @@ class LocalSandbox(VmSandbox):
             await build_here(artifact)
 
     async def pull_images(self, image_names: list[str]) -> None:
-        """Pull each image but one this machine built from a build context, which no registry holds."""
-        built = await asyncio.gather(*(asyncio.to_thread(built_here, name) for name in image_names))
-        if pulled := [name for name, here in zip(image_names, built) if not here]:
+        """Pull each image but one this machine built from a build context, which no registry holds, and one its Docker
+        holds that its provider prepared (``prepared``) or under a name pinned to a digest, so a tag isn't pulled again
+        over the image a digest names."""
+        held = await asyncio.gather(*(asyncio.to_thread(self._held, name) for name in image_names))
+        if pulled := [name for name, here in zip(image_names, held) if not here]:
             await super().pull_images(pulled)
+
+    def _held(self, image_name: str) -> bool:
+        return built_here(image_name) or ((image_name in self.prepared or "@sha256:" in image_name)
+                                          and present(image_name))
+
+    async def pull_published(self, artifacts: list) -> list:
+        """Pull each published image but one this machine's Docker already holds under its name, so a run after the
+        first needs no registry."""
+        held = await asyncio.gather(*(asyncio.to_thread(present, artifact.image_name) for artifact in artifacts))
+        return await super().pull_published([artifact for artifact, here in zip(artifacts, held) if not here])
 
     def host_port(self, port: int) -> int:
         """The allocated host port for a published container port (identity if unmapped)."""
@@ -573,6 +587,12 @@ class LocalSandboxProvider(SandboxProvider):
     SANDBOX_ACCEPTS = Accepts.NAME_OR_CONTEXT
     CONTAINER_ACCEPTS = Accepts.NAME_OR_CONTEXT
 
+    @property
+    def _prepared(self) -> set[str]:
+        """The images prepare_image had this machine's Docker hold, by name; made on first use, so a subclass with an
+        ``__init__`` of its own needn't call this one's."""
+        return self.__dict__.setdefault("_prepared_images", set())
+
     def url_from_sandbox(self, url: str) -> str:
         return self.get_external_url(url)
 
@@ -598,6 +618,7 @@ class LocalSandboxProvider(SandboxProvider):
         sandbox = LocalSandbox(port_map=port_map)
         (sandbox.work_dir / _PORT_MAP_FILE).write_text(json.dumps(sandbox._port_map))
         sandbox.network_policy = self.effective_network_policy(network_policy)
+        sandbox.prepared = frozenset(self._prepared)
         return sandbox
 
     async def create_container(
@@ -664,9 +685,14 @@ class LocalSandboxProvider(SandboxProvider):
         await start_trusting(sandbox, sandbox.container_name, trust_dir)
 
     async def prepare_image(self, image: Any, *, attribution: Optional[Attribution] = None) -> None:
-        """Build a context-only image on this machine, whose containers the local provider starts by name."""
+        """Have this machine's Docker hold the image the local provider starts containers from by name: one that is only
+        a build context built here, and one with a digest pulled by it, or built from its build context when it can't
+        be."""
         if image.context_only:
             await build_here(image)
+        elif image.image_digest:
+            await pull_here(image)
+            self._prepared.add(image.image_name)
 
     async def create_sandbox(
         self,

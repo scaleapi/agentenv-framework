@@ -15,6 +15,8 @@ from agentenv_protocol.a2a_agent import STANDARD_EXTENSIONS
 from agent_env.config import get_config
 from agent_env.config.model import MODEL_HEADERS_ENV
 from agent_env.entity.refs import EntityRef
+from agent_env.plugins._bundles import installed_aliases
+from agent_env.store.base import NotFoundError
 from agent_env.providers.sandbox_providers.sandbox import (
     SANDBOX_LABEL,
     NetworkPolicy,
@@ -41,7 +43,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
 from agent_env.attribution import Attribution
 
 if TYPE_CHECKING:
-    from agent_env.a2a_agent.store import A2AAgentQuery
+    from agent_env.a2a_agent.store import A2AAgentQuery, A2AAgentStore
     from agent_env.bundle.authoring import AuthoringContext
     from agent_env.entity.export import ExportContext
     from agent_env.artifact import CliArtifact
@@ -72,6 +74,15 @@ def unwritten_local_agent(agent_id: str, field: str) -> str:
     return (f"there is no agent {agent_id!r} in the store: an @local agent is written by `agent-env run` of the bundle "
             f"that defines it or uses it, so run the task through that bundle, or point {field} or [agents] "
             "default_a2a_agent_id at an agent the store holds")
+
+
+def _holds(store: A2AAgentStore, agent_id: str) -> bool:
+    """Whether ``store`` has an agent of ``agent_id``, at any version."""
+    try:
+        store.get(agent_id)
+    except NotFoundError:
+        return False
+    return True
 
 
 @dataclass
@@ -398,8 +409,34 @@ class A2AAgent:
 
     @classmethod
     def get(cls, id: str, version: Optional[int] = None) -> A2AAgent:
+        """The agent ``id`` names: the store's agent of that id, else the agent an installed bundle gives the alias
+        ``id``, which the store holds once a run of a bundle has used it. An alias takes no version, and a version the
+        store's agent of that id lacks is missing. Raises NotFoundError."""
         from .store import get_a2a_agent_store
-        return get_a2a_agent_store().get(id, version)
+        store = get_a2a_agent_store()
+        try:
+            return store.get(id, version)
+        except NotFoundError:
+            if not isinstance(id, str) or id.startswith("@") or "/" in id:  # neither an alias nor close to one
+                raise
+            aliases = installed_aliases()
+            named, refusal = aliases.target(id), aliases.refusal(id)
+            if named is None and refusal is None:
+                if version is None and (hint := aliases.hint(id)):
+                    raise NotFoundError(f"there is no agent {id!r} in the store{hint}") from None
+                raise
+            if version is not None and _holds(store, id):
+                raise
+            if named is None:
+                raise NotFoundError(refusal) from None
+            if version is not None:
+                raise NotFoundError(f"{id!r} is an alias of {named.agent_id}, which comes with {named.declared_by}, so "
+                                    "it has no fixed version; drop the pin") from None
+        try:
+            return store.get(named.agent_id)
+        except NotFoundError:
+            raise NotFoundError(f"{id!r} is an alias of {named.agent_id}, which comes with {named.declared_by} and isn't "
+                                "in the store yet: an `agent-env run` of a bundle that uses it writes it") from None
 
     @classmethod
     def put(cls, **kwargs) -> A2AAgent:

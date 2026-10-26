@@ -10,5 +10,6 @@ import agent_env
 AGENT_DIR = Path(agent_env.__file__).parent / "agents" / "agents" / "claude-code"
 sys.path.insert(0, str(AGENT_DIR))
 a2a_server = importlib.import_module("a2a_server")
+tar_changelog = importlib.import_module("tar_changelog")
 claude_bridge = importlib.import_module("claude_bridge")
 kit = importlib.import_module("kit")

@@ -9,11 +9,14 @@ writes to one.
 A reference by id to an env, agent or artifact an installed bundle defines, and a step's fallback to the configured
 default agent when an installed bundle defines it, pulls that entity into the plan with what it references in its
 bundle, so the run checks and writes it as it does its own. Such an id has no fixed version, and one the installed
-bundle doesn't define is refused rather than read from the store.
+bundle doesn't define is refused rather than read from the store. A reference to an agent by an alias an installed
+bundle gives it (its ``aliases.toml``) does the same, unless the store has an agent of that id, which it names instead;
+the task is written naming the agent by its id.
 """
 
 from __future__ import annotations
 
+import copy
 import heapq
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
@@ -22,18 +25,22 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agent_env.a2a_agent import A2AAgent
+from agent_env.a2a_agent.store import get_a2a_agent_store
 from agent_env.artifact import Artifact, CliArtifact, EnvironmentArtifact, SeedsEnvironments
 from agent_env.artifact.artifact import FolderChild
+from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.registry import canonical_type, get_artifact_registry
 from agent_env.config import get_config
-from agent_env.entity.refs import EntityKind, default_agent_refs
+from agent_env.entity.refs import EntityKind, RefRole, default_agent_refs, ref_sites
 from agent_env.env.env import Env
 from agent_env.env.envs._deployment import provider_refusal
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.website import WebsiteEnv
+from agent_env.env.published_images import published_agent_image
 from agent_env.env.registry import get_env_registry
 from agent_env.env.store import ENVS_COLLECTION
+from agent_env.plugins._bundles import InstalledAliases, installed_aliases
 from agent_env.providers.env_providers.constants import (
     AGENT_ENV_WEBSITE_BACKEND_SUFFIX,
     AGENT_ENV_WEBSITE_FRONTEND_SUFFIX,
@@ -47,10 +54,13 @@ from agent_env.store.routing import namespace_routing_enabled
 from agent_env.task import Task
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_step import TaskStep
+from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
+from agent_env.task_step.task_steps.install_agent import InstallAgentTaskStep
 from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
+from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 
 from ._fs import fold, relative, with_article
-from .authoring import AuthoringContext, entry_files
+from .authoring import AuthoringContext, entry_files, staged_build_context
 from .parse import NAMED_BY, Bundle, BundleEntry, BundleError, BundleKind, parse_bundle
 from .resolve import BuiltImage, BundleImage, Reference, ResolvedBundle, ResolvedEntry, build_step, resolve_bundle
 
@@ -63,7 +73,13 @@ Installed = Callable[[], "tuple[InstalledBundle, ...]"]
 # The kinds a reference pulls in from an installed bundle.
 _PULLED = (EntityKind.ENV, EntityKind.AGENT, EntityKind.ARTIFACT)
 
-STORE_GETTERS = {EntityKind.ENV: Env.get, EntityKind.AGENT: A2AAgent.get, EntityKind.ARTIFACT: Artifact.get,
+
+def _stored_agent(id: str, version: int | None) -> A2AAgent:
+    """The store's agent of ``id`` itself: a plan weighs an installed alias against the store on its own."""
+    return get_a2a_agent_store().get(id, version)
+
+
+STORE_GETTERS = {EntityKind.ENV: Env.get, EntityKind.AGENT: _stored_agent, EntityKind.ARTIFACT: Artifact.get,
                  EntityKind.TASK: Task.get}
 
 # The type a field naming an environment artifact takes: what an artifact referencing one holds.
@@ -76,6 +92,53 @@ _FOLDER_HOOKS = {"written_besides": Artifact, "seeded_environments": SeedsEnviro
 _ENV_FROM_TOMLS = (Env, MCPServerEnv, WebsiteEnv, MultiEnv)
 
 _NOTHING_TO_RUN = "this bundle has no tasks or evals to run"
+
+
+@dataclass(frozen=True)
+class Publication:
+    """The image published for the sources a bundle builds an agent's image from, which the run registers by its tag
+    and digest, with those sources as its build context."""
+
+    ref: str  # its repository and source tag
+    digest: str
+    sources: str  # the source digest of the build context it was found for
+
+    @property
+    def pinned(self) -> str:
+        return f"{self.ref}@{self.digest}"
+
+    def unwritten(self, image_id: str) -> DockerImageArtifact:
+        """The image as the run will store it as ``image_id``, but for its build context, which only the write uploads:
+        what a deploy's providers are checked against before it's written."""
+        return DockerImageArtifact(id=image_id, description="", image_name=self.ref, image_digest=self.digest,
+                                   source_digest=self.sources)
+
+
+@dataclass(frozen=True)
+class AliasUse:
+    """An agent alias the run names, and the agent it names: the one an installed bundle gives the alias or, when the
+    store has an agent of that id, that one, which shadows it."""
+
+    alias: str
+    target_id: str  # the agent the installed bundle gives the alias
+    declared_by: str  # "<dist>'s <name> bundle"
+    store_version: int | None = None  # the store's agent of the alias's id, when it shadows the alias
+
+    @property
+    def agent_id(self) -> str:
+        """The id of the agent the alias names in this run."""
+        return self.alias if self.store_version is not None else self.target_id
+
+
+@dataclass(frozen=True)
+class AgentOverride:
+    """The agent a run deploys for the solver in place of the one each task names: at each step that deploys or
+    installs an agent a step prompts, not as its user simulator (``solver_steps``), by task id."""
+
+    name: str  # as the run was given it
+    agent_id: str
+    steps: Mapping[str, tuple[str, ...]]
+    version: int | None = None  # the store's version the plan read; None for an agent the run writes
 
 
 @dataclass(frozen=True)
@@ -97,6 +160,11 @@ class Plan:
     store_refs: tuple[Reference, ...]  # the store ids the writes reference, checked to exist
     store_latest: dict[tuple[EntityKind, str], int]  # the version each unpinned store ref named when planned
     origins: Mapping[BundleEntry, Bundle] = field(default_factory=dict)  # each entry from another bundle, with it
+    # Each agent image the bundle builds from a shipped agent's sources, by id: the image published for them, which the
+    # run registers in place of its build context alone.
+    published: Mapping[str, Publication] = field(default_factory=dict)
+    aliases: Mapping[str, AliasUse] = field(default_factory=dict)  # each agent alias the run names, by alias
+    agent: AgentOverride | None = None  # the agent --agent names for the solver
 
     def bundle_of(self, entry: BundleEntry) -> Bundle:
         """The bundle ``entry`` comes from: the installed one for an entry pulled in from one, else the run's."""
@@ -109,12 +177,13 @@ class Plan:
 
 
 def plan_bundle(resolved: ResolvedBundle, *, tasks: Sequence[str] = (), evals: Sequence[str] = (),
-                installed: Installed | None = None) -> Plan:
+                installed: Installed | None = None, agent: str | None = None) -> Plan:
     """Plan a run of ``tasks`` and ``evals``, each a name or id in this bundle. With neither, the
     run is every eval or, in a bundle without evals, every task. ``installed`` lists the installed bundles whose
-    entities a reference pulls in (``installed_bundles``); without it, an id under one is a store id. Raises
+    entities a reference pulls in (``installed_bundles``); without it, an id under one is a store id. ``agent`` names
+    the agent the solver runs as, as a task's reference would, leaving the tasks as written (``Plan.agent``). Raises
     BundleError listing every problem found."""
-    return _Planner(resolved, installed).plan(tasks, evals)
+    return _Planner(resolved, installed).plan(tasks, evals, agent)
 
 
 def check_bundle(resolved: ResolvedBundle, *, installed: Installed | None = None) -> None:
@@ -152,6 +221,9 @@ class _Planner:
         self.others: tuple[InstalledBundle, ...] | None = None  # the installed bundles but this one, once listed
         self.pullable: dict[str, _Pullable | str] = {}  # each installed bundle read, by id root, or why it can't be
         self.unpulled: dict[tuple[EntityKind, str, int | None], str] = {}  # why an installed bundle's id isn't pulled
+        self.alias_table: InstalledAliases | None = None  # the installed aliases, once a plan reads them
+        self.alias_uses: dict[str, AliasUse] = {}  # each alias the plan names, by alias
+        self.alias_stored: dict[str, int | None] = {}  # the store's latest version of each alias's id, as read
         self.pulling: set[_Key] = set()
         self.own = _by_id(resolved.bundle)  # what a pulled entity's id names in this bundle
         images: dict[BundleEntry, list[BundleImage]] = {}
@@ -185,21 +257,138 @@ class _Planner:
             return entry
         return replace(entry, references=tuple(references))
 
-    def _default_agents(self, task: ResolvedEntry) -> list[Reference]:
-        """A reference to the configured default agent for each step of ``task`` that leaves an agent field unset,
-        when this bundle or an installed one defines that agent. One in the store is preflight's to check."""
+    def _default_agents(self, task: ResolvedEntry, agent_id: str | None = None) -> list[Reference]:
+        """A reference to the configured default agent, or ``agent_id``, for each step of ``task`` that leaves an agent
+        field unset, when this bundle or an installed one defines that agent. One in the store is preflight's to
+        check."""
         registry = get_task_step_registry()
         found = []
         for step in task.config:
             cls = registry.get(step.get("type")) if isinstance(step.get("type"), str) else None
             for field_ref in default_agent_refs(cls.entity_refs or () if cls is not None else (), step):
                 version = step.get(field_ref.version_field) if field_ref.version_field else None
-                ref = Reference(EntityKind.AGENT, get_config().get_default_a2a_agent_id(), version, None,
+                ref = Reference(EntityKind.AGENT, agent_id or get_config().get_default_a2a_agent_id(), version, None,
                                 f"step {step.get('id')!r}: {field_ref.path} (the default agent)", None)
                 pulled = self._pulled(ref)
                 if pulled.local is not None or (ref.kind, ref.id, ref.version) in self.unpulled:
                     found.append(pulled)
         return found
+
+    # Agents named by an installed bundle's alias
+
+    def _resolve_aliases(self) -> dict[str, AliasUse]:
+        """Point each task's reference to an agent by an alias an installed bundle gives it, and the configured default
+        when it's one, at that agent, pulled into the plan, unless the store has an agent of the alias's id, which the
+        reference keeps naming. A field naming the alias is rewritten to the agent's id. A reference that can't be
+        pointed at the alias's agent is left with the problem the store ref check reports."""
+        if self.installed is None:
+            return {}
+        table, uses, stored, default = installed_aliases(self.installed()), self.alias_uses, self.alias_stored, _UNREAD
+        self.alias_table = table
+        for index, entry in enumerate(self.entries):
+            if entry.entry.kind is not BundleKind.TASK:
+                continue
+            references, aliased = [], {}
+            for ref in entry.references:
+                use = None
+                if ref.kind is EntityKind.AGENT and ref.local is None:
+                    use = self._alias_use(table, ref.id, ref.version, uses, stored)
+                if isinstance(use, str):
+                    self.unpulled[ref.kind, ref.id, ref.version] = use
+                elif use is not None and use.store_version is None:
+                    aliased[ref.id] = use.target_id
+                    ref = self._pulled(replace(ref, id=use.target_id))
+                references.append(ref)
+            if _leaves_an_agent_unset(entry):
+                if default is _UNREAD:
+                    default = self._alias_use(table, get_config().get_default_a2a_agent_id(), None, uses, stored)
+                    if isinstance(default, str):
+                        self.problems.append(f"[agents] default_a2a_agent_id: {default}")
+                if isinstance(default, AliasUse) and default.store_version is None:
+                    references += self._default_agents(entry, default.target_id)
+            if references != list(entry.references):
+                self._replace(index, replace(entry, config=_renamed(entry.config, aliased), references=tuple(references)))
+        return uses
+
+    def _agent_override(self, name: str) -> AgentOverride | None:
+        """The agent ``name`` names, as a task's reference to it would: this bundle's agent, an installed bundle's
+        pulled in, an alias's, or the store's, read once. Each task with solver steps gets a reference to it, so it's
+        written and checked with what the task needs, and its config is left as written. Records a problem and gives
+        None when ``name`` names no agent, or no task has a step for the solver."""
+        where = f"--agent {name!r}"
+        agents = [entry.entry for entry in self.resolved.entries if entry.entry.kind is BundleKind.AGENT]
+        own = next((agent for agent in agents if _nfc(name) in (agent.name, agent.id)), None)
+        near = next((agent for agent in agents if fold(name) in (fold(agent.name), fold(agent.id))), None)
+        if own is None and near is not None:
+            self.problems.append(f"{where}: isn't in this bundle, but {near.name!r} is; names are case-sensitive")
+            return None
+        if own is not None:
+            ref = Reference(EntityKind.AGENT, own.id, None, own, where, None)
+        else:
+            ref = Reference(EntityKind.AGENT, name, None, None, where, None)
+            use = None if self.alias_table is None else self._alias_use(
+                self.alias_table, name, None, self.alias_uses, self.alias_stored)
+            if isinstance(use, str):
+                self.problems.append(f"{where}: {use}")
+                return None
+            ref = self._pulled(replace(ref, id=use.target_id) if use is not None and use.store_version is None else ref)
+            if (problem := self.unpulled.get((ref.kind, ref.id, None)) or self._unstored(ref)) is not None:
+                self.problems.append(f"{where}: {problem}")
+                return None
+        steps = {}
+        for index, entry in enumerate(self.entries):
+            if entry.entry.kind is BundleKind.TASK and (solver := solver_steps(entry.config)):
+                steps[entry.entry.id] = solver
+                self._replace(index, replace(entry, references=(*entry.references, ref)))
+        if not steps:
+            self.problems.append(f"{where}: no step in this bundle's tasks prompts an agent, so none deploys a solver")
+            return None
+        return AgentOverride(name, ref.local.id if ref.local is not None else ref.id, steps)
+
+    def _unstored(self, ref: Reference) -> str | None:
+        """Why the store has no agent ``ref`` names, a store ref, or None when it has one or ``ref`` is local."""
+        if ref.local is not None:
+            return None
+        try:
+            STORE_GETTERS[EntityKind.AGENT](ref.id, None)
+        except NotFoundError:
+            hint = self.alias_table.hint(ref.id) if self.alias_table is not None else ""
+            return f"there is no agent {ref.id!r} in this bundle, an installed bundle or the store{hint}"
+        except (ValueError, KeyError, TypeError) as e:
+            return f"agent {ref.id!r} can't be read ({type(e).__name__}: {e})"
+        return None
+
+    def _alias_use(self, table: InstalledAliases, agent_id: str, version: int | None, uses: dict[str, AliasUse],
+                   stored: dict[str, int | None]) -> AliasUse | str | None:
+        """What ``agent_id`` names when it's an installed alias, the store's agent of that id read first (its latest
+        version, or None, cached in ``stored``), recorded in ``uses``; why it can't be named so; or None when it's no
+        alias, or names the store's agent as any store reference does: pinned, or with the alias refused."""
+        if agent_id.startswith(LOCAL_PREFIX):
+            return None
+        refusal, named = table.refusal(agent_id), table.target(agent_id)
+        if refusal is None and named is None:
+            return None
+        if agent_id not in stored:
+            try:
+                stored[agent_id] = STORE_GETTERS[EntityKind.AGENT](agent_id, None).version
+            except NotFoundError:
+                stored[agent_id] = None
+            except (ValueError, KeyError, TypeError):  # one the store has but can't read, which the store ref check says
+                return None
+        if stored[agent_id] is not None and (refusal is not None or version is not None):
+            return None
+        if refusal is not None:
+            return refusal
+        if version is not None:
+            return (f"{agent_id!r} is an alias of {named.agent_id}, which comes with {named.declared_by}, so it has no "
+                    "fixed version; drop the pin")
+        return uses.setdefault(agent_id, AliasUse(agent_id, named.agent_id, named.declared_by, stored[agent_id]))
+
+    def _replace(self, index: int, entry: ResolvedEntry) -> None:
+        """Put ``entry`` in place of the bundle's own entry at ``index``, with what it now references."""
+        key = _key(entry.entry)
+        self.entries[index] = self.nodes[key] = entry
+        self.edges[key] = _needs(entry)
 
     def _pulled(self, ref: Reference) -> Reference:
         """``ref``, a store reference, pointing at what its id names: this bundle's entity, for a reference a pulled
@@ -280,12 +469,16 @@ class _Planner:
         self.pulling.discard(key)
         self._add(key, source, _needs(source))
 
-    def plan(self, tasks: Sequence[str], evals: Sequence[str]) -> Plan:
+    def plan(self, tasks: Sequence[str], evals: Sequence[str], agent: str | None = None) -> Plan:
+        aliases = self._resolve_aliases()
+        override = self._agent_override(agent) if agent is not None else None
         self._check_writers()
         self._check_loops()
         selected_tasks, selected_evals = self._selection(tasks, evals)
         closure = self._closure(selected_tasks + selected_evals)
         store_refs, store_latest = self._check_store_refs(closure)
+        if override is not None:
+            override = replace(override, version=store_latest.get((EntityKind.AGENT, override.agent_id)))
         self._build_tasks(closure)
         self._check_files(closure)
         self._check_cli_loads(closure)
@@ -295,8 +488,9 @@ class _Planner:
         self._check_loaded_environments(closure, store_latest)
         if self.problems:
             raise BundleError(self.problems)
-        return Plan(self.resolved, self._ordered(closure), tuple(selected_tasks), tuple(selected_evals), store_refs,
-                    store_latest, dict(self.origins))
+        writes = self._ordered(closure)
+        return Plan(self.resolved, writes, tuple(selected_tasks), tuple(selected_evals), store_refs, store_latest,
+                    dict(self.origins), self._published(writes), aliases, override)
 
     def check(self) -> None:
         self._check_writers()
@@ -488,7 +682,10 @@ class _Planner:
         if found is None:
             at = f" version {ref.version}" if ref.version is not None else ""
             other = self.named.get(fold(ref.id))
-            hint = f"; this bundle's {other.kind.store} {other.name!r} has that name" if other is not None else ""
+            if other is not None:
+                hint = f"; this bundle's {other.kind.store} {other.name!r} has that name"
+            else:
+                hint = self.alias_table.hint(ref.id) if ref.kind is EntityKind.AGENT and self.alias_table else ""
             return f"there is no {kind} {ref.id!r}{at} in the store{hint}"
         if isinstance(found, str):
             return f"{kind} {ref.id!r} {found}"
@@ -793,6 +990,23 @@ class _Planner:
                     heapq.heappush(ready, (self.rank[dependent], dependent))
         return tuple(writes)
 
+    def _published(self, writes: Sequence[Write]) -> dict[str, Publication]:
+        """The published image of each agent image in ``writes`` built from a shipped agent's sources, by id. Only an
+        agent's are looked up, as agent-env publishes no other kind of bundle image."""
+        published = {}
+        for write in writes:
+            image = write.source
+            if not (isinstance(image, BuiltImage) and image.entry.kind is BundleKind.AGENT):
+                continue
+            with staged_build_context(self._bundle_of(image.entry), image.entry, image.dockerfile) as staged:
+                try:
+                    sources, _ = staged.identity(write.id)
+                except ValueError:  # a context its write refuses, which says why
+                    continue
+            if (found := published_agent_image(sources)) is not None:
+                published[write.id] = Publication(*found, sources)
+        return published
+
     def _bundle_of(self, entry: BundleEntry) -> Bundle:
         return self.origins.get(entry, self.resolved.bundle)
 
@@ -836,6 +1050,44 @@ def folder_files(bundle: Bundle, entry: BundleEntry) -> Mapping[str, Path]:
     """What the write of the artifact ``entry`` reads from its folder, which the ledger hashes: every file in it, none
     at all included; a type whose write needs a file says so in its ``accept_toml``. Raises BundleError."""
     return entry_files(bundle, entry, empty_ok=True)
+
+
+_UNREAD: Any = object()  # the configured default agent, before a task needs it
+
+
+def solver_steps(steps: Any) -> tuple[str, ...]:
+    """The ids of the steps in ``steps``, a task's config, that deploy or install an agent a ``prompt_agent`` step
+    prompts, and not as its user simulator: the solver's."""
+    prompts = [step for step in steps if isinstance(step, dict) and step.get("type") == PromptAgentTaskStep.type]
+    prompted = {step.get("agent_name") or TaskStep.DEFAULT_AGENT_NAME for step in prompts}
+    prompted -= {step.get("user_agent_name") or PromptAgentTaskStep.DEFAULT_USER_AGENT_NAME for step in prompts}
+    return tuple(step["id"] for step in steps if isinstance(step, dict) and isinstance(step.get("id"), str)
+                 and step.get("type") in (DeployAgentTaskStep.type, InstallAgentTaskStep.type)
+                 and (step.get("agent_name") or TaskStep.DEFAULT_AGENT_NAME) in prompted)
+
+
+def _leaves_an_agent_unset(task: ResolvedEntry) -> bool:
+    """Whether a step of ``task`` leaves an agent field unset, so deploys the configured default agent."""
+    registry = get_task_step_registry()
+    for step in task.config:
+        cls = registry.get(step.get("type")) if isinstance(step.get("type"), str) else None
+        if any(default_agent_refs(cls.entity_refs or () if cls is not None else (), step)):
+            return True
+    return False
+
+
+def _renamed(steps: Any, ids: Mapping[str, str]) -> Any:
+    """A copy of a task's ``steps`` with each agent field naming an alias in ``ids`` naming that agent's id instead."""
+    if not ids:
+        return steps
+    steps = copy.deepcopy(steps)
+    registry = get_task_step_registry()
+    for step in steps:
+        cls = registry.get(step.get("type")) if isinstance(step.get("type"), str) else None
+        for site in ref_sites(cls.entity_refs or () if cls is not None else (), step):
+            if site.ref.kind is EntityKind.AGENT and site.ref.role is RefRole.INPUT and site.value in ids:
+                site.rewrite(ids[site.value])
+    return steps
 
 
 def _needs(entry: ResolvedEntry) -> list[_Key]:

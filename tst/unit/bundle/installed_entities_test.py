@@ -15,8 +15,13 @@ from agent_env.bundle import run as run_module
 from agent_env.bundle.installed import InstalledBundle
 from agent_env.bundle.ledger import locked_ids
 from agent_env.bundle.materialize import materialize
-from agent_env.bundle.plan import check_bundle, plan_bundle
+from agent_env.a2a_agent import A2AAgent
+from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
+from agent_env.artifact.store import get_artifact_store
+from agent_env.bundle.plan import AliasUse, check_bundle, plan_bundle
 from agent_env.bundle.resolve import resolve_bundle
+from agent_env.plugins._bundles import ALIASES_FILE
+from agent_env.store.routing import namespace_routing
 from tst.unit.bundle._support import RefusingStore, layout, local_builds
 
 ROOT = "@local/~/triage"
@@ -326,3 +331,187 @@ def test_a_run_locks_the_entities_it_pulls_in_as_it_does_its_own(bundle_dir, tmp
         holder.wait()
 
     assert SOLVER in locked_ids(plan) and waited == [False]
+
+
+# Agents named by an alias an installed bundle gives them
+
+ALIASED = {ALIASES_FILE: '[agents]\nsolver = ["solver-x"]\n'}
+
+
+def _store_agent(agent_id):
+    with namespace_routing():
+        image = get_artifact_store().put_document(DockerImageArtifact(
+            id=f"{agent_id}-image", description="d", image_name="ghcr.io/acme/agent:1", tar_gz_s3_url="s3://b/x.tar.gz"))
+        return A2AAgent.put(id=agent_id, docker_image_artifact=image)
+
+
+def _step(plan, step_id="agent"):
+    task = next(write for write in plan.writes if write.kind is BundleKind.TASK)
+    return next(step for step in task.source.config if step["id"] == step_id)
+
+
+def test_an_agent_named_by_an_installed_alias_is_pulled_in_and_the_task_names_it_by_id(bundle_dir, tmp_path):
+    kit = _kit(tmp_path, ALIASED)
+
+    plan = _plan(_task(bundle_dir, [{"id": "agent", "type": "deploy_agent", "a2a_agent_id": "solver-x"}]), kit)
+
+    assert _writes(plan) == [(BundleKind.ARTIFACT, f"{SOLVER}__agent_image"), (BundleKind.AGENT, SOLVER),
+                             (BundleKind.TASK, f"{ROOT}/t")]
+    assert _step(plan)["a2a_agent_id"] == SOLVER
+    assert plan.aliases == {"solver-x": AliasUse("solver-x", SOLVER, "demo-dist's kit bundle")}
+    assert plan.aliases["solver-x"].agent_id == SOLVER and plan.store_refs == ()
+
+
+def test_the_stores_agent_of_an_alias_id_shadows_the_alias(bundle_dir, tmp_path):
+    """Someone's own agent of that id is the one they mean."""
+    kit = _kit(tmp_path, ALIASED)
+    _store_agent("solver-x")
+
+    plan = _plan(_task(bundle_dir, [{"id": "agent", "type": "deploy_agent", "a2a_agent_id": "solver-x"}]), kit)
+
+    assert _writes(plan) == [(BundleKind.TASK, f"{ROOT}/t")] and _step(plan)["a2a_agent_id"] == "solver-x"
+    assert plan.aliases["solver-x"] == AliasUse("solver-x", SOLVER, "demo-dist's kit bundle", store_version=1)
+    assert plan.aliases["solver-x"].agent_id == "solver-x" and [ref.id for ref in plan.store_refs] == ["solver-x"]
+
+
+def test_a_bundles_own_agent_named_like_an_installed_alias_is_the_one_it_names(bundle_dir, tmp_path):
+    kit = _kit(tmp_path, ALIASED)
+
+    plan = _plan(_task(bundle_dir, [{"id": "agent", "type": "deploy_agent", "a2a_agent_id": "solver-x"}],
+                       {"agents/solver-x/Dockerfile": "FROM scratch\n"}), kit)
+
+    assert _step(plan)["a2a_agent_id"] == f"{ROOT}/solver-x" and plan.aliases == {}
+
+
+def test_every_field_naming_an_alias_in_a_task_is_renamed(bundle_dir, tmp_path):
+    kit = _kit(tmp_path, ALIASED)
+
+    plan = _plan(_task(bundle_dir, [
+        {"id": "agent", "type": "deploy_agent", "a2a_agent_id": "solver-x"},
+        {"id": "p", "type": "prompt_agent", "prompt_id": "p", "prompt": "hi", "depends_on": ["agent"]},
+        {"id": "v", **JUDGE, "judge_a2a_agent_id": "solver-x", "depends_on": ["p"]},
+    ]), kit)
+
+    assert _step(plan)["a2a_agent_id"] == _step(plan, "v")["judge_a2a_agent_id"] == SOLVER
+
+
+def test_an_alias_takes_no_pin(bundle_dir, tmp_path):
+    kit = _kit(tmp_path, ALIASED)
+    resolved = _task(bundle_dir, [{"id": "agent", "type": "deploy_agent", "a2a_agent_id": "solver-x",
+                                   "a2a_agent_version": 2}])
+
+    assert _problems(resolved, kit) == (
+        f"tasks/t.json: step 'agent': a2a_agent_id: 'solver-x' is an alias of {SOLVER}, which comes with demo-dist's "
+        "kit bundle, so it has no fixed version; drop the pin",)
+
+
+def test_a_pinned_reference_to_the_stores_agent_of_an_alias_id_names_that_agent(bundle_dir, tmp_path):
+    kit = _kit(tmp_path, ALIASED)
+    _store_agent("solver-x")
+
+    plan = _plan(_task(bundle_dir, [{"id": "agent", "type": "deploy_agent", "a2a_agent_id": "solver-x",
+                                     "a2a_agent_version": 1}]), kit)
+
+    assert [(ref.id, ref.version) for ref in plan.store_refs] == [("solver-x", 1)] and plan.aliases == {}
+
+
+def test_an_alias_two_installed_bundles_give_is_refused_naming_both(bundle_dir, tmp_path):
+    kit = _kit(tmp_path, ALIASED)
+    other = _installed(tmp_path / "site2" / "tools", {"agents/helper/Dockerfile": "FROM scratch\n",
+                                                      ALIASES_FILE: '[agents]\nhelper = ["solver-x"]\n'},
+                       dist="zeta-tools", name="tools")
+    resolved = _task(bundle_dir, [{"id": "agent", "type": "deploy_agent", "a2a_agent_id": "solver-x"}])
+
+    [problem] = _problems(resolved, kit, other)
+
+    assert problem == ("tasks/t.json: step 'agent': a2a_agent_id: 'solver-x' is an alias demo-dist's kit bundle and "
+                       "zeta-tools's tools bundle each give an agent, so it names none of them; name the agent by its id")
+
+
+def test_the_stores_agent_of_a_refused_alias_id_is_the_one_it_names(bundle_dir, tmp_path):
+    kit = _kit(tmp_path, ALIASED)
+    other = _installed(tmp_path / "site2" / "tools", {"agents/helper/Dockerfile": "FROM scratch\n",
+                                                      ALIASES_FILE: '[agents]\nhelper = ["solver-x"]\n'},
+                       dist="zeta-tools", name="tools")
+    _store_agent("solver-x")
+
+    plan = _plan(_task(bundle_dir, [{"id": "agent", "type": "deploy_agent", "a2a_agent_id": "solver-x"}]), kit, other)
+
+    assert [ref.id for ref in plan.store_refs] == ["solver-x"] and plan.aliases == {}
+
+
+def test_an_agent_misspelling_an_alias_is_pointed_at_it(bundle_dir, tmp_path):
+    kit = _kit(tmp_path, ALIASED)
+    resolved = _task(bundle_dir, [{"id": "agent", "type": "deploy_agent", "a2a_agent_id": "solver_x"}])
+
+    assert _problems(resolved, kit) == (
+        "tasks/t.json: step 'agent': a2a_agent_id: there is no agent 'solver_x' in the store; did you mean the alias "
+        "'solver-x'? agent-env a2a-agent list lists the agents a task can name",)
+
+
+def test_an_alias_whose_agent_its_bundle_lacks_is_refused_naming_the_bundle(bundle_dir, tmp_path):
+    kit = _kit(tmp_path, {ALIASES_FILE: '[agents]\nghost = ["ghost"]\n'})
+    resolved = _task(bundle_dir, [{"id": "agent", "type": "deploy_agent", "a2a_agent_id": "ghost"}])
+
+    [problem] = _problems(resolved, kit)
+
+    assert problem.startswith(f"tasks/t.json: step 'agent': a2a_agent_id: '{KIT}/ghost' comes with the installed "
+                              "bundle demo-dist/kit, which can't be read: aliases.toml: agents.ghost: this bundle has "
+                              "no agent 'ghost'")
+
+
+def test_a_default_agent_set_to_an_alias_is_pulled_in_for_a_step_naming_none(bundle_dir, tmp_path, default_agent):
+    kit = _kit(tmp_path, ALIASED)
+    default_agent("solver-x")
+
+    plan = _plan(_task(bundle_dir, [{"id": "agent", "type": "deploy_agent"}]), kit)
+
+    assert (BundleKind.AGENT, SOLVER) in _writes(plan) and "a2a_agent_id" not in _step(plan)
+    assert plan.aliases == {"solver-x": AliasUse("solver-x", SOLVER, "demo-dist's kit bundle")}
+
+
+def test_a_default_agent_set_to_an_alias_no_step_falls_back_to_isnt_read(bundle_dir, tmp_path, default_agent):
+    kit = _kit(tmp_path, ALIASED)
+    default_agent("solver-x")
+
+    plan = _plan(_task(bundle_dir, [{"id": "agent", "type": "deploy_agent", "a2a_agent_id": SOLVER}]), kit)
+
+    assert plan.aliases == {}
+
+
+def test_checking_a_bundle_naming_an_alias_reads_no_store(bundle_dir, tmp_path, monkeypatch):
+    kit = _kit(tmp_path, ALIASED)
+    resolved = _task(bundle_dir, [{"id": "agent", "type": "deploy_agent", "a2a_agent_id": "solver-x"}])
+    monkeypatch.setattr("agent_env.bundle.plan.STORE_GETTERS", RefusingStore())
+
+    check_bundle(resolved, installed=lambda: (kit,))
+
+
+def test_a_dry_run_says_which_agent_an_alias_names_and_preflights_an_aliased_default(bundle_dir, tmp_path,
+                                                                                     default_agent, monkeypatch):
+    default_agent("solver-x")
+    kit = _kit(tmp_path, ALIASED)
+    monkeypatch.setattr(run_module, "installed_bundles", lambda: (kit,))
+    monkeypatch.setattr(preflight_module, "docker_unreachable", lambda: None)
+    _task(bundle_dir, [{"id": "agent", "type": "deploy_agent"}])
+    said = []
+
+    dry = dry_run_bundle(bundle_dir, sandbox="local", on_progress=said.append)
+
+    assert said[0] == f"solver-x → {SOLVER} (the alias demo-dist's kit bundle gives it)"
+    assert [dry.path(entry) for entry in dry.runs] == ["tasks/t.json"]
+
+
+def test_a_dry_run_says_when_the_store_shadows_an_alias(bundle_dir, tmp_path, monkeypatch):
+    kit = _kit(tmp_path, ALIASED)
+    _store_agent("solver-x")
+    monkeypatch.setattr(run_module, "installed_bundles", lambda: (kit,))
+    monkeypatch.setattr(preflight_module, "docker_unreachable", lambda: None)
+    _task(bundle_dir, [{"id": "agent", "type": "deploy_agent", "a2a_agent_id": "solver-x"}])
+    said = []
+
+    dry_run_bundle(bundle_dir, sandbox="local", on_progress=said.append)
+
+    assert said[0] == (f"solver-x → the store's agent 'solver-x' v1, which shadows the alias demo-dist's kit bundle "
+                       f"gives {SOLVER}")
+

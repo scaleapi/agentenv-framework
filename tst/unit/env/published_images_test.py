@@ -1,5 +1,5 @@
-"""The images agent-env publishes for its infra envs: one per shipped Dockerfile, tagged by its sources, and the record
-of their digests a release wheel carries."""
+"""The images agent-env publishes for its infra envs and its agents: one per shipped Dockerfile, tagged by its sources,
+and the record of their digests a release wheel carries."""
 
 import hashlib
 import json
@@ -7,15 +7,27 @@ import shutil
 
 import pytest
 
-from agent_env.env import bootstrap
-from agent_env.env.published_images import REGISTRY, PublishedImage, release_digests, write_release_digests
+from agent_env.env import bootstrap, published_images
+from agent_env.env.published_images import (
+    AGENT_IMAGES,
+    REGISTRY,
+    PublishedImage,
+    _registry_digest,
+    published_agent_image,
+    published_digest,
+    release_digests,
+    write_release_digests,
+)
+from agent_env.store.image_store.registry_api import NoSuchImageError
 from agent_env.utils.docker.context import BuildContext
 
 _DIGEST = "sha256:" + "b" * 64
 
 
 def test_every_shipped_dockerfile_is_published_once_under_a_name_of_its_own():
+    """The infra envs' and every shipped agent's."""
     shipped = [dockerfile for dockerfiles in bootstrap._DOCKERFILES.values() for dockerfile in dockerfiles]
+    shipped += published_images._AGENTS.glob("*/Dockerfile")
 
     assert sorted(image.dockerfile for image in bootstrap.PUBLISHED_IMAGES) == sorted(shipped)
     assert len({image.name for image in bootstrap.PUBLISHED_IMAGES}) == len(bootstrap.PUBLISHED_IMAGES)
@@ -80,3 +92,49 @@ def test_a_file_that_isnt_a_record_is_refused(tmp_path, content, message):
 
     with pytest.raises(ValueError, match=message):
         release_digests(path)
+
+
+def test_an_install_whose_release_recorded_an_images_digest_pulls_it_without_asking_the_registry(tmp_path, monkeypatch):
+    image = bootstrap.PUBLISHED_IMAGES[0]
+    record = tmp_path / "published_images.json"
+    write_release_digests({image.ref(): _DIGEST}, record)
+    monkeypatch.setattr(published_images, "RELEASE_FILE", record)
+    monkeypatch.setattr(published_images, "_registry_digest", lambda ref: pytest.fail(f"asked the registry for {ref}"))
+
+    assert published_digest(image) == _DIGEST
+
+
+def test_an_image_its_release_didnt_record_is_looked_up_and_only_what_was_served_is_remembered(monkeypatch):
+    """A published tag is never moved, so the digest it was served under holds; one not served yet may be later."""
+    monkeypatch.setattr(published_images, "_registry_digest", _registry_digest)
+    monkeypatch.setattr(published_images, "_SERVED", {})
+    served, missing = bootstrap.PUBLISHED_IMAGES[:2]
+    asked = []
+
+    def pin(ref, auth, *, timeout):
+        asked.append((ref, auth, timeout))
+        if ref == missing.ref():
+            raise NoSuchImageError(f"{ref}: ghcr.io has no such image")
+        return f"{ref}@{_DIGEST}"
+
+    monkeypatch.setattr(published_images, "pin_digest", pin)
+
+    assert [published_digest(image) for image in (served, missing, served, missing)] == [_DIGEST, None, _DIGEST, None]
+    assert asked == [(served.ref(), None, 10), (missing.ref(), None, 10), (missing.ref(), None, 10)]
+
+
+def test_a_shipped_agents_sources_find_its_published_image_and_other_sources_none(monkeypatch):
+    claude_code = AGENT_IMAGES[0]
+    sources = BuildContext.of(claude_code.dockerfile.parent, claude_code.dockerfile).source_digest(None)
+    monkeypatch.setattr(published_images, "_registry_digest", lambda ref: _DIGEST if ref == claude_code.ref() else None)
+
+    assert published_agent_image(sources) == (claude_code.ref(), _DIGEST)
+    assert published_agent_image("sha256:" + "0" * 64) is None
+
+
+def test_a_shipped_agents_sources_whose_image_isnt_published_find_none(monkeypatch):
+    claude_code = AGENT_IMAGES[0]
+    sources = BuildContext.of(claude_code.dockerfile.parent, claude_code.dockerfile).source_digest(None)
+
+    assert published_agent_image(sources) is None
+
