@@ -35,6 +35,12 @@ agent = [
     "regex>=2023.12.25",
     "uvicorn>=0.30",
 ]
+# A computer driver: ComputerDriverEnvironment serves its tools over mcp's FastMCP and crops and encodes frames.
+computer = [
+    "mcp>=1.25,<2",
+    "Pillow>=10.4",
+    "uvicorn>=0.30",
+]
 dev = [
     "a2a-sdk[http-server]>=0.3.26,<0.4",
     "python-multipart>=0.0.13",
@@ -43,6 +49,7 @@ dev = [
     "pytest-asyncio>=0.23.0",
     "mcp>=1.25,<2",
     "fastmcp>=3.4,<4",  # the standalone-fastmcp mount path
+    "Pillow>=10.4",  # the computer extra's frame crops and encodings
 ]
 [project.urls]
 Homepage = "https://www.agentenvframework.com"
