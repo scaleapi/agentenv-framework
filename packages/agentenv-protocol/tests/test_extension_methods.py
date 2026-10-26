@@ -1,5 +1,6 @@
 """Several methods per extension: handlers given ``op`` merge into one card entry with an endpoint per method, with
-the environment's extension_params beside them; declaration-only extensions; the refusals at mount."""
+the environment's extension_params beside them; declaration-only extensions; served_extensions choosing what is
+served; the refusals at mount."""
 from __future__ import annotations
 
 from unittest.mock import patch
@@ -193,3 +194,43 @@ def test_an_extension_both_declared_and_served_is_refused():
 
     with pytest.raises(ValueError, match="both declared and served"):
         _card(_Both())
+
+
+class _ReadOnly(_Display):
+    def served_extensions(self, extensions: list[EnvironmentExtension]) -> list[EnvironmentExtension]:
+        served = []
+        for e in extensions:
+            if e.uri == _DISPLAY:
+                served.append(e.model_copy(update={"params": {**e.params, "methods": {"get": e.params["methods"]["get"]}}}))
+            elif e.uri != "urn:agentenv:legacy/v1":
+                served.append(e)
+        return served
+
+
+@pytest.mark.asyncio
+async def test_served_extensions_chooses_the_extensions_and_methods_served():
+    env = _ReadOnly()
+    extensions = _extensions(_card(env))
+    assert set(extensions[_DISPLAY].params["methods"]) == {"get"} and extensions[_DISPLAY].params["modes"]
+    assert "urn:agentenv:legacy/v1" not in extensions and _POINTER in extensions
+    async with _http(env) as http:
+        got = await http.get("/agentenv/ext/computer-display/get")
+        unset = await http.post("/agentenv/ext/computer-display/set", json={"width": 1920, "height": 1080})
+        legacy = await http.post("/agentenv/ext/legacy", json={})
+    assert got.json()["width"] == 1280 and unset.status_code == 404 and legacy.status_code == 404
+
+
+@pytest.mark.parametrize("chosen, error", [
+    (lambda exts: [*exts, EnvironmentExtension(uri="urn:agentenv:ghost/v1")],
+     r"extensions with no @extension handler: \['urn:agentenv:ghost/v1'\]"),
+    (lambda exts: [e.model_copy(update={"params": {**e.params, "methods": {**e.params["methods"], "reset": {}}}})
+                   if e.uri == _DISPLAY else e for e in exts],
+     r"methods of urn:agentenv:computer-display/v1 with no @extension handler: \['reset'\]"),
+])
+def test_served_extensions_naming_an_unhandled_extension_or_method_is_refused(chosen, error):
+    class _Bad(_Display):
+        def served_extensions(self, extensions):
+            return chosen(extensions)
+
+    with pytest.raises(ValueError, match=error):
+        _card(_Bad())

@@ -1,9 +1,10 @@
-"""@tool annotations, structured output and _meta on both FastMCPs, and served_tools choosing what a handler serves."""
+"""@tool annotations, structured output and _meta on both FastMCPs, served_tools choosing what a handler serves, and\nupdate_tool changing a served description."""
 from __future__ import annotations
 
 from typing import Annotated
 
 import anyio
+import httpx
 import pytest
 from pydantic import BaseModel
 
@@ -158,3 +159,50 @@ async def test_structured_output_false_lists_no_schema_for_a_call_tool_result_on
             listed = (await client.list_tools())[0]
             result = await client.call_tool("shot", {})
     assert listed.outputSchema is None and result.content[0].text == "ok"
+
+
+async def _card_tools(app) -> dict:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as http:
+        card = (await http.get("/.well-known/agent-env.json")).json()
+    return {t["name"]: t for t in card["capabilities"]["tools"]}
+
+
+@pytest.mark.asyncio
+async def test_update_tool_rewrites_a_description_on_the_card_and_in_tools_list_on_mcps_fastmcp():
+    env = _Env()
+    app = env.create_app()
+    await env.update_tool("look", description="Look again.")
+    with anyio.fail_after(30):
+        async with create_connected_server_and_client_session(app) as session:
+            tools = {t.name: t for t in (await session.list_tools()).tools}
+            look = await session.call_tool("look", {})
+    card = await _card_tools(app.streamable_http_app())
+    assert tools["look"].description == card["look"]["description"] == "Look again."
+    assert set(card) == set(tools) == {"look", "plain", "secret", "shot"}
+    assert look.structuredContent == {"frame_id": "f1", "width": 1280}
+
+
+@pytest.mark.asyncio
+async def test_update_tool_rewrites_a_description_on_the_card_and_in_tools_list_on_fastmcp():
+    env = _Env()
+    app = fastmcp.FastMCP("tools")
+    env.mount(app)
+    await env.update_tool("look", description="Look again.")
+    with anyio.fail_after(30):
+        async with fastmcp.Client(app) as client:
+            tools = {t.name: t for t in await client.list_tools()}
+            look = await client.call_tool("look", {})
+    card = await _card_tools(app.http_app())
+    assert tools["look"].description == card["look"]["description"] == "Look again."
+    assert tools["look"].annotations.readOnlyHint is True and tools["look"].meta["agentenv.io/group"] == "minimum"
+    assert look.structured_content == {"frame_id": "f1", "width": 1280}
+
+
+@pytest.mark.asyncio
+async def test_update_tool_needs_a_mounted_env_and_a_served_tool():
+    with pytest.raises(RuntimeError, match="_Env is not mounted"):
+        await _Env().update_tool("look", description="x")
+    env = _Chooser()
+    env.create_app()
+    with pytest.raises(ValueError, match="no served tool is named 'secret'"):
+        await env.update_tool("secret", description="x")

@@ -217,7 +217,8 @@ class AgentEnvApplication(ABC):
 
     def __init__(self, environment_card: EnvironmentCard, handler: Any) -> None:
         self.handler = handler
-        ext_handlers = _discover_extensions(handler)
+        self._app: Any = None
+        ext_handlers = _served_extensions(handler, _discover_extensions(handler))
         environment_card = _merge_extensions(environment_card, ext_handlers + _declared_extensions(handler, ext_handlers))
         tool_handlers = _served_tools(handler, _discover_tools(handler, environment_card.name))
         if tool_handlers and not self.supports_tools:
@@ -229,7 +230,7 @@ class AgentEnvApplication(ABC):
         )
         if self._tool_access is not None:
             environment_card = _merge_extensions(environment_card, [(e,) for e in tool_access_extensions()])
-        methods = _discover_methods(handler)
+        methods = _served_operations(handler, _discover_methods(handler))
         environment_card = _merge_operations(environment_card, methods)
         environment_card = _merge_data_objects(environment_card, methods)
         self.environment_card = environment_card
@@ -246,9 +247,12 @@ class AgentEnvApplication(ABC):
 
     def add_routes_to_app(self, app: Any, *, rpc_url: str = RPC_PATH, card_url: str = WELL_KNOWN_PATH) -> None:
         self._check_tool_binding(app)
+        self._app = app
+        if isinstance(self.handler, AgentEnvEnvironment):
+            self.handler._application = self
         self.environment_card = self._card_for(app)
         self._add_route(app, rpc_url, ["POST"], self._dispatch)
-        self._add_route(app, card_url, ["GET"], _card_handler(self.environment_card))
+        self._add_route(app, card_url, ["GET"], self._serve_card)
         for path, method, handler in self._ext_routes:
             self._add_route(app, path, [method], handler)
         for descriptor, fn in self._tools:
@@ -274,6 +278,24 @@ class AgentEnvApplication(ABC):
 
     def _card_for(self, app: Any) -> EnvironmentCard:
         return self.environment_card
+
+    async def _serve_card(self, request: Request) -> Response:
+        return _json_response(self.environment_card.model_dump())
+
+    async def update_tool(self, name: str, *, description: str) -> None:
+        """Change a served tool's description after the mount: on the card and in tools/list alike."""
+        if all(descriptor.name != name for descriptor, _fn in self._tools):
+            raise ValueError(f"no served tool is named {name!r}")
+        self._tools = [(d.model_copy(update={"description": description}) if d.name == name else d, fn)
+                       for d, fn in self._tools]
+        caps = self.environment_card.capabilities
+        tools = [t.model_copy(update={"description": description}) if t.name == name else t for t in caps.tools or []]
+        self.environment_card = self.environment_card.model_copy(
+            update={"capabilities": caps.model_copy(update={"tools": tools})})
+        await self._describe_registered_tool(name, description)
+
+    async def _describe_registered_tool(self, name: str, description: str) -> None:
+        raise NotImplementedError(f"{type(self).__name__} does not serve MCP tools")
 
 
 class AgentEnvFastMCPApplication(AgentEnvApplication):
@@ -409,6 +431,19 @@ class AgentEnvFastMCPApplication(AgentEnvApplication):
         functools.update_wrapper(list_tools, inner)
         manager.list_tools = list_tools
 
+    async def _describe_registered_tool(self, name: str, description: str) -> None:
+        """fastmcp replaces a tool through its public provider; mcp's FastMCP lists the tool its manager holds."""
+        app = self._app
+        if self._binding == "middleware":
+            registered = await app.get_tool(name)
+            app.local_provider.remove_tool(name)
+            app.local_provider.add_tool(registered.model_copy(update={"description": description}))
+            return
+        manager = getattr(app, "_tool_manager", None)
+        registered = manager.get_tool(name) if manager is not None else None
+        if registered is not None:
+            registered.description = description
+
     def _card_for(self, app: Any) -> EnvironmentCard:
         """Declare the MCP endpoint only when the app says where it serves it; FastMCP-shaped targets may not."""
         path = getattr(getattr(app, "settings", None), "streamable_http_path", None)
@@ -446,6 +481,8 @@ class AgentEnvEnvironment:
     #: gateway's paths and with its rules, for an env agents reach with no gateway in front.
     tool_access: ClassVar[bool] = False
     _mounted: bool = False
+    #: The application mounted with this environment, which ``update_tool`` changes.
+    _application: Any = None
 
     def _build_card(self) -> EnvironmentCard:
         config = dict(getattr(self, _CARD_CONFIG_ATTR, None) or {})
@@ -467,6 +504,12 @@ class AgentEnvEnvironment:
         self._mounted = True
         return app
 
+    async def update_tool(self, name: str, *, description: str) -> None:
+        """Change a served tool's description after the mount: on the card and in tools/list alike."""
+        if self._application is None:
+            raise RuntimeError(f"{type(self).__name__} is not mounted")
+        await self._application.update_tool(name, description=description)
+
     def serve(self, transport: str = "streamable-http") -> None:
         if self.mcp is None:
             self.create_app()
@@ -481,6 +524,15 @@ class AgentEnvEnvironment:
     def declared_extensions(self) -> list[EnvironmentExtension]:
         """Declaration-only extensions to advertise, like ``intake/v1``: a promise with params and no handler."""
         return []
+
+    def served_extensions(self, extensions: list[EnvironmentExtension]) -> list[EnvironmentExtension]:
+        """The ``@extension`` handlers' extensions to serve, chosen at mount: one left out is not served, and of one served
+        with ``op``, only the methods its returned descriptor still lists."""
+        return extensions
+
+    def served_operations(self, operations: list[str]) -> list[str]:
+        """The data-plane methods to serve (``data/add`` and the others the handler marks), chosen at mount."""
+        return operations
 
     def served_tools(self, tools: list[EnvironmentTool]) -> list[EnvironmentTool]:
         """The ``@tool`` methods to serve, chosen at mount; a returned descriptor's description replaces the marked one."""
@@ -962,6 +1014,46 @@ def _discover_tools(handler: Any, environment_name: str) -> list:
     return ordered
 
 
+def _served_extensions(handler: Any, ext_handlers: list) -> list:
+    """The extension handlers the handler's ``served_extensions`` keeps, with its descriptors."""
+    hook = getattr(handler, "served_extensions", None)
+    if hook is None:
+        return ext_handlers
+    offered = {descriptor.uri: descriptor for descriptor, *_ in ext_handlers}
+    chosen = {descriptor.uri: descriptor for descriptor in hook(list(offered.values()))}
+    unknown = sorted(set(chosen) - set(offered))
+    if unknown:
+        raise ValueError(f"served_extensions returned extensions with no @extension handler: {unknown}")
+    ops = {}
+    for descriptor, fn, *_ in ext_handlers:
+        ops.setdefault(descriptor.uri, set()).add(getattr(fn, _EXT_OP_ATTR, None))
+    for uri, served in chosen.items():
+        if None not in ops[uri]:
+            added = sorted(set((served.params or {}).get("methods") or {}) - ops[uri])
+            if added:
+                raise ValueError(f"served_extensions lists methods of {uri} with no @extension handler: {added}")
+    kept = []
+    for descriptor, fn, path, method in ext_handlers:
+        served = chosen.get(descriptor.uri)
+        op = getattr(fn, _EXT_OP_ATTR, None)
+        if served is None or (op is not None and op not in (served.params or {}).get("methods", {})):
+            continue
+        kept.append((served, fn, path, method))
+    return kept
+
+
+def _served_operations(handler: Any, methods: dict) -> dict:
+    """The data-plane methods the handler's ``served_operations`` keeps."""
+    hook = getattr(handler, "served_operations", None)
+    if hook is None:
+        return methods
+    chosen = set(hook(list(methods)))
+    unknown = sorted(chosen - set(methods))
+    if unknown:
+        raise ValueError(f"served_operations returned operations with no handler: {unknown}")
+    return {name: entry for name, entry in methods.items() if name in chosen}
+
+
 def _served_tools(handler: Any, tool_handlers: list) -> list:
     """The tools the handler's ``served_tools`` keeps, in its order and with its descriptors; all of them without one."""
     hook = getattr(handler, "served_tools", None)
@@ -1259,12 +1351,6 @@ def _jsonrpc_handler(methods: dict) -> Callable:
         except _OperationError as e:
             return _rpc_error(rid, RPC_ERROR_CODE_SERVER_ERROR, e.message, {"code": e.code})
         return _json_response({"jsonrpc": "2.0", "id": rid, "result": result})
-    return handler
-
-
-def _card_handler(card: EnvironmentCard) -> Callable:
-    async def handler(request: Request) -> Response:
-        return _json_response(card.model_dump())
     return handler
 
 

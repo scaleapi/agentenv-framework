@@ -96,7 +96,8 @@ with MCP `ToolAnnotations`, an output schema and `_meta`, on mcp's FastMCP and o
 where it can, False lists none); a tool returning `Annotated[CallToolResult, Model]` sends its
 result as is, image blocks included, and is listed with `Model`'s schema. An environment chooses
 at mount which of its `@tool` methods it serves, and with which descriptions, by overriding
-`served_tools(tools)`.
+`served_tools(tools)`. After the mount, `await env.update_tool(name, description=...)` changes a
+served tool's description on the card and in `tools/list` alike, on both FastMCPs.
 
 `AgentEnvStarletteApplication` mounts the same handler onto a Starlette/FastAPI app instead of
 FastMCP; since those apps have no MCP tool registry, constructing one with `@tool` methods
@@ -210,6 +211,12 @@ environment's `extension_params(uri)`, merged beside `methods`. A declaration-on
 promise with params and no handler like `intake/v1`, is returned from `declared_extensions()`.
 Two handlers for one method, or a handler without `op` on a URI another handler also serves, are
 refused at mount.
+
+An environment chooses at mount which of its `@extension` handlers it serves by overriding
+`served_extensions(extensions)`: an extension it leaves out is not served, and of one served with
+`op`, only the methods its returned descriptor still lists under `params.methods`.
+`served_operations(operations)` chooses the data-plane methods (`data/add` and the others it
+marks) the same way. Either hook returning something with no handler is refused at mount.
 
 ```python
 @extension("urn:agentenv:computer-display/v1", op="get", method="GET")
