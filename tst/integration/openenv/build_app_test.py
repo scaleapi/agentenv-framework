@@ -188,7 +188,7 @@ async def test_every_failure_that_ends_an_episode_is_an_error_observation_and_a_
             [deployed] = context["deployed_envs"]
             _docker("kill", f"agent-{deployed['sandbox_id']}")
             killed = await env.step({"type": "call_tool", "tool_name": "items_add_item", "arguments": {"item": "x"}})
-            assert (killed.done, killed.observation["error"]["error_type"]) == (False, "transport_error")
+            assert (killed.done, killed.observation["error"]["error_type"]) == (False, "execution_error")
             ended = await env.step({"type": "call_tool", "tool_name": "end_turn", "arguments": {}})
             assert (ended.done, ended.reward, ended.observation["metadata"]["status"]) == (True, None, "error")
     assert _left(items.sandboxes) == []
