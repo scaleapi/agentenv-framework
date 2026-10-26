@@ -171,7 +171,7 @@ class Clock:
         return self.state()
 
     def advance(self, virtual_time: str) -> dict:
-        """Jump forward to virtual_time on the current arm: t0, rate and generation stay, so time triggers keep their marks."""
+        """Jump forward to virtual_time on the current arm, keeping t0, rate and generation, so marks stay put."""
         target = _parse_rfc3339(virtual_time)
         with self._lock:
             if not self._armed or self._t0 is None:
@@ -198,8 +198,7 @@ class Clock:
         return {"ok": True, "armed": False}
 
     def elapsed(self) -> float:
-        """Virtual seconds run so far: real time at each arm's rate (1 while unarmed), plus the jump of each re-arm
-        or advance forward; one back counts nothing."""
+        """Virtual seconds run so far: real time at each arm's rate (1 unarmed), plus each forward re-arm or advance."""
         with self._lock:
             return self._lived + (self._now() - self._anchor) * self._rate
 
@@ -209,6 +208,13 @@ class Clock:
                 return None
             elapsed = self._now() - self._anchor
             return _advance(self._t0, elapsed * self._rate + self._ahead)
+
+    def at_elapsed(self, elapsed: float) -> datetime | None:
+        """The virtual time at which elapsed() reaches `elapsed` on the current arm; None while unarmed."""
+        with self._lock:
+            if not self._armed or self._t0 is None:
+                return None
+            return _advance(self._t0, elapsed - self._lived + self._ahead)
 
     def read(self) -> dict:
         """The frozen consumer contract: {"virtual_time": "<RFC3339>"} — pure read, never advances."""
