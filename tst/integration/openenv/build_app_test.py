@@ -147,6 +147,41 @@ async def test_a_bundle_task_played_by_openenvs_clients_scores_as_agent_env_run_
 
 
 @pytest.mark.asyncio
+async def test_a_task_whose_agent_works_in_its_sandbox_is_played_through_bash_where_the_agent_works(items):
+    """A task that loads a file into its agent and checks what the agent left: a proxy is deployed in the agent's place,
+    the client's ``bash`` runs there as the agent's user in its folder, the check scores what it left, and nothing is
+    left running."""
+    uid = uuid.uuid4().hex[:8]
+    greeting = FileArtifact.put_bytes(id=f"openenv-greeting-{uid}", description="openenv e2e", filename="greeting.txt",
+                                      content=b"hello", content_type="text/plain")
+    env, policy, play, _ = items()
+    steps = [env, policy, {"id": "load", "type": "load_artifact", "agent_name": "policy", "artifact_id": greeting.id,
+                           "destination_path": "/app/inputs"}, play,
+             {"id": "copied", "type": "verify_sandbox", "agent_name": "policy", "verifier_id": "copied", "criteria": [
+                 {"type": "probe_file_contains", "criterion": "the greeting is copied", "paths": ["outputs/answer.txt"],
+                  "expected": "^hello$"}]}]
+
+    with _serving(build_app(str(items.bundle("desk", {"copy": steps})))) as url:
+        async with GenericEnvClient(base_url=url, message_timeout_s=600) as client:
+            await client.reset()
+            episode_id = (await client.state())["episode_id"]
+            listed = [tool["name"] for tool in (await client.step({"type": "list_tools"})).observation["tools"]]
+            here = await client.step({"type": "call_tool", "tool_name": "bash",
+                                      "arguments": {"command": "pwd; whoami; cat inputs/greeting.txt"}})
+            await client.step({"type": "call_tool", "tool_name": "bash", "arguments": {
+                "command": "mkdir -p outputs && cp inputs/greeting.txt outputs/answer.txt"}})
+            ended = await client.step({"type": "call_tool", "tool_name": "end_turn", "arguments": {"response": "Done."}})
+        context = Task.get_instance(episode_id).context  # while the server routes @local records
+
+    assert listed[0] == "bash" and {"items_add_item", "items_whoami"} <= set(listed) and listed[-1] == "end_turn"
+    assert here.observation["result"]["data"] == "/app\nagent\nhello"
+    assert (ended.done, ended.reward, ended.observation["metadata"]["scores"]) == (True, 1.0, {"copied": 1.0})
+    assert _left(items.sandboxes) == []
+    for entry in (*context["deployed_agents"], *context["deployed_envs"]):
+        assert _docker("ps", "-aq", "--filter", f"name=^/agent-{entry['sandbox_id']}$").stdout.strip() == ""
+
+
+@pytest.mark.asyncio
 async def test_a_two_turn_task_hands_over_its_next_prompt_then_its_reward(items):
     with _serving(build_app(str(items.bundle("dock", {"twice": items(turns=2)})))) as url:
         async with GenericEnvClient(base_url=url, message_timeout_s=300) as env:
