@@ -23,11 +23,14 @@ from agentenv_protocol.a2a_agent import (
     ProxyToolsResponse,
 )
 from pydantic import BaseModel
-from agentenv_protocol.a2a_agent.proxy import ProxyAgent
+from agentenv_protocol.a2a_agent.proxy import TOOL_TIMEOUT_SECONDS, ProxyAgent
 
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 
 _CALL_TIMEOUT = httpx.Timeout(60.0, connect=10.0)
+# The calls that wait for a turn's tools to be listed, which the proxy allows TOOL_TIMEOUT_SECONDS an env server.
+_LISTING_CALLS = frozenset({"tools", "record"})
+_LISTING_TIMEOUT = httpx.Timeout(TOOL_TIMEOUT_SECONDS + 60.0, connect=10.0)
 _SERVE_TIMEOUT_SECONDS = 30.0
 # Short, so a long-poll in flight when the episode ends finishes within the server's shutdown.
 _IN_PROCESS_LONG_POLL_SECONDS = 1.0
@@ -103,7 +106,9 @@ class ProxyClient:
     async def _post(self, operation: str, body: dict[str, Any], *, attempts: int = _ATTEMPTS) -> httpx.Response:
         for attempt in range(1, attempts + 1):
             try:
-                return await self._client.post(self._endpoints[operation], json={"token": self._token, **body})
+                return await self._client.post(
+                    self._endpoints[operation], json={"token": self._token, **body},
+                    timeout=_LISTING_TIMEOUT if operation in _LISTING_CALLS else _CALL_TIMEOUT)
             except httpx.TransportError:
                 if attempt == attempts:
                     raise

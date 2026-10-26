@@ -1,9 +1,10 @@
-"""The episode's client of a proxy: which calls it sends again when one doesn't reach the proxy."""
+"""The episode's client of a proxy: which calls it sends again when one doesn't reach the proxy, and how long it
+waits for each."""
 
 import httpx
 import pytest
 from agentenv_protocol.a2a_agent import ProxyTextPart, ProxyTool
-from agentenv_protocol.a2a_agent.proxy import ProxyAgent
+from agentenv_protocol.a2a_agent.proxy import LONG_POLL_SECONDS, TOOL_TIMEOUT_SECONDS, ProxyAgent
 
 from agent_env.task.episode import proxy as client_module
 from agent_env.task.episode.proxy import ProxyClient
@@ -72,3 +73,25 @@ async def test_fields_a_newer_proxy_adds_are_ignored():
     answer = await client.next(0)
 
     assert (answer.version, [t.parts[0].text for t in answer.turns]) == (2, ["Add one."])
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_waits_for_the_turns_listing_waits_as_long_as_the_proxy_may_take_to_list():
+    waits: dict[str, float] = {}
+
+    answers = {"tools": {"tools": []}, "next": {"version": 1, "turns": []}}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        operation = request.url.path.rsplit("/", 1)[-1]
+        waits[operation] = request.extensions["timeout"]["read"]
+        return httpx.Response(200, json=answers.get(operation, {}))
+
+    client = ProxyClient("http://proxy", CARD)
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+    await client.tools("task-1")
+    await client.record("task-1", "Adding one.", None, None)
+    await client.next(0)
+    await client.reply("task-1", parts=PARTS)
+
+    assert waits["tools"] > TOOL_TIMEOUT_SECONDS and waits["record"] > TOOL_TIMEOUT_SECONDS
+    assert LONG_POLL_SECONDS < waits["next"] == waits["reply"] < TOOL_TIMEOUT_SECONDS
