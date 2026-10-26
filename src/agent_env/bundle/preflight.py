@@ -78,7 +78,7 @@ from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, docker_plugin_m
 
 from .parse import BundleError, BundleKind
 from .plan import AgentOverride, Plan
-from .resolve import BuiltImage, Reference, ReferencedImage, ResolvedEntry, build_step
+from .resolve import BuiltImage, Reference, ReferencedImage, ResolvedEntry, build_step, played_deploys
 
 _SHOWN = 3
 _MODEL_VARS = frozenset({ENV_BASE_URL, ENV_API_KEY})
@@ -93,12 +93,13 @@ class Preflight:
     built_here: frozenset[str] = frozenset()  # the ids of the images the bundle builds that a deploy here runs
 
 
-def preflight_run(plan: Plan, tasks: Iterable[ResolvedEntry], sandbox: str | None) -> Preflight:
+def preflight_run(plan: Plan, tasks: Iterable[ResolvedEntry], sandbox: str | None, *, played: bool = False) -> Preflight:
     """Check where each of ``tasks`` deploys, with ``sandbox`` overriding every deploy's provider, and name the infra
-    envs the run builds. Raises BundleError listing every problem found. Reads the store but writes nothing."""
+    envs the run builds; ``played`` skips each task's played agent's deploys (``played_deploys``). Raises BundleError
+    listing every problem found. Reads the store but writes nothing."""
     walk = _Walk(plan, sandbox)
     for task in tasks:
-        walk.task(task)
+        walk.task(task, skip=played_deploys(task) if played else frozenset())
     return walk.finish()
 
 
@@ -144,11 +145,13 @@ class _Walk:
         # Each deploy of an image the bundle builds: (where, what, its provider's links, the images it accepts on each)
         self.uses: dict[str, list[tuple[str, str, list[SandboxProvider], Callable[[SandboxProvider], Accepts]]]] = {}
 
-    def task(self, task: ResolvedEntry) -> None:
+    def task(self, task: ResolvedEntry, skip: frozenset[str]) -> None:
         steps = [build_step(config) for config in task.config]
         sandboxes = {step.sandbox_name: step for step in steps if isinstance(step, DeploySandboxTaskStep)}
         solver = self.plan.agent.steps.get(task.entry.id, ()) if self.plan.agent else ()
         for step in steps:
+            if step.id in skip:
+                continue
             where = f"{self.plan.path(task.entry)}: step {step.id!r}"
             override = self.plan.agent if step.id in solver else None
             try:

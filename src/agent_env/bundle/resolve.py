@@ -12,7 +12,7 @@ import copy
 import functools
 import unicodedata
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -109,6 +109,35 @@ class ResolvedBundle:
 def resolve_bundle(bundle: Bundle) -> ResolvedBundle:
     """Resolve every entry's references. Raises BundleError listing every problem found."""
     return _Resolver(bundle).resolve()
+
+
+def played_deploys(entry: ResolvedEntry) -> frozenset[str]:
+    """The ``deploy_agent`` steps of a task's only prompted agent, which a caller playing that agent itself
+    (``EpisodeSpec``) stands in for; none when the entry isn't a task, or prompts no agent or several."""
+    if entry.entry.kind is not BundleKind.TASK:
+        return frozenset()
+    prompted = {_agent_name(step) for step in entry.config if step.get("type") == "prompt_agent"}
+    if len(prompted) != 1:
+        return frozenset()
+    return frozenset(step.get("id") for step in entry.config
+                     if step.get("type") == "deploy_agent" and _agent_name(step) in prompted)
+
+
+def without_played_agents(resolved: ResolvedBundle) -> ResolvedBundle:
+    """``resolved`` without what each task's played agent would deploy: the caller plays it, so the agent and its
+    snapshot files needn't exist. Its envs stay referenced, since the stand-in binds the same ones."""
+
+    def kept(entry: ResolvedEntry) -> ResolvedEntry:
+        played = played_deploys(entry)
+        return replace(entry, references=tuple(
+            ref for ref in entry.references
+            if ref.kind is EntityKind.ENV or not any(ref.where.startswith(f"step {step!r}: ") for step in played)))
+
+    return replace(resolved, entries=tuple(kept(entry) for entry in resolved.entries))
+
+
+def _agent_name(step: dict) -> str:
+    return step.get("agent_name") or TaskStep.DEFAULT_AGENT_NAME
 
 
 class _Skip(Exception):

@@ -2,7 +2,6 @@
 stores only, once each however many runs ask; pulled from the images published for their sources when every one of a
 kind's is, else built for this host's platform. One built here switches to them once they're published."""
 
-import importlib
 import re
 from pathlib import Path
 
@@ -289,7 +288,6 @@ def test_up_builds_whats_missing_and_says_what_was_already_there(puts, capsys):
 def test_up_reports_infra_it_cant_build_as_one_line(puts, monkeypatch):
     monkeypatch.setattr(bootstrap, "docker_unreachable", lambda: "docker isn't on PATH")
 
-    monkeypatch.setattr(importlib.import_module("agent_env.cli.up"), "_require_explorer_deps", lambda: None)
     monkeypatch.setattr("agent_env.config.runtime.Config.config_path", lambda self: "config.toml")
     monkeypatch.setattr("agent_env.config.configure", lambda *a, **k: None)
     result = CliRunner().invoke(up, [])

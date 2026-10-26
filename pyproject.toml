@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentenv-framework"
-version = "0.9.1359"
+version = "0.9.1360"
 description = "SDK and CLI for building, deploying and running agent environments and the tasks that grade agents in them."
 readme = "README.md"
 license = "Apache-2.0"
@@ -46,6 +46,7 @@ dependencies = [
     "uvicorn>=0.47",  # 0.47 adds ssl_context_factory, how the local grant server gets its TLS context
     "modal>=1.5.2.dev22",  # dev22 adds _experimental_create(tags=); dev2 added VM-mode V2 (vm_runtime)
     "e2b~=2.46.4",  # AsyncSandbox/AsyncTemplate APIs validated against the 2.46 line
+    "openenv>=0.9,<0.11",  # serves bundle tasks as OpenEnv envs; the range spans OpenEnv's two-minor deprecation window
 ]
 
 [project.optional-dependencies]
@@ -53,12 +54,6 @@ dependencies = [
 aws = [
     "boto3>=1.35.0",
     "botocore>=1.35.0",
-]
-# The local explorer / `agent-env up` (Part 5). Optional so a library or worker install
-# stays lean; `agent-env up` fails fast with an install hint when it is absent.
-explorer = [
-    "fastapi>=0.110",
-    "uvicorn>=0.29",
 ]
 # The Google Cloud store backends, selected by impl pointer in config.toml.
 gcp = [
@@ -94,7 +89,7 @@ daytona = [
     "daytona~=0.224.0",  # AsyncDaytona sandboxes, sessions, file API, preview links and egress lists validated against 0.224
 ]
 dev = [
-    "agentenv-framework[aws,boxd,daytona,explorer,gcp,sail,tensorlake,tenki,vercel]",  # exercise portable optional providers and stores in CI
+    "agentenv-framework[aws,boxd,daytona,gcp,sail,tensorlake,tenki,vercel]",  # exercise portable optional providers and stores in CI
     "fastmcp>=3.4,<4",  # the standalone-fastmcp mount path of the protocol; <4 keeps mcp 1.x
     "Pillow>=10.4",  # the protocol's computer extra, whose tests the unit tier runs
     "griffelib==2.3.0",  # the plugin API check; exact, since what it reports as a break changes between releases

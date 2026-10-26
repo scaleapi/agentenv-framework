@@ -17,7 +17,7 @@ from agentenv_protocol.a2a_agent import (
 
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.providers.sandbox_providers.sandbox_provider import sandbox_request_headers_for_url
-from agent_env.store.routing import namespace_routing
+from agent_env.store.routing import namespace_routing, run_scope
 from agent_env.task.episode.proxy import InProcessProxy, ProxyClient, ProxyRefused
 from agent_env.task.store import record_task_cancelled
 from agent_env.task.task import Task, recorded_scores, substitute_seed_in_steps
@@ -174,6 +174,11 @@ class Episode:
         self._played: set[str] = set()
         self._in_process: list[InProcessProxy] = []
 
+    @property
+    def finished(self) -> bool:
+        """Whether the run has ended, its teardown with it; ``result()`` then returns or raises at once."""
+        return self._run.done()
+
     async def next_turn(self) -> Turn | None:
         """The next outside turn the run reaches, or None once the run has finished. Raises the run's error if it
         failed first. End the turns you hold before waiting on one that depends on them."""
@@ -247,7 +252,7 @@ class Episode:
                         logger.warning("episode %s: %s may still be up", self.id,
                                        [s.sandbox_id for s in report.still_up])
                     if self._abandoned is not None:
-                        await asyncio.to_thread(record_task_cancelled, self.id, self._abandoned, Task._utc_now_str())
+                        await asyncio.to_thread(_record_cancelled, self._task.id, self.id, self._abandoned)
                 finally:
                     del _live[self.id]
 
@@ -348,3 +353,10 @@ class Episode:
 
 def _episode_of(context: TaskStepContext) -> Episode:
     return _live[context.metadata["episode"]["id"]]
+
+
+def _record_cancelled(task_id: str, instance_id: str, reason: str) -> None:
+    """Marked where the run recorded its instance, as ``Task.run`` scopes it: an ``@local`` task's in the local
+    stores."""
+    with run_scope(task_id):
+        record_task_cancelled(instance_id, reason, Task._utc_now_str())

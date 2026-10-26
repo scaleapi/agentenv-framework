@@ -151,6 +151,12 @@ def read_dual_keyed(data: dict[str, Any], legacy: str, neutral: str) -> Any:
     return value if value is not None else data.get(neutral)
 
 
+def sandbox_overrides(sandbox: str) -> dict[str, str]:
+    """The ``user_overrides`` that deploy a run's envs, agents, sandboxes and judge on ``sandbox``, as
+    ``agent-env run --sandbox`` sets them."""
+    return {"env_sandbox": sandbox, "agent_sandbox": sandbox, "sandbox": sandbox}
+
+
 # (legacy, neutral) keys of the PromptResponse fields that were renamed. Stored documents and raw-doc readers use the
 # legacy keys, so to_dict writes each beside its neutral one and from_dict reads either.
 _PROMPT_RESPONSE_LEGACY_KEYS = (
