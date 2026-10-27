@@ -53,6 +53,7 @@ dependencies = [
     { name = "click" },
     { name = "cryptography" },
     { name = "e2b" },
+    { name = "fastapi" },
     { name = "httpx" },
     { name = "litellm" },
     { name = "mcp" },
@@ -83,7 +84,6 @@ dev = [
     { name = "botocore" },
     { name = "boxd" },
     { name = "daytona" },
-    { name = "fastapi" },
     { name = "fastmcp" },
     { name = "google-api-core" },
     { name = "google-auth" },
@@ -117,7 +117,6 @@ gcp = [
     { name = "requests" },
 ]
 openenv = [
-    { name = "fastapi" },
     { name = "openenv" },
 ]
 sail = [
@@ -152,7 +151,7 @@ requires-dist = [
     { name = "cryptography", specifier = ">=42" },
     { name = "daytona", marker = "extra == 'daytona'", specifier = "~=0.224.0" },
     { name = "e2b", specifier = "~=2.46.4" },
-    { name = "fastapi", marker = "extra == 'openenv'", specifier = ">=0.116" },
+    { name = "fastapi", specifier = ">=0.110" },
     { name = "fastmcp", marker = "extra == 'dev'", specifier = ">=3.4,<4" },
     { name = "google-api-core", marker = "extra == 'gcp'", specifier = ">=2.24" },
     { name = "google-auth", marker = "extra == 'gcp'", specifier = ">=2.40" },

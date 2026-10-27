@@ -251,6 +251,10 @@ def test_the_sail_vm_provider_without_the_extra_names_the_extra_to_install():
     assert "pip install 'agentenv-framework[sail]'" in message, message
 
 
+def test_the_explorer_imports_without_any_extra():
+    assert _run(_IMPORT, _not_in_core(), "agent_env.explorer.app") == ""
+
+
 def test_the_openenv_server_without_the_extra_names_the_extra_to_install():
     message = _run(_IMPORT, _only_in("openenv"), "agent_env.openenv")
     assert message.endswith("pip install 'agentenv-framework[openenv]'"), message

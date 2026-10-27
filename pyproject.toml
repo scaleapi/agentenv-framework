@@ -46,13 +46,13 @@ dependencies = [
     "uvicorn>=0.47",  # 0.47 adds ssl_context_factory, how the local grant server gets its TLS context
     "modal>=1.5.2.dev22",  # dev22 adds _experimental_create(tags=); dev2 added VM-mode V2 (vm_runtime)
     "e2b~=2.46.4",  # AsyncSandbox/AsyncTemplate APIs validated against the 2.46 line
+    "fastapi>=0.110",  # the explorer, agent-env up
 ]
 
 [project.optional-dependencies]
 # agent_env.openenv: bundle tasks served as OpenEnv envs. No cap: OpenEnv ships a minor a week, and the openenv-compat
 # workflow runs the OpenEnv tests against its latest release and main.
 openenv = [
-    "fastapi>=0.116",  # build_app's return type; openenv's own floor
     "openenv>=0.9",
 ]
 # The AWS store backends (S3, Secrets Manager, DynamoDB, ECR), selected by impl pointer in config.toml.
