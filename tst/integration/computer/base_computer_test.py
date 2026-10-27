@@ -16,7 +16,7 @@ from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import reset_artifact_store
 from agent_env.config import configure, reset_config
-from tst.integration.computer.conftest import BASE
+from tst.integration.computer.conftest import BASE, docker
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
@@ -39,7 +39,7 @@ def stores(monkeypatch, tmp_path):
 
 def test_the_desktop_runs_as_the_session_user_with_the_settings_a_deploy_passes(base):
     name = f"agentenv-test-base-{uuid.uuid4().hex[:8]}"
-    _docker("run", "-d", "--name", name, "-e", "AGENTENV_SETTING_RESOLUTION=1600x900",
+    docker("run", "-d", "--name", name, "-e", "AGENTENV_SETTING_RESOLUTION=1600x900",
             "-e", "AGENTENV_SETTING_TIMEZONE=Europe/Paris", base)
     try:
         running = _all_running(name)
@@ -61,7 +61,7 @@ def test_the_desktop_runs_as_the_session_user_with_the_settings_a_deploy_passes(
 
 def test_the_desktop_comes_back_however_often_x_dies(base):
     name = f"agentenv-test-base-{uuid.uuid4().hex[:8]}"
-    _docker("run", "-d", "--name", name, base)
+    docker("run", "-d", "--name", name, base)
     try:
         _all_running(name)
         for _ in range(10):
@@ -96,7 +96,7 @@ def test_a_setting_it_cant_use_stops_it_at_start(base, setting, value, error):
 
 
 def test_pushed_to_a_registry_it_registers_as_a_computer_whose_image_put_reads_back(base, stores):
-    _docker("push", "-q", base)
+    docker("push", "-q", base)
     declared = tomllib.loads((BASE / "artifact.toml").read_text())
     pinned = DockerImageArtifact.put_ref("base-image", description="the base", image_name=base)
 
@@ -118,10 +118,6 @@ def _all_running(name: str) -> str:
             break
         time.sleep(1)
     return running
-
-
-def _docker(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["docker", *args], check=True, capture_output=True)
 
 
 def _exec(name: str, *argv: str) -> str:

@@ -64,7 +64,9 @@ def _scaffold(root: Path, base: str) -> Path:
     shutil.copytree(SCAFFOLD, root, ignore=shutil.ignore_patterns("__pycache__"))
     desktop = root / "envs" / "desktop"
     dockerfile = desktop / "Dockerfile"
-    dockerfile.write_text(dockerfile.read_text().replace("ARG BASE\n", f"ARG BASE={base}\n"))
+    text = dockerfile.read_text()
+    assert "\nARG BASE\n" in text, "the scaffold's Dockerfile names its base by ARG BASE, which _scaffold sets"
+    dockerfile.write_text(text.replace("\nARG BASE\n", f"\nARG BASE={base}\n"))
     shutil.copy(DRIVER, desktop / "driver.py")
     shutil.copy(FIXTURE, desktop / "fixture.py")
     shutil.copytree(PROTOCOL / "src", desktop / "protocol" / "src", ignore=shutil.ignore_patterns("__pycache__"))

@@ -141,9 +141,10 @@ def test_what_a_computer_declares_is_checked(registry, changes, message):
         _put(image, **changes)
 
 
-def test_an_absolute_link_is_followed_and_an_image_without_os_release_or_not_linux_fails(registry):
+def test_an_absolute_link_is_followed_and_an_image_without_os_release_or_not_linux_or_unreadable_fails(registry):
     linked = registry.image(layer({"etc/os-release": "/usr/lib/os-release", "usr/lib/os-release": UBUNTU}))
     bare = registry.image(layer({"etc/motd": b"hi\n"}))
+    garbled = registry.image(b"not a tar")
     windows = registry._manifest({"mediaType": MANIFEST, "layers": [],
                                   "config": {"digest": registry.blob(b'{"os": "windows", "architecture": "amd64"}')}})
 
@@ -153,3 +154,5 @@ def test_an_absolute_link_is_followed_and_an_image_without_os_release_or_not_lin
         _put(_image(f"ghcr.io/acme/desktop:2@{bare}"), arch=["amd64"])
     with pytest.raises(ValueError, match="it has no linux/amd64 image, only none"):
         _put(_image(f"ghcr.io/acme/desktop:3@{windows}"), arch=["amd64"])
+    with pytest.raises(ValueError, match="its os-release couldn't be read: its layer sha256:[0-9a-f]+ isn't a readable tar"):
+        _put(_image(f"ghcr.io/acme/desktop:4@{garbled}"), arch=["amd64"])
