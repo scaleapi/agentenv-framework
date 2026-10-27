@@ -8,6 +8,8 @@ import pytest
 
 from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact import Artifact, FileArtifact
+from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
+from agent_env.artifact.store import get_artifact_store
 from agent_env.bundle import BundleError
 from agent_env.bundle import _import_report as import_report_module
 from agent_env.bundle import _imported as imported_module
@@ -315,3 +317,37 @@ def test_an_installed_bundle_s_agent_takes_no_source_from_the_folder_s_record(lo
     installed = [write for write in plan.writes if write.source.entry in plan.origins]
 
     assert installed and [source_of(record, plan, write) for write in installed] == [None] * len(installed)
+
+
+def test_an_env_whose_image_is_pulled_from_its_registry_registers_as_imported(local_stores, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    image = get_artifact_store().put_document(DockerImageArtifact(
+        id="crm-image", description="crm", image_name="registry.example.com/crm:v1",
+        tar_gz_s3_url="file:///nowhere/crm-image.tar.gz"))
+    MCPServerEnv.put(id="crm-env", docker_image_artifact=image, environment_name="crm")
+    Task.put(id="pulled", steps=[build_step({"id": "env", "type": "deploy_env", "env_id": "crm-env"})])
+    folder = import_task("pulled", tmp_path / "pulled").root
+
+    registered = register_bundle(folder)
+
+    assert _written(registered) == {"crm-image": (1, True), "crm-env": (1, True), "pulled": (1, True)}
+
+
+@pytest.mark.parametrize("source", [{"object_url": "s3://their-bucket/skills/notes-v2/"},
+                                    {"body": "Keep notes in notes.md."}])
+def test_a_skill_the_folder_gives_a_source_of_its_own_keeps_it(local_stores, tmp_path, monkeypatch, source):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    notes = {"name": "notes", "description": "how notes are kept", "object_url": "s3://their-bucket/skills/notes/"}
+    Task.put(id="skilled", steps=[build_step({"id": "skills", "type": "add_skills", "agent_name": "default-agent",
+                                              "skills": [notes]})])
+    folder = import_task("skilled", tmp_path / "skilled").root
+    task_file = folder / "tasks/skilled.json"
+    steps = json.loads(task_file.read_text())
+    steps[0]["skills"][0].update(source)
+    task_file.write_text(json.dumps(steps))
+
+    register_bundle(folder)
+
+    skill = Task.get("skilled", 2).to_dict()["steps"][0]["skills"][0]
+    assert {key: skill.get(key) for key in ("object_url", "s3_url", "body")} == {
+        "object_url": source.get("object_url"), "s3_url": source.get("object_url"), "body": source.get("body")}

@@ -101,6 +101,8 @@ class Pulled:
     folder: str
     key: str
     image: str
+    artifact: str  # the stored image's id and version
+    version: int
     why: str | None = None  # why it's pulled though it has a build context: the context can't be written
 
 
@@ -181,6 +183,8 @@ def provenance(source: dict, imported: BundleImport, root: Path) -> str:
         "images": [{"folder": image.folder, "key": image.key, "id": image.artifact, "version": image.version,
                     "dockerfile": image.pruned.dockerfile, "dockerfile_found": image.found}
                    for image in imported.images],
+        "pulled": [{"folder": pull.folder, "key": pull.key, "id": pull.artifact, "version": pull.version}
+                   for pull in imported.pulled],
         "pinned": [{"where": pin.where, "kind": pin.kind.value, "id": pin.id, "version": pin.version, "why": pin.why}
                    for pin in imported.pinned],
         "files": written_files(root),

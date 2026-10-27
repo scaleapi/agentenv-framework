@@ -29,7 +29,8 @@ from .resolve import BuiltImage, BundleImage
 @dataclass(frozen=True)
 class Imported:
     """What an import recorded: each entity folder, task file and eval file's store id and version, each image's by its
-    folder and toml key, with the Dockerfile it's built from, and each file as it wrote it."""
+    folder and toml key, built or pulled, with the Dockerfile a built one is built from, and each file as it wrote
+    it."""
 
     entities: Mapping[str, tuple[str, int]]
     images: Mapping[tuple[str, str], tuple[str, int]]
@@ -55,7 +56,8 @@ def read_imported(root: Path) -> tuple[Imported | None, str | None]:
     entities |= {item["file"]: (item["id"], item["version"]) for item in record.get("tasks", [])}
     if (stored_eval := record.get("eval")) is not None:
         entities[stored_eval["file"]] = (stored_eval["id"], stored_eval["version"])
-    images = {(item["folder"], item["key"]): (item["id"], item["version"]) for item in record.get("images", [])}
+    images = {(item["folder"], item["key"]): (item["id"], item["version"])
+              for item in [*record.get("images", []), *record.get("pulled", [])]}
     dockerfiles = {(item["folder"], item["key"]): item.get("dockerfile") for item in record.get("images", [])}
     return Imported(entities, images, record.get("files", {}), dockerfiles), None
 
@@ -139,16 +141,20 @@ def _given_back(step: dict, origin: dict, cls: type) -> list[str]:
     """Give ``step`` back what the import left out of ``origin``, in place; the path of each field it took."""
     user = [path for path, scope in cls.field_scopes.items() if scope is FieldScope.USER]
     repinned = _repinned(step, origin, cls)
-    given = []
+    given, lists = [], {}
     for path in user:
         if path in repinned:
             continue
         if "[]" in path:
-            given += _given_back_items(step, origin, path, user)
+            at, _, field = path.partition("[].")
+            if "[]" not in field:
+                lists.setdefault(at, []).append(field)
             continue
         for _, holder, key in field_sites(origin, path):
             if holder[key] not in ("", [], {}) and _graft(step, path.split("."), holder[key]):
                 given.append(path)
+    for at, fields in lists.items():
+        given += _given_back_items(step, origin, at, fields)
     scrubbed = copy.deepcopy(origin)
     scrub(scrubbed)
     return given + _unscrubbed(step, origin, scrubbed)
@@ -163,33 +169,36 @@ def _repinned(step: dict, origin: dict, cls: type) -> set[str]:
             if site.version_key is not None and held.get(site.path, site.value) != site.value}
 
 
-def _given_back_items(step: dict, origin: dict, path: str, user: list[str]) -> list[str]:
-    """Give each item of the list ``path`` names, ``<list>[].<field>``, its field from the stored item it was written
-    from: the one it equals but for the list's user-scoped fields, else the one alone in sharing its name."""
-    at, _, field = path.partition("[].")
-    if "[]" in field:
-        return []
+def _given_back_items(step: dict, origin: dict, at: str, fields: list[str]) -> list[str]:
+    """Give each item of the list ``at`` the ``fields`` the import left out of it, from the stored item it was written
+    from (``_source_item``): all of them, or none when the item sets one, since together they can be one choice, such as
+    a source under either of its names."""
     items, stored = _at(step, at), _at(origin, at)
     if not isinstance(items, list) or not isinstance(stored, list):
         return []
-    left_out = {other.partition("[].")[2].split(".")[0] for other in user if other.startswith(f"{at}[].")}
+    left_out = {field.split(".")[0] for field in fields}
     given = []
     for index, item in enumerate(items):
+        if not isinstance(item, dict) or any(_at(item, field) is not None for field in fields):
+            continue
         if (source := _source_item(item, stored, left_out)) is None:
             continue
-        for _, holder, key in field_sites(source, field):
-            if holder[key] not in ("", [], {}) and _graft(item, field.split("."), holder[key]):
-                given.append(f"{at}[{index}].{field}")
+        for field in fields:
+            for _, holder, key in field_sites(source, field):
+                if holder[key] not in ("", [], {}) and _graft(item, field.split("."), holder[key]):
+                    given.append(f"{at}[{index}].{field}")
     return given
 
 
-def _source_item(item: object, stored: list, left_out: set[str]) -> dict | None:
-    if not isinstance(item, dict):
-        return None
+def _source_item(item: dict, stored: list, left_out: set[str]) -> dict | None:
+    """The stored item ``item`` was written from: the one it equals but for the ``left_out`` fields, else the one alone
+    in sharing its name, when ``item`` sets nothing that one doesn't."""
     candidates = [one for one in stored if isinstance(one, dict)]
-    same = [one for one in candidates if _bare(one, left_out) == _bare(item, left_out)]
+    bare = _bare(item, left_out)
+    same = [one for one in candidates if _bare(one, left_out) == bare]
     if not same and item.get("name") is not None:
-        same = [one for one in candidates if one.get("name") == item["name"]]
+        same = [one for one in candidates
+                if one.get("name") == item["name"] and bare.keys() <= _bare(one, left_out).keys()]
     return same[0] if len(same) == 1 else None
 
 

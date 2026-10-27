@@ -266,7 +266,7 @@ class _Importer:
             out.images.append(job)
             return job.toml
         if names_registry(artifact.image_name):
-            out.pulled.append(Pulled(out.folder, key, artifact.image_name))
+            out.pulled.append(Pulled(out.folder, key, artifact.image_name, artifact.id, artifact.version))
             return {"ref": artifact.image_name}
         why = (f"it's stored only as a docker save tarball, under {artifact.image_name}, which names no registry"
                if artifact.tar_gz_object_url else "it records neither a build context nor a registry to pull it from")
@@ -346,7 +346,8 @@ class _Importer:
         if names_registry(job.artifact.image_name):
             job.toml.clear()
             job.toml["ref"] = job.artifact.image_name
-            self.pulled.append(Pulled(job.folder, job.key, job.artifact.image_name, job.problem))
+            self.pulled.append(Pulled(job.folder, job.key, job.artifact.image_name, job.artifact.id,
+                                      job.artifact.version, job.problem))
             return
         key = (EntityKind.ARTIFACT, job.artifact.id, job.artifact.version)
         try:
