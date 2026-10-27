@@ -7,6 +7,7 @@ import asyncio
 import json
 import math
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from importlib import resources
 
@@ -36,7 +37,7 @@ MINIMUM_TOOLS = ("computer_screenshot", "computer_click", "computer_drag", "comp
 DATA_PLANE = (INTAKE_EXTENSION_URI, DATA_OBJECTS_EXTENSION_URI)
 #: Where the fixture is staged and keeps its state, relative to the session user's home.
 STAGE = ".agentenv-probe"
-#: The role the tool-access check hides a tool from.
+#: What the tool-access check's role, new each run, and the probe's request ids start with.
 PROBE_ROLE = "agentenv-probe"
 #: How long the probe waits for an effect to reach the fixture, and how often it looks.
 SETTLE_S = 5.0
@@ -63,6 +64,7 @@ class Probe:
         self.results: list[CheckResult] = []
         self.features = driver.params(COMPUTER)
         self.layout: dict = {}
+        self.fixture_pid: str | None = None
 
     async def basic(self) -> None:
         for check, section in (("P0", self._ready), ("P1", self._card), ("P2", self._frame), ("P5", self._refusals),
@@ -78,10 +80,13 @@ class Probe:
             missing.append("data/add")
         if missing:
             return self._skip_full(f"the fixture is staged with data/add and computer-exec; the driver lacks {missing}")
-        problem = await self._stage()
-        if problem:
-            return self._skip_full(f"the fixture didn't start: {problem}")
         try:
+            try:
+                problem = await self._stage()
+            except Exception as e:
+                problem = f"{type(e).__name__}: {e}"
+            if problem:
+                return self._skip_full(f"the fixture didn't start: {problem}")
             for check, section in (("P9", self._security), ("P3", self._geometry), ("P4", self._effects),
                                    ("P5", self._unchanged), ("P6", self._typing), ("P7", self._scroll_and_drag),
                                    ("X", self._pointer_input), ("X", self._data_add)):
@@ -118,7 +123,9 @@ class Probe:
     # Talking to the driver
 
     async def tool(self, name: str, args: dict | None = None) -> CallToolResult:
-        return await self.session.call_tool(name, args or {})
+        """Call ``name``, its points in frame pixels unless ``args`` names a space, whatever the driver's default."""
+        args = args or {}
+        return await self.session.call_tool(name, {"space": "frame", **args} if name in POINT_TOOLS else args)
 
     async def shot(self, **args) -> tuple[CallToolResult, object]:
         result = await self.tool("computer_screenshot", args)
@@ -378,16 +385,17 @@ class Probe:
             return
 
         async def per_role() -> str | None:
-            hidden = {"role": PROBE_ROLE, "tools": ["computer_wait"]}
+            role = f"{PROBE_ROLE}-{uuid.uuid4().hex[:8]}"
+            hidden = {"role": role, "tools": ["computer_wait"]}
             await self.driver.invoke(DISABLE_TOOL_EXTENSION_URI, "disable", hidden)
             try:
-                async with self.driver.session(PROBE_ROLE) as other:
+                async with self.driver.session(role) as other:
                     listed = {t.name for t in (await other.list_tools()).tools}
                     refused = await other.call_tool("computer_wait", {"ms": 0})
                 allowed = await self.tool("computer_wait", {"ms": 0})
             finally:
                 await self.driver.invoke(ENABLE_TOOL_EXTENSION_URI, "enable", hidden)
-            async with self.driver.session(PROBE_ROLE) as other:
+            async with self.driver.session(role) as other:
                 back = await other.call_tool("computer_wait", {"ms": 0})
             if "computer_wait" in listed:
                 return "a disabled tool is still listed for its role"
@@ -436,7 +444,9 @@ class Probe:
         if "error" in added:
             return f"data/add refused it: {added['error'].get('message')}"
         await self.driver.run("sh", "-c", f"rm -rf {STAGE}/state")
-        await self.driver.run("sh", "-c", f"python3 {STAGE}/fixture.py {STAGE}/state > {STAGE}/fixture.log 2>&1 &")
+        started = await self.driver.run(
+            "sh", "-c", f"python3 {STAGE}/fixture.py {STAGE}/state > {STAGE}/fixture.log 2>&1 & echo $!")
+        self.fixture_pid = started["stdout"].strip() or None
         deadline = time.monotonic() + FIXTURE_START_S
         while time.monotonic() < deadline:
             layout = await self.driver.run("cat", f"{STAGE}/state/layout.json")
@@ -451,8 +461,8 @@ class Probe:
         return f"no layout after {FIXTURE_START_S:g} s: {log['stdout'].strip() or log['stderr'].strip()}"
 
     async def _unstage(self) -> None:
-        if pid := self.layout.get("pid"):
-            await self.driver.run("kill", str(pid))
+        if self.fixture_pid:
+            await self.driver.run("kill", self.fixture_pid)
         await self.driver.run("rm", "-rf", STAGE)
 
     async def _base(self) -> tuple[str, float, object]:

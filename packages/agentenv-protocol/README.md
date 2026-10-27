@@ -455,7 +455,8 @@ window's widgets report, reads back what reached them, and then removes the fixt
 fixture can't be staged, the `full` checks are unverified rather than failed. The probe leaves out
 the checks for an extension the card doesn't declare. P8 is not applicable to a driver without
 leasing, and unverified for one with it until the probe has lease checks. The probe calls as the
-role `agentenv-probe`, so a driver's per-role tool access applies to it.
+default role; the tool-access check hides a tool from a role of its own, `agentenv-probe-<random>`,
+and gives it back.
 
 ## A2A agent framework
 

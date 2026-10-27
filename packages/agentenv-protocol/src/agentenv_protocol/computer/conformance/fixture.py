@@ -186,7 +186,6 @@ def main(state_dir: Path) -> None:
         boxes["markers"] = [[field.winfo_rootx() + x, field.winfo_rooty() + y, colour] for x, y, colour in MARKERS]
         boxes["cell"] = CELL
         boxes["clipboard"] = CLIPBOARD
-        boxes["pid"] = os.getpid()
         save()
         (state_dir / "layout.json").write_text(json.dumps(boxes))
 

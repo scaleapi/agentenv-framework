@@ -17,6 +17,7 @@ from PIL import ImageChops  # noqa: E402
 from probe_fake import FixtureDriver, served  # noqa: E402
 
 from agentenv_protocol.computer import (  # noqa: E402
+    ComputerSettings,
     ExecResult,
     Platform,
     ReadyCheck,
@@ -30,7 +31,9 @@ from agentenv_protocol.computer import (  # noqa: E402
 )
 from agentenv_protocol.computer.conformance import CheckResult, ProbeReport, run_probe  # noqa: E402
 from agentenv_protocol.computer.conformance import checks  # noqa: E402
+from agentenv_protocol.computer.conformance.client import Driver  # noqa: E402
 from agentenv_protocol.computer.conformance.__main__ import main  # noqa: E402
+from agentenv_protocol.tool_access import DISABLE_TOOL_EXTENSION_URI  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -63,6 +66,24 @@ async def test_the_fake_driver_passes_every_check_at_full_and_cleans_up(home):
     assert counts["failed"] == counts["unverified"] == 0 and counts["not_applicable"] == 1
     assert {c.check for c in report.checks} == {f"P{n}" for n in range(10)} | {"X"}
     assert not (home / ".agentenv-probe").exists() and ["kill", "4242"] in driver.commands
+
+
+@pytest.mark.asyncio
+async def test_a_driver_whose_default_space_is_norm_passes_at_full():
+    report = await _probe(FixtureDriver(settings=ComputerSettings(default_space="norm")))
+    assert report.passed, _failed(report)
+
+
+@pytest.mark.asyncio
+async def test_a_tool_already_hidden_from_the_probes_role_stays_hidden():
+    with served(FixtureDriver()) as url:
+        driver = await Driver.connect(url, 10)
+        await driver.invoke(DISABLE_TOOL_EXTENSION_URI, "disable", {"role": checks.PROBE_ROLE, "tools": ["computer_wait"]})
+        report = await run_probe(url, "basic")
+        async with driver.session(checks.PROBE_ROLE) as session:
+            refused = await session.call_tool("computer_wait", {"ms": 0})
+    assert report.passed, _failed(report)
+    assert refused.isError and refused.structuredContent["code"] == "permission_denied"
 
 
 @pytest.mark.asyncio
@@ -165,9 +186,16 @@ class NoFixture(FixtureDriver):
 class SilentFixture(FixtureDriver):
     def _fixture(self, argv):
         if "python3" in " ".join(argv):
-            return ExecResult(0)
+            return ExecResult(0, b"4243\n")
         if argv[:1] == ["tail"]:
             return ExecResult(0, b"ModuleNotFoundError: No module named 'tkinter'\n")
+        return super()._fixture(argv)
+
+
+class ExecBreaks(FixtureDriver):
+    def _fixture(self, argv):
+        if f"rm -rf {checks.STAGE}/state" in " ".join(argv):
+            raise RuntimeError("exec broke")
         return super()._fixture(argv)
 
 
@@ -175,13 +203,17 @@ class SilentFixture(FixtureDriver):
 @pytest.mark.parametrize("driver, why", [
     (NoFixture, "the fixture didn't start: the screen is 800x600"),
     (SilentFixture, "no layout after 0.6 s: ModuleNotFoundError: No module named 'tkinter'"),
+    (ExecBreaks, "the fixture didn't start: ExtensionCallError"),
 ])
-async def test_a_fixture_that_doesnt_start_leaves_full_unverified(driver, why, monkeypatch):
+async def test_a_fixture_that_doesnt_start_leaves_full_unverified_and_is_cleaned_up(driver, why, monkeypatch, home):
     monkeypatch.setattr(checks, "FIXTURE_START_S", 0.6)
-    report = await _probe(driver())
+    probed = driver()
+    report = await _probe(probed)
     assert report.passed, _failed(report)
     unverified = [c for c in report.checks if c.status == "unverified"]
     assert len(unverified) == len(checks.FULL_CHECKS) and why in unverified[0].detail
+    assert not (home / checks.STAGE).exists()
+    assert (["kill", "4243"] in probed.commands) is (driver is SilentFixture)
 
 
 def test_a_refusal_must_carry_the_code_and_applied_no():

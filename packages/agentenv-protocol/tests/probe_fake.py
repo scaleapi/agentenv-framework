@@ -37,8 +37,7 @@ MARKERS = ((11, 11, "#ff0000"), (12, 11, "#00ff00"), (11, 12, "#0000ff"), (12, 1
 LAYOUT = {"name": [140, 40, 420, 34], "save": [560, 34, 120, 44], "subscribe": [40, 100, 160, 34],
           "notes": [760, 40, 380, 90], "list": [40, 160, 280, 400], "grid": [400, 160, 400, 400],
           "pad": [840, 160, 400, 300], "wheel": [840, 500, 200, 120], "field": [*FIELD, 48, 48], "list_row_height": 24,
-          "markers": [[FIELD[0] + x, FIELD[1] + y, c] for x, y, c in MARKERS], "cell": 50, "clipboard": CLIPBOARD,
-          "pid": 4242}
+          "markers": [[FIELD[0] + x, FIELD[1] + y, c] for x, y, c in MARKERS], "cell": 50, "clipboard": CLIPBOARD}
 KEYSYMS = {" ": "space", ",": "comma", "!": "exclam", "\t": "Tab", "\n": "Return"}
 
 
@@ -185,7 +184,7 @@ class FixtureDriver(FakeDriver):
             return ExecResult(0, json.dumps(self.desk.read()).encode()) if self.desk.started else ExecResult(1)
         if f"python3 {STAGE}/fixture.py" in text:
             self.desk.start()
-            return ExecResult(0)
+            return ExecResult(0, b"4242\n")
         if argv in (["id", "-u"], ["stat", "-c", "%u", f"{STAGE}/fixture.py"]):
             return ExecResult(0, b"1000\n")
         if argv[:1] in (["kill"], ["tail"]) or f"rm -rf {STAGE}/state" in text:
