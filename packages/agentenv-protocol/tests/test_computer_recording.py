@@ -117,7 +117,7 @@ async def test_a_driver_with_recording_serves_it_and_one_without_does_not():
     assert set(extension["params"]["methods"]) == {"start", "end"}
     assert {k: v for k, v in extension["params"].items() if k not in ("methods", "endpoint")} == {
         "formats": ["video/mp4; codecs=avc1"], "scopes": ["display"], "fps": {"default": 10, "max": 15},
-        "cursor": True, "source": "capture", "max_segment_s": 1, "max_concurrent": 2, "max_duration_s": 3600}
+        "cursor": True, "source": "capture", "max_segment_s": 1, "max_concurrent": 2, "max_duration_s": 86_400}
     assert COMPUTER_RECORDING not in [e["uri"] for e in plain["capabilities"]["extensions"]]
 
 

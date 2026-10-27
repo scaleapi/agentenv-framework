@@ -438,7 +438,7 @@ from agentenv_protocol.computer import RecordedFrame, Recording, record
 
 
 class MyDriver(ComputerDriverEnvironment):
-    recording = Recording(max_fps=30)      # max_concurrent=2, max_duration_s=3600, max_segment_s=300
+    recording = Recording(max_fps=30)      # max_concurrent=2, max_duration_s=86400, max_segment_s=300
 
     @record
     async def stream(self, hints):         # hints.scope, fps, max_edge, cursor, max_segment_s, directory

@@ -62,7 +62,7 @@ class Recording:
     """A driver's recording features, as a class attribute: ``recording = Recording()`` serves computer-recording/v1."""
     max_fps: int = 15
     max_concurrent: int = 2
-    max_duration_s: int = 3600
+    max_duration_s: int = 86_400
     max_segment_s: int = 300
 
 
