@@ -39,3 +39,14 @@ def test_only_the_froms_given_name_their_mirror_copy_and_the_rest_is_unchanged()
     assert rewritten == (DOCKERFILE.replace(node, f"mirror.gcr.io/library/node@{DIGEST}")
                          .replace("  ubuntu:24.04", "  mirror.gcr.io/library/ubuntu:24.04"))
     assert with_bases(DOCKERFILE, {}) == DOCKERFILE
+
+
+def test_a_from_naming_a_stage_that_took_an_images_name_builds_from_that_stage():
+    dockerfile = "FROM alpine AS initial\nFROM busybox AS alpine\nRUN touch /stage\nFROM alpine\n"
+
+    bases = official_bases(dockerfile)
+
+    assert bases == {"alpine": "mirror.gcr.io/library/alpine", "busybox": "mirror.gcr.io/library/busybox"}
+    assert with_bases(dockerfile, bases) == ("FROM mirror.gcr.io/library/alpine AS initial\n"
+                                             "FROM mirror.gcr.io/library/busybox AS alpine\nRUN touch /stage\n"
+                                             "FROM alpine\n")
