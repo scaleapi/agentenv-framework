@@ -30,6 +30,7 @@ from urllib.parse import urlsplit
 
 from agent_env.config import get_config
 from agent_env.entity.refs import RefRole, ref_sites
+from agent_env.store import Filter
 from agent_env.plugins._bundles import AGENT_ALIASES
 from agent_env.store.document_store import DocumentStore, LocalSqliteDocumentStore
 from agent_env.store.ids import LOCAL_PREFIX, is_local_id
@@ -39,7 +40,7 @@ from agent_env.task_step.registry import get_task_step_registry
 
 from ._secrets import credentials_in
 from .installed import installed_bundles
-from .ledger import Ledger
+from .ledger import Check, Ledger
 from .materialize import Materialization, Materialized, Registering, materialize
 from .parse import Bundle, BundleEntry, BundleError, BundleKind, parse_bundle
 from .plan import AliasUse, Plan, Write, plan_bundle, plan_entities
@@ -94,8 +95,8 @@ def register_bundle(
         target = configured_store(get_config().get_document_store())
         shared = shared_store(target)
         identity, commit, dirty = bundle_identity(bundle.root)
-        ledger = RegistrationLedger(target, registered, identity, commit, dirty)
-        problems = [*_unowned(registered, ledger, frozenset(adopt)), *_unregistrable(registered, shared)]
+        ledger = RegistrationLedger(target, registered, identity, commit, dirty, frozenset(adopt))
+        problems = [*_unowned(registered, ledger), *_unregistrable(registered, shared)]
         if problems:
             raise BundleError(problems)
         say = on_progress or (lambda line: None)
@@ -276,12 +277,35 @@ class RegistrationLedger(Ledger):
     pins_references = True
     strict = True
 
-    def __init__(self, store: DocumentStore, plan: Plan, identity: str, commit: str | None, dirty: bool | None):
+    def __init__(self, store: DocumentStore, plan: Plan, identity: str, commit: str | None, dirty: bool | None,
+                 adopt: frozenset[str] = frozenset()):
         super().__init__(store, plan)
-        self.identity, self.commit, self.dirty = identity, commit, dirty
+        self.identity, self.commit, self.dirty, self.adopted_ids = identity, commit, dirty, adopt
 
-    def bundle_key(self, write: Write) -> str:
-        return self._bundle(write)
+    def check(self, write: Write, needs: Mapping[tuple[str, str], int]) -> Check:
+        """``Ledger.check``, refusing a write whose id the store holds that this bundle didn't register, checked again
+        as it's about to be written, since another bundle can write the id after the check before any write."""
+        check = super().check(write, needs)
+        if (problem := self.unowned(write, check.stored)) is not None:
+            raise BundleError([problem])
+        return check
+
+    def unowned(self, write: Write, stored: int | None) -> str | None:
+        """Why this bundle may not write ``write``'s id, which the store holds at ``stored``, or None when it may: the
+        store doesn't hold it, ``adopt`` names it, this bundle registered its latest version, or an interrupted
+        registration of this bundle wrote it."""
+        if stored is None or write.id in self.adopted_ids:
+            return None
+        row = self._latest(write.kind.store, write.id)
+        if row is not None and row.get("bundle") == self._bundle(write):
+            return None
+        pending = self._find(self.collection, Filter.of(store=write.kind.store, id=write.id, bundle=self._bundle(write),
+                                                        status="pending"))
+        if pending is not None and pending.get("version") == stored:
+            return None
+        by = f"registered from {row['bundle']}" if row is not None else "not registered from a bundle"
+        return (f"{self._plan.path(write.source.entry)}: {write.id!r} is in the store already, at v{stored}, {by}; pass "
+                f"--adopt {write.id} to write a new version of it, or --prefix to register this bundle under other ids")
 
     def stored_version(self, write: Write) -> int | None:
         return self._stored_version(write)
@@ -327,19 +351,12 @@ def _remote_name(remote: str) -> str:
     return f"{host}/{path.strip('/').removesuffix('.git')}"
 
 
-def _unowned(plan: Plan, ledger: RegistrationLedger, adopt: frozenset[str]) -> Iterator[str]:
-    """A problem for each write whose id the store holds already, unless this bundle registered it or ``adopt`` names
-    it."""
+def _unowned(plan: Plan, ledger: RegistrationLedger) -> Iterator[str]:
+    """A problem for each write this bundle may not make (``RegistrationLedger.unowned``), every one found before any
+    write."""
     for write in plan.writes:
-        stored = ledger.stored_version(write)
-        if stored is None or write.id in adopt:
-            continue
-        row = ledger.latest_row(write.kind.store, write.id)
-        if row is not None and row.get("bundle") == ledger.bundle_key(write):
-            continue
-        by = f"registered from {row['bundle']}" if row is not None else "not registered from a bundle"
-        yield (f"{plan.path(write.source.entry)}: {write.id!r} is in the store already, at v{stored}, {by}; pass "
-               f"--adopt {write.id} to write a new version of it, or --prefix to register this bundle under other ids")
+        if (problem := ledger.unowned(write, ledger.stored_version(write))) is not None:
+            yield problem
 
 
 def _unregistrable(plan: Plan, shared: bool) -> Iterator[str]:

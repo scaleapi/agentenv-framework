@@ -188,10 +188,6 @@ class Ledger:
         """What each row records beyond the write: nothing here."""
         return {}
 
-    def latest_row(self, store: str, id: str) -> dict | None:
-        """The latest done row for (``store``, ``id``), whichever bundle wrote it."""
-        return self._latest(store, id)
-
     def _orphan(self, write: Write, stored: int | None, digest: Digest) -> int | None:
         """The version an interrupted run of this bundle wrote and didn't record, when it's still the store's
         latest and was made from what ``write`` is now made from."""

@@ -378,16 +378,20 @@ def _build(write: Write, plan: Plan, versions: dict[tuple[str, str], int] | None
 
 
 def pinned_steps(plan: Plan, write: Write, versions: dict[tuple[str, str], int]) -> list[dict]:
-    """A copy of the task ``write``'s steps with each reference it reads, the bundle's own entity or a store's, naming
-    the version it reads (``_version``), where its field takes a version."""
+    """A copy of the task ``write``'s steps with each reference it reads that names no version, where its field takes
+    one, naming the version it reads: the one written for the bundle's own entity, or the store's latest the plan
+    read."""
     steps = copy.deepcopy(write.source.config)
-    references = {(ref.kind, ref.id): ref for ref in write.source.references}
+    own = {(ref.kind, ref.id) for ref in write.source.references if ref.local is not None}
     registry = get_task_step_registry()
     for step in steps:
         for site in ref_sites(registry[step["type"]].entity_refs or (), step):
-            ref = references.get((site.ref.kind, site.value))
-            if site.ref.role is RefRole.INPUT and site.version_key is not None and site.version is None and ref:
-                site.rewrite(site.value, _version(plan, ref, versions))
+            if site.ref.role is not RefRole.INPUT or site.version_key is None or site.version is not None:
+                continue
+            key = (site.ref.kind, site.value)
+            version = versions[_KINDS[site.ref.kind], site.value] if key in own else plan.store_latest.get(key)
+            if version is not None:
+                site.rewrite(site.value, version)
     return steps
 
 

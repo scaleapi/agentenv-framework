@@ -456,3 +456,65 @@ def test_a_write_that_fails_leaves_no_pending_row(home, monkeypatch):
         register_bundle(layout(home / "triage", TRIAGE))
 
     assert get_config().get_document_store().query(REGISTRATIONS, Filter.of(status="pending")) == []
+
+
+def test_a_step_naming_no_version_takes_the_latest_even_where_another_step_pins_one(home):
+    (home / "seed.txt").write_text("seed")
+    FileArtifact.put("shared-seed", description="seed", file_path=str(home / "seed.txt"))
+    FileArtifact.put("shared-seed", description="seed", file_path=str(home / "seed.txt"))
+    files = {"tasks/t.json": json.dumps([BOX, _load("latest", "shared-seed"),
+                                         {**_load("pinned", "shared-seed"), "artifact_version": 1}])}
+
+    register_bundle(layout(home / "triage", files))
+
+    assert [step["artifacts"] for step in _steps("triage-t")[1:]] == [[{"id": "shared-seed", "version": 2}],
+                                                                       [{"id": "shared-seed", "version": 1}]]
+
+
+class _Killed(BaseException):
+    """Stands in for the process dying."""
+
+
+def test_a_registration_killed_after_a_write_and_before_its_row_is_done_resumes(home, monkeypatch):
+    root = layout(home / "triage", TRIAGE)
+    digest = register_module.Ledger.digest
+    calls = []
+
+    def dies_after_writing_docs(self, write, needs):
+        calls.append(write.id)
+        if write.id == "triage-docs" and calls.count("triage-docs") == 2:  # the check's, then the one after the write
+            raise _Killed
+        return digest(self, write, needs)
+
+    monkeypatch.setattr(register_module.Ledger, "digest", dies_after_writing_docs)
+    with pytest.raises(_Killed):
+        register_bundle(root)
+    monkeypatch.setattr(register_module.Ledger, "digest", digest)
+
+    resumed = register_bundle(root)
+
+    assert {done.write.id: (done.version, done.reused) for done in resumed.materialization.writes} == {
+        "triage-docs": (1, True), "triage-greeting": (1, False), "triage-t": (1, False)}
+
+
+def test_an_id_another_bundle_registers_after_the_check_is_refused_before_it_is_written(home, monkeypatch):
+    root = layout(home / "triage", TRIAGE)
+    unowned = register_module._unowned
+
+    def then_another_bundle_writes(plan, ledger):
+        problems = list(unowned(plan, ledger))
+        (home / "theirs.txt").write_text("theirs")
+        FileArtifact.put("triage-docs", description="theirs", file_path=str(home / "theirs.txt"))
+        get_config().get_document_store().insert(REGISTRATIONS, {
+            "store": "artifact", "id": "triage-docs", "bundle": "folder:/elsewhere/triage", "status": "done",
+            "version": 1, "scheme": 2, "digest": None, "inputs": None})
+        return iter(problems)
+
+    monkeypatch.setattr(register_module, "_unowned", then_another_bundle_writes)
+
+    with pytest.raises(BundleError) as refused:
+        register_bundle(root)
+
+    assert "'triage-docs' is in the store already, at v1, registered from folder:/elsewhere/triage" in \
+        refused.value.problems[0]
+    assert Artifact.get("triage-docs").description == "theirs"
