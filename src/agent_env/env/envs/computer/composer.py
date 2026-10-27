@@ -321,7 +321,8 @@ class _Record:
 
     def finished(self, form: str, arch: str, result: dict) -> None:
         with self.lock:
-            self.composed.setdefault(form, {})[arch] = result
+            started = self.composed.get(form, {}).get(arch, {}).get("started_at")
+            self.composed.setdefault(form, {})[arch] = {**result, "started_at": started}
             self.env.merge_metadata({"composed": copy.deepcopy(self.composed)})
 
     def built(self) -> dict[str, str]:
