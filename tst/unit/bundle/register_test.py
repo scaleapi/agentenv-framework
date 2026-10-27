@@ -298,18 +298,23 @@ def test_an_at_local_id_left_in_what_would_be_written_is_refused(home):
         "tasks/t.json: [0].metadata.from names '@local/~/elsewhere/x', which only this machine's stores hold",)
 
 
-def test_a_shared_store_refuses_a_credential_written_out_and_a_url_only_this_machine_reaches(home, monkeypatch):
+def test_a_shared_store_refuses_a_credential_or_reference_in_env_vars_and_a_url_only_this_machine_reaches(
+        home, monkeypatch):
     monkeypatch.setattr(register_module, "shared_store", lambda store: True)
     files = {"tasks/t.json": json.dumps([
-        {**BOX, "env_vars": {"API_KEY": "abc", "TOKEN": "secret:team_token", "MODE": "fast"}},
+        {**BOX, "env_vars": {"API_KEY": "abc", "TOKEN": "secret:team_token", "MODE": "fast", "DB_URL": "env:DB_URL"}},
         {"id": "agent", "type": "deploy_agent", "env_ids": [], "metadata": {"wiki": "http://localhost:8080/x"}}])}
 
     with pytest.raises(BundleError) as refused:
         register_bundle(layout(home / "triage", files))
 
     assert refused.value.problems == (
-        "tasks/t.json: [0].env_vars.API_KEY: its name looks like a secret's, and it's set, and a shared store shows "
-        "it to anyone who reads it; leave it out, for whatever runs the task to give it",
+        "tasks/t.json: [0].env_vars.API_KEY: its name looks like a secret's and it's set, which a shared store shows "
+        "to anyone who reads it; leave it out, for whatever runs the task to give it",
+        "tasks/t.json: [0].env_vars.DB_URL: it's a reference, and nothing resolves one in a step's env vars, so the run "
+        "would get the reference itself; leave it out, for whatever runs the task to give it",
+        "tasks/t.json: [0].env_vars.TOKEN: it's a reference, and nothing resolves one in a step's env vars, so the run "
+        "would get the reference itself; leave it out, for whatever runs the task to give it",
         "tasks/t.json: [1].metadata.wiki names http://localhost:8080, which only this machine reaches")
 
 

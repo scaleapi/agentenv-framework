@@ -381,8 +381,7 @@ def _unregistrable(plan: Plan, shared: bool) -> Iterator[str]:
                 yield f"{where}: {path or 'its value'} names {url}, which only this machine reaches"
         if shared:
             for path, why in credentials_in(write.source.config):
-                yield (f"{where}: {path}: {why}, and a shared store shows it to anyone who reads it; leave it out, for "
-                       "whatever runs the task to give it")
+                yield f"{where}: {path}: {why}; leave it out, for whatever runs the task to give it"
 
 
 def _strings(value: Any, path: str = "") -> Iterator[tuple[str, str]]:
