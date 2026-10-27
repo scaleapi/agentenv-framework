@@ -82,7 +82,7 @@ class ConfigureWakeupsTaskStep(TaskStep):
             state = await deployed.invoke(EXT_WAKEUPS_URI, "config", body, timeout=self.timeout_seconds)
         except httpx.HTTPStatusError as e:
             raise RuntimeError(f"wakeups config failed (HTTP {e.response.status_code}): {e.response.text}") from e
-        logger.info(f"configure_wakeups env={self.env_id}: {body}")
+        logger.info(f"configure_wakeups completed for env={self.env_id}")
         context.metadata.setdefault("wakeup_configurations", []).append({
             "step_id": self.id, "env_id": self.env_id, **body,
             "applied": {k: state.get(k) for k in ("scheduled_checks", "max_active", "min_interval")},

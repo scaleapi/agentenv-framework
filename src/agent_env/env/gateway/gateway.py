@@ -312,6 +312,11 @@ class Gateway:
 
         @self._mcp.custom_route("/wakeups/config", methods=["POST"])
         async def wakeups_config(request: Request) -> Response:
+            try:  # the backing servers' tools must be known, or a later discovery would replace ours unseen
+                await self._ensure_tools_discovered()
+            except Exception as e:
+                return self._json_response(
+                    {"ok": False, "error": f"tool discovery has not completed ({type(e).__name__}); retry"}, 503)
             taken = sorted(set(WAKEUP_TOOL_NAMES) & set(self._tool_server_urls))
             if taken:
                 return self._json_response(
