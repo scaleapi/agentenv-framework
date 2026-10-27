@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 from pathlib import Path
 
@@ -144,6 +145,22 @@ async def test_what_comes_due_together_goes_in_one_message_oldest_first(hook, ga
 async def test_it_ends_at_end_time_without_waking_for_what_lies_beyond(hook, gateway):
     gateway._wakeups.schedule("next week", at="2026-03-10T09:00:00Z")
     assert await _turns(hook, _context(), params={"end_time": "P5D"}) == [{"end": "end_time"}]
+
+
+@pytest.mark.asyncio
+async def test_a_state_check_the_agents_turn_set_off_finishes_before_the_clock_jumps(hook, gateway, monkeypatch):
+    async def slow_check(check, ctx=None, role=None):
+        await asyncio.sleep(0.3)
+        return True
+
+    monkeypatch.setattr(gateway._trigger_engine, "_run_check", slow_check)
+    _register(gateway, {"id": "seen", "when": {"type": "state", "check": {"tool": "items_list", "predicate": {"exists": True}}},
+                        "actions": [{"type": "tool", "tool": "items_add_item", "args": {"item": "seen"}}]},
+              {"id": "tue", "when": {"type": "time", "at": "2026-03-03T09:00:00Z"},
+               "actions": [{"type": "tool", "tool": "items_add_item", "args": {"item": "tue"}}]})
+    gateway._trigger_engine.on_tool_call("default", "send_email", {}, CallToolResult(content=[], isError=False))
+    await _turns(hook, _context())
+    assert gateway.calls[0] == ("seen", MONDAY)
 
 
 @pytest.mark.asyncio

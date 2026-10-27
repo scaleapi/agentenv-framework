@@ -166,6 +166,8 @@ async def _settle(turn, envs, timeout):
 
 
 def _busy(row, now):
+    if row.get("evaluating"):  # a state check the agent's turn set off is still running
+        return True
     if row["status"] not in IN_FLIGHT and not row.get("pending"):
         return False
     return not (row.get("waiting") and row.get("resumes_at") and _utc(row["resumes_at"]) > now)
