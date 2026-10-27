@@ -121,8 +121,15 @@ TRIGGER_EXECUTOR_HOURS = "executor_hours"
 TRIGGER_UNLESS = "unless"
 TRIGGER_WEBSITE = "website"
 TRIGGER_EXECUTOR_HOURS_TIME_ZONE = "executor_hours_time_zone"
+TRIGGER_NEXT_EVENT_AT = "next_event_at"
 TRIGGER_FEATURES = (TRIGGER_NAMED_EXECUTORS, TRIGGER_PROVOKING_ROLES, TRIGGER_ACTION_DELAY, TRIGGER_EXECUTOR_HOURS,
-                    TRIGGER_UNLESS, TRIGGER_WEBSITE, TRIGGER_EXECUTOR_HOURS_TIME_ZONE)
+                    TRIGGER_UNLESS, TRIGGER_WEBSITE, TRIGGER_EXECUTOR_HOURS_TIME_ZONE, TRIGGER_NEXT_EVENT_AT)
+
+# The one `source` a /step call may name instead of step_api, with the id of the hook artifact that made it.
+STEP_SOURCE_POST_TURN_HOOK = "post_turn_hook"
+# What step/v1 takes beyond its first release, declared on the card as triggers/v1 declares its features.
+STEP_SOURCE = "source"
+STEP_FEATURES = (STEP_SOURCE,)
 
 GATEWAY_TRAJECTORY_FILE = os.environ.get(
     "GATEWAY_TRAJECTORY_FILE",
@@ -167,7 +174,8 @@ _TOOLS_REQUEST = {
 # call_tool also needs a tool_name; if/then rather than oneOf keeps the fields top-level, where card viewers read them
 _STEP_REQUEST = {
     "type": "object",
-    "properties": {"action": {"enum": ["list_tools", "call_tool"]}, "tool_name": {"type": "string", "minLength": 1}, "arguments": {"type": "object"}},
+    "properties": {"action": {"enum": ["list_tools", "call_tool"]}, "tool_name": {"type": "string", "minLength": 1}, "arguments": {"type": "object"},
+                   "source": {"enum": [STEP_SOURCE_POST_TURN_HOOK]}, "hook_artifact_id": {"type": "string", "minLength": 1}},
     "required": ["action"],
     "if": {"properties": {"action": {"const": "call_tool"}}},
     "then": {"required": ["tool_name"]},
@@ -197,10 +205,11 @@ GATEWAY_EXTENSIONS = [
     },
     {
         "uri": EXT_CLOCK_URI,
-        "description": "Virtual clock (urn:agentenv:clock/v1): read the gateway's virtual time (wall-clock-derived, rate-scaled) via get_time; set-time/clear are the harness control path.",
+        "description": "Virtual clock (urn:agentenv:clock/v1): read the gateway's virtual time (wall-clock-derived, rate-scaled) via get_time; set-time/advance/clear are the harness control path.",
         "params": {"endpoint": "/clock/time", "methods": {
             "get_time": {"method": "GET", "endpoint": "/clock/time"},
             "set_time": {"method": "PUT", "endpoint": "/clock/set-time", "request": {"type": "object", "properties": {"virtual_time": {"type": "string"}, "virtual_seconds_per_real_second": {"type": "number"}}, "required": ["virtual_time"]}},
+            "advance": {"method": "PUT", "endpoint": "/clock/advance", "request": {"type": "object", "properties": {"virtual_time": {"type": "string"}}, "required": ["virtual_time"]}},
             "clear": {"method": "POST", "endpoint": "/clock/clear", "request": {"type": "object", "properties": {}}},
             "state": {"method": "GET", "endpoint": "/clock/state", "request": {"type": "object", "properties": {}}}}},
         "required": False,
@@ -214,8 +223,8 @@ GATEWAY_EXTENSIONS = [
     },
     {
         "uri": EXT_STEP_URI,
-        "description": "Step (urn:agentenv:step/v1): list or call the env's tools over REST, filtered by the AgentEnv-Role header.",
-        "params": {"endpoint": "/step", "methods": {
+        "description": "Step (urn:agentenv:step/v1): list or call the env's tools over REST, filtered by the AgentEnv-Role header; a call a post-turn hook makes names it, and the trajectory records it as the hook's.",
+        "params": {"endpoint": "/step", "features": list(STEP_FEATURES), "methods": {
             "step": {"method": "POST", "endpoint": "/step", "request": _STEP_REQUEST}}},
         "required": False,
     },

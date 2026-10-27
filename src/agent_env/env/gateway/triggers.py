@@ -414,6 +414,7 @@ class TriggerEngine:
         self._driver_task: asyncio.Task | None = None
         self._driver_interval = 1.0  # real seconds between autonomous time-trigger polls
         self._time_trigger_gate = asyncio.Event()  # parks the driver while no time-trigger is armed
+        self._clock_moved = asyncio.Event()  # set, and replaced, when an advance moves the clock under waiting actions
 
     def register(self, body: Any) -> dict:
         """Additively add each trigger by id (idempotent upsert; conflicting id or bad shape -> 400); watch_roles and
@@ -461,7 +462,7 @@ class TriggerEngine:
                                    "failure_count": 0, "last_failure_at": None,
                                    "rng": _make_rng(spec), "mark_gen": None,
                                    "pending": deque(), "task": None, "delay_rngs": _delay_rngs(spec),
-                                   "attempts": 0, "waiting": False}
+                                   "attempts": 0, "waiting": False, "resumes": None, "hours": None}
             self._emit("added", tid)
         self._recompute_time_flag()
         return {"ok": True, "added": batch_order, "all": list(self._triggers)}
@@ -840,6 +841,9 @@ class TriggerEngine:
         events = self._events + list(self._events_tail)
         for t in self._triggers.values():
             assert t["status"] in TRIGGER_STATUSES, f"unknown trigger status {t['status']!r}"
+        resumes = {tid: self._resumes_at(t) for tid, t in self._triggers.items()}
+        upcoming = [self._upcoming_mark(t) for t in self._triggers.values()] + list(resumes.values())
+        next_event = min((at for at in upcoming if at is not None), default=None)
         return {
             "config": {"watch_roles": sorted(self._watch_roles),
                        "executor_configured": None in self._executors,
@@ -851,10 +855,12 @@ class TriggerEngine:
                  "fired_at": t["fired_at"], "fire_count": t["fire_count"],
                  "failure_count": t["failure_count"], "last_failure_at": t["last_failure_at"],
                  "barrier": t["spec"].get("barrier"),
-                 "pending": len(t["pending"]), "waiting": t["waiting"],
+                 "pending": len(t["pending"]), "waiting": t["waiting"], "evaluating": t["evaluating"],
+                 "resumes_at": _iso(resumes[tid]) if resumes[tid] else None,
                  "next_mark": _iso(t["next_mark"]) if t["next_mark"] else None}
                 for tid, t in self._triggers.items()
             ],
+            "next_event_at": _iso(next_event) if next_event else None,
             "events": events,
             "events_dropped": max(0, self._seq - len(events)),
         }
@@ -984,12 +990,13 @@ class TriggerEngine:
         trig["task"].set_name(tid)
         return trig["task"]
 
-    def _eval_time_triggers(self) -> None:
-        """Poll armed time-triggers against the virtual clock and schedule the due ones."""
+    def _eval_time_triggers(self) -> list[str]:
+        """Poll armed time-triggers against the virtual clock and schedule the due ones; returns their ids."""
         clock = self._gw._clock
         now = clock.now()
+        detected: list[str] = []
         if now is None:  # clock unarmed -> nothing can be due yet
-            return
+            return detected
         gen = clock.generation
         for tid, trig in list(self._triggers.items()):
             when = trig["spec"]["when"]
@@ -1015,24 +1022,66 @@ class TriggerEngine:
             if marks:
                 # The cause is time passing, not whichever path observed it.
                 self._mark_time_detected(tid, trig, marks, capped, terminated, {"source": "clock"})
+                detected.append(tid)
             elif terminated:  # retired without firing (e.g. `until` already passed)
                 trig["status"] = "fired"
                 trig["next_mark"] = None
                 self._recompute_time_flag()
+        return detected
+
+    def clock_advanced(self) -> list[str]:
+        """The triggers an advance made due, fired now or with their wait ended, and their waiting actions woken."""
+        due = self._eval_time_triggers()
+        now = self._gw._clock.now()
+        ended = [tid for tid, t in self._triggers.items()
+                 if now is not None and (at := self._resumes_at(t)) is not None and at <= now
+                 and (t["hours"] is None or _next_opening(now, t["hours"]) is None)]
+        self._clock_moved.set()
+        self._clock_moved = asyncio.Event()
+        return list(dict.fromkeys(due + ended))
 
     def _resolve_first_mark(self, trig: dict, now: datetime) -> None:
         """Stamp the first mark for a non-anchored time-trigger; event-anchored ones wait for _resolve_dependents."""
         when = trig["spec"]["when"]
         if "after" in when:
             return
+        trig["next_mark"] = self._first_mark(when, trig["rng"])
+        trig["resolved"] = True
+
+    def _first_mark(self, when: dict, rng: random.Random | None) -> datetime:
+        """A non-anchored time trigger's first mark on the current arm, a stochastic interval drawn from `rng`."""
         t0 = self._gw._clock.t0()
         if "at" in when:
             kind, val = _time_mark_spec(when["at"])
-            start = val if kind == "abs" else _advance(t0, val.total_seconds())
-        else:  # recurring with no explicit start: first fire is one interval after t0
-            start = _advance(t0, self._next_interval_seconds(trig))
-        trig["next_mark"] = start
-        trig["resolved"] = True
+            return val if kind == "abs" else _advance(t0, val.total_seconds())
+        # recurring with no explicit start: first fire is one interval after t0
+        return _advance(t0, _interval_seconds(when, rng))
+
+    def _upcoming_mark(self, trig: dict) -> datetime | None:
+        """The mark the engine fires `trig` at next, stamped as its next evaluation would stamp it, without stamping."""
+        when = trig["spec"]["when"]
+        clock = self._gw._clock
+        # A trigger mid-fire can't fire again until that fire ends; a waiting one's resumes_at stands in for it.
+        if when["type"] != "time" or trig["status"] != "armed" or not clock.armed:
+            return None
+        if "after" in when or (trig["resolved"] and trig["mark_gen"] == clock.generation):
+            mark = trig["next_mark"]
+        else:  # unresolved, or resolved on an earlier arm, which re-anchors it with a fresh draw
+            source = trig["rng"] if not trig["resolved"] else _make_rng(trig["spec"])
+            rng = None
+            if source is not None:
+                rng = random.Random()
+                rng.setstate(source.getstate())
+            mark = self._first_mark(when, rng)
+        until = self._until_dt(trig)
+        return None if mark is None or (until is not None and mark > until) else mark
+
+    def _resumes_at(self, trig: dict) -> datetime | None:
+        """When a fire waiting out a delay or its executor's hours goes on, in virtual time; None when none waits."""
+        resumes = trig["resumes"]
+        if resumes is None or isinstance(resumes, datetime):
+            return resumes
+        return self._gw._clock.at_elapsed(resumes)
 
     def _resolve_dependents(self, anchor_tid: str) -> None:
         """Stamp the concrete mark (virtual_now + offset) of every time-trigger anchored on `anchor_tid`."""
@@ -1060,11 +1109,7 @@ class TriggerEngine:
 
     def _next_interval_seconds(self, trig: dict) -> float:
         """Virtual seconds to the next mark; drawn on the sync path so the sequence depends only on the seed."""
-        every = trig["spec"]["when"]["every"]
-        if isinstance(every, dict):
-            mean_s = _parse_duration(every["mean"]).total_seconds()
-            return trig["rng"].expovariate(1.0 / mean_s)
-        return _parse_duration(every).total_seconds()
+        return _interval_seconds(trig["spec"]["when"], trig["rng"])
 
     def _advance_marks(self, trig: dict, now: datetime) -> tuple[list[datetime], bool, bool]:
         """SYNC: the marks due at `now` (<= _MAX_CATCHUP), advancing next_mark past them.
@@ -1385,31 +1430,35 @@ class TriggerEngine:
             seconds = trig["delay_rngs"][index].expovariate(1.0 / mean)
         self._emit("delayed", tid, action_index=index, virtual_seconds=round(seconds, 3), **_named_executor(action))
         trig["waiting"] = True
+        trig["resumes"] = since + seconds
         try:
             await self._sleep_virtual(seconds - (self._gw._clock.elapsed() - since))
         finally:
             trig["waiting"] = False
+            trig["resumes"] = None
 
     async def _await_hours(self, tid: str, trig: dict, index: int, hours: dict, named: dict) -> None:
-        """Wait until the executor's working hours are open, reckoned again after a re-arm; they don't apply while the
-        clock is unarmed."""
+        """Wait until the executor's working hours are open now, reckoned each pass; not while the clock is unarmed."""
         clock = self._gw._clock
         gen = opens = None
         trig["waiting"] = True
+        trig["hours"] = hours
         try:
             while True:
                 current = clock.generation  # read before now(), so a re-arm in between is caught on the next pass
                 if (now := clock.now()) is None:
                     return
-                if current != gen:
-                    gen, opens = current, _next_opening(now, hours)
-                    if opens is not None:
-                        self._emit("deferred", tid, action_index=index, until=_iso(opens), **named)
-                if opens is None or now >= opens:
+                if (opening := _next_opening(now, hours)) is None:
                     return
+                if current != gen or opening != opens:
+                    gen, opens = current, opening
+                    trig["resumes"] = opens
+                    self._emit("deferred", tid, action_index=index, until=_iso(opens), **named)
                 await self._sleep_virtual((opens - now).total_seconds(), generation=gen)
         finally:
             trig["waiting"] = False
+            trig["resumes"] = None
+            trig["hours"] = None
 
     async def _sleep_virtual(self, seconds: float, generation: int | None = None) -> None:
         """Wait out ``seconds`` of virtual time as the clock runs (real time at its rate, 1 while unarmed, none while
@@ -1418,7 +1467,17 @@ class TriggerEngine:
         until = clock.elapsed() + seconds
         while (left := until - clock.elapsed()) > 0 and (generation is None or clock.generation == generation):
             rate = clock.rate
-            await asyncio.sleep(min(left / rate, _VIRTUAL_RECHECK_S) if rate else _VIRTUAL_RECHECK_S)
+            await self._nap(min(left / rate, _VIRTUAL_RECHECK_S) if rate else _VIRTUAL_RECHECK_S)
+
+    async def _nap(self, seconds: float) -> None:
+        """Sleep `seconds` of real time, cut short when an advance moves the clock."""
+        nap = asyncio.ensure_future(asyncio.sleep(seconds))
+        moved = asyncio.ensure_future(self._clock_moved.wait())
+        try:
+            await asyncio.wait({nap, moved}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            nap.cancel()
+            moved.cancel()
 
     async def _call_executor(self, executor: dict | None, instruction: str, context_id: str) -> str | None:
         if executor is None:
@@ -1457,6 +1516,14 @@ class TriggerEngine:
         for dep_id, dep in self._triggers.items():
             if dep["spec"]["when"].get("after") == tid and dep["status"] == "armed":
                 self._cancel(dep_id, dep, anchor=tid)
+
+
+def _interval_seconds(when: dict, rng: random.Random | None) -> float:
+    """Virtual seconds from one mark of a recurring time trigger to the next, a stochastic one drawn from `rng`."""
+    every = when["every"]
+    if isinstance(every, dict):
+        return rng.expovariate(1.0 / _parse_duration(every["mean"]).total_seconds())
+    return _parse_duration(every).total_seconds()
 
 
 def _result_text(result: CallToolResult) -> str:
