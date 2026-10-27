@@ -391,6 +391,14 @@ def test_a_cli_is_tracked_while_it_runs_a_turn(spawn):
     assert running == [1, 1] and codex_bridge._RUNNING == set()
 
 
+def test_the_runs_tags_join_the_ones_model_headers_name():
+    headers = json.dumps({"X-LiteLLM-Tags": "useCase:evals,taskId:own"})
+
+    assert codex_bridge.cli_env({"LITELLM_EXTRA_HEADERS": headers}, project_id="p-1", task_id="t-1")[
+        "LITELLM_TAGS"] == "useCase:evals,taskId:own,projectId:p-1"
+    assert codex_bridge.cli_env({"LITELLM_EXTRA_HEADERS": headers})["LITELLM_TAGS"] == "useCase:evals,taskId:own"
+
+
 def test_the_cli_gets_the_endpoint_key_under_the_name_codex_prechecks():
     assert codex_bridge.cli_env({"LITELLM_API_KEY": "k"})["OPENAI_API_KEY"] == "k"
     assert codex_bridge.cli_env({"LITELLM_API_KEY": "k", "OPENAI_API_KEY": "own"})["OPENAI_API_KEY"] == "own"

@@ -61,7 +61,7 @@ def _write(cfg: dict[str, Any]) -> bool:
     return True
 
 
-def _model_headers(raw: str | None) -> dict[str, str]:
+def model_headers(raw: str | None) -> dict[str, str]:
     """[model.headers], from agent-env's JSON object; none when it isn't one."""
     if not raw:
         return {}
@@ -104,7 +104,9 @@ def write_base_config(environ: Mapping[str, str]) -> None:
                 "x-litellm-tags": "LITELLM_TAGS",
             },
         }
-        headers = _model_headers(environ.get(MODEL_HEADERS_ENV))
+        # x-litellm-tags goes as LITELLM_TAGS instead, so a run's tags can join it.
+        headers = {name: value for name, value in model_headers(environ.get(MODEL_HEADERS_ENV)).items()
+                   if name.lower() != "x-litellm-tags"}
         if headers:
             provider["http_headers"] = headers
         cfg.setdefault("model_providers", {})["litellm"] = provider
