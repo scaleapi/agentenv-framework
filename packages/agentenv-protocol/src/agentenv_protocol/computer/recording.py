@@ -28,6 +28,11 @@ from ..transfers import NamespaceUploader, WriteNamespaceGrant
 from .errors import InvalidArgument, LimitExceeded, Unsupported
 from .frames import to_pil
 
+try:
+    import av
+except ImportError:  # the recording extra isn't installed: a start says so
+    av = None
+
 if TYPE_CHECKING:
     from .runtime import ComputerRuntime
 
@@ -133,11 +138,8 @@ class Recordings:
             if sum(not r.done for r in self.running.values()) >= features.max_concurrent:
                 raise LimitExceeded(f"{features.max_concurrent} recordings are running, the most this computer "
                                     "records at once; end one first")
-            try:
-                import av  # noqa: F401
-            except ImportError:
-                raise Unsupported("recording needs PyAV: install agentenv-framework-protocol[computer,recording]") \
-                    from None
+            if av is None:
+                raise Unsupported("recording needs PyAV: install agentenv-framework-protocol[computer,recording]")
             recording_id = f"rec-{uuid.uuid4().hex[:12]}"
             root = Path.home() / RECORDINGS_DIR
             hints = dataclasses.replace(hints, directory=root / recording_id)
@@ -334,8 +336,6 @@ class _Encoder:
     the video's timeline is the computer's clock."""
 
     def __init__(self, path: Path, width: int, height: int, fps: int, started_at: datetime) -> None:
-        import av
-
         self.path = path
         self.size = (width, height)
         self.started_at = self.last_at = started_at
@@ -350,6 +350,7 @@ class _Encoder:
     def add(self, frame: Any, at: datetime) -> None:
         pts = max(int((at - self.started_at).total_seconds() * 1000), self._last_pts + 1)
         frame.pts, frame.time_base = pts, Fraction(1, 1000)
+        frame.pict_type = av.video.frame.PictureType.NONE  # a decoded stream marks every frame a keyframe
         for packet in self.stream.encode(frame):
             self.container.mux(packet)
         self._last_pts, self.last_at = pts, at
@@ -384,8 +385,6 @@ def _draw_pointer(image: PILImage.Image, x: float, y: float) -> None:
 
 def _video_frame(image: Any, max_edge: Optional[int]) -> Any:
     """``image`` as a ``yuv420p`` frame of even size, its longer edge at most ``max_edge``."""
-    import av
-
     frame = image if isinstance(image, av.VideoFrame) else av.VideoFrame.from_image(image.convert("RGB"))
     width, height = frame.width, frame.height
     if max_edge is not None and max(width, height) > max_edge:

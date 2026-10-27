@@ -42,13 +42,15 @@ class Recorded(FakeDriver):
 
 
 class Streamed(FakeDriver):
-    """A stream of the fake screen's frames, as a driver with its own capture stream yields them."""
+    """A stream of the fake screen's frames as a decoder hands them over, each marked a keyframe, as x11grab's are."""
     recording = Recording(max_fps=30, max_segment_s=60)
 
     @record
     async def frames(self, hints):
         while True:
-            yield RecordedFrame(self.screen.image.copy(), datetime.now(timezone.utc))
+            frame = av.VideoFrame.from_image(self.screen.image.copy())
+            frame.pict_type = av.video.frame.PictureType.I
+            yield RecordedFrame(frame, datetime.now(timezone.utc))
             await asyncio.sleep(1 / hints.fps)
 
 
@@ -224,6 +226,9 @@ async def test_a_stream_of_frames_keeps_each_frames_capture_time(home):
     frames = _decoded(home / ".agentenv-recordings" / segment["path"])
     span = (_at(segment["ended_at"]) - _at(segment["started_at"])).total_seconds()
     assert len(frames) == segment["frames"] >= 10 and abs(frames[-1].time - span) < 0.002
+    with av.open(str(home / ".agentenv-recordings" / segment["path"])) as container:
+        keyframes = sum(packet.is_keyframe for packet in container.demux(video=0) if packet.size)
+    assert keyframes <= 2, f"{keyframes} of {len(frames)} frames were encoded as keyframes"
 
 
 @pytest.mark.asyncio
@@ -321,7 +326,7 @@ async def test_bad_calls_are_refused_with_a_code(path, body, status, code):
 
 @pytest.mark.asyncio
 async def test_without_pyav_a_start_is_refused_naming_the_extra(monkeypatch):
-    monkeypatch.setitem(__import__("sys").modules, "av", None)
+    monkeypatch.setattr(recording_module, "av", None)
     async with http_client(Recorded()) as http:
         refused = await http.post(START, json={"request_id": "r"})
     assert refused.status_code == 501 and "agentenv-framework-protocol[computer,recording]" in refused.text
