@@ -23,7 +23,7 @@ from typing import Any, NoReturn
 
 from agent_env.bundle._fs import Unreadable, fold, home, on_disk, read_regular, show, with_article
 from agent_env.entity.refs import EntityKind
-from agent_env.plugins._bundles import AGENT_ALIASES, ALIASES_FILE, ENV_ALIASES, read_aliases
+from agent_env.plugins._bundles import AGENT_ALIASES, ALIASES_FILE, ARTIFACT_ALIASES, ENV_ALIASES, read_aliases
 from agent_env.store.ids import LOCAL_PREFIX, MAX_AUTHORED_LOCAL_ID_BYTES, validate_local_id
 from agent_env.utils.paths import LEAVINGS, os_reason
 
@@ -159,14 +159,16 @@ class _Parser:
         )
 
     def _aliases(self, entries: list[BundleEntry]) -> dict[str, dict[str, tuple[str, ...]]]:
-        """The aliases the bundle's aliases.toml gives its agents and envs. Each names one the bundle has, of its
-        table's kind, by its folder name, so it keeps the id its folder gives it, and none is another one's name or id."""
+        """The aliases the bundle's aliases.toml gives its agents, envs and artifacts. Each names one the bundle has, of
+        its table's kind, by its folder name, so it keeps the id its folder gives it, and none is another one's name or
+        id."""
         if self.aliases_file is None:
             return {}
         declared, problems = read_aliases(self.aliases_file)
         for problem in problems:
             self._problem(self.aliases_file, problem)
-        for table, kind, noun in ((AGENT_ALIASES, BundleKind.AGENT, "agent"), (ENV_ALIASES, BundleKind.ENV, "env")):
+        for table, kind, noun in ((AGENT_ALIASES, BundleKind.AGENT, "agent"), (ENV_ALIASES, BundleKind.ENV, "env"),
+                                  (ARTIFACT_ALIASES, BundleKind.ARTIFACT, "artifact")):
             own = {entry.name: entry for entry in entries if entry.kind is kind}
             taken = {key: entry for entry in own.values() for key in (entry.name, entry.id)}
             for name, aliases in declared.get(table, {}).items():
