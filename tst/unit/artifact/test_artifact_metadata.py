@@ -1,12 +1,27 @@
 """An artifact version's metadata: written with it, then changed by compare-and-swap without touching its versioned
-fields, merging with a concurrent writer's keys rather than overwriting them."""
+fields, merging with a concurrent writer's keys rather than overwriting them. An environment universe, whose stored
+metadata key holds its legacy metadata file ids, keeps none."""
 
 import pytest
 
 from agent_env.artifact import Artifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
+from agent_env.artifact.artifacts.environment_universe import EnvironmentUniverseArtifact
 from agent_env.artifact.store import get_artifact_store
 from agent_env.store import ConcurrentModificationError, NotFoundError
+
+
+def test_an_environment_universe_reads_its_metadata_key_as_its_legacy_file_ids_and_keeps_no_artifact_metadata(
+        local_stores):
+    legacy = get_artifact_store().put_document(EnvironmentUniverseArtifact.model_validate(
+        {"id": "universe", "description": "", "service_artifact_ids": ["env"], "metadata": {"readme": "file-1"}}))
+
+    stored = Artifact.get("universe", legacy.version)
+
+    assert (stored.legacy_metadata, stored.metadata) == ({"readme": "file-1"}, {})
+    with pytest.raises(TypeError, match="keeps no artifact metadata"):
+        stored.merge_metadata({"validated": {"x": 1}})
+    assert Artifact.get("universe", legacy.version).legacy_metadata == {"readme": "file-1"}
 
 
 def _image(**metadata) -> DockerImageArtifact:
