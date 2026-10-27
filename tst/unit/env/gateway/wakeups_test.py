@@ -66,6 +66,8 @@ def test_a_check_takes_a_duration_from_now_or_a_time_with_its_offset():
     ({"note": "x", "every": "PT10M"}, "at least"),
     ({"note": "x", "at": "PT1H", "until": "P1D"}, "until only applies"),
     ({"note": "x", "every": "PT6H", "until": "PT1H"}, "before the first"),
+    ({"note": "x", "at": "PT1H", "every": "P3000000D"}, "too long"),
+    ({"note": "x", "at": "P3000000D"}, "too far away"),
 ])
 def test_bad_checks_are_refused_with_the_reason(kwargs, error):
     with pytest.raises(WakeupError, match=error):
@@ -108,6 +110,16 @@ def test_a_repeating_check_moves_past_a_long_jump_and_says_how_often_it_came_due
     assert w.list()["checks"][0]["next"] == "2027-02-02T20:00:00Z"
 
 
+def test_a_jump_over_a_short_every_is_counted_not_stepped():
+    clock = _frozen_clock()
+    w = _wakeups(clock, min_interval="PT0.001S")
+    w.schedule("tick", every="PT0.001S")
+    clock.set_time("2027-02-02T15:00:00Z", 0)
+    [item] = w.take({})["items"]
+    assert item["times"] == 86_400_000
+    assert w.list()["checks"][0]["next"] == "2027-02-02T15:00:00.001000Z"
+
+
 def test_a_repeating_check_ends_at_until():
     clock = _frozen_clock()
     w = _wakeups(clock)
@@ -133,6 +145,15 @@ def test_notifications_queue_at_the_virtual_time_and_are_taken_once():
     [item] = w.take({})["items"]
     assert (item["kind"], item["text"]) == ("notification", "Jamie: did the rug thing get sorted?")
     assert w.take({})["items"] == [] and w.state()["pending_notifications"] == []
+
+
+def test_due_is_judged_on_the_time_not_its_text():
+    clock = _frozen_clock()
+    w = _wakeups(clock)
+    w.notify("Messages", "on the second")                    # 15:00:00Z sorts after 15:00:00.500000Z as text
+    w.schedule("half a second on", at="PT0.5S")
+    items = w.take({"until": "PT0.75S"})["items"]
+    assert [i.get("text") or i.get("note") for i in items] == ["on the second", "half a second on"]
 
 
 def test_clear_turns_checks_off_and_forgets_everything():
@@ -200,6 +221,28 @@ def test_config_is_refused_over_a_backing_server_tool_of_the_same_name(gateway):
     gateway._tool_server_urls["schedule_check"] = "http://svc:1/mcp"
     r = _request(gateway, "POST", "/wakeups/config", {})
     assert r.status_code == 409 and "schedule_check" in r.json()["error"]
+
+
+def test_config_waits_for_tool_discovery_and_sees_what_it_found(gateway, monkeypatch):
+    gateway._tools_discovered = False
+
+    async def discover():
+        gateway._tool_server_urls["schedule_check"] = "http://svc:1/mcp"
+        gateway._tools_discovered = True
+
+    monkeypatch.setattr(gateway, "_ensure_tools_discovered", discover)
+    r = _request(gateway, "POST", "/wakeups/config", {})
+    assert r.status_code == 409 and "schedule_check" in r.json()["error"]
+
+
+def test_config_is_a_503_while_tool_discovery_fails(gateway, monkeypatch):
+    async def discover():
+        raise RuntimeError("backing server down")
+
+    monkeypatch.setattr(gateway, "_ensure_tools_discovered", discover)
+    r = _request(gateway, "POST", "/wakeups/config", {})
+    assert r.status_code == 503 and "retry" in r.json()["error"]
+    assert not set(WAKEUP_TOOL_NAMES) & set(gateway._mcp._tool_manager._tools)
 
 
 def test_a_bad_config_is_a_400(gateway):

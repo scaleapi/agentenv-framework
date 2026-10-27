@@ -70,6 +70,8 @@ def _when(text: Any, now: datetime, field: str) -> datetime:
         return now + _parse_duration(text) if text.startswith("P") else _parse_rfc3339(text)
     except ClockError as e:
         raise WakeupError(f"{field}: {e}")
+    except OverflowError:
+        raise WakeupError(f"{field} is too far away")
 
 
 class Wakeups:
@@ -102,7 +104,7 @@ class Wakeups:
             raise WakeupError("max_active must be a positive integer")
         try:
             min_interval = _parse_duration(body.get("min_interval", DEFAULT_MIN_INTERVAL))
-        except ClockError as e:
+        except (ClockError, OverflowError) as e:
             raise WakeupError(f"min_interval: {e}")
         if min_interval <= timedelta(0):
             raise WakeupError("min_interval must be a positive duration")
@@ -145,13 +147,18 @@ class Wakeups:
         if every is not None:
             try:
                 step = _parse_duration(every)
-            except ClockError as e:
+            except (ClockError, OverflowError) as e:
                 raise WakeupError(f"every: {e}")
             if step < self._min_interval:
                 raise WakeupError(f"every must be at least {self._min_interval} apart")
-        first = _when(at, now, "at") if at is not None else (now + step if step else None)
-        if first is None:
+        if at is None and step is None:
             raise WakeupError("give at (when) or every (how often)")
+        first = _when(at, now, "at") if at is not None else _when(every, now, "every")
+        if step is not None:
+            try:
+                first + step  # a repeat that can't be counted forward would break every later take
+            except OverflowError:
+                raise WakeupError("every is too long")
         if first <= now:
             raise WakeupError(f"at {_iso(first)} has already passed; it is now {_iso(now)}")
         end = _when(until, now, "until") if until is not None else None
@@ -195,16 +202,16 @@ class Wakeups:
         now = self._clock.now()
         with self._lock:
             item = {"id": self._next_id("note"), "channel": channel, "text": text, "trigger_id": trigger_id,
-                    "at": _iso(now) if now else None, "status": "pending"}
+                    "at": _iso(now) if now else None, "status": "pending", "_at": now}
             self._notifications.append(item)
-            return dict(item)
+            return _public_note(item)
 
     # ---- harness ----
 
     def state(self) -> dict:
         with self._lock:
             active = [c for c in self._checks.values() if c["status"] == "active"]
-            pending = [dict(n) for n in self._notifications if n["status"] == "pending"]
+            pending = [_public_note(n) for n in self._notifications if n["status"] == "pending"]
             nxt = min((c["next"] for c in active), default=None)
             return {"scheduled_checks": self._enabled, "max_active": self._max_active,
                     "min_interval": str(self._min_interval), "next_check_at": _iso(nxt) if nxt else None,
@@ -218,28 +225,47 @@ class Wakeups:
         body = body if isinstance(body, dict) else {}
         now = self._clock.now()
         until = _when(body["until"], now, "until") if body.get("until") is not None and now else now
-        items: list[dict] = []
+        due: list[tuple[datetime | None, dict]] = []
         with self._lock:
-            for check in self._checks.values():
-                if check["status"] != "active" or until is None or check["next"] > until:
-                    continue
-                due, times = check["next"], 0
-                while check["status"] == "active" and check["next"] <= until:
-                    times += 1
-                    if check["every"] and (check["until"] is None or check["next"] + check["every"] <= check["until"]):
-                        check["next"] = check["next"] + check["every"]
-                    else:
-                        check["status"] = "done"
+            # work the whole batch out before marking anything handed out
+            checks = [(c, *_after(c, until)) for c in self._checks.values()
+                      if c["status"] == "active" and until is not None and c["next"] <= until]
+            notes = [n for n in self._notifications
+                     if n["status"] == "pending" and (until is None or n["_at"] is None or n["_at"] <= until)]
+            for check, times, nxt in checks:
+                due.append((check["next"], {"kind": "scheduled_check", "check_id": check["check_id"],
+                                            "note": check["note"], "at": _iso(check["next"]), "times": times}))
                 check["fired"] += 1
-                items.append({"kind": "scheduled_check", "check_id": check["check_id"], "note": check["note"],
-                              "at": _iso(due), "times": times})
-            for note in self._notifications:
-                if note["status"] == "pending" and (until is None or note["at"] is None or note["at"] <= _iso(until)):
-                    note["status"] = "delivered"
-                    items.append({"kind": "notification", "id": note["id"], "channel": note["channel"],
-                                  "text": note["text"], "at": note["at"], "trigger_id": note["trigger_id"]})
-        items.sort(key=lambda i: i["at"] or "")
-        return {"items": items, "until": _iso(until) if until else None}
+                if nxt is None:
+                    check["status"] = "done"
+                else:
+                    check["next"] = nxt
+            for note in notes:
+                note["status"] = "delivered"
+                due.append((note["_at"], {"kind": "notification", "id": note["id"], "channel": note["channel"],
+                                          "text": note["text"], "at": note["at"], "trigger_id": note["trigger_id"]}))
+        due.sort(key=lambda d: (d[0] is not None, d[0]))
+        return {"items": [item for _, item in due], "until": _iso(until) if until else None}
+
+
+def _after(check: dict, until: datetime) -> tuple[int, datetime | None]:
+    """How many times a due check came due by `until`, and its next time after that (None: it is done). Counted,
+    not stepped, so a long jump over a short `every` costs nothing."""
+    step, end = check["every"], check["until"]
+    if not step:
+        return 1, None
+    times = (until - check["next"]) // step + 1
+    if end is not None:
+        times = min(times, (end - check["next"]) // step + 1)
+    try:
+        nxt = check["next"] + step * times
+    except OverflowError:
+        return times, None
+    return times, nxt if end is None or nxt <= end else None
+
+
+def _public_note(note: dict) -> dict:
+    return {k: v for k, v in note.items() if not k.startswith("_")}
 
 
 def _tool_error(text: str) -> CallToolResult:
