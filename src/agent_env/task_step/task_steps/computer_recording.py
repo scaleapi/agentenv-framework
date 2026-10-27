@@ -33,7 +33,7 @@ _KEY_PREFIX = "agentenv-recordings"
 GRANT_MARGIN_S = 600
 _MAX_SEGMENT_BYTES = 5 << 30
 #: The segments a grant takes: a recording also rolls over early, on a size change or after a gap.
-MAX_SEGMENTS = 1000
+MAX_SEGMENTS = 10_000
 MAX_RECORDING_BYTES = 64 << 30
 
 

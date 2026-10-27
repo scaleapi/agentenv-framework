@@ -63,7 +63,7 @@ class Recording:
     max_fps: int = 15
     max_concurrent: int = 2
     max_duration_s: int = 86_400
-    max_segment_s: int = 300
+    max_segment_s: int = 15
 
 
 @dataclass(frozen=True)
