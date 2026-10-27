@@ -50,8 +50,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# agent_env.openenv: bundle tasks served as OpenEnv envs. No cap: OpenEnv ships a minor a week, and the openenv-compat
-# workflow runs the OpenEnv tests against its latest release and main.
+# agent_env.openenv: bundle tasks served as OpenEnv envs. No cap: OpenEnv ships a minor release a week.
 openenv = [
     "openenv>=0.9",
 ]
