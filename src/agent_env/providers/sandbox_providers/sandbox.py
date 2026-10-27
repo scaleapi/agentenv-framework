@@ -25,6 +25,8 @@ from typing import IO, TYPE_CHECKING, Any, AsyncIterator, Callable, ClassVar, It
 from agent_env.config import get_config
 from agent_env.store.image_store.oci_registry_credentials import registry_host_from_ref
 from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM
+from agent_env.utils.docker.context import ignore_names
+from agent_env.utils.docker.mirror import official_bases, with_bases
 from agent_env.utils.paths import validate_relative_filename
 
 if TYPE_CHECKING:
@@ -396,10 +398,11 @@ class VmSandbox(Sandbox):
             # At extraction times, not the stored ones: BuildKit reuses a file it sent from a folder of the same name
             # when its path, size and time match, so a changed file keeping its size would build as the old one.
             await self.exec_script(f"tar -xzmf {work}/context.tar.gz -C {work}/context")
+            dockerfile = await self._mirrored(work, first.dockerfile_path, platform)
             await _once_more(
                 self,
                 f"cd {work}/context && docker build --platform {shlex.quote(platform)} "
-                f"-f {shlex.quote(first.dockerfile_path)} {tags} .",
+                f"-f {shlex.quote(dockerfile)} {tags} .",
                 f"Building {', '.join(names)}",
                 unless=_RUN_FAILED,
             )
@@ -410,6 +413,38 @@ class VmSandbox(Sandbox):
                 await self.exec_script(f"rm -rf {work}")
             except Exception as e:  # the VM may be gone; the folder goes with it
                 logger.warning(f"Could not remove {work} on {self.sandbox_id}: {e}")
+
+    async def _mirrored(self, work: str, dockerfile: str, platform: str) -> str:
+        """The Dockerfile to build ``work``'s context with: when egress is open, a copy outside the context naming
+        mirror.gcr.io for each Docker Official Image it builds from that the mirror serves, since Public ECR and Docker
+        Hub cap anonymous pulls per address, which a provider's VMs can share; else ``dockerfile``."""
+        if self.network_policy is not None and self.network_policy.restricts_egress:
+            return dockerfile
+        path = shlex.quote(f"{work}/context/{dockerfile}")
+        if not (bases := official_bases(text := await self.exec_script(f"if [ -f {path} ]; then cat {path}; fi"))):
+            return dockerfile
+        mirrors = list(dict.fromkeys(bases.values()))
+        pulls = await asyncio.gather(*(self.exec_script(f"docker pull --quiet --platform {shlex.quote(platform)} "
+                                                        f"{shlex.quote(mirror)}") for mirror in mirrors),
+                                     return_exceptions=True)
+        served = set()
+        for mirror, pull in zip(mirrors, pulls, strict=True):
+            if isinstance(pull, RuntimeError):
+                logger.warning("Couldn't pull %s on %s, so its build pulls the image its Dockerfile names: %s", mirror,
+                               self.sandbox_id, _last_output_line(str(pull)))
+            elif isinstance(pull, BaseException):
+                raise pull
+            else:
+                served.add(mirror)
+        if not served:
+            return dockerfile
+        logger.info(f"Pulled {', '.join(sorted(served))} on {self.sandbox_id} for the build")
+        copy = f"{work}/dockerfile/{posixpath.basename(dockerfile)}"
+        await self.write_host_file(with_bases(text, {base: mirror for base, mirror in bases.items()
+                                                     if mirror in served}).encode(), copy)
+        ignore = shlex.quote(f"{work}/context/{ignore_names(dockerfile)[0]}")
+        await self.exec_script(f"if [ -f {ignore} ]; then cp {ignore} {shlex.quote(f'{copy}.dockerignore')}; fi")
+        return copy
 
     async def _load_tarballs(self, artifacts: list) -> None:
         """Load the images of ``artifacts``, each with a tar.gz, in parallel."""

@@ -10,7 +10,7 @@ import pytest
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.providers.sandbox_providers import sandbox as sandbox_module
-from agent_env.providers.sandbox_providers.sandbox import VmSandbox
+from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy, VmSandbox
 from agent_env.store import ImageStore, RegistryAuth, set_object_store
 from agent_env.config import get_config, reset_config
 from tst.unit.store.fakes import ConfiguredObjectStore
@@ -399,6 +399,82 @@ async def test_a_published_image_neither_pulled_nor_built_says_why_each_failed(s
 
     assert str(e.value).startswith(f"Couldn't pull {_PINNED}: manifest unknown. Building {_GATEWAY} from its build "
                                    "context failed: ")
+
+
+_NODE = "public.ecr.aws/docker/library/node:22-slim@sha256:" + "a" * 64
+_MIRRORED_NODE = "mirror.gcr.io/library/node@sha256:" + "a" * 64
+_MIXED = f"FROM {_NODE} AS node\nFROM python:3.11-slim\nCOPY --from=node /usr/local/bin/node /usr/local/bin/\n"
+
+_MAIL = "local/mail-0123456789ab:v1"
+
+
+def _mail() -> DockerImageArtifact:
+    return _context_image("mail", "sha256:" + "8" * 64, dockerfile="envs/mail/Dockerfile")
+
+
+class _MirrorVm(_RecordingVmSandbox):
+    """Holds ``dockerfile`` in the build context it extracts; mirror.gcr.io serves it each image but ``unserved``."""
+
+    def __init__(self, dockerfile: str, unserved: tuple[str, ...] = ()):
+        super().__init__()
+        self.dockerfile, self.unserved, self.written = dockerfile, unserved, {}
+
+    async def exec_script(self, script, *, max_retries=0):
+        self.scripts.append(script)
+        if script.startswith("if [ -f ") and "; then cat " in script:
+            return self.dockerfile
+        if script.startswith("docker pull --quiet") and script.endswith(self.unserved):
+            raise RuntimeError("Script failed (exit 1):\nstderr: manifest unknown")
+        return ""
+
+    async def write_host_file(self, data, vm_path):
+        self.written[vm_path] = data.decode()
+
+
+def _build(sandbox: _RecordingVmSandbox) -> str:
+    (build,) = (script for script in sandbox.scripts if "docker build" in script)
+    return build
+
+
+@pytest.mark.asyncio
+async def test_a_build_takes_each_official_image_the_mirror_serves_from_it_and_the_rest_from_where_it_names(
+        signing_store):
+    """Public ECR and Docker Hub cap anonymous pulls per address, which a provider's VMs can share. The edited copy is
+    outside the context, so a COPY of the context still copies the Dockerfile as stored."""
+    sandbox = _MirrorVm(_MIXED, unserved=("mirror.gcr.io/library/python:3.11-slim",))
+
+    await sandbox.load_docker_images([_mail()])
+
+    assert sandbox.scripts.count(f"docker pull --quiet --platform linux/amd64 {_MIRRORED_NODE}") == 1
+    ((copy, written),) = sandbox.written.items()
+    assert written == _MIXED.replace(_NODE, _MIRRORED_NODE)
+    work = copy.removesuffix("/dockerfile/Dockerfile")
+    assert work.startswith("/tmp/agent-env-build-")
+    assert f"if [ -f {work}/context/envs/mail/Dockerfile.dockerignore ]; then cp " \
+           f"{work}/context/envs/mail/Dockerfile.dockerignore {copy}.dockerignore; fi" in sandbox.scripts
+    assert f"docker build --platform linux/amd64 -f {copy} -t {_MAIL} ." in _build(sandbox)
+
+
+@pytest.mark.asyncio
+async def test_a_build_the_mirror_serves_no_base_for_uses_the_dockerfile_as_stored(signing_store):
+    sandbox = _MirrorVm(_MIXED, unserved=("mirror.gcr.io/library/python:3.11-slim", _MIRRORED_NODE))
+
+    await sandbox.load_docker_images([_mail()])
+
+    assert not sandbox.written
+    assert f"-f envs/mail/Dockerfile -t {_MAIL} ." in _build(sandbox)
+
+
+@pytest.mark.asyncio
+async def test_a_vm_whose_egress_is_restricted_builds_from_the_bases_its_dockerfile_names(signing_store):
+    """Its policy allows the registries the Dockerfile names, which needn't include the mirror."""
+    sandbox = _MirrorVm(_MIXED)
+    sandbox.network_policy = NetworkPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=("public.ecr.aws",))
+
+    await sandbox.load_docker_images([_mail()])
+
+    assert not any("mirror.gcr.io" in script or "; then cat " in script for script in sandbox.scripts)
+    assert f"-f envs/mail/Dockerfile -t {_MAIL} ." in _build(sandbox)
 
 
 class _ScriptRecorder(VmSandbox):
@@ -821,6 +897,7 @@ async def test_a_context_only_image_is_built_in_the_vm_from_its_context(signing_
         f"rm -rf {work} && mkdir -p {work}/context",
         f"curl -fsSL {sandbox_module.CURL_RETRY_FLAGS} https://signed/build-context.tar.gz -o {work}/context.tar.gz",
         f"tar -xzmf {work}/context.tar.gz -C {work}/context",
+        f"if [ -f {work}/context/Dockerfile ]; then cat {work}/context/Dockerfile; fi",
         f"cd {work}/context && docker build --platform linux/amd64 -f Dockerfile -t local/a-0123456789ab:v1 .",
         f"rm -rf {work}",
     ]
