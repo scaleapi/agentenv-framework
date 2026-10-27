@@ -78,6 +78,7 @@ EXT_TRAJECTORY_URI = "urn:agentenv:trajectory/v1"
 EXT_STEP_URI = "urn:agentenv:step/v1"
 EXT_STATE_URI = "urn:agentenv:state/v1"
 EXT_CHANGES_URI = "urn:agentenv:changes/v1"
+EXT_WAKEUPS_URI = "urn:agentenv:wakeups/v1"
 
 # Rows per GET /changes page: the default, and the most a client may ask for.
 CHANGES_PAGE_DEFAULT = 1000
@@ -121,8 +122,9 @@ TRIGGER_EXECUTOR_HOURS = "executor_hours"
 TRIGGER_UNLESS = "unless"
 TRIGGER_WEBSITE = "website"
 TRIGGER_EXECUTOR_HOURS_TIME_ZONE = "executor_hours_time_zone"
+TRIGGER_NOTIFY_AGENT = "notify_agent"
 TRIGGER_FEATURES = (TRIGGER_NAMED_EXECUTORS, TRIGGER_PROVOKING_ROLES, TRIGGER_ACTION_DELAY, TRIGGER_EXECUTOR_HOURS,
-                    TRIGGER_UNLESS, TRIGGER_WEBSITE, TRIGGER_EXECUTOR_HOURS_TIME_ZONE)
+                    TRIGGER_UNLESS, TRIGGER_WEBSITE, TRIGGER_EXECUTOR_HOURS_TIME_ZONE, TRIGGER_NOTIFY_AGENT)
 
 GATEWAY_TRAJECTORY_FILE = os.environ.get(
     "GATEWAY_TRAJECTORY_FILE",
@@ -233,6 +235,19 @@ GATEWAY_EXTENSIONS = [
             "get": {"method": "GET", "endpoint": "/changes", "request": {"type": "object", "properties": {
                 "after_id": {"type": "integer", "minimum": 0},
                 "limit": {"type": "integer", "minimum": 1, "maximum": CHANGES_PAGE_MAX}}}}}},
+        "required": False,
+    },
+    {
+        "uri": EXT_WAKEUPS_URI,
+        "description": "Wakeups (urn:agentenv:wakeups/v1): what is due to wake the agent between its turns, on the virtual clock: checks it scheduled for itself (schedule_check, which config turns on) and notifications triggers sent it (the notify_agent action). state says when the next is due; take hands out each due one once (harness control path).",
+        "params": {"endpoint": "/wakeups/state", "methods": {
+            "config": {"method": "POST", "endpoint": "/wakeups/config", "request": {"type": "object", "properties": {
+                "scheduled_checks": {"type": "boolean"}, "max_active": {"type": "integer", "minimum": 1},
+                "min_interval": {"type": "string"}}}},
+            "state": {"method": "GET", "endpoint": "/wakeups/state", "request": {"type": "object", "properties": {}}},
+            "take": {"method": "POST", "endpoint": "/wakeups/take", "request": {"type": "object", "properties": {
+                "until": {"type": "string"}}}},
+            "clear": {"method": "POST", "endpoint": "/wakeups/clear", "request": {"type": "object", "properties": {}}}}},
         "required": False,
     },
 ]

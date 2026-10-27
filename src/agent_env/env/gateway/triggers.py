@@ -23,6 +23,7 @@ import httpx
 from mcp.types import CallToolResult, TextContent
 
 from .clock import ClockError, _advance, _iso, _parse_duration, _parse_rfc3339, _zone
+from .wakeups import validate_channel
 from .caller import Caller
 from .constants import DEFAULT_ROLE, TRIGGER_IN_FLIGHT_STATUSES, TRIGGER_STATUSES
 
@@ -34,7 +35,7 @@ _WHEN_TYPES = ("action", "state", "time", "website")
 _CTX_ROOTS = {"action": ("args", "result"), "website": ("args",)}
 # RFC 9110's safe methods: a request using one asks for no change, so it prompts no state re-evaluation.
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
-_ACTION_TYPES = ("nl", "tool", "permission")
+_ACTION_TYPES = ("nl", "tool", "permission", "notify_agent")
 _TERMINAL_A2A_STATES = ("completed", "failed", "canceled", "rejected")
 # Bounds the per-evaluation catch-up burst; the backlog drains on later evaluations.
 _MAX_CATCHUP = 1000
@@ -741,6 +742,8 @@ class TriggerEngine:
             raise TriggerError(f"{w}: 'as' is only valid on tool actions")
         if "executor" in action and atype != "nl":
             raise TriggerError(f"{w}: 'executor' is only valid on nl actions")
+        if "verify" in action and atype == "notify_agent":
+            raise TriggerError(f"{w}: a notify_agent action has nothing to verify")
         if action.get("delay") is None:
             action.pop("delay", None)
         else:
@@ -760,6 +763,14 @@ class TriggerEngine:
             elif not isinstance(named, str) or named not in executors:
                 raise TriggerError(f"{w}: executor {named!r} is not a registered executor name "
                                    f"(registered: {sorted(n for n in executors if n is not None)})")
+        elif atype == "notify_agent":
+            try:
+                validate_channel(action.get("channel"), w)
+            except ValueError as e:
+                raise TriggerError(str(e))
+            if not isinstance(action.get("text"), str) or not action["text"].strip():
+                raise TriggerError(f"{w}: text must be the notification's non-empty text")
+            _validate_placeholders(action["text"], f"{w}.text", roots)
         elif atype == "tool":
             if not isinstance(action.get("tool"), str) or not action["tool"]:
                 raise TriggerError(f"{w}: tool must be a non-empty string")
@@ -1317,6 +1328,15 @@ class TriggerEngine:
                                tool=action["tool"], args=_echo_args(args), **acting)
                     return False
                 detail = {"tool": action["tool"], "args": _echo_args(args), **acting}
+            elif action["type"] == "notify_agent":
+                try:
+                    text = _template(action["text"], {}, ctx)
+                except TemplateError as e:
+                    self._emit("action_failed", tid, action_index=index, detail=str(e)[:300])
+                    return False
+                note = self._gw._wakeups.notify(action["channel"], str(text), trigger_id=tid)
+                # the text may carry what a person wrote, so the log keeps its size, not its words
+                detail = {"notify_agent": action["channel"], "notification_id": note["id"], "text_len": len(str(text))}
             else:
                 if not await self._run_nl(tid, trig, index, action, ctx):
                     return False
