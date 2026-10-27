@@ -9,6 +9,7 @@ import json
 import re
 import tarfile
 import tempfile
+import tomllib
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
@@ -19,6 +20,7 @@ from agent_env.artifact.artifact import Artifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.ref import ArtifactRef
 from agent_env.entity.refs import EntityRef
+from agent_env.store.ids import derive_id
 from agent_env.store.image_store.oci_registry_credentials import names_registry
 from agent_env.store.image_store.registry_api import read_blob, read_manifest
 
@@ -155,6 +157,18 @@ class ComputerArtifact(Artifact):
         return get_artifact_store().put_document(computer)
 
     @classmethod
+    def put_folder(cls, id: str, folder: Path, *, inspect: bool = True) -> Self:
+        """Write the computer ``folder``'s artifact.toml declares, outside a bundle, its form's image key written as a
+        bundle writes one: a Dockerfile in the folder as its build context alone, a registry ref pinned now, or the image
+        artifact it names."""
+        fields = {key: value for key, value in tomllib.loads((folder / "artifact.toml").read_text()).items()
+                  if key not in ("id", "type", "version")}
+        container = (fields.get("forms") or {}).get("container")
+        if isinstance(container, dict) and "image" in container:
+            container["image"] = _folder_image(derive_id(id, "forms_container_image"), folder, container["image"])
+        return cls.put(id=id, inspect=inspect, **fields)
+
+    @classmethod
     def from_toml(cls, data: dict[str, Any], ctx: AuthoringContext) -> Self:
         """Write the computer an artifact.toml declares, its form's image as the bundle wrote it or the artifact the
         key names."""
@@ -175,6 +189,22 @@ class ComputerArtifact(Artifact):
         problem, or ``uninspected`` with why, for an image no registry serves yet."""
         image = DockerImageArtifact.get(self.forms.container.image.id, self.forms.container.image.version)
         return {"container": _inspect_container(image, self.arch, self.os)}
+
+
+def _folder_image(image_id: str, folder: Path, key: Any) -> dict[str, Any]:
+    if isinstance(key, dict) and key.keys() == {"dockerfile"}:
+        image = DockerImageArtifact.put_context(image_id, description=f"built from {folder.name}/{key['dockerfile']}",
+                                                context_path=str(folder), dockerfile_path=key["dockerfile"], platform=None)
+    elif isinstance(key, dict) and key.keys() == {"ref"}:
+        image = DockerImageArtifact.put_ref(image_id, description=f"referenced by {folder.name}", image_name=key["ref"])
+    elif isinstance(key, dict) and key.keys() <= {"artifact", "version"} and "artifact" in key:
+        image = DockerImageArtifact.get(key["artifact"], key.get("version"))
+    elif isinstance(key, str):
+        image = DockerImageArtifact.get(key)
+    else:
+        raise ValueError(f"forms.container.image is {{ dockerfile = \"<path>\" }}, {{ ref = \"<image>\" }}, an image "
+                         f"artifact's id or {{ artifact = \"<id>\", version = <n> }}, not {key!r}")
+    return {"id": image.id, "version": image.version}
 
 
 def _inspect_container(image: DockerImageArtifact, arches: list[str], os: LinuxOS) -> dict[str, dict[str, Any]]:
