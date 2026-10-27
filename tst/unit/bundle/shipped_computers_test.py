@@ -10,7 +10,6 @@ from pathlib import Path
 import pytest
 
 import agent_env
-from agent_env.artifact.artifacts import computer as computer_module
 from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.bundle import parse_bundle
@@ -52,11 +51,9 @@ def test_a_task_naming_ubuntu_24_04_writes_the_shipped_base_over_its_folders_ima
 
 def test_a_task_naming_ubuntu_24_04_after_a_release_writes_the_shipped_base_over_its_published_image(
         tmp_path, monkeypatch, local_stores, cli_routing, builds):
-    served = Registry()
+    served = Registry().serve(monkeypatch)
     index = served.index(amd64=served.image(UBUNTU_LAYER), arm64=served.image(UBUNTU_LAYER, arch="arm64"))
     monkeypatch.setattr("agent_env.env.published_images._registry_digest", lambda ref: index)
-    monkeypatch.setattr(computer_module, "read_manifest", served.read_manifest)
-    monkeypatch.setattr(computer_module, "read_blob", served.read_blob)
     monkeypatch.setenv("HOME", str(tmp_path))
     plan = _naming_ubuntu(tmp_path)
 

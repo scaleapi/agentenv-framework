@@ -1,11 +1,13 @@
 """A registry serving OCI images from memory, for code that reads an image's manifests and layers without pulling it:
-index, image manifest and blob by digest, a tag pinned to the digest it names, each blob fetched recorded."""
+index, image manifest and blob by digest, a tag pinned to the digest it names, each blob fetched recorded.
+``Registry().serve(monkeypatch)`` puts it in place of every registry agent-env reads an image's contents from."""
 
 import hashlib
 import io
 import json
 import tarfile
 
+from agent_env.store.image_store import image_contents
 from agent_env.store.image_store.registry_api import NoSuchImageError
 
 UBUNTU = b'PRETTY_NAME="Ubuntu 24.04.3 LTS"\nNAME="Ubuntu"\nVERSION_ID="24.04"\nID=ubuntu\n'
@@ -18,6 +20,11 @@ class Registry:
 
     def __init__(self):
         self.manifests, self.blobs, self.tags, self.fetched = {}, {}, {}, []
+
+    def serve(self, monkeypatch) -> "Registry":
+        for name in ("pin_digest", "read_manifest", "read_blob"):
+            monkeypatch.setattr(image_contents, name, getattr(self, name))
+        return self
 
     def blob(self, data: bytes) -> str:
         digest = f"sha256:{hashlib.sha256(data).hexdigest()}"

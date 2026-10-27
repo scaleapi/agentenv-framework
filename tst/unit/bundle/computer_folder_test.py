@@ -2,19 +2,16 @@
 names, built from a Dockerfile in the folder or pinned from a registry, and the computer is written over that image's
 version, inspected when a registry serves it."""
 
-import hashlib
-import io
 import json
-import tarfile
 
 import pytest
 
-from agent_env.artifact.artifacts import computer as computer_module
 from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.bundle.parse import BundleError
 from agent_env.bundle.materialize import materialize
 from tst.unit.bundle._support import DIGEST, layout, local_builds, plan_of
+from tst.util.oci_registry import UBUNTU_LAYER, Registry
 
 ROOT = "@local/~/desk"
 COMPUTER = f"{ROOT}/desktop"
@@ -72,25 +69,9 @@ def test_a_computer_folder_builds_its_image_and_is_written_over_it_uninspected_u
 
 def test_a_computer_naming_a_registry_image_is_written_over_its_pin_and_inspected(bundle_dir, builds, registry,
                                                                                   monkeypatch):
-    blobs = {}
-
-    def blob(data: bytes) -> str:
-        digest = f"sha256:{hashlib.sha256(data).hexdigest()}"
-        blobs[digest] = data
-        return digest
-
-    buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
-        release = b"ID=ubuntu\nVERSION_ID=\"24.04\"\n"
-        info = tarfile.TarInfo("etc/os-release")
-        info.size = len(release)
-        tar.addfile(info, io.BytesIO(release))
-    image_manifest = {"layers": [{"digest": blob(buffer.getvalue())}], "config": {"digest": blob(b"{}")}}
-    amd64 = blob(json.dumps(image_manifest).encode())
-    manifests = {DIGEST: {"manifests": [{"digest": amd64, "platform": {"os": "linux", "architecture": "amd64"}}]},
-                 amd64: image_manifest}
-    monkeypatch.setattr(computer_module, "read_manifest", lambda ref, auth: manifests[ref.rpartition("@")[2]])
-    monkeypatch.setattr(computer_module, "read_blob", lambda ref, digest, auth, path: path.write_bytes(blobs[digest]))
+    served = Registry().serve(monkeypatch)
+    amd64 = served.image(UBUNTU_LAYER)
+    served.manifests[DIGEST] = served.manifests[served.index(amd64=amd64)]  # the digest the registry fixture pins
     layout(bundle_dir, _files('{ ref = "ghcr.io/acme/desktop:1" }'))
 
     done = _run(bundle_dir)
@@ -113,7 +94,7 @@ def test_a_computer_folder_that_declares_what_isnt_supported_is_refused_naming_t
 
 def test_a_registry_image_that_isnt_what_the_computer_declares_is_refused_naming_the_folder(bundle_dir, builds,
                                                                                          registry, monkeypatch):
-    monkeypatch.setattr(computer_module, "read_manifest", lambda ref, auth: {"manifests": []})
+    Registry().serve(monkeypatch).manifests[DIGEST] = {"manifests": []}
     layout(bundle_dir, _files('{ ref = "ghcr.io/acme/desktop:1" }'))
 
     with pytest.raises(BundleError) as refused:

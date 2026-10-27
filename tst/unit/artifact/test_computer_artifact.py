@@ -5,7 +5,6 @@ architecture. An image no registry serves yet is written uninspected."""
 import pytest
 
 from agent_env.artifact import Artifact
-from agent_env.artifact.artifacts import computer as computer_module
 from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.file import FileArtifact
@@ -14,11 +13,7 @@ from tst.util.oci_registry import MANIFEST, UBUNTU, UBUNTU_LAYER, Registry, laye
 
 @pytest.fixture
 def registry(local_stores, monkeypatch):
-    registry = Registry()
-    monkeypatch.setattr(computer_module, "pin_digest", registry.pin_digest)
-    monkeypatch.setattr(computer_module, "read_manifest", registry.read_manifest)
-    monkeypatch.setattr(computer_module, "read_blob", registry.read_blob)
-    return registry
+    return Registry().serve(monkeypatch)
 
 
 def _image(name: str) -> DockerImageArtifact:
