@@ -142,8 +142,12 @@ async def test_each_way_a_recording_can_fall_short_fails_its_check(home, monkeyp
     monkeypatch.setattr(recording_module, "MIN_FREE_BYTES", 1 << 62)
     limited = await _recording_checks(Recorder())
     monkeypatch.setattr(recording_module, "MIN_FREE_BYTES", 0)
+    real_digest = checks.READ_DIGEST
     monkeypatch.setattr(checks, "READ_DIGEST", "import sys; sys.exit(3)")
     unreadable = await _recording_checks(Recorder())
+    monkeypatch.setattr(checks, "READ_DIGEST", real_digest)
+    monkeypatch.setattr(checks, "READ_CHUNK", "import sys; sys.exit(3)")
+    truncated = await _recording_checks(Recorder())
     monkeypatch.undo()
     monkeypatch.setattr(checks, "RECORD_S", 0.8)
     real_end = recording_module.Recordings.end
@@ -158,6 +162,7 @@ async def test_each_way_a_recording_can_fall_short_fails_its_check(home, monkeyp
     assert "s between segments 0 and 1" in gap[NAMES[0]][1]
     assert "it ended by 'limit'" in limited[NAMES[0]][1]
     assert "couldn't be read back" in unreadable[NAMES[0]][1]
+    assert "stopped reading back at byte 0" in truncated[NAMES[0]][1]
     assert "the manifest says 1280x800" in miscount[NAMES[0]][1]
 
 

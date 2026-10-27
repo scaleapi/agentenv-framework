@@ -811,7 +811,11 @@ class Probe:
             data = b""
             while len(data) < file["size"]:
                 chunk = await self.driver.run("python3", "-c", READ_CHUNK, path, str(len(data)), str(CHUNK_BYTES))
-                data += base64.b64decode(chunk["stdout"])
+                read = base64.b64decode(chunk["stdout"]) if chunk.get("exit_code") == 0 else b""
+                if not read:
+                    return f"segment {segment['index']} stopped reading back at byte {len(data)} of {file['size']}: " \
+                           f"{chunk.get('stderr', '')[-200:]}"
+                data += read
             mp4 = read_mp4(data)
             span = (_when(segment["ended_at"]) - _when(segment["started_at"])).total_seconds()
             if ((mp4["width"], mp4["height"], mp4["frames"]) != (segment["width"], segment["height"], segment["frames"])
