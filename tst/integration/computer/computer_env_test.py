@@ -106,6 +106,7 @@ def test_an_env_that_changes_only_its_display_and_name_reuses_the_image(composed
     first = composed.metadata["composed"]["container"]
 
     assert results[ARCH]["reused"] is True and results[ARCH]["image"] == first[ARCH]["image"]
+    assert results[ARCH]["installed"] == first[ARCH]["installed"] and results[ARCH]["emulated"] is False
     assert took < 60, took
 
 

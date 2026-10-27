@@ -89,14 +89,16 @@ def build(image: DockerImageArtifact, before: Callable[[], None] | None = None) 
             _build(context, image.dockerfile_path, image.image_name, sources(image))
 
 
+def platform_tag(image: DockerImageArtifact, platform: str) -> str:
+    """The tag ``build_for`` holds ``image`` built for ``platform`` under: its name with the platform's arch after it."""
+    return f"{image.image_name}-{normalize_platform(platform).rsplit('/', 1)[-1]}"
+
+
 def build_for(image: DockerImageArtifact, platform: str) -> str:
-    """The tag under which this machine's Docker holds ``image`` built for ``platform``, built from its stored build
-    context unless one built from the same sources is held: its own name for the host's platform, else that name with
-    the platform's arch after it, built through Docker's emulation. Raises DockerBuildError."""
-    if normalize_platform(platform) == host_platform():
-        build(image)
-        return image.image_name
-    tag, built_from = f"{image.image_name}-{platform.rsplit('/', 1)[-1]}", f"{sources(image)}@{platform}"
+    """Have this machine's Docker hold ``image`` built for ``platform`` under ``platform_tag``, from its stored build
+    context unless one built from the same sources is held, natively or through Docker's emulation; the tag. Raises
+    DockerBuildError."""
+    tag, built_from = platform_tag(image, platform), f"{sources(image)}@{normalize_platform(platform)}"
     with holding_locks([f"image-build:{built_from}"]):
         if not holds(tag, built_from):
             with tempfile.TemporaryDirectory(prefix="agent-env-build-") as work:

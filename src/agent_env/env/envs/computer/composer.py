@@ -24,13 +24,14 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from agent_env.artifact.artifacts.computer import ComputerArtifact
-from agent_env.artifact.artifacts.docker_image import DockerImageArtifact, push_local_image
+from agent_env.artifact.artifacts.docker_image import DockerImageArtifact, docker_login, push_local_image
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.config import get_config
 from agent_env.env.envs.computer import gate
 from agent_env.env.envs.computer.install import Install
-from agent_env.providers.sandbox_providers.host_images import build_for, host_platform
+from agent_env.providers.sandbox_providers.host_images import build_for, host_platform, platform_tag
 from agent_env.store.ids import derive_id
+from agent_env.store.image_store.image_contents import labels
 from agent_env.store.image_store.oci_registry_credentials import names_registry
 from agent_env.store.image_store.registry_api import NoSuchImageError, pin_digest
 from agent_env.utils.docker.build import DockerBuildError, build_image
@@ -46,6 +47,11 @@ REPOSITORY = "agentenv-computers"
 #: Where a driver's files go in a composed computer, in a folder named for the driver.
 DRIVERS = "/opt/agentenv/drivers"
 KEY_LABEL = "dev.agentenv.computer-key"
+# What a build installed and whether it was emulated, kept on its image for an env that reuses it.
+INSTALLED_LABEL, EMULATED_LABEL = "dev.agentenv.installed", "dev.agentenv.emulated"
+# What a file starts with when it's only ever run: a script or a Linux binary, made executable in the image, since the
+# store keeps no file modes.
+_RUN_ONLY = (b"#!", b"\x7fELF")
 _PROTOCOL = "agentenv-framework-protocol"
 # What building the protocol from its source reads, beside src/.
 _PROTOCOL_FILES = ("pyproject.toml", "README.md", "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md")
@@ -69,6 +75,12 @@ def compose(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv,
                 logger.info(f"{env.id}: {form}/{arch} {'reused' if result['reused'] else 'built'}: {result['image']}")
             record.finished(form, arch, result)
     record.computer(_computer(env, base, record.built()))
+
+
+def current(env: ComputerEnv) -> bool:
+    """Whether the env's computer was written over every pair built, as a put or env build that failed writing it
+    leaves it not."""
+    return "computer" in env.metadata and env.metadata["computer"].get("images") == _Record(env).built()
 
 
 def pending(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv) -> list[tuple[str, str]]:
@@ -96,16 +108,22 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
             store.ensure_repository(REPOSITORY)
             ref = store.image_ref(REPOSITORY, key.removeprefix("sha256:"))
             if (pinned := _served(ref, store)) is not None:
-                return {"status": "unverified", "key": key, "image": pinned, "reused": True, "built_at": _now()}
+                kept = labels(pinned, arch, store.auth(pinned))
+                return {"status": "unverified", "key": key, "image": pinned, "reused": True,
+                        "emulated": kept.get(EMULATED_LABEL) == "true",
+                        "installed": json.loads(kept.get(INSTALLED_LABEL, "{}")), "built_at": _now()}
             platform = f"linux/{arch}"
             emulated = platform != host_platform()
             if emulated and platform not in _emulated_platforms():
                 return _failed(env, form, arch, "build", key, f"this machine can't build {platform}: its Docker has "
                                "no emulation for it")
+            _ready_base(base, arch)
             (context / "Dockerfile").write_text(f"{dockerfile}LABEL {KEY_LABEL}={key}\n")
             local = f"agentenv-computer:{key[7:23]}-{arch}"
             build_image(context / "Dockerfile", context, local, platform=platform, labels={KEY_LABEL: key})
             installed = _installed(local, layer)
+            _label(local, platform, {INSTALLED_LABEL: json.dumps(installed, sort_keys=True),
+                                     EMULATED_LABEL: "true" if emulated else "false"})
             stage = "push"
             push_local_image(local, ref, store)
             return {"status": "unverified", "key": key, "image": pin_digest(ref, store.auth(ref)), "reused": False,
@@ -119,14 +137,25 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
 
 
 def _base(base: ComputerArtifact, arch: str) -> tuple[str, str]:
-    """What the composed image is built ``FROM`` for ``arch``, and the base's part of the key: a registry image pinned to
-    its digest, or one built here from the base's stored build context for that arch."""
+    """What the composed image is built ``FROM`` for ``arch``, and the base's part of the key, found without building
+    anything: a registry image pinned to its digest, or the tag a build of the base's stored build context for that
+    arch gets, the same on every machine."""
     image = base.image()
     if names_registry(image.image_name):
         store = get_config().get_image_store()
         pinned = image.pinned_name if "@" in image.pinned_name else pin_digest(image.pinned_name, store.auth(image.pinned_name))
         return pinned, pinned
-    return build_for(image, f"linux/{arch}"), f"sources:{image.source_digest}"
+    return platform_tag(image, f"linux/{arch}"), f"sources:{image.source_digest}"
+
+
+def _ready_base(base: ComputerArtifact, arch: str) -> None:
+    """Have this machine's Docker able to build ``FROM`` the base for ``arch``: signed in to its registry with the image
+    store's credentials for it, or holding it built from its stored build context."""
+    image = base.image()
+    if names_registry(image.image_name):
+        docker_login(get_config().get_image_store().auth(image.pinned_name))
+    else:
+        build_for(image, f"linux/{arch}")
 
 
 def _stage_driver(context: Path, driver: ComputerDriverEnv, base: ComputerArtifact) -> str:
@@ -140,7 +169,9 @@ def _stage_driver(context: Path, driver: ComputerDriverEnv, base: ComputerArtifa
         if folder == PurePosixPath(".") or path.is_relative_to(folder):
             target = context / "driver" / path.relative_to(folder)
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(artifact.load())
+            target.write_bytes(data := artifact.load())
+            if data.startswith(_RUN_ONLY):
+                target.chmod(0o755)
     (context / "driver").mkdir(exist_ok=True)
     (context / f"agentenv-{layer}.conf").write_text(_programs(layer, install, driver.port))
     return layer
@@ -222,6 +253,14 @@ def _installed(local: str, layer: str) -> dict[str, str]:
     with tarfile.open(fileobj=io.BytesIO(copied.stdout)) as archive:
         listed = json.loads(archive.extractfile(archive.getmembers()[0]).read())
     return {package["name"]: package["version"] for package in listed}
+
+
+def _label(local: str, platform: str, extra: dict[str, str]) -> None:
+    """Add ``extra``'s labels to this machine's image ``local``, which adds no layer."""
+    with tempfile.TemporaryDirectory(prefix="agentenv-label-") as work:
+        dockerfile = Path(work) / "Dockerfile"
+        dockerfile.write_text(f"FROM {local}\n")
+        build_image(dockerfile, Path(work), local, platform=platform, labels=extra)
 
 
 def _served(ref: str, store) -> str | None:
@@ -331,6 +370,7 @@ class _Record:
                 if result.get("status") in ("unverified", "ready")}
 
     def computer(self, ref: dict | None) -> None:
+        """Record the env's computer, with the images it was written over."""
         if ref is not None:
             with self.lock:
-                self.env.merge_metadata({"computer": ref})
+                self.env.merge_metadata({"computer": {**ref, "images": self.built()}})

@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 DECLARE_TIMEOUT_S = 120
 #: The port the SDK serves a driver on when MCP_PORT doesn't name one.
 DEFAULT_PORT = 18765
+MAX_PORT = 65535
 
 
 class ComputerDriverEnv(Env):
@@ -80,8 +81,8 @@ class ComputerDriverEnv(Env):
         elif module is not None and (not module.partition(":")[2] or module.partition(":")[0] not in files):
             problems.append(f'module {module!r} names no "<file>:<class>" in this folder; it has '
                             f"{', '.join(sorted(files))}")
-        if not 1 <= fields.get("port", DEFAULT_PORT) <= 65535:
-            problems.append(f"port must be 1 to 65535, not {fields['port']}")
+        if not 1 <= fields.get("port", DEFAULT_PORT) <= MAX_PORT:
+            problems.append(f"port must be 1 to {MAX_PORT}, not {fields['port']}")
         fields["install"], invalid = installs(fields.get("install", {}))
         problems += invalid + [problem for os_type, install in fields["install"].items()
                                for problem in _missing(os_type, install, files)]

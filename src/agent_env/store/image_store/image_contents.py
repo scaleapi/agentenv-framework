@@ -40,6 +40,23 @@ def platform_manifests(ref: str, auth: RegistryAuth | None) -> tuple[str, dict[s
     return pinned, {config["architecture"]: pinned.rpartition("@")[2]} if config.get("os") == "linux" else {}
 
 
+def labels(ref: str, arch: str, auth: RegistryAuth | None) -> dict[str, str]:
+    """The labels of ``ref``'s image for ``arch``, read from its config, an index's or a single image's. Raises
+    ValueError when it has none for ``arch``, or as ``read_manifest`` does."""
+    pinned, manifests = platform_manifests(ref, auth)
+    if arch not in manifests:
+        raise ValueError(f"{ref} has no linux/{arch} image")
+    manifest = read_manifest(f"{pinned.partition('@')[0]}@{manifests[arch]}", auth)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "config"
+        try:
+            read_blob(ref, manifest["config"]["digest"], auth, path)
+            config = json.loads(path.read_text())
+        except OSError as e:
+            raise ValueError(f"its config {manifest['config']['digest']} couldn't be read: {e}") from e
+    return (config.get("config") or {}).get("Labels") or {}
+
+
 def os_release(ref: str, digest: str, auth: RegistryAuth | None) -> dict[str, str]:
     """The os-release fields of the image manifest ``digest`` in ``ref``'s repository, from the lowest layer that holds
     the file, normally the OS's own, so only that layer is fetched. Raises ValueError when no layer holds it or one

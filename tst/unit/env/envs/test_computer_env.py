@@ -42,7 +42,7 @@ class FakeDocker:
     context's files and its programs, each push landing in the fake registry as an image of its arch."""
 
     def __init__(self, registry: Registry):
-        self.registry, self.builds, self.fail, self.emulates = registry, [], {}, {"linux/amd64"}
+        self.registry, self.builds, self.fail, self.emulates, self.labels = registry, [], {}, {"linux/amd64"}, {}
 
     def build_image(self, dockerfile, context, tag, *, platform, labels=None, build_args=None):
         if platform in self.fail:
@@ -51,8 +51,12 @@ class FakeDocker:
                             "files": sorted(p.relative_to(context).as_posix() for p in context.rglob("*") if p.is_file()),
                             "conf": next(context.glob("agentenv-*.conf")).read_text()})
 
+    def label(self, local, platform, extra):
+        self.labels[local] = extra
+
     def push(self, local, ref, store):
-        self.registry.tags[ref] = self.registry.image(UBUNTU_LAYER, arch=local.rsplit("-", 1)[1])
+        self.registry.tags[ref] = self.registry.image(UBUNTU_LAYER, arch=local.rsplit("-", 1)[1],
+                                                      labels=self.labels.get(local))
 
     def joined(self, index, images):
         manifests = {self.registry.manifests[image.rpartition("@")[2]]["config"]["digest"]: image.rpartition("@")[2]
@@ -70,6 +74,8 @@ def docker(local_stores, cli_routing, monkeypatch):
     fake = FakeDocker(registry)
     monkeypatch.setattr(composer, "build_image", fake.build_image)
     monkeypatch.setattr(composer, "push_local_image", fake.push)
+    monkeypatch.setattr(composer, "_label", fake.label)
+    monkeypatch.setattr(composer, "docker_login", lambda auth: None)
     monkeypatch.setattr(composer, "_joined", fake.joined)
     monkeypatch.setattr(composer, "pin_digest", registry.pin_digest)
     monkeypatch.setattr(docker_image, "pin_digest", registry.pin_digest)
@@ -166,6 +172,8 @@ def test_an_env_that_differs_only_in_what_doesnt_change_the_image_reuses_the_one
     built, reused = (Env.get(env.id).metadata["composed"]["container"] for env in (first, second))
     assert len(docker.builds) == 2 and all(reused[arch]["reused"] for arch in reused)
     assert {arch: reused[arch]["image"] for arch in reused} == {arch: built[arch]["image"] for arch in built}
+    assert {arch: (r["installed"], r["emulated"]) for arch, r in reused.items()} == {
+        "amd64": ({"mss": "10.1.0"}, True), "arm64": ({"mss": "10.1.0"}, False)}
 
 
 @pytest.mark.parametrize("change", ["requirements", "build-setting", "service"])
@@ -217,8 +225,10 @@ def test_a_base_built_from_its_context_is_built_here_for_each_arch_and_keyed_by_
                         f"{image.image_name}-{platform.rsplit('/', 1)[1]}")
 
     env = Env.get(_put(_base(image), driver).id)
+    again = Env.get(_put(_base(image), driver, id="@local/~/kit/again", environment_name="again").id)
 
     assert sorted(built_for) == ["linux/amd64", "linux/arm64"]
+    assert {r["reused"] for r in again.metadata["composed"]["container"].values()} == {True}
     assert {build["dockerfile"].splitlines()[0] for build in docker.builds} == {
         "FROM local/base-1234:abcd-amd64", "FROM local/base-1234:abcd-arm64"}
     assert {r["status"] for r in env.metadata["composed"]["container"].values()} == {"unverified"}
@@ -396,3 +406,45 @@ def test_the_packages_a_build_installed_are_read_from_its_image_without_running_
     assert composer._installed("agentenv-computer:abc-arm64", "reference") == {
         "mss": "10.2.0", "agentenv-framework-protocol": "0.1.382"}
     assert calls == [["docker", "create"], ["docker", "cp"], ["docker", "rm"]]
+
+
+def test_a_script_or_binary_in_the_drivers_files_stays_executable_in_the_image(base, docker, tmp_path, monkeypatch):
+    folder = tmp_path / "scripted"
+    folder.mkdir()
+    (folder / "driver.py").write_text("class Desk: ...\n")
+    (folder / "start").write_text("#!/bin/sh\nexec venv/bin/python -m agentenv_protocol.computer.serve driver.py:Desk\n")
+    (folder / "helper").write_bytes(b"\x7fELF\x02\x01\x01")
+    modes = {}
+    monkeypatch.setattr(composer, "build_image", lambda dockerfile, context, tag, **kw: modes.update(
+        {path.name: path.stat().st_mode & 0o111 for path in (context / "driver").iterdir()}))
+    files = FileArtifactUniverse.put_bundled("@local/~/kit/scripted__files", files={
+        name: folder / name for name in ("driver.py", "start", "helper")})
+    driver = ComputerDriverEnv.put(
+        id="@local/~/kit/scripted", module="driver.py:Desk", files=files, declaration=_driver(tmp_path / "d").declaration,
+        install={"linux": Install(services=[Service(name="driver", command="./start")])}, port=18765)
+
+    _put(base, driver)
+
+    assert modes == {"driver.py": 0, "start": 0o111, "helper": 0o111}
+
+
+def test_a_registry_base_is_signed_in_to_before_its_image_is_built_on(base, driver, docker, monkeypatch):
+    signed = []
+    monkeypatch.setattr(composer, "docker_login", signed.append)
+
+    _put(base, driver)
+
+    assert len(signed) == 2 and len(docker.builds) == 2
+
+
+def test_env_build_writes_the_computer_again_when_it_isnt_over_every_pair_built(base, driver, docker, caplog):
+    caplog.set_level(logging.ERROR, logger=composer.__name__)
+    stored = Env.get(_put(base, driver).id)
+    stale = {**stored.metadata["computer"], "images": {"arm64": stored.metadata["computer"]["images"]["arm64"]}}
+    stored.update_metadata({**stored.metadata, "computer": stale})
+
+    assert not composer.current(Env.get(stored.id))
+    rebuilt = CliRunner().invoke(cli, ["env", "build", "--id", stored.id])
+
+    assert rebuilt.exit_code == 0 and composer.current(Env.get(stored.id)) and len(docker.builds) == 2
+    assert Env.get(stored.id).metadata["computer"]["version"] == stale["version"] + 1
