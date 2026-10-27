@@ -23,7 +23,10 @@ from agent_env.config.runtime import Config
 from agent_env.entity.refs import EntityRef, RefRole
 from agent_env.env.env import Env
 from agent_env.eval import Eval
-from agent_env.store import Filter
+from agent_env.bundle.parse import BundleKind
+from agent_env.store import ConcurrentModificationError, Filter
+from agent_env.store.base import NotFoundError
+from agent_env.store.document_store import expecting_version
 from agent_env.task import Task
 from agent_env.task_step.task_step import TaskStep
 from tst.unit.bundle._support import DIGEST, layout
@@ -394,3 +397,51 @@ def test_an_image_is_built_and_pushed_once_under_the_tag_of_its_sources(home, mo
     assert ref.startswith("registry.example.com/triage-crm-env_image:src-") and "__" not in ref
     assert [platform for _, platform in built] == ["linux/amd64"] and pushed == [ref]
     assert store.repositories == ["triage-crm-env_image", "triage-crm-env_image"]
+
+
+def test_a_put_held_to_a_version_writes_exactly_it_or_fails(home):
+    (home / "seed.txt").write_text("seed")
+
+    with expecting_version("held", 1):
+        held = FileArtifact.put("held", description="first", file_path=str(home / "seed.txt"))
+    with expecting_version("held", 1), pytest.raises(ConcurrentModificationError):
+        FileArtifact.put("held", description="late", file_path=str(home / "seed.txt"))
+    with expecting_version("held-task", 2), pytest.raises(ConcurrentModificationError):
+        Task.put(id="held-task", steps=[])
+
+    assert held.version == 1 and Artifact.get("held").description == "first"
+
+
+def test_a_registration_that_loses_a_race_for_a_version_fails_rather_than_write_the_next_one(home, monkeypatch):
+    """As a registration of the same bundle on another machine, which no local lock waits for, would."""
+    root = layout(home / "triage", TRIAGE)
+    writer = materialize_module._WRITERS[BundleKind.ARTIFACT]
+
+    def raced(plan, write):
+        if write.id == "triage-docs" and not raced.done:
+            raced.done = True
+            (home / "other.txt").write_text("the other machine's")
+            with expecting_version("triage-docs", 1):
+                FileArtifact.put("triage-docs", description="won the race", file_path=str(home / "other.txt"))
+        return writer(plan, write)
+
+    raced.done = False
+    monkeypatch.setitem(materialize_module._WRITERS, BundleKind.ARTIFACT, raced)
+
+    with pytest.raises(ConcurrentModificationError):
+        register_bundle(root)
+
+    assert Artifact.get("triage-docs", 1).description == "won the race"
+    with pytest.raises(NotFoundError):
+        Artifact.get("triage-docs", 2)
+
+
+def test_an_installed_env_a_task_names_by_its_alias_is_refused_before_anything_is_written(home):
+    files = {"tasks/t.json": json.dumps([{"id": "env", "type": "deploy_env", "env_id": "mail"}])}
+
+    with pytest.raises(BundleError) as refused:
+        register_bundle(layout(home / "triage", files))
+
+    assert "comes with an installed bundle, and only an agent with an alias is registered from one" in \
+        refused.value.problems[0]
+    assert get_config().get_document_store().count("envs", Filter()) == 0

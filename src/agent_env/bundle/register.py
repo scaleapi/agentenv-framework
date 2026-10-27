@@ -30,7 +30,7 @@ from urllib.parse import urlsplit
 
 from agent_env.config import get_config
 from agent_env.entity.refs import RefRole, ref_sites
-from agent_env.plugins._bundles import AGENT_ALIASES, ENV_ALIASES
+from agent_env.plugins._bundles import AGENT_ALIASES
 from agent_env.store.document_store import DocumentStore, LocalSqliteDocumentStore
 from agent_env.store.ids import LOCAL_PREFIX, is_local_id
 from agent_env.store.image_store.oci_registry_credentials import is_loopback_host
@@ -146,8 +146,9 @@ def registry_ids(plan: Plan, prefix: str) -> tuple[dict[str, str], list[str]]:
     """The registry id each ``@local`` id the plan writes takes, and each problem giving them.
 
     The bundle's own entry is ``<prefix><name>``, its name lowercased with each run of what an id can't hold made
-    ``-``. An installed bundle's agent or env pulled in by a reference takes the first alias its bundle gives it,
-    which the reference named it by. An id derived from another (``<id>__env_image``) keeps its suffix after the
+    ``-``. An installed bundle's agent pulled in by a reference takes the first alias its bundle gives it, which the
+    reference named it by; any other entity of an installed bundle has no registry id, and an env's alias can't be
+    one, since no store env may start on an installed env alias's id. An id derived from another (``<id>__env_image``) keeps its suffix after the
     other's registry id, and a task's output is ``<task id>-<name>``."""
     ids: dict[str, str] = {}
     problems: list[str] = []
@@ -158,8 +159,8 @@ def registry_ids(plan: Plan, prefix: str) -> tuple[dict[str, str], list[str]]:
         if entry in plan.origins:
             alias = _alias(plan.origins[entry], entry)
             if alias is None:
-                problems.append(f"{plan.path(entry)}: comes with an installed bundle and has no alias to register it "
-                                "under; name an entity the store holds instead")
+                problems.append(f"{plan.path(entry)}: comes with an installed bundle, and only an agent with an alias "
+                                "is registered from one; name an entity the store holds instead")
                 continue
             ids[entry.id] = alias
         elif name := _slug(entry.name):
@@ -186,8 +187,7 @@ def registry_ids(plan: Plan, prefix: str) -> tuple[dict[str, str], list[str]]:
 
 
 def _alias(bundle: Bundle, entry: BundleEntry) -> str | None:
-    table = {BundleKind.AGENT: AGENT_ALIASES, BundleKind.ENV: ENV_ALIASES}.get(entry.kind)
-    aliases = bundle.aliases.get(table, {}).get(entry.name, ()) if table else ()
+    aliases = bundle.aliases.get(AGENT_ALIASES, {}).get(entry.name, ()) if entry.kind is BundleKind.AGENT else ()
     return aliases[0] if aliases else None
 
 
@@ -269,10 +269,12 @@ def _renamed(value: Any, ids: Mapping[str, str]) -> Any:
 
 class RegistrationLedger(Ledger):
     """A registration's rows, in the target store: each names the bundle that wrote it, by its identity, and the commit
-    and state of the folder it was written from. A task or eval is hashed with the versions it names."""
+    and state of the folder it was written from. A task or eval is hashed with the versions it names, and each write
+    lands on exactly the version its check found next."""
 
     collection = REGISTRATIONS
     pins_references = True
+    strict = True
 
     def __init__(self, store: DocumentStore, plan: Plan, identity: str, commit: str | None, dirty: bool | None):
         super().__init__(store, plan)

@@ -13,7 +13,7 @@ import hashlib
 import json
 import stat
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from pathlib import Path
@@ -27,7 +27,7 @@ from agent_env.env.registry import get_env_registry
 from agent_env.env.store import ENVS_COLLECTION
 from agent_env.eval.store import EVALS_COLLECTION
 from agent_env.store import Filter, Sort
-from agent_env.store.document_store import DocumentStore, LocalSqliteDocumentStore
+from agent_env.store.document_store import DocumentStore, LocalSqliteDocumentStore, expecting_version
 from agent_env.store.local_state import holding_locks
 from agent_env.task.store import TASKS_COLLECTION
 
@@ -82,6 +82,9 @@ class Ledger:
     collection = LEDGER_COLLECTION
     # Whether a task or eval is written naming the versions of what it references, so is hashed with them.
     pins_references = False
+    # Whether each write lands on exactly the version its check found next, so one that loses a race to another
+    # writer raises ConcurrentModificationError rather than add a version after the other's.
+    strict = False
 
     def __init__(self, store: DocumentStore, plan: Plan):
         self._store = store
@@ -157,7 +160,8 @@ class Ledger:
                    "digest": check.digest.value if check.digest else None,
                    "inputs": check.digest.inputs if check.digest else None, "at": _now(), **self.row_fields()}
         self._store.insert(self.collection, pending)
-        version = write()
+        with expecting_version(check.write.id, check.next_version) if self.strict else nullcontext():
+            version = write()
         # Stamped before the check below, which can take seconds, so a run interrupted during it leaves the version
         # this attempt wrote, and the next run keeps it rather than writing it again.
         self._store.replace(self.collection, Filter.of(**key, status="pending"), {**pending, "version": version})
