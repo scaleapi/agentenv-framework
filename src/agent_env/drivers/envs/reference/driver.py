@@ -1,7 +1,7 @@
 """The reference computer driver, for an X11 desktop: mss captures the screen and XTEST, through python-xlib, sends the
 input. X calls run off the event loop, one at a time, on a connection checked before each call and reopened when it
 drops, so the driver outlives a restarted X server. It records the display through FFmpeg's ``x11grab``, by PyAV. It
-needs ``agentenv-framework-protocol[computer,recording]``, ``mss`` and ``python-xlib`` where it runs."""
+needs ``agentenv-framework-protocol[computer]``, ``mss`` and ``python-xlib`` where it runs."""
 from __future__ import annotations
 
 import asyncio

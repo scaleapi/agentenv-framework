@@ -41,6 +41,6 @@ def check_features(cls: type) -> None:
         problems.append("display_modes and @set_display come together")
     problems += check_recording(cls.recording)
     if "record" in declared(cls) and cls.recording is None:
-        problems.append("@record needs recording = Recording()")
+        problems.append("@record needs recording, which recording = None turns off")
     if problems:
         raise TypeError(f"{cls.__qualname__}: " + "; ".join(problems))

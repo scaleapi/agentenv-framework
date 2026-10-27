@@ -79,8 +79,11 @@ async def test_a_limit_the_driver_doesnt_keep_fails_and_its_recordings_are_still
 
 
 @pytest.mark.asyncio
-async def test_a_driver_without_recording_gets_no_recording_checks(home):
-    assert await _recording_checks(FixtureDriver()) == {}
+async def test_a_driver_that_turns_recording_off_gets_no_recording_checks(home):
+    class Off(FixtureDriver):
+        recording = None
+
+    assert await _recording_checks(Off()) == {}
 
 
 def _box(kind: bytes, payload: bytes) -> bytes:

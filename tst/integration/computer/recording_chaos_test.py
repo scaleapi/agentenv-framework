@@ -52,12 +52,14 @@ async def test_a_recording_outlives_its_x_server_with_a_gap_and_a_new_segment(im
 async def test_segments_roll_over_at_max_segment_s_with_no_frame_lost_between_them(image, tmp_path):
     async with _desk(image) as (name, driver):
         started = await _start(driver)
-        await asyncio.sleep(2 * SEGMENT_S + 2)
+        await asyncio.sleep(2 * SEGMENT_S + 5)
         manifest = await _end(driver, started)
         decoded = _decoded(name, manifest, tmp_path)
     spans = [(_when(s.ended_at) - _when(s.started_at)).total_seconds() for s in manifest.segments]
-    assert len(spans) == 3 and all(span < SEGMENT_S for span in spans)
-    assert all(gap < 2 / FPS for gap in _gaps(manifest)) and decoded == [s.frames for s in manifest.segments]
+    gaps = _gaps(manifest)
+    assert len(spans) >= 3 and all(SEGMENT_S - 2 / FPS <= span < SEGMENT_S for span in spans[:2]), spans
+    assert all(gap < 2 / FPS for gap in gaps), gaps
+    assert decoded == [s.frames for s in manifest.segments]
 
 
 @pytest.mark.asyncio

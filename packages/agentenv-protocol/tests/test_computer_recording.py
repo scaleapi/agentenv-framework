@@ -120,25 +120,30 @@ def _at(iso: str) -> datetime:
 
 
 @pytest.mark.asyncio
-async def test_a_driver_with_recording_serves_it_and_one_without_does_not():
-    async with http_client(Recorded()) as http:
-        card = (await http.get("/.well-known/agent-env.json")).json()
+async def test_every_driver_serves_recording_unless_it_turns_it_off():
+    class Off(FakeDriver):
+        recording = None
+
     async with http_client(FakeDriver()) as http:
-        plain = (await http.get("/.well-known/agent-env.json")).json()
+        card = (await http.get("/.well-known/agent-env.json")).json()
+    async with http_client(Off()) as http:
+        off = (await http.get("/.well-known/agent-env.json")).json()
     extension = next(e for e in card["capabilities"]["extensions"] if e["uri"] == COMPUTER_RECORDING)
     assert set(extension["params"]["methods"]) == {"start", "end"}
     assert {k: v for k, v in extension["params"].items() if k not in ("methods", "endpoint")} == {
         "formats": ["video/mp4; codecs=avc1"], "scopes": ["display"], "fps": {"default": 10, "max": 15},
-        "cursor": True, "source": "capture", "max_segment_s": 1, "max_concurrent": 2, "max_duration_s": 86_400}
-    assert COMPUTER_RECORDING not in [e["uri"] for e in plain["capabilities"]["extensions"]]
+        "cursor": True, "source": "capture", "max_segment_s": 15, "max_concurrent": 2, "max_duration_s": 86_400}
+    assert COMPUTER_RECORDING not in [e["uri"] for e in off["capabilities"]["extensions"]]
 
 
 def test_recording_features_and_record_are_checked_when_the_class_is_defined():
     with pytest.raises(TypeError, match="recording.max_fps is an integer from 1 to 60"):
         class TooFast(FakeDriver):
             recording = Recording(max_fps=120)
-    with pytest.raises(TypeError, match="@record needs recording = Recording()"):
-        class Undeclared(FakeDriver):
+    with pytest.raises(TypeError, match="@record needs recording, which recording = None turns off"):
+        class Off(FakeDriver):
+            recording = None
+
             @record
             async def frames(self, hints):
                 yield None
@@ -167,10 +172,7 @@ async def test_the_fallback_polls_capture_and_draws_the_pointer(home):
 
 @pytest.mark.asyncio
 async def test_a_driver_without_the_pointer_group_records_without_a_cursor(home):
-    class Plain(MinimalDriver):
-        recording = Recording()
-
-    _, manifest = await _record(Plain(), 0.4)
+    _, manifest = await _record(MinimalDriver(), 0.4)
     assert manifest["cursor"] is False and manifest["segments"][0]["width"] == 640
 
 
@@ -221,8 +223,6 @@ async def test_a_stream_that_keeps_failing_ends_the_recording_with_its_error(hom
     monkeypatch.setattr(recording_module, "FAILING_S", 0.5)
 
     class Broken(FakeDriver):
-        recording = Recording()
-
         @record
         async def frames(self, hints):
             raise RuntimeError("no display")
@@ -337,14 +337,6 @@ async def test_bad_calls_are_refused_with_a_code(path, body, status, code):
     async with http_client(Recorded()) as http:
         refused = await http.post(path, json=body)
     assert refused.status_code == status and refused.json()["error"]["code"] == code
-
-
-@pytest.mark.asyncio
-async def test_without_pyav_a_start_is_refused_naming_the_extra(monkeypatch):
-    monkeypatch.setattr(recording_module, "av", None)
-    async with http_client(Recorded()) as http:
-        refused = await http.post(START, json={"request_id": "r"})
-    assert refused.status_code == 501 and "agentenv-framework-protocol[computer,recording]" in refused.text
 
 
 @pytest.mark.asyncio

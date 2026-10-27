@@ -208,6 +208,8 @@ agent = [
     { name = "uvicorn" },
 ]
 computer = [
+    { name = "av", version = "18.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "av", version = "19.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "mcp" },
     { name = "pillow" },
     { name = "uvicorn" },
@@ -224,17 +226,13 @@ dev = [
     { name = "python-multipart" },
     { name = "regex" },
 ]
-recording = [
-    { name = "av", version = "18.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "av", version = "19.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-]
 
 [package.metadata]
 requires-dist = [
     { name = "a2a-sdk", extras = ["http-server"], marker = "extra == 'agent'", specifier = ">=0.3.26,<0.4" },
     { name = "a2a-sdk", extras = ["http-server"], marker = "extra == 'dev'", specifier = ">=0.3.26,<0.4" },
+    { name = "av", marker = "extra == 'computer'", specifier = ">=17" },
     { name = "av", marker = "extra == 'dev'", specifier = ">=17" },
-    { name = "av", marker = "extra == 'recording'", specifier = ">=17" },
     { name = "fastmcp", marker = "extra == 'dev'", specifier = ">=3.4,<4" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "mcp", marker = "extra == 'agent'", specifier = ">=1.25,<2" },
@@ -253,7 +251,7 @@ requires-dist = [
     { name = "uvicorn", marker = "extra == 'agent'", specifier = ">=0.30" },
     { name = "uvicorn", marker = "extra == 'computer'", specifier = ">=0.30" },
 ]
-provides-extras = ["agent", "computer", "recording", "dev"]
+provides-extras = ["agent", "computer", "dev"]
 
 [[package]]
 name = "aiofile"

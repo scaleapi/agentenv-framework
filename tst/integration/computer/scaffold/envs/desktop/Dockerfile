@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 COPY protocol /opt/protocol
 RUN python3 -m venv /opt/driver \
-    && /opt/driver/bin/pip install --no-cache-dir "/opt/protocol[computer,recording]" "mss>=9,<11" "python-xlib>=0.33,<0.34"
+    && /opt/driver/bin/pip install --no-cache-dir "/opt/protocol[computer]" "mss>=9,<11" "python-xlib>=0.33,<0.34"
 RUN useradd --create-home --uid 10001 user
 COPY start.sh driver.py fixture.py /opt/desktop/
 USER user

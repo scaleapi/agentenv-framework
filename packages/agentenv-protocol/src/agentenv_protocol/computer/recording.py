@@ -1,7 +1,6 @@
 """Recording a computer's display, computer-recording/v1: the base class runs each recording from the driver's
 ``@record`` stream, or by polling ``@capture`` where the driver has none, encodes frames as H.264 segments, uploads
-each segment as it closes and seals the recording at ``end`` with its manifest. Encoding needs the ``recording``
-extra (PyAV)."""
+each segment as it closes and seals the recording at ``end`` with its manifest."""
 from __future__ import annotations
 
 import asyncio
@@ -21,6 +20,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
+import av
 from PIL import Image as PILImage
 from PIL import ImageDraw
 from pydantic import ValidationError
@@ -29,11 +29,6 @@ from ..transfers import NamespaceUploader, WriteNamespaceGrant
 from .errors import InvalidArgument, LimitExceeded, Unsupported
 from .frames import to_pil
 from .manifest import ManifestSegment, RecordingManifest
-
-try:
-    import av
-except ImportError:  # the recording extra isn't installed: a start says so
-    av = None
 
 if TYPE_CHECKING:
     from .runtime import ComputerRuntime
@@ -68,7 +63,7 @@ THREAD_QUEUE = 8
 
 @dataclass(frozen=True)
 class Recording:
-    """A driver's recording features, as a class attribute: ``recording = Recording()`` serves computer-recording/v1."""
+    """A driver's recording limits, as its ``recording`` class attribute; every driver has the defaults."""
     max_fps: int = 15
     max_concurrent: int = 2
     max_duration_s: int = 86_400
@@ -154,8 +149,6 @@ class Recordings:
             if sum(not r.done for r in self.running.values()) >= features.max_concurrent:
                 raise LimitExceeded(f"{features.max_concurrent} recordings are running, the most this computer "
                                     "records at once; end one first")
-            if av is None:
-                raise Unsupported("recording needs PyAV: install agentenv-framework-protocol[computer,recording]")
             recording_id = f"rec-{uuid.uuid4().hex[:12]}"
             root = Path.home() / RECORDINGS_DIR
             hints = dataclasses.replace(hints, directory=root / recording_id)

@@ -316,7 +316,7 @@ async with ToolSession(mcp_url=mcp_url, role="alice@example.com") as session:
 
 A computer driver is what runs inside a computer an agent uses through screenshots and input. Write
 one as a `ComputerDriverEnvironment` subclass from `agentenv_protocol.computer`, which needs the
-`computer` extra (`pip install 'agentenv-framework-protocol[computer]'`: mcp, uvicorn and Pillow).
+`computer` extra (`pip install 'agentenv-framework-protocol[computer]'`: mcp, uvicorn, Pillow and PyAV).
 The driver marks the methods that capture the screen and send input; the base class serves the
 computer contract from them, so the tools, results and errors can't drift from it. A complete
 driver for an X11 desktop is agent-env's reference driver, in its
@@ -367,7 +367,7 @@ pixels), at the display's size times its scale. Input operations may return an `
 | `@key_down`, `@key_up` | both or none | `computer-keyboard/v1` and its two tools |
 | `@run_in_session` | no; a Linux default | `computer-exec/v1` |
 | `@write_files` | no; a Linux default | `data/add` |
-| `@record` | no, with `recording = Recording()` | the stream `computer-recording/v1` records from; without it the base class polls `@capture` |
+| `@record` | no | the stream `computer-recording/v1` records from; without it the base class polls `@capture` |
 
 The class is checked when it is defined: a missing required operation, half a group, two methods
 for one operation that some platform could both match, or features that don't match the
@@ -429,9 +429,9 @@ running the driver, its operations or its dependencies.
 
 ### Recording the display
 
-A driver that declares `recording` serves `computer-recording/v1`: video of the display, as MP4
-(H.264) segments, for the framework to start and end around the work it wants on record. Encoding
-needs PyAV, from the `recording` extra (`pip install 'agentenv-framework-protocol[computer,recording]'`).
+Every driver serves `computer-recording/v1`: video of the display, as MP4 (H.264) segments, for the
+framework to start and end around the work it wants on record. `recording = Recording(...)` sets its
+limits, and `recording = None` turns it off.
 
 ```python
 from agentenv_protocol.computer import RecordedFrame, Recording, record
