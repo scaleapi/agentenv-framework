@@ -63,6 +63,6 @@ def test_the_gate_checks_the_folder_of_every_shipped_bundle():
     roots = {name: root.relative_to(SCRIPT.parents[2]).as_posix() for name, root in clean_install.bundle_roots().items()}
 
     assert roots == {"agent-wakeups": "src/agent_env/examples/agent-wakeups", "agents": "src/agent_env/agents",
-                     "drivers": "src/agent_env/drivers", "echo-mcp": "src/agent_env/examples/echo-mcp",
-                     "hello": "src/agent_env/examples/hello", "mail-mcp": "src/agent_env/examples/mail-mcp",
+                     "drivers": "src/agent_env/drivers", "echo-mcp": "src/agent_env/examples/echo-mcp", "hello": "src/agent_env/examples/hello",
+                     "mail-mcp": "src/agent_env/examples/mail-mcp",
                      "next-env-event": "src/agent_env/examples/next-env-event"}
