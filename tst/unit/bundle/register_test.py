@@ -202,6 +202,15 @@ def test_a_name_an_id_cant_hold_is_made_one_and_names_that_collide_are_refused(h
                                       "registered as 'big-triage-my-docs'; rename one",)
 
 
+def test_entries_whose_names_make_one_id_register_in_their_own_stores(home):
+    files = {"artifacts/Echo/a.md": "a\n", "tasks/echo.json": json.dumps([BOX, _load("greet", "Echo")])}
+
+    registered = register_bundle(layout(home / "triage", files))
+
+    assert {(done.write.kind.store, done.write.id) for done in registered.materialization.writes} == {
+        ("artifact", "triage-echo"), ("task", "triage-echo")}
+
+
 def test_a_bad_prefix_is_refused(home):
     with pytest.raises(BundleError) as refused:
         register_bundle(layout(home / "triage", TRIAGE), prefix="Team/")
