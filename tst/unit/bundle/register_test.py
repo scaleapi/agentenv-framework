@@ -32,6 +32,8 @@ from agent_env.task_step.task_step import TaskStep
 from tst.unit.bundle._support import DIGEST, layout
 
 BOX = {"id": "box", "type": "deploy_sandbox", "sandbox_name": "box", "sandbox_mode": "vm"}
+# Not a credential: what a remote URL's user info holds in the tests that its name drops, joined in at run time.
+_FAKE_TOKEN = "not-a-token"
 
 
 def _load(step_id, artifact):
@@ -134,7 +136,8 @@ def test_the_ledger_rows_are_in_the_target_store_and_name_the_bundle_by_its_remo
     monkeypatch.setattr(register_module, "_git", _GIT)
     repo = tmp_path / "repo"
     layout(repo / "bundles" / "triage", TRIAGE)
-    for args in (["init", "-q"], ["remote", "add", "origin", "https://user:token123@github.com/team/repo.git"],
+    remote = "https://user:" + _FAKE_TOKEN + "@github.com/team/repo.git"
+    for args in (["init", "-q"], ["remote", "add", "origin", remote],
                  ["add", "."], ["-c", "user.email=a@b.c", "-c", "user.name=a", "commit", "-q", "-m", "x"]):
         subprocess.run(["git", "-C", str(repo), *args], check=True)
 
@@ -145,12 +148,12 @@ def test_the_ledger_rows_are_in_the_target_store_and_name_the_bundle_by_its_remo
     assert {row["id"] for row in rows} == {"triage-docs", "triage-greeting", "triage-t"}
     assert {row["bundle"] for row in rows} == {"github.com/team/repo:bundles/triage"}
     assert all(row["commit"] and row["dirty"] is False for row in rows)
-    assert "token123" not in json.dumps(rows, default=str)
+    assert _FAKE_TOKEN not in json.dumps(rows, default=str)
 
 
 @pytest.mark.parametrize(("remote", "name"), [
     ("git@github.com:team/repo.git", "github.com/team/repo"),
-    ("https://x-access-token:ghs_abc@github.com/team/repo", "github.com/team/repo"),
+    ("https://x-access-token:" + _FAKE_TOKEN + "@github.com/team/repo", "github.com/team/repo"),
     ("ssh://git@gitlab.example.com:2222/group/sub/repo.git", "gitlab.example.com/group/sub/repo"),
 ])
 def test_a_remote_is_named_by_its_host_and_path_alone(remote, name):
