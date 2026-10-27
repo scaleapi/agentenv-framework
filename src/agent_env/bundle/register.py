@@ -42,7 +42,7 @@ from agent_env.task_step.registry import get_task_step_registry
 from ._secrets import credentials_in
 from .installed import installed_bundles
 from .ledger import Check, Ledger
-from .materialize import Materialization, Materialized, Registering, materialize
+from .materialize import Materialization, Materialized, materialize
 from .parse import Bundle, BundleEntry, BundleError, BundleKind, parse_bundle
 from .plan import AliasUse, Plan, Write, plan_bundle, plan_entities
 from .run import _label
@@ -103,7 +103,7 @@ def register_bundle(
             raise BundleError(problems)
         say = on_progress or (lambda line: None)
         materialization = materialize(
-            registered, dry_run=dry_run, registering=Registering(ledger),
+            registered, dry_run=dry_run, ledger=ledger,
             on_wait=lambda: say("waiting for another agent-env run to finish writing this bundle's ids"),
             on_build=lambda write: say(f"  {_label(registered, write)}: building with docker and pushing"),
             on_write=lambda done: say(f"  {registered_line(registered, done)}"))
@@ -188,7 +188,7 @@ def registry_ids(plan: Plan, prefix: str) -> tuple[dict[str, str], list[str]]:
     for local, registry_id in ids.items():
         for store in stores.get(local, ()):
             by_target.setdefault((store, registry_id), []).append(local)
-        if not _REGISTRY_ID.fullmatch(registry_id.replace("__", "_")):
+        if not _REGISTRY_ID.fullmatch(registry_id):
             problems.append(f"{registry_id!r}: isn't an id a registry takes; rename what it's made from")
     for (_, registry_id), locals_ in by_target.items():
         if len(locals_) > 1:
@@ -214,8 +214,18 @@ def _slug(name: str) -> str:
     return _NOT_IN_ID.sub("-", ascii_name.replace("__", "-")).strip("-._")
 
 
+# The fields of a Plan that hold no ``@local`` id, so a translated plan keeps them: the store's latest versions, by store
+# id, and the agent ``--agent`` names, which a registration plans without.
+_KEPT = frozenset({"store_latest", "agent"})
+
+
 def translated(plan: Plan, ids: Mapping[str, str]) -> Plan:
     """``plan`` writing each entity under its registry id, and naming it so wherever the plan's documents do."""
+    return replace(plan, **_translations(plan, ids))
+
+
+def _translations(plan: Plan, ids: Mapping[str, str]) -> dict[str, Any]:
+    """Each field of ``plan`` but those it keeps (``_KEPT``), with each ``@local`` id in it its registry id."""
 
     def entity(entry: BundleEntry) -> BundleEntry:
         if entry not in entries:
@@ -250,16 +260,16 @@ def translated(plan: Plan, ids: Mapping[str, str]) -> Plan:
     resolved_bundle = ResolvedBundle(bundle, tuple(sources.get(entity(entry.entry)) or resolved(entry)
                                                    for entry in plan.bundle.entries),
                                      tuple(image(source) for source in plan.bundle.images))
-    return replace(
-        plan, bundle=resolved_bundle, writes=writes,
-        tasks=tuple(sources[entity(task.entry)] for task in plan.tasks),
-        evals=tuple(sources[entity(item.entry)] for item in plan.evals),
-        store_refs=tuple(reference(ref) for ref in plan.store_refs),
-        origins={entity(entry): origin for entry, origin in plan.origins.items()},
-        published={ids.get(id, id): publication for id, publication in plan.published.items()},
-        aliases={alias: _aliased(use, ids) for alias, use in plan.aliases.items()},
-        env_aliases={alias: _aliased(use, ids) for alias, use in plan.env_aliases.items()},
-    )
+    return {
+        "bundle": resolved_bundle, "writes": writes,
+        "tasks": tuple(sources[entity(task.entry)] for task in plan.tasks),
+        "evals": tuple(sources[entity(item.entry)] for item in plan.evals),
+        "store_refs": tuple(reference(ref) for ref in plan.store_refs),
+        "origins": {entity(entry): origin for entry, origin in plan.origins.items()},
+        "published": {ids.get(id, id): publication for id, publication in plan.published.items()},
+        "aliases": {alias: _aliased(use, ids) for alias, use in plan.aliases.items()},
+        "env_aliases": {alias: _aliased(use, ids) for alias, use in plan.env_aliases.items()},
+    }
 
 
 def _aliased(use: AliasUse, ids: Mapping[str, str]) -> AliasUse:
@@ -279,12 +289,13 @@ def _renamed(value: Any, ids: Mapping[str, str]) -> Any:
 
 class RegistrationLedger(Ledger):
     """A registration's rows, in the target store: each names the bundle that wrote it, by its identity, and the commit
-    and state of the folder it was written from. A task or eval is hashed with the versions it names, and each write
-    lands on exactly the version its check found next."""
+    and state of the folder it was written from. A task or eval is hashed with the versions it names, each write lands
+    on exactly the version its check found next, and each image the bundle builds is built here and pushed."""
 
     collection = REGISTRATIONS
     pins_references = True
     strict = True
+    pushes_images = True
 
     def __init__(self, store: DocumentStore, plan: Plan, identity: str, commit: str | None, dirty: bool | None,
                  adopt: frozenset[str] = frozenset()):
