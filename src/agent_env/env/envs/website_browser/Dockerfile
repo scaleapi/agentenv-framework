@@ -40,11 +40,9 @@ RUN npm init -y && \
     npx playwright install chromium
 
 # The recorder (recorder.py): computer-recording/v1 of the browser's page, idle until a recording starts.
-ARG AGENTENV_PROTOCOL_VERSION=0.1.382
-ARG WEBSOCKETS_VERSION=15.0.1
+COPY recorder-requirements.txt /app/
 RUN python3 -m venv /opt/recorder && \
-    /opt/recorder/bin/pip install --no-cache-dir \
-        "agentenv-framework-protocol[computer]==${AGENTENV_PROTOCOL_VERSION}" "websockets==${WEBSOCKETS_VERSION}"
+    /opt/recorder/bin/pip install --no-cache-dir -r /app/recorder-requirements.txt
 
 COPY recorder.py entrypoint.sh /app/
 RUN chmod +x /app/entrypoint.sh
