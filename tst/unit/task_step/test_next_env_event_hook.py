@@ -164,6 +164,24 @@ async def test_a_fire_the_agents_turn_set_off_lands_before_the_clock_jumps(hook,
 
 
 @pytest.mark.asyncio
+async def test_a_state_check_the_agents_turn_set_off_finishes_before_the_clock_jumps(hook, gateway, monkeypatch):
+    async def slow_check(check, ctx=None, role=None):
+        await asyncio.sleep(0.3)
+        return True
+
+    monkeypatch.setattr(gateway._trigger_engine, "_run_check", slow_check)
+    _register(gateway, {"id": "seen", "when": {"type": "state", "check": {"tool": "items_list", "predicate": {"exists": True}}},
+                        "actions": _add("seen")},
+              {"id": "tue", "when": {"type": "time", "at": "2026-03-03T09:00:00Z"}, "actions": _add("tue")})
+    gateway._trigger_engine.on_tool_call("default", "send_email", {}, CallToolResult(content=[], isError=False))
+    assert gateway._trigger_engine.state()["triggers"][0]["evaluating"] is True
+
+    await _turns(hook, _context())
+
+    assert gateway.calls[0] == ("seen", MONDAY)
+
+
+@pytest.mark.asyncio
 async def test_an_agent_trigger_reply_is_sent_first_at_the_current_time_with_no_jump(hook, gateway):
     _register(gateway, {"id": "school", "when": {"type": "time", "at": "2026-03-03T09:00:00Z"},
                         "actions": _add("school email")})

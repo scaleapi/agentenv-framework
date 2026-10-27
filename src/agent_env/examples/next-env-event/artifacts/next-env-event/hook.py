@@ -116,7 +116,9 @@ async def _settle(turn, envs, timeout):
 
 
 def _busy(row, now):
-    """A trigger is still firing, and not just waiting for a later time."""
+    """A trigger is still firing or checking its state, and not just waiting for a later time."""
+    if row.get("evaluating"):
+        return True
     if row["status"] not in IN_FLIGHT and not row.get("pending"):
         return False
     return not (row.get("waiting") and row.get("resumes_at") and _utc(row["resumes_at"]) > now)
