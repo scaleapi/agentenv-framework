@@ -74,29 +74,16 @@ jobs:
             -e ".[aws,boxd,daytona,gcp,sail,tensorlake,tenki,vercel]" "mcp>=2.3,<3" "fastmcp>=4,<5"
           .venv/bin/python -c 'import importlib.metadata as m; from packaging.version import Version; assert Version(m.version("mcp")) >= Version("2.3"), m.version("mcp")'
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
-      # Left out of both passes: the gateway's tests and those that build a card with the real gateway server, which
-      # serves on mcp 1's FastMCP inside its own image; the openenv tests and the two packaging tests that read every
-      # extra's installed metadata, openenv's included, which the unit job runs.
+      # .github/scripts/mcp2_test_split.py says what the passes leave out and which tests import fastmcp.
       - name: Unit tier on mcp 2, fastmcp not imported
         run: >-
           .venv/bin/python -m pytest tst/unit packages/agentenv-protocol/tests -n auto -q --timeout=300
-          --ignore=tst/unit/env/gateway --ignore=tst/unit/env/test_env.py --ignore=tst/unit/env/envs/test_env_card_loads.py
-          --ignore=tst/unit/providers/env_providers/env_gateway_provider_test.py
-          --ignore=tst/unit/task_step/sync_env_clock_test.py --ignore=tst/unit/task_step/test_apply_server_config.py
-          --ignore=tst/unit/task_step/test_verify_universe_roundtrip.py --ignore=tst/unit/task_step/snapshot_env_upload_grant_test.py
-          --ignore=tst/unit/task_step/test_snapshot_env.py --ignore=tst/unit/task_step/test_snapshot_agent_state.py
-          --ignore=tst/unit/openenv --ignore=tst/unit/test_optional_extras_stay_optional.py
-          --ignore=tst/unit/test_runtime_dependencies_are_imported.py
-          --ignore=packages/agentenv-protocol/tests/test_computer_spaces.py --ignore=packages/agentenv-protocol/tests/test_errors.py
-          --ignore=packages/agentenv-protocol/tests/test_tool_access.py --ignore=packages/agentenv-protocol/tests/test_tool_annotations.py
-          --ignore=packages/agentenv-protocol/tests/test_tool_context_fastmcp.py
+          $(python .github/scripts/mcp2_test_split.py leave-out)
+          $(python .github/scripts/mcp2_test_split.py fastmcp | xargs -n1 printf -- '--ignore=%s ')
           --deselect=packages/agentenv-protocol/tests/test_agent_env_environment.py::test_hidden_by_default_reaches_tools_list_on_standalone_fastmcp
       - name: The tests that import fastmcp, on mcp 2
         run: >-
-          .venv/bin/python -m pytest -q --timeout=300
-          packages/agentenv-protocol/tests/test_computer_spaces.py packages/agentenv-protocol/tests/test_errors.py
-          packages/agentenv-protocol/tests/test_tool_access.py packages/agentenv-protocol/tests/test_tool_annotations.py
-          packages/agentenv-protocol/tests/test_tool_context_fastmcp.py
+          .venv/bin/python -m pytest -q --timeout=300 $(python .github/scripts/mcp2_test_split.py fastmcp)
           packages/agentenv-protocol/tests/test_agent_env_environment.py::test_hidden_by_default_reaches_tools_list_on_standalone_fastmcp
 
   ui:
