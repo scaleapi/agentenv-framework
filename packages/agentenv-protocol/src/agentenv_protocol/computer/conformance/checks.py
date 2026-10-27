@@ -54,9 +54,13 @@ NORM = 1000
 #: How long the probe records, and the frame rate it asks for.
 RECORD_S = 2.0
 RECORD_FPS = 5
-#: Prints a file's size, SHA-256 and bytes as JSON, run with ``python3 -c`` on the computer.
-READ_FILE = ("import base64,hashlib,json,sys;d=open(sys.argv[1],'rb').read();"
-             "print(json.dumps({'size':len(d),'sha256':hashlib.sha256(d).hexdigest(),'data':base64.b64encode(d).decode()}))")
+#: Prints a file's size and SHA-256 as JSON, run with ``python3 -c`` on the computer.
+READ_DIGEST = ("import hashlib,json,sys;d=open(sys.argv[1],'rb').read();"
+               "print(json.dumps({'size':len(d),'sha256':hashlib.sha256(d).hexdigest()}))")
+#: Prints ``length`` bytes of a file from ``offset``, base64, under computer-exec's output cap.
+READ_CHUNK = ("import base64,sys;f=open(sys.argv[1],'rb');f.seek(int(sys.argv[2]));"
+              "print(base64.b64encode(f.read(int(sys.argv[3]))).decode())")
+CHUNK_BYTES = 512 << 10
 #: The checks only ``full`` runs, recorded unverified when the fixture can't be staged.
 FULL_CHECKS = (("P3", "fixture colours land where the mapping says"), ("P4", "clicks show their effect"),
                ("P5", "refusals leave the fixture as it was"), ("P6", "typed and pressed keys arrive"),
@@ -780,25 +784,35 @@ class Probe:
                 with contextlib.suppress(Exception):
                     await self.driver.invoke(COMPUTER_RECORDING, "end", {"recording_id": recording_id})
                 await self.driver.run("rm", "-rf", f"{RECORDINGS_DIR}/{recording_id}")
+            await self.driver.run("sh", "-c", f"rmdir {RECORDINGS_DIR} 2>/dev/null || true")
 
     async def _segments_match(self, manifest: dict, fps: int) -> str | None:
         """What is wrong with a recording without a grant, read back from the computer, or None."""
         segments = manifest.get("segments") or []
         if manifest.get("ended_by") != "end" or not segments:
             return f"it ended by {manifest.get('ended_by')!r} with {len(segments)} segments"
+        span = (_when(segments[-1]["ended_at"]) - _when(segments[0]["started_at"])).total_seconds()
+        frames = sum(s["frames"] for s in segments)
+        if span < RECORD_S - 2 / fps or frames < fps * RECORD_S / 2:
+            return f"{frames} frames over {span:.2f} s of a {RECORD_S:g} s recording at {fps} fps"
         for before, after in zip(segments, segments[1:]):
             gap = (_when(after["started_at"]) - _when(before["ended_at"])).total_seconds()
             if gap > 2 / fps:
                 return f"{gap:.2f} s between segments {before['index']} and {after['index']}"
         for segment in segments:
-            out = await self.driver.run("python3", "-c", READ_FILE, f"{RECORDINGS_DIR}/{segment['path']}")
-            if out.get("exit_code") != 0 or out.get("truncated"):
+            path = f"{RECORDINGS_DIR}/{segment['path']}"
+            out = await self.driver.run("python3", "-c", READ_DIGEST, path)
+            if out.get("exit_code") != 0:
                 return f"segment {segment['index']} couldn't be read back: {out.get('stderr', '')[-200:]}"
             file = json.loads(out["stdout"])
             if (file["size"], file["sha256"]) != (segment["bytes"], segment["sha256"]):
                 return f"segment {segment['index']}'s file is {file['size']} bytes, sha256 {file['sha256'][:12]}; " \
                        f"the manifest says {segment['bytes']}, {segment['sha256'][:12]}"
-            mp4 = read_mp4(base64.b64decode(file["data"]))
+            data = b""
+            while len(data) < file["size"]:
+                chunk = await self.driver.run("python3", "-c", READ_CHUNK, path, str(len(data)), str(CHUNK_BYTES))
+                data += base64.b64decode(chunk["stdout"])
+            mp4 = read_mp4(data)
             span = (_when(segment["ended_at"]) - _when(segment["started_at"])).total_seconds()
             if ((mp4["width"], mp4["height"], mp4["frames"]) != (segment["width"], segment["height"], segment["frames"])
                     or abs(mp4["duration_s"] - span) > 2 / fps):

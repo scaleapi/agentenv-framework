@@ -50,6 +50,10 @@ MIN_FREE_BYTES = 512 << 20
 FAILING_S = 60.0
 #: Frames further apart than this start a new segment.
 GAP_S = 2.0
+#: How long a stream that stopped or failed waits before it is started again.
+RETRY_S = 1.0
+#: How often free disk is checked while frames arrive.
+DISK_CHECK_S = 5.0
 KEEP_ENDED = 64
 
 
@@ -135,6 +139,9 @@ class Recordings:
             if request_id in self.started:
                 return self.started[request_id]
             hints, grant = self._hints(features, scope, window, fps, max_edge, cursor, upload)
+            stopped = [rid for rid, r in self.running.items() if r.done]
+            for rid in stopped[:max(0, len(stopped) - KEEP_ENDED)]:  # stopped by itself and never ended
+                self.running.pop(rid)
             if sum(not r.done for r in self.running.values()) >= features.max_concurrent:
                 raise LimitExceeded(f"{features.max_concurrent} recordings are running, the most this computer "
                                     "records at once; end one first")
@@ -147,6 +154,7 @@ class Recordings:
             recording = _Recording(recording_id, hints, features, root, grant, self.runtime)
             self.running[recording_id] = recording
             recording.task = asyncio.create_task(recording.run())
+            recording.timer = asyncio.get_running_loop().call_later(features.max_duration_s, recording.expire)
             answer = {"recording_id": recording_id, "started_at": _iso(recording.requested_at), "format": MP4}
             self.started[request_id] = answer
             while len(self.started) > 4 * KEEP_ENDED:
@@ -203,7 +211,10 @@ class _Recording:
         self.error: Optional[str] = None
         self.done = False
         self.task: Optional[asyncio.Task] = None
+        self.timer: Optional[asyncio.TimerHandle] = None
+        self.released: Optional[asyncio.Future] = None
         self.uploads: set[asyncio.Task] = set()
+        self.sealing: set[asyncio.Future] = set()
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"computer-{recording_id}")
         self._last_disk_check = 0.0
 
@@ -213,11 +224,11 @@ class _Recording:
             while True:
                 try:
                     async for item in self._source():
-                        failing_since = None
                         if isinstance(item, RecordedSegment):
                             await self._add_segment(item)
                         else:
                             await self._add_frame(item)
+                        failing_since = None
                         if self.ended_by is not None:
                             return
                 except asyncio.CancelledError:
@@ -229,10 +240,25 @@ class _Recording:
                         self.ended_by = "error"
                         return
                 await self._close()
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(RETRY_S)
         finally:
-            await self._close()
-            self.done = True
+            try:
+                await self._close()
+            finally:
+                self.done = True
+                self.released = asyncio.ensure_future(self._release())
+
+    def expire(self) -> None:
+        """``max_duration_s`` is up, whether or not frames are arriving."""
+        if not self.done:
+            self.ended_by = self.ended_by or "limit"
+            self.task.cancel()
+
+    async def _release(self) -> None:
+        """Once every closing segment is sealed, the encoder's thread goes."""
+        if self.sealing:
+            await asyncio.gather(*self.sealing, return_exceptions=True)
+        self.executor.shutdown(wait=False)
 
     def _source(self) -> AsyncIterator:
         if self.streams:
@@ -240,12 +266,15 @@ class _Recording:
         return _poll(self.runtime, self.hints, self.cursor)
 
     async def end(self, reason: str, grant: Optional[WriteNamespaceGrant]) -> dict:
+        if self.timer is not None:
+            self.timer.cancel()
         if self.task is not None and not self.task.done():
             self.task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self.task
         if self.ended_by is None:
             self.ended_by = reason
+        await (self.released or asyncio.ensure_future(self._release()))
         if self.uploads:
             await asyncio.gather(*self.uploads, return_exceptions=True)
         uploader = NamespaceUploader(grant) if grant is not None else self.uploader
@@ -253,7 +282,6 @@ class _Recording:
             for segment in self.segments:
                 if not segment["uploaded"]:
                     await self._upload(uploader, segment)
-        self.executor.shutdown(wait=False)
         with contextlib.suppress(OSError):
             self.hints.directory.rmdir()
         first, last = (self.segments[0], self.segments[-1]) if self.segments else ({}, {})
@@ -277,7 +305,7 @@ class _Recording:
             path = self.hints.directory / f"{len(self.segments):04d}.mp4"
             self.encoder = await self._in_thread(_Encoder, path, frame.width, frame.height, self.hints.fps, at)
         await self._in_thread(self.encoder.add, frame, at)
-        self._check_limits(at)
+        self._check_disk()
 
     async def _add_segment(self, item: RecordedSegment) -> None:
         index = len(self.segments)
@@ -285,20 +313,26 @@ class _Recording:
         if Path(item.path) != target:
             await asyncio.to_thread(shutil.move, str(item.path), target)
         await self._finish(target, item.started_at, item.ended_at, item.width, item.height, item.frames)
-        self._check_limits(item.ended_at)
+        self._check_disk()
 
-    def _check_limits(self, at: datetime) -> None:
-        if (at - self.requested_at).total_seconds() >= self.features.max_duration_s:
-            self.ended_by = "limit"
-        elif time.monotonic() - self._last_disk_check > 5:
+    def _check_disk(self) -> None:
+        if time.monotonic() - self._last_disk_check > DISK_CHECK_S:
             self._last_disk_check = time.monotonic()
             if shutil.disk_usage(self.root).free < MIN_FREE_BYTES:
                 self.ended_by = "limit"
 
     async def _close(self) -> None:
+        """Seal the open segment. Sealing runs on even when ``end`` cancels the recording meanwhile, and ``end``
+        waits for it, so a segment is never lost between its encoder and the manifest."""
         encoder, self.encoder = self.encoder, None
         if encoder is None:
             return
+        sealing = asyncio.ensure_future(self._seal(encoder))
+        self.sealing.add(sealing)
+        sealing.add_done_callback(self.sealing.discard)
+        await asyncio.shield(sealing)
+
+    async def _seal(self, encoder: _Encoder) -> None:
         await self._in_thread(encoder.close)
         if encoder.frames:
             await self._finish(encoder.path, encoder.started_at, encoder.last_at, *encoder.size, encoder.frames)

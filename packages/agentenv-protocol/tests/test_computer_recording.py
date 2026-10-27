@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import time
 from datetime import datetime, timedelta, timezone
 from fractions import Fraction
 from unittest.mock import AsyncMock, patch
@@ -368,3 +369,72 @@ async def test_only_the_latest_starts_and_ends_are_kept_for_retries(home, monkey
             await http.post(END, json={"recording_id": started["recording_id"]})
     kept = driver._computer.recordings
     assert list(kept.started) == list("bcde") and len(kept.ended) == 1
+
+
+class Stalls(FakeDriver):
+    """A stream that hands over one frame and then waits forever."""
+    recording = Recording(max_duration_s=1, max_concurrent=1)
+
+    @record
+    async def frames(self, hints):
+        yield RecordedFrame(self.screen.image.copy(), datetime.now(timezone.utc))
+        await asyncio.sleep(3600)
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_stream_still_ends_at_max_duration_and_frees_its_slot(home):
+    driver = Stalls()
+    async with http_client(driver) as http:
+        first = (await http.post(START, json={"request_id": "a"})).json()
+        await asyncio.sleep(1.4)
+        second = await http.post(START, json={"request_id": "b"})
+        ended = (await http.post(END, json={"recording_id": first["recording_id"]})).json()
+        await http.post(END, json={"recording_id": second.json()["recording_id"]})
+    assert second.status_code == 200 and ended["ended_by"] == "limit" and len(ended["segments"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_encoder_that_fails_every_frame_ends_the_recording_with_its_error(home, monkeypatch):
+    monkeypatch.setattr(recording_module, "FAILING_S", 0.5)
+    monkeypatch.setattr(recording_module, "RETRY_S", 0.1)
+
+    def fail(self, frame, at):
+        raise RuntimeError("the encoder is out of memory")
+
+    monkeypatch.setattr(recording_module._Encoder, "add", fail)
+    _, manifest = await _record(Recorded(), 1.5)
+    assert manifest["ended_by"] == "error" and manifest["error"] == "RuntimeError: the encoder is out of memory"
+
+
+@pytest.mark.asyncio
+async def test_an_end_that_comes_while_a_segment_is_sealing_keeps_it(home, monkeypatch):
+    real_close = recording_module._Encoder.close
+
+    def slow_close(self):
+        time.sleep(0.6)
+        real_close(self)
+
+    monkeypatch.setattr(recording_module._Encoder, "close", slow_close)
+    _, manifest = await _record(Recorded(), 1.2)
+    (segment,) = manifest["segments"]  # the end came while the rolled-over segment was still sealing
+    assert segment["frames"] >= 8
+    for segment in manifest["segments"]:
+        assert len(_decoded(home / ".agentenv-recordings" / segment["path"])) == segment["frames"]
+
+
+@pytest.mark.asyncio
+async def test_recordings_that_stop_themselves_release_their_thread_and_only_the_latest_are_kept(home, monkeypatch):
+    monkeypatch.setattr(recording_module, "KEEP_ENDED", 1)
+    driver = FakeDriver()
+    driver.recording = Recording(max_duration_s=1, max_concurrent=4)
+    async with http_client(driver) as http:
+        for name in "abc":
+            await http.post(START, json={"request_id": name})
+        await asyncio.sleep(1.6)
+        stopped = list(driver._computer.recordings.running.values())
+        await http.post(START, json={"request_id": "d"})
+        running = driver._computer.recordings.running
+        assert all(r.done and r.executor._shutdown for r in stopped)
+        assert len(running) == 2 and sum(not r.done for r in running.values()) == 1
+        for recording_id in list(running):
+            await http.post(END, json={"recording_id": recording_id})

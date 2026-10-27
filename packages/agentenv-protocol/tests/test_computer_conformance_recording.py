@@ -3,7 +3,9 @@ hash or size isn't the file's, on a card that declares a limit the driver doesn'
 every recording the probe made is ended and removed."""
 from __future__ import annotations
 
+import asyncio
 import struct
+from datetime import datetime, timezone
 
 import pytest
 
@@ -13,7 +15,7 @@ pytest.importorskip("av")
 
 from probe_fake import FixtureDriver, served  # noqa: E402
 
-from agentenv_protocol.computer import Recording, capture  # noqa: E402
+from agentenv_protocol.computer import RecordedFrame, Recording, capture, record  # noqa: E402
 from agentenv_protocol.computer import recording as recording_module  # noqa: E402
 from agentenv_protocol.computer.conformance import checks, run_probe  # noqa: E402
 from agentenv_protocol.computer.conformance.client import Driver  # noqa: E402
@@ -50,7 +52,7 @@ async def test_a_driver_that_records_passes_the_recording_checks_at_full_and_lea
     statuses = {c.name: c.status for c in report.checks}
     assert report.passed and all(statuses[name] == "passed" for name in NAMES)
     assert report.extensions["urn:agentenv:computer-recording/v1"] == "verified"
-    assert not any((home / ".agentenv-recordings").iterdir())
+    assert not (home / ".agentenv-recordings").exists()
 
 
 @pytest.mark.asyncio
@@ -73,7 +75,7 @@ async def test_a_limit_the_driver_doesnt_keep_fails_and_its_recordings_are_still
     found = await _recording_checks(driver)
     assert found[NAMES[2]][0] == "failed" and "recording 2 of at most 1 started" in found[NAMES[2]][1]
     assert found[NAMES[0]][0] == found[NAMES[1]][0] == "passed"
-    assert not driver._computer.recordings.running and not any((home / ".agentenv-recordings").iterdir())
+    assert not driver._computer.recordings.running and not (home / ".agentenv-recordings").exists()
 
 
 @pytest.mark.asyncio
@@ -140,7 +142,7 @@ async def test_each_way_a_recording_can_fall_short_fails_its_check(home, monkeyp
     monkeypatch.setattr(recording_module, "MIN_FREE_BYTES", 1 << 62)
     limited = await _recording_checks(Recorder())
     monkeypatch.setattr(recording_module, "MIN_FREE_BYTES", 0)
-    monkeypatch.setattr(checks, "READ_FILE", "import sys; sys.exit(3)")
+    monkeypatch.setattr(checks, "READ_DIGEST", "import sys; sys.exit(3)")
     unreadable = await _recording_checks(Recorder())
     monkeypatch.undo()
     monkeypatch.setattr(checks, "RECORD_S", 0.8)
@@ -167,3 +169,25 @@ async def test_a_card_with_no_max_concurrent_fails_the_limit_check(home, monkeyp
                                                    if k != "max_concurrent"})
     found = await _recording_checks(Recorder())
     assert found[NAMES[2]] == ("failed", "the card declares no max_concurrent")
+
+
+class Stalled(Recorder):
+    """A stream that hands over one frame and then nothing."""
+
+    @record
+    async def frames(self, hints):
+        yield RecordedFrame(self.screen.image.copy(), datetime.now(timezone.utc))
+        await asyncio.sleep(3600)
+
+
+@pytest.mark.asyncio
+async def test_a_stream_that_stalls_after_its_first_frame_fails(home):
+    found = await _recording_checks(Stalled())
+    assert found[NAMES[0]][0] == "failed" and "1 frames over 0.00 s of a 0.8 s recording" in found[NAMES[0]][1]
+
+
+@pytest.mark.asyncio
+async def test_a_segment_bigger_than_a_chunk_is_read_back_in_pieces(home, monkeypatch):
+    monkeypatch.setattr(checks, "CHUNK_BYTES", 1024)
+    found = await _recording_checks(Recorder())
+    assert found[NAMES[0]] == ("passed", "")
