@@ -15,6 +15,7 @@ from tst.util.oci_registry import MANIFEST, UBUNTU, UBUNTU_LAYER, Registry, laye
 @pytest.fixture
 def registry(local_stores, monkeypatch):
     registry = Registry()
+    monkeypatch.setattr(computer_module, "pin_digest", registry.pin_digest)
     monkeypatch.setattr(computer_module, "read_manifest", registry.read_manifest)
     monkeypatch.setattr(computer_module, "read_blob", registry.read_blob)
     return registry
@@ -69,6 +70,18 @@ def test_an_image_that_isnt_what_the_computer_declares_refuses_the_put(registry,
 
     assert problem in str(refused.value)
     assert get_artifact_store().next_version("desktop") == 1
+
+
+@pytest.mark.parametrize("served", ["single", "index"])
+def test_an_image_recorded_by_its_tag_alone_is_read_at_the_digest_its_registry_serves_for_it(registry, served):
+    single = registry.image(UBUNTU_LAYER)
+    registry.tags["localhost:5000/desktop-image:v1"] = single if served == "single" else registry.index(amd64=single)
+
+    computer = _put(_image("localhost:5000/desktop-image:v1"), arch=["amd64"])
+
+    found = computer.metadata["validated_images"]["container"]["amd64"]
+    assert (found["status"], found["manifest"]) == ("passed", single)
+    assert found["image"] == f"localhost:5000/desktop-image:v1@{registry.tags['localhost:5000/desktop-image:v1']}"
 
 
 def test_os_release_comes_from_the_lowest_layer_holding_it_and_a_single_image_is_read_by_its_config(registry):

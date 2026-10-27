@@ -23,7 +23,7 @@ from agent_env.entity.refs import EntityRef
 from agent_env.store.base import NotFoundError
 from agent_env.store.ids import derive_id
 from agent_env.store.image_store.oci_registry_credentials import names_registry
-from agent_env.store.image_store.registry_api import read_blob, read_manifest
+from agent_env.store.image_store.registry_api import pin_digest, read_blob, read_manifest
 
 if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
@@ -223,6 +223,7 @@ def _inspect_container(image: DockerImageArtifact, arches: list[str], os: LinuxO
     ref = image.pinned_name
     auth = get_config().get_image_store().auth(ref)
     try:
+        ref = ref if "@" in ref else pin_digest(ref, auth)
         manifests = _platform_manifests(ref, auth)
     except ValueError as e:
         return {arch: _result("failed", ref, problem=str(e)) for arch in arches}
