@@ -93,38 +93,15 @@ def _parse(ref: str) -> _ImageRef:
 
 def _check(image: _ImageRef, reference: str, auth: RegistryAuth | None, timeout: float) -> str:
     """The digest the registry serves for ``reference`` (a tag or a digest) in ``image``'s repository."""
-    # A registry on this machine serves plain HTTP, as Docker allows for a loopback one.
-    scheme = "http" if is_loopback_host(image.host) else "https"
-    url = f"{scheme}://{image.host}/v2/{image.repository}/manifests/{reference}"
     what = f"{image.name}{'@' if _DIGEST.match(reference) else ':'}{reference}"
-    basic = (auth.username, auth.password) if auth is not None else None
-    try:
-        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
-            headers = {"Accept": _MANIFEST_TYPES}
-            # Basic credentials go with every request until a Bearer token replaces them.
-            credentials = basic
-            response = client.head(url, headers=headers, auth=credentials)
-            if response.status_code == 401 and (token := _bearer_token(client, response, basic, what)) is not None:
-                headers["Authorization"] = f"Bearer {token}"
-                credentials = None
-                response = client.head(url, headers=headers)
-            if response.status_code == 200 and not response.headers.get("docker-content-digest"):
-                response = client.get(url, headers=headers, auth=credentials)
-                if response.status_code == 200:
-                    return f"sha256:{hashlib.sha256(response.content).hexdigest()}"
-    except httpx.HTTPError as e:
-        raise ValueError(f"{what}: couldn't read its manifest from {image.host}: {type(e).__name__}: {e}") from e
-    if response.status_code == 200:
-        served = response.headers["docker-content-digest"]
-        if not _DIGEST.match(served):
-            raise ValueError(f"{what}: {image.host} answered with {served!r}, which isn't a digest")
-        return served
-    if response.status_code == 404:
-        raise NoSuchImageError(f"{what}: {image.host} has no such image")
-    if response.status_code in (401, 403):
-        raise RegistryRefusedError(f"{what}: {image.host} refused to serve it (HTTP {response.status_code}); agent-env reaches a "
-                         "private registry only with the configured image store's credentials, for its own registry")
-    raise ValueError(f"{what}: {image.host} answered HTTP {response.status_code}")
+    path = f"manifests/{reference}"
+    with _Repository(image, auth, timeout, what) as repository:
+        served = repository.head(path, accept=_MANIFEST_TYPES).headers.get("docker-content-digest")
+        if not served:
+            return f"sha256:{hashlib.sha256(repository.get(path, accept=_MANIFEST_TYPES).content).hexdigest()}"
+    if not _DIGEST.match(served):
+        raise ValueError(f"{what}: {image.host} answered with {served!r}, which isn't a digest")
+    return served
 
 
 def _bearer_token(client: httpx.Client, challenged: httpx.Response, basic: tuple[str, str] | None,
@@ -186,6 +163,7 @@ class _Repository:
     """One image's repository on its registry, read with the Bearer token the registry's first challenge asks for."""
 
     def __init__(self, image: _ImageRef, auth: RegistryAuth | None, timeout: float, what: str) -> None:
+        # A registry on this machine serves plain HTTP, as Docker allows for a loopback one.
         scheme = "http" if is_loopback_host(image.host) else "https"
         self._base = f"{scheme}://{image.host}/v2/{image.repository}"
         self._basic = (auth.username, auth.password) if auth is not None else None
@@ -199,15 +177,20 @@ class _Repository:
     def __exit__(self, *_exc) -> None:
         self._client.close()
 
+    def head(self, path: str, *, accept: str | None = None) -> httpx.Response:
+        response = self._send("HEAD", path, accept, stream=False)
+        self._raise_for(response)
+        return response
+
     def get(self, path: str, *, accept: str | None = None) -> httpx.Response:
-        response = self._send(path, accept, stream=False)
+        response = self._send("GET", path, accept, stream=False)
         self._raise_for(response)
         return response
 
     @contextlib.contextmanager
     def stream(self, path: str) -> Iterator[httpx.Response]:
         """``path`` as a streamed response, closed when the block ends."""
-        response = self._send(path, None, stream=True)
+        response = self._send("GET", path, None, stream=True)
         try:
             if response.status_code != 200:
                 response.read()
@@ -216,13 +199,14 @@ class _Repository:
         finally:
             response.close()
 
-    def _send(self, path: str, accept: str | None, *, stream: bool) -> httpx.Response:
+    def _send(self, method: str, path: str, accept: str | None, *, stream: bool) -> httpx.Response:
         try:
             for _ in range(2):
                 headers = {"Accept": accept} if accept else {}
                 if self._token:
                     headers["Authorization"] = f"Bearer {self._token}"
-                request = self._client.build_request("GET", f"{self._base}/{path}", headers=headers)
+                request = self._client.build_request(method, f"{self._base}/{path}", headers=headers)
+                # Basic credentials go with every request until a Bearer token replaces them.
                 response = self._client.send(request, auth=None if self._token else self._basic, stream=stream)
                 if response.status_code != 401 or self._token:
                     return response
@@ -234,7 +218,8 @@ class _Repository:
                 self._token = token
             return response
         except httpx.HTTPError as e:
-            raise ValueError(f"{self._what}: couldn't read {path} from {self._host}: {type(e).__name__}: {e}") from e
+            thing = "its manifest" if path.startswith("manifests/") else f"the blob {path.removeprefix('blobs/')}"
+            raise ValueError(f"{self._what}: couldn't read {thing} from {self._host}: {type(e).__name__}: {e}") from e
 
     def _raise_for(self, response: httpx.Response) -> None:
         if response.status_code == 200:
@@ -242,5 +227,7 @@ class _Repository:
         if response.status_code == 404:
             raise NoSuchImageError(f"{self._what}: {self._host} has no such image")
         if response.status_code in (401, 403):
-            raise RegistryRefusedError(f"{self._what}: {self._host} refused to serve it (HTTP {response.status_code})")
+            raise RegistryRefusedError(f"{self._what}: {self._host} refused to serve it (HTTP {response.status_code}); "
+                                       "agent-env reaches a private registry only with the configured image store's "
+                                       "credentials, for its own registry")
         raise ValueError(f"{self._what}: {self._host} answered HTTP {response.status_code}")
