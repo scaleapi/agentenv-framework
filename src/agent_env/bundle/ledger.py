@@ -86,6 +86,9 @@ class Ledger:
     # Whether each write lands on exactly the version its check found next, so one that loses a race to another
     # writer raises ConcurrentModificationError rather than add a version after the other's.
     strict = False
+    # Whether each image the bundle builds is built here and pushed to the configured image store, for whatever reads the
+    # store, rather than written as its build context for each deploy to build.
+    pushes_images = False
 
     def __init__(self, store: DocumentStore, plan: Plan):
         self._store = store

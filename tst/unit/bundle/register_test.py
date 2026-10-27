@@ -4,6 +4,7 @@ written."""
 
 import json
 import subprocess
+from dataclasses import fields
 from pathlib import Path
 
 import pytest
@@ -23,7 +24,9 @@ from agent_env.config.runtime import Config
 from agent_env.entity.refs import EntityRef, RefRole
 from agent_env.env.env import Env
 from agent_env.eval import Eval
-from agent_env.bundle.parse import BundleKind
+from agent_env.bundle.parse import BundleKind, parse_bundle
+from agent_env.bundle.plan import Plan, plan_bundle
+from agent_env.bundle.resolve import resolve_bundle
 from agent_env.store import ConcurrentModificationError, Filter
 from agent_env.store.base import NotFoundError
 from agent_env.store.document_store import expecting_version
@@ -209,6 +212,15 @@ def test_entries_whose_names_make_one_id_register_in_their_own_stores(home):
 
     assert {(done.write.kind.store, done.write.id) for done in registered.materialization.writes} == {
         ("artifact", "triage-echo"), ("task", "triage-echo")}
+
+
+def test_a_translated_plan_renames_every_field_of_a_plan_but_those_that_hold_no_local_id(home):
+    plan = plan_bundle(resolve_bundle(parse_bundle(layout(home / "triage", TRIAGE))), tasks=["t"])
+
+    translations = register_module._translations(plan, {})
+
+    assert translations.keys() | register_module._KEPT == {field.name for field in fields(Plan)}
+    assert not translations.keys() & register_module._KEPT
 
 
 def test_a_bad_prefix_is_refused(home):
