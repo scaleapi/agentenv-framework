@@ -21,6 +21,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.routing import Route
 
+from . import mcp_compat
 from .errors import AgentEnvError
 from .tool_access import DISABLE as TOOL_DISABLE, ENABLE as TOOL_ENABLE, PATHS as TOOL_ACCESS_PATHS, ToolAccess, caller_role
 from .tool_access import extensions as tool_access_extensions
@@ -333,8 +334,8 @@ class AgentEnvFastMCPApplication(AgentEnvApplication):
         """Decide, before any route or tool is added, how every tools/call on ``app`` gets its ToolContext, and
         refuse what cannot be honoured. The standalone ``fastmcp`` package (a ``middleware`` list with
         ``add_middleware``) is joined through that public chain, checked first because its 2.x line also keeps a
-        tool manager whose dispatch has another shape; mcp's own FastMCP (``mcp>=1.25,<2``) has no public hook,
-        so its tool manager's ``call_tool`` is wrapped. An app with neither cannot bind: mounting it is refused
+        tool manager whose dispatch has another shape; mcp's own server (FastMCP on mcp 1, MCPServer on mcp 2) has
+        no public hook around a tool's dispatch, so its tool manager's ``call_tool`` is wrapped. An app with neither cannot bind: mounting it is refused
         when the handler declared that it reads the context (a ``ToolContext`` parameter or an ``on_tool_call``),
         since an empty caller would then be a lie nothing can detect, and goes ahead unbound, with a warning,
         otherwise. A dispatch this protocol already wraps is refused either way (one handler per app, or the
@@ -359,8 +360,8 @@ class AgentEnvFastMCPApplication(AgentEnvApplication):
         readers += ["tool_access"] if self._tool_access is not None else []
         if readers:
             raise RuntimeError(
-                "this app has no tool dispatch to bind a ToolContext around (mcp>=1.25,<2 keeps one at "
-                f"FastMCP._tool_manager; fastmcp exposes a middleware list), and {', '.join(readers)} "
+                "this app has no tool dispatch to bind a ToolContext around (mcp keeps one at the server's "
+                f"_tool_manager; fastmcp exposes a middleware list), and {', '.join(readers)} "
                 "would read an empty caller"
             )
         self._binding = None
@@ -410,7 +411,7 @@ class AgentEnvFastMCPApplication(AgentEnvApplication):
                 except Exception as e:
                     error = _agentenv_error(e)
                     if error is None:
-                        raise
+                        raise mcp_compat.with_crash_text(e)
                     return _error_result(error)
 
         functools.update_wrapper(call_tool, inner)
@@ -421,7 +422,11 @@ class AgentEnvFastMCPApplication(AgentEnvApplication):
 
     @staticmethod
     def _filter_tool_list(app: Any, manager: Any, access: ToolAccess) -> None:
-        """tools/list under the live request's caller, read through ``FastMCP.get_context``, as tools/call reads it."""
+        """tools/list under the live request's caller, as tools/call reads it: through ``FastMCP.get_context`` on
+        mcp 1, and in the middleware of mcp 2's MCPServer, which has no request context outside a handler."""
+        if not callable(getattr(app, "get_context", None)):
+            app.middleware.append(_tool_list_filter(access))
+            return
         inner = manager.list_tools
 
         def list_tools(*args: Any, **kwargs: Any) -> Any:
@@ -446,7 +451,7 @@ class AgentEnvFastMCPApplication(AgentEnvApplication):
 
     def _card_for(self, app: Any) -> EnvironmentCard:
         """Declare the MCP endpoint only when the app says where it serves it; FastMCP-shaped targets may not."""
-        path = getattr(getattr(app, "settings", None), "streamable_http_path", None)
+        path = mcp_compat.streamable_http_path(app)
         return _merge_mcp_interface(self.environment_card, path) if path else self.environment_card
 
 
@@ -456,15 +461,13 @@ class AgentEnvStarletteApplication(AgentEnvApplication):
 
 
 def create_fastmcp_app(handler: Any, *, card: EnvironmentCard, **fastmcp_kwargs: Any) -> Any:
-    """FastMCP app wired for the agent-env deploy contract, with ``handler`` mounted under ``card``; returned un-served."""
+    """mcp's high-level server (FastMCP on mcp 1, MCPServer on mcp 2) wired for the agent-env deploy contract, with
+    ``handler`` mounted under ``card``; returned un-served."""
     try:
-        from mcp.server.fastmcp import FastMCP
+        app = mcp_compat.deployed_server(card.name, host=os.environ.get("MCP_HOST", "0.0.0.0"),
+                                         port=int(os.environ.get("MCP_PORT", "18765")), **fastmcp_kwargs)
     except ImportError as e:
-        raise ImportError("create_fastmcp_app requires the 'mcp' package: pip install 'mcp>=1.25,<2'") from e
-    app = FastMCP(card.name, **fastmcp_kwargs)
-    app.settings.host = os.environ.get("MCP_HOST", "0.0.0.0")
-    app.settings.port = int(os.environ.get("MCP_PORT", "18765"))
-    app.settings.transport_security.enable_dns_rebinding_protection = False
+        raise ImportError("create_fastmcp_app requires the 'mcp' package: pip install mcp") from e
     AgentEnvFastMCPApplication(card, handler).add_routes_to_app(app)
     return app
 
@@ -652,9 +655,8 @@ def _is_tool_context_annotation(annotation: Any) -> bool:
 
 
 def _fastmcp_context_type() -> type | None:
-    """FastMCP's Context class when mcp is loaded, else None. mcp is an optional dependency, so it is
-    looked up rather than imported; a Context-annotated handler has necessarily imported it already."""
-    return getattr(sys.modules.get("mcp.server.fastmcp.server"), "Context", None)
+    """mcp's tool Context class when mcp is loaded, else None."""
+    return mcp_compat.context_class()
 
 
 def _is_fastmcp_context_annotation(annotation: Any) -> bool:
@@ -810,6 +812,20 @@ def _tool_context_middleware(hook: Callable | None, access: ToolAccess | None = 
     middleware = ToolContextMiddleware()
     setattr(middleware, _TOOL_CONTEXT_BOUND_ATTR, True)
     return middleware
+
+
+def _tool_list_filter(access: ToolAccess) -> Callable:
+    """mcp 2 middleware leaving out of a tools/list answer the tools the caller's role has disabled."""
+    async def filtered(ctx: Any, call_next: Callable) -> Any:
+        result = await call_next(ctx)
+        if ctx.method != "tools/list" or result is None:
+            return result
+        role = caller_role(context_from_mcp(types.SimpleNamespace(request_context=ctx), "", {}))
+        if isinstance(result, dict):
+            return {**result, "tools": [t for t in result["tools"] if not access.is_disabled(role, t["name"])]}
+        return result.model_copy(update={"tools": [t for t in result.tools if not access.is_disabled(role, t.name)]})
+
+    return filtered
 
 
 def _fastmcp_tool_result(answer: Any) -> Any:

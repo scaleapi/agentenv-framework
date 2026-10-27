@@ -13,8 +13,8 @@ updates:
       python-minor-and-patch:
         update-types: ["minor", "patch"]
     ignore:
-      # mcp 2 removed mcp.server.fastmcp, which env/gateway imports at module scope, and the dev
-      # extra's fastmcp needs mcp<2, so a major update can't resolve.
+      # The lock stays on mcp 1: the dev extra's openenv needs fastmcp<4, which needs mcp<2, so a major
+      # update can't resolve. The unit-mcp2 job runs the unit tier on mcp 2.
       - dependency-name: "mcp"
         update-types: ["version-update:semver-major"]
   # ci-requirements.txt: the uv the workflows install.

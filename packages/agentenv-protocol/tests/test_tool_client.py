@@ -66,7 +66,7 @@ def _route_clients_to(monkeypatch, transport: httpx.AsyncBaseTransport) -> None:
 @pytest.fixture
 def serve_items(monkeypatch):
     """Serve an _Items env with create_fastmcp_app in the given mode, in process; yields the handler."""
-    pytest.importorskip("mcp.server.fastmcp")
+    pytest.importorskip("mcp")
 
     async def serve(**fastmcp_kwargs):
         handler = _Items()

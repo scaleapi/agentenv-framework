@@ -29,13 +29,12 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "agentenv-framework-protocol[computer]>=0.1.0",  # a computer_driver env's put reads the driver class with it
+    "agentenv-framework-protocol[computer]>=0.1.0",  # a computer_driver env's put reads the driver class with it; brings mcp (1 or 2) for agent_env's MCP clients
     "certifi>=2024.2.2",  # the public roots the local transfer CA's trust bundle carries
     "click>=8.0.0",
     "cryptography>=42",  # the local transfer CA
     "httpx>=0.27.0",
     "litellm>=1.96.0,<1.97",
-    "mcp>=1.25,<2",  # same floor as env/gateway/requirements.txt and agentenv-protocol; 2.0.0 removed mcp.server.fastmcp, imported at module scope by env/gateway
     "packaging>=22",  # evaluates a plugin's requirement markers with no extra
     "a2a-sdk==0.3.26",
     "pydantic>=2.12",  # model_validate(extra=...) reads agent responses tolerantly
@@ -94,7 +93,7 @@ daytona = [
 ]
 dev = [
     "agentenv-framework[aws,boxd,daytona,gcp,openenv,sail,tensorlake,tenki,vercel]",  # exercise portable optional providers and stores in CI
-    "fastmcp>=3.4,<4",  # the standalone-fastmcp mount path of the protocol; <4 keeps mcp 1.x
+    "fastmcp>=3.4,<5",  # the standalone-fastmcp mount path of the protocol; openenv 0.10 holds the lock to fastmcp 3 and mcp 1
     "Pillow>=10.4",  # the protocol's computer extra, whose tests the unit tier runs
     "av>=17",  # the protocol's computer extra, whose tests the unit tier runs and which the recording tests decode with
     "griffelib==2.3.0",  # the plugin API check; exact, since what it reports as a break changes between releases

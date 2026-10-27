@@ -14,13 +14,10 @@ import httpx
 import pytest
 from pydantic import Field
 
-pytest.importorskip("mcp.server.fastmcp")
+pytest.importorskip("mcp")
 
-from mcp import ClientSession  # noqa: E402
-from mcp.client import streamable_http as _streamable_http  # noqa: E402
-from mcp.server.fastmcp import Context, FastMCP  # noqa: E402
-from mcp.server.fastmcp.tools.base import Tool  # noqa: E402
-from mcp.shared.memory import create_connected_server_and_client_session  # noqa: E402
+from mcp_versions import MCP_2, Context, FastMCP, Tool, http_session, wire  # noqa: E402
+from mcp_versions import memory_session  # noqa: E402
 from mcp.types import CallToolResult, TextContent  # noqa: E402
 
 from agentenv_protocol import (  # noqa: E402
@@ -42,8 +39,9 @@ from agentenv_protocol.tool_context import EMPTY, bound, context_from_mcp  # noq
 
 
 def _text(result: Any) -> str:
-    """The text of FastMCP.call_tool's result: a (content, structured) tuple for structured tools, else content."""
-    content = result[0] if isinstance(result, tuple) else result
+    """The text of the server's call_tool result: mcp 2's CallToolResult, or on mcp 1's FastMCP a (content,
+    structured) tuple for structured tools, else the content."""
+    content = result.content if MCP_2 else result[0] if isinstance(result, tuple) else result
     return content[0].text
 
 
@@ -118,7 +116,7 @@ async def test_card_and_fastmcp_tools_list_both_omit_the_slot():
     }
     card_tools = await _card_tools(app)
     assert card_tools["whoami"]["inputSchema"] == expected
-    listed = {t.name: t for t in await app.list_tools()}
+    listed = {t.name: t for t in wire(await app.list_tools())}
     assert set(listed["whoami"].inputSchema["properties"]) == {"q", "limit"}
     assert listed["whoami"].inputSchema["required"] == ["q"]
     assert "$defs" not in listed["whoami"].inputSchema
@@ -162,7 +160,7 @@ async def test_concurrent_calls_with_different_meta_roles_never_cross():
     results: dict[str, str] = {}
 
     async def call(role: str) -> None:
-        async with create_connected_server_and_client_session(app) as session:
+        async with memory_session(app) as session:
             result = await session.call_tool("rendezvous", {"who": role}, meta={ROLE_META_KEY: role})
             assert result.isError is False
             results[role] = result.content[0].text
@@ -198,7 +196,7 @@ async def test_header_fallback_and_default_blank_roles():
     await call("whoami_sync", {}, context=_request_context({ROLE_META_KEY: "   "}, None))
     assert env.seen[-1][0].caller.role is None
 
-    async with create_connected_server_and_client_session(app) as session:
+    async with memory_session(app) as session:
         result = await session.call_tool("whoami_sync", {}, meta={ROLE_META_KEY: "default"})
     assert result.content[0].text == "-" and env.seen[-1][0].caller == Caller()
 
@@ -247,7 +245,7 @@ async def test_on_tool_call_refusal_reaches_the_wire_as_is_error_for_structured_
     assert app._tool_manager.get_tool("structured").output_schema is not None
     assert app._tool_manager.get_tool("plain").output_schema is not None
 
-    async with create_connected_server_and_client_session(app) as session:
+    async with memory_session(app) as session:
         for name in ("structured", "plain", "slotless"):
             result = await session.call_tool(name, {"x": 1}, meta={ROLE_META_KEY: "intruder"})
             assert result.isError is True, name
@@ -273,7 +271,7 @@ async def test_on_tool_call_exceptions_and_bad_returns_surface_as_errors():
         def on_tool_call(self, context: ToolContext) -> Any:
             return {"not": "a CallToolResult"}
 
-    async with create_connected_server_and_client_session(_Raising().create_app()) as session:
+    async with memory_session(_Raising().create_app()) as session:
         result = await session.call_tool("plain", {"x": 1})
         assert result.isError is True and "boom" in result.content[0].text
 
@@ -281,7 +279,7 @@ async def test_on_tool_call_exceptions_and_bad_returns_surface_as_errors():
     app = bad.create_app()
     with pytest.raises(TypeError, match="on_tool_call must return None or mcp.types.CallToolResult, got dict"):
         await app.call_tool("plain", {"x": 1})
-    async with create_connected_server_and_client_session(app) as session:
+    async with memory_session(app) as session:
         result = await session.call_tool("plain", {"x": 1})
         assert result.isError is True and "on_tool_call must return None or mcp.types.CallToolResult" in result.content[0].text
     assert bad.ran == []
@@ -304,7 +302,7 @@ async def test_fastmcp_context_param_is_off_the_card_but_still_injected():
     card_tools = await _card_tools(app)
     assert set(card_tools["t"]["inputSchema"]["properties"]) == {"x"}
     assert set(card_tools["both"]["inputSchema"]["properties"]) == {"x"}
-    listed = {t.name: t for t in await app.list_tools()}
+    listed = {t.name: t for t in wire(await app.list_tools())}
     assert set(listed["t"].inputSchema["properties"]) == {"x"}
     assert set(listed["both"].inputSchema["properties"]) == {"x"}
     assert app._tool_manager.get_tool("t").context_kwarg == "ctx"
@@ -363,7 +361,7 @@ async def test_pre_installed_guard_runs_inside_the_binding():
     assert installed is not guard and installed.__wrapped__ is guard
     assert installed.__agentenv_tool_context__ is True
 
-    async with create_connected_server_and_client_session(app) as session:
+    async with memory_session(app) as session:
         result = await session.call_tool("slow", {"delay": 0}, meta={ROLE_META_KEY: "alice"})
     assert result.isError is False and result.content[0].text == "alice|alice"
     assert guard_saw == [("slow", "alice")]
@@ -407,26 +405,19 @@ async def test_create_fastmcp_app_binds_tool_calls_for_a_plain_handler_without_a
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(not hasattr(_streamable_http, "streamable_http_client"), reason="mcp without streamable_http_client")
 async def test_direct_caller_over_streamable_http_gets_the_header_role_and_its_own_session():
     env = _Env()
     app = FastMCP("direct", json_response=True)
     env.mount(app)
-    base = "http://127.0.0.1:8000"
-    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app.streamable_http_app()), base_url=base,
-                               headers={ROLE_HEADER: "grader"})
+    asgi = app.streamable_http_app()
 
     with anyio.fail_after(30):
-        async with app.session_manager.run(), client:
-            async with _streamable_http.streamable_http_client(f"{base}/mcp", http_client=client) as (read, write, session_id):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    result = await session.call_tool("whoami_sync", {})
-                    forwarded = await session.call_tool("whoami_sync", {}, meta={ROLE_META_KEY: "bob"})
-                    sid = session_id()
-    assert sid and result.content[0].text == "grader" and forwarded.content[0].text == "bob"
+        async with app.session_manager.run(), http_session(asgi, headers={ROLE_HEADER: "grader"}) as (session, sid):
+            result = await session.call_tool("whoami_sync", {})
+            forwarded = await session.call_tool("whoami_sync", {}, meta={ROLE_META_KEY: "bob"})
+    assert sid() and result.content[0].text == "grader" and forwarded.content[0].text == "bob"
     direct, proxied = env.seen[-2][0], env.seen[-1][0]
-    assert direct.caller == Caller("grader", sid)
+    assert direct.caller == Caller("grader", sid())
     assert proxied.caller == Caller("bob")  # a _meta role entry: the connection's id is not the caller's
 
 
@@ -481,7 +472,7 @@ def test_positional_only_slot_and_mismatched_hook_fail_at_mount():
 async def test_unknown_tool_is_answered_by_the_dispatch_without_the_hook():
     env = _Env()
     app = env.create_app()
-    async with create_connected_server_and_client_session(app) as session:
+    async with memory_session(app) as session:
         result = await session.call_tool("nope", {"x": 1}, meta={ROLE_META_KEY: "alice"})
     assert result.isError is True and "Unknown tool" in result.content[0].text
     assert env.hook_roles == [] and env.seen == []

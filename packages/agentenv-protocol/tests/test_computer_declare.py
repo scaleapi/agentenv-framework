@@ -8,7 +8,7 @@ import sys
 
 import pytest
 
-pytest.importorskip("mcp.server.fastmcp")
+pytest.importorskip("mcp")
 pytest.importorskip("PIL")
 
 from agentenv_protocol.computer._declare import _Stub, _StubModule, declare, main  # noqa: E402

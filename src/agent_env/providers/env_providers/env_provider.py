@@ -9,8 +9,7 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, ClassVar
 
 import httpx
-from mcp import ClientSession
-from mcp.client.streamable_http import streamable_http_client
+from agentenv_protocol.mcp_compat import client_session
 from agent_env.env.env import DeployedEnv
 from agent_env.env.gateway.constants import WELL_KNOWN_PATH
 from agent_env.plugins import _registration
@@ -205,10 +204,8 @@ def _card_from(response: httpx.Response) -> dict | None:
 
 async def _tool_names(mcp_url: str) -> list[str]:
     """The server's tool names as it lists them, duplicates included."""
-    async with streamable_http_client(mcp_url) as (read_stream, write_stream, _):
-        async with ClientSession(read_stream, write_stream) as session:
-            await session.initialize()
-            return [tool.name for tool in (await session.list_tools()).tools]
+    async with client_session(mcp_url) as session:
+        return [tool.name for tool in (await session.list_tools()).tools]
 
 
 def _builtin_env_providers() -> dict[str, type[_SandboxEnvironmentProvider]]:

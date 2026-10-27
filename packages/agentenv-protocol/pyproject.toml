@@ -30,7 +30,7 @@ dependencies = [
 [project.optional-dependencies]
 agent = [
     "a2a-sdk[http-server]>=0.3.26,<0.4",
-    "mcp>=1.25,<2",  # the peer-agents tools' MCP server; 2.0 removed the server API it serves them with
+    "mcp>=1.25,<3",  # the peer-agents tools' MCP server
     "python-multipart>=0.0.13",  # the staging extension's upload forms
     "regex>=2023.12.25",
     "uvicorn>=0.30",
@@ -39,7 +39,7 @@ agent = [
 # records the display as H.264 with PyAV (computer-recording/v1).
 computer = [
     "av>=17",
-    "mcp>=1.25,<2",
+    "mcp>=1.25,<3",
     "Pillow>=10.4",
     "uvicorn>=0.30",
 ]
@@ -49,8 +49,8 @@ dev = [
     "regex>=2023.12.25",
     "pytest>=9.0",
     "pytest-asyncio>=0.23.0",
-    "mcp>=1.25,<2",
-    "fastmcp>=3.4,<4",  # the standalone-fastmcp mount path
+    "mcp>=1.25,<3",
+    "fastmcp>=3.4,<5",  # the standalone-fastmcp mount path
     "Pillow>=10.4",  # the computer extra's frame crops and encodings
     "av>=17",  # the computer extra's encoder, and the tests' decoder
 ]

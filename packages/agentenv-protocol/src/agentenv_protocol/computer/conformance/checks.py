@@ -20,6 +20,7 @@ from pydantic import ValidationError
 
 from ... import client as protocol
 from ...client import ExtensionCallError
+from ...mcp_compat import field
 from ...tool_access import DISABLE_TOOL_EXTENSION_URI, ENABLE_TOOL_EXTENSION_URI
 from ...types import DATA_OBJECTS_EXTENSION_URI, INTAKE_EXTENSION_URI
 from ..card import (
@@ -147,13 +148,13 @@ class Probe:
 
     async def shot(self, **args) -> tuple[CallToolResult, object]:
         result = await self.tool("computer_screenshot", args)
-        if result.isError:
+        if field(result, "isError"):
             raise AssertionError(f"computer_screenshot failed: {result.content[0].text}")
         return result, image(result)
 
     async def act(self, name: str, args: dict) -> None:
         result = await self.tool(name, args)
-        if result.isError:
+        if field(result, "isError"):
             raise AssertionError(f"{name} {args} failed: {result.content[0].text}")
 
     async def state(self) -> dict:
@@ -175,8 +176,8 @@ class Probe:
 
     @staticmethod
     def refused(result: CallToolResult, code: str) -> str | None:
-        data = result.structuredContent or {}
-        if not result.isError:
+        data = field(result, "structuredContent") or {}
+        if not field(result, "isError"):
             return f"it wasn't refused: {data.get('summary')!r}"
         if data.get("code") != code:
             return f"refused {data.get('code')!r}, not {code!r}: {data.get('message')}"
@@ -215,7 +216,7 @@ class Probe:
 
         async def minimum() -> str | None:
             missing = [n for n in MINIMUM_TOOLS if n not in tools]
-            bare = [n for n in MINIMUM_TOOLS if n in tools and not (tools[n].inputSchema and tools[n].outputSchema)]
+            bare = [n for n in MINIMUM_TOOLS if n in tools and not (field(tools[n], "inputSchema") and field(tools[n], "outputSchema"))]
             if missing:
                 return f"missing {missing}"
             return f"listed without an input or output schema: {bare}" if bare else None
@@ -237,7 +238,7 @@ class Probe:
     async def _frame(self) -> None:
         async def native() -> str | None:
             result, img = await self.shot()
-            data, display = result.structuredContent, result.structuredContent["display"]
+            data, display = field(result, "structuredContent"), field(result, "structuredContent")["display"]
             want = (round(display["width"] * display["scale"]), round(display["height"] * display["scale"]))
             if img.size != (data["width"], data["height"]) or img.size != want:
                 return f"the image is {img.size}, the frame says {(data['width'], data['height'])}, the display {want}"
@@ -247,21 +248,21 @@ class Probe:
             result, img = await self.shot()
             w, h = img.size
             box = [w // 4, h // 4, w // 4 + w // 3, h // 4 + h // 3]
-            cropped = await self.tool("computer_screenshot", {"region": box, "frame_id": result.structuredContent["frame_id"]})
-            if cropped.isError:
+            cropped = await self.tool("computer_screenshot", {"region": box, "frame_id": field(result, "structuredContent")["frame_id"]})
+            if field(cropped, "isError"):
                 return cropped.content[0].text
             part = image(cropped)
             if part.size != (box[2] - box[0], box[3] - box[1]):
                 return f"a {box} region came back {part.size}"
-            if cropped.structuredContent.get("parent_frame_id") != result.structuredContent["frame_id"]:
-                return f"its parent_frame_id is {cropped.structuredContent.get('parent_frame_id')!r}"
+            if field(cropped, "structuredContent").get("parent_frame_id") != field(result, "structuredContent")["frame_id"]:
+                return f"its parent_frame_id is {field(cropped, 'structuredContent').get('parent_frame_id')!r}"
             points = [(0, 0), (part.width - 1, part.height - 1), (part.width // 2, part.height // 2)]
             wrong = [p for p in points if part.getpixel(p) != img.getpixel((box[0] + p[0], box[1] + p[1]))]
             return f"its pixels at {wrong} aren't its frame's" if wrong else None
 
         async def jpeg() -> str | None:
             result = await self.tool("computer_screenshot", {"format": "jpeg", "quality": 60})
-            mime = next(c.mimeType for c in result.content if c.type == "image")
+            mime = next(field(c, "mimeType") for c in result.content if c.type == "image")
             return None if mime == "image/jpeg" else f"it answered {mime}"
 
         await self.check("P2", "a screenshot is native: its image, frame and display agree", native)
@@ -273,7 +274,7 @@ class Probe:
     async def _refusal_cases(self) -> list[tuple[str, str, dict, str]]:
         """The calls a driver must refuse, aimed at a fresh frame, with the code each is refused with."""
         result, img = await self.shot()
-        frame, (w, _h) = result.structuredContent["frame_id"], img.size
+        frame, (w, _h) = field(result, "structuredContent")["frame_id"], img.size
         over = int(self.features.get("max_click_count", 1)) + 1
         return [
             ("a point outside the frame", "computer_click", {"x": w, "y": 0, "frame_id": frame}, "out_of_bounds"),
@@ -300,7 +301,7 @@ class Probe:
         async def get() -> str | None:
             got = await self.driver.invoke(COMPUTER_DISPLAY, "get")
             result, _ = await self.shot()
-            frame = result.structuredContent["display"]
+            frame = field(result, "structuredContent")["display"]
             seen = (frame["width"], frame["height"], frame["scale"])
             return None if (got["width"], got["height"], got["scale"]) == seen else f"get says {got}, frames {frame}"
 
@@ -417,9 +418,9 @@ class Probe:
                 back = await other.call_tool("computer_wait", {"ms": 0})
             if "computer_wait" in listed:
                 return "a disabled tool is still listed for its role"
-            if not refused.isError or (refused.structuredContent or {}).get("code") != "permission_denied":
+            if not field(refused, "isError") or (field(refused, "structuredContent") or {}).get("code") != "permission_denied":
                 return f"a disabled tool answered its role: {refused.content[0].text if refused.content else ''}"
-            if allowed.isError or back.isError:
+            if field(allowed, "isError") or field(back, "isError"):
                 return "the tool was refused to another role, or after it was enabled again"
             return None
 
@@ -431,14 +432,14 @@ class Probe:
             return
 
         async def listed() -> str | None:
-            pointers = (await self.tool("computer_pointer_list")).structuredContent.get("pointers") or []
+            pointers = field(await self.tool("computer_pointer_list"), "structuredContent").get("pointers") or []
             return None if sum(p.get("default") is True for p in pointers) == 1 else f"it listed {pointers}"
 
         async def moved() -> str | None:
             result, img = await self.shot()
-            frame, (x, y) = result.structuredContent["frame_id"], (img.width // 3, img.height // 3)
+            frame, (x, y) = field(result, "structuredContent")["frame_id"], (img.width // 3, img.height // 3)
             await self.act("computer_pointer_move", {"x": x, "y": y, "frame_id": frame})
-            where = (await self.tool("computer_pointer_position", {"frame_id": frame})).structuredContent
+            where = field(await self.tool("computer_pointer_position", {"frame_id": frame}), "structuredContent")
             return None if (where.get("x"), where.get("y"), where.get("inside_frame")) == (x, y, True) else (
                 f"moved to ({x}, {y}); it reports {where}")
 
@@ -486,7 +487,7 @@ class Probe:
     async def _base(self) -> tuple[str, float, object]:
         """A fresh frame of the fixture: its id, the display's scale, and its image."""
         result, img = await self.shot()
-        return result.structuredContent["frame_id"], result.structuredContent["display"]["scale"], img
+        return field(result, "structuredContent")["frame_id"], field(result, "structuredContent")["display"]["scale"], img
 
     def _at(self, box: str, scale: float, dx: float | None = None, dy: float | None = None) -> tuple[int, int]:
         """A point of a fixture widget in frame pixels: its centre, or ``dx``, ``dy`` in from its corner."""
@@ -523,7 +524,7 @@ class Probe:
                           min((fx + 4.5) * NORM / img.width, NORM), min((fy + 4.5) * NORM / img.height, NORM)]
                 cropped = await self.tool("computer_screenshot", {"region": region, "frame_id": frame, "space": "norm",
                                                                   "norm_scale": NORM})
-                if cropped.isError:
+                if field(cropped, "isError"):
                     return cropped.content[0].text
                 if (got := image(cropped).getpixel((0, 0))) != colour:
                     wrong.append((x, y, colour, got))
@@ -568,9 +569,9 @@ class Probe:
             gx, gy = self._at("grid", scale, 0, 0)
             gw, gh = math.floor(self.layout["grid"][2] * scale), math.floor(self.layout["grid"][3] * scale)
             cropped = await self.tool("computer_screenshot", {"region": [gx, gy, gx + gw, gy + gh], "frame_id": frame})
-            if cropped.isError:
+            if field(cropped, "isError"):
                 return cropped.content[0].text
-            inner = cropped.structuredContent["frame_id"]
+            inner = field(cropped, "structuredContent")["frame_id"]
             await self.act("computer_click", {"x": math.floor((4 * size + size / 2) * scale),
                                               "y": math.floor((6 * size + size / 2) * scale), "frame_id": inner})
             return await self.settled(lambda s: s["cells"].get("6,4") == 1, lambda s: s["cells"])
@@ -579,8 +580,8 @@ class Probe:
             targets = [cell(row, col) for row in (1, 3) for col in range(8)]
             results = await asyncio.gather(*(self.tool("computer_click", {"x": x, "y": y, "frame_id": frame})
                                              for x, y in targets))
-            if any(r.isError for r in results):
-                return f"{sum(r.isError for r in results)} of {len(results)} were refused"
+            if any(field(r, "isError") for r in results):
+                return f"{sum(field(r, 'isError') for r in results)} of {len(results)} were refused"
             landed = lambda s: sum(s["cells"].get(f"{r},{c}", 0) >= 1 for r in (1, 3) for c in range(8))  # noqa: E731
             return await self.settled(lambda s: landed(s) == 16, lambda s: f"{landed(s)} of 16 cells")
 

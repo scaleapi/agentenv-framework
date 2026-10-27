@@ -8,10 +8,11 @@ from types import SimpleNamespace
 
 import pytest
 
-pytest.importorskip("mcp.server.fastmcp")
+pytest.importorskip("mcp")
 pytest.importorskip("PIL")
 
 from computer_fake import FakeScreen, MinimalDriver  # noqa: E402
+from mcp_versions import wire  # noqa: E402
 from mcp.types import CallToolResult, TextContent  # noqa: E402
 from PIL import ImageChops  # noqa: E402
 from probe_fake import FixtureDriver, served  # noqa: E402
@@ -83,7 +84,7 @@ async def test_a_tool_already_hidden_from_the_probes_role_stays_hidden():
         await driver.invoke(DISABLE_TOOL_EXTENSION_URI, "disable", {"role": checks.PROBE_ROLE, "tools": ["computer_wait"]})
         report = await run_probe(url, "basic")
         async with driver.session(checks.PROBE_ROLE) as session:
-            refused = await session.call_tool("computer_wait", {"ms": 0})
+            refused = wire(await session.call_tool("computer_wait", {"ms": 0}))
     assert report.passed, _failed(report)
     assert refused.isError and refused.structuredContent["code"] == "permission_denied"
 

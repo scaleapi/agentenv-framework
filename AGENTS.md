@@ -270,9 +270,13 @@ A merge into `main` needs an approving review from a code owner (`CODEOWNERS`), 
 resolved, and the checks the `main` ruleset requires: `unit`, `integration-local` and
 `integration-local-slow`. The other checks below run on every pull request too and are expected to
 pass, but a failing one does not block the merge.
-`.github/workflows/local-backends.yml` runs `unit`, `ui`, `integration-local`, `integration-local-slow`,
+`.github/workflows/local-backends.yml` runs `unit`, `unit-mcp2`, `ui`, `integration-local`, `integration-local-slow`,
 `integration-local-gateway` (the slow tier's `gateway_test.py`, run beside the rest of it) and
-`installer`. The Python jobs install from `uv.lock` (public PyPI only), with the uv that
+`installer`. `unit-mcp2` runs the unit tier on mcp 2.3 and fastmcp 4, which `uv.lock` can't hold (the
+`openenv` extra's fastmcp 3 needs mcp 1), so it resolves them itself; it leaves out the gateway's tests,
+the ones that build a card with the real gateway, and `openenv`'s, and runs the tests that import
+fastmcp in a pass of their own, since fastmcp 4 adds mcp 1's camel-case attributes to mcp's types once
+imported. The other Python jobs install from `uv.lock` (public PyPI only), with the uv that
 `.github/ci-requirements.txt` pins, and use no secrets and no external services (a `registry:2`
 container for the integration jobs). The `unit` job also fails if `uv.lock` resolves anything from a
 registry other than PyPI, if `agentenv-framework-protocol` is not the editable workspace member, if
@@ -334,6 +338,10 @@ proposes only a base's digest and patch updates, and a major or minor upgrade is
 - No ticket ids, program codenames or review context in code, docstrings or docs; that belongs in
   the commit message and the PR.
 - No defensive code for a case no caller produces; say so in the PR instead.
+- Code outside `env/gateway/` runs on mcp 1 and mcp 2 (a trainer with vLLM 0.30 or later has mcp 2):
+  open MCP client sessions with `agentenv_protocol.mcp_compat.client_session`, read an mcp type's
+  field with `mcp_compat.field(result, "isError")`, and build a high-level server with
+  `mcp_compat.server`. The gateway's image pins its own mcp 1.
 - Keep core vendor-neutral: no vendor hostnames, account ids or deployment facts in `src/`, `tst/`
   or this file. A deployment plugs in through the extension points above. Where the project itself
   publishes isn't a deployment fact: its PyPI names, its GitHub repository, and the GHCR namespace its

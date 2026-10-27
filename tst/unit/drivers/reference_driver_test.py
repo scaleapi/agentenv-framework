@@ -14,11 +14,12 @@ from pathlib import Path
 
 import httpx
 import pytest
-from mcp.shared.memory import create_connected_server_and_client_session
 
 import agent_env
 from agentenv_protocol.computer import (COMPUTER_EXEC, COMPUTER_KEYBOARD, COMPUTER_POINTER, COMPUTER_RECORDING,
                                         Platform, RecordHints)
+
+from tst.util.mcp_versions import memory_session
 
 DRIVER = Path(agent_env.__file__).parent / "drivers" / "envs" / "reference" / "driver.py"
 LINUX = Platform(os="linux", distribution="ubuntu", version="24.04", arch="amd64", display="x11")
@@ -176,7 +177,7 @@ def x11(monkeypatch):
 
 @contextlib.asynccontextmanager
 async def mcp_session(driver):
-    async with create_connected_server_and_client_session(driver.mcp or driver.create_app()) as session:
+    async with memory_session(driver.mcp or driver.create_app()) as session:
         yield session
 
 

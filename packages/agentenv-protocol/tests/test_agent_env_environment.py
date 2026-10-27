@@ -251,7 +251,7 @@ _MCP_INTERFACE_CASES = [
 @pytest.mark.parametrize("declared,served_path,expected", _MCP_INTERFACE_CASES)
 @pytest.mark.asyncio
 async def test_card_declares_the_mcp_endpoint_the_app_serves(declared, served_path, expected):
-    pytest.importorskip("mcp.server.fastmcp")
+    pytest.importorskip("mcp")
     card = EnvironmentCard(name="items", additionalInterfaces=declared)
     http_app = create_fastmcp_app(_ToolHandler(), card=card, streamable_http_path=served_path).streamable_http_app()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=http_app), base_url="http://t") as client:
@@ -668,7 +668,8 @@ async def test_extension_schema_includes_annotated_field_descriptions():
 
 def test_tool_schema_parity_with_fastmcp_derivation():
     # Card and tools/list schemas are derived independently from the same signature — pin agreement.
-    fastmcp_base = pytest.importorskip("mcp.server.fastmcp.tools.base")
+    pytest.importorskip("mcp")
+    from mcp_versions import Tool
 
     async def sample(
         product_id: Annotated[str, Field(description="The product ID.")],
@@ -678,7 +679,7 @@ def test_tool_schema_parity_with_fastmcp_derivation():
         return "[]"
 
     ours = _schema_from_signature(sample)
-    theirs = fastmcp_base.Tool.from_function(sample).parameters
+    theirs = Tool.from_function(sample).parameters
     assert set(ours["properties"]) == set(theirs["properties"])
     assert set(ours.get("required", [])) == set(theirs.get("required", []))
     for prop, spec in ours["properties"].items():
@@ -1140,21 +1141,24 @@ def test_environment_card_config_inherited_by_subclass(monkeypatch):
 
 
 def test_create_fastmcp_app_without_mcp_raises_install_hint(monkeypatch):
-    monkeypatch.setitem(sys.modules, "mcp.server.fastmcp", None)
+    for module in ("mcp.server.fastmcp", "mcp.server.mcpserver", "mcp.server.transport_security"):
+        monkeypatch.setitem(sys.modules, module, None)
     with pytest.raises(ImportError, match="requires the 'mcp' package"):
         create_fastmcp_app(_ToolHandler(), card=EnvironmentCard(name="items"))
 
 
 @pytest.mark.asyncio
 async def test_create_fastmcp_app_encodes_deploy_contract(monkeypatch):
-    pytest.importorskip("mcp.server.fastmcp")
+    pytest.importorskip("mcp")
+    from mcp_versions import MCP_2
     monkeypatch.delenv("SERVICE_NAME", raising=False)
     monkeypatch.setenv("MCP_HOST", "127.0.0.1")
     monkeypatch.setenv("MCP_PORT", "19999")
     handler = _ToolHandler()
     app = create_fastmcp_app(handler, card=EnvironmentCard(name="items"))
-    assert app.settings.host == "127.0.0.1" and app.settings.port == 19999
-    assert app.settings.transport_security.enable_dns_rebinding_protection is False
+    serving = app.serving if MCP_2 else app.settings.model_dump()
+    assert serving["host"] == "127.0.0.1" and serving["port"] == 19999
+    assert (app.serving["transport_security"] if MCP_2 else app.settings.transport_security).enable_dns_rebinding_protection is False
     assert {"count_items", "items_add_item"} <= {t.name for t in await app.list_tools()}
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app.streamable_http_app()), base_url="http://t") as client:
         card = (await client.get("/.well-known/agent-env.json")).json()
@@ -1180,7 +1184,7 @@ def test_hidden_by_default_meta_key_is_the_literal_the_gateway_mirrors():
 
 @pytest.mark.asyncio
 async def test_hidden_by_default_tool_is_listed_with_the_meta_flag_and_others_without(monkeypatch):
-    pytest.importorskip("mcp.server.fastmcp")
+    pytest.importorskip("mcp")
     monkeypatch.delenv("SERVICE_NAME", raising=False)
     handler = _PlumbingHandler()
     app = create_fastmcp_app(handler, card=EnvironmentCard(name="items"))
@@ -1211,14 +1215,14 @@ def test_an_unflagged_tool_mounts_on_a_target_without_the_meta_parameter():
 
 def test_create_fastmcp_app_uses_card_verbatim(monkeypatch):
     # identity is the caller's card; SERVICE_NAME resolution lives in the env's card config
-    pytest.importorskip("mcp.server.fastmcp")
+    pytest.importorskip("mcp")
     monkeypatch.setenv("SERVICE_NAME", "fromenv")
     assert create_fastmcp_app(_ToolHandler(), card=EnvironmentCard(name="carded")).name == "carded"
 
 
 @pytest.mark.asyncio
 async def test_create_app_allows_imperative_registration_before_serve(monkeypatch):
-    pytest.importorskip("mcp.server.fastmcp")
+    pytest.importorskip("mcp")
     monkeypatch.delenv("SERVICE_NAME", raising=False)
     env = _ServeEnv()
     app = env.create_app()
