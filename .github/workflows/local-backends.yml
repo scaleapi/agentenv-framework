@@ -73,6 +73,7 @@ jobs:
           uv pip install -r dev-tools.txt -e "./packages/agentenv-protocol[agent,computer]" \
             -e ".[aws,boxd,daytona,gcp,sail,tensorlake,tenki,vercel]" "mcp>=2.3,<3" "fastmcp>=4,<5"
           .venv/bin/python -c 'import importlib.metadata as m; from packaging.version import Version; assert Version(m.version("mcp")) >= Version("2.3"), m.version("mcp")'
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
       # Left out of both passes: the gateway's tests and those that build a card with the real gateway server, which
       # serves on mcp 1's FastMCP inside its own image; the openenv tests and the two packaging tests that read every
       # extra's installed metadata, openenv's included, which the unit job runs.

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import importlib
 import importlib.metadata
 import logging
 import re
@@ -94,16 +95,15 @@ def low_level_server(name: str, list_tools: Callable[[], Awaitable[list[Any]]],
 @contextlib.asynccontextmanager
 async def client_session(url: str, *, headers: dict[str, str] | None = None, timeout: float | None = None,
                          read_timeout: float | None = None) -> AsyncIterator[Any]:
-    """An initialized ``ClientSession`` on ``url`` over streamable HTTP. mcp 2 takes an ``httpx2`` client where mcp 1
-    takes an ``httpx`` one, and yields two streams where mcp 1 yields three."""
+    """An initialized ``ClientSession`` on ``url`` over streamable HTTP, on the client mcp builds for itself: its
+    timeouts (30 s, 300 s to read a stream) unless ``timeout`` is given. mcp 2's client is ``httpx2`` where mcp 1's is
+    ``httpx``, and yields two streams where mcp 1's yields three."""
     from mcp import ClientSession
     from mcp.client.streamable_http import streamable_http_client
-    if mcp_2():
-        import httpx2 as http
-    else:
-        import httpx as http
-    limits = {} if timeout is None else {"timeout": http.Timeout(timeout, read=read_timeout or timeout)}
-    async with http.AsyncClient(headers=headers or {}, **limits) as client:
+    from mcp.shared._httpx_utils import create_mcp_http_client
+    http = importlib.import_module("httpx2" if mcp_2() else "httpx")
+    limits = None if timeout is None else http.Timeout(timeout, read=read_timeout or timeout)
+    async with create_mcp_http_client(headers=headers, timeout=limits) as client:
         async with streamable_http_client(url, http_client=client) as streams:
             async with ClientSession(streams[0], streams[1]) as session:
                 await session.initialize()
