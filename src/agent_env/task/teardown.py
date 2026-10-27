@@ -2,8 +2,8 @@
 
 ``teardown_run`` terminates every sandbox a run's context records: its bare sandboxes', its envs' and its
 agents'. It removes compute only; the instance, its outputs and the artifacts it collected stay. A local
-sandbox's work folder goes too, once the sandbox is down. ``agent-env run`` and ``agent-env eval run`` call
-it after each run. ``Task.run`` never does, so a caller that keeps a run's environment up, as the hub and
+sandbox's work folder goes too, once the sandbox is down. Recordings still open are ended first. ``agent-env run`` and ``agent-env
+eval run`` call it after each run. ``Task.run`` never does, so a caller that keeps a run's environment up, as the hub and
 the worker do, owns its teardown.
 """
 
@@ -20,6 +20,7 @@ from agent_env.providers.sandbox_providers.local_sandbox import remove_local_wor
 from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider
 from agent_env.task.interrupts import tearing_down
 from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.task_steps.computer_recording import end_open_recordings
 from agent_env.task_step.task_steps.teardown_sandboxes import (
     _DEFAULT_PROVIDERS, TORN_DOWN_KEY, _env_sandbox_ids, _sandbox_ids_of,
 )
@@ -102,6 +103,13 @@ async def teardown_run(context: TaskStepContext, *, timeout: float = TERMINATE_T
             await drain_all(staged_changelogs(context.metadata))
     except TimeoutError:
         logger.warning("teardown: staged changelog increments were not all drained within %gs", timeout)
+    except asyncio.CancelledError:
+        return TeardownReport(left=pending)
+    try:  # a recording still open is ended, its last segment uploaded and registered, before its computer goes
+        async with asyncio.timeout(timeout):
+            await end_open_recordings(context, "teardown")
+    except TimeoutError:
+        logger.warning("teardown: open recordings were not all ended within %gs", timeout)
     except asyncio.CancelledError:
         return TeardownReport(left=pending)
 

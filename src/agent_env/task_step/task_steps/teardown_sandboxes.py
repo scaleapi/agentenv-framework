@@ -25,6 +25,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     get_sandbox_provider,
 )
 from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.task_steps.computer_recording import end_open_recordings
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)
@@ -87,6 +88,8 @@ class TeardownSandboxesTaskStep(TaskStep):
             logger.warning(f"teardown_sandboxes: not deployed in this run, skipping: {', '.join(missing)}")
         already = set(context.metadata.get(TORN_DOWN_KEY) or [])
         pending = {sid: (stype, default) for sid, (stype, default) in targets.items() if sid not in already}
+        if self.env_ids:
+            await end_open_recordings(context, "teardown", env_ids=self.env_ids)
         for name in self.agent_names:  # a changelog staged on an agent goes into the store before the agent does
             await drain_all(staged_changelogs(context.metadata, agent_name=name), within=LAST_DRAIN_SECONDS)
         results = await asyncio.gather(
