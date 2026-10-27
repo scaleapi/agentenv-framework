@@ -13,6 +13,7 @@ from agent_env.bundle.plan import plan_bundle
 from agent_env.bundle.resolve import resolve_bundle
 from agent_env.bundle import parse_bundle
 from agent_env.env import Env
+from agent_env.env.envs import computer_driver
 from agent_env.env.envs.computer_driver import ComputerDriverEnv
 from tst.unit.bundle._support import layout, plan_of
 
@@ -125,6 +126,13 @@ def test_a_driver_its_class_cant_be_read_from_is_refused_before_any_write(bundle
     assert problem in _problems(bundle_dir)
     with pytest.raises(Exception):
         Env.get(f"{ROOT}/desk")
+
+
+def test_a_driver_whose_class_takes_too_long_to_read_is_refused(bundle_dir, monkeypatch):
+    monkeypatch.setattr(computer_driver, "DECLARE_TIMEOUT_S", 0.001)
+    _bundle(bundle_dir)
+
+    assert "reading driver.py:Desk took over 0.001 s" in _problems(bundle_dir)
 
 
 @pytest.mark.asyncio
