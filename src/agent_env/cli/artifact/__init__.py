@@ -1,7 +1,6 @@
 import click
 
 from .cli import cli
-from .computer import computer
 from .file_artifact_universe import file_artifact_universe
 from .environment import environment
 from .environment_universe import environment_universe
@@ -15,7 +14,6 @@ def artifact():
 
 
 artifact.add_command(cli)
-artifact.add_command(computer)
 artifact.add_command(file_artifact_universe)
 artifact.add_command(environment)
 artifact.add_command(environment_universe)
