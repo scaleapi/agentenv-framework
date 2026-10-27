@@ -11,6 +11,7 @@ from agent_env.bundle.installed import installed_bundles
 from agent_env.bundle.materialize import materialize
 from agent_env.bundle.plan import plan_bundle
 from agent_env.bundle.resolve import resolve_bundle
+from agent_env.bundle.run import dry_run_bundle
 from agent_env.bundle import parse_bundle
 from agent_env.env import Env
 from agent_env.env.envs import computer_driver
@@ -25,6 +26,7 @@ from agentenv_protocol.computer import (ComputerDriverEnvironment, Display, capt
                                         drag, press, scroll, type_text)
 
 SHIFT = Keyboard.keysym("Shift_L")
+print("loading the desk driver")
 
 
 @computer_driver(name="desk", supports={supports})
@@ -126,6 +128,15 @@ def test_a_driver_its_class_cant_be_read_from_is_refused_before_any_write(bundle
     assert problem in _problems(bundle_dir)
     with pytest.raises(Exception):
         Env.get(f"{ROOT}/desk")
+
+
+def test_a_dry_run_refuses_a_driver_folder_its_env_toml_doesnt_name_a_class_of(bundle_dir):
+    _bundle(bundle_dir, toml='type = "computer_driver"\nmodule = "server.py:Desk"\n')
+
+    with pytest.raises(BundleError) as caught:
+        dry_run_bundle(bundle_dir)
+
+    assert "module 'server.py:Desk' names no" in " ".join(caught.value.problems)
 
 
 def test_a_driver_whose_class_takes_too_long_to_read_is_refused(bundle_dir, monkeypatch):

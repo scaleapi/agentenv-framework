@@ -46,8 +46,18 @@ class ComputerDriverEnv(Env):
 
     @classmethod
     def from_toml(cls, data: dict, ctx: AuthoringContext) -> ComputerDriverEnv:
-        """``module = "<file>:<class>"`` names the driver's class in its folder, which is read in a process of its own
-        (``agentenv_protocol.computer._declare``), so the driver's own dependencies need not be installed here."""
+        """The driver's class is read in a process of its own (``agentenv_protocol.computer._declare``), so the
+        driver's own dependencies need not be installed here."""
+        module = cls.accept_toml(data, ctx)["module"]
+        file, _, name = module.partition(":")
+        declaration = _declare(ctx, file, name)
+        universe = FileArtifactUniverse.put_bundled(derive_id(ctx.id, "files"), files=ctx.files())
+        return cls.put(id=ctx.id, module=module, files=universe, declaration=declaration)
+
+    @classmethod
+    def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:
+        """The keys of ``data``, an env.toml, a computer driver env takes: ``module = "<file>:<class>"``, naming a file
+        of its folder. Raises BundleError listing every problem."""
         fields = ctx.accept(data, module=str)
         module = fields.get("module")
         if module is None:
@@ -58,9 +68,7 @@ class ComputerDriverEnv(Env):
         if not name or file not in files:
             ctx.refuse([ctx.config_problem(f'module {module!r} names no "<file>:<class>" in this folder; it has '
                                            f"{', '.join(sorted(files))}")])
-        declaration = _declare(ctx, file, name)
-        universe = FileArtifactUniverse.put_bundled(derive_id(ctx.id, "files"), files=files)
-        return cls.put(id=ctx.id, module=module, files=universe, declaration=declaration)
+        return fields
 
     async def deploy(self, **kwargs) -> DeployedEnv:
         raise NotImplementedError(f"{self.id} is a computer_driver env, which deploys inside a computer, and "

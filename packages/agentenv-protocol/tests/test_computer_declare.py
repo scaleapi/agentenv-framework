@@ -20,6 +20,7 @@ from agentenv_protocol.computer import (ComputerDriverEnvironment, Display, capt
                                         drag, press, scroll, type_text)
 
 SHIFT = Keyboard.keysym("Shift_L")[0]
+print("loading the desk driver")
 
 
 class Connection(Base):
@@ -103,11 +104,13 @@ def test_a_name_that_isnt_a_driver_or_declares_no_platform_is_refused(folder, na
         declare(folder, "driver.py", name)
 
 
-def test_main_prints_the_declaration_or_exits_1_with_why_it_cant(folder, capsys):
+def test_main_prints_only_the_declaration_or_exits_1_with_why_it_cant(folder, capsys):
     _driver(folder)
     assert main([str(folder), "driver.py", "Desk"]) == 0
-    assert json.loads(capsys.readouterr().out)["name"] == "desk"
+    printed = capsys.readouterr()
+    assert json.loads(printed.out)["name"] == "desk" and printed.err == "loading the desk driver\n"
 
     _driver(folder, buttons=("thumb",))
     assert main([str(folder), "driver.py", "Desk"]) == 1
-    assert capsys.readouterr().err.startswith("TypeError: ")
+    printed = capsys.readouterr()
+    assert printed.out == "" and printed.err.splitlines()[-1].startswith("TypeError: Desk: buttons include left")

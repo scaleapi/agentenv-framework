@@ -5,6 +5,7 @@ JSON. Nothing runs beyond defining the module and its classes, and a class that 
 with why."""
 from __future__ import annotations
 
+import contextlib
 import importlib.abc
 import importlib.machinery
 import importlib.util
@@ -81,9 +82,11 @@ def declare(folder: Path, file: str, name: str) -> dict:
 
 
 def main(argv: list[str]) -> int:
+    """Print the declaration as the only output; what the module prints while it loads goes to stderr."""
     folder, file, name = argv
     try:
-        declared = declare(Path(folder), file, name)
+        with contextlib.redirect_stdout(sys.stderr):
+            declared = declare(Path(folder), file, name)
     except Exception as e:
         print(f"{type(e).__name__}: {e}", file=sys.stderr)
         return 1
