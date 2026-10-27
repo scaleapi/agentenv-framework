@@ -139,8 +139,8 @@ def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_
     assert arm64["dockerfile"].splitlines() == [
         f"FROM {base.image().image_name}", "USER root", "COPY driver/ /opt/agentenv/drivers/desk/",
         "RUN python3 -m venv /opt/agentenv/drivers/desk/venv && /opt/agentenv/drivers/desk/venv/bin/pip install "
-        "--no-cache-dir -r /opt/agentenv/drivers/desk/requirements.txt && /opt/agentenv/drivers/desk/venv/bin/pip freeze "
-        "> /opt/agentenv/drivers/desk/installed.txt",
+        "--no-cache-dir -r /opt/agentenv/drivers/desk/requirements.txt && /opt/agentenv/drivers/desk/venv/bin/pip list "
+        "--format=json > /opt/agentenv/drivers/desk/installed.json",
         "COPY agentenv-desk.conf /etc/supervisor/conf.d/agentenv-desk.conf",
         "RUN test -d /opt/agentenv/drivers/desk && test -f /etc/supervisor/conf.d/agentenv-desk.conf && test -x "
         "/opt/agentenv/drivers/desk/venv/bin/python",

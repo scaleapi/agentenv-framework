@@ -196,8 +196,8 @@ def _dockerfile(source: str, layer: str, install: Install, base: ComputerArtifac
         if protocol:
             lines.append("COPY protocol /tmp/agentenv-protocol")
         lines.append(f"RUN python3 -m venv {prefix}/venv && {prefix}/venv/bin/pip install --no-cache-dir {packages} "
-                     f"&& {prefix}/venv/bin/pip freeze > {prefix}/installed.txt" + (" && rm -rf /tmp/agentenv-protocol"
-                                                                                    if protocol else ""))
+                     f"&& {prefix}/venv/bin/pip list --format=json > {prefix}/installed.json"
+                     + (" && rm -rf /tmp/agentenv-protocol" if protocol else ""))
     lines.append(f"COPY agentenv-{layer}.conf /etc/supervisor/conf.d/agentenv-{layer}.conf")
     checks = [f"test -d {prefix}", f"test -f /etc/supervisor/conf.d/agentenv-{layer}.conf"]
     if install.python is not None:
@@ -213,15 +213,15 @@ def _installed(local: str, layer: str) -> dict[str, str]:
     so on any arch; none for a driver with no venv."""
     created = subprocess.run(["docker", "create", local], capture_output=True, text=True, check=True).stdout.strip()
     try:
-        copied = subprocess.run(["docker", "cp", f"{created}:{DRIVERS}/{layer}/installed.txt", "-"],
+        copied = subprocess.run(["docker", "cp", f"{created}:{DRIVERS}/{layer}/installed.json", "-"],
                                 capture_output=True)
     finally:
         subprocess.run(["docker", "rm", created], capture_output=True)
     if copied.returncode != 0:
         return {}
     with tarfile.open(fileobj=io.BytesIO(copied.stdout)) as archive:
-        text = archive.extractfile(archive.getmembers()[0]).read().decode()
-    return dict(line.split("==", 1) for line in text.splitlines() if "==" in line)
+        listed = json.loads(archive.extractfile(archive.getmembers()[0]).read())
+    return {package["name"]: package["version"] for package in listed}
 
 
 def _served(ref: str, store) -> str | None:
