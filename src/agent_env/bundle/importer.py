@@ -295,7 +295,6 @@ class _Importer:
                 pinned=tuple(self.pinned), floating=tuple(self.floating), dropped=tuple(self.dropped),
                 needs=tuple(self.needs), undeclared=tuple(self.undeclared), duplicates=tuple(self.duplicates),
                 downloaded=downloaded)
-            self.files[PROVENANCE] = provenance(source, imported)
             self.files["README.md"] = readme(description, imported)
             try:
                 for folder, (name, toml) in self.tomls.items():
@@ -304,6 +303,7 @@ class _Importer:
                 for path, text in self.files.items():
                     (staging / path).parent.mkdir(parents=True, exist_ok=True)
                     (staging / path).write_text(text, encoding="utf-8")
+                (staging / PROVENANCE).write_text(provenance(source, imported, staging), encoding="utf-8")
             except OSError as e:
                 raise BundleError([f"{show(self.dest.parent)}: can't write the import there: {os_reason(e)}"]) from None
             check_bundle(resolve_bundle(parse_bundle(staging)), installed=installed_bundles)

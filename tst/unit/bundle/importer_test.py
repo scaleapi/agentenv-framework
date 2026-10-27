@@ -288,6 +288,12 @@ def test_an_eval_imports_with_each_task_it_names_once_under_names_taken_from_the
     assert imported.eval == ImportedEval("evals/regression.toml", "nightly/regression", 1)
     plan = plan_bundle(resolve_bundle(parse_bundle(imported.root)))
     assert [entry.entry.name for entry in plan.evals] == ["regression"]
+    provenance = json.loads((imported.root / "provenance.json").read_text())
+    assert provenance["eval"] == {"file": "evals/regression.toml", "id": "nightly/regression", "version": 1}
+    assert provenance["tasks"] == [{"file": "tasks/run.json", "id": "team/run", "version": 1},
+                                   {"file": "tasks/run-2.json", "id": "other/run", "version": 1},
+                                   {"file": "tasks/RUN-3.json", "id": "RUN", "version": 1},
+                                   {"file": "tasks/triage.json", "id": "triage", "version": 1}]
 
 
 def test_an_eval_naming_a_task_the_store_doesnt_hold_is_refused_and_writes_nothing(store):

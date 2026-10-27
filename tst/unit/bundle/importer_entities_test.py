@@ -2,6 +2,7 @@
 stored build context, downloading a context stored as one object once; and what a folder can't hold fails the import,
 unless --include-scope user leaves it in the store, pinned."""
 
+import hashlib
 import json
 import os
 import tomllib
@@ -19,6 +20,7 @@ from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniv
 from agent_env.artifact.artifacts.skill import SkillArtifact
 from agent_env.artifact.store import get_artifact_store
 from agent_env.bundle import BundleError
+from agent_env.bundle._import_report import store_fingerprint
 from agent_env.bundle.importer import import_task
 from agent_env.bundle.resolve import build_step
 from agent_env.cli import cli
@@ -83,7 +85,7 @@ def test_with_the_user_scope_it_stays_in_the_store_pinned_and_the_report_and_rea
         ("artifact", "crm-image", 1, "envs/crm: image")]
     readme = (imported.root / "README.md").read_text()
     assert "## Still needs the store" in readme and "except what *Still needs the store* lists" in readme
-    assert json.loads((imported.root / "provenance.json").read_text())["store"][0]["id"] == "crm-image"
+    assert json.loads((imported.root / "provenance.json").read_text())["pinned"][0]["id"] == "crm-image"
 
 
 def test_the_cli_says_up_front_that_the_folder_still_needs_the_store(home):
@@ -274,12 +276,41 @@ def test_provenance_names_each_written_entity_and_image_by_store_id_and_version_
 
     text = (imported.root / "provenance.json").read_text()
     provenance = json.loads(text)
+    assert provenance["schema"] == 2
     assert provenance["from"] == {"task": "t", "version": 1}
+    assert provenance["tasks"] == [{"file": "tasks/t.json", "id": "t", "version": 1}] and provenance["eval"] is None
     assert provenance["written"] == [{"folder": "envs/crm", "kind": "env", "type": "mcp_server", "id": "crm",
                                       "version": 1}]
     assert provenance["images"] == [{"folder": "envs/crm", "key": "image", "id": "crm-image", "version": 1,
                                      "dockerfile": "Dockerfile", "dockerfile_found": False}]
+    assert provenance["store"] == store_fingerprint() and provenance["store"].startswith("sha256:")
     assert "file://" not in text and str(home) not in text
+
+
+def test_provenance_holds_each_file_the_import_wrote_as_written_so_an_edit_can_be_told(home):
+    """Every file but the README and provenance itself, by its path in the folder, as its content hash, +x when
+    executable."""
+    MCPServerEnv.put(id="crm", docker_image_artifact=context_image(home, "crm-image", {
+        "Dockerfile": "FROM python:3.12-slim\nCOPY run.sh /\n", "run.sh": "#!/bin/sh\n"}), environment_name="crm")
+    _task([DEPLOY])
+
+    imported = import_task("t", home / "t")
+
+    files = json.loads((imported.root / "provenance.json").read_text())["files"]
+    on_disk = {path.relative_to(imported.root).as_posix() for path in imported.root.rglob("*") if path.is_file()}
+    assert set(files) == on_disk - {"README.md", "provenance.json"}
+    assert {"tasks/t.json", "envs/crm/env.toml", "envs/crm/Dockerfile"} <= set(files)
+    for path, digest in files.items():
+        executable = os.access(imported.root / path, os.X_OK)
+        expected = "sha256:" + hashlib.sha256((imported.root / path).read_bytes()).hexdigest()
+        assert digest == expected + ("+x" if executable else "")
+
+
+def test_the_store_fingerprint_tells_one_configured_document_store_from_another(home, tmp_path, monkeypatch):
+    here = store_fingerprint()
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "elsewhere"))
+
+    assert store_fingerprint() != here and store_fingerprint() == store_fingerprint()
 
 
 def _saved_image(path, url, files):

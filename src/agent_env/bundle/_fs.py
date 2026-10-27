@@ -1,9 +1,10 @@
 """Filesystem plumbing for the bundle parser: a path spelled as the filesystem stores it, the user's
-home, a regular file read without surprises, names compared without case, and paths rendered for
-messages."""
+home, a regular file read without surprises, a file's content hash, names compared without case, and paths rendered
+for messages."""
 
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
 import sys
@@ -94,6 +95,14 @@ def read_regular(path: Path) -> bytes:
     if len(data) > MAX_FILE_BYTES:
         raise Unreadable(f"larger than the {MAX_FILE_BYTES >> 20} MiB limit for a bundle's config files")
     return data
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as file:
+        for chunk in iter(lambda: file.read(1 << 20), b""):
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
 
 
 def fold(name: str) -> str:

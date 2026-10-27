@@ -3,13 +3,17 @@ and its provenance."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import posixpath
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib.metadata import version as package_version
 from pathlib import Path
 
+from agent_env.bundle._fs import file_sha256
+from agent_env.config import get_config
 from agent_env.config.model import ENV_API_KEY, ENV_BASE_URL
 from agent_env.entity.refs import EntityKind
 from agent_env.store.image_store.oci_registry_credentials import registry_host_from_ref
@@ -17,8 +21,10 @@ from agent_env.utils.docker.build import DOCKER_PLUGINS
 from agent_env.utils.docker.lock import IN_IMAGE, Locked
 from agent_env.utils.docker.prune import Pruned
 
-# The file an import records what it wrote in, and from where, for publishing the folder back.
+# The file an import records what it wrote in, and from where, for registering the folder back.
 PROVENANCE = "provenance.json"
+# Bumped when what the file records changes.
+PROVENANCE_SCHEMA = 2
 
 
 @dataclass(frozen=True)
@@ -155,20 +161,46 @@ def size_text(size: int) -> str:
     return f"{size} B" if size < 1_000 else f"{size / 1_000:.1f} KB" if size < 1_000_000 else f"{size / 1_000_000:.1f} MB"
 
 
-def provenance(source: dict, imported: BundleImport) -> str:
-    """What the folder was imported from and what it holds, by store id and version: no store's locations."""
+def provenance(source: dict, imported: BundleImport, root: Path) -> str:
+    """What the folder was imported from and what it holds, by store id and version, and each file written at ``root``,
+    so an edit can be told from what the store holds: no store's locations, only a fingerprint of the store's config."""
     return json.dumps({
+        "schema": PROVENANCE_SCHEMA,
         "agent_env": package_version("agentenv-framework"),
         "imported_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "from": source,
+        "store": store_fingerprint(),
+        "tasks": [{"file": task.path, "id": task.id, "version": task.version} for task in imported.tasks],
+        "eval": {"file": imported.eval.path, "id": imported.eval.id, "version": imported.eval.version}
+        if imported.eval else None,
         "written": [{"folder": entity.folder, "kind": entity.kind.value, "type": entity.type, "id": entity.id,
                      "version": entity.version} for entity in imported.written],
         "images": [{"folder": image.folder, "key": image.key, "id": image.artifact, "version": image.version,
                     "dockerfile": image.pruned.dockerfile, "dockerfile_found": image.found}
                    for image in imported.images],
-        "store": [{"where": pin.where, "kind": pin.kind.value, "id": pin.id, "version": pin.version, "why": pin.why}
-                  for pin in imported.pinned],
+        "pinned": [{"where": pin.where, "kind": pin.kind.value, "id": pin.id, "version": pin.version, "why": pin.why}
+                   for pin in imported.pinned],
+        "files": written_files(root),
     }, indent=2, ensure_ascii=False) + "\n"
+
+
+def store_fingerprint() -> str:
+    """A hash of the configured document store's section, which tells one store from another without naming where
+    either is."""
+    section = get_config().trace_section("document").value
+    text = json.dumps(section, sort_keys=True, separators=(",", ":"), default=str)
+    return "sha256:" + hashlib.sha256(text.encode()).hexdigest()
+
+
+def written_files(root: Path) -> dict[str, str]:
+    """Each file under ``root`` but its README and provenance, by its path in NFC, as its content hash, ``+x`` after it
+    when it's executable."""
+    files = {}
+    for path in sorted(root.rglob("*")):
+        relative = unicodedata.normalize("NFC", path.relative_to(root).as_posix())
+        if path.is_file() and relative not in ("README.md", PROVENANCE):
+            files[relative] = file_sha256(path) + ("+x" if path.stat().st_mode & 0o111 else "")
+    return files
 
 
 def readme(description: str, imported: BundleImport) -> str:
