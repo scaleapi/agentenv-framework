@@ -48,7 +48,7 @@ version = "0.9.1361"
 source = { editable = "." }
 dependencies = [
     { name = "a2a-sdk" },
-    { name = "agentenv-framework-protocol" },
+    { name = "agentenv-framework-protocol", extra = ["computer"] },
     { name = "certifi" },
     { name = "click" },
     { name = "cryptography" },
@@ -137,7 +137,7 @@ vercel = [
 requires-dist = [
     { name = "a2a-sdk", specifier = "==0.3.26" },
     { name = "agentenv-framework", extras = ["aws", "boxd", "daytona", "gcp", "sail", "tensorlake", "tenki", "vercel"], marker = "extra == 'dev'" },
-    { name = "agentenv-framework-protocol", editable = "packages/agentenv-protocol" },
+    { name = "agentenv-framework-protocol", extras = ["computer"], editable = "packages/agentenv-protocol" },
     { name = "anyio", marker = "extra == 'vercel'", specifier = ">=4,<5" },
     { name = "boto3", marker = "extra == 'aws'", specifier = ">=1.35.0" },
     { name = "botocore", marker = "extra == 'aws'", specifier = ">=1.35.0" },

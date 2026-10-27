@@ -33,7 +33,7 @@ from agent_env.task.store import TASKS_COLLECTION
 
 from .authoring import build_context_files
 from .parse import BundleKind
-from .plan import Plan, Write, artifact_writer, env_writer, folder_files, unpinned_store_refs
+from .plan import Plan, Write, artifact_writer, env_folder_writer, env_writer, folder_files, unpinned_store_refs
 from .resolve import BuiltImage, BundleImage, ReferencedImage
 
 LEDGER_COLLECTION = "bundle_ledger"
@@ -121,7 +121,9 @@ class Ledger:
         config = _config(write)
         inputs = {"type": _type(write), "config": _sha256(_canonical(config)),
                   "files": {}, "needs": {}, "store_refs": {}}
-        if write.kind in (BundleKind.ARTIFACT, BundleKind.SKILL) and not isinstance(write.source, ReferencedImage):
+        from_folder = write.kind in (BundleKind.ARTIFACT, BundleKind.SKILL) or (
+            write.kind is BundleKind.ENV and env_folder_writer(get_env_registry().get(_type(write))))
+        if from_folder and not isinstance(write.source, ReferencedImage):
             built = isinstance(write.source, BuiltImage)
             listing = build_context_files if built else folder_files
             for key, path in listing(self._plan.bundle_of(write.source.entry), write.source.entry).items():

@@ -1,0 +1,53 @@
+{
+  "declaration": {
+    "name": "reference",
+    "platforms": [
+      {
+        "features": {
+          "buttons": [
+            "left"
+          ],
+          "max_click_count": 1
+        },
+        "platform": {
+          "arch": "amd64",
+          "display": "x11",
+          "os": "linux"
+        },
+        "provides": [
+          "urn:agentenv:computer/v1",
+          "urn:agentenv:computer-ready/v1"
+        ],
+        "tools": [
+          "computer_screenshot",
+          "computer_click"
+        ]
+      }
+    ],
+    "supports": [
+      {
+        "arch": [
+          "amd64"
+        ],
+        "os": {
+          "display": [
+            "x11"
+          ],
+          "type": "linux"
+        }
+      }
+    ]
+  },
+  "files": {
+    "id": "tutorial-files",
+    "type": "file_artifact_universe",
+    "version": 4
+  },
+  "id": "reference-driver",
+  "metadata": {
+    "owner": "example-team"
+  },
+  "module": "driver.py:ReferenceDriver",
+  "type": "computer_driver",
+  "version": 4
+}

@@ -29,7 +29,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "agentenv-framework-protocol>=0.1.0",
+    "agentenv-framework-protocol[computer]>=0.1.0",  # a computer_driver env's put reads the driver class with it
     "certifi>=2024.2.2",  # the public roots the local transfer CA's trust bundle carries
     "click>=8.0.0",
     "cryptography>=42",  # the local transfer CA

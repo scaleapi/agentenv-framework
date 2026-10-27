@@ -34,6 +34,7 @@ from agent_env.config import get_config
 from agent_env.entity.refs import EntityKind, RefRole, default_agent_refs, ref_sites
 from agent_env.env.env import Env
 from agent_env.env.envs._deployment import provider_refusal
+from agent_env.env.envs.computer_driver import ComputerDriverEnv
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.website import WebsiteEnv
@@ -94,7 +95,9 @@ _ENVIRONMENT = EnvironmentArtifact.model_fields["type"].default
 _FOLDER_HOOKS = {"written_besides": Artifact, "seeded_environments": SeedsEnvironments}
 # The env types whose from_toml reads only the toml and what it names, so a type built by one of them is written from
 # its env.toml and the ledger can list what it's made from.
-_ENV_FROM_TOMLS = (Env, MCPServerEnv, WebsiteEnv, MultiEnv)
+_ENV_FROM_TOMLS = (Env, MCPServerEnv, WebsiteEnv, MultiEnv, ComputerDriverEnv)
+# The env types whose from_toml also reads every file in the env's folder, which the ledger hashes as an artifact's.
+_ENV_FROM_FOLDERS = (ComputerDriverEnv,)
 
 _NOTHING_TO_RUN = "this bundle has no tasks or evals to run"
 
@@ -1086,6 +1089,11 @@ def env_writer(cls: type | None) -> bool:
     """Whether an env of type ``cls`` is written from its env.toml, by a ``from_toml`` that reads only the toml and
     what it names: its own, or one it inherits from a core env type."""
     return cls is not None and next(c for c in cls.__mro__ if "from_toml" in vars(c)) in _ENV_FROM_TOMLS
+
+
+def env_folder_writer(cls: type | None) -> bool:
+    """Whether an env of type ``cls`` is written from every file in its folder, as well as its env.toml."""
+    return cls is not None and next(c for c in cls.__mro__ if "from_toml" in vars(c)) in _ENV_FROM_FOLDERS
 
 
 def artifact_writer(cls: type | None) -> bool:
