@@ -168,6 +168,28 @@ def test_due_is_judged_on_the_time_not_its_text():
     assert [i.get("text") or i.get("note") for i in items] == ["on the second", "half a second on"]
 
 
+def test_turning_checks_off_cancels_the_ones_still_to_come():
+    clock = _frozen_clock()
+    w = _wakeups(clock)
+    w.schedule("sweep", every="P1D")
+    w.configure({"scheduled_checks": False})
+    clock.set_time("2027-02-05T15:00:00Z", 0)
+    assert w.state()["next_check_at"] is None and w.take({})["items"] == []
+    assert [c["status"] for c in w.state()["checks"]] == ["cancelled"]
+
+
+def test_history_is_bounded_and_delivered_notifications_are_dropped():
+    from agent_env.env.gateway import wakeups as wakeups_mod
+    w = _wakeups()
+    for n in range(wakeups_mod._HISTORY + 10):
+        w.cancel(w.schedule(f"check {n}", at="PT1H")["check_id"])
+    checks = w.state()["checks"]
+    assert len(checks) == wakeups_mod._HISTORY and checks[-1]["note"] == f"check {wakeups_mod._HISTORY + 9}"
+    w.notify("Messages", "hi")
+    w.take({})
+    assert w._notifications == []
+
+
 def test_clear_turns_checks_off_and_forgets_everything():
     w = _wakeups()
     w.schedule("x", at="PT1H")
