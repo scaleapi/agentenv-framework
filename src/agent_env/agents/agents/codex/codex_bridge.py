@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from codex_config import MODEL_HEADERS_ENV, model_headers
+
 logger = logging.getLogger(__name__)
 WORKSPACE_DIR = os.environ.get("CODEX_WORKSPACE_DIR", "/app")
 
@@ -89,7 +91,8 @@ def get_last_attribution_snapshot() -> dict[str, str | None]:
 def cli_env(environ: Mapping[str, str], *, project_id: str | None = None,
             task_id: str | None = None) -> dict[str, str]:
     """The CLI's environment: this process's, with the endpoint's key also under the name codex's own precheck
-    reads, and the run's attribution, which config.toml's env_http_headers sends as headers on each model call."""
+    reads, and the run's attribution, which config.toml's env_http_headers sends as headers on each model call. The
+    run's tags join the x-litellm-tags [model.headers] names."""
     env = dict(environ)
     if env.get("LITELLM_API_KEY") and not env.get("OPENAI_API_KEY"):
         env["OPENAI_API_KEY"] = env["LITELLM_API_KEY"]
@@ -99,8 +102,10 @@ def cli_env(environ: Mapping[str, str], *, project_id: str | None = None,
         tags.append(f"projectId:{project_id}")
     if task_id:
         tags.append(f"taskId:{task_id}")
-    if tags:
-        env["LITELLM_TAGS"] = ",".join(tags)
+    configured = next((value for name, value in model_headers(env.get(MODEL_HEADERS_ENV)).items()
+                       if name.lower() == _TAGS_HEADER), "")
+    if joined := _join_tags(configured, ",".join(tags)):
+        env["LITELLM_TAGS"] = joined
     return env
 
 
@@ -934,3 +939,13 @@ async def run_codex(
             budget_left,
         )
         await asyncio.sleep(min(backoff, max(0, budget_left)))
+
+
+_TAGS_HEADER = "x-litellm-tags"
+
+
+def _join_tags(configured: str, run: str) -> str:
+    """x-litellm-tags as configured, then each of the run's tags whose key (the part before ``:``) they don't name."""
+    tags = [tag.strip() for tag in configured.split(",") if tag.strip()]
+    keys = {tag.partition(":")[0] for tag in tags}
+    return ",".join([*tags, *(tag for tag in run.split(",") if tag and tag.partition(":")[0] not in keys)])

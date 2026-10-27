@@ -1,6 +1,7 @@
 """A bundle's tasks as an OpenEnv env: each session plays one episode of a task at a time (``EpisodeSpec``), as
 OpenEnv's own tool envs do. Reset deploys and opens the first turn, steps list and call the env's tools, and the
-``end_turn`` tool hands the reply back; an episode that can't go on ends in an observation, never an exception."""
+``end_turn`` tool hands the reply back. An episode that can't go on ends in an observation, never an exception; a step
+before the session's first reset raises, as OpenEnv's imported envs do, so a tool call never starts an episode."""
 
 from __future__ import annotations
 
@@ -34,6 +35,7 @@ END_TURN = Tool(
     input_schema={"type": "object", "properties": {"response": {"type": "string", "description": "Your reply."}}},
 )
 ENDED = "the episode has ended; call reset"
+NOT_RESET = "no episode has started; call reset before stepping"
 
 
 @dataclass(frozen=True)
@@ -146,6 +148,8 @@ class AgentEnvEnvironment(Environment):
             return await self._step(action, timeout_s)
 
     async def _step(self, action: Any, timeout_s: float | None) -> Observation:
+        if self._loop is None:
+            raise RuntimeError(NOT_RESET)
         if isinstance(action, ListToolsAction):
             if (stopped := await self._why_stopped()) is not None:
                 return ListToolsObservation(tools=[], done=True, reward=None, metadata=stopped)
@@ -162,7 +166,7 @@ class AgentEnvEnvironment(Environment):
     def step(self, action: Any, timeout_s: float | None = None, **kwargs: Any) -> Observation:
         """OpenEnv's web playground steps from a worker thread; the episode lives on the loop its reset ran on."""
         if self._loop is None:
-            return asyncio.run(self.step_async(action, timeout_s))
+            raise RuntimeError(NOT_RESET)
         return asyncio.run_coroutine_threadsafe(self.step_async(action, timeout_s), self._loop).result()
 
     @property
@@ -199,9 +203,9 @@ class AgentEnvEnvironment(Environment):
             "content": result.content, "structured_content": None, "meta": None, "data": result.text, "is_error": False})
 
     async def _end_turn(self, name: str, response: str) -> CallToolObservation:
-        await self._turn.end(response)
-        await self._close_tools()
         try:
+            await self._turn.end(response)
+            await self._close_tools()
             turn = await self._episode.next_turn()
             if turn is not None:
                 await self._open(turn)

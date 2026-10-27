@@ -4,15 +4,19 @@ fixture with data/add, launches it with computer-exec and reads its state back t
 from __future__ import annotations
 
 import asyncio
+import base64
+import contextlib
 import json
 import math
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from importlib import resources
 
 from mcp import ClientSession
 from mcp.types import CallToolResult
+from pydantic import ValidationError
 
 from ... import client as protocol
 from ...client import ExtensionCallError
@@ -25,11 +29,15 @@ from ..card import (
     COMPUTER_KEYBOARD,
     COMPUTER_POINTER,
     COMPUTER_READY,
+    COMPUTER_RECORDING,
     COMPUTER_SPACES,
     GROUP_TOOLS,
     POINT_TOOLS,
 )
+from ..manifest import RecordingManifest
+from ..recording import RECORDINGS_DIR
 from .client import Driver, image
+from .mp4 import read_mp4
 from .report import CheckResult
 
 MINIMUM_TOOLS = ("computer_screenshot", "computer_click", "computer_drag", "computer_scroll", "computer_type",
@@ -45,6 +53,16 @@ POLL_S = 0.15
 #: How long the fixture may take to start.
 FIXTURE_START_S = 30.0
 NORM = 1000
+#: How long the probe records, and the frame rate it asks for.
+RECORD_S = 2.0
+RECORD_FPS = 5
+#: Prints a file's size and SHA-256 as JSON, run with ``python3 -c`` on the computer.
+READ_DIGEST = ("import hashlib,json,sys;d=open(sys.argv[1],'rb').read();"
+               "print(json.dumps({'size':len(d),'sha256':hashlib.sha256(d).hexdigest()}))")
+#: Prints ``length`` bytes of a file from ``offset``, base64, under computer-exec's output cap.
+READ_CHUNK = ("import base64,sys;f=open(sys.argv[1],'rb');f.seek(int(sys.argv[2]));"
+              "print(base64.b64encode(f.read(int(sys.argv[3]))).decode())")
+CHUNK_BYTES = 512 << 10
 #: The checks only ``full`` runs, recorded unverified when the fixture can't be staged.
 FULL_CHECKS = (("P3", "fixture colours land where the mapping says"), ("P4", "clicks show their effect"),
                ("P5", "refusals leave the fixture as it was"), ("P6", "typed and pressed keys arrive"),
@@ -89,7 +107,7 @@ class Probe:
                 return self._skip_full(f"the fixture didn't start: {problem}")
             for check, section in (("P9", self._security), ("P3", self._geometry), ("P4", self._effects),
                                    ("P5", self._unchanged), ("P6", self._typing), ("P7", self._scroll_and_drag),
-                                   ("X", self._pointer_input), ("X", self._data_add)):
+                                   ("X", self._pointer_input), ("X", self._data_add), ("X", self._recording)):
                 await self._guarded(check, section)
         finally:
             await self._unstage()
@@ -720,6 +738,103 @@ class Probe:
             return await self.settled(lambda s: s["loaded"] == message, lambda s: s["loaded"])
 
         await self.check("X", "a file data/add writes is there for an app to read", picked_up, *DATA_PLANE)
+
+    async def _recording(self) -> None:
+        if not self.driver.declares(COMPUTER_RECORDING):
+            return
+        params = self.driver.params(COMPUTER_RECORDING)
+        fps = min(RECORD_FPS, (params.get("fps") or {}).get("max") or RECORD_FPS)
+        made: list[str] = []
+        state: dict = {}
+
+        async def start(request_id: str) -> dict:
+            started = await self.driver.invoke(COMPUTER_RECORDING, "start", {"request_id": request_id, "fps": fps})
+            if started["recording_id"] not in made:
+                made.append(started["recording_id"])
+            return started
+
+        async def recorded() -> str | None:
+            request_id = f"{PROBE_ROLE}-recording-{uuid.uuid4().hex[:8]}"
+            started = await start(request_id)
+            state["joined"] = await start(request_id) == started
+            await asyncio.sleep(RECORD_S)
+            manifest = await self.driver.invoke(COMPUTER_RECORDING, "end", {"recording_id": started["recording_id"]})
+            return await self._segments_match(manifest, fps)
+
+        async def joined() -> str | None:
+            return None if state.get("joined") else "a repeated request_id started a second recording"
+
+        async def limited() -> str | None:
+            most = params.get("max_concurrent")
+            if not isinstance(most, int):
+                return "the card declares no max_concurrent"
+            for _ in range(most):
+                await start(f"{PROBE_ROLE}-limit-{uuid.uuid4().hex[:8]}")
+            try:
+                extra = await start(f"{PROBE_ROLE}-limit-{uuid.uuid4().hex[:8]}")
+            except ExtensionCallError as e:
+                return None if e.code == "limit_exceeded" else f"refused {e.code!r}, not 'limit_exceeded': {e.detail}"
+            return f"recording {most + 1} of at most {most} started: {extra['recording_id']}"
+
+        try:
+            await self.check("X", "a recording's segments match their files, with no gap between them", recorded,
+                             COMPUTER_RECORDING)
+            await self.check("X", "a repeated request_id joins the first recording", joined, COMPUTER_RECORDING)
+            await self.check("X", "a recording past max_concurrent is refused", limited, COMPUTER_RECORDING)
+        finally:
+            for recording_id in made:
+                with contextlib.suppress(Exception):
+                    await self.driver.invoke(COMPUTER_RECORDING, "end", {"recording_id": recording_id})
+                await self.driver.run("rm", "-rf", f"{RECORDINGS_DIR}/{recording_id}")
+            await self.driver.run("sh", "-c", f"rmdir {RECORDINGS_DIR} 2>/dev/null || true")
+
+    async def _segments_match(self, wire: dict, fps: int) -> str | None:
+        """What is wrong with a recording without a grant, read back from the computer, or None."""
+        try:
+            manifest = RecordingManifest.model_validate(wire)
+        except ValidationError as e:
+            return f"its manifest isn't a computer-recording/v1 manifest: {e}"
+        segments = manifest.segments
+        if manifest.ended_by != "end" or not segments:
+            return f"it ended by {manifest.ended_by!r} with {len(segments)} segments"
+        if unmeasured := [s.index for s in segments if not s.measured]:
+            return f"segments {unmeasured} lack their times, size, frame count or digest"
+        span = (_when(segments[-1].ended_at) - _when(segments[0].started_at)).total_seconds()
+        frames = sum(s.frames for s in segments)
+        if span < RECORD_S - 2 / fps or frames < fps * RECORD_S / 2:
+            return f"{frames} frames over {span:.2f} s of a {RECORD_S:g} s recording at {fps} fps"
+        for before, after in zip(segments, segments[1:]):
+            gap = (_when(after.started_at) - _when(before.ended_at)).total_seconds()
+            if gap > 2 / fps:
+                return f"{gap:.2f} s between segments {before.index} and {after.index}"
+        for segment in segments:
+            path = f"{RECORDINGS_DIR}/{segment.path}"
+            out = await self.driver.run("python3", "-c", READ_DIGEST, path)
+            if out.get("exit_code") != 0:
+                return f"segment {segment.index} couldn't be read back: {out.get('stderr', '')[-200:]}"
+            file = json.loads(out["stdout"])
+            if (file["size"], file["sha256"]) != (segment.bytes, segment.sha256):
+                return f"segment {segment.index}'s file is {file['size']} bytes, sha256 {file['sha256'][:12]}; " \
+                       f"the manifest says {segment.bytes}, {segment.sha256[:12]}"
+            data = b""
+            while len(data) < file["size"]:
+                chunk = await self.driver.run("python3", "-c", READ_CHUNK, path, str(len(data)), str(CHUNK_BYTES))
+                read = base64.b64decode(chunk["stdout"]) if chunk.get("exit_code") == 0 else b""
+                if not read:
+                    return f"segment {segment.index} stopped reading back at byte {len(data)} of {file['size']}: " \
+                           f"{chunk.get('stderr', '')[-200:]}"
+                data += read
+            mp4 = read_mp4(data)
+            span = (_when(segment.ended_at) - _when(segment.started_at)).total_seconds()
+            if ((mp4["width"], mp4["height"], mp4["frames"]) != (segment.width, segment.height, segment.frames)
+                    or abs(mp4["duration_s"] - span) > 2 / fps):
+                return f"segment {segment.index}'s MP4 is {mp4}; the manifest says {segment.width}x" \
+                       f"{segment.height}, {segment.frames} frames over {span:.2f} s"
+        return None
+
+
+def _when(iso: str) -> datetime:
+    return datetime.fromisoformat(iso.replace("Z", "+00:00"))
 
 
 def _rgb(colour: str) -> tuple[int, int, int]:

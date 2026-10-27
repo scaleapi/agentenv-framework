@@ -60,14 +60,22 @@ def test_the_models_aliases_are_pinned_on_the_endpoint_but_an_explicit_one_wins(
 
 def test_model_headers_and_the_runs_attribution_reach_every_call():
     env = claude_bridge.cli_env(
-        {**GATEWAY, "LITELLM_EXTRA_HEADERS": json.dumps({"X-Bill-To": "team-a", "x-litellm-tags": "from-config"})},
+        {**GATEWAY, "LITELLM_EXTRA_HEADERS": json.dumps({"X-Bill-To": "team-a", "X-LiteLLM-Tags": "useCase:evals"})},
         project_id="p-1", task_id="t-1")
 
     assert env["ANTHROPIC_CUSTOM_HEADERS"].splitlines() == [
         "X-Bill-To: team-a",
-        "x-litellm-tags: projectId:p-1,taskId:t-1",
         "x-litellm-customer-id: p-1",
+        "x-litellm-tags: useCase:evals,projectId:p-1,taskId:t-1",
     ]
+
+
+def test_a_tag_key_model_headers_name_keeps_their_value():
+    env = claude_bridge.cli_env(
+        {**GATEWAY, "LITELLM_EXTRA_HEADERS": json.dumps({"x-litellm-tags": "taskId:own, useCase:evals"})},
+        project_id="p-1", task_id="t-1")
+
+    assert "x-litellm-tags: taskId:own,useCase:evals,projectId:p-1" in env["ANTHROPIC_CUSTOM_HEADERS"].splitlines()
 
 
 @pytest.mark.parametrize("raw", ["not json", '["a list"]'])
