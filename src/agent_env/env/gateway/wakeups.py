@@ -150,7 +150,7 @@ class Wakeups:
             except (ClockError, OverflowError) as e:
                 raise WakeupError(f"every: {e}")
             if step < self._min_interval:
-                raise WakeupError(f"every must be at least {self._min_interval} apart")
+                raise WakeupError(f"every must be at least {_iso_duration(self._min_interval)} apart")
         if at is None and step is None:
             raise WakeupError("give at (when) or every (how often)")
         first = _when(at, now, "at") if at is not None else _when(every, now, "every")
@@ -190,7 +190,7 @@ class Wakeups:
     def _public(check: dict) -> dict:
         out = {"check_id": check["check_id"], "note": check["note"], "next": _iso(check["next"])}
         if check["every"]:
-            out["every"] = str(check["every"])
+            out["every"] = _iso_duration(check["every"])
         if check["until"]:
             out["until"] = _iso(check["until"])
         return out
@@ -214,7 +214,7 @@ class Wakeups:
             pending = [_public_note(n) for n in self._notifications if n["status"] == "pending"]
             nxt = min((c["next"] for c in active), default=None)
             return {"scheduled_checks": self._enabled, "max_active": self._max_active,
-                    "min_interval": str(self._min_interval), "next_check_at": _iso(nxt) if nxt else None,
+                    "min_interval": _iso_duration(self._min_interval), "next_check_at": _iso(nxt) if nxt else None,
                     "checks": [{**self._public(c), "status": c["status"], "fired": c["fired"]}
                                for c in self._checks.values()],
                     "pending_notifications": pending}
@@ -262,6 +262,15 @@ def _after(check: dict, until: datetime) -> tuple[int, datetime | None]:
     except OverflowError:
         return times, None
     return times, nxt if end is None or nxt <= end else None
+
+
+def _iso_duration(td: timedelta) -> str:
+    """A duration in the ISO 8601 form the tools take (PT3H, P1DT6H, PT0.5S), so what they echo can be sent back."""
+    hours, rest = divmod(td.seconds, 3600)
+    minutes, seconds = divmod(rest, 60)
+    secs = f"{seconds}.{td.microseconds:06d}".rstrip("0") if td.microseconds else (str(seconds) if seconds else "")
+    clock = (f"{hours}H" if hours else "") + (f"{minutes}M" if minutes else "") + (f"{secs}S" if secs else "")
+    return "P" + (f"{td.days}D" if td.days else "") + (f"T{clock}" if clock else "") if td.days or clock else "PT0S"
 
 
 def _public_note(note: dict) -> dict:

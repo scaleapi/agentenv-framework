@@ -19,13 +19,13 @@ _GATEWAY = "http://gw:18765"
 
 @pytest.mark.asyncio
 async def test_posts_the_config_and_records_what_the_gateway_applied(monkeypatch):
-    sent = _mock_gateway(monkeypatch, {"scheduled_checks": True, "max_active": 5, "min_interval": "1:00:00"})
+    sent = _mock_gateway(monkeypatch, {"scheduled_checks": True, "max_active": 5, "min_interval": "PT1H"})
     out = await _step(max_active=5).execute(TaskStepContext(deployed_envs=[_record()], metadata={}))
     [request] = sent
     assert (request.method, str(request.url)) == ("POST", f"{_GATEWAY}/wakeups/config")
     assert json.loads(request.content) == {"scheduled_checks": True, "max_active": 5, "min_interval": "PT1H"}
     [entry] = out.metadata["wakeup_configurations"]
-    assert entry["applied"] == {"scheduled_checks": True, "max_active": 5, "min_interval": "1:00:00"}
+    assert entry["applied"] == {"scheduled_checks": True, "max_active": 5, "min_interval": "PT1H"}
 
 
 @pytest.mark.asyncio

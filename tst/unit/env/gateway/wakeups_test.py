@@ -74,6 +74,18 @@ def test_bad_checks_are_refused_with_the_reason(kwargs, error):
         _wakeups().schedule(**kwargs)
 
 
+@pytest.mark.parametrize("text", ["PT3H", "P1D", "P1DT6H30M", "PT0.001S", "PT1M0.5S"])
+def test_durations_are_echoed_in_the_form_the_tools_take(text):
+    w = _wakeups(min_interval="PT0.001S")
+    assert w.schedule("x", every=text)["every"] == text
+    assert _wakeups(min_interval=text).state()["min_interval"] == text
+
+
+def test_the_too_short_error_names_the_minimum_as_a_duration_to_send_back():
+    with pytest.raises(WakeupError, match=r"at least PT3H apart"):
+        _wakeups(min_interval="PT3H").schedule("x", every="PT1H")
+
+
 def test_the_active_cap_refuses_one_more_until_one_is_cancelled():
     w = _wakeups(max_active=2)
     first = w.schedule("a", at="PT1H")["check_id"]
