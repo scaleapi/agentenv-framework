@@ -866,7 +866,7 @@ class TriggerEngine:
                  "fired_at": t["fired_at"], "fire_count": t["fire_count"],
                  "failure_count": t["failure_count"], "last_failure_at": t["last_failure_at"],
                  "barrier": t["spec"].get("barrier"),
-                 "pending": len(t["pending"]), "waiting": t["waiting"],
+                 "pending": len(t["pending"]), "waiting": t["waiting"], "evaluating": t["evaluating"],
                  "resumes_at": _iso(resumes[tid]) if resumes[tid] else None,
                  "next_mark": _iso(t["next_mark"]) if t["next_mark"] else None}
                 for tid, t in self._triggers.items()
