@@ -8,7 +8,7 @@ from unittest.mock import patch
 import httpx
 import pytest
 
-pytest.importorskip("mcp.server.fastmcp")
+pytest.importorskip("mcp")
 
 from agentenv_protocol import (  # noqa: E402
     AgentEnvEnvironment,

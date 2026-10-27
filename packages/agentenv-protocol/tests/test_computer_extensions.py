@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-pytest.importorskip("mcp.server.fastmcp")
+pytest.importorskip("mcp")
 pytest.importorskip("PIL")
 
 from computer_fake import FakeDriver, MinimalDriver, http_client  # noqa: E402

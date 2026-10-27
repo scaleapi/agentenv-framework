@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Optional
 
 import httpx
 from agentenv_protocol import RPC_PATH, DataPart, client as protocol_v1
+from agentenv_protocol.mcp_compat import client_session
 
 if TYPE_CHECKING:
     from agent_env.env.env import DeployedEnv
@@ -119,20 +120,15 @@ async def reset_via_mcp_tool(
     max_retries: int = DEFAULT_MCP_MAX_RETRIES,
 ) -> None:
     """Call the ``{environment_name}_reset`` MCP tool, retrying on transient failures."""
-    from mcp import ClientSession
-    from mcp.client.streamable_http import streamable_http_client
-
     for attempt in range(max_retries):
         reset_done = False
         try:
-            async with streamable_http_client(mcp_url) as (read_stream, write_stream, _):
-                async with ClientSession(read_stream, write_stream) as session:
-                    await session.initialize()
-                    reset_tool_name = f"{environment_name}_reset"
-                    result = await session.call_tool(reset_tool_name, {"mock_data_path": mock_data_path})
-                    result_text = "".join(c.text for c in result.content if hasattr(c, "text"))
-                    logger.info(f"load_environment_artifact: {reset_tool_name} returned: {result_text}")
-                    reset_done = True
+            async with client_session(mcp_url) as session:
+                reset_tool_name = f"{environment_name}_reset"
+                result = await session.call_tool(reset_tool_name, {"mock_data_path": mock_data_path})
+                result_text = "".join(c.text for c in result.content if hasattr(c, "text"))
+                logger.info(f"load_environment_artifact: {reset_tool_name} returned: {result_text}")
+                reset_done = True
         except BaseExceptionGroup as eg:
             if reset_done:
                 logger.info("load_environment_artifact: succeeded (ignoring cleanup ExceptionGroup)")

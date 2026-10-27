@@ -5,9 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, ClassVar, Optional
 
-import httpx
-from mcp import ClientSession
-from mcp.client.streamable_http import streamable_http_client
+from agentenv_protocol.mcp_compat import client_session, field
 
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity.refs import EntityRef
@@ -105,12 +103,12 @@ class VerifyMCPToolSchemaTaskStep(TaskStep):
         """Check tool descriptions and parameter quality. Includes full tool schemas."""
         missing = [t.name for t in tools if not (t.description or "").strip()]
         tool_schemas = [
-            {"name": t.name, "description": t.description or "", "input_schema": t.inputSchema or {}}
+            {"name": t.name, "description": t.description or "", "input_schema": field(t, "inputSchema") or {}}
             for t in tools
         ]
         parameter_issues: dict[str, list[str]] = {}
         for t in tools:
-            issues = VerifyMCPToolSchemaTaskStep._check_parameter_issues(t.name, t.inputSchema or {})
+            issues = VerifyMCPToolSchemaTaskStep._check_parameter_issues(t.name, field(t, "inputSchema") or {})
             if issues:
                 parameter_issues[t.name] = issues
 
@@ -126,14 +124,8 @@ class VerifyMCPToolSchemaTaskStep(TaskStep):
 
         mcp_url = deployed.mcp_url
         logger.info(f"Connecting to MCP at {mcp_url} to verify tool schemas")
-        http_client = httpx.AsyncClient()
-        try:
-            async with streamable_http_client(mcp_url, http_client=http_client) as (read_stream, write_stream, _):
-                async with ClientSession(read_stream, write_stream) as session:
-                    await session.initialize()
-                    tools_result = await session.list_tools()
-        finally:
-            await http_client.aclose()
+        async with client_session(mcp_url) as session:
+            tools_result = await session.list_tools()
 
         tools = tools_result.tools
         logger.info(f"Retrieved {len(tools)} tool(s) from {mcp_url}")

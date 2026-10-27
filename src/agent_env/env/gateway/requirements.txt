@@ -1,5 +1,5 @@
 psycopg2-binary>=2.9.0
 httpx
-mcp>=1.25,<2
+mcp>=1.25,<2  # the gateway serves on mcp 1's FastMCP, which mcp 2 removed
 pydantic>=2.0
 tzdata

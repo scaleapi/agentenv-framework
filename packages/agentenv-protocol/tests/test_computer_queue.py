@@ -8,7 +8,7 @@ import time
 import anyio
 import pytest
 
-pytest.importorskip("mcp.server.fastmcp")
+pytest.importorskip("mcp")
 pytest.importorskip("PIL")
 
 from computer_fake import COLOURS, FakeDriver, FakeScreen, MinimalDriver, http_client, mcp_session  # noqa: E402

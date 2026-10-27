@@ -15,8 +15,6 @@ fastmcp = pytest.importorskip("fastmcp")
 from fastmcp import Client, FastMCP  # noqa: E402
 from fastmcp.exceptions import ToolError  # noqa: E402
 from fastmcp.server.middleware import Middleware  # noqa: E402
-from mcp import ClientSession  # noqa: E402
-from mcp.client import streamable_http as _streamable_http  # noqa: E402
 from mcp.types import CallToolResult, TextContent  # noqa: E402
 
 from agentenv_protocol import (  # noqa: E402
@@ -165,23 +163,29 @@ async def test_the_hook_answers_a_call_before_the_tool_runs():
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(not hasattr(_streamable_http, "streamable_http_client"), reason="mcp without streamable_http_client")
 async def test_a_direct_caller_over_http_gets_the_header_role_and_its_own_session():
     app = FastMCP("fm")
     env = _Env()
     env.mount(app)
     asgi = app.http_app(path="/mcp", json_response=True)
-    base = "http://127.0.0.1:8000"
-    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=asgi), base_url=base, headers={ROLE_HEADER: "grader"})
+    headers = {ROLE_HEADER: "grader", "Accept": "application/json, text/event-stream"}
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=asgi), base_url="http://127.0.0.1:8000", headers=headers)
+
+    async def rpc(method: str, params: dict, sid: str | None = None) -> httpx.Response:
+        return await client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+                                 headers={"mcp-session-id": sid} if sid else {})
+
     with anyio.fail_after(30):
         async with asgi.router.lifespan_context(asgi), client:
-            async with _streamable_http.streamable_http_client(f"{base}/mcp", http_client=client) as (read, write, session_id):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    direct = await session.call_tool("whoami_sync", {})
-                    proxied = await session.call_tool("whoami_sync", {}, meta={ROLE_META_KEY: "bob"})
-                    sid = session_id()
-    assert sid and direct.content[0].text == "grader|grader" and proxied.content[0].text == "bob|bob"
+            initialized = await rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+                                                   "clientInfo": {"name": "t", "version": "1"}})
+            sid = initialized.headers["mcp-session-id"]
+            await client.post("/mcp", json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+                              headers={"mcp-session-id": sid})
+            direct = (await rpc("tools/call", {"name": "whoami_sync", "arguments": {}}, sid)).json()["result"]
+            proxied = (await rpc("tools/call", {"name": "whoami_sync", "arguments": {},
+                                                "_meta": {ROLE_META_KEY: "bob"}}, sid)).json()["result"]
+    assert direct["content"][0]["text"] == "grader|grader" and proxied["content"][0]["text"] == "bob|bob"
     assert env.seen[-2].caller == Caller("grader", sid)
     assert env.seen[-1].caller == Caller("bob")  # a _meta role entry: the connection's id is not the caller's
 

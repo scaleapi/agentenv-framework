@@ -27,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.responses import PlainTextResponse
 from starlette.types import Receive, Scope, Send
 
+from ..mcp_compat import low_level_server
 from ..transfers import serving_port
 from .extensions import PeerAgent
 
@@ -192,14 +193,10 @@ class PeerAgents:
             await self._manager.handle_request(scope, receive, send)
 
     def _mcp_server(self) -> Server:
-        server: Server = Server(PEER_MCP_SERVER_NAME)
-
-        @server.list_tools()
         async def list_tools() -> list[types.Tool]:
             return [types.Tool(name=name, description=tool.description, inputSchema=_schema(tool.arguments))
                     for name, tool in self._tools.items()]
 
-        @server.call_tool()
         async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
             tool = self._tools.get(name)
             if tool is None:
@@ -211,7 +208,7 @@ class PeerAgents:
                 raise TimeoutError(f"{name} got no answer from the peer within {_CALL_BUDGET_SECONDS}s") from None
             return [types.TextContent(type="text", text=json.dumps(result))]
 
-        return server
+        return low_level_server(PEER_MCP_SERVER_NAME, list_tools, call_tool)
 
     async def _peer_list(self, _: _NoArguments) -> list[dict[str, Any]]:
         return [_summary(peer) for peer in self._peers.values()]

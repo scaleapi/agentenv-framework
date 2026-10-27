@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-pytest.importorskip("mcp.server.fastmcp")
+pytest.importorskip("mcp")
 pytest.importorskip("PIL")
 
 import asyncio  # noqa: E402
@@ -12,8 +12,8 @@ import base64  # noqa: E402
 import io  # noqa: E402
 
 from computer_fake import LINUX, FakeDriver, FakeScreen, MinimalDriver, http_client, mcp_session  # noqa: E402
-from mcp.server.fastmcp import FastMCP  # noqa: E402
-from mcp.shared.memory import create_connected_server_and_client_session  # noqa: E402
+from mcp_versions import FastMCP  # noqa: E402
+from mcp_versions import memory_session  # noqa: E402
 from PIL import Image as PILImage  # noqa: E402
 
 from agentenv_protocol.computer import (  # noqa: E402
@@ -348,7 +348,7 @@ async def test_a_failure_after_part_of_a_call_was_delivered_is_applied_unknown()
 async def test_a_driver_mounted_on_an_app_serves_the_same_tools():
     driver = MinimalDriver()
     app = driver.mount(FastMCP("mounted"))
-    async with create_connected_server_and_client_session(app) as session:
+    async with memory_session(app) as session:
         tools = {t.name: t for t in (await session.list_tools()).tools}
         refused = await session.call_tool("computer_click", {})
     assert "required" not in tools["computer_click"].inputSchema and "computer_pointer_move" not in tools

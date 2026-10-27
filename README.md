@@ -36,6 +36,8 @@ A plain install runs on local stores and needs no cloud SDK. The cloud store bac
 
 The distribution is named `agentenv-framework`, the import package is `agent_env` and the command is `agent-env`. It depends on `agentenv-framework-protocol`, whose import package is `agentenv_protocol`, and installs it too.
 
+agent-env runs on `mcp` 1 or 2, so it installs beside a trainer on vLLM 0.30 or later, which needs mcp 2; the `openenv` extra holds it to mcp 1 until OpenEnv moves to FastMCP 4. A verifier script that opens its own MCP session runs in agent-env's process, so it should open it with `agentenv_protocol.mcp_compat.client_session(mcp_url)` and read results with `mcp_compat.field(result, "isError")`, which work on both, as the bundled examples' verifiers do.
+
 To work on agent-env itself, install from a clone with [uv](https://docs.astral.sh/uv/):
 
 ```bash

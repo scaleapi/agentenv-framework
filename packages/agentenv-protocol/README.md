@@ -144,7 +144,7 @@ and `ctx.call_id` describe the call. Code that runs on behalf
 of the call without a parameter of its own, such as a database method, reads the same object through
 `ToolContext.current()`, which returns an empty context outside any call. The binding is per call
 and follows the request's task, so concurrent callers never see each other's context. It is made
-at FastMCP's own tool dispatch, for which `mcp` 1.x offers no public hook, and the mount refuses an
+at the server's own tool dispatch, for which `mcp` offers no public hook, and the mount refuses an
 app without one, so a server that mounted is a server whose tool calls are bound.
 
 To answer a call before the tool runs, override `on_tool_call(self, context)`: return `None` to let
@@ -156,7 +156,16 @@ handler directly or a seeding script, binds a context it builds:
 
 ## Serving
 
-`serve()` builds the FastMCP app via `create_fastmcp_app()`, which encodes the agent-env deploy
+The SDK runs on `mcp` 1 and `mcp` 2. On mcp 1 the app is a `FastMCP`; on mcp 2, which renamed it
+`MCPServer` and takes the serving settings (path, host, port, transport security) at
+`streamable_http_app()` and `run()` rather than at construction, it is an `MCPServer` that keeps those
+settings for them. `agentenv_protocol.mcp_compat.server(name, **settings)` builds either from mcp 1's
+FastMCP settings. Code that talks to an MCP server works on both through the same module:
+`client_session(url, headers=..., timeout=...)` opens an initialized `ClientSession` (mcp 2's client
+takes an `httpx2` client and yields two streams, where mcp 1's took `httpx` and yielded three), and
+`field(result, "isError")` reads an mcp type's field, which mcp 2 spells in snake case.
+
+`serve()` builds the app via `create_fastmcp_app()`, which encodes the agent-env deploy
 contract once — the name resolution order (`ENVIRONMENT_NAME`, which agent-env sets to the env's
 registered name, then `@environment_card`'s name, then the class name; `SERVICE_NAME` is no
 longer consulted), `MCP_HOST`/`MCP_PORT`
@@ -238,7 +247,7 @@ paths (`POST /tools/disable`, `POST /tools/enable`) with its bodies (`{role, too
 `modify_env_tool_access` step works on such an env unchanged. A call with no role is `default`, as
 at the gateway.
 
-Where the binding lives depends on the app. On mcp's own FastMCP it wraps the tool manager's dispatch; on the standalone `fastmcp` package it joins the app's middleware chain as the outermost layer, so a handler's own middleware runs under it too. An app with neither seam mounts unbound, with a warning, unless a tool declares a `ToolContext` parameter or the handler defines `on_tool_call`: then the mount is refused rather than serving an empty caller.
+Where the binding lives depends on the app. On mcp's own server (FastMCP or MCPServer) it wraps the tool manager's dispatch, and on mcp 2 a role's `tools/list` is filtered in the server's middleware, as mcp 2 has no request context outside a handler; on the standalone `fastmcp` package it joins the app's middleware chain as the outermost layer, so a handler's own middleware runs under it too. An app with neither seam mounts unbound, with a warning, unless a tool declares a `ToolContext` parameter or the handler defines `on_tool_call`: then the mount is refused rather than serving an empty caller.
 
 ### Uploading an export through a grant
 

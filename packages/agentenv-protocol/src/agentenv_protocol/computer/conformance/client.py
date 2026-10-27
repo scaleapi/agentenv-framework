@@ -11,11 +11,11 @@ from typing import Any
 
 import httpx
 from mcp import ClientSession
-from mcp.client.streamable_http import streamable_http_client
 from mcp.types import CallToolResult
 from PIL import Image as PILImage
 
 from ... import client as protocol
+from ...mcp_compat import client_session
 from ...tool_context import ROLE_HEADER
 from ..card import COMPUTER_EXEC
 
@@ -49,13 +49,9 @@ class Driver:
 
     @contextlib.asynccontextmanager
     async def session(self, role: str | None = None) -> AsyncIterator[ClientSession]:
-        headers = {ROLE_HEADER: role} if role else {}
-        timeout = httpx.Timeout(self.timeout_s, read=max(self.timeout_s, STREAM_READ_S))
-        async with httpx.AsyncClient(headers=headers, timeout=timeout) as http:
-            async with streamable_http_client(self.url + protocol.mcp_path(self.card), http_client=http) as streams:
-                async with ClientSession(streams[0], streams[1]) as session:
-                    await session.initialize()
-                    yield session
+        async with client_session(self.url + protocol.mcp_path(self.card), headers={ROLE_HEADER: role} if role else None,
+                                  timeout=self.timeout_s, read_timeout=max(self.timeout_s, STREAM_READ_S)) as session:
+            yield session
 
     async def invoke(self, uri: str, method: str, params: dict | None = None) -> Any:
         return await protocol.invoke_extension(self.url, self.card, uri, params or {}, method=method,

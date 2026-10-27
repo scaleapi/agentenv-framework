@@ -8,10 +8,10 @@ import anyio
 import httpx
 import pytest
 
-pytest.importorskip("mcp.server.fastmcp")
+pytest.importorskip("mcp")
 fastmcp = pytest.importorskip("fastmcp")
 
-from mcp.shared.memory import create_connected_server_and_client_session  # noqa: E402
+from mcp_versions import memory_session  # noqa: E402
 
 from agentenv_protocol import (  # noqa: E402
     AgentEnvEnvironment,
@@ -103,7 +103,7 @@ async def test_invalid_params_never_ran_so_applied_is_no():
 async def test_a_tool_error_is_an_error_result_with_structured_fields_on_mcps_fastmcp():
     env = _Env()
     with anyio.fail_after(30):
-        async with create_connected_server_and_client_session(env.create_app()) as session:
+        async with memory_session(env.create_app()) as session:
             refused = await session.call_tool("click", {"x": 140})
             served = await session.call_tool("click", {"x": 4})
             crashed = await session.call_tool("crash", {})

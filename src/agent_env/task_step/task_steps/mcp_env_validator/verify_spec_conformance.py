@@ -23,8 +23,7 @@ from typing import Any, ClassVar, Optional
 
 import httpx
 import yaml
-from mcp import ClientSession
-from mcp.client.streamable_http import streamable_http_client
+from agentenv_protocol.mcp_compat import client_session, field
 
 from agent_env.env import legacy_protocol
 from agent_env.task_step.context import TaskStepContext
@@ -263,7 +262,7 @@ def diff_conformance(
     spec_params = normalize_spec_params(spec)
     spec_ops, spec_collisions = _index_by_normalized(list(spec_params.items()), service_name)
     live, live_collisions = _index_by_normalized(
-        [(t.name, normalize_tool_params(t.inputSchema or {})) for t in tools],
+        [(t.name, normalize_tool_params(field(t, "inputSchema") or {})) for t in tools],
         service_name,
     )
 
@@ -436,14 +435,8 @@ class VerifySpecConformanceTaskStep(TaskStep):
         #    slow gateway can't trip httpx's short default and block the gate.
         mcp_url = deployed.mcp_url
         logger.info(f"Connecting to MCP at {mcp_url} to read live tools")
-        http_client = httpx.AsyncClient(timeout=_HTTP_TIMEOUT_S)
-        try:
-            async with streamable_http_client(mcp_url, http_client=http_client) as (read_stream, write_stream, _):
-                async with ClientSession(read_stream, write_stream) as session:
-                    await session.initialize()
-                    tools_result = await session.list_tools()
-        finally:
-            await http_client.aclose()
+        async with client_session(mcp_url, timeout=_HTTP_TIMEOUT_S) as session:
+            tools_result = await session.list_tools()
         tools = tools_result.tools
 
         # 3. Diff. Without the tool-name prefix every tool reads as both missing and extra.

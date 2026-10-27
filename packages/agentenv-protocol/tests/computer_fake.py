@@ -7,7 +7,7 @@ import asyncio
 import contextlib
 
 import httpx
-from mcp.shared.memory import create_connected_server_and_client_session
+from mcp_versions import memory_session
 from PIL import Image as PILImage
 
 from agentenv_protocol.computer import (
@@ -202,7 +202,7 @@ class MinimalDriver(ComputerDriverEnvironment):
 @contextlib.asynccontextmanager
 async def mcp_session(driver: ComputerDriverEnvironment):
     """An MCP client session on the driver's app, in memory."""
-    async with create_connected_server_and_client_session(driver.mcp or driver.create_app()) as session:
+    async with memory_session(driver.mcp or driver.create_app()) as session:
         yield session
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-pytest.importorskip("mcp.server.fastmcp")
+pytest.importorskip("mcp")
 pytest.importorskip("PIL")
 fastmcp = pytest.importorskip("fastmcp")
 

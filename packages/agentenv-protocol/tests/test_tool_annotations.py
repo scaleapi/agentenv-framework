@@ -8,10 +8,10 @@ import httpx
 import pytest
 from pydantic import BaseModel
 
-pytest.importorskip("mcp.server.fastmcp")
+pytest.importorskip("mcp")
 fastmcp = pytest.importorskip("fastmcp")
 
-from mcp.shared.memory import create_connected_server_and_client_session  # noqa: E402
+from mcp_versions import memory_session  # noqa: E402
 from mcp.types import CallToolResult, ImageContent, TextContent  # noqa: E402
 
 from agentenv_protocol import (  # noqa: E402
@@ -54,7 +54,7 @@ class _Env(AgentEnvEnvironment):
 
 async def _mcp_tools(env: AgentEnvEnvironment) -> dict:
     with anyio.fail_after(30):
-        async with create_connected_server_and_client_session(env.create_app()) as session:
+        async with memory_session(env.create_app()) as session:
             return {t.name: t for t in (await session.list_tools()).tools}
 
 
@@ -73,7 +73,7 @@ async def test_annotations_meta_and_output_schemas_are_listed_on_mcps_fastmcp():
 @pytest.mark.asyncio
 async def test_structured_results_reach_the_caller_with_their_content_blocks():
     with anyio.fail_after(30):
-        async with create_connected_server_and_client_session(_Env().create_app()) as session:
+        async with memory_session(_Env().create_app()) as session:
             look = await session.call_tool("look", {})
             shot = await session.call_tool("shot", {})
     assert look.structuredContent == {"frame_id": "f1", "width": 1280}
@@ -173,7 +173,7 @@ async def test_update_tool_rewrites_a_description_on_the_card_and_in_tools_list_
     app = env.create_app()
     await env.update_tool("look", description="Look again.")
     with anyio.fail_after(30):
-        async with create_connected_server_and_client_session(app) as session:
+        async with memory_session(app) as session:
             tools = {t.name: t for t in (await session.list_tools()).tools}
             look = await session.call_tool("look", {})
     card = await _card_tools(app.streamable_http_app())

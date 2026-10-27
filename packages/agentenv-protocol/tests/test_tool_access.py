@@ -8,12 +8,11 @@ import anyio
 import httpx
 import pytest
 
-pytest.importorskip("mcp.server.fastmcp")
+pytest.importorskip("mcp")
 fastmcp = pytest.importorskip("fastmcp")
 
-from mcp import ClientSession  # noqa: E402
-from mcp.client import streamable_http as _streamable_http  # noqa: E402
-from mcp.server.fastmcp import FastMCP  # noqa: E402
+from mcp_versions import BASE as _BASE  # noqa: E402
+from mcp_versions import FastMCP, http_session  # noqa: E402
 
 from agentenv_protocol import (  # noqa: E402
     ROLE_HEADER,
@@ -26,10 +25,6 @@ from agentenv_protocol import (  # noqa: E402
 )
 from agentenv_protocol.tool_access import DISABLE_TOOL_EXTENSION_URI, ENABLE_TOOL_EXTENSION_URI, ToolAccess  # noqa: E402
 
-pytestmark = pytest.mark.skipif(not hasattr(_streamable_http, "streamable_http_client"),
-                                reason="mcp without streamable_http_client")
-
-_BASE = "http://127.0.0.1:8000"
 
 
 @environment_card(name="desk")
@@ -58,12 +53,8 @@ async def _served():
 
     @contextlib.asynccontextmanager
     async def session(role: str | None = None):
-        headers = {ROLE_HEADER: role} if role else {}
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=asgi), base_url=_BASE, headers=headers) as http:
-            async with _streamable_http.streamable_http_client(f"{_BASE}/mcp", http_client=http) as (read, write, _):
-                async with ClientSession(read, write) as s:
-                    await s.initialize()
-                    yield s
+        async with http_session(asgi, headers={ROLE_HEADER: role} if role else {}) as (s, _):
+            yield s
 
     async with app.session_manager.run():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=asgi), base_url=_BASE) as rest:
@@ -159,13 +150,9 @@ async def test_roles_are_honoured_on_fastmcp_too():
         async with asgi.router.lifespan_context(asgi):
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=asgi), base_url=_BASE) as rest:
                 await rest.post("/tools/disable", json={"role": "agent", "tools": ["write"]})
-            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=asgi), base_url=_BASE,
-                                         headers={ROLE_HEADER: "agent"}) as http:
-                async with _streamable_http.streamable_http_client(f"{_BASE}/mcp", http_client=http) as (read, write, _):
-                    async with ClientSession(read, write) as session:
-                        await session.initialize()
-                        tools = await _names(session)
-                        refused = await session.call_tool("write", {})
+            async with http_session(asgi, headers={ROLE_HEADER: "agent"}) as (session, _):
+                tools = await _names(session)
+                refused = await session.call_tool("write", {})
     assert tools == ["read"]
     assert refused.isError and refused.structuredContent["code"] == "permission_denied"
 

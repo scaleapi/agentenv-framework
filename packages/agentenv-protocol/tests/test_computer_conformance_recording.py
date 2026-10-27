@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-pytest.importorskip("mcp.server.fastmcp")
+pytest.importorskip("mcp")
 pytest.importorskip("PIL")
 pytest.importorskip("av")
 
