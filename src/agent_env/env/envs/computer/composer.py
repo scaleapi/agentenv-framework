@@ -129,7 +129,10 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
             return {"status": "unverified", "key": key, "image": pin_digest(ref, store.auth(ref)), "reused": False,
                     "emulated": emulated, "installed": installed, "built_at": _now()}
     except DockerBuildError as e:
-        return _failed(env, form, arch, stage, key, "the build failed", log=str(e))
+        # Docker can list a platform it has lost the emulation for, until it restarts; the build says so.
+        unemulated = "exec format error" in str(e)
+        return _failed(env, form, arch, stage, key, f"this machine can't run linux/{arch} programs: its Docker has no "
+                       "emulation for it" if unemulated else "the build failed", log=str(e))
     except subprocess.CalledProcessError as e:
         return _failed(env, form, arch, stage, key, f"{' '.join(e.cmd[:2])} failed: {(e.stderr or '').strip()}")
     except (RuntimeError, ValueError, OSError) as e:

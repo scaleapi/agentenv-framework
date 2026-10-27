@@ -215,6 +215,15 @@ def test_a_machine_that_cant_emulate_the_other_arch_fails_that_arch_alone(base, 
     assert [build["platform"] for build in docker.builds] == ["linux/arm64"]
 
 
+def test_a_build_that_cant_run_the_other_archs_programs_says_its_emulation_is_missing(base, driver, docker):
+    docker.fail["linux/amd64"] = "#6 0.01 exec /bin/sh: exec format error\n#6 ERROR: process did not complete successfully"
+
+    amd64 = Env.get(_put(base, driver).id).metadata["composed"]["container"]["amd64"]
+
+    assert amd64["reason"].startswith("this machine can't run linux/amd64 programs: its Docker has no emulation for it:")
+    assert amd64["log"]
+
+
 def test_a_base_built_from_its_context_is_built_here_for_each_arch_and_keyed_by_its_sources(driver, docker,
                                                                                             monkeypatch):
     image = get_artifact_store().put_document(DockerImageArtifact(
