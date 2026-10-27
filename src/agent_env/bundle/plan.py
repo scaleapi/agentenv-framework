@@ -531,9 +531,12 @@ class _Planner:
                     dict(self.origins), self._published(writes), aliases, override, dict(self.env_alias_uses))
 
     def check(self) -> None:
+        """The checks a run makes before it reads a store. A bundle with nothing to run passes only when its
+        aliases.toml gives what it holds aliases: other bundles pull from it, as from a library."""
         self._check_writers()
         self._check_loops()
-        if not any(entry.entry.kind in (BundleKind.TASK, BundleKind.EVAL) for entry in self.entries):
+        runs = any(entry.entry.kind in (BundleKind.TASK, BundleKind.EVAL) for entry in self.entries)
+        if not runs and not any(self.resolved.bundle.aliases.values()):
             self.problems.append(_NOTHING_TO_RUN)
         everything = set(self.nodes)
         self._check_store_refs(everything, stores=False)

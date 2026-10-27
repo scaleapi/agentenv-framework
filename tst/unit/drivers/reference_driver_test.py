@@ -1,24 +1,24 @@
-"""The X11 example driver against fake mss and Xlib modules: it passes the definition checks, serves the whole
-computer contract, and turns tool calls into the XTEST events they mean, without resending input, leaving keys or
-buttons down, or letting go of keys it didn't press."""
+"""The reference driver against fake mss and Xlib modules: it passes the definition checks, serves the whole computer
+contract, and turns tool calls into the XTEST events they mean, without resending input, leaving keys or buttons down,
+or letting go of keys it didn't press."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.util
 import sys
 import types
 from pathlib import Path
 
+import httpx
 import pytest
+from mcp.shared.memory import create_connected_server_and_client_session
 
-pytest.importorskip("mcp.server.fastmcp")
-pytest.importorskip("PIL")
+import agent_env
+from agentenv_protocol.computer import COMPUTER_EXEC, COMPUTER_KEYBOARD, COMPUTER_POINTER, Platform
 
-from computer_fake import LINUX, http_client, mcp_session  # noqa: E402
-
-from agentenv_protocol.computer import COMPUTER_EXEC, COMPUTER_KEYBOARD, COMPUTER_POINTER  # noqa: E402
-
-DRIVER = Path(__file__).resolve().parents[1] / "examples" / "computer_x11" / "driver.py"
+DRIVER = Path(agent_env.__file__).parent / "drivers" / "envs" / "reference" / "driver.py"
+LINUX = Platform(os="linux", distribution="ubuntu", version="24.04", arch="amd64", display="x11")
 WIDTH, HEIGHT = 640, 400
 TOKYO = [0x01000000 | ord(ch) for ch in "東京"]
 #: The fake keymap puts the named keys, such as Shift_L, from this keycode up; printable ASCII is its keysym + 8.
@@ -133,10 +133,23 @@ def x11(monkeypatch):
     monkeypatch.setattr("agentenv_protocol.computer.driver.detect", lambda: LINUX)
     monkeypatch.delenv("ENVIRONMENT_NAME", raising=False)
     monkeypatch.delenv("AGENTENV_COMPUTER_SETTINGS", raising=False)
-    spec = importlib.util.spec_from_file_location("computer_x11_driver", DRIVER)
+    spec = importlib.util.spec_from_file_location("reference_driver", DRIVER)
     example = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(example)
-    return example.X11Driver(), fake, lambda name: fake.keysym_to_keycode(XK.string_to_keysym(name))
+    return example.ReferenceDriver(), fake, lambda name: fake.keysym_to_keycode(XK.string_to_keysym(name))
+
+
+@contextlib.asynccontextmanager
+async def mcp_session(driver):
+    async with create_connected_server_and_client_session(driver.mcp or driver.create_app()) as session:
+        yield session
+
+
+@contextlib.asynccontextmanager
+async def http_client(driver):
+    app = (driver.mcp or driver.create_app()).streamable_http_app()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
+        yield client
 
 
 async def _events(fake: FakeX, session, tool: str, args: dict) -> list:
@@ -154,7 +167,7 @@ async def test_the_example_serves_the_whole_computer_contract(x11):
         tools = {t.name for t in (await session.list_tools()).tools}
         ready = (await http.get("/agentenv/ext/computer-ready/status")).json()
     extensions = {e["uri"]: e for e in card["capabilities"]["extensions"]}
-    assert card["name"] == "x11-desktop" and len(tools) == 14 and "computer_keyboard_down" in tools
+    assert card["name"] == "reference" and len(tools) == 14 and "computer_keyboard_down" in tools
     assert {COMPUTER_POINTER, COMPUTER_KEYBOARD, COMPUTER_EXEC} <= set(extensions)
     assert extensions["urn:agentenv:computer/v1"]["params"]["max_click_count"] == 3
     assert ready["ready"] and [c["name"] for c in ready["checks"]] == ["display", "capture", "xtest"]

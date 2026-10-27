@@ -7,7 +7,11 @@ import json
 import pytest
 
 from agent_env.bundle import BundleError
+from agent_env.bundle.installed import installed_bundles
 from agent_env.bundle.materialize import materialize
+from agent_env.bundle.plan import plan_bundle
+from agent_env.bundle.resolve import resolve_bundle
+from agent_env.bundle import parse_bundle
 from agent_env.env import Env
 from agent_env.env.envs.computer_driver import ComputerDriverEnv
 from tst.unit.bundle._support import layout, plan_of
@@ -131,3 +135,17 @@ async def test_a_driver_env_doesnt_deploy_until_there_is_a_computer_to_deploy_it
     with pytest.raises(NotImplementedError, match="deploys inside a computer, and agent-env can't create a computer"):
         await Env.get(f"{ROOT}/desk").deploy()
 
+
+def test_a_run_naming_the_reference_driver_writes_the_shipped_one(tmp_path, monkeypatch, local_stores, cli_routing):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    layout(tmp_path / "uses", {"tasks/t.json": json.dumps([
+        {"id": "agent", "type": "deploy_agent", "env_ids": ["reference"]}])})
+    plan = plan_bundle(resolve_bundle(parse_bundle(tmp_path / "uses")), installed=installed_bundles)
+
+    written = {done.write.id for done in materialize(plan).writes}
+    env = Env.get("@local/agentenv-framework/drivers/reference")
+
+    assert "@local/agentenv-framework/drivers/reference" in written
+    assert env.declaration["name"] == "reference" and len(env.declaration["platforms"]) == 2
+    assert {"urn:agentenv:computer-pointer/v1", "urn:agentenv:computer-keyboard/v1",
+            "urn:agentenv:computer-exec/v1"} <= set(env.declaration["platforms"][0]["provides"])

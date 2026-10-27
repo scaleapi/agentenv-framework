@@ -319,8 +319,8 @@ one as a `ComputerDriverEnvironment` subclass from `agentenv_protocol.computer`,
 `computer` extra (`pip install 'agentenv-framework-protocol[computer]'`: mcp, uvicorn and Pillow).
 The driver marks the methods that capture the screen and send input; the base class serves the
 computer contract from them, so the tools, results and errors can't drift from it. A complete
-driver for an X11 desktop, with an image to run it in, is in
-[`examples/computer_x11/`](https://github.com/scaleapi/agentenv-framework/tree/main/packages/agentenv-protocol/examples/computer_x11).
+driver for an X11 desktop is agent-env's reference driver, in its
+[`drivers` bundle](https://github.com/scaleapi/agentenv-framework/tree/main/src/agent_env/drivers).
 
 ```python
 from agentenv_protocol.computer import (

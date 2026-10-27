@@ -1,6 +1,7 @@
-"""An X11 computer driver: mss captures the screen and XTEST, through python-xlib, sends the input. X calls run off the
-event loop, one at a time, on a connection checked before each call and reopened when it drops, so the driver outlives
-a restarted X server."""
+"""The reference computer driver, for an X11 desktop: mss captures the screen and XTEST, through python-xlib, sends the
+input. X calls run off the event loop, one at a time, on a connection checked before each call and reopened when it
+drops, so the driver outlives a restarted X server. It needs ``agentenv-framework-protocol[computer]``, ``mss`` and
+``python-xlib`` where it runs."""
 from __future__ import annotations
 
 import asyncio
@@ -59,9 +60,9 @@ DRAG_STEP_PX = 20
 DROPPED = (ConnectionClosedError, DisplayConnectionError, OSError)
 
 
-@computer_driver(name="x11-desktop",
+@computer_driver(name="reference",
                  supports=[{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}])
-class X11Driver(ComputerDriverEnvironment):
+class ReferenceDriver(ComputerDriverEnvironment):
     buttons = ("left", "right", "middle", "back", "forward")
     max_click_count = 3
     max_drag_points = 50
@@ -371,4 +372,4 @@ def _keysym(key: str) -> int:
 
 
 if __name__ == "__main__":
-    X11Driver().serve()
+    ReferenceDriver().serve()

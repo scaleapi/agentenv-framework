@@ -113,6 +113,7 @@ agent-env = "agent_env.cli:cli"
 
 [project.entry-points."agent_env.bundles"]
 agents = "agent_env"
+drivers = "agent_env"
 hello = "agent_env.examples"
 echo-mcp = "agent_env.examples"
 mail-mcp = "agent_env.examples"
