@@ -37,7 +37,7 @@ from agent_env.env.envs._deployment import provider_refusal
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.website import WebsiteEnv
-from agent_env.env.published_images import published_agent_image
+from agent_env.env.published_images import published_bundle_image
 from agent_env.env.registry import get_env_registry
 from agent_env.env.store import ENVS_COLLECTION, get_env_store
 from agent_env.plugins._bundles import ENV_ALIASES, InstalledAliases, installed_aliases
@@ -1039,19 +1039,19 @@ class _Planner:
         return tuple(writes)
 
     def _published(self, writes: Sequence[Write]) -> dict[str, Publication]:
-        """The published image of each agent image in ``writes`` built from a shipped agent's sources, by id. Only an
-        agent's are looked up, as agent-env publishes no other kind of bundle image."""
+        """The published image of each image in ``writes`` built from the sources of a shipped bundle image, an agent's
+        or an example env's, by id."""
         published = {}
         for write in writes:
             image = write.source
-            if not (isinstance(image, BuiltImage) and image.entry.kind is BundleKind.AGENT):
+            if not isinstance(image, BuiltImage):
                 continue
             with staged_build_context(self._bundle_of(image.entry), image.entry, image.dockerfile) as staged:
                 try:
                     sources, _ = staged.identity(write.id)
                 except ValueError:  # a context its write refuses, which says why
                     continue
-            if (found := published_agent_image(sources)) is not None:
+            if (found := published_bundle_image(sources)) is not None:
                 published[write.id] = Publication(*found, sources)
         return published
 

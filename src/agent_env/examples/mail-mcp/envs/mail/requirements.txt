@@ -1,3 +1,5 @@
-# A release pins agentenv-framework-protocol to the version it was released with.
-agentenv-framework-protocol
+# The image installs the newest agentenv-framework-protocol at or above this floor; a release publishes the image and
+# doesn't pin it, so it is built again only when this folder changes. Raise the floor when the server needs a newer
+# protocol.
+agentenv-framework-protocol>=0.1.372
 mcp>=1.25,<2
