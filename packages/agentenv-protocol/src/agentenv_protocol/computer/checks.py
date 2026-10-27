@@ -5,6 +5,7 @@ from __future__ import annotations
 from ..errors import AgentEnvError
 from .keys import canonical
 from .operations import declared
+from .recording import check_recording
 
 BUTTONS = ("left", "right", "middle", "back", "forward")
 
@@ -38,5 +39,8 @@ def check_features(cls: type) -> None:
             problems.append(f"keys: {e.message}")
     if ("set_display" in declared(cls)) != bool(cls.display_modes):
         problems.append("display_modes and @set_display come together")
+    problems += check_recording(cls.recording)
+    if "record" in declared(cls) and cls.recording is None:
+        problems.append("@record needs recording, which recording = None turns off")
     if problems:
         raise TypeError(f"{cls.__qualname__}: " + "; ".join(problems))

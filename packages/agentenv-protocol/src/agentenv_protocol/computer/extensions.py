@@ -1,5 +1,5 @@
-"""The framework extensions agentenv calls, never agents: readiness, display, coordinate spaces, keyboard settings
-and commands in the session."""
+"""The framework extensions agentenv calls, never agents: readiness, display, coordinate spaces, keyboard settings,
+commands in the session and recordings."""
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Callable, Optional
@@ -11,6 +11,7 @@ from .card import (
     COMPUTER_EXEC,
     COMPUTER_KEYBOARD,
     COMPUTER_READY,
+    COMPUTER_RECORDING,
     COMPUTER_SPACES,
     KEYBOARD_RANGES,
     MAX_EXEC_TIMEOUT_S,
@@ -110,6 +111,19 @@ class Extensions:
             raise InvalidArgument(f"timeout_s is above 0 and at most {MAX_EXEC_TIMEOUT_S}, got {timeout}")
         cap = self.settings.exec_output_bytes
         return await self._computer.command(request_id, lambda: _run(self._computer, cap, argv, cwd, env, timeout))
+
+    @extension(COMPUTER_RECORDING, op="start",
+               description="Record the display: start returns a recording whose segments upload through its grant as "
+                           "they close, and end seals it and returns its manifest; repeats answer the same.")
+    async def _computer_recording_start(self, request_id: str, scope: str = "display", window: Optional[str] = None,
+                                        fps: Optional[int] = None, max_edge: Optional[int] = None, cursor: bool = True,
+                                        upload: Optional[dict] = None) -> dict:
+        return await self._computer.recordings.start(request_id, scope, window, fps, max_edge, cursor, upload)
+
+    @extension(COMPUTER_RECORDING, op="end")
+    async def _computer_recording_end(self, recording_id: str, upload: Optional[dict] = None,
+                                      reason: str = "end") -> dict:
+        return await self._computer.recordings.end(recording_id, upload, reason)
 
 
 async def _run(computer: ComputerRuntime, cap: int, argv: list, cwd: Optional[str], env: Optional[dict],

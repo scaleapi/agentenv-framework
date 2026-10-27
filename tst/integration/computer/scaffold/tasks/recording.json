@@ -1,0 +1,8 @@
+[
+  {"id": "env", "type": "deploy_env", "env_id": "desktop", "sandbox_type": "local"},
+  {"id": "record", "type": "start_computer_recording", "env_id": "desktop", "name": "desk", "fps": 10,
+   "depends_on": ["env"]},
+  {"id": "drive", "type": "env_outcome_verifier", "env_id": "desktop", "file_artifact_id": "drive_desk",
+   "verifier_id": "drive", "depends_on": ["record"]},
+  {"id": "end", "type": "end_computer_recording", "name": "desk", "depends_on": ["drive"]}
+]

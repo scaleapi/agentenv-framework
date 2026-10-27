@@ -1,6 +1,6 @@
 """``build_app`` over bundle folders, served in process: the splits it serves and the tasks it leaves out, the reward
-and bundles it refuses, an episode played over OpenEnv's own WebSocket, and namespace routing for each of the app's
-runs."""
+and bundles it refuses, an episode played over OpenEnv's own WebSocket after a step before reset is refused, and
+namespace routing for each of the app's runs."""
 
 import json
 import logging
@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from agent_env.bundle import BundleError
 from agent_env.openenv import build_app
+from agent_env.openenv.environment import NOT_RESET
 from agent_env.store.routing import namespace_routing, namespace_routing_enabled
 from agent_env.task import Task
 from tst.unit.bundle._support import layout
@@ -74,6 +75,8 @@ def test_an_episode_is_played_over_openenvs_websocket_and_the_session_closing_te
     with TestClient(app) as client:
         assert namespace_routing_enabled()
         with client.websocket_connect("/ws") as ws:
+            ws.send_json({"type": "step", "data": {"type": "list_tools"}})
+            refused = ws.receive_json()
             ws.send_json({"type": "reset", "data": {"split": "all", "index": 0}})
             reset = ws.receive_json()["data"]
             ws.send_json({"type": "step", "data": {"type": "call_tool", "tool_name": "end_turn",
@@ -84,6 +87,7 @@ def test_an_episode_is_played_over_openenvs_websocket_and_the_session_closing_te
             ws.send_json({"type": "state"})
             open_episode = ws.receive_json()["data"]["episode_id"]
 
+    assert (refused["type"], refused["data"]["message"]) == ("error", NOT_RESET)
     assert reset["observation"]["metadata"]["prompt"] == "Add a crate."
     assert (ended["done"], ended["reward"]) == (True, 1.0)
     assert not namespace_routing_enabled()

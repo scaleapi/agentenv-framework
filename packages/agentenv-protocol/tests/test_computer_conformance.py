@@ -39,6 +39,7 @@ from agentenv_protocol.tool_access import DISABLE_TOOL_EXTENSION_URI  # noqa: E4
 @pytest.fixture(autouse=True)
 def home(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(checks, "RECORD_S", 0.8)
     return tmp_path
 
 
@@ -61,11 +62,12 @@ async def test_the_fake_driver_passes_every_check_at_full_and_cleans_up(home):
     report = await _probe(driver)
     assert report.passed, _failed(report)
     assert report.driver == "FixtureDriver" and report.level == "full"
-    assert set(report.extensions.values()) == {"verified"} and len(report.extensions) == 11
+    assert set(report.extensions.values()) == {"verified"} and len(report.extensions) == 12
     counts = report.counts()
     assert counts["failed"] == counts["unverified"] == 0 and counts["not_applicable"] == 1
     assert {c.check for c in report.checks} == {f"P{n}" for n in range(10)} | {"X"}
-    assert not (home / ".agentenv-probe").exists() and ["kill", "4242"] in driver.commands
+    assert not (home / ".agentenv-probe").exists() and not (home / ".agentenv-recordings").exists()
+    assert ["kill", "4242"] in driver.commands
 
 
 @pytest.mark.asyncio

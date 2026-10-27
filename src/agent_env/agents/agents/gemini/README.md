@@ -20,7 +20,8 @@ different roles or system prompts running at once share none:
   workspace.
 
 The CLI's model calls go to a proxy in the agent, `/litellm-gemini/<run>/...`, which adds `[model.headers]`
-(`LITELLM_EXTRA_HEADERS`), then the run's `project_id` and `task_id` as `x-litellm-customer-id` and `x-litellm-tags`,
+(`LITELLM_EXTRA_HEADERS`), then the run's `project_id` and `task_id` as `x-litellm-customer-id` and `x-litellm-tags`
+(the run's tags join an `x-litellm-tags` that `[model.headers]` names, whose own keys, such as `taskId`, win),
 and forwards to `$LITELLM_BASE_URL/gemini/...`, with TLS checks on. A model named with a provider prefix, such as `vertex_ai/global/gemini-3.1-pro-preview`, is handed to the
 CLI by its last segment, and the proxy translates its generate calls to `/v1/chat/completions` and back.
 
