@@ -8,12 +8,13 @@ and each task and eval is written naming the version of each entity it reference
 changes meaning. Each image the bundle builds is built here for linux/amd64 and pushed to the configured image store
 under a tag of its sources, with its build context beside it; one published for its sources is registered as published.
 
-Nothing is written when any problem is found before the first write: an id the rules can't give, two writes given one
-id, an id the store holds that this bundle didn't register (unless adopted), an ``@local`` id left in what would be
-written, a store reference the store doesn't hold, or, for a store that isn't this machine's, a credential written out
-or a URL that only reaches this machine. A dry run checks the same and writes, builds and pushes nothing. Each write
-goes through a ledger kept in the target store, so registering again writes only what changed. Two registrations
-racing for one id can't both write a version of it: the loser fails, and running it again reuses what the winner wrote.
+Nothing is written when any problem is found before the first write: an id the rules can't give, two writes to one store
+given one id, an id the store holds that this bundle didn't register (unless adopted), an ``@local`` id left in what
+would be written, a store reference the store doesn't hold, or, for a store that isn't this machine's, a credential
+written out or a URL that only reaches this machine. A dry run checks the same and writes, builds and pushes nothing.
+Each write goes through a ledger kept in the target store, so registering again writes only what changed. Two
+registrations racing for one id can't both write a version of it: the loser fails, and running it again reuses what the
+winner wrote.
 """
 
 from __future__ import annotations
@@ -52,6 +53,7 @@ REGISTRATIONS = "bundle_registrations"
 _REGISTRY_ID = re.compile(r"[a-z0-9][a-z0-9._-]*")
 _NOT_IN_ID = re.compile(r"[^a-z0-9._-]+")
 _URL = re.compile(r"\b(?:file:///?[^\s\"']*|[a-z][a-z0-9+.-]*://[^\s/\"']+)", re.IGNORECASE)
+_GIT_TIMEOUT_SECONDS = 10
 
 
 @dataclass(frozen=True)
@@ -176,12 +178,19 @@ def registry_ids(plan: Plan, prefix: str) -> tuple[dict[str, str], list[str]]:
             for output in source.outputs:
                 name = _slug(output.id.removeprefix(f"{source.entry.id}/").rsplit("/", 1)[-1])
                 ids[output.id] = f"{ids[source.entry.id]}-{name}"
-    by_target: dict[str, list[str]] = {}
+    stores: dict[str, set[str]] = {}
+    for write in plan.writes:
+        stores.setdefault(write.id, set()).add(write.kind.store)
+        if isinstance(write.source, ResolvedEntry):
+            for output in write.source.outputs:
+                stores.setdefault(output.id, set()).add(BundleKind.ARTIFACT.store)
+    by_target: dict[tuple[str, str], list[str]] = {}
     for local, registry_id in ids.items():
-        by_target.setdefault(registry_id, []).append(local)
+        for store in stores.get(local, ()):
+            by_target.setdefault((store, registry_id), []).append(local)
         if not _REGISTRY_ID.fullmatch(registry_id.replace("__", "_")):
             problems.append(f"{registry_id!r}: isn't an id a registry takes; rename what it's made from")
-    for registry_id, locals_ in by_target.items():
+    for (_, registry_id), locals_ in by_target.items():
         if len(locals_) > 1:
             problems.append(f"{', '.join(sorted(locals_))} would all be registered as {registry_id!r}; rename one")
     return ids, problems
@@ -343,7 +352,8 @@ def bundle_identity(root: Path) -> tuple[str, str | None, bool | None]:
 
 def _git(root: Path, *args: str) -> str | None:
     try:
-        result = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, timeout=10)
+        result = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True,
+                                timeout=_GIT_TIMEOUT_SECONDS)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return result.stdout.strip() if result.returncode == 0 else None
