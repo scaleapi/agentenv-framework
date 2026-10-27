@@ -160,8 +160,13 @@ class Ledger:
                    "digest": check.digest.value if check.digest else None,
                    "inputs": check.digest.inputs if check.digest else None, "at": _now(), **self.row_fields()}
         self._store.insert(self.collection, pending)
-        with expecting_version(check.write.id, check.next_version) if self.strict else nullcontext():
-            version = write()
+        try:
+            with expecting_version(check.write.id, check.next_version) if self.strict else nullcontext():
+                version = write()
+        except Exception:
+            # It wrote no version this run knows of, so the row marks nothing for the next run to keep.
+            self._store.delete(self.collection, Filter.of(**key, status="pending"))
+            raise
         # Stamped before the check below, which can take seconds, so a run interrupted during it leaves the version
         # this attempt wrote, and the next run keeps it rather than writing it again.
         self._store.replace(self.collection, Filter.of(**key, status="pending"), {**pending, "version": version})

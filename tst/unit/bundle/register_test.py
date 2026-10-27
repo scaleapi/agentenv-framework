@@ -445,3 +445,14 @@ def test_an_installed_env_a_task_names_by_its_alias_is_refused_before_anything_i
     assert "comes with an installed bundle, and only an agent with an alias is registered from one" in \
         refused.value.problems[0]
     assert get_config().get_document_store().count("envs", Filter()) == 0
+
+
+def test_a_write_that_fails_leaves_no_pending_row(home, monkeypatch):
+    def failing(*args, **kwargs):
+        raise RuntimeError("the store went away")
+
+    monkeypatch.setattr(Task, "put", failing)
+    with pytest.raises(RuntimeError):
+        register_bundle(layout(home / "triage", TRIAGE))
+
+    assert get_config().get_document_store().query(REGISTRATIONS, Filter.of(status="pending")) == []
