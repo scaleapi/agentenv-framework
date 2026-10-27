@@ -29,6 +29,7 @@ DEFAULT_MAX_ACTIVE = 10
 DEFAULT_MIN_INTERVAL = "PT1H"
 _MAX_NOTE_CHARS = 2000
 _MAX_CHANNEL_CHARS = 60
+_HISTORY = 50  # finished and cancelled checks state() still shows
 
 SCHEDULE_CHECK_DESCRIPTION = (
     "Schedule a check-in for yourself. You only run when you are messaged, so to look at something again later "
@@ -110,6 +111,11 @@ class Wakeups:
             raise WakeupError("min_interval must be a positive duration")
         with self._lock:
             self._enabled, self._max_active, self._min_interval = enabled, max_active, min_interval
+            if not enabled:  # the agent loses its tools, so the checks it can no longer cancel go too
+                for check in self._checks.values():
+                    if check["status"] == "active":
+                        check["status"] = "cancelled"
+                self._prune()
         return self.state()
 
     def clear(self) -> dict:
@@ -184,6 +190,7 @@ class Wakeups:
             if check is None or check["status"] != "active":
                 raise WakeupError(f"no active scheduled check {check_id!r}")
             check["status"] = "cancelled"
+            self._prune()
             return {"cancelled": check_id}
 
     @staticmethod
@@ -219,6 +226,13 @@ class Wakeups:
                                for c in self._checks.values()],
                     "pending_notifications": pending}
 
+    def _prune(self) -> None:
+        """Drop delivered notifications and all but the last _HISTORY finished checks; the caller holds the lock."""
+        finished = [cid for cid, c in self._checks.items() if c["status"] != "active"]
+        for cid in finished[:max(0, len(finished) - _HISTORY)]:
+            del self._checks[cid]
+        self._notifications = [n for n in self._notifications if n["status"] == "pending"]
+
     def take(self, body: Any = None) -> dict:
         """Everything due by `until` (default: now), oldest first; each is handed out once. A repeating check moves to
         its next time after `until` and says how many times it came due, so a long jump wakes the agent once."""
@@ -244,6 +258,7 @@ class Wakeups:
                 note["status"] = "delivered"
                 due.append((note["_at"], {"kind": "notification", "id": note["id"], "channel": note["channel"],
                                           "text": note["text"], "at": note["at"], "trigger_id": note["trigger_id"]}))
+            self._prune()
         due.sort(key=lambda d: (d[0] is not None, d[0]))
         return {"items": [item for _, item in due], "until": _iso(until) if until else None}
 
