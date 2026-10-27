@@ -38,6 +38,7 @@ from agent_env.artifact.artifacts.environment_universe import EnvironmentUnivers
 from agent_env.artifact.artifacts.skill import SkillArtifact
 from agent_env.artifact.ref import ArtifactRef
 from agent_env.artifact.registry import get_artifact_registry
+from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.computer.install import Install, Service
 from agent_env.env.envs.computer_driver import ComputerDriverEnv
 from agent_env.env.envs.gateway_server import GatewayEnv
@@ -157,6 +158,24 @@ ARTIFACT_FIXTURES = {
 }
 
 ENV_FIXTURES = {
+    "computer": lambda: ComputerEnv(
+        id="desktop",
+        version=2,
+        environment_name="desktop",
+        computer={"id": "ubuntu-24.04", "version": 1},
+        driver={"id": "reference-driver", "version": 4},
+        forms=["container"],
+        display={"width": 1280, "height": 800},
+        network={"mode": "allow_all"},
+        hidden_tools=["computer_keyboard_*"],
+        settings={"ubuntu-24.04": {"timezone": "Europe/Paris"}},
+        data_paths=["Documents"],
+        metadata={"composed": {"container": {"amd64": {
+            "status": "unverified", "key": "sha256:" + "a" * 64, "reused": False, "emulated": False,
+            "image": "localhost:5000/agentenv-computers:" + "a" * 64 + "@sha256:" + "b" * 64,
+            "installed": {"mss": "10.1.0"}, "built_at": "2026-10-28T10:02:11+00:00"}}},
+            "computer": {"id": "desktop__computer", "version": 1}},
+    ),
     "computer_driver": lambda: ComputerDriverEnv(
         id="reference-driver",
         version=4,

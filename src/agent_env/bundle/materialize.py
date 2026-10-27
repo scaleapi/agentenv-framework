@@ -156,6 +156,8 @@ def _write_entity(plan: Plan, write: Write, here: bool, on_build: Callable[[Writ
         if write.id in plan.published:
             return _write_published_image(plan, write)
         return _write_build_context(plan, write, here, on_build)
+    if write.kind is BundleKind.ENV and get_env_registry()[write.source.entry.type].builds_at_put and on_build:
+        on_build(write)
     return _WRITERS[write.kind](plan, write)
 
 

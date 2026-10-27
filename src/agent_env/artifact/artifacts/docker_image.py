@@ -132,7 +132,7 @@ class DockerImageArtifact(Artifact):
         repository = image_repository(id)
         image_ref = image_store.image_ref(repository, f"v{version}")
         image_store.ensure_repository(repository)
-        _push_local_image(image_name, image_ref, image_store)
+        push_local_image(image_name, image_ref, image_store)
         platform = normalize_platform(platform) if platform else _image_platform(image_ref)
 
         with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
@@ -584,11 +584,12 @@ def push_context_image(id: str, context_path: str, dockerfile_path: str,
         before()
     local = f"{local_image_repository(id)}:{tag}"
     build_image(Path(context_path) / context.dockerfile, Path(context_path), local, platform=DEFAULT_BUILD_PLATFORM)
-    _push_local_image(local, ref, store)
+    push_local_image(local, ref, store)
     return ref, pin_digest(ref, store.auth(ref)).rpartition("@")[2]
 
 
-def _push_local_image(local_tag: str, image_ref: str, image_store) -> None:
+def push_local_image(local_tag: str, image_ref: str, image_store) -> None:
+    """Push this machine's ``local_tag`` to ``image_ref`` in ``image_store``, signing in with its credentials first."""
     auth = image_store.auth(image_ref)
     if auth is not None:
         login = subprocess.run(
