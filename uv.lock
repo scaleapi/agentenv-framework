@@ -80,6 +80,8 @@ daytona = [
 ]
 dev = [
     { name = "anyio" },
+    { name = "av", version = "18.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "av", version = "19.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "boto3" },
     { name = "botocore" },
     { name = "boxd" },
@@ -139,6 +141,7 @@ requires-dist = [
     { name = "agentenv-framework", extras = ["aws", "boxd", "daytona", "gcp", "sail", "tensorlake", "tenki", "vercel"], marker = "extra == 'dev'" },
     { name = "agentenv-framework-protocol", extras = ["computer"], editable = "packages/agentenv-protocol" },
     { name = "anyio", marker = "extra == 'vercel'", specifier = ">=4,<5" },
+    { name = "av", marker = "extra == 'dev'", specifier = ">=17" },
     { name = "boto3", marker = "extra == 'aws'", specifier = ">=1.35.0" },
     { name = "botocore", marker = "extra == 'aws'", specifier = ">=1.35.0" },
     { name = "boxd", marker = "extra == 'boxd'", specifier = "~=0.2.17" },

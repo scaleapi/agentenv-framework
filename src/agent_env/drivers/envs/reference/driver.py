@@ -1,17 +1,20 @@
 """The reference computer driver, for an X11 desktop: mss captures the screen and XTEST, through python-xlib, sends the
 input. X calls run off the event loop, one at a time, on a connection checked before each call and reopened when it
-drops, so the driver outlives a restarted X server. It needs ``agentenv-framework-protocol[computer]``, ``mss`` and
-``python-xlib`` where it runs."""
+drops, so the driver outlives a restarted X server. It records the display through FFmpeg's ``x11grab``, by PyAV. It
+needs ``agentenv-framework-protocol[computer,recording]``, ``mss`` and ``python-xlib`` where it runs."""
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import math
+import os
 import threading
 import time
 from collections import OrderedDict
-from typing import Any, Callable
+from datetime import datetime, timezone
+from typing import Any, AsyncIterator, Callable
 
+import av
 import mss
 from Xlib import X, XK
 from Xlib import display as xdisplay
@@ -25,6 +28,9 @@ from agentenv_protocol.computer import (
     Display,
     Image,
     ReadyCheck,
+    RecordedFrame,
+    RecordHints,
+    Recording,
     Unsupported,
     capture,
     click,
@@ -38,6 +44,7 @@ from agentenv_protocol.computer import (
     pointer_position,
     pointer_up,
     press,
+    record,
     scroll,
     type_text,
 )
@@ -58,6 +65,8 @@ CLICK_GAP_S = 0.04
 #: How far apart a drag's pointer moves are, in pixels.
 DRAG_STEP_PX = 20
 DROPPED = (ConnectionClosedError, DisplayConnectionError, OSError)
+#: How many recorded frames wait for the encoder before the oldest is dropped.
+RECORD_QUEUE = 8
 
 
 @computer_driver(name="reference",
@@ -66,6 +75,7 @@ class ReferenceDriver(ComputerDriverEnvironment):
     buttons = ("left", "right", "middle", "back", "forward")
     max_click_count = 3
     max_drag_points = 50
+    recording = Recording(max_fps=30)
 
     def __init__(self) -> None:
         super().__init__()
@@ -84,6 +94,45 @@ class ReferenceDriver(ComputerDriverEnvironment):
     @capture
     async def grab(self) -> Image:
         return await asyncio.to_thread(_grab)
+
+    @record
+    async def stream(self, hints: RecordHints) -> AsyncIterator[RecordedFrame]:
+        """The display through FFmpeg's ``x11grab``, read in a thread of its own. Its frames carry the wall clock,
+        so each one's time is when it was captured."""
+        size = await self.screen()
+        loop, frames, stop = asyncio.get_running_loop(), asyncio.Queue(), threading.Event()
+
+        def offer(item: Any) -> None:
+            if frames.qsize() >= RECORD_QUEUE:
+                frames.get_nowait()
+            frames.put_nowait(item)
+
+        def post(item: Any) -> None:
+            with contextlib.suppress(RuntimeError):  # the loop has closed: nobody is reading
+                loop.call_soon_threadsafe(offer, item)
+
+        def pump() -> None:
+            options = {"framerate": str(hints.fps), "video_size": f"{size.width}x{size.height}",
+                       "draw_mouse": "1" if hints.cursor else "0"}
+            try:
+                with av.open(os.environ.get("DISPLAY", ":0"), format="x11grab", options=options) as source:
+                    for frame in source.decode(video=0):
+                        if stop.is_set():
+                            return
+                        post(RecordedFrame(frame, datetime.fromtimestamp(frame.time, timezone.utc)))
+            except Exception as e:
+                post(e)
+            finally:
+                post(None)
+
+        threading.Thread(target=pump, name="reference-record", daemon=True).start()
+        try:
+            while (item := await frames.get()) is not None:
+                if isinstance(item, Exception):
+                    raise item
+                yield item
+        finally:
+            stop.set()
 
     async def ready_checks(self) -> list[ReadyCheck]:
         try:

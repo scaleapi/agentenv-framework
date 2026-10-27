@@ -7,7 +7,9 @@ import asyncio
 import contextlib
 import importlib.util
 import sys
+import time
 import types
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -15,7 +17,8 @@ import pytest
 from mcp.shared.memory import create_connected_server_and_client_session
 
 import agent_env
-from agentenv_protocol.computer import COMPUTER_EXEC, COMPUTER_KEYBOARD, COMPUTER_POINTER, Platform
+from agentenv_protocol.computer import (COMPUTER_EXEC, COMPUTER_KEYBOARD, COMPUTER_POINTER, COMPUTER_RECORDING,
+                                        Platform, RecordHints)
 
 DRIVER = Path(agent_env.__file__).parent / "drivers" / "envs" / "reference" / "driver.py"
 LINUX = Platform(os="linux", distribution="ubuntu", version="24.04", arch="amd64", display="x11")
@@ -94,6 +97,37 @@ class FakeMSS:
         return types.SimpleNamespace(width=WIDTH, height=HEIGHT, bgra=bytes(WIDTH * HEIGHT * 4))
 
 
+class FakeGrab:
+    """FFmpeg's x11grab through PyAV: ``frames`` frames a few milliseconds apart, each with its wall-clock time, then
+    ``fail`` raised if set; ``opened`` keeps what each open was asked."""
+    opened: list = []
+    frames = 3
+    fail: Exception | None = None
+    closed = 0
+
+    def __init__(self, display: str, format: str, options: dict) -> None:
+        self.args = (display, format, options)
+
+    @classmethod
+    def open(cls, display, format, options):
+        grab = cls(display, format, options)
+        cls.opened.append(grab.args)
+        return grab
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        FakeGrab.closed += 1
+
+    def decode(self, video):
+        for n in range(self.frames):
+            time.sleep(0.005)
+            yield types.SimpleNamespace(time=1_793_000_000.0 + n / 10, index=n)
+        if self.fail is not None:
+            raise self.fail
+
+
 @pytest.fixture
 def x11(monkeypatch):
     """The example's driver on a fake X display, and the keycodes the fake keymap gives named keys."""
@@ -130,6 +164,7 @@ def x11(monkeypatch):
     module("Xlib.ext", xtest=xtest)
     module("Xlib", X=X, XK=XK, display=display)
     module("mss", MSS=FakeMSS)
+    module("av", open=FakeGrab.open)
     monkeypatch.setattr("agentenv_protocol.computer.driver.detect", lambda: LINUX)
     monkeypatch.delenv("ENVIRONMENT_NAME", raising=False)
     monkeypatch.delenv("AGENTENV_COMPUTER_SETTINGS", raising=False)
@@ -301,3 +336,64 @@ async def test_a_dropped_x_connection_is_reopened_and_a_dead_one_is_device_unava
     assert not moved.isError and reopened == 2
     assert refused.structuredContent["code"] == "device_unavailable"
     assert "the X server is unavailable: ConnectionClosedError" in refused.structuredContent["message"]
+
+
+def _hints(tmp_path, **kwargs) -> RecordHints:
+    return RecordHints(**{"scope": "display", "fps": 12, "max_edge": None, "cursor": True, "max_segment_s": 300,
+                          "directory": tmp_path, **kwargs})
+
+
+@pytest.fixture
+def grab(monkeypatch):
+    monkeypatch.setattr(FakeGrab, "opened", [])
+    monkeypatch.setattr(FakeGrab, "frames", 3)
+    monkeypatch.setattr(FakeGrab, "fail", None)
+    monkeypatch.setattr(FakeGrab, "closed", 0)
+    monkeypatch.setenv("DISPLAY", ":99")
+    return FakeGrab
+
+
+@pytest.mark.asyncio
+async def test_recording_streams_x11grab_frames_stamped_with_their_capture_time(x11, grab, tmp_path):
+    driver, _fake, _code = x11
+    frames = [frame async for frame in driver.stream(_hints(tmp_path, cursor=False))]
+    assert grab.opened == [(":99", "x11grab", {"framerate": "12", "video_size": "640x400", "draw_mouse": "0"})]
+    assert [f.image.index for f in frames] == [0, 1, 2] and grab.closed == 1
+    assert frames[1].captured_at == datetime.fromtimestamp(1_793_000_000.1, timezone.utc)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_grab_raises_from_the_stream_and_a_slow_reader_gets_the_latest_frames(x11, grab, tmp_path):
+    driver, _fake, _code = x11
+    grab.fail = RuntimeError("Cannot open display :99")
+    with pytest.raises(RuntimeError, match="Cannot open display"):
+        [frame async for frame in driver.stream(_hints(tmp_path))]
+    grab.fail, grab.frames = None, 30
+    stream = driver.stream(_hints(tmp_path))
+    first = await anext(stream)
+    await asyncio.sleep(0.5)
+    rest = [frame async for frame in stream]
+    assert first.image.index == 0 and len(rest) < 10 and rest[-1].image.index == 29
+
+
+@pytest.mark.asyncio
+async def test_closing_the_stream_stops_the_grab(x11, grab, tmp_path):
+    driver, _fake, _code = x11
+    grab.frames = 10_000
+    stream = driver.stream(_hints(tmp_path))
+    await anext(stream)
+    await stream.aclose()
+    for _ in range(100):
+        if grab.closed:
+            break
+        await asyncio.sleep(0.01)
+    assert grab.closed == 1
+
+
+@pytest.mark.asyncio
+async def test_the_reference_driver_records_from_its_stream_at_up_to_30_fps(x11):
+    driver, _fake, _code = x11
+    async with http_client(driver) as http:
+        card = (await http.get("/.well-known/agent-env.json")).json()
+    recording = next(e for e in card["capabilities"]["extensions"] if e["uri"] == COMPUTER_RECORDING)
+    assert recording["params"]["source"] == "stream" and recording["params"]["fps"] == {"default": 10, "max": 30}
