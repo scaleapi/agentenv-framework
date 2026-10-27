@@ -442,15 +442,15 @@ def test_the_stores_env_of_an_alias_id_shadows_the_alias(bundle_dir, tmp_path):
 
 
 
-def test_an_env_definition_naming_an_env_alias_is_refused_saying_to_name_the_env_by_its_id(bundle_dir, tmp_path):
-    """An env alias names an env in a task's steps; a MultiEnv's servers name theirs by id."""
+def test_an_env_definition_naming_an_env_alias_is_pointed_at_the_env_it_names_pulled_in(bundle_dir, tmp_path):
     kit = _kit(tmp_path, ENV_ALIASED)
 
-    problems = _problems(_task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "suite"}],
-                               {"envs/suite/env.toml": 'type = "multi"\nmcp_server_envs = ["crm-x"]\n'}), kit)
+    plan = _plan(_task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "suite"}],
+                       {"envs/suite/env.toml": 'type = "multi"\nmcp_server_envs = ["crm-x"]\n'}), kit)
 
-    assert any(f"'crm-x' is an alias of {CRM}, which comes with demo-dist's kit bundle, and an env alias names an env only "
-               "in a task's steps; name the env by its id" in problem for problem in problems), problems
+    suite = next(write for write in plan.writes if write.id.endswith("/suite"))
+    assert (BundleKind.ENV, CRM) in _writes(plan) and suite.source.config["mcp_server_envs"] == [CRM]
+    assert plan.alias_uses[EntityKind.ENV]["crm-x"].target_id == CRM and plan.store_refs == ()
 
 ARTIFACT_ALIASED = {"artifacts/notes/notes.txt": "a note\n", "artifacts/img/Dockerfile": "FROM scratch\n",
                     ALIASES_FILE: '[artifacts]\nnotes = ["notes-x"]\nimg = ["img-x"]\n'}
@@ -470,15 +470,29 @@ def test_an_artifact_named_by_an_installed_alias_is_pulled_in_and_the_task_names
     assert plan.alias_uses[EntityKind.ENV] == {} and plan.store_refs == ()
 
 
-def test_an_env_definition_naming_an_artifact_alias_is_refused_saying_to_name_the_artifact_by_its_id(bundle_dir,
+def test_an_env_definition_naming_an_artifact_alias_is_pointed_at_the_artifact_it_names_pulled_in(bundle_dir,
                                                                                                     tmp_path):
     kit = _kit(tmp_path, ARTIFACT_ALIASED)
 
-    problems = _problems(_task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}],
-                               {"envs/crm/env.toml": 'environment_name = "crm"\nimage = "img-x"\n'}), kit)
+    plan = _plan(_task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}],
+                       {"envs/crm/env.toml": 'environment_name = "crm"\nimage = { artifact = "img-x" }\n'}), kit)
 
-    assert any(f"'img-x' is an alias of {KIT}/img, which comes with demo-dist's kit bundle, and an artifact alias names "
-               "an artifact only in a task's steps; name the artifact by its id" in problem for problem in problems), problems
+    crm = next(write for write in plan.writes if write.kind is BundleKind.ENV)
+    assert (BundleKind.ARTIFACT, f"{KIT}/img") in _writes(plan) and crm.source.config["image"] == {"artifact": f"{KIT}/img"}
+    assert plan.alias_uses[EntityKind.ARTIFACT]["img-x"].target_id == f"{KIT}/img"
+
+
+def test_an_installed_bundles_env_naming_another_bundles_alias_is_pointed_at_it_when_pulled_in(bundle_dir, tmp_path):
+    images = _installed(tmp_path / "site" / "images", {"artifacts/img/Dockerfile": "FROM scratch\n",
+                                                        ALIASES_FILE: '[artifacts]\nimg = ["img-x"]\n'},
+                        dist="demo-images", name="images")
+    kit = _kit(tmp_path, {"envs/crm/env.toml": 'environment_name = "crm"\nimage = "img-x"\n'})
+
+    plan = _plan(_task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": f"{KIT}/crm"}]), kit, images)
+
+    crm = next(write for write in plan.writes if write.kind is BundleKind.ENV)
+    assert (crm.id, crm.source.config["image"]) == (f"{KIT}/crm", "@local/demo-images/images/img")
+    assert (BundleKind.ARTIFACT, "@local/demo-images/images/img") in _writes(plan)
 
 
 def test_the_stores_agent_of_an_alias_id_shadows_the_alias(bundle_dir, tmp_path):
