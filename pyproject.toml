@@ -122,6 +122,7 @@ drivers = "agent_env"
 hello = "agent_env.examples"
 echo-mcp = "agent_env.examples"
 mail-mcp = "agent_env.examples"
+next-env-event = "agent_env.examples"
 
 [project.urls]
 Homepage = "https://www.agentenvframework.com"

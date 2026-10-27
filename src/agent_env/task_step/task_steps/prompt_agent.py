@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import functools
 import json
 import logging
 import time
@@ -12,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, ClassVar, Optional
 import httpx
 from a2a.types import TaskState
+from agentenv_protocol.a2a_agent import card_request_accepts
 
 from agent_env.a2a_agent import A2AAgent, conversation_store
 from agent_env.a2a_agent import protocol
@@ -27,10 +29,11 @@ from agent_env.config.model import MODEL_PARAMS_RESERVED
 from agent_env.env.gateway.constants import EXT_CLOCK_URI, EXT_TRIGGERS_URI, TRIGGER_IN_FLIGHT_STATUSES
 from agent_env.store import DuplicateKeyError, get_config
 from agent_env.store.object_store import ObjectStore
-from agent_env.task_step.context import PromptResponse, TaskStepContext
+from agent_env.task_step.context import DeployedAgent, PromptResponse, TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import RetryConfig, TaskStep, TaskStepDependency
+from agent_env.task_step.task_steps.post_turn_hooks import PostTurnHooks, run_post_turn_hooks, validate_hook_specs
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (
     agent_error_text,
     fetch_container_logs,
@@ -102,6 +105,9 @@ def _file_uris(parts: list[dict]) -> list[str]:
     return [file["uri"] for file in files if isinstance(file, dict) and isinstance(file.get("uri"), str)]
 
 
+# The decide body that asks a user agent to record nothing when no agent trigger fires.
+_QUIET_DECIDE = ("turn", "solver_message", "context_id", "env_triggers", "record_unfired")
+
 _DEFAULT_USER_SIM_OUTPUT_FORMAT: dict[str, Any] = {
     "type": "json_schema",
     "schema": {
@@ -118,7 +124,11 @@ _DEFAULT_USER_SIM_OUTPUT_FORMAT: dict[str, Any] = {
 class PromptAgentTaskStep(TaskStep):
     type: ClassVar[str] = "prompt_agent"
     DEFAULT_USER_AGENT_NAME: ClassVar[str] = "human_agent"
-    entity_refs = (EntityRef.env("snapshot_config.env_id"),)
+    entity_refs = (
+        EntityRef.env("snapshot_config.env_id"),
+        EntityRef.artifact("post_turn_hooks[].file_artifact_id", version_field="file_artifact_version",
+                           artifact_type="file"),
+    )
     # user_a2a_url stays the task's: setting it is also what tells a human counterpart from a simulator.
     field_scopes = {**TaskStep.field_scopes, **dict.fromkeys(
         ("model", "model_params", "effort", "max_thinking_tokens", "harness", "user_model", "trajectory_output_prefix"),
@@ -159,6 +169,7 @@ class PromptAgentTaskStep(TaskStep):
         *,
         snapshot_config: Optional[SnapshotConfig] = None,
         live_trajectory: bool = False,
+        post_turn_hooks: Optional[list[dict]] = None,
     ):
         # `prompt` is the legacy text-only field; `parts` is the multimodal
         # form that's the authoritative A2A wire shape. Exactly one must be set:
@@ -172,6 +183,8 @@ class PromptAgentTaskStep(TaskStep):
             self._validate_parts(parts)
         if max_conversation_turns < 1:
             raise ValueError("max_conversation_turns must be >= 1")
+        if post_turn_hooks is not None:
+            validate_hook_specs(post_turn_hooks)
         if model_params:
             reserved = set(model_params) & MODEL_PARAMS_RESERVED
             if reserved:
@@ -202,6 +215,7 @@ class PromptAgentTaskStep(TaskStep):
         self.user_model = user_model
         self.snapshot_config = snapshot_config
         self.live_trajectory = live_trajectory
+        self.post_turn_hooks = post_turn_hooks
 
     @staticmethod
     def _validate_parts(parts: list[dict]) -> None:
@@ -277,6 +291,8 @@ class PromptAgentTaskStep(TaskStep):
             base["snapshot_config"] = self.snapshot_config.to_dict()
         if self.live_trajectory:
             base["live_trajectory"] = True
+        if self.post_turn_hooks is not None:
+            base["post_turn_hooks"] = self.post_turn_hooks
         return base
 
     @classmethod
@@ -313,6 +329,7 @@ class PromptAgentTaskStep(TaskStep):
                 else None
             ),
             live_trajectory=data.get("live_trajectory", False),
+            post_turn_hooks=data.get("post_turn_hooks"),
         )
 
     def _trajectory_prefix(self) -> str:
@@ -411,6 +428,21 @@ class PromptAgentTaskStep(TaskStep):
         a2a_context_id: str,
         series: Optional[SnapshotSeries] = None,
     ) -> TaskStepContext:
+        hooks = await PostTurnHooks.load(self.post_turn_hooks, self.id) if self.post_turn_hooks else None
+        try:
+            return await self._converse(context, a2a_context_id=a2a_context_id, series=series, hooks=hooks)
+        finally:
+            if hooks is not None:
+                hooks.close()
+
+    async def _converse(
+        self,
+        context: TaskStepContext,
+        *,
+        a2a_context_id: str,
+        series: Optional[SnapshotSeries],
+        hooks: Optional[PostTurnHooks],
+    ) -> TaskStepContext:
         agent = next((a for a in context.deployed_agents if a.agent_name == self.agent_name), None)
         if agent is None:
             raise RuntimeError(f"Agent with name '{self.agent_name}' not found in context.deployed_agents")
@@ -419,7 +451,8 @@ class PromptAgentTaskStep(TaskStep):
         user_url = self.user_a2a_url or (
             (user_sim.a2a_url or user_sim.api_url) if user_sim else None
         )
-        if user_url is None and user_sim is None and self.max_conversation_turns > 1:
+        # With hooks, a human peer is looked up only once one is asked.
+        if user_url is None and user_sim is None and self.max_conversation_turns > 1 and hooks is None:
             user_url = get_config().get_default_human_a2a_url()
 
         trajectory_output_prefix = self._trajectory_prefix()
@@ -474,6 +507,7 @@ class PromptAgentTaskStep(TaskStep):
         )
         trig_ext = A2AAgent.find_extension(user_sim.a2a_card or {}, A2AAgent.EXT_TRIGGERS) if is_user_sim else None
         decide_url = state_url = None
+        decide_method: dict = {}
         if trig_ext and triggers_registered:
             decide_method = A2AAgent.extension_method(user_sim.a2a_card, A2AAgent.EXT_TRIGGERS, "decide") or {}
             decide_url = user_url + decide_method.get("endpoint", "/ext/triggers/decide")
@@ -506,6 +540,7 @@ class PromptAgentTaskStep(TaskStep):
         )
 
         current_user_parts = initial_parts
+        clock_envs = [d for d in context.deployed_envs if d.supports(EXT_CLOCK_URI, "state")]
         final_terminal = protocol.TerminalResponse(response_text="")
         # Each turn's terminal reports only that turn's tool calls, so the conversation's count is
         # their sum. None until a turn reports one, so agents that don't report it stay None.
@@ -523,6 +558,11 @@ class PromptAgentTaskStep(TaskStep):
         # What the target has been sent: of the files its replies name, the only ones a user-sim is made able
         # to read, so a reply naming any other object a store owns can't read it out through the user-sim.
         sent_to_target: set[str] = set()
+        user_side = _UserSide(
+            self, context, url=user_url, user_sim=user_sim, is_user_sim=is_user_sim, conversation_id=conversation_id,
+            decide_url=decide_url, shareable=sent_to_target,
+            decides_quietly=card_request_accepts(decide_method.get("request") or {}, _QUIET_DECIDE),
+        )
 
         try:
             for turn in range(self.max_conversation_turns):
@@ -530,6 +570,7 @@ class PromptAgentTaskStep(TaskStep):
                 # agent and recorded on the conversation as `a2a_task_id`.
                 # This id is also used as part of the key name for the trajectory S3 object.
                 target_a2a_task_id = uuid.uuid4().hex
+                sent_clock = await self._env_clock(clock_envs)
 
                 # The turn records the objects' own URLs, and only once the parts are ready to send, so an
                 # object the agent can't be sent leaves no turn waiting.
@@ -540,6 +581,7 @@ class PromptAgentTaskStep(TaskStep):
                         parts=current_user_parts,
                         a2a_task_id=target_a2a_task_id,
                         role="user",
+                        **sent_clock,
                     )
                     # Turn 0 of a prompt-mode step re-sends exactly the text already
                     # persisted as PromptResponse.prompt_text; store a None placeholder
@@ -572,6 +614,7 @@ class PromptAgentTaskStep(TaskStep):
                     conversation_id=conversation_id,
                     parts=agent_response_parts,
                     role="agent",
+                    **(await self._env_clock(clock_envs)),
                 )
 
                 if traj_ext_cached:
@@ -592,7 +635,8 @@ class PromptAgentTaskStep(TaskStep):
                 if target_state == TaskState.failed:
                     conversation_store.mark_closed(conversation_id)
                     break
-                if turn == self.max_conversation_turns - 1:
+                last = turn == self.max_conversation_turns - 1
+                if last and hooks is None:
                     break
 
                 conv_doc = conversation_store.get_conversation(conversation_id)
@@ -602,76 +646,30 @@ class PromptAgentTaskStep(TaskStep):
 
                 # After every `break` above: a turn that ends the conversation is covered
                 # by teardown's final capture instead of being captured twice.
-                if series is not None:
+                if series is not None and not last:
                     await series.capture_turn(context, turn + 1)
 
-                if trig_ext and triggers_registered:
-                    env_triggers = await self._read_env_triggers(context)
-                    (context.metadata.setdefault("env_trigger_snapshots", {})
-                        .setdefault(self.id, []).append({"turn": turn + 1, "envs": env_triggers}))
-                    resp = await self._decide(decide_url, turn + 1, final_terminal.response_text, conversation_id, env_triggers)
-                    (context.metadata.setdefault("agent_trigger_firings", {})
-                        .setdefault(self.id, []).append({"turn": turn + 1, "fired": resp.get("fired", [])}))
-                    logger.info(f"Turn {turn+1} agent-trigger decide: fired={resp.get('fired', [])} done={resp.get('done')}")
-                    if bool(resp.get("done")):
-                        current_user_parts = resp.get("parts") or []
-                        conversation_store.add_a2a_task(conversation_id, parts=current_user_parts,
-                                                        a2a_task_id=uuid.uuid4().hex, role="user")
-                        conversation_store.mark_closed(conversation_id)
-                        break
-                    if resp.get("fired"):
-                        current_user_parts = resp.get("parts") or []
-                        continue
-                    # no trigger fired -> fall through to the LLM user-sim for this turn (hybrid)
-
-                user_a2a_task_id = uuid.uuid4().hex
-                try:
-                    # A user-sim runs in a sandbox agent-env deployed; a human peer, registered or named by
-                    # user_a2a_url, has none and reads the store itself.
-                    _, user_result = await send_and_wait(
-                        user_url, agent_response_parts,
-                        agent=user_sim if is_user_sim and user_sim.sandbox_id else None, shareable=sent_to_target,
-                        message_id=user_a2a_task_id, context_id=conversation_id,
-                        timeout_seconds=self.user_agent_timeout_seconds,
-                        poll_interval_seconds=self.poll_interval_seconds,
+                answer = None
+                if hooks is not None:
+                    reply = final_terminal.response_text
+                    answer = await run_post_turn_hooks(
+                        hooks, context=context, step_id=self.id, number=turn + 1, last=last, agent_reply=reply,
+                        agent_parts=agent_response_parts,
+                        ask_user=functools.partial(user_side.ask, turn + 1, reply, agent_response_parts),
+                        user_triggers=functools.partial(user_side.triggers, turn + 1, reply),
                     )
-                except TimeoutError as e:
-                    logger.warning(f"user_a2a_url timeout for conversation {conversation_id} ({e}); marking abandoned")
+                if answer is None and not last:
+                    answer = await user_side.ask(turn + 1, final_terminal.response_text, agent_response_parts)
+                if answer is not None and "end" in answer:
+                    if "message" in answer:
+                        conversation_store.add_a2a_task(conversation_id, parts=answer["message"],
+                                                        a2a_task_id=uuid.uuid4().hex, role="user",
+                                                        **(await self._env_clock(clock_envs)))
                     conversation_store.mark_closed(conversation_id)
                     break
-
-                user_state = (user_result.get("status") or {}).get("state")
-                if user_state != TaskState.completed:
-                    logger.info(f"user_a2a_url returned state={user_state}; ending multi-turn")
-                    conversation_store.mark_closed(conversation_id)
+                if last:
                     break
-
-                user_msg = (user_result.get("status") or {}).get("message") or {}
-                current_user_parts = user_msg.get("parts") or []
-                if not current_user_parts:
-                    logger.warning("user_a2a_url returned no parts; ending multi-turn")
-                    conversation_store.mark_closed(conversation_id)
-                    break
-
-                if is_user_sim:
-                    raw_text = next((p["text"] for p in current_user_parts if p.get("kind") == "text"), "")
-                    try:
-                        parsed = json.loads(raw_text)
-                        message_text = parsed["message"]
-                        done = bool(parsed["done"])
-                    except (json.JSONDecodeError, KeyError) as e:
-                        logger.warning(f"user-sim returned malformed output despite output_format ({e}); using raw text as next prompt; raw={raw_text[:200]!r}")
-                        current_user_parts = [{"kind": "text", "text": raw_text}]
-                    else:
-                        extras = {k: v for k, v in parsed.items() if k not in ("message", "done")}
-                        if extras:
-                            (context.metadata.setdefault("usersim_turn_outputs", {})
-                                .setdefault(self.id, []).append({"turn": turn + 1, "fields": extras}))
-                        current_user_parts = [{"kind": "text", "text": message_text}]
-                        if done:
-                            logger.info(f"user-sim signaled done=true at turn {turn+1}; ending multi-turn")
-                            conversation_store.mark_closed(conversation_id)
-                            break
+                current_user_parts = answer["message"]
         finally:
             # On failure too, so a reader of the last turn knows no other follows.
             if live_turns is not None:
@@ -816,6 +814,16 @@ class PromptAgentTaskStep(TaskStep):
         fetched = await fetch_trajectory(a2a_url + get_path, {"task_id": a2a_server_task_id}, upload=upload, store=store)
         return await asyncio.to_thread(store_trajectory, fetched, trajectory_output_prefix, name=target_a2a_task_id)
 
+    async def _env_clock(self, envs: list) -> dict:
+        """``{"env_clock": [...]}``, each armed env clock for a conversation message, or {} when no clock is armed."""
+        if not envs:
+            return {}
+        states = await asyncio.gather(*(self._get_clock_state(d) for d in envs))
+        clocks = [{"env_id": d.env_id, "env_step_id": (d.metadata or {}).get("deploy_step_id"),
+                   "virtual_time": state["virtual_time"]}
+                  for d, state in zip(envs, states) if state and state.get("armed")]
+        return {"env_clock": clocks} if clocks else {}
+
     async def _read_env_triggers(self, context: TaskStepContext) -> dict:
         """Snapshot each deployed env's triggers state as {env_id: {trigger_id: status}}; {} when its card offers none; fail-closed on a read error."""
         env_triggers: dict = {}
@@ -837,9 +845,11 @@ class PromptAgentTaskStep(TaskStep):
                 raise RuntimeError(f"fail-closed: could not read /triggers/state for env '{d.env_id}': {last_exc}")
         return env_triggers
 
-    async def _decide(self, decide_url: str, turn: int, solver_message: str, context_id: str, env_triggers: dict) -> dict:
+    async def _decide(self, decide_url: str, turn: int, solver_message: str, context_id: str, env_triggers: dict,
+                      **quiet: bool) -> dict:
         """Call the usersim's /decide for the triggers that should fire this turn."""
-        payload = {"turn": turn, "solver_message": solver_message, "context_id": context_id, "env_triggers": env_triggers}
+        payload = {"turn": turn, "solver_message": solver_message, "context_id": context_id,
+                   "env_triggers": env_triggers, **quiet}
         async with httpx.AsyncClient() as client:
             resp = await client.post(decide_url, json=payload, timeout=self.user_agent_timeout_seconds)
             if resp.status_code >= 400:
@@ -995,3 +1005,113 @@ class PromptAgentTaskStep(TaskStep):
                 last_exc = e
                 await asyncio.sleep(0.5 * (attempt + 1))
         raise RuntimeError(f"could not read /triggers/state for env '{deployed.env_id}': {last_exc}")
+
+
+class _UserSide:
+    """Who answers the agent between turns: agent triggers first, then the LLM user simulator or a human peer."""
+
+    def __init__(self, step: PromptAgentTaskStep, context: TaskStepContext, *, url: Optional[str],
+                 user_sim: Optional[DeployedAgent], is_user_sim: bool, conversation_id: str,
+                 decide_url: Optional[str], decides_quietly: bool, shareable: set[str]) -> None:
+        self._step = step
+        self._context = context
+        self._url = url
+        self._user_sim = user_sim
+        self._is_user_sim = is_user_sim
+        self._conversation_id = conversation_id
+        self._decide_url = decide_url
+        self._decides_quietly = decides_quietly
+        self._shareable = shareable
+
+    async def ask(self, number: int, solver_message: str, agent_parts: list[dict]) -> dict:
+        """The user side's answer: ``{"message": parts}``, or ``{"end": reason}`` with any closing message to record."""
+        if self._decide_url is not None:
+            env_triggers = await self._step._read_env_triggers(self._context)
+            self._record("env_trigger_snapshots", {"turn": number, "envs": env_triggers})
+            resp = await self._step._decide(self._decide_url, number, solver_message, self._conversation_id,
+                                            env_triggers)
+            self._record("agent_trigger_firings", {"turn": number, "fired": resp.get("fired", [])})
+            logger.info(f"Turn {number} agent-trigger decide: fired={resp.get('fired', [])} done={resp.get('done')}")
+            answer = _trigger_answer(resp)
+            if answer is not None:
+                return answer
+            # no trigger fired -> fall through to the LLM user-sim for this turn (hybrid)
+        return await self._ask_peer(number, agent_parts)
+
+    async def triggers(self, number: int, solver_message: str) -> Optional[dict]:
+        """Agent triggers alone: their answer, recorded as ``ask`` records it, or None, recording nothing."""
+        if self._decide_url is None:
+            return None
+        if not self._decides_quietly:
+            raise RuntimeError(f"user agent '{self._step.user_agent_name}' records every agent-trigger decide, so one "
+                               "where none fires would reset its once-only triggers; rebuild it on an "
+                               "agentenv-framework-protocol whose triggers/v1 decide takes record_unfired")
+        env_triggers = await self._step._read_env_triggers(self._context)
+        resp = await self._step._decide(self._decide_url, number, solver_message, self._conversation_id, env_triggers,
+                                        record_unfired=False)
+        logger.info(f"Turn {number} agent-trigger decide: fired={resp.get('fired', [])} done={resp.get('done')}")
+        answer = _trigger_answer(resp)
+        if answer is not None:
+            self._record("env_trigger_snapshots", {"turn": number, "envs": env_triggers})
+            self._record("agent_trigger_firings", {"turn": number, "fired": resp.get("fired", [])})
+        return answer
+
+    async def _ask_peer(self, number: int, agent_parts: list[dict]) -> dict:
+        step = self._step
+        if self._url is None:
+            self._url = get_config().get_default_human_a2a_url()
+        user_a2a_task_id = uuid.uuid4().hex
+        try:
+            # A user-sim runs in a sandbox agent-env deployed; a human peer, registered or named by
+            # user_a2a_url, has none and reads the store itself.
+            _, user_result = await send_and_wait(
+                self._url, agent_parts,
+                agent=self._user_sim if self._is_user_sim and self._user_sim.sandbox_id else None,
+                shareable=self._shareable, message_id=user_a2a_task_id, context_id=self._conversation_id,
+                timeout_seconds=step.user_agent_timeout_seconds,
+                poll_interval_seconds=step.poll_interval_seconds,
+            )
+        except TimeoutError as e:
+            logger.warning(f"user_a2a_url timeout for conversation {self._conversation_id} ({e}); marking abandoned")
+            return {"end": "user_timeout"}
+
+        user_state = (user_result.get("status") or {}).get("state")
+        if user_state != TaskState.completed:
+            logger.info(f"user_a2a_url returned state={user_state}; ending multi-turn")
+            return {"end": "user_not_completed"}
+
+        user_msg = (user_result.get("status") or {}).get("message") or {}
+        parts = user_msg.get("parts") or []
+        if not parts:
+            logger.warning("user_a2a_url returned no parts; ending multi-turn")
+            return {"end": "user_no_parts"}
+
+        if not self._is_user_sim:
+            return {"message": parts}
+        raw_text = next((p["text"] for p in parts if p.get("kind") == "text"), "")
+        try:
+            parsed = json.loads(raw_text)
+            message_text = parsed["message"]
+            done = bool(parsed["done"])
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.warning(f"user-sim returned malformed output despite output_format ({e}); using raw text as next prompt; raw={raw_text[:200]!r}")
+            return {"message": [{"kind": "text", "text": raw_text}]}
+        extras = {k: v for k, v in parsed.items() if k not in ("message", "done")}
+        if extras:
+            self._record("usersim_turn_outputs", {"turn": number, "fields": extras})
+        if done:
+            logger.info(f"user-sim signaled done=true at turn {number}; ending multi-turn")
+            return {"end": "user_done"}
+        return {"message": [{"kind": "text", "text": message_text}]}
+
+    def _record(self, key: str, entry: dict) -> None:
+        self._context.metadata.setdefault(key, {}).setdefault(self._step.id, []).append(entry)
+
+
+def _trigger_answer(resp: dict) -> Optional[dict]:
+    """An agent-trigger decide's answer: it ended the conversation, it speaks for the user, or None when none fired."""
+    if bool(resp.get("done")):
+        return {"end": "agent_trigger_done", "message": resp.get("parts") or []}
+    if resp.get("fired"):
+        return {"message": resp.get("parts") or []}
+    return None

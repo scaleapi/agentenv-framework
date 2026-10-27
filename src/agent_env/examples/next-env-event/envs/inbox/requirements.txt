@@ -1,0 +1,3 @@
+# A release pins agentenv-framework-protocol to the version it was released with.
+agentenv-framework-protocol
+mcp>=1.25,<2

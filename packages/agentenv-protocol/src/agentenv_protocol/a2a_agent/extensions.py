@@ -285,6 +285,7 @@ class TriggerDecideRequest(ExtensionRequest):
     solver_message: str = Field(default="", max_length=MAX_SOLVER_MESSAGE_LENGTH)
     context_id: str = "default"
     env_triggers: dict[str, dict[str, Any]] | None = None
+    record_unfired: bool = True  # False: a decision where nothing fires changes no state, so it can be repeated
 
 
 PROXY_TOKEN_MIN_LENGTH = 22
