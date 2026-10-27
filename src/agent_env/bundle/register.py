@@ -38,6 +38,8 @@ from agent_env.store.image_store.oci_registry_credentials import is_loopback_hos
 from agent_env.store.routing import configured_store, namespace_routing
 from agent_env.task_step.registry import get_task_step_registry
 
+from ._import_report import written_files
+from ._imported import Imported, as_imported, grafted, read_imported, source_of
 from ._secrets import credentials_in
 from .installed import installed_bundles
 from .ledger import Check, Ledger
@@ -84,22 +86,27 @@ def register_bundle(
 
     It turns namespace routing on while it runs. Raises BundleError listing every problem found before anything is
     written; a write that fails stops it, and every earlier one stays, in the ledger, for the next run to reuse."""
+    say = on_progress or (lambda line: None)
     with namespace_routing():
         bundle = parse_bundle(Path(root))
+        imported, why = read_imported(bundle.root)
+        if why is not None:
+            say(f"  {why}")
+        bundle, grafts = grafted(bundle, imported) if imported is not None else (bundle, {})
         resolved = resolve_bundle(bundle)
         plan = _plan(resolved, tasks, evals)
-        ids, problems = registry_ids(plan, _prefix(bundle, prefix))
+        ids, problems = registry_ids(plan, _prefix(bundle, prefix), imported)
         if problems:
             raise BundleError(problems)
         registered = translated(plan, ids)
         target = configured_store(get_config().get_document_store())
         shared = shared_store(target)
         identity, commit, dirty = bundle_identity(bundle.root)
-        ledger = RegistrationLedger(target, registered, identity, commit, dirty, frozenset(adopt))
-        problems = [*_unowned(registered, ledger), *_unregistrable(registered, shared)]
+        sources, kept = _sources(plan, ids, imported)
+        ledger = RegistrationLedger(target, registered, identity, commit, dirty, frozenset(adopt), sources, kept)
+        problems = [*_unowned(registered, ledger), *_unregistrable(registered, shared, grafts)]
         if problems:
             raise BundleError(problems)
-        say = on_progress or (lambda line: None)
         materialization = materialize(
             registered, dry_run=dry_run, registering=Registering(ledger),
             on_wait=lambda: say("waiting for another agent-env run to finish writing this bundle's ids"),
@@ -143,18 +150,24 @@ def _prefix(bundle: Bundle, prefix: str | None) -> str:
     return f"{name}-"
 
 
-def registry_ids(plan: Plan, prefix: str) -> tuple[dict[str, str], list[str]]:
+def registry_ids(plan: Plan, prefix: str, imported: Imported | None = None) -> tuple[dict[str, str], list[str]]:
     """The registry id each ``@local`` id the plan writes takes, and each problem giving them.
 
-    The bundle's own entry is ``<prefix><name>``, its name lowercased with each run of what an id can't hold made
+    What ``imported`` records the folder was imported from takes the id it had there, and an imported task's outputs
+    the names its file gives them, as the stored task did. Any other entry of the bundle's own is ``<prefix><name>``, its name lowercased with each run of what an id can't hold made
     ``-``. An installed bundle's agent pulled in by a reference takes the first alias its bundle gives it, which the
     reference named it by; any other entity of an installed bundle has no registry id, and an env's alias can't be
     one, since no store env may start on an installed env alias's id. An id derived from another (``<id>__env_image``) keeps its suffix after the
     other's registry id, and a task's output is ``<task id>-<name>``."""
     ids: dict[str, str] = {}
     problems: list[str] = []
+    imported_tasks = set()
     for write in plan.writes:
         entry = write.source.entry
+        if imported is not None and (source := source_of(imported, plan, write)) is not None:
+            ids[write.id] = source[0]
+            imported_tasks.update([entry.id] if write.kind is BundleKind.TASK else [])
+            continue
         if entry.id in ids or (isinstance(write.source, BundleImage) and write.id != entry.id):
             continue
         if entry in plan.origins:
@@ -174,17 +187,47 @@ def registry_ids(plan: Plan, prefix: str) -> tuple[dict[str, str], list[str]]:
         source = write.source
         if isinstance(source, ResolvedEntry) and source.entry.id in ids:
             for output in source.outputs:
-                name = _slug(output.id.removeprefix(f"{source.entry.id}/").rsplit("/", 1)[-1])
-                ids[output.id] = f"{ids[source.entry.id]}-{name}"
+                written = output.id.removeprefix(f"{source.entry.id}/")
+                ids[output.id] = (written if source.entry.id in imported_tasks
+                                  else f"{ids[source.entry.id]}-{_slug(written.rsplit('/', 1)[-1])}")
     by_target: dict[str, list[str]] = {}
+    kept = {registry_id for local, registry_id in ids.items()
+            if imported is not None and local not in _given(ids, imported_tasks, plan, imported)}
     for local, registry_id in ids.items():
         by_target.setdefault(registry_id, []).append(local)
-        if not _REGISTRY_ID.fullmatch(registry_id.replace("__", "_")):
+        if registry_id not in kept and not _REGISTRY_ID.fullmatch(registry_id.replace("__", "_")):
             problems.append(f"{registry_id!r}: isn't an id a registry takes; rename what it's made from")
     for registry_id, locals_ in by_target.items():
         if len(locals_) > 1:
             problems.append(f"{', '.join(sorted(locals_))} would all be registered as {registry_id!r}; rename one")
     return ids, problems
+
+
+def _given(ids: Mapping[str, str], imported_tasks: set[str], plan: Plan, imported: Imported) -> set[str]:
+    """The ``@local`` ids in ``ids`` whose registry ids the rules made, not ``imported``'s record: what isn't an
+    imported write, an imported task's output, or derived from either."""
+    taken = {write.id for write in plan.writes if source_of(imported, plan, write) is not None}
+    taken |= {local for local in ids if local.rpartition("/")[0] in imported_tasks}
+    return {local for local in ids
+            if local not in taken and not any(local.startswith(f"{base}__") for base in taken)}
+
+
+def _sources(plan: Plan, ids: Mapping[str, str],
+             imported: Imported | None) -> tuple[dict[tuple[str, str], int], set[tuple[str, str]]]:
+    """For each write of ``plan``, under its ``@local`` ids, that the folder was imported from, by (store, registry id),
+    the version it was imported at; and which of them the folder still holds as the import wrote it."""
+    if imported is None:
+        return {}, set()
+    now = written_files(plan.bundle.bundle.root)
+    sources, kept = {}, set()
+    for write in plan.writes:
+        if (source := source_of(imported, plan, write)) is None:
+            continue
+        key = (write.kind.store, ids.get(write.id, write.id))
+        sources[key] = source[1]
+        if as_imported(imported, plan, write, now):
+            kept.add(key)
+    return sources, kept
 
 
 def _alias(bundle: Bundle, entry: BundleEntry) -> str | None:
@@ -278,13 +321,19 @@ class RegistrationLedger(Ledger):
     strict = True
 
     def __init__(self, store: DocumentStore, plan: Plan, identity: str, commit: str | None, dirty: bool | None,
-                 adopt: frozenset[str] = frozenset()):
+                 adopt: frozenset[str] = frozenset(), sources: Mapping[tuple[str, str], int] | None = None,
+                 kept: set[tuple[str, str]] | None = None):
         super().__init__(store, plan)
         self.identity, self.commit, self.dirty, self.adopted_ids = identity, commit, dirty, adopt
+        self.sources, self.kept = sources or {}, kept or set()
 
     def check(self, write: Write, needs: Mapping[tuple[str, str], int]) -> Check:
         """``Ledger.check``, refusing a write whose id the store holds that this bundle didn't register, checked again
-        as it's about to be written, since another bundle can write the id after the check before any write."""
+        as it's about to be written, since another bundle can write the id after the check before any write. A write the
+        folder holds as its import wrote it, all it needs kept at the versions they were imported at, keeps the version
+        it was imported at, and the ledger records it."""
+        if (kept := self._as_imported(write, needs)) is not None:
+            return kept
         check = super().check(write, needs)
         if (problem := self.unowned(write, check.stored)) is not None:
             raise BundleError([problem])
@@ -292,23 +341,45 @@ class RegistrationLedger(Ledger):
 
     def unowned(self, write: Write, stored: int | None) -> str | None:
         """Why this bundle may not write ``write``'s id, which the store holds at ``stored``, or None when it may: the
-        store doesn't hold it, ``adopt`` names it, this bundle registered its latest version, or an interrupted
-        registration of this bundle wrote it."""
+        store doesn't hold it, ``adopt`` names it, an interrupted registration of this bundle wrote its latest version,
+        or that's the version this bundle last registered or its folder was imported from. One the store has written
+        anew since is refused, so no one else's version is written over unseen."""
         if stored is None or write.id in self.adopted_ids:
-            return None
-        row = self._latest(write.kind.store, write.id)
-        if row is not None and row.get("bundle") == self._bundle(write):
             return None
         pending = self._find(self.collection, Filter.of(store=write.kind.store, id=write.id, bundle=self._bundle(write),
                                                         status="pending"))
         if pending is not None and pending.get("version") == stored:
             return None
+        where, key = self._plan.path(write.source.entry), (write.kind.store, write.id)
+        row = self._latest(write.kind.store, write.id)
+        if row is not None and row.get("bundle") == self._bundle(write):
+            return None if row.get("version") == stored else self._moved(where, write.id, stored, row["version"],
+                                                                        "this bundle last registered")
+        if key in self.sources:
+            return None if stored == self.sources[key] else self._moved(where, write.id, stored, self.sources[key],
+                                                                        "this folder was imported from")
         by = f"registered from {row['bundle']}" if row is not None else "not registered from a bundle"
-        return (f"{self._plan.path(write.source.entry)}: {write.id!r} is in the store already, at v{stored}, {by}; pass "
-                f"--adopt {write.id} to write a new version of it, or --prefix to register this bundle under other ids")
+        return (f"{where}: {write.id!r} is in the store already, at v{stored}, {by}; pass --adopt {write.id} to write a "
+                "new version of it, or --prefix to register this bundle under other ids")
+
+    @staticmethod
+    def _moved(where: str, entity_id: str, stored: int, own: int, whose: str) -> str:
+        return (f"{where}: {entity_id!r} is at v{stored} in the store, newer than the v{own} {whose}; pass --adopt "
+                f"{entity_id} to write over it")
 
     def stored_version(self, write: Write) -> int | None:
         return self._stored_version(write)
+
+    def _as_imported(self, write: Write, needs: Mapping[tuple[str, str], int]) -> Check | None:
+        key = (write.kind.store, write.id)
+        if key not in self.kept or any(needs[need] != self.sources.get(need) for need in write.needs):
+            return None
+        stored = self._stored_version(write)
+        if stored is None or stored < self.sources[key]:
+            return None
+        digest = self.digest(write, needs)
+        return Check(write, digest, self.sources[key], ("as it was imported",), stored, needs,
+                     adopted=digest is not None)
 
     def _bundle(self, write: Write) -> str:
         """The bundle's identity, or for an entity an installed bundle comes with, that bundle's, which every bundle
@@ -355,26 +426,34 @@ def _unowned(plan: Plan, ledger: RegistrationLedger) -> Iterator[str]:
     """A problem for each write this bundle may not make (``RegistrationLedger.unowned``), every one found before any
     write."""
     for write in plan.writes:
-        if (problem := ledger.unowned(write, ledger.stored_version(write))) is not None:
+        kept = (write.kind.store, write.id) in ledger.kept  # it may write nothing; its check decides
+        if not kept and (problem := ledger.unowned(write, ledger.stored_version(write))) is not None:
             yield problem
 
 
-def _unregistrable(plan: Plan, shared: bool) -> Iterator[str]:
+def _unregistrable(plan: Plan, shared: bool, grafts: Mapping[Path, set[str]]) -> Iterator[str]:
     """A problem for each ``@local`` id left in what the plan writes and, for a ``shared`` store, each credential
-    written out and each URL that reaches only this machine."""
+    written out and each URL that reaches only this machine, but in a field given back from the stored task the folder
+    was imported from (``grafts``), which the store holds already."""
     for write in plan.writes:
         if not isinstance(write.source, ResolvedEntry):
             continue
         where = plan.path(write.source.entry)
+        taken = grafts.get(write.source.entry.path, set())
+
+        def stored(path: str) -> bool:
+            return any(path == field or path.startswith((f"{field}.", f"{field}[")) for field in taken)
+
         for path, text in _strings(write.source.config):
             if is_local_id(text):
                 yield f"{where}: {path or 'its value'} names {text!r}, which only this machine's stores hold"
-            elif shared and (url := _local_url(text)) is not None:
+            elif shared and not stored(path) and (url := _local_url(text)) is not None:
                 yield f"{where}: {path or 'its value'} names {url}, which only this machine reaches"
         if shared:
             for path, why in credentials_in(write.source.config):
-                yield (f"{where}: {path}: {why}, and a shared store shows it to anyone who reads it; leave it out, for "
-                       "whatever runs the task to give it")
+                if not stored(path):
+                    yield (f"{where}: {path}: {why}, and a shared store shows it to anyone who reads it; leave it out, "
+                           "for whatever runs the task to give it")
 
 
 def _strings(value: Any, path: str = "") -> Iterator[tuple[str, str]]:

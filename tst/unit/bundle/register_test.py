@@ -518,3 +518,19 @@ def test_an_id_another_bundle_registers_after_the_check_is_refused_before_it_is_
     assert "'triage-docs' is in the store already, at v1, registered from folder:/elsewhere/triage" in \
         refused.value.problems[0]
     assert Artifact.get("triage-docs").description == "theirs"
+
+
+def test_a_version_someone_else_wrote_since_is_not_written_over_unless_adopted(home):
+    root = layout(home / "triage", TRIAGE)
+    register_bundle(root)
+    (home / "seed.txt").write_text("seed")
+    FileArtifact.put("triage-docs", description="someone else's", file_path=str(home / "seed.txt"))
+    (root / "artifacts/docs/a.md").write_text("changed\n")
+
+    with pytest.raises(BundleError) as refused:
+        register_bundle(root)
+    adopted = register_bundle(root, adopt=["triage-docs"])
+
+    assert refused.value.problems == ("artifacts/docs: 'triage-docs' is at v2 in the store, newer than the v1 this "
+                                      "bundle last registered; pass --adopt triage-docs to write over it",)
+    assert {done.write.id: done.version for done in adopted.materialization.writes}["triage-docs"] == 3
