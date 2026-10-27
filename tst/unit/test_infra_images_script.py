@@ -51,16 +51,17 @@ def test_plan_lists_every_image_with_its_checkout_paths_and_tag(script, monkeypa
 
 
 def test_plan_only_lists_the_infra_images_or_the_agents_images(script, monkeypatch, capsys):
-    """The release builds the infra images before it publishes the protocol, and the bundles', which install it,
-    after."""
+    """The release builds the infra images before it publishes the protocol, and the images that install it, the
+    bundles' and the website browser's, after."""
     planned = {}
     for only in ("infra", "agents"):
         assert _run(script, monkeypatch, "plan", "--only", only) == 0
         planned[only] = [entry["name"] for entry in json.loads(capsys.readouterr().out)]
 
     bundles = [image.name for image in BUNDLE_IMAGES]
-    assert planned == {"infra": [image.name for image in bootstrap.PUBLISHED_IMAGES if image.name not in bundles],
-                       "agents": bundles}
+    after = [*bundles, "agentenv-website-browser"]  # the browser's recorder installs the protocol too
+    assert planned == {"infra": [image.name for image in bootstrap.PUBLISHED_IMAGES if image.name not in after],
+                       "agents": after}
     assert "agentenv-gateway" in planned["infra"] and bundles == [
         "agentenv-claude-code", "agentenv-codex", "agentenv-gemini", "agentenv-opencode", "agentenv-openhands",
         "agentenv-pi", "agentenv-proxy", "agentenv-mail-mcp"]

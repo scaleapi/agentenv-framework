@@ -50,8 +50,8 @@ _PRINTED_CHARS = 200  # of what docker printed in place of a manifest, in the er
 # Docker Hub send.
 _RATE_LIMITED = re.compile(r"429 Too Many Requests|toomanyrequests", re.IGNORECASE)
 # What pip in an agent image's build answers for the agentenv-framework-protocol its release published moments earlier,
-# until PyPI's index, which a CDN caches, lists it.
-_NOT_YET_SERVED = re.compile(r"No matching distribution found for agentenv-framework-protocol(\[[^\]]*\])?==")
+# until PyPI's index, which a CDN caches, lists it: pinned (an agent's), or a floor it names (the browser's recorder).
+_NOT_YET_SERVED = re.compile(r"No matching distribution found for agentenv-framework-protocol(\[[^\]]*\])?(==|>=)")
 # How long to wait before each try again, so a burst of builds starting together spreads out.
 _RETRY_WAITS_SECONDS = (30, 60, 120)
 
