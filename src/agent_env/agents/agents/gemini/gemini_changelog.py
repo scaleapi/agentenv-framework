@@ -216,8 +216,10 @@ def main():
                 # The metadata lives outside the roots, so tar takes it as one more member unless a root holds it.
                 written = bool(meta) and _write_meta(meta, k, record)
                 members = [*present, meta] if written and cfg.get("meta_explicit") else present
+                # A file the agent can't read is one it didn't write: skipped, so the rest of the increment is kept.
                 tar = subprocess.run(
-                    ["tar", "--listed-incremental=" + work, "--exclude=" + changelog_dir, "-czf", local, *members],
+                    ["tar", "--ignore-failed-read", "--listed-incremental=" + work, "--exclude=" + changelog_dir,
+                     "-czf", local, *members],
                     check=False, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, pass_fds=(lock.fileno(),),
                 )
                 archived = True
@@ -457,8 +459,8 @@ class Changelog:
             present = [r for r in roots if os.path.exists(r)]
             (self.directory / "present.json").write_text(json.dumps(present))
             subprocess.run(
-                ["tar", f"--listed-incremental={self.snar}", f"--exclude={self.directory}", "-cf", "/dev/null",
-                 *present],
+                ["tar", "--ignore-failed-read", f"--listed-incremental={self.snar}", f"--exclude={self.directory}",
+                 "-cf", "/dev/null", *present],
                 check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
 
