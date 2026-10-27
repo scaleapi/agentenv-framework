@@ -1,6 +1,6 @@
 """The ubuntu-24.04 base computer, built from its folder: its desktop runs as the session user with the settings a deploy
-passes, a setting it can't use stops it at start, and pushed to the local registry it registers as a computer artifact
-whose image put reads back. Needs Docker and the local registry on localhost:5000."""
+passes and comes back however often X dies, a setting it can't use stops it at start, and pushed to the local registry it
+registers as a computer artifact whose image put reads back. Needs Docker and the local registry on localhost:5000."""
 
 import json
 import platform
@@ -51,11 +51,7 @@ def test_the_desktop_runs_as_the_session_user_with_the_settings_a_deploy_passes(
     _docker("run", "-d", "--name", name, "-e", "AGENTENV_SETTING_RESOLUTION=1600x900",
             "-e", "AGENTENV_SETTING_TIMEZONE=Europe/Paris", image)
     try:
-        for _ in range(60):
-            running = subprocess.run(["docker", "exec", name, *SUPERVISOR], capture_output=True, text=True).stdout
-            if running and all(" RUNNING " in line for line in running.splitlines()):
-                break
-            time.sleep(1)
+        running = _all_running(name)
         users = set(_exec(name, "ps", "-eo", "user=").split())
         uid = _exec(name, "id", "-u", "user").strip()
         screen = _exec(name, "xdpyinfo")
@@ -70,6 +66,29 @@ def test_the_desktop_runs_as_the_session_user_with_the_settings_a_deploy_passes(
     assert "dimensions:    1600x900 pixels" in screen and "window id #" in wm
     assert "TZ=Europe/Paris" in environment.splitlines() and "DISPLAY=:99" in environment.splitlines()
     assert int(accessibility) == 1
+
+
+def test_the_desktop_comes_back_however_often_x_dies(image):
+    name = f"agentenv-test-base-{uuid.uuid4().hex[:8]}"
+    _docker("run", "-d", "--name", name, image)
+    try:
+        _all_running(name)
+        for _ in range(10):
+            killed = _exec(name, "pgrep", "-x", "Xvfb").strip()
+            _exec(name, "pkill", "-9", "-x", "Xvfb")
+            for _ in range(40):
+                time.sleep(0.25)
+                back = subprocess.run(["docker", "exec", name, "pgrep", "-x", "Xvfb"], capture_output=True, text=True)
+                if back.stdout.strip() not in ("", killed):
+                    break
+            time.sleep(1.2)
+        time.sleep(5)
+        running = _all_running(name)
+        wm = _exec(name, "xprop", "-root", "_NET_SUPPORTING_WM_CHECK")
+    finally:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+    assert all(" RUNNING " in line for line in running.splitlines()), running
+    assert "window id #" in wm
 
 
 @pytest.mark.parametrize("setting, value, error", [
@@ -96,6 +115,15 @@ def test_pushed_to_a_registry_it_registers_as_a_computer_whose_image_put_reads_b
     found = computer.metadata["validated_images"]["container"][ARCH]
     assert (found["status"], found["os_release"]) == ("passed", {"ID": "ubuntu", "VERSION_ID": "24.04"}), json.dumps(found)
     assert found["image"] == pinned.image_name
+
+
+def _all_running(name: str) -> str:
+    for _ in range(60):
+        running = subprocess.run(["docker", "exec", name, *SUPERVISOR], capture_output=True, text=True).stdout
+        if running and all(" RUNNING " in line for line in running.splitlines()):
+            break
+        time.sleep(1)
+    return running
 
 
 def _docker(*args: str) -> subprocess.CompletedProcess:
