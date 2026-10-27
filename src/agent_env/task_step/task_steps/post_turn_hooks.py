@@ -24,6 +24,7 @@ from agent_env.env.gateway.constants import (
     EXT_CLOCK_URI,
     EXT_STEP_URI,
     EXT_TRIGGERS_URI,
+    EXT_WAKEUPS_URI,
     STEP_SOURCE,
     STEP_SOURCE_POST_TURN_HOOK,
 )
@@ -31,7 +32,7 @@ from agent_env.task_step.context import TaskStepContext, _strip_redacted_keys
 
 _SPEC_KEYS = ("file_artifact_id", "file_artifact_version", "params")
 _RECORD_TAGS = ("hook", "turn")
-_INVOKABLE = (EXT_CLOCK_URI, EXT_TRIGGERS_URI)
+_INVOKABLE = (EXT_CLOCK_URI, EXT_TRIGGERS_URI, EXT_WAKEUPS_URI)
 _TOOL_CALL_TIMEOUT_S = 600
 
 Answer = dict[str, Any]
@@ -108,7 +109,7 @@ class PostTurnHooks:
 
 
 class HookEnv:
-    """A deployed env as a hook reaches it: clock and triggers calls, and tool calls recorded as the hook's."""
+    """A deployed env as a hook reaches it: clock, triggers and wakeups calls, and tool calls recorded as the hook's."""
 
     def __init__(self, deployed: DeployedEnv, hook_artifact_id: str) -> None:
         self.env_id = deployed.env_id
