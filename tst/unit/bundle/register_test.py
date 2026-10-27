@@ -1,0 +1,396 @@
+"""Registering a bundle: each entry under a registry id, each task and eval naming the versions it reads, a ledger in
+the target store so registering again writes only what changed, and every problem refused before anything is
+written."""
+
+import json
+import subprocess
+from pathlib import Path
+
+import pytest
+from click.testing import CliRunner
+
+from agent_env.a2a_agent import A2AAgent
+from agent_env.artifact import Artifact, FileArtifact
+from agent_env.artifact.artifacts import docker_image as docker_image_module
+from agent_env.artifact.artifacts.docker_image import DockerImageArtifact, push_context_image
+from agent_env.bundle import BundleError
+from agent_env.bundle import materialize as materialize_module
+from agent_env.bundle import register as register_module
+from agent_env.bundle.register import REGISTRATIONS, _remote_name, register_bundle
+from agent_env.cli import cli
+from agent_env.config import get_config
+from agent_env.config.runtime import Config
+from agent_env.entity.refs import EntityRef, RefRole
+from agent_env.env.env import Env
+from agent_env.eval import Eval
+from agent_env.store import Filter
+from agent_env.task import Task
+from agent_env.task_step.task_step import TaskStep
+from tst.unit.bundle._support import DIGEST, layout
+
+BOX = {"id": "box", "type": "deploy_sandbox", "sandbox_name": "box", "sandbox_mode": "vm"}
+
+
+def _load(step_id, artifact):
+    return {"id": step_id, "type": "load_artifact", "sandbox_name": "box", "artifact_id": artifact}
+
+
+TRIAGE = {
+    "artifacts/greeting/hello.txt": "hello\n",
+    "artifacts/docs/a.md": "a\n",
+    "tasks/t.json": json.dumps([BOX, _load("greet", "greeting"), _load("docs", "docs")]),
+}
+
+
+class _Writes(TaskStep):
+    """A step writing the artifact ``artifact_id``."""
+
+    type = "writes_register_test"
+    entity_refs = (EntityRef.artifact("artifact_id", role=RefRole.OUTPUT),)
+
+    def __init__(self, artifact_id=None, **base):
+        super().__init__(**base)
+        self.artifact_id = artifact_id
+
+    @classmethod
+    def from_dict(cls, data):
+        return cls(**cls._base_from_dict(data), artifact_id=data.get("artifact_id"))
+
+    def to_dict(self):
+        return {**super().to_dict(), "artifact_id": self.artifact_id}
+
+    async def execute(self, context):
+        return context
+
+
+@pytest.fixture(autouse=True)
+def steps(monkeypatch):
+    registry = {**Config().task_step_registry(), _Writes.type: _Writes}
+    monkeypatch.setattr(Config, "task_step_registry", lambda self: registry)
+
+
+_GIT = register_module._git
+
+
+@pytest.fixture(autouse=True)
+def outside_git(monkeypatch):
+    """Each folder is outside git, but the test that says otherwise: none reads a repository it didn't make."""
+    monkeypatch.setattr(register_module, "_git", lambda root, *args: None)
+
+
+@pytest.fixture
+def home(local_stores, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    return tmp_path
+
+
+def _steps(task_id, version=None):
+    return Task.get(task_id, version).to_dict()["steps"]
+
+
+def _rows():
+    return get_config().get_document_store().query(REGISTRATIONS, Filter.of(status="done"))
+
+
+def test_each_entry_takes_its_prefix_and_name_and_each_task_names_the_versions_it_reads(home):
+    registered = register_bundle(layout(home / "triage", TRIAGE))
+
+    assert {done.write.id: done.version for done in registered.materialization.writes} == {
+        "triage-docs": 1, "triage-greeting": 1, "triage-t": 1}
+    steps = _steps("triage-t")
+    assert [step["artifacts"] for step in steps[1:]] == [[{"id": "triage-greeting", "version": 1}],
+                                                         [{"id": "triage-docs", "version": 1}]]
+    assert Artifact.get("triage-docs").version == 1
+
+
+def test_registering_again_writes_nothing_and_an_edit_rewrites_only_what_it_reaches(home):
+    root = layout(home / "triage", TRIAGE)
+    register_bundle(root)
+
+    again = register_bundle(root)
+    (root / "artifacts/docs/a.md").write_text("changed\n")
+    edited = register_bundle(root)
+
+    assert all(done.reused for done in again.materialization.writes)
+    assert {done.write.id: (done.version, done.reused) for done in edited.materialization.writes} == {
+        "triage-docs": (2, False), "triage-greeting": (1, True), "triage-t": (2, False)}
+    assert _steps("triage-t")[2]["artifacts"] == [{"id": "triage-docs", "version": 2}]
+    assert _steps("triage-t", 1)[2]["artifacts"] == [{"id": "triage-docs", "version": 1}]
+
+
+def test_a_dry_run_says_what_it_would_write_and_writes_nothing(home):
+    planned = register_bundle(layout(home / "triage", TRIAGE), dry_run=True)
+
+    assert {done.write.id: done.version for done in planned.materialization.writes} == {
+        "triage-docs": 1, "triage-greeting": 1, "triage-t": 1}
+    assert get_config().get_document_store().count("tasks", Filter()) == 0 and _rows() == []
+
+
+def test_the_ledger_rows_are_in_the_target_store_and_name_the_bundle_by_its_remote_without_credentials(
+        local_stores, tmp_path, monkeypatch):
+    monkeypatch.setattr(register_module, "_git", _GIT)
+    repo = tmp_path / "repo"
+    layout(repo / "bundles" / "triage", TRIAGE)
+    for args in (["init", "-q"], ["remote", "add", "origin", "https://user:token123@github.com/team/repo.git"],
+                 ["add", "."], ["-c", "user.email=a@b.c", "-c", "user.name=a", "commit", "-q", "-m", "x"]):
+        subprocess.run(["git", "-C", str(repo), *args], check=True)
+
+    registered = register_bundle(repo / "bundles" / "triage")
+
+    assert registered.bundle == "github.com/team/repo:bundles/triage"
+    rows = _rows()
+    assert {row["id"] for row in rows} == {"triage-docs", "triage-greeting", "triage-t"}
+    assert {row["bundle"] for row in rows} == {"github.com/team/repo:bundles/triage"}
+    assert all(row["commit"] and row["dirty"] is False for row in rows)
+    assert "token123" not in json.dumps(rows, default=str)
+
+
+@pytest.mark.parametrize(("remote", "name"), [
+    ("git@github.com:team/repo.git", "github.com/team/repo"),
+    ("https://x-access-token:ghs_abc@github.com/team/repo", "github.com/team/repo"),
+    ("ssh://git@gitlab.example.com:2222/group/sub/repo.git", "gitlab.example.com/group/sub/repo"),
+])
+def test_a_remote_is_named_by_its_host_and_path_alone(remote, name):
+    assert _remote_name(remote) == name
+
+
+def test_an_id_the_store_holds_that_the_bundle_didnt_register_is_refused_unless_adopted(home):
+    (home / "seed.txt").write_text("seed")
+    FileArtifact.put("triage-docs", description="someone else's", file_path=str(home / "seed.txt"))
+    root = layout(home / "triage", TRIAGE)
+
+    with pytest.raises(BundleError) as refused:
+        register_bundle(root)
+    adopted = register_bundle(root, adopt=["triage-docs"])
+
+    assert refused.value.problems == (
+        "artifacts/docs: 'triage-docs' is in the store already, at v1, not registered from a bundle; pass --adopt "
+        "triage-docs to write a new version of it, or --prefix to register this bundle under other ids",)
+    assert {done.write.id: done.version for done in adopted.materialization.writes}["triage-docs"] == 2
+
+
+def test_another_folder_of_the_same_name_is_refused_the_ids_this_one_registered(home):
+    register_bundle(layout(home / "a" / "triage", TRIAGE))
+
+    with pytest.raises(BundleError) as refused:
+        register_bundle(layout(home / "b" / "triage", TRIAGE))
+
+    assert len(refused.value.problems) == 3
+    assert all(f"registered from folder:{home / 'a' / 'triage'}" in problem for problem in refused.value.problems)
+
+
+def test_a_prefix_registers_under_other_ids(home):
+    registered = register_bundle(layout(home / "triage", TRIAGE), prefix="team.")
+
+    assert {done.write.id for done in registered.materialization.writes} == {"team.docs", "team.greeting", "team.t"}
+
+
+def test_a_name_an_id_cant_hold_is_made_one_and_names_that_collide_are_refused(home):
+    files = {"artifacts/My Docs/a.md": "a\n", "artifacts/my-docs/b.md": "b\n",
+             "tasks/T.json": json.dumps([BOX, _load("one", "My Docs"), _load("two", "my-docs")])}
+
+    with pytest.raises(BundleError) as refused:
+        register_bundle(layout(home / "Big Triage", files))
+
+    assert refused.value.problems == ("@local/~/Big Triage/My Docs, @local/~/Big Triage/my-docs would all be "
+                                      "registered as 'big-triage-my-docs'; rename one",)
+
+
+def test_a_bad_prefix_is_refused(home):
+    with pytest.raises(BundleError) as refused:
+        register_bundle(layout(home / "triage", TRIAGE), prefix="Team/")
+
+    assert "--prefix 'Team/'" in refused.value.problems[0]
+
+
+def test_a_task_output_is_named_after_its_task_and_isnt_pinned(home):
+    files = {**TRIAGE, "tasks/t.json": json.dumps([BOX, {"id": "make", "type": _Writes.type, "artifact_id": "report"},
+                                                   {**_load("read", "report"), "depends_on": [{"task_step_id": "make"}]}])}
+
+    registered = register_bundle(layout(home / "triage", files))
+
+    assert registered.ids["@local/~/triage/t/report"] == "triage-t-report"
+    steps = _steps("triage-t")
+    assert steps[1]["artifact_id"] == "triage-t-report"
+    assert steps[2]["artifacts"] == [{"id": "triage-t-report", "version": None}]
+
+
+def test_an_eval_names_the_version_of_each_task(home):
+    files = {**TRIAGE, "evals/nightly.toml": 'tasks = ["t"]\n'}
+    root = layout(home / "triage", files)
+    register_bundle(root)
+    (root / "artifacts/docs/a.md").write_text("changed\n")
+
+    register_bundle(root)
+
+    assert [(task.task_id, task.task_version) for task in Eval.get("triage-nightly").tasks] == [("triage-t", 2)]
+    assert [(task.task_id, task.task_version) for task in Eval.get("triage-nightly", 1).tasks] == [("triage-t", 1)]
+
+
+def test_a_store_reference_is_pinned_to_the_version_the_plan_read(home):
+    (home / "seed.txt").write_text("seed")
+    FileArtifact.put("shared-seed", description="seed", file_path=str(home / "seed.txt"))
+    FileArtifact.put("shared-seed", description="seed", file_path=str(home / "seed.txt"))
+    files = {"tasks/t.json": json.dumps([BOX, _load("seed", "shared-seed")])}
+
+    register_bundle(layout(home / "triage", files))
+
+    assert _steps("triage-t")[1]["artifacts"] == [{"id": "shared-seed", "version": 2}]
+
+
+def test_a_step_that_leaves_its_agent_unset_is_registered_so_and_writes_no_default_agent(home):
+    files = {"tasks/t.json": json.dumps([BOX, {"id": "agent", "type": "deploy_agent", "env_ids": []}])}
+
+    registered = register_bundle(layout(home / "triage", files))
+
+    assert [done.write.id for done in registered.materialization.writes] == ["triage-t"]
+    assert _steps("triage-t")[1].get("a2a_agent_id") is None
+
+
+def test_a_shipped_agent_named_by_its_alias_is_registered_under_the_alias(home, agents_published):
+    files = {"tasks/t.json": json.dumps([BOX, {"id": "agent", "type": "deploy_agent", "env_ids": [],
+                                               "a2a_agent_id": "claude-code"}])}
+
+    registered = register_bundle(layout(home / "triage", files))
+
+    written = {done.write.id: done.version for done in registered.materialization.writes}
+    assert written == {"claude-code__agent_image": 1, "claude-code": 1, "triage-t": 1}
+    step = _steps("triage-t")[1]
+    assert (step["a2a_agent_id"], step["a2a_agent_version"]) == ("claude-code", 1)
+    image = DockerImageArtifact.get("claude-code__agent_image")
+    assert (image.image_name, image.image_digest) == (agents_published, DIGEST)
+    assert A2AAgent.get("claude-code").docker_image_artifact.id == "claude-code__agent_image"
+
+
+def test_an_image_the_bundle_builds_is_pushed_and_registered_by_its_digest_with_its_context(home, monkeypatch):
+    pushed = []
+
+    def push(entity_id, context_path, dockerfile_path, before=None):
+        pushed.append((entity_id, dockerfile_path))
+        return f"registry.example.com/{entity_id}:src-1", DIGEST
+
+    monkeypatch.setattr(materialize_module, "push_context_image", push)
+    files = {"envs/crm/Dockerfile": "FROM python:3.12-slim\n", "envs/crm/env.toml": 'environment_name = "crm"\n',
+             "tasks/t.json": json.dumps([{"id": "env", "type": "deploy_env", "env_id": "crm"}])}
+
+    register_bundle(layout(home / "triage", files))
+
+    assert [(entity_id, Path(dockerfile).name) for entity_id, dockerfile in pushed] == [
+        ("triage-crm__env_image", "Dockerfile")]
+    image = DockerImageArtifact.get("triage-crm__env_image")
+    assert (image.image_name, image.image_digest) == ("registry.example.com/triage-crm__env_image:src-1", DIGEST)
+    assert image.build_context_object_url and image.dockerfile_path == "Dockerfile"
+    assert Env.get("triage-crm").docker_image_artifact.id == "triage-crm__env_image"
+    step = _steps("triage-t")[0]
+    assert (step["env_id"], step["env_version"]) == ("triage-crm", 1)
+
+
+def test_an_at_local_id_left_in_what_would_be_written_is_refused(home):
+    files = {"tasks/t.json": json.dumps([{**BOX, "metadata": {"from": "@local/~/elsewhere/x"}}])}
+
+    with pytest.raises(BundleError) as refused:
+        register_bundle(layout(home / "triage", files))
+
+    assert refused.value.problems == (
+        "tasks/t.json: [0].metadata.from names '@local/~/elsewhere/x', which only this machine's stores hold",)
+
+
+def test_a_shared_store_refuses_a_credential_written_out_and_a_url_only_this_machine_reaches(home, monkeypatch):
+    monkeypatch.setattr(register_module, "shared_store", lambda store: True)
+    files = {"tasks/t.json": json.dumps([
+        {**BOX, "env_vars": {"API_KEY": "abc", "TOKEN": "secret:team_token", "MODE": "fast"}},
+        {"id": "agent", "type": "deploy_agent", "env_ids": [], "metadata": {"wiki": "http://localhost:8080/x"}}])}
+
+    with pytest.raises(BundleError) as refused:
+        register_bundle(layout(home / "triage", files))
+
+    assert refused.value.problems == (
+        "tasks/t.json: [0].env_vars.API_KEY: its name looks like a secret's, and it's set, and a shared store shows "
+        "it to anyone who reads it; leave it out, for whatever runs the task to give it",
+        "tasks/t.json: [1].metadata.wiki names http://localhost:8080, which only this machine reaches")
+
+
+def test_the_cli_says_what_it_would_write_asks_before_a_shared_store_and_dry_run_writes_nothing(home, monkeypatch):
+    root = layout(home / "triage", TRIAGE)
+    monkeypatch.setattr(register_module, "shared_store", lambda store: True)
+
+    dry = CliRunner().invoke(cli, ["bundle", "register", str(root), "--dry-run"])
+    declined = CliRunner().invoke(cli, ["bundle", "register", str(root)], input="n\n")
+    written = CliRunner().invoke(cli, ["bundle", "register", str(root), "--yes"])
+    again = CliRunner().invoke(cli, ["bundle", "register", str(root), "--yes"])
+
+    assert dry.exit_code == 0, dry.output
+    assert "  artifacts/docs -> artifact triage-docs v1 (new)" in dry.output
+    assert dry.output.rstrip().endswith("Nothing was written: --dry-run.")
+    assert declined.exit_code == 1 and "Write these to the stores above?" in declined.output
+    assert written.exit_code == 0, written.output
+    assert "Run a registered task with: agent-env task run --id triage-t --version 1" in written.output
+    assert "Nothing to write: every version is registered already." in again.output
+    assert [task.version for task in [Task.get("triage-t")]] == [1]
+
+
+def test_a_bundle_with_no_tasks_registers_every_entity(home):
+    registered = register_bundle(layout(home / "library", {"artifacts/greeting/hello.txt": "hello\n"}))
+
+    assert [done.write.id for done in registered.materialization.writes] == ["library-greeting"]
+
+
+def test_a_failed_write_keeps_what_was_written_and_the_next_run_reuses_it(home, monkeypatch):
+    root = layout(home / "triage", TRIAGE)
+    real = Task.put
+
+    def failing(*args, **kwargs):
+        raise RuntimeError("the store went away")
+
+    monkeypatch.setattr(Task, "put", failing)
+    with pytest.raises(RuntimeError):
+        register_bundle(root)
+    monkeypatch.setattr(Task, "put", real)
+
+    retried = register_bundle(root)
+
+    assert {done.write.id: (done.version, done.reused) for done in retried.materialization.writes} == {
+        "triage-docs": (1, True), "triage-greeting": (1, True), "triage-t": (1, False)}
+    assert Artifact.get("triage-docs").version == 1
+
+
+class _Store:
+    """An image store that records each repository it's asked to set up."""
+
+    def __init__(self):
+        self.repositories = []
+
+    def image_ref(self, repository, tag):
+        return f"registry.example.com/{repository}:{tag}"
+
+    def ensure_repository(self, repository):
+        self.repositories.append(repository)
+
+    def auth(self, ref):
+        return None
+
+
+def test_an_image_is_built_and_pushed_once_under_the_tag_of_its_sources(home, monkeypatch):
+    store, built, pushed, served = _Store(), [], [], set()
+
+    def pin(ref, auth):
+        if ref not in served:
+            raise docker_image_module.NoSuchImageError(f"{ref}: no such image")
+        return f"{ref}@{DIGEST}"
+
+    monkeypatch.setattr(get_config(), "get_image_store_for", lambda entity_id: store)
+    monkeypatch.setattr(docker_image_module, "pin_digest", pin)
+    monkeypatch.setattr(docker_image_module, "build_image",
+                        lambda dockerfile, context, tag, platform: built.append((tag, platform)))
+    monkeypatch.setattr(docker_image_module, "_push_local_image",
+                        lambda local, ref, image_store: (pushed.append(ref), served.add(ref)))
+    context = layout(home / "context", {"Dockerfile": "FROM python:3.12-slim\n"})
+
+    first = push_context_image("triage-crm__env_image", str(context), "Dockerfile")
+    again = push_context_image("triage-crm__env_image", str(context), "Dockerfile")
+
+    ref = first[0]
+    assert first == again == (ref, DIGEST)
+    assert ref.startswith("registry.example.com/triage-crm-env_image:src-") and "__" not in ref
+    assert [platform for _, platform in built] == ["linux/amd64"] and pushed == [ref]
+    assert store.repositories == ["triage-crm-env_image", "triage-crm-env_image"]

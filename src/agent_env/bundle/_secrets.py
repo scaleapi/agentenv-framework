@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from agent_env.config.describe import is_secret_key
+from agent_env.config.loader import SECRET_REF_PREFIX
 
 # The fields that map environment variable names to values, where a credential is most often set.
 _ENV_VAR_MAPS = ("env_vars", "default_env_vars")
@@ -58,3 +59,26 @@ def _masked(text: str) -> tuple[str, list[str]]:
         if count:
             found.append(what)
     return text, found
+
+
+def credentials_in(value: Any, path: str = "") -> list[tuple[str, str]]:
+    """Each credential ``value`` holds written out, by its path, and what it is: an env var whose name looks like a
+    secret's, set to anything but a ``secret:`` reference, and any value holding a credential ``scrub`` masks."""
+    found = []
+    items = value.items() if isinstance(value, dict) else enumerate(value) if isinstance(value, list) else ()
+    for key, item in items:
+        at = f"{path}.{key}" if path and isinstance(key, str) else f"{path}[{key}]" if isinstance(key, int) else key
+        if isinstance(value, dict) and key in _ENV_VAR_MAPS and isinstance(item, dict):
+            for name, setting in item.items():
+                if not isinstance(setting, str) or not setting or setting.startswith(SECRET_REF_PREFIX):
+                    continue
+                if is_secret_key(name):
+                    found.append((f"{at}.{name}", "its name looks like a secret's, and it's set"))
+                elif kinds := _masked(setting)[1]:
+                    found.append((f"{at}.{name}", f"it holds {kinds[0]}"))
+        elif isinstance(item, str):
+            if kinds := _masked(item)[1]:
+                found.append((at, f"it holds {', '.join(kinds)}"))
+        else:
+            found += credentials_in(item, at)
+    return found

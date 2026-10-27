@@ -22,9 +22,9 @@ from agent_env.artifact.artifact import Artifact, _write_twin
 from agent_env.store.ids import fs_safe, image_repository, is_local_id, local_image_repository
 from agent_env.store.image_store.local_registry_image_store import LocalRegistryImageStore
 from agent_env.store.image_store.oci_registry_credentials import is_loopback_host, names_registry, registry_host_from_ref
-from agent_env.store.image_store.registry_api import pin_digest, pinned_from
+from agent_env.store.image_store.registry_api import NoSuchImageError, pin_digest, pinned_from
 from agent_env.utils.docker.context import BuildContext
-from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, normalize_platform
+from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, build_image, normalize_platform
 
 logger = logging.getLogger(__name__)
 
@@ -559,6 +559,33 @@ class GitHubBuildResult:
     github_commit: str
     dockerfile_github_url: str
     docker_context_github_url: str | None
+
+
+def push_context_image(id: str, context_path: str, dockerfile_path: str,
+                       before: Callable[[], None] | None = None) -> tuple[str, str]:
+    """The ref and digest of the image of ``id``'s build context in ``id``'s image store, under the tag of its sources:
+    built for linux/amd64 with this machine's Docker and pushed, calling ``before`` first, unless the store serves the
+    tag already. Raises DockerBuildError when the build fails, RuntimeError when the push does, and ValueError when the
+    registry can't be read."""
+    from agent_env.config import get_config
+
+    context = _context_of(Path(context_path), dockerfile_path)
+    tag = "src-" + context.source_digest(DEFAULT_BUILD_PLATFORM).removeprefix("sha256:")
+    store = get_config().get_image_store_for(id)
+    # ECR, unlike the OCI spec, refuses two separators in a row, which a derived id (``<id>__env_image``) holds.
+    repository = image_repository(id).replace("__", "-")
+    ref = store.image_ref(repository, tag)
+    store.ensure_repository(repository)
+    try:
+        return ref, pin_digest(ref, store.auth(ref)).rpartition("@")[2]
+    except NoSuchImageError:
+        pass
+    if before is not None:
+        before()
+    local = f"{local_image_repository(id)}:{tag}"
+    build_image(Path(context_path) / context.dockerfile, Path(context_path), local, platform=DEFAULT_BUILD_PLATFORM)
+    _push_local_image(local, ref, store)
+    return ref, pin_digest(ref, store.auth(ref)).rpartition("@")[2]
 
 
 def _push_local_image(local_tag: str, image_ref: str, image_store) -> None:

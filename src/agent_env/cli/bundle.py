@@ -1,4 +1,4 @@
-"""``agent-env bundle``: start a bundle folder from what a store holds."""
+"""``agent-env bundle``: start a bundle folder from what a store holds, and register one into the stores."""
 
 from __future__ import annotations
 
@@ -7,13 +7,15 @@ from pathlib import Path
 import click
 
 from agent_env.bundle.importer import BundleImport, import_eval, import_task
+from agent_env.bundle.parse import BundleKind
+from agent_env.bundle.register import describe_target, register_bundle
 from agent_env.cli.utils import interruptible
 from agent_env.entity.scopes import FieldScope
 
 
 @click.group()
 def bundle():
-    """Create bundle folders, which ``agent-env run`` runs."""
+    """Create bundle folders, which ``agent-env run`` runs, and register them into the configured stores."""
 
 
 @bundle.command("init")
@@ -59,3 +61,57 @@ def _report(imported: BundleImport, folder: Path) -> None:
         for line in lines:
             click.echo(f"  {line}")
     click.echo(f"Run it with: agent-env run {folder}")
+
+
+@bundle.command("register")
+@click.argument("folder", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--task", "tasks", multiple=True,
+              help="Register this task, by name, with what it uses. Repeatable. With no --task or --eval, every task "
+                   "and eval in the bundle.")
+@click.option("--eval", "evals", multiple=True, help="Register this eval, by name, and the tasks it names. Repeatable.")
+@click.option("--prefix", default=None,
+              help="What each entry's registry id opens with; by default the folder's name and a dash.")
+@click.option("--adopt", multiple=True,
+              help="An id the store holds that this bundle didn't register, to write a new version of. Repeatable.")
+@click.option("--dry-run", is_flag=True, help="Check everything and say what would be written; write nothing.")
+@click.option("--yes", is_flag=True, help="Write to a store other than this machine's own without asking.")
+def register(folder: Path, tasks: tuple[str, ...], evals: tuple[str, ...], prefix: str | None,
+             adopt: tuple[str, ...], dry_run: bool, yes: bool):
+    """Write the bundle at FOLDER into the configured stores under registry ids, so whatever runs the stores' tasks
+    runs what the folder runs.
+
+    Each env, agent, artifact, skill, task and eval takes the id PREFIX plus its name, lowercased; a task's outputs
+    take the task's id and their names. A shipped agent a task names by its alias is registered under the alias when
+    the store lacks one. Each task and eval names the version of everything it references, so a registered version
+    never changes meaning; a step that leaves its agent unset is left so, for whatever runs it to give its own. Each
+    image the bundle builds is built here for linux/amd64 with Docker and pushed to the configured image store, with
+    its build context beside it.
+
+    It checks everything first and says what it would write: an id the store holds that this bundle didn't register,
+    an @local id left in what it would write, or, for a store other than this machine's, a credential written out or a
+    URL only this machine reaches, refuses the whole registration. A store other than this machine's is written only
+    after you confirm, or with --yes. Registering again writes only what changed since."""
+    options = {"tasks": tasks, "evals": evals, "prefix": prefix, "adopt": adopt}
+    click.echo(f"Registering {folder} into:")
+    for line in describe_target():
+        click.echo(f"  {line}")
+    click.echo("Checking:")
+    with interruptible():
+        planned = register_bundle(folder, dry_run=True, on_progress=click.echo, **options)
+    for line in planned.floating:
+        click.echo(f"  floating, since its field takes no version: {line}")
+    if dry_run:
+        click.echo("Nothing was written: --dry-run.")
+        return
+    if all(done.reused for done in planned.materialization.writes):
+        click.echo("Nothing to write: every version is registered already.")
+        return
+    if planned.shared and not yes:
+        click.confirm("Write these to the stores above?", abort=True)
+    click.echo("Writing:")
+    with interruptible():
+        registered = register_bundle(folder, on_progress=click.echo, **options)
+    tasks_written = [done for done in registered.materialization.writes if done.write.kind is BundleKind.TASK]
+    if tasks_written:
+        first = tasks_written[0]
+        click.echo(f"Run a registered task with: agent-env task run --id {first.write.id} --version {first.version}")

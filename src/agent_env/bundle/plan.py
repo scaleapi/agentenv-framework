@@ -187,13 +187,14 @@ class Plan:
 
 
 def plan_bundle(resolved: ResolvedBundle, *, tasks: Sequence[str] = (), evals: Sequence[str] = (),
-                installed: Installed | None = None, agent: str | None = None) -> Plan:
+                installed: Installed | None = None, agent: str | None = None, default_agents: bool = True) -> Plan:
     """Plan a run of ``tasks`` and ``evals``, each a name or id in this bundle. With neither, the
     run is every eval or, in a bundle without evals, every task. ``installed`` lists the installed bundles whose
     entities a reference pulls in (``installed_bundles``); without it, an id under one is a store id. ``agent`` names
-    the agent the solver runs as, as a task's reference would, leaving the tasks as written (``Plan.agent``). Raises
-    BundleError listing every problem found."""
-    return _Planner(resolved, installed).plan(tasks, evals, agent)
+    the agent the solver runs as, as a task's reference would, leaving the tasks as written (``Plan.agent``). Without
+    ``default_agents``, a step that leaves its agent unset pulls in no configured default, as for a task written to
+    run wherever another's default applies. Raises BundleError listing every problem found."""
+    return _Planner(resolved, installed, default_agents).plan(tasks, evals, agent)
 
 
 def plan_entities(resolved: ResolvedBundle, ids: Sequence[str], *, installed: Installed | None = None) -> Plan:
@@ -220,8 +221,9 @@ class _Pullable:
 
 
 class _Planner:
-    def __init__(self, resolved: ResolvedBundle, installed: Installed | None = None):
+    def __init__(self, resolved: ResolvedBundle, installed: Installed | None = None, default_agents: bool = True):
         self.resolved = resolved
+        self.default_agents = default_agents
         self.problems: list[str] = []
         self.nodes: dict[_Key, ResolvedEntry | BundleImage] = {}
         self.rank: dict[_Key, int] = {}
@@ -271,7 +273,7 @@ class _Planner:
         reference to the bundle's own entity points at that; for a task, with a reference for each step that deploys
         the configured default agent when this bundle or an installed one defines it."""
         references = [ref if ref.local is not None else self._pulled(ref) for ref in entry.references]
-        if entry.entry.kind is BundleKind.TASK:
+        if entry.entry.kind is BundleKind.TASK and self.default_agents:
             references += self._default_agents(entry)
         if references == list(entry.references):
             return entry
@@ -325,7 +327,7 @@ class _Planner:
                     aliased[ref.kind, ref.id] = use.target_id
                     ref = self._pulled(replace(ref, id=use.target_id))
                 references.append(ref)
-            if _leaves_an_agent_unset(entry):
+            if self.default_agents and _leaves_an_agent_unset(entry):
                 if default is _UNREAD:
                     default = self._alias_use(self.alias_table, EntityKind.AGENT,
                                               get_config().get_default_a2a_agent_id(), None, self.alias_uses,
