@@ -1,0 +1,365 @@
+"""computer-recording/v1: a driver with ``recording`` serves it, from its ``@record`` stream or by polling ``@capture``;
+segments roll over and upload as they close, the manifest matches the files, and the limits and retries hold."""
+from __future__ import annotations
+
+import asyncio
+import hashlib
+from datetime import datetime, timedelta, timezone
+from fractions import Fraction
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+pytest.importorskip("mcp.server.fastmcp")
+pytest.importorskip("PIL")
+av = pytest.importorskip("av")
+
+from computer_fake import FakeDriver, MinimalDriver, http_client  # noqa: E402
+from PIL import Image as PILImage  # noqa: E402
+
+from agentenv_protocol.computer import (  # noqa: E402
+    COMPUTER_RECORDING,
+    DeviceUnavailable,
+    RecordedFrame,
+    RecordedSegment,
+    Recording,
+    record,
+)
+from agentenv_protocol.computer import recording as recording_module  # noqa: E402
+from agentenv_protocol.transfers import TransferError  # noqa: E402
+
+START, END = "/agentenv/ext/computer-recording/start", "/agentenv/ext/computer-recording/end"
+
+
+@pytest.fixture(autouse=True)
+def home(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    return tmp_path
+
+
+class Recorded(FakeDriver):
+    recording = Recording(max_segment_s=1)
+
+
+class Streamed(FakeDriver):
+    """A stream of the fake screen's frames, as a driver with its own capture stream yields them."""
+    recording = Recording(max_fps=30, max_segment_s=60)
+
+    @record
+    async def frames(self, hints):
+        while True:
+            yield RecordedFrame(self.screen.image.copy(), datetime.now(timezone.utc))
+            await asyncio.sleep(1 / hints.fps)
+
+
+class Segmented(FakeDriver):
+    """A native recorder that writes whole segments itself."""
+    recording = Recording(max_segment_s=60)
+
+    @record
+    async def segments(self, hints):
+        for n in range(2):
+            path = hints.directory / ("0000.mp4" if n == 0 else f"native-{n}.mp4")
+            start = datetime.now(timezone.utc)
+            await asyncio.to_thread(_mp4, path, 5, (160, 100))
+            yield RecordedSegment(path, start, start + timedelta(seconds=0.4), 160, 100, 5)
+        await asyncio.sleep(3600)
+
+
+def _mp4(path, frames, size):
+    out = av.open(str(path), "w", format="mp4")
+    stream = out.add_stream("libx264", rate=10)
+    stream.width, stream.height, stream.pix_fmt = *size, "yuv420p"
+    for i in range(frames):
+        frame = av.VideoFrame.from_image(PILImage.new("RGB", size, (i * 40, 0, 0))).reformat(format="yuv420p")
+        frame.pts, frame.time_base = i * 100, Fraction(1, 1000)
+        for p in stream.encode(frame):
+            out.mux(p)
+    for p in stream.encode():
+        out.mux(p)
+    out.close()
+
+
+def _grant() -> dict:
+    return {"root_path": "rec/run-1", "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+            "max_objects": 50, "max_object_bytes": 10 << 20, "max_total_bytes": 100 << 20,
+            "write": {"kind": "http-post-policy", "url": "https://store.test/", "fields": {}, "path_field": "key",
+                      "file_field": "file"}}
+
+
+async def _record(driver, seconds: float, start: dict | None = None, end: dict | None = None) -> tuple[dict, dict]:
+    async with http_client(driver) as http:
+        started = (await http.post(START, json={"request_id": "r", "fps": 10, **(start or {})})).json()
+        await asyncio.sleep(seconds)
+        manifest = (await http.post(END, json={"recording_id": started["recording_id"], **(end or {})})).json()
+    return started, manifest
+
+
+def _decoded(path) -> list:
+    with av.open(str(path)) as container:
+        return list(container.decode(container.streams.video[0]))
+
+
+def _at(iso: str) -> datetime:
+    return datetime.fromisoformat(iso.replace("Z", "+00:00"))
+
+
+@pytest.mark.asyncio
+async def test_a_driver_with_recording_serves_it_and_one_without_does_not():
+    async with http_client(Recorded()) as http:
+        card = (await http.get("/.well-known/agent-env.json")).json()
+    async with http_client(FakeDriver()) as http:
+        plain = (await http.get("/.well-known/agent-env.json")).json()
+    extension = next(e for e in card["capabilities"]["extensions"] if e["uri"] == COMPUTER_RECORDING)
+    assert set(extension["params"]["methods"]) == {"start", "end"}
+    assert {k: v for k, v in extension["params"].items() if k not in ("methods", "endpoint")} == {
+        "formats": ["video/mp4; codecs=avc1"], "scopes": ["display"], "fps": {"default": 10, "max": 15},
+        "cursor": True, "source": "capture", "max_segment_s": 1, "max_concurrent": 2, "max_duration_s": 3600}
+    assert COMPUTER_RECORDING not in [e["uri"] for e in plain["capabilities"]["extensions"]]
+
+
+def test_recording_features_and_record_are_checked_when_the_class_is_defined():
+    with pytest.raises(TypeError, match="recording.max_fps is an integer from 1 to 60"):
+        class TooFast(FakeDriver):
+            recording = Recording(max_fps=120)
+    with pytest.raises(TypeError, match="@record needs recording = Recording()"):
+        class Undeclared(FakeDriver):
+            @record
+            async def frames(self, hints):
+                yield None
+    with pytest.raises(TypeError, match="recording is a Recording"):
+        class Wrong(FakeDriver):
+            recording = {"max_fps": 10}
+
+
+@pytest.mark.asyncio
+async def test_the_fallback_polls_capture_and_draws_the_pointer(home):
+    driver = Recorded()
+    driver.screen.pointer = (200, 120)
+    started, manifest = await _record(driver, 0.6)
+    assert started["recording_id"].startswith("rec-") and started["format"] == "video/mp4; codecs=avc1"
+    assert manifest["source"] == "capture" and manifest["cursor"] is True and manifest["ended_by"] == "end"
+    (segment,) = manifest["segments"]
+    file = home / ".agentenv-recordings" / segment["path"]
+    assert segment["uploaded"] is False and segment["bytes"] == file.stat().st_size
+    assert segment["sha256"] == hashlib.sha256(file.read_bytes()).hexdigest()
+    frames = _decoded(file)
+    assert len(frames) == segment["frames"] >= 4 and (frames[0].width, frames[0].height) == (1280, 800)
+    pixel = frames[-1].to_image().getpixel((202, 128))
+    assert sum(pixel) < 200, f"no pointer drawn at the pointer: {pixel}"
+    assert _at(manifest["started_at"]) <= _at(manifest["ended_at"])
+
+
+@pytest.mark.asyncio
+async def test_a_driver_without_the_pointer_group_records_without_a_cursor(home):
+    class Plain(MinimalDriver):
+        recording = Recording()
+
+    _, manifest = await _record(Plain(), 0.4)
+    assert manifest["cursor"] is False and manifest["segments"][0]["width"] == 640
+
+
+@pytest.mark.asyncio
+async def test_segments_roll_over_with_no_gap_between_them(home):
+    _, manifest = await _record(Recorded(), 2.6)
+    segments = manifest["segments"]
+    assert len(segments) >= 2 and [s["index"] for s in segments] == list(range(len(segments)))
+    for before, after in zip(segments, segments[1:]):
+        gap = (_at(after["started_at"]) - _at(before["ended_at"])).total_seconds()
+        assert 0 < gap < 0.25, gap
+    for segment in segments:
+        assert (_at(segment["ended_at"]) - _at(segment["started_at"])).total_seconds() <= 1.0
+
+
+@pytest.mark.asyncio
+async def test_a_size_change_starts_a_segment_of_the_new_size(home):
+    driver = Recorded()
+    driver.recording = Recording(max_segment_s=60)
+    async with http_client(driver) as http:
+        started = (await http.post(START, json={"request_id": "r", "fps": 10})).json()
+        await asyncio.sleep(0.4)
+        driver.screen.resize(640, 400, 1.0)
+        await asyncio.sleep(0.4)
+        manifest = (await http.post(END, json={"recording_id": started["recording_id"]})).json()
+    assert [(s["width"], s["height"]) for s in manifest["segments"]] == [(1280, 800), (640, 400)]
+
+
+@pytest.mark.asyncio
+async def test_captures_that_fail_leave_a_gap_and_recording_resumes(home):
+    driver = Recorded()
+    driver.recording = Recording(max_segment_s=60)
+    async with http_client(driver) as http:
+        started = (await http.post(START, json={"request_id": "r", "fps": 10})).json()
+        await asyncio.sleep(0.4)
+        driver.fail["capture"] = DeviceUnavailable("the X server went away")
+        await asyncio.sleep(1.6)
+        manifest = (await http.post(END, json={"recording_id": started["recording_id"]})).json()
+    assert len(manifest["segments"]) == 2 and manifest["ended_by"] == "end"
+    gap = (_at(manifest["segments"][1]["started_at"]) - _at(manifest["segments"][0]["ended_at"])).total_seconds()
+    assert gap >= 0.9
+
+
+@pytest.mark.asyncio
+async def test_a_stream_that_keeps_failing_ends_the_recording_with_its_error(home, monkeypatch):
+    monkeypatch.setattr(recording_module, "FAILING_S", 0.5)
+
+    class Broken(FakeDriver):
+        recording = Recording()
+
+        @record
+        async def frames(self, hints):
+            raise RuntimeError("no display")
+            yield
+
+    _, manifest = await _record(Broken(), 2.5)
+    assert manifest["ended_by"] == "error" and manifest["error"] == "RuntimeError: no display"
+    assert manifest["segments"] == [] and manifest["started_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_stream_of_frames_keeps_each_frames_capture_time(home):
+    _, manifest = await _record(Streamed(), 0.8, start={"fps": 20, "max_edge": 640})
+    (segment,) = manifest["segments"]
+    assert manifest["source"] == "stream" and (segment["width"], segment["height"]) == (640, 400)
+    frames = _decoded(home / ".agentenv-recordings" / segment["path"])
+    span = (_at(segment["ended_at"]) - _at(segment["started_at"])).total_seconds()
+    assert len(frames) == segment["frames"] >= 10 and abs(frames[-1].time - span) < 0.002
+
+
+@pytest.mark.asyncio
+async def test_a_native_recorders_segments_are_kept_as_they_come(home):
+    _, manifest = await _record(Segmented(), 1.0)
+    assert [(s["index"], s["path"].rsplit("/", 1)[1], s["frames"]) for s in manifest["segments"]] == [
+        (0, "0000.mp4", 5), (1, "0001.mp4", 5)]
+    assert len(_decoded(home / ".agentenv-recordings" / manifest["segments"][1]["path"])) == 5
+
+
+@pytest.mark.asyncio
+async def test_segments_upload_as_they_close_and_end_retries_with_a_fresh_grant(home):
+    calls = []
+
+    def uploader(grant):
+        fail = grant.root_path == "rec/run-1" and not calls
+        upload = AsyncMock(side_effect=TransferError("transfer_unavailable", "down") if fail else None)
+        calls.append((grant.root_path, upload))
+        return type("Uploader", (), {"upload": upload})()
+
+    with patch.object(recording_module, "NamespaceUploader", side_effect=uploader):
+        _, manifest = await _record(Recorded(), 0.5, start={"upload": _grant()},
+                                    end={"upload": {**_grant(), "root_path": "rec/run-2"}})
+    (segment,) = manifest["segments"]
+    assert segment["uploaded"] is True and "upload_error" not in segment
+    assert [root for root, _ in calls] == ["rec/run-1", "rec/run-2"]
+    assert calls[1][1].await_args.args[0] == segment["path"]
+    assert not (home / ".agentenv-recordings" / segment["path"]).exists()
+
+
+@pytest.mark.asyncio
+async def test_an_upload_that_fails_with_no_fresh_grant_is_reported_and_the_file_kept(home):
+    failing = AsyncMock(side_effect=TransferError("grant_expired", "expired"))
+    with patch.object(recording_module, "NamespaceUploader") as uploader:
+        uploader.return_value.upload = failing
+        _, manifest = await _record(Recorded(), 0.4, start={"upload": _grant()})
+    (segment,) = manifest["segments"]
+    assert segment["uploaded"] is False and "grant_expired" in segment["upload_error"]
+    assert (home / ".agentenv-recordings" / segment["path"]).exists()
+
+
+@pytest.mark.asyncio
+async def test_retries_join_the_first_start_and_answer_end_again(home):
+    async with http_client(Recorded()) as http:
+        first = (await http.post(START, json={"request_id": "same"})).json()
+        again = (await http.post(START, json={"request_id": "same", "fps": 5})).json()
+        await asyncio.sleep(0.3)
+        ended = (await http.post(END, json={"recording_id": first["recording_id"]})).json()
+        repeat = (await http.post(END, json={"recording_id": first["recording_id"], "reason": "teardown"})).json()
+    assert again == first and repeat == ended and ended["ended_by"] == "end"
+
+
+@pytest.mark.asyncio
+async def test_a_start_past_max_concurrent_is_refused_and_a_reason_is_kept(home):
+    driver = FakeDriver()
+    driver.recording = Recording(max_concurrent=1)
+    async with http_client(driver) as http:
+        first = (await http.post(START, json={"request_id": "a"})).json()
+        refused = await http.post(START, json={"request_id": "b"})
+        ended = (await http.post(END, json={"recording_id": first["recording_id"], "reason": "reset"})).json()
+        after = await http.post(START, json={"request_id": "c"})
+        await http.post(END, json={"recording_id": after.json()["recording_id"]})
+    assert refused.status_code == 429 and refused.json()["error"]["code"] == "limit_exceeded"
+    assert ended["ended_by"] == "reset" and after.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_max_duration_and_a_full_disk_end_a_recording_as_limit(home, monkeypatch):
+    driver = FakeDriver()
+    driver.recording = Recording(max_duration_s=1)
+    _, timed = await _record(driver, 1.6)
+    monkeypatch.setattr(recording_module, "MIN_FREE_BYTES", 1 << 62)
+    _, full = await _record(Recorded(), 0.4, start={"request_id": "full"})
+    assert timed["ended_by"] == "limit" and (_at(timed["ended_at"]) - _at(timed["started_at"])).total_seconds() < 1.2
+    assert full["ended_by"] == "limit"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path, body, status, code", [
+    (START, {"request_id": "r", "fps": 0}, 400, "invalid_argument"),
+    (START, {"request_id": "r", "fps": 30}, 400, "invalid_argument"),
+    (START, {"request_id": "r", "max_edge": 10}, 400, "invalid_argument"),
+    (START, {"request_id": "r", "scope": "region"}, 400, "invalid_argument"),
+    (START, {"request_id": "r", "scope": "window", "window": "w1"}, 501, "unsupported"),
+    (START, {"request_id": "r", "upload": {"root_path": "x"}}, 400, "invalid_argument"),
+    (START, {"request_id": ""}, 400, "invalid_argument"),
+    (END, {"recording_id": "rec-nope"}, 400, "invalid_argument"),
+    (END, {"recording_id": "rec-nope", "reason": "later"}, 400, "invalid_argument"),
+])
+async def test_bad_calls_are_refused_with_a_code(path, body, status, code):
+    async with http_client(Recorded()) as http:
+        refused = await http.post(path, json=body)
+    assert refused.status_code == status and refused.json()["error"]["code"] == code
+
+
+@pytest.mark.asyncio
+async def test_without_pyav_a_start_is_refused_naming_the_extra(monkeypatch):
+    monkeypatch.setitem(__import__("sys").modules, "av", None)
+    async with http_client(Recorded()) as http:
+        refused = await http.post(START, json={"request_id": "r"})
+    assert refused.status_code == 501 and "agentenv-framework-protocol[computer,recording]" in refused.text
+
+
+@pytest.mark.asyncio
+async def test_uploaded_segments_are_not_sent_again_at_end(home):
+    upload = AsyncMock()
+    with patch.object(recording_module, "NamespaceUploader") as uploader:
+        uploader.return_value.upload = upload
+        _, manifest = await _record(Recorded(), 1.4, start={"upload": _grant()})
+    assert all(s["uploaded"] for s in manifest["segments"]) and upload.await_count == len(manifest["segments"]) >= 2
+
+
+@pytest.mark.asyncio
+async def test_an_encoder_that_fails_on_its_first_frame_leaves_no_empty_segment(home, monkeypatch):
+    real, failed = recording_module._Encoder.add, []
+
+    def add(self, frame, at):
+        if not failed:
+            failed.append(at)
+            raise RuntimeError("encoder failed")
+        return real(self, frame, at)
+
+    monkeypatch.setattr(recording_module._Encoder, "add", add)
+    _, manifest = await _record(Recorded(), 1.6)
+    assert failed and manifest["segments"] and all(s["frames"] > 0 for s in manifest["segments"])
+    assert sorted(p.name for p in (home / ".agentenv-recordings" / manifest["recording_id"]).iterdir()) == [
+        s["path"].rsplit("/", 1)[1] for s in manifest["segments"]]
+
+
+@pytest.mark.asyncio
+async def test_only_the_latest_starts_and_ends_are_kept_for_retries(home, monkeypatch):
+    monkeypatch.setattr(recording_module, "KEEP_ENDED", 1)
+    driver = Recorded()
+    async with http_client(driver) as http:
+        for name in "abcde":
+            started = (await http.post(START, json={"request_id": name})).json()
+            await http.post(END, json={"recording_id": started["recording_id"]})
+    kept = driver._computer.recordings
+    assert list(kept.started) == list("bcde") and len(kept.ended) == 1
