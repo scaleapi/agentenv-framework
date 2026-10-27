@@ -83,9 +83,11 @@ def test_the_desktop_comes_back_however_often_x_dies(base):
 
 
 @pytest.mark.parametrize("setting, value, error", [
-    ("RESOLUTION", "big", "resolution is <width>x<height>, not 'big'"),
+    ("RESOLUTION", "big", "resolution is <width>x<height>, each 1 to 32767 pixels, not 'big'"),
+    ("RESOLUTION", "40000x800", "resolution is <width>x<height>, each 1 to 32767 pixels, not '40000x800'"),
+    ("RESOLUTION", "1280x0", "resolution is <width>x<height>, each 1 to 32767 pixels, not '1280x0'"),
     ("TIMEZONE", "Mars/Olympus", "timezone 'Mars/Olympus' isn't in /usr/share/zoneinfo"),
-], ids=["resolution", "timezone"])
+], ids=["resolution", "resolution-too-wide", "resolution-zero", "timezone"])
 def test_a_setting_it_cant_use_stops_it_at_start(base, setting, value, error):
     stopped = subprocess.run(["docker", "run", "--rm", "-e", f"AGENTENV_SETTING_{setting}={value}", base],
                              capture_output=True, text=True, timeout=120)

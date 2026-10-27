@@ -11,7 +11,7 @@ Its settings reach the computer as environment variables, `AGENTENV_SETTING_<NAM
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `resolution` | `1280x800` | The size of the Xvfb screen, as `<width>x<height>` |
+| `resolution` | `1280x800` | The size of the Xvfb screen, as `<width>x<height>`, each 1 to 32767 pixels |
 | `timezone` | `UTC` | The time zone every program runs in, a name under `/usr/share/zoneinfo` |
 
 A value it can't use stops the computer at start, with the reason on stderr. Composing a driver or an app onto it adds
