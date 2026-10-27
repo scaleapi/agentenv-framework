@@ -16,7 +16,8 @@ Codex reads its settings from `$CODEX_HOME/config.toml`, which the agent writes:
 
 - At start, `model_providers.litellm` points Codex at `$LITELLM_BASE_URL/openai/v1` with the Responses API, its key
   from `LITELLM_API_KEY`, `[model.headers]` (`LITELLM_EXTRA_HEADERS`) on every model call, and a run's `project_id`
-  and `task_id` as `x-litellm-customer-id` and `x-litellm-tags`.
+  and `task_id` as `x-litellm-customer-id` and `x-litellm-tags`. The run's tags join an `x-litellm-tags` that
+  `[model.headers]` names, whose own keys, such as `taskId`, win.
 - Before each task, every registered MCP server, the task's `peer_agents` tools included, as an `mcp-remote` stdio
   server. Its `AgentEnv-Role` header is the role its registration names, unless the task has a role of its own, which
   reaches that task's CLI alone as `-c` overrides, so tasks of different roles running at once share the file. Codex

@@ -64,11 +64,14 @@ def test_the_endpoint_is_the_configured_base_urls_v1(base, expected):
 
 
 def test_the_endpoints_model_headers_go_under_the_runs_attribution_in_any_case():
-    environ = {"LITELLM_EXTRA_HEADERS": json.dumps({"X-Route": "eu", "X-LiteLLM-Tags": "spoofed"})}
+    environ = {"LITELLM_EXTRA_HEADERS": json.dumps(
+        {"X-Route": "eu", "X-LiteLLM-Customer-Id": "spoofed", "X-LiteLLM-Tags": "useCase:evals,taskId:own"})}
 
-    headers = opencode_bridge.provider_headers(environ, {"x-litellm-tags": "projectId:p-1"})
+    headers = opencode_bridge.provider_headers(
+        environ, {"x-litellm-customer-id": "p-1", "x-litellm-tags": "projectId:p-1,taskId:t-1"})
 
-    assert headers == {"x-route": "eu", "x-litellm-tags": "projectId:p-1"}
+    assert headers == {"x-route": "eu", "x-litellm-customer-id": "p-1",
+                       "x-litellm-tags": "useCase:evals,taskId:own,projectId:p-1"}
 
 
 @pytest.mark.parametrize("raw", ["not json", '["x-route", "eu"]'])

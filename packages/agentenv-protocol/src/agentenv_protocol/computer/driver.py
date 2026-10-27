@@ -14,6 +14,7 @@ from .dataplane import DataPlane
 from .extensions import Extensions
 from .operations import ReadyCheck, check_class, default_for
 from .platform import Platform, detect
+from .recording import Recording
 from .runtime import ComputerRuntime
 from .settings import ComputerSettings, load_settings
 from .tools import Tools
@@ -42,6 +43,9 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
     layouts: ClassVar[tuple[str, ...]] = ("us",)
     #: The platforms the driver supports, as the driver env declares them: ``[{"os": {...}, "arch": [...]}]``.
     supports: ClassVar[list] = []
+    #: computer-recording/v1, from ``@record`` if the driver has one, else by polling ``@capture``; ``None`` turns
+    #: it off.
+    recording: ClassVar[Recording | None] = Recording()
     tool_access = True
     #: What the base class keeps for the driver, built by ``__init__``.
     _computer: ComputerRuntime | None = None

@@ -1,6 +1,6 @@
 [project]
 name = "agentenv-framework-protocol"
-version = "0.1.379"
+version = "0.1.382"
 description = "Open data-plane protocol and server SDK for agent environments."
 readme = "README.md"
 license = "Apache-2.0"
@@ -35,8 +35,10 @@ agent = [
     "regex>=2023.12.25",
     "uvicorn>=0.30",
 ]
-# A computer driver: ComputerDriverEnvironment serves its tools over mcp's FastMCP and crops and encodes frames.
+# A computer driver: ComputerDriverEnvironment serves its tools over mcp's FastMCP, crops and encodes frames, and
+# records the display as H.264 with PyAV (computer-recording/v1).
 computer = [
+    "av>=17",
     "mcp>=1.25,<2",
     "Pillow>=10.4",
     "uvicorn>=0.30",
@@ -50,6 +52,7 @@ dev = [
     "mcp>=1.25,<2",
     "fastmcp>=3.4,<4",  # the standalone-fastmcp mount path
     "Pillow>=10.4",  # the computer extra's frame crops and encodings
+    "av>=17",  # the computer extra's encoder, and the tests' decoder
 ]
 [project.urls]
 Homepage = "https://www.agentenvframework.com"

@@ -86,14 +86,15 @@ def test_the_passthrough_forwards_verbatim_with_attribution(upstream, agent, cli
 
 
 def test_the_endpoints_model_headers_are_forwarded_under_the_runs_attribution(monkeypatch, upstream, agent, client):
-    monkeypatch.setenv("LITELLM_EXTRA_HEADERS", json.dumps({"X-Route": "eu", "X-LiteLLM-Tags": "spoofed"}))
-    _route(agent, project_id="p-1")
+    headers = {"X-Route": "eu", "X-LiteLLM-Tags": "useCase:evals,taskId:own"}
+    monkeypatch.setenv("LITELLM_EXTRA_HEADERS", json.dumps(headers))
+    _route(agent, project_id="p-1", task_id="t-1")
 
-    client.post(GENERATE, content=b"{}", headers={"x-route": "cli"})
+    client.post(GENERATE, content=b"{}", headers={"x-route": "cli", "x-litellm-tags": "from-cli"})
 
     (request,) = upstream.requests
     assert request.headers.get_list("x-route") == ["eu"]
-    assert request.headers.get_list("x-litellm-tags") == ["projectId:p-1"]
+    assert request.headers.get_list("x-litellm-tags") == ["useCase:evals,taskId:own,projectId:p-1"]
 
 
 @pytest.mark.parametrize("raw", ["not json", '["x-route", "eu"]'])
