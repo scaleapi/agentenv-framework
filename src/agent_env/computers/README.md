@@ -16,7 +16,8 @@ Its settings reach the computer as environment variables, `AGENTENV_SETTING_<NAM
 
 A value it can't use stops the computer at start, with the reason on stderr. Composing a driver or an app onto it adds
 its services as supervisord programs in `/etc/supervisor/conf.d/`; they inherit the display (`DISPLAY=:99`), the
-session bus and the time zone.
+session bus and the time zone. A program that needs X runs as `start-desktop with-x <command>`, which waits for X, and
+with `startsecs=0`, so X dying however often never leaves it `FATAL`, as the XFCE session does.
 
 This bundle has no tasks of its own: other bundles pull its computers by alias, and `agent-env run computers` has
 nothing to run.

@@ -1,7 +1,7 @@
 #!/bin/sh
 # The base's start, with the settings a deploy passes as AGENTENV_SETTING_<NAME>, their defaults artifact.toml's:
-# init applies the time zone for every program and starts supervisord, which runs xvfb at the resolution and then the
-# XFCE session once X answers.
+# init applies the time zone for every program and starts supervisord, which runs xvfb at the resolution, and with-x
+# runs a program, the XFCE session first, once X answers.
 set -eu
 resolution="${AGENTENV_SETTING_RESOLUTION:-1280x800}"
 echo "$resolution" | grep -Eqx '[0-9]+x[0-9]+' || { echo "resolution is <width>x<height>, not '$resolution'" >&2; exit 2; }
@@ -15,11 +15,12 @@ case "${1:-}" in
     xvfb)
         exec Xvfb "$DISPLAY" -screen 0 "${resolution}x24" -nolisten tcp -ac
         ;;
-    session)
+    with-x)
+        shift
         for _ in $(seq 100); do xdpyinfo >/dev/null 2>&1 && break; sleep 0.1; done
-        exec xfce4-session
+        exec "$@"
         ;;
     *)
-        echo "usage: start-desktop init|xvfb|session" >&2; exit 2
+        echo "usage: start-desktop init|xvfb|with-x <command>" >&2; exit 2
         ;;
 esac

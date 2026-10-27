@@ -1,8 +1,8 @@
-"""The reference driver on a desktop of its own before agent-env can compose a computer: the scaffold, a hand-written
-Ubuntu 24.04 image under this folder, deployed by ``agent-env run`` as an MCP server on the server provider, passes
-the conformance probe at full three runs in a row, records a scripted drive of its desk that lines up with the drive's
-screenshots, and an agent drives its desktop through the computer_* tools under a recording. Needs a Docker daemon and
-the local registry; the agent's task, a model endpoint too."""
+"""The reference driver on a desktop of its own before agent-env can compose a computer: the scaffold, an image under
+this folder that lays it on the ubuntu-24.04 base, deployed by ``agent-env run`` as an MCP server on the server
+provider, passes the conformance probe at full three runs in a row, records a scripted drive of its desk that lines up
+with the drive's screenshots, and an agent drives its desktop through the computer_* tools under a recording. Needs a
+Docker daemon and the local registry; the agent's task, a model endpoint too."""
 
 import json
 import logging
@@ -58,11 +58,13 @@ def state(monkeypatch, tmp_path):
         reset_config()
 
 
-def _scaffold(root: Path) -> Path:
-    """The scaffold bundle with the reference driver, the probe's fixture and this checkout's protocol beside its
-    Dockerfile."""
+def _scaffold(root: Path, base: str) -> Path:
+    """The scaffold bundle on the base image ``base``, with the reference driver, the probe's fixture and this
+    checkout's protocol beside its Dockerfile."""
     shutil.copytree(SCAFFOLD, root, ignore=shutil.ignore_patterns("__pycache__"))
     desktop = root / "envs" / "desktop"
+    dockerfile = desktop / "Dockerfile"
+    dockerfile.write_text(dockerfile.read_text().replace("ARG BASE\n", f"ARG BASE={base}\n"))
     shutil.copy(DRIVER, desktop / "driver.py")
     shutil.copy(FIXTURE, desktop / "fixture.py")
     shutil.copytree(PROTOCOL / "src", desktop / "protocol" / "src", ignore=shutil.ignore_patterns("__pycache__"))
@@ -104,15 +106,15 @@ def _thumb(image: Image.Image) -> bytes:
     return image.convert("L").resize((64, 40)).tobytes()
 
 
-def test_the_reference_driver_passes_the_probe_at_full(state):
-    ran = _run(_scaffold(state / "scaffold"), "probe")
+def test_the_reference_driver_passes_the_probe_at_full(state, base):
+    ran = _run(_scaffold(state / "scaffold", base), "probe")
 
     assert ran.exit_code == 0, ran.output
     assert "passed (probe: 1)" in ran.output, ran.output
 
 
-def test_a_scripted_drive_is_recorded_on_the_clock_its_screenshots_carry(state):
-    ran = _run(_scaffold(state / "scaffold"), "recording")
+def test_a_scripted_drive_is_recorded_on_the_clock_its_screenshots_carry(state, base):
+    ran = _run(_scaffold(state / "scaffold", base), "recording")
 
     assert ran.exit_code == 0, ran.output
     assert "passed (drive: 1)" in ran.output, ran.output
@@ -139,8 +141,8 @@ def test_a_scripted_drive_is_recorded_on_the_clock_its_screenshots_carry(state):
 
 
 @skip_without_model_endpoint()
-def test_an_agent_drives_the_reference_drivers_desktop_under_a_recording(state):
-    ran = _run(_scaffold(state / "scaffold"), "agent")
+def test_an_agent_drives_the_reference_drivers_desktop_under_a_recording(state, base):
+    ran = _run(_scaffold(state / "scaffold", base), "agent")
 
     assert ran.exit_code == 0, ran.output
     assert "passed (check: 1)" in ran.output, ran.output

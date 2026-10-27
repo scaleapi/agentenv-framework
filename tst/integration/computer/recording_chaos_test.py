@@ -28,9 +28,10 @@ FPS = 10
 
 
 @pytest.fixture(scope="module")
-def image(tmp_path_factory):
+def image(tmp_path_factory, base):
     tag = f"agentenv-test-recording-desk:{uuid.uuid4().hex[:8]}"
-    _docker("build", "-q", "-t", tag, str(_scaffold(tmp_path_factory.mktemp("desk") / "scaffold") / "envs" / "desktop"))
+    scaffold = _scaffold(tmp_path_factory.mktemp("desk") / "scaffold", base)
+    _docker("build", "-q", "-t", tag, str(scaffold / "envs" / "desktop"))
     yield tag
     subprocess.run(["docker", "rmi", "-f", tag], capture_output=True)
 

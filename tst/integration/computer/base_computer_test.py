@@ -1,6 +1,7 @@
-"""The ubuntu-24.04 base computer, built from its folder: its desktop runs as the session user with the settings a deploy
-passes and comes back however often X dies, a setting it can't use stops it at start, and pushed to the local registry it
-registers as a computer artifact whose image put reads back. Needs Docker and the local registry on localhost:5000."""
+"""The ubuntu-24.04 base computer, built from its folder: its desktop runs as the session user with the settings a
+deploy passes and comes back however often X dies, a setting it can't use stops it at start, and pushed to the local
+registry it registers as a computer artifact whose image put reads back. Needs Docker and the local registry on
+localhost:5000."""
 
 import json
 import platform
@@ -8,29 +9,19 @@ import subprocess
 import time
 import tomllib
 import uuid
-from pathlib import Path
 
 import pytest
 
-import agent_env
 from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import reset_artifact_store
 from agent_env.config import configure, reset_config
+from tst.integration.computer.conftest import BASE
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
-BASE = Path(agent_env.__file__).parent / "computers" / "artifacts" / "ubuntu-24.04"
 SUPERVISOR = ["supervisorctl", "-c", "/etc/supervisor/supervisord.conf", "status"]
 ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}[platform.machine().lower()]
-
-
-@pytest.fixture(scope="module")
-def image():
-    tag = f"localhost:5000/agentenv-test-ubuntu-24.04:{uuid.uuid4().hex[:8]}"
-    _docker("build", "-q", "-t", tag, str(BASE))
-    yield tag
-    subprocess.run(["docker", "rmi", "-f", tag], capture_output=True)
 
 
 @pytest.fixture
@@ -46,10 +37,10 @@ def stores(monkeypatch, tmp_path):
     reset_config()
 
 
-def test_the_desktop_runs_as_the_session_user_with_the_settings_a_deploy_passes(image):
+def test_the_desktop_runs_as_the_session_user_with_the_settings_a_deploy_passes(base):
     name = f"agentenv-test-base-{uuid.uuid4().hex[:8]}"
     _docker("run", "-d", "--name", name, "-e", "AGENTENV_SETTING_RESOLUTION=1600x900",
-            "-e", "AGENTENV_SETTING_TIMEZONE=Europe/Paris", image)
+            "-e", "AGENTENV_SETTING_TIMEZONE=Europe/Paris", base)
     try:
         running = _all_running(name)
         users = set(_exec(name, "ps", "-eo", "user=").split())
@@ -68,9 +59,9 @@ def test_the_desktop_runs_as_the_session_user_with_the_settings_a_deploy_passes(
     assert int(accessibility) == 1
 
 
-def test_the_desktop_comes_back_however_often_x_dies(image):
+def test_the_desktop_comes_back_however_often_x_dies(base):
     name = f"agentenv-test-base-{uuid.uuid4().hex[:8]}"
-    _docker("run", "-d", "--name", name, image)
+    _docker("run", "-d", "--name", name, base)
     try:
         _all_running(name)
         for _ in range(10):
@@ -95,17 +86,17 @@ def test_the_desktop_comes_back_however_often_x_dies(image):
     ("RESOLUTION", "big", "resolution is <width>x<height>, not 'big'"),
     ("TIMEZONE", "Mars/Olympus", "timezone 'Mars/Olympus' isn't in /usr/share/zoneinfo"),
 ], ids=["resolution", "timezone"])
-def test_a_setting_it_cant_use_stops_it_at_start(image, setting, value, error):
-    stopped = subprocess.run(["docker", "run", "--rm", "-e", f"AGENTENV_SETTING_{setting}={value}", image],
+def test_a_setting_it_cant_use_stops_it_at_start(base, setting, value, error):
+    stopped = subprocess.run(["docker", "run", "--rm", "-e", f"AGENTENV_SETTING_{setting}={value}", base],
                              capture_output=True, text=True, timeout=120)
 
     assert stopped.returncode == 2 and error in stopped.stderr
 
 
-def test_pushed_to_a_registry_it_registers_as_a_computer_whose_image_put_reads_back(image, stores):
-    _docker("push", "-q", image)
+def test_pushed_to_a_registry_it_registers_as_a_computer_whose_image_put_reads_back(base, stores):
+    _docker("push", "-q", base)
     declared = tomllib.loads((BASE / "artifact.toml").read_text())
-    pinned = DockerImageArtifact.put_ref("base-image", description="the base", image_name=image)
+    pinned = DockerImageArtifact.put_ref("base-image", description="the base", image_name=base)
 
     computer = ComputerArtifact.put(id="base", arch=[ARCH], os=declared["os"], session=declared["session"],
                                     config=declared["config"],
@@ -113,7 +104,8 @@ def test_pushed_to_a_registry_it_registers_as_a_computer_whose_image_put_reads_b
                                                          "image": {"id": pinned.id, "version": pinned.version}}})
 
     found = computer.metadata["validated_images"]["container"][ARCH]
-    assert (found["status"], found["os_release"]) == ("passed", {"ID": "ubuntu", "VERSION_ID": "24.04"}), json.dumps(found)
+    assert found["status"] == "passed", json.dumps(found)
+    assert found["os_release"] == {"ID": "ubuntu", "VERSION_ID": "24.04"}
     assert found["image"] == pinned.image_name
 
 
