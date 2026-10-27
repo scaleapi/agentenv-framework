@@ -213,8 +213,10 @@ class Screencast:
             await cdp.call("Page.startScreencast", options, session)
         except (CdpError, asyncio.TimeoutError, KeyError) as e:  # the page went meanwhile
             logger.info("screencasting page %s: %s", target, e)
-            if self.page == target:
+            if self.page == target:  # nothing took over since: back to the newest page left
                 self.page = None
+                self._pages.pop(target, None)
+                await self._show(cdp, next(reversed(self._pages), None))
             return
         if self.page == target:
             self._session = session

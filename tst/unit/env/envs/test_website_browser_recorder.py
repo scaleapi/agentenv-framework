@@ -47,12 +47,15 @@ class _Browser:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict, str | None]] = []
+        self.gone: set[str] = set()  # pages that close before an attach reaches them
         self._events: asyncio.Queue = asyncio.Queue()
         self._sessions = itertools.count(1)
 
     async def call(self, method, params=None, session=None):
         self.calls.append((method, params or {}, session))
         if method == "Target.attachToTarget":
+            if params["targetId"] in self.gone:
+                raise recorder.CdpError(f"No target with given id found: {params['targetId']}")
             return {"sessionId": f"{params['targetId']}-{next(self._sessions)}"}
         return {}
 
@@ -132,6 +135,23 @@ async def test_the_screencast_follows_new_and_navigated_pages_and_falls_back_whe
                                                                                                         "B-2"]
     assert [params["sessionId"] for method, params, _ in browser.calls if method == "Target.detachFromTarget"] == [
         "A-1", "B-2", "A-3", "B-4"]
+
+
+@pytest.mark.asyncio
+async def test_a_page_that_closes_before_its_screencast_starts_hands_back_to_the_page_before_it():
+    browser, red = _Browser(), _jpeg((255, 0, 0))
+    screencast = recorder.Screencast(None, find=lambda: None, connect=None)
+    browser.gone.add("B")
+    browser.page("A", "https://shop.test/")
+    browser.frame("A-1", red)
+    browser.page("B", "about:blank", openerId="A")  # a popup that closes while the attach is on its way
+    browser.emit("Target.targetDestroyed", {"targetId": "B"})
+    browser.close()
+    await screencast.watch(browser)
+
+    assert browser.attached() == ["A", "B", "A"]
+    assert (screencast.page, screencast.latest) == ("A", base64.b64decode(red))
+    assert screencast._session == "A-2"
 
 
 def _recorder(browser: _Browser) -> recorder.BrowserRecorder:
