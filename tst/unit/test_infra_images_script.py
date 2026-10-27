@@ -51,7 +51,8 @@ def test_plan_lists_every_image_with_its_checkout_paths_and_tag(script, monkeypa
 
 
 def test_plan_only_lists_the_infra_images_or_the_agents_images(script, monkeypatch, capsys):
-    """The release builds the infra images before it publishes the protocol, and the bundles', which install it, after."""
+    """The release builds the infra images before it publishes the protocol, and the bundles', which install it,
+    after."""
     planned = {}
     for only in ("infra", "agents"):
         assert _run(script, monkeypatch, "plan", "--only", only) == 0

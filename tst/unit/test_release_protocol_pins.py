@@ -97,7 +97,8 @@ def test_each_shipped_requirements_file_the_release_pins_holds_one_protocol_line
 
 def test_each_shipped_agent_and_published_env_requires_the_protocol_by_a_floor():
     """Nothing pins theirs at release, so an exact version there would hold the image to that protocol."""
-    files = [path for root in shipped_bundles.bundle_roots().values() for path in root.glob("agents/*/requirements.txt")]
+    files = [path for root in shipped_bundles.bundle_roots().values()
+             for path in root.glob("agents/*/requirements.txt")]
     files += [REPO / folder / "requirements.txt" for folder in shipped_bundles.PUBLISHED_ENVS]
     lines = {path.parent.name: [line for line in path.read_text().splitlines()
                                 if line.startswith("agentenv-framework-protocol")] for path in files}

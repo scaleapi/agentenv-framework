@@ -1,5 +1,5 @@
-"""The images agent-env publishes for its infra envs, its agents and an example's env: one per shipped Dockerfile, tagged
-by its sources, and the record of their digests a release wheel carries."""
+"""The images agent-env publishes for its infra envs, its agents and an example's env: one per shipped Dockerfile,
+tagged by its sources, and the record of their digests a release wheel carries."""
 
 import hashlib
 import json
@@ -140,6 +140,20 @@ def test_the_mail_examples_env_sources_find_its_published_image(monkeypatch):
     monkeypatch.setattr(published_images, "_registry_digest", lambda ref: _DIGEST if ref == mail.ref() else None)
 
     assert mail.name == "agentenv-mail-mcp" and published_bundle_image(sources) == (mail.ref(), _DIGEST)
+
+
+def test_a_recorded_image_the_registry_doesnt_serve_anonymously_isnt_published_yet(monkeypatch, tmp_path):
+    """A new package stays private until a package admin makes it public, so a sandbox pulling it by name would fail."""
+    mail = EXAMPLE_IMAGES[0]
+    sources = BuildContext.of(mail.dockerfile.parent, mail.dockerfile).source_digest(None)
+    write_release_digests({mail.ref(): _DIGEST}, tmp_path / "published_images.json")
+    monkeypatch.setattr(published_images, "RELEASE_FILE", tmp_path / "published_images.json")
+    served = {}
+    monkeypatch.setattr(published_images, "_registry_digest", lambda ref: served.get(ref))
+
+    assert published_bundle_image(sources) is None
+    served[mail.ref()] = _DIGEST
+    assert published_bundle_image(sources) == (mail.ref(), _DIGEST)
 
 
 def test_a_shipped_agents_sources_whose_image_isnt_published_find_none(monkeypatch):

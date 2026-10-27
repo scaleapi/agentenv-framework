@@ -1,7 +1,7 @@
 """The images agent-env publishes for the infra envs, the agents it ships and an example's env, for linux/amd64 and
-linux/arm64: one per Dockerfile, built from the Dockerfile's folder. Each is tagged by its build context's content, so an
-install holding the same sources finds the image built from them; a release wheel also records the digest its release
-published under each tag."""
+linux/arm64: one per Dockerfile, built from the Dockerfile's folder. Each is tagged by its build context's content, so
+an install holding the same sources finds the image built from them; a release wheel also records the digest its
+release published under each tag."""
 
 from __future__ import annotations
 
@@ -70,12 +70,16 @@ def published_digest(image: PublishedImage) -> str | None:
 def published_bundle_image(sources: str) -> tuple[str, str] | None:
     """The ref and digest of the image published for a shipped bundle's image (an agent's or an example env's) whose
     installed build context has the source digest ``sources`` (``BuildContext.source_digest(None)``), or None when no
-    shipped image has those sources or it isn't published."""
+    shipped image has those sources or the registry doesn't serve it anonymously, as a sandbox pulls it: a new package
+    stays private until a package admin makes it public, and a sandbox running an image by name can't build it
+    instead."""
     tag = f"src-{sources.removeprefix('sha256:')}"
     for image in BUNDLE_IMAGES:
         if image.tag() == tag:
-            digest = published_digest(image)
-            return (image.ref(), digest) if digest else None
+            ref = image.ref()
+            if (served := _registry_digest(ref)) is None:
+                return None
+            return ref, release_digests(RELEASE_FILE).get(ref) or served
     return None
 
 
