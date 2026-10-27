@@ -188,6 +188,9 @@ async def test_a_teardown_sandboxes_step_ends_the_recordings_of_its_envs_only(st
 def test_the_steps_round_trip_and_refuse_what_they_cant_run():
     start = _start(fps=5, max_edge=1280, cursor=False, fail_task_on_error=True)
     assert StartComputerRecordingTaskStep.from_dict(start.to_dict()).to_dict() == start.to_dict()
+    assert "environment_name" not in start.to_dict()
+    child = _start(environment_name="website-browser")
+    assert StartComputerRecordingTaskStep.from_dict(child.to_dict()).environment_name == "website-browser"
     assert EndComputerRecordingTaskStep.from_dict(_end().to_dict()).to_dict() == _end().to_dict()
     assert StartComputerRecordingTaskStep.from_dict({"id": "s", "env_id": "e", "name": "n"}).fail_task_on_error is False
     with pytest.raises(ValueError, match="needs an env_id and a name"):
@@ -273,3 +276,40 @@ async def test_a_recording_that_cant_be_ended_at_all_is_marked_and_the_rest_stil
     await recording_steps.end_open_recordings(context)
     recordings = context.metadata[RECORDINGS_KEY]
     assert (recordings["a"]["state"], recordings["b"]["state"]) == ("failed", "ended")
+
+
+class _Gateway(_Computer):
+    """A gateway env whose child env ``website-browser`` records, and whose own card declares no recording."""
+
+    def __init__(self, store) -> None:
+        super().__init__(store, env_id="shop")
+        self.environment_card = {"name": "shop", "capabilities": {"extensions": []},
+                                 "children_environments": [{**_CARD, "name": "website-browser"}]}
+        self.children: list = []
+
+    def get_child_env_card(self, environment_name):
+        return next((c for c in self.environment_card["children_environments"] if c["name"] == environment_name), None)
+
+    async def invoke(self, uri, method, params=None, *, environment_name=None, **kwargs):
+        self.children.append(environment_name)
+        return await super().invoke(uri, method, params, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_a_child_env_is_recorded_through_its_own_card_from_start_to_end(store):
+    gateway = _Gateway(store)
+    context = await _start(env_id="shop", environment_name="website-browser").execute(_context(gateway))
+    assert context.metadata[RECORDINGS_KEY]["desk"]["environment_name"] == "website-browser"
+    entry = (await _end().execute(context)).metadata[RECORDINGS_KEY]["desk"]
+    assert entry["state"] == "ended" and gateway.children == ["website-browser", "website-browser"]
+    (_, start), (_, end) = gateway.calls
+    assert start["upload"]["root_path"] == end["upload"]["root_path"]
+
+
+@pytest.mark.asyncio
+async def test_a_start_without_a_child_env_reads_the_envs_own_card_as_before(store):
+    context = await _start(env_id="shop").execute(_context(_Gateway(store)))
+    entry = context.metadata[RECORDINGS_KEY]["desk"]
+    assert entry["state"] == "failed" and "max_duration_s" in entry["error"]  # its own card declares no recording
+    context = await _start().execute(_context(_Computer(store)))
+    assert "environment_name" not in context.metadata[RECORDINGS_KEY]["desk"]

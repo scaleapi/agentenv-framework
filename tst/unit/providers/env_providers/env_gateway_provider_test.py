@@ -1075,6 +1075,27 @@ def test_compose_maps_extra_hosts_into_the_gateway(extra_hosts):
     assert mapped == ({GATEWAY_SERVICE_NAME: list(extra_hosts)} if extra_hosts else {})
 
 
+def test_compose_reads_a_servers_card_on_its_card_port_and_its_mcp_on_the_mcp_port():
+    """The website browser serves its card from its recorder's port: the gateway's REST proxy, which it reads the card
+    through, points there, while its MCP connection and health check stay on the MCP port."""
+    from agent_env.env.envs.service_db import ServiceDBConfig
+
+    compose = EnvironmentGatewayProvider().create_docker_compose(
+        mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack"),
+                     MCPServerConfig(image="browser", environment_name="website-browser", card_port=18766)],
+        gateway_image="agent-gateway",
+        gateway_port=18765,
+        state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
+        state_instance=LocalPostgresStateProvider.default_instance(),
+    )
+
+    services = yaml.safe_load(compose)["services"]
+    gateway = dict(item.split("=", 1) for item in services[GATEWAY_SERVICE_NAME]["environment"])
+    assert gateway["REST_PROXY_URLS"] == "mcp-slack=http://slack:18765,mcp-website-browser=http://website-browser:18766"
+    assert (gateway["INTERNAL_MCP_SERVERS"], gateway["INTERNAL_MCP_PORT"]) == ("slack,website-browser", "18765")
+    assert "18765" in services["website-browser"]["healthcheck"]["test"][1]
+
+
 # --- sidecar rendering --------------------------------------------------------
 
 class _FakeImageArtifact:
@@ -1328,6 +1349,8 @@ async def test_deploy_via_vm_prepares_schemas_including_website_browser():
     names = state_provider.prepare.call_args.args[0]
     assert set(names) == {"slack", "shop", "website-browser"}
     assert compose.call_args.kwargs["mcp_server_name"] == "crm"
+    browser = next(s for s in compose.call_args.kwargs["mcp_servers"] if s.environment_name == "website-browser")
+    assert browser.card_port == 18766  # its card is the recorder's
 
 
 @pytest.mark.asyncio

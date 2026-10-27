@@ -1,5 +1,6 @@
-"""Record a computer env's display. ``start_computer_recording`` starts a recording on a deployed env whose card
-declares computer-recording/v1, with a grant to upload its segments under a namespace of its own;
+"""Record a computer env's display. ``start_computer_recording`` starts a recording on a deployed env whose card, or
+whose child env's card (``environment_name``), declares computer-recording/v1, with a grant to upload its segments
+under a namespace of its own;
 ``end_computer_recording`` ends it and registers its segments and manifest as one FileArtifactUniverse. Teardown
 ends whatever a run left open (``end_open_recordings``)."""
 from __future__ import annotations
@@ -39,29 +40,35 @@ MAX_RECORDING_BYTES = 64 << 30
 
 
 class StartComputerRecordingTaskStep(TaskStep):
-    """Start recording a deployed env's display, under ``name``. Best effort by default."""
+    """Start recording a deployed env's display, or its child env ``environment_name``'s, under ``name``. Best effort
+    by default."""
 
     type: ClassVar[str] = "start_computer_recording"
     entity_refs = (EntityRef.env("env_id"),)
 
     def __init__(self, id: str, version: Optional[int], env_id: str, name: str, fps: Optional[int] = None,
-                 max_edge: Optional[int] = None, cursor: bool = True,
+                 max_edge: Optional[int] = None, cursor: bool = True, environment_name: Optional[str] = None,
                  depends_on: Optional[list[TaskStepDependency]] = None, fail_task_on_error: bool = False):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
         if not env_id or not name:
             raise ValueError("start_computer_recording needs an env_id and a name for the recording")
         self.env_id, self.name, self.fps, self.max_edge, self.cursor = env_id, name, fps, max_edge, cursor
+        self.environment_name = environment_name
 
     def to_dict(self) -> dict:
-        return {**super().to_dict(), "env_id": self.env_id, "name": self.name, "fps": self.fps,
+        data = {**super().to_dict(), "env_id": self.env_id, "name": self.name, "fps": self.fps,
                 "max_edge": self.max_edge, "cursor": self.cursor}
+        if self.environment_name is not None:  # left out otherwise, so a step without one serializes as before
+            data["environment_name"] = self.environment_name
+        return data
 
     @classmethod
     def from_dict(cls, data: dict) -> StartComputerRecordingTaskStep:
         base = cls._base_from_dict(data)
         base["fail_task_on_error"] = data.get("fail_task_on_error", False)
         return cls(**base, env_id=data["env_id"], name=data["name"], fps=data.get("fps"),
-                   max_edge=data.get("max_edge"), cursor=data.get("cursor", True))
+                   max_edge=data.get("max_edge"), cursor=data.get("cursor", True),
+                   environment_name=data.get("environment_name"))
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         recordings = context.metadata.setdefault(RECORDINGS_KEY, {})
@@ -77,10 +84,10 @@ class StartComputerRecordingTaskStep(TaskStep):
         try:
             deployed = _deployed(context, self.env_id)
             namespace = _namespace(request_id)
-            grant = _grant(deployed, namespace)
+            grant = _grant(deployed, namespace, self.environment_name)
             started = await deployed.invoke(COMPUTER_RECORDING, "start", {
                 "request_id": request_id, "fps": self.fps, "max_edge": self.max_edge, "cursor": self.cursor,
-                "upload": grant})
+                "upload": grant}, environment_name=self.environment_name)
         except Exception as e:
             recordings[self.name] = {"env_id": self.env_id, "state": "failed", "error": f"{type(e).__name__}: {e}"[:500]}
             logger.warning("start_computer_recording %s on %s: %s", self.name, self.env_id, e)
@@ -90,6 +97,8 @@ class StartComputerRecordingTaskStep(TaskStep):
         recordings[self.name] = {
             "env_id": self.env_id, "recording_id": started["recording_id"], "started_at": started["started_at"],
             "namespace": namespace, "state": "open"}
+        if self.environment_name is not None:
+            recordings[self.name]["environment_name"] = self.environment_name
         logger.info("start_computer_recording %s on %s: %s", self.name, self.env_id, started["recording_id"])
         return context
 
@@ -149,9 +158,10 @@ async def end_recording(context: TaskStepContext, name: str, reason: str) -> Non
     if entry.get("state") != "open":
         return
     try:
-        deployed = _deployed(context, entry["env_id"])
+        deployed, environment_name = _deployed(context, entry["env_id"]), entry.get("environment_name")
         manifest = RecordingManifest.model_validate(await deployed.invoke(COMPUTER_RECORDING, "end", {
-            "recording_id": entry["recording_id"], "upload": _grant(deployed, entry["namespace"]), "reason": reason}))
+            "recording_id": entry["recording_id"], "upload": _grant(deployed, entry["namespace"], environment_name),
+            "reason": reason}, environment_name=environment_name))
     except Exception as e:
         logger.warning("end_computer_recording %s: %s; registering what its namespace holds", name, e)
         entry["error"] = f"{type(e).__name__}: {e}"[:500]
@@ -187,10 +197,11 @@ def _namespace(request_id: str) -> str:
     return config.get_object_store().object_url(f"{config.get_artifact_key_prefix()}{_KEY_PREFIX}/{key}")
 
 
-def _grant(deployed, namespace: str) -> dict:
-    """A grant that uploads under ``namespace``, lasting the env's ``max_duration_s`` and a margin, or the longest
-    the store issues."""
-    params = (find_extension(deployed.environment_card or {}, COMPUTER_RECORDING) or {}).get("params") or {}
+def _grant(deployed, namespace: str, environment_name: Optional[str] = None) -> dict:
+    """A grant that uploads under ``namespace``, lasting the recorded env's ``max_duration_s`` and a margin, or the
+    longest the store issues."""
+    card = deployed.environment_card if environment_name is None else deployed.get_child_env_card(environment_name)
+    params = (find_extension(card or {}, COMPUTER_RECORDING) or {}).get("params") or {}
     store = get_config().get_object_store()
     sandbox_type = getattr(deployed, "sandbox_type", None)
     if not issues_grants_to(store, sandbox_type):
