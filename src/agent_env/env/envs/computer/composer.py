@@ -1,5 +1,6 @@
 """The composer: a computer env's base and driver built into one image for each form and arch with this machine's Docker,
-tagged in the image store by a key of everything that goes into it, so an image of that key, built for any env, is reused.
+tagged in the env's image store by a key of everything that goes into it, so an image of that key, built for any env, is
+reused.
 Each result is recorded in the env's metadata as it finishes (``composed``), and the arches that built are written as
 the env's computer, a ``computer`` artifact over an index of their images."""
 
@@ -52,6 +53,7 @@ INSTALLED_LABEL, EMULATED_LABEL = "dev.agentenv.installed", "dev.agentenv.emulat
 # What a file starts with when it's only ever run: a script or a Linux binary, made executable in the image, since the
 # store keeps no file modes.
 _RUN_ONLY = (b"#!", b"\x7fELF")
+_EXECUTABLE = 0o755
 _PROTOCOL = "agentenv-framework-protocol"
 # What building the protocol from its source reads, beside src/.
 _PROTOCOL_FILES = ("pyproject.toml", "README.md", "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md")
@@ -104,7 +106,7 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
                 "base": base_identity, "dockerfile": dockerfile, "context": _digest(context), "form": form,
                 "arch": arch, "composer": _composer_digest(),
             }, sort_keys=True).encode()).hexdigest()
-            store = get_config().get_image_store()
+            store = get_config().get_image_store_for(env.id)
             store.ensure_repository(REPOSITORY)
             ref = store.image_ref(REPOSITORY, key.removeprefix("sha256:"))
             if (pinned := _served(ref, store)) is not None:
@@ -174,7 +176,7 @@ def _stage_driver(context: Path, driver: ComputerDriverEnv, base: ComputerArtifa
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data := artifact.load())
             if data.startswith(_RUN_ONLY):
-                target.chmod(0o755)
+                target.chmod(_EXECUTABLE)
     (context / "driver").mkdir(exist_ok=True)
     (context / f"agentenv-{layer}.conf").write_text(_programs(layer, install, driver.port))
     return layer
@@ -299,14 +301,16 @@ def _failed(env: ComputerEnv, form: str, arch: str, stage: str, key: str | None,
 
 
 def _computer(env: ComputerEnv, base: ComputerArtifact, built: dict[str, str]) -> dict | None:
-    """Write the env's computer over the images ``built``, by arch, joined into one index: its arches those, its OS and
-    session the base's, its settings the base's with the env's values as their defaults. None when nothing built."""
+    """Write the env's computer over the images ``built``, by arch, joined into one index in the env's image store, signed
+    in to it: its arches those, its OS and session the base's, its settings the base's with the env's values as their
+    defaults. None when nothing built."""
     if not built:
         return None
     arches = [arch for arch in base.arch if arch in built]
-    store = get_config().get_image_store()
+    store = get_config().get_image_store_for(env.id)
     index = store.image_ref(REPOSITORY, "index-" + hashlib.sha256(
         ",".join(built[arch] for arch in arches).encode()).hexdigest())
+    docker_login(store.auth(index))
     _joined(index, [built[arch] for arch in arches])
     image = DockerImageArtifact.put_ref(derive_id(env.id, "computer_image"), description=(
         f"{env.id}'s composed computer"), image_name=index)

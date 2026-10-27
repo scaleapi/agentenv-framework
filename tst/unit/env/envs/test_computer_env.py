@@ -26,7 +26,9 @@ from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.computer.install import Install, Service
 from agent_env.env.envs.computer_driver import ComputerDriverEnv
 from agent_env.store.base import NotFoundError
+from agent_env.store.image_store.image_store import OciRegistryImageStore
 from agent_env.store.image_store.local_registry_image_store import LocalRegistryImageStore
+from agent_env.store.image_store.oci_registry_credentials import RegistryAuth
 from agent_env.utils.docker.build import DockerBuildError
 from tst.util.oci_registry import UBUNTU_LAYER, Registry
 
@@ -129,7 +131,9 @@ def _put(base, driver, compose=True, **changes):
                               "environment_name": "desktop", "compose": compose, **changes})
 
 
-def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_its_images_make(base, driver, docker):
+def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_its_images_make(base, driver, docker,
+                                                                                                local_stores):
+    local_stores.set_image_store(OciRegistryImageStore("registry.example"))
     env = _put(base, driver, settings={"ubuntu-24.04": {"timezone": "Europe/Paris", "theme": "dark"}},
                display={"width": 1600, "height": 900})
 
@@ -141,6 +145,7 @@ def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_
     assert composed["arm64"]["image"].startswith("localhost:5000/agentenv-computers:")
     computer = ComputerArtifact.get(stored.metadata["computer"]["id"], stored.metadata["computer"]["version"])
     assert computer.id == "@local/~/kit/desktop__computer" and computer.arch == ["amd64", "arm64"]
+    assert computer.image().image_name.startswith("localhost:5000/agentenv-computers:index-")
     assert {arch: r["status"] for arch, r in computer.metadata["validated_images"]["container"].items()} == {
         "amd64": "passed", "arm64": "passed"}
     assert (computer.config["resolution"].default, computer.config["timezone"].default) == ("1600x900", "Europe/Paris")
@@ -164,8 +169,14 @@ def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_
 
 
 def test_an_env_that_differs_only_in_what_doesnt_change_the_image_reuses_the_one_another_env_built(base, driver,
-                                                                                                    docker):
+                                                                                                    docker, monkeypatch):
+    auth, docker_calls = RegistryAuth("localhost:5000", "user", "token"), []
+    monkeypatch.setattr(LocalRegistryImageStore, "auth", lambda self, ref: auth)
+    monkeypatch.setattr(composer, "docker_login", lambda signed_in: docker_calls.append(("login", signed_in)))
+    monkeypatch.setattr(composer, "_joined", lambda index, images: (docker_calls.append(("join", index)),
+                                                                    docker.joined(index, images)))
     first = _put(base, driver)
+    docker_calls.clear()
     second = _put(base, driver, id="@local/~/kit/other", environment_name="other", display={"width": 640, "height": 480},
                   network={"mode": "allowlist"}, tools={"hide": ["computer_type"]})
 
@@ -174,6 +185,8 @@ def test_an_env_that_differs_only_in_what_doesnt_change_the_image_reuses_the_one
     assert {arch: reused[arch]["image"] for arch in reused} == {arch: built[arch]["image"] for arch in built}
     assert {arch: (r["installed"], r["emulated"]) for arch, r in reused.items()} == {
         "amd64": ({"mss": "10.1.0"}, True), "arm64": ({"mss": "10.1.0"}, False)}
+    index = ComputerArtifact.get(f"{second.id}__computer").image().image_name.partition("@")[0]
+    assert docker_calls == [("login", auth), ("join", index)]
 
 
 @pytest.mark.parametrize("change", ["requirements", "build-setting", "service"])
@@ -437,13 +450,14 @@ def test_a_script_or_binary_in_the_drivers_files_stays_executable_in_the_image(b
     assert modes == {"driver.py": 0, "start": 0o111, "helper": 0o111}
 
 
-def test_a_registry_base_is_signed_in_to_before_its_image_is_built_on(base, driver, docker, monkeypatch):
+def test_a_registry_base_is_signed_in_to_before_its_image_is_built_on_and_the_store_before_the_index(base, driver,
+                                                                                                     docker, monkeypatch):
     signed = []
     monkeypatch.setattr(composer, "docker_login", signed.append)
 
     _put(base, driver)
 
-    assert len(signed) == 2 and len(docker.builds) == 2
+    assert len(signed) == 3 and len(docker.builds) == 2
 
 
 def test_env_build_writes_the_computer_again_when_it_isnt_over_every_pair_built(base, driver, docker, caplog):
