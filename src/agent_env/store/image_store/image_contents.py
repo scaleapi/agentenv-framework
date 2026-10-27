@@ -26,8 +26,11 @@ def platform_manifests(ref: str, auth: RegistryAuth | None) -> tuple[str, dict[s
                         if (entry.get("platform") or {}).get("os") == "linux"}
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "config"
-        read_blob(pinned, top["config"]["digest"], auth, path)
-        config = json.loads(path.read_text())
+        try:
+            read_blob(pinned, top["config"]["digest"], auth, path)
+            config = json.loads(path.read_text())
+        except OSError as e:
+            raise ValueError(f"its config {top['config']['digest']} couldn't be read: {e}") from e
     return pinned, {config["architecture"]: pinned.rpartition("@")[2]} if config.get("os") == "linux" else {}
 
 
@@ -40,8 +43,8 @@ def os_release(ref: str, digest: str, auth: RegistryAuth | None) -> dict[str, st
     with tempfile.TemporaryDirectory() as tmp:
         for layer in manifest.get("layers") or ():
             path = Path(tmp) / layer["digest"].replace(":", "-")
-            read_blob(ref, layer["digest"], auth, path)
             try:
+                read_blob(ref, layer["digest"], auth, path)
                 with tarfile.open(path, "r:*") as tar:
                     for member in tar:
                         name = member.name.removeprefix("./")
@@ -50,9 +53,9 @@ def os_release(ref: str, digest: str, auth: RegistryAuth | None) -> dict[str, st
                                 found[name] = member.linkname
                             elif (extracted := tar.extractfile(member)) is not None:
                                 found[name] = extracted.read()
+                path.unlink()
             except (OSError, tarfile.TarError) as e:
-                raise ValueError(f"its layer {layer['digest']} isn't a readable tar: {e}") from e
-            path.unlink()
+                raise ValueError(f"its layer {layer['digest']} couldn't be read: {e}") from e
             if (text := _resolved(found)) is not None:
                 return _parsed(text)
     raise ValueError("no layer holds /etc/os-release or /usr/lib/os-release")

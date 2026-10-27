@@ -9,6 +9,7 @@ from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.store import get_artifact_store
+from agent_env.store.image_store import image_contents
 from tst.util.oci_registry import MANIFEST, UBUNTU, UBUNTU_LAYER, Registry, layer
 
 @pytest.fixture
@@ -154,5 +155,21 @@ def test_an_absolute_link_is_followed_and_an_image_without_os_release_or_not_lin
         _put(_image(f"ghcr.io/acme/desktop:2@{bare}"), arch=["amd64"])
     with pytest.raises(ValueError, match="it has no linux/amd64 image, only none"):
         _put(_image(f"ghcr.io/acme/desktop:3@{windows}"), arch=["amd64"])
-    with pytest.raises(ValueError, match="its os-release couldn't be read: its layer sha256:[0-9a-f]+ isn't a readable tar"):
+    with pytest.raises(ValueError, match="its os-release couldn't be read: its layer sha256:[0-9a-f]+ couldn't be read"):
         _put(_image(f"ghcr.io/acme/desktop:4@{garbled}"), arch=["amd64"])
+
+
+@pytest.mark.parametrize("served, problem", [
+    ("index", "its os-release couldn't be read: its layer sha256:[0-9a-f]+ couldn't be read"),
+    ("single", "its config sha256:[0-9a-f]+ couldn't be read"),
+])
+def test_a_blob_that_cant_be_written_where_it_is_read_fails_the_put_naming_it(registry, monkeypatch, served, problem):
+    def full(ref, digest, auth, path):
+        raise OSError(28, "No space left on device")
+
+    single = registry.image(UBUNTU_LAYER)
+    digest = registry.index(amd64=single) if served == "index" else single
+    monkeypatch.setattr(image_contents, "read_blob", full)
+
+    with pytest.raises(ValueError, match=rf"forms.container \(amd64\): {problem}: \[Errno 28\] No space left"):
+        _put(_image(f"ghcr.io/acme/desktop:1@{digest}"), arch=["amd64"])
