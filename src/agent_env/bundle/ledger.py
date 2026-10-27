@@ -31,6 +31,7 @@ from agent_env.store.document_store import DocumentStore, LocalSqliteDocumentSto
 from agent_env.store.local_state import holding_locks
 from agent_env.task.store import TASKS_COLLECTION
 
+from ._fs import file_sha256
 from .authoring import build_context_files
 from .parse import BundleKind
 from .plan import Plan, Write, artifact_writer, env_folder_writer, env_writer, folder_files, unpinned_store_refs
@@ -134,7 +135,7 @@ class Ledger:
             built = isinstance(write.source, BuiltImage)
             listing = build_context_files if built else folder_files
             for key, path in listing(self._plan.bundle_of(write.source.entry), write.source.entry).items():
-                inputs["files"][key] = _file_sha256(path) + (_mode(path) if built else "")
+                inputs["files"][key] = file_sha256(path) + (_mode(path) if built else "")
         if (published := self._plan.published.get(write.id)) is not None:
             inputs["published"] = published.pinned
         if self.pins_references or write.kind not in (BundleKind.TASK, BundleKind.EVAL):
@@ -323,14 +324,6 @@ _USUAL_MODE = 0o644
 def _mode(path: Path) -> str:
     mode = stat.S_IMODE(path.stat().st_mode)
     return "" if mode == _USUAL_MODE else f"+{mode:o}"
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as file:
-        for chunk in iter(lambda: file.read(1 << 20), b""):
-            digest.update(chunk)
-    return "sha256:" + digest.hexdigest()
 
 
 def _now() -> str:
