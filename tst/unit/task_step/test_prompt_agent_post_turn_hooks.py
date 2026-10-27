@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import sys
 import textwrap
 
 import httpx
@@ -21,6 +22,7 @@ from agent_env.env.gateway.constants import (
     EXT_CLOCK_URI, EXT_STEP_URI, EXT_TRIGGERS_URI, GATEWAY_EXTENSIONS, WELL_KNOWN_PATH,
 )
 from agent_env.task_step.context import HEARTBEAT_KEY
+from agent_env.task_step.task_steps.post_turn_hooks import PostTurnHooks
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from tst.unit.task_step.test_prompt_agent_user_side import (
     AGENT, ENV, USER, USER_SIM_CONFIG, _TRIGGERS_CARD, _USER_SIM_CARD, Peers, _context, _stored, decide, exchange,
@@ -144,6 +146,26 @@ async def test_a_hook_that_is_not_an_async_post_turn_fails_the_step_before_the_a
         await _step(_hook("sync", source)).execute(ctx)
 
     assert peers.raw == []
+
+
+@pytest.mark.asyncio
+async def test_a_hook_with_a_dataclass_and_postponed_annotations_loads_and_close_unregisters_it():
+    source = """
+        from __future__ import annotations
+        from dataclasses import dataclass
+
+        @dataclass
+        class Plan:
+            at: str
+
+        async def post_turn(turn, params):
+            return {"message": Plan("tue").at}
+        """
+    loaded = await PostTurnHooks.load([{"file_artifact_id": _hook("dataclass", source)}], "week")
+    [name] = loaded._modules
+    assert name in sys.modules and await loaded.hooks[0].post_turn(None, {}) == {"message": "tue"}
+    loaded.close()
+    assert name not in sys.modules
 
 
 # ---- what a hook decides --------------------------------------------------------------------------------------------

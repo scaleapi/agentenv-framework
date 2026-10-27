@@ -7,7 +7,9 @@ import functools
 import importlib.util
 import inspect
 import os
+import sys
 import tempfile
+import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -71,6 +73,7 @@ class PostTurnHooks:
     def __init__(self) -> None:
         self.hooks: list[PostTurnHook] = []
         self._paths: list[str] = []
+        self._modules: list[str] = []
 
     @classmethod
     async def load(cls, specs: list[dict], step_id: str) -> PostTurnHooks:
@@ -90,8 +93,12 @@ class PostTurnHooks:
         self._paths.append(path)
         os.write(fd, source)
         os.close(fd)
+        module_name = f"{module_name}_{uuid.uuid4().hex[:8]}"  # concurrent runs may share a step id
         module_spec = importlib.util.spec_from_file_location(module_name, path)
         module = importlib.util.module_from_spec(module_spec)
+        # registered while it runs, as an import would be: dataclasses and typing look a module up by name
+        sys.modules[module_name] = module
+        self._modules.append(module_name)
         module_spec.loader.exec_module(module)
         post_turn = getattr(module, "post_turn", None)
         if not inspect.iscoroutinefunction(post_turn):
@@ -105,6 +112,9 @@ class PostTurnHooks:
             if os.path.exists(path):
                 os.unlink(path)
         self._paths.clear()
+        for name in self._modules:
+            sys.modules.pop(name, None)
+        self._modules.clear()
 
 
 class HookEnv:
