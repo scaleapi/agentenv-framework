@@ -1,0 +1,18 @@
+type = "computer"
+description = "Ubuntu 24.04 with XFCE on Xvfb, D-Bus and AT-SPI, run by supervisord as the session user"
+arch = ["amd64", "arm64"]
+os = { type = "linux", distribution = "ubuntu", version = "24.04", display = "x11" }
+session = { user = "user" }
+
+[forms.container]
+image = { dockerfile = "Dockerfile" }
+init = "supervisord"
+input_channel = "env"
+
+[config.resolution]
+default = "1280x800"
+phase = "deploy"
+
+[config.timezone]
+default = "UTC"
+phase = "deploy"

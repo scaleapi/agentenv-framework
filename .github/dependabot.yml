@@ -48,6 +48,7 @@ updates:
       - "/src/agent_env/agents/agents/pi"
       - "/src/agent_env/agents/agents/proxy"
       - "/src/agent_env/examples/mail-mcp/envs/mail"
+      - "/src/agent_env/computers/artifacts/ubuntu-24.04"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
