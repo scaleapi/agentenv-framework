@@ -1,7 +1,7 @@
 """The Linux fixture the conformance probe stages with data/add and launches with computer-exec: a Tk window, the
-Fixture Desk, whose widgets' screen boxes are written to <state-dir>/layout.json and every effect that reaches it to
-<state-dir>/state.json, so the probe can aim at it and read back what arrived. Run as
-``python3 fixture.py <state-dir>``; it needs a 1280x800 screen or larger."""
+Fixture Desk, whose widgets' screen boxes are written to <state-dir>/layout.json and every effect that reaches it,
+with whatever lands in <state-dir>/inbox.txt, to <state-dir>/state.json, so the probe can aim at it and read back
+what arrived. Run as ``python3 fixture.py <state-dir>``; it needs a 1280x800 screen or larger."""
 from __future__ import annotations
 
 import json
@@ -171,7 +171,7 @@ def main(state_dir: Path) -> None:
         field.create_rectangle(x, y, x + 1, y + 1, fill=colour, outline="", width=0)
 
     def poll_inbox() -> None:
-        message = Path.home() / "inbox" / "message.txt"
+        message = state_dir / "inbox.txt"
         if message.exists() and (text := message.read_text()) != state["loaded"]:
             state["loaded"] = text
             save()

@@ -704,13 +704,10 @@ class Probe:
     async def _data_add(self) -> None:
         async def picked_up() -> str | None:
             message = f"hello from data/add {time.time_ns()}"
-            added = await self.driver.add_file("inbox/message.txt", message.encode())
+            added = await self.driver.add_file(f"{STAGE}/state/inbox.txt", message.encode())
             if "error" in added:
                 return f"data/add refused it: {added['error'].get('message')}"
-            try:
-                return await self.settled(lambda s: s["loaded"] == message, lambda s: s["loaded"])
-            finally:
-                await self.driver.run("rm", "-f", "inbox/message.txt")
+            return await self.settled(lambda s: s["loaded"] == message, lambda s: s["loaded"])
 
         await self.check("X", "a file data/add writes is there for an app to read", picked_up, *DATA_PLANE)
 

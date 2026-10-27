@@ -65,7 +65,7 @@ class FakeDesk:
         self.started = True
 
     def read(self) -> dict:
-        message = Path.home() / "inbox" / "message.txt"
+        message = Path.home() / STAGE / "state" / "inbox.txt"
         self.state["loaded"] = message.read_text() if message.exists() else self.state["loaded"]
         return self.state
 
