@@ -93,11 +93,21 @@ def _grant() -> dict:
 
 
 async def _record(driver, seconds: float, start: dict | None = None, end: dict | None = None) -> tuple[dict, dict]:
+    """A recording that runs ``seconds`` from its first frame, however long that took to come, and then ends."""
     async with http_client(driver) as http:
         started = (await http.post(START, json={"request_id": "r", "fps": 10, **(start or {})})).json()
+        await _first_frame(driver, started)
         await asyncio.sleep(seconds)
         manifest = (await http.post(END, json={"recording_id": started["recording_id"], **(end or {})})).json()
     return started, manifest
+
+
+async def _first_frame(driver, started: dict) -> None:
+    recording = driver._computer.recordings.running[started["recording_id"]]
+    for _ in range(1000):
+        if recording.segments or (recording.encoder and recording.encoder.frames) or recording.done:
+            return
+        await asyncio.sleep(0.01)
 
 
 def _decoded(path) -> list:
@@ -182,6 +192,7 @@ async def test_a_size_change_starts_a_segment_of_the_new_size(home):
     driver.recording = Recording(max_segment_s=60)
     async with http_client(driver) as http:
         started = (await http.post(START, json={"request_id": "r", "fps": 10})).json()
+        await _first_frame(driver, started)
         await asyncio.sleep(0.4)
         driver.screen.resize(640, 400, 1.0)
         await asyncio.sleep(0.4)
@@ -195,6 +206,7 @@ async def test_captures_that_fail_leave_a_gap_and_recording_resumes(home):
     driver.recording = Recording(max_segment_s=60)
     async with http_client(driver) as http:
         started = (await http.post(START, json={"request_id": "r", "fps": 10})).json()
+        await _first_frame(driver, started)
         await asyncio.sleep(0.4)
         driver.fail["capture"] = DeviceUnavailable("the X server went away")
         await asyncio.sleep(1.6)
@@ -464,6 +476,11 @@ async def test_frames_in_thread_hands_over_a_blocking_sources_frames_and_what_it
         got = [f.image async for f in frames_in_thread(_counted(5, closed, RuntimeError("the X server went away")))]
     got = [f.image async for f in frames_in_thread(_counted(5, closed))]
     assert got == [0, 1, 2, 3, 4] and closed.is_set()
+    late = frames_in_thread(_counted(5, threading.Event(), RuntimeError("gone")), keep=1)
+    await anext(late)
+    await asyncio.sleep(0.2)
+    with pytest.raises(RuntimeError, match="gone"):
+        [f async for f in late]
 
 
 @pytest.mark.asyncio
@@ -477,5 +494,5 @@ async def test_frames_in_thread_keeps_the_latest_frames_for_a_slow_reader_and_cl
     endless = frames_in_thread(_counted(1_000_000, stopped))
     await anext(endless)
     await endless.aclose()
-    assert first == 0 and len(rest) < 4 and rest[-1] == 29
+    assert first == 0 and rest == [26, 27, 28, 29]
     assert await asyncio.to_thread(stopped.wait, 5)

@@ -12,7 +12,7 @@ import shutil
 import threading
 import time
 import uuid
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import AsyncIterator, Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -412,37 +412,49 @@ class _Encoder:
 async def frames_in_thread(frames: Callable[[], Iterator[RecordedFrame]],
                            keep: int = THREAD_QUEUE) -> AsyncIterator[RecordedFrame]:
     """A ``@record`` stream from a blocking source: the generator ``frames()`` runs in a thread of its own, the
-    latest ``keep`` of its frames wait for the encoder, what it raises is raised here, and it is closed when the
-    recording stops."""
-    loop, queue, stop = asyncio.get_running_loop(), asyncio.Queue(), threading.Event()
+    latest ``keep`` of its frames wait for the encoder, what it raises is raised here after them, and it is closed
+    when the recording stops."""
+    loop, stop, wake = asyncio.get_running_loop(), threading.Event(), asyncio.Event()
+    held: deque[RecordedFrame] = deque(maxlen=keep)
+    ended: list[Optional[Exception]] = []  # the source's end, and what it raised: never dropped like a frame
 
-    def offer(item: Any) -> None:
-        if queue.qsize() >= keep:
-            queue.get_nowait()
-        queue.put_nowait(item)
+    def hold(frame: RecordedFrame) -> None:
+        held.append(frame)
+        wake.set()
 
-    def post(item: Any) -> None:
+    def end(error: Optional[Exception]) -> None:
+        ended.append(error)
+        wake.set()
+
+    def post(fn: Callable, item: Any) -> None:
         with contextlib.suppress(RuntimeError):  # the loop has closed: nobody is reading
-            loop.call_soon_threadsafe(offer, item)
+            loop.call_soon_threadsafe(fn, item)
 
     def pump() -> None:
+        error = None
         try:
             with contextlib.closing(frames()) as source:
-                for item in source:
+                for frame in source:
                     if stop.is_set():
                         return
-                    post(item)
+                    post(hold, frame)
         except Exception as e:
-            post(e)
+            error = e
         finally:
-            post(None)
+            post(end, error)
 
     threading.Thread(target=pump, name="computer-record", daemon=True).start()
     try:
-        while (item := await queue.get()) is not None:
-            if isinstance(item, Exception):
-                raise item
-            yield item
+        while True:
+            if held:
+                yield held.popleft()
+            elif ended:
+                if ended[0] is not None:
+                    raise ended[0]
+                return
+            else:
+                wake.clear()
+                await wake.wait()
     finally:
         stop.set()
 
